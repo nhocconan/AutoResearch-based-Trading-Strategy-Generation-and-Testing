@@ -1,0 +1,576 @@
+//@version=6
+strategy("ORB Breakout", 
+     overlay=true, 
+     fill_orders_on_standard_ohlc=true, 
+     pyramiding=0,
+     initial_capital=50000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=4.0,
+     slippage=2,
+     margin_long=1,
+     margin_short=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+i_orbBars       = input.int(3, "ORB Bars", minval=1, maxval=20)
+i_sessionString = input.session("0930-1730", "Trading Session")
+i_timeZone      = input.string("America/New_York", "Timezone", options=["America/New_York", "America/Chicago", "Europe/London", "Asia/Tokyo"])
+i_maxTrades     = input.int(2, "Max Trades Per Day", minval=1, maxval=10)
+
+// Risk Management Mode
+i_riskMode      = input.string("Breakout Candle", "TP/SL Mode", options=["Fixed Points", "Breakout Candle"], group="Risk Management", tooltip="Fixed Points: Set exact point values. Breakout Candle: Stop at candle low/high, TP as ratio of risk")
+
+// Fixed Points Settings
+i_fixedTpPoints = input.float(20.0, "Take Profit (points)", minval=1.0, maxval=500.0, step=1.0, group="Fixed Points Mode", tooltip="Fixed distance in points from entry")
+i_fixedSlPoints = input.float(10.0, "Stop Loss (points)", minval=1.0, maxval=500.0, step=1.0, group="Fixed Points Mode", tooltip="Fixed distance in points from entry")
+
+// Breakout Candle Settings
+i_rrRatio       = input.float(1.0, "Risk:Reward Ratio", minval=0.5, maxval=5.0, step=0.5, group="Breakout Candle Mode", tooltip="1.0 = 1:1 R:R, 2.0 = 1:2 R:R. TP distance = Risk × this value")
+
+// Breakeven (applies to both modes)
+i_useBreakeven  = input.bool(true, "Use Breakeven", group="Breakeven")
+i_beMultiplier  = input.float(0.5, "Breakeven Trigger (x TP Distance)", minval=0.1, maxval=1.0, step=0.1, group="Breakeven", tooltip="0.5 = move stop to entry when price reaches 50% of TP")
+
+// VWAP Filter
+i_useVwapFilter = input.bool(true, "Use VWAP Filter", group="VWAP Filter")
+i_vwapSlopeBars = input.int(5, "VWAP Slope Lookback", minval=2, maxval=20, group="VWAP Filter")
+i_minVwapSlope  = input.float(0.5, "Min VWAP Slope (points)", minval=0.0, maxval=10.0, step=0.1, group="VWAP Filter")
+
+// Volume Filter
+i_useVolumeFilter = input.bool(true, "Use Volume Filter", group="Volume Filter")
+i_minVolume       = input.int(2500, "Min Breakout Volume", minval=100, maxval=50000, step=100, group="Volume Filter")
+
+// Candle Strength Filter
+i_useCandleFilter    = input.bool(true, "Use Candle Strength Filter", group="Candle Strength")
+i_minCandleStrength  = input.float(0.7, "Min Candle Strength (%)", minval=0.5, maxval=0.95, step=0.05, group="Candle Strength", tooltip="0.7 = close must be in top 30% (long) or bottom 30% (short) of candle range")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+inSession    = not na(time(timeframe.period, i_sessionString, i_timeZone))
+sessionStart = inSession and not inSession[1]
+sessionEnd   = not inSession and inSession[1]
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION VWAP
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float vwapSum    = 0.0
+var float vwapVolSum = 0.0
+var float sessionVwap = na
+
+if sessionStart
+    vwapSum    := 0.0
+    vwapVolSum := 0.0
+
+if inSession
+    vwapSum     += hlc3 * volume
+    vwapVolSum  += volume
+    sessionVwap := vwapVolSum > 0 ? vwapSum / vwapVolSum : na
+
+vwapSlope       = sessionVwap - nz(sessionVwap[i_vwapSlopeBars])
+vwapSlopingUp   = vwapSlope > i_minVwapSlope
+vwapSlopingDown = vwapSlope < -i_minVwapSlope
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VOLUME & CANDLE STRENGTH (evaluated on current bar for order placement)
+// ══════════════════════════════════════════════════════════════════════════════
+
+highVolume      = volume >= i_minVolume
+candleRange     = high - low
+closePosition   = candleRange > 0 ? (close - low) / candleRange : 0.5
+bullishStrength = closePosition >= i_minCandleStrength
+bearishStrength = closePosition <= (1 - i_minCandleStrength)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ORB CALCULATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float orbHigh  = na
+var float orbLow   = na
+var int   barNum   = 0
+var bool  orbReady = false
+
+if sessionStart
+    orbHigh  := high
+    orbLow   := low
+    barNum   := 1
+    orbReady := i_orbBars == 1
+else if inSession and barNum >= 1 and barNum < i_orbBars
+    orbHigh := math.max(orbHigh, high)
+    orbLow  := math.min(orbLow, low)
+    barNum  += 1
+    if barNum == i_orbBars
+        orbReady := true
+
+orbRange = orbHigh - orbLow
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TRADE STATE MANAGEMENT
+// ══════════════════════════════════════════════════════════════════════════════
+
+var int   tradesToday    = 0
+var float tradeEntry     = na
+var float tradeTpLevel   = na
+var float tradeSlLevel   = na
+var float tradeBeTrigger = na
+var bool  beTriggered    = false
+
+if sessionStart
+    tradesToday := 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FILTER CONDITIONS (evaluated each bar for stop order placement)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// VWAP Filter - for longs: price above VWAP and VWAP rising
+vwapLongOk  = not i_useVwapFilter or (close > sessionVwap and vwapSlopingUp)
+vwapShortOk = not i_useVwapFilter or (close < sessionVwap and vwapSlopingDown)
+
+// Volume Filter
+volumeOk = not i_useVolumeFilter or highVolume
+
+// Candle Strength Filter
+candleLongOk  = not i_useCandleFilter or bullishStrength
+candleShortOk = not i_useCandleFilter or bearishStrength
+
+// Can we trade?
+canTrade = strategy.position_size == 0 and tradesToday < i_maxTrades and inSession and orbReady
+
+// Combined filter conditions
+longFiltersOk  = vwapLongOk and volumeOk and candleLongOk
+shortFiltersOk = vwapShortOk and volumeOk and candleShortOk
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STOP ORDER PLACEMENT - Entry at exact ORB level
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Place/update stop orders each bar if filters pass
+// Orders trigger intrabar when price reaches ORB level
+
+if canTrade
+    // Long stop order at ORB High
+    if longFiltersOk and close < orbHigh  // Only place if price hasn't already broken out
+        strategy.entry("Long", strategy.long, stop=orbHigh)
+    else
+        strategy.cancel("Long")
+    
+    // Short stop order at ORB Low
+    if shortFiltersOk and close > orbLow  // Only place if price hasn't already broken down
+        strategy.entry("Short", strategy.short, stop=orbLow)
+    else
+        strategy.cancel("Short")
+
+// Cancel all pending orders outside session or when can't trade
+if not canTrade
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT - Set exits when position opens
+// Use CURRENT bar's low/high (the breakout bar) for SL calculation
+// ══════════════════════════════════════════════════════════════════════════════
+
+useFixedPoints = i_riskMode == "Fixed Points"
+
+// Long position just opened
+if strategy.position_size > 0 and strategy.position_size[1] == 0
+    tradesToday += 1
+    tradeEntry  := strategy.opentrades.entry_price(0)
+    
+    if useFixedPoints
+        // Fixed Points Mode
+        tradeTpLevel := tradeEntry + i_fixedTpPoints
+        tradeSlLevel := tradeEntry - i_fixedSlPoints
+    else
+        // Breakout Candle Mode - use CURRENT bar's low (the breakout bar)
+        tradeSlLevel := low
+        float risk   = tradeEntry - tradeSlLevel
+        // Ensure minimum risk to avoid division issues
+        if risk < 1
+            risk := 1
+        tradeTpLevel := tradeEntry + (risk * i_rrRatio)
+    
+    // Breakeven trigger
+    if i_useBreakeven
+        tradeBeTrigger := tradeEntry + ((tradeTpLevel - tradeEntry) * i_beMultiplier)
+    else
+        tradeBeTrigger := na
+    
+    beTriggered := false
+    strategy.exit("Long Exit", "Long", limit=tradeTpLevel, stop=tradeSlLevel)
+
+// Short position just opened
+if strategy.position_size < 0 and strategy.position_size[1] == 0
+    tradesToday += 1
+    tradeEntry  := strategy.opentrades.entry_price(0)
+    
+    if useFixedPoints
+        // Fixed Points Mode
+        tradeTpLevel := tradeEntry - i_fixedTpPoints
+        tradeSlLevel := tradeEntry + i_fixedSlPoints
+    else
+        // Breakout Candle Mode - use CURRENT bar's high (the breakout bar)
+        tradeSlLevel := high
+        float risk   = tradeSlLevel - tradeEntry
+        // Ensure minimum risk to avoid division issues
+        if risk < 1
+            risk := 1
+        tradeTpLevel := tradeEntry - (risk * i_rrRatio)
+    
+    // Breakeven trigger
+    if i_useBreakeven
+        tradeBeTrigger := tradeEntry - ((tradeEntry - tradeTpLevel) * i_beMultiplier)
+    else
+        tradeBeTrigger := na
+    
+    beTriggered := false
+    strategy.exit("Short Exit", "Short", limit=tradeTpLevel, stop=tradeSlLevel)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BREAKEVEN LOGIC
+// ══════════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size > 0 and not beTriggered and not na(tradeBeTrigger) and i_useBreakeven
+    if high >= tradeBeTrigger
+        beTriggered  := true
+        tradeSlLevel := tradeEntry
+        strategy.exit("Long Exit", "Long", limit=tradeTpLevel, stop=tradeEntry)
+
+if strategy.position_size < 0 and not beTriggered and not na(tradeBeTrigger) and i_useBreakeven
+    if low <= tradeBeTrigger
+        beTriggered  := true
+        tradeSlLevel := tradeEntry
+        strategy.exit("Short Exit", "Short", limit=tradeTpLevel, stop=tradeEntry)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// POSITION CLOSED - Reset state
+// ══════════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    tradeEntry      := na
+    tradeTpLevel    := na
+    tradeSlLevel    := na
+    tradeBeTrigger  := na
+    beTriggered     := false
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION END - Close positions and cancel orders
+// ══════════════════════════════════════════════════════════════════════════════
+
+if sessionEnd
+    strategy.close_all(comment="Session End")
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    tradeEntry      := na
+    tradeTpLevel    := na
+    tradeSlLevel    := na
+    tradeBeTrigger  := na
+    beTriggered     := false
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALIZATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Session backgrounds
+orbForming = inSession and barNum >= 1 and barNum <= i_orbBars and not orbReady
+bgcolor(orbForming ? color.new(color.orange, 85) : na, title="ORB Forming")
+bgcolor(inSession and orbReady ? color.new(color.green, 95) : na, title="Trading Session")
+
+// ORB Levels
+plot(orbReady and inSession ? orbHigh : na, "ORB High", color.green, 2, plot.style_linebr)
+plot(orbReady and inSession ? orbLow : na, "ORB Low", color.red, 2, plot.style_linebr)
+
+// Session VWAP
+vwapColor = vwapSlopingUp ? color.green : vwapSlopingDown ? color.red : color.gray
+plot(inSession ? sessionVwap : na, "Session VWAP", vwapColor, 2, plot.style_linebr)
+
+// Trade Levels (only when in position)
+plot(strategy.position_size != 0 ? tradeEntry : na, "Entry", color.white, 1, plot.style_linebr)
+plot(strategy.position_size != 0 ? tradeTpLevel : na, "Take Profit", color.lime, 2, plot.style_linebr)
+plot(strategy.position_size != 0 ? tradeSlLevel : na, "Stop Loss", color.red, 2, plot.style_linebr)
+plot(strategy.position_size != 0 and not beTriggered and i_useBreakeven ? tradeBeTrigger : na, "BE Trigger", color.orange, 1, plot.style_linebr)
+
+// Breakeven active indicator
+bgcolor(strategy.position_size != 0 and beTriggered ? color.new(color.blue, 90) : na, title="Breakeven Active")
+
+// Show pending order levels (when order is placed but not yet filled)
+pendingLong  = canTrade and longFiltersOk and close < orbHigh
+pendingShort = canTrade and shortFiltersOk and close > orbLow
+
+plotshape(pendingLong, "Pending Long", shape.triangleup, location.belowbar, color.new(color.green, 50), size=size.tiny)
+plotshape(pendingShort, "Pending Short", shape.triangledown, location.abovebar, color.new(color.red, 50), size=size.tiny)
+
+View in Pine Editor・307 lines
+Use on chart
+5
+5
+2
+1 956
+Jan 4
+Overview
+This strategy implements the classic Opening Range Breakout (ORB) methodology, a well-documented approach in trading literature that has been used by institutional and retail traders for decades. The strategy identifies the high and low of the first 15 minutes of the trading session, then trades breakouts with defined risk management.
+This implementation includes multiple customizable filters (VWAP, Volume, Candle Strength) that traders can enable, disable, and tune to find configurations that work for their specific markets and trading style.
+
+How It Works
+Opening Range Calculation
+The strategy captures the high and low of the first N bars after the session open (default: 3 bars on a 5-minute chart = 15 minutes). These levels become the breakout triggers for the session.
+
+Entry Logic
+
+Long Entry: When a bar closes above the ORB High and all enabled filters pass
+Short Entry: When a bar closes below the ORB Low and all enabled filters pass
+
+Exit Logic
+
+Take Profit: Configurable multiple of the ORB range (default: 1x = full range beyond breakout level)
+Stop Loss: Opposite side of the ORB range
+Breakeven: Optional stop adjustment to entry price when trade reaches configurable profit threshold
+Session Close: All positions automatically closed at end of trading session
+
+Configurable Filters
+All filters can be independently enabled or disabled:
+
+1. VWAP Filter
+
+Requires price above/below session-anchored VWAP
+Requires VWAP slope confirmation (configurable lookback and minimum slope)
+Purpose: Align trades with intraday trend direction
+
+2. Volume Filter
+
+Requires minimum volume on the breakout bar
+Purpose: Confirm institutional participation in the breakout
+
+3. Candle Strength Filter
+
+Requires close in upper/lower portion of the bar range
+Purpose: Filter out weak breakouts with poor conviction
+
+Strategy Properties
+
+Initial Capital - $50.000USD
+
+Position Size - 1 contract (fixed)
+
+Commission - $4.00 per contract
+
+Slippage - 2 ticks
+
+Margin - 1%
+
+Pyramiding - Disabled
+
+
+
+Backtest Results (NQ)
+Recent Performance (Jan 2025 - Jan 2026)
+
+Total Trades - 243
+
+Win Rate - 39.09%
+
+Profit Factor - 1.03
+
+Net P&L - $3,581 (+7.16%)
+
+Max Drawdown - $25,447 (39.96%)
+
+
+
+Long-Term Performance (2010 - 2026)
+
+Total Trades - 1699
+
+Win Rate - 37.61%
+
+Profit Factor - 0.756
+
+Net P&L - ($49,632) (-99.26%)
+
+Max Drawdown - $50,262 (99.27%)
+
+
+
+Important: Long-term results show negative expectancy with default settings. This strategy is published as a research framework, not a ready-to-trade system. Users are encouraged to experiment with different configurations to find their edge.
+
+Settings Guide
+Main Settings
+
+
+ORB Bars: Number of bars for opening range (3 = 15 min on 5-min chart)
+
+Trading Session: Time window for trading (e.g., 0930-1200 for morning only)
+
+Timezone: Your market's timezone
+
+Take Profit: Multiple of ORB range for target
+
+Breakeven Trigger: Distance to move stop to entry
+
+Max Trades Per Day: Daily trade limit
+
+
+
+VWAP Filter
+
+
+Use VWAP Filter: Enable/disable
+
+VWAP Slope Lookback: Bars to measure VWAP direction
+
+Min VWAP Slope: Minimum slope threshold
+
+
+
+Volume Filter
+
+
+Use Volume Filter: Enable/disable
+
+Min Breakout
+
+Volume: Minimum contracts required
+
+Candle Strength Filter
+
+
+Use Candle Strength Filter: Enable/disable
+
+Min Candle Strength: Required close position (0.7 = top/bottom 30%)
+
+
+
+Research Suggestions
+This strategy provides a foundation for exploring ORB-based approaches. Consider testing:
+
+
+Different ORB periods: 5, 10, 15, or 30 minutes
+
+Session variations: Morning only (0930-1200), afternoon, or full day
+
+Direction bias: Long-only or short-only based on daily trend
+
+Filter combinations: Different mixes of VWAP, volume, and candle filters
+
+Take profit ratios: 0.5x, 1x, 1.5x, or 2x ORB range
+
+Market regimes: Performance may vary in trending vs ranging markets
+
+Different instruments: Test on ES, NQ, MNQ, or other futures
+
+
+
+Visual Elements
+
+
+Orange Background: ORB forming period
+
+Green Background: Active trading session
+
+Green Line: ORB High level
+
+Red Line: ORB Low level
+
+VWAP Line: Green = upslope, Red = downslope, Gray = flat
+
+White Line: Trade entry price
+
+Lime Line: Take profit level
+
+Red Line: Stop loss level
+
+Orange Line: Breakeven trigger level
+
+Blue Background: Breakeven activated
+
+Triangles: Entry signals (only appear when trade executes)
+
+
+
+Limitations
+
+
+Negative long-term expectancy: Default settings do not produce profitable results over extended periods
+
+Parameter sensitivity: Results highly dependent on filter settings and market conditions
+
+Market regime dependent: May perform differently in trending vs choppy markets
+
+Commission impact: Frequent trading accumulates significant transaction costs
+
+Curve fitting risk: Optimized settings may not persist in future markets
+
+
+
+Disclaimer
+This strategy is provided for educational and research purposes only. It does not constitute financial advice.
+
+
+Past performance does not guarantee future results
+
+Backtested results may not reflect actual trading conditions
+
+The long-term backtest shows significant negative returns
+
+Always paper trade before risking real capital
+
+Never risk more than you can afford to lose
+
+Conduct your own research and due diligence
+
+
+
+This is a research framework designed for traders to explore and customize, not a plug-and-play trading system.
+Jan 23
+Release Notes
+Overview
+
+This strategy combines Opening Range Breakout (ORB) with three confirmation filters designed to work together as a unified entry system. Each filter targets a specific type of false breakout that ORB alone cannot detect.
+
+Why These Three Filters Together
+
+Standard ORB triggers on any price cross of the opening range. The problem: many breakouts fail immediately. After testing various filter combinations, these three address distinct failure modes that often occur independently:
+
+VWAP Filter catches counter-trend breakouts. A long breakout while price is below a falling VWAP means you're fighting the day's flow. This filter requires price above VWAP with positive slope for longs.
+
+Volume Filter catches low-participation breakouts. A breakout on 500 contracts is just stop-hunting; one on 5,000 contracts has real interest behind it. This requires minimum volume on the setup bar.
+
+Candle Strength Filter catches weak-momentum breakouts. A bar can spike above the ORB high but close near its low - sellers actually won despite the breakout. This requires the close to be in the top 30% of the bar's range for longs.
+
+These filters are independent - a breakout can fail VWAP but pass volume, or pass both but fail candle strength. By requiring all three, the strategy only enters when trend, participation, and momentum align.
+
+Entry Mechanism
+
+Uses stop orders at the ORB level for precise entries. When filters pass, a stop order is placed; when price touches the ORB level, entry executes at that exact price rather than waiting for bar close.
+
+Risk Management
+
+Two modes available:
+
+Fixed Points - Set exact TP/SL distances in points. Example: TP=20, SL=10 gives 2:1 reward-to-risk.
+
+Breakout Candle - Stop at the breakout candle's low (longs) or high (shorts), TP calculated as a multiple of that risk. Adapts to volatility automatically.
+
+Optional breakeven moves stop to entry when price reaches a percentage of TP.
+
+Settings
+
+Core: ORB Bars (default 3), Trading Session, Max Trades/Day
+Risk: TP/SL Mode, Fixed Points values or R:R Ratio, Breakeven trigger
+Filters: Each can be enabled/disabled with adjustable thresholds
+
+Long-term results are poor with defaults. Published as a research framework - test and optimize for your market.
+
+Limitations
+
+Filters evaluate on the bar before breakout. Default settings lose money long-term. Thresholds need adjustment per instrument.
+
+Disclaimer
+
+Educational purposes only. Not financial advice. Past performance does not guarantee future results. Test on paper before risking capital.

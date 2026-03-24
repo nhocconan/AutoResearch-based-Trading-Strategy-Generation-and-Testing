@@ -1,0 +1,40 @@
+{
+  "saved_at": "2026-03-23T01:38:01.743946+00:00",
+  "scope": "tradingview-strategies only",
+  "active_processes_expected": 0,
+  "stage_1_pine_cache": {
+    "total_items": 5403,
+    "cached_ok": 3792,
+    "pending": 0,
+    "errors": 1611
+  },
+  "stage_2_conversion": {
+    "reports": 45,
+    "unsupported": 6,
+    "converted_import_ok": 39,
+    "convert_errors": 0
+  },
+  "stage_3_backtests": {
+    "bulk_result_rows": 82,
+    "bulk_strategy_files": 41,
+    "manual_supported": 6,
+    "manual_unsupported": 1
+  },
+  "important_files": {
+    "cache_manifest": "tradingview-strategies/raw-pine/cache-manifest.json",
+    "stage_progress": "tradingview-strategies/results/stage-progress.json",
+    "stage1_runner": "tradingview-strategies/results/stage1-runner.json",
+    "bulk_backtests": "tradingview-strategies/results/bulk-backtests.json",
+    "bulk_backtest_errors": "tradingview-strategies/results/bulk-backtest-errors.json",
+    "manual_backtests": "tradingview-strategies/results/backtest_results.json"
+  },
+  "resume_commands": [
+    "./.venv/bin/python tradingview-strategies/tools/run_stage1_pine_cache.py --batch-size 20 --max-agents 2 --max-retries 4",
+    "./.venv/bin/python tradingview-strategies/tools/backtest_bulk_generated.py"
+  ],
+  "notes": [
+    "Stage 1 extraction was fixed to use HTTP-first tree parsing and Source code tab fallback.",
+    "Resume work only inside tradingview-strategies/.",
+    "Kill any agent-browser or Chrome for Testing processes after any future browser batch."
+  ]
+}

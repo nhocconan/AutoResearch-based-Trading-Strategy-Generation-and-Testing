@@ -1,0 +1,120 @@
+//@version=6
+strategy("TheWave + Supertrend Hybrid w/ Signals", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1)
+
+// === INPUTS ===
+atrPeriod      = input.int(14, "ATR Period")
+sma5Period     = input.int(5, "SMA Period (Momentum)")
+sma15Period    = input.int(50, "SMA Period (Bias)")
+atrMultiplier  = input.float(2.5, "ATR Spike Filter")
+tpATRmult      = input.float(3.0, "Take Profit ATR Multiplier")
+slATRmult      = input.float(1.0, "Stop Loss ATR Multiplier")
+fixedStopPerc  = input.float(2.0, "Fixed Stop % (max 15%)", minval=0, maxval=15)
+
+// Supertrend Inputs
+superAtr    = input.int(10, "Supertrend ATR Period")
+superFactor = input.float(3.0, "Supertrend Factor", step=0.01)
+
+// QQE Inputs
+qqeRSIPeriod = input.int(14, "QQE RSI Period")
+qqeSmooth    = input.int(5, "QQE Smooth")
+qqeRmaPeriod = input.int(14, "QQE RMA Period")
+qqeFastMult  = input.float(3.0, "QQE Fast Mult")
+qqeSlowMult  = input.float(2.0, "QQE Slow Mult")
+qqeConfirmTF = input.timeframe("30", "QQE Confirm TF")
+
+// Trading session NY
+sessionNY = input.string("0945-1559", "Trading Session (NY)")
+nyTimezone = "America/New_York"
+inTradingSession = not na(time(timeframe.period, sessionNY, nyTimezone))
+
+// === FUNCTIONS ===
+f_qqe(_src, _rsiPeriod, _smooth, _rmaPeriod, _fastMult, _slowMult) =>
+    rsiVal = ta.rsi(_src, _rsiPeriod)
+    rsiSm = ta.rma(rsiVal, _smooth)
+    absDelta = math.abs(rsiSm - nz(rsiSm[1]))
+    atrRsi = ta.rma(absDelta, _rmaPeriod)
+    fastTL = rsiSm - _fastMult * atrRsi
+    slowTL = rsiSm - _slowMult * atrRsi
+    [rsiSm, slowTL]
+
+// === QQE CONFLUENCE ===
+[q_rsi_chart, q_slow_chart] = f_qqe(close, qqeRSIPeriod, qqeSmooth, qqeRmaPeriod, qqeFastMult, qqeSlowMult)
+[q_rsi_30, q_slow_30] = request.security(syminfo.tickerid, qqeConfirmTF, f_qqe(close, qqeRSIPeriod, qqeSmooth, qqeRmaPeriod, qqeFastMult, qqeSlowMult))
+
+qqeBull = (q_rsi_chart > q_slow_chart) and (q_rsi_30 > q_slow_30)
+qqeBear = (q_rsi_chart < q_slow_chart) and (q_rsi_30 < q_slow_30)
+
+// === TREND FILTERS ===
+// 15m SMA bias
+sma15_15m = request.security(syminfo.tickerid, "15", ta.sma(close, sma15Period))
+close15m  = request.security(syminfo.tickerid, "15", close)
+biasBull15 = close15m > sma15_15m
+biasBear15 = close15m < sma15_15m
+
+// ATR spike filter (5m)
+atr5 = request.security(syminfo.tickerid, "5", ta.atr(atrPeriod))
+high5 = request.security(syminfo.tickerid, "5", high)
+low5  = request.security(syminfo.tickerid, "5", low)
+isSpike = (high5 - low5) > atrMultiplier * atr5
+
+// SMA5 cross (momentum)
+sma5_chart = ta.sma(close, sma5Period)
+crossAbove = ta.crossover(close, sma5_chart)
+crossBelow = ta.crossunder(close, sma5_chart)
+
+// Supertrend
+[superLine, superDir] = ta.supertrend(superFactor, superAtr)
+superBull = superDir == 1
+superBear = superDir == -1
+
+// === ENTRY CONDITIONS ===
+longCondition  = inTradingSession and biasBull15 and crossAbove and qqeBull and superBull and not isSpike
+shortCondition = inTradingSession and biasBear15 and crossBelow and qqeBear and superBear and not isSpike
+
+// === STOP LOSS & TAKE PROFIT ===
+longSL  = fixedStopPerc > 0 ? close * (1 - fixedStopPerc/100) : close - atr5*slATRmult
+longTP  = close + atr5*tpATRmult
+shortSL = fixedStopPerc > 0 ? close * (1 + fixedStopPerc/100) : close + atr5*slATRmult
+shortTP = close - atr5*tpATRmult
+
+// === EXECUTION ===
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP)
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+// Exit at session end
+afterSession = not na(time(timeframe.period, "1600-2359", nyTimezone))
+if afterSession and strategy.position_size != 0
+    strategy.close_all(comment="Session End Close")
+
+// === PLOT SIGNALS ===
+plot(sma5_chart, title="SMA5", color=color.blue)
+plot(superLine, title="Supertrend", color=superBull ? color.green : color.red, linewidth=2)
+
+// Entry arrows
+plotshape(longCondition, title="Long Entry", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.large)
+plotshape(shortCondition, title="Short Entry", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.large)
+
+// Exit markers for TP / SL
+plotshape(strategy.position_size > 0 and close >= longTP, title="Long TP", location=location.abovebar, color=color.lime, style=shape.cross, size=size.small)
+plotshape(strategy.position_size > 0 and close <= longSL, title="Long SL", location=location.abovebar, color=color.maroon, style=shape.cross, size=size.small)
+
+plotshape(strategy.position_size < 0 and close <= shortTP, title="Short TP", location=location.belowbar, color=color.lime, style=shape.cross, size=size.small)
+plotshape(strategy.position_size < 0 and close >= shortSL, title="Short SL", location=location.belowbar, color=color.maroon, style=shape.cross, size=size.small)
+
+View in Pine Editor・107 lines
+Use on chart
+1
+9
+837
+• Green triangle below bar → Long entry signal
+• Red triangle above bar → Short entry signal
+• Small lime cross above/below → Take-profit hit
+• Small maroon cross above/below → Stop-loss hit
+• SMA5 and Supertrend lines for trend context
+
+This version makes all entries and exits visually obvious while keeping the hybrid TheWave + Supertrend logic intact.

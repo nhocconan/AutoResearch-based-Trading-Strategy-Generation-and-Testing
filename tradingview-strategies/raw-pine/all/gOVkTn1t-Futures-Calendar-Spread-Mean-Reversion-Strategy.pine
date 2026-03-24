@@ -1,0 +1,79 @@
+//@version=6
+strategy("Futures Calendar Spread Mean Reversion Strategy", overlay=false)
+
+// Input parameters
+length = input.int(20, title="Rolling Mean Length")
+z_entry = input.float(3.1, title="Entry Z-Score (Std Dev)")
+z_stop_loss = input.float(4.0, title="Stop Loss Z-Score (Std Dev)")
+use_stop_loss = input.bool(true, title="Use Stop Loss")
+take_profit_at_mean = input.bool(true, title="Take Profit at Mean")
+show_spread = input.bool(true, title="Show Spread on Chart")
+
+// Input for the two futures contracts (symbols)
+front_contract_symbol = input.symbol("FUT1", title="Front Month Contract Symbol")
+back_contract_symbol = input.symbol("FUT2", title="Back Month Contract Symbol")
+price_source = input.source(close, title="Price Source (e.g., Close)")
+
+// Request data for the front and back contracts
+front_contract = request.security(front_contract_symbol, timeframe.period, price_source)
+back_contract = request.security(back_contract_symbol, timeframe.period, price_source)
+
+// Calculate the spread
+spread = front_contract - back_contract
+
+// Calculate the 20-day rolling mean and standard deviation of the spread
+spread_ma = ta.sma(spread, length)
+spread_std = ta.stdev(spread, length)
+
+// Calculate the Z-Score
+z_score = (spread - spread_ma) / spread_std
+
+// Entry conditions
+long_entry = ta.crossover(z_score, -z_entry)      // Go long spread when z-score crosses below -3.1
+short_entry = ta.crossunder(z_score, z_entry)     // Go short spread when z-score crosses above +3.1
+
+// Exit conditions (take profit at mean)
+long_exit = take_profit_at_mean and ta.crossunder(z_score, 0)   // Exit long when z-score reverts to mean (0)
+short_exit = take_profit_at_mean and ta.crossover(z_score, 0)   // Exit short when z-score reverts to mean (0)
+
+// Optional stop-loss logic
+long_stop_loss = use_stop_loss and (z_score < -z_stop_loss)     // Stop out of long if z-score extends further negative
+short_stop_loss = use_stop_loss and (z_score > z_stop_loss)     // Stop out of short if z-score extends further positive
+
+// Plot the spread and the mean (optional visualization)
+//plot(show_spread ? spread : na, color=color.blue, title="Spread")
+//plot(show_spread ? spread_ma : na, color=color.orange, title="Rolling Mean")
+
+// Plot the Z-Score
+hline(0, "Z-Score 0 Line", color=color.gray)
+hline(z_entry, "Upper Entry Z-Score", color=color.red, linestyle=hline.style_dotted)
+hline(-z_entry, "Lower Entry Z-Score", color=color.green, linestyle=hline.style_dotted)
+
+// Strategy entry logic
+if (long_entry)
+    strategy.entry("Long Spread", strategy.long)
+
+if (short_entry)
+    strategy.entry("Short Spread", strategy.short)
+
+// Strategy exit logic for taking profit at the mean or stop-loss
+if (long_exit or long_stop_loss)
+    strategy.close("Long Spread")
+
+if (short_exit or short_stop_loss)
+    strategy.close("Short Spread")
+
+// Plot Z-Score for reference
+plot(z_score, color=color.purple, title="Z-Score", linewidth=2)
+
+View in Pine Editor・67 lines
+Use on chart
+2
+1
+657
+futures calendar spread strategy:
+Make sure you type in the correct spread in your chart
+3 standard deviations for entry, with a stop at 4 standard deviations, seems to work best
+don't select tp at mean
+
+Use with energies and grains futures, anything very seasonal

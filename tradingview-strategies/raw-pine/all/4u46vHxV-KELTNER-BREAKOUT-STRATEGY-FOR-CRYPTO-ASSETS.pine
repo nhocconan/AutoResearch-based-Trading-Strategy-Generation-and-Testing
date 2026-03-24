@@ -1,0 +1,128 @@
+//@version=5
+strategy("Keltner Trend Follower (20, 100)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// Keltner Channel 20 Settings
+kc20_length = input.int(20, "KC 20 - EMA Length", group="Keltner Channel 20")
+kc20_mult = input.float(2.0, "KC 20 - ATR Multiplier", step=0.1, group="Keltner Channel 20")
+kc20_atr_length = input.int(10, "KC 20 - ATR Length", group="Keltner Channel 20")
+
+// Keltner Channel 100 Settings
+kc100_length = input.int(100, "KC 100 - EMA Length", group="Keltner Channel 100")
+kc100_mult = input.float(2.0, "KC 100 - ATR Multiplier", step=0.1, group="Keltner Channel 100")
+kc100_atr_length = input.int(10, "KC 100 - ATR Length", group="Keltner Channel 100")
+
+// Moving Average Settings
+ma_length = input.int(100, "MA Length", group="Moving Average")
+
+// ============================================================================
+// CALCULATIONS
+// ============================================================================
+
+// Keltner Channel 20
+kc20_basis = ta.ema(close, kc20_length)
+kc20_range = ta.atr(kc20_atr_length) * kc20_mult
+kc20_upper = kc20_basis + kc20_range
+kc20_lower = kc20_basis - kc20_range
+
+// Keltner Channel 100
+kc100_basis = ta.ema(close, kc100_length)
+kc100_range = ta.atr(kc100_atr_length) * kc100_mult
+kc100_upper = kc100_basis + kc100_range
+kc100_lower = kc100_basis - kc100_range
+
+// Moving Average 100
+ma100 = ta.sma(close, ma_length)
+
+// ============================================================================
+// STRATEGY LOGIC
+// ============================================================================
+
+// Long Conditions: Price > KC100 Upper AND Price breaks above KC20 Upper
+longCondition = (close > kc100_upper) and ta.crossover(close, kc20_upper)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+// Long Exit: Price breaks below MA 100
+if (ta.crossunder(close, ma100))
+    strategy.close("Long", comment="MA 100 Exit")
+
+// Short Conditions: Price < KC100 Lower AND Price breaks below KC20 Lower
+shortCondition = (close < kc100_lower) and ta.crossunder(close, kc20_lower)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// Short Exit: Price breaks above MA 100
+if (ta.crossover(close, ma100))
+    strategy.close("Short", comment="MA 100 Exit")
+
+// ============================================================================
+// PLOTTING
+// ============================================================================
+
+// Keltner Channel 20 (Blue)
+p20_u = plot(kc20_upper, "KC 20 Upper", color=color.blue, linewidth=1)
+plot(kc20_basis, "KC 20 Basis", color=color.blue, linewidth=1, style=plot.style_circles, display=display.none)
+p20_l = plot(kc20_lower, "KC 20 Lower", color=color.blue, linewidth=1)
+fill(p20_u, p20_l, color=color.new(color.blue, 90), title="KC 20 Fill")
+
+// Keltner Channel 100 (Purple)
+p100_u = plot(kc100_upper, "KC 100 Upper", color=color.purple, linewidth=2)
+p100_l = plot(kc100_lower, "KC 100 Lower", color=color.purple, linewidth=2)
+fill(p100_u, p100_l, color=color.new(color.purple, 95), title="KC 100 Fill")
+
+// Moving Average 100 (Yellow/Orange)
+plot(ma100, "MA 100", color=color.orange, linewidth=2)
+
+View in Pine Editor・78 lines
+Use on chart
+1
+0
+586
+1. Philosophy: The "Volatility Breakout"
+
+The core philosophy is that **momentum precedes price**. By waiting for a break above the Keltner Channel, you aren't just betting that the price will go up; you are betting that the price has enough energy (volatility) to move outside its standard deviation.
+
+Asset Class Suitability: This strategy is specifically designed for **Cryptocurrencies**. Because Crypto often moves in parabolic cycles with high volatility, it can sustain the "overextended" moves required to stay outside the Keltner Channels.
+
+Why not FX or Stocks? Traditional markets like Forex are typically mean-reverting, and Stocks often have "gap" risks or lower intraday volatility. In those markets, hitting the upper KC band often signals exhaustion. In Crypto, it’s often the signal that the "real" move is starting.
+
+The "Let Winners Run" Mantra: No fixed Take Profit (TP) allows you to capture "fat-tail" returns—those rare, massive trends that make up the bulk of a trend-follower's profits.
+
+
+2. Background: The Components
+
+*Keltner Channels: Uses Average True Range (ATR) rather than standard deviation. This makes the bands more representative of actual price action and volatility gaps common in crypto.
+
+The 100 MA Anchor: The 100-period Simple Moving Average acts as the "line in the sand." It filters out noise and provides a trailing exit that only triggers when the macro trend has officially shifted.
+
+
+3. Trading Cheat Sheet (Copy-Paste Ready)
+
+Market Environment
+
+Asset Focus: Crypto Only (High Volatility assets).
+
+Trend Filter: Price must be outside the KC 100 bands to confirm a macro trend.
+
+Long Setup (Buy)
+
+Macro Requirement: Price must be trading ABOVE the KC 100 Upper Band.
+Entry Trigger: Price crosses ABOVE the KC 20 Upper Band.
+Mandatory Exit: Price closes BELOW the MA 100.
+
+Short Setup (Sell)
+
+Macro Requirement: Price must be trading BELOW the KC 100 Lower Band.
+Entry Trigger: Price crosses BELOW the KC 20 Lower Band.
+Mandatory Exit: Price closes ABOVE the MA 100.
+
+Risk Management
+
+Take Profit: None (Trend-following approach).
+Stop Loss: Trailing via the MA 100.
+
+

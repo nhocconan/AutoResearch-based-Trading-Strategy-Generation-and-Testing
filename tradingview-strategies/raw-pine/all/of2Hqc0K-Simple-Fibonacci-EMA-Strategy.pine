@@ -1,0 +1,41 @@
+//@version=3
+//Author: @aoeuaoeu
+strategy("Simple Fibonacci EMA Strategy", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+s = input(title="Slow EMA", type=integer, defval=55)
+f = input(title="Fast EMA", type=integer, defval=21)
+strategy.entry("enter long", true, when = ema(close, f) > ema(close, s)) 
+strategy.entry("enter short", false, when = ema(close, f) < ema(close, s))
+
+plot(ema(close, 55), color=color(#0100E0, 20))
+plot(ema(close, 34), color=color(#0038E1, 30))
+plot(ema(close, 21), color=color(#0070E2, 40))
+plot(ema(close, 13), color=color(#00A8E3, 50))
+plot(ema(close, 8), color = color(#00E1E5, 60))
+
+bgcolor(ema(close, f) < ema(close, s) ? red : green, transp=100, editable = true)
+
+alertcondition(ema(close, 21) > ema(close, 55) and ema(close[1], 21) < ema(close[1], 55), title='Simple EMA Buy Signal', message='The 21 EMA has crossed over the 55 EMA!')
+alertcondition(ema(close, 21) < ema(close, 55) and ema(close[1], 21) > ema(close[1], 55), title='Simple EMA Sell Signal', message='The 21 EMA has crossed under the 55EMA!')
+
+View in Pine Editor・19 lines
+Use on chart
+5
+4
+5
+4
+17 958
+May 8, 2018
+This script gives a buy signal when the 21 EMA crosses above the 55 EMA and a sell signal when the 55 EMA crosses below the 21 EMA. This strategy works well for cryptocurrencies at all time frames. However, it does not work for stocks or forex. Sometimes, the simple strategies are the best strategies, especially in markets that have not been dominated by institutions.
+
+
+
+When editing how much of your balance to trade, attach at least one decimal place. For instance, 12.0, 90.0, and 83.3 would work, but 100, 32, or 70 does not work.
+
+
+May 9, 2018
+Release Notes
+Didn't realize you couldn't edit the source code unless you copied the script. Now you can adjust the trade percentage in the settings. However, you cannot trade over 100% (leverage). :(
+May 10, 2018
+Release Notes
+Now you can change the background color.

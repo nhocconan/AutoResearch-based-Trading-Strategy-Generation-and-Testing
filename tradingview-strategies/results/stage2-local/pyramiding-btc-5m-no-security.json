@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-03-23T06:40:45.433818+00:00",
+  "queue_rank": 3409,
+  "page": 143,
+  "name": "Pyramiding BTC 5 min no security",
+  "slug": "pyramiding-btc-5m-no-security",
+  "chart_url": "https://www.tradingview.com/script/iImkk8VO-Pyramiding-BTC-5-min-no-security/",
+  "pine_file": "raw-pine/bulk/iImkk8VO-Pyramiding-BTC-5-min-no-security.pine",
+  "symbol_name": "BINANCE:BTCUSDT",
+  "repo_timeframe_hint": "5m",
+  "status": "converted",
+  "classification": "partial",
+  "timeframe": "5m",
+  "reason": "Stop/target logic relies on intrabar ticks requiring next-bar approximation; pyramiding requires stateful trade count simulation.",
+  "adaptations": [
+    "Convert tick-based stops to price percentages",
+    "Simulate pyramiding entry count statefully",
+    "Remove hardcoded backtest date window",
+    "Approximate intrabar fills to next-bar signals"
+  ],
+  "attempts_used": 2,
+  "attempt_log": [
+    "convert_attempt_1: TimeoutError: LLM call timed out after 60s"
+  ],
+  "conversion_notes": [
+    "Fixed timeout by simplifying code structure and removing verbose comments",
+    "Converted Pine EMA, WMA, HMA3, and linear regression to pandas/numpy helpers",
+    "Pyramiding logic simulated statefully with entry price tracking array",
+    "Stop loss (10%) and take profit (3%) converted from ticks to price percentages",
+    "Removed hardcoded backtest date window for fair comparison mode",
+    "Signals represent target position (1.0 = long, 0.0 = flat) with next-bar execution",
+    "All NaN handling added for indicator warmup periods",
+    "Returns np.ndarray with exactly len(prices) elements as required by repo contract"
+  ],
+  "python_file": "python-strategies/stage2-local/pyramiding-btc-5m-no-security.py",
+  "failed_python_files": [],
+  "validation": {
+    "module_name": "Pyramiding BTC 5 min no security",
+    "module_timeframe": "5m",
+    "symbol": "BTCUSDT",
+    "bars_checked": 43489,
+    "non_zero_signals": 30837,
+    "finite_ratio": 1.0
+  },
+  "last_error": null
+}

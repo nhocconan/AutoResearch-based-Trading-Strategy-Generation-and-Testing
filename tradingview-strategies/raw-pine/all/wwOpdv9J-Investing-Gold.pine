@@ -1,0 +1,104 @@
+//@version=2
+strategy(title="Investing Gold", shorttitle="CIGOLD", overlay = true)
+
+// ============================================ PROCESS INPUTS ============================================= //
+
+tClose = security(tickerid, period, open)
+
+// Inputs
+ssPeriod = input(defval = 20, title = "Period length", type = integer) // Period of bars to look back on
+
+// The number of previous data points to use when building the EMA
+number_of_periods = input(title="Number Of Periods", type=integer, defval=1, minval=1)
+
+// The type of price to use when building the EMA (close, open, high, low, etc)
+data_source = input(title="Data Source", type=source, defval=hlc3)
+
+// The time-frame to use when building the EMA
+// Value must be greater than or equal to your current time-frame
+// Min value is 1 minute. Max value is 1440 minutes(1 day)
+data_source_period = input(title="Data Source Period (Minutes)", type=integer, defval=1440, minval=1, maxval=14400)
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2018, title = "From Year", minval = 2000)
+ToMonth   = input(defval = 12, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 31, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 9999, title = "To Year", minval = 2000)
+
+
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+valid_inputs = true
+
+if isintraday
+    if data_source_period < interval
+        valid_inputs := false // why show a 5 minute EMA on a 4 hour chart
+else
+    valid_inputs := false // this version only supports intraday charts
+
+// =============================================== BUILD EMA =============================================== //
+
+a1 = exp(-1.414*3.14159 / ssPeriod)
+b1 = 2*a1*cos((3.14159/180)*(1.414*180 / ssPeriod))
+c2 = b1
+c3 = (-a1)*a1
+c1 = 1 - c2 - c3
+Filt = c1*(tClose + nz(tClose[1])) / 2 + c2*nz(Filt[1]) + c3*nz(Filt[2])
+
+// Short Smooth
+plot(Filt, title = "Short", style = line, color = red, transp = 0, linewidth = 1) // Plot it
+
+len1 = input(31, minval=1, title="EMA1 (Slow)")
+src1 = input(open, title="EMA1 Source")
+ema1 = ema(src1, len1)
+
+
+// Default to an EMA on the current time-frame
+ema_values = ema(data_source, number_of_periods)
+
+// Get the price feed for the specified price type and time-frame
+price_feed_for_ema = security(tickerid, tostring(data_source_period), data_source)
+
+if valid_inputs
+    number_of_periods_normalized = number_of_periods * data_source_period / interval
+    ema_values :=  ema(price_feed_for_ema, number_of_periods_normalized)
+
+// Long
+plot(series=ema_values, title = "Long", style=line, linewidth=1, color=green)
+
+//extra
+len12 = input(73, minval=1, title="Slow EMA 12")
+src = close
+ema12 = ema(src, len12)
+colFinal2 = gray
+p4=plot(ema12, title="Slow EMA 12", style=line, linewidth=2, color=black)
+// extra
+len7 = input(30, minval=1, title="Slow EMA 7")
+ema7 = ema(src, len7)
+plot(ema7, title="Slow EMA 7", style=line, linewidth=1, color=purple)
+
+longCondition = crossunder(ema12, ema_values)
+shortCondition = crossover(ema12, ema_values)
+
+
+
+if (longCondition)
+    strategy.entry("Go Long Entry", strategy.long, when = window())
+
+if (shortCondition)
+    strategy.entry("Go Short Entry", strategy.short, when = window())
+
+View in Pine Editor・95 lines
+Use on chart
+6
+4
+6
+32
+18 216
+Good results to invest in gold...

@@ -1,0 +1,87 @@
+//@version=5
+strategy("RSI Strategy with Manual TP and SL", overlay=true)
+
+// Strategy Parameters
+length = input(14, title="RSI Length")
+overSold = input(30, title="Oversold Level")
+overBought = input(70, title="Overbought Level")
+trail_profit_pct = input.float(20, title="Trailing Profit (%)")
+
+// RSI Calculation
+vrsi = ta.rsi(close, length)
+
+// Entry Conditions for Long Position
+rsi_crossed_below_30 = vrsi > overSold and ta.sma(vrsi, 2) <= overSold // RSI crossed above 30
+daily_close_above_threshold = close > (ta.highest(close, 50) * 0.7) // Daily close above 70% of the highest close in the last 50 bars
+
+// Entry Conditions for Short Position
+rsi_crossed_above_70 = vrsi < overBought and ta.sma(vrsi, 2) >= overBought // RSI crossed below 70
+daily_close_below_threshold = close < (ta.lowest(close, 50) * 1.3) // Daily close below 130% of the lowest close in the last 50 bars
+
+// Entry Signals
+if (rsi_crossed_below_30 and daily_close_above_threshold)
+    strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+
+if (rsi_crossed_above_70 and daily_close_below_threshold)
+    strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+
+// Manual Take Profit and Stop Loss
+tp_percentage = input.float(1, title="Take Profit (%)")
+sl_percentage = input.float(1, title="Stop Loss (%)")
+
+long_tp = strategy.position_avg_price * (1 + tp_percentage / 100)
+long_sl = strategy.position_avg_price * (1 - sl_percentage / 100)
+short_tp = strategy.position_avg_price * (1 - tp_percentage / 100)
+short_sl = strategy.position_avg_price * (1 + sl_percentage / 100)
+
+strategy.exit("TP/SL Long", "RsiLE", limit=long_tp, stop=long_sl)
+strategy.exit("TP/SL Short", "RsiSE", limit=short_tp, stop=short_sl)
+
+View in Pine Editor・38 lines
+Use on chart
+2
+3
+3
+6 930
+This TradingView script implements a simple RSI (Relative Strength Index) strategy with manual take profit (TP) and stop-loss (SL) levels. Let's break down the script and analyze its components:
+
+RSI Calculation: The script calculates the RSI using the specified length parameter. RSI is a momentum oscillator that measures the speed and change of price movements. It ranges from 0 to 100 and typically values above 70 indicate overbought conditions while values below 30 indicate oversold conditions.
+
+Strategy Parameters:
+
+length: Length of the RSI period.
+overSold: Threshold for oversold condition.
+overBought: Threshold for overbought condition.
+trail_profit_pct: Percentage for trailing profit.
+Entry Conditions:
+
+For a long position: RSI crosses above 30 and the daily close is above 70% of the highest close in the last 50 bars.
+For a short position: RSI crosses below 70 and the daily close is below 130% of the lowest close in the last 50 bars.
+Entry Signals:
+
+Long entry is signaled when both conditions for a long position are met.
+Short entry is signaled when both conditions for a short position are met.
+Manual TP and SL:
+
+Take profit and stop-loss levels are calculated based on the entry price and the specified percentage.
+For long positions, the take profit level is set above the entry price and the stop-loss level is set below the entry price.
+For short positions, the take profit level is set below the entry price and the stop-loss level is set above the entry price.
+Strategy Exits:
+
+Exit conditions are defined for both long and short positions using the calculated take profit and stop-loss levels.
+Chart Analysis:
+
+This strategy aims to capitalize on short-term momentum shifts indicated by RSI crossings combined with daily price movements.
+It utilizes manual TP and SL levels, providing traders with flexibility in managing their positions.
+The strategy may perform well in ranging or oscillating markets where RSI signals are more reliable.
+However, it may encounter challenges in trending markets where RSI can remain overbought or oversold for extended periods.
+Traders should backtest this strategy thoroughly on historical data and consider optimizing parameters to suit different market conditions.
+Risk management is crucial, so traders should carefully adjust TP and SL percentages based on their risk tolerance and market volatility.
+Overall, this strategy provides a structured approach to trading based on RSI signals while allowing traders to customize their risk management. However, like any trading strategy, it should be used judiciously and in conjunction with other forms of analysis and risk management techniques.
+
+
+
+
+
+
+

@@ -1,0 +1,30 @@
+//@version=3
+strategy("SimpleMA smoothed crossover strategy", shorttitle="SMA_X", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=720, default_qty_value=100, calc_on_order_fills=true, calc_on_every_tick=true, pyramiding=0)
+SMA1=input(title="SMA LONG",type=integer,defval=21)
+SMA2=input(title="SMA SHORT",type=integer,defval=19)
+p=ohlc4[1]
+ma1=sma(p, SMA1)
+ma2=sma(p, SMA2)
+p_a = ma1*2
+p_b = ma1
+p_c = p_a - p_b
+p_d = p_c / 24
+p_e = ma2*2
+p_f = ma2
+p_g = p_e - p_f
+p_h = p_g / 24
+longCondition = crossover(p_h, p_d)
+if (longCondition)
+    strategy.entry("UP", strategy.long)
+shortCondition = crossunder(p_h, p_d)
+if (shortCondition)
+    strategy.entry("DOWN", strategy.short)
+
+View in Pine Editor・21 lines
+Use on chart
+6
+5
+2
+2 823
+Experimental simple Bot script for ETH/USD 1 hour chart. welcome to test on other pairs. put feedback in comments.
+This is a crossbreed between SMA and HULLMA

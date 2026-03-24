@@ -1,0 +1,5 @@
+//@version=4
+color bullcolor=##input(defval=#4CAF50,type='INPUT_COLOR',##id='in_0')
+color bearcolor=##input(defval=#880E4F,type='INPUT_COLOR',##id='in_1')
+##root(root_metainfo,plot_0_0,bullcolor,input__color)
+##root(root_metainfo,plot_0_1,bearcolor,input__color)

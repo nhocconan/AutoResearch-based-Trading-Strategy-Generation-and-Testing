@@ -1,0 +1,102 @@
+//@version=5
+strategy("Multi-Factor Hedge Fund Strategy", overlay=true)
+
+// Input parameters
+fastLength = input(12, "MACD Fast Length")
+slowLength = input(26, "MACD Slow Length")
+signalLength = input(9, "MACD Signal Length")
+rsiLength = input(14, "RSI Length")
+atrLength = input(14, "ATR Length")
+
+// Calculate indicators
+[macdLine, signalLine, histLine] = ta.macd(close, fastLength, slowLength, signalLength)
+rsi = ta.rsi(close, rsiLength)
+atr = ta.atr(atrLength)
+
+sma50 = ta.sma(close, 50)
+sma200 = ta.sma(close, 200)
+
+// Strategy logic
+longCondition = macdLine > signalLine and rsi < 70 and close > sma50 and sma50 > sma200
+shortCondition = macdLine < signalLine and rsi > 30 and close < sma50 and sma50 < sma200
+
+// Execute trades
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// Set stop loss and take profit
+stopLoss = 2 * atr
+takeProfit = 3 * atr
+
+strategy.exit("Exit Long", "Long", stop = strategy.position_avg_price - stopLoss, limit = strategy.position_avg_price + takeProfit)
+strategy.exit("Exit Short", "Short", stop = strategy.position_avg_price + stopLoss, limit = strategy.position_avg_price - takeProfit)
+
+// Plot indicators
+plot(sma50, color=color.blue, title="50 SMA")
+plot(sma200, color=color.red, title="200 SMA")
+plot(ta.crossover(macdLine, signalLine) ? close : na, style=plot.style_circles, color=color.green, title="MACD Crossover")
+plot(ta.crossunder(macdLine, signalLine) ? close : na, style=plot.style_circles, color=color.red, title="MACD Crossunder")
+
+View in Pine Editor・41 lines
+Use on chart
+1
+0
+3
+2 993
+This trading strategy combines multiple technical indicators to create a systematic approach for entering and exiting trades. The goal is to capture trends by aligning several key indicators to confirm the direction and strength of a potential trade. Below is a detailed description of how the strategy works:
+
+Indicators Used
+MACD (Moving Average Convergence Divergence):
+
+MACD Line: The difference between the 12-period and 26-period Exponential Moving Averages (EMAs).
+Signal Line: A 9-period EMA of the MACD line.
+
+Usage: The strategy looks for crossovers between the MACD line and the Signal line as entry signals. A bullish crossover (MACD line crossing above the Signal line) indicates a potential upward movement, while a bearish crossover (MACD line crossing below the Signal line) signals a potential downward movement.
+
+RSI (Relative Strength Index):
+
+Usage: RSI is used to gauge the momentum of the price movement. The strategy uses specific thresholds: below 70 for long positions to avoid overbought conditions and above 30 for short positions to avoid oversold conditions.
+
+ATR (Average True Range):
+
+Usage: ATR measures market volatility and is used to set dynamic stop-loss and take-profit levels. A stop loss is set at 2 times the ATR, and a take profit at 3 times the ATR, ensuring that risk is managed relative to market conditions.
+Simple Moving Averages (SMA):
+
+50-day SMA: A short-term trend indicator.
+
+200-day SMA: A long-term trend indicator.
+
+Usage: The strategy uses the relationship between the 50-day and 200-day SMAs to determine the overall market trend. Long positions are taken when the price is above the 50-day SMA and the 50-day SMA is above the 200-day SMA, indicating an uptrend. Conversely, short positions are taken when the price is below the 50-day SMA and the 50-day SMA is below the 200-day SMA, indicating a downtrend.
+
+Entry Conditions
+
+Long Position:
+
+-MACD Crossover: The MACD line crosses above the Signal line.
+
+-RSI Confirmation: RSI is below 70, ensuring the asset is not overbought.
+
+-SMA Confirmation: The price is above the 50-day SMA, and the 50-day SMA is above the 200-day SMA, indicating a strong uptrend.
+Short Position:
+
+MACD Crossunder: The MACD line crosses below the Signal line.
+RSI Confirmation: RSI is above 30, ensuring the asset is not oversold.
+
+SMA Confirmation: The price is below the 50-day SMA, and the 50-day SMA is below the 200-day SMA, indicating a strong downtrend.
+
+Opposite conditions for shorts
+
+Exit Strategy
+Stop Loss: Set at 2 times the ATR from the entry price. This dynamically adjusts to market volatility, allowing for wider stops in volatile markets and tighter stops in calmer markets.
+
+Take Profit: Set at 3 times the ATR from the entry price. This ensures a favorable risk-reward ratio of 1:1.5, aiming for higher rewards on successful trades.
+
+Visualization
+SMAs: The 50-day and 200-day SMAs are plotted on the chart to visualize the trend direction.
+MACD Crossovers: Bullish and bearish MACD crossovers are highlighted on the chart to identify potential entry points.
+
+Summary
+This strategy is designed to align multiple indicators to increase the probability of successful trades by confirming trends and momentum before entering a position. It systematically manages risk with ATR-based stop loss and take profit levels, ensuring that trades are exited based on market conditions rather than arbitrary points. The combination of trend indicators (SMAs) with momentum and volatility indicators (MACD, RSI, ATR) creates a robust approach to trading in various market environments.

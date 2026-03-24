@@ -1,0 +1,127 @@
+//@version=5
+strategy("Supertrend Hombrok Bot", overlay=true, default_qty_type=strategy.cash, default_qty_value=1000)
+
+// INPUTS
+atrPeriod = input.int(10, title="ATR Period")
+atrMult = input.float(3.0, title="ATR Multiplier")
+rsiPeriod = input.int(14, title="RSI Period")
+rsiOverbought = input.int(70, title="RSI Overbought")
+rsiOversold = input.int(30, title="RSI Oversold")
+volumeMultiplier = input.float(1.2, title="Volume Multiplier")
+bodyPctOfATR = input.float(0.3, title="Candle Body % of ATR (min strength)")
+riskRewardRatio = input.float(2.0, title="R:R (Take Profit / Stop Loss)")
+capitalPerTrade = input.float(10, title="Capital por operação ($)")
+
+// ATR e Supertrend
+atr = ta.atr(atrPeriod)
+upperBand = hl2 - (atrMult * atr)
+lowerBand = hl2 + (atrMult * atr)
+prevUpper = nz(upperBand[1], upperBand)
+prevLower = nz(lowerBand[1], lowerBand)
+
+trendUp = close[1] > prevUpper ? math.max(upperBand, prevUpper) : upperBand
+trendDown = close[1] < prevLower ? math.min(lowerBand, prevLower) : lowerBand
+
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > trendDown ? 1 : trend == 1 and close < trendUp ? -1 : trend
+
+isUpTrend = trend == 1
+isDownTrend = trend == -1
+
+// Filtros
+volAverage = ta.sma(volume, 20)
+volOk = volume > volAverage * volumeMultiplier
+
+bodySize = math.abs(close - open)
+bodyOk = bodySize > (atr * bodyPctOfATR)
+
+rsi = ta.rsi(close, rsiPeriod)
+rsiBuyOk = rsi < rsiOverbought
+rsiSellOk = rsi > rsiOversold
+
+// Condições
+buyCond = isUpTrend and volOk and bodyOk and rsiBuyOk
+sellCond = isDownTrend and volOk and bodyOk and rsiSellOk
+
+// TP e SL
+longSL = close - atr
+longTP = close + (atr * riskRewardRatio)
+shortSL = close + atr
+shortTP = close - (atr * riskRewardRatio)
+
+// Estratégia de entrada e saída
+if buyCond
+    strategy.entry("Compra", strategy.long, qty=capitalPerTrade / close)
+    strategy.exit("TP/SL Compra", from_entry="Compra", stop=longSL, limit=longTP)
+
+if sellCond
+    strategy.entry("Venda", strategy.short, qty=capitalPerTrade / close)
+    strategy.exit("TP/SL Venda", from_entry="Venda", stop=shortSL, limit=shortTP)
+
+// ALERTAS + LABELS
+alertLong = '{"side":"buy", "capital":' + str.tostring(capitalPerTrade) + ', "sl":' + str.tostring(longSL) + ', "tp":' + str.tostring(longTP) + '}'
+alertShort = '{"side":"sell", "capital":' + str.tostring(capitalPerTrade) + ', "sl":' + str.tostring(shortSL) + ', "tp":' + str.tostring(shortTP) + '}'
+
+if buyCond
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white)
+    alert(alertLong, alert.freq_once_per_bar_close)
+
+if sellCond
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white)
+    alert(alertShort, alert.freq_once_per_bar_close)
+
+// VISUAL
+plotshape(buyCond, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(sellCond, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+plot(trend == 1 ? trendUp : na, title="Trend Up", color=color.green, linewidth=1)
+plot(trend == -1 ? trendDown : na, title="Trend Down", color=color.red, linewidth=1)
+
+View in Pine Editor・79 lines
+Use on chart
+4
+5
+1 939
+Supertrend Hombrok Bot – Automated Trading Strategy for Dynamic Market Conditions
+
+This trading strategy script has been developed to operate automatically based on detailed market conditions. It combines the popular Supertrend indicator, RSI (Relative Strength Index), Volume, and ATR (Average True Range) to determine the best entry and exit points while maintaining proper risk management.
+
+Key Features:
+Supertrend as the Base: Uses the Supertrend indicator to identify the market's trend direction, generating buy signals when the market is in an uptrend and sell signals when in a downtrend.
+
+RSI Filter: The RSI is used to determine overbought and oversold conditions, helping to avoid entries in extreme market conditions. Entries are avoided when RSI > 70 (overbought) and RSI < 30 (oversold), reducing the risk of false movements.
+
+Volume Filter: The strategy checks if the trading volume is above the average multiplied by a user-defined factor. This ensures that only significant movements, with higher liquidity, are considered.
+
+Candle Body Size: The strategy filters only candles with a body large enough relative to the ATR (Average True Range), ensuring that the price movements on the chart have sufficient strength.
+
+Risk Management: The bot is configured to operate with an adjustable Risk/Reward Ratio (R:R). This means that for each trade, both Take Profit (TP) and Stop Loss (SL) are adjusted based on the market's volatility as measured by the ATR.
+
+Automatic Entries and Exits: The script automatically executes entries based on the specified conditions and exits with predefined Stop Loss and Take Profit levels, ensuring risk is controlled for each trade.
+
+How It Works:
+Buy Condition: Triggered when the market is in an uptrend (Supertrend), the volume is above the adjusted average, the candle body is strong enough, and the RSI is below the overbought level.
+
+Sell Condition: Triggered when the market is in a downtrend (Supertrend), the volume is above the adjusted average, the candle body is strong enough, and the RSI is above the oversold level.
+
+Alerts:
+Buy and Sell Alerts are configured with detailed information, including Stop Loss and Take Profit values, allowing the user to receive notifications when trading conditions are met.
+
+Capital Management:
+The capital per trade can be adjusted based on account size and risk profile.
+
+Important Note:
+Always test before trading with real capital: While the strategy has been designed based on solid technical analysis methods, always perform tests in real-time market conditions with demo accounts before applying the bot in live trading.
+
+Disclaimer: This script is a tool to assist in the trading process and does not guarantee profit. Past performance is not indicative of future results, and the trader is always responsible for their investment decisions.
+
+
+
+
+
+
+
+
+
+

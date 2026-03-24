@@ -1,0 +1,93 @@
+//@version=5
+strategy("SSL + Hama Scalping Strategy with Consolidation Detection", overlay=true)
+
+// Parametry SSL Channel
+sslPeriod = input.int(13, title="SSL Channel Period")
+sslChannel = ta.sma(close, sslPeriod)
+sslIsGreen = close > sslChannel
+sslIsRed = close < sslChannel
+
+// Parametry NSDT Hama Candles
+hamaOpen = ta.ema(open, 25)
+hamaHigh = ta.ema(high, 20)
+hamaLow = ta.ema(low, 20)
+hamaClose = ta.ema(close, 20)
+hamaLine = ta.ema(close, 100)
+hamaIsGreen = hamaClose > hamaLine
+hamaIsRed = hamaClose < hamaLine
+
+// Kolor świec Hama w zależności od trendu
+bgcolor(hamaIsGreen ? color.green : color.red, transp=90)
+
+// Parametry dla wykrywania konsolidacji z ATR
+atrPeriod = input.int(14, title="ATR Period")
+atrThreshold = input.float(0.003, title="ATR Threshold")  // Niższy próg dla bardziej precyzyjnego wykrywania konsolidacji
+atrValue = ta.atr(atrPeriod)
+isConsolidation = atrValue / close < atrThreshold
+
+// Oznaczanie konsolidacji na wykresie żółtym tłem
+bgcolor(isConsolidation ? color.new(color.yellow, 80) : na)
+
+// Parametry zarządzania ryzykiem
+takeProfitRR = input.float(1.0, title="Take Profit R:R Ratio")
+stopLossBuffer = input.float(0.5, title="Stop Loss Buffer")
+
+// Warunki wejścia na pozycję długą i krótką
+longCondition = sslIsGreen and hamaIsGreen and close > hamaClose
+shortCondition = sslIsRed and hamaIsRed and close < hamaClose
+
+// Obliczenia TP i SL
+longStopLoss = hamaLine * (1 - stopLossBuffer / 100)
+shortStopLoss = hamaLine * (1 + stopLossBuffer / 100)
+longTakeProfit = close * (1 + takeProfitRR / 100)
+shortTakeProfit = close * (1 - takeProfitRR / 100)
+
+// Wejście na pozycję długą z TP i SL
+if (longCondition)
+    strategy.entry("Long", strategy.long, stop=longStopLoss, limit=longTakeProfit)
+
+// Wejście na pozycję krótką z TP i SL
+if (shortCondition)
+    strategy.entry("Short", strategy.short, stop=shortStopLoss, limit=shortTakeProfit)
+
+// Zamknięcie na powrocie ceny do Hama Candles
+if (longCondition and close <= hamaClose)
+    strategy.close("Long")
+if (shortCondition and close >= hamaClose)
+    strategy.close("Short")
+
+// Rysowanie wskaźników
+plot(sslChannel, title="SSL Channel", color=color.blue, linewidth=2)
+plot(hamaLine, title="Hama Line", color=color.purple, linewidth=1)
+
+View in Pine Editor・61 lines
+Use on chart
+1
+0
+6
+1
+5 421
+This TradingView script brings a powerful scalping strategy that combines the SSL Channel and Hama Candles indicators with a special twist—consolidation detection. Designed for traders looking for consistency in various markets like crypto, forex, and stocks, this strategy highlights clear trend signals, risk management, and helps filter out risky trades during consolidation periods.
+
+Why Use This Strategy?
+Clear Trend Detection:
+
+With the SSL Channel, you’ll know exactly when the market is in an uptrend (green) or downtrend (red), giving you straightforward entry points.
+Short-Term Trend Precision with Hama Candles:
+
+By calculating unique EMAs for open, high, low, and close, the Hama Candles show the strength and direction of short-term trends. Combined with the Hama Line, it gives you a solid confirmation on whether the trend is strong or about to reverse, allowing for precise entries and exits.
+Avoiding Choppy Markets:
+
+Thanks to ATR-based consolidation detection, this strategy identifies low-volatility periods where the market is “choppy” and less predictable. During these times, a yellow background appears on the chart, warning you to hold off on trades, reducing the likelihood of entering losing trades.
+Built-In Risk Management:
+
+With adjustable Take Profit and Stop Loss levels based on price movements, you can set and forget your trades, with a safety net if the market turns against you. The strategy automatically closes positions if the price returns to the Hama Candle, keeping your risk low.
+How It Works:
+Long Position: When both the SSL and Hama indicators show a green trend, and the price is above the Hama Candles, the strategy opens a long position. Take Profit triggers at your chosen risk-to-reward ratio, while Stop Loss protects you just below the Hama Line.
+
+Short Position: When both indicators align in red and the price is below the Hama Candles, the strategy opens a short. Similar to longs, Stop Loss is set just above the Hama Line, and Take Profit is at your defined level.
+
+Start Trading Confidently
+Test this strategy with different settings and discover how it can perform across various assets. Whether you're trading Bitcoin, forex pairs, or stocks, this system has the flexibility and robustness to help you spot profitable trends and avoid risky zones. Try it today on a 30-minute timeframe to see how it aligns with your trading goals, and let the consolidation detection guide you away from false signals.
+
+Happy trading, and may the trends be with you! 📈

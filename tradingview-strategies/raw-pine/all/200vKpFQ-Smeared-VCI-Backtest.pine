@@ -1,0 +1,75 @@
+//@version=3
+strategy("Smeared VCI Backtest", overlay=false, shorttitle="SVCI Backtest", default_qty_type = strategy.percent_of_equity, default_qty_value = 100, initial_capital = 10000, slippage = 5)
+// Smeared Variability Channel Index
+//    a variation of the VCI indicator of the same author.
+// The orange line over the lime line is bullish;
+// The lime line over the orange one is bearish.
+//
+// vitelot/yanez/Vts
+// Feb 2019
+//
+src = close
+
+ep1 = input(5, minval=1, title="Fast EMA period")
+ep2 = input(13, minval=2, title="Slow EMA period")
+
+sm = input(34, minval=1, title="Smearing period")
+tp = input(13, minval=1, title="Trigger line period")
+treshold_long = input(0, title="Treshold Long")
+treshold_short = input(0, title="Treshold Short")
+
+fixedSL = input(title="SL Activation", defval=300)
+trailSL = input(title="SL Trigger", defval=1)
+fixedTP = input(title="TP Activation", defval=150)
+trailTP = input(title="TP Trigger", defval=1)
+
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2019, title = "From Year", minval = 2017)
+ToMonth   = input(defval = 6, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 19, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 2020, title = "To Year", minval = 2017)
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+startTimeOk()  => time >= start and time <= finish ? true : false // create function "within window of time" if statement true
+
+atrP = 96
+
+e1 = ema(src,ep1)
+e2 = ema(src,ep2)
+
+vci = (e1-e2)/atr(atrP)
+
+svci = sma(vci,sm)
+t = sma(svci,tp)
+
+plot(svci, color=lime, linewidth=3, transp=0, title="Smeared VCI")
+plot(t, color=orange, linewidth=3, transp=0, title="Trigger line")
+
+hline(0, title="Reference line")
+
+long = crossover(svci,t) and svci < treshold_long
+short = crossover(t,svci)  and svci > treshold_short
+
+// === STRATEGY - LONG POSITION EXECUTION ===
+strategy.entry("Long", strategy.long, when= long and startTimeOk())
+strategy.exit("Exit", qty_percent = 100, loss=fixedSL, trail_offset=trailTP, trail_points=fixedTP) 
+strategy.exit("Exit", when= short)
+// === STRATEGY - SHORT POSITION EXECUTION ===
+strategy.entry("Short", strategy.short, when= short and startTimeOk())
+strategy.exit("Exit", qty_percent = 100, loss=fixedSL, trail_offset=trailTP, trail_points=fixedTP)
+strategy.exit("Exit", when= long)
+
+View in Pine Editor・61 lines
+Use on chart
+1
+2
+9
+1
+3 553
+Mar 31, 2019
+This is the strategy with backtest date range and trailing-stop / stop-loss for vitelot's Smeared VCI indicator:
+
+Mar 31, 2019
+Release Notes
+Update: added a threshold for signals...

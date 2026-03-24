@@ -1,0 +1,120 @@
+//@version=5
+strategy("ICT Bread and Butter Sell-Setup", overlay=true)
+
+// Get current date values
+t = time
+currentYear = year(t)
+currentMonth = month(t)
+currentDay = dayofmonth(t)
+
+// Time Settings
+sessionNYOpen  = timestamp(currentYear, currentMonth, currentDay, 08, 20) // CME Open
+sessionLondon  = timestamp(currentYear, currentMonth, currentDay, 02, 00) // London Open
+sessionAsia    = timestamp(currentYear, currentMonth, currentDay, 19, 00) // Asia Open
+sessionEnd     = timestamp(currentYear, currentMonth, currentDay, 16, 00) // Market Close
+
+// Session Ranges (Initialize to the first bar values)
+var float londonHigh = high
+var float londonLow = low
+var float nyHigh = high
+var float nyLow = low
+var float asiaHigh = high
+var float asiaLow = low
+
+// Update Highs & Lows for Each Session
+if (time >= sessionLondon and time < sessionNYOpen)
+    londonHigh := math.max(londonHigh, high)
+    londonLow := math.min(londonLow, low)
+
+if (time >= sessionNYOpen and time < sessionEnd)
+    nyHigh := math.max(nyHigh, high)
+    nyLow := math.min(nyLow, low)
+
+if (time >= sessionAsia and time < sessionLondon)
+    asiaHigh := math.max(asiaHigh, high)
+    asiaLow := math.min(asiaLow, low)
+
+// New York Judas Swing (Temporary Rally)
+judasSwing = high >= londonHigh and time >= sessionNYOpen and time < sessionEnd
+
+// Short Entry in NY Kill Zone
+shortEntry = judasSwing and close < open
+stopLoss = high + 10 * syminfo.mintick
+profitTarget = low - 20 * syminfo.mintick
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Take Profit", from_entry="Short", limit=profitTarget, stop=stopLoss)
+
+// London Close Buy Setup
+londonCloseBuy = time >= timestamp(currentYear, currentMonth, currentDay, 10, 30) and time <= timestamp(currentYear, currentMonth, currentDay, 13, 00) and close < londonLow
+if londonCloseBuy
+    strategy.entry("Buy", strategy.long)
+    strategy.exit("Take Profit Buy", from_entry="Buy", limit=close + 20 * syminfo.mintick, stop=low - 10 * syminfo.mintick)
+
+// Asia Open Sell Setup
+asiaSell = time >= sessionAsia and time < sessionLondon and close > asiaHigh
+if asiaSell
+    strategy.entry("Asia Short", strategy.short)
+    strategy.exit("Asia Profit", from_entry="Asia Short", limit=close - 15 * syminfo.mintick, stop=high + 10 * syminfo.mintick)
+
+// Plot High/Low of Sessions
+plot(londonHigh, color=color.blue, title="London High")
+plot(londonLow, color=color.blue, title="London Low")
+plot(nyHigh, color=color.red, title="NY High")
+plot(nyLow, color=color.red, title="NY Low")
+plot(asiaHigh, color=color.orange, title="Asia High")
+plot(asiaLow, color=color.orange, title="Asia Low")
+
+View in Pine Editor・67 lines
+Use on chart
+1
+3
+1
+4 818
+ICT Bread and Butter Sell-Setup – TradingView Strategy
+Overview:
+The ICT Bread and Butter Sell-Setup is an intraday trading strategy designed to capitalize on bearish market conditions. It follows institutional order flow and exploits liquidity patterns within key trading sessions—London, New York, and Asia—to identify high-probability short entries.
+
+Key Components of the Strategy:
+🔹 London Open Setup (2:00 AM – 8:20 AM NY Time)
+
+The London session typically sets the initial directional move of the day.
+A short-term high often forms before a downward push, establishing the daily high.
+🔹 New York Open Kill Zone (8:20 AM – 10:00 AM NY Time)
+
+The New York Judas Swing (a temporary rally above London’s high) creates an opportunity for short entries.
+Traders fade this move, anticipating a sell-off targeting liquidity below previous lows.
+🔹 London Close Buy Setup (10:30 AM – 1:00 PM NY Time)
+
+If price reaches a higher timeframe discount array, a retracement higher is expected.
+A bullish order block or failure swing signals a possible reversal.
+The risk is set just below the day’s low, targeting a 20-30% retracement of the daily range.
+🔹 Asia Open Sell Setup (7:00 PM – 2:00 AM NY Time)
+
+If institutional order flow remains bearish, a short entry is taken around the 0-GMT Open.
+Expect a 15-20 pip decline as the Asian range forms.
+Strategy Rules:
+📉 Short Entry Conditions:
+✅ New York Judas Swing occurs (price moves above London’s high before reversing).
+✅ Short entry is triggered when price closes below the open.
+✅ Stop-loss is set 10 pips above the session high.
+✅ Take-profit targets liquidity zones on higher timeframes.
+
+📈 Long Entry (London Close Reversal):
+✅ Price reaches a higher timeframe discount array between 10:30 AM – 1:00 PM NY Time.
+✅ A bullish order block confirms the reversal.
+✅ Stop-loss is set 10 pips below the day’s low.
+✅ Take-profit targets 20-30% of the daily range retracement.
+
+📉 Asia Open Sell Entry:
+✅ Price trades slightly above the 0-GMT Open.
+✅ Short entry is taken at resistance, targeting a quick 15-20 pip move.
+
+Why Use This Strategy?
+🚀 Institutional Order Flow Tracking – Aligns with smart money concepts.
+📊 Precise Session Timing – Uses market structure across London, New York, and Asia.
+🎯 High-Probability Entries – Focuses on liquidity grabs and engineered stop hunts.
+📉 Optimized Risk Management – Defined stop-loss and take-profit levels.
+
+This strategy is ideal for traders looking to trade with institutions, fade liquidity grabs, and capture high-probability short setups during the trading day. 📉🔥

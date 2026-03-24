@@ -1,0 +1,105 @@
+//@version=6
+strategy("VIX Counter-Trend Strategy", overlay=true)
+
+// --- 1. Define Parameters (Adjustable buying the dip and exit thresholds) ---
+// VIX Buy Threshold: VIX reaching or exceeding this value is considered extreme panic
+vix_buy_threshold = input.float(25.0, "VIX Buy Threshold (Panic Value)", minval=20.0)
+// VIX Moving Average Period
+vix_ma_period = input.int(5, "VIX MA Period", minval=1)
+
+// Exit Condition Selection
+exit_mode = input.string("Holding Days", "Exit Condition", options=["Holding Days", "VIX Retreat", "Both"])
+// Exit Days: Number of days after purchase to force exit
+exit_days = input.int(100, "Forced Exit Days After Purchase", minval=1)
+// VIX Sell Threshold
+vix_sell_threshold = input.float(20.0, "VIX Sell Threshold (Calm Value)", minval=10.0)
+
+// --- 2. Get VIX Data ---
+// The VIX ticker on TradingView is usually TVC:VIX
+// Use request.security() function to fetch the VIX daily close price on the VOO chart
+vix_data = request.security("TVC:VIX", "D", close)
+
+// Calculate the 5-day Moving Average of VIX
+vix_ma = request.security("TVC:VIX", "D", ta.sma(close, vix_ma_period))
+
+// --- 3. Strategy Logic: Buy Condition ---
+// Determine if VIX has reached the buying the dip threshold AND VIX crosses under the 5-day MA
+// Cross Under: VIX drops below the MA from above
+// Use [1] to ensure data is confirmed (i.e., cross occurred on the previous bar)
+vix_cross_under = ta.crossunder(vix_data, vix_ma)
+buy_condition = vix_data[1] >= vix_buy_threshold and vix_cross_under[1]
+
+// Execute Buy Entry
+if buy_condition
+    strategy.entry("BuyVOO", strategy.long, comment="VIX Panic Dip Buy")
+
+// --- 4. Strategy Logic: Sell Condition ---
+// Calculate the number of holding bars
+var int bars_since_entry = 0
+if strategy.position_size > 0
+    bars_since_entry := bars_since_entry + 1
+else
+    bars_since_entry := 0
+
+// Determine various exit conditions
+time_exit = bars_since_entry >= exit_days
+vix_exit = vix_data <= vix_sell_threshold
+
+// Execute Sell based on user's selected mode
+if exit_mode == "Holding Days"
+    if time_exit
+        strategy.close("BuyVOO", comment="Holding Period Exceeded")
+else if exit_mode == "VIX Retreat"
+    if vix_exit
+        strategy.close("BuyVOO", comment="VIX Below " + str.tostring(vix_sell_threshold))
+else if exit_mode == "Both"
+    if time_exit or vix_exit
+        strategy.close("BuyVOO", comment=time_exit ? "Holding Period Exceeded" : "VIX Below " + str.tostring(vix_sell_threshold))
+
+View in Pine Editor・60 lines
+Use on chart
+2
+0
+659
+VIX Panic Index VOO Bottom-Fishing Strategy
+
+📊 Strategy Overview
+This strategy utilizes the VIX (Volatility Index) as a market sentiment indicator to help investors rationally enter positions during periods of extreme market panic, using objective technical signals to avoid emotional decision-making. It is designed to capture rebound opportunities in VOO (or other US equity ETFs) following panic-driven selloffs.
+
+🎯 Entry and Exit Conditions
+
+Entry Conditions (both must be met):
+VIX reaches or exceeds the set threshold (default 25, adjustable)
+VIX death crosses below its moving average (default 5-day MA), confirming panic sentiment is beginning to recede
+
+
+Exit Conditions (three modes available):
+Holding Period Mode: Exit after holding for the set number of days (default 100 days)
+VIX Decline Mode: Exit when VIX falls below the set threshold (default 20)
+Either Condition Mode: Exit when either condition is met
+
+
+⚠️ Important Warnings
+Not Suitable for Leveraged ETF Bottom-Fishing: VIX reflects market volatility. Using leveraged ETFs (such as TQQQ, SOXL) increases risk due to decay effects and greater volatility, potentially causing larger losses during panic periods.
+Bear Market Inaccuracy Risk: This strategy assumes markets will rebound from panic. However, during prolonged bear markets or systemic risks (such as the 2008 financial crisis or 2022 rate hike cycle), VIX may remain elevated for extended periods, triggering multiple buy signals while prices continue declining, rendering the strategy ineffective.
+Recommended to Combine with Market Trend Analysis: Works better in bull market conditions. In bear markets, consider raising VIX thresholds or suspending use.
+For Reference Only, Not Investment Advice: Historical performance does not guarantee future results. Please use cautiously according to your personal risk tolerance.
+
+VIX 恐慌指數 VOO 抄底策略
+📊 策略目的
+本策略利用 VIX 恐慌指數作為市場情緒指標，幫助投資人在市場極度恐慌時理性進場抄底，並透過客觀的技術訊號避免情緒化操作。適合用於捕捉 VOO（或其他美股 ETF）在恐慌性下跌後的反彈機會。
+🎯 進出場條件
+進場條件（同時滿足）：
+VIX 指數達到設定門檻以上（預設 25，可調整）
+VIX 死亡交叉其均線（預設 5 日均線），確認恐慌情緒開始回落
+
+出場條件（三種模式可選）：
+持有天數模式：持有達到設定天數後出場（預設 100 天）
+VIX 回落模式：VIX 降至設定門檻以下時出場（預設 20）
+兩者皆可模式：任一條件滿足即出場
+
+⚠️ 重要警語
+不適合槓桿型 ETF 抄底：VIX 反映的是市場波動度，使用槓桿 ETF（如 TQQQ、SOXL）會因為衰減效應和更大波動而增加風險，可能在恐慌期間造成更大虧損。
+空頭市場失準風險：本策略假設市場會從恐慌中反彈，但在長期空頭或系統性風險（如 2008 金融危機、2022 升息循環）中，VIX 可能長期處於高檔，多次觸發買入訊號卻持續下跌，導致策略失效。
+建議搭配大盤趨勢判斷：在多頭格局中使用效果較佳，空頭格局建議提高 VIX 門檻或暫停使用。
+僅供參考，非投資建議：歷史績效不代表未來表現，請依個人風險承受度謹慎使用。

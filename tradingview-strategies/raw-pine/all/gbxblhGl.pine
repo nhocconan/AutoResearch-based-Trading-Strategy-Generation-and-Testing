@@ -1,0 +1,80 @@
+//@version=4
+//Based on Turtle traders strategy: buy/sell on Donchian breakouts and stop loss on ATR 2x
+// initial version considerations :
+//// 1. Does not consider filter for avoiding new entries after winning trades (filtering rule from Turtle Strategy on 20 day breakout strategy) 
+//// 2. Does not consider pyramiding (aditional entries after 1N price movements)
+
+strategy("Turtle trading strategy (Donchian/ATR)", overlay=true)
+
+enter_period = input(20, minval=1, title="Enter Channel")
+exit_period = input(10, minval=1, title="Exit Channel")
+offset_bar = input(0,minval=0, title ="Offset Bars")
+direction = input("Long",options=["Long","Short"],title="Direction")
+max_length = max(enter_period,exit_period)
+atrmult = input(2.0,title="ATR multiplier (Stop Loss)")
+atrperiod = input(20,title="ATR Period")
+
+closed_pos = false
+dir_long = direction == "Long"? true : false
+atr=ema(tr(true),atrperiod)
+atrstop = atrmult*atr
+upper = dir_long ? highest(enter_period): highest(exit_period)
+lower = dir_long ? lowest(exit_period): lowest(enter_period)
+atrupper = ema(close + atrstop,3)
+atrlower = ema(close - atrstop,3)
+atrupper_incpos = close + atr
+atrlower_incpos = close - atr
+plotted_atr = dir_long ? atrlower : atrupper
+atr_incpos = dir_long ? atrupper_incpos : atrlower_incpos
+
+//basis = avg(upper, lower)
+
+l = plot(lower, style=plot.style_line, linewidth=3, color=color.lime, offset=1)
+u = plot(upper, style=plot.style_line, linewidth=3, color=color.lime, offset=1)
+a = plot(plotted_atr, style=plot.style_line,linewidth=2,color=color.red,offset=1)
+lin = line.new(x1=bar_index[5],x2=bar_index,y1=atr_incpos,y2=atr_incpos,color=color.lime,style=line.style_dashed)
+line.set_width(lin,2)
+line.delete(lin[4])
+//plot(basis, color=yellow, style=line, linewidth=1, title="Mid-Line Average")
+//break upper Donchian (with 1 candle offset) (buy signal)
+break_up = (close >= upper[1])
+//break lower Donchian (with 1 candle offset) (sell signal)
+break_down = (close <= lower[1])
+stop_loss = dir_long ? (close<=plotted_atr[1]) : (close>=plotted_atr[1])
+
+if break_up and dir_long
+    strategy.entry("buy", strategy.long, 1)
+    closed_pos :=false
+if (break_down or stop_loss) and dir_long
+    strategy.close("buy")
+    
+if break_down and not dir_long
+    strategy.entry("sell", strategy.short, 1)
+    closed_pos :=false
+if (break_up or stop_loss) and not dir_long
+    strategy.close("sell")
+    closed_pos :=true
+    
+alertcondition(true, 'TurtleTest', 'Teste Estratégia Turtle')
+
+View in Pine Editor・58 lines
+Use on chart
+1.7 K
+9
+48 408
+Oct 17, 2019
+Strategy based on Turtle Trading Strategy from William Eckhardt and Richard Dennis
+
+- Considers entering trades on breakout of Donchian channels (upper for long, lower for short) (Default length = 20 for daily)
+- Considers exiting trades on breakout of Donchian channels (lower for long, upper for short) with lower length (10 for daily)
+- Uses 2N ATR (default) as stop loss
+Oct 17, 2019
+Release Notes
+Corrected ATR Stop Loss (was not been multiplied for the factor atrmult)
+Nov 4, 2019
+Release Notes
+- Updated to v4 pine script language
+- Added indication for increase position based on 1N ATR value (marked on green dashed line) if the trade is in profit.
+Jan 15, 2020
+Release Notes
+Changed ATR Multiplier to permit non-integer values

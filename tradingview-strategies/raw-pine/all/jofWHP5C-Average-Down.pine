@@ -1,0 +1,85 @@
+//@version=3
+
+// ########################################################################## // 
+//
+// This scipt is intended to demonstrate how pyramiding can be used to average
+// down a position.
+//
+// We will buy when a stock closes above its 20 day MA and Average down if
+// the trade does not go in our favor. We will hold until a profit is made. 
+// (which could mean we hold forever)
+//
+// ########################################################################## //
+
+strategy("Average Down", overlay=true, pyramiding=4, default_qty_type=strategy.percent_of_equity,
+  default_qty_value=10)
+
+// Date Ranges
+from_month = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+from_day   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+from_year  = input(defval = 2010, title = "From Year")
+to_month   = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+to_day     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+to_year    = input(defval = 9999, title = "To Year")
+start  = timestamp(from_year, from_month, from_day, 00, 00)  // backtest start window
+finish = timestamp(to_year, to_month, to_day, 23, 59)        // backtest finish window
+window = time >= start and time <= finish ? true : false // create function "within window of time"
+// Strategy Inputs
+target_perc = input(-10, title='Target Loss to Average Down (%)', maxval=0)/100
+take_profit = input(10, title='Target Take Profit', minval=0)/100
+target_qty  = input(50, title='% Of Current Holdings to Buy', minval=0)/100 
+sma_period  = input(20, title='SMA Period') 
+
+// Get our SMA, this will be used for our first entry 
+ma = sma(close,sma_period)
+
+// Calculate our key levels
+pnl = (close - strategy.position_avg_price) / strategy.position_avg_price
+take_profit_level = strategy.position_avg_price * (1 + take_profit)
+
+// First Position
+first_long = crossover(close, ma) and strategy.position_size == 0 and window
+if (first_long)
+    strategy.entry("Long", strategy.long)
+
+// Average Down!
+if (pnl <= target_perc)
+    qty = floor(strategy.position_size * target_qty)
+    strategy.entry("Long", strategy.long, qty=qty)
+
+// Take Profit!
+strategy.exit("Take Profit", "Long", limit=take_profit_level)
+
+// Plotting
+plot(ma, color=blue, linewidth=2, title='SMA')
+plot(strategy.position_avg_price, style=linebr, color=red, title='Average Price')
+
+View in Pine Editor・55 lines
+Use on chart
+2
+4
+1
+2
+6 612
+This strategy has been published for a Pyramiding tutorial on the Backtest Rookies website.
+
+For a full overview of the code and an introduction to Pyramiding check out our site.
+
+Summary
+The code example will create a simple script that allows us to average down whenever our portfolio is down x%. The idea will be to bring our average cost down so that we can still exit with a profit when conditions improve. With this in mind, the strategy shall also have a simple take profit exit at x% above our average price.
+
+Inputs
+
+
+Target Loss to Average Down (%): This is the target percentage level will trigger us to average down. In other words, if we have a close below this level from our average buying price, we will average down.
+
+Target Take Profit: A standard take profit percentage level. Use this to set how much profit you will target.
+
+% Of Current Holdings to Buy: Is the number of shares/contracts we will aim to buy when we average down. 50 will mean we buy 50% of our current holdings. So if we have 100 shares, then we buy 50 when we average down.
+
+SMA Period: Defines our SMA lookback period. Our strategy will enter the first/initial position when we have a close above our SMA level.
+
+
+
+
+

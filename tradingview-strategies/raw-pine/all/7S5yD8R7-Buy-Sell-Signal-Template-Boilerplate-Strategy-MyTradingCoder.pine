@@ -1,0 +1,50 @@
+//@version=5
+strategy(title = "Buy/Sell Signal Template/Boilerplate Strategy[ExoMaven]", shorttitle = "Buy/Sell Signal Template Strategy[V1]", overlay = true)
+
+source = input.source(title = "Source", defval = ohlc4, group = "Source Settings")
+
+buy_type = input.string(title = "Buy Type", defval = "Greater Than", options = ["Greater Than", "Less Than"], group = "Signal Settings")
+buy_value  = input.float(title = "Buy Value", defval = 50, group = "Signal Settings")
+
+sell_type = input.string(title = "Sell Type", defval = "Less Than", options = ["Less Than", "Greater Than"], group = "Signal Settings")
+sell_value = input.float(title = "Sell Value", defval = 50, group = "Signal Settings")
+
+buy_above_or_below = buy_type == "Greater Than" ? source > buy_value and source[1] < buy_value : source < buy_value and source[1] > buy_value
+sell_above_or_below = sell_type == "Less Than" ? source < sell_value and source[1] > sell_value : source > sell_value and source[1] < sell_value
+
+buy = buy_above_or_below and barstate.isconfirmed
+sell = sell_above_or_below and barstate.isconfirmed
+
+if buy
+    strategy.close_all()
+    strategy.entry(id = "Buy", direction = strategy.long)
+
+if sell
+    strategy.close_all()
+    strategy.entry(id = "Sell", direction = strategy.short)
+
+View in Pine Editor・27 lines
+Use on chart
+1
+5
+1
+6 975
+This script allows the user to connect an external indicator output/plot value to allow for a no-code solution to setup a simple buy/sell signal strategy. For those of you who do not know how to program, do not be intimidated as this is a very easy setup process.
+
+Maybe you want to buy when the 'RSI' value drops below '30' and then sell when the 'RSI' value climbs above '70', but you don't want to code it. You can do that with this indicator along with thousands of others found on the free TradingView indicator library.
+
+Step #1:
+
+Put the strategy on the chart.
+
+Step #2:
+
+Apply a secondary indicator onto the chart, such as an RSI .
+
+Step #3:
+
+Open the strategy settings and change the source to the RSI
+
+Step #4:
+
+Change the 'Signal Settings' to match when you want a buy, or a sell. For example, if you want to get a buy signal when the RSI crosses above 50, and get a sell when it crosses below 50, set the 'buy value' to 50, and the 'buy type' to greater than, then set the 'sell value' to 50 and the 'sell type' to less than. BOOM! It works :)

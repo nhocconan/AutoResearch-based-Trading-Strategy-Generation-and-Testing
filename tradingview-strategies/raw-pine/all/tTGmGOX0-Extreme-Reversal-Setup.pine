@@ -1,0 +1,37 @@
+//@version=4
+strategy("Extreme Reversal", overlay=true)
+
+bodySize = input(defval=0.75)
+barsBack = input(title="Lookback Period", defval=50)
+bodyMultiplier = input(title="Body Multiplier", defval=2.0)
+
+myBodySize = abs(close - open)
+averageBody = rma(myBodySize, barsBack)
+myCandleSize = abs(high - low)
+averageCandle = rma(myCandleSize, barsBack)
+
+signal_long = open[1]-close[1] >= bodySize*(high[1]-low[1]) and 
+   high[1]-low[1] > averageCandle*bodyMultiplier and 
+   open[1]-close[1] > averageBody and close > open
+signal_short = close[1]-open[1] >= bodySize*(high[1]-low[1]) and 
+   high[1]-low[1] > averageCandle*bodyMultiplier and 
+   close[1]-open[1] > averageBody and open > close
+
+plotshape(signal_long, "LONG", shape.triangleup, location.belowbar, size=size.normal)
+plotshape(signal_short, "SHORT", shape.triangledown, location.belowbar, size=size.normal)
+
+strategy.entry("LONG", strategy.long, when=signal_long)
+strategy.entry("SHORT", strategy.short, when=signal_short)
+
+View in Pine Editor・24 lines
+Use on chart
+1
+4
+6
+2
+7 231
+Dec 26, 2019
+The extreme reversal strategy covered in the PivotBoss text.
+Dec 26, 2019
+Release Notes
+More in line with original PivotBoss script.

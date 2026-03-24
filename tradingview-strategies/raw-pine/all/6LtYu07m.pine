@@ -1,0 +1,137 @@
+//@version=5
+strategy("Asian Reclaim - ATR Stop & 100€ Risk", overlay=true, initial_capital=10000, currency=currency.EUR)
+
+// --- INPUT ---
+asian_start_hr = input.int(0, "Ora Inizio Asian (UTC)", minval=0, maxval=23)
+asian_end_hr   = input.int(8, "Ora Fine Asian (UTC)", minval=0, maxval=23)
+tp_ratio       = input.float(1.5, "Take Profit Ratio (Risk:Reward)")
+risk_amount    = input.float(100.0, "Rischio Fisso per Trade (€)")
+atr_length     = input.int(14, "Periodi ATR per Stop")
+atr_mult       = input.float(1.0, "Moltiplicatore ATR", step=0.1)
+
+// --- INDICATORI ---
+atr = ta.atr(atr_length)
+
+// --- LOGICA SESSIONE ---
+is_asian = (hour >= asian_start_hr and hour < asian_end_hr)
+var float asian_high = na
+var float asian_low = na
+
+if is_asian
+    if not is_asian[1]
+        asian_high := high
+        asian_low := low
+    else
+        asian_high := math.max(asian_high, high)
+        asian_low := math.min(asian_low, low)
+
+// Disegno Range Asiatico
+var box asian_box = na
+if is_asian and not is_asian[1]
+    asian_box := box.new(bar_index, asian_high, bar_index, asian_low, bgcolor=color.new(color.orange, 90), border_color=color.orange)
+if is_asian
+    box.set_right(asian_box, bar_index)
+    box.set_top(asian_box, asian_high)
+    box.set_bottom(asian_box, asian_low)
+
+// --- LOGICA DI SBILANCIAMENTO ---
+after_asian = (hour >= asian_end_hr)
+var bool sbilanciato_sopra = false
+var bool sbilanciato_sotto = false
+
+if not after_asian
+    sbilanciato_sopra := false
+    sbilanciato_sotto := false
+else
+    if high > asian_high
+        sbilanciato_sopra := true
+    if low < asian_low
+        sbilanciato_sotto := true
+
+// --- VARIABILI DI GESTIONE ---
+var float entry_p = na
+var float sl_p = na
+var float tp_p = na
+var float be_trig = na
+var bool be_active = false
+
+// --- ENTRATE CON ATR STOP ---
+
+// SHORT: Chiude col corpo dentro (sotto asian_high) dopo sbilanciamento
+if sbilanciato_sopra and close < asian_high and high[1] > asian_high and strategy.position_size == 0
+    entry_p := close
+    // STOP = Massimo della candela + ATR
+    sl_p    := high + (atr * atr_mult) 
+    float risk_points = sl_p - entry_p
+    
+    if risk_points > 0
+        float pos_size = risk_amount / (risk_points * syminfo.pointvalue)
+        tp_p    := entry_p - (risk_points * tp_ratio)
+        be_trig := entry_p - (risk_points * 0.5)
+        be_active := false
+        strategy.entry("Short", strategy.short, qty=pos_size, comment="Risk 100€")
+        line.new(bar_index, low * 0.999, bar_index, high * 1.001, color=color.new(color.yellow, 0), width=2) // Segnale Giallo
+    sbilanciato_sopra := false
+
+// LONG: Chiude col corpo dentro (sopra asian_low) dopo sbilanciamento
+if sbilanciato_sotto and close > asian_low and low[1] < asian_low and strategy.position_size == 0
+    entry_p := close
+    // STOP = Minimo della candela - ATR
+    sl_p    := low - (atr * atr_mult)
+    float risk_points = entry_p - sl_p
+    
+    if risk_points > 0
+        float pos_size = risk_amount / (risk_points * syminfo.pointvalue)
+        tp_p    := entry_p + (risk_points * tp_ratio)
+        be_trig := entry_p + (risk_points * 0.5)
+        be_active := false
+        strategy.entry("Long", strategy.long, qty=pos_size, comment="Risk 100€")
+        line.new(bar_index, low * 0.999, bar_index, high * 1.001, color=color.new(color.yellow, 0), width=2) // Segnale Giallo
+    sbilanciato_sotto := false
+
+// --- GESTIONE EXIT E BREAK-EVEN ---
+if strategy.position_size != 0
+    if strategy.position_size > 0 and high >= be_trig
+        be_active := true
+    if strategy.position_size < 0 and low <= be_trig
+        be_active := true
+    
+    exit_sl = be_active ? entry_p : sl_p
+    strategy.exit("Exit", "Long", stop=exit_sl, limit=tp_p, comment_loss=be_active ? "BE" : "SL")
+    strategy.exit("Exit", "Short", stop=exit_sl, limit=tp_p, comment_loss=be_active ? "BE" : "SL")
+
+// Reset sbilanciamenti a fine giornata
+if ta.change(time("D"))
+    sbilanciato_sopra := false
+    sbilanciato_sotto := false
+
+// --- VISUALIZZAZIONE LIVELLI ---
+plot(strategy.position_size != 0 ? tp_p : na, "TP", color.green, 2, plot.style_linebr)
+plot(strategy.position_size != 0 ? be_trig : na, "BE Trig", color.blue, 1, plot.style_linebr)
+plot(strategy.position_size != 0 ? (be_active ? entry_p : sl_p) : na, "SL (ATR)", color.red, 2, plot.style_linebr)
+
+View in Pine Editor・111 lines
+Use on chart
+5
+323
+This strategy is based on the concept of Liquidity Sweeps (Sbilanciamento) and Mean Reversion following the Asian Session. It identifies the high and low of the Asian range and looks for a false breakout. Once the price "sweeps" the liquidity outside the range and closes back inside with a full candle body, a trade is triggered in the opposite direction.
+
+Core Logic
+Asian Range Identification: The script automatically plots the High and Low of the Asian session (customizable hours).
+
+Liquidity Sweep: It monitors for price action that breaks above or below these levels (the "manipulation" phase).
+
+The Reclaim (Entry): A signal is generated only when an M15 candle closes its body back inside the Asian Range. This confirms the false breakout.
+
+ATR-Based Stop Loss: To account for market noise, the Stop Loss is placed at the signal candle's High/Low plus an ATR (14) buffer.
+
+Dynamic Position Sizing: The strategy automatically calculates the lot size to ensure a fixed risk of €100 per trade, regardless of the Stop Loss distance.
+
+Key Features
+Automatic Risk Management: Fixed cash risk (€100) per trade.
+
+0.50 Fibonacci Break-Even: Once the price reaches 50% of the distance to the Target (TP), the Stop Loss is automatically moved to Break-Even to protect capital.
+
+1:1.5 Risk/Reward Ratio: Optimized for consistent growth.
+
+Visual Aids: Yellow vertical lines highlight the entry candle, and an orange box displays the Asian session range.

@@ -1,0 +1,105 @@
+//@version=4
+strategy("JUnit RS and RoC", shorttitle="RS & ROC", overlay=false)
+
+//Insert your stock ticker here
+ticker = syminfo.ticker
+
+//Define the period for your calculations
+len = input(14, minval=1, title="Length")
+window = len 
+
+//Calculate the Close price of the chosen stock
+stock_close = security(ticker, timeframe.period, close)
+stock_ema = ema(stock_close, 25)
+
+//Get the Close price of the S&P 500 Index for the Relative Strength calculation
+index_close = security("NDX", timeframe.period, close)
+
+//Calculate the Relative Strength (RS)
+rs = (stock_close / index_close) * 100
+
+//Calculate the Moving RS Ratio and its Rate of Change
+rs_ratio = sma(rs, len)
+rm_ratio = roc(rs_ratio, len)
+
+//Normalization
+jdk_rs_ratio = 100 + ((rs_ratio - sma(rs_ratio, window)) / stdev(rs_ratio, window) + 1)
+jdk_rm_ratio = 100 + ((rm_ratio - sma(rm_ratio, window)) / stdev(rm_ratio, window) + 1)
+
+
+//Plot JUnit RS and JUnit RoC
+plot(jdk_rs_ratio, color=color.blue, title="JUnit RS")
+plot(jdk_rm_ratio, color=color.red, title="Junit RoC")
+
+hline(100, "Zero Line", color=color.gray)
+
+statecolor = color.purple
+
+if (statecolor[1] == color.green)
+    statecolor := color.green
+else if (statecolor[1] == color.red)
+    statecolor := color.red
+else if (statecolor[1] == color.yellow)
+    statecolor := color.yellow
+else if (statecolor[1] == color.blue)
+    statecolor := color.blue
+
+if (jdk_rs_ratio > 100 and jdk_rm_ratio > 100)
+    statecolor := color.green
+else if (jdk_rs_ratio > 100 and jdk_rm_ratio < 100)
+    statecolor := color.yellow
+else if (jdk_rs_ratio < 100 and jdk_rm_ratio < 100)
+    statecolor := color.red
+else if (jdk_rs_ratio < 100 and jdk_rm_ratio > 100)
+    statecolor := color.blue
+
+
+buy_signal =  statecolor[0] == color.green and year >= 2010
+sell_signal = statecolor[0] == color.red
+
+hold_signal = statecolor[0] == color.yellow
+watch_signal = statecolor[0] == color.blue
+
+
+//Add color to background when both JUnit RS and JUnit RoC cross above 100
+bgcolor((buy_signal) ? color.green : na)
+bgcolor((sell_signal) ? color.red : na)
+bgcolor((hold_signal) ? color.yellow : na)
+bgcolor((watch_signal) ? color.blue : na)
+
+
+// Execute trades
+if (buy_signal)
+    strategy.entry("BUY", strategy.long)
+
+if (sell_signal)
+    strategy.close("BUY")
+
+View in Pine Editor・76 lines
+Use on chart
+1
+5
+7
+1
+7 049
+The code outlines a trading strategy that leverages Relative Strength (RS) and Rate of Change (RoC) to make trading decisions. Here's a detailed breakdown of the tactic described by the code:
+
+Ticker and Period Selection: The strategy begins by selecting a stock ticker symbol and defining a period (len) for the calculations, which defaults to 14 but can be adjusted by the user.
+
+Stock and Index Data Retrieval: It fetches the closing price (stock_close) of the chosen stock and calculates its 25-period exponential moving average (stock_ema). Additionally, it retrieves the closing price of the S&P 500 Index (index_close), used as a benchmark for calculating Relative Strength.
+
+Relative Strength Calculation: The Relative Strength (rs) is computed by dividing the stock's closing price by the index's closing price, then multiplying by 100 to scale the result. This metric is used to assess the stock's performance relative to the broader market.
+
+Moving RS Ratio and Rate of Change: The strategy calculates a Simple Moving Average (sma) of the RS over the specified period to get the RS Ratio (rs_ratio). It then computes the Rate of Change (roc) of this RS Ratio over the same period to get the RM Ratio (rm_ratio).
+
+Normalization: The RS Ratio and RM Ratio are normalized using a formula that adjusts their values based on the mean and standard deviation of their respective series over the specified window. This normalization process helps in standardizing the indicators, making them easier to interpret and compare.
+
+Indicator Plotting: The normalized RS Ratio (jdk_rs_ratio) and RM Ratio (jdk_rm_ratio) are plotted on the chart with different colors for visual analysis. A horizontal line (hline) at 100 serves as a reference point, indicating a neutral level for the indicators.
+
+State Color Logic: The script includes a logic to determine the state color (statecolor) based on the previous state color and the current values of jdk_rs_ratio and jdk_rm_ratio. This color coding is intended to visually represent different market states: green for bullish, red for bearish, yellow for hold, and blue for watch conditions.
+
+Signal Generation: The strategy generates buy, sell, hold, and watch signals based on the state color and the indicators' values relative to 100. For example, a buy signal is generated when both jdk_rs_ratio and jdk_rm_ratio are above 100, and the background color is set to green to reflect this bullish condition.
+
+Trade Execution: Finally, the strategy executes trades based on the generated signals. A "BUY" trade is entered when a buy signal is present, and it is closed when a sell signal occurs.
+
+Overall, the strategy uses a combination of RS and RoC indicators, normalized for better comparison, to identify potential buy and sell opportunities based on the stock's performance relative to the market and its momentum.

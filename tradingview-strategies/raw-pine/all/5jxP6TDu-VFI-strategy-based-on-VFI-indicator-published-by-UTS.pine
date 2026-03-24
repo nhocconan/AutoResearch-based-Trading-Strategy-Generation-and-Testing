@@ -1,0 +1,5 @@
+//@version=4
+vfi_buyLine=##input(defval=-4,type='INPUT_INTEGER',##id='in_5')
+vfi_sellLine=##input(defval=5,type='INPUT_INTEGER',##id='in_6')
+##root(root_metainfo,rm_0,vfi_buyLine,input__float)
+##root(root_metainfo,rm_1,vfi_sellLine,input__float)

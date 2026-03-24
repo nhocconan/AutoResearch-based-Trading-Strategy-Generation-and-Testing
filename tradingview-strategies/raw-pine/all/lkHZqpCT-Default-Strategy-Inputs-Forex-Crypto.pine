@@ -1,0 +1,4 @@
+//@version=3
+dir_inp=##input(defval="Both",type='INPUT_STRING',##id='in_0')
+dir=((dir_inp=="Both")?'all':((dir_inp=="Short Only")?'short':'long'))
+##root(root_metainfo,rm_0,dir)

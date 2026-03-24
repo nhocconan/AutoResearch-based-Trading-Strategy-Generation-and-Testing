@@ -1,0 +1,191 @@
+//@version=4
+//
+//  作品: [LunaOwl] 超級趨勢2
+//
+////////////////////////////////
+//     ~~!!*(๑╹◡╹๑) **       //
+//  製作: @LunaOwl 彭彭       //
+//  第1版: 2019年05月29日     //
+//  第2版: 2019年06月12日     //
+//  微調:  2019年10月26日     //
+//  第3版: 2020年02月12日     //
+//  微調:  2020年06月02日     //
+////////////////////////////////
+//
+//
+//超級趨勢的缺點：
+//--1.止損距離可能相當大, 請自己調整週期
+//--2.市場沒有存在明顯趨勢的時候表現不佳
+//
+//超級趨勢的優點：
+//--1.具有可以參考的移動止損線, 適合新手
+//--2.市場存在明顯趨勢的時候表現會很不錯
+//
+//使用須知：
+//--1.每筆交易都需要下移動止損單, 絕對要下
+//--2.中途被針掃出場時不要急著再進去
+//--3.當錯失機會不要追高追低, 等待下次機會
+//--4.實質槓桿比率不要太高, 不要輕忽市場變化
+//--5.訂單進出場都建議分成五份、十份區間掛單
+//--6.不要妄圖賺到市場上的每一分錢
+//
+//稍做更新：
+//--1.平均真實區間利用了遞迴均線減少雜訊
+//--2.針對高波動率的小幣市場，中期順勢策略應該以減少雜訊為重點
+//--3.研究國外交易策略後，它們常用平滑因子過濾隨機走勢
+//--4.績效上和其它平均法比較並沒有突出，但優點是參數變動穩定性
+//--5.我選擇四小時線回測小幣市場，並且選擇經歷過牛熊市的以太坊
+
+//==設定策略==//
+
+strategy(
+     title               = "[LunaOwl] 超級趨勢2",
+     shorttitle          = "[LunaOwl] 超級趨勢2",
+     format              = format.inherit,
+     overlay             = true,
+     calc_on_order_fills = true,
+     calc_on_every_tick  = false,
+     pyramiding          =  0,      
+     currency            = currency.USD,    
+     initial_capital     = 10000,
+     slippage            = 10,
+     default_qty_value   = 100,
+     default_qty_type    = strategy.percent_of_equity,
+     commission_value    = 0.1
+     )
+
+//==設定參數==//
+
+source = input(close, title = "數據來源", type = input.source)
+
+length = input(
+     title  = "ATR 周期", 
+     type   = input.integer,
+     minval = 1,
+     maxval = 4,
+     defval = 1
+     )
+
+//可以設定的精度為小數點後三位
+
+mult = input(
+     title  = "ATR 乘數", 
+     type   = input.float,
+     minval = 1.000, 
+     maxval = 9.000,
+     defval = 2.618,
+     step   = 0.001
+     )
+
+//==平均真實區間==//
+
+atr = mult * atr(length) 
+atr_rma = rma(atr, 14)    //添加遞回均線
+
+//==算法邏輯==//
+
+LongStop      = hl2 - atr_rma
+LongStopPrev  = nz(LongStop[1], LongStop)
+LongStop     := close[1] > LongStopPrev ? max(LongStop, LongStopPrev) : LongStop
+ 
+ShortStop     = hl2 + atr_rma
+ShortStopPrev = nz(ShortStop[1], ShortStop)
+ShortStop    := close[1] < ShortStopPrev ? min(ShortStop, ShortStopPrev) : ShortStop
+
+dir  = 1
+dir := nz(dir[1], dir)
+dir := dir == -1 and close > ShortStopPrev ? 1 :
+       dir ==  1 and close < LongStopPrev ? -1 : 
+       dir
+
+//LongMark  = dir ==  1 and dir[1] == -1 ? LongStop : na
+//ShortMark = dir == -1 and dir[1] == 1 ? ShortStop : na
+
+LongColor  = #0D47A1  //普魯士藍
+ShortColor = #B71C1C  //酒紅色
+
+//==設置止損線==//
+
+LongStop_data  = dir == 1 ? LongStop :  na
+ShortStop_data = dir == 1 ? na : ShortStop
+
+plot(LongStop_data,
+     title     = "移動止損線",
+     style     = plot.style_linebr,
+     color     = LongColor,
+     linewidth = 1
+     )
+     
+plot(ShortStop_data,
+     title     = "移動止損線",
+     style     = plot.style_linebr,
+     color     = ShortColor,
+     linewidth = 1 
+     )
+
+//==設定燭台顏色==//
+
+barcolor(dir == 1 ? LongColor : ShortColor, title = "燭台顏色")
+
+//==日期範圍==//
+
+Filter = input(true, "============過濾日期範圍============")
+Year1  = input(2017, "起西元..年", minval = 1900, maxval = 2049)
+Month1 = input(   7, "..........月",  minval = 1, maxval = 12)
+Day1   = input(   1, "..........日",  minval = 1, maxval = 31)
+Year2  = input(2040, "迄西元..年", minval = 1901, maxval = 2050)
+Month2 = input(   1, "..........月",  minval = 1, maxval = 12)
+Day2   = input(   1, "..........日",  minval = 1, maxval = 31)
+Date1  = timestamp(Year1, Month1, Day1, 00, 00)
+Date2  = timestamp(Year2, Month2, Day2, 23, 59)
+
+//==買賣條件==//
+
+Long = source > LongStop_data
+strategy.entry("多頭進場", strategy.long, when = Long and (time >= Date1 and time <= Date2))
+strategy.close("多頭出場", when = Long) 
+
+Short = source < ShortStop_data
+strategy.entry("空頭進場", strategy.short, when = Short and (time >= Date1 and time <= Date2))
+strategy.close("空頭回補", when = Short)
+
+View in Pine Editor・154 lines
+Use on chart
+6
+5
+0
+16
+12 979
+Feb 14, 2020
+It is very similar to the previous version. I changed the function from study to a strategy, and added the Average true range to RMA again.
+I don't know the academic suitability, but using this strategy to trade the Altcoins market may have a good effect.
+refer to Binance for 0.1% of fees, starting from Q4 2017.
+
+跟以前的版本變化不大，我將腳本函數從"study"更改為"strategy"，然後將平均真實範圍再次用遞迴平均線均化數值。
+不知道學術上的適不適合這麼做...但是，直到目前交易小幣現貨市場，效果還算不錯，用用看。
+交易手續費參考幣安小幣，0.1%，從2017年第四季開始測。
+
+Updated:
+--1. use RMA to reduce ATR noise.
+--2. for the highly volatile Altcions market, strategy should focus on reducing noise.
+--3. the Street commonly used alpha filtering for Random Walk.
+--4. compared to other MAs, the performance is not outstanding, but the advantage is stability.
+--5. I choose the 4H time frame to test the Altcoins (ex: ETH).
+
+稍做更新：
+--1.平均真實區間利用了遞迴均線減少雜訊
+--2.針對高波動率的小幣市場，中期順勢策略應該以減少雜訊為重點
+--3.研究國外交易策略後，它們常用平滑因子過濾隨機走勢
+--4.績效上和其它平均法比較並沒有突出，但優點是參數變動穩定性
+--5.我選擇四小時線回測小幣市場，並且選擇經歷過牛熊市的以太坊
+
+The purpose of publishing Chinese Scripts is to make Pine close to more Chinese user.
+發布中文腳本的目的，是希望可以讓 Pine 親近更多中文圈的使用者。
+
+
+Feb 14, 2020
+Release Notes
+回測版本的 mult 原設定的值是2.618，可以自己拿來調整參數，建議 4 小時線以上，低於 1 小時交易費用太高都不合成本。
+Jun 9, 2020
+Release Notes
+進行回測日期範圍與整潔度的調整。

@@ -1,0 +1,240 @@
+//@version=6
+strategy(title="BTCUSDT.P MEXC Structure Bot - 4H Bias + 15m CHOCH BOS Pullback",
+     overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=1,
+     pyramiding=0,
+     calc_on_order_fills=true,
+     calc_on_every_tick=false)
+
+//====================================================
+// Inputs
+//====================================================
+tfBias      = input.timeframe("240", "Bias timeframe (HTF)")
+L_4H        = input.int(3,  "4H Pivot length", minval=1)
+L_15        = input.int(5,  "15m Pivot length", minval=1)
+
+atrLen      = input.int(14, "ATR length")
+k4h         = input.float(0.10, "4H BOS filter (k * ATR)", step=0.01)
+k15         = input.float(0.05, "15m BOS filter (k * ATR)", step=0.01)
+
+entryRetr   = input.float(0.50, "Entry retracement (0.5 = 50%)", step=0.05)
+bufAtr      = input.float(0.05, "Stop buffer (15m ATR *)", step=0.01)
+
+riskPct     = input.float(0.50, "Risk % per trade", step=0.05)
+tp1R        = input.float(1.0,  "TP1 (R multiple)", step=0.25)
+tp2R        = input.float(2.5,  "TP2 (R multiple)", step=0.25)
+tp1Pct      = input.int(50, "TP1 qty %", minval=1, maxval=99)
+
+maxDailyR   = input.float(2.0, "Daily loss limit (R). Stop after -X R/day", step=0.5)
+
+impulseLookback = input.int(20, "Impulse lookback (15m bars)", minval=5)
+
+// MEXC BTCUSDT.P sizing + rounding
+contractStepBTC  = input.float(0.0001, "Qty step (BTC). 0.0001 = 1 contract", step=0.0001)
+priceTick        = input.float(0.1,    "Price tick size", step=0.1)
+
+//====================================================
+// Helpers
+//====================================================
+round_to_step(x, step) =>
+    step <= 0 ? x : math.round(x / step) * step
+
+atr15 = ta.atr(atrLen)
+atr4h = request.security(syminfo.tickerid, tfBias, ta.atr(atrLen))
+c4h   = request.security(syminfo.tickerid, tfBias, close)
+
+// Call these every bar (prevents scope warnings)
+impLowAll  = ta.lowest(low,  impulseLookback)
+impHighAll = ta.highest(high, impulseLookback)
+
+//====================================================
+// 4H swings + BOS -> bias
+//====================================================
+ph4h = request.security(syminfo.tickerid, tfBias, ta.pivothigh(high, L_4H, L_4H))
+pl4h = request.security(syminfo.tickerid, tfBias, ta.pivotlow(low,  L_4H, L_4H))
+
+var float lastSH4 = na
+var float lastSL4 = na
+if not na(ph4h)
+    lastSH4 := ph4h
+if not na(pl4h)
+    lastSL4 := pl4h
+
+bosUp4 = not na(lastSH4) and c4h > (lastSH4 + k4h * atr4h)
+bosDn4 = not na(lastSL4) and c4h < (lastSL4 - k4h * atr4h)
+
+var int bias = 0  // 1 bull, -1 bear, 0 neutral
+if bosUp4
+    bias := 1
+else if bosDn4
+    bias := -1
+
+//====================================================
+// 15m swings + structure (CHOCH/BOS)  [FIXED]
+//====================================================
+ph15 = ta.pivothigh(high, L_15, L_15)
+pl15 = ta.pivotlow(low,  L_15, L_15)
+
+var float lastSH15 = na
+var float lastSL15 = na
+if not na(ph15)
+    lastSH15 := ph15
+if not na(pl15)
+    lastSL15 := pl15
+
+breakUp15 = not na(lastSH15) and close > (lastSH15 + k15 * atr15)
+breakDn15 = not na(lastSL15) and close < (lastSL15 - k15 * atr15)
+
+// Micro trend = direction of most recent valid break (but compute signals using previous trend)
+var int microTrend = 0
+prevTrend = microTrend  // snapshot BEFORE update
+
+// CHOCH = break against prev trend
+chochUp = (prevTrend == -1) and breakUp15
+chochDn = (prevTrend ==  1) and breakDn15
+
+// BOS continuation = break in direction of prev trend
+bosUp15 = (prevTrend ==  1) and breakUp15
+bosDn15 = (prevTrend == -1) and breakDn15
+
+// Update trend AFTER
+if breakUp15
+    microTrend := 1
+else if breakDn15
+    microTrend := -1
+
+//====================================================
+// Daily loss kill-switch (approx)
+//====================================================
+var float dayStartEquity = na
+isNewDay = timeframe.change("D")
+if isNewDay
+    dayStartEquity := strategy.equity
+dayStartEquity := nz(dayStartEquity, strategy.equity)
+
+dayLoss      = dayStartEquity - strategy.equity
+dayLossLimit = dayStartEquity * (riskPct/100.0) * maxDailyR
+kill         = dayLoss > dayLossLimit
+
+//====================================================
+// State machine: arm on CHOCH, fire on BOS aligned with 4H bias
+//====================================================
+var bool armedLong  = false
+var bool armedShort = false
+
+if bias == 1 and chochUp
+    armedLong := true
+if bias == -1 and chochDn
+    armedShort := true
+
+longSignal  = bias == 1  and armedLong  and bosUp15
+shortSignal = bias == -1 and armedShort and bosDn15
+
+//====================================================
+// Orders + sizing + exits (limit pullback + bracket exits)
+//====================================================
+flat = strategy.position_size == 0
+
+f_qty(_entry, _stop) =>
+    riskUsd  = strategy.equity * (riskPct/100.0)
+    stopDist = math.abs(_entry - _stop)
+    rawQty   = stopDist > 0 ? (riskUsd / stopDist) : 0.0
+    round_to_step(rawQty, contractStepBTC)
+
+f_place_exits(_dir, _entry, _stop) =>
+    r = math.abs(_entry - _stop)
+    tp1Price = _dir == 1 ? _entry + tp1R * r : _entry - tp1R * r
+    tp2Price = _dir == 1 ? _entry + tp2R * r : _entry - tp2R * r
+
+    tp1Price := round_to_step(tp1Price, priceTick)
+    tp2Price := round_to_step(tp2Price, priceTick)
+    stopPrice = round_to_step(_stop, priceTick)
+
+    strategy.exit("TP1", from_entry="ENTRY", limit=tp1Price, stop=stopPrice, qty_percent=tp1Pct)
+    strategy.exit("TP2", from_entry="ENTRY", limit=tp2Price, stop=stopPrice, qty_percent=100 - tp1Pct)
+
+var bool  pending   = false
+var float pendEntry = na
+var float pendStop  = na
+var int   pendDir   = 0
+
+if not kill and flat and not pending
+    if longSignal
+        armedLong := false
+
+        impLow  = impLowAll
+        impHigh = high
+        entry   = impLow + entryRetr * (impHigh - impLow)
+        stop    = nz(lastSL15, impLow) - bufAtr * atr15
+
+        entry := round_to_step(entry, priceTick)
+        stop  := round_to_step(stop,  priceTick)
+
+        qty = f_qty(entry, stop)
+        if qty > 0
+            pending   := true
+            pendEntry := entry
+            pendStop  := stop
+            pendDir   := 1
+            strategy.order("ENTRY", strategy.long, qty=qty, limit=entry)
+
+    if shortSignal
+        armedShort := false
+
+        impHigh = impHighAll
+        impLow  = low
+        entry   = impHigh - entryRetr * (impHigh - impLow)
+        stop    = nz(lastSH15, impHigh) + bufAtr * atr15
+
+        entry := round_to_step(entry, priceTick)
+        stop  := round_to_step(stop,  priceTick)
+
+        qty = f_qty(entry, stop)
+        if qty > 0
+            pending   := true
+            pendEntry := entry
+            pendStop  := stop
+            pendDir   := -1
+            strategy.order("ENTRY", strategy.short, qty=qty, limit=entry)
+
+// Cancel pending if invalidated
+if pending and flat
+    invalidLong  = pendDir == 1  and close < pendStop
+    invalidShort = pendDir == -1 and close > pendStop
+    if invalidLong or invalidShort or kill
+        strategy.cancel("ENTRY")
+        pending   := false
+        pendEntry := na
+        pendStop  := na
+        pendDir   := 0
+
+// On fill, place exits once
+justFilled = pending and not flat
+if justFilled
+    f_place_exits(pendDir, pendEntry, pendStop)
+    pending := false
+
+//====================================================
+// Visuals
+//====================================================
+plot(lastSH4, "4H Swing High", color=color.new(color.green, 60), linewidth=1, style=plot.style_linebr)
+plot(lastSL4, "4H Swing Low",  color=color.new(color.red,   60), linewidth=1, style=plot.style_linebr)
+
+plot(pending ? pendEntry : na, "Pending Entry", color=color.new(color.blue, 0), linewidth=2, style=plot.style_linebr)
+plot(pending ? pendStop  : na, "Pending Stop",  color=color.new(color.orange, 0), linewidth=2, style=plot.style_linebr)
+
+bgcolor(kill ? color.new(color.red, 85) : na)
+plotchar(bias, "Bias (1 bull / -1 bear)", "", location=location.top)
+
+alertcondition(longSignal and not kill and flat and not pending,  "LONG_SETUP",  "LONG setup detected")
+alertcondition(shortSignal and not kill and flat and not pending, "SHORT_SETUP", "SHORT setup detected")
+
+View in Pine Editor・233 lines
+Use on chart
+1
+3
+472
+Follows market structure on 4hr and enters on choch and bos confirmation on 15m TF

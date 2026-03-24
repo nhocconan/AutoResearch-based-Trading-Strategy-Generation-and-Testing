@@ -1,0 +1,190 @@
+//@version=6
+strategy("IBS (Internal Bar Strength) Trading Strategy for SPY and NDQ", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=50, pyramiding = 2, currency = currency.USD, process_orders_on_close=false)
+
+// ***** INPUTS *****
+enum tradeTypes
+    long = "Long Only"
+    short = "Short Only"
+    all = "Long and Short"
+// IBS thresholds
+ibsEntryThreshold = input.float(0.09, title="IBS Entry Threshold", step=0.01, tooltip="IBS = (Previous Close - Previous Low) / (Previous High - Previous Low), and IBS value below 0.2 is typically interpreted as an oversold condition, while a value above 0.9 suggests an overbought state.")
+ibsExitThreshold  = input.float(0.985, title="IBS Exit Threshold", step=0.01, tooltip="IBS = (Previous Close - Previous Low) / (Previous High - Previous Low), and IBS value below 0.2 is typically interpreted as an oversold condition, while a value above 0.9 suggests an overbought state.")
+// EMA period (set to 0 to disable the EMA condition)
+emaPeriod = input.int(220, title="EMA Period (0 to disable)", minval=0, maxval=5000, step=1, tooltip="Exponential Moving Average Filter Period (0 to disable)")
+// Minimum percentage drop required for a new entry (for dollar-cost averaging)
+minEntryPct = input.float(0, title="Minimum Distance for New Entry (%)", step=0.05, minval=0.0, maxval=100, tooltip = "Distance in Price from Last Opened Position, in Percentage Terms (%)")
+maxTradeDuration = input.int(title="Maximum Trade Duration (days)", defval=14, minval=1, step=1, maxval=1000, tooltip = "Exit at close if maximum trade duration is reached.")
+// The default values are specified using the timestamp() function.
+startDate = input.time(timestamp("01 Jan 2020 00:00 +0000"), title="Start Date")
+endDate   = input.time(timestamp("31 Dec 2025 00:00 +0000"), title="End Date")
+entryType      = input.enum(tradeTypes.long, "Entry Type")
+
+// Check if the current bar's time is within the test range.
+inTestRange = time >= startDate and time <= endDate
+
+// Persistent variable to record the bar index when the trade is entered.
+var int entryBarIndex = na
+
+// ***** EMA CALCULATION *****
+// Calculate the EMA globally if the period is greater than 0, otherwise leave as na.
+emaValue = emaPeriod > 0 ? ta.ema(close, emaPeriod) : na
+
+// ***** IBS CALCULATION *****
+// Calculate IBS using the previous bar’s values.
+// Guard against division by zero: if previous high equals previous low, default IBS to 0.5.
+prevHigh  = high[1]
+prevLow   = low[1]
+prevClose = close[1]
+ibs = (prevHigh != prevLow) ? (prevClose - prevLow) / (prevHigh - prevLow) : 0.5
+
+// ***** ENTRY AND EXIT CONDITIONS *****
+// Define the EMA condition: if emaPeriod is 0, bypass the EMA check.
+emaConditionLong = emaPeriod == 0 or (close > emaValue)
+emaConditionShort = emaPeriod == 0 or (close < emaValue)
+
+// Entry: IBS is below the entry threshold and the EMA condition holds.
+enterLong = (ibs < ibsEntryThreshold) and emaConditionLong and (entryType == tradeTypes.long or entryType == tradeTypes.all)
+enterShort = (ibs > ibsExitThreshold) and emaConditionShort and (entryType == tradeTypes.short or entryType == tradeTypes.all)
+
+// Exit: IBS is above the exit threshold.
+exitLong = ibs > ibsExitThreshold
+exitShort = ibs < ibsEntryThreshold
+
+// ***** DOLLAR-COST AVERAGING CONDITION IN PERCENTAGE *****
+// Track the last entry price. Reset when there is no open position.
+var float lastEntryPrice = na
+if strategy.position_size == 0
+    lastEntryPrice := na
+
+// If there is no previous entry, the condition is met.
+// Otherwise, allow a new entry only if the current price is lower than the last entry price
+// by at least the predefined percentage (converted to a fraction).
+dcaCondition = na(lastEntryPrice) or ((close < lastEntryPrice) and (((lastEntryPrice - close) / lastEntryPrice) >= (minEntryPct / 100)))
+dcaConditionShort = na(lastEntryPrice) or ((close > lastEntryPrice) and (((close - lastEntryPrice) / lastEntryPrice) >= (minEntryPct / 100)))
+
+
+// ***** STRATEGY ORDERS *****
+// Enter a long position only if both the entry condition and the DCA condition are met.
+if enterLong and dcaCondition and inTestRange
+    strategy.entry("Long", strategy.long)
+    lastEntryPrice := close  // update the last entry price
+    entryBarIndex := bar_index
+
+if enterShort and dcaConditionShort and inTestRange
+    strategy.entry("Short", strategy.short)
+    lastEntryPrice := close  // update the last entry price
+    entryBarIndex := bar_index
+
+// Compute trade duration in days using the absolute difference
+tradeDuration = not na(entryBarIndex) ? math.abs(bar_index - entryBarIndex) : 0
+
+// Exit the long position when the exit condition is met or if the trade duration reaches maxTradeDuration days.
+if exitLong or (tradeDuration >= maxTradeDuration)
+    strategy.close("Long")
+
+// Exit the long position when the exit condition is met or if the trade duration reaches maxTradeDuration days.
+if exitShort or (tradeDuration >= maxTradeDuration)
+    strategy.close("Short")
+
+// ***** PLOTTING *****
+// Plot IBS for reference, along with horizontal lines for the entry and exit thresholds.
+//plot(ibs, title="IBS", color=color.blue, linewidth=2)
+//hline(ibsEntryThreshold, title="IBS Entry Threshold", color=color.green)
+//hline(ibsExitThreshold, title="IBS Exit Threshold", color=color.red)
+
+View in Pine Editor・101 lines
+Use on chart
+9
+3
+3
+3 357
+Feb 26, 2025
+Implementation by AlgoTradeKit
+
+Overview
+The IBS Trading Strategy is a daily bars long-only trading system, based on the concept of Internal Bar Strength (IBS). The strategy aims to identify potential reversals by monitoring how the previous bar’s close positions itself within its high-low range. It is suitable for stock and US indices. The default parameters are optimized for SPY/SPX and NDQ/QQQ
+
+Strategy Concept
+The Internal Bar Strength (IBS) is calculated using the formula:
+
+
+Pine Script®
+IBS = (Previous Close - Previous Low) / (Previous High - Previous Low)
+
+
+
+This value always lies between 0 and 1. An IBS value below 0.2 is typically interpreted as an oversold condition, while a value above 0.9 suggests an overbought state.
+
+Trading Rules
+- Long Entry:
+- Condition 1: IBS is below the user-defined entry threshold (default is 0.2).
+- Condition 2: The current price is above an N-period Exponential Moving Average (EMA) (default period is 252).
+- Note: You can disable the EMA condition by setting the EMA period to 0.
+
+- Long Exit
+- The position is closed when IBS rises above the user-defined exit threshold (default is 0.9).
+
+Customization Options
+- IBS Entry Threshold: Adjust to set the sensitivity for entering a long trade based on oversold conditions.
+- IBS Exit Threshold: Customize to define the exit point when the market becomes overbought.
+- EMA Period: Set the lookback period for the EMA to align with your trend bias; disable this condition by setting the period to 0.
+
+Risk Management & Trading Considerations
+- Designed for daily charts, the strategy captures higher timeframe trends and minimizes noise.
+- The entry and exit conditions are straightforward, aiming to avoid over-trading while letting clear signals dictate trade management.
+- Always use proper risk management techniques and test the strategy thoroughly on historical data and in a simulated environment before applying it in live markets.
+
+Disclaimer
+This strategy is for educational and informational purposes only and does not constitute financial advice. Trading involves risk, and past performance is not indicative of future results. Always conduct your own research and consider your risk tolerance before making any trades.
+
+Feb 26, 2025
+Release Notes
+Implementation by AlgoTradeKit
+
+Overview
+The IBS Trading Strategy is a daily bars long-only trading system, based on the concept of Internal Bar Strength (IBS). The strategy aims to identify potential reversals by monitoring how the previous bar’s close positions itself within its high-low range. It is suitable for stock and US indices. The default parameters are optimized for SPY/SPX and NDQ/QQQ
+
+Strategy Concept
+The Internal Bar Strength (IBS) is calculated using the formula:
+
+
+Pine Script®
+IBS = (Previous Close - Previous Low) / (Previous High - Previous Low)
+
+
+
+This value always lies between 0 and 1. An IBS value below 0.2 is typically interpreted as an oversold condition, while a value above 0.9 suggests an overbought state.
+
+Trading Rules
+- Long Entry:
+- Condition 1: IBS is below the user-defined entry threshold (default is 0.2).
+- Condition 2: The current price is above an N-period Exponential Moving Average (EMA) (default period is 252).
+- Note: You can disable the EMA condition by setting the EMA period to 0.
+
+- Long Exit
+- The position is closed when IBS rises above the user-defined exit threshold (default is 0.9).
+
+Customization Options
+- IBS Entry Threshold: Adjust to set the sensitivity for entering a long trade based on oversold conditions.
+- IBS Exit Threshold: Customize to define the exit point when the market becomes overbought.
+- EMA Period: Set the lookback period for the EMA to align with your trend bias; disable this condition by setting the period to 0.
+
+Risk Management & Trading Considerations
+- Designed for daily charts, the strategy captures higher timeframe trends and minimizes noise.
+- The entry and exit conditions are straightforward, aiming to avoid over-trading while letting clear signals dictate trade management.
+- Always use proper risk management techniques and test the strategy thoroughly on historical data and in a simulated environment before applying it in live markets.
+
+Disclaimer
+This strategy is for educational and informational purposes only and does not constitute financial advice. Trading involves risk, and past performance is not indicative of future results. Always conduct your own research and consider your risk tolerance before making any trades.
+Feb 26, 2025
+Release Notes
+Introduced new parameter called "Minimum Distance for New Entry (%)". The aim is to reduce further the drawdown by assuring that new positions will be opened only at favorable price.
+Feb 26, 2025
+Release Notes
+Added new parameter, called "Maximum Trade Duration (days)". The position will be closed either by exit condition, or after maximum trade duration days are reached.
+Feb 26, 2025
+Release Notes
+Removed plot functionallity.
+Mar 4, 2025
+Release Notes
+Updated the default account size value. Also introduced trade type: Long only, Short only, Long + Short. Added Moving Average as trend filter. Inside the source code you find the recommended settings for SPY and QQQ/NDQ

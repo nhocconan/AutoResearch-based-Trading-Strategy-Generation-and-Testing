@@ -1,0 +1,112 @@
+//@version=4
+
+
+// === SET THE GAP SIZE FOR BUY OPORTUNITIES ===
+// Currently defval is %1.2 percent (0.012)
+// This value can also be set in the GUI on the indicators settings
+
+Gap = input(defval = 0.012, title = "Gap % as float (0.10=%10)", type = input.float)
+
+// === SETUP DEFAULT "BUY" STYLE ===
+// use # of shares to buy or % of equity
+// (you can also change this in the UI settings dialogs)
+// % of equity (%100 shown):
+strategy("gap_bounce_down", initial_capital = 10000, overlay = true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+// # of shares (1 shown):
+// strategy("gap_bounce_down", initial_capital = 10000, overlay = true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+
+// === INPUT BACKTEST RANGE ===
+// these can be set from GUI settings
+// Only important thing to note is the defval sets the default
+// Currently that is set to only calculating from 2017+
+FromMonth = input(defval = 1,    title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1,    title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2017, title = "From Year", minval = 1990)
+ToMonth   = input(defval = 1,    title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1,    title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 9999, title = "To Year", minval = 1991)
+
+
+
+// setting up time limit functions
+// this function will be called to be sure we are in the required time window
+// before doing further calculations
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+
+
+// global values used to store calculations between tick/iterations:
+var stoploss_price = 0.0
+var buy_price = 0.0
+
+// all code following this point will only run if 
+// the window() function tells us that we are in the right time window
+
+if window()
+    // BEGIN SECTION TO MONITOR OPEN TRADE FOR PROFIT LOCKIN
+    // this section of code only runs if there is an open trade
+    // this section of code checks if current tick is going up
+    // if it is we will modify the trade stoploss to lock in some profits
+    if strategy.opentrades >= 1
+
+        // calculate potential new stoploss
+        new_stoploss_price = close - (close * Gap)
+        if new_stoploss_price > stoploss_price
+            label.new(bar_index, high, "+"+tostring(new_stoploss_price-stoploss_price,"#.##"), color=color.green, style=label.style_none)
+            stoploss_price := new_stoploss_price
+            strategy.exit("stoploss", "buy", stop=stoploss_price)
+            // TODO : using `high` instead would increase profit but withough as much flexibility for volitility
+    // END SECTION TO MONITOR OPEN TRADE
+    
+    // BEGIN SECTION TO OPEN CHECK FOR CHANCE TO OPEN NEW TRADE
+    // this next block of code will determine if we have a valid buy op
+    // this should only be run when there is not currently already an open trade
+    // to check if there is an opentrade when check:
+    if strategy.opentrades == 0
+        // get yesterdays (or last ticks) low
+        previous_tick_low = low[1]
+        // get todays (or current ticks) high
+        current_tick_high = high
+        // we are only looking for jump down gaps which would mean the 
+        // previous low will always be higher than the current high:
+        if previous_tick_low > current_tick_high
+            // calculate the size of the gap
+            gap_amount = previous_tick_low - current_tick_high
+            // turn size of gap into a Percentage
+            gap_percent = gap_amount / previous_tick_low
+            // Compare that percentage to user specified Gap % that indicates buy op
+            if gap_percent >= Gap
+                // we have a buy op
+                // make buy price the current ticks `close` price
+                buy_price := close
+                // set our stoploss price to buy-%1.2
+                stoploss_price := buy_price - (buy_price * Gap)
+                // add a label to graph so we see this purchase in the graph
+                label.new(bar_index, na, "buy: "+tostring(buy_price,"#.##") + "\nstop: "+tostring(stoploss_price,"#.##"), 
+                  color=color.blue, textcolor=color.white,
+                  style=label.style_labeldown, yloc=yloc.abovebar)
+                // do the actual buy order
+                strategy.order("buy", strategy.long, limit = buy_price)
+                // setup a stop loss for the buy order
+                // this stop loss will be moved up if price goes up through code
+                // we see coming up
+                strategy.exit("stoploss", "buy", stop=stoploss_price)
+    
+
+// PLOT things
+// these only make sense to show if you detach them from the main y scale which 
+// can be done in the UI or by adding scale=scale.none or scale.right to strategy()
+
+// plot(strategy.equity, title="Equity", color=color.green)
+//plot(strategy.netprofit, title="Netprofit", color=color.blue)
+//plot((strategy.netprofit/strategy.equity)*100, title="Netprofit % of equity", color=color.purple)
+
+View in Pine Editor・105 lines
+Use on chart
+2
+8
+1 704
+basic script to back-test a simple strategy which looks for dead cat bounc

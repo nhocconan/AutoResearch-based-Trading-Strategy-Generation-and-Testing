@@ -1,0 +1,117 @@
+//@version=5
+strategy(title = "DNSE VN301! SMA & EMA Cross Strategy", shorttitle = "VN301! Signals_DNSE S1", overlay = true, slippage = 1, backtest_fill_limits_assumption = 1, initial_capital = 100000000, default_qty_type = strategy.fixed, default_qty_value = 4, commission_type = strategy.commission.cash_per_order, commission_value = 2700, fill_orders_on_standard_ohlc = true, calc_on_order_fills = true, process_orders_on_close = true) 
+
+//Settings explaination: (Backtest) Contract code = VN301!, capital = 100M VND, constant order size = 4 contracts, min commission = 2,700VND/contract
+//  Accounted for slippage of 1 tick for a more robust back-test result 
+//Giải thích setting: Mã HĐ Backtest = VN301!, vốn 100tr VND, mỗi lệnh vào 4 HĐ, phí tối thiểu = 2,700/HĐ
+//  Trượt giá (Slippage) = 1 tick để kết quả back-test thực tế hơn
+
+// Indicators, plotting SMA and EMA
+// Vẽ đường EMA và SMA 
+float sma60 = ta.sma(close, 60)
+float ema15 = ta.ema(close, 15)
+plot(sma60, title = "SMA 60", color = color.white, linewidth = 1)
+plot(ema15, title = "EMA 15", color = color.yellow, linewidth = 1)
+
+// Input time settings, ensuring all orders are closed by 14:30, cut-off 5 minutes before continuous-trading session end. 
+// Tạo thêm điều kiện về thời gian, đảm bảo các vị thế được đóng hết trước 14:30, đóng lệnh 5 phút trước khi hết phiên khớp lệnh liên tục. 
+session_close_hour = input.int(14, title = "Session Close Hour (24-hour format)")
+session_close_minute = input.int(30, title = "Session Close Minute")
+minutes_before_close = input.int(5, title = "Minutes Before Session Close to Exit")
+exit_hour = session_close_hour
+exit_minute = session_close_minute - minutes_before_close
+exit_hour := exit_minute < 0 ? exit_hour - 1 : exit_hour
+exit_minute := exit_minute < 0 ? exit_minute + 60 : exit_minute
+cutoff_time = (hour > exit_hour) or (hour == exit_hour and minute >= exit_minute)
+
+// Long/Short Signals Generation Conditions
+// Điều kiện để tạo tín hiệu Long/Short 
+longsignal = ta.crossover(ema15, sma60) and not cutoff_time
+longstopsignal = ta.crossunder(ema15, sma60) and close <= ema15
+shortsignal = ta.crossunder(ema15, sma60) and not cutoff_time
+shortstopsignal = ta.crossover(ema15, sma60) and close >= ema15
+
+// Maximum loss settings - Adjusting max loss level in ticks, set by 20 ticks (2 points) by default.
+// Điều chỉnh mức cắt lỗ, mặc định là 20 ticks (2 điểm)
+longmaxloss = 20
+shortmaxloss = 20
+
+// Entry and exit logic
+// logic Điểm Vào và Điểm Ra/Cắt Lỗ
+if (longsignal and close >= ema15)
+    strategy.entry("Long", strategy.long)
+
+if (longstopsignal or cutoff_time or longmaxloss)
+    strategy.exit("Long Exit", from_entry="Long", loss=longmaxloss)
+
+if (shortsignal and close <= ema15)
+    strategy.entry("Short", strategy.short)
+
+if (shortstopsignal or cutoff_time or shortmaxloss)
+    strategy.exit("Short Exit", from_entry="Short", loss=shortmaxloss)
+
+// Ensure all positions are closed before the session end
+// Đóng toàn bộ vị thế cuối ngày, không giữ lệnh qua đêm 
+if cutoff_time
+    strategy.close_all()
+
+View in Pine Editor・59 lines
+Use on chart
+1
+2
+0
+2
+3 705
+Discover the tailored Pinescript to trade VN30F1M Future Contracts intraday, the strategy focuses on SMA & EMA crosses to identify potential entry/exit points. The script closes all positions by 14:25 to avoid holding any contracts overnight.
+
+VN301!
+
+https://www.tradingview.com/chart/651E79et/
+
+Setting & Backtest result:
+1-minute chart, initial capital of VND 100 million, entering 4 contracts per time, backtest result from Jan-2024 to Nov-2024 yielded a return over 40%, executed over 1,000 trades (average of 4 trades/day), winning trades rate ~ 30% with a profit factor of 1.10.
+
+The default setting of the script:
+A decent optimization is reached when SMA and EMA periods are set to 60 and 15 respectively while the Long/Short stop-loss level is set to 20 ticks (2 points) from the entry price.
+
+Entry & Exit conditions:
+Long signals are generated when ema(15) crosses over sma(60) while Short signals happen when ema(15) crosses under sma(60). Long orders are closed when ema(15) crosses under sma(60) while Short orders are closed when ema(15) crosses over sma(60).
+Exit conditions happen when (whichever came first):
+
+Another Long/Short signal is generated
+
+The Stop-loss level is reached
+
+The Cut-off time is reached (14:25 every day)
+
+
+
+*Disclaimers:
+Futures Contracts Trading are subjected to a high degree of risk and price movements can fluctuate significantly. This script functions as a reference source and should be used after users have clearly understood how futures trading works, accessed their risk tolerance level, and are knowledgeable of the functioning logic behind the script.
+Users are solely responsible for their investment decisions, and DNSE is not responsible for any potential losses from applying such a strategy to real-life trading activities. Past performance is not indicative/guarantee of future results, kindly reach out to us should you have specific questions about this script.
+
+---------------------------------------------------------------------------------------
+
+Khám phá Pinescript được thiết kế riêng để giao dịch Hợp đồng tương lai VN30F1M trong ngày, chiến lược tập trung vào các đường SMA & EMA cắt nhau để xác định các điểm vào/ra tiềm năng. Chiến lược sẽ đóng tất cả các vị thế trước 14:25 để tránh giữ bất kỳ hợp đồng nào qua đêm.
+
+Thiết lập & Kết quả backtest:
+Chart 1 phút, vốn ban đầu là 100 triệu đồng, vào 4 hợp đồng mỗi lần, kết quả backtest từ tháng 1/2024 tới tháng 11/2024 mang lại lợi nhuận trên 40%, thực hiện hơn 1.000 giao dịch (trung bình 4 giao dịch/ngày), tỷ lệ giao dịch thắng ~ 30% với hệ số lợi nhuận là 1,10.
+
+Thiết lập mặc định của chiến lược:
+Đạt được một mức tối ưu ổn khi SMA và EMA periods được đặt lần lượt là 60 và 15 trong khi mức cắt lỗ được đặt thành 20 tick (2 điểm) từ giá vào.
+
+Điều kiện Mở và Đóng vị thế:
+Tín hiệu Long được tạo ra khi ema(15) cắt trên sma(60) trong khi tín hiệu Short xảy ra khi ema(15) cắt dưới sma(60). Lệnh Long được đóng khi ema(15) cắt dưới sma(60) trong khi lệnh Short được đóng khi ema(15) cắt lên sma(60).
+Điều kiện đóng vị thể xảy ra khi (tùy điều kiện nào đến trước):
+
+Một tín hiệu Long/Short khác được tạo ra
+
+Giá chạm mức cắt lỗ
+
+Lệnh chưa đóng nhưng tới giờ cut-off (14:25 hàng ngày)
+
+
+
+*Tuyên bố miễn trừ trách nhiệm:
+Giao dịch hợp đồng tương lai có mức rủi ro cao và giá có thể dao động đáng kể. Chiến lược này hoạt động như một nguồn tham khảo và nên được sử dụng sau khi người dùng đã hiểu rõ cách thức giao dịch hợp đồng tương lai, đã đánh giá mức độ chấp nhận rủi ro của bản thân và hiểu rõ về logic vận hành của chiến lược này.
+Người dùng hoàn toàn chịu trách nhiệm về các quyết định đầu tư của mình và DNSE không chịu trách nhiệm về bất kỳ khoản lỗ tiềm ẩn nào khi áp dụng chiến lược này vào các hoạt động giao dịch thực tế. Hiệu suất trong quá khứ không chỉ ra/cam kết kết quả trong tương lai, vui lòng liên hệ với chúng tôi nếu bạn có thắc mắc cụ thể về chiến lược giao dịch này.

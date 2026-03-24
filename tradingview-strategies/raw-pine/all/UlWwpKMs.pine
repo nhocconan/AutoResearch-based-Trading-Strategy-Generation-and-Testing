@@ -1,0 +1,813 @@
+//@version=6
+strategy("Absorption Pro V3", overlay=true, initial_capital=100000, default_qty_type=strategy.fixed, default_qty_value=0.1, process_orders_on_close=true, pyramiding=100, max_labels_count=500)
+
+// =====================================
+// === Key Levels Settings ===
+// =====================================
+key_tolerance = input.float(0.0002, "Key Levels Tolerance (2 pips)", group = 'Key Levels Settings')
+zz_percent = input.float(0.7, "ZigZag Percent for Fib", step=0.1, group = 'Key Levels Settings')
+
+string calc_tf = input.timeframe("", "Calculation Timeframe")
+string higher_tf = input.timeframe("", "Higher Timeframe")
+string extra_tf = input.timeframe("", "Extra Timeframe")
+float mtf_scale = input.float(0.25, "Higher TF Scale", step=0.05)
+float extra_scale = input.float(0.1, "Extra TF Scale", step=0.05)
+float min_pro = input.float(1.0, "Min Pro Multiplier")
+float max_pro = input.float(10.0, "Max Pro Multiplier")
+float min_contra = input.float(1.0, "Min Contra Multiplier")
+float max_contra = input.float(0.1, "Max Contra Multiplier")
+
+// Detect New Periods (moved up)
+bool new_day = ta.change(time("D")) != 0
+bool new_week = ta.change(time("W")) != 0
+
+// =====================================
+// === Absorption Settings and Calculations ===
+// =====================================
+minVolume = 1100
+minDeltaProxy = 220.0
+priceTolerance = 0.2
+closeHighFrac = 0.75
+closeLowFrac = 0.25
+intensityScale = 12.0
+emaLength = 200
+
+// SMMA Settings
+smma_length = input.int(200, "SMMA Length", group="Trend Settings")
+smma_pct_per_pip = input.float(0.03, "SMMA % per Pip", step=0.01, group="Trend Settings")
+
+// VWAPony Inputs
+fib1 = input.float(title = 'Fibo extension 1', defval = 1.618, group = 'VWAPony Settings')
+fib2 = input.float(title = 'Fibo extension 2', defval = 2.618, group = 'VWAPony Settings')
+reso = input.timeframe(title = 'Resolution VWAP', defval = 'D', group = 'VWAPony Settings')
+
+// VWAP Calculations
+t = time(reso)
+debut = na(t[1]) or t > t[1]
+
+var addsource = 0.0
+var addvol = 0.0
+
+addsource := debut ? hlc3 * volume : addsource[1] + hlc3 * volume
+addvol := debut ? volume : addvol[1] + volume
+VWAP = addsource / addvol
+
+var sn = 0.0
+sn := debut ? 0.0 : sn[1] + volume * (hlc3 - VWAP[1]) * (hlc3 - VWAP)
+sd = math.sqrt(sn / addvol)
+
+Fibp2 = VWAP + fib2 * sd
+Fibp1 = VWAP + fib1 * sd
+Fibm1 = VWAP - fib1 * sd
+Fibm2 = VWAP - fib2 * sd
+
+// VWAP Sup (optional, but included for completeness)
+transparency = input.bool(false, 'Afficher VWAP Supérieur', inline = '01', group = 'VWAPony Settings')
+w_reso = input.timeframe(title = 'Resolution VWAP supérieur', defval = 'W', group = 'VWAPony Settings', inline = '01')
+t_sup = time(w_reso)
+debut_sup = na(t_sup[1]) or t_sup > t_sup[1]
+
+var addsource_sup = 0.0
+var addvol_sup = 0.0
+addsource_sup := debut_sup ? hlc3 * volume : addsource_sup[1] + hlc3 * volume
+addvol_sup := debut_sup ? volume : addvol_sup[1] + volume
+VWAP_sup = addsource_sup / addvol_sup
+
+var sn_sup = 0.0
+sn_sup := debut_sup ? 0.0 : sn_sup[1] + volume * (hlc3 - VWAP_sup[1]) * (hlc3 - VWAP_sup)
+sd_sup = math.sqrt(sn_sup / addvol_sup)
+
+Fibp2_sup = VWAP_sup + fib2 * sd_sup
+Fibp1_sup = VWAP_sup + fib1 * sd_sup
+Fibm1_sup = VWAP_sup - fib1 * sd_sup
+Fibm2_sup = VWAP_sup - fib2 * sd_sup
+
+// Absorption Calculations
+candleRange = high - low
+safeRange = candleRange == 0 ? syminfo.mintick : candleRange
+
+deltaProxy = volume * (close - open) / safeRange
+priceMovePct = math.abs(close - open) / close * 100.0
+closePosition = (close - low) / safeRange
+emaFilter = ta.ema(close, emaLength)
+
+isLiquid = volume >= minVolume
+intensityRaw = math.abs(deltaProxy) / (minDeltaProxy * intensityScale)
+level = math.min(8, math.max(1, math.floor(intensityRaw * 8)))
+
+absBuy = isLiquid and deltaProxy > minDeltaProxy and close > open and priceMovePct < priceTolerance and closePosition >= closeHighFrac and close > emaFilter
+absSell = isLiquid and deltaProxy < -minDeltaProxy and close < open and priceMovePct < priceTolerance and closePosition <= closeLowFrac and close < emaFilter
+
+// VWAP Range Conditions
+is_in_vwap_range_red = high > Fibp1 and low < Fibp2
+is_in_vwap_range_green = high > Fibm2 and low < Fibm1
+
+// Absorption Score (-10 to +10)
+absorption_score = 0.0
+if absBuy and is_in_vwap_range_red
+    absorption_score := level  // Positive for overbought
+if absSell and is_in_vwap_range_green
+    absorption_score := -level  // Negative for oversold
+
+// RSI for divergences (moved up)
+rsi_length = input.int(14, title="RSI Length", group="Additional Indicators")
+rsi_val = ta.rsi(close, rsi_length)
+
+// Correlated ticker for SMT (moved up)
+string correlated_ticker = input.string("", title="Correlated Ticker for SMT Divergence", group="Additional Indicators")
+
+// =====================================
+// === ZigZag for Fibonacci ===
+// =====================================
+var int trend = 0
+trend := na(trend[1]) ? 1 : trend[1]
+var float LL = 0.0
+LL := na(LL[1]) ? low : LL[1]
+var float HH = 0.0
+HH := na(HH[1]) ? high : HH[1]
+
+var float HH_rsi = na
+HH_rsi := na(HH_rsi[1]) ? rsi_val : HH_rsi[1]
+var float LL_rsi = na
+LL_rsi := na(LL_rsi[1]) ? rsi_val : LL_rsi[1]
+
+var float prev_high_price = na
+var float last_high_price = na
+var float prev_low_price = na
+var float last_low_price = na
+var float prev_high_rsi = na
+var float last_high_rsi = na
+var float prev_low_rsi = na
+var float last_low_rsi = na
+
+// Declarations for SMT (moved up)
+var float prev_high_price2 = na
+var float last_high_price2 = na
+var float prev_low_price2 = na
+var float last_low_price2 = na
+
+float rsi_div_score = 0.0
+float smt_div_score = 0.0
+
+float PivotChg = zz_percent * 0.02
+float zigzag = na
+
+var float fib_low = na
+var float fib_high = na
+var string swing_dir = na
+
+if (trend > 0) // trend is up, look for new swing low
+    if (high >= HH) // new higher high detected
+        HH := high
+        HH_rsi := rsi_val
+    else
+        if (low < HH * (1 - PivotChg))
+            zigzag := HH[1]
+            trend := -1
+            fib_low := LL[1]
+            fib_high := HH[1]
+            swing_dir := "up"
+            LL := low
+            if not na(last_high_price)
+                prev_high_price := last_high_price
+                prev_high_rsi := last_high_rsi
+            last_high_price := HH[1]
+            last_high_rsi := HH_rsi[1]
+            if not na(prev_high_price) and last_high_price > prev_high_price and last_high_rsi < prev_high_rsi
+                rsi_div_score := 3.0
+            if not na(prev_high_price2) and last_high_price > prev_high_price and last_high_price2 < prev_high_price2
+                smt_div_score := 3.0
+else // trend is down, look for new swing high
+    if (low <= LL) // new lower low detected
+        LL := low
+        LL_rsi := rsi_val
+    else
+        if (high > LL * (1 + PivotChg))
+            zigzag := LL[1]
+            trend := 1
+            fib_high := HH[1]
+            fib_low := LL[1]
+            swing_dir := "down"
+            HH := high
+            if not na(last_low_price)
+                prev_low_price := last_low_price
+                prev_low_rsi := last_low_rsi
+            last_low_price := LL[1]
+            last_low_rsi := LL_rsi[1]
+            if not na(prev_low_price) and last_low_price < prev_low_price and last_low_rsi > prev_low_rsi
+                rsi_div_score := -3.0
+            if not na(prev_low_price2) and last_low_price < prev_low_price and last_low_price2 > prev_low_price2
+                smt_div_score := -3.0
+
+// Fibonacci Zone Score
+float fib_score = 0.0
+if not na(swing_dir)
+    float diff = math.abs(fib_high - fib_low)
+    if swing_dir == "up"
+        float fib_60 = fib_high - 0.60 * diff
+        float fib_64 = fib_high - 0.64 * diff
+        float zone_low = fib_64
+        float zone_high = fib_60
+        if open > zone_high and close >= zone_low and close <= zone_high
+            fib_score -= 2.0
+    else if swing_dir == "down"
+        float fib_60 = fib_low + 0.60 * diff
+        float fib_64 = fib_low + 0.64 * diff
+        float zone_low = fib_60
+        float zone_high = fib_64
+        if open < zone_low and close >= zone_low and close <= zone_high
+            fib_score += 2.0
+
+// =====================================
+// === Previous Sessions and Pivots ===
+// =====================================
+
+// Daily Sessions
+var float daily_high = 0.0
+var float daily_low = 0.0
+var float prev_daily_high = na
+var float prev_daily_low = na
+var float prev_daily_close = na
+
+if new_day
+    prev_daily_high := daily_high[1]
+    prev_daily_low := daily_low[1]
+    prev_daily_close := close[1]
+    daily_high := high
+    daily_low := low
+else
+    daily_high := math.max(daily_high, high)
+    daily_low := math.min(daily_low, low)
+
+// Weekly Sessions
+var float weekly_high = 0.0
+var float weekly_low = 0.0
+var float prev_weekly_high = na
+var float prev_weekly_low = na
+var float prev_weekly_close = na
+
+if new_week
+    prev_weekly_high := weekly_high[1]
+    prev_weekly_low := weekly_low[1]
+    prev_weekly_close := close[1]
+    weekly_high := high
+    weekly_low := low
+else
+    weekly_high := math.max(weekly_high, high)
+    weekly_low := math.min(weekly_low, low)
+
+// Daily Pivots
+float daily_PP = na(prev_daily_high) ? na : (prev_daily_high + prev_daily_low + prev_daily_close) / 3
+float daily_R1 = na(daily_PP) ? na : 2 * daily_PP - prev_daily_low
+float daily_R2 = na(daily_PP) ? na : daily_PP + (prev_daily_high - prev_daily_low)
+float daily_S1 = na(daily_PP) ? na : 2 * daily_PP - prev_daily_high
+float daily_S2 = na(daily_PP) ? na : daily_PP - (prev_daily_high - prev_daily_low)
+
+// Weekly Pivots
+float weekly_PP = na(prev_weekly_high) ? na : (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
+float weekly_R1 = na(weekly_PP) ? na : 2 * weekly_PP - prev_weekly_low
+float weekly_R2 = na(weekly_PP) ? na : weekly_PP + (prev_weekly_high - prev_weekly_low)
+float weekly_S1 = na(weekly_PP) ? na : 2 * weekly_PP - prev_weekly_high
+float weekly_S2 = na(weekly_PP) ? na : weekly_PP - (prev_weekly_high - prev_weekly_low)
+
+// Psychological Round Numbers
+float round_01 = math.round(close / 0.01) * 0.01
+float round_1 = math.round(close / 0.1) * 0.1
+
+// Key Levels Score
+float key_score = 0.0
+
+// Resistance Levels (PDH, R1, R2, etc.)
+array<float> res_levels = array.from(daily_R1, daily_R2, weekly_R1, weekly_R2, prev_daily_high, prev_weekly_high)
+for res in res_levels
+    if not na(res) and open < res and math.abs(close - res) <= key_tolerance
+        key_score += 1.0
+
+// Support Levels (PDL, S1, S2, etc.)
+array<float> sup_levels = array.from(daily_S1, daily_S2, weekly_S1, weekly_S2, prev_daily_low, prev_weekly_low)
+for sup in sup_levels
+    if not na(sup) and open > sup and math.abs(close - sup) <= key_tolerance
+        key_score -= 1.0
+
+// Neutral Levels (PP, PDC, Rounds)
+array<float> neutral_levels = array.from(daily_PP, weekly_PP, prev_daily_close, prev_weekly_close, round_01, round_1)
+for neut in neutral_levels
+    if not na(neut) and math.abs(close - neut) <= key_tolerance
+        if open < neut
+            key_score += 1.0
+        if open > neut
+            key_score -= 1.0
+
+// Add Fib Score
+key_score += fib_score
+
+// =====================================
+// === Additional Indicators ===
+// =====================================
+
+// Stochastic Oscillator Parameters
+stoch_length = input.int(21, title="Stochastic Length", group="Additional Indicators")
+stoch_smoothK = input.int(2, title="Stochastic %K Smooth", group="Additional Indicators")
+stoch_smoothD = input.int(2, title="Stochastic %D Smooth", group="Additional Indicators")
+
+// Stochastic Calculations
+stoch_lowest = ta.lowest(low, stoch_length)
+stoch_highest = ta.highest(high, stoch_length)
+stoch_K = 100 * (close - stoch_lowest) / (stoch_highest - stoch_lowest)
+stoch_D = ta.sma(stoch_K, stoch_smoothD)
+stoch_avg = ta.sma(stoch_K, stoch_smoothK)
+
+// Stochastic Score (-5 to 5, only extremes)
+stoch_score = 0.0
+if stoch_avg > 85
+    stoch_score := ((stoch_avg - 90) / 10) * 5.0
+else if stoch_avg < 15
+    stoch_score := ((stoch_avg - 10) / 10) * 5.0
+if ta.crossover(stoch_avg, stoch_D) and stoch_avg < 10
+    stoch_score -= 1.0  // Strengthen oversold on bullish cross
+if ta.crossunder(stoch_avg, stoch_D) and stoch_avg > 90
+    stoch_score += 1.0  // Strengthen overbought on bearish cross
+stoch_score := math.min(5, math.max(-5, stoch_score))
+
+// CCI Parameters
+cci_length = input.int(15, title="CCI Length", group="Additional Indicators")
+
+// CCI Calculation
+cci_typical = (high + low + close) / 3
+cci_ma = ta.sma(cci_typical, cci_length)
+cci_md = ta.sma(math.abs(cci_typical - cci_ma), cci_length)
+cci_val = (cci_typical - cci_ma) / (0.015 * cci_md)
+
+// CCI Score (-5 to 5, only extremes)
+cci_score = 0.0
+if cci_val > 180
+    cci_score := math.min(5, math.floor((cci_val - 180) / 45) + 1)
+else if cci_val < -180
+    cci_score := math.max(-5, math.ceil((cci_val + 180) / 45) - 1)
+
+// MACD Parameters
+macd_fast = input.int(17, title="MACD Fast Length", group="Additional Indicators")
+macd_slow = input.int(30, title="MACD Slow Length", group="Additional Indicators")
+macd_signal = input.int(9, title="MACD Signal Length", group="Additional Indicators")
+
+// MACD Calculation
+[macd_line, signal_line, hist] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+
+// MACD Score (-5 to 5, only extremes)
+hist_std = ta.stdev(hist, 20)
+macd_normalized = hist_std != 0 ? hist / hist_std : 0
+macd_score = 0.0
+if math.abs(macd_normalized) > 2.0  // Raised to 2.0 std dev (~95th percentile) for rarer extremes
+    macd_score := math.sign(macd_normalized) * math.min(5, (math.abs(macd_normalized) - 2.0) * 1.25 + 1.25)  // Adjusted scaling to reach 5 at ~6 std dev
+
+// Detect simple divergence for bonus
+price_up = close > close[1]
+macd_down = hist < hist[1]
+price_down = close < close[1]
+macd_up = hist > hist[1]
+if price_up and macd_down and macd_score > 0
+    macd_score += 1.0  // Bearish divergence, strengthen overbought
+if price_down and macd_up and macd_score < 0
+    macd_score -= 1.0  // Bullish divergence, strengthen oversold
+macd_score := math.min(5, math.max(-5, macd_score))
+
+// ADX Parameters
+adx_length = input.int(14, title="ADX Length", group="Additional Indicators")
+adx_smoothing = input.int(10, title="ADX Smoothing", group="Additional Indicators")
+
+// ADX Calculation
+[di_plus, di_minus, adx] = ta.dmi(adx_length, adx_smoothing)
+
+// ADX Score (-5 to 5, only extremes)
+trend_dir = di_plus - di_minus
+adx_score = 0.0
+if adx > 40
+    adx_score := math.min(5, math.max(-5, (trend_dir / 100) * ((adx - 40) / 10) * 5))  // Scale based on strength beyond 40
+
+// =====================================
+// === Original Scoring Calculations ===
+// =====================================
+
+// General Parameters
+bin_multiplier = input.int(10, title="Bin Tick Multiplier")
+bin_size = syminfo.mintick * bin_multiplier
+va_percent = input.float(0.68, title="Value Area Percent")
+tolerance = input.float(0.0001, title="Tolerance Range (in price units)")
+resolution = 100  // Fixed samples per bar for volume distribution
+
+// BB Parameters
+bb_length = input.int(300, title="BB Length")
+bb_dev_step = input.float(0.6, title="BB Deviation Step")
+bb_max_dev = input.float(4.0, title="BB Max Deviation")
+bb_points_per_step = input.int(1, title="BB Points per Step")
+
+// RSI Step Parameters (RSI val moved up)
+rsi_step = input.int(5, title="RSI Step")
+rsi_points_per_step = input.int(1, title="RSI Points per Step")
+rsi_mid = 50.0
+
+// Trend MA Parameters
+trend_ma_length = input.int(200, title="Trend EMA Length", group="Trend Settings")
+trend_ma = ta.ema(close, trend_ma_length)
+
+// Daily VP Variables
+var map<float, float> daily_profile = map.new<float, float>()
+var float daily_total_vol = 0.0
+var float prev_daily_VAL = na
+var float prev_daily_VAH = na
+
+// Weekly VP Variables
+var map<float, float> weekly_profile = map.new<float, float>()
+var float weekly_total_vol = 0.0
+var float prev_weekly_VAL = na
+var float prev_weekly_VAH = na
+
+// Process Daily VP
+if new_day
+    if map.size(daily_profile) > 0
+        array<float> prices = map.keys(daily_profile)
+        array.sort(prices)
+        // POC
+        float max_vol = 0.0
+        float poc = na
+        for price in prices
+            float vol = map.get(daily_profile, price)
+            if vol > max_vol
+                max_vol := vol
+                poc := price
+        // Value Area
+        float va_target = daily_total_vol * va_percent
+        int idx = array.indexof(prices, poc)
+        int low_idx = idx
+        int up_idx = idx
+        float current_vol = max_vol
+        while current_vol < va_target and (low_idx > 0 or up_idx < array.size(prices) - 1)
+            float low_v = low_idx > 0 ? map.get(daily_profile, array.get(prices, low_idx - 1)) : 0.0
+            float up_v = up_idx < array.size(prices) - 1 ? map.get(daily_profile, array.get(prices, up_idx + 1)) : 0.0
+            if low_v >= up_v and low_idx > 0
+                low_idx -= 1
+                current_vol += low_v
+            else if up_idx < array.size(prices) - 1
+                up_idx += 1
+                current_vol += up_v
+        prev_daily_VAL := array.get(prices, low_idx)
+        prev_daily_VAH := array.get(prices, up_idx)
+    map.clear(daily_profile)
+    daily_total_vol := 0.0
+
+// Process Weekly VP
+if new_week
+    if map.size(weekly_profile) > 0
+        array<float> prices = map.keys(weekly_profile)
+        array.sort(prices)
+        // POC
+        float max_vol = 0.0
+        float poc = na
+        for price in prices
+            float vol = map.get(weekly_profile, price)
+            if vol > max_vol
+                max_vol := vol
+                poc := price
+        // Value Area
+        float va_target = weekly_total_vol * va_percent
+        int idx = array.indexof(prices, poc)
+        int low_idx = idx
+        int up_idx = idx
+        float current_vol = max_vol
+        while current_vol < va_target and (low_idx > 0 or up_idx < array.size(prices) - 1)
+            float low_v = low_idx > 0 ? map.get(weekly_profile, array.get(prices, low_idx - 1)) : 0.0
+            float up_v = up_idx < array.size(prices) - 1 ? map.get(weekly_profile, array.get(prices, up_idx + 1)) : 0.0
+            if low_v >= up_v and low_idx > 0
+                low_idx -= 1
+                current_vol += low_v
+            else if up_idx < array.size(prices) - 1
+                up_idx += 1
+                current_vol += up_v
+        prev_weekly_VAL := array.get(prices, low_idx)
+        prev_weekly_VAH := array.get(prices, up_idx)
+    map.clear(weekly_profile)
+    weekly_total_vol := 0.0
+
+// Add Volume to Daily and Weekly Profiles
+daily_total_vol += volume
+weekly_total_vol += volume
+if high == low
+    float bin = math.round(close / bin_size) * bin_size
+    float curr_d = map.get(daily_profile, bin)
+    curr_d := na(curr_d) ? 0.0 : curr_d
+    map.put(daily_profile, bin, curr_d + volume)
+    float curr_w = map.get(weekly_profile, bin)
+    curr_w := na(curr_w) ? 0.0 : curr_w
+    map.put(weekly_profile, bin, curr_w + volume)
+else
+    float add_per_sample = volume / resolution
+    for i = 0 to resolution - 1
+        float p = low + (high - low) * (i / (resolution - 1.0))
+        float bin = math.round(p / bin_size) * bin_size
+        float curr_d = map.get(daily_profile, bin)
+        curr_d := na(curr_d) ? 0.0 : curr_d
+        map.put(daily_profile, bin, curr_d + add_per_sample)
+        float curr_w = map.get(weekly_profile, bin)
+        curr_w := na(curr_w) ? 0.0 : curr_w
+        map.put(weekly_profile, bin, curr_w + add_per_sample)
+
+// VP Score
+vp_score = 0.0
+if not na(prev_daily_VAL) and open > prev_daily_VAL and math.abs(close - prev_daily_VAL) <= tolerance
+    vp_score -= 1.0
+if not na(prev_daily_VAH) and open < prev_daily_VAH and math.abs(close - prev_daily_VAH) <= tolerance
+    vp_score += 1.0
+if not na(prev_weekly_VAL) and open > prev_weekly_VAL and math.abs(close - prev_weekly_VAL) <= tolerance
+    vp_score -= 3.0
+if not na(prev_weekly_VAH) and open < prev_weekly_VAH and math.abs(close - prev_weekly_VAH) <= tolerance
+    vp_score += 3.0
+
+// Calculate BB Basis (EMA)
+basis = ta.ema(close, bb_length)
+
+// Calculate BB Score
+bb_score = 0.0
+num_steps = math.round(bb_max_dev / bb_dev_step)
+stdev = ta.stdev(close, bb_length)
+for i = 1 to num_steps
+    dev = i * bb_dev_step
+    upper = basis + stdev * dev
+    lower = basis - stdev * dev
+    if close > upper
+        bb_score += bb_points_per_step
+    else if close < lower
+        bb_score -= bb_points_per_step
+
+// Calculate RSI Score
+rsi_score = 0.0
+if rsi_val > rsi_mid
+    levels_above = math.floor((rsi_val - rsi_mid) / rsi_step)
+    rsi_score := levels_above * rsi_points_per_step
+else if rsi_val < rsi_mid
+    levels_below = math.floor((rsi_mid - rsi_val) / rsi_step)
+    rsi_score := -levels_below * rsi_points_per_step
+
+// Calculate Approximate Delta (buyers - sellers)
+hl_range = high - low
+delta = hl_range != 0 ? volume * (2 * (close - low) / hl_range - 1) : 0
+
+// Delta Score with Streaks
+var int streak_seller = 0
+var int streak_buyer = 0
+delta_score = 0.0
+if delta > 0 and close < open
+    streak_seller += 1
+    streak_buyer := 0
+    delta_score := 3.0 + (streak_seller - 1) * 2.0
+else if delta < 0 and close > open
+    streak_buyer += 1
+    streak_seller := 0
+    delta_score := -(3.0 + (streak_buyer - 1) * 2.0)
+else
+    streak_seller := 0
+    streak_buyer := 0
+
+// SMMA Calculation
+smma = ta.rma(close, smma_length)
+
+// SMT Divergence Calculations
+float high2 = na
+float low2 = na
+if correlated_ticker != ""
+    high2 := request.security(correlated_ticker, timeframe.period, high)
+    low2 := request.security(correlated_ticker, timeframe.period, low)
+
+var int trend2 = 0
+trend2 := na(trend2[1]) ? 1 : trend2[1]
+var float LL2 = 0.0
+LL2 := na(LL2[1]) ? low2 : LL2[1]
+var float HH2 = 0.0
+HH2 := na(HH2[1]) ? high2 : HH2[1]
+
+float zigzag2 = na
+
+if correlated_ticker != ""
+    if (trend2 > 0)
+        if (high2 >= HH2)
+            HH2 := high2
+        else
+            if (low2 < HH2 * (1 - PivotChg))
+                zigzag2 := HH2[1]
+                trend2 := -1
+                if not na(last_high_price2)
+                    prev_high_price2 := last_high_price2
+                last_high_price2 := HH2[1]
+                LL2 := low2
+    else
+        if (low2 <= LL2)
+            LL2 := low2
+        else
+            if (high2 > LL2 * (1 + PivotChg))
+                zigzag2 := LL2[1]
+                trend2 := 1
+                if not na(last_low_price2)
+                    prev_low_price2 := last_low_price2
+                last_low_price2 := LL2[1]
+                HH2 := high2
+
+// Base Score for security
+float base_score = bb_score + rsi_score + delta_score + vp_score + absorption_score + stoch_score + cci_score + macd_score + adx_score + key_score + rsi_div_score + smt_div_score
+
+// Apply Calculation Timeframe
+string effective_tf = calc_tf == "" ? timeframe.period : calc_tf
+float calc_base = request.security(syminfo.tickerid, effective_tf, base_score, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+// Apply Higher Timeframe if set
+float higher_base = na
+if higher_tf != ""
+    higher_base := request.security(syminfo.tickerid, higher_tf, base_score, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+// Apply Extra Timeframe if set
+float extra_base = na
+if extra_tf != ""
+    extra_base := request.security(syminfo.tickerid, extra_tf, base_score, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+float total_score = calc_base + (na(higher_base) ? 0.0 : higher_base * mtf_scale) + (na(extra_base) ? 0.0 : extra_base * extra_scale)
+
+// Trend Slope Strength
+atr = ta.atr(17)
+average_slope = (trend_ma - trend_ma[10]) / 10.0
+float strength = math.abs(average_slope) / atr
+strength := math.min(1.0, math.max(0.0, 2.0 * strength))  // Amplify by 2 to reach extremes faster
+
+// Multipliers
+pro_mult = 1.0 + strength * 9.0  // 1 to 10
+contra_mult = 1.0 - strength * 0.95  // 1 to 0.1
+
+// Apply Trend Multiplier
+bool is_rising = average_slope > 0
+bool is_falling = average_slope < 0
+if total_score > 0
+    if is_rising  // contra
+        total_score *= contra_mult
+    else if is_falling  // pro
+        total_score *= pro_mult
+else if total_score < 0
+    if is_rising  // pro
+        total_score *= pro_mult
+    else if is_falling  // contra
+        total_score *= contra_mult
+
+// Distance in pips (assuming pip = 0.0001 for EURUSD)
+float pip_size = 0.0002
+float distance_pips = math.abs(close - smma) / pip_size
+
+// SMMA Multiplier ( +5% per pip if deviation in signal direction)
+float smma_mult = 1.0
+if total_score > 0 and close > smma
+    smma_mult += smma_pct_per_pip * distance_pips
+else if total_score < 0 and close < smma
+    smma_mult += smma_pct_per_pip * distance_pips
+
+// Apply SMMA Multiplier
+total_score *= smma_mult
+
+// Adjust Total Score with ADX (amplify in low trend, reduce in high trend)
+adx_factor = adx > 40 ? 0.5 : adx < 20 ? 1.5 : 1.0
+total_score *= adx_factor
+
+// Round to 0.1 steps
+total_score := math.round(total_score * 10) / 10
+
+// Track streaks for degradation
+var int streak_pos = 0
+var int streak_neg = 0
+
+if total_score > 23
+    streak_pos += 1
+    streak_neg := 0
+else if total_score < -23
+    streak_neg += 1
+    streak_pos := 0
+else
+    streak_pos := 0
+    streak_neg := 0
+
+// Signal Threshold Filters
+long_threshold_above = input.float(-15.0, "Long (Bull) Threshold Above MA200", group="Signal Threshold Filters")
+short_threshold_above = input.float(24.0, "Short (Bear) Threshold Above MA200", group="Signal Threshold Filters")
+long_threshold_below = input.float(-24.0, "Long (Bull) Threshold Below MA200", group="Signal Threshold Filters")
+short_threshold_below = input.float(15.0, "Short (Bear) Threshold Below MA200", group="Signal Threshold Filters")
+
+// Determine if above or below MA200
+bool above_ma = close > emaFilter
+
+// Select thresholds based on position relative to MA200
+float long_threshold = above_ma ? long_threshold_above : long_threshold_below
+float short_threshold = above_ma ? short_threshold_above : short_threshold_below
+
+// Strategy Logic
+var float long_mult = 1.0
+var float short_mult = 1.0
+var int long_count = 0
+var int short_count = 0
+float base_risk_pct = 0.001
+float max_risk_pct = 0.005
+float sl_pips = input.float(10, "SL Pips")
+float tp_pips = input.float(10, "TP Pips")
+float pip_value = 10.0  // USD per pip per lot
+
+long_signal = total_score < long_threshold  // blue/green = long
+short_signal = total_score > short_threshold  // red/yellow = short
+
+if long_signal or short_signal
+    if (long_signal and strategy.position_size < 0) or (short_signal and strategy.position_size > 0)
+        strategy.close_all(comment="Opposite Signal")
+        long_count := 0
+        short_count := 0
+        long_mult := 1.0
+        short_mult := 1.0
+
+if long_signal
+    risk_amount = math.min(strategy.equity * max_risk_pct, strategy.equity * base_risk_pct * long_mult)
+    qty = risk_amount / (sl_pips * pip_value)
+    entry_id = "Long" + str.tostring(long_count)
+    strategy.entry(entry_id, strategy.long, qty=qty)
+    long_count += 1
+    if long_count % 3 == 0
+        long_mult *= 2
+    sl_price = close - sl_pips * pip_size
+    tp_price = close + tp_pips * pip_size
+    strategy.exit("Exit " + entry_id, from_entry=entry_id, stop=sl_price, limit=tp_price)
+
+if short_signal
+    risk_amount = math.min(strategy.equity * max_risk_pct, strategy.equity * base_risk_pct * short_mult)
+    qty = risk_amount / (sl_pips * pip_value)
+    entry_id = "Short" + str.tostring(short_count)
+    strategy.entry(entry_id, strategy.short, qty=qty)
+    short_count += 1
+    if short_count % 3 == 0
+        short_mult *= 2
+    sl_price = close + sl_pips * pip_size
+    tp_price = close - tp_pips * pip_size
+    strategy.exit("Exit " + entry_id, from_entry=entry_id, stop=sl_price, limit=tp_price)
+
+// Display Circle if condition met (for visualization)
+bool current_signal = total_score > short_threshold or total_score < long_threshold
+bool recent_signal = (math.abs(total_score[1]) > math.abs(long_threshold) or math.abs(total_score[1]) > short_threshold) or (math.abs(total_score[2]) > math.abs(long_threshold) or math.abs(total_score[2]) > short_threshold)
+if current_signal and recent_signal
+    abs_score = math.abs(total_score)
+    float opacity_factor = math.min(1, math.max(0, (abs_score - 10) / (35 - 10)))
+    int trans = math.round(100 * (1 - opacity_factor))  // 100 (transparent) at 10, 0 (opaque) at 35+
+    
+    int degraded_r = 0
+    int degraded_g = 0
+    int degraded_b = 0
+    
+    float factor = 0.0
+    if total_score > 0
+        factor := math.min(1.0, (streak_pos > 1 ? (streak_pos - 1) / 9.0 : 0.0))
+        degraded_r := math.round(255 * (1 - factor) + 255 * factor)
+        degraded_g := math.round(165 * (1 - factor) + 182 * factor)
+        degraded_b := math.round(0 * (1 - factor) + 193 * factor)
+    else
+        factor := math.min(1.0, (streak_neg > 1 ? (streak_neg - 1) / 9.0 : 0.0))
+        degraded_r := math.round(0 * (1 - factor) + 144 * factor)
+        degraded_g := math.round(0 * (1 - factor) + 238 * factor)
+        degraded_b := math.round(255 * (1 - factor) + 144 * factor)
+    
+    color circle_color = color.new(color.rgb(degraded_r, degraded_g, degraded_b), trans)
+    
+    is_positive = total_score > 0
+    y_pos = is_positive ? high : low
+    y_loc = is_positive ? yloc.abovebar : yloc.belowbar
+    label.new(bar_index, y_pos, "", yloc=y_loc, style=label.style_circle, color=circle_color, textcolor=color.new(color.white, 100), size=size.tiny)
+
+View in Pine Editor・779 lines
+Use on chart
+1
+7
+0
+3 388
+Nov 28, 2025
+OF - Absorption PRO (Clean & Smart)Ultra-clean, high-precision absorption reversal strategy.Detects institutional buying/selling pressure using volume-weighted delta proxy and VWAP deviation zones.Smart RSI + early-session range filter automatically separates valid range-bound reversals from trend exhaustion.Green/Red circles → High-probability entries (fully tradable)
+Small crosses + colored zones → Rejected signals (avoid)
+Blue dotted lines → Session range ±100% deviation levels (optional)
+
+By default: only signals and rejection zones displayed — zero clutter.Minimalist, professional, and deadly accurate on futures & forex (1m–15m).Less noise. Better trades.
+Nov 28, 2025
+Release Notes
+OF - Absorption PRO (Clean & Smart)
+
+Ultra-clean, high-precision absorption reversal strategy.Detects institutional buying/selling pressure using volume-weighted delta proxy and VWAP deviation zones.Smart RSI + early-session range filter automatically separates valid range-bound reversals from trend exhaustion.
+
+
+Green/Red circles → High-probability entries (fully tradable)
+
+Small crosses + colored zones → Rejected signals (avoid)
+
+Blue dotted lines → Session range ±100% deviation levels (optional)
+
+
+
+By default: only signals and rejection zones displayed — zero clutter.Minimalist, professional, and deadly accurate on futures & forex (1m–15m).Less noise. Better trades.
+
+
+Dec 22, 2025
+Release Notes
+Beaucoup plus sensible aux tendances.

@@ -1,0 +1,5 @@
+//@version=5
+obLevel=##input(defval=0.75,type='INPUT_FLOAT',##id='in_5')
+osLevel=##input(defval=0.25,type='INPUT_FLOAT',##id='in_6')
+##root(root_metainfo,rm_0,obLevel,input__float)
+##root(root_metainfo,rm_1,osLevel,input__float)

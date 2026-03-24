@@ -1,0 +1,173 @@
+//@version=6
+strategy(
+    "Session Liquidity Sweep + Trend Confirmation",
+    overlay=true,
+    initial_capital=100000,
+    default_qty_type=strategy.percent_of_equity,
+    default_qty_value=5,
+    commission_type=strategy.commission.percent,
+    commission_value=0.05,
+    slippage=1
+)
+
+
+// ─────────────────────
+// INPUTS
+// ─────────────────────
+sessionStart = input.int(930, "Session Start (HHMM)")
+sessionEnd   = input.int(1100, "Session End (HHMM)")
+lookbackBars = input.int(20, "Liquidity Lookback")
+atrLen       = input.int(14, "ATR Length")
+slMult       = input.float(1.5, "Stop ATR Multiplier")
+rr           = input.float(2.5, "Risk-Reward")
+emaTrendLen  = input.int(50, "EMA Trend Filter")
+
+
+// ─────────────────────
+// SESSION FILTER
+// ─────────────────────
+hourMinute = hour * 100 + minute
+inSession  = (hourMinute >= sessionStart) and (hourMinute <= sessionEnd)
+
+
+// ─────────────────────
+// TREND FILTER
+// ─────────────────────
+emaTrend = ta.ema(close, emaTrendLen)
+trendUp   = close > emaTrend
+trendDown = close < emaTrend
+
+
+// ─────────────────────
+// LIQUIDITY LEVELS
+// ─────────────────────
+prevHigh = ta.highest(high[1], lookbackBars)
+prevLow  = ta.lowest(low[1], lookbackBars)
+
+
+// ─────────────────────
+// SWEEP + CONFIRMATION
+// ─────────────────────
+sweepHigh = (high > prevHigh) and (close < prevHigh)
+sweepLow  = (low < prevLow) and (close > prevLow)
+
+
+// ─────────────────────
+// ATR FOR RISK
+// ─────────────────────
+atrVal = ta.atr(atrLen)
+
+
+// ─────────────────────
+// ENTRY CONDITIONS
+// ─────────────────────
+longCond  = inSession and sweepLow and trendUp and (close > open) and (strategy.position_size == 0)
+shortCond = inSession and sweepHigh and trendDown and (close < open) and (strategy.position_size == 0)
+
+
+if longCond
+    strategy.entry("Long", strategy.long)
+
+
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+
+// ─────────────────────
+// RISK MANAGEMENT
+// ─────────────────────
+longStop  = strategy.position_avg_price - atrVal * slMult
+longLimit = strategy.position_avg_price + atrVal * slMult * rr
+
+
+shortStop  = strategy.position_avg_price + atrVal * slMult
+shortLimit = strategy.position_avg_price - atrVal * slMult * rr
+
+
+strategy.exit("Long Exit", "Long", stop=longStop, limit=longLimit)
+strategy.exit("Short Exit", "Short", stop=shortStop, limit=shortLimit)
+
+
+// ─────────────────────
+// VISUALS
+// ─────────────────────
+plot(prevHigh, "Prior Liquidity High", color=color.new(color.red, 40))
+plot(prevLow, "Prior Liquidity Low", color=color.new(color.green, 40))
+plot(emaTrend, "EMA Trend", color=color.new(color.blue, 0))
+
+View in Pine Editor・99 lines
+Use on chart
+4
+1
+1 804
+This strategy aims to capture high-probability intraday trades by combining liquidity sweeps with a trend confirmation filter. It is designed for traders who want a systematic approach to trade breakouts during specific market sessions while controlling risk with ATR-based stops.
+
+How it Works:
+Session Filter: Trades are only considered during a defined session (default 9:30 - 11:00). This helps avoid low-volume periods that can lead to false signals.
+
+Trend Confirmation: The strategy uses a 50-period EMA to identify the market trend. Long trades are only taken in an uptrend, and short trades in a downtrend.
+
+Liquidity Sweep Detection:
+
+A long entry occurs when price dips below the prior N-bar low but closes back above it, indicating a potential liquidity sweep that stops being triggered before the trend continues upward.
+
+
+
+A short entry occurs when price spikes above the prior N-bar high but closes below it, signaling a potential sweep of stops before the downward trend resumes.
+
+
+
+ATR-Based Risk Management:
+
+Stop loss is calculated using the Average True Range (ATR) multiplied by a configurable factor (default 1.5).
+
+
+
+Take profit is set based on a risk-reward ratio (default 2.5x).
+
+
+
+Position Sizing: Default position size is 5% of equity per trade, making it suitable for risk-conscious trading.
+
+Inputs:
+
+Session Start/End (HHMM)
+
+Liquidity Lookback Period (number of bars to define prior high/low)
+
+ATR Length for stop calculation
+
+ATR Stop Multiplier
+
+Risk-Reward Ratio
+
+EMA Trend Filter Length
+
+
+
+Visuals:
+
+Prior Liquidity High (red)
+
+Prior Liquidity Low (green)
+
+EMA Trend (blue)
+
+
+
+Why Use This Strategy:
+
+Captures stop-hunt moves often triggered by larger market participants.
+
+Only trades with trend confirmation, reducing false signals.
+
+Provides automatic ATR-based stop loss and take profit for consistent risk management.
+
+Easy to adjust session time, ATR, EMA length, and risk-reward to suit your trading style.
+
+
+
+Important Notes:
+Assumes 0.05% commission and 1-pip slippage. Adjust according to your broker.
+Not financial advice; intended for educational, backtesting, or paper trading purposes.
+Always test strategies thoroughly before applying to live accounts.

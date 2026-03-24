@@ -1,0 +1,180 @@
+//@version=6
+strategy("💸 DCA Accumulation Strategy (USD-Based Scaling)", overlay=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     initial_capital=5000,
+     pyramiding=100,
+     commission_type=strategy.commission.percent,
+     commission_value=2,
+     // ✅ Ensures strategy orders fill on the same bar CLOSE that confirms the signal
+     process_orders_on_close=true)
+
+// === 🕒 BACKTEST SETTINGS ===
+groupBacktest = "🕒 Backtest Controls"
+
+backtestMode = input.string("Date Range", title="Backtest Mode", options=["Date Range", "Days Ago"], group=groupBacktest,
+  tooltip="Select 'Date Range' to specify exact dates, or 'Days Ago' to simulate N days from now.")
+
+startYear  = input.int(2020, title="Start Year (only for Date Range)", group=groupBacktest)
+startMonth = input.int(1,    title="Start Month", group=groupBacktest)
+startDay   = input.int(1,    title="Start Day", group=groupBacktest)
+endYear    = input.int(2025, title="End Year", group=groupBacktest)
+endMonth   = input.int(12,   title="End Month", group=groupBacktest)
+endDay     = input.int(31,   title="End Day", group=groupBacktest)
+
+daysBack   = input.int(180,  title="Days Back (only for Days Ago)", group=groupBacktest)
+
+startTime     = timestamp(startYear, startMonth, startDay, 00, 00)
+endTime       = timestamp(endYear,   endMonth,   endDay,   23, 59)
+daysBackMs    = daysBack * 24 * 60 * 60 * 1000
+startAgoTime  = timenow - daysBackMs
+
+inRange = (backtestMode == "Date Range" and time >= startTime and time <= endTime) or
+          (backtestMode == "Days Ago"  and time >= startAgoTime)
+
+// === 📈 DCA & Take-Profit Settings ===
+groupDCA = "📈 DCA & Profit Settings"
+baseCash      = input.float(1000, title="USD Invested Per Buy",     group=groupDCA)
+sellQtyPct    = input.float(5,    title="Sell % of Position",       group=groupDCA, minval=1, maxval=100)
+takeProfitsOn = input.bool(true,  title="Enable Take-Profits?",     group=groupDCA, tooltip="If enabled, partial profits are taken on sell signals.")
+
+// === 🔁 Entry Logic Settings (WaveTrend & Stoch RSI) ===
+groupWT = "🔁 Buy Signal Logic"
+timeout        = input.int(8,     title="Valid bars after Stoch Cross",        group=groupWT)
+wtChan         = input.int(12,    title="WaveTrend Channel Length",            group=groupWT)
+wtAvg          = input.int(21,    title="WaveTrend Average Length",            group=groupWT)
+wtThresh       = input.float(-10, title="WT Buy Threshold (Dot Below)",        group=groupWT)
+wtSellThresh   = input.float(85,  title="WT Sell Threshold (Dot Above)",       group=groupWT)
+barsBefore     = input.int(3,     title="WT Dot Bars *Before* Stoch RSI",      group=groupWT)
+barsAfter      = input.int(8,     title="WT Dot Bars *After* Stoch RSI",       group=groupWT)
+
+// === 📊 Stoch RSI Settings ===
+groupStoch = "📊 Stoch RSI Settings"
+stochLen = input.int(15, title="Stoch RSI Length",            group=groupStoch)
+smoothK  = input.int(2,  title="Stoch %K Smoothing",          group=groupStoch)
+smoothD  = input.int(2,  title="Stoch %D Smoothing",          group=groupStoch)
+
+// === 🎨 Display Options ===
+groupDisplay = "🎨 Visual Display Settings"
+showBuy     = input.bool(true,  title="Show Buy Arrows?",            group=groupDisplay)
+showCost    = input.bool(true,  title="Show Avg Cost Line?",         group=groupDisplay)
+showZones   = input.bool(true,  title="Show Buy/Profit Zones?",      group=groupDisplay)
+showWTdebug = input.bool(false, title="Show WT Sell Debug Markers?", group=groupDisplay)
+showAvgDCA  = input.bool(true,  title="Show Custom Avg DCA Line?",   group=groupDisplay)
+
+// === SIGNAL CALCULATIONS ===
+rsi     = ta.rsi(close, stochLen)
+k       = ta.sma(ta.stoch(rsi, rsi, rsi, stochLen), smoothK)
+d       = ta.sma(k, smoothD)
+crossUp = ta.crossover(k, d) and k < 20
+
+ap        = hlc3
+esa       = ta.ema(ap, wtChan)
+dwt       = ta.ema(math.abs(ap - esa), wtChan)
+ci        = (ap - esa) / (0.015 * dwt)
+tci       = ta.ema(ci, wtAvg)
+sig       = ta.ema(tci, 4)
+wtDot     = ta.crossover(tci, sig) and tci < wtThresh
+wtDotSell = ta.crossunder(tci, sig) and tci > wtSellThresh
+
+var int lastStochBar = na
+if crossUp
+    lastStochBar := bar_index
+
+withinRange = not na(lastStochBar) and (bar_index >= lastStochBar - barsBefore) and (bar_index <= lastStochBar + barsAfter)
+dailyBuy   = wtDot and withinRange and inRange
+dailySell  = wtDotSell and inRange
+
+// === DCA TRACKING ===
+var float investedUSD = 0.0
+var float totalQty    = 0.0
+if dailyBuy
+    investedUSD += baseCash
+    totalQty     += baseCash / close
+
+avgDCAprice  = totalQty > 0 ? investedUSD / totalQty : na
+positionQty  = strategy.position_size
+canSell      = takeProfitsOn and dailySell and positionQty > 0 and close > avgDCAprice
+
+// === Track First Buy Date ===
+var int firstBuyDate = na
+if dailyBuy and na(firstBuyDate)
+    firstBuyDate := time
+daysSinceFirstBuy = not na(firstBuyDate) ? math.floor((time - firstBuyDate) / (1000 * 60 * 60 * 24)) : na
+
+startDateStr = str.tostring(startYear) + "-" + str.tostring(startMonth) + "-" + str.tostring(startDay)
+endDateStr   = str.tostring(endYear)   + "-" + str.tostring(endMonth)   + "-" + str.tostring(endDay)
+
+// === ENTRY & EXIT ===
+qtyToBuy = baseCash / close
+if dailyBuy
+    strategy.entry("DCA", strategy.long, qty=qtyToBuy)
+    // ✅ Removed alert() call.
+    // Create TradingView alert using: "Order fills" ONLY
+
+if canSell
+    strategy.close("DCA", qty_percent=sellQtyPct, comment="Take Profit")
+
+if (time >= endTime) and (time[1] < endTime) and (backtestMode == "Date Range")
+    strategy.close_all("End Exit")
+
+// === PLOTTING ===
+avgCost     = strategy.position_size > 0 ? strategy.position_avg_price : na
+validAvg    = not na(avgCost)
+smoothedAvg = validAvg ? ta.ema(avgCost, 10) : na
+
+plot(showCost and validAvg ? smoothedAvg : na, title="Smoothed Avg Cost Line", color=color.orange, linewidth=2)
+plot(showAvgDCA ? avgDCAprice : na, title="Custom Avg DCA", color=color.purple, linewidth=2)
+
+below15 = avgCost * 0.85
+below25 = avgCost * 0.75
+above40 = avgCost * 1.40
+plot(showZones ? below15 : na, title="15% Below Avg", color=color.new(color.green, 60))
+plot(showZones ? below25 : na, title="25% Below Avg", color=color.new(color.green, 80))
+plot(showZones ? above40 : na, title="40% Above Avg", color=color.new(color.red,   60))
+
+plotshape(showBuy and dailyBuy, title="Buy Arrow", location=location.belowbar, style=shape.arrowup, color=color.blue, size=size.small)
+plotshape(showWTdebug and wtDotSell, title="WT Sell Debug", location=location.abovebar, style=shape.xcross, color=color.red, size=size.tiny)
+
+// === ALERTCONDITIONS (optional; ignore if you're using Order fills only) ===
+alertcondition(dailyBuy, title="Buy Trigger",        message="Buy Signal")
+alertcondition(canSell,  title="Take Profit Trigger",message="Sell Signal – Profitable WT Red Dot")
+alertcondition(close < below25, title="Aggressive Add Zone", message="Price 25% below cost basis")
+alertcondition(close > above40, title="Profit Zone",          message="Price 40% above cost basis – consider exiting")
+
+// === METRICS & INFO ===
+avgPositionPrice = strategy.position_avg_price
+positionSize     = strategy.position_size
+investedLive     = avgPositionPrice * positionSize
+unrealizedPnL    = (close - avgPositionPrice) * positionSize
+customReturnPct  = investedLive > 0 ? (unrealizedPnL / investedLive) * 100 : na
+
+// === ✅ INFO BOX PINNED BOTTOM-LEFT (TABLE; updates EVERY bar) ===
+var table infoTbl = table.new(position.bottom_left, 1, 1, border_width=1)
+
+infoText =
+   "📅 Range: " + startDateStr + " → " + endDateStr + "\n" +
+   "🗓 Days Since First Buy: " + (not na(daysSinceFirstBuy) ? str.tostring(daysSinceFirstBuy) : "-") + "\n" +
+   "📦 Shares: " + str.tostring(positionQty, "#.##") + "\n" +
+   "💰 Invested: $" + str.tostring(investedLive, "#.##") + "\n" +
+   "💵 Avg Cost: $" + str.tostring(avgPositionPrice, "#.##") + "\n" +
+   "📉 PnL: $" + str.tostring(unrealizedPnL, "#.##") + "\n" +
+   "📈 Return: " + str.tostring(customReturnPct, "#.##") + "%"
+
+// Write every bar so it never "disappears" (Bar Replay, scrolling, etc.)
+table.cell(
+     infoTbl, 0, 0, infoText,
+     text_color=color.white,
+     bgcolor=color.new(color.black, 0)
+)
+
+View in Pine Editor・169 lines
+Use on chart
+1
+5
+703
+Nov 3, 2025
+Buy when blue arrow appears, if the next arrow is lower than the last increase your position. This will pull your average cost down slowly over time.
+Jan 13
+Release Notes
+Buy and Hold Strategy. This Strategy will trigger buys primarily at dips to get a better DCA Price. In the settings you may choose how many days or a date range for testing. Recommended to use 1D or 1W charts.

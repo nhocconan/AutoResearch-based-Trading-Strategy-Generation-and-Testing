@@ -1,0 +1,176 @@
+//@version=5
+strategy('Strategy:Reversal-Catcher', shorttitle="Reversal-Catcher", overlay=true , currency=currency.NONE, initial_capital=100000)
+
+// Inputs
+src = input(close, title="Source (close, high, low, open etc.")
+
+BBlength = input.int(defval=20, minval=1,title="Bollinger Period Length, default 20")
+BBmult = input.float(defval=1.5, minval=1.0, maxval=4, step=0.1, title="Bollinger Bands Standard Deviation, default is 1.5")
+
+fastMovingAvg = input.int(defval=21, minval=5,title="Fast Exponential Moving Average, default 21", group = "Trends")
+slowMovingAvg = input.int(defval=50, minval=8,title="Slow Exponential Moving Average, default 50", group = "Trends")
+
+rsiLenght = input.int(defval=14, title="RSI Lenght, default 14", group = "Momentum")
+overbought = input.int(defval=70, title="Overbought limit (RSI), default 70", group = "Momentum")
+oversold = input.int(defval=30, title="Oversold limit (RSI), default 30", group = "Momentum")
+
+hide = input.bool(defval=true, title="Hide all plots and legends from the chart (default: true)")
+
+
+// Trade related
+tradeType = input.string(defval='Both', group="Trade settings", title="Trade Type", options=['Both', 'TrendFollowing', 'Reversal'], tooltip="Consider all types of trades? Or only Trend Following or only Reversal? (default: Both).")
+endOfDay = input.int(defval=1500, title="Close all trades, default is 3:00 PM, 1500 hours (integer)", group="Trade settings")
+mktAlwaysOn = input.bool(defval=false, title="Markets that never closed (Crypto, Forex, Commodity)", tooltip="Some markers never closes. For those cases, make this checked. (Default: off)", group="Trade settings")
+
+
+// Utils
+annotatePlots(txt, val, hide) => 
+    if (not hide)
+        var l1 = label.new(bar_index, val, txt, style=label.style_label_left, size = size.tiny, textcolor = color.white, tooltip = txt)
+        label.set_xy(l1, bar_index, val)
+
+/////////////////////////////// Indicators /////////////////////
+vwap = ta.vwap(src)
+plot(hide ? na : vwap, color=color.purple, title="VWAP", style = plot.style_line)
+annotatePlots('VWAP', vwap, hide)
+
+// Bollinger Band of present time frame
+[BBbasis, BBupper, BBlower] = ta.bb(src, BBlength, BBmult)
+p1 = plot(hide ? na : BBupper, color=color.blue,title="Bollinger Bands Upper Line")
+p2 = plot(hide ? na : BBlower, color=color.blue,title="Bollinger Bands Lower Line")
+p3 = plot(hide ? na : BBbasis, color=color.maroon,title="Bollinger Bands Width", style=plot.style_circles, linewidth = 1)
+annotatePlots('BB-Upper', BBupper, hide)
+annotatePlots('BB-Lower', BBlower, hide)
+annotatePlots('BB-Base(20-SMA)', BBbasis, hide)
+
+// RSI
+rsi = ta.rsi(src, rsiLenght)
+
+// Trend following
+ema50 = ta.ema(src, slowMovingAvg)
+ema21 = ta.ema(src, fastMovingAvg)
+annotatePlots('21-EMA', ema21, hide)
+annotatePlots('50-EMA', ema50, hide)
+
+
+// Trend conditions
+upTrend = ema21 > ema50 
+downTrend = ema21 < ema50
+
+
+// Condition to check Special Entry: HH_LL
+// Long side:
+hhLLong = barstate.isconfirmed and (low > low[1]) and (high > high[1]) and (close > high[1])
+hhLLShort = barstate.isconfirmed and (low < low[1]) and (high < high[1]) and (close < low[1])
+
+longCond =  barstate.isconfirmed and (high[1] < BBlower[1]) and (close > BBlower) and (close < BBupper) and hhLLong and ta.crossover(rsi, oversold) and downTrend
+shortCond = barstate.isconfirmed and (low[1] > BBupper[1]) and (close < BBupper) and (close > BBlower) and hhLLShort and ta.crossunder(rsi, overbought) and upTrend
+
+// Trade execute
+h = hour(time('1'), syminfo.timezone)
+m = minute(time('1'), syminfo.timezone)
+hourVal = h * 100 + m
+totalTrades = strategy.opentrades + strategy.closedtrades
+if (mktAlwaysOn or (hourVal < endOfDay))
+    // Entry
+    var float sl = na
+    var float target = na
+    if (longCond)
+        strategy.entry("enter long", strategy.long, 1, limit=na, stop=na, comment="Long[E]")
+        sl := low[1]
+        target := high >= BBbasis ? BBupper : BBbasis
+        alert('Buy:' + syminfo.ticker + ' ,SL:' + str.tostring(math.floor(sl)) + ', Target:' + str.tostring(target), alert.freq_once_per_bar)
+    if (shortCond)
+        strategy.entry("enter short", strategy.short, 1, limit=na, stop=na, comment="Short[E]")
+        sl := high[1]
+        target := low <= BBbasis ? BBlower : BBbasis
+        alert('Sell:' + syminfo.ticker + ' ,SL:' + str.tostring(math.floor(sl)) + ', Target:' + str.tostring(target), alert.freq_once_per_bar)
+
+    // Exit: target or SL
+    if ((close >= target) or (close <= sl))
+        strategy.close("enter long", comment=close < sl ? "Long[SL]" : "Long[T]")
+    if ((close <= target) or (close >= sl))
+        strategy.close("enter short", comment=close > sl ? "Short[SL]" : "Short[T]")
+else if (not mktAlwaysOn)
+    // Close all open position at the end if Day
+    strategy.close_all(comment = "EoD[Exit]", alert_message = "EoD Exit", immediately = true)
+
+View in Pine Editor・99 lines
+Use on chart
+4
+8
+8
+1
+9 249
+What
+This is a plain and vanilla reversal based strategy for intraday (15m) timeframe on Futures prices of the assets.
+
+Now what all it comprises of?
+
+
+It finds out the dynamic support & resistance from Bollinger Band (20 period, 1.5 std dev).
+
+It finds out the potential divergence of price deviation from 5 period exponential moving average (EMA).
+
+If the previous candle (N-1) shows a divergence it confirms the reversal by checking the present candle (N) to be closed inside the Bollinger Band.
+
+It confirms the momentum by checking RSI shows a crossover/crossunder to oversold (30) / overbought (70) region.
+
+It also confirms whether the trend is up (then only reversal trade to short) or down (then only reversal trade to long). The trend is checked with EMA-21 and EMA-50.
+
+Re-affirmation Condition: It re-affirms the position of two successive candles called as `hhLLong` and `hhLLShort` in the script. [Described below]
+
+
+
+Why
+
+In Indian context, retail participants are pre-dominantly (yes- 80% of Indian daily volume) Options buyers mainly in weekly indices (Nifty, BankNifty, FinNifty, CNXMidcap, Sensex, Bankx .. well everyday is expiry now in India, except -- Thank God -- Saturday & Sunday).
+And in Index Options the momentum plays a big role.
+If one can catch a good reversal point the potential of high Risk-to-Reward trade (hence earn handsomely) is very likely (please note: there is no holy grail in trading. Nothing works 100%).
+So this is the attempt to catch a reversal.
+
+
+Re-affirmation of Reversal
+
+hhLLong: It's a reversal point after an uptrend. It checks the relative positioning of current candle compared to that of previous candle. [The details are in the script. Check for variable
+hhLLong
+in script.
+
+hhLLShort: It's a reversal point after a downtrend. It checks the relative positioning of current candle compared to that of previous candle. [The details are in the script. Check for variable
+hhLLShort
+in script.
+
+
+
+
+Unique-ness
+
+What's unique in it? Why we decided to publicly share this:
+
+
+Already given the context of The Great Indian Options Buyers community. It should be helpful to them, we believe.
+
+It takes Very Less Number of Trades with High Accuracy. Please check the result in 
+NIFTY1!
+ in 15m timeframe. 71% accuracy with roughly a trade in a month.
+
+There is no point giving brokers' the brokerages taking 10 trades a day and ending not-so-good EoD. Better lets take less trades with better result possibility. [The ultimate result is same .. you take 10 trades .. 200 trades a month and earn something. If you can get same with lesser number of trades - hopefully - that's better as it perceived generally].
+
+
+
+Mention
+
+
+There are many people uses this variation of Bolling Band, 5EMA
+
+Many people use RSI, trends and relative positioning of candles.
+--> We are grateful to all of them. It's really difficult to mention everyone's name. But all people somehow influence the thought process. Thanks for all of them.
+
+Statutory Disclaimer
+There is no silver bullet / holy grail in trading. Nothing works 100% time. One has to be careful about the loss (s)he can bear in case of the trade goes against.
+
+We, as the author of this script, is not responsible for any trading or position decision one is taken based on the outcome of this.
+
+It is our sole discretion to change, add, delete the portion or withdraw the whole script without any prior notice or intimation.
+
+In Indian Context: We are not SEBI registered, will never be SEBI registered.

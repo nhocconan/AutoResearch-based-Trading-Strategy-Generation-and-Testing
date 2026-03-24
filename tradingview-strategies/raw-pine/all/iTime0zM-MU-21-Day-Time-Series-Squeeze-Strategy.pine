@@ -1,0 +1,157 @@
+//@version=6
+strategy(
+     title            = "MU 21-Day Time Series & Squeeze Strategy",
+     overlay          = true,
+     initial_capital  = 100000,
+     commission_value = 0.03,
+     default_qty_type = strategy.cash
+ )
+
+// ============================================================================
+// MU CONTEXT
+// Tech Score: 95/100 | Trend: Bullish (Golden Cross)
+// Risk Profile: Volatility compression detected
+// AI Verdict: ACCUMULATE on Dips
+// ============================================================================
+
+// --- INPUTS ---
+var string grp_ema = "Screen 1 & 7: Momentum EMAs"
+emaFastLen = input.int(8,  "Fast EMA", group = grp_ema)
+emaSlowLen = input.int(21, "Slow EMA", group = grp_ema)
+
+var string grp_sqz = "Screen 3: Volatility Squeeze"
+sqzLength = input.int(20,    "Squeeze Length", group = grp_sqz)
+bbMult    = input.float(2.0, "BB Multiplier",  group = grp_sqz)
+kcMult    = input.float(1.5, "KC Multiplier",  group = grp_sqz)
+
+var string grp_vol = "Volume & Gravity"
+volSmaLen = input.int(20, "Volume SMA Length", group = grp_vol)
+
+// --- INDICATORS ---
+float emaFast = ta.ema(close, emaFastLen)
+float emaSlow = ta.ema(close, emaSlowLen)
+
+float volSma  = ta.sma(volume, volSmaLen)
+bool  volConf = volume > volSma
+
+float bbMid   = ta.sma(close, sqzLength)
+float bbDev   = bbMult * ta.stdev(close, sqzLength)
+float bbUpper = bbMid + bbDev
+float bbLower = bbMid - bbDev
+
+float trRange = ta.sma(ta.tr(true), sqzLength)
+float kcUpper = bbMid + kcMult * trRange
+float kcLower = bbMid - kcMult * trRange
+
+float atr5    = ta.atr(5)
+
+// --- CROSS SIGNALS ---
+bool bullCross = ta.crossover(emaFast,  emaSlow)
+bool bearCross = ta.crossunder(emaFast, emaSlow)
+
+// --- BARS SINCE CROSS COUNTERS ---
+var int barsSinceBull = 0
+var int barsSinceBear = 0
+barsSinceBull := bullCross ? 0 : emaFast > emaSlow ? nz(barsSinceBull[1]) + 1 : 0
+barsSinceBear := bearCross ? 0 : emaFast < emaSlow ? nz(barsSinceBear[1]) + 1 : 0
+
+// --- SCREEN CONDITIONS ---
+bool isFreshBreakout = barsSinceBull >= 1 and barsSinceBull <= 3 and volConf and close > high[1]
+bool isSustainedMom  = barsSinceBull >= 10 and low <= emaSlow and close > emaSlow
+bool isGravity       = volume > volSma and (high - low) < atr5[1] * 0.8
+
+var int gravityDays = 0
+gravityDays := isGravity ? nz(gravityDays[1]) + 1 : 0
+bool gravityBreakoutLong = gravityDays >= 3 and close > ta.highest(high, 3)[1]
+
+// --- SQUEEZE DETECTION ---
+bool isSqueeze = bbUpper < kcUpper and bbLower > kcLower
+
+var int  squeezeDays = 0
+var bool prevSqueeze = false
+squeezeDays := isSqueeze ? nz(squeezeDays[1]) + 1 : 0
+prevSqueeze := isSqueeze[1]
+
+bool squeezeFiredLong = not isSqueeze and prevSqueeze and squeezeDays[1] >= 15 and close > bbUpper
+
+bool isBearishShift = bearCross and close < low[1]
+
+// --- POSITION SIZING (guarded against negative/zero equity) ---
+// Use math.max to ensure equity is always positive before dividing
+float safeEq = math.max(strategy.equity, 1.0)
+float safeClose = math.max(close, 0.0001)  // avoid divide-by-zero on bad data
+
+float qty25  = math.max((safeEq * 0.25) / safeClose, 0.0)
+float qty50  = math.max((safeEq * 0.50) / safeClose, 0.0)
+float qty75  = math.max((safeEq * 0.75) / safeClose, 0.0)
+float qty100 = math.max((safeEq * 1.00) / safeClose, 0.0)
+
+// Safety gate: only trade if equity is positive and qty is valid
+bool canTrade = strategy.equity > 0 and safeClose > 0
+
+// --- LONG ENTRIES ---
+if canTrade and isFreshBreakout and strategy.position_size == 0
+    strategy.entry("FreshBreak_L", strategy.long, qty = qty50)
+
+if canTrade and isSustainedMom and strategy.position_size == 0
+    strategy.entry("Sustained_L",  strategy.long, qty = qty100)
+
+if canTrade and gravityBreakoutLong and strategy.position_size == 0
+    strategy.entry("Gravity_L",    strategy.long, qty = qty75)
+
+if canTrade and squeezeFiredLong and strategy.position_size == 0
+    strategy.entry("Squeeze_L",    strategy.long, qty = qty100)
+
+// --- SHORT ENTRY ---
+if canTrade and isBearishShift
+    strategy.close_all("Bear_Cross_Exit")
+    strategy.entry("BearShift_S", strategy.short, qty = qty50)
+
+// --- EXITS / STOPS ---
+if strategy.position_size > 0 and close < emaSlow
+    strategy.close_all("Tao_Stop")
+
+if strategy.position_size < 0 and close > ta.highest(high, 5)
+    strategy.close_all("Short_Stop")
+
+// --- PLOTS ---
+plot(emaFast, title = "8 EMA",  color = color.new(color.blue,   0), linewidth = 2)
+plot(emaSlow, title = "21 EMA", color = color.new(color.orange, 0), linewidth = 2)
+
+bgcolor(isSqueeze ? color.new(color.red, 85) : na, title = "Squeeze Zone")
+
+plotshape(
+     squeezeFiredLong,
+     title    = "Squeeze Fired",
+     style    = shape.triangleup,
+     location = location.belowbar,
+     color    = color.green,
+     size     = size.small
+ )
+
+// --- INFO TABLE ---
+var table muData = table.new(
+     position.top_right, 2, 4,
+     bgcolor      = color.new(color.black, 10),
+     border_width = 1
+ )
+
+if barstate.islast
+    table.cell(muData, 0, 0, "Ticker:",     text_color = color.gray)
+    table.cell(muData, 1, 0, "MU",          text_color = color.white)
+    table.cell(muData, 0, 1, "Tech Score:", text_color = color.gray)
+    table.cell(muData, 1, 1, "95/100 ✦ Golden Cross", text_color = color.lime)
+    table.cell(muData, 0, 2, "State:",      text_color = color.gray)
+    table.cell(muData, 1, 2,
+         isSqueeze ? "Vol Compression" : "Expanding",
+         text_color = isSqueeze ? color.yellow : color.aqua
+     )
+    table.cell(muData, 0, 3, "AI Verdict:", text_color = color.gray)
+    table.cell(muData, 1, 3, "ACCUMULATE on Dips", text_color = color.orange)
+
+View in Pine Editor・150 lines
+Use on chart
+1
+0
+410
+This is kinda a one time only for right now... follow up to a post

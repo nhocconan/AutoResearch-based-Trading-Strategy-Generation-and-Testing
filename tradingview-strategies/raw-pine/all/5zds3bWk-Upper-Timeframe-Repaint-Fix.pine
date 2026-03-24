@@ -1,0 +1,5 @@
+//@version=3
+ob=##input(defval=70,type='INPUT_INTEGER',##id='in_3')
+os=##input(defval=30,type='INPUT_INTEGER',##id='in_4')
+##root(root_metainfo,rm_0,ob)
+##root(root_metainfo,rm_1,os)

@@ -1,0 +1,57 @@
+//@version=4
+//Simple strategy based on MACD and Bollinger Bands, where BBs are calculatend from macd signal.
+strategy("Strategy MACD vs BB", overlay=false, pyramiding=5,default_qty_type=strategy.fixed,default_qty_value=10000)
+
+fast_length = input(title="Fast MA period", type=input.integer, defval=8)
+slow_length = input(title="Slow MA period", type=input.integer, defval=21)
+src = input(close,"Source")
+
+
+// ----------MA calculation - ChartArt-------------
+smoothinput = input(1, minval=1, maxval=4, title='Moving Average Calculation: (1 = SMA), (2 = EMA), (3 = WMA), (4 = Linear)')
+
+fast_ma = smoothinput == 1 ? sma(src, fast_length):smoothinput == 2 ? ema(src, fast_length):smoothinput == 3 ? wma(src, fast_length):smoothinput == 4 ? linreg(src, fast_length,0):na
+slow_ma = smoothinput == 1 ? sma(src, slow_length):smoothinput == 2 ? ema(src, slow_length):smoothinput == 3 ? wma(src, slow_length):smoothinput == 4 ? linreg(src, slow_length,0):na
+//----------------------------------------------
+macd = fast_ma - slow_ma
+p1=plot(macd,"macd signal",color=color.blue)
+length = input(40, minval=1)
+mult = input(2.0,"BB multiplier")
+
+basis = sma(macd, length)
+dev = mult * stdev(macd, length)
+plot(basis,"BB basis",color=color.orange)
+upper = basis + dev
+lower = basis - dev
+p2=plot(upper,"BB upper",color=color.red)
+p3=plot(lower,"BB basis",color=color.green)
+
+longCondition = crossover(macd, lower)
+shortCondition = crossunder(macd, upper)
+
+plotshape(longCondition?lower:na, title="Long", style=shape.xcross, location=location.absolute, text="Long", color=color.green, transp=0, size=size.tiny)
+plotshape(shortCondition?upper:na, title="Short", style=shape.xcross, location=location.absolute, text="Short", color=color.red, transp=0, size=size.tiny)
+fill(p1,p3,color=macd<lower?color.green:na,transp=90,title="support")
+fill(p1,p2,color=macd>upper?color.red:na,transp=90,title="resistance")
+
+if longCondition
+    strategy.entry("Long",strategy.long)
+if shortCondition
+    strategy.entry("Short",strategy.short)
+
+View in Pine Editor・40 lines
+Use on chart
+8
+3
+8
+11
+17 037
+Strategy based on MACD and Bollinger Bands, where BBs are calculatend from macd signal.
+Strategy doesn't open at breakout of bands but it waits for a pullback.
+Upper and lower bands are used as resistance and support.
+
+There are various parameters that can be optimized.
+
+I have also a study with alerts.
+
+Please use comment section for any feedback or cointact me if you need support.

@@ -1,0 +1,130 @@
+//@version=5
+strategy("Trend Following Parabolic Buy Sell Strategy [TradeDots]", overlay = true, shorttitle="Trend Following Parabolic [TradeDots]", initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 70, commission_type = strategy.commission.percent, commission_value = 0.01)
+
+// Parabolic SAR setup
+start = input.float(title='Start', step=0.001, defval=0.02, group = "Parabolic SAR")
+increment = input.float(title='Increment', step=0.001, defval=0.02, group = "Parabolic SAR")
+max = input.float(title='Max Value', step=0.01, defval=0.2, group = "Parabolic SAR")
+
+psar = ta.sar(start, increment, max)
+direction = psar < close ? 1 : 0
+
+// Plotting Parabolic SAR
+pColor = direction == 1 ? #9cff87 : #f9396a
+psarPlot = plot(psar, title='PSAR', style=plot.style_circles, linewidth=2, color=pColor)
+
+// MA setup
+ma(source, length, type) =>
+  type == "SMA" ? ta.sma(source, length) :
+  type == "EMA" ? ta.ema(source, length) :
+  type == "SMMA (RMA)" ? ta.rma(source, length) :
+  type == "WMA" ? ta.wma(source, length) :
+  type == "VWMA" ? ta.vwma(source, length) :
+  na
+
+ma_type   = input.string("SMA", "Trendline", inline="MA", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Moving Averages")
+ma_source = input(close, "", inline="MA", group="Moving Averages")
+ma_length = input.int(200, "", inline="MA", minval=1,group="Moving Averages")
+ma_color  = input(#ffffff, "", inline="MA",group="Moving Averages")
+ma = ma(ma_source, ma_length, ma_type)
+
+fastma_type   = input.string("EMA", "Fast MA", inline="MA", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Moving Averages")
+fastma_source = input(close, "", inline="MA", group="Moving Averages")
+fastma_length = input.int(10, "", inline="MA", minval=1,group="Moving Averages")
+fastma_color  = input(#ffffff, "", inline="MA",group="Moving Averages")
+fastma = ma(fastma_source, fastma_length, fastma_type)
+
+slowma_type   = input.string("EMA", "Slow MA", inline="MA", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Moving Averages")
+slowma_source = input(close, "", inline="MA", group="Moving Averages")
+slowma_length = input.int(25, "", inline="MA", minval=1,group="Moving Averages")
+slowma_color  = input(#ffffff, "", inline="MA",group="Moving Averages")
+slowma = ma(slowma_source, slowma_length, slowma_type)
+
+// Plotting MA
+trendlinePlot = plot(ma, title = "Trendline", color = color.white)
+fastmaPlot = plot(fastma, title = "Fast MA", color = #fefae0)
+slowmaPlot = plot(slowma, title = "Slow MA", color = #bc6c25)
+
+// Strategy setup (Risk / Reward)
+riskRewardRatio = input.float(1.3, "Risk & Reward Ratio", minval = 0.0, step = 0.1, group = "Strategy")
+var float stopLoss = na
+var float takeProfit = na
+
+// Long and Short conditions 
+if close > ma and ta.crossover(fastma, slowma) and direction == 1 and strategy.opentrades == 0
+    strategy.entry("Long", strategy.long)
+    stopLoss := ma
+    takeProfit := close + (close - ma)*riskRewardRatio
+    strategy.exit("TP / SL", "Long", limit = takeProfit, stop = stopLoss)
+    label.new(bar_index, low, "🟢 Long", color = #9cff87, style = label.style_label_up)
+    
+if close < ma and ta.crossover(slowma, fastma) and direction == 0 and strategy.opentrades == 0
+    strategy.entry("Short", strategy.short)
+    stopLoss := ma
+    takeProfit := close - (ma - close)*riskRewardRatio
+    strategy.exit("TP / SL", "Short", limit = takeProfit, stop = stopLoss)
+    label.new(bar_index, high, "🔴 Short", color = #f9396a, style = label.style_label_down, textcolor = color.white)
+
+// Check if position is closed (Print label if true)
+is_pos_closed = (strategy.position_size[1] != 0 and strategy.position_size == 0)
+is_short = strategy.position_size < 0
+is_long = strategy.position_size > 0
+
+if is_pos_closed and is_short[1]
+    label.new(bar_index, low, "🟢 Close Short", color = #9cff87, style = label.style_label_up)
+
+else if is_pos_closed and is_long[1]
+    label.new(bar_index, high, "🔴 Close Long", color = #f9396a, style = label.style_label_down, textcolor = color.white)
+
+
+// Color Filling of trend
+closelinePlot = plot(close, "", display = display.none)
+fill(trendlinePlot, closelinePlot, math.max(ma,close), ma,color.new(#9cff87, 95), color.new(#9cff87, 80))
+fill(trendlinePlot, closelinePlot, ma, math.min(ma,close),color.new(#f9396a, 80), color.new(#f9396a, 95))
+
+// Plotting take profit and stop loss line
+plot(strategy.opentrades > 0 ? stopLoss : na, color = #f9396a, style = plot.style_cross, linewidth = 1, title = "Stop Loss Line")
+plot(strategy.opentrades > 0 ? takeProfit : na, color = #9cff87, style = plot.style_cross, linewidth = 1, title = "Take Profit Line")
+
+View in Pine Editor・87 lines
+Use on chart
+5
+4
+5
+2
+14 537
+The Trend Following Parabolic Buy-Sell Strategy leverages the Parabolic SAR in combination with moving average crossovers to deliver buy and sell signals within a trend-following framework.
+
+This strategy synthesizes proven methodologies sourced from various trading tutorials available on platforms such as YouTube and blogs, enabling traders to conduct robust backtesting on their selected trading pairs to assess the strategy's effectiveness.
+
+HOW IT WORKS
+
+This strategy employs four key indicators to orchestrate its trading signals:
+
+1. Trend Alignment: It first assesses the relationship between the price and the predominant trendline to determine the directional stance—taking long positions only when the price trends above the moving average, signaling an upward market trajectory.
+
+2. Momentum Confirmation: Subsequent to trend alignment, the strategy looks for moving average crossovers as a confirmation that the price is gaining momentum in the direction of the intended trades.
+
+3. Signal Finalization: Finally, buy or sell signals are validated using the Parabolic SAR indicator. A long order is validated when the closing price is above the Parabolic SAR dots, and similarly, conditions are reversed for short orders.
+
+4. Risk Management: The strategy institutes a fixed stop-loss at the moving average trendline and a take-profit level determinable by a prefixed risk-reward ratio calculated from the moving average trendline. These parameters are customizable by the users within the strategy settings.
+
+APPLICATION
+
+Designed for assets exhibiting pronounced directional momentum, this strategy aims to capitalize on clear trend movements conducive to achieving set take-profit targets.
+
+As a lagging strategy that waits for multiple confirmatory signals, entry into trades might occasionally lag beyond optimal timing.
+
+Furthermore, in periods of consolidation or sideways movement, the strategy may generate several false signals, suggesting the potential need for additional market condition filters to enhance signal accuracy during volatile phases.
+
+DEFAULT SETUP
+
+Commission: 0.01%
+Initial Capital: $10,000
+Equity per Trade: 70%
+
+Users are advised to adjust and personalize this trading strategy to better match their individual trading preferences and style.
+
+RISK DISCLAIMER
+
+Trading entails substantial risk, and most day traders incur losses. All content, tools, scripts, articles, and education provided by TradeDots serve purely informational and educational purposes. Past performances are not definitive predictors of future results.

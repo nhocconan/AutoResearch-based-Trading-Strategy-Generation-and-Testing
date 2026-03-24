@@ -1,0 +1,21 @@
+//@version=2
+strategy("LinearRegressionChannelBreakout", overlay=true, max_bars_back=5000, default_qty_type=strategy.fixed, default_qty_value=10000, currency="EUR")
+
+length = input( 100 )
+hprice = high
+lprice = low
+cprice = close
+
+strategy.close("Short", crossover(cprice, linreg(low, length, 0)))
+strategy.close("Long",  crossunder(cprice, linreg(high, length,0)))
+strategy.entry("Long",  strategy.long, comment="Long", when = (strategy.position_size==0 and crossover(cprice, linreg(high, length,0))))
+strategy.entry("Short", strategy.short, comment="Short", when = (strategy.position_size==0 and crossunder(cprice, linreg(low, length,0))))
+
+View in Pine Editor・12 lines
+Use on chart
+5
+2
+3
+2
+12 178
+My first idea about the linear regression channel... It is free and available for everybody.

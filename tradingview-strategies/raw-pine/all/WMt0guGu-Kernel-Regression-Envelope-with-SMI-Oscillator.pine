@@ -1,0 +1,10 @@
+//@version=5
+upper_color=##input(defval=#FF525266,type='INPUT_COLOR',##id='in_10')
+yhat_green=##input(defval=#4CAF5080,type='INPUT_COLOR',##id='in_11')
+yhat_red=##input(defval=#FF525280,type='INPUT_COLOR',##id='in_12')
+lower_color=##input(defval=#4CAF5066,type='INPUT_COLOR',##id='in_13')
+##root(root_metainfo,rm_0,2,input__integer,plot,linewidth)
+##root(root_metainfo,plot_0_0,upper_color,input__color)
+##root(root_metainfo,plot_1_0,yhat_red,input__color)
+##root(root_metainfo,plot_1_1,yhat_green,input__color)
+##root(root_metainfo,plot_2_0,lower_color,input__color)

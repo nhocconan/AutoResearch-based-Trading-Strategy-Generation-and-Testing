@@ -1,0 +1,263 @@
+//@version=6
+strategy("Professional Grid & Reversal Bot v10 (Binance Style)", 
+     overlay=true, 
+     initial_capital=1000, 
+     default_qty_type=strategy.fixed, 
+     default_qty_value=0, 
+     currency=currency.USD, 
+     calc_on_order_fills=true, 
+     calc_on_every_tick=true, 
+     pyramiding=50,
+     max_labels_count=500,
+     max_lines_count=500)
+     // تم حذف سطر comment من هنا لأنه يسبب الخطأ
+
+// ─────────────────────────────────────────────────────────────
+// 1) 🎨 UI & Language / المظهر واللغة
+// ─────────────────────────────────────────────────────────────
+grp_ui = "🎨 المظهر والإعدادات العامة"
+lang   = input.string("AR", "اللغة / Language", options=["AR", "EN"], group=grp_ui)
+showTable = input.bool(true, "عرض جدول الأوامر (Binance Style)", group=grp_ui)
+tablePos  = input.string("Right", "مكان الجدول", options=["Right", "Left"], group=grp_ui)
+
+// دالة الترجمة
+tr(string ar, string en) => lang == "AR" ? ar : en
+
+// ألوان متطورة (Dark Theme optimized)
+colBuy    = #0ECB81 // أخضر باينانس
+colSell   = #F6465D // أحمر باينانس
+colMid    = #FCD535 // أصفر
+colBg     = color.new(#1E2329, 10) // خلفية داكنة
+colTxt    = #EAECEF
+
+// ─────────────────────────────────────────────────────────────
+// 2) ⚙️ Grid & Range / إعدادات النطاق والشبكة
+// ─────────────────────────────────────────────────────────────
+grp_grid = "🕸 إعدادات الشبكة"
+gridLevels = input.int(8, "عدد المستويات (Grids)", minval=4, maxval=20, group=grp_grid)
+lookback   = input.int(200, "فترة حساب القمة/القاع", group=grp_grid)
+updateMode = input.string("Auto", "تحديث النطاق", options=["Auto", "Manual"], group=grp_grid)
+manHigh    = input.float(0.0, "سعر القمة اليدوي", group=grp_grid)
+manLow     = input.float(0.0, "سعر القاع اليدوي", group=grp_grid)
+
+// ─────────────────────────────────────────────────────────────
+// 3) 🚀 Smart Reversal / الارتداد الذكي
+// ─────────────────────────────────────────────────────────────
+grp_rev = "🔄 استراتيجية الارتداد (Reversal)"
+useReversal = input.bool(true, "تفعيل الارتداد عند الأطراف؟", group=grp_rev, tooltip="يبيع عند لمس القمة والهبوط، ويشتري عند لمس القاع والصعود")
+revPct      = input.float(0.5, "نسبة الارتداد لتأكيد الدخول %", step=0.1, group=grp_rev) / 100
+
+// ─────────────────────────────────────────────────────────────
+// 4) 💰 Risk & Size / إدارة المال
+// ─────────────────────────────────────────────────────────────
+grp_risk = "💰 إدارة المخاطر"
+leverage = input.int(10, "الرافعة المالية", minval=1, group=grp_risk)
+entryUSD = input.float(20, "حجم الصفقة بالدولار (Cost)", group=grp_risk)
+tp_pct   = input.float(1.5, "هدف الربح %", step=0.1, group=grp_risk) / 100
+sl_pct   = input.float(3.0, "وقف الخسارة %", step=0.1, group=grp_risk) / 100
+
+// ─────────────────────────────────────────────────────────────
+// 5) الحسابات الأساسية (Core Logic)
+// ─────────────────────────────────────────────────────────────
+// تحديد النطاق
+var float rHigh = na
+var float rLow  = na
+
+h_curr = ta.highest(high, lookback)
+l_curr = ta.lowest(low, lookback)
+
+if updateMode == "Auto"
+    rHigh := h_curr
+    rLow  := l_curr
+else
+    rHigh := manHigh > 0 ? manHigh : h_curr
+    rLow  := manLow > 0 ? manLow : l_curr
+
+// حساب المستويات
+step = (rHigh - rLow) / gridLevels
+mid  = math.avg(rHigh, rLow)
+
+// دالة حساب الكمية
+getQty(float price) =>
+    (entryUSD * leverage) / price
+
+// ─────────────────────────────────────────────────────────────
+// 6) التنفيذ: الشبكة (Grid Execution)
+// ─────────────────────────────────────────────────────────────
+// مصفوفة لتخزين أسعار المستويات للرسم لاحقاً
+var float[] levelsArr = array.new_float(gridLevels + 1)
+
+// منطق الشبكة الكلاسيكي (Limit Orders simulation)
+if strategy.opentrades < gridLevels
+    for i = 0 to gridLevels
+        lvl = rLow + (step * i)
+        array.set(levelsArr, i, lvl) // تخزين السعر
+        
+        // الشراء فقط في النصف السفلي
+        if lvl < mid and close > lvl
+            strategy.entry("Buy_G"+str.tostring(i), strategy.long, limit=lvl, qty=getQty(lvl), comment="Grid Buy")
+        
+        // البيع فقط في النصف العلوي (إذا كنت تملك مركزاً أو تريد فتح Short - هنا سنركز على Long Grid)
+        // يمكنك تفعيل الشورت هنا إذا كان السوق فيوتشرز
+        // if lvl > mid and close < lvl
+        //     strategy.entry("Sell_G"+str.tostring(i), strategy.short, limit=lvl, qty=getQty(lvl))
+
+// ─────────────────────────────────────────────────────────────
+// 7) التنفيذ: الارتداد الذكي (Reversal Execution)
+// ─────────────────────────────────────────────────────────────
+var bool touchedHigh = false
+var bool touchedLow  = false
+
+if high >= rHigh
+    touchedHigh := true
+if low <= rLow
+    touchedLow := true
+
+// إشارة بيع قوية عند القمة (ارتداد)
+if useReversal and touchedHigh and close < rHigh * (1 - revPct)
+    strategy.entry("Rev_Short", strategy.short, qty=getQty(close) * 2, comment="🔴 Smart Reversal")
+    touchedHigh := false // إعادة تعيين
+
+// إشارة شراء قوية عند القاع (ارتداد)
+if useReversal and touchedLow and close > rLow * (1 + revPct)
+    strategy.entry("Rev_Long", strategy.long, qty=getQty(close) * 2, comment="🟢 Smart Reversal")
+    touchedLow := false // إعادة تعيين
+
+// ─────────────────────────────────────────────────────────────
+// 8) الخروج وإدارة الصفقات
+// ─────────────────────────────────────────────────────────────
+// هدف ووقف لكل صفقة
+strategy.exit("TP/SL", profit=close * tp_pct / syminfo.mintick, loss=close * sl_pct / syminfo.mintick)
+
+// رسم خطوط وقف الخسارة وجني الربح للصفقات المفتوحة (تعليمي)
+if strategy.position_size != 0
+    avg = strategy.position_avg_price
+    line.new(bar_index, avg * (1+tp_pct), bar_index+10, avg * (1+tp_pct), color=colBuy, style=line.style_dashed, width=1)
+    line.new(bar_index, avg * (1-sl_pct), bar_index+10, avg * (1-sl_pct), color=colSell, style=line.style_dashed, width=1)
+
+// ─────────────────────────────────────────────────────────────
+// 9) الرسم البياني التعليمي (Advanced Visualization)
+// ─────────────────────────────────────────────────────────────
+// رسم القناة
+p_h = plot(rHigh, "High", color=colSell, linewidth=1)
+p_l = plot(rLow, "Low", color=colBuy, linewidth=1)
+fill(p_h, p_l, color=color.new(colMid, 95))
+
+// رسم مناطق العرض والطلب (Boxes)
+if barstate.islast
+    // Supply Zone
+    box.new(bar_index - 20, rHigh, bar_index + 10, rHigh * 0.99, border_color=na, bgcolor=color.new(colSell, 80))
+    label.new(bar_index + 5, rHigh, tr("منطقة بيع", "Supply Zone"), style=label.style_none, textcolor=colSell, size=size.small)
+    
+    // Demand Zone
+    box.new(bar_index - 20, rLow, bar_index + 10, rLow * 1.01, border_color=na, bgcolor=color.new(colBuy, 80))
+    label.new(bar_index + 5, rLow, tr("منطقة شراء", "Demand Zone"), style=label.style_none, textcolor=colBuy, size=size.small)
+
+// رسم خطوط الشبكة
+if barstate.islast
+    for i = 0 to gridLevels
+        lvl = array.get(levelsArr, i)
+        // تغيير اللون بناء على الموقع من الوسط
+        isBuyLevel = lvl < mid
+        c = isBuyLevel ? colBuy : colSell
+        l_style = lvl == mid ? line.style_solid : line.style_dotted
+        w = lvl == mid ? 2 : 1
+        
+        line.new(bar_index, lvl, bar_index + 50, lvl, color=color.new(c, 50), style=l_style, width=w)
+
+// ─────────────────────────────────────────────────────────────
+// 10) لوحة التحكم الاحترافية (Binance Order Book Style)
+// ─────────────────────────────────────────────────────────────
+var table book = table.new(tablePos == "Right" ? position.middle_right : position.middle_left, 3, gridLevels + 5, bgcolor=colBg, border_width=1, border_color=color.new(color.gray, 80))
+
+if barstate.islast and showTable
+    // العناوين
+    table.cell(book, 0, 0, tr("النوع", "Side"), text_color=color.gray, text_size=size.small)
+    table.cell(book, 1, 0, tr("السعر", "Price (USDT)"), text_color=color.gray, text_size=size.small)
+    table.cell(book, 2, 0, tr("الكمية", "Qty (SOL)"), text_color=color.gray, text_size=size.small)
+
+    // ملء الجدول من الأعلى (بيع) إلى الأسفل (شراء)
+    // نعرض فقط المستويات القريبة من السعر الحالي لعدم ملء الشاشة
+    
+    int row = 1
+    // عرض الأوامر من الأعلى للأسفل (عكس الحلقة لرؤية الأسعار العالية فوق)
+    for i = gridLevels to 0
+        lvl = array.get(levelsArr, i)
+        isSell = lvl > mid
+        
+        // تلوين السطر بناءً على النوع
+        c_txt = isSell ? colSell : colBuy
+        type_txt = isSell ? "SELL" : "BUY"
+        qty_val = math.round(getQty(lvl), 2)
+        
+        // تمييز السعر الحالي
+        isClose = math.abs(close - lvl) / lvl < 0.005
+        bg_row = isClose ? color.new(color.yellow, 80) : colBg
+
+        table.cell(book, 0, row, type_txt, text_color=c_txt, bgcolor=bg_row, text_size=size.small)
+        table.cell(book, 1, row, str.tostring(lvl, format.mintick), text_color=colTxt, bgcolor=bg_row, text_size=size.small)
+        table.cell(book, 2, row, str.tostring(qty_val), text_color=colTxt, bgcolor=bg_row, text_size=size.small)
+        
+        row += 1
+
+    // إضافة سطر الحالة في الأسفل
+    table.cell(book, 0, row, "PnL:", text_color=color.gray)
+    pnl = strategy.openprofit
+    table.cell(book, 1, row, str.tostring(math.round(pnl, 2)) + "$", text_color=pnl >= 0 ? colBuy : colSell, text_halign=text.align_left)
+
+View in Pine Editor・211 lines
+Use on chart
+6
+8
+1 733
+Professional Grid & Reversal Bot v10 (Binance Style) – Open Source & Educational
+
+About this Script:
+This script is an advanced Grid Trading & Smart Reversal strategy, inspired by professional Binance-style execution. It is designed as an educational, open-source tool for traders who want to understand market dynamics, grid logic, and risk management.
+
+How it Works:
+
+1️⃣ Grid Execution:
+• Divides the price range between the high and low into multiple levels (Grids).
+• Opens Buy orders in the lower half and Sell orders in the upper half.
+• Levels are calculated dynamically based on the highest and lowest prices over a selected lookback period.
+
+2️⃣ Smart Reversal System:
+• Detects price touches on the high or low range boundaries to identify potential reversal points.
+• Opens Buy orders at the lows and Sell orders at the highs using a configurable confirmation percentage (revPct).
+• Helps traders capture short-term price swings effectively.
+
+3️⃣ Risk & Size Management:
+• Position sizing based on USD amount and leverage.
+• Automatic Take Profit (TP) and Stop Loss (SL) for every trade.
+• Controls overtrading via the "pyramiding" parameter (max open trades).
+
+4️⃣ Advanced Visualization:
+• Plots the grid range with high/low levels and fills the background for clear context.
+• Highlights potential Supply and Demand Zones.
+• Displays a dynamic "Binance-style" Order Book table showing Side, Price, Quantity, and PnL.
+
+5️⃣ Key Counters & Indicators:
+• levelsArr → Stores all grid levels for execution and plotting.
+• touchedHigh / touchedLow → Monitors range touches to trigger reversals.
+• strategy.openprofit → Displays live open trade PnL directly on the chart.
+
+Additional Features:
+• Supports both English and Arabic languages.
+• Dark Theme optimized for readability.
+• Dynamic control panel updates on every bar.
+• Flexible settings for Auto or Manual grid range updates.
+
+User Guidance:
+• This script is for educational purposes only; it does not guarantee profits.
+• We recommend adjusting Grid Levels, Reversal Percentage, and Trade Size to experiment with different strategies.
+
+Community Engagement:
+• Suggestions and improvements are welcome! 💡
+• If you have ideas for new features, let's develop them together to enhance learning.
+• Please support the script with a Like & Boost if you find it useful.
+• Encourages knowledge sharing to improve collective performance.
+
+License:
+Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+Free for educational use only. Please give credit to the author when sharing or modifying the script.

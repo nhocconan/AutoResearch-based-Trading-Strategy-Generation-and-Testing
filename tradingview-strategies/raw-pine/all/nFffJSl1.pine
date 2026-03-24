@@ -1,0 +1,110 @@
+//@version=5
+strategy("Chande Momentum Oscillator Strategy", overlay=false)
+
+// Input for the CMO period
+cmoPeriod = input.int(9, minval=1, title="CMO Period")
+
+// Calculate price changes
+priceChange = ta.change(close)
+
+// Separate positive and negative changes
+up = priceChange > 0 ? priceChange : 0
+down = priceChange < 0 ? -priceChange : 0
+
+// Calculate the sum of ups and downs using a rolling window
+sumUp = ta.sma(up, cmoPeriod) * cmoPeriod
+sumDown = ta.sma(down, cmoPeriod) * cmoPeriod
+
+// Calculate the Chande Momentum Oscillator (CMO)
+cmo = 100 * (sumUp - sumDown) / (sumUp + sumDown)
+
+// Define the entry and exit conditions
+buyCondition = cmo < -50
+sellCondition1 = cmo > 50
+sellCondition2 = ta.barssince(buyCondition) >= 5
+
+// Track if we are in a long position
+var bool inTrade = false
+
+if (buyCondition and not inTrade)
+    strategy.entry("Long", strategy.long)
+    inTrade := true
+
+if (sellCondition1 or sellCondition2)
+    strategy.close("Long")
+    inTrade := false
+
+// Plot the Chande Momentum Oscillator
+plot(cmo, title="Chande Momentum Oscillator", color=color.blue)
+hline(-50, "Buy Threshold", color=color.green)
+hline(50, "Sell Threshold", color=color.red)
+
+View in Pine Editor・40 lines
+Use on chart
+2
+7
+1 607
+The Chande Momentum Oscillator (CMO) Trading Strategy is based on the momentum oscillator developed by Tushar Chande in 1994. The CMO measures the momentum of a security by calculating the difference between the sum of recent gains and losses over a defined period. The indicator offers a means to identify overbought and oversold conditions, making it suitable for developing mean-reversion trading strategies (Chande, 1997).
+
+Strategy Overview:
+
+Calculation of the Chande Momentum Oscillator (CMO):
+
+The CMO formula considers both positive and negative price changes over a defined period (commonly set to 9 days) and computes the net momentum as a percentage.
+
+The formula is as follows:
+
+CMO=100×(Sum of Gains−Sum of Losses)(Sum of Gains+Sum of Losses)
+CMO=100×(Sum of Gains+Sum of Losses)(Sum of Gains−Sum of Losses)​
+
+This approach distinguishes the CMO from other oscillators like the RSI by using both price gains and losses in the numerator, providing a more symmetrical measurement of momentum (Chande, 1997).
+
+Entry Condition:
+
+The strategy opens a long position when the CMO value falls below -50, signaling an oversold condition where the price may revert to the mean. Research in mean-reversion, such as by Poterba and Summers (1988), supports this approach, highlighting that prices often revert after sharp movements due to overreaction in the markets.
+
+Exit Conditions:
+
+The strategy closes the long position when:
+
+The CMO rises above 50, indicating that the price may have become overbought and may not provide further upside potential.
+
+Alternatively, the position is closed 5 days after the buy signal is triggered, regardless of the CMO value, to ensure a timely exit even if the momentum signal does not reach the predefined level.
+
+This exit strategy aligns with the concept of time-based exits, reducing the risk of prolonged exposure to adverse price movements (Fama, 1970).
+
+Scientific Basis and Rationale:
+
+Momentum and Mean-Reversion:
+
+The strategy leverages the well-known phenomenon of mean-reversion in financial markets. According to research by Jegadeesh and Titman (1993), prices tend to revert to their mean over short periods following strong movements, creating opportunities for traders to profit from temporary deviations.
+
+The CMO captures this mean-reversion behavior by monitoring extreme price conditions. When the CMO reaches oversold levels (below -50), it signals potential buying opportunities, whereas crossing overbought levels (above 50) indicates conditions for selling.
+
+Market Efficiency and Overreaction:
+
+The strategy takes advantage of behavioral inefficiencies and overreactions, which are often the drivers behind sharp price movements (Shiller, 2003). By identifying these extreme conditions with the CMO, the strategy aims to capitalize on the market’s tendency to correct itself when price deviations become too large.
+
+Optimization and Parameter Selection:
+
+The 9-day period used for the CMO calculation is a widely accepted timeframe that balances responsiveness and noise reduction, making it suitable for capturing short-term price fluctuations. Studies in technical analysis suggest that oscillators optimized over such periods are effective in detecting reversals (Murphy, 1999).
+
+Performance and Backtesting:
+
+The strategy's effectiveness is confirmed through backtesting, which shows that using the CMO as a mean-reversion tool yields profitable opportunities. The use of time-based exits alongside momentum-based signals enhances the reliability of the strategy by ensuring that trades are closed even when the momentum signal alone does not materialize.
+Conclusion:
+
+The Chande Momentum Oscillator Trading Strategy combines the principles of momentum measurement and mean-reversion to identify and capitalize on short-term price fluctuations. By using a widely tested oscillator like the CMO and integrating a systematic exit approach, the strategy effectively addresses both entry and exit conditions, providing a robust method for trading in diverse market environments.
+References:
+
+Chande, T. S. (1997). The New Technical Trader: Boost Your Profit by Plugging into the Latest Indicators. John Wiley & Sons.
+
+Fama, E. F. (1970). Efficient Capital Markets: A Review of Theory and Empirical Work. The Journal of Finance, 25(2), 383-417.
+
+Jegadeesh, N., & Titman, S. (1993). Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency. The Journal of Finance, 48(1), 65-91.
+
+Murphy, J. J. (1999). Technical Analysis of the Financial Markets: A Comprehensive Guide to Trading Methods and Applications. New York Institute of Finance.
+
+Poterba, J. M., & Summers, L. H. (1988). Mean Reversion in Stock Prices: Evidence and Implications. Journal of Financial Economics, 22(1), 27-59.
+
+Shiller, R. J. (2003). From Efficient Markets Theory to Behavioral Finance. Journal of Economic Perspectives, 17(1), 83-104.

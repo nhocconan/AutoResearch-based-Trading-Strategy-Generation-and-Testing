@@ -1,0 +1,155 @@
+//@version=5
+strategy("Dual MTF Confirmed Trend Strategy (5m Entry / 15m MACD & RSI) v1", overlay=true, initial_capital=10000, default_qty_value=100, default_qty_type=strategy.percent_of_equity)
+
+// --- TIMEFRAME AND INPUT SETTINGS ---
+string MTF_TIMEFRAME = "15" // 15-minute confirmation period
+int RSI_LENGTH = 14
+int MACD_FAST_LEN = 12
+int MACD_SLOW_LEN = 26
+int MACD_SIGNAL_LEN = 9
+
+// --- 1. 5M MAIN ENTRY FILTERS (Current Successful Code) ---
+atrPeriod = input.int(10, title="5m ST: ATR Period")
+factor = input.float(5.3, title="5m ST: Multiplier")
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+// GANN HI-LO CALCULATION
+HPeriod = input.int(13, '5m GHL: HIGH Period')
+LPeriod = input.int(21, '5m GHL: LOW Period')
+sma_H = ta.sma(high, HPeriod)
+sma_L = ta.sma(low, LPeriod)
+
+var float HLv_d = 0.0
+if close > sma_H[1]
+    HLv_d := 1
+else if close < sma_L[1]
+    HLv_d := -1
+
+gannHiLoLine = HLv_d == -1 ? sma_H : sma_L
+
+// 5m EMA CALCULATION
+ema50 = ta.ema(close, input.int(50, title="5m EMA 50"))
+ema100 = ta.ema(close, input.int(100, title="5m EMA 100"))
+
+// 5m Confirmation Conditions
+long5mCondition = close > supertrend and close > gannHiLoLine and close > ema50 and close > ema100
+short5mCondition = close < supertrend and close < gannHiLoLine and close < ema50 and close < ema100
+
+
+// --- 2. 15M MTF CONFIRMATION FILTERS (MACD Histogram and RSI 50 Trend Alignment) ---
+
+// Helper function for MACD Histogram Calculation
+f_macd_hist(source, fastLength, slowLength, signalLength) =>
+    fastMA = ta.ema(source, fastLength)
+    slowMA = ta.ema(source, slowLength)
+    macd = fastMA - slowMA
+    signal = ta.ema(macd, signalLength)
+    macd - signal // Histogram = MACD Line - Signal Line
+
+// Fetching 15m MACD Histogram and RSI values
+hist15m = request.security(syminfo.tickerid, MTF_TIMEFRAME, f_macd_hist(close, MACD_FAST_LEN, MACD_SLOW_LEN, MACD_SIGNAL_LEN))
+rsi15m = request.security(syminfo.tickerid, MTF_TIMEFRAME, ta.rsi(close, RSI_LENGTH))
+
+// 15m MACD Long Confirmation: Histogram must be Above Zero
+long15mMacdConfirmation = hist15m > 0
+
+// 15m RSI Long Confirmation: RSI must be Above 50
+long15mRsiConfirmation = rsi15m > 50
+
+// Total 15m Long Confirmation
+finalLong15mConfirmation = long15mMacdConfirmation and long15mRsiConfirmation
+
+// 15m MACD Short Confirmation: Histogram must be Below Zero
+short15mMacdConfirmation = hist15m < 0
+
+// 15m RSI Short Confirmation: RSI must be Below 50
+short15mRsiConfirmation = rsi15m < 50
+
+// Total 15m Short Confirmation
+finalShort15mConfirmation = short15mMacdConfirmation and short15mRsiConfirmation
+
+
+// --- 3. TRADE ORDERS ---
+
+// Final Conditions: 5m Entry AND Dual 15m Confirmation Required
+finalLongCondition = long5mCondition and finalLong15mConfirmation
+finalShortCondition = short5mCondition and finalShort15mConfirmation
+
+// Long Signal
+if (finalLongCondition)
+    strategy.close("Short", comment="Short Closed (Dual MTF Confirmation)")
+    strategy.entry("Long", strategy.long, comment="Long Opened (Dual MTF Confirmation)")
+
+// Short Signal
+if (finalShortCondition)
+    strategy.close("Long", comment="Long Closed (Dual MTF Confirmation)")
+    strategy.entry("Short", strategy.short, comment="Short Opened (Dual MTF Confirmation)")
+
+// --- 4. VISUALIZATION ---
+plot(supertrend, color=direction ? color.green : color.red, title="5m Supertrend")
+plot(gannHiLoLine, linewidth=2, color=HLv_d == -1 ? color.maroon : color.blue, title="5m Gann HiLo")
+plot(ema50, color=color.blue, title="5m EMA 50")
+plot(ema100, color=color.orange, title="5m EMA 100")
+
+// *** Buradaki plotshape fonksiyonlarına display=display.none eklendi ***
+// Bu sayede, şekiller varsayılan olarak grafikte görünmez, ancak kullanıcı Ayarlar -> Stil sekmesinden etkinleştirebilir.
+plotshape(finalLongCondition, style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.small, text="MTF", display=display.none)
+plotshape(finalShortCondition, style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, text="MTF", display=display.none)
+
+View in Pine Editor・97 lines
+Use on chart
+1
+7
+1 166
+That is a detailed Dual Multi-Timeframe (MTF) Confirmed Trend Strategy written in Pine Script for TradingView. The core idea of this strategy is to only take entry signals on a faster timeframe (5-minute) when the trend is strongly confirmed on a slower, higher timeframe (15-minute). This aims to reduce false signals and trade in the direction of the dominant trend. Here is an explanation of how the strategy works, broken down by section:
+
+1. 5-Minute Entry Filters 🚀This section calculates several indicators on the current 5-minute chart to identify potential trade setups. A position is only considered if all 5-minute conditions align.
+Supertrend: A trend-following indicator based on Average True Range (ATR).
+Long Condition: The closing price must be above the Supertrend line.
+Short Condition: The closing price must be below the Supertrend line.
+Gann Hi-Lo (GHL): A trend indicator using Simple Moving Averages (SMA) of the high and low prices. GHL Line: Switches between the SMA of the Highs and the SMA of the Lows based on price action.
+Long Condition: The closing price must be above the GHL line.
+Short Condition: The closing price must be below the GHL line.
+Exponential Moving Averages (EMAs): It uses a 50-period EMA and a 100-period EMA to confirm the short-term trend direction.
+Long Condition: The closing price must be above both the 50 EMA and the 100 EMA.
+Short Condition: The closing price must be below both the 50 EMA and the 100 EMA.
+
+2. 15-Minute MTF Confirmation Filters ⏳This is the crucial step where the strategy verifies the trend on the slower, 15-minute timeframe using the request security function. This step acts as a gatekeeper to ensure the 5-minute trade aligns with the larger trend.
+MACD Histogram (12, 26, 9): The difference between the MACD Line and the Signal Line.
+Long Confirmation: The 15m MACD Histogram must be greater than 0 (MACD line is above the Signal line, indicating bullish momentum).
+Short Confirmation: The 15m MACD Histogram must be less than 0 (MACD line is below the Signal line, indicating bearish momentum).
+RSI (Relative Strength Index) (14): A momentum oscillator. The 50 level is often used to determine the general market trend.
+Long Confirmation: The 15m RSI must be greater than 50 (indicating stronger bullish momentum).
+Short Confirmation: The 15m RSI must be less than 50 (indicating stronger bearish momentum).
+The Total 15m Confirmation is only true if both the MACD and the RSI confirmation signals align.
+
+3. Trade Orders (Entry Logic) ⚖️
+The strategy only executes a trade when the 5-minute entry conditions are met AND the 15-minute confirmation conditions are met.
+
+Final Long Condition:
+5m Conditions (Supertrend, GHL, EMA alignment) AND
+15m Confirmation (MACD Hist > 0 AND RSI > 50)
+
+Final Short Condition:
+5m Conditions (Supertrend, GHL, EMA alignment) AND
+15m Confirmation (MACD Hist < 0 AND RSI < 50)
+
+When a trade signal is generated, the strategy:
+
+Closes any opposite position (e.g., closes a "Short" trade if a "Long" signal appears).
+
+Enters the new position (e.g., enters a "Long" trade).
+
+This is designed as a reversal strategy where a new entry automatically closes the previous opposing trade.
+
+In Summary
+The strategy operates on a principle of Trend Alignment:
+
+5-Minute Chart: Is used for Signal Timing (when exactly to enter the market).
+
+15-Minute Chart: Is used for Trend Validation (is the overall market momentum supporting the signal?).
+
+It's an attempt to capture short-term moves (5m signals) that are backed by strong medium-term momentum (15m confirmation), thereby aiming for higher probability trades.
+
+This is not investment advice; it is recommended to perform optimization and backtesting for the assets intended for implementation.
+

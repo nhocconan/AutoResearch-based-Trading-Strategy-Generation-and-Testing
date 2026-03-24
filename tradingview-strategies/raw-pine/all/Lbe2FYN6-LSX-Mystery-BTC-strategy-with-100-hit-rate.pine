@@ -1,0 +1,41 @@
+//@version=3
+strategy("LSX", overlay=true, default_qty_value=100)
+
+shortSym = "BTCUSDSHORTS"
+longSym = "BTCUSDLONGS"
+src = input(close)
+
+shorts = security(shortSym, period, src)
+longs = security(longSym, period, src)
+
+longCondition = crossover(shorts, longs)
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = crossunder(shorts, longs)
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+    
+    //rekt*2
+
+View in Pine Editor・19 lines
+Use on chart
+1
+2
+3
+3
+6 651
+Apr 12, 2018
+I said in the main crypto chat, that it was easy to create a BS strategy with a 100% profit rate, so here's the proof.
+
+Looks awesome right? I can promise you, if you trade with this, it will sooner or later blow your account.
+
+Keeping the inner workings of it a secret, just like the scammers do.
+
+Why am I publishing this? To show why investing in these 'mystery strategies' is a terrible idea. That's also why I've hidden the code, so it looks more attractive than it really is.
+
+
+Say safe, don't get scammed. Don't get rekt.
+Apr 12, 2018
+Release Notes
+ok, because TV's script publishing kinda sucks, the code is open. fine, enjoy!

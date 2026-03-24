@@ -1,0 +1,47 @@
+//@version=2
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 10/01/2017
+// The RSI is a very popular indicator that follows price activity. 
+// It calculates an average of the positive net changes, and an average 
+// of the negative net changes in the most recent bars, and it determines 
+// the ratio between these averages. The result is expressed as a number 
+// between 0 and 100. Commonly it is said that if the RSI has a low value, 
+// for example 30 or under, the symbol is oversold. And if the RSI has a 
+// high value, 70 for example, the symbol is overbought. 
+//
+// You can change long to short in the Input Settings
+// Please, use it only for learning or paper trading. Do not for real trading.
+////////////////////////////////////////////////////////////
+strategy(title="Strategy RSI", shorttitle="Strategy RSI", overlay = true )
+Length = input(12, minval=1)
+Oversold = input(30, minval=1)
+Overbought = input(70, minval=1)
+reverse = input(false, title="Trade reverse")
+xRSI = rsi(close, Length)
+pos = iff(xRSI > Overbought, 1,
+       iff(xRSI < Oversold, -1, nz(pos[1], 0))) 
+possig = iff(reverse and pos == 1, -1,
+          iff(reverse and pos == -1, 1, pos))
+if (possig == 1) 
+    strategy.entry("Long", strategy.long)
+if (possig == -1)
+    strategy.entry("Short", strategy.short)               
+barcolor(possig == -1 ? red: possig == 1 ? green : blue )
+
+View in Pine Editor・29 lines
+Use on chart
+4
+2
+1
+9
+10 641
+The RSI is a very popular indicator that follows price activity.
+It calculates an average of the positive net changes, and an average
+of the negative net changes in the most recent bars, and it determines
+the ratio between these averages. The result is expressed as a number
+between 0 and 100. Commonly it is said that if the RSI has a low value,
+for example 30 or under, the symbol is oversold. And if the RSI has a
+high value, 70 for example, the symbol is overbought.
+
+You can change long to short in the Input Settings
+Please, use it only for learning or paper trading. Do not for real trading.

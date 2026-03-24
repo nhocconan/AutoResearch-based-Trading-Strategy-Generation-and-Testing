@@ -1,0 +1,73 @@
+//@version=5
+strategy("EMA MACD", overlay=true, margin_long=100, margin_short=100, process_orders_on_close=true)
+
+// ─────────────── INPUTS ───────────────
+fastLen   = input.int(5,  "Fast EMA Length", minval=1, group = "Input")
+slowLen   = input.int(20, "Slow EMA Length", minval=1, group = "Input")
+useTF     = input.timeframe("15", "EMA Timeframe (leave empty for chart)", group = "Input")
+
+ema3Len   = input.int(200, "EMA 3 Length", group = "Above-Below")
+ema4Len   = input.int(100, "EMA 4 Length", group = "Above-Below")
+ema3TF    = input.timeframe("5",  "EMA 3 Timeframe", group = "Above-Below")
+ema4TF    = input.timeframe("30", "EMA 4 Timeframe", group = "Above-Below")
+
+targetPts = input.int(1000, "Target Points", minval=1, group = "Targets")
+stopPts   = input.int(410, "Stoploss Points", minval=1, group = "Targets")
+
+// ─────────────── CALCULATIONS ───────────────
+getEMA(src, length, tf) => request.security(syminfo.tickerid, tf, ta.ema(src, length))
+
+fastEMA = request.security(syminfo.tickerid, useTF == "" ? timeframe.period : useTF, ta.ema(close, fastLen))
+slowEMA = request.security(syminfo.tickerid, useTF == "" ? timeframe.period : useTF, ta.ema(close, slowLen))
+
+ema3 = getEMA(close, ema3Len, ema3TF)
+ema4 = getEMA(close, ema4Len, ema4TF)
+
+[macdDay, macdSignalDay, _] = request.security(syminfo.tickerid, "D", ta.macd(close, 7, 13, 9))
+
+// ─────────────── SIGNAL CONDITIONS ───────────────
+longSignal  = ta.crossover(fastEMA, slowEMA) and ema3 >= ema4 and macdDay >= macdSignalDay
+shortSignal = ta.crossunder(fastEMA, slowEMA) and ema3 <= ema4 and macdDay <= macdSignalDay
+
+// Store signal when condition happens
+var float entryPrice = na
+var line  slLine     = na
+var line  tpLine     = na
+
+// ─────────────── ENTRY EXECUTION AT NEXT CANDLE ───────────────
+if (longSignal)
+    entryPrice := na  // reset, actual price will be set next bar
+    strategy.entry("Long", strategy.long)
+
+if (shortSignal)
+    entryPrice := na
+    strategy.entry("Short", strategy.short)
+
+// On the NEXT candle after entry, record the open price as actual entry
+// Once position is open, set entryPrice = next candle open
+if (strategy.position_size > 0 and na(entryPrice))
+    entryPrice := open
+    strategy.exit("Long Exit", "Long",        stop  = entryPrice - stopPts * syminfo.mintick,        limit = entryPrice + targetPts * syminfo.mintick)
+    // Draw SL/TP lines
+    slLine := line.new(bar_index, entryPrice - stopPts * syminfo.mintick, bar_index + 35, entryPrice - stopPts * syminfo.mintick, color=color.red, style=line.style_dashed)
+    tpLine := line.new(bar_index, entryPrice + targetPts * syminfo.mintick, bar_index + 35, entryPrice + targetPts * syminfo.mintick, color=color.green, style=line.style_dashed)
+
+if (strategy.position_size < 0 and na(entryPrice))
+    entryPrice := open
+    strategy.exit("Short Exit", "Short",        stop  = entryPrice + stopPts * syminfo.mintick,        limit = entryPrice - targetPts * syminfo.mintick)
+    // Draw SL/TP lines
+    slLine := line.new(bar_index, entryPrice + stopPts * syminfo.mintick, bar_index + 35, entryPrice + stopPts * syminfo.mintick, color=color.red, style=line.style_dashed)
+    tpLine := line.new(bar_index, entryPrice - targetPts * syminfo.mintick, bar_index + 35, entryPrice - targetPts * syminfo.mintick, color=color.green, style=line.style_dashed)
+
+
+// ─────────────── VISUAL MARKERS ───────────────
+plotshape(longSignal,  title="Buy Signal",  location=location.belowbar, color=color.green, style=shape.triangleup,   size=size.small, text="BUY")
+plotshape(shortSignal, title="Sell Signal", location=location.abovebar, color=color.red,   style=shape.triangledown, size=size.small, text="SELL")
+
+View in Pine Editor・65 lines
+Use on chart
+4
+1
+1
+1 103
+Based on Crossover and Big timeframe EMA Support and resistance this strategy is developed.

@@ -1,0 +1,52 @@
+//@version=5
+strategy("EMA Crossover with Pine Logs2", overlay=true, initial_capital=10000)
+
+// ====== INPUTS ======
+fastLen = input.int(9, title="Fast EMA")
+slowLen = input.int(21, title="Slow EMA")
+useLogs = input.bool(true, title="Enable Pine Logs")
+
+// ====== INDICATORS ======
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+// ====== PLOTS ======
+plot(emaFast, color=color.green)
+plot(emaSlow, color=color.red)
+
+// ====== CONDITIONS ======
+longCondition  = ta.crossover(emaFast, emaSlow)
+shortCondition = ta.crossunder(emaFast, emaSlow)
+
+// ====== LOGIC ======
+if longCondition
+    strategy.entry("LONG", strategy.long)
+    if useLogs
+        log.info("LONG entry | Price: " + str.tostring(close) +
+                 " | EMA Fast: " + str.tostring(emaFast) +
+                 " | EMA Slow: " + str.tostring(emaSlow))
+
+if shortCondition
+    strategy.entry("SHORT", strategy.short)
+    if useLogs
+        log.info("SHORT entry | Price: " + str.tostring(close) +
+                 " | EMA Fast: " + str.tostring(emaFast) +
+                 " | EMA Slow: " + str.tostring(emaSlow))
+
+// ====== EXIT EXAMPLE ======
+if strategy.position_size > 0 and ta.crossunder(emaFast, emaSlow)
+    strategy.close("LONG")
+    if useLogs
+        log.warning("LONG exit | Price: " + str.tostring(close))
+
+if strategy.position_size < 0 and ta.crossover(emaFast, emaSlow)
+    strategy.close("SHORT")
+    if useLogs
+        log.warning("SHORT exit | Price: " + str.tostring(close))
+
+View in Pine Editor・45 lines
+Use on chart
+7
+461
+We are exclusively licensed Austria Guides and count on smaller groups – this is how communication with the guests works best. Exciting facts and a large portion of humour are part of our tours, just like a lot of experience and knowledge off the beaten track. We even infect die-hard Vienna connoisseurs with our enthusiasm for the city! If you want to get to know Vienna differently than the average tourist, then we are your perfect partner: We make sure that your travel stories are nowhere to be found.
+

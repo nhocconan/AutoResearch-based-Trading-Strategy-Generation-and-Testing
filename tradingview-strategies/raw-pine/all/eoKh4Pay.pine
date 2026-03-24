@@ -1,0 +1,141 @@
+//@version=6
+strategy("Breakout Session Asiatique avec Retest (RR modifiable)", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=1)
+
+// -------------------- Inputs
+sess1      = input.session("2000-2359", "Session Asie (partie 1)")
+sess2      = input.session("0000-0800", "Session Asie (partie 2)")
+rr         = input.float(3.0, "Risk/Reward (TP = RR × risque)", step=0.1, minval=0.1)
+onePerSess = input.bool(true, "Un seul trade par session asiatique")
+bufTicks   = input.int(0, "Marge SL (en ticks) derrière la bougie", minval=0)
+
+// -------------------- Détection session asiatique
+inSess1 = not na(time(timeframe.period, sess1))
+inSess2 = not na(time(timeframe.period, sess2))
+inAsia  = inSess1 or inSess2
+
+// -------------------- Variables persistantes
+var float asiaHigh   = na
+var float asiaLow    = na
+var float rangeHigh  = na
+var float rangeLow   = na
+var bool  asiaActive = false
+var bool  traded     = false
+var bool  breakoutUp   = false
+var bool  breakoutDown = false
+
+// -------------------- Construction du range asiatique
+if inAsia
+    if not asiaActive
+        // Reset au début
+        asiaHigh   := high
+        asiaLow    := low
+        asiaActive := true
+        traded     := false
+        breakoutUp   := false
+        breakoutDown := false
+    else
+        asiaHigh := math.max(asiaHigh, high)
+        asiaLow  := math.min(asiaLow,  low)
+else
+    // Fin de session : on fige le range
+    if asiaActive
+        rangeHigh  := asiaHigh
+        rangeLow   := asiaLow
+        asiaActive := false
+
+// -------------------- Étape 1 : Détection de cassure initiale
+if not inAsia and not na(rangeHigh) and not breakoutUp and ta.crossover(close, rangeHigh)
+    breakoutUp := true
+
+if not inAsia and not na(rangeLow) and not breakoutDown and ta.crossunder(close, rangeLow)
+    breakoutDown := true
+
+// -------------------- Étape 2 : Attente du retest
+longRetest  = breakoutUp   and low <= rangeHigh and close > rangeHigh
+shortRetest = breakoutDown and high >= rangeLow and close < rangeLow
+
+// -------------------- SL/TP et entrée
+tick    = syminfo.mintick
+buf     = bufTicks * tick
+
+if longRetest and (strategy.position_size == 0) and (not traded or not onePerSess)
+    entryPrice = close
+    slPrice    = low - buf
+    risk       = entryPrice - slPrice
+    if risk > 0
+        tpPrice = entryPrice + rr * risk
+        strategy.entry("Long", strategy.long)
+        strategy.exit("L-Exit", from_entry="Long", stop=slPrice, limit=tpPrice)
+        traded := true
+        breakoutUp := false
+
+if shortRetest and (strategy.position_size == 0) and (not traded or not onePerSess)
+    entryPrice = close
+    slPrice    = high + buf
+    risk       = slPrice - entryPrice
+    if risk > 0
+        tpPrice = entryPrice - rr * risk
+        strategy.entry("Short", strategy.short)
+        strategy.exit("S-Exit", from_entry="Short", stop=slPrice, limit=tpPrice)
+        traded := true
+        breakoutDown := false
+
+// -------------------- Visuels
+plot(rangeHigh, "Haut Asie", color=color.new(color.green, 0), linewidth=2)
+plot(rangeLow,  "Bas Asie",  color=color.new(color.red,   0), linewidth=2)
+bgcolor(inAsia ? color.new(color.blue, 90) : na)
+
+View in Pine Editor・87 lines
+Use on chart
+3
+3
+1 235
+1 — Customizable Parameters
+sess1 & sess2: The two time ranges that define the Asian session (e.g., 20:00–23:59 and 00:00–08:00).
+Important: format is HHMM-HHMM.
+
+rr: The risk/reward ratio (default = 3.0, meaning TP = 3× risk size).
+
+onePerSess: Toggle to allow only one trade per Asian session or multiple.
+
+bufTicks: Extra margin for the SL beyond the signal candle.
+
+2 — Detecting the Asian Session
+The script checks if the candle’s time is inside the first range (sess1) or inside the second range (sess2).
+
+While inside the Asian session, it updates the current high and low.
+
+When the session ends, it locks in these levels as rangeHigh and rangeLow.
+
+3 — Step 1: Detecting the Initial Breakout
+Bullish breakout → close above rangeHigh → flag breakoutUp is set to true.
+
+Bearish breakout → close below rangeLow → flag breakoutDown is set to true.
+
+No trade yet — this is just the breakout signal.
+
+4 — Step 2: Waiting for the Retest
+If a bullish breakout occurred, wait for the price to return to or slightly below rangeHigh and then close back above it.
+
+If a bearish breakout occurred, wait for the price to return to or slightly above rangeLow and then close back below it.
+
+5 — Entry & Exit
+When the retest is confirmed:
+
+strategy.entry() is triggered.
+
+SL = behind the retest confirmation candle (with optional bufTicks margin).
+
+TP = entry price ± RR × risk size.
+
+If onePerSess is enabled, no further trades happen until the next Asian session.
+
+6 — Chart Display
+Green line = locked Asian session high.
+
+Red line = locked Asian session low.
+
+Light blue background = active Asian session hours.
+
+Trade entries are shown on the chart when retests occur.

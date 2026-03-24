@@ -1,0 +1,555 @@
+//@version=6
+strategy("OPTIMAL Elite Fusion v1.8 — LITE r4 (Top-Down, RSI + SR + Chart Link)",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=25,
+     pyramiding=0, process_orders_on_close=false, calc_on_order_fills=true)
+
+// ==========================
+// USER SETTINGS
+// ==========================
+// ---- Metadata / Alerts ----
+chart_id            = input.string("yxVwv11M", "Chart ID (for alerts)")
+labelTimeframe      = input.string("5m", "Label: Entry Timeframe")
+entriesAtClose      = input.bool(true,  "Place orders & order alerts only on bar close")
+showAlertStamps     = input.bool(false, "Plot alert stamps on chart (debug)")
+
+// ---- Core Lengths ----
+atrLength           = input.int(10,  "ATR Length (fast)", minval=1)
+emaDynLen           = input.int(21,  "Dynamic EMA Length", minval=1)
+fastLen             = input.int(10,  "Fast DEMA", minval=1)
+slowLen             = input.int(21,  "Slow DEMA", minval=1)
+volSmaLen           = input.int(20,  "Volume SMA Length", minval=1)
+
+// ---- Supertrend ----
+stWarn              = input.float(2.0, "Supertrend Warning Factor", step=0.1)
+stPrim              = input.float(3.0, "Supertrend Primary Factor", step=0.1)
+stConf              = input.float(4.0, "Supertrend Confirm Factor", step=0.1)
+
+// ---- ADX / Volatility ----
+adxThreshold        = input.int(20,  "ADX Threshold", minval=1)
+minNATR             = input.float(0.4, "Normalized ATR min")
+maxNATR             = input.float(3.2, "Normalized ATR max")
+
+// ---- Entry Enhancers ----
+enableContinuation  = input.bool(true,  "Enable Donchian Continuation")
+donLen              = input.int(16,     "Donchian Length", minval=2)
+enableExpansion     = input.bool(true,  "Enable Expansion Bar Entry")
+expK                = input.float(1.4,  "Expansion Multiplier")
+
+// ---- Pattern Filters ----
+usePinBar           = input.bool(true,  "Pin Bar Patterns")
+useEngulf           = input.bool(true,  "Engulfing Patterns")
+useInsideFB         = input.bool(true,  "Inside Bar False Breakouts")
+useDojiFilter       = input.bool(true,  "Exclude Doji Candles")
+
+// ---- Sessions ----
+limitToHighLiquidity= input.bool(true, "Color high-liquidity sessions")
+asiaStart           = input.int(0,  "Asia Start (UTC hour)")
+asiaEnd             = input.int(4,  "Asia End (UTC hour)")
+usStart             = input.int(12, "US Start (UTC hour)")
+usEnd               = input.int(20, "US End (UTC hour)")
+gateSessions        = input.bool(false,"HARD gate to those sessions (blocks orders outside)")
+
+// ---- Confluence Scoring ----
+eliteThreshold      = input.float(8.0,  "Elite Entry Score ≥")
+premiumThreshold    = input.float(6.0,  "Premium Entry Score ≥")
+
+// ---- Risk & Management ----
+tpMultiplier        = input.float(3.2,  "Take Profit x ATR")
+slMultiplier        = input.float(1.1,  "Stop Loss x ATR")
+trailEnabled        = input.bool(true,   "Use True Trailing Stop (ATR)")
+trailATRmult        = input.float(1.3,   "ATR Trail Multiplier")
+breakevenEnabled    = input.bool(true,   "Breakeven Protection")
+breakevenR          = input.float(1.2,   "Breakeven Trigger (R)")
+armExitsAfterBars   = input.int(1,       "Do NOT arm exits for N bars after entry", minval=0, maxval=10)
+
+// ---- Cooldown / Debug ----
+cooldownBars        = input.int(2, "Cooldown Bars (min bars between entries)", minval=0)
+debugGates          = input.bool(false, "Show gate debug markers (L/S)")
+
+// ==========================
+// TOP-DOWN SETTINGS
+// ==========================
+requireHTF_All      = input.bool(true,  "Require 15m + 1h + 4h alignment")
+allowEliteOverride  = input.bool(true,  "Allow ELITE only when 2 of 3 agree")
+macroTF             = input.string("240", "Macro TF for alignment (e.g. 240=4h)")
+macroFast           = input.int(50,  "Macro Fast EMA", minval=1)
+macroSlow           = input.int(200, "Macro Slow EMA", minval=1)
+
+// Chop detector
+useChopFilter       = input.bool(true,  "Filter out chop (ADX/Range/Vol)")
+adxLookbackSlope    = input.int(5,     "ADX slope lookback", minval=1)
+rangeTightMultATR   = input.float(1.2, "Donchian width < ATR×", step=0.1)
+volQuietBoost       = input.float(1.1, "NATR quiet ≤ min×", step=0.05)
+
+// ==========================
+// RSI Movement Filter (simple)
+// ==========================
+useRSIFilter        = input.bool(true,  "Use RSI Movement Filter")
+rsiLength           = input.int(14,     "RSI Length", minval=1)
+rsiMidLow           = input.int(45,     "RSI Mid-Band Low",  minval=1, maxval=99)
+rsiMidHigh          = input.int(55,     "RSI Mid-Band High", minval=1, maxval=99)
+rsiSlopeLookback    = input.int(5,      "RSI Slope Lookback", minval=1)
+rsiMinSlope         = input.float(0.35, "RSI Min Slope (pts/bar)", step=0.05)
+
+// ==========================
+// Dynamic S/R (pivot clusters) + optional SFP
+// ==========================
+useSR               = input.bool(true,  "Use Dynamic S/R (Pivot Clusters)")
+requireSRforEntry   = input.bool(false, "Require SR for entry (else SR is optional)")
+srLeft              = input.int(5,      "SR Pivot Left",  minval=1)
+srRight             = input.int(5,      "SR Pivot Right", minval=1)
+srTolATR            = input.float(0.50, "SR Tolerance (ATR×)", step=0.05)
+srMinTouches        = input.int(3,      "SR Min Touches", minval=1, maxval=20)
+useSFP              = input.bool(true,  "Detect Liquidity Sweeps (SFP)")
+
+// ==========================
+// CORE INDICATORS
+// ==========================
+f_dema(src, length) =>
+    ema1 = ta.ema(src, length)
+    ema2 = ta.ema(ema1, length)
+    2 * ema1 - ema2
+
+ema200   = ta.ema(close, 200)
+emaDyn   = ta.ema(close, emaDynLen)
+
+demaFast = f_dema(close, fastLen)
+demaSlow = f_dema(close, slowLen)
+demaBull = demaFast > demaSlow
+ndemaBear= demaFast < demaSlow
+
+// Supertrend
+[stWarnLine, _d1] = ta.supertrend(stWarn, atrLength)
+[stPrimLine, _d2] = ta.supertrend(stPrim, atrLength)
+[stConfLine, _d3] = ta.supertrend(stConf, atrLength)
+upST   = close > stPrimLine and close > stConfLine
+downST = close < stPrimLine and close < stConfLine
+
+// ATR / NATR
+atr  = ta.atr(atrLength)
+natr = atr / math.max(ta.ema(atr, 20), 1e-10)
+stableVolatility = (natr > minNATR) and (natr < maxNATR)
+
+// ADX
+upMove   = high - high[1]
+downMove = low[1] - low
+plusDM   = (upMove > downMove and upMove > 0) ? upMove : 0.0
+minusDM  = (downMove > upMove and downMove > 0) ? downMove : 0.0
+trur     = ta.rma(ta.tr(true), atrLength)
+plusDI   = 100 * ta.rma(plusDM, atrLength) / trur
+minusDI  = 100 * ta.rma(minusDM, atrLength) / trur
+dx       = 100 * math.abs(plusDI - minusDI) / math.max(plusDI + minusDI, 1e-10)
+adx      = ta.rma(dx, atrLength)
+strongTrend = adx > adxThreshold
+
+// Volume
+volSma   = ta.sma(volume, volSmaLen)
+volSpike = volume > volSma * 1.5
+
+// HTF confluence (15m + 1h)
+hTF_demaFast  = request.security(syminfo.tickerid, "15", f_dema(close, fastLen),  lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+hTF_demaSlow  = request.security(syminfo.tickerid, "15", f_dema(close, slowLen), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+hTF_uptrend   = hTF_demaFast > hTF_demaSlow
+hTF_downtrend = hTF_demaFast < hTF_demaSlow
+
+htfClose   = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+htfSMA20   = request.security(syminfo.tickerid, "60", ta.sma(close, 20), lookahead=barmerge.lookahead_off)
+htfSMA50   = request.security(syminfo.tickerid, "60", ta.sma(close, 50), lookahead=barmerge.lookahead_off)
+htfBullish = htfClose > htfSMA20 and htfSMA20 > htfSMA50
+htfBearish = htfClose < htfSMA20 and htfSMA20 < htfSMA50
+htfTrendStrength = math.abs(htfClose - htfSMA20) / math.max(htfSMA20, 1e-10) * 100
+
+// Macro TF (4h) ribbon
+macroFastEMA = request.security(syminfo.tickerid, macroTF, ta.ema(close, macroFast))
+macroSlowEMA = request.security(syminfo.tickerid, macroTF, ta.ema(close, macroSlow))
+macroBullish = macroFastEMA > macroSlowEMA
+macroBearish = macroFastEMA < macroSlowEMA
+
+// ==========================
+// RSI & Momentum Gate
+// ==========================
+rsi = ta.rsi(close, rsiLength)
+rsiInMidBand = (rsi >= rsiMidLow and rsi <= rsiMidHigh)
+rsiSlope     = (rsi - rsi[rsiSlopeLookback]) / rsiSlopeLookback
+rsiBreakLong = (rsi > rsiMidHigh and rsiSlope >  rsiMinSlope) or ta.crossover(rsi, rsiMidHigh)
+rsiBreakShort= (rsi < rsiMidLow  and rsiSlope < -rsiMinSlope) or ta.crossunder(rsi, rsiMidLow)
+
+// ==========================
+// Donchian + Expansion
+// ==========================
+donHigh = ta.highest(high, donLen)
+donLow  = ta.lowest(low,  donLen)
+trange  = high - low
+closePos= trange > 0 ? (close - low) / trange : 0.5
+contLong  = enableContinuation and (close > donHigh[1])
+contShort = enableContinuation and (close < donLow[1])
+expLong   = enableExpansion and trange > expK * atr and closePos > 0.7
+expShort  = enableExpansion and trange > expK * atr and closePos < 0.3
+
+// ==========================
+// Sessions
+// ==========================
+hourSession = hour(time, "UTC")
+asiaOK      = hourSession >= asiaStart and hourSession <= asiaEnd
+usOK        = hourSession >= usStart  and hourSession <= usEnd
+activeHour  = (asiaOK or usOK)
+sessionGate = not gateSessions or activeHour
+
+// ==========================
+// Candle Patterns (light)
+// ==========================
+body        = math.abs(close - open)
+candleRange = high - low
+uwick       = high - math.max(open, close)
+lwick       = math.min(open, close) - low
+isDoji      = candleRange > 0 ? (body / candleRange) < 0.10 : false
+
+bullPin = usePinBar ? (lwick >= body * 2 and uwick <= body and close >= open) : false
+bearPin = usePinBar ? (uwick >= body * 2 and lwick <= body and close <= open) : false
+bullEng = useEngulf ? (close > open and close[1] < open[1] and open <= close[1] and close >= open[1]) : false
+bearEng = useEngulf ? (close < open and close[1] > open[1] and open >= close[1] and close <= open[1]) : false
+inside = (high <= high[1] and low >= low[1])
+bullInsideFB = useInsideFB ? (inside[1] and low < low[2] and close > open) : false
+bearInsideFB = useInsideFB ? (inside[1] and high > high[2] and close < open) : false
+bullSignal = (bullPin or bullEng or bullInsideFB)
+bearSignal = (bearPin or bearEng or bearInsideFB)
+
+// Pattern tags for alerts
+patternLong  = bullPin ? "pin" : bullEng ? "engulf" : bullInsideFB ? "insideFB" : "none"
+patternShort = bearPin ? "pin" : bearEng ? "engulf" : bearInsideFB ? "insideFB" : "none"
+
+// ==========================
+// Base Trend (uses ST + DEMA + EMA200 + HTF)
+// ==========================
+upTrendBase   = (demaFast > demaSlow) and (close > ema200) and (volume > volSma)
+downTrendBase = (demaFast < demaSlow) and (close < ema200) and (volume > volSma)
+upTrend       = upST and upTrendBase and hTF_uptrend
+downTrend     = downST and downTrendBase and hTF_downtrend
+
+// ==========================
+// Dynamic S/R (clusters) + SFP
+// ==========================
+phSR = ta.pivothigh(high, srLeft, srRight)
+plSR = ta.pivotlow(low,  srLeft, srRight)
+
+var float srHighLevel   = na
+var float srLowLevel    = na
+var int   srHighTouches = 0
+var int   srLowTouches  = 0
+
+srTol = atr * srTolATR
+
+if not na(phSR)
+    if na(srHighLevel) or math.abs(phSR - srHighLevel) > srTol
+        srHighLevel   := phSR
+        srHighTouches := 1
+    else
+        srHighLevel   := (srHighLevel * srHighTouches + phSR) / (srHighTouches + 1)
+        srHighTouches += 1
+
+if not na(plSR)
+    if na(srLowLevel) or math.abs(plSR - srLowLevel) > srTol
+        srLowLevel   := plSR
+        srLowTouches := 1
+    else
+        srLowLevel   := (srLowLevel * srLowTouches + plSR) / (srLowTouches + 1)
+        srLowTouches += 1
+
+if not na(srHighLevel) and (high >= srHighLevel - srTol and high <= srHighLevel + srTol)
+    srHighTouches += 1
+if not na(srLowLevel) and (low <= srLowLevel + srTol and low >= srLowLevel - srTol)
+    srLowTouches += 1
+
+srHighValid = useSR and (srHighTouches >= srMinTouches)
+srLowValid  = useSR and (srLowTouches  >= srMinTouches)
+
+sweepHigh = useSFP and srHighValid and high > srHighLevel + srTol and close < srHighLevel
+sweepLow  = useSFP and srLowValid  and low  < srLowLevel  - srTol and close > srLowLevel
+
+srConfluenceLong  = srLowValid  and ( (close <= srLowLevel + srTol and close >= srLowLevel - srTol) or sweepLow )
+srConfluenceShort = srHighValid and ( (close >= srHighLevel - srTol and close <= srHighLevel + srTol) or sweepHigh )
+
+// ==========================
+// Confluence Score
+// ==========================
+confluence(isBull) =>
+    float score = 0.0
+    if (isBull and upTrend) or (not isBull and downTrend)
+        score += 3
+    if (isBull and demaBull) or (not isBull and ndemaBear)
+        score += 2
+    if (isBull and close > ema200) or (not isBull and close < ema200)
+        score += 1
+    if (isBull and close > stPrimLine) or (not isBull and close < stPrimLine)
+        score += 1
+    if (isBull and close > stConfLine) or (not isBull and close < stConfLine)
+        score += 1
+    // Momentum gate
+    if (isBull and (not useRSIFilter or rsiBreakLong)) or (not isBull and (not useRSIFilter or rsiBreakShort))
+        score += 1
+    // Volume & strength
+    if volSpike
+        score += 1
+    if strongTrend
+        score += 1
+    if stableVolatility and (limitToHighLiquidity ? activeHour : true)
+        score += 1
+    // HTF bonus
+    if (isBull and htfBullish) or (not isBull and htfBearish)
+        score += 1
+        if htfTrendStrength > 2.0
+            score += 1
+    // Continuation / expansion
+    if (isBull and contLong) or (not isBull and contShort)
+        score += 1
+    if (isBull and expLong) or (not isBull and expShort)
+        score += 1
+    // SR / SFP
+    if (isBull and srConfluenceLong) or (not isBull and srConfluenceShort)
+        score += 1
+    score
+
+bullScore = confluence(true)
+bearScore = confluence(false)
+
+eliteBull   = bullScore >= eliteThreshold
+eliteBear   = bearScore >= eliteThreshold
+premiumBull = not eliteBull and bullScore >= premiumThreshold
+premiumBear = not eliteBear and bearScore >= premiumThreshold
+
+// ==========================
+// GATES & CHOP FILTER
+// ==========================
+bullAgree = (hTF_uptrend ? 1 : 0) + (htfBullish ? 1 : 0) + (macroBullish ? 1 : 0)
+bearAgree = (hTF_downtrend ? 1 : 0) + (htfBearish ? 1 : 0) + (macroBearish ? 1 : 0)
+
+htfOKBull_all = (hTF_uptrend and htfBullish and macroBullish)
+htfOKBear_all = (hTF_downtrend and htfBearish and macroBearish)
+
+htfOKBull_relaxed = (bullAgree >= 2)
+htfOKBear_relaxed = (bearAgree >= 2)
+
+htfOKBull = requireHTF_All ? htfOKBull_all : htfOKBull_relaxed
+htfOKBear = requireHTF_All ? htfOKBear_all : htfOKBear_relaxed
+
+adxSlope    = adx - adx[adxLookbackSlope]
+rangeWidth  = donHigh - donLow
+isTightRange= rangeWidth < atr * rangeTightMultATR
+isQuietVol  = natr < (minNATR * volQuietBoost)
+isChopBase  = (adx < adxThreshold) or (adxSlope < 0 and adx < adxThreshold + 5) or isTightRange or isQuietVol
+isChop      = useChopFilter ? isChopBase : false
+
+var int lastEntryBar = na
+cooldownOK = na(lastEntryBar) or (bar_index - lastEntryBar > cooldownBars)
+
+// If not fully aligned, require ELITE; else allow PREMIUM too
+bullTierOK = (htfOKBull) ? (eliteBull or premiumBull) : (allowEliteOverride ? eliteBull and htfOKBull_relaxed : false)
+bearTierOK = (htfOKBear) ? (eliteBear or premiumBear) : (allowEliteOverride ? eliteBear and htfOKBear_relaxed : false)
+
+// Final gates (SR is OPTIONAL unless you toggle requireSRforEntry)
+rsiGateLong   = not useRSIFilter or rsiBreakLong
+rsiGateShort  = not useRSIFilter or rsiBreakShort
+srGateLong    = not requireSRforEntry or srConfluenceLong or contLong or expLong
+srGateShort   = not requireSRforEntry or srConfluenceShort or contShort or expShort
+
+canLong  = sessionGate and cooldownOK and not isChop and bullTierOK and rsiGateLong  and srGateLong
+canShort = sessionGate and cooldownOK and not isChop and bearTierOK and rsiGateShort and srGateShort
+
+// ==========================
+// ORDER TIMING HELPER
+// ==========================
+entry_timing_ok(cond) =>
+    entriesAtClose ? (barstate.isconfirmed and cond) : cond
+
+// ==========================
+// RISK PRIMITIVES
+// ==========================
+volFactor = math.max(0.9, math.min(1.4, natr))
+
+// ==========================
+// POSITION STATE
+// ==========================
+var float longStopInit   = na
+var float shortStopInit  = na
+var float atrAtEntry     = na
+var float longPeak       = na
+var float shortTrough    = na
+var int   entryBarIdx    = na
+
+barsSinceEntry = na(entryBarIdx) ? 100000 : (bar_index - entryBarIdx)
+exitsArmed     = barsSinceEntry >= armExitsAfterBars
+
+// ==========================
+// ORDERS
+// ==========================
+if entry_timing_ok(canLong)
+    strategy.entry("FUSION LONG", strategy.long)
+    atrAtEntry   := atr
+    longStopInit := close - slMultiplier * atrAtEntry * volFactor
+    longPeak     := high
+    entryBarIdx  := bar_index
+    lastEntryBar := bar_index
+
+if entry_timing_ok(canShort)
+    strategy.entry("FUSION SHORT", strategy.short)
+    atrAtEntry    := atr
+    shortStopInit := close + slMultiplier * atrAtEntry * volFactor
+    shortTrough   := low
+    entryBarIdx   := bar_index
+    lastEntryBar  := bar_index
+
+// ==========================
+// EXIT MANAGEMENT
+// ==========================
+var float longStop  = na
+var float shortStop = na
+
+// LONG
+if strategy.position_size > 0
+    entry = strategy.position_avg_price
+    initSL = na(longStop) ? longStopInit : longStop
+    longPeak := na(longPeak) ? high : math.max(longPeak, high)
+    if breakevenEnabled and exitsArmed
+        if (close - entry) >= (breakevenR * (atrAtEntry))
+            initSL := math.max(initSL, entry)
+    if trailEnabled and exitsArmed
+        trailCandidate = longPeak - (atrAtEntry * trailATRmult)
+        initSL := math.max(initSL, trailCandidate)
+    longStop := initSL
+    tpLong = entry + tpMultiplier * atrAtEntry * volFactor
+    strategy.exit("TP/SL LONG", from_entry="FUSION LONG",
+         stop = exitsArmed ? longStop : na,
+         limit = exitsArmed ? tpLong   : na)
+
+// SHORT
+if strategy.position_size < 0
+    entry = strategy.position_avg_price
+    initSL = na(shortStop) ? shortStopInit : shortStop
+    shortTrough := na(shortTrough) ? low : math.min(shortTrough, low)
+    if breakevenEnabled and exitsArmed
+        if (entry - close) >= (breakevenR * (atrAtEntry))
+            initSL := math.min(initSL, entry)
+    if trailEnabled and exitsArmed
+        trailCandidate = shortTrough + (atrAtEntry * trailATRmult)
+        initSL := math.min(initSL, trailCandidate)
+    shortStop := initSL
+    tpShort = entry - tpMultiplier * atrAtEntry * volFactor
+    strategy.exit("TP/SL SHORT", from_entry="FUSION SHORT",
+         stop = exitsArmed ? shortStop : na,
+         limit = exitsArmed ? tpShort  : na)
+
+// Reset state when flat
+if strategy.position_size == 0
+    longStop := na
+    shortStop := na
+    longPeak := na
+    shortTrough := na
+    atrAtEntry := na
+    entryBarIdx := na
+
+// ==========================
+// ==========================
+// CHART DEEPLINK (no timeframe.* dependency)
+// ==========================
+tv_chart_url = 'https://www.tradingview.com/chart/?symbol=' + syminfo.tickerid + '&interval={{interval}}'
+
+// ==========================
+// ALERTS — ORDERS (now include tv_chart_url & placeholders)
+// ==========================
+pos = strategy.position_size
+posChangedToLong  = (pos > 0)  and (strategy.position_size[1] <= 0)
+posChangedToShort = (pos < 0)  and (strategy.position_size[1] >= 0)
+posClosed         = (pos == 0) and (strategy.position_size[1] != 0)
+
+if entry_timing_ok(posChangedToLong)
+    rrVal    = tpMultiplier / slMultiplier
+    priceStr = str.tostring(strategy.position_avg_price, format.mintick)
+    tpStr    = str.tostring(strategy.position_avg_price + tpMultiplier * atrAtEntry * volFactor, format.mintick)
+    slStr    = str.tostring(longStopInit, format.mintick)
+    qtyStr   = str.tostring(pos)
+    json_entry_long = '{"event":"ENTRY","tier":"' + (eliteBull ? "ELITE" : "PREMIUM") + '","direction":"LONG","symbol":"' + syminfo.ticker + '","price":' + priceStr + ',"qty":' + qtyStr + ',"tp":' + tpStr + ',"sl":' + slStr + ',"rr":' + str.tostring(rrVal) + ',"strategy":"OPTIMAL_Elite_Fusion_v1.8_LITE_r4","timeframe":"' + labelTimeframe + '","score":' + str.tostring(bullScore) + ',"time":' + str.tostring(time) + ',"chart_id":"' + chart_id + '","atr":' + str.tostring(atrAtEntry, format.mintick) + ',"adx":' + str.tostring(adx) + ',"pattern":"' + patternLong + '","rsi":' + str.tostring(rsi) + ',"rsi_slope":' + str.tostring(rsiSlope) + ',"tv_chart_url":"' + tv_chart_url + '","tv_placeholders":{"ticker":"{{ticker}}","interval":"{{interval}}","time":"{{time}}","open":"{{open}}","high":"{{high}}","low":"{{low}}","close":"{{close}}"},"img_hint":"Enable screenshot in UI to receive screenshot_url"}'
+    alert(json_entry_long, alert.freq_once_per_bar_close)
+    if showAlertStamps
+        label.new(bar_index, high, "ENTRY LONG", style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white)
+
+if entry_timing_ok(posChangedToShort)
+    rrVal    = tpMultiplier / slMultiplier
+    priceStr = str.tostring(strategy.position_avg_price, format.mintick)
+    tpStr    = str.tostring(strategy.position_avg_price - tpMultiplier * atrAtEntry * volFactor, format.mintick)
+    slStr    = str.tostring(shortStopInit, format.mintick)
+    qtyStr   = str.tostring(pos)
+    json_entry_short = '{"event":"ENTRY","tier":"' + (eliteBear ? "ELITE" : "PREMIUM") + '","direction":"SHORT","symbol":"' + syminfo.ticker + '","price":' + priceStr + ',"qty":' + qtyStr + ',"tp":' + tpStr + ',"sl":' + slStr + ',"rr":' + str.tostring(rrVal) + ',"strategy":"OPTIMAL_Elite_Fusion_v1.8_LITE_r4","timeframe":"' + labelTimeframe + '","score":' + str.tostring(bearScore) + ',"time":' + str.tostring(time) + ',"chart_id":"' + chart_id + '","atr":' + str.tostring(atrAtEntry, format.mintick) + ',"adx":' + str.tostring(adx) + ',"pattern":"' + patternShort + '","rsi":' + str.tostring(rsi) + ',"rsi_slope":' + str.tostring(rsiSlope) + ',"tv_chart_url":"' + tv_chart_url + '","tv_placeholders":{"ticker":"{{ticker}}","interval":"{{interval}}","time":"{{time}}","open":"{{open}}","high":"{{high}}","low":"{{low}}","close":"{{close}}"},"img_hint":"Enable screenshot in UI to receive screenshot_url"}'
+    alert(json_entry_short, alert.freq_once_per_bar_close)
+    if showAlertStamps
+        label.new(bar_index, low, "ENTRY SHORT", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white)
+
+if entry_timing_ok(posClosed)
+    exitStr = str.tostring(close, format.mintick)
+    json_exit = '{"event":"EXIT","symbol":"' + syminfo.ticker + '","exit_price":' + exitStr + ',"strategy":"OPTIMAL_Elite_Fusion_v1.8_LITE_r4","timeframe":"' + labelTimeframe + '","time":' + str.tostring(time) + ',"chart_id":"' + chart_id + ',"final_atr":' + str.tostring(atr, format.mintick) + ',"tv_chart_url":"' + tv_chart_url + '","tv_placeholders":{"ticker":"{{ticker}}","interval":"{{interval}}","time":"{{time}}","close":"{{close}}"},"img_hint":"Enable screenshot in UI to receive screenshot_url"}'
+    alert(json_exit, alert.freq_once_per_bar_close)
+    if showAlertStamps
+        label.new(bar_index, close, "EXIT", style=label.style_label_left, color=color.new(color.gray, 0), textcolor=color.white)
+
+// ==========================
+// SIGNALS (optional) & DEBUG
+// ==========================
+eliteBullNow    = eliteBull   and not eliteBull[1]
+eliteBearNow    = eliteBear   and not eliteBear[1]
+premiumBullNow  = premiumBull and not premiumBull[1]
+premiumBearNow  = premiumBear and not premiumBear[1]
+
+alertOnSignals  = input.bool(true, "Send Alerts on Chart Signals (ELITE/PREMIUM)", inline="s1")
+signalsAtClose  = input.bool(true, "Only on Bar Close", inline="s1")
+
+signalGate(cond) =>
+    signalsAtClose ? (barstate.isconfirmed and cond) : cond
+
+if signalGate(eliteBullNow) and alertOnSignals
+    alert('{"event":"SIGNAL","tier":"ELITE","direction":"LONG","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, format.mintick) + ',"score":' + str.tostring(bullScore) + ',"time":' + str.tostring(time) + ',"tf":"' + labelTimeframe + '","pattern":"' + patternLong + '","tv_chart_url":"' + tv_chart_url + '","tv_placeholders":{"ticker":"{{ticker}}","interval":"{{interval}}","time":"{{time}}","close":"{{close}}"},"img_hint":"Enable screenshot in UI to receive screenshot_url"}', alert.freq_once_per_bar_close)
+
+if signalGate(premiumBullNow) and alertOnSignals
+    alert('{"event":"SIGNAL","tier":"PREMIUM","direction":"LONG","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, format.mintick) + ',"score":' + str.tostring(bullScore) + ',"time":' + str.tostring(time) + ',"tf":"' + labelTimeframe + '","pattern":"' + patternLong + '","tv_chart_url":"' + tv_chart_url + '","tv_placeholders":{"ticker":"{{ticker}}","interval":"{{interval}}","time":"{{time}}","close":"{{close}}"},"img_hint":"Enable screenshot in UI to receive screenshot_url"}', alert.freq_once_per_bar_close)
+
+if signalGate(eliteBearNow) and alertOnSignals
+    alert('{"event":"SIGNAL","tier":"ELITE","direction":"SHORT","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, format.mintick) + ',"score":' + str.tostring(bearScore) + ',"time":' + str.tostring(time) + ',"tf":"' + labelTimeframe + '","pattern":"' + patternShort + '","tv_chart_url":"' + tv_chart_url + '","tv_placeholders":{"ticker":"{{ticker}}","interval":"{{interval}}","time":"{{time}}","close":"{{close}}"},"img_hint":"Enable screenshot in UI to receive screenshot_url"}', alert.freq_once_per_bar_close)
+
+if signalGate(premiumBearNow) and alertOnSignals
+    alert('{"event":"SIGNAL","tier":"PREMIUM","direction":"SHORT","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, format.mintick) + ',"score":' + str.tostring(bearScore) + ',"time":' + str.tostring(time) + ',"tf":"' + labelTimeframe + '","pattern":"' + patternShort + '","tv_chart_url":"' + tv_chart_url + '","tv_placeholders":{"ticker":"{{ticker}}","interval":"{{interval}}","time":"{{time}}","close":"{{close}}"},"img_hint":"Enable screenshot in UI to receive screenshot_url"}', alert.freq_once_per_bar_close)
+
+// DEBUG markers
+plotchar(debugGates and canLong,  title="Can Long",  char='L', location=location.bottom, color=color.new(color.lime, 0))
+plotchar(debugGates and canShort, title="Can Short", char='S', location=location.bottom, color=color.new(color.red,  0))
+
+// ==========================
+// VISUALS
+// ==========================
+plot(emaDyn, "Dynamic EMA", color=color.new(color.blue, 0))
+plot(stPrimLine, "ST Primary", color=color.new(color.teal, 0))
+plot(stConfLine, "ST Confirm", color=color.new(color.orange, 0))
+
+plotshape(eliteBull,  title="ELITE BUY",  location=location.belowbar, color=color.green, style=shape.labelup,   text="🏆 BUY")
+plotshape(eliteBear,  title="ELITE SELL", location=location.abovebar, color=color.red,   style=shape.labeldown, text="🏆 SELL")
+plotshape(premiumBull,title="PREMIUM BUY",location=location.belowbar, color=color.lime,  style=shape.triangleup,   text="💎")
+plotshape(premiumBear,title="PREMIUM SELL",location=location.abovebar, color=color.orange,style=shape.triangledown, text="💎")
+
+bgcolor(limitToHighLiquidity and asiaOK ? color.new(color.yellow, 95) : na, title="Asia Session")
+bgcolor(limitToHighLiquidity and usOK   ? color.new(color.blue, 95)   : na, title="US Session")
+bgcolor(useChopFilter and isChop ? color.new(color.gray, 88) : na, title="Chop Filter")
+
+bgcolor(useRSIFilter and rsiInMidBand ? color.new(color.purple, 92) : na, title="RSI Mid-Band")
+plotshape(useRSIFilter and rsiBreakLong,  title="RSI Break Long",  location=location.belowbar, style=shape.circle, color=color.new(color.lime, 0), size=size.tiny, text="RSI⇧")
+plotshape(useRSIFilter and rsiBreakShort, title="RSI Break Short", location=location.abovebar, style=shape.circle, color=color.new(color.red,  0), size=size.tiny, text="RSI⇩")
+
+plot(useSR and srHighValid ? srHighLevel : na, title="SR High (cluster)", color=color.new(color.fuchsia, 0), linewidth=2)
+plot(useSR and srLowValid  ? srLowLevel  : na, title="SR Low (cluster)",  color=color.new(color.fuchsia, 0), linewidth=2)
+
+plot(strategy.position_size > 0 and not na(longStop) ? longStop : na,  title="Long Stop",  color=color.new(color.red, 0), linewidth=2)
+plot(strategy.position_size < 0 and not na(shortStop) ? shortStop : na, title="Short Stop", color=color.new(color.red, 0), linewidth=2)
+
+View in Pine Editor・548 lines
+Use on chart
+3
+8
+1 681
+super trend tripple confirm for leverage. Ai implemented for higher r:r still a work in progresss

@@ -1,0 +1,104 @@
+//@version=5
+strategy("Larry Connors %b Strategy (Bollinger Band)", overlay=false)
+
+// Parameters for moving averages and Bollinger Bands
+sma200 = ta.sma(close, 200)
+length = 20  // Bollinger Band period
+src = close  // Source for Bollinger Bands
+mult = 2.0   // Bollinger Band standard deviation multiplier
+
+// Calculate Bollinger Bands and %b
+basis = ta.sma(src, length)
+dev = ta.stdev(src, length)
+upperBand = basis + mult * dev
+lowerBand = basis - mult * dev
+percentB = (close - lowerBand) / (upperBand - lowerBand)
+
+// Conditions for the strategy
+condition1 = close > sma200  // Condition 1: Close is above the 200-day moving average
+
+// %b must be below 0.2 for the last three consecutive days
+condition2 = percentB[2] < 0.2 and percentB[1] < 0.2 and percentB < 0.2
+
+// Combined buy condition
+buyCondition = condition1 and condition2
+
+// Sell condition: %b closes above 0.8
+sellCondition = percentB > 0.8
+
+// Execute buy signal when buy condition is met
+if buyCondition
+    strategy.entry("Buy", strategy.long)
+
+// Execute sell signal when the sell condition is met
+if sellCondition
+    strategy.close("Buy")
+
+// Plotting Bollinger Bands
+plot(upperBand, color=color.new(color.rgb(255, 0, 0), 50), title="Upper Bollinger Band")  // Red color with 50% transparency
+plot(lowerBand, color=color.new(color.rgb(0, 255, 0), 50), title="Lower Bollinger Band")  // Green color with 50% transparency
+plot(basis, color=color.rgb(0, 0, 255), title="Middle Bollinger Band")  // Blue color
+
+// Plot %b value for visual confirmation
+plot(percentB, color=color.rgb(128, 0, 128), linewidth=2, title="%b Value")  // Purple color
+
+// Additional lines to improve visualization
+hline(0.2, "Oversold (0.2)", color=color.rgb(255, 165, 0), linestyle=hline.style_dashed)  // Orange dashed line at 0.2
+hline(0.8, "Overbought (0.8)", color=color.rgb(255, 105, 180), linestyle=hline.style_dashed)  // Pink dashed line at 0.8
+
+// Set background color when a position is open
+bgcolor(strategy.opentrades > 0 ? color.new(color.green, 50) : na)
+
+View in Pine Editor・53 lines
+Use on chart
+9
+7
+1
+3 148
+Larry Connors’ %b Strategy is a mean-reversion trading approach that uses Bollinger Bands to identify buy and sell signals based on the %b indicator. This strategy was developed by Larry Connors, a renowned trader and author known for his systematic, data-driven trading methods, particularly those focusing on short-term mean reversion.
+
+The %b indicator measures the position of the current price relative to the Bollinger Bands, which are volatility bands placed above and below a moving average. The strategy specifically targets times when prices are oversold within a long-term uptrend and aims to capture rebounds by buying at relatively low points and selling at relatively high points.
+
+Strategy Rules
+
+The basic rules of the %b Strategy are:
+
+1. Trend Confirmation: The closing price must be above the 200-day moving average. This filter ensures that trades are made in alignment with a longer-term uptrend, thereby avoiding trades against the primary market trend.
+
+2. Oversold Conditions: The %b indicator must be below 0.2 for three consecutive days. The %b value below 0.2 indicates that the price is near the lower Bollinger Band, suggesting an oversold condition.
+
+3. Entry Signal: Enter a long position at the close when conditions 1 and 2 are met.
+
+4. Exit Signal: Exit the position when the %b value closes above 0.8, signaling an overbought condition where the price is near the upper Bollinger Band.
+
+How the Strategy Works
+
+This strategy operates on the premise of mean reversion, which suggests that extreme price movements will revert to the mean over time. By entering positions when the %b value indicates an oversold condition (below 0.2) in a confirmed uptrend, the strategy attempts to capture short-term price rebounds. The exit rule (when %b is above 0.8) aims to lock in profits once the price reaches an overbought condition, often near the upper Bollinger Band.
+
+Who Was Larry Connors?
+
+Larry Connors is a well-known figure in the world of financial markets and trading. He co-authored several influential trading books, including “Short-Term Trading Strategies That Work” and “High Probability ETF Trading.” Connors is recognized for his quantitative approach, focusing on systematic, rules-based strategies that leverage historical data to validate trading edges.
+
+His work primarily revolves around short-term trading strategies, often using technical indicators like RSI (Relative Strength Index), Bollinger Bands, and moving averages. Connors’ methodologies have been widely adopted by traders seeking structured approaches to exploit short-term inefficiencies in the market.
+
+Risks of the Strategy
+
+While the %b Strategy can be effective, particularly in mean-reverting markets, it is not without risks:
+
+1. Mean Reversion Assumption: The strategy is based on the assumption that prices will revert to the mean. In trending or sharply falling markets, this reversion may not occur, leading to sustained losses.
+
+2. False Signals in Choppy Markets: In volatile or sideways markets, the strategy may generate multiple false signals, resulting in whipsaw trades that can erode capital through frequent small losses.
+
+3. No Stop Loss: The basic implementation of the strategy does not include a stop loss, which increases the risk of holding losing trades longer than intended, especially if the market continues to move against the position.
+
+4. Performance During Market Crashes: During major market downturns, the strategy’s buy signals could be triggered frequently as prices decline, compounding losses without the presence of a risk management mechanism.
+
+Scientific References and Theoretical Basis
+
+The %b Strategy relies on the concept of mean reversion, which has been extensively studied in finance literature. Studies by Avellaneda and Lee (2010) and Bouchaud et al. (2018) have demonstrated that mean-reverting strategies can be profitable in specific market environments, particularly when combined with volatility filters like Bollinger Bands. However, the same studies caution that such strategies are highly sensitive to market conditions and often perform poorly during periods of prolonged trends.
+
+Bollinger Bands themselves were popularized by John Bollinger and are widely used to assess price volatility and detect potential overbought and oversold conditions. The %b value is a critical part of this analysis, as it standardizes the position of price relative to the bands, making it easier to compare conditions across different securities and time frames.
+
+Conclusion
+
+Larry Connors’ %b Strategy is a well-known mean-reversion technique that leverages Bollinger Bands to identify buying opportunities in uptrending markets when prices are temporarily oversold. While the strategy can be effective under the right conditions, traders should be aware of its limitations and risks, particularly in trending or highly volatile markets. Incorporating risk management techniques, such as stop losses, could help mitigate some of these risks, making the strategy more robust against adverse market conditions.

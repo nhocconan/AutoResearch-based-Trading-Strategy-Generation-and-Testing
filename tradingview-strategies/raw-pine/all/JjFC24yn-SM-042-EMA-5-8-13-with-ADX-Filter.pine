@@ -1,0 +1,76 @@
+//@version=5
+strategy("[SM-042] EMA 5-8-13 with ADX Filter", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=1000, currency=currency.USD, commission_type=strategy.commission.percent)
+
+// === INPUTS ===
+enableLong     = input.bool(true,  title="Enable Long Trades")
+enableShort    = input.bool(true,  title="Enable Short Trades")
+useAdxFilter   = input.bool(false,  title="Use ADX Filter")
+adxThreshold   = input.int(20,     title="ADX Threshold")
+
+// === EMA CALCULATIONS ===
+ema5  = ta.ema(close, 5)
+ema8  = ta.ema(close, 8)
+ema13 = ta.ema(close, 13)
+
+// === ADX FILTER ===
+[plusDI, minusDI, adxValue] = ta.dmi(14, 14)
+adxCondition = adxValue > adxThreshold
+
+// === ENTRY CONDITIONS ===
+longCondition  = ta.crossover(ema5, ema8)  and enableLong  and (not useAdxFilter or adxCondition)
+shortCondition = ta.crossunder(ema5, ema8) and enableShort and (not useAdxFilter or adxCondition)
+
+// === EXIT CONDITIONS ===
+longExit  = close < ema13
+shortExit = close > ema13
+
+// === STRATEGY EXECUTION ===
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+if (strategy.position_size > 0 and longExit)
+    strategy.close("Long")
+
+if (strategy.position_size < 0 and shortExit)
+    strategy.close("Short")
+
+// === PLOTTING ===
+plot(ema5,  title="EMA 5",  color=color.blue)
+plot(ema8,  title="EMA 8",  color=color.yellow)
+plot(ema13, title="EMA 13", color=color.purple)
+
+hline(adxThreshold, "ADX Threshold", color=color.gray, linestyle=hline.style_dotted)
+plot(adxValue, title="ADX", color=color.orange)
+
+View in Pine Editor・49 lines
+Use on chart
+3
+9
+1 755
+What is the strategy?
+The strategy combines three exponential moving averages (EMAs) — 5, 8, and 13 periods — with an optional ADX (Average Directional Index) filter. It is designed to enter long or short positions based on EMA crossovers and to exit positions when the price crosses a specific EMA. The ADX filter, if enabled, adds a condition that only allows trades when the ADX value is above a certain threshold, indicating trend strength.
+
+Who is it for?
+This strategy is for traders leveraging EMAs and trend strength indicators to make trade decisions. It can be used by anyone looking for a simple trend-following strategy, with the flexibility to adjust for trend strength using the ADX filter.
+
+When is it used?
+- **Long trades**: When the 5-period EMA crosses above the 8-period EMA, with an optional ADX condition (if enabled) that requires the ADX value to be above a specified threshold.
+- **Short trades**: When the 5-period EMA crosses below the 8-period EMA, with the ADX filter again optional.
+- **Exits**: The strategy exits a long position when the price falls below the 13-period EMA and exits a short position when the price rises above the 13-period EMA.
+
+Where is it applied?
+This strategy is applied on a chart with any asset on TradingView, with the EMAs and ADX plotted for visual reference. The strategy uses `strategy.entry` to open positions and `strategy.close` to close them based on the set conditions.
+
+Why is it useful?
+This strategy helps traders identify trending conditions and filter out potential false signals by using both EMAs (to capture short-term price movements) and the ADX (to confirm the strength of the trend). The ADX filter can be turned off if not desired, making the strategy flexible for both trending and range-bound markets.
+
+How does it work?
+- **EMA Crossover**: The strategy enters a long position when the 5-period EMA crosses above the 8-period EMA, and enters a short position when the 5-period EMA crosses below the 8-period EMA.
+- **ADX Filter**: If enabled, the strategy checks whether the ADX value is above a set threshold (default is 20) before allowing a trade.
+- **Exit Conditions**: Long positions are closed when the price falls below the 13-period EMA, and short positions are closed when the price rises above the 13-period EMA.
+- **Plotting**: The strategy plots the three EMAs and the ADX value on the chart for visualization. It also displays a horizontal line at the ADX threshold.
+
+This setup allows for clear decision-making based on the interaction between different time-frame EMAs and trend strength as indicated by ADX.

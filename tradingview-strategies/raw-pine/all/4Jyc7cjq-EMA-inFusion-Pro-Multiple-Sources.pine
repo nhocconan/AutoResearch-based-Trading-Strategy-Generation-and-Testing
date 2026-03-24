@@ -1,0 +1,332 @@
+//@version=5
+//@fenyesk
+strategy("EMA inFusion Pro - Source Selection", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// =============================================
+// === INPUT PARAMETERS =======================
+// =============================================
+
+// Moving Average Source Selection
+maSourceSelection = input.string("Price", "Moving Average Source", 
+  options=["Price", "Volume", "Rate of Change", "Heikin Ashi Price", "Heikin Ashi Volume", "Heikin Ashi Rate of Change"],
+  tooltip="Select data source for EMA calculation")
+
+// EMA Settings
+emaLength = input.int(50, title="EMA Length", minval=1, maxval=200)
+rocLength = input.int(1, title="Rate of Change Length", minval=1, maxval=50, tooltip="Length for ROC calculation")
+
+// ADX Filter Settings
+useAdxFilter = input.bool(true, title="Use ADX Filter", group="ADX Settings")
+adxLength = input.int(14, title="ADX Length", minval=1, maxval=50, group="ADX Settings")
+adxThreshold = input.float(25, title="ADX Threshold", minval=10, maxval=50, step=0.5, group="ADX Settings")
+
+// Volume Spike Settings
+useVolumeFilter = input.bool(true, title="Use Volume Spike Filter", group="Volume Settings")
+volumeMultiplier = input.float(1.0, title="Volume Spike Multiplier", minval=1.0, maxval=5.0, step=0.1, group="Volume Settings")
+volumeSmaLength = input.int(20, title="Volume SMA Length", minval=5, maxval=100, group="Volume Settings")
+
+// Trading Exit Mode Selector
+tradingMode = input.int(2, title="Trading Exit Mode", minval=1, maxval=3, 
+  tooltip="1: Exit on reverse signal\n2: ATR based TP/SL\n3: Percent based TP/SL", 
+  group="Exit Strategy")
+
+// Mode 3: Percent-Based Settings
+takeProfitPercent = input.float(2.0, title="Take Profit %", minval=0.1, maxval=10.0, step=0.1, group="Percent Exit")
+stopLossPercent = input.float(1.5, title="Stop Loss %", minval=0.1, maxval=10.0, step=0.1, group="Percent Exit")
+
+// Mode 2: ATR-Based Settings
+atrLength = input.int(14, title="ATR Length", minval=1, maxval=50, group="ATR Exit")
+atrMultiplierTp = input.float(4.0, title="ATR Take Profit Multiplier", minval=0.1, maxval=10.0, step=0.1, group="ATR Exit")
+atrMultiplierSl = input.float(4.0, title="ATR Stop Loss Multiplier", minval=0.1, maxval=10.0, step=0.1, group="ATR Exit")
+
+// =============================================
+// === SOURCE CALCULATIONS ====================
+// =============================================
+
+// Rate of Change calculation
+roc(src, length) =>
+    change = src - src[length]
+    src[length] != 0 ? (change / src[length] * 100) : 0
+
+// Standard Rate of Change
+rocPrice = roc(close, rocLength)
+rocVolume = roc(volume, rocLength)
+
+// Heikin Ashi calculations
+haClose = (open + high + low + close) / 4
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+haHigh = math.max(high, math.max(haOpen, haClose))
+haLow = math.min(low, math.min(haOpen, haClose))
+
+// Heikin Ashi Rate of Change
+haRocPrice = roc(haClose, rocLength)
+haRocVolume = roc(volume, rocLength)  // Volume remains same for HA
+
+// Define EMA source based on selection
+emaSource = switch maSourceSelection
+    "Price" => close
+    "Volume" => volume
+    "Rate of Change" => rocPrice
+    "Heikin Ashi Price" => haClose
+    "Heikin Ashi Volume" => volume  // Volume doesn't change in HA
+    "Heikin Ashi Rate of Change" => haRocPrice
+    => close  // Default fallback
+
+// =============================================
+// === INDICATOR CALCULATIONS =================
+// =============================================
+
+// Core Indicators
+emaValue = ta.ema(emaSource, emaLength)
+[diPlus, diMinus, adx] = ta.dmi(adxLength, adxLength)
+volumeSma = ta.sma(volume, volumeSmaLength)
+volumeSpike = volume > (volumeSma * volumeMultiplier)
+atrValue = ta.atr(atrLength)
+
+// Trend Conditions (adjusted for different source types)
+bullishTrend = switch maSourceSelection
+    "Price" => close > emaValue
+    "Heikin Ashi Price" => haClose > emaValue
+    "Volume" => volume > emaValue
+    "Heikin Ashi Volume" => volume > emaValue
+    "Rate of Change" => rocPrice > emaValue
+    "Heikin Ashi Rate of Change" => haRocPrice > emaValue
+    => close > emaValue
+
+bearishTrend = not bullishTrend
+
+// Cross conditions (adjusted for source type)
+emaCrossUp = switch maSourceSelection
+    "Price" => ta.crossover(close, emaValue)
+    "Heikin Ashi Price" => ta.crossover(haClose, emaValue)
+    "Volume" => ta.crossover(volume, emaValue)
+    "Heikin Ashi Volume" => ta.crossover(volume, emaValue)
+    "Rate of Change" => ta.crossover(rocPrice, emaValue)
+    "Heikin Ashi Rate of Change" => ta.crossover(haRocPrice, emaValue)
+    => ta.crossover(close, emaValue)
+
+emaCrossDown = switch maSourceSelection
+    "Price" => ta.crossunder(close, emaValue)
+    "Heikin Ashi Price" => ta.crossunder(haClose, emaValue)
+    "Volume" => ta.crossunder(volume, emaValue)
+    "Heikin Ashi Volume" => ta.crossunder(volume, emaValue)
+    "Rate of Change" => ta.crossunder(rocPrice, emaValue)
+    "Heikin Ashi Rate of Change" => ta.crossunder(haRocPrice, emaValue)
+    => ta.crossunder(close, emaValue)
+
+// Filters
+strongTrend = useAdxFilter ? adx >= adxThreshold : true
+volumeConfirm = useVolumeFilter ? volumeSpike : true
+
+// Entry Signals
+longCondition = emaCrossUp and strongTrend and volumeConfirm
+shortCondition = emaCrossDown and strongTrend and volumeConfirm
+
+// =============================================
+// === STRATEGY EXECUTION WITH EXIT MODES =====
+// =============================================
+
+// MODE 1: EXIT ON REVERSE SIGNAL
+if (tradingMode == 1)
+    if (longCondition)
+        strategy.entry("Long", strategy.long)
+        strategy.close("Short")
+    if (shortCondition)
+        strategy.entry("Short", strategy.short)
+        strategy.close("Long")
+
+// MODE 2: ATR-BASED TAKE PROFIT & STOP LOSS
+else if (tradingMode == 2)
+    if (longCondition)
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long TP/SL", "Long", 
+          profit=atrMultiplierTp * atrValue / syminfo.mintick, 
+          loss=atrMultiplierSl * atrValue / syminfo.mintick)
+    
+    if (shortCondition)
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Short TP/SL", "Short", 
+          profit=atrMultiplierTp * atrValue / syminfo.mintick, 
+          loss=atrMultiplierSl * atrValue / syminfo.mintick)
+
+// MODE 3: PERCENT-BASED TAKE PROFIT & STOP LOSS
+else if (tradingMode == 3)
+    if (longCondition)
+        longTpPrice = close * (1 + takeProfitPercent / 100)
+        longSlPrice = close * (1 - stopLossPercent / 100)
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long TP/SL", "Long", limit=longTpPrice, stop=longSlPrice)
+    
+    if (shortCondition)
+        shortTpPrice = close * (1 - takeProfitPercent / 100)
+        shortSlPrice = close * (1 + stopLossPercent / 100)
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Short TP/SL", "Short", limit=shortTpPrice, stop=shortSlPrice)
+
+// =============================================
+// === VISUALIZATIONS =========================
+// =============================================
+
+// Plot EMA with dynamic color based on source type
+emaColor = switch maSourceSelection
+    "Price" => color.blue
+    "Volume" => color.orange
+    "Rate of Change" => color.purple
+    "Heikin Ashi Price" => color.green
+    "Heikin Ashi Volume" => color.red
+    "Heikin Ashi Rate of Change" => color.maroon
+    => color.blue
+
+plot(emaValue, title="EMA", color=emaColor, linewidth=2)
+
+// Plot source data for reference (in separate pane when not price-based)
+sourceColor = maSourceSelection == "Price" or maSourceSelection == "Heikin Ashi Price" ? na : color.gray
+plot(str.contains(maSourceSelection, "Price") ? na : emaSource, title="Source Data", color=sourceColor, display=display.data_window)
+
+// Background color based on trend
+bgcolor(bullishTrend ? color.new(color.green, 95) : color.new(color.red, 95), title="Trend Background")
+
+// Entry signals
+plotshape(longCondition, title="Long Signal", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(shortCondition, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+// Volume spikes
+plotchar(useVolumeFilter and volumeSpike, title="Volume Spike", char="V", location=location.bottom, color=color.orange, size=size.tiny)
+
+// ATR-based levels for Mode 2
+plot(tradingMode == 2 and strategy.position_size > 0 ? strategy.position_avg_price + (atrMultiplierTp * atrValue) : na, 
+  title="Long TP Level", color=color.green, style=plot.style_circles, linewidth=1)
+plot(tradingMode == 2 and strategy.position_size > 0 ? strategy.position_avg_price - (atrMultiplierSl * atrValue) : na, 
+  title="Long SL Level", color=color.red, style=plot.style_circles, linewidth=1)
+plot(tradingMode == 2 and strategy.position_size < 0 ? strategy.position_avg_price - (atrMultiplierTp * atrValue) : na, 
+  title="Short TP Level", color=color.green, style=plot.style_circles, linewidth=1)
+plot(tradingMode == 2 and strategy.position_size < 0 ? strategy.position_avg_price + (atrMultiplierSl * atrValue) : na, 
+  title="Short SL Level", color=color.red, style=plot.style_circles, linewidth=1)
+
+// =============================================
+// === INFO PANEL =============================
+// =============================================
+
+var table infoTable = table.new(position.top_right, 2, 9, bgcolor=color.white, border_width=1)
+
+if barstate.islast
+    // Trading mode display
+    modeText = tradingMode == 1 ? "Reverse Signal" : tradingMode == 2 ? "ATR Based" : "Percent Based"
+    
+    table.cell(infoTable, 0, 0, "MA Source", text_color=color.black, bgcolor=color.yellow)
+    table.cell(infoTable, 1, 0, maSourceSelection, text_color=color.black, bgcolor=color.yellow)
+    
+    table.cell(infoTable, 0, 1, "Exit Mode", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 1, modeText, text_color=color.black)
+    
+    table.cell(infoTable, 0, 2, "EMA Value", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 2, str.tostring(emaValue, "#.####"), text_color=color.black)
+    
+    table.cell(infoTable, 0, 3, "Source Value", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 3, str.tostring(emaSource, "#.####"), text_color=color.black)
+    
+    table.cell(infoTable, 0, 4, "ADX", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 4, str.tostring(adx, "#.##"), text_color=color.black)
+    
+    table.cell(infoTable, 0, 5, "Volume Spike", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 5, volumeSpike ? "YES" : "NO", text_color=volumeSpike ? color.green : color.red)
+    
+    table.cell(infoTable, 0, 6, "Trend", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 6, bullishTrend ? "BULL" : "BEAR", text_color=bullishTrend ? color.green : color.red)
+    
+    table.cell(infoTable, 0, 7, "Position", text_color=color.black, bgcolor=color.gray)
+    posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "NONE"
+    posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(infoTable, 1, 7, posText, text_color=posColor)
+    
+    // Exit parameters based on mode
+    if tradingMode == 2
+        table.cell(infoTable, 0, 8, "TP/SL ATR", text_color=color.black, bgcolor=color.gray)
+        table.cell(infoTable, 1, 8, str.tostring(atrMultiplierTp, "#.#") + "/" + str.tostring(atrMultiplierSl, "#.#"), text_color=color.black)
+    else if tradingMode == 3
+        table.cell(infoTable, 0, 8, "TP/SL %", text_color=color.black, bgcolor=color.gray)
+        table.cell(infoTable, 1, 8, str.tostring(takeProfitPercent, "#.#") + "/" + str.tostring(stopLossPercent, "#.#"), text_color=color.black)
+    else
+        table.cell(infoTable, 0, 8, "Exit Rule", text_color=color.black, bgcolor=color.gray)
+        table.cell(infoTable, 1, 8, "Reverse Signal", text_color=color.black)
+
+// Alert conditions
+alertcondition(longCondition, title="Long Entry", message="EMA Fusion Pro: Long entry signal")
+alertcondition(shortCondition, title="Short Entry", message="EMA Fusion Pro: Short entry signal")
+
+View in Pine Editor・256 lines
+Use on chart
+2
+4
+1
+944
+EMA Fusion Pro: Dynamic Trend & Momentum Strategy with Three Exit Modes
+EMA Fusion Pro is a highly customizable, multi-exit trend-following strategy designed for traders who value both precision and flexibility. By leveraging exponential moving averages (EMA), average directional index (ADX), and volume analysis, this strategy aims to capture trending market moves while offering three distinct exit modes for optimal risk management across varying market conditions.
+
+Strategy Overview
+This strategy systematically identifies potential entry points using a moving average crossover with highly configurable data sources (including price, volume, rate of change, or their Heikin Ashi versions) and filters signal quality with ADX trend strength and volume spikes. Each trade is managed with one of three advanced exit methodologies—reverse signal, ATR-based stop/take profit, or fixed percentage—giving you the control to adapt your risk profile to different market regimes.
+
+Key Features
+Customizable EMA Source: Calculate the core trend-filtering EMA from price (default), volume, rate of change, or their Heikin Ashi counterparts for unique market perspectives.
+
+Trend Filter with ADX: Confirm entries only when the trend is strong, as measured by the user-adjustable ADX threshold.
+
+Volume Spike Confirmation: Optional filter to only take trades with above-average volume activity, reducing false signals.
+
+Three Exit Modes:
+
+Reverse Signal: Exit trades when a new, opposite entry signal occurs.
+
+ATR-Based Stop/Take Profit: Dynamic risk management using multiples of the average true range (ATR) for both take profit and stop loss.
+
+Percent-Based Stop/Take Profit: Fixed-percentage risk management with user-defined thresholds.
+
+Visual Annotations: Signal markers, EMA line color-coded by source, trend background coloring, and optional ATR/percent-based TP/SL levels.
+
+Info Panel: Real-time display of all core indicators, current trading mode, exit parameters, and position status for quick oversight.
+
+How It Works
+Entry Logic: A crossover signal (above/below the EMA) triggers a new entry, but only if both ADX trend strength and (optionally) volume spike conditions are met.
+
+Exit Logic: Three selectable modes allow you to exit trades on reverse signals, at a dynamic ATR-based profit or loss, or at a fixed percentage gain/loss.
+
+Flexible Data Analysis: The EMA source can be chosen from six options—standard price, volume, rate of change, or their Heikin Ashi variants—allowing experimentation with different market dimensions.
+
+Risk Management: All exits are precisely controlled, either by the next opposing signal, by volatility-adjusted levels, or by fixed risk/reward ratios.
+
+Backtest & Optimization: The strategy is fully backtestable within TradingView’s Strategy Tester, with adjustable parameters for optimization.
+
+Customization & Usage
+Indicator Source: Select your preferred data type for EMA calculation, opening the door to creative strategy variations (e.g., volume momentum, pure price trend, rate of change divergence).
+
+Filter Toggles: Enable/disable ADX and volume filters as desired—useful for different market environments.
+
+Exit Mode Selection: Switch between reverse, ATR, or percent-based exits with a single parameter—ideal for adapting to ranging vs. trending markets.
+
+Visual Clarity: The EMA line color reflects its underlying source, and the info panel summarizes all critical values for easy monitoring.
+
+Who Should Use This Strategy?
+Trend Followers seeking to ride strong moves with multiple exit options.
+
+Experienced Traders who want to experiment with different data types (volume, momentum, Heikin Ashi) for trend analysis.
+
+Algorithmic Traders looking for a robust, flexible base to build upon with their own ideas.
+
+Getting Started
+Apply the script to your chart and review default settings.
+
+Customize parameters—EMA length, ADX threshold, volume settings, exit type—as desired.
+
+Backtest on multiple instruments and timeframes to evaluate performance.
+
+Optimize filters, exit rules, and risk parameters for your preferred trading style.
+
+Monitor with the real-time info panel and trade alerts.
+
+Disclaimer
+This script is for educational and entertainment purposes only. It is not financial advice. Past performance is not indicative of future results. Always conduct thorough testing and consider your risk tolerance before trading real capital.
+
+— Happy Trading —
+Feel free to adapt, share, and contribute to this open-source strategy!
+

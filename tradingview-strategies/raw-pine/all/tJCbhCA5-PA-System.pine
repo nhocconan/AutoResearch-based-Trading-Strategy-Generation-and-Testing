@@ -1,0 +1,506 @@
+//@version=6
+strategy("PA System (V1.1) - MultiMarket + Trendlines",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.fixed,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     slippage=2,
+     max_bars_back=500,
+     max_lines_count=500)
+
+// =====================================================
+// Inputs
+// =====================================================
+// --- Structure
+swingLength   = input.int(5,  "Swing Length（摆动长度）", minval=2, group="结构 Structure")
+trendBars     = input.int(3,  "Trend Confirm Bars（趋势确认根数）", minval=2, group="结构 Structure")
+stateDebounce = input.int(2,  "State Debounce（状态防抖根数）", minval=1, group="结构 Structure")
+channelATR    = input.float(2.0,"Channel ATR Mult（通道阈值 ATR倍数）", group="结构 Structure")
+
+// --- BoS / CHoCH
+useBosChoch        = input.bool(true,  "Enable BoS/CHoCH（启用结构突破）", group="结构 BoS/CHoCH")
+bosUseCloseOnly    = input.bool(true,  "Break uses Close（仅收盘确认破位）", group="结构 BoS/CHoCH")
+showBosChochLines  = input.bool(true,  "Show BoS/CHoCH Lines（画破位线）", group="结构 BoS/CHoCH")
+showBosChochLabels = input.bool(true,  "Show BoS/CHoCH Labels（标注BoS/CHoCH）", group="结构 BoS/CHoCH")
+breakLookbackBars  = input.int(40,     "Break Valid Lookback（破位有效窗口bars）", minval=5, maxval=300, group="结构 BoS/CHoCH")
+useBreakFilter     = input.bool(false, "Use Break Filter for Entries（入场需近期同向破位）", group="结构 BoS/CHoCH")
+
+// --- Signals
+enableH2        = input.bool(true, "Enable H2 Longs（启用H2做多）", group="信号 Signals")
+enableL2        = input.bool(true, "Enable L2 Shorts（启用L2做空）", group="信号 Signals")
+requirePullback = input.bool(true, "Require HH/HL or LH/LL（必须结构回调）", group="信号 Signals")
+
+// --- Signals V2
+useMicroBreakout    = input.bool(true, "Use Micro Range Breakout（微平台突破触发）", group="信号 V2")
+microLen            = input.int(3, "Micro Range Length（微平台长度）", minval=2, maxval=10, group="信号 V2")
+minWaitAfterH1L1    = input.int(2, "Min Bars After H1/L1（H1/L1后等待bars）", minval=1, maxval=10, group="信号 V2")
+signalCloseStrength = input.float(0.6, "Close Strength（收盘强度0-1）", minval=0.3, maxval=0.9, step=0.05, group="信号 V2")
+
+// --- Filters
+useEMAFilter = input.bool(true, "Use EMA Filter（EMA趋势过滤）", group="过滤 Filters")
+emaFast      = input.int(20, "Fast EMA（快EMA）", group="过滤 Filters")
+emaSlow      = input.int(50, "Slow EMA（慢EMA）", group="过滤 Filters")
+cooldownBars = input.int(5,  "Cooldown After Exit（出场冷却bars）", minval=0, group="过滤 Filters")
+
+// --- Risk
+riskPerTrade   = input.float(1.0, "Risk %（每笔风险%）", minval=0.1, maxval=10, group="风控 Risk")
+rewardRatio    = input.float(2.0, "R:R（盈亏比）", minval=1, group="风控 Risk")
+maxRiskATR     = input.float(2.5, "Max SL ATR（止损最大ATR倍）", minval=0.5, group="风控 Risk")
+partialExitR   = input.float(1.0, "Partial at R（部分止盈R）", minval=0.5, group="风控 Risk")
+partialExitPct = input.float(50, "Partial %（部分止盈百分比）", minval=10, maxval=90, group="风控 Risk")
+breakevenR     = input.float(0.8, "Move to BE at R（保本触发R）", minval=0.3, group="风控 Risk")
+
+// --- Trend Lines (New)
+showTrendLines  = input.bool(true, 'Show Trend Lines（显示趋势线）', group = '可视化 Trendlines')
+trendLineLength = input.int(20, 'Trend Line Sensitivity（趋势线灵敏度）', group = '可视化 Trendlines', minval = 10)
+upTlColor       = input.color(color.new(color.teal, 15), title = 'Bullish Color', group = '可视化 Trendlines', inline = 'tl')
+downTlColor     = input.color(color.new(color.red, 15), title = 'Bearish Color', group = '可视化 Trendlines', inline = 'tl')
+
+// --- Visual
+showSignals          = input.bool(true, "Show H1/H2/L1/L2（显示信号点）", group="可视化 Signals")
+showQtyDebug         = input.bool(true, "Show qty=0 Debug（显示qty=0原因）", group="可视化 Signals")
+showStruct           = input.bool(true, "Show HH/HL/LH/LL（显示结构点）", group="可视化 Structure")
+structPadATR         = input.float(0.18, "Marker Padding ATR", minval=0.0, step=0.02, group="可视化 Structure")
+maxLabels            = input.int(120, "Max Labels", minval=10, group="性能 Performance")
+
+// =====================================================
+// Globals / helpers
+// =====================================================
+var label[] allLabels = array.new<label>()
+addLabel(x, y, txt, s, col, tcol=color.white, size=size.normal) =>
+    lbl = label.new(x, y, txt, style=s, color=col, textcolor=tcol, size=size)
+    array.push(allLabels, lbl)
+    if array.size(allLabels) > maxLabels
+        label.delete(array.shift(allLabels))
+    lbl
+
+calcPositionSize(entryPrice, stopPrice) =>
+    riskAmount = strategy.equity * (riskPerTrade / 100.0)
+    riskPerPoint = math.abs(entryPrice - stopPrice)
+    riskPerUnit = riskPerPoint * syminfo.pointvalue
+    qty = riskPerUnit > 0 ? math.floor(riskAmount / riskPerUnit) : 0
+    qty
+
+closePos() =>
+    rng = (high - low)
+    rng > 0 ? (close - low) / rng : 0.5
+
+// Trendline Helpers
+extendTrendline(lineId, startIndex, startValue, endIndex, endValue) =>
+    slope = (endValue - startValue) / (endIndex - startIndex)
+    newEndIndex = bar_index
+    newEndValue = startValue + slope * (newEndIndex - startIndex)
+    line.set_x2(lineId, newEndIndex)
+    line.set_y2(lineId, newEndValue)
+
+getSlope(startIndex, startValue, endIndex, endValue) =>
+    (endValue - startValue) / (endIndex - startIndex)
+
+// =====================================================
+// Core calcs
+// =====================================================
+atr   = ta.atr(14)
+ema20 = ta.ema(close, emaFast)
+ema50 = ta.ema(close, emaSlow)
+rangeSize20 = ta.highest(high, 20) - ta.lowest(low, 20)
+
+phVal = ta.pivothigh(high, swingLength, swingLength)
+plVal = ta.pivotlow(low,  swingLength, swingLength)
+
+// =====================================================
+// Structure HH/HL/LH/LL
+// =====================================================
+var float lastHH = na
+var float lastHL = na
+var float lastLH = na
+var float lastLL = na
+var float swingHigh = na
+var float swingLow  = na
+var int   swingHighBar = na
+var int   swingLowBar  = na
+
+pad = atr * structPadATR
+
+if not na(phVal)
+    pivotBar = bar_index - swingLength
+    if not na(swingHigh)
+        if phVal > swingHigh
+            lastHH := phVal
+            if showStruct
+                addLabel(pivotBar, phVal + pad, "HH", label.style_label_down, color.lime, size=size.tiny)
+        else
+            lastLH := phVal
+            if showStruct
+                addLabel(pivotBar, phVal + pad, "LH", label.style_label_down, color.red, size=size.tiny)
+    swingHigh := phVal
+    swingHighBar := pivotBar
+
+if not na(plVal)
+    pivotBar = bar_index - swingLength
+    if not na(swingLow)
+        if plVal < swingLow
+            lastLL := plVal
+            if showStruct
+                addLabel(pivotBar, plVal - pad, "LL", label.style_label_up, color.maroon, size=size.tiny)
+        else
+            lastHL := plVal
+            if showStruct
+                addLabel(pivotBar, plVal - pad, "HL", label.style_label_up, color.green, size=size.tiny)
+    swingLow := plVal
+    swingLowBar := pivotBar
+
+// =====================================================
+// BoS/CHoCH
+// =====================================================
+var int lastBreakDir = 0
+var int lastBreakBar = na
+
+if useBosChoch
+    upRef = swingHigh
+    dnRef = swingLow
+    breakUp = (bosUseCloseOnly ? close > upRef : high > upRef) and (bosUseCloseOnly ? close[1] <= upRef : high[1] <= upRef)
+    breakDn = (bosUseCloseOnly ? close < dnRef : low < dnRef) and (bosUseCloseOnly ? close[1] >= dnRef : low[1] >= dnRef)
+
+    if breakUp
+        prev = lastBreakDir
+        lastBreakDir := 1
+        lastBreakBar := bar_index
+        if showBosChochLines and not na(swingHighBar)
+            line.new(swingHighBar, upRef, bar_index, upRef, color=color.new(color.teal, 50))
+        if showBosChochLabels
+            addLabel(bar_index, high + atr*0.2, prev == -1 ? "CHoCH" : "BoS", label.style_label_down, color.teal, size=size.tiny)
+
+    if breakDn
+        prev = lastBreakDir
+        lastBreakDir := -1
+        lastBreakBar := bar_index
+        if showBosChochLines and not na(swingLowBar)
+            line.new(swingLowBar, dnRef, bar_index, dnRef, color=color.new(color.red, 50))
+        if showBosChochLabels
+            addLabel(bar_index, low - atr*0.2, prev == 1 ? "CHoCH" : "BoS", label.style_label_up, color.red, size=size.tiny)
+
+breakOkLong  = not useBreakFilter or (not na(lastBreakBar) and (bar_index - lastBreakBar <= breakLookbackBars) and lastBreakDir == 1)
+breakOkShort = not useBreakFilter or (not na(lastBreakBar) and (bar_index - lastBreakBar <= breakLookbackBars) and lastBreakDir == -1)
+
+// =====================================================
+// Trend Lines Logic (Merged from UAlgo)
+// =====================================================
+var line newBearishTrendline = na
+var line newBullishTrendline = na
+
+if showTrendLines
+    phTrend = ta.pivothigh(high, trendLineLength, trendLineLength)
+    plTrend = ta.pivotlow(low, trendLineLength, trendLineLength)
+
+    bullishTrendLineStart = ta.valuewhen(not na(plTrend), bar_index[trendLineLength], 1)
+    bullishTrendLineEnd = ta.valuewhen(not na(plTrend), bar_index[trendLineLength], 0)
+    bearishTrendLineStart = ta.valuewhen(not na(phTrend), bar_index[trendLineLength], 1)
+    bearishTrendLineEnd = ta.valuewhen(not na(phTrend), bar_index[trendLineLength], 0)
+
+    bullishTrendLineStartVal = ta.valuewhen(not na(plTrend), low[trendLineLength], 1)
+    bullishTrendLineEndVal = ta.valuewhen(not na(plTrend), low[trendLineLength], 0)
+    bearishTrendLineStartVal = ta.valuewhen(not na(phTrend), high[trendLineLength], 1)
+    bearishTrendLineEndVal = ta.valuewhen(not na(phTrend), high[trendLineLength], 0)
+
+    line.delete(newBearishTrendline)
+    line.delete(newBullishTrendline)
+
+    slopeBearish = getSlope(bearishTrendLineStart, bearishTrendLineStartVal, bearishTrendLineEnd, bearishTrendLineEndVal)
+    slopeBullish = getSlope(bullishTrendLineStart, bullishTrendLineStartVal, bullishTrendLineEnd, bullishTrendLineEndVal)
+
+    if slopeBearish < 0
+        newBearishTrendline := line.new(x1 = bearishTrendLineStart, y1 = bearishTrendLineStartVal, x2 = bar_index, y2 = bearishTrendLineEndVal, xloc = xloc.bar_index, color = downTlColor, width = 2)
+        extendTrendline(newBearishTrendline, bearishTrendLineStart, bearishTrendLineStartVal, bearishTrendLineEnd, bearishTrendLineEndVal)
+        
+    if slopeBullish > 0
+        newBullishTrendline := line.new(x1 = bullishTrendLineStart, y1 = bullishTrendLineStartVal, x2 = bar_index, y2 = bullishTrendLineEndVal, xloc = xloc.bar_index, color = upTlColor, width = 2)
+        extendTrendline(newBullishTrendline, bullishTrendLineStart, bullishTrendLineStartVal, bullishTrendLineEnd, bullishTrendLineEndVal)
+
+// =====================================================
+// State machine (Market Context)
+// =====================================================
+var string marketState = "CHANNEL"
+var string alwaysIn    = "NONE"
+
+isBullBar = close > open and (close - open) > atr * 0.4
+isBearBar = close < open and (open - close) > atr * 0.4
+
+var int bullStreak = 0
+var int bearStreak = 0
+bullStreak := isBullBar ? bullStreak + 1 : 0
+bearStreak := isBearBar ? bearStreak + 1 : 0
+
+if bullStreak >= trendBars
+    marketState := "BREAKOUT", alwaysIn := "BULL"
+else if bearStreak >= trendBars
+    marketState := "BREAKOUT", alwaysIn := "BEAR"
+else if rangeSize20 < atr * channelATR
+    marketState := "RANGE", alwaysIn := "NONE"
+else
+    marketState := "CHANNEL"
+    alwaysIn := (close > ema20 and ema20 > ema50) ? "BULL" : (close < ema20 and ema20 < ema50) ? "BEAR" : "NONE"
+
+// =====================================================
+// Signals H1/H2/L1/L2
+// =====================================================
+var bool h1Seen = false
+var bool l1Seen = false
+var int  h1Bar  = na
+var int  l1Bar  = na
+
+if h1Seen and bar_index > h1Bar + 8
+    h1Seen := false
+if l1Seen and bar_index > l1Bar + 8
+    l1Seen := false
+
+isH1 = alwaysIn == "BULL" and low <= ta.highest(high, 5) and close > open
+if isH1 and not h1Seen
+    h1Seen := true, h1Bar := bar_index
+
+isL1 = alwaysIn == "BEAR" and high >= ta.lowest(low, 5) and close < open
+if isL1 and not l1Seen
+    l1Seen := true, l1Bar := bar_index
+
+h2Trigger = useMicroBreakout ? (high > ta.highest(high[1], microLen) and closePos() > signalCloseStrength) : (high > high[1] and closePos() > signalCloseStrength)
+l2Trigger = useMicroBreakout ? (low < ta.lowest(low[1], microLen) and closePos() < (1-signalCloseStrength)) : (low < low[1] and closePos() < (1-signalCloseStrength))
+
+isH2 = h1Seen and bar_index > h1Bar and h2Trigger and breakOkLong and enableH2
+isL2 = l1Seen and bar_index > l1Bar and l2Trigger and breakOkShort and enableL2
+
+plotshape(showSignals and isH1, "H1", shape.circle, location.belowbar, color.lime, size=size.tiny)
+plotshape(showSignals and isH2, "H2", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(showSignals and isL1, "L1", shape.circle, location.abovebar, color.red, size=size.tiny)
+plotshape(showSignals and isL2, "L2", shape.triangledown, location.abovebar, color.maroon, size=size.small)
+
+// =====================================================
+// Execution & Risk Management
+// =====================================================
+var float entrySL = na
+var float entryTP = na
+var int lastExitBar = 0
+inCooldown = (bar_index - lastExitBar) < cooldownBars
+
+if (isH2 or isL2) and strategy.position_size == 0 and not inCooldown
+    float slDist = math.min(atr * maxRiskATR, math.abs(close - (isH2 ? ta.lowest(low, 3) : ta.highest(high, 3))))
+    entrySL := isH2 ? close - slDist : close + slDist
+    entryTP := isH2 ? close + (slDist * rewardRatio) : close - (slDist * rewardRatio)
+    
+    int qty = calcPositionSize(close, entrySL)
+    if qty > 0
+        strategy.entry(isH2 ? "Long" : "Short", isH2 ? strategy.long : strategy.short, qty=qty)
+        h1Seen := false, l1Seen := false
+    else if showQtyDebug
+        addLabel(bar_index, high + atr, "Qty=0\nRisk Too High", label.style_label_down, color.orange, size=size.tiny)
+
+if strategy.position_size != 0
+    if partialExitPct > 0
+        float pTarget = strategy.position_avg_price + (strategy.position_size > 0 ? (math.abs(strategy.position_avg_price - entrySL) * partialExitR) : -(math.abs(strategy.position_avg_price - entrySL) * partialExitR))
+        strategy.exit("Partial", qty_percent=partialExitPct, limit=pTarget, comment="Part")
+    
+    float beLevel = strategy.position_avg_price + (strategy.position_size > 0 ? (math.abs(strategy.position_avg_price - entrySL) * breakevenR) : -(math.abs(strategy.position_avg_price - entrySL) * breakevenR))
+    bool reachBE = strategy.position_size > 0 ? high >= beLevel : low <= beLevel
+    strategy.exit("Exit", stop=reachBE ? strategy.position_avg_price : entrySL, limit=entryTP, comment="Full/SL")
+
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    lastExitBar := bar_index
+
+View in Pine Editor・306 lines
+Use on chart
+8
+6
+1
+1 957
+Dec 27, 2025
+PA System
+
+
+短简介 Short Description（放在最上面）
+
+中文：
+PA System 是一套以 AL Brooks 价格行为为核心的策略（Strategy），将 结构（HH/HL/LH/LL）→ 回调（H1/L1）→ 二次入场（H2/L2 微平台突破） 串成完整可回测流程，并可选叠加 BoS/CHoCH 结构突破过滤 与 Liquidity Sweep（扫流动性）确认。内置风险管理：定风险仓位、部分止盈、保本、移动止损、时间止损、冷却期。
+
+English:
+PA System is an AL Brooks–inspired Price Action strategy that chains Market Structure (HH/HL/LH/LL) → Pullback (H1/L1) → Second Entry (H2/L2 via Micro Range Breakout) into a complete backtestable workflow, with optional BoS/CHoCH structure-break filtering and Liquidity Sweep confirmation. Built-in risk management includes risk-based sizing, partial exits, breakeven, trailing stops, time stop, and cooldown.
+
+⸻
+
+
+1) 核心理念 Core Idea
+
+中文：
+这不是“指标堆叠”，而是一条清晰的价格行为决策链：
+结构确认 → 回调出现 → 小平台突破（二次入场）→ 风控出场。
+策略把 Brooks 常见的“二次入场”思路程序化，同时用可选的结构突破与扫流动性模块提升信号质量、减少震荡误入。
+
+English:
+This is not an “indicator soup.” It’s a clear price-action decision chain:
+Confirmed structure → Pullback → Micro-range breakout (second entry) → Risk-managed exits.
+The system programmatically implements the Brooks-style “second entry” concept, and optionally adds structure-break and liquidity-sweep context to reduce chop and improve trade quality.
+
+⸻
+
+2) 主要模块 Main Modules
+
+A. 结构识别 Market Structure (HH/HL/LH/LL)
+中文：
+使用 pivot 摆动点确认结构，标记 HH/HL/LH/LL，并可显示最近一组摆动水平线，方便对照结构位置。
+
+English:
+Uses confirmed pivot swings to label HH/HL/LH/LL and optionally plots the most recent swing levels for clean structure context.
+
+B. 状态机 Market Regime (State Machine + “Always In”)
+中文：
+基于趋势K强度、EMA关系与波动范围，识别市场环境（Breakout/Channel/Range）以及 Always-In 方向，用于过滤不合适的交易环境。
+
+English:
+A lightweight regime engine detects Breakout/Channel/Range and an “Always In” directional bias using momentum and EMA/range context to avoid low-quality conditions.
+
+C. 二次入场 Second Entry Engine (H1→H2 / L1→L2)
+中文：
+• H1/L1：回调到结构附近并出现反转迹象
+• H2/L2：在 H1/L1 后等待最小 bars，然后触发 Micro Range Breakout（小平台突破）并要求信号K收盘强度达标
+这一段是策略的“主发动机”。
+
+English:
+• H1/L1: Pullback into structure with reversal intent
+• H2/L2: After a minimum wait, triggers on Micro Range Breakout plus a configurable close-strength filter
+This is the main “entry engine.”
+
+D. 可选过滤器 Optional Filters (Quality Boost)
+BoS/CHoCH（结构突破过滤）
+中文： 可识别 BoS / CHoCH，并可要求“入场前最近 N bars 必须有同向 break”。
+English: Detects BoS/CHoCH and can require a recent same-direction break within N bars.
+
+Liquidity Sweeps（扫流动性确认）
+中文： 画出 pivot 高/低的流动性水平线，检测“刺破后收回”的 sweep，并可要求入场前出现同向 sweep。
+English: Tracks pivot-based liquidity levels, confirms sweeps (pierce-and-reclaim), and can require a recent sweep before entry.
+
+E. FVG 可视化 FVG Visualization
+中文： 提供 FVG 区域盒子与管理模式（仅保留未回补 / 仅保留最近N），主要用于区域理解与复盘，不作为强制入场条件（可自行扩展）。
+English: Displays FVG boxes with retention modes (unfilled-only or last-N). Primarily for context/analysis; not required for entries (you can extend it as a filter/target).
+
+⸻
+
+3) 风险管理 Risk Management (Built-In)
+
+中文：
+• 定风险仓位：按账户权益百分比计算仓位
+• SL/TP：基于结构 + ATR 缓冲，且限制最大止损 ATR 倍
+• 部分止盈：到达指定 R 后减仓
+• 保本：到达指定 R 后推到 BE
+• 移动止损：到达指定 R 后开始跟随
+• 时间止损：持仓太久不动则退出
+• 冷却期：出场后等待 N bars 再允许新单
+
+English:
+• Risk-based sizing: position size from equity risk %
+• SL/TP: structure + ATR buffer with max ATR risk cap
+• Partial exits at an R threshold
+• Breakeven at an R threshold
+• Trailing stop activation at an R threshold
+• Time stop to reduce chop damage
+• Cooldown after exit to avoid rapid re-entries
+
+⸻
+
+4) 推荐使用方式 Recommended Usage
+
+中文：
+• 推荐从 5m / 15m / 1H 开始测试
+• 想更稳：开启 EMA Filter + Break Filter + Sweep Filter，并提高 Close Strength
+• 想更多信号：关闭 Break/Sweep 过滤或降低 Swing Length / Close Strength
+• 回测时务必设置合理的手续费与滑点，尤其是期货/指数
+
+English:
+• Start testing on 5m / 15m / 1H
+• For higher quality: enable EMA Filter + Break Filter + Sweep Filter and increase Close Strength
+• For more signals: disable Break/Sweep filters or reduce Swing Length / Close Strength
+• Use realistic commissions/slippage in backtests (especially for futures/indices)
+
+⸻
+
+5) 重要说明 Notes
+
+中文：
+结构 pivot 需要右侧确认 bars，因此结构点存在天然滞后（确认后不会再变）。策略逻辑尽量避免不必要的对象堆叠，并对数组/对象做了稳定管理，适合长期运行与复盘。
+
+English:
+Pivot-based structure requires right-side confirmation (inherent lag; once confirmed it won’t change). The script is designed for stability and resource-safe object management, suitable for long sessions and review.
+
+⸻
+
+免责声明 Disclaimer（建议原样保留）
+
+中文：
+本脚本仅用于教育与研究目的，不构成任何投资建议。策略回测结果受市场条件、手续费、滑点、交易时段、数据质量等影响显著。使用者需自行验证并承担全部风险。过往表现不代表未来结果。
+
+English:
+This script is for educational and research purposes only and does not constitute financial advice. Backtest results are highly sensitive to market conditions, fees, slippage, session settings, and data quality. Use at your own risk. Past performance is not indicative of future results.
+
+
+
+Dec 27, 2025
+Release Notes
+📋 更新日志：PA System (V1.1) - 全能价格行为交易系统
+当前版本： V1.1.0
+语言标准： Pine Script v6
+主要功能： 价格行为信号 (H1/H2/L1/L2)、市场状态识别、SMC 结构破位、动态风控、趋势线集成。
+🚀 [V1.1.0] - 2024-05-24 (当前综合版)
+1. 核心功能集成
+趋势线模块 (UAlgo Integration)： 成功集成了 UAlgo 趋势线逻辑，支持基于 Pivot High/Low 的动态斜率计算和自动延伸功能。
+全自动化执行： 补全了缺失的下单逻辑，策略现在可以根据 H2 (多头) 和 L2 (空头) 信号自动开仓。
+2. 进阶风险管理 (Risk Management)
+动态仓位计算： 支持基于账户净值百分比的风险头寸管理（Risk % per trade）。
+分批止盈 (Partial Exit)： 增加了基于 R 倍数的触发逻辑，支持自定义止盈百分比。
+保本止损 (Breakeven)： 当价格达到预设的 R 倍数盈利时，止损位自动移动至入场价。
+出场冷却 (Cooldown)： 增加出场后的冷却 Bars 设置，防止在震荡行情中连续被“割肉”。
+3. 代码优化与修复
+Pine Script v6 升级： 全面适配 TradingView 最新版 v6 语法，优化了数组处理和绘图性能。
+参数命名修复： 解决了 addLabel 函数中 sz 与 size 参数冲突导致的编译错误。
+可视化增强： 统一了 HH/HL/BoS/CHoCH 的标签样式，并增加了趋势线的视觉开关。
+🛠️ 核心模块说明
+市场状态机 (State Machine)： 自动识别 Breakout (突破)、Channel (通道) 和 Range (震荡)，只有在趋势或通道状态下才会激活 H2/L2 交易信号。
+SMC 结构破位： 实时计算 BoS (结构持续) 和 CHoCH (趋势转折)，并作为信号过滤的重要参考。
+微平台突破 (Micro Breakout)： 通过 microLen 参数识别短期的微小整理区间，捕捉更具爆发力的入场点。
+⚠️ 使用注意事项
+最大绘图限制： 脚本中包含大量趋势线和结构线，已设置 max_lines_count=500。如果在极短周期运行，建议适当调大 swingLength 以减少线条生成数量。
+交易品种适配： 默认风控基于 syminfo.pointvalue。在操作某些非标准点值的期货合约时，请核对“风控 Risk”选项卡下的开仓量输出。
+重绘说明： 结构点 (HH/LL) 和趋势线依赖于 Pivot 算法，会有 swingLength 根 Bar 的确认延迟，这是技术分析中的正常现象，不属于非法重绘。
+后续开发计划 (To-do):
+
+增加多时间周期 (MTF) 趋势过滤。
+
+增加基于成交量分布 (Volume Profile) 的入场确认。
+
+增加仪表盘面板，实时显示当前所有风控参数。
+
+
+🚀 [V1.1.0] - 2024-05-24 (Current Integrated Version)
+1. Core Module Integration
+Trendline Module (UAlgo Integration): Successfully integrated UAlgo’s trendline logic, supporting dynamic slope calculation and automatic extension based on Pivot Highs/Lows.
+Fully Automated Execution: Completed the execution logic; the strategy now automatically triggers entries based on H2 (Bullish) and L2 (Bearish) setups.
+2. Advanced Risk Management
+Dynamic Position Sizing: Supports equity-based risk management (Risk % per trade) to ensure consistent capital exposure.
+Partial Exit: Added R-multiple based triggers allowing users to secure profits by closing a custom percentage of the position at predefined targets.
+Move to Breakeven (BE): Automated SL adjustment to the entry price once the market reaches a specific reward-to-risk (R) threshold.
+Trade Cooldown (Anti-Whipsaw): Introduced a "Cooldown Bars" setting to prevent overtrading or being "whipsawed" during choppy market conditions immediately after an exit.
+3. Code Refinement & Bug Fixes
+Pine Script v6 Upgrade: Fully optimized for TradingView’s latest v6 engine, improving array processing and drawing performance.
+Parameter Naming Fix: Resolved the compilation error caused by the conflict between sz and size parameters in the addLabel function.
+Visual Enhancements: Unified the styling for HH/HL/BoS/CHoCH labels and added toggles for Trendline visibility.
+🛠️ Core Module Overview
+Market State Machine: Automatically categorizes the market into Breakout, Channel, or Range. H2/L2 signals are filtered to trigger only during trending or channel phases.
+SMC Structure Analysis: Real-time tracking of BoS (Break of Structure) and CHoCH (Change of Character) to serve as high-conviction trend filters.
+Micro Range Breakout: Utilizes the microLen parameter to identify short-term consolidations, capturing explosive entry points with tighter precision.
+⚠️ Important Notes
+Drawing Limits: The script handles a high volume of lines and labels (max_lines_count=500). For lower timeframes, consider increasing the swingLength to reduce visual clutter and processing load.
+Asset Adaptation: Risk calculations are based on syminfo.pointvalue. When trading non-standard contracts (like certain Futures), verify the "Qty" output in the Risk tab to ensure correct sizing.
+Regarding Repainting: Structure points (HH/LL) and Trendlines rely on Pivot algorithms, which require a swingLength delay for confirmation. This is standard for technical analysis and ensures the validity of the structure.
+Future Roadmap (To-do):
+
+Implement Multi-Timeframe (MTF) trend filtering.
+
+Integrate Volume Profile / Order Flow confirmation for entries.
+
+Add an on-screen Dashboard to display real-time Risk/Reward metrics.

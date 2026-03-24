@@ -1,0 +1,2356 @@
+//@version=6
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║  ALERT SETUP: Create ONE alert → Order fills only                  ║
+// ║  Clear the Message box and paste ONLY this:                        ║
+// ║  {{strategy.order.alert_message}}                                  ║
+// ║  Add your TradersPost / Ghost webhook URL → Done                   ║
+// ╚══════════════════════════════════════════════════════════════════════╝
+strategy(
+     "ORB SESSIONS STRAT",
+     overlay                         = true,
+     initial_capital                 = 50000,
+     currency                        = currency.USD,
+     default_qty_type                = strategy.fixed,
+     default_qty_value               = 1,
+     pyramiding                      = 1,
+     commission_type                 = strategy.commission.cash_per_contract,
+     commission_value                = 1.2,
+     slippage                        = 2,
+     margin_long                     = 1,
+     margin_short                    = 1,
+     calc_on_every_tick              = true,
+     calc_on_order_fills             = false,
+     use_bar_magnifier               = true,
+     process_orders_on_close         = true,
+     backtest_fill_limits_assumption = 0,
+     fill_orders_on_standard_ohlc    = false,
+     max_lines_count                 = 500,
+     max_labels_count                = 500,
+     max_boxes_count                 = 500
+)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// GLOBAL SETTINGS
+// ════════════════════════════════════════════════════════════════════════════════
+grpGlobal = "Global Settings"
+i_daysToShow  = input.int(10, "Days to Show", minval=1, maxval=50, group=grpGlobal, tooltip="Number of historical days of ORB levels, SL/TP lines, and trade events to display on the chart.")
+i_timezone = input.string("America/Los_Angeles", "Timezone", options=["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Asia/Tokyo", "Asia/Hong_Kong", "Asia/Singapore", "Australia/Sydney", "UTC"], tooltip="All session times are interpreted in this timezone.", group=grpGlobal)
+
+// ── Helpers ──
+f_dayKey(_t, _tz) => year(_t, _tz) * 10000 + month(_t, _tz) * 100 + dayofmonth(_t, _tz)
+
+// ── TP Quantity Split Helper (prevents 0-qty TPs when trading small size) ──
+f_tpQty(_total, _p1, _p2, _p3) =>
+    int total = math.max(0, int(math.round(_total)))
+    float p1 = math.max(0.0, _p1)
+    float p2 = math.max(0.0, _p2)
+    float p3 = math.max(0.0, _p3)
+    bool a1 = p1 > 0
+    bool a2 = p2 > 0
+    bool a3 = p3 > 0
+    int active = (a1 ? 1 : 0) + (a2 ? 1 : 0) + (a3 ? 1 : 0)
+    if total == 0
+        [0, 0, 0]
+    else if active == 0
+        [total, 0, 0]
+    else
+        // Base allocation (floors)
+        int q1 = a1 ? int(math.floor(total * (p1 / 100.0))) : 0
+        int q2 = a2 ? int(math.floor(total * (p2 / 100.0))) : 0
+        int q3 = a3 ? int(math.floor(total * (p3 / 100.0))) : 0
+
+        // If we have enough contracts to give at least 1 to each active TP, do it.
+        if total >= active
+            if a1 and q1 == 0
+                q1 := 1
+            if a2 and q2 == 0
+                q2 := 1
+            if a3 and q3 == 0
+                q3 := 1
+        else
+            // Not enough contracts to split: prioritize TP1 then TP2 then TP3
+            q1 := a1 ? 1 : 0
+            q2 := 0
+            q3 := 0
+            if q1 == 0 and a2
+                q2 := 1
+            if q1 == 0 and q2 == 0 and a3
+                q3 := 1
+
+        int sumQ = q1 + q2 + q3
+
+        // If we over-allocated (can happen after min-1 forcing), trim from later TPs first.
+        while sumQ > total
+            if q3 > 0
+                q3 -= 1
+            else if q2 > 0
+                q2 -= 1
+            else if q1 > 0
+                q1 -= 1
+            sumQ := q1 + q2 + q3
+
+        // Distribute remainder to earlier TPs by priority and pct weight.
+        int rem = total - sumQ
+        while rem > 0
+            if a1
+                q1 += 1
+                rem -= 1
+            if rem > 0 and a2
+                q2 += 1
+                rem -= 1
+            if rem > 0 and a3
+                q3 += 1
+                rem -= 1
+
+        [q1, q2, q3]
+
+// ── Shared Trade Settings ──
+
+// ── Day & Time Filters (Global) ──
+grpFlat = "Prop Firm Flat Window"
+i_flatWindowEnable = input.bool(true, "Enable Flat Window", tooltip="Flatten all positions and block new entries during this time window.", group=grpFlat)
+i_flatWindowStart  = input.string("1300", "Flat Start (HHMM)", group=grpFlat, inline="flat", tooltip="Start of the flat window.")
+i_flatWindowEnd    = input.string("1500", "Flat End (HHMM)", group=grpFlat, inline="flat", tooltip="End of the flat window.")
+
+// Day filter check
+f_dayAllowed(_sun, _mon, _tue, _wed, _thu, _fri, _sat) =>
+    int dow = dayofweek(time, i_timezone)
+    dow == dayofweek.sunday    ? _sun :
+     dow == dayofweek.monday    ? _mon :
+     dow == dayofweek.tuesday   ? _tue :
+     dow == dayofweek.wednesday ? _wed :
+     dow == dayofweek.thursday  ? _thu :
+     dow == dayofweek.friday    ? _fri :
+     dow == dayofweek.saturday  ? _sat : false
+
+
+// Prop firm flat window check
+_flatStartH = math.floor(str.tonumber(i_flatWindowStart) / 100)
+_flatStartM = str.tonumber(i_flatWindowStart) % 100
+_flatEndH   = math.floor(str.tonumber(i_flatWindowEnd) / 100)
+_flatEndM   = str.tonumber(i_flatWindowEnd) % 100
+_curH = hour(time, i_timezone)
+_curM = minute(time, i_timezone)
+_curTime = _curH * 60 + _curM
+_flatStart = _flatStartH * 60 + _flatStartM
+_flatEnd   = _flatEndH * 60 + _flatEndM
+inFlatWindow = i_flatWindowEnable and (_flatStart < _flatEnd ? (_curTime >= _flatStart and _curTime < _flatEnd) : (_curTime >= _flatStart or _curTime < _flatEnd))
+flatWindowJustStarted = inFlatWindow and not inFlatWindow[1]
+
+// ── Trailing Stop Settings ──
+
+// ── Re-Arm Settings ──
+// ════════════════════════════════════════════════════════════════════════════════
+// EMA TREND FILTER
+// ════════════════════════════════════════════════════════════════════════════════
+grpEMA = "EMA Trend Filter"
+i_emaEnable      = input.bool(false, "Enable EMA Filter", group=grpEMA, tooltip="When enabled, only take longs above EMA and shorts below EMA.")
+i_emaLength      = input.int(9, "EMA Length", minval=1, maxval=200, group=grpEMA, tooltip="Period for the EMA calculation.")
+i_emaTF          = input.string("Chart", "EMA Timeframe", options=["Chart", "5 Min", "15 Min", "1 Hour", "4 Hour", "Daily"], group=grpEMA, tooltip="Timeframe to calculate the EMA on. Chart = current chart timeframe.")
+i_emaSource      = input.source(close, "EMA Source", group=grpEMA, tooltip="Price source for EMA calculation.")
+i_emaScope       = input.string("All Entries", "Filter Scope", options=["First Entry Only", "All Entries"], group=grpEMA, tooltip="First Entry Only: filter the initial breakout, re-arms ignore EMA.\nAll Entries: every entry must agree with EMA direction.")
+i_nyEMAFilter    = input.bool(true, "NY: Use EMA Filter", group=grpEMA, inline="ema_sess", tooltip="Apply EMA filter to NY session entries.")
+i_asEMAFilter    = input.bool(true, "AS: Use EMA Filter", group=grpEMA, inline="ema_sess", tooltip="Apply EMA filter to Asia session entries.")
+i_lnEMAFilter    = input.bool(true, "LN: Use EMA Filter", group=grpEMA, inline="ema_sess", tooltip="Apply EMA filter to London session entries.")
+
+// EMA visual settings
+i_emaColorSmooth = input.int(3, "Color Smoothing", minval=1, maxval=20, group=grpEMA, display=display.none, tooltip="Smoothing period for EMA color gradient transition.")
+i_emaShowGlow    = input.bool(true, "Show EMA Glow", group=grpEMA, display=display.none, tooltip="Display glowing halo effect around the EMA line.")
+i_emaShowBG      = input.bool(false, "Show Trend Background", group=grpEMA, display=display.none, tooltip="Tint chart background based on EMA trend direction.")
+i_emaBullBG      = input.color(color.new(#00ff88, 96), "Bull BG", group=grpEMA, display=display.none, inline="emabg")
+i_emaBearBG      = input.color(color.new(#ff3366, 96), "Bear BG", group=grpEMA, display=display.none, inline="emabg")
+
+
+
+// ════════════════════════════════════════════════════════════════════════════════
+// EMA CALCULATION & VISUAL
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Resolve timeframe string
+f_emaTF() =>
+    switch i_emaTF
+        "Chart"  => timeframe.period
+        "5 Min"  => "5"
+        "15 Min" => "15"
+        "1 Hour" => "60"
+        "4 Hour" => "240"
+        "Daily"  => "D"
+
+// Calculate EMA (supports MTF via request.security)
+_emaTFStr = f_emaTF()
+_emaRaw = i_emaTF == "Chart" ? ta.ema(i_emaSource, i_emaLength) : request.security(syminfo.tickerid, _emaTFStr, ta.ema(close, i_emaLength), barmerge.gaps_off, barmerge.lookahead_off)
+emaValue = _emaRaw
+
+// EMA trend state
+emaBullish = close > emaValue
+emaBearish = close < emaValue
+
+// EMA filter function — returns true if entry is allowed
+f_emaAllowLong(_sessionUsesEMA, _isRearm) =>
+    if not i_emaEnable or not _sessionUsesEMA
+        true
+    else if i_emaScope == "First Entry Only" and _isRearm
+        true
+    else
+        emaBullish
+
+f_emaAllowShort(_sessionUsesEMA, _isRearm) =>
+    if not i_emaEnable or not _sessionUsesEMA
+        true
+    else if i_emaScope == "First Entry Only" and _isRearm
+        true
+    else
+        emaBearish
+
+// ── EMA Color Gradient (from BOSWaves style) ──
+_emaChange = emaValue - nz(emaValue[1])
+_emaAccel  = ta.ema(_emaChange, i_emaColorSmooth)
+
+// Normalized tanh for color mapping
+f_tanh(_x) =>
+    _ex = math.exp(2 * _x)
+    (_ex - 1) / (_ex + 1)
+
+_accelNorm = f_tanh(_emaAccel / (ta.atr(14) * 0.01))
+_hueRaw = 60 + _accelNorm * 60
+_hue = na(_hueRaw[1]) ? _hueRaw : (_hueRaw + _hueRaw[1]) / 2
+
+// HSV to RGB
+f_hsv(_h, _s, _v) =>
+    _c = _v * _s
+    _x = _c * (1 - math.abs((_h / 60) % 2 - 1))
+    _m = _v - _c
+    _r = 0.0, _g = 0.0, _b = 0.0
+    if _h < 60
+        _r := _c, _g := _x
+    else if _h < 120
+        _r := _x, _g := _c
+    else if _h < 180
+        _g := _c, _b := _x
+    else if _h < 240
+        _g := _x, _b := _c
+    else if _h < 300
+        _r := _x, _b := _c
+    else
+        _r := _c, _b := _x
+    color.rgb(int((_r + _m) * 255), int((_g + _m) * 255), int((_b + _m) * 255))
+
+_emaColor = i_emaEnable ? f_hsv(_hue, 1.0, 1.0) : na
+
+// ── EMA Glow Effect ──
+_glowOff = ta.atr(14) * 0.25
+
+_emaShow = i_emaEnable
+
+_showGlow = _emaShow and i_emaShowGlow
+_eg6p = plot(_showGlow ? emaValue + _glowOff * 6 : na, "EG6+", color.new(_emaColor, 97), 1, display=display.none, editable=false)
+_eg5p = plot(_showGlow ? emaValue + _glowOff * 5 : na, "EG5+", color.new(_emaColor, 95), 1, display=display.none, editable=false)
+_eg4p = plot(_showGlow ? emaValue + _glowOff * 4 : na, "EG4+", color.new(_emaColor, 92), 1, display=display.none, editable=false)
+_eg3p = plot(_showGlow ? emaValue + _glowOff * 3 : na, "EG3+", color.new(_emaColor, 88), 1, display=display.none, editable=false)
+_eg2p = plot(_showGlow ? emaValue + _glowOff * 2 : na, "EG2+", color.new(_emaColor, 83), 1, display=display.none, editable=false)
+_eg1p = plot(_showGlow ? emaValue + _glowOff * 1 : na, "EG1+", color.new(_emaColor, 75), 1, display=display.none, editable=false)
+_pEmaCore = plot(_emaShow ? emaValue : na, "EMA", _emaColor, 3, editable=false)
+_eg1m = plot(_showGlow ? emaValue - _glowOff * 1 : na, "EG1-", color.new(_emaColor, 75), 1, display=display.none, editable=false)
+_eg2m = plot(_showGlow ? emaValue - _glowOff * 2 : na, "EG2-", color.new(_emaColor, 83), 1, display=display.none, editable=false)
+_eg3m = plot(_showGlow ? emaValue - _glowOff * 3 : na, "EG3-", color.new(_emaColor, 88), 1, display=display.none, editable=false)
+_eg4m = plot(_showGlow ? emaValue - _glowOff * 4 : na, "EG4-", color.new(_emaColor, 92), 1, display=display.none, editable=false)
+_eg5m = plot(_showGlow ? emaValue - _glowOff * 5 : na, "EG5-", color.new(_emaColor, 95), 1, display=display.none, editable=false)
+_eg6m = plot(_showGlow ? emaValue - _glowOff * 6 : na, "EG6-", color.new(_emaColor, 97), 1, display=display.none, editable=false)
+
+// Glow fills
+fill(_eg6p, _eg5p, _showGlow ? color.new(_emaColor, 97) : na)
+fill(_eg5p, _eg4p, _showGlow ? color.new(_emaColor, 95) : na)
+fill(_eg4p, _eg3p, _showGlow ? color.new(_emaColor, 93) : na)
+fill(_eg3p, _eg2p, _showGlow ? color.new(_emaColor, 90) : na)
+fill(_eg2p, _eg1p, _showGlow ? color.new(_emaColor, 87) : na)
+fill(_eg1p, _pEmaCore, _showGlow ? color.new(_emaColor, 80) : na)
+fill(_pEmaCore, _eg1m, _showGlow ? color.new(_emaColor, 80) : na)
+fill(_eg1m, _eg2m, _showGlow ? color.new(_emaColor, 87) : na)
+fill(_eg2m, _eg3m, _showGlow ? color.new(_emaColor, 90) : na)
+fill(_eg3m, _eg4m, _showGlow ? color.new(_emaColor, 93) : na)
+fill(_eg4m, _eg5m, _showGlow ? color.new(_emaColor, 95) : na)
+fill(_eg5m, _eg6m, _showGlow ? color.new(_emaColor, 97) : na)
+
+// Background
+bgcolor(i_emaEnable and i_emaShowBG and emaBullish ? i_emaBullBG : i_emaEnable and i_emaShowBG and emaBearish ? i_emaBearBG : na, title="EMA Trend BG")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SESSION 1: NEW YORK
+// ════════════════════════════════════════════════════════════════════════════════
+grpNY = "Session 1: New York ORB"
+i_nyEnable     = input.bool(true, "Enable NY Session", group=grpNY, tooltip="Enable trading during the New York session.")
+i_nyContracts      = input.int(3, "Contracts", minval=1, maxval=100, group=grpNY, tooltip="Contracts per trade entry.")
+i_nyDirection  = input.string("Both", "Direction", options=["Long Only", "Short Only", "Both"], group=grpNY, tooltip="Only take long, short, or both directions for NY session entries.")
+i_nyORBStart   = input.string("0630", "ORB Start (HHMM)", group=grpNY, tooltip="Time the Opening Range begins building (24h format, in your selected timezone).")
+i_nyORBDur     = input.string("15 Min", "ORB Duration", options=["5 Min", "15 Min", "30 Min", "1 Hour", "Custom"], group=grpNY, tooltip="How long the Opening Range builds before completing. Candles during this window define the high/low of the ORB.")
+i_nyORBEnd     = input.string("0645", "ORB Custom End (HHMM)", tooltip="Only used when Duration = Custom", group=grpNY, display=display.none)
+i_nySessEnd    = input.string("1300", "Session End (HHMM)", tooltip="Go flat and reset at this time.", group=grpNY)
+i_nyFlattenEOD = input.bool(true, "Flatten at Session End", group=grpNY, tooltip="Force close all positions when this session ends using a hard market order (EOS).")
+i_nyEntryMode      = input.string("Breakout", "Entry Mode", options=["Breakout", "Retest Zone", "Retest Midpoint"], group=grpNY, tooltip="Breakout: enter on candle close through level.\nRetest Zone: wait for wick back to broken level.\nRetest Midpoint: wait for wick back to ORB midpoint.")
+i_nyEntryBuffer    = input.int(0, "Entry Buffer (ticks)", minval=0, maxval=50, group=grpNY, tooltip="Ticks beyond ORB level for entry trigger.")
+i_nyRetestTimeout  = input.int(20, "Retest Timeout (bars)", minval=3, maxval=100, group=grpNY, display=display.none, tooltip="Bars to wait for retest before signal expires.")
+i_nySLMethod   = input.string("Opposite Side", "Stop Loss", options=["Midpoint", "Opposite Side", "Fixed Points"], group=grpNY, tooltip="Where to place the stop loss. Midpoint = ORB mid. Opposite Side = other ORB boundary. Fixed Points = custom distance.")
+i_nySLPoints   = input.float(20.0, "SL Fixed Points", minval=0.25, step=0.25, group=grpNY, display=display.none, tooltip="Distance in points for stop loss when using Fixed Points mode.")
+i_nyTP1RR      = input.float(1.0, "TP1 R:R", minval=0.1, step=0.1, group=grpNY, inline="nytp1", tooltip="Take Profit 1 as a multiple of the risk (distance to stop loss).")
+i_nyTP1Qty     = input.int(1, "Qty", minval=1, maxval=100, group=grpNY, inline="nytp1", tooltip="Contracts to exit at TP1.")
+i_nyTP2RR      = input.float(2.0, "TP2 R:R", minval=0.1, step=0.1, group=grpNY, inline="nytp2", tooltip="Take Profit 2 as a multiple of the risk. Set Qty to 0 to disable.")
+i_nyTP2Qty     = input.int(1, "Qty", minval=0, maxval=100, group=grpNY, inline="nytp2", tooltip="Contracts to exit at TP2. 0 = disabled, remainder goes to TP3.")
+i_nyTP3RR      = input.float(3.0, "TP3 R:R", minval=0.1, step=0.1, group=grpNY, inline="nytp3", tooltip="Take Profit 3 as a multiple of the risk. Set Qty to 0 to disable.")
+i_nyTP3Qty     = input.int(1, "Qty", minval=0, maxval=100, group=grpNY, inline="nytp3", tooltip="Contracts to exit at TP3. 0 = auto-assign remaining contracts.")
+i_nyTrailEnable    = input.bool(true, "Enable Staircase Stop", group=grpNY, tooltip="Staircase SL: TP1->entry, TP2->TP1, TP3->TP2.")
+i_nyTrailShowLine  = input.bool(true, "Show Staircase Line", group=grpNY, display=display.none, tooltip="Display staircase stop line on chart.")
+i_nyRearmEnable    = input.bool(true, "Enable Re-Arm", group=grpNY, tooltip="Re-arm for new entries after trade closes.")
+i_nyRearmMaxTrades = input.int(2, "Max Trades", minval=1, maxval=20, group=grpNY, display=display.none, tooltip="Max entries per session including re-arms.")
+i_nyRearmAfter     = input.string("SL Only", "Re-Arm After", options=["SL Only", "TP Only", "Both"], group=grpNY, display=display.none, tooltip="Which exits allow re-arming.")
+i_nyRearmDirection = input.string("Both Directions", "Re-Arm Direction", options=["Same Direction", "Opposite Direction", "Both Directions"], group=grpNY, display=display.none, tooltip="Direction filter for re-arm entries.")
+i_nyRearmGate      = input.string("Inside ORB", "Re-Arm Gate", options=["Immediate", "Inside ORB", "Touch Midpoint", "Touch Opposite Side"], group=grpNY, display=display.none, tooltip="Price gate for re-arm.")
+i_nyRearmCooldown  = input.int(0, "Cooldown Bars", minval=0, maxval=50, group=grpNY, display=display.none, tooltip="Bars to wait after trade closes before re-arm.")
+i_nyRearmBars      = input.int(0, "Bars Inside ORB", minval=0, maxval=50, group=grpNY, display=display.none, tooltip="Bars with close inside ORB before re-arming.")
+i_nySun = input.bool(false, "Sun", group=grpNY, inline="nydays0", tooltip="Allow NY trades on Sunday.")
+i_nyMon = input.bool(true, "Mon", group=grpNY, inline="nydays0", tooltip="Allow NY trades on Monday.")
+i_nyTue = input.bool(false, "Tue", group=grpNY, inline="nydays0", tooltip="Allow NY trades on Tuesday.")
+i_nyWed = input.bool(true, "Wed", group=grpNY, inline="nydays1", tooltip="Allow NY trades on Wednesday.")
+i_nyThu = input.bool(true, "Thu", group=grpNY, inline="nydays1", tooltip="Allow NY trades on Thursday.")
+i_nyFri = input.bool(true, "Fri", group=grpNY, inline="nydays1", tooltip="Allow NY trades on Friday.")
+i_nySat = input.bool(false, "Sat", group=grpNY, inline="nydays2", tooltip="Allow NY trades on Saturday.")
+i_nyHighColor  = input.color(color.new(#9900ff, 0), "High Color", group=grpNY, display=display.none, tooltip="Color of the ORB high boundary line.")
+i_nyLowColor   = input.color(color.new(#9900ff, 0), "Low Color", group=grpNY, display=display.none, tooltip="Color of the ORB low boundary line.")
+i_nyMidColor   = input.color(color.new(#9900ff, 50), "Midline Color", group=grpNY, display=display.none, tooltip="Color of the ORB midline.")
+i_nyLineWidth  = input.int(3, "Line Thickness", minval=1, maxval=5, group=grpNY, display=display.none, tooltip="Width of the ORB boundary lines.")
+i_nyShowMid    = input.bool(true, "Show Midline", group=grpNY, display=display.none, tooltip="Display the midpoint line between ORB high and low.")
+i_nyShowEntry      = input.bool(true, "Show Entry Arrows", group=grpNY, display=display.none, tooltip="Display entry signal arrows.")
+i_nyShowSLTP       = input.bool(true, "Show SL/TP Lines", group=grpNY, display=display.none, tooltip="Display SL/TP lines on chart.")
+i_nyPDColor    = input.color(color.new(#9900ff, 0), "Prev Day H/L Color", group=grpNY, display=display.none, tooltip="Color for previous day session high/low lines.")
+i_nyPDStyle    = input.string("Dashed", "Prev Day Line Style", options=["Solid", "Dashed", "Dotted"], group=grpNY, display=display.none, tooltip="Line style for previous day session high/low lines.")
+i_nyPDWidth    = input.int(1, "Prev Day Line Width", minval=1, maxval=5, group=grpNY, display=display.none, tooltip="Thickness of previous day session high/low lines.")
+i_nyShowPD     = input.bool(true, "Show Prev Day H/L", group=grpNY, display=display.none, tooltip="Display previous day session high and low levels.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SESSION 2: ASIA
+// ════════════════════════════════════════════════════════════════════════════════
+grpAS = "Session 2: Asia ORB"
+i_asEnable     = input.bool(true, "Enable Asia Session", group=grpAS, tooltip="Enable trading during the Asia session.")
+i_asContracts      = input.int(3, "Contracts", minval=1, maxval=100, group=grpAS, tooltip="Contracts per trade entry.")
+i_asDirection  = input.string("Both", "Direction", options=["Long Only", "Short Only", "Both"], group=grpAS, tooltip="Only take long, short, or both directions for Asia session entries.")
+i_asORBStart   = input.string("1500", "ORB Start (HHMM)", group=grpAS, tooltip="Time the Opening Range begins building (24h format, in your selected timezone).")
+i_asORBDur     = input.string("15 Min", "ORB Duration", options=["5 Min", "15 Min", "30 Min", "1 Hour", "Custom"], group=grpAS, tooltip="How long the Opening Range builds before completing. Candles during this window define the high/low of the ORB.")
+i_asORBEnd     = input.string("1515", "ORB Custom End (HHMM)", tooltip="Only used when Duration = Custom", group=grpAS, display=display.none)
+i_asSessEnd    = input.string("0000", "Session End (HHMM)", tooltip="Go flat and reset at this time.", group=grpAS)
+i_asFlattenEOD = input.bool(true, "Flatten at Session End", group=grpAS, tooltip="Force close all positions when this session ends using a hard market order (EOS).")
+i_asEntryMode      = input.string("Breakout", "Entry Mode", options=["Breakout", "Retest Zone", "Retest Midpoint"], group=grpAS, tooltip="Breakout: enter on candle close through level.\nRetest Zone: wait for wick back to broken level.\nRetest Midpoint: wait for wick back to ORB midpoint.")
+i_asEntryBuffer    = input.int(0, "Entry Buffer (ticks)", minval=0, maxval=50, group=grpAS, tooltip="Ticks beyond ORB level for entry trigger.")
+i_asRetestTimeout  = input.int(20, "Retest Timeout (bars)", minval=3, maxval=100, group=grpAS, display=display.none, tooltip="Bars to wait for retest before signal expires.")
+i_asSLMethod   = input.string("Opposite Side", "Stop Loss", options=["Midpoint", "Opposite Side", "Fixed Points"], group=grpAS, tooltip="Where to place the stop loss. Midpoint = ORB mid. Opposite Side = other ORB boundary. Fixed Points = custom distance.")
+i_asSLPoints   = input.float(20.0, "SL Fixed Points", minval=0.25, step=0.25, group=grpAS, display=display.none, tooltip="Distance in points for stop loss when using Fixed Points mode.")
+i_asTP1RR      = input.float(0.5, "TP1 R:R", minval=0.1, step=0.1, group=grpAS, inline="astp1", tooltip="Take Profit 1 as a multiple of the risk (distance to stop loss).")
+i_asTP1Qty     = input.int(1, "Qty", minval=1, maxval=100, group=grpAS, inline="astp1", tooltip="Contracts to exit at TP1.")
+i_asTP2RR      = input.float(1.0, "TP2 R:R", minval=0.1, step=0.1, group=grpAS, inline="astp2", tooltip="Take Profit 2 as a multiple of the risk. Set Qty to 0 to disable.")
+i_asTP2Qty     = input.int(1, "Qty", minval=0, maxval=100, group=grpAS, inline="astp2", tooltip="Contracts to exit at TP2. 0 = disabled, remainder goes to TP3.")
+i_asTP3RR      = input.float(1.5, "TP3 R:R", minval=0.1, step=0.1, group=grpAS, inline="astp3", tooltip="Take Profit 3 as a multiple of the risk. Set Qty to 0 to disable.")
+i_asTP3Qty     = input.int(1, "Qty", minval=0, maxval=100, group=grpAS, inline="astp3", tooltip="Contracts to exit at TP3. 0 = auto-assign remaining contracts.")
+i_asTrailEnable    = input.bool(true, "Enable Staircase Stop", group=grpAS, tooltip="Staircase SL: TP1->entry, TP2->TP1, TP3->TP2.")
+i_asTrailShowLine  = input.bool(true, "Show Staircase Line", group=grpAS, display=display.none, tooltip="Display staircase stop line on chart.")
+i_asRearmEnable    = input.bool(true, "Enable Re-Arm", group=grpAS, tooltip="Re-arm for new entries after trade closes.")
+i_asRearmMaxTrades = input.int(2, "Max Trades", minval=1, maxval=20, group=grpAS, display=display.none, tooltip="Max entries per session including re-arms.")
+i_asRearmAfter     = input.string("SL Only", "Re-Arm After", options=["SL Only", "TP Only", "Both"], group=grpAS, display=display.none, tooltip="Which exits allow re-arming.")
+i_asRearmDirection = input.string("Both Directions", "Re-Arm Direction", options=["Same Direction", "Opposite Direction", "Both Directions"], group=grpAS, display=display.none, tooltip="Direction filter for re-arm entries.")
+i_asRearmGate      = input.string("Inside ORB", "Re-Arm Gate", options=["Immediate", "Inside ORB", "Touch Midpoint", "Touch Opposite Side"], group=grpAS, display=display.none, tooltip="Price gate for re-arm.")
+i_asRearmCooldown  = input.int(0, "Cooldown Bars", minval=0, maxval=50, group=grpAS, display=display.none, tooltip="Bars to wait after trade closes before re-arm.")
+i_asRearmBars      = input.int(0, "Bars Inside ORB", minval=0, maxval=50, group=grpAS, display=display.none, tooltip="Bars with close inside ORB before re-arming.")
+i_asSun = input.bool(true, "Sun", group=grpAS, inline="asdays0", tooltip="Allow Asia trades on Sunday.")
+i_asMon = input.bool(false, "Mon", group=grpAS, inline="asdays0", tooltip="Allow Asia trades on Monday.")
+i_asTue = input.bool(false, "Tue", group=grpAS, inline="asdays0", tooltip="Allow Asia trades on Tuesday.")
+i_asWed = input.bool(false, "Wed", group=grpAS, inline="asdays1", tooltip="Allow Asia trades on Wednesday.")
+i_asThu = input.bool(true, "Thu", group=grpAS, inline="asdays1", tooltip="Allow Asia trades on Thursday.")
+i_asFri = input.bool(false, "Fri", group=grpAS, inline="asdays1", tooltip="Allow Asia trades on Friday.")
+i_asSat = input.bool(false, "Sat", group=grpAS, inline="asdays2", tooltip="Allow Asia trades on Saturday.")
+i_asHighColor  = input.color(color.new(#cc0000, 0), "High Color", group=grpAS, display=display.none, tooltip="Color of the ORB high boundary line.")
+i_asLowColor   = input.color(color.new(#cc0000, 0), "Low Color", group=grpAS, display=display.none, tooltip="Color of the ORB low boundary line.")
+i_asMidColor   = input.color(color.new(#cc0000, 50), "Midline Color", group=grpAS, display=display.none, tooltip="Color of the ORB midline.")
+i_asLineWidth  = input.int(3, "Line Thickness", minval=1, maxval=5, group=grpAS, display=display.none, tooltip="Width of the ORB boundary lines.")
+i_asShowMid    = input.bool(true, "Show Midline", group=grpAS, display=display.none, tooltip="Display the midpoint line between ORB high and low.")
+i_asShowEntry      = input.bool(true, "Show Entry Arrows", group=grpAS, display=display.none, tooltip="Display entry signal arrows.")
+i_asShowSLTP       = input.bool(true, "Show SL/TP Lines", group=grpAS, display=display.none, tooltip="Display SL/TP lines on chart.")
+i_asPDColor    = input.color(color.new(#cc0000, 0), "Prev Day H/L Color", group=grpAS, display=display.none, tooltip="Color for previous day session high/low lines.")
+i_asPDStyle    = input.string("Dashed", "Prev Day Line Style", options=["Solid", "Dashed", "Dotted"], group=grpAS, display=display.none, tooltip="Line style for previous day session high/low lines.")
+i_asPDWidth    = input.int(1, "Prev Day Line Width", minval=1, maxval=5, group=grpAS, display=display.none, tooltip="Thickness of previous day session high/low lines.")
+i_asShowPD     = input.bool(true, "Show Prev Day H/L", group=grpAS, display=display.none, tooltip="Display previous day session high and low levels.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SESSION 3: LONDON
+// ════════════════════════════════════════════════════════════════════════════════
+grpLN = "Session 3: London ORB"
+i_lnEnable     = input.bool(false, "Enable London Session", group=grpLN, tooltip="Enable trading during the London session.")
+i_lnContracts      = input.int(3, "Contracts", minval=1, maxval=100, group=grpLN, tooltip="Contracts per trade entry.")
+i_lnDirection  = input.string("Short Only", "Direction", options=["Long Only", "Short Only", "Both"], group=grpLN, tooltip="Only take long, short, or both directions for London session entries.")
+i_lnORBStart   = input.string("0000", "ORB Start (HHMM)", group=grpLN, tooltip="Time the Opening Range begins building (24h format, in your selected timezone).")
+i_lnORBDur     = input.string("15 Min", "ORB Duration", options=["5 Min", "15 Min", "30 Min", "1 Hour", "Custom"], group=grpLN, tooltip="How long the Opening Range builds before completing. Candles during this window define the high/low of the ORB.")
+i_lnORBEnd     = input.string("0015", "ORB Custom End (HHMM)", tooltip="Only used when Duration = Custom", group=grpLN, display=display.none)
+i_lnSessEnd    = input.string("0630", "Session End (HHMM)", tooltip="Go flat and reset at this time.", group=grpLN)
+i_lnFlattenEOD = input.bool(true, "Flatten at Session End", group=grpLN, tooltip="Force close all positions when this session ends using a hard market order (EOS).")
+i_lnEntryMode      = input.string("Breakout", "Entry Mode", options=["Breakout", "Retest Zone", "Retest Midpoint"], group=grpLN, tooltip="Breakout: enter on candle close through level.\nRetest Zone: wait for wick back to broken level.\nRetest Midpoint: wait for wick back to ORB midpoint.")
+i_lnEntryBuffer    = input.int(0, "Entry Buffer (ticks)", minval=0, maxval=50, group=grpLN, tooltip="Ticks beyond ORB level for entry trigger.")
+i_lnRetestTimeout  = input.int(20, "Retest Timeout (bars)", minval=3, maxval=100, group=grpLN, display=display.none, tooltip="Bars to wait for retest before signal expires.")
+i_lnSLMethod   = input.string("Opposite Side", "Stop Loss", options=["Midpoint", "Opposite Side", "Fixed Points"], group=grpLN, tooltip="Where to place the stop loss. Midpoint = ORB mid. Opposite Side = other ORB boundary. Fixed Points = custom distance.")
+i_lnSLPoints   = input.float(20.0, "SL Fixed Points", minval=0.25, step=0.25, group=grpLN, display=display.none, tooltip="Distance in points for stop loss when using Fixed Points mode.")
+i_lnTP1RR      = input.float(0.5, "TP1 R:R", minval=0.1, step=0.1, group=grpLN, inline="lntp1", tooltip="Take Profit 1 as a multiple of the risk (distance to stop loss).")
+i_lnTP1Qty     = input.int(1, "Qty", minval=1, maxval=100, group=grpLN, inline="lntp1", tooltip="Contracts to exit at TP1.")
+i_lnTP2RR      = input.float(1.0, "TP2 R:R", minval=0.1, step=0.1, group=grpLN, inline="lntp2", tooltip="Take Profit 2 as a multiple of the risk. Set Qty to 0 to disable.")
+i_lnTP2Qty     = input.int(1, "Qty", minval=0, maxval=100, group=grpLN, inline="lntp2", tooltip="Contracts to exit at TP2. 0 = disabled, remainder goes to TP3.")
+i_lnTP3RR      = input.float(1.5, "TP3 R:R", minval=0.1, step=0.1, group=grpLN, inline="lntp3", tooltip="Take Profit 3 as a multiple of the risk. Set Qty to 0 to disable.")
+i_lnTP3Qty     = input.int(1, "Qty", minval=0, maxval=100, group=grpLN, inline="lntp3", tooltip="Contracts to exit at TP3. 0 = auto-assign remaining contracts.")
+i_lnTrailEnable    = input.bool(true, "Enable Staircase Stop", group=grpLN, tooltip="Staircase SL: TP1->entry, TP2->TP1, TP3->TP2.")
+i_lnTrailShowLine  = input.bool(true, "Show Staircase Line", group=grpLN, display=display.none, tooltip="Display staircase stop line on chart.")
+i_lnRearmEnable    = input.bool(true, "Enable Re-Arm", group=grpLN, tooltip="Re-arm for new entries after trade closes.")
+i_lnRearmMaxTrades = input.int(3, "Max Trades", minval=1, maxval=20, group=grpLN, display=display.none, tooltip="Max entries per session including re-arms.")
+i_lnRearmAfter     = input.string("SL Only", "Re-Arm After", options=["SL Only", "TP Only", "Both"], group=grpLN, display=display.none, tooltip="Which exits allow re-arming.")
+i_lnRearmDirection = input.string("Both Directions", "Re-Arm Direction", options=["Same Direction", "Opposite Direction", "Both Directions"], group=grpLN, display=display.none, tooltip="Direction filter for re-arm entries.")
+i_lnRearmGate      = input.string("Inside ORB", "Re-Arm Gate", options=["Immediate", "Inside ORB", "Touch Midpoint", "Touch Opposite Side"], group=grpLN, display=display.none, tooltip="Price gate for re-arm.")
+i_lnRearmCooldown  = input.int(0, "Cooldown Bars", minval=0, maxval=50, group=grpLN, display=display.none, tooltip="Bars to wait after trade closes before re-arm.")
+i_lnRearmBars      = input.int(0, "Bars Inside ORB", minval=0, maxval=50, group=grpLN, display=display.none, tooltip="Bars with close inside ORB before re-arming.")
+i_lnSun = input.bool(false, "Sun", group=grpLN, inline="lndays0", tooltip="Allow London trades on Sunday.")
+i_lnMon = input.bool(true, "Mon", group=grpLN, inline="lndays0", tooltip="Allow London trades on Monday.")
+i_lnTue = input.bool(false, "Tue", group=grpLN, inline="lndays0", tooltip="Allow London trades on Tuesday.")
+i_lnWed = input.bool(false, "Wed", group=grpLN, inline="lndays1", tooltip="Allow London trades on Wednesday.")
+i_lnThu = input.bool(true, "Thu", group=grpLN, inline="lndays1", tooltip="Allow London trades on Thursday.")
+i_lnFri = input.bool(true, "Fri", group=grpLN, inline="lndays1", tooltip="Allow London trades on Friday.")
+i_lnSat = input.bool(false, "Sat", group=grpLN, inline="lndays2", tooltip="Allow London trades on Saturday.")
+i_lnHighColor  = input.color(color.new(#ff6600, 0), "High Color", group=grpLN, display=display.none, tooltip="Color of the ORB high boundary line.")
+i_lnLowColor   = input.color(color.new(#ff6600, 0), "Low Color", group=grpLN, display=display.none, tooltip="Color of the ORB low boundary line.")
+i_lnMidColor   = input.color(color.new(#ff6600, 50), "Midline Color", group=grpLN, display=display.none, tooltip="Color of the ORB midline.")
+i_lnLineWidth  = input.int(3, "Line Thickness", minval=1, maxval=5, group=grpLN, display=display.none, tooltip="Width of the ORB boundary lines.")
+i_lnShowMid    = input.bool(true, "Show Midline", group=grpLN, display=display.none, tooltip="Display the midpoint line between ORB high and low.")
+i_lnShowEntry      = input.bool(true, "Show Entry Arrows", group=grpLN, display=display.none, tooltip="Display entry signal arrows.")
+i_lnShowSLTP       = input.bool(true, "Show SL/TP Lines", group=grpLN, display=display.none, tooltip="Display SL/TP lines on chart.")
+i_lnPDColor    = input.color(color.new(#ff6600, 0), "Prev Day H/L Color", group=grpLN, display=display.none, tooltip="Color for previous day session high/low lines.")
+i_lnPDStyle    = input.string("Dashed", "Prev Day Line Style", options=["Solid", "Dashed", "Dotted"], group=grpLN, display=display.none, tooltip="Line style for previous day session high/low lines.")
+i_lnPDWidth    = input.int(1, "Prev Day Line Width", minval=1, maxval=5, group=grpLN, display=display.none, tooltip="Thickness of previous day session high/low lines.")
+i_lnShowPD     = input.bool(true, "Show Prev Day H/L", group=grpLN, display=display.none, tooltip="Display previous day session high and low levels.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// OVERLAY SETTINGS
+// ════════════════════════════════════════════════════════════════════════════════
+// ── Per-Session Day Filters ──
+nyDayAllowed = f_dayAllowed(i_nySun, i_nyMon, i_nyTue, i_nyWed, i_nyThu, i_nyFri, i_nySat)
+asDayAllowed = f_dayAllowed(i_asSun, i_asMon, i_asTue, i_asWed, i_asThu, i_asFri, i_asSat)
+lnDayAllowed = f_dayAllowed(i_lnSun, i_lnMon, i_lnTue, i_lnWed, i_lnThu, i_lnFri, i_lnSat)
+
+
+
+grpHTF = "Higher Timeframe Bias"
+showDashboard = input.bool(true, "Show Dashboard", group=grpHTF, display=display.none, tooltip="Display the HTF bias dashboard on the chart.")
+htf1 = input.timeframe("240", "Timeframe 1", group=grpHTF, display=display.none)
+htf2 = input.timeframe("60", "Timeframe 2", group=grpHTF, display=display.none)
+swingLookback = input.int(10, "Swing Lookback", minval=3, maxval=50, group=grpHTF, display=display.none, tooltip="Number of bars to look back for swing high/low detection in HTF analysis.")
+dashPosition = input.string("Top Right", "Dashboard Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grpHTF, display=display.none, tooltip="Corner of the chart to place the dashboard.")
+dashSize = input.string("Tiny", "Dashboard Size", options=["Tiny", "Small", "Normal"], group=grpHTF, display=display.none, tooltip="Text size of the dashboard.")
+
+grpDashColors = "Dashboard Colors"
+dashBgColor = input.color(color.new(#0d1117, 10), "Background", group=grpDashColors, display=display.none, tooltip="Dashboard background color.")
+dashBorderColor = input.color(color.new(color.gray, 70), "Border", group=grpDashColors, display=display.none, tooltip="Dashboard border color.")
+dashHeaderBg = input.color(color.new(#2962ff, 70), "Header Background", group=grpDashColors, display=display.none, tooltip="Dashboard header row background color.")
+dashHeaderText = input.color(color.white, "Header Text", group=grpDashColors, display=display.none, tooltip="Dashboard header text color.")
+dashLabelColor = input.color(color.gray, "Labels", group=grpDashColors, display=display.none, tooltip="Dashboard label text color.")
+dashBullColor = input.color(color.green, "Bullish", group=grpDashColors, display=display.none, tooltip="Color for bullish values in the dashboard.")
+dashBearColor = input.color(color.red, "Bearish", group=grpDashColors, display=display.none, tooltip="Color for bearish values in the dashboard.")
+dashNeutralColor = input.color(color.gray, "Neutral", group=grpDashColors, display=display.none, tooltip="Color for neutral values in the dashboard.")
+
+grpStyle = "Style"
+lineStyle = input.string("Solid", "Line Style", options=["Solid", "Dashed", "Dotted"], group=grpStyle, display=display.none, tooltip="Style for SL/TP lines (Solid, Dashed, or Dotted).")
+showLabels = input.bool(true, "Show Labels", group=grpStyle, display=display.none, tooltip="Display text labels on SL/TP lines.")
+labelSize = input.string("Tiny", "Label Size", options=["Tiny", "Small", "Normal"], group=grpStyle, display=display.none, tooltip="Size of the SL/TP labels.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Session-end cooldown (blocks entries for 1 bar after any flatten)
+var bool nySessionJustEnded = false
+var bool asSessionJustEnded = false
+var bool lnSessionJustEnded = false
+var int activeSession = 0  // 0=none, 1=NY, 2=AS, 3=LN
+if nySessionJustEnded[1]
+    nySessionJustEnded := false
+if asSessionJustEnded[1]
+    asSessionJustEnded := false
+if lnSessionJustEnded[1]
+    lnSessionJustEnded := false
+nyEntryBuf = i_nyEntryBuffer * syminfo.mintick
+nyRearmEntryBuf = i_nyEntryBuffer * syminfo.mintick
+asEntryBuf = i_asEntryBuffer * syminfo.mintick
+asRearmEntryBuf = i_asEntryBuffer * syminfo.mintick
+lnEntryBuf = i_lnEntryBuffer * syminfo.mintick
+lnRearmEntryBuf = i_lnEntryBuffer * syminfo.mintick
+
+// ── Helper: check if exit type qualifies for re-arm ──
+f_exitQualifies(bool wasSL, string rearmAfter) =>
+    (rearmAfter == "Both") or (rearmAfter == "SL Only" and wasSL) or (rearmAfter == "TP Only" and not wasSL)
+
+// ── Helper: check if direction is allowed for re-arm ──
+// Returns [allowLong, allowShort]
+f_dirAllowed(int lastDir, string rearmDir) =>
+    bool aL = true
+    bool aS = true
+    if rearmDir == "Same Direction"
+        aL := lastDir == 1
+        aS := lastDir == -1
+    else if rearmDir == "Opposite Direction"
+        aL := lastDir == -1
+        aS := lastDir == 1
+    [aL, aS]
+
+calcEndTime(simple string startTime, simple string duration) =>
+    startHour = math.floor(str.tonumber(str.substring(startTime, 0, 2)))
+    startMin = math.floor(str.tonumber(str.substring(startTime, 2, 4)))
+    addMins = switch duration
+        "5 Min" => 5
+        "15 Min" => 15
+        "30 Min" => 30
+        "1 Hour" => 60
+        => 0
+    totalMins = startMin + addMins
+    endHour = (startHour + math.floor(totalMins / 60)) % 24
+    endMin = totalMins % 60
+    endHourStr = endHour < 10 ? "0" + str.tostring(endHour) : str.tostring(endHour)
+    endMinStr = endMin < 10 ? "0" + str.tostring(endMin) : str.tostring(endMin)
+    endHourStr + endMinStr
+
+getLineStyle() =>
+    switch lineStyle
+        "Solid" => line.style_solid
+        "Dashed" => line.style_dashed
+        "Dotted" => line.style_dotted
+
+getLabelSize() =>
+    switch labelSize
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+
+getDashSize() =>
+    switch dashSize
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+
+formatTF(simple string tf) =>
+    switch tf
+        "1" => "1m"
+        "3" => "3m"
+        "5" => "5m"
+        "15" => "15m"
+        "30" => "30m"
+        "45" => "45m"
+        "60" => "1H"
+        "120" => "2H"
+        "180" => "3H"
+        "240" => "4H"
+        "D" => "1D"
+        "W" => "1W"
+        => tf
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TYPES
+// ════════════════════════════════════════════════════════════════════════════════
+type orbData
+    float hi
+    float lo
+    float mid
+    int startBar
+    int hiBar
+    int loBar
+    int endBar
+    int startTime
+    int hiTime
+    int loTime
+    int endTime
+    line hiLine
+    line loLine
+    line midLine
+    label hiLabel
+    label loLabel
+    label midLabel
+
+
+// ════════════════════════════════════════════════════════════════════════════════
+// BUILD SESSION STRINGS
+// ════════════════════════════════════════════════════════════════════════════════
+nyORBEndTime = i_nyORBDur == "Custom" ? i_nyORBEnd : calcEndTime(i_nyORBStart, i_nyORBDur)
+nyORBSession = i_nyORBStart + "-" + nyORBEndTime
+nyTradeSession = i_nyORBStart + "-" + i_nySessEnd
+
+asORBEndTime = i_asORBDur == "Custom" ? i_asORBEnd : calcEndTime(i_asORBStart, i_asORBDur)
+asORBSession = i_asORBStart + "-" + asORBEndTime
+asTradeSession = i_asORBStart + "-" + i_asSessEnd
+
+lnORBEndTime = i_lnORBDur == "Custom" ? i_lnORBEnd : calcEndTime(i_lnORBStart, i_lnORBDur)
+lnORBSession = i_lnORBStart + "-" + lnORBEndTime
+lnTradeSession = i_lnORBStart + "-" + i_lnSessEnd
+
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TIME CHECKS
+// ════════════════════════════════════════════════════════════════════════════════
+inNYORB   = not na(time(timeframe.period, nyORBSession, i_timezone))
+inNYTrade = not na(time(timeframe.period, nyTradeSession, i_timezone))
+inAsORB   = not na(time(timeframe.period, asORBSession, i_timezone))
+inAsTrade = not na(time(timeframe.period, asTradeSession, i_timezone))
+inLnORB   = not na(time(timeframe.period, lnORBSession, i_timezone))
+inLnTrade = not na(time(timeframe.period, lnTradeSession, i_timezone))
+
+// Per-session TP qty calculations
+_nyTp1Qty = math.min(i_nyTP1Qty, i_nyContracts)
+_nyTp2Qty = i_nyTP2Qty > 0 ? math.min(i_nyTP2Qty, i_nyContracts - _nyTp1Qty) : 0
+_nyTp3Qty = i_nyTP3Qty > 0 ? math.min(i_nyTP3Qty, i_nyContracts - _nyTp1Qty - _nyTp2Qty) : (i_nyContracts - _nyTp1Qty - _nyTp2Qty)
+
+_asTp1Qty = math.min(i_asTP1Qty, i_asContracts)
+_asTp2Qty = i_asTP2Qty > 0 ? math.min(i_asTP2Qty, i_asContracts - _asTp1Qty) : 0
+_asTp3Qty = i_asTP3Qty > 0 ? math.min(i_asTP3Qty, i_asContracts - _asTp1Qty - _asTp2Qty) : (i_asContracts - _asTp1Qty - _asTp2Qty)
+
+_lnTp1Qty = math.min(i_lnTP1Qty, i_lnContracts)
+_lnTp2Qty = i_lnTP2Qty > 0 ? math.min(i_lnTP2Qty, i_lnContracts - _lnTp1Qty) : 0
+_lnTp3Qty = i_lnTP3Qty > 0 ? math.min(i_lnTP3Qty, i_lnContracts - _lnTp1Qty - _lnTp2Qty) : (i_lnContracts - _lnTp1Qty - _lnTp2Qty)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// HIGHER TIMEFRAME BIAS
+// ════════════════════════════════════════════════════════════════════════════════
+[htf1High, htf1Low] = request.security(syminfo.tickerid, htf1, [high, low])
+htf1SwingHigh = ta.pivothigh(htf1High, swingLookback, swingLookback)
+htf1SwingLow = ta.pivotlow(htf1Low, swingLookback, swingLookback)
+var float htf1LastHigh = na, var float htf1PrevHigh = na
+var float htf1LastLow = na, var float htf1PrevLow = na
+if not na(htf1SwingHigh)
+    htf1PrevHigh := htf1LastHigh, htf1LastHigh := htf1SwingHigh
+if not na(htf1SwingLow)
+    htf1PrevLow := htf1LastLow, htf1LastLow := htf1SwingLow
+htf1Bullish = not na(htf1LastHigh) and not na(htf1PrevHigh) and htf1LastHigh > htf1PrevHigh and not na(htf1LastLow) and not na(htf1PrevLow) and htf1LastLow > htf1PrevLow
+htf1Bearish = not na(htf1LastHigh) and not na(htf1PrevHigh) and htf1LastHigh < htf1PrevHigh and not na(htf1LastLow) and not na(htf1PrevLow) and htf1LastLow < htf1PrevLow
+htf1BiasText = htf1Bullish ? "BULLISH" : htf1Bearish ? "BEARISH" : "NEUTRAL"
+htf1BiasColor = htf1Bullish ? dashBullColor : htf1Bearish ? dashBearColor : dashNeutralColor
+htf1HH = not na(htf1LastHigh) and not na(htf1PrevHigh) and htf1LastHigh > htf1PrevHigh
+htf1LH = not na(htf1LastHigh) and not na(htf1PrevHigh) and htf1LastHigh < htf1PrevHigh
+htf1HL = not na(htf1LastLow) and not na(htf1PrevLow) and htf1LastLow > htf1PrevLow
+htf1LL = not na(htf1LastLow) and not na(htf1PrevLow) and htf1LastLow < htf1PrevLow
+htf1StructureText = (htf1HH ? "HH" : htf1LH ? "LH" : "-") + " / " + (htf1HL ? "HL" : htf1LL ? "LL" : "-")
+
+[htf2High, htf2Low] = request.security(syminfo.tickerid, htf2, [high, low])
+htf2SwingHigh = ta.pivothigh(htf2High, swingLookback, swingLookback)
+htf2SwingLow = ta.pivotlow(htf2Low, swingLookback, swingLookback)
+var float htf2LastHigh = na, var float htf2PrevHigh = na
+var float htf2LastLow = na, var float htf2PrevLow = na
+if not na(htf2SwingHigh)
+    htf2PrevHigh := htf2LastHigh, htf2LastHigh := htf2SwingHigh
+if not na(htf2SwingLow)
+    htf2PrevLow := htf2LastLow, htf2LastLow := htf2SwingLow
+htf2Bullish = not na(htf2LastHigh) and not na(htf2PrevHigh) and htf2LastHigh > htf2PrevHigh and not na(htf2LastLow) and not na(htf2PrevLow) and htf2LastLow > htf2PrevLow
+htf2Bearish = not na(htf2LastHigh) and not na(htf2PrevHigh) and htf2LastHigh < htf2PrevHigh and not na(htf2LastLow) and not na(htf2PrevLow) and htf2LastLow < htf2PrevLow
+htf2BiasText = htf2Bullish ? "BULLISH" : htf2Bearish ? "BEARISH" : "NEUTRAL"
+htf2BiasColor = htf2Bullish ? dashBullColor : htf2Bearish ? dashBearColor : dashNeutralColor
+htf2HH = not na(htf2LastHigh) and not na(htf2PrevHigh) and htf2LastHigh > htf2PrevHigh
+htf2LH = not na(htf2LastHigh) and not na(htf2PrevHigh) and htf2LastHigh < htf2PrevHigh
+htf2HL = not na(htf2LastLow) and not na(htf2PrevLow) and htf2LastLow > htf2PrevLow
+htf2LL = not na(htf2LastLow) and not na(htf2PrevLow) and htf2LastLow < htf2PrevLow
+htf2StructureText = (htf2HH ? "HH" : htf2LH ? "LH" : "-") + " / " + (htf2HL ? "HL" : htf2LL ? "LL" : "-")
+
+// ════════════════════════════════════════════════════════════════════════════════
+//  TRAILING STOP HELPER
+//  Calculates new trail stop given current state. Returns updated trailSL.
+//  Staircase: TP1 hit -> SL to entry, TP2 hit -> SL to TP1, TP3 hit -> SL to TP2
+// ════════════════════════════════════════════════════════════════════════════════
+f_pdLineStyle(_style) =>
+    _style == "Solid" ? line.style_solid : _style == "Dotted" ? line.style_dotted : line.style_dashed
+
+calcTrail(int dir, float curTrail, float entry, float tp1, float tp2, float tp3, float origSL, bool trailEnabled) =>
+    float newTrail = curTrail
+    if trailEnabled and dir != 0
+        if dir == 1  // long — staircase: TP hit moves SL to previous level
+            if not na(tp3) and high >= tp3
+                newTrail := math.max(newTrail, tp2)
+            else if not na(tp2) and high >= tp2
+                newTrail := math.max(newTrail, tp1)
+            else if not na(tp1) and high >= tp1
+                newTrail := math.max(newTrail, entry)
+        else  // short — staircase
+            if not na(tp3) and low <= tp3
+                newTrail := math.min(newTrail, tp2)
+            else if not na(tp2) and low <= tp2
+                newTrail := math.min(newTrail, tp1)
+            else if not na(tp1) and low <= tp1
+                newTrail := math.min(newTrail, entry)
+    newTrail
+
+// ── SL/TP Line Style ──
+grpLines = "SL/TP Lines"
+i_slLineColor  = input.color(color.red, "SL Color", group=grpLines, inline="sl", tooltip="Color of the stop loss line.")
+i_slLineStyle  = input.string("Dashed", "Style", options=["Solid", "Dashed", "Dotted"], group=grpLines, inline="sl", tooltip="Line style (Solid, Dashed, or Dotted).")
+i_slLineWidth  = input.int(1, "Width", minval=1, maxval=5, group=grpLines, inline="sl", tooltip="Line width in pixels.")
+i_tpLineColor  = input.color(color.lime, "TP Color", group=grpLines, inline="tp", tooltip="Color of the take profit lines.")
+i_tpLineStyle  = input.string("Dashed", "Style", options=["Solid", "Dashed", "Dotted"], group=grpLines, inline="tp", tooltip="Line style (Solid, Dashed, or Dotted).")
+i_tpLineWidth  = input.int(2, "Width", minval=1, maxval=5, group=grpLines, inline="tp", tooltip="Line width in pixels.")
+i_trailColor   = input.color(color.yellow, "Trail Color", group=grpLines, inline="trail", tooltip="Color of the staircase trailing stop line.")
+i_trailStyle   = input.string("Dotted", "Style", options=["Solid", "Dashed", "Dotted"], group=grpLines, inline="trail", tooltip="Line style for the trailing stop.")
+i_trailWidth   = input.int(2, "Width", minval=1, maxval=5, group=grpLines, inline="trail", tooltip="Line width for the trailing stop.")
+
+f_lineStyle(string s) =>
+    s == "Solid" ? line.style_solid : s == "Dotted" ? line.style_dotted : line.style_dashed
+
+slStyle = f_lineStyle(i_slLineStyle)
+tpStyle = f_lineStyle(i_tpLineStyle)
+trailLineStyle = f_lineStyle(i_trailStyle)
+
+// ── Webhook Alert JSON (TradersPost / Ghost compatible) ──
+// Set your TradingView alert message to: {{strategy.order.alert_message}}
+// Alert on: Order fills only
+_jsonBuy   = '{"ticker": "{{ticker}}", "action": "buy", "price": {{close}}}'
+_jsonSell  = '{"ticker": "{{ticker}}", "action": "sell", "price": {{close}}}'
+_jsonExit  = '{"ticker": "{{ticker}}", "action": "exit", "qty": {{strategy.order.contracts}}, "price": {{close}}}'
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ═══  NEW YORK ORB MODULE  ══════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════════
+var orbData[] nyOrbArray = array.new<orbData>(0)
+var float nyORBHigh = na, var float nyORBLow = na, var float nyORBMid = na
+var int nyOrbStartBar = na, var int nyOrbHighBar = na, var int nyOrbLowBar = na
+var int nyOrbStartTime = na, var int nyOrbHighTime = na, var int nyOrbLowTime = na
+var bool nyOrbBuilding = false, var bool nyOrbComplete = false
+var bool  nySigFired = false, var bool  nyBrkPending = false, var bool nyRetestDone = false
+var int   nyBrkDir = 0, var int nyBrkBar = 0
+var float nySigEntry = na, var float nySigSL = na
+var float nySigTP1 = na, var float nySigTP2 = na, var float nySigTP3 = na
+var int   nySigDir = 0
+var bool  nyTP1Hit = false, var bool nyTP2Hit = false, var bool nyTP3Hit = false, var bool nySLHit = false
+var line  nySLLine = na, var line nyTP1Line = na, var line nyTP2Line = na, var line nyTP3Line = na
+var label nySLLabel = na, var label nyTP1Label = na, var label nyTP2Label = na, var label nyTP3Label = na
+var float nyTrailSL = na
+var line  nyTrailLine = na
+var label nyTrailLabel = na
+var bool nyFlattenDone = false
+var int nyTradeCount = 0
+var int nyInsideBars = 0
+var bool nyLastWasSL = false
+var int nyLastDir = 0
+var int nyExitBar = 0
+var bool nyCooldownDone = false
+var bool nyInsideStarted = false
+
+nyDay = f_dayKey(time, i_timezone)
+nyNewDay = nyDay != nz(nyDay[1], nyDay)
+nySessionStart = (inNYTrade and not inNYTrade[1]) or (inNYTrade and nyNewDay)
+if nySessionStart
+    nyFlattenDone := false
+    nyTradeCount := 0
+    nyInsideBars := 0
+    nyLastWasSL := false
+    nyLastDir := 0
+    nyExitBar := 0
+    nyCooldownDone := false
+    nyInsideStarted := false
+    nyORBHigh := na, nyORBLow := na, nyORBMid := na
+    nyOrbBuilding := false, nyOrbComplete := false
+    nyOrbStartBar := na, nyOrbHighBar := na, nyOrbLowBar := na
+    nyOrbStartTime := na, nyOrbHighTime := na, nyOrbLowTime := na
+    nySigFired := false, nyBrkPending := false, nyRetestDone := false, nyBrkDir := 0, nyBrkBar := 0
+    if strategy.position_size == 0
+        nySigDir := 0
+    nyTP1Hit := false, nyTP2Hit := false, nyTP3Hit := false, nySLHit := false
+    nySigEntry := na, nySigSL := na, nySigTP1 := na, nySigTP2 := na, nySigTP3 := na
+    nyTrailSL := na
+    // Don't delete old SL/TP lines — they persist for history
+    nySLLine := na, nyTP1Line := na, nyTP2Line := na, nyTP3Line := na
+    nySLLabel := na, nyTP1Label := na, nyTP2Label := na, nyTP3Label := na
+    nyTrailLine := na, nyTrailLabel := na
+
+nySessionEnd = not inNYTrade and inNYTrade[1]
+if nySessionEnd and i_nyEnable
+    // Freeze ORB lines at session end
+    if nyOrbArray.size() > 0
+        for j = 0 to nyOrbArray.size() - 1
+            _o = nyOrbArray.get(j)
+            if na(_o.endBar)
+                _o.endBar := bar_index[1]
+                _o.endTime := time[1]
+                nyOrbArray.set(j, _o)
+    // Hard flatten: close all positions and cancel pending orders
+    // Freeze lines before flatten
+    if not na(nySLLine)
+        nySLLine.set_x2(time)
+    if not na(nyTP1Line)
+        nyTP1Line.set_x2(time)
+    if not na(nyTP2Line)
+        nyTP2Line.set_x2(time)
+    if not na(nyTP3Line)
+        nyTP3Line.set_x2(time)
+    nySLLine := na, nyTP1Line := na, nyTP2Line := na, nyTP3Line := na
+    strategy.cancel_all()
+    if strategy.position_size > 0
+        strategy.order("EOS", strategy.short, qty=math.abs(strategy.position_size), alert_message=_jsonExit)
+    else if strategy.position_size < 0
+        strategy.order("EOS", strategy.long, qty=math.abs(strategy.position_size), alert_message=_jsonExit)
+    nySessionJustEnded := true
+    activeSession := 0
+    nySigDir := 0
+// NY: ORB Build
+if i_nyEnable and inNYORB and not nyOrbComplete
+    if not nyOrbBuilding
+        nyOrbStartBar := bar_index, nyOrbStartTime := time, nyOrbBuilding := true
+    if na(nyORBHigh) or high > nyORBHigh
+        nyORBHigh := high, nyOrbHighBar := bar_index, nyOrbHighTime := time
+    if na(nyORBLow) or low < nyORBLow
+        nyORBLow := low, nyOrbLowBar := bar_index, nyOrbLowTime := time
+
+if i_nyEnable and not inNYORB and nyOrbBuilding and not nyOrbComplete and not na(nyORBHigh)
+    nyOrbComplete := true
+    nyORBMid := (nyORBHigh + nyORBLow) / 2
+    hiLine = line.new(nyOrbHighTime, nyORBHigh, time, nyORBHigh, xloc=xloc.bar_time, color=i_nyHighColor, style=getLineStyle(), width=i_nyLineWidth)
+    loLine = line.new(nyOrbLowTime, nyORBLow, time, nyORBLow, xloc=xloc.bar_time, color=i_nyLowColor, style=getLineStyle(), width=i_nyLineWidth)
+    midLine = i_nyShowMid ? line.new(nyOrbStartTime, nyORBMid, time, nyORBMid, xloc=xloc.bar_time, color=i_nyMidColor, style=line.style_dotted, width=math.max(1, i_nyLineWidth - 1)) : na
+    hiLabel = showLabels ? label.new(time, nyORBHigh, "NY ORB H", xloc=xloc.bar_time, style=label.style_none, textcolor=i_nyHighColor, size=getLabelSize()) : na
+    loLabel = showLabels ? label.new(time, nyORBLow, "NY ORB L", xloc=xloc.bar_time, style=label.style_none, textcolor=i_nyLowColor, size=getLabelSize()) : na
+    midLabel = showLabels and i_nyShowMid ? label.new(time, nyORBMid, "NY ORB M", xloc=xloc.bar_time, style=label.style_none, textcolor=i_nyMidColor, size=getLabelSize()) : na
+    newOrb = orbData.new(nyORBHigh, nyORBLow, nyORBMid, nyOrbStartBar, nyOrbHighBar, nyOrbLowBar, na, nyOrbStartTime, nyOrbHighTime, nyOrbLowTime, na, hiLine, loLine, midLine, hiLabel, loLabel, midLabel)
+    nyOrbArray.unshift(newOrb)
+    if nyOrbArray.size() > i_daysToShow
+        old = nyOrbArray.pop()
+        old.hiLine.delete(), old.loLine.delete(), old.midLine.delete()
+        old.hiLabel.delete(), old.loLabel.delete(), old.midLabel.delete()
+
+// NY: Extend all historic ORB lines
+if nyOrbArray.size() > 0
+    for i = 0 to nyOrbArray.size() - 1
+        cur = nyOrbArray.get(i)
+        int _t2 = na(cur.endTime) ? time : cur.endTime
+
+        cur.hiLine.set_x1(cur.hiTime)
+        cur.hiLine.set_x2(_t2)
+        cur.loLine.set_x1(cur.loTime)
+        cur.loLine.set_x2(_t2)
+        if i_nyShowMid and not na(cur.midLine)
+            cur.midLine.set_x1(cur.startTime)
+            cur.midLine.set_x2(_t2)
+
+        if i == 0 and showLabels
+            cur.hiLabel.set_x(_t2)
+            cur.loLabel.set_x(_t2)
+            if i_nyShowMid and not na(cur.midLabel)
+                cur.midLabel.set_x(_t2)
+        else
+            cur.hiLabel.delete()
+            cur.loLabel.delete()
+            if not na(cur.midLabel)
+                cur.midLabel.delete()
+            cur.hiLabel := na
+            cur.loLabel := na
+            cur.midLabel := na
+
+// NY: Signals
+
+_nyBuf = nyTradeCount > 0 and i_nyRearmEnable ? nyRearmEntryBuf : nyEntryBuf
+nyCrossUp = close > nyORBHigh + _nyBuf and close[1] <= nyORBHigh + _nyBuf
+nyHighBreak = nyOrbComplete and inNYTrade and nyCrossUp
+nyCrossDn = close < nyORBLow - _nyBuf and close[1] >= nyORBLow - _nyBuf
+nyLowBreak  = nyOrbComplete and inNYTrade and nyCrossDn
+bool nyLongSig = false, bool nyShortSig = false
+
+if i_nyEnable and nyBrkPending and bar_index > nyBrkBar and not nySigFired
+    _isMidRetest = i_nyEntryMode == "Retest Midpoint"
+    _retestLvl = _isMidRetest ? nyORBMid : (nyBrkDir == 1 ? nyORBHigh : nyORBLow)
+    if nyBrkDir == 1
+        if not nyRetestDone and low <= _retestLvl
+            nyRetestDone := true
+        if nyRetestDone and (_isMidRetest ? close > nyORBMid : close > nyORBHigh + _nyBuf)
+            nyLongSig := true, nyBrkPending := false, nyRetestDone := false
+        else if _isMidRetest and nyRetestDone and close <= nyORBMid
+            nyBrkPending := false, nyRetestDone := false
+        else if _isMidRetest and close < nyORBLow
+            nyBrkPending := false, nyRetestDone := false
+        else if not _isMidRetest and close <= nyORBHigh
+            nyBrkPending := false
+    else if nyBrkDir == -1
+        if not nyRetestDone and high >= _retestLvl
+            nyRetestDone := true
+        if nyRetestDone and (_isMidRetest ? close < nyORBMid : close < nyORBLow - _nyBuf)
+            nyShortSig := true, nyBrkPending := false, nyRetestDone := false
+        else if _isMidRetest and nyRetestDone and close >= nyORBMid
+            nyBrkPending := false, nyRetestDone := false
+        else if _isMidRetest and close > nyORBHigh
+            nyBrkPending := false, nyRetestDone := false
+        else if not _isMidRetest and close >= nyORBLow
+            nyBrkPending := false
+    if nyBrkPending and bar_index - nyBrkBar >= i_nyRetestTimeout
+        nyBrkPending := false, nyRetestDone := false
+
+if i_nyEnable and nyOrbComplete and inNYTrade and not nySigFired and (nyTradeCount < i_nyRearmMaxTrades or not i_nyRearmEnable)
+    if nyHighBreak and not nyBrkPending
+        if i_nyEntryMode == "Breakout"
+            nyLongSig := true
+        else
+            nyBrkPending := true, nyBrkDir := 1, nyBrkBar := bar_index
+    else if nyLowBreak and not nyBrkPending
+        if i_nyEntryMode == "Breakout"
+            nyShortSig := true
+        else
+            nyBrkPending := true, nyBrkDir := -1, nyBrkBar := bar_index
+          // NY: Direction filter on re-armed signals
+if i_nyRearmEnable and nyTradeCount > 0 and nyLastDir != 0
+    [nyAllowL, nyAllowS] = f_dirAllowed(nyLastDir, i_nyRearmDirection)
+    if nyLongSig and not nyAllowL
+        nyLongSig := false
+    if nyShortSig and not nyAllowS
+        nyShortSig := false
+    // EMA trend filter
+    if nyLongSig and not f_emaAllowLong(i_nyEMAFilter, nyTradeCount > 0)
+        nyLongSig := false
+    if nyShortSig and not f_emaAllowShort(i_nyEMAFilter, nyTradeCount > 0)
+        nyShortSig := false
+
+// NY: Entry Long
+if barstate.isconfirmed and nyLongSig and nyDayAllowed and not inFlatWindow and i_nyDirection != "Short Only" and not nySessionJustEnded
+    nySigFired := true, nySigEntry := close, nySigDir := 1
+    activeSession := 1
+    nyTradeCount += 1
+    nySigSL := i_nySLMethod == "Midpoint" ? nyORBMid : i_nySLMethod == "Opposite Side" ? nyORBLow : close - i_nySLPoints
+    _risk = math.abs(nySigEntry - nySigSL)
+    if _risk > 0
+        nySigTP1 := nySigEntry + _risk * i_nyTP1RR, nySigTP2 := nySigEntry + _risk * i_nyTP2RR, nySigTP3 := nySigEntry + _risk * i_nyTP3RR
+    nyTrailSL := nySigSL
+    strategy.entry("NY Long", strategy.long, qty=i_nyContracts, alert_message=_jsonBuy)
+    if _risk > 0
+        strategy.exit("NY TP1", from_entry="NY Long", qty=_nyTp1Qty, limit=nySigTP1, stop=nySigSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+        if _nyTp2Qty > 0
+            strategy.exit("NY TP2", from_entry="NY Long", qty=_nyTp2Qty, limit=nySigTP2, stop=nySigSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+        if _nyTp3Qty > 0
+            strategy.exit("NY TP3", from_entry="NY Long", qty=_nyTp3Qty, limit=nySigTP3, stop=nySigSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+    else
+        strategy.exit("NY SL", from_entry="NY Long", stop=nySigSL, alert_message=_jsonExit)
+    if i_nyShowSLTP
+        nySLLine  := line.new(time, nySigSL, time, nySigSL, xloc=xloc.bar_time, color=i_slLineColor, style=slStyle, width=i_slLineWidth)
+        nySLLabel := showLabels ? label.new(time, nySigSL, "SL", xloc=xloc.bar_time, style=label.style_none, textcolor=i_slLineColor, size=getLabelSize()) : na
+        if not na(nySigTP1)
+            nyTP1Line := line.new(time, nySigTP1, time, nySigTP1, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=i_tpLineWidth)
+            nyTP1Label := showLabels ? label.new(time, nySigTP1, "TP1", xloc=xloc.bar_time, style=label.style_none, textcolor=i_tpLineColor, size=getLabelSize()) : na
+        if not na(nySigTP2) and _nyTp2Qty > 0
+            nyTP2Line := line.new(time, nySigTP2, time, nySigTP2, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+            nyTP2Label := showLabels ? label.new(time, nySigTP2, "TP2", xloc=xloc.bar_time, style=label.style_none, textcolor=i_tpLineColor, size=getLabelSize()) : na
+        if not na(nySigTP3) and _nyTp3Qty > 0
+            nyTP3Line := line.new(time, nySigTP3, time, nySigTP3, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+            nyTP3Label := showLabels ? label.new(time, nySigTP3, "TP3", xloc=xloc.bar_time, style=label.style_none, textcolor=i_tpLineColor, size=getLabelSize()) : na
+
+// NY: Entry Short
+if barstate.isconfirmed and nyShortSig and nyDayAllowed and not inFlatWindow and i_nyDirection != "Long Only" and not nySessionJustEnded
+    nySigFired := true, nySigEntry := close, nySigDir := -1
+    activeSession := 1
+    nyTradeCount += 1
+    nySigSL := i_nySLMethod == "Midpoint" ? nyORBMid : i_nySLMethod == "Opposite Side" ? nyORBHigh : close + i_nySLPoints
+    _risk = math.abs(nySigSL - nySigEntry)
+    if _risk > 0
+        nySigTP1 := nySigEntry - _risk * i_nyTP1RR, nySigTP2 := nySigEntry - _risk * i_nyTP2RR, nySigTP3 := nySigEntry - _risk * i_nyTP3RR
+    nyTrailSL := nySigSL
+    strategy.entry("NY Short", strategy.short, qty=i_nyContracts, alert_message=_jsonSell)
+    if _risk > 0
+        strategy.exit("NY TP1", from_entry="NY Short", qty=_nyTp1Qty, limit=nySigTP1, stop=nySigSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+        if _nyTp2Qty > 0
+            strategy.exit("NY TP2", from_entry="NY Short", qty=_nyTp2Qty, limit=nySigTP2, stop=nySigSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+        if _nyTp3Qty > 0
+            strategy.exit("NY TP3", from_entry="NY Short", qty=_nyTp3Qty, limit=nySigTP3, stop=nySigSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+    else
+        strategy.exit("NY SL", from_entry="NY Short", stop=nySigSL, alert_message=_jsonExit)
+    if i_nyShowSLTP
+        nySLLine  := line.new(time, nySigSL, time, nySigSL, xloc=xloc.bar_time, color=i_slLineColor, style=slStyle, width=i_slLineWidth)
+        if not na(nySigTP1)
+            nyTP1Line := line.new(time, nySigTP1, time, nySigTP1, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=i_tpLineWidth)
+        if not na(nySigTP2) and _nyTp2Qty > 0
+            nyTP2Line := line.new(time, nySigTP2, time, nySigTP2, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+        if not na(nySigTP3) and _nyTp3Qty > 0
+            nyTP3Line := line.new(time, nySigTP3, time, nySigTP3, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+
+// NY: Trailing Stop Update
+if i_nyTrailEnable and nySigDir != 0 and not nySLHit and strategy.position_size != 0
+    _prevTrail = nyTrailSL
+    nyTrailSL := calcTrail(nySigDir, nyTrailSL, nySigEntry, nySigTP1, nySigTP2, nySigTP3, nySigSL, i_nyTrailEnable)
+    if nyTrailSL != _prevTrail
+        // Re-issue exits with new trail stop for remaining qty
+        if nySigDir == 1
+            strategy.exit("NY TP1", from_entry="NY Long", qty=_nyTp1Qty, limit=nySigTP1, stop=nyTrailSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+            if _nyTp2Qty > 0
+                strategy.exit("NY TP2", from_entry="NY Long", qty=_nyTp2Qty, limit=nySigTP2, stop=nyTrailSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+            if _nyTp3Qty > 0
+                strategy.exit("NY TP3", from_entry="NY Long", qty=_nyTp3Qty, limit=nySigTP3, stop=nyTrailSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+        else
+            strategy.exit("NY TP1", from_entry="NY Short", qty=_nyTp1Qty, limit=nySigTP1, stop=nyTrailSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+            if _nyTp2Qty > 0
+                strategy.exit("NY TP2", from_entry="NY Short", qty=_nyTp2Qty, limit=nySigTP2, stop=nyTrailSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+            if _nyTp3Qty > 0
+                strategy.exit("NY TP3", from_entry="NY Short", qty=_nyTp3Qty, limit=nySigTP3, stop=nyTrailSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+    // Draw trail line
+    if i_nyTrailShowLine and nyTrailSL != nySigSL
+        nyTrailLine := line.new(time[1], nyTrailSL, time, nyTrailSL, xloc=xloc.bar_time, color=i_trailColor, style=trailLineStyle, width=i_trailWidth)
+        if na(nyTrailLabel)
+            nyTrailLabel := showLabels ? label.new(time, nyTrailSL, "TRAIL", xloc=xloc.bar_time, style=label.style_none, textcolor=i_trailColor, size=getLabelSize()) : na
+        else
+            nyTrailLabel.set_y(nyTrailSL)
+
+// NY: SL/TP line extend to current bar while trade active
+if nySigDir != 0 and i_nyShowSLTP
+    if not na(nySLLine)
+        nySLLine.set_x2(time)
+    if not na(nySLLabel)
+        nySLLabel.set_x(time)
+    if not na(nyTP1Line)
+        nyTP1Line.set_x2(time)
+    if not na(nyTP1Label)
+        nyTP1Label.set_x(time)
+    if not na(nyTP2Line)
+        nyTP2Line.set_x2(time)
+    if not na(nyTP2Label)
+        nyTP2Label.set_x(time)
+    if not na(nyTP3Line)
+        nyTP3Line.set_x2(time)
+    if not na(nyTP3Label)
+        nyTP3Label.set_x(time)
+    // Trail line + label extend
+    if not na(nyTrailLine)
+        nyTrailLine.set_x2(time)
+    if not na(nyTrailLabel)
+        nyTrailLabel.set_x(time)
+
+if i_nyEnable and nySigDir != 0 and not nySLHit
+    if nySigDir == 1
+        if low <= nyTrailSL
+            nySLHit := true
+            nyLastWasSL := true
+            nyLastDir := nySigDir
+            nyExitBar := bar_index
+            nyCooldownDone := false
+            nyInsideStarted := false
+            nyInsideBars := 0
+            nySigDir := 0
+            // Freeze SL/TP lines at exit bar
+            if not na(nySLLine)
+                nySLLine.set_x2(time)
+            if not na(nyTP1Line)
+                nyTP1Line.set_x2(time)
+            if not na(nyTP2Line)
+                nyTP2Line.set_x2(time)
+            if not na(nyTP3Line)
+                nyTP3Line.set_x2(time)
+            nySLLine := na, nyTP1Line := na, nyTP2Line := na, nyTP3Line := na
+        else
+            if not nyTP1Hit and high >= nySigTP1
+                nyTP1Hit := true
+            if not nyTP2Hit and high >= nySigTP2
+                nyTP2Hit := true
+            if not nyTP3Hit and high >= nySigTP3
+                nyTP3Hit := true
+    else if nySigDir == -1
+        if high >= nyTrailSL
+            nySLHit := true
+            nyLastWasSL := true
+            nyLastDir := nySigDir
+            nyExitBar := bar_index
+            nyCooldownDone := false
+            nyInsideStarted := false
+            nyInsideBars := 0
+            nySigDir := 0
+            if not na(nySLLine)
+                nySLLine.set_x2(time)
+            if not na(nyTP1Line)
+                nyTP1Line.set_x2(time)
+            if not na(nyTP2Line)
+                nyTP2Line.set_x2(time)
+            if not na(nyTP3Line)
+                nyTP3Line.set_x2(time)
+            nySLLine := na, nyTP1Line := na, nyTP2Line := na, nyTP3Line := na
+        else
+            if not nyTP1Hit and low <= nySigTP1
+                nyTP1Hit := true
+            if not nyTP2Hit and low <= nySigTP2
+                nyTP2Hit := true
+            if not nyTP3Hit and low <= nySigTP3
+                nyTP3Hit := true
+
+// NY: Detect TP exit (position closed without SL — requires prior bar had position)
+if i_nyEnable and nySigFired and nySigDir != 0 and strategy.position_size == 0 and strategy.position_size[1] != 0 and not nySLHit
+    nyLastWasSL := false
+    nyLastDir := nySigDir
+    nyExitBar := bar_index
+    nyCooldownDone := false
+    nyInsideStarted := false
+    nyInsideBars := 0
+    nySigDir := 0
+    // Freeze SL/TP lines at exit bar
+    if not na(nySLLine)
+        nySLLine.set_x2(time)
+    if not na(nyTP1Line)
+        nyTP1Line.set_x2(time)
+    if not na(nyTP2Line)
+        nyTP2Line.set_x2(time)
+    if not na(nyTP3Line)
+        nyTP3Line.set_x2(time)
+    nySLLine := na, nyTP1Line := na, nyTP2Line := na, nyTP3Line := na
+
+plotshape(i_nyShowEntry and nyLongSig and nyDayAllowed and not inFlatWindow and i_nyDirection != "Short Only" and not nySessionJustEnded,  title="NY Long",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small, text="NY LONG")
+plotshape(i_nyShowEntry and nyShortSig and nyDayAllowed and not inFlatWindow and i_nyDirection != "Long Only" and not nySessionJustEnded, title="NY Short", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small, text="NY SHORT")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ═══  ASIA ORB MODULE  ══════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════════
+var orbData[] asOrbArray = array.new<orbData>(0)
+var float asORBHigh = na, var float asORBLow = na, var float asORBMid = na
+var int asOrbStartBar = na, var int asOrbHighBar = na, var int asOrbLowBar = na
+var int asOrbStartTime = na, var int asOrbHighTime = na, var int asOrbLowTime = na
+var bool asOrbBuilding = false, var bool asOrbComplete = false
+var bool  asSigFired = false, var bool  asBrkPending = false, var bool asRetestDone = false
+var int   asBrkDir = 0, var int asBrkBar = 0
+var float asSigEntry = na, var float asSigSL = na
+var float asSigTP1 = na, var float asSigTP2 = na, var float asSigTP3 = na
+var int   asSigDir = 0
+var bool  asTP1Hit = false, var bool asTP2Hit = false, var bool asTP3Hit = false, var bool asSLHit = false
+var line  asSLLine = na, var line asTP1Line = na, var line asTP2Line = na, var line asTP3Line = na
+var label asSLLabel = na, var label asTP1Label = na, var label asTP2Label = na, var label asTP3Label = na
+var float asTrailSL = na
+var line  asTrailLine = na
+var label asTrailLabel = na
+var bool asFlattenDone = false
+var int asTradeCount = 0
+var int asInsideBars = 0
+var bool asLastWasSL = false
+var int asLastDir = 0
+var int asExitBar = 0
+var bool asCooldownDone = false
+var bool asInsideStarted = false
+
+asDay = f_dayKey(time, i_timezone)
+asNewDay = asDay != nz(asDay[1], asDay)
+asSessionStart = (inAsTrade and not inAsTrade[1]) or (inAsTrade and asNewDay)
+if asSessionStart
+    asFlattenDone := false
+    asTradeCount := 0
+    asInsideBars := 0
+    asLastWasSL := false
+    asLastDir := 0
+    asExitBar := 0
+    asCooldownDone := false
+    asInsideStarted := false
+    asORBHigh := na, asORBLow := na, asORBMid := na
+    asOrbBuilding := false, asOrbComplete := false
+    asOrbStartBar := na, asOrbHighBar := na, asOrbLowBar := na
+    asOrbStartTime := na, asOrbHighTime := na, asOrbLowTime := na
+    asSigFired := false, asBrkPending := false, asRetestDone := false, asBrkDir := 0, asBrkBar := 0
+    if strategy.position_size == 0
+        asSigDir := 0
+    asTP1Hit := false, asTP2Hit := false, asTP3Hit := false, asSLHit := false
+    asSigEntry := na, asSigSL := na, asSigTP1 := na, asSigTP2 := na, asSigTP3 := na
+    asTrailSL := na
+    // Don't delete old SL/TP lines — they persist for history
+    asSLLine := na, asTP1Line := na, asTP2Line := na, asTP3Line := na
+    asSLLabel := na, asTP1Label := na, asTP2Label := na, asTP3Label := na
+    asTrailLine := na, asTrailLabel := na
+
+asSessionEnd = not inAsTrade and inAsTrade[1]
+if asSessionEnd and i_asEnable
+    // Freeze ORB lines at session end
+    if asOrbArray.size() > 0
+        for j = 0 to asOrbArray.size() - 1
+            _o = asOrbArray.get(j)
+            if na(_o.endBar)
+                _o.endBar := bar_index[1]
+                _o.endTime := time[1]
+                asOrbArray.set(j, _o)
+    // Hard flatten: close all positions and cancel pending orders
+    // Freeze lines before flatten
+    if not na(asSLLine)
+        asSLLine.set_x2(time)
+    if not na(asTP1Line)
+        asTP1Line.set_x2(time)
+    if not na(asTP2Line)
+        asTP2Line.set_x2(time)
+    if not na(asTP3Line)
+        asTP3Line.set_x2(time)
+    asSLLine := na, asTP1Line := na, asTP2Line := na, asTP3Line := na
+    strategy.cancel_all()
+    if strategy.position_size > 0
+        strategy.order("EOS", strategy.short, qty=math.abs(strategy.position_size), alert_message=_jsonExit)
+    else if strategy.position_size < 0
+        strategy.order("EOS", strategy.long, qty=math.abs(strategy.position_size), alert_message=_jsonExit)
+    asSessionJustEnded := true
+    activeSession := 0
+    asSigDir := 0
+if i_asEnable and inAsORB and not asOrbComplete
+    if not asOrbBuilding
+        asOrbStartBar := bar_index, asOrbStartTime := time, asOrbBuilding := true
+    if na(asORBHigh) or high > asORBHigh
+        asORBHigh := high, asOrbHighBar := bar_index, asOrbHighTime := time
+    if na(asORBLow) or low < asORBLow
+        asORBLow := low, asOrbLowBar := bar_index, asOrbLowTime := time
+
+if i_asEnable and not inAsORB and asOrbBuilding and not asOrbComplete and not na(asORBHigh)
+    asOrbComplete := true
+    asORBMid := (asORBHigh + asORBLow) / 2
+    hiLine = line.new(asOrbHighTime, asORBHigh, time, asORBHigh, xloc=xloc.bar_time, color=i_asHighColor, style=getLineStyle(), width=i_asLineWidth)
+    loLine = line.new(asOrbLowTime, asORBLow, time, asORBLow, xloc=xloc.bar_time, color=i_asLowColor, style=getLineStyle(), width=i_asLineWidth)
+    midLine = i_asShowMid ? line.new(asOrbStartTime, asORBMid, time, asORBMid, xloc=xloc.bar_time, color=i_asMidColor, style=line.style_dotted, width=math.max(1, i_asLineWidth - 1)) : na
+    hiLabel = showLabels ? label.new(time, asORBHigh, "ASIA ORB H", xloc=xloc.bar_time, style=label.style_none, textcolor=i_asHighColor, size=getLabelSize()) : na
+    loLabel = showLabels ? label.new(time, asORBLow, "ASIA ORB L", xloc=xloc.bar_time, style=label.style_none, textcolor=i_asLowColor, size=getLabelSize()) : na
+    midLabel = showLabels and i_asShowMid ? label.new(time, asORBMid, "ASIA ORB M", xloc=xloc.bar_time, style=label.style_none, textcolor=i_asMidColor, size=getLabelSize()) : na
+    newOrb = orbData.new(asORBHigh, asORBLow, asORBMid, asOrbStartBar, asOrbHighBar, asOrbLowBar, na, asOrbStartTime, asOrbHighTime, asOrbLowTime, na, hiLine, loLine, midLine, hiLabel, loLabel, midLabel)
+    asOrbArray.unshift(newOrb)
+    if asOrbArray.size() > i_daysToShow
+        old = asOrbArray.pop()
+        old.hiLine.delete(), old.loLine.delete(), old.midLine.delete()
+        old.hiLabel.delete(), old.loLabel.delete(), old.midLabel.delete()
+
+if asOrbArray.size() > 0
+    for i = 0 to asOrbArray.size() - 1
+        cur = asOrbArray.get(i)
+        int _t2 = na(cur.endTime) ? time : cur.endTime
+
+        cur.hiLine.set_x1(cur.hiTime)
+        cur.hiLine.set_x2(_t2)
+        cur.loLine.set_x1(cur.loTime)
+        cur.loLine.set_x2(_t2)
+        if i_asShowMid and not na(cur.midLine)
+            cur.midLine.set_x1(cur.startTime)
+            cur.midLine.set_x2(_t2)
+
+        if i == 0 and showLabels
+            cur.hiLabel.set_x(_t2)
+            cur.loLabel.set_x(_t2)
+            if i_asShowMid and not na(cur.midLabel)
+                cur.midLabel.set_x(_t2)
+        else
+            cur.hiLabel.delete()
+            cur.loLabel.delete()
+            if not na(cur.midLabel)
+                cur.midLabel.delete()
+            cur.hiLabel := na
+            cur.loLabel := na
+            cur.midLabel := na
+
+_asBuf = asTradeCount > 0 and i_asRearmEnable ? asRearmEntryBuf : asEntryBuf
+asCrossUp = close > asORBHigh + _asBuf and close[1] <= asORBHigh + _asBuf
+asHighBreak = asOrbComplete and inAsTrade and asCrossUp
+asCrossDn = close < asORBLow - _asBuf and close[1] >= asORBLow - _asBuf
+asLowBreak  = asOrbComplete and inAsTrade and asCrossDn
+bool asLongSig = false, bool asShortSig = false
+
+if i_asEnable and asBrkPending and bar_index > asBrkBar and not asSigFired
+    _isMidRetest = i_asEntryMode == "Retest Midpoint"
+    _retestLvl = _isMidRetest ? asORBMid : (asBrkDir == 1 ? asORBHigh : asORBLow)
+    if asBrkDir == 1
+        if not asRetestDone and low <= _retestLvl
+            asRetestDone := true
+        if asRetestDone and (_isMidRetest ? close > asORBMid : close > asORBHigh + _asBuf)
+            asLongSig := true, asBrkPending := false, asRetestDone := false
+        else if _isMidRetest and asRetestDone and close <= asORBMid
+            asBrkPending := false, asRetestDone := false
+        else if _isMidRetest and close < asORBLow
+            asBrkPending := false, asRetestDone := false
+        else if not _isMidRetest and close <= asORBHigh
+            asBrkPending := false
+    else if asBrkDir == -1
+        if not asRetestDone and high >= _retestLvl
+            asRetestDone := true
+        if asRetestDone and (_isMidRetest ? close < asORBMid : close < asORBLow - _asBuf)
+            asShortSig := true, asBrkPending := false, asRetestDone := false
+        else if _isMidRetest and asRetestDone and close >= asORBMid
+            asBrkPending := false, asRetestDone := false
+        else if _isMidRetest and close > asORBHigh
+            asBrkPending := false, asRetestDone := false
+        else if not _isMidRetest and close >= asORBLow
+            asBrkPending := false
+    if asBrkPending and bar_index - asBrkBar >= i_asRetestTimeout
+        asBrkPending := false, asRetestDone := false
+
+if i_asEnable and asOrbComplete and inAsTrade and not asSigFired and (asTradeCount < i_asRearmMaxTrades or not i_asRearmEnable)
+    if asHighBreak and not asBrkPending
+        if i_asEntryMode == "Breakout"
+            asLongSig := true
+        else
+            asBrkPending := true, asBrkDir := 1, asBrkBar := bar_index
+    else if asLowBreak and not asBrkPending
+        if i_asEntryMode == "Breakout"
+            asShortSig := true
+        else
+            asBrkPending := true, asBrkDir := -1, asBrkBar := bar_index
+// AS: Direction filter on re-armed signals
+if i_asRearmEnable and asTradeCount > 0 and asLastDir != 0
+    [asAllowL, asAllowS] = f_dirAllowed(asLastDir, i_asRearmDirection)
+    if asLongSig and not asAllowL
+        asLongSig := false
+    if asShortSig and not asAllowS
+        asShortSig := false
+    // EMA trend filter
+    if asLongSig and not f_emaAllowLong(i_asEMAFilter, asTradeCount > 0)
+        asLongSig := false
+    if asShortSig and not f_emaAllowShort(i_asEMAFilter, asTradeCount > 0)
+        asShortSig := false
+
+if barstate.isconfirmed and asLongSig and asDayAllowed and not inFlatWindow and i_asDirection != "Short Only" and not asSessionJustEnded
+    asSigFired := true, asSigEntry := close, asSigDir := 1
+    activeSession := 2
+    asTradeCount += 1
+    asSigSL := i_asSLMethod == "Midpoint" ? asORBMid : i_asSLMethod == "Opposite Side" ? asORBLow : close - i_asSLPoints
+    _risk = math.abs(asSigEntry - asSigSL)
+    if _risk > 0
+        asSigTP1 := asSigEntry + _risk * i_asTP1RR, asSigTP2 := asSigEntry + _risk * i_asTP2RR, asSigTP3 := asSigEntry + _risk * i_asTP3RR
+    asTrailSL := asSigSL
+    strategy.entry("AS Long", strategy.long, qty=i_asContracts, alert_message=_jsonBuy)
+    if _risk > 0
+        strategy.exit("AS TP1", from_entry="AS Long", qty=_asTp1Qty, limit=asSigTP1, stop=asSigSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+        if _asTp2Qty > 0
+            strategy.exit("AS TP2", from_entry="AS Long", qty=_asTp2Qty, limit=asSigTP2, stop=asSigSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+        if _asTp3Qty > 0
+            strategy.exit("AS TP3", from_entry="AS Long", qty=_asTp3Qty, limit=asSigTP3, stop=asSigSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+    else
+        strategy.exit("AS SL", from_entry="AS Long", stop=asSigSL, alert_message=_jsonExit)
+    if i_asShowSLTP
+        asSLLine  := line.new(time, asSigSL, time, asSigSL, xloc=xloc.bar_time, color=i_slLineColor, style=slStyle, width=i_slLineWidth)
+        if not na(asSigTP1)
+            asTP1Line := line.new(time, asSigTP1, time, asSigTP1, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=i_tpLineWidth)
+        if not na(asSigTP2) and _asTp2Qty > 0
+            asTP2Line := line.new(time, asSigTP2, time, asSigTP2, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+        if not na(asSigTP3) and _asTp3Qty > 0
+            asTP3Line := line.new(time, asSigTP3, time, asSigTP3, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+
+if barstate.isconfirmed and asShortSig and asDayAllowed and not inFlatWindow and i_asDirection != "Long Only" and not asSessionJustEnded
+    asSigFired := true, asSigEntry := close, asSigDir := -1
+    activeSession := 2
+    asTradeCount += 1
+    asSigSL := i_asSLMethod == "Midpoint" ? asORBMid : i_asSLMethod == "Opposite Side" ? asORBHigh : close + i_asSLPoints
+    _risk = math.abs(asSigSL - asSigEntry)
+    if _risk > 0
+        asSigTP1 := asSigEntry - _risk * i_asTP1RR, asSigTP2 := asSigEntry - _risk * i_asTP2RR, asSigTP3 := asSigEntry - _risk * i_asTP3RR
+    asTrailSL := asSigSL
+    strategy.entry("AS Short", strategy.short, qty=i_asContracts, alert_message=_jsonSell)
+    if _risk > 0
+        strategy.exit("AS TP1", from_entry="AS Short", qty=_asTp1Qty, limit=asSigTP1, stop=asSigSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+        if _asTp2Qty > 0
+            strategy.exit("AS TP2", from_entry="AS Short", qty=_asTp2Qty, limit=asSigTP2, stop=asSigSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+        if _asTp3Qty > 0
+            strategy.exit("AS TP3", from_entry="AS Short", qty=_asTp3Qty, limit=asSigTP3, stop=asSigSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+    else
+        strategy.exit("AS SL", from_entry="AS Short", stop=asSigSL, alert_message=_jsonExit)
+    if i_asShowSLTP
+        asSLLine  := line.new(time, asSigSL, time, asSigSL, xloc=xloc.bar_time, color=i_slLineColor, style=slStyle, width=i_slLineWidth)
+        if not na(asSigTP1)
+            asTP1Line := line.new(time, asSigTP1, time, asSigTP1, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=i_tpLineWidth)
+        if not na(asSigTP2) and _asTp2Qty > 0
+            asTP2Line := line.new(time, asSigTP2, time, asSigTP2, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+        if not na(asSigTP3) and _asTp3Qty > 0
+            asTP3Line := line.new(time, asSigTP3, time, asSigTP3, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+
+// Asia: Trailing Stop
+if i_asTrailEnable and asSigDir != 0 and not asSLHit and strategy.position_size != 0
+    _prevTrail = asTrailSL
+    asTrailSL := calcTrail(asSigDir, asTrailSL, asSigEntry, asSigTP1, asSigTP2, asSigTP3, asSigSL, i_asTrailEnable)
+    if asTrailSL != _prevTrail
+        if asSigDir == 1
+            strategy.exit("AS TP1", from_entry="AS Long", qty=_asTp1Qty, limit=asSigTP1, stop=asTrailSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+            if _asTp2Qty > 0
+                strategy.exit("AS TP2", from_entry="AS Long", qty=_asTp2Qty, limit=asSigTP2, stop=asTrailSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+            if _asTp3Qty > 0
+                strategy.exit("AS TP3", from_entry="AS Long", qty=_asTp3Qty, limit=asSigTP3, stop=asTrailSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+        else
+            strategy.exit("AS TP1", from_entry="AS Short", qty=_asTp1Qty, limit=asSigTP1, stop=asTrailSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+            if _asTp2Qty > 0
+                strategy.exit("AS TP2", from_entry="AS Short", qty=_asTp2Qty, limit=asSigTP2, stop=asTrailSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+            if _asTp3Qty > 0
+                strategy.exit("AS TP3", from_entry="AS Short", qty=_asTp3Qty, limit=asSigTP3, stop=asTrailSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+    if i_asTrailShowLine and asTrailSL != asSigSL
+        asTrailLine := line.new(time[1], asTrailSL, time, asTrailSL, xloc=xloc.bar_time, color=i_trailColor, style=trailLineStyle, width=i_trailWidth)
+        if na(asTrailLabel)
+            asTrailLabel := showLabels ? label.new(time, asTrailSL, "TRAIL", xloc=xloc.bar_time, style=label.style_none, textcolor=i_trailColor, size=getLabelSize()) : na
+        else
+            asTrailLabel.set_y(asTrailSL)
+
+// AS: SL/TP line extend to current bar while trade active
+if asSigDir != 0 and i_asShowSLTP
+    if not na(asSLLine)
+        asSLLine.set_x2(time)
+    if not na(asSLLabel)
+        asSLLabel.set_x(time)
+    if not na(asTP1Line)
+        asTP1Line.set_x2(time)
+    if not na(asTP1Label)
+        asTP1Label.set_x(time)
+    if not na(asTP2Line)
+        asTP2Line.set_x2(time)
+    if not na(asTP2Label)
+        asTP2Label.set_x(time)
+    if not na(asTP3Line)
+        asTP3Line.set_x2(time)
+    if not na(asTP3Label)
+        asTP3Label.set_x(time)
+    // Trail line + label extend
+    if not na(asTrailLine)
+        asTrailLine.set_x2(time)
+    if not na(asTrailLabel)
+        asTrailLabel.set_x(time)
+
+if i_asEnable and asSigDir != 0 and not asSLHit
+    if asSigDir == 1
+        if low <= asTrailSL
+            asSLHit := true
+            asLastWasSL := true
+            asLastDir := asSigDir
+            asExitBar := bar_index
+            asCooldownDone := false
+            asInsideStarted := false
+            asInsideBars := 0
+            asSigDir := 0
+            if not na(asSLLine)
+                asSLLine.set_x2(time)
+            if not na(asTP1Line)
+                asTP1Line.set_x2(time)
+            if not na(asTP2Line)
+                asTP2Line.set_x2(time)
+            if not na(asTP3Line)
+                asTP3Line.set_x2(time)
+            asSLLine := na, asTP1Line := na, asTP2Line := na, asTP3Line := na
+        else
+            if not asTP1Hit and high >= asSigTP1
+                asTP1Hit := true
+            if not asTP2Hit and high >= asSigTP2
+                asTP2Hit := true
+            if not asTP3Hit and high >= asSigTP3
+                asTP3Hit := true
+    else if asSigDir == -1
+        if high >= asTrailSL
+            asSLHit := true
+            asLastWasSL := true
+            asLastDir := asSigDir
+            asExitBar := bar_index
+            asCooldownDone := false
+            asInsideStarted := false
+            asInsideBars := 0
+            asSigDir := 0
+            if not na(asSLLine)
+                asSLLine.set_x2(time)
+            if not na(asTP1Line)
+                asTP1Line.set_x2(time)
+            if not na(asTP2Line)
+                asTP2Line.set_x2(time)
+            if not na(asTP3Line)
+                asTP3Line.set_x2(time)
+            asSLLine := na, asTP1Line := na, asTP2Line := na, asTP3Line := na
+        else
+            if not asTP1Hit and low <= asSigTP1
+                asTP1Hit := true
+            if not asTP2Hit and low <= asSigTP2
+                asTP2Hit := true
+            if not asTP3Hit and low <= asSigTP3
+                asTP3Hit := true
+
+// AS: Detect TP exit (position closed without SL — requires prior bar had position)
+if i_asEnable and asSigFired and asSigDir != 0 and strategy.position_size == 0 and strategy.position_size[1] != 0 and not asSLHit
+    asLastWasSL := false
+    asLastDir := asSigDir
+    asExitBar := bar_index
+    asCooldownDone := false
+    asInsideStarted := false
+    asInsideBars := 0
+    asSigDir := 0
+    if not na(asSLLine)
+        asSLLine.set_x2(time)
+    if not na(asTP1Line)
+        asTP1Line.set_x2(time)
+    if not na(asTP2Line)
+        asTP2Line.set_x2(time)
+    if not na(asTP3Line)
+        asTP3Line.set_x2(time)
+    asSLLine := na, asTP1Line := na, asTP2Line := na, asTP3Line := na
+
+plotshape(i_asShowEntry and asLongSig and asDayAllowed and not inFlatWindow and i_asDirection != "Short Only" and not asSessionJustEnded,  title="AS Long",  style=shape.triangleup,   location=location.belowbar, color=#e040fb, size=size.small, text="AS LONG")
+plotshape(i_asShowEntry and asShortSig and asDayAllowed and not inFlatWindow and i_asDirection != "Long Only" and not asSessionJustEnded, title="AS Short", style=shape.triangledown, location=location.abovebar, color=#e040fb, size=size.small, text="AS SHORT")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ═══  LONDON ORB MODULE  ════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════════
+var orbData[] lnOrbArray = array.new<orbData>(0)
+var float lnORBHigh = na, var float lnORBLow = na, var float lnORBMid = na
+var int lnOrbStartBar = na, var int lnOrbHighBar = na, var int lnOrbLowBar = na
+var int lnOrbStartTime = na, var int lnOrbHighTime = na, var int lnOrbLowTime = na
+var bool lnOrbBuilding = false, var bool lnOrbComplete = false
+var bool  lnSigFired = false, var bool  lnBrkPending = false, var bool lnRetestDone = false
+var int   lnBrkDir = 0, var int lnBrkBar = 0
+var float lnSigEntry = na, var float lnSigSL = na
+var float lnSigTP1 = na, var float lnSigTP2 = na, var float lnSigTP3 = na
+var int   lnSigDir = 0
+var bool  lnTP1Hit = false, var bool lnTP2Hit = false, var bool lnTP3Hit = false, var bool lnSLHit = false
+var line  lnSLLine = na, var line lnTP1Line = na, var line lnTP2Line = na, var line lnTP3Line = na
+var label lnSLLabel = na, var label lnTP1Label = na, var label lnTP2Label = na, var label lnTP3Label = na
+var float lnTrailSL = na
+var line  lnTrailLine = na
+var label lnTrailLabel = na
+var bool lnFlattenDone = false
+var int lnTradeCount = 0
+var int lnInsideBars = 0
+var bool lnLastWasSL = false
+var int lnLastDir = 0
+var int lnExitBar = 0
+var bool lnCooldownDone = false
+var bool lnInsideStarted = false
+
+lnDay = f_dayKey(time, i_timezone)
+lnNewDay = lnDay != nz(lnDay[1], lnDay)
+lnSessionStart = (inLnTrade and not inLnTrade[1]) or (inLnTrade and lnNewDay)
+if lnSessionStart
+    lnFlattenDone := false
+    lnTradeCount := 0
+    lnInsideBars := 0
+    lnLastWasSL := false
+    lnLastDir := 0
+    lnExitBar := 0
+    lnCooldownDone := false
+    lnInsideStarted := false
+    lnORBHigh := na, lnORBLow := na, lnORBMid := na
+    lnOrbBuilding := false, lnOrbComplete := false
+    lnOrbStartBar := na, lnOrbHighBar := na, lnOrbLowBar := na
+    lnOrbStartTime := na, lnOrbHighTime := na, lnOrbLowTime := na
+    lnSigFired := false, lnBrkPending := false, lnRetestDone := false, lnBrkDir := 0, lnBrkBar := 0
+    if strategy.position_size == 0
+        lnSigDir := 0
+    lnTP1Hit := false, lnTP2Hit := false, lnTP3Hit := false, lnSLHit := false
+    lnSigEntry := na, lnSigSL := na, lnSigTP1 := na, lnSigTP2 := na, lnSigTP3 := na
+    lnTrailSL := na
+    // Don't delete old SL/TP lines — they persist for history
+    lnSLLine := na, lnTP1Line := na, lnTP2Line := na, lnTP3Line := na
+    lnSLLabel := na, lnTP1Label := na, lnTP2Label := na, lnTP3Label := na
+    lnTrailLine := na, lnTrailLabel := na
+
+lnSessionEnd = not inLnTrade and inLnTrade[1]
+if lnSessionEnd and i_lnEnable
+    // Freeze ORB lines at session end
+    if lnOrbArray.size() > 0
+        for j = 0 to lnOrbArray.size() - 1
+            _o = lnOrbArray.get(j)
+            if na(_o.endBar)
+                _o.endBar := bar_index[1]
+                _o.endTime := time[1]
+                lnOrbArray.set(j, _o)
+    // Hard flatten: close all positions and cancel pending orders
+    // Freeze lines before flatten
+    if not na(lnSLLine)
+        lnSLLine.set_x2(time)
+    if not na(lnTP1Line)
+        lnTP1Line.set_x2(time)
+    if not na(lnTP2Line)
+        lnTP2Line.set_x2(time)
+    if not na(lnTP3Line)
+        lnTP3Line.set_x2(time)
+    lnSLLine := na, lnTP1Line := na, lnTP2Line := na, lnTP3Line := na
+    strategy.cancel_all()
+    if strategy.position_size > 0
+        strategy.order("EOS", strategy.short, qty=math.abs(strategy.position_size), alert_message=_jsonExit)
+    else if strategy.position_size < 0
+        strategy.order("EOS", strategy.long, qty=math.abs(strategy.position_size), alert_message=_jsonExit)
+    lnSessionJustEnded := true
+    activeSession := 0
+    lnSigDir := 0
+if i_lnEnable and inLnORB and not lnOrbComplete
+    if not lnOrbBuilding
+        lnOrbStartBar := bar_index, lnOrbStartTime := time, lnOrbBuilding := true
+    if na(lnORBHigh) or high > lnORBHigh
+        lnORBHigh := high, lnOrbHighBar := bar_index, lnOrbHighTime := time
+    if na(lnORBLow) or low < lnORBLow
+        lnORBLow := low, lnOrbLowBar := bar_index, lnOrbLowTime := time
+
+if i_lnEnable and not inLnORB and lnOrbBuilding and not lnOrbComplete and not na(lnORBHigh)
+    lnOrbComplete := true
+    lnORBMid := (lnORBHigh + lnORBLow) / 2
+    hiLine = line.new(lnOrbHighTime, lnORBHigh, time, lnORBHigh, xloc=xloc.bar_time, color=i_lnHighColor, style=getLineStyle(), width=i_lnLineWidth)
+    loLine = line.new(lnOrbLowTime, lnORBLow, time, lnORBLow, xloc=xloc.bar_time, color=i_lnLowColor, style=getLineStyle(), width=i_lnLineWidth)
+    midLine = i_lnShowMid ? line.new(lnOrbStartTime, lnORBMid, time, lnORBMid, xloc=xloc.bar_time, color=i_lnMidColor, style=line.style_dotted, width=math.max(1, i_lnLineWidth - 1)) : na
+    hiLabel = showLabels ? label.new(time, lnORBHigh, "LDN ORB H", xloc=xloc.bar_time, style=label.style_none, textcolor=i_lnHighColor, size=getLabelSize()) : na
+    loLabel = showLabels ? label.new(time, lnORBLow, "LDN ORB L", xloc=xloc.bar_time, style=label.style_none, textcolor=i_lnLowColor, size=getLabelSize()) : na
+    midLabel = showLabels and i_lnShowMid ? label.new(time, lnORBMid, "LDN ORB M", xloc=xloc.bar_time, style=label.style_none, textcolor=i_lnMidColor, size=getLabelSize()) : na
+    newOrb = orbData.new(lnORBHigh, lnORBLow, lnORBMid, lnOrbStartBar, lnOrbHighBar, lnOrbLowBar, na, lnOrbStartTime, lnOrbHighTime, lnOrbLowTime, na, hiLine, loLine, midLine, hiLabel, loLabel, midLabel)
+    lnOrbArray.unshift(newOrb)
+    if lnOrbArray.size() > i_daysToShow
+        old = lnOrbArray.pop()
+        old.hiLine.delete(), old.loLine.delete(), old.midLine.delete()
+        old.hiLabel.delete(), old.loLabel.delete(), old.midLabel.delete()
+
+if lnOrbArray.size() > 0
+    for i = 0 to lnOrbArray.size() - 1
+        cur = lnOrbArray.get(i)
+        int _t2 = na(cur.endTime) ? time : cur.endTime
+
+        cur.hiLine.set_x1(cur.hiTime)
+        cur.hiLine.set_x2(_t2)
+        cur.loLine.set_x1(cur.loTime)
+        cur.loLine.set_x2(_t2)
+        if i_lnShowMid and not na(cur.midLine)
+            cur.midLine.set_x1(cur.startTime)
+            cur.midLine.set_x2(_t2)
+
+        if i == 0 and showLabels
+            cur.hiLabel.set_x(_t2)
+            cur.loLabel.set_x(_t2)
+            if i_lnShowMid and not na(cur.midLabel)
+                cur.midLabel.set_x(_t2)
+        else
+            cur.hiLabel.delete()
+            cur.loLabel.delete()
+            if not na(cur.midLabel)
+                cur.midLabel.delete()
+            cur.hiLabel := na
+            cur.loLabel := na
+            cur.midLabel := na
+
+_lnBuf = lnTradeCount > 0 and i_lnRearmEnable ? lnRearmEntryBuf : lnEntryBuf
+lnCrossUp = close > lnORBHigh + _lnBuf and close[1] <= lnORBHigh + _lnBuf
+lnHighBreak = lnOrbComplete and inLnTrade and lnCrossUp
+lnCrossDn = close < lnORBLow - _lnBuf and close[1] >= lnORBLow - _lnBuf
+lnLowBreak  = lnOrbComplete and inLnTrade and lnCrossDn
+bool lnLongSig = false, bool lnShortSig = false
+
+if i_lnEnable and lnBrkPending and bar_index > lnBrkBar and not lnSigFired
+    _isMidRetest = i_lnEntryMode == "Retest Midpoint"
+    _retestLvl = _isMidRetest ? lnORBMid : (lnBrkDir == 1 ? lnORBHigh : lnORBLow)
+    if lnBrkDir == 1
+        if not lnRetestDone and low <= _retestLvl
+            lnRetestDone := true
+        if lnRetestDone and (_isMidRetest ? close > lnORBMid : close > lnORBHigh + _lnBuf)
+            lnLongSig := true, lnBrkPending := false, lnRetestDone := false
+        else if _isMidRetest and lnRetestDone and close <= lnORBMid
+            lnBrkPending := false, lnRetestDone := false
+        else if _isMidRetest and close < lnORBLow
+            lnBrkPending := false, lnRetestDone := false
+        else if not _isMidRetest and close <= lnORBHigh
+            lnBrkPending := false
+    else if lnBrkDir == -1
+        if not lnRetestDone and high >= _retestLvl
+            lnRetestDone := true
+        if lnRetestDone and (_isMidRetest ? close < lnORBMid : close < lnORBLow - _lnBuf)
+            lnShortSig := true, lnBrkPending := false, lnRetestDone := false
+        else if _isMidRetest and lnRetestDone and close >= lnORBMid
+            lnBrkPending := false, lnRetestDone := false
+        else if _isMidRetest and close > lnORBHigh
+            lnBrkPending := false, lnRetestDone := false
+        else if not _isMidRetest and close >= lnORBLow
+            lnBrkPending := false
+    if lnBrkPending and bar_index - lnBrkBar >= i_lnRetestTimeout
+        lnBrkPending := false, lnRetestDone := false
+
+if i_lnEnable and lnOrbComplete and inLnTrade and not lnSigFired and (lnTradeCount < i_lnRearmMaxTrades or not i_lnRearmEnable)
+    if lnHighBreak and not lnBrkPending
+        if i_lnEntryMode == "Breakout"
+            lnLongSig := true
+        else
+            lnBrkPending := true, lnBrkDir := 1, lnBrkBar := bar_index
+    else if lnLowBreak and not lnBrkPending
+        if i_lnEntryMode == "Breakout"
+            lnShortSig := true
+        else
+            lnBrkPending := true, lnBrkDir := -1, lnBrkBar := bar_index
+// LN: Direction filter on re-armed signals
+if i_lnRearmEnable and lnTradeCount > 0 and lnLastDir != 0
+    [lnAllowL, lnAllowS] = f_dirAllowed(lnLastDir, i_lnRearmDirection)
+    if lnLongSig and not lnAllowL
+        lnLongSig := false
+    if lnShortSig and not lnAllowS
+        lnShortSig := false
+    // EMA trend filter
+    if lnLongSig and not f_emaAllowLong(i_lnEMAFilter, lnTradeCount > 0)
+        lnLongSig := false
+    if lnShortSig and not f_emaAllowShort(i_lnEMAFilter, lnTradeCount > 0)
+        lnShortSig := false
+
+if barstate.isconfirmed and lnLongSig and lnDayAllowed and not inFlatWindow and i_lnDirection != "Short Only" and not lnSessionJustEnded
+    lnSigFired := true, lnSigEntry := close, lnSigDir := 1
+    activeSession := 3
+    lnTradeCount += 1
+    lnSigSL := i_lnSLMethod == "Midpoint" ? lnORBMid : i_lnSLMethod == "Opposite Side" ? lnORBLow : close - i_lnSLPoints
+    _risk = math.abs(lnSigEntry - lnSigSL)
+    if _risk > 0
+        lnSigTP1 := lnSigEntry + _risk * i_lnTP1RR, lnSigTP2 := lnSigEntry + _risk * i_lnTP2RR, lnSigTP3 := lnSigEntry + _risk * i_lnTP3RR
+    lnTrailSL := lnSigSL
+    strategy.entry("LDN Long", strategy.long, qty=i_lnContracts, alert_message=_jsonBuy)
+    if _risk > 0
+        strategy.exit("LDN TP1", from_entry="LDN Long", qty=_lnTp1Qty, limit=lnSigTP1, stop=lnSigSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+        if _lnTp2Qty > 0
+            strategy.exit("LDN TP2", from_entry="LDN Long", qty=_lnTp2Qty, limit=lnSigTP2, stop=lnSigSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+        if _lnTp3Qty > 0
+            strategy.exit("LDN TP3", from_entry="LDN Long", qty=_lnTp3Qty, limit=lnSigTP3, stop=lnSigSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+    else
+        strategy.exit("LDN SL", from_entry="LDN Long", stop=lnSigSL, alert_message=_jsonExit)
+    if i_lnShowSLTP
+        lnSLLine  := line.new(time, lnSigSL, time, lnSigSL, xloc=xloc.bar_time, color=i_slLineColor, style=slStyle, width=i_slLineWidth)
+        if not na(lnSigTP1)
+            lnTP1Line := line.new(time, lnSigTP1, time, lnSigTP1, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=i_tpLineWidth)
+        if not na(lnSigTP2) and _lnTp2Qty > 0
+            lnTP2Line := line.new(time, lnSigTP2, time, lnSigTP2, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+        if not na(lnSigTP3) and _lnTp3Qty > 0
+            lnTP3Line := line.new(time, lnSigTP3, time, lnSigTP3, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+
+if barstate.isconfirmed and lnShortSig and lnDayAllowed and not inFlatWindow and i_lnDirection != "Long Only" and not lnSessionJustEnded
+    lnSigFired := true, lnSigEntry := close, lnSigDir := -1
+    activeSession := 3
+    lnTradeCount += 1
+    lnSigSL := i_lnSLMethod == "Midpoint" ? lnORBMid : i_lnSLMethod == "Opposite Side" ? lnORBHigh : close + i_lnSLPoints
+    _risk = math.abs(lnSigSL - lnSigEntry)
+    if _risk > 0
+        lnSigTP1 := lnSigEntry - _risk * i_lnTP1RR, lnSigTP2 := lnSigEntry - _risk * i_lnTP2RR, lnSigTP3 := lnSigEntry - _risk * i_lnTP3RR
+    lnTrailSL := lnSigSL
+    strategy.entry("LDN Short", strategy.short, qty=i_lnContracts, alert_message=_jsonSell)
+    if _risk > 0
+        strategy.exit("LDN TP1", from_entry="LDN Short", qty=_lnTp1Qty, limit=lnSigTP1, stop=lnSigSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+        if _lnTp2Qty > 0
+            strategy.exit("LDN TP2", from_entry="LDN Short", qty=_lnTp2Qty, limit=lnSigTP2, stop=lnSigSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+        if _lnTp3Qty > 0
+            strategy.exit("LDN TP3", from_entry="LDN Short", qty=_lnTp3Qty, limit=lnSigTP3, stop=lnSigSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+    else
+        strategy.exit("LDN SL", from_entry="LDN Short", stop=lnSigSL, alert_message=_jsonExit)
+    if i_lnShowSLTP
+        lnSLLine  := line.new(time, lnSigSL, time, lnSigSL, xloc=xloc.bar_time, color=i_slLineColor, style=slStyle, width=i_slLineWidth)
+        if not na(lnSigTP1)
+            lnTP1Line := line.new(time, lnSigTP1, time, lnSigTP1, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=i_tpLineWidth)
+        if not na(lnSigTP2) and _lnTp2Qty > 0
+            lnTP2Line := line.new(time, lnSigTP2, time, lnSigTP2, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+        if not na(lnSigTP3) and _lnTp3Qty > 0
+            lnTP3Line := line.new(time, lnSigTP3, time, lnSigTP3, xloc=xloc.bar_time, color=i_tpLineColor, style=tpStyle, width=math.max(1, i_tpLineWidth - 1))
+
+// London: Trailing Stop
+if i_lnTrailEnable and lnSigDir != 0 and not lnSLHit and strategy.position_size != 0
+    _prevTrail = lnTrailSL
+    lnTrailSL := calcTrail(lnSigDir, lnTrailSL, lnSigEntry, lnSigTP1, lnSigTP2, lnSigTP3, lnSigSL, i_lnTrailEnable)
+    if lnTrailSL != _prevTrail
+        if lnSigDir == 1
+            strategy.exit("LDN TP1", from_entry="LDN Long", qty=_lnTp1Qty, limit=lnSigTP1, stop=lnTrailSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+            if _lnTp2Qty > 0
+                strategy.exit("LDN TP2", from_entry="LDN Long", qty=_lnTp2Qty, limit=lnSigTP2, stop=lnTrailSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+            if _lnTp3Qty > 0
+                strategy.exit("LDN TP3", from_entry="LDN Long", qty=_lnTp3Qty, limit=lnSigTP3, stop=lnTrailSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+        else
+            strategy.exit("LDN TP1", from_entry="LDN Short", qty=_lnTp1Qty, limit=lnSigTP1, stop=lnTrailSL, comment_profit="TP1", comment_loss="SL", alert_message=_jsonExit)
+            if _lnTp2Qty > 0
+                strategy.exit("LDN TP2", from_entry="LDN Short", qty=_lnTp2Qty, limit=lnSigTP2, stop=lnTrailSL, comment_profit="TP2", comment_loss="SL", alert_message=_jsonExit)
+            if _lnTp3Qty > 0
+                strategy.exit("LDN TP3", from_entry="LDN Short", qty=_lnTp3Qty, limit=lnSigTP3, stop=lnTrailSL, comment_profit="TP3", comment_loss="SL", alert_message=_jsonExit)
+    if i_lnTrailShowLine and lnTrailSL != lnSigSL
+        lnTrailLine := line.new(time[1], lnTrailSL, time, lnTrailSL, xloc=xloc.bar_time, color=i_trailColor, style=trailLineStyle, width=i_trailWidth)
+        if na(lnTrailLabel)
+            lnTrailLabel := showLabels ? label.new(time, lnTrailSL, "TRAIL", xloc=xloc.bar_time, style=label.style_none, textcolor=i_trailColor, size=getLabelSize()) : na
+        else
+            lnTrailLabel.set_y(lnTrailSL)
+
+// LN: SL/TP line extend to current bar while trade active
+if lnSigDir != 0 and i_lnShowSLTP
+    if not na(lnSLLine)
+        lnSLLine.set_x2(time)
+    if not na(lnSLLabel)
+        lnSLLabel.set_x(time)
+    if not na(lnTP1Line)
+        lnTP1Line.set_x2(time)
+    if not na(lnTP1Label)
+        lnTP1Label.set_x(time)
+    if not na(lnTP2Line)
+        lnTP2Line.set_x2(time)
+    if not na(lnTP2Label)
+        lnTP2Label.set_x(time)
+    if not na(lnTP3Line)
+        lnTP3Line.set_x2(time)
+    if not na(lnTP3Label)
+        lnTP3Label.set_x(time)
+    // Trail line + label extend
+    if not na(lnTrailLine)
+        lnTrailLine.set_x2(time)
+    if not na(lnTrailLabel)
+        lnTrailLabel.set_x(time)
+
+if i_lnEnable and lnSigDir != 0 and not lnSLHit
+    if lnSigDir == 1
+        if low <= lnTrailSL
+            lnSLHit := true
+            lnLastWasSL := true
+            lnLastDir := lnSigDir
+            lnExitBar := bar_index
+            lnCooldownDone := false
+            lnInsideStarted := false
+            lnInsideBars := 0
+            lnSigDir := 0
+            if not na(lnSLLine)
+                lnSLLine.set_x2(time)
+            if not na(lnTP1Line)
+                lnTP1Line.set_x2(time)
+            if not na(lnTP2Line)
+                lnTP2Line.set_x2(time)
+            if not na(lnTP3Line)
+                lnTP3Line.set_x2(time)
+            lnSLLine := na, lnTP1Line := na, lnTP2Line := na, lnTP3Line := na
+        else
+            if not lnTP1Hit and high >= lnSigTP1
+                lnTP1Hit := true
+            if not lnTP2Hit and high >= lnSigTP2
+                lnTP2Hit := true
+            if not lnTP3Hit and high >= lnSigTP3
+                lnTP3Hit := true
+    else if lnSigDir == -1
+        if high >= lnTrailSL
+            lnSLHit := true
+            lnLastWasSL := true
+            lnLastDir := lnSigDir
+            lnExitBar := bar_index
+            lnCooldownDone := false
+            lnInsideStarted := false
+            lnInsideBars := 0
+            lnSigDir := 0
+            if not na(lnSLLine)
+                lnSLLine.set_x2(time)
+            if not na(lnTP1Line)
+                lnTP1Line.set_x2(time)
+            if not na(lnTP2Line)
+                lnTP2Line.set_x2(time)
+            if not na(lnTP3Line)
+                lnTP3Line.set_x2(time)
+            lnSLLine := na, lnTP1Line := na, lnTP2Line := na, lnTP3Line := na
+        else
+            if not lnTP1Hit and low <= lnSigTP1
+                lnTP1Hit := true
+            if not lnTP2Hit and low <= lnSigTP2
+                lnTP2Hit := true
+            if not lnTP3Hit and low <= lnSigTP3
+                lnTP3Hit := true
+
+// LN: Detect TP exit (position closed without SL — requires prior bar had position)
+if i_lnEnable and lnSigFired and lnSigDir != 0 and strategy.position_size == 0 and strategy.position_size[1] != 0 and not lnSLHit
+    lnLastWasSL := false
+    lnLastDir := lnSigDir
+    lnExitBar := bar_index
+    lnCooldownDone := false
+    lnInsideStarted := false
+    lnInsideBars := 0
+    lnSigDir := 0
+    if not na(lnSLLine)
+        lnSLLine.set_x2(time)
+    if not na(lnTP1Line)
+        lnTP1Line.set_x2(time)
+    if not na(lnTP2Line)
+        lnTP2Line.set_x2(time)
+    if not na(lnTP3Line)
+        lnTP3Line.set_x2(time)
+    lnSLLine := na, lnTP1Line := na, lnTP2Line := na, lnTP3Line := na
+
+plotshape(i_lnShowEntry and lnLongSig and lnDayAllowed and not inFlatWindow and i_lnDirection != "Short Only" and not lnSessionJustEnded,  title="LN Long",  style=shape.triangleup,   location=location.belowbar, color=#00ff00, size=size.small, text="LDN LONG")
+plotshape(i_lnShowEntry and lnShortSig and lnDayAllowed and not inFlatWindow and i_lnDirection != "Long Only" and not lnSessionJustEnded, title="LN Short", style=shape.triangledown, location=location.abovebar, color=#cc0000, size=size.small, text="LDN SHORT")
+
+
+// ── Prop Firm Flat Window: close everything when window starts ──
+if flatWindowJustStarted and strategy.position_size != 0
+    strategy.cancel_all()
+    if strategy.position_size > 0
+        strategy.order("FLAT WINDOW", strategy.short, qty=math.abs(strategy.position_size), alert_message=_jsonExit)
+    else if strategy.position_size < 0
+        strategy.order("FLAT WINDOW", strategy.long, qty=math.abs(strategy.position_size), alert_message=_jsonExit)
+    nySessionJustEnded := true
+    asSessionJustEnded := true
+    lnSessionJustEnded := true
+    activeSession := 0
+    if not na(nySLLine)
+        nySLLine.set_x2(time)
+    if not na(nyTP1Line)
+        nyTP1Line.set_x2(time)
+    if not na(nyTP2Line)
+        nyTP2Line.set_x2(time)
+    if not na(nyTP3Line)
+        nyTP3Line.set_x2(time)
+    nySLLine := na, nyTP1Line := na, nyTP2Line := na, nyTP3Line := na
+    nySigDir := 0
+    if not na(asSLLine)
+        asSLLine.set_x2(time)
+    if not na(asTP1Line)
+        asTP1Line.set_x2(time)
+    if not na(asTP2Line)
+        asTP2Line.set_x2(time)
+    if not na(asTP3Line)
+        asTP3Line.set_x2(time)
+    asSLLine := na, asTP1Line := na, asTP2Line := na, asTP3Line := na
+    asSigDir := 0
+    if not na(lnSLLine)
+        lnSLLine.set_x2(time)
+    if not na(lnTP1Line)
+        lnTP1Line.set_x2(time)
+    if not na(lnTP2Line)
+        lnTP2Line.set_x2(time)
+    if not na(lnTP3Line)
+        lnTP3Line.set_x2(time)
+    lnSLLine := na, lnTP1Line := na, lnTP2Line := na, lnTP3Line := na
+    lnSigDir := 0
+
+// ═══ SL/TP Level Plots (guaranteed visibility) ═══
+_nyTPplot = i_nyEnable and nySigDir != 0 and i_lnShowSLTP ? nySigTP1 : na
+_nySLplot = i_nyEnable and nySigDir != 0 and i_lnShowSLTP ? nySigSL : na
+_asTPplot = i_asEnable and asSigDir != 0 and i_lnShowSLTP ? asSigTP1 : na
+_asSLplot = i_asEnable and asSigDir != 0 and i_lnShowSLTP ? asSigSL : na
+_lnTPplot = i_lnEnable and lnSigDir != 0 and i_lnShowSLTP ? lnSigTP1 : na
+_lnSLplot = i_lnEnable and lnSigDir != 0 and i_lnShowSLTP ? lnSigSL : na
+
+plot(_nyTPplot, "NY TP", color=i_tpLineColor, style=plot.style_linebr, linewidth=2)
+plot(_nySLplot, "NY SL", color=i_slLineColor, style=plot.style_linebr, linewidth=1)
+plot(_asTPplot, "AS TP", color=i_tpLineColor, style=plot.style_linebr, linewidth=2)
+plot(_asSLplot, "AS SL", color=i_slLineColor, style=plot.style_linebr, linewidth=1)
+plot(_lnTPplot, "LN TP", color=i_tpLineColor, style=plot.style_linebr, linewidth=2)
+plot(_lnSLplot, "LN SL", color=i_slLineColor, style=plot.style_linebr, linewidth=1)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// PER-SESSION PREVIOUS DAY HIGH/LOW
+// ════════════════════════════════════════════════════════════════════════════════
+
+// NY Session PDH/PDL
+var float nySessHigh = na, var float nySessLow = na
+var float nyPDH = na, var float nyPDL = na
+var line nyPDHLine = na, var line nyPDLLine = na
+var label nyPDHLabel = na, var label nyPDLLabel = na
+
+if inNYTrade
+    if na(nySessHigh) or high > nySessHigh
+        nySessHigh := high
+    if na(nySessLow) or low < nySessLow
+        nySessLow := low
+if nySessionEnd
+    nyPDH := nySessHigh, nyPDL := nySessLow
+    nySessHigh := na, nySessLow := na
+    if i_nyEnable and i_nyShowPD
+        if not na(nyPDHLine)
+            nyPDHLine.delete(), nyPDLLine.delete()
+        if not na(nyPDHLabel)
+            nyPDHLabel.delete(), nyPDLLabel.delete()
+        nyPDHLine := line.new(time, nyPDH, time, nyPDH, xloc=xloc.bar_time, color=i_nyPDColor, style=f_pdLineStyle(i_nyPDStyle), width=i_nyPDWidth)
+        nyPDLLine := line.new(time, nyPDL, time, nyPDL, xloc=xloc.bar_time, color=i_nyPDColor, style=f_pdLineStyle(i_nyPDStyle), width=i_nyPDWidth)
+        nyPDHLabel := label.new(time, nyPDH, "NY PDH", xloc=xloc.bar_time, style=label.style_none, textcolor=i_nyPDColor, size=getLabelSize())
+        nyPDLLabel := label.new(time, nyPDL, "NY PDL", xloc=xloc.bar_time, style=label.style_none, textcolor=i_nyPDColor, size=getLabelSize())
+if not na(nyPDHLine)
+    nyPDHLine.set_x2(time), nyPDLLine.set_x2(time)
+    nyPDHLabel.set_x(time), nyPDLLabel.set_x(time)
+
+// AS Session PDH/PDL
+var float asSessHigh = na, var float asSessLow = na
+var float asPDH = na, var float asPDL = na
+var line asPDHLine = na, var line asPDLLine = na
+var label asPDHLabel = na, var label asPDLLabel = na
+
+if inAsTrade
+    if na(asSessHigh) or high > asSessHigh
+        asSessHigh := high
+    if na(asSessLow) or low < asSessLow
+        asSessLow := low
+if asSessionEnd
+    asPDH := asSessHigh, asPDL := asSessLow
+    asSessHigh := na, asSessLow := na
+    if i_asEnable and i_asShowPD
+        if not na(asPDHLine)
+            asPDHLine.delete(), asPDLLine.delete()
+        if not na(asPDHLabel)
+            asPDHLabel.delete(), asPDLLabel.delete()
+        asPDHLine := line.new(time, asPDH, time, asPDH, xloc=xloc.bar_time, color=i_asPDColor, style=f_pdLineStyle(i_asPDStyle), width=i_asPDWidth)
+        asPDLLine := line.new(time, asPDL, time, asPDL, xloc=xloc.bar_time, color=i_asPDColor, style=f_pdLineStyle(i_asPDStyle), width=i_asPDWidth)
+        asPDHLabel := label.new(time, asPDH, "AS PDH", xloc=xloc.bar_time, style=label.style_none, textcolor=i_asPDColor, size=getLabelSize())
+        asPDLLabel := label.new(time, asPDL, "AS PDL", xloc=xloc.bar_time, style=label.style_none, textcolor=i_asPDColor, size=getLabelSize())
+if not na(asPDHLine)
+    asPDHLine.set_x2(time), asPDLLine.set_x2(time)
+    asPDHLabel.set_x(time), asPDLLabel.set_x(time)
+
+// LN Session PDH/PDL
+var float lnSessHigh = na, var float lnSessLow = na
+var float lnPDH = na, var float lnPDL = na
+var line lnPDHLine = na, var line lnPDLLine = na
+var label lnPDHLabel = na, var label lnPDLLabel = na
+
+if inLnTrade
+    if na(lnSessHigh) or high > lnSessHigh
+        lnSessHigh := high
+    if na(lnSessLow) or low < lnSessLow
+        lnSessLow := low
+if lnSessionEnd
+    lnPDH := lnSessHigh, lnPDL := lnSessLow
+    lnSessHigh := na, lnSessLow := na
+    if i_lnEnable and i_lnShowPD
+        if not na(lnPDHLine)
+            lnPDHLine.delete(), lnPDLLine.delete()
+        if not na(lnPDHLabel)
+            lnPDHLabel.delete(), lnPDLLabel.delete()
+        lnPDHLine := line.new(time, lnPDH, time, lnPDH, xloc=xloc.bar_time, color=i_lnPDColor, style=f_pdLineStyle(i_lnPDStyle), width=i_lnPDWidth)
+        lnPDLLine := line.new(time, lnPDL, time, lnPDL, xloc=xloc.bar_time, color=i_lnPDColor, style=f_pdLineStyle(i_lnPDStyle), width=i_lnPDWidth)
+        lnPDHLabel := label.new(time, lnPDH, "LN PDH", xloc=xloc.bar_time, style=label.style_none, textcolor=i_lnPDColor, size=getLabelSize())
+        lnPDLLabel := label.new(time, lnPDL, "LN PDL", xloc=xloc.bar_time, style=label.style_none, textcolor=i_lnPDColor, size=getLabelSize())
+if not na(lnPDHLine)
+    lnPDHLine.set_x2(time), lnPDLLine.set_x2(time)
+    lnPDHLabel.set_x(time), lnPDLLabel.set_x(time)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// RE-ARM LOGIC
+// 1. Check exit type matches i_lnRearmAfter (SL Only / TP Only / Both)
+// 2. Wait for cooldown bars after trade close
+// 3. If i_lnRearmBars > 0, wait for first bar inside ORB (with buffer), 
+//    then count bars from there (no reset on outside bars)
+// 4. If i_lnRearmBars == 0, re-arm immediately after cooldown
+// 5. Check direction filter and max trades
+// ════════════════════════════════════════════════════════════════════════════════
+// ── NY Re-Arm ──
+if i_nyRearmEnable and i_nyEnable and nyOrbComplete and inNYTrade and nySigFired and nySigDir == 0 and strategy.position_size == 0 and nyTradeCount < i_nyRearmMaxTrades
+    if f_exitQualifies(nyLastWasSL, i_nyRearmAfter)
+        // Step 1: Cooldown
+        if not nyCooldownDone
+            if bar_index - nyExitBar >= i_nyRearmCooldown
+                nyCooldownDone := true
+        // Step 2: Inside bars (or immediate if i_nyRearmBars == 0)
+        if nyCooldownDone
+            if i_nyRearmBars == 0
+                nySigFired := false
+                nyBrkPending := false
+                nyTP1Hit := false, nyTP2Hit := false, nyTP3Hit := false, nySLHit := false
+                // If price already beyond ORB, force crossover detection next bar
+                if close > nyORBHigh + nyRearmEntryBuf
+                    nyCrossUp := true
+                if close < nyORBLow - nyRearmEntryBuf
+                    nyCrossDn := true
+            else
+                // Check if bar is inside ORB range with buffer
+                bool _nyGateMet = false
+                if i_nyRearmGate == "Inside ORB"
+                    _nyGateMet := close >= nyORBLow + nyRearmEntryBuf and close <= nyORBHigh - nyRearmEntryBuf
+                else if i_nyRearmGate == "Touch Midpoint"
+                    _nyGateMet := low <= nyORBMid and high >= nyORBMid
+                else if i_nyRearmGate == "Touch Opposite Side"
+                    _nyGateMet := low <= nyORBLow or high >= nyORBHigh
+                else
+                    _nyGateMet := true
+                if not nyInsideStarted
+                    if _nyGateMet
+                        nyInsideStarted := true
+                        nyInsideBars := 1
+                else
+                    nyInsideBars += 1
+                if nyInsideStarted and nyInsideBars >= i_nyRearmBars
+                    nySigFired := false
+                    nyBrkPending := false
+                    nyInsideBars := 0
+                    nyInsideStarted := false
+                    nyTP1Hit := false, nyTP2Hit := false, nyTP3Hit := false, nySLHit := false
+
+// ── AS Re-Arm ──
+if i_asRearmEnable and i_asEnable and asOrbComplete and inAsTrade and asSigFired and asSigDir == 0 and strategy.position_size == 0 and asTradeCount < i_asRearmMaxTrades
+    if f_exitQualifies(asLastWasSL, i_asRearmAfter)
+        if not asCooldownDone
+            if bar_index - asExitBar >= i_asRearmCooldown
+                asCooldownDone := true
+        if asCooldownDone
+            if i_asRearmBars == 0
+                asSigFired := false
+                asBrkPending := false
+                asTP1Hit := false, asTP2Hit := false, asTP3Hit := false, asSLHit := false
+                if close > asORBHigh + asRearmEntryBuf
+                    asCrossUp := true
+                if close < asORBLow - asRearmEntryBuf
+                    asCrossDn := true
+            else
+                bool _asGateMet = false
+                if i_asRearmGate == "Inside ORB"
+                    _asGateMet := close >= asORBLow + asRearmEntryBuf and close <= asORBHigh - asRearmEntryBuf
+                else if i_asRearmGate == "Touch Midpoint"
+                    _asGateMet := low <= asORBMid and high >= asORBMid
+                else if i_asRearmGate == "Touch Opposite Side"
+                    _asGateMet := low <= asORBLow or high >= asORBHigh
+                else
+                    _asGateMet := true
+                if not asInsideStarted
+                    if _asGateMet
+                        asInsideStarted := true
+                        asInsideBars := 1
+                else
+                    asInsideBars += 1
+                if asInsideStarted and asInsideBars >= i_asRearmBars
+                    asSigFired := false
+                    asBrkPending := false
+                    asInsideBars := 0
+                    asInsideStarted := false
+                    asTP1Hit := false, asTP2Hit := false, asTP3Hit := false, asSLHit := false
+
+// ── LN Re-Arm ──
+if i_lnRearmEnable and i_lnEnable and lnOrbComplete and inLnTrade and lnSigFired and lnSigDir == 0 and strategy.position_size == 0 and lnTradeCount < i_lnRearmMaxTrades
+    if f_exitQualifies(lnLastWasSL, i_lnRearmAfter)
+        if not lnCooldownDone
+            if bar_index - lnExitBar >= i_lnRearmCooldown
+                lnCooldownDone := true
+        if lnCooldownDone
+            if i_lnRearmBars == 0
+                lnSigFired := false
+                lnBrkPending := false
+                lnTP1Hit := false, lnTP2Hit := false, lnTP3Hit := false, lnSLHit := false
+                if close > lnORBHigh + lnRearmEntryBuf
+                    lnCrossUp := true
+                if close < lnORBLow - lnRearmEntryBuf
+                    lnCrossDn := true
+            else
+                bool _lnGateMet = false
+                if i_lnRearmGate == "Inside ORB"
+                    _lnGateMet := close >= lnORBLow + lnRearmEntryBuf and close <= lnORBHigh - lnRearmEntryBuf
+                else if i_lnRearmGate == "Touch Midpoint"
+                    _lnGateMet := low <= lnORBMid and high >= lnORBMid
+                else if i_lnRearmGate == "Touch Opposite Side"
+                    _lnGateMet := low <= lnORBLow or high >= lnORBHigh
+                else
+                    _lnGateMet := true
+                if not lnInsideStarted
+                    if _lnGateMet
+                        lnInsideStarted := true
+                        lnInsideBars := 1
+                else
+                    lnInsideBars += 1
+                if lnInsideStarted and lnInsideBars >= i_lnRearmBars
+                    lnSigFired := false
+                    lnBrkPending := false
+                    lnInsideBars := 0
+                    lnInsideStarted := false
+                    lnTP1Hit := false, lnTP2Hit := false, lnTP3Hit := false, lnSLHit := false
+
+
+// ══════════════════════════════════════════════════════════════════
+// HARD SESSION FLATTEN — explicit time check every bar
+// ══════════════════════════════════════════════════════════════════
+// Hard flatten uses session window detection (not inNYTrade etc) + activeSession tracking
+
+// Force close using strategy.order (more reliable than close_all in backtesting)
+_flatQty = math.abs(strategy.position_size)
+if i_nyEnable and i_nyFlattenEOD and not inNYTrade and activeSession == 1 and strategy.position_size != 0
+    strategy.cancel_all()
+    if strategy.position_size > 0
+        strategy.order("EOS", strategy.short, qty=_flatQty, alert_message=_jsonExit)
+    else
+        strategy.order("EOS", strategy.long, qty=_flatQty, alert_message=_jsonExit)
+    nySessionJustEnded := true
+    activeSession := 0
+    nySigDir := 0
+if i_asEnable and i_asFlattenEOD and not inAsTrade and activeSession == 2 and strategy.position_size != 0
+    strategy.cancel_all()
+    if strategy.position_size > 0
+        strategy.order("EOS", strategy.short, qty=_flatQty, alert_message=_jsonExit)
+    else
+        strategy.order("EOS", strategy.long, qty=_flatQty, alert_message=_jsonExit)
+    asSessionJustEnded := true
+    activeSession := 0
+    asSigDir := 0
+if i_lnEnable and i_lnFlattenEOD and not inLnTrade and activeSession == 3 and strategy.position_size != 0
+    strategy.cancel_all()
+    if strategy.position_size > 0
+        strategy.order("EOS", strategy.short, qty=_flatQty, alert_message=_jsonExit)
+    else
+        strategy.order("EOS", strategy.long, qty=_flatQty, alert_message=_jsonExit)
+    nySessionJustEnded := true
+    activeSession := 0
+    lnSigDir := 0
+if strategy.position_size != 0 and not inNYTrade and not inAsTrade and not inLnTrade
+    strategy.cancel_all()
+    if strategy.position_size > 0
+        strategy.order("EOS", strategy.short, qty=_flatQty, alert_message=_jsonExit)
+    else
+        strategy.order("EOS", strategy.long, qty=_flatQty, alert_message=_jsonExit)
+    nySessionJustEnded := true
+    activeSession := 0
+    nySigDir := 0
+    asSigDir := 0
+    lnSigDir := 0
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SESSION P&L TRACKING
+// ════════════════════════════════════════════════════════════════════════════════
+
+// ── P&L Dashboard Settings ──
+grpPnlDash = "P&L Dashboard"
+showPnlDash = input.bool(true, "Show P&L Dashboard", group=grpPnlDash, tooltip="Display the session P&L dashboard on the chart.")
+pnlDashPosition = input.string("Bottom Right", "P&L Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grpPnlDash, display=display.none, tooltip="Corner of the chart to place the P&L dashboard.")
+pnlDashMode = input.string("Today", "P&L Mode", options=["Today", "All Time"], group=grpPnlDash, display=display.none, tooltip="Today: reset each trading day. All Time: cumulative since strategy start.")
+
+// ── Today's date tracking ──
+var int _todayKey = 0
+_currentKey = f_dayKey(time, i_timezone)
+_newDay = _currentKey != _todayKey
+if _newDay
+    _todayKey := _currentKey
+
+// ── Per-session P&L (All Time) ──
+f_sessionPnL(_prefix) =>
+    float _total = 0.0
+    int _wins = 0
+    int _count = 0
+    int _numTrades = strategy.closedtrades
+    if _numTrades > 0
+        for i = 0 to _numTrades - 1
+            string _id = strategy.closedtrades.entry_id(i)
+            if str.startswith(_id, _prefix)
+                _total += strategy.closedtrades.profit(i) + strategy.closedtrades.commission(i)
+                _count += 1
+                if strategy.closedtrades.profit(i) > 0
+                    _wins += 1
+    [_total, _count, _wins]
+
+// ── Per-session P&L (Today) ──
+f_sessionPnLToday(_prefix, _dayKey) =>
+    float _total = 0.0
+    int _wins = 0
+    int _count = 0
+    int _numTrades = strategy.closedtrades
+    if _numTrades > 0
+        for i = 0 to _numTrades - 1
+            string _id = strategy.closedtrades.entry_id(i)
+            if str.startswith(_id, _prefix)
+                int _exitTime = strategy.closedtrades.exit_time(i)
+                int _exitDay = f_dayKey(_exitTime, i_timezone)
+                if _exitDay == _dayKey
+                    _total += strategy.closedtrades.profit(i) + strategy.closedtrades.commission(i)
+                    _count += 1
+                    if strategy.closedtrades.profit(i) > 0
+                        _wins += 1
+    [_total, _count, _wins]
+
+// ── Previous day key tracking ──
+var int _prevDayKey = 0
+if _newDay
+    _prevDayKey := nz(_todayKey[1], 0)
+
+// All Time
+[nyPnL, nyCount, nyWins] = f_sessionPnL("NY")
+[asPnL, asCount, asWins] = f_sessionPnL("AS")
+[lnPnL, lnCount, lnWins] = f_sessionPnL("LDN")
+
+// Today
+[nyPnLT, nyCountT, nyWinsT] = f_sessionPnLToday("NY", _todayKey)
+[asPnLT, asCountT, asWinsT] = f_sessionPnLToday("AS", _todayKey)
+[lnPnLT, lnCountT, lnWinsT] = f_sessionPnLToday("LDN", _todayKey)
+
+// Yesterday
+[nyPnLY, nyCountY, nyWinsY] = f_sessionPnLToday("NY", _prevDayKey)
+[asPnLY, asCountY, asWinsY] = f_sessionPnLToday("AS", _prevDayKey)
+[lnPnLY, lnCountY, lnWinsY] = f_sessionPnLToday("LDN", _prevDayKey)
+
+// Select based on mode
+bool _isToday = pnlDashMode == "Today"
+float _nyP = _isToday ? nyPnLT : nyPnL
+int _nyC = _isToday ? nyCountT : nyCount
+int _nyW = _isToday ? nyWinsT : nyWins
+float _asP = _isToday ? asPnLT : asPnL
+int _asC = _isToday ? asCountT : asCount
+int _asW = _isToday ? asWinsT : asWins
+float _lnP = _isToday ? lnPnLT : lnPnL
+int _lnC = _isToday ? lnCountT : lnCount
+int _lnW = _isToday ? lnWinsT : lnWins
+float _totalP = _nyP + _asP + _lnP
+int _totalC = _nyC + _asC + _lnC
+int _totalW = _nyW + _asW + _lnW
+
+// Yesterday totals
+float _nyPY = nyPnLY
+float _asPY = asPnLY
+float _lnPY = lnPnLY
+float _totalPY = _nyPY + _asPY + _lnPY
+
+// Open trade unrealized P&L
+float _openPnL = strategy.openprofit
+
+f_pnlStr(_val) =>
+    string _sign = _val >= 0 ? "+" : ""
+    _sign + str.tostring(_val, "#,##0.00")
+
+f_wrStr(_wins, _count) =>
+    _count > 0 ? str.tostring(math.round(_wins / _count * 100)) + "%" : "—"
+
+// ════════════════════════════════════════════════════════════════════════════════
+// DASHBOARD 1: HTF BIAS & STATUS
+// ════════════════════════════════════════════════════════════════════════════════
+if showDashboard
+    tablePos = switch dashPosition
+        "Top Right" => position.top_right
+        "Top Left" => position.top_left
+        "Bottom Right" => position.bottom_right
+        => position.bottom_left
+    var table dash = table.new(tablePos, 3, 7, bgcolor=dashBgColor, border_width=1, border_color=dashBorderColor)
+    if barstate.islast
+        dash.cell(0, 0, "HTF BIAS", text_color=dashHeaderText, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        dash.cell(1, 0, "Structure", text_color=dashHeaderText, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        dash.cell(2, 0, "Bias", text_color=dashHeaderText, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        dash.cell(0, 1, formatTF(htf1), text_color=dashLabelColor, text_size=getDashSize())
+        dash.cell(1, 1, htf1StructureText, text_color=htf1BiasColor, text_size=getDashSize())
+        dash.cell(2, 1, htf1BiasText, text_color=htf1BiasColor, text_size=getDashSize())
+        dash.cell(0, 2, formatTF(htf2), text_color=dashLabelColor, text_size=getDashSize())
+        dash.cell(1, 2, htf2StructureText, text_color=htf2BiasColor, text_size=getDashSize())
+        dash.cell(2, 2, htf2BiasText, text_color=htf2BiasColor, text_size=getDashSize())
+        // ORB status
+        nyOrbText = i_nyEnable ? (nyOrbComplete ? str.tostring(nyORBHigh, format.mintick) + " / " + str.tostring(nyORBLow, format.mintick) : nyOrbBuilding ? "Building..." : "—") : "OFF"
+        dash.cell(0, 3, "NY ORB", text_color=dashLabelColor, text_size=getDashSize())
+        dash.cell(1, 3, nyOrbText, text_color=i_nyHighColor, text_size=getDashSize())
+        dash.merge_cells(1, 3, 2, 3)
+        asOrbText = i_asEnable ? (asOrbComplete ? str.tostring(asORBHigh, format.mintick) + " / " + str.tostring(asORBLow, format.mintick) : asOrbBuilding ? "Building..." : "—") : "OFF"
+        dash.cell(0, 4, "ASIA ORB", text_color=dashLabelColor, text_size=getDashSize())
+        dash.cell(1, 4, asOrbText, text_color=i_asHighColor, text_size=getDashSize())
+        dash.merge_cells(1, 4, 2, 4)
+        lnOrbText = i_lnEnable ? (lnOrbComplete ? str.tostring(lnORBHigh, format.mintick) + " / " + str.tostring(lnORBLow, format.mintick) : lnOrbBuilding ? "Building..." : "—") : "OFF"
+        dash.cell(0, 5, "LDN ORB", text_color=dashLabelColor, text_size=getDashSize())
+        dash.cell(1, 5, lnOrbText, text_color=i_lnHighColor, text_size=getDashSize())
+        dash.merge_cells(1, 5, 2, 5)
+        // Trail status per session
+        _nyStair = i_nyTrailEnable ? "ON" : "OFF"
+        _asStair = i_asTrailEnable ? "ON" : "OFF"
+        _lnStair = i_lnTrailEnable ? "ON" : "OFF"
+        _stairText = "NY:" + _nyStair + " AS:" + _asStair + " LN:" + _lnStair
+        dash.cell(0, 6, "Stair Stop", text_color=dashLabelColor, text_size=getDashSize())
+        dash.cell(1, 6, _stairText, text_color=color.yellow, text_size=getDashSize())
+        dash.merge_cells(1, 6, 2, 6)
+        // Mode
+
+// ════════════════════════════════════════════════════════════════════════════════
+// DASHBOARD 2: SESSION P&L
+// ════════════════════════════════════════════════════════════════════════════════
+if showPnlDash
+    pnlPos = switch pnlDashPosition
+        "Top Right" => position.top_right
+        "Top Left" => position.top_left
+        "Bottom Right" => position.bottom_right
+        => position.bottom_left
+    var table pnlDash = table.new(pnlPos, 3, 7, bgcolor=dashBgColor, border_width=1, border_color=dashBorderColor)
+    if barstate.islast
+        string _modeLabel = _isToday ? "TODAY" : "ALL TIME"
+        // Header
+        pnlDash.cell(0, 0, "", text_color=dashHeaderText, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        pnlDash.cell(1, 0, _modeLabel, text_color=dashHeaderText, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        pnlDash.cell(2, 0, "PREV DAY", text_color=dashHeaderText, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        // NY
+        pnlDash.cell(0, 1, "NY", text_color=i_nyHighColor, text_size=getDashSize())
+        pnlDash.cell(1, 1, f_pnlStr(_nyP), text_color=_nyP >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize())
+        pnlDash.cell(2, 1, f_pnlStr(_nyPY), text_color=_nyPY >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize())
+        // Asia
+        pnlDash.cell(0, 2, "ASIA", text_color=i_asHighColor, text_size=getDashSize())
+        pnlDash.cell(1, 2, f_pnlStr(_asP), text_color=_asP >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize())
+        pnlDash.cell(2, 2, f_pnlStr(_asPY), text_color=_asPY >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize())
+        // LDN
+        pnlDash.cell(0, 3, "LDN", text_color=i_lnHighColor, text_size=getDashSize())
+        pnlDash.cell(1, 3, f_pnlStr(_lnP), text_color=_lnP >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize())
+        pnlDash.cell(2, 3, f_pnlStr(_lnPY), text_color=_lnPY >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize())
+        // Open P&L
+        pnlDash.cell(0, 4, "OPEN", text_color=dashLabelColor, text_size=getDashSize())
+        pnlDash.cell(1, 4, f_pnlStr(_openPnL), text_color=_openPnL >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize())
+        pnlDash.cell(2, 4, "", text_size=getDashSize())
+        // Realized total
+        pnlDash.cell(0, 5, "REALIZED", text_color=dashLabelColor, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        pnlDash.cell(1, 5, f_pnlStr(_totalP), text_color=_totalP >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        pnlDash.cell(2, 5, f_pnlStr(_totalPY), text_color=_totalPY >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        // Net (realized + open)
+        float _netAll = _totalP + _openPnL
+        pnlDash.cell(0, 6, "NET", text_color=dashLabelColor, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        pnlDash.cell(1, 6, f_pnlStr(_netAll), text_color=_netAll >= 0 ? dashBullColor : dashBearColor, text_size=getDashSize(), bgcolor=dashHeaderBg)
+        pnlDash.cell(2, 6, "", text_size=getDashSize(), bgcolor=dashHeaderBg)
+
+View in Pine Editor・2341 lines
+Use on chart
+8
+7
+2
+1 217
+Feb 21
+Updated of the original by Vonkar to work with ghost
+Mar 1
+Release Notes
+TPs now take partials like its suppose to
+Mar 2
+Release Notes
+Retest midline now fires at the retest of midline from wick with the bar of candle closing ABOVE midline.

@@ -1,0 +1,157 @@
+//@version=5
+strategy("Triple EMA + QQE Trend Following Strategy [TradeDots]", overlay = true, max_lines_count = 500, max_boxes_count = 100, initial_capital = 10000, currency = currency.USD, commission_type = strategy.commission.percent, commission_value = 0.01, default_qty_type = strategy.percent_of_equity, default_qty_value = 80)
+
+//pipsize
+GetPipSize() =>
+    syminfo.mintick * (syminfo.type == "forex" ? 10 : 1)
+
+pipSize = GetPipSize()
+
+var ts = 0.
+var float stopLoss = na
+
+//qqe values
+rsi_period = input(14, title='RSI Length', group = "QQE")
+rsi_smoothing_period = input(5, title='RSI Smoothing Period', group = "QQE")
+factor = input(4.238, title='QQE Factor', group = "QQE")
+
+//tema
+ma_source = input(close, "TEMA Source", inline="MA1", group="TEMA")
+tema1_length = input.int(20, "TEMA #1 Length", minval=1,group="TEMA")
+tema2_length = input.int(40, "TEMA #2 Length", minval=1,group="TEMA")
+
+input_stop_loss = input.int(120, "Stop Loss (pip)", group = "Strategy")
+
+tema(src, length) =>
+    ema1 = ta.ema(src, length)
+    ema2 = ta.ema(ema1, length)
+    ema3 = ta.ema(ema2, length)
+
+    tema = 3*ema1 - 3*ema2 + ema3
+
+tema1 = tema(ma_source, tema1_length)
+tema2 = tema(ma_source, tema2_length)
+
+tema1Plot = plot(tema1, title = " TEMA #1", color = #c7f9cc, linewidth = 2)
+tema2Plot = plot(tema2, title = " TEMA #2", color = #57cc99, linewidth = 2)
+
+// calculating qqe
+rsi = ta.rsi(close, rsi_period)
+rsiMa = ta.ema(rsi, rsi_smoothing_period)
+atrRsi = math.abs(rsiMa[1] - rsiMa)
+
+final_smooth = rsi_period * 2 - 1
+MaAtrRsi = ta.ema(atrRsi, final_smooth)
+dar = ta.ema(MaAtrRsi, final_smooth) * factor
+
+crossover = ta.crossover(rsiMa, ts)
+crossunder = ta.crossunder(rsiMa, ts)
+
+ts := nz(crossover ? rsiMa - MaAtrRsi * factor
+  : crossunder ? rsiMa + MaAtrRsi * factor
+  : rsiMa > ts ? math.max(rsiMa - MaAtrRsi * factor, ts)
+  : math.min(rsiMa + MaAtrRsi * factor, ts), rsiMa)
+
+// entry and exit conditions
+long_condition = close > tema1 and tema1 > tema2 and tema2 > tema2[1] and ta.crossover(rsiMa, ts) and dayofweek != dayofweek.monday
+short_condition = close < tema1 and tema1 < tema2 and tema2 < tema2[1] and ta.crossunder(rsiMa, ts) and dayofweek != dayofweek.monday
+
+if long_condition and strategy.opentrades == 0
+    strategy.entry("Long", strategy.long)
+    label.new(bar_index, low, "🟢 Long", color = #9cff87, style = label.style_label_up)
+    stopLoss := close - input_stop_loss * pipSize
+
+else if short_condition and strategy.opentrades == 0
+    strategy.entry("Short", strategy.short)
+    label.new(bar_index, high, "🔴 Short", color = #f9396a, style = label.style_label_down, textcolor = color.white)
+    stopLoss := close + input_stop_loss * pipSize
+
+else if strategy.opentrades == 0
+    stopLoss := na
+
+if barstate.isconfirmed and strategy.opentrades > 0
+    if strategy.opentrades.size(strategy.opentrades- 1) > 0
+        if close < stopLoss
+            strategy.close("Long")
+        stopLoss := (close - input_stop_loss * pipSize) > stopLoss ? close - input_stop_loss * pipSize : stopLoss
+    else if strategy.opentrades.size(strategy.opentrades - 1) < 0
+        if close > stopLoss
+            strategy.close("Short")
+        stopLoss := (close + input_stop_loss * pipSize) < stopLoss ? close + input_stop_loss * pipSize : stopLoss
+
+// Check if position is closed (Print label if true)
+is_pos_closed = (strategy.position_size[1] != 0 and strategy.position_size == 0)
+is_short = strategy.position_size < 0
+is_long = strategy.position_size > 0
+
+if is_pos_closed and is_short[1]
+    label.new(bar_index, low, "🟢 Close Short", color = #9cff87, style = label.style_label_up)
+
+else if is_pos_closed and is_long[1]
+    label.new(bar_index, high, "🔴 Close Long", color = #f9396a, style = label.style_label_down, textcolor = color.white)
+
+fill(tema2Plot, tema1Plot, math.max(tema2,tema1), tema2,color.new(#9cff87, 85), color.new(#9cff87, 70))
+fill(tema2Plot, tema1Plot, tema2, math.min(tema2,tema1),color.new(#f9396a, 70), color.new(#f9396a, 85))
+
+plot(stopLoss, color=#f9396a, style = plot.style_cross, linewidth = 2, title = "Trail Stop")
+
+View in Pine Editor・99 lines
+Use on chart
+1.2 K
+26 605
+The "Triple EMA + QQE Trend Following Strategy" harnesses the power of two sophisticated technical indicators, the Triple Exponential Moving Average (TEMA) and the Qualitative Quantitative Estimation (QQE), to generate precise buy and sell signals. This strategy excels in capturing shifts in trends by identifying short-term price momentum and dynamic overbought or oversold conditions.
+
+HOW IT WORKS
+
+This strategy integrates two pivotal indicators:
+
+Triple Exponential Moving Average (TEMA): TEMA enhances traditional moving averages by reducing lag and smoothing the data more effectively. It achieves this by applying the EMA formula three times onto the price, as follows:
+
+Pine Script®
+tema(src, length) =>
+    ema1 = ta.ema(src, length)
+    ema2 = ta.ema(ema1, length)
+    ema3 = ta.ema(ema2, length)
+    tema = 3*ema1 - 3*ema2 + ema3
+
+
+
+This computation helps to sharpen the sensitivity to price movements.
+
+Qualitative Quantitative Estimation (QQE): The QQE indicator improves upon the standard RSI by incorporating a smoothing mechanism. It starts with the standard RSI, overlays a 5-period EMA on this RSI, and then enhances the result using a double application of a 27-period EMA. A slow trailing line is then derived by multiplying the result with a factor number. This approach establishes a more refined and less jittery trend-following signal, complementing the TEMA to enhance overall market timing during fluctuating conditions.
+
+APPLICATION
+
+Referenced from insights on "Trading Tact," the strategy implementation follows:
+
+First of all, we utilize two TEMA lines: one set at a 20-period and the other at a 40-period. Then following the rules below:
+
+
+40-period TEMA is rising
+
+20-period TEMA is above 40-period TEMA
+
+Price closes above 20-period TEMA
+
+Today is not Monday
+
+RSI MA crosses the Slow trailing line
+
+
+
+This strategy does not employ an active take profit mechanism; instead, it utilizes a trailing stop loss to allow the price to reach the stop loss naturally, thereby maximizing potential profit margins.
+
+DEFAULT SETUP
+
+Commission: 0.01%
+Initial Capital: $10,000
+Equity per Trade: 80%
+
+Users are advised to adjust and personalize this trading strategy to better match their individual trading preferences and style.
+
+RISK DISCLAIMER
+
+Trading entails substantial risk, and most day traders incur losses. All content, tools, scripts, articles, and education provided by TradeDots serve purely informational and educational purposes. Past performances are not definitive predictors of future results.
+
+Reference:
+Trading Tact. What Is the QQE Indicator? Retrieved from: tradingtact.com/qqe-indicator/

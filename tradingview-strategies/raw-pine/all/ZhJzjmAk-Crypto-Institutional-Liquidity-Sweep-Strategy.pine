@@ -1,0 +1,211 @@
+//@version=5
+strategy("BTC Institutional Liquidity Sweep Strategy", 
+     overlay=true, 
+     initial_capital=10000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=10, 
+     pyramiding=0, 
+     process_orders_on_close=true)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+// Core Filters
+trendEmaLen    = input.int(200, "EMA Trend Length", group="Trend Filter")
+emaBufferPct   = input.float(0.0, "EMA Buffer %", step=0.1, group="Trend Filter")
+modeSecondary  = input.string("VolatilityOscillator", "Secondary Filter Mode", options=["SmartTrendlines", "VolatilityOscillator"], group="Filters")
+
+// Exit Settings (Fixed 1:2 RR)
+atrLen         = input.int(14, "ATR Length", group="Risk Management")
+stopATRmult    = input.float(1.0, "Stop ATR Multiplier", step=0.1, group="Risk Management")
+tpATRmult      = input.float(2.0, "TP ATR Multiplier (Set 2x for 1:2 RR)", step=0.1, group="Risk Management")
+
+// Liquidity Sweep Settings
+sweepLeft      = input.int(3, "Pivot Left Bars", group="Liquidity Sweep")
+sweepRight     = input.int(3, "Pivot Right Bars", group="Liquidity Sweep")
+sweepMaxAge    = input.int(10, "Sweep Signal Max Age (Bars)", group="Liquidity Sweep")
+sweepType      = input.string("WickSweep", "Sweep Type", options=["WickSweep", "CloseReclaim"], group="Liquidity Sweep")
+
+// Confirmation Settings
+confirmType    = input.string("ReversalCandle", "Confirmation Type", options=["ReversalCandle", "BreakOfStructure", "Both"], group="Confirmation")
+revStrength    = input.float(0.60, "Reversal Strength (0-1)", minval=0.1, maxval=1.0, group="Confirmation")
+
+// Mode: Smart Trendlines (Slope-based Structure)
+slopeLen       = input.int(50, "Structure Slope Length", group="Smart Trendlines Mode")
+slopeMin       = input.float(0.0, "Min Slope Threshold", group="Smart Trendlines Mode")
+
+// Mode: Volatility Oscillator
+volFastLen     = input.int(10, "Vol Fast EMA", group="Volatility Mode")
+volSlowLen     = input.int(30, "Vol Slow EMA", group="Volatility Mode")
+volMinThresh   = input.float(0.0, "Vol Min Threshold", group="Volatility Mode")
+volRisingBars  = input.int(2, "Required Rising Bars", group="Volatility Mode")
+
+// Misc
+useSession     = input.bool(false, "Use Session Filter", group="Misc")
+sessionInput   = input.session("0000-2359", "Trading Session", group="Misc")
+cooldown       = input.int(0, "Cooldown Bars after Exit", group="Misc")
+useLong        = input.bool(true, "Allow Long Trades", group="Direction")
+useShort       = input.bool(true, "Allow Short Trades", group="Direction")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. CALCULATIONS & INDICATORS
+// ─────────────────────────────────────────────────────────────────────────────
+// EMA Trend Filter
+emaTrend = ta.ema(close, trendEmaLen)
+longBias  = close > emaTrend * (1 + emaBufferPct/100)
+shortBias = close < emaTrend * (1 - emaBufferPct/100)
+
+// ATR and Session
+atr = ta.atr(atrLen)
+inSession = not useSession or not na(time(timeframe.period, sessionInput))
+
+// 3. LIQUIDITY SWEEP LOGIC
+var float lastHighLevel = na
+var float lastLowLevel  = na
+ph = ta.pivothigh(high, sweepLeft, sweepRight)
+pl = ta.pivotlow(low, sweepLeft, sweepRight)
+
+if not na(ph)
+    lastHighLevel := ph
+if not na(pl)
+    lastLowLevel := pl
+
+// Detection
+bullSweep = low < lastLowLevel and (sweepType == "WickSweep" ? close > lastLowLevel : (close > lastLowLevel and close > open))
+bearSweep = high > lastHighLevel and (sweepType == "WickSweep" ? close < lastHighLevel : (close < lastHighLevel and close < open))
+
+var int lastBullSweepBar = -999
+var int lastBearSweepBar = -999
+if bullSweep
+    lastBullSweepBar := bar_index
+if bearSweep
+    lastBearSweepBar := bar_index
+
+bullSweepValid = (bar_index - lastBullSweepBar) <= sweepMaxAge
+bearSweepValid = (bar_index - lastBearSweepBar) <= sweepMaxAge
+
+// 4. SECONDARY FILTERS
+// Mode A: Smart Trendlines (Linear Regression Slope)
+slope = ta.linreg(close, slopeLen, 0) - ta.linreg(close, slopeLen, 1)
+structUp   = slope > slopeMin
+structDown = slope < -slopeMin
+
+// Mode B: Volatility Oscillator
+volFast = ta.ema(ta.tr(true), volFastLen)
+volSlow = ta.ema(ta.tr(true), volSlowLen)
+volOsc  = 100 * (volFast - volSlow) / volSlow
+volRising = ta.rising(volOsc, volRisingBars)
+volFilter = volOsc > volMinThresh and volRising
+
+// Active Filter Selection
+secondaryFilterLong  = (modeSecondary == "SmartTrendlines" ? structUp : volFilter)
+secondaryFilterShort = (modeSecondary == "SmartTrendlines" ? structDown : volFilter)
+
+// 5. CONFIRMATION
+candleSize = math.max(high - low, syminfo.mintick)
+closePos   = (close - low) / candleSize
+
+// Reversal Candle
+revLong  = close > open and closePos >= revStrength
+revShort = close < open and closePos <= (1 - revStrength)
+
+// Break of Structure (Micro BOS)
+bosLong  = close > ta.highest(high[1], 3)
+bosShort = close < ta.lowest(low[1], 3)
+
+confirmLong  = (confirmType == "ReversalCandle" ? revLong : (confirmType == "BreakOfStructure" ? bosLong : revLong and bosLong))
+confirmShort = (confirmType == "ReversalCandle" ? revShort : (confirmType == "BreakOfStructure" ? bosShort : revShort and bosShort))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. EXECUTION LOGIC (FIXED RR)
+// ─────────────────────────────────────────────────────────────────────────────
+// Cooldown check
+barsSinceExit = strategy.closedtrades > 0 ? bar_index - strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) : 999
+cooldownActive = barsSinceExit < cooldown
+
+canEnterLong  = useLong and inSession and longBias and bullSweepValid and secondaryFilterLong and confirmLong and not cooldownActive
+canEnterShort = useShort and inSession and shortBias and bearSweepValid and secondaryFilterShort and confirmShort and not cooldownActive
+
+// Persistent Exit Variables
+var float longSL  = na
+var float longTP  = na
+var float shortSL = na
+var float shortTP = na
+
+if canEnterLong and strategy.position_size == 0
+    longSL := close - (atr * stopATRmult)
+    longTP := close + (atr * tpATRmult)
+    strategy.entry("Long", strategy.long, comment="SL: " + str.tostring(longSL, "#.#") + " TP: " + str.tostring(longTP, "#.#"))
+
+if canEnterShort and strategy.position_size == 0
+    shortSL := close + (atr * stopATRmult)
+    shortTP := close - (atr * tpATRmult)
+    strategy.entry("Short", strategy.short, comment="SL: " + str.tostring(shortSL, "#.#") + " TP: " + str.tostring(shortTP, "#.#"))
+
+// Static Exit Orders
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. PLOTS & VISUALS
+// ─────────────────────────────────────────────────────────────────────────────
+plot(emaTrend, "EMA 200", color=color.new(color.gray, 50), linewidth=2)
+
+// Sweep Levels
+plot(lastHighLevel, "Liq High", color=color.new(color.red, 80), style=plot.style_linebr)
+plot(lastLowLevel, "Liq Low", color=color.new(color.green, 80), style=plot.style_linebr)
+
+// Signals
+plotshape(bullSweep, "Bull Sweep", shape.labelup, location.belowbar, color.green, text="SWEEP", textcolor=color.white, size=size.small)
+plotshape(bearSweep, "Bear Sweep", shape.labeldown, location.abovebar, color.red, text="SWEEP", textcolor=color.white, size=size.small)
+
+// Background for Filters
+bgcolor(modeSecondary == "SmartTrendlines" ? (structUp ? color.new(color.green, 90) : structDown ? color.new(color.red, 90) : na) : na)
+
+View in Pine Editor・166 lines
+Use on chart
+2
+9
+1 034
+Strategy Overview: Institutional Liquidity Sweep & Trend Convergence
+This strategy is a high-conviction systematic trading framework designed to exploit "stop-runs" and liquidity grabs within a dominant market trend. It combines institutional price action concepts with mathematical filters to ensure entries occur only when trend direction, volatility, and liquidity align.
+
+1. The Trend Framework (EMA 200 Filter)
+The foundation of the strategy is the 200-period Exponential Moving Average (EMA). This acts as a "Directional North Star."
+
+Long Bias: Trades are only considered when price is above the EMA 200.
+
+Short Bias: Trades are only considered when price is below the EMA 200.
+
+Buffer Logic: An optional percentage buffer can be applied to avoid "choppy" entries when price is hugging the moving average.
+
+2. The Entry Trigger (Liquidity Sweeps)
+The strategy identifies Institutional Liquidity Pools using Swing Highs and Swing Lows (Pivots).
+
+The Sweep: The system waits for price to pierce below a recent structural low (Bullish Sweep) or above a recent structural high (Bearish Sweep).
+
+The Trap: It then monitors for a "reclaim" where price quickly rejects the level. This suggests that the breach was not a breakout, but a hunt for stop-losses to fuel a move in the opposite direction.
+
+3. Secondary Confirmation Filters
+To maximize the win rate, the strategy requires a Secondary Filter to confirm market health (User selectable):
+
+Volatility Oscillator: Ensures the market is in an Expansion Phase. It requires the oscillator to be rising, indicating that momentum is behind the reversal.
+
+Smart Trendlines (Structure): Uses Linear Regression Slope to ensure the immediate micro-structure is aligned with the macro-trend.
+
+4. Entry Confirmation (The Reversal Candle)
+A trade is not triggered simply because a level was swept. The strategy requires a Reversal Confirmation:
+
+Price Location: The candle must close in the upper 40% (for longs) or lower 40% (for shorts) of its total range.
+
+Directional Body: The candle must close bullish for longs and bearish for shorts, confirming that buyers or sellers have seized control of the bar.
+
+5. Risk Management (Fixed 1:2 RR)
+The strategy prioritizes capital preservation through an ATR-based (Average True Range) risk model:
+
+Static Exits: Upon entry, the Stop Loss and Take Profit levels are calculated and locked. They do not move, ensuring a mathematically pure 1:2 Reward-to-Risk ratio.
+
+Volatility Adjusted: The distance of the stop loss is determined by the ATR, meaning the strategy automatically widens stops during high volatility and tightens them during calm periods.

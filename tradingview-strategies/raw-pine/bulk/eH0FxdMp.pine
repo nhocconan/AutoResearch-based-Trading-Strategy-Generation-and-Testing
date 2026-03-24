@@ -1,0 +1,93 @@
+//@version=4
+strategy(title="Optimized Keltner Channels SL/TP Strategy for BTC", overlay=true)
+length = input(9, minval=1)
+mult = input(1.0, "Multiplier")
+src = input(close, title="Source")
+exp = input(true, "Use Exponential MA")
+BandsStyle = input("Average True Range", options = ["Average True Range", "True Range", "Range"], title="Bands Style")
+atrlength = input(19, "ATR Length")
+sl = input(defval=20, minval=0, type=input.float, step=0.1, title="Stop Loss (%)")
+tp = input(defval=20.3, minval=0, type=input.float, step=0.1, title="Take Profit (%)")
+
+esma(source, length)=>
+    s = sma(source, length)
+    e = ema(source, length)
+    exp ? e : s
+ma = esma(src, length)
+rangema = BandsStyle == "True Range" ? rma(tr(true), length) : BandsStyle == "Average True Range" ? atr(atrlength) : rma(high - low, length)
+upper = ma + rangema * mult
+lower = ma - rangema * mult
+c = color.blue
+u = plot(upper, color=color.green, title="Upper")
+plot(ma, color=#0094FF, title="Basis")
+l = plot(lower, color=color.red, title="Lower")
+fill(u, l, color.new(color=#0094FF, transp=95), title="Background")
+crossUpper = crossover(src, upper)
+crossLower = crossunder(src, lower)
+bprice = 0.0
+bprice := crossUpper ? close+syminfo.mintick : nz(bprice[1])
+sprice = 0.0
+sprice := crossLower ? close-syminfo.mintick : nz(sprice[1])
+crossBcond = false
+crossBcond := crossUpper ? true
+     : na(crossBcond[1]) ? false : crossBcond[1]
+crossScond = false
+crossScond := crossLower ? true
+     : na(crossScond[1]) ? false : crossScond[1]
+cancelBcond = crossBcond and (src < ma or high >= bprice )
+cancelScond = crossScond and (src > ma or low <= sprice )
+if (cancelBcond)
+    strategy.cancel("KltChLE")
+if (crossUpper)
+    strategy.entry("KltChLE", strategy.long, stop=bprice, comment="Long")
+if (cancelScond)
+    strategy.cancel("KltChSE")
+if (crossLower)
+    strategy.entry("KltChSE", strategy.short, stop=sprice, comment="Short")
+
+strategy.exit("Long exit", "KltChLE", profit = close * tp * 0.01 / syminfo.mintick, loss = close * sl * 0.01 / syminfo.mintick)
+strategy.exit("Short exit", "KltChSE", profit = close * tp * 0.01 / syminfo.mintick, loss = close * sl * 0.01 / syminfo.mintick)
+
+plot(bprice, color=color.green)
+plot(sprice, color=color.red)
+View in Pine Editor・55 lines
+Use on chart
+4
+9
+7
+10
+16 164
+Sep 2, 2021
+This strategy is optimized for Bitcoin with the Keltner Channel Strategy, which is TradingView's built-in strategy. In the original Keltner Channel Strategy, it was difficult to predict the timing of entry because the Buy and Sell signals floated in the middle of the candle in real time. This strategy is convenient because if the bitcoin price hits the top or bottom of the Keltner Channel and closes the closing price, you can enter Buy or Sell at the next candle start price. In addition, this strategy provides Stop Loss and Take Profit functions to maximize profit.
+_________________________________
+Recommended settings are below.
+- length: 9
+- multiplier: 1
+- source: close
+- (v) Use EMA
+- Bands Style: Average True Range
+- ATR Length: 19
+- Stop Loss (%): 20
+- Take Profit (%) : 20
+_________________________________
+- length: 9
+- multiplier: 1
+- source: close
+- (v) Use EMA
+- Bands Style: Average True Range
+- ATR Length: 18
+- Stop Loss (%): 20
+- Take Profit (%) : 5
+_________________________________
+▶ Usefulness and Originality
+- Stop Loss and Take Profit functions are available
+- Convenient Buy and Sell entry compared to the original Keltner Channel Strategy
+- Optimized for BTCUSD market (maximizing profits)
+
+___________________________________________
+이 전략은 TradingView의 Built-in 전략인 Keltner Channel Strategy를 비트코인에 맞게 최적화되었습니다. 기존의 Keltner Channel Strategy는 Buy, Sell 신호가 캔들 중간에 실시간으로 떠서 진입 시점을 예측하기 어려운 불편함이 있었지만 이 전략은 비트코인 가격이 Keltner Channel 상단 혹은 하단을 찍고 종가를 마감하면 그 다음 캔들 시작가에서 Buy 혹은 Sell 진입이 가능하여 편리합니다. 또한, 이 전략은 Keltner Channel을 만나서 캔들을 마감한 가격 (bprice, sprice)을 시각적으로 plot을 제공하여 타점 및 차트를 보기에 편리하며 손절가 및 목표가를 지정한 백테스팅이 가능합니다.
+Sep 5, 2021
+Release Notes
+Minor revision
+- SL/TP input float % is available for maximizing profits.
+- color.new() function is applied for deprecated 'transp'.

@@ -1,0 +1,348 @@
+//@version=6
+strategy("Enhanced MA Crossover Pro", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === INPUTS ===
+maType1 = input.string("EMA", "MA Type 1", group="Moving Averages", options=["EMA", "WMA", "SMA", "SMMA"])
+maType2 = input.string("EMA", "MA Type 2", group="Moving Averages", options=["EMA", "WMA", "SMA", "SMMA"])
+ma1Length = input.int(8, "MA 1 Length", minval=1)
+ma2Length = input.int(20, "MA 2 Length", minval=1)
+
+useSMA = input.bool(true, "Use SMA Filter?", group="Filters")
+smaLength = input.int(200, "SMA Length", minval=1)
+
+useVWAP = input.bool(true, "Use VWAP Filter?")
+useRSI = input.bool(true, "Use RSI Filter?")
+rsiLength = input.int(14, "RSI Length")
+rsiOverbought = input.int(70, "RSI Overbought")
+rsiOversold = input.int(30, "RSI Oversold")
+
+useMACD = input.bool(true, "Use MACD Filter?")
+macdFast = input.int(12, "MACD Fast Length")
+macdSlow = input.int(26, "MACD Slow Length")
+macdSignal = input.int(9, "MACD Signal Smoothing")
+
+sessionStartHour = input.int(9, "Session Start Hour", minval=0, maxval=23, group="Session Settings")
+sessionStartMinute = input.int(30, "Session Start Minute", minval=0, maxval=59)
+sessionEndHour = input.int(16, "Session End Hour", minval=0, maxval=23)
+sessionEndMinute = input.int(0, "Session End Minute", minval=0, maxval=59)
+closeHour = input.int(15, "Force Close Hour", minval=0, maxval=23)
+closeMinute = input.int(45, "Force Close Minute", minval=0, maxval=59)
+
+enableLong = input.bool(true, "Enable Long Trades", group="Trade Management")
+enableShort = input.bool(true, "Enable Short Trades")
+
+// === STOP SETTINGS ===
+fixed_profit_ticks = input.int(50, "Fixed Profit Target (Ticks)", minval=1, group="Stop & Target Settings")
+stop_method = input.string("Fixed", "Stop Method", options=["Fixed", "ATR", "Capped ATR", "Exit on Close Cross MA"])
+ma_for_exit = input.string("MA1", "Select MA for Exit", options=["MA1", "MA2"])
+
+fixed_stop_ticks = input.int(30, "Fixed Stop Loss (Ticks)", minval=1)
+atr_length = input.int(7, "ATR Length")
+atr_multiplier = input.float(3.0, "ATR Multiplier")
+max_atr_stop_ticks = input.int(50, "Max ATR Stop (Ticks)", minval=5)
+
+fixed_trail_ticks = input.int(50, "Fixed Trailing Stop (Ticks)", minval=5)
+atr_trail_multiplier = input.float(2.0, "ATR Trailing Multiplier")
+atr_tight_trail_multiplier = input.float(1.0, "ATR Tightened Trail Multiplier After Breakeven")
+use_custom_trail = input.bool(true, "Optimize Trailing Per Stop Method")
+use_auto_tighten = input.bool(true, "Auto Tighten Trailing After Breakeven")
+
+use_adaptive_breakeven = input.bool(true, "Enable Adaptive Breakeven?")
+adaptive_breakeven_pct = input.float(0.25, "Breakeven Activation at % ATR Target", minval=0.01)
+
+enable_breakeven = input.bool(true, "Enable Breakeven Stop")
+breakeven_trigger_ticks = input.int(65, "Breakeven Trigger Distance (Ticks)", minval=1)
+
+use_profit_target = input.bool(true, "Enable Dynamic Profit Target?")
+profit_target_multiplier = input.float(1.5, "Profit Target Multiplier")
+
+// === DAILY LIMITS ===
+enable_daily_profit_limit = input.bool(true, "Enable Daily Profit Limit?", group="Daily Limits")
+enable_daily_loss_limit = input.bool(true, "Enable Daily Loss Limit?")
+daily_max_profit_ticks = input.int(200, "Max Daily Profit (Ticks)")
+daily_max_loss_ticks = input.int(-100, "Max Daily Loss (Ticks)")
+
+max_trades_per_day = input.int(1, "Max Trades Per Day", minval=1, maxval=9)
+
+// === TRADING DAYS SELECTION ===
+trade_sunday    = input.bool(false, 'Trade Sunday')
+trade_monday    = input.bool(true,  'Trade Monday')
+trade_tuesday   = input.bool(true,  'Trade Tuesday')
+trade_wednesday = input.bool(true,  'Trade Wednesday')
+trade_thursday  = input.bool(true,  'Trade Thursday')
+trade_friday    = input.bool(true,  'Trade Friday')
+trade_saturday  = input.bool(false, 'Trade Saturday')
+
+// === FUNCTIONS ===
+getMA(src, len, type) =>
+    type == "EMA" ? ta.ema(src, len) : type == "WMA" ? ta.wma(src, len) : type == "SMA" ? ta.sma(src, len) : ta.rma(src, len)
+
+// === INDICATORS ===
+ma1 = getMA(close, ma1Length, maType1)
+ma2 = getMA(close, ma2Length, maType2)
+sma = useSMA ? ta.sma(close, smaLength) : na
+vwap = ta.vwap(close)
+rsi = ta.rsi(close, rsiLength)
+[macdLine, signalLine, _] = ta.macd(close, macdFast, macdSlow, macdSignal)
+atr = ta.atr(atr_length)
+
+// === MULTI-TIMEFRAME CONFIRMATION ===
+showHTFMAs = input.bool(true, "Show Higher Timeframe MAs?", group="Higher Timeframe Settings")
+useHTFforEntry = input.bool(false, "Use Higher Timeframe MAs for Entry?", group="Higher Timeframe Settings")
+useHTFConfirm = input.bool(false, "Use Higher Timeframe MA Confirmation?", group="Higher Timeframe Settings")
+htf_maType1 = input.string("EMA", "Higher Timeframe MA 1 Type", group="Higher Timeframe Settings", options=["EMA", "WMA", "SMA", "SMMA"])
+htf_maType2 = input.string("EMA", "Higher Timeframe MA 2 Type", options=["EMA", "WMA", "SMA", "SMMA"])
+htf_ma1Length = input.int(8, "Higher Timeframe MA 1 Length", minval=1)
+htf_ma2Length = input.int(20, "Higher Timeframe MA 2 Length", minval=1)
+htf_res = input.timeframe("60", "Higher Timeframe Resolution")
+
+htf_ma1 = request.security(syminfo.tickerid, htf_res, getMA(close, htf_ma1Length, htf_maType1))
+htf_ma2 = request.security(syminfo.tickerid, htf_res, getMA(close, htf_ma2Length, htf_maType2))
+
+// === MA CROSSOVER ===
+maCrossUp = useHTFforEntry ? ta.crossover(htf_ma1, htf_ma2) : ta.crossover(ma1, ma2)
+maCrossDown = useHTFforEntry ? ta.crossunder(htf_ma1, htf_ma2) : ta.crossunder(ma1, ma2)
+
+// === TIME CONTROL ===
+inSession = (hour > sessionStartHour or (hour == sessionStartHour and minute >= sessionStartMinute)) and (hour < sessionEndHour or (hour == sessionEndHour and minute <= sessionEndMinute))
+closeNow = hour == closeHour and minute >= closeMinute
+
+// === TRADING DAY FILTER ===
+is_trading_day = (dayofweek == dayofweek.sunday    and trade_sunday) or
+                 (dayofweek == dayofweek.monday    and trade_monday) or
+                 (dayofweek == dayofweek.tuesday   and trade_tuesday) or
+                 (dayofweek == dayofweek.wednesday and trade_wednesday) or
+                 (dayofweek == dayofweek.thursday  and trade_thursday) or
+                 (dayofweek == dayofweek.friday    and trade_friday) or
+                 (dayofweek == dayofweek.saturday  and trade_saturday)
+
+// === FILTER CONDITIONS ===
+htfConfirmLong = not useHTFConfirm or htf_ma1 > htf_ma2
+htfConfirmShort = not useHTFConfirm or htf_ma1 < htf_ma2
+trendBull = useSMA ? close > sma : true
+trendBear = useSMA ? close < sma : true
+rsiOKLong = not useRSI or rsi < rsiOverbought
+rsiOKShort = not useRSI or rsi > rsiOversold
+macdOKLong = not useMACD or macdLine > signalLine
+macdOKShort = not useMACD or macdLine < signalLine
+
+entry_long = enableLong and maCrossUp and inSession and (not useVWAP or close > vwap) and trendBull and rsiOKLong and macdOKLong and htfConfirmLong
+entry_short = enableShort and maCrossDown and inSession and (not useVWAP or close < vwap) and trendBear and rsiOKShort and macdOKShort and htfConfirmShort
+
+// === DAILY PNL TRACKING ===
+var float daily_realized_ticks = 0.0
+var float daily_unrealized_ticks = 0.0
+var bool profit_limit_hit = false
+var bool loss_limit_hit = false
+var bool entry_blocked = false
+var int trades_today = 0
+
+new_day = na(time('D')[1]) or time('D') != time('D')[1]
+if new_day
+    daily_realized_ticks := 0.0
+    daily_unrealized_ticks := 0.0
+    profit_limit_hit := false
+    loss_limit_hit := false
+    entry_blocked := false
+    trades_today := 0  // reset trade counter
+
+if strategy.opentrades > 0
+    avg_price = strategy.position_avg_price
+    pos_dir = strategy.position_size > 0 ? 1 : -1
+    daily_unrealized_ticks := pos_dir * (close - avg_price) / syminfo.mintick
+else
+    daily_unrealized_ticks := 0.0
+
+if strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
+    last_entry = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+    last_exit = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    last_size = strategy.closedtrades.size(strategy.closedtrades - 1)
+    direction = last_size > 0 ? 1 : -1
+    tick_gain = direction * (last_exit - last_entry) / syminfo.mintick
+    daily_realized_ticks += tick_gain
+    trades_today += 1  // count trade
+
+total_ticks = daily_realized_ticks + daily_unrealized_ticks
+
+if enable_daily_profit_limit and not profit_limit_hit and total_ticks >= daily_max_profit_ticks
+    profit_limit_hit := true
+    strategy.close_all(comment='Daily Profit Limit Hit')
+    label.new(bar_index, high, 'Profit Limit Hit', style=label.style_label_down, color=color.green, textcolor=color.white)
+
+if enable_daily_loss_limit and not loss_limit_hit and total_ticks <= daily_max_loss_ticks
+    loss_limit_hit := true
+    strategy.close_all(comment='Daily Loss Limit Hit')
+    label.new(bar_index, low, 'Loss Limit Hit', style=label.style_label_up, color=color.red, textcolor=color.white)
+
+entry_blocked := profit_limit_hit or loss_limit_hit or (trades_today >= max_trades_per_day)
+
+// === ENTRY EXECUTION ===
+if entry_long and not entry_blocked and is_trading_day and not closeNow
+    strategy.entry("Long", strategy.long)
+    alert('{"action":"buy","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+if entry_short and not entry_blocked and is_trading_day and not closeNow
+    strategy.entry("Short", strategy.short)
+    alert('{"action":"sell","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+
+// === EXIT LOGIC ===
+
+exit_long_cross = (ma_for_exit == "MA1" and close[1] > ma1[1] and close < ma1) or (ma_for_exit == "MA2" and close[1] > ma2[1] and close < ma2)
+exit_short_cross = (ma_for_exit == "MA1" and close[1] < ma1[1] and close > ma1) or (ma_for_exit == "MA2" and close[1] < ma2[1] and close > ma2)
+var float entryPrice = na
+if strategy.opentrades > 0
+    entryPrice := strategy.opentrades.entry_price(0)
+
+breakeven_price = strategy.position_avg_price
+var float dynamic_breakeven_trigger = breakeven_trigger_ticks * syminfo.mintick
+if use_adaptive_breakeven
+    dynamic_breakeven_trigger := atr * adaptive_breakeven_pct
+
+trigger_long = close >= strategy.position_avg_price + dynamic_breakeven_trigger
+trigger_short = close <= strategy.position_avg_price - dynamic_breakeven_trigger
+
+var float trail_amt = na
+if use_custom_trail
+    if stop_method == "Fixed"
+        trail_amt := fixed_trail_ticks * syminfo.mintick
+    else
+        trail_amt := atr * atr_trail_multiplier
+else
+    trail_amt := atr * atr_multiplier
+
+if use_auto_tighten
+    if (strategy.position_size > 0 and trigger_long) or (strategy.position_size < 0 and trigger_short)
+        trail_amt := atr * atr_tight_trail_multiplier
+
+var float stop_loss_amt = na
+atr_stop = atr * atr_multiplier
+atr_stop_capped = math.min(atr_stop, max_atr_stop_ticks * syminfo.mintick)
+if stop_method == "Fixed"
+    stop_loss_amt := fixed_stop_ticks * syminfo.mintick
+else if stop_method == "ATR"
+    stop_loss_amt := atr_stop
+else if stop_method == "Capped ATR"
+    stop_loss_amt := atr_stop_capped
+
+if strategy.position_size > 0
+    stop_price = enable_breakeven and trigger_long ? breakeven_price : strategy.position_avg_price - stop_loss_amt
+    target_price = stop_method == "Fixed" ? strategy.position_avg_price + fixed_profit_ticks * syminfo.mintick : (use_profit_target ? strategy.position_avg_price + atr * profit_target_multiplier : na)
+    strategy.exit('Exit Long', from_entry='Long', trail_points=trail_amt / syminfo.mintick, stop=stop_price, limit=target_price)
+    if strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
+        alert('{"action":"exit","position":"long","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+
+if strategy.position_size < 0
+    stop_price = enable_breakeven and trigger_short ? breakeven_price : strategy.position_avg_price + stop_loss_amt
+    target_price = stop_method == "Fixed" ? strategy.position_avg_price - fixed_profit_ticks * syminfo.mintick : (use_profit_target ? strategy.position_avg_price - atr * profit_target_multiplier : na)
+    strategy.exit('Exit Short', from_entry='Short', trail_points=trail_amt / syminfo.mintick, stop=stop_price, limit=target_price)
+    if strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
+        alert('{"action":"exit","position":"short","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+
+// === EXIT ON MA CLOSE CROSS ===
+if stop_method == "Exit on Close Cross MA"
+    if strategy.position_size > 0 and exit_long_cross
+        strategy.close("Long", comment="Exit on Close Cross MA")
+    if strategy.position_size < 0 and exit_short_cross
+        strategy.close("Short", comment="Exit on Close Cross MA")
+
+// === CLOSE ALL AT SESSION END ===
+if closeNow
+    strategy.close_all(comment="Close at Session End")
+
+// === PLOTS ===
+plot(showHTFMAs ? htf_ma1 : na, color=color.teal, title="HTF MA 1")
+plot(showHTFMAs ? htf_ma2 : na, color=color.fuchsia, title="HTF MA 2")
+plot(ma1, color=color.green, title="MA 1")
+plot(ma2, color=color.orange, title="MA 2")
+plot(sma, color=color.gray, title="SMA", linewidth=2)
+plot(vwap, color=color.purple, title="VWAP")
+
+// === HIGHLIGHT CROSSOVERS ===
+plotshape(maCrossUp, title="Bullish Cross", location=location.belowbar, color=color.green, style=shape.labelup, size=size.small, text="BUY")
+plotshape(maCrossDown, title="Bearish Cross", location=location.abovebar, color=color.red, style=shape.labeldown, size=size.small, text="SELL")
+
+// === TRAILING STOP PLOT ===
+var float trailing_stop_level = na
+var color trailing_color = na
+if strategy.position_size > 0
+    trailing_stop_level := close - trail_amt
+    trailing_color := close > strategy.position_avg_price ? color.green : color.red
+else if strategy.position_size < 0
+    trailing_stop_level := close + trail_amt
+    trailing_color := close < strategy.position_avg_price ? color.green : color.red
+plot(strategy.position_size != 0 ? trailing_stop_level : na, title="Trailing Stop", color=trailing_color, style=plot.style_circles, linewidth=2)
+
+View in Pine Editor・272 lines
+Use on chart
+2
+5
+676
+📝 Strategy Summary: Enhanced MA Crossover Pro
+This strategy is an advanced, highly configurable moving average (MA) crossover system designed for algorithmic trading. It uses the crossover of two customizable MAs (a "Fast" MA 1 and a "Slow" MA 2) as its core entry signal, but aggressively integrates multiple technical filters, time controls, and dynamic position management to create a robust and comprehensive trading system.
+
+💡 Core Logic
+Entry Signal: A bullish crossover (MA1 > MA2) generates a Long signal, and a bearish crossover (MA1 < MA2) generates a Short signal. Users can opt to use MA crossovers from a Higher Timeframe (HTF) for the entry signal.
+
+Confirmation/Filters: The basic MA cross signal is filtered by several optional indicators (see Filters section below) to ensure trades align with a broader trend or momentum context.
+
+Position Management: Trades are managed with a sophisticated system of Stop Loss, Take Profit, Trailing Stops, and Breakeven stops that can be fixed, ATR-based, or dynamically adjusted.
+
+Risk Management: Daily limits are enforced for maximum profit/loss and maximum trades per day.
+
+⚙️ Key Features and Customization
+1. Moving Averages
+Primary MAs (MA1 & MA2): Highly configurable lengths (default 8 & 20) and types: EMA, WMA, SMA, or SMMA/RMA.
+
+Higher Timeframe (HTF) MAs: Optional MAs calculated on a user-defined resolution (e.g., "60" for 1-hour) for use as an entry signal or as a trend confirmation filter.
+
+2. Multi-Filter System
+The entry signal can be filtered by the following optional conditions:
+
+SMA Filter: Price must be above a 200-period SMA for long trades, and below it for short trades.
+
+VWAP Filter: Price must be above VWAP for long trades, and below it for short trades.
+
+RSI Filter: Long trades are blocked if RSI is overbought (default 70); short trades are blocked if RSI is oversold (default 30).
+
+MACD Filter: Requires the MACD Line to be above the Signal Line for long trades (and vice versa for short trades).
+
+HTF Confirmation: Requires the HTF MA1 to be above HTF MA2 for long entries (and vice versa).
+
+3. Dynamic Stop and Target Management (S/L & T/P)
+The strategy provides extensive control over exits:
+
+Stop Loss Methods:
+
+Fixed: Fixed tick amount.
+
+ATR: Based on a multiple of the Average True Range (ATR).
+
+Capped ATR: ATR stop limited by a maximum fixed tick amount.
+
+Exit on Close Cross MA: Position is closed if the price crosses back over the chosen MA (MA1 or MA2).
+
+Breakeven Stop: A stop can be moved to the entry price once a trigger distance (fixed ticks or Adaptive Breakeven based on ATR%) is reached.
+
+Trailing Stop: Can be fixed or ATR-based, with an optional feature to auto-tighten the trailing multiplier after the breakeven condition is met.
+
+Profit Target: Can be a fixed tick amount or a dynamic target based on an ATR multiplier.
+
+4. Time and Session Control
+Trading Session: Trades are only taken between defined Start/End Hours and Minutes (e.g., 9:30 to 16:00).
+
+Forced Close: All open positions are closed near the end of the session (e.g., 15:45).
+
+Trading Days: Allows specific days of the week to be enabled or disabled for trading.
+
+5. Risk and Position Limits
+Daily Profit/Loss Limits: The strategy tracks daily realized and unrealized PnL in ticks and will close all positions and block new entries if the user-defined maximum profit or maximum loss is hit.
+
+Max Trades Per Day: Limits the number of executed trades in a single day.
+
+🎨 Outputs and Alerts
+Plots: Plots the MA1, MA2, SMA, VWAP, and HTF MAs (if enabled) on the chart.
+
+Shapes: Plots visual markers (BUY/SELL labels) on the bar where the MA crossover occurs.
+
+Trailing Stop: Plots the dynamic trailing stop level when a position is open.
+
+Alerts: Generates JSON-formatted alerts for entry ({"action":"buy", "price":...}) and exit ({"action":"exit", "position":"long", "price":...}).

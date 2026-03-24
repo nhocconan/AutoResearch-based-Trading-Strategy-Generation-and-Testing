@@ -1,0 +1,9 @@
+//@version=4
+lineW1=##input(defval=1,type='INPUT_INTEGER',##id='in_24')
+lineW2=##input(defval=1,type='INPUT_INTEGER',##id='in_25')
+##root(root_metainfo,rm_0,7,input__integer,plot,style)
+##root(root_metainfo,rm_1,7,input__integer,plot,style)
+##root(root_metainfo,rm_2,7,input__integer,plot,style)
+##root(root_metainfo,rm_3,7,input__integer,plot,style)
+##root(root_metainfo,rm_4,lineW1,input__integer)
+##root(root_metainfo,rm_5,lineW2,input__integer)

@@ -1,0 +1,27 @@
+//@version=2
+strategy("Hausky Simple MA Strategy", overlay=true)
+fastLength = input(11)
+slowLength = input(26)
+price = close
+
+mafast = sma(price, fastLength)
+maslow = sma(price, slowLength)
+
+if (crossover(mafast, maslow))
+    strategy.entry("MA2CrossLE", strategy.long, comment="MA2CrossLE")
+    strategy.exit("MA2CrossLE", profit = 1040, trail_points = 731) 
+
+if (crossunder(mafast, maslow))
+    strategy.entry("MA2CrossSE", strategy.short, comment="MA2CrossSE")
+    strategy.exit("MA2CrossSE", profit = 1040, trail_points = 731) 
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・18 lines
+Use on chart
+1
+1
+2
+1
+3 578
+Here is my simple Moving Average crossover strategy for EURUSD 1H

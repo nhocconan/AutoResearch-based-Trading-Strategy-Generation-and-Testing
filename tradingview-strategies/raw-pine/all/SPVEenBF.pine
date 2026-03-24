@@ -1,0 +1,55 @@
+//@version=5
+strategy("Estratégia - CCI + PVT", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Parâmetros
+cciShort = input.int(14, title="CCI Curto")
+cciLong  = input.int(50, title="CCI Longo")
+pvtMaLen = input.int(50, title="Período da Média PVT")
+
+// Cálculo dos CCIs
+cci14 = ta.cci(close, cciShort)
+cci50 = ta.cci(close, cciLong)
+
+// Cálculo do PVT
+var float pvt = na
+pvt := nz(pvt[1]) + ((close - close[1]) / close[1]) * volume
+pvt_ma = ta.sma(pvt, pvtMaLen)
+
+// Condições
+cond_compra = cci14 > 0 and cci50 > 0 and pvt > pvt_ma
+cond_venda  = cci14 < 0 and cci50 < 0 and pvt < pvt_ma
+
+// Entradas e saídas
+if (cond_compra and strategy.position_size <= 0)
+    strategy.entry("Compra", strategy.long)
+
+if (cond_venda and strategy.position_size >= 0)
+    strategy.entry("Venda", strategy.short)
+
+// Visual (opcional)
+barcolor(cond_compra ? color.green : cond_venda ? color.red : na)
+plotshape(cond_compra, title="Sinal de Compra", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(cond_venda, title="Sinal de Venda", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+View in Pine Editor・32 lines
+Use on chart
+3
+2
+951
+Aqui está a tradução fiel e técnica para o inglês, ideal para a descrição do seu script no TradingView:
+
+### 1. Requirements (The 3 Principles)
+
+1. **Study** the code.
+2. **Modify** the code.
+3. **Distribute** copies or derivative versions (respecting the original credits).
+
+Description: Direction and Strength — CK Index
+
+The **CK Index** is a composite indicator formed by the conceptual sum of two CCIs and the PVT (Price Volume Trend) with an arithmetic mean. Its function is to simultaneously validate direction and accumulated flow.
+
+For a **buy operation**, both CCIs must be above zero, indicating bullish dominance across different time horizons, and the PVT must be above its average. For a **sell operation**, the CCIs must be below zero and the PVT below its average.
+
+It is important to emphasize that it acts as an **entry trigger**: the candle will turn **blue** to indicate a buy, **yellow** for a sell, and **white** when there is neutrality (meaning the color will be white when there is no clear definition—these are my personal settings). In its default form, it uses **green, red, and gray**, respectively.
+
+Good trades, and make the world a better and freer place!

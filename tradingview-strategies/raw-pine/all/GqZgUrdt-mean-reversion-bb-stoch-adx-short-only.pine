@@ -1,0 +1,95 @@
+//@version=5
+strategy("Mean Reversion: BB + Stoch + ADX (Short Only)", overlay=true, initial_capital=100, default_qty_type=strategy.cash, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04)
+
+// --- Входные параметры ---
+// Bollinger Bands
+bb_mult = input.float(2.0, "BB Multiplier")
+bb_len  = input.int(20, "BB Length")
+
+// Stochastic
+stoch_len = input.int(14, "Stoch Length")
+stoch_k   = input.int(3, "Stoch %K")
+stoch_d   = input.int(3, "Stoch %D")
+
+// ADX
+adx_len    = input.int(14, "ADX Length")
+adx_cutoff = input.int(25, "ADX Trend Filter (Max)")
+
+// ATR Exit
+atr_len = input.int(14, "ATR Length")
+tp_mult = input.float(3.5, "TP Mult (ATR)")
+sl_mult = input.float(2.0, "SL Mult (ATR)")
+
+// --- Расчет индикаторов ---
+// Bollinger Bands
+[bb_mid, bb_upper, bb_lower] = ta.bb(close, bb_len, bb_mult)
+
+// Stochastic
+stoch_k_val = ta.sma(ta.stoch(close, high, low, stoch_len), stoch_k)
+
+// ADX
+[plus_di, minus_di, adx] = ta.dmi(adx_len, adx_len)
+
+// ATR
+atr = ta.atr(atr_len)
+
+// --- Логика условий ---
+// Рынок считается спокойным (флэт), если ADX ниже порога
+is_flat = adx < adx_cutoff
+
+// Сигнал в Шорт: Цена выше верхней ленты + Стохастик > 80 + Флэт (ADX < 25)
+short_signal = ta.crossover(high, bb_upper) and stoch_k_val > 80 and is_flat
+
+// --- Выполнение сделок ---
+if (short_signal and strategy.position_size == 0)
+    float sl = close + (atr * sl_mult)
+    float tp = close - (atr * tp_mult)
+    strategy.entry("Short", strategy.short, comment="BB Upper + Overbought")
+    strategy.exit("Exit Short", "Short", stop=sl, limit=tp, comment_loss="SL", comment_profit="TP")
+
+// --- Визуализация ---
+plot(bb_upper, color=color.new(color.red, 50), title="BB Upper")
+plot(bb_mid, color=color.new(color.gray, 80), title="BB Mid")
+// Нижнюю ленту оставил для визуального контекста, но она не используется в логике
+plot(bb_lower, color=color.new(color.blue, 80), title="BB Lower")
+
+// Фон: подсвечиваем зоны, где ADX разрешает вход (флэт)
+bgcolor(is_flat ? color.new(color.green, 90) : color.new(color.red, 90))
+
+View in Pine Editor・57 lines
+Use on chart
+1
+4
+506
+Strategy overview
+This strategy is a specialized tool for changing the average price, designed exclusively for short positions. It determines the overbought conditions in a non-trending market, allowing you to "smooth out" price extremes with high accuracy.
+
+How it works (logic):
+The script uses a triple confirmation filter to ensure high quality inputs:
+
+Bollinger Bands: defines price extremes. We are looking for when the price will cross the upper band.
+
+Stochastic Oscillator: Confirms that the asset is technically overbought (value > 80).
+
+ADX (Average Directivity Index): "The secret tool." It acts as a trend filter. The strategy only works if the ADX is below a certain threshold (default is 25), which ensures that we will not try to open short positions in case of a strong bullish breakout.
+
+Exit strategy:
+Risk management is automated using ATR (Average True Range).
+
+Stop Loss: Set above the entry price based on the current volatility.
+
+Take profit: Calculated as a multiple of the ATR value to record a return to the average value.
+
+Key functions:
+
+For short positions only: Optimized for bearish corrections and limited range markets.
+
+Trend protection: The ADX filter prevents "catching a falling knife" during strong rises.
+
+Visual feedback: The background turns green when the market is "flat" enough to trade, and red when the trend is too strong.
+
+It is best to use on:
+
+Time frame: 10 minutes, 15 minutes
+
+Assets: Crypto

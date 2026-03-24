@@ -1,0 +1,35 @@
+//@version=3
+strategy("My Strategy", overlay=true)
+
+// these price levels are derived from our A.I. driven quant models;
+// long-entries should have an 8-point trailing stop, 
+//and short entries a 6-point trailing stop - still learning this TradingView environment to code this in
+longCondition1 = crossover(sma(close, 1), 2895.00)
+longCondition2 = crossover(sma(close, 1), 2886.00)
+longCondition3 = crossover(sma(close, 1), 2874.00)
+if (longCondition1 or longCondition2 or longCondition3)
+    strategy.exit("ShortExit123","Short123")
+    strategy.entry("Long123", strategy.long)
+
+shortCondition1 = crossunder(sma(close, 1), 2890)
+shortCondition2 = crossunder(sma(close, 1), 2882)
+shortCondition3 = crossunder(sma(close, 1), 2870)
+if (shortCondition1 or shortCondition2 or shortCondition3)
+    strategy.exit("LongExit123","Long123")
+    strategy.entry("Short123", strategy.short)
+
+View in Pine Editor・19 lines
+Use on chart
+2
+7
+9
+8 545
+(New to TradingView and trying to learn how best to share our daily Model Trades with the awesome community here. Still learning the tools here and may not be using the best approaches to publish ideas/charts/scirpts - please help us learn by suggesting best practices)
+
+>>>>> Model Trades Published pre-market this morning at tradersai blogspot <<<<<
+
+***** Medium-Frequency Models*****: For today, Monday 06/10, our medium-frequency models indicate going long on a break above 2903 with a 10-point trailing stop, and going short on a break below 2845 with an 8-point trailing stop.
+---Note: For the trades to trigger, the breaks should occur during the regular session hours starting at 9:30am ET. By design, these models do NOT open any new positions after 3:45pm. Only one open position at any given time.---
+
+***** Aggressive Intraday Models *****: For today, Monday 06/10, our aggressive intraday models indicate going long on a break above 2895 or 2886 or 2874 with an 8-point trailing stop, and going short on a break below 2890 or 2882 or 2870 with a 6-point trailing stop.
+---- Note: For the trades to trigger, the breaks should occur during regular session hours starting at 9:30am ET. Due to the intraday nature of these aggressive models, they indicate closing any open trades at 3:55pm and remaining flat into the session close. No opening of new positions after 3:45pm. Only one open position at any given time.----

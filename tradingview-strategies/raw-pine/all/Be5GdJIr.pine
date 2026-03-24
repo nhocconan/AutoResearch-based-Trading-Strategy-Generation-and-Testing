@@ -1,0 +1,162 @@
+//@version=4
+strategy(title="Scalping using RSI 2 indicator and alert", shorttitle="RSI 2 Strategy", overlay=true, pyramiding=0, process_orders_on_close=false)
+
+var bool ConditionEntryL = false
+var bool ConditionEntryS = false
+
+
+//***********
+// Costants
+//***********
+def_start_date = timestamp("01 Jan 2021 07:30 +0000")
+def_end_date   = timestamp("01 Dec 2024 07:30 +0000")
+
+def_rsi_length = 2
+def_overbought_value = 90
+def_oversold_value   = 10
+
+def_slow_ma_length = 200
+def_fast_ma_length = 50
+def_ma_choice      = "EMA"
+
+def_tick   = 0.5
+def_filter = true
+
+def_trailing_stop = 1
+
+
+//***********
+// Alert messages
+//***********
+alert_msg_long_entry  = "RSI Long\nSymbol: "+syminfo.tickerid+"\nPrice: "+tostring(close)
+alert_msg_long_exit   = "Exit Long\nSymbol: "+syminfo.tickerid+"\nPrice: "+tostring(close)
+alert_msg_short_entry = "RSI Short\nSymbol: "+syminfo.tickerid+"\nPrice: "+tostring(close)
+alert_msg_short_exit  = "Exit Short\nSymbol: "+syminfo.tickerid+"\nPrice: "+tostring(close)
+
+
+//***********
+// Change the optional parameters
+//***********
+start_time  = input(title="Start date", defval=def_start_date, type=input.time)
+end_time    = input(title="End date", defval=def_end_date, type=input.time)
+// RSI
+src         = input(title="Source", defval=close, type=input.source)
+rsi_length  = input(title="RSI Length", defval=def_rsi_length, minval=1, type=input.integer)
+overbought_threshold = input(title="Overbought threshold", defval=def_overbought_value, type=input.float)
+oversold_threshold   = input(title="Oversold threshold", defval=def_oversold_value, type=input.float)
+// Moving average
+slow_ma_length = input(title="Slow MA length", defval=def_slow_ma_length, type=input.integer)
+fast_ma_length = input(title="Fast MA length", defval=def_fast_ma_length, type=input.integer)
+ma_choice = input(title="MA choice", defval="EMA", options=["SMA", "EMA"])
+// Input ticker
+tick   = input(title="Ticker size", defval=def_tick, type=input.float)
+filter = input(title="Trend Filter", defval=def_filter, type=input.bool)
+// Trailing stop (%)
+ts_perc = input(title="Trailing Stop %", defval=def_trailing_stop, type=input.float)
+
+
+//***********
+// RSI
+//***********
+// Calculate RSI
+up   = rma(max(change(src), 0), rsi_length)
+down = rma(-min(change(src), 0), rsi_length)
+rsi = (down == 0 ? 100 : (up == 0 ? 0 : 100-100/(1+up/down)))
+
+
+//***********
+// Moving averages
+//***********
+slow_ma = (ma_choice == "SMA" ? sma(close, slow_ma_length) : ema(close, slow_ma_length))
+fast_ma = (ma_choice == "SMA" ? sma(close, fast_ma_length) : ema(close, fast_ma_length))
+// Show the moving averages
+plot(slow_ma, color=color.white,  title="Slow MA")
+plot(fast_ma, color=color.yellow, title="Fast MA")
+
+
+//***********
+// Strategy
+//***********
+if time > start_time and time < end_time
+    // Determine the entry conditions (only market entry and market exit conditions)
+    // Long position
+    ConditionEntryL := (filter == true ? (fast_ma > slow_ma and close > slow_ma and rsi < oversold_threshold) : (fast_ma > slow_ma and rsi < oversold_threshold))
+    // Short position
+    ConditionEntryS := (filter == true ? (fast_ma < slow_ma and close < slow_ma and rsi > overbought_threshold) : (fast_ma < slow_ma and rsi > overbought_threshold))
+   
+    // Calculate the trailing stop
+    ts_calc = close * (1/tick) * ts_perc * 0.01
+
+    // Submit the entry orders and the exit orders
+    // *******************************************
+    // Long position
+    if ConditionEntryL
+        // Entry
+        strategy.entry("RSI Long", strategy.long)
+        alert(alert_msg_long_entry, alert.freq_once_per_bar)
+        // Exit
+        strategy.exit("Exit Long", "RSI Long", trail_points=0, trail_offset=ts_calc, alert_message=alert_msg_long_exit)
+
+    // *******************************************
+    // Short position 
+    if ConditionEntryS
+        // Entry
+        strategy.entry("RSI Short", strategy.short)
+        alert(alert_msg_short_entry, alert.freq_once_per_bar)
+        // Exit
+        strategy.exit("Exit Short", "RSI Short", trail_points=0, trail_offset=ts_calc, alert_message=alert_msg_short_exit)
+    
+
+// Highlights long conditions
+bgcolor (ConditionEntryL ? color.navy : na, transp=60, offset=1, editable=true, title="Long position band")
+// Highlights short conditions
+bgcolor (ConditionEntryS ? color.olive : na, transp=60, offset=1, editable=true, title="Short position band")
+
+View in Pine Editor・118 lines
+Use on chart
+5
+1
+9
+17
+22 173
+Feb 19, 2021
+This strategy implements a simply scalping using the RSI (calculated on two periods), the slopes of two MAs ( EMA or SMA ) having different lengths (by default, I use 50 and 200).
+A trailing stop loss (%) is used.
+
+Entry conditions:
+.) Fast MA > Slow MA and Price > Slow MA and RSI < Oversold Threshold ------> go Long
+.) Fast MA < Slow MA and Price < Slow MA and RSI > Overbought Threshold ------> go Short
+
+Exit conditions:
+.) Long entry condition is true and (close >= TP or close <= TSL ) ----> close short position
+.) Short entry condition is true and (close <= TP or close >= TSL ) ----> close long position
+
+
+The strategy performed best on Bitcoin and the most liquid and capitalized Altcoins but works excellent on volatile assets, mainly if they often go trending.
+Works best on 3h - 4h time frame.
+
+There's also an optional Volatility filter, which opens the position only if the difference between the two slopes is more than a specific value, which can be set in the study inputs. The purpose is not opening positions if the price goes sideways and the noise is way > than the signal.
+
+Note:
+.) the RSI length is 2;
+.) the oversold Threshold is 90%;
+.) the overbought Threshold is 10%;
+.) by default, the trailing stop loss per cent is 1%;
+.) by default, the fast MA length is 50;
+.) by default, the slow MA length is 200;
+.) by default, the MA used is EMA.
+
+Cheers.
+Feb 20, 2021
+Release Notes
+Added the alerts.
+Feb 25, 2021
+Release Notes
+A new version of this scalping strategy uses the RSI indicator.
+
+I have improved the exit conditions in this version, and I implemented the alters using the alert() function.
+
+Now, the alters can inform you correctly about every entry and exit conditions.
+Feb 25, 2021
+Release Notes
+Modified the comments.

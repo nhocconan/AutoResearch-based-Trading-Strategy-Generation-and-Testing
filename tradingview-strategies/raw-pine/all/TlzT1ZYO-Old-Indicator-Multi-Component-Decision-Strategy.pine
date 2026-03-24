@@ -1,0 +1,320 @@
+//@version=6
+strategy("Old Indicator Multi-Component Decision Strategy", overlay=true, max_labels_count=500)
+
+// Inputs (Keep your existing inputs) 
+fromYear = input.int(2020, title="From Year", minval=1970)
+fromMonth = input.int(1, title="From Month", minval=1, maxval=12)
+fromDay = input.int(1, title="From Day", minval=1, maxval=31)
+toYear = input.int(2024, title="To Year", minval=1970)
+toMonth = input.int(12, title="To Month", minval=1, maxval=12)
+toDay = input.int(31, title="To Day", minval=1, maxval=31)
+
+// Create timestamps for start and end dates with error handling
+var startDate = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+var endDate = timestamp(toYear, toMonth, toDay, 23, 59)
+if na(startDate) or na(endDate)
+    runtime.error("Invalid date input")
+
+lengthMA = input.int(12, title="MA Length")
+lengthSignal = input.int(9, title="Signal Length")
+compareTimeframe = input.timeframe("D", title="Comparison Timeframe")
+rsiLength = input.int(14, "RSI Length")
+volumeMALength = input.int(12, "Volume MA Length")
+rsiThreshold = input.float(2, "RSI Change Threshold", minval=0, maxval=10, step=0.1)
+
+// MACD calculation functions
+calc_smma(src, len) =>
+    smma = ta.sma(src, len)
+    smma := na(smma[1]) ? smma : (smma[1] * (len - 1) + src) / len
+    smma
+
+calc_zlema(src, length) =>
+    ema1 = ta.ema(src, length)
+    ema2 = ta.ema(ema1, length)
+    d = ema1 - ema2
+    ema1 + d
+
+calc_macd(src, hi, lo, mi) =>
+    md = (mi > hi) ? (mi - hi) : (mi < lo) ? (mi - lo) : 0
+    sb = ta.sma(md, lengthSignal)
+    sh = md - sb
+    mdc = src > mi ? (src > hi ? 1 : 1) : (src < lo ? -1 : -1)
+    [md, sb, sh, mdc]
+
+// Calculate MACD components
+src = hlc3
+hi = calc_smma(high, lengthMA)
+lo = calc_smma(low, lengthMA)
+mi = calc_zlema(src, lengthMA)
+
+[md, sb, sh, macd_color] = calc_macd(src, hi, lo, mi)
+
+// Calculate MACD for comparison timeframe
+[md_compare, sb_compare, sh_compare, macd_color_compare] = request.security(syminfo.tickerid, compareTimeframe, calc_macd(hlc3, calc_smma(high, lengthMA), calc_smma(low, lengthMA), calc_zlema(hlc3, lengthMA)))
+
+// MACD calculation
+fast_length = input(title="Fast Length", defval=12)
+slow_length = input(title="Slow Length", defval=26)
+srcnmacd = input(title="Source", defval=close)
+signal_length = input.int(title="Signal Smoothing", minval=1, maxval=50, defval=9)
+sma_source = input.string(title="Oscillator MA Type", defval="EMA", options=["SMA", "EMA"])
+sma_signal = input.string(title="Signal Line MA Type", defval="EMA", options=["SMA", "EMA"])
+
+mdc = src > mi ? (src > hi ? color.lime : color.green) : (src < lo ? color.red : color.orange)
+ebc = input.bool(false, title="Enable bar colors")
+barcolor(ebc ? mdc : na) 
+
+// Calculating
+fast_ma = sma_source == "SMA" ? ta.sma(srcnmacd, fast_length) : ta.ema(srcnmacd, fast_length)
+slow_ma = sma_source == "SMA" ? ta.sma(srcnmacd, slow_length) : ta.ema(srcnmacd, slow_length)
+macd = fast_ma - slow_ma
+signal = sma_signal == "SMA" ? ta.sma(macd, signal_length) : ta.ema(macd, signal_length)
+hist = macd - signal
+
+// Calculate macdHistValue 
+macdHistValue = hist >= 0 ? (hist > hist[1] ? 1 : -1) : (hist < hist[1] ? -1 : 1)
+
+// Component calculations
+closeOpenValue = close >= open ? 1 : close < open ? -1 : 0
+volumeMA = ta.sma(volume, volumeMALength)
+volumeValue = volume >= volume[1] ? 1 : volume < volume[1] ? -1 : 0
+macdValue = macd_color
+comparisonMacdValue = macd_color_compare
+rsi = ta.rsi(close, rsiLength)
+rsiChange = ta.change(rsi)
+rsiValue = math.abs(rsiChange) > rsiThreshold ? (rsiChange > 0 ? 1 : -1) : 0
+prevRsiChange = rsiChange[1]
+
+
+// Count green, red, and inconclusive components
+greenCount = (closeOpenValue == 1 ? 1 : 0) +
+             (volumeValue == 1 ? 1 : 0) +
+             (comparisonMacdValue > 0 ? 1 : 0) +
+             (macdHistValue > 0 ? 1 : 0) +
+             (rsiValue == 1 ? 1 : 0) +
+             (macdValue > 0 ? 1 : 0)
+
+redCount = (closeOpenValue == -1 ? 1 : 0) +
+           (volumeValue == -1 ? 1 : 0) +
+           (comparisonMacdValue < 0 ? 1 : 0) +
+           (macdHistValue < 0 ? 1 : 0) +
+           (rsiValue == -1 ? 1 : 0) +
+           (macdValue < 0 ? 1 : 0)
+
+inconclusiveCount = 6 - greenCount - redCount
+
+prevClose = close[1]  //# Previous close
+
+// Decision logic
+decisionColor1 = switch
+    greenCount >= 4 => color.green
+    redCount >= 4 => color.red
+    greenCount == 3 and redCount == 3 and rsiChange >=1 => color.green
+    greenCount == 3 and redCount == 3 and rsiChange < 1 => color.red
+    greenCount == 3 and rsiValue == 0 => color.yellow // No Action
+    redCount >= greenCount + inconclusiveCount => color.red
+    greenCount >= redCount + inconclusiveCount => color.green
+    => #3bc7ff // Inconclusive
+
+// Determine final decision
+// Final decision color with additional conditions
+decisionColor2 = switch
+    // decisionColor1 == color.green and close<open and greenCount <3 and rsiChange<0 => color.red
+    prevClose == close => color.orange
+    => decisionColor1
+
+decisionColor = switch
+    // decisionColor1 == color.green and close<open and greenCount <3 and rsiChange<0 => color.red
+    close[1]<open[1] and decisionColor2 == color.orange => color.green
+    (mdc[1]==color.green or mdc[1]== color.lime) and close[1]>open[1] and decisionColor2 == color.orange => color.red
+    => decisionColor2
+    
+// Determine final decision
+finalDecision = switch
+    decisionColor == color.green => "BUY"
+    decisionColor == color.red => "SELL"
+    => rsiValue == 0 ? "NO ACTION" : "INCONCLUSIVE"
+
+// Calculate strength meter
+strengthMeter = math.max(greenCount, redCount) / 6 * 100
+strengthRating = math.ceil(math.max(math.min((strengthMeter / 100) * 10, 10), 1))
+
+
+allowShorts = input.bool(false, title="Allow Short Trades")
+enableLimitPrice = input.bool(false, title="Enable Limit Trades") // Disable internal limit orders
+enableAlerts = input.bool(true, title="Enable Alerts")
+
+// New input for order offset percentage
+orderOffsetBuyPercent = input.float(0, title="Order Offset (%)", minval=0, maxval=5, step=0.1)
+// New input for order offset percentage
+orderOffsetSellPercent = input.float(0, title="Order Offset (%)", minval=0, maxval=5, step=0.1)
+
+useBuffer = input.bool(false, title="Use Price Buffer")
+bufferPercentage = input.float(0.01, title="Price Buffer Percentage", step=0.001, minval=0)
+
+var lastTradePrice = 0.0
+
+// Variables to track last alert
+var float lastBuyAlertPrice = na
+var float lastSellAlertPrice = na
+
+// Define variables to store plot conditions
+var bool plotLongSignal = false
+var bool plotShortSignal = false
+var bool plotCloseSignal = false
+
+var bool inLongSignal = false
+var bool inShortSignal = false
+var bool inCloseSignal = false
+
+var float prevEntryPrice = na
+
+isTrendFalling(barsToCheck) =>
+    lowerLowCount = 0
+    higherLowCount = 0
+    for i = 0 to barsToCheck - 1
+        if close[i] <= close[i+1]
+            lowerLowCount += 1
+        else if close[i] > close[i+1]
+            higherLowCount += 1
+    lowerLowCount > higherLowCount
+
+
+trendCheckBars = input.int(4, title="Number of Bars to Check Trend", minval=2, maxval=10)
+trendNotFalling = not isTrendFalling(trendCheckBars)
+currentBarHigher = low>low[1] //and not (mdc == color.red 
+
+noaction= rsiChange==0 
+longCondition =  not (mdc == color.red or mdc == color.orange) and ( not (not trendNotFalling and noaction) and ((decisionColor == color.green ) and ((trendNotFalling and (strengthMeter>50 and (not (mdc == color.red and low <low[1] ))) or (not trendNotFalling and (strengthMeter>70 and strengthMeter<100)))) ))
+//longCondition = (decisionColor == color.green ) and (trendNotFalling or (not trendNotFalling and (strengthMeter>70 and strengthMeter<100))) and not noaction
+shortCondition = ((decisionColor == color.red) or not  trendNotFalling) 
+
+
+// longCondition =  decisionColor == color.green
+// shortCondition = (decisionColor == color.red)
+
+// === STATE VARIABLES ===
+var float buyLimit = na   // Tracks the buy limit price
+var float sellLimit = na  // Tracks the sell limit price
+var bool  waitForBuy  = false // Triggered when the buy order is in place
+var bool  waitForSell = false// Triggered when the sell order is in place
+showLabel = input.bool(false, title="showLabel")
+// Strategy logic
+if time >= startDate and time <= endDate
+    if useBuffer
+        priceBuffer = lastTradePrice * bufferPercentage
+        bufferCheck = math.abs(close - lastTradePrice) > priceBuffer or lastTradePrice == 0.0
+        longCondition := longCondition and bufferCheck
+        shortCondition := shortCondition and bufferCheck
+
+    // 1. Calculate Limit Prices
+    var float entryPrice = close
+    if enableLimitPrice
+        if longCondition
+            entryPrice := close - ((close - low) * orderOffsetBuyPercent)  // Buy Limit Price
+        else if shortCondition
+            if((mdc==color.red or mdc== color.orange) and close<open)
+                entryPrice := close
+            else            
+                entryPrice := close + ((high - close) * orderOffsetSellPercent) // Sell Limit Price
+
+    // 2. Check for new buy/sell signals & RESET LIMITS
+
+    if longCondition and barstate.isconfirmed
+        buyLimit := entryPrice
+        waitForBuy := true
+        sellLimit := na
+        waitForSell := false
+        if showLabel
+            label.new(bar_index, low, text= str.format("Ep: {0} \n RSI Δ: {1} \n S: {2}", str.tostring(entryPrice),str.tostring(rsiChange, "#.##"), str.tostring(strengthMeter, "#.##")), color=color.green, textcolor=color.white)
+
+    else if shortCondition and barstate.isconfirmed
+        sellLimit := entryPrice
+        waitForSell := true
+        buyLimit := na
+        waitForBuy := false
+        if showLabel
+            label.new(bar_index, low, text= str.format("Ep: {0} \n RSI Δ: {1} \n S: {2}", str.tostring(entryPrice),str.tostring(rsiChange, "#.##"), str.tostring(strengthMeter, "#.##")), color=color.red, textcolor=color.white)
+
+    // 3. Trigger alert AFTER crossing
+    if waitForBuy and close <= buyLimit
+        strategy.entry("Buy", strategy.long)
+        alert('{"alertId": "a1e7420e-1f72-455e-bdbb-07679c10b79c", "action":"Buy", "buyLimit":' + str.tostring(buyLimit) + '}')
+        waitForBuy := false
+        buyLimit := na
+
+    else if waitForSell and close >= sellLimit
+        strategy.exit("EB", from_entry="Buy", limit=entryPrice)
+        alert('{"alertId": "6d910094-602c-45c9-8ba0-cf5454c192cf", "action":"Sell", "sellLimit":' + str.tostring(sellLimit) + '}')
+        waitForSell := false
+        sellLimit := na
+
+// Separate entry hit conditions for green and red decisions
+entryHitGreen = not na(prevEntryPrice[1]) and longCondition[1] and low <= prevEntryPrice[1]
+entryHitRed = not na(prevEntryPrice[1]) and shortCondition[1] and high >= prevEntryPrice[1]
+// Determine the color of the entry hit indicator
+// Combine the conditions
+entryHit = entryHitGreen or entryHitRed
+// Determine the color of the entry hit indicator
+entryHitColor = if entryHit
+    if entryHitGreen
+        #ff52d1  // Pink color for long entry hits
+    else if entryHitRed
+        #bf7a25  // Brown color for short entry hits
+    else
+        color.yellow  // This case shouldn't occur with this logic, but kept for completeness
+
+offsetValue = ta.atr(14) * 0.1
+// Plot the entry hit indicator
+plotshape(entryHit, title="Entry Hit", location=location.abovebar, color=entryHitColor, style=shape.flag, size=size.small)
+
+// Define the gap as a percentage of the bar's height
+gapPercentage = input.float(3, title="Label Gap (%)", minval=0.1, maxval=1000)
+
+// Calculate the label position
+barHeight = high - low
+labelOffset = low * (gapPercentage / 100)
+labelY = low - labelOffset
+label.new(x=bar_index, y=labelY, text=str.tostring(strengthMeter, "#.##"), color=decisionColor, textcolor=#2f0808dc, size=size.small)
+
+bgcolor(not trendNotFalling ? color.new(color.red, 90) : color.new(color.green, 90), title="Trend Background")
+
+
+// Input for lookback period
+lookbackPeriod = input.int(20, title="Lookback Period", minval=1)
+
+// Calculate daily range as a percentage
+dailyRangePercent = ((high - low) / low) * 100
+
+atr= ta.atr(lookbackPeriod)
+// Calculate average range percentage over the specified lookback period
+avgRangePercent =(atr / low) * 100  //ta.sma(dailyRangePercent, lookbackPeriod)
+
+// Plot the average range percentage
+plot(avgRangePercent* 20, title="Average Daily Range %", color=color.blue, linewidth=2)
+plot(rsiChange, title="rsi", color=color.red, linewidth=2)
+// Display current dynamic stop-loss percentage
+// if barstate.islast
+//     label.new(bar_index, 0, text=str.tostring(avgRangePercent, "#.##") + "%", 
+//               color=color.purple, textcolor=color.white, size=size.tiny)
+
+// RSI inputs
+rsiOverbought = input.int(70, title="RSI Overbought Level")
+rsiOversold = input.int(30, title="RSI Oversold Level")
+// Plot RSI values
+// Plotting adjusted RSI
+rsiPlot = plot(rsi, color=color.gray, title="RSI", linewidth=1)
+adjustedOverbought = (rsiOverbought)
+adjustedOversold = (rsiOversold )
+obLevel = plot(adjustedOverbought, color=color.red, style=plot.style_circles, title="Overbought")
+osLevel = plot(adjustedOversold, color=color.green, style=plot.style_circles, title="Oversold")
+fill(rsiPlot, obLevel, color=color.new(color.red, 95), title="Overbought Background")
+fill(rsiPlot, osLevel, color=color.new(color.green, 95), title="Oversold Background")
+
+View in Pine Editor・312 lines
+Use on chart
+7
+407
+Strategy to test signals based on rsi and few other technicals
+
+

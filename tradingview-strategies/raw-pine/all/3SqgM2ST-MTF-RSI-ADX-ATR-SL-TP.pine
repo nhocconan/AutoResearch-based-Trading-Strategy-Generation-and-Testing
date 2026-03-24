@@ -1,0 +1,72 @@
+//@version=5
+strategy("MTF RSI + ADX + ATR SL/TP", overlay=true, margin_long=100, margin_short=100,
+     initial_capital = 100000, commission_type = strategy.commission.percent, commission_value = 0.05)
+
+// === Inputs
+rsiLen  = input.int(14, "RSI Length")
+adxLen  = input.int(14, "ADX Length")
+adxMin  = input.float(20.0, "Min ADX")
+
+atrLen  = input.int(14, "ATR Length")
+atrMult = input.float(2.0, "ATR Stop Multiplier")
+tpRR    = input.float(2.0, "Take Profit (RR multiple)")
+
+// === MTF RSI values
+rsiDaily = ta.rsi(request.security(syminfo.tickerid, "1D", close), rsiLen)
+rsi4H    = ta.rsi(request.security(syminfo.tickerid, "240", close), rsiLen)
+rsi1H    = ta.rsi(request.security(syminfo.tickerid, "60", close), rsiLen)
+rsi10m   = ta.rsi(request.security(syminfo.tickerid, "10", close), rsiLen)
+
+// === ADX Calculation (safer way)
+[plusDI, minusDI, adxValue] = ta.dmi(adxLen, adxLen)
+adxCond = adxValue > adxMin
+
+// === ATR Stop Loss & TP levels
+atr = ta.atr(atrLen)
+
+// === Entry Condition
+longCond = rsiDaily > 60 and rsi4H > 60 and rsi1H > 60 and rsi10m > 40 and adxCond
+
+if (longCond and strategy.position_size == 0)
+    longStop = close - atr * atrMult
+    longRisk = close - longStop
+    longTP   = close + longRisk * tpRR
+    
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", from_entry="Long", stop=longStop, limit=longTP)
+
+// === Plot Debug
+plot(rsiDaily, color=color.red, title="RSI Daily")
+plot(rsi4H, color=color.orange, title="RSI 4H")
+plot(rsi1H, color=color.blue, title="RSI 1H")
+plot(rsi10m, color=color.green, title="RSI 10m")
+plot(adxValue, color=color.purple, title="ADX (current TF)")
+hline(adxMin, 'ADX Threshold', color=color.gray, linestyle=hline.style_dotted)
+
+View in Pine Editor・44 lines
+Use on chart
+1
+0
+889
+This strategy combines the power of multi-timeframe RSI filtering with ADX trend confirmation and ATR-based risk management to capture strong directional moves.
+
+🔑 Entry Rules:
+• Daily RSI > 60
+• 4H RSI > 60
+• 1H RSI > 60
+• 10m RSI > 40
+• ADX (current timeframe) > 20
+
+When all conditions align, a long entry is triggered.
+
+🛡 Risk Management:
+• ATR-based Stop-Loss (customizable multiplier)
+• Take-Profit defined as a Risk-Reward multiple of the ATR stop
+
+🎯 Why this Strategy?
+• Ensures alignment across higher timeframes before entering a trade
+• Uses ADX to avoid choppy/range-bound markets
+• Built-in ATR stop-loss & take-profit for disciplined risk control
+• Fully customizable parameters
+
+This strategy is designed for trend-following swing entries. It works best on liquid instruments such as indices, forex pairs, and large-cap stocks. Always optimize the parameters based on your preferred asset and timeframe.

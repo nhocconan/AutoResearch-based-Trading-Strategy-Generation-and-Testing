@@ -1,0 +1,9 @@
+//@version=5
+upBoxColor=##input(defval=#4CAF5026,type='INPUT_COLOR',##id='in_12')
+upBorderColor=##input(defval=#4CAF50,type='INPUT_COLOR',##id='in_13')
+downBoxColor=##input(defval=#FF525226,type='INPUT_COLOR',##id='in_14')
+downBorderColor=##input(defval=#FF5252,type='INPUT_COLOR',##id='in_15')
+##root(root_metainfo,rm_ic_0,upBoxColor,input__color)
+##root(root_metainfo,rm_ic_1,upBorderColor,input__color)
+##root(root_metainfo,rm_ic_2,downBoxColor,input__color)
+##root(root_metainfo,rm_ic_3,downBorderColor,input__color)

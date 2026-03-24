@@ -1,0 +1,178 @@
+//@version=4
+
+strategy(title="Ichimoku only Long Strategy", shorttitle="Ichimoku only Long", overlay = true, pyramiding = 0, calc_on_order_fills = false, commission_type =  strategy.commission.percent, commission_value = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, initial_capital=10000, currency=currency.USD)
+
+// Time Range
+FromMonth=input(defval=1,title="FromMonth",minval=1,maxval=12)
+FromDay=input(defval=1,title="FromDay",minval=1,maxval=31)
+FromYear=input(defval=2017,title="FromYear",minval=2017)
+ToMonth=input(defval=1,title="ToMonth",minval=1,maxval=12)
+ToDay=input(defval=1,title="ToDay",minval=1,maxval=31)
+ToYear=input(defval=9999,title="ToYear",minval=2017)
+start=timestamp(FromYear,FromMonth,FromDay,00,00)
+finish=timestamp(ToYear,ToMonth,ToDay,23,59)
+window()=>time>=start and time<=finish?true:false
+
+// See if this bar's time happened on/after start date
+afterStartDate = time >= start and time<=finish?true:false
+
+//Enable RSI
+enableema = input(true, title="Enable EMA?")
+enablestochrsi = input(false, title="Enable Stochastik RSI?")
+
+//EMA
+emasrc = close, 
+len1 = input(24, minval=1, title="EMA 1")
+len2 = input(90, minval=1, title="EMA 2")
+
+ema1 = ema(emasrc, len1)
+ema2 = ema(emasrc, len2)
+
+col1 = color.lime
+col2 = color.red
+
+//EMA Plots
+plot(ema1, title="EMA 1", linewidth=1, color=col1)
+plot(ema2, title="EMA 2", linewidth=1, color=col2)
+
+//STOCH RSI
+smoothK = input(3, minval=1, title="RSI K Line")
+smoothD = input(3, minval=1, title="RSI D Line")
+lengthRSI = input(14, minval=1, title="RSI Length")
+lengthStoch = input(14, minval=1, title="Stochastik Length")
+src = input(close, title="RSI Source")
+
+rsi1 = rsi(src, lengthRSI)
+k = sma(stoch(rsi1, rsi1, rsi1, lengthStoch), smoothK)
+d = sma(k, smoothD)
+
+//Ichimoku
+conversionPeriods = input(9, minval=1, title="Ichi Conversion Line Length")
+basePeriods = input(26, minval=1, title="Ichi Base Line Length")
+laggingSpan2Periods = input(52, minval=1, title="Ichi Lagging Span 2 Length")
+displacement = input(26, minval=0, title="Ichi Displacement")
+donchian(len) => avg(lowest(len), highest(len))
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+p1 = plot(leadLine1, offset = displacement - 1, color=color.green,
+     title="Lead 1")
+p2 = plot(leadLine2, offset = displacement - 1, color=color.red,
+     title="Lead 2")
+fill(p1, p2, color = leadLine1 > leadLine2 ? color.green : color.red)
+
+
+//Long Condition
+crossup = k[0] > d[0] and k[1] <= d[1]
+ichigreenabovered = leadLine1 > leadLine2
+ichimokulong = close > leadLine1
+greencandle =  close > open
+redcandle = close < open
+emacondl = ema1 > ema2
+longcondition = ichigreenabovered and ichimokulong and greencandle
+
+//Short Condition
+crossdown = k[0] < d[0] and k[1] >= d[1]
+ichigreenunderred = leadLine1 < leadLine2
+ichimokushort = close < leadLine1
+emaconds = ema1 < ema2
+shortcondition = ichigreenunderred and ichimokushort and redcandle
+
+//Exit Condition Long
+ichimokuexitl = close < leadLine1
+
+exitconditionl = ichimokuexitl and redcandle
+
+//Exit Condition Short
+ichimokuexits = close > leadLine2
+
+exitconditions = ichimokuexits and greencandle
+
+//Entrys long
+
+if (enablestochrsi == false) and (enableema == false) and (longcondition) and (afterStartDate) and (strategy.opentrades < 1)
+    strategy.entry("Long", strategy.long)
+    
+if (enablestochrsi == true) and (enableema == false) and (longcondition) and (crossup) and (afterStartDate) and (strategy.opentrades < 1)
+    strategy.entry("Long", strategy.long)
+
+if (enableema == true) and (enablestochrsi == false) and (longcondition) and (emacondl) and (afterStartDate) and (strategy.opentrades < 1)
+    strategy.entry("Long", strategy.long)
+
+if (enableema == true) and (enablestochrsi == true) and (longcondition) and (emacondl) and (crossup) and (afterStartDate) and (strategy.opentrades < 1)
+    strategy.entry("Long", strategy.long)
+
+//Entrys short
+
+if (enablestochrsi == false) and (enableema == false) and (shortcondition) and (afterStartDate) and (strategy.opentrades < 1)
+    strategy.entry("Short", strategy.short)
+    
+if (enablestochrsi == true) and (enableema == false) and (shortcondition) and (crossdown) and (afterStartDate) and (strategy.opentrades < 1)
+    strategy.entry("Short", strategy.short)
+
+if (enableema == true) and (enablestochrsi == false) and (shortcondition) and (emaconds) and (afterStartDate) and (strategy.opentrades < 1)
+    strategy.entry("Short", strategy.short)
+
+if (enableema == true) and (enablestochrsi == true) and (shortcondition) and (emaconds) and (crossdown) and (afterStartDate) and (strategy.opentrades < 1)
+    strategy.entry("Short", strategy.short)
+
+//Exits
+if (afterStartDate)
+    strategy.close(id = "Long", when = exitconditionl)
+
+if (afterStartDate)
+    strategy.close(id = "Short", when = exitconditions)
+
+View in Pine Editor・125 lines
+Use on chart
+5
+4
+1
+7
+16 330
+Jun 2, 2021
+Hey there!
+
+Here I show you an Ichimoku Cloud Strategy.
+I discovered the strategy on a YouTube channel and tried to transfer it as a strategy into a script.
+
+He said in his video that you would make more profit with this strategy than holding the coin.
+
+Tested with the crypto pair ETH/USDT in the four hour chart.
+Period: beginning of 2017 until today.
+
+The strategy should also work with foreign exchange. But then the settings have to be adjusted.
+
+There is the possibility to activate two EMA's and a Stochastic RSI .
+
+-----------------------------------------------------------------------------------
+
+How does the strategy work?
+
+ENTRY
+The green Ichimoku lead line must above the red Ichimoku lead line - only the two lead lines are activated.
+A green candle must closed above the green lead line.
+
+EXIT
+A red candle must close below the green Ichimoku lead line.
+
+OPTIONAL ENTRY
+EMA
+Once you activate the EMA , long positions will only be taken once the EMA1 is above the EMA2.
+Thereby I could observe a significant increase of the profit as well as a decrease of the maximum drawdown.
+
+RSI
+As soon as you activate the Stochastic RSI , long positions are only taken when the K line is above the D line.
+In the future, I may add an oversold - undersold parameter.
+
+The results of the strategy are without commissions and levers.
+
+If you have any questions or feedback, please let me know in the comments.
+
+If you need more information about the strategy and want to know exactly how to apply it, check out my profile.
+
+I wish you good luck with the strategy!
+Jul 6, 2021
+Release Notes
+I have added the possibility to short.

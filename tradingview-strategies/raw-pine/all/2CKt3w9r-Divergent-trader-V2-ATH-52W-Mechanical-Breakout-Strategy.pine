@@ -1,0 +1,110 @@
+//@version=6
+strategy("ATH / 52W Mechanical Breakout Strategy",
+     overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10)
+
+// ==== INPUTS ====
+
+// Breakout Selection
+useATH   = input.bool(true,  "Use All-Time High")
+use52W   = input.bool(true,  "Use 52-Week High")
+
+// Lookback for ATH (acts as full history proxy)
+athLookback = input.int(5000, "ATH Lookback Bars")
+
+// ATR Settings
+atrLength = input.int(14, "ATR Length")
+atrMult   = input.float(2.0, "ATR Multiplier", step=0.1)
+
+// EMA Exit Option
+useEMAExit = input.bool(false, "Use EMA Exit Instead of ATR")
+emaLength  = input.int(20, "EMA Length")
+
+// ==== LEVEL CALCULATIONS ====
+
+// All-Time High (rolling large lookback)
+ath = ta.highest(high, athLookback)
+
+// True 52-Week High from weekly data
+weeklyHigh = request.security(syminfo.tickerid, "W", ta.highest(high, 52))
+
+// ==== ENTRY CONDITIONS ====
+
+// Breakout uses HIGH to detect level break
+breakATH = useATH and high > ath[1]
+break52W = use52W and high > weeklyHigh[1]
+
+longCondition = breakATH or break52W
+
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+// ==== ATR TRAILING STOP (Proper Trailing Logic) ====
+
+atr = ta.atr(atrLength)
+
+// Track highest price since entry
+var float highestSinceEntry = na
+
+if strategy.position_size > 0
+    highestSinceEntry := na(highestSinceEntry) ? high : math.max(highestSinceEntry, high)
+else
+    highestSinceEntry := na
+
+// Chandelier-style trailing stop
+atrStop = highestSinceEntry - (atr * atrMult)
+
+// Exit using ATR trailing stop
+if not useEMAExit and strategy.position_size > 0
+    strategy.exit("ATR Exit", from_entry="Long", stop=atrStop)
+
+// ==== EMA EXIT OPTION ====
+
+ema = ta.ema(close, emaLength)
+
+if useEMAExit and strategy.position_size > 0
+    if close < ema
+        strategy.close("Long")
+
+// ==== PLOTS ====
+
+plot(useATH ? ath : na, title="ATH Level", color=color.maroon, linewidth=2)
+plot(use52W ? weeklyHigh : na, title="52W High", color=color.red, linewidth=2)
+plot(useEMAExit ? ema : na, title="EMA Exit", color=color.blue)
+plot(strategy.position_size > 0 and not useEMAExit ? atrStop : na,
+     title="ATR Trailing Stop",
+     color=color.orange,
+     style=plot.style_linebr)
+
+View in Pine Editor・79 lines
+Use on chart
+1
+4
+1
+473
+escription
+
+This indicator highlights breakouts above major structural highs.
+
+It identifies when price moves above:
+
+The All-Time High (ATH)
+
+The 52-Week High
+
+Both levels can be independently enabled or disabled.
+
+When price closes above either level, the indicator marks the breakout directly on the chart. The logic is fully mechanical and rule-based — no discretion, no pattern reading, no prediction.
+
+The core idea is simple:
+Strength tends to lead to further strength.
+
+When price moves into new territory, there is no overhead supply and no trapped sellers above. Breakouts at these levels often trigger institutional buying, momentum participation, and short covering.
+
+This tool is designed for traders who prefer systematic breakout trading over reversal prediction.
+
+It works across stocks, indices, crypto, commodities, and other liquid markets.
+
+Simple logic. Structural levels. Mechanical execution.

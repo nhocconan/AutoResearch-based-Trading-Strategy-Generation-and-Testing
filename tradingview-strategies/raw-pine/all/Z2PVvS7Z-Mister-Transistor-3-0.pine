@@ -1,0 +1,151 @@
+//@version=2
+strategy(title= "Mister Transistor", overlay=true)
+
+// 2016 Boffin Hollow Lab
+// Author: Tarzan
+
+c = navy
+
+//(dayofmonth == 1 )       ? color(black, 54) :
+
+bgColor = (dayofweek == monday)    ? color(c, 94) :
+          (dayofweek == tuesday)   ? color(c, 90) :
+          (dayofweek == wednesday) ? color(c, 86) :
+          (dayofweek == thursday)  ? color(c, 84) :
+          (dayofweek == friday)    ? color(c, 82) : na
+          
+          
+bgcolor(color = bgColor)
+
+tgtt = input(title = "profit target", defval=400, step = 5)
+mloss = input(title = "max loss", defval=-2000, step = 5)
+bars = input(title = "HA Bars", defval=2, step = 1)
+lt = input(title = "1 for reverse long entry", defval=0)
+st = input (title = "0 for reverse short entry", defval=1)
+toomany = input(title = "HAbar array size", defval=6, step = 1)
+flipperz = input(title = "0 normal 1 flip array long condition", defval=0, step = 1)
+flippers = input(title = "1 normal 0 flip array short condition", defval=1, step = 1)
+toomanylimit = input(title = "HAbar array long limit", defval=7, step =1)
+toomanyslimit = input(title = "HAbar array short limit", defval=7, step =1)
+ladjj = input(0.0000, step = .01)
+sadjj = input(0.0000, step= .01)
+//adjj = input("exit on open plus limit", type = float, defval=0.0000, step = 1)
+//threshold = input(title="Threshold", type=float, defval=0.0014, step=0.0001)
+
+
+//price = close
+
+heikinashi_close = ((open + high + low + close) / 4)
+
+heikinashi_open = (nz(heikinashi_open[1]) + nz(heikinashi_close[1])) / 2 
+
+heikinashi_high = max(high, max(heikinashi_open, heikinashi_close) )
+
+heikinashi_low = min(low, min(heikinashi_open, heikinashi_close) )
+
+//white bar = 1 black bar = 0 
+
+// total bars processed so far
+
+totbars = + 1
+
+heikinashi_bar = (heikinashi_close > heikinashi_open) ? 1 : 0
+
+// running count of black vs white heikinashi bars
+
+cardcount = (heikinashi_bar == 1 ) ? (+ 1 ) : ( - 1)
+
+// keep a count of total black bars
+
+totalblacks = (heikinashi_close > heikinashi_open) ? (+ 1) : na
+
+// long signal if 2 consecutive white = 1 bars
+
+//lsignal = ( (heikinashi_bar + nz(heikinashi_bar[1]) ) == 2 ) ? 1 : 0
+
+//lsignal = (sum(nz(heikinashi_bar), bars) == bars ) ? 1 : 0
+
+// both signals require the sum of bars in the ha array to be less than the limit
+// in other words if the array size is 10 and the limit is 8 there must be less than
+// 8 white bars in the array for a long signal
+// this parm is nullified by setting the limit higher than the array size
+
+
+lsignal = (sum(nz(heikinashi_bar), bars) == bars and (sum(nz(heikinashi_bar), toomany) < toomanylimit) and flipperz == 0) ? 1 : 
+          (sum(nz(heikinashi_bar), bars) == bars and (sum(nz(heikinashi_bar), toomany) > toomanylimit) and flipperz == 1) ? 1 :0
+
+
+
+//lsignal = ( heikinashi_bar  == 1 ) ? 1 : 0
+
+//ssignal = (sum(nz(heikinashi_bar), bars) == 0 ) ? 1 : 0
+
+//on the short signal if the array size is 10 and the limit is 8 there must be less than the limit of black bars in the array 
+//for a signal
+
+ssignal = (sum(nz(heikinashi_bar), bars) == 0 and (sum(nz(heikinashi_bar), toomany) > toomanyslimit) and flippers == 0) ? 1 : 
+          (sum(nz(heikinashi_bar), bars) == 0 and (sum(nz(heikinashi_bar), toomany) < toomanyslimit) and flippers == 1) ? 1 : 0
+
+//       (sum(nz(heikinashi_bar), bars) == 0 and (sum(nz(heikinashi_bar), toomany) > toomanyslimit) ) :0
+
+
+//ssignal = ( heikinashi_bar  == 0 ) ? 1 : 0
+
+//ups = price > price[1] ? nz(ups[1]) + 1 : 0
+
+//dns = price < price[1] ? nz(dns[1]) + 1 : 0
+
+prz = open 
+//quant = 1
+
+volatil = variance (close, toomany)
+
+
+// enter a trade if we have a signal
+
+
+// long entry conditions
+
+if (lsignal == 1 and lt == 0)
+    strategy.entry("UpLE", strategy.long, qty = 1 , limit = prz-ladjj , comment="LE")
+    
+if (ssignal == 1 and st == 0)
+    strategy.entry("DnSE", strategy.long, qty = 1 , limit = prz-sadjj , comment="revSE")  
+    
+    //exit conditions  
+ 
+strategy.close_all( when = strategy.openprofit > (tgtt))   
+strategy.close_all( when = strategy.openprofit < (mloss))   
+
+// short entry conditions
+    
+if (lsignal == 1 and lt == 1)
+    strategy.entry("UpLE", strategy.short, qty = 1 , limit = prz-ladjj , comment="revLE")    
+    
+if (ssignal == 1 and st == 1)
+    strategy.entry("DnSE", strategy.short, qty = 1 , limit = prz+sadjj , comment="SE")
+    
+//exit conditions  
+ 
+strategy.close_all( when = strategy.openprofit > (tgtt))   
+strategy.close_all( when = strategy.openprofit < (mloss))   
+    
+
+
+// plot(lsignal)
+
+//plot(close)
+
+View in Pine Editor・137 lines
+Use on chart
+8
+7
+3 596
+This is a general purpose very flexible program to test the effectiveness of HA bars.
+
+Please note that if you are charting at tradingview using Heikin-Ashi charting, your system will be trading fictitious prices even if you check the "use real prices" box. Thought you might like to know that before you lose all your money.
+
+This program performs the HA calcs internally thus allowing you to use HA bars on a standard bar chart and obtaining real prices for your trades.
+
+Courtesy of Boffin Hollow Lab
+Author: Tarzan the Ape Man

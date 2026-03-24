@@ -1,0 +1,91 @@
+//@version=5
+strategy("HKST Cloud", overlay=true, default_qty_type= strategy.percent_of_equity, default_qty_value=100)
+
+
+
+////////////////nAMA
+Lengthkaufman = input(20) 
+xPrice = ohlc4
+xvnoise = math.abs(xPrice - xPrice[1])
+nfastend = 0.666
+nslowend = 0.0645
+nsignal = math.abs(xPrice - xPrice[Lengthkaufman])
+nnoise = math.sum(xvnoise, Lengthkaufman)
+nefratio = nnoise != 0? nsignal / nnoise : 0
+nsmooth = math.pow(nefratio * (nfastend - nslowend) + nslowend, 2) 
+nAMA =  float(0)
+nAMA := nz(nAMA[1]) + nsmooth * (xPrice - nz(nAMA[1]))
+
+//plot(nAMA,color=color.red)
+///short=input(true)
+
+
+
+///////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////
+
+////////hull moving average
+hull_len=input(20)
+hull= ta.hma(nAMA,hull_len)
+
+///////atr trail
+atr_factor=input(2)
+atr_period=input(5)
+[supertrend, direction] = ta.supertrend(atr_factor,atr_period)
+
+/////////cloud
+band1= math.max(supertrend,hull,nAMA)
+band2= math.min(supertrend,hull,nAMA)
+
+b1=plot(band1, "band1", color = color.rgb(76, 175, 79, 85), style=plot.style_linebr)
+b2=plot(band2, "band2", color = color.rgb(255, 82, 82, 78), style=plot.style_linebr)
+fill(b1,b2,color.rgb(12, 50, 186, 75))
+longCondition = ta.crossover(high,band1) //or ta.crossover(low,band2)
+if (longCondition)
+    strategy.entry("Up", strategy.long)
+
+shortCondition =  ta.crossunder(low,band2) or close<band2
+if (shortCondition) 
+    strategy.close("Up", shortCondition)
+
+View in Pine Editor・52 lines
+Use on chart
+4
+3
+8
+1
+14 219
+TLDR: This is a long only trend following system that uses highest and lowest values of three trend following indicators to form a "cloud". Enter when the candle high crosses above the highest band. Close if the low or close crosses below the lowest band.
+
+3 indicators
+1. Kaufman Adaptive moving Average - set at 20
+2. Hull Moving Average (of the Kaufman Adaptive moving average) - set at 20
+3. SuperTrend - I believe this is set at 5 periods and 3*atr but this can be changed
+
+
+Cloud
+the upper band is the highest of the 3 indicators
+the lower band is the lowest of the 3 indicators
+
+Entry and Exit:
+Enter when the high crosses above the upper band of the cloud.
+(This means you will only get a long signal if the high was previously below the upper band of the cloud and then crosses over.)
+
+Exit when the low crosses below the lower band of the cloud .
+(This means that this rule will only close if the low was previously above the upper band and then crosses under)
+
+The "Exit" may not trigger if the low (the wick) never gets above the band. In this case the long order will close if the closing price is below the cloud.
+
+
+
+Logic
+Kaufamn is the best moving average i have found at responding to changes in volatility. This means it moves up or down quickly during expansive moves but becoming very flat during relative choppiness. However, getting flat causes the the Kaufman AMA to trigger a lot of false signals when volatility is transitioning from high to low. This is why the Hull moving average (with its rounded turns) keeps a lot of the false continuations contained because usually prices need to decisively move higher in order to over come the Hull moving average which continues to increase/decrease during the candles after an expansive move.
+
+The super trend places a stagnant floor and ceiling which acts as a great stoploss or trigger as price action attempts to trend in a certain direction. The super trend allows for the user to adjust the likely hood of this cloud indicator changing from bullish to bearish based on the volatility of the asset that is being analyzed.
+
+individually all of these are great. Together the trader can use this cloud to create a trend following or anlysis system that captures the bulk of moves.
+
+Not my best explanation but this indicator is actually pretty simple.
+
+Hope this helps. Happy Trades
+-Snarky Puppy

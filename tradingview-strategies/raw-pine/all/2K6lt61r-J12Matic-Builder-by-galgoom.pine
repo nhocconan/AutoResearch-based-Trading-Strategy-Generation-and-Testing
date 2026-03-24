@@ -1,0 +1,814 @@
+//@version=6
+strategy("J12Matic Builder by galgoom",
+     overlay=true,
+     // Position sizing defaults
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     // Execution / calc defaults
+     calc_on_every_tick=false,   // On bar close
+     use_bar_magnifier=true)     // Enable Bar Magnifier (pick OHLC in Properties)
+
+// ============================================================================
+// QUICK GUIDE (read-me)
+// - Use ONE entry engine at a time: Multi-Source(3) OR QBand+Moneyball.
+// - Exits: Trailing/TP engine (Bricks or Ticks). Optional Static TP/SL.
+// - Windows (NY time): auto-flatten at the end of enabled windows (no alerts).
+// - Day limits: Profit/Loss (USD) + Trade-count. When hit -> HALT new entries.
+// - Alerts: create alert with this strategy, choose "Order fills only",
+//   and set Message to:  {{strategy.order.alert_message}}
+//   The script sets alert_message= on EVERY order.
+// ============================================================================
+
+
+// ------------------------------
+// 01) ENTRIES & SIGNALS
+// ------------------------------
+gEntries = "01) Entries & Signals"
+
+entryLogicMode = input.string(
+     "Multi-Source (3)", "Entry Logic",
+     options=["Multi-Source (3)", "QBand + Moneyball"],
+     group=gEntries,
+     tooltip="Choose the entry engine:\n- Multi-Source(3): combine up to 3 long/short sources with Single/Dual/Triple logic.\n- QBand + Moneyball: gate -> trigger model with timing windows.")
+
+enableBuy  = input.bool(true,  "Enable Long Signals",  group=gEntries, tooltip="Master switch for long entries.")
+enableSell = input.bool(true,  "Enable Short Signals", group=gEntries, tooltip="Master switch for short entries.")
+
+flipOnOpposite = input.bool(true, "Flip on opposite signal (same bar)", group=gEntries,
+     tooltip="If a long signal appears while a short is open, close the short first (with exit alert_message), then open long; and vice versa.")
+
+// Multi-Source (3)
+signalLogic = input.string(
+     "Triple", "Signal Logic (for Multi-Source)",
+     options=["Single","Dual","Triple"], group=gEntries,
+     tooltip="How many sources must confirm:\n- Single: any 1 of 3\n- Dual: Source1 AND Source2\n- Triple: 1 AND 2 AND 3 (default)")
+
+buySignalSource1  = input.source(close, "Long Signal Source 1",  group=gEntries, tooltip="Long source #1; > 0 is considered a bullish pulse.")
+buySignalSource2  = input.source(close, "Long Signal Source 2",  group=gEntries, tooltip="Long source #2; > 0 is considered a bullish pulse.")
+buySignalSource3  = input.source(close, "Long Signal Source 3",  group=gEntries, tooltip="Long source #3; > 0 is considered a bullish pulse.")
+
+sellSignalSource1 = input.source(close, "Short Signal Source 1", group=gEntries, tooltip="Short source #1; > 0 is considered a bearish pulse.")
+sellSignalSource2 = input.source(close, "Short Signal Source 2", group=gEntries, tooltip="Short source #2; > 0 is considered a bearish pulse.")
+sellSignalSource3 = input.source(close, "Short Signal Source 3", group=gEntries, tooltip="Short source #3; > 0 is considered a bearish pulse.")
+
+useSignalLookback = input.bool(true, "Use Lookback for Entry Signals? (Multi-Source)", group=gEntries,
+     tooltip="If enabled, a source pulse remains valid for N bars (below), so confirmations can arrive on different bars.")
+longLookbackBars  = input.int(10, "Long Signal Lookback (bars)",  minval=1, group=gEntries, tooltip="How many bars to keep a recent LONG source pulse valid.")
+shortLookbackBars = input.int(10, "Short Signal Lookback (bars)", minval=1, group=gEntries, tooltip="How many bars to keep a recent SHORT source pulse valid.")
+
+// QBand + Moneyball (Gate -> Trigger)
+gQBM = "01b) QBands + Moneyball (Gate -> Trigger)"
+
+qbm_enableSameBar = input.bool(true, "Allow same-bar Gate->Trigger", group=gQBM,
+     tooltip="If ON, a trigger can fire on the SAME bar as the gate pulse.")
+qbm_winN      = input.int(1000, "Trigger must fire within N bars after Gate", minval=1, group=gQBM,
+     tooltip="Time window (in bars) after a gate pulse during which a trigger is allowed.")
+qbm_maxPerWin = input.int(0, "Max signals per window (0 = unlimited)", minval=0, group=gQBM,
+     tooltip="Limit the number of orders per gate window (0 disables the limit).")
+
+b1_src = input.source(close, "Buy Source 1 - Gate (QBands Bull)", group=gQBM,
+     tooltip="Bullish GATE pulse source; opens a Buy window.")
+bTrigPulseMode = input.string("Rise > 0", "Buy Trigger Pulse Mode",
+     options=["Change","Appear (NA->value)","Rise > 0","Fall < 0"], group=gQBM,
+     tooltip="How to detect a TRIGGER pulse for buys.")
+b2_src = input.source(close, "Buy Source 2 - Trigger A", group=gQBM, tooltip="Primary buy TRIGGER source A.")
+b2_ext = input.int(0, "Extend Bars (Trigger A)", minval=0, group=gQBM, tooltip="Max gap from S2 to S3 in S2 AND S3 mode.")
+b3_src = input.source(close, "Buy Source 3 - Trigger B (optional)", group=gQBM, tooltip="Optional buy TRIGGER source B.")
+b3_ext = input.int(0, "Extend Bars (Trigger B)", minval=0, group=gQBM, tooltip="Keep Trigger B true for N bars (used in non-sequential modes).")
+bTrigMode = input.string("S2 only", "Buy Trigger Mode",
+     options=["S2 only","S3 only","S2 OR S3","S2 AND S3"], group=gQBM,
+     tooltip="Which trigger(s) can fire a trade while the buy window is open.")
+
+s1_src = input.source(close, "Sell Source 1 - Gate (QBands Bear)", group=gQBM,
+     tooltip="Bearish GATE pulse source; opens a Sell window.")
+sTrigPulseMode = input.string("Rise > 0", "Sell Trigger Pulse Mode",
+     options=["Change","Appear (NA->value)","Rise > 0","Fall < 0"], group=gQBM,
+     tooltip="How to detect a TRIGGER pulse for sells.")
+s2_src = input.source(close, "Sell Source 2 - Trigger A", group=gQBM, tooltip="Primary sell TRIGGER source A.")
+s2_ext = input.int(0, "Extend Bars (Trigger A)", minval=0, group=gQBM, tooltip="Max gap from S2 to S3 in S2 AND S3 mode.")
+s3_src = input.source(close, "Sell Source 3 - Trigger B (optional)", group=gQBM, tooltip="Optional sell TRIGGER source B.")
+s3_ext = input.int(0, "Extend Bars (Trigger B)", minval=0, group=gQBM, tooltip="Keep Trigger B true for N bars (used in non-sequential modes).")
+sTrigMode = input.string("S2 only", "Sell Trigger Mode",
+     options=["S2 only","S3 only","S2 OR S3","S2 AND S3"], group=gQBM,
+     tooltip="Which trigger(s) can fire a trade while the sell window is open.")
+
+
+// ------------------------------
+// 02) EXIT UNITS (TRAILING / TP)
+// ------------------------------
+gUnits = "02) Exit Units (Trailing/TP)"
+exitUnits = input.string("Bricks", "Use Bricks or Ticks for exits?",
+     options=["Bricks","Ticks"], group=gUnits,
+     tooltip="Measurement for trailing/TP/SL distances:\n- Bricks: uses Renko brick size\n- Ticks: uses instrument's min tick")
+
+// Tick-based trailing / stops
+gTicks = "03) Tick-based Trailing / Stops"
+initialSLTicks     = input.int(40, "Initial SL (ticks)",          minval=1, group=gTicks, tooltip="Initial stop distance in ticks from entry.")
+trailStartTicks    = input.int(10, "Start Trailing After (ticks)", minval=1, group=gTicks, tooltip="Start trailing once price moves this many ticks in your favor.")
+trailDistanceTicks = input.int(20, "Trailing Distance (ticks)",    minval=1, group=gTicks, tooltip="Trailing stop offset (ticks) from peak/trough after trailing starts.")
+takeProfitTicks    = input.int(40, "Take Profit (ticks)",          minval=1, group=gTicks, tooltip="Static take-profit distance in ticks (if enabled).")
+stopLossTicks      = input.int(50, "Stop Loss (ticks)",            minval=1, group=gTicks, tooltip="Static stop-loss distance in ticks (if enabled).")
+
+// Brick-based trailing / stops
+gBricks = "04) Brick-based Trailing / Stops"
+renkoBrickSize      = input.float(5.0, "Renko Brick Size (must match chart)", minval=0.1, group=gBricks, tooltip="Brick size your Renko chart uses. Must match chart settings.")
+initialSLBricks     = input.int(2,  "Initial SL (bricks)",              minval=1, group=gBricks, tooltip="Initial stop distance in bricks from entry.")
+trailStartBricks    = input.int(1,  "Start Trailing After (bricks)",    minval=1, group=gBricks, tooltip="Start trailing once price moves this many bricks in your favor.")
+trailDistanceBricks = input.int(2,  "Trailing Distance (bricks)",       minval=1, group=gBricks, tooltip="Trailing stop offset (bricks) from peak/trough after trailing starts.")
+takeProfitBricks    = input.int(2,  "Take Profit (bricks)",             minval=1, group=gBricks, tooltip="Static take-profit distance in bricks (if enabled).")
+stopLossBricks      = input.int(2,  "Stop Loss (bricks)",               minval=1, group=gBricks, tooltip="Static stop-loss distance in bricks (if enabled).")
+
+// Static TP/SL switch
+gStatic = "05) TP / SL Switch"
+enableStaticTP = input.bool(true,  "Enable Static Take Profit",                    group=gStatic, tooltip="If ON, closes trades at a fixed TP distance.")
+enableStaticSL = input.bool(false, "Enable Static Stop Loss (Overrides Trailing)", group=gStatic, tooltip="If ON, uses fixed SL (no trailing). If OFF, uses trailing engine.")
+
+
+// ------------------------------
+// 06) TRADING WINDOWS (NY time)
+// ------------------------------
+gWin = "06) Trading Windows (NY time)"
+useTradingWindow    = input.bool(true, "Use Trading Windows?", group=gWin, tooltip="Master enable for all session windows.")
+enableEveningWindow = input.bool(true, "Enable Evening Window", group=gWin, tooltip="Use the Evening NY-time window.")
+eveningSessionStr   = input.session("1800-2359", "Evening Window", group=gWin, tooltip="NY-time session for Evening trades.")
+flattenAtEveningEnd = input.bool(true, "Flatten at End of Evening?", group=gWin, tooltip="Close all open positions at the end of the Evening window.")
+
+enableOvernightWindow = input.bool(true, "Enable Overnight Window", group=gWin, tooltip="Use the Overnight NY-time window.")
+overnightSessionStr   = input.session("0000-0800", "Overnight Window", group=gWin, tooltip="NY-time session for Overnight trades.")
+flattenAtOvernightEnd = input.bool(true, "Flatten at End of Overnight?", group=gWin, tooltip="Close all open positions at the end of the Overnight window.")
+
+enableNYWindow  = input.bool(true, "Enable NY Session Window", group=gWin, tooltip="Use the NY day session.")
+nySessionStr    = input.session("0930-1600", "NY Session", group=gWin, tooltip="NY-time session for regular day trading.")
+flattenAtNYEnd  = input.bool(true, "Flatten at End of NY Session?", group=gWin, tooltip="Close all open positions at the end of the NY session.")
+
+
+// ------------------------------
+// 07) DAY CONTROLS & LIMITS
+// ------------------------------
+gRisk = "07) Day Controls & Limits"
+enableProfitLimit    = input.bool(false, "Enable Profit Limits?", group=gRisk, tooltip="If ON, HALT new entries when daily net PnL ≥ Profit Limit.")
+profitLimitDollars   = input.float(2000.0, "Profit Limit (Dollars)", minval=0.0, group=gRisk, tooltip="PnL threshold to HALT trading for the day (auto-flattens active positions).")
+
+enableLossLimit      = input.bool(false, "Enable Loss Limits?", group=gRisk, tooltip="If ON, HALT new entries when daily net PnL ≤ -Loss Limit.")
+lossLimitDollars     = input.float(1000.0, "Loss Limit (Dollars)", minval=0.0, group=gRisk, tooltip="Drawdown threshold to HALT trading for the day (auto-flattens active positions).")
+
+enableTradeLimit     = input.bool(false, "Enable Trade Count Limits?", group=gRisk, tooltip="If ON, stop taking new entries after N trades (does not auto-flatten).")
+maxTradesPerDay      = input.int(3, "Number of Trades Allowed", minval=1, group=gRisk, tooltip="Max entries per day. Hitting this HALTs new trades for the rest of the day.")
+
+
+// ------------------------------
+// 08) CUSTOM ALERT PAYLOADS (used as strategy.order.alert_message)
+// ------------------------------
+gCustom = "08) Custom Alert Payloads"
+customLongEntry       = input.string("", "Long Entry",          group=gCustom, tooltip="Payload sent on LONG entries. Leave blank to use default JSON.")
+customLongExit        = input.string("", "Regular Long Exit",   group=gCustom, tooltip="Payload sent on LONG exits (SL/TP/flip). Leave blank for default JSON.")
+customShortEntry      = input.string("", "Short Entry",         group=gCustom, tooltip="Payload sent on SHORT entries. Leave blank to use default JSON.")
+customShortExit       = input.string("", "Regular Short Exit",  group=gCustom, tooltip="Payload sent on SHORT exits (SL/TP/flip). Leave blank for default JSON.")
+customSessionExit     = input.string("", "End of Session Window Exit", group=gCustom, tooltip="Payload sent when positions are flattened at any session window end.")
+customLimitClose      = input.string("", "Profit/Loss/Trade Limit Close", group=gCustom, tooltip="Payload sent when daily Profit/Loss limit triggers auto-flatten. (Trade-count limit does not auto-flatten.)")
+
+// Fallbacks if any field left blank
+defaultOpen(side) =>
+    "{\"event\":\"open\",\"side\":\"" + side + "\",\"symbol\":\"" + syminfo.ticker + "\"}"
+defaultClose(side, reason) =>
+    "{\"event\":\"close\",\"side\":\"" + side + "\",\"reason\":\"" + reason + "\",\"symbol\":\"" + syminfo.ticker + "\"}"
+pick(txt, fallback) =>
+    (str.length(txt) > 0) ? txt : fallback
+
+
+// ------------------------------
+// SESSION FLAGS
+// ------------------------------
+evTime  = time(timeframe.period, eveningSessionStr,   "America/New_York")
+ovTime  = time(timeframe.period, overnightSessionStr, "America/New_York")
+nyTime  = time(timeframe.period, nySessionStr,        "America/New_York")
+
+inEveningRaw   = not na(evTime)
+inOvernightRaw = not na(ovTime)
+inNYRaw        = not na(nyTime)
+
+inEvening   = useTradingWindow and enableEveningWindow   ? inEveningRaw   : false
+inOvernight = useTradingWindow and enableOvernightWindow ? inOvernightRaw : false
+inNY        = useTradingWindow and enableNYWindow        ? inNYRaw        : false
+inAnyWindow = useTradingWindow ? (inEvening or inOvernight or inNY) : true
+
+endOfEvening   = useTradingWindow and enableEveningWindow   and bar_index > 0 and inEvening[1]   and not inEvening
+endOfOvernight = useTradingWindow and enableOvernightWindow and bar_index > 0 and inOvernight[1] and not inOvernight
+endOfNY        = useTradingWindow and enableNYWindow        and bar_index > 0 and inNY[1]        and not inNY
+
+
+// ------------------------------
+// HELPERS
+// ------------------------------
+f_extend(sig, n) =>
+    n <= 0 ? sig : (sig or (not na(ta.barssince(sig)) and ta.barssince(sig) <= n))
+
+f_pulse_change(src) => not na(src) and (na(src[1]) or src != src[1])
+f_pulse_appear(src) => not na(src) and na(src[1])
+f_pulse_rise_pos(src) => src > 0 and nz(src[1]) <= 0
+f_pulse_fall_neg(src) => src < 0 and nz(src[1]) >= 0
+
+f_pulse_by_mode(src, mode) =>
+    if mode == "Change"
+        f_pulse_change(src)
+    else if mode == "Appear (NA->value)"
+        f_pulse_appear(src)
+    else if mode == "Rise > 0"
+        f_pulse_rise_pos(src)
+    else
+        f_pulse_fall_neg(src)
+
+_tick = syminfo.mintick
+f_bricksToPrice(b) => b * renkoBrickSize
+f_ticksToPrice(t)  => t * _tick
+
+f_initialSL_d() =>
+    exitUnits == "Bricks" ? f_bricksToPrice(initialSLBricks) : f_ticksToPrice(initialSLTicks)
+
+f_trailStart_moved(entry, peak, trough, isLong) =>
+    float move = na
+    if exitUnits == "Bricks"
+        move := isLong ? (peak - entry) / renkoBrickSize : (entry - trough) / renkoBrickSize
+    else
+        move := isLong ? (peak - entry) / _tick : (entry - trough) / _tick
+    move
+
+f_trailDistance_d() =>
+    exitUnits == "Bricks" ? f_bricksToPrice(trailDistanceBricks) : f_ticksToPrice(trailDistanceTicks)
+f_staticTP_d() =>
+    exitUnits == "Bricks" ? f_bricksToPrice(takeProfitBricks) : f_ticksToPrice(takeProfitTicks)
+f_staticSL_d() =>
+    exitUnits == "Bricks" ? f_bricksToPrice(stopLossBricks) : f_ticksToPrice(stopLossTicks)
+f_trailStart_threshold() =>
+    exitUnits == "Bricks" ? trailStartBricks : trailStartTicks
+
+
+// ------------------------------
+// ENTRY LOGIC
+// ------------------------------
+// A) Multi-Source (3)
+buy1_now  = buySignalSource1  > 0
+buy2_now  = buySignalSource2  > 0
+buy3_now  = buySignalSource3  > 0
+sell1_now = sellSignalSource1 > 0
+sell2_now = sellSignalSource2 > 0
+sell3_now = sellSignalSource3 > 0
+
+// Lookback memory for Multi-Source (per-source hold counters)
+var int lb_b1 = 0
+var int lb_b2 = 0
+var int lb_b3 = 0
+var int lb_s1 = 0
+var int lb_s2 = 0
+var int lb_s3 = 0
+
+lb_b1 := useSignalLookback ? (buy1_now  ? longLookbackBars  : math.max(lb_b1 - 1, 0)) : (buy1_now  ? 1 : 0)
+lb_b2 := useSignalLookback ? (buy2_now  ? longLookbackBars  : math.max(lb_b2 - 1, 0)) : (buy2_now  ? 1 : 0)
+lb_b3 := useSignalLookback ? (buy3_now  ? longLookbackBars  : math.max(lb_b3 - 1, 0)) : (buy3_now  ? 1 : 0)
+lb_s1 := useSignalLookback ? (sell1_now ? shortLookbackBars : math.max(lb_s1 - 1, 0)) : (sell1_now ? 1 : 0)
+lb_s2 := useSignalLookback ? (sell2_now ? shortLookbackBars : math.max(lb_s2 - 1, 0)) : (sell2_now ? 1 : 0)
+lb_s3 := useSignalLookback ? (sell3_now ? shortLookbackBars : math.max(lb_s3 - 1, 0)) : (sell3_now ? 1 : 0)
+
+buy1_ok  = useSignalLookback ? (lb_b1 > 0) : buy1_now
+buy2_ok  = useSignalLookback ? (lb_b2 > 0) : buy2_now
+buy3_ok  = useSignalLookback ? (lb_b3 > 0) : buy3_now
+sell1_ok = useSignalLookback ? (lb_s1 > 0) : sell1_now
+sell2_ok = useSignalLookback ? (lb_s2 > 0) : sell2_now
+sell3_ok = useSignalLookback ? (lb_s3 > 0) : sell3_now
+
+// Resolve multi-source logic
+bool _buyCond  = false
+bool _sellCond = false
+if signalLogic == "Single"
+    _buyCond  := buy1_ok or buy2_ok or buy3_ok
+    _sellCond := sell1_ok or sell2_ok or sell3_ok
+else if signalLogic == "Dual"
+    _buyCond  := buy1_ok and buy2_ok
+    _sellCond := sell1_ok and sell2_ok
+else
+    _buyCond  := buy1_ok and buy2_ok and buy3_ok
+    _sellCond := sell1_ok and sell2_ok and sell3_ok
+
+buyConditionMulti  = _buyCond
+sellConditionMulti = _sellCond
+
+// B) QBand + Moneyball (Gate -> Trigger)
+// Pulses with extension (for S2/S3 only/OR modes)
+b1_pulse = f_pulse_change(b1_src)
+b2_pulse_ext = f_extend(f_pulse_by_mode(b2_src, bTrigPulseMode), b2_ext)
+b3_pulse_ext = f_extend(f_pulse_by_mode(b3_src, bTrigPulseMode), b3_ext)
+s1_pulse = f_pulse_change(s1_src)
+s2_pulse_ext = f_extend(f_pulse_by_mode(s2_src, sTrigPulseMode), s2_ext)
+s3_pulse_ext = f_extend(f_pulse_by_mode(s3_src, sTrigPulseMode), s3_ext)
+
+// Raw one-bar events (used for sequential S2->S3 logic)
+b2_evt = f_pulse_by_mode(b2_src, bTrigPulseMode)
+b3_evt = f_pulse_by_mode(b3_src, bTrigPulseMode)
+s2_evt = f_pulse_by_mode(s2_src, sTrigPulseMode)
+s3_evt = f_pulse_by_mode(s3_src, sTrigPulseMode)
+
+// Gate timing
+var int lastBuyGate  = na
+var int lastSellGate = na
+if b1_pulse
+    lastBuyGate := bar_index
+if s1_pulse
+    lastSellGate := bar_index
+
+bullActive = not na(lastBuyGate)  and (na(lastSellGate) or lastBuyGate > lastSellGate)
+bearActive = not na(lastSellGate) and (na(lastBuyGate)  or lastSellGate > lastBuyGate)
+
+inBuyWindow  = bullActive and not na(lastBuyGate)  and (qbm_enableSameBar ? (bar_index - lastBuyGate  <= qbm_winN) : (bar_index - lastBuyGate  > 0 and bar_index - lastBuyGate  <= qbm_winN))
+inSellWindow = bearActive and not na(lastSellGate) and (qbm_enableSameBar ? (bar_index - lastSellGate <= qbm_winN) : (bar_index - lastSellGate > 0 and bar_index - lastSellGate <= qbm_winN))
+
+// Per-window counters
+var int buyCount  = 0
+var int sellCount = 0
+if b1_pulse
+    buyCount := 0
+if s1_pulse
+    sellCount := 0
+
+// Sequential S2->S3 state machines (reset on new gate and after each trade)
+var int buyStage  = 0   // 0=wait S2, 1=wait S3
+var int sellStage = 0   // 0=wait S2, 1=wait S3
+var int buyS2TTL  = 0   // bars left for S3 after S2
+var int sellS2TTL = 0   // bars left for S3 after S2
+if b1_pulse
+    buyStage := 0
+    buyS2TTL := 0
+if s1_pulse
+    sellStage := 0
+    sellS2TTL := 0
+
+// Build trigger pulses based on selected mode
+bool buyTriggerPulse = false
+bool sellTriggerPulse = false
+
+// BUY modes
+if bTrigMode == "S2 only"
+    buyTriggerPulse := inBuyWindow and b2_pulse_ext
+else if bTrigMode == "S3 only"
+    buyTriggerPulse := inBuyWindow and b3_pulse_ext
+else if bTrigMode == "S2 OR S3"
+    buyTriggerPulse := inBuyWindow and (b2_pulse_ext or b3_pulse_ext)
+else
+    // S2 AND S3 with TTL = Extend Bars (Trigger A)
+    buyTriggerPulse := false
+    if inBuyWindow
+        if buyStage == 0 and b2_evt
+            buyStage := 1
+            buyS2TTL := math.min(math.max(0, b2_ext), qbm_winN)
+        if buyStage == 1
+            if b3_evt
+                buyTriggerPulse := true
+                buyStage := 0
+                buyS2TTL := 0
+            else
+                if buyS2TTL <= 0
+                    buyStage := 0
+                else
+                    buyS2TTL -= 1
+    else
+        buyStage := 0
+        buyS2TTL := 0
+
+// SELL modes
+if sTrigMode == "S2 only"
+    sellTriggerPulse := inSellWindow and s2_pulse_ext
+else if sTrigMode == "S3 only"
+    sellTriggerPulse := inSellWindow and s3_pulse_ext
+else if sTrigMode == "S2 OR S3"
+    sellTriggerPulse := inSellWindow and (s2_pulse_ext or s3_pulse_ext)
+else
+    // S2 AND S3 with TTL = Extend Bars (Trigger A)
+    sellTriggerPulse := false
+    if inSellWindow
+        if sellStage == 0 and s2_evt
+            sellStage := 1
+            sellS2TTL := math.min(math.max(0, s2_ext), qbm_winN)
+        if sellStage == 1
+            if s3_evt
+                sellTriggerPulse := true
+                sellStage := 0
+                sellS2TTL := 0
+            else
+                if sellS2TTL <= 0
+                    sellStage := 0
+                else
+                    sellS2TTL -= 1
+    else
+        sellStage := 0
+        sellS2TTL := 0
+
+// Respect window caps
+canBuyMore  = (qbm_maxPerWin == 0) or (buyCount  < qbm_maxPerWin)
+canSellMore = (qbm_maxPerWin == 0) or (sellCount < qbm_maxPerWin)
+
+buyEventQBM  = enableBuy  and canBuyMore  and buyTriggerPulse
+sellEventQBM = enableSell and canSellMore and sellTriggerPulse
+if buyEventQBM
+    buyCount  += 1
+if sellEventQBM
+    sellCount += 1
+
+// Choose engine
+useMulti = entryLogicMode == "Multi-Source (3)"
+buySignalChosen  = useMulti ? buyConditionMulti  : buyEventQBM
+sellSignalChosen = useMulti ? sellConditionMulti : sellEventQBM
+
+// Rising-edge entries (first-hit only per event)
+buyEdge  = buySignalChosen  and (nz(buySignalChosen[1]  ? 1 : 0, 0) == 0)
+sellEdge = sellSignalChosen and (nz(sellSignalChosen[1] ? 1 : 0, 0) == 0)
+
+
+// ------------------------------
+// DAILY LIMITS STATE + UI
+// ------------------------------
+var int   dailyTradeCount = 0
+var int   lastTradeDay    = na
+var float dayStartNet     = na
+var bool  dayHalted       = false
+var string haltReason     = ""
+var table  statusTbl = table.new(position.top_right, 1, 1, border_width=1)
+var label  haltLbl   = na
+var string _haltText  = ""
+var color  _haltColor = na
+
+today    = timestamp("GMT-0", year, month, dayofmonth)
+isNewDay = na(lastTradeDay) or (today != lastTradeDay)
+if isNewDay
+    lastTradeDay    := today
+    dailyTradeCount := 0
+    dayStartNet     := strategy.netprofit
+    dayHalted       := false
+    haltReason      := ""
+    if not na(haltLbl)
+        label.delete(haltLbl)
+        haltLbl := na
+
+dayPnl = strategy.netprofit - nz(dayStartNet, strategy.netprofit)
+
+// Profit / Loss limit checks (auto-flatten & HALT; sends alert_message)
+if not dayHalted
+    if enableProfitLimit and dayPnl >= profitLimitDollars
+        dayHalted  := true
+        haltReason := "PROFIT LIMIT"
+        strategy.close_all(comment="Daily Profit Limit Hit", alert_message=pick(customLimitClose, defaultClose("flat","limit_profit")))
+    if enableLossLimit and dayPnl <= -lossLimitDollars
+        dayHalted  := true
+        haltReason := "LOSS LIMIT"
+        strategy.close_all(comment="Daily Loss Limit Hit", alert_message=pick(customLimitClose, defaultClose("flat","limit_loss")))
+
+// ENTRY GATING (stop trading when halted or when trade-count limit hit)
+canTradeToday = (not enableTradeLimit or (dailyTradeCount < maxTradesPerDay)) and (not dayHalted)
+inWindowOK    = inAnyWindow
+canEnterNow   = canTradeToday and inWindowOK
+
+
+// ------------------------------
+// ENTRIES (with alert_message on orders)
+// ------------------------------
+if (enableBuy and buyEdge and canEnterNow)
+    if flipOnOpposite and strategy.position_size < 0
+        strategy.close("Short", alert_message=pick(customShortExit, defaultClose("short","flip")))
+    strategy.entry("Long", strategy.long, alert_message=pick(customLongEntry,  defaultOpen("long")))
+    dailyTradeCount += 1
+    if enableTradeLimit and dailyTradeCount >= maxTradesPerDay and not dayHalted
+        dayHalted  := true
+        haltReason := "TRADE LIMIT"
+
+if (enableSell and sellEdge and canEnterNow)
+    if flipOnOpposite and strategy.position_size > 0
+        strategy.close("Long", alert_message=pick(customLongExit, defaultClose("long","flip")))
+    strategy.entry("Short", strategy.short, alert_message=pick(customShortEntry, defaultOpen("short")))
+    dailyTradeCount += 1
+    if enableTradeLimit and dailyTradeCount >= maxTradesPerDay and not dayHalted
+        dayHalted  := true
+        haltReason := "TRADE LIMIT"
+
+
+// ------------------------------
+// EXIT ENGINE (Trailing/Static TP/SL) - all with alert_message
+// ------------------------------
+var float entryPrice  = na
+var float trailStop   = na
+var float peakPrice   = na
+var float troughPrice = na
+
+if (strategy.opentrades > 0)
+    if na(entryPrice)
+        entryPrice  := strategy.position_avg_price
+        peakPrice   := close
+        troughPrice := close
+        trailStop   := na
+
+    peakPrice   := math.max(peakPrice, close)
+    troughPrice := math.min(troughPrice, close)
+
+    // LONG
+    if strategy.position_size > 0
+        moved = f_trailStart_moved(entryPrice, peakPrice, troughPrice, true)
+        if enableStaticSL
+            trailStop := entryPrice - f_staticSL_d()
+        else
+            if moved >= f_trailStart_threshold()
+                trailStop := peakPrice - f_trailDistance_d()
+            else
+                trailStop := entryPrice - f_initialSL_d()
+        if close <= trailStop
+            strategy.close("Long", comment=enableStaticSL ? "Static SL Hit" : "Trailing SL Hit", alert_message=pick(customLongExit, defaultClose("long","sl")))
+        if enableStaticTP
+            tpLevel = entryPrice + f_staticTP_d()
+            if close >= tpLevel
+                strategy.close("Long", comment="Static TP Hit", alert_message=pick(customLongExit, defaultClose("long","tp")))
+
+    // SHORT
+    if strategy.position_size < 0
+        moved = f_trailStart_moved(entryPrice, peakPrice, troughPrice, false)
+        if enableStaticSL
+            trailStop := entryPrice + f_staticSL_d()
+        else
+            if moved >= f_trailStart_threshold()
+                trailStop := troughPrice + f_trailDistance_d()
+            else
+                trailStop := entryPrice + f_initialSL_d()
+        if close >= trailStop
+            strategy.close("Short", comment=enableStaticSL ? "Static SL Hit" : "Trailing SL Hit", alert_message=pick(customShortExit, defaultClose("short","sl")))
+        if enableStaticTP
+            tpLevel = entryPrice - f_staticTP_d()
+            if close <= tpLevel
+                strategy.close("Short", comment="Static TP Hit", alert_message=pick(customShortExit, defaultClose("short","tp")))
+
+
+// ------------------------------
+// PER-WINDOW FLATTEN (session closes send alert_message)
+// ------------------------------
+if flattenAtEveningEnd and endOfEvening
+    strategy.close_all(comment="Flatten: End of Evening", alert_message=pick(customSessionExit, defaultClose("flat","session")))
+if flattenAtOvernightEnd and endOfOvernight
+    strategy.close_all(comment="Flatten: End of Overnight", alert_message=pick(customSessionExit, defaultClose("flat","session")))
+if flattenAtNYEnd and endOfNY
+    strategy.close_all(comment="Flatten: End of NY Session", alert_message=pick(customSessionExit, defaultClose("flat","session")))
+
+// Reset trailing state when flat
+if strategy.opentrades == 0
+    entryPrice  := na
+    trailStop   := na
+    peakPrice   := na
+    troughPrice := na
+
+
+// ------------------------------
+// ON-CHART HALT DISPLAY (label + background + compact panel)
+// ------------------------------
+if (dayHalted and not dayHalted[1])
+    _haltText  := "TRADING HALTED: " + haltReason
+    _haltColor := (haltReason == "PROFIT LIMIT") ? color.new(color.green, 0) : (haltReason == "LOSS LIMIT") ? color.new(color.red, 0) : color.new(color.orange, 0)
+    haltLbl := label.new(x=bar_index, y=close, text=_haltText, xloc=xloc.bar_index, yloc=yloc.price, color=_haltColor, style=label.style_label_down, textcolor=color.white)
+
+// Background tint while halted
+var color _bg = na
+_bg := na
+if dayHalted
+    if haltReason == "PROFIT LIMIT"
+        _bg := color.new(color.green, 85)
+    else if haltReason == "LOSS LIMIT"
+        _bg := color.new(color.red, 85)
+    else
+        _bg := color.new(color.orange, 85)
+bgcolor(_bg)
+
+// Compact status panel (top-right)
+if barstate.islast
+    table.clear(statusTbl, 0, 0, 0, 0)
+    txt = "J12Matic - Status" + "\n" +
+          "Day PnL: " + str.tostring(strategy.netprofit - nz(dayStartNet, strategy.netprofit)) + "\n" +
+          "Trades: " + str.tostring(dailyTradeCount) + (enableTradeLimit ? "/" + str.tostring(maxTradesPerDay) : "/unlimited") + "\n" +
+          (dayHalted ? ("HALTED (" + haltReason + ")") : "Active")
+    _tblBg = dayHalted ? color.new(color.gray, 20) : color.new(color.silver, 80)
+    table.cell(statusTbl, 0, 0, txt, text_color=color.white, bgcolor=_tblBg)
+
+// Visual flags for window ends
+plotshape(endOfEvening,   title="End of Evening",   style=shape.flag, location=location.top, size=size.tiny, text="EoE")
+plotshape(endOfOvernight, title="End of Overnight", style=shape.flag, location=location.top, size=size.tiny, text="EoO")
+plotshape(endOfNY,        title="End of NY",        style=shape.flag, location=location.top, size=size.tiny, text="EoN")
+
+View in Pine Editor・595 lines
+Use on chart
+7
+9
+1 571
+Aug 31, 2025
+A flexible Renko/tick strategy that lets you choose between two entry engines (Multi-Source 3-way or QBand+Moneyball), with a unified trailing/TP exit engine, NY-time trading windows with auto-flatten, daily profit/loss and trade-count limits (HALT mode), and clean webhook routing using {{strategy.order.alert_message}}.
+
+Highlights
+
+Two entry engines
+
+Multi-Source (3): up to three long/short sources with Single / Dual / Triple logic and optional lookback.
+
+QBand + Moneyball: Gate → Trigger workflow with timing windows, OR/AND trigger modes, per-window caps, optional same-bar fire.
+
+Unified exit engine: Trailing by Bricks or Ticks, plus optional static TP/SL.
+
+Session control (NY time): Evening / Overnight / NY Session windows; auto-flatten at end of any enabled window.
+
+Day controls: Profit/Loss (USD) and Trade-count limits. When hit, strategy HALTS new entries, shows an on-chart label/background.
+
+Alert routing designed for webhooks: Every order sets alert_message= so you can run alerts with:
+
+Condition: this strategy
+
+Notify on: Order fills only
+
+Message: {{strategy.order.alert_message}}
+
+Default JSONs or Custom payloads: If a Custom field is blank, a sensible default JSON is sent. Fill a field to override.
+
+How to set up alerts (the 15-second version)
+
+Create a TradingView alert with this strategy as Condition.
+
+Notify on: Order fills only.
+
+Message: {{strategy.order.alert_message}} (exactly).
+
+If you want your own payloads, paste them into Inputs → 08) Custom Alert Payloads.
+
+Leave blank → the strategy sends a default JSON.
+
+Fill in → your text is sent as-is.
+
+Note: Anything you type into the alert dialog’s Message box is ignored except the {{strategy.order.alert_message}} token, which forwards the payload supplied by the strategy at order time.
+
+Publishing notes / best practices
+
+Renko users: Make sure “Renko Brick Size” in Inputs matches your chart’s brick size exactly.
+
+Ticks vs Bricks: Exit distances switch instantly when you toggle Exit Units.
+
+Same-bar flips: If enabled, a new opposite signal will first close the open trade (with its exit payload), then enter the new side.
+
+HALT mode: When day profit/loss limit or trade-count limit triggers, new entries are blocked for the rest of the session day. You’ll see a label and a soft background tint.
+
+Session end flatten: Auto-closes positions at window ends; these exits use the “End of Session Window Exit” payload.
+
+Bar magnifier: Strategy is configured for on-close execution; you can enable Bar Magnifier in Properties if needed.
+
+Default JSONs (used when a Custom field is empty)
+
+Open: {"event":"open","side":"long|short","symbol":"<ticker>"}
+
+Close: {"event":"close","side":"long|short|flat","reason":"tp|sl|flip|session|limit_profit|limit_loss","symbol":"<ticker>"}
+
+You can paste any text/JSON into the Custom fields; it will be forwarded as-is when that event occurs.
+
+Input sections — user guide
+01) Entries & Signals
+
+Entry Logic: Choose Multi-Source (3) or QBand + Moneyball (pick one).
+
+Enable Long/Short Signals: Master on/off switches for entering long/short.
+
+Flip on opposite signal: If enabled, a new opposite signal will close the current position first, then open the other side.
+
+Signal Logic (Multi-Source):
+
+Single: any 1 of the 3 sources > 0
+
+Dual: Source1 AND Source2 > 0
+
+Triple (default): 1 AND 2 AND 3 > 0
+
+Long/Short Signal Sources 1–3: Provide up to three series (often indicators). A positive value (> 0) is treated as a “pulse”.
+
+Use Lookback: Keeps a source “true” for N bars after it pulses (helps catch late triggers).
+
+Long/Short Lookback (bars): How many bars to remember that pulse.
+
+01b) QBands + Moneyball (Gate -> Trigger)
+
+Allow same-bar Gate->Trigger: If ON, a trigger can fire on the same bar as the gate pulse.
+
+Trigger must fire within N bars after Gate: Size of the gate window (in bars).
+
+Max signals per window (0 = unlimited): Cap the number of entries allowed while a gate window is open.
+
+Buy/Sell Source 1 – Gate: Gate pulse sources that open the buy/sell window (often a regime/zone, e.g., QBands bull/bear).
+
+Trigger Pulse Mode (Buy/Sell): How to detect a trigger pulse from the trigger sources (Change / Appear / Rise>0 / Fall<0).
+
+Trigger A/B sources + Extend Bars: Primary/secondary triggers plus optional extension to persist their pulse for N bars.
+
+Trigger Mode: Pick S2 only, S3 only, S2 OR S3, or S2 AND S3. AND mode remembers both pulses inside the window before firing.
+
+02) Exit Units (Trailing/TP)
+
+Exit Units: Choose Bricks (Renko) or Ticks. All distances below switch accordingly.
+
+03) Tick-based Trailing / Stops (active when Exit Units = Ticks)
+
+Initial SL (ticks): Starting stop distance from entry.
+
+Start Trailing After (ticks): Start trailing once price moves this far in your favor.
+
+Trailing Distance (ticks): Offset of the trailing stop from peak/trough once trailing begins.
+
+Take Profit (ticks): Optional static TP distance.
+
+Stop Loss (ticks): Optional static SL distance (overrides trailing if enabled).
+
+04) Brick-based Trailing / Stops (active when Exit Units = Bricks)
+
+Renko Brick Size: Must match your chart’s brick size.
+
+Initial SL / Start Trailing After / Trailing Distance (bricks): Same definitions as tick mode, measured in bricks.
+
+Take Profit / Stop Loss (bricks): Optional static distances.
+
+05) TP / SL Switch
+
+Enable Static Take Profit: If ON, closes the trade at the fixed TP distance.
+
+Enable Static Stop Loss (Overrides Trailing): If ON, trailing is disabled and a fixed SL is used.
+
+06) Trading Windows (NY time)
+
+Use Trading Windows: Master toggle for all windows.
+
+Evening / Overnight / NY Session: Define each session in NY time.
+
+Flatten at End of [Window]: Auto-close any open position when a window ends (sends the Session Exit payload).
+
+07) Day Controls & Limits
+
+Enable Profit Limits / Profit Limit (Dollars): When daily net PnL ≥ limit → auto-flatten and HALT.
+
+Enable Loss Limits / Loss Limit (Dollars): When daily net PnL ≤ −limit → auto-flatten and HALT.
+
+Enable Trade Count Limits / Number of Trades Allowed: After N entries, HALT new entries (does not auto-flatten).
+
+On-chart HUD: A label and soft background tint appear when HALTED; a compact status table shows Day PnL, trade count, and mode.
+
+08) Custom Alert Payloads (used as strategy.order.alert_message)
+
+Long/Short Entry: Payload sent on entries (if blank, a default open JSON is sent).
+
+Regular Long/Short Exit: Payload sent on closes from SL/TP/flip (if blank, a default close JSON is sent).
+
+End of Session Window Exit: Payload sent when any enabled window ends and positions are flattened.
+
+Profit/Loss/Trade Limit Close: Payload sent when daily profit/loss limit causes auto-flatten.
+
+Tip: Any tokens you include here are forwarded “as is”. If your downstream expects variables, do the substitution on the receiver side.
+
+Known limitations
+
+No bracket orders from Pine: This strategy doesn’t create OCO/attached brackets on the broker; it simulates exits with strategy logic and forwards your payloads for external automation.
+
+alert_message is per order only: Alerts fire on order events. General status pings aren’t sent unless you wire a separate indicator/alert.
+
+Renko specifics: Backtests on synthetic Renko can differ from live execution. Always forward-test on your instrument and settings.
+
+Quick checklist before you publish
+
+✅ Brick size in Inputs matches your Renko chart
+
+✅ Exit Units set to Bricks or Ticks as you intend
+
+✅ Day limits/Windows toggled as you want
+
+✅ Custom payloads filled (or leave blank to use defaults)
+
+✅ Your alert uses Order fills only + {{strategy.order.alert_message}}
+
+
+Aug 31, 2025
+Release Notes
+Fixed a bug
+Sep 1, 2025
+Release Notes
+QBand + Moneyball — S2 & S3 Mode Update
+
+“S2 AND S3” is now truly sequential.
+A trade fires only when S2 (Trigger A) occurs first, then S3 (Trigger B) occurs after S2 within a set time.
+
+Extend Bars (Trigger A) = max S2→S3 gap.
+This value is a bar-based TTL for the sequence:
+
+0 ⇒ S3 must arrive on the same bar as S2.
+
+1 ⇒ Same bar or next bar.
+
+N ⇒ Within N bars after S2.
+(Also bounded by the active Gate window length.)
+
+Auto-reset & repeatable.
+If S3 doesn’t arrive before TTL expires, the sequence resets and waits for a fresh S2. After a fill, the sequence resets and can repeat within the same gate, allowing multiple S2→S3 trades per gate (subject to your Max signals per window cap).
+
+Other trigger modes unchanged.
+“S2 only”, “S3 only”, and “S2 OR S3” behave exactly as before.
+In the sequential mode, the S2→S3 timing is governed by Extend Bars (Trigger A); the Extend Bars (Trigger B) setting still applies to non-sequential modes.
+
+This change makes S2/S3 a clear confluence sequence instead of two independent triggers.

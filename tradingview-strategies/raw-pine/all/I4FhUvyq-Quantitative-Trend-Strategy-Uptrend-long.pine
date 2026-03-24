@@ -1,0 +1,3 @@
+//@version=5
+i_p_width_line=##input(defval=2,type='INPUT_INTEGER',##id='in_12')
+##root(root_metainfo,rm_0,i_p_width_line,input__integer)

@@ -1,0 +1,226 @@
+//@version=5
+strategy("Trend Following S/R Fibonacci Strategy", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, currency=currency.USD)
+
+// ===== Input Parameters =====
+// Trend Settings
+emaFast = input.int(20, "EMA Fast", minval=1)
+emaSlow = input.int(50, "EMA Slow", minval=1)
+atrPeriod = input.int(14, "ATR Period", minval=1)
+atrMultiplier = input.float(2.0, "ATR Multiplier", minval=0.1, step=0.1)
+
+// Support/Resistance Settings
+lookback = input.int(20, "S/R Lookback Period", minval=5)
+srStrength = input.int(3, "S/R Strength", minval=1)
+
+// Fibonacci Settings
+showFiboLevels = input.bool(true, "Show Fibonacci Levels")
+tp1Ratio = input.float(0.236, "TP1 Ratio (23.6%)", minval=0.1, maxval=1.0)
+tp2Ratio = input.float(0.382, "TP2 Ratio (38.2%)", minval=0.1, maxval=1.0)
+tp3Ratio = input.float(0.618, "TP3 Ratio (61.8%)", minval=0.1, maxval=1.0)
+
+// Risk Management
+riskRewardRatio = input.float(1.5, "Risk/Reward Ratio", minval=0.5, step=0.1)
+useATRStop = input.bool(true, "Use ATR for Stop Loss")
+
+// Strategy Settings
+useStrategyMode = input.bool(true, "Use Strategy Mode (Backtesting)")
+positionSize = input.float(10.0, "Position Size (% of Equity)", minval=0.1, maxval=100.0, step=0.1)
+maxPositions = input.int(1, "Max Concurrent Positions", minval=1, maxval=10)
+usePyramiding = input.bool(false, "Allow Pyramiding")
+
+// Display Settings
+showInfoTable = input.bool(true, "Show Info Table")
+tablePosition = input.string("Top Right", "Table Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"])
+tableSize = input.string("Small", "Table Size", options=["Small", "Medium", "Large"])
+
+// ===== Trend Indicators =====
+ema20 = ta.ema(close, emaFast)
+ema50 = ta.ema(close, emaSlow)
+atr = ta.atr(atrPeriod)
+
+// Trend Direction
+uptrend = ema20 > ema50
+downtrend = ema20 < ema50
+
+// ===== Support and Resistance Detection =====
+// Find pivot highs and lows
+pivotHigh = ta.pivothigh(high, srStrength, srStrength)
+pivotLow = ta.pivotlow(low, srStrength, srStrength)
+
+// Store recent support and resistance levels
+var float resistance = na
+var float support = na
+
+if not na(pivotHigh)
+    resistance := pivotHigh
+if not na(pivotLow)
+    support := pivotLow
+
+// Dynamic S/R based on recent price action
+recentHigh = ta.highest(high, lookback)
+recentLow = ta.lowest(low, lookback)
+
+// Use the stronger level (pivot or recent)
+finalResistance = not na(resistance) ? math.max(resistance, recentHigh) : recentHigh
+finalSupport = not na(support) ? math.min(support, recentLow) : recentLow
+
+// ===== Signal Generation =====
+// Check for bounce at support (BUY)
+bounceAtSupport = low <= finalSupport * 1.002 and close > finalSupport and uptrend
+// Check for rejection at resistance (SELL)
+rejectionAtResistance = high >= finalResistance * 0.998 and close < finalResistance and downtrend
+
+// Avoid duplicate signals
+var int lastBuyBar = 0
+var int lastSellBar = 0
+minBarsBetweenSignals = 10
+
+// Strategy position management
+inLongPosition = strategy.position_size > 0
+inShortPosition = strategy.position_size < 0
+inPosition = inLongPosition or inShortPosition
+
+buySignal = bounceAtSupport and not inLongPosition and (bar_index - lastBuyBar) > minBarsBetweenSignals
+sellSignal = rejectionAtResistance and not inShortPosition and (bar_index - lastSellBar) > minBarsBetweenSignals
+
+// Calculate position size
+qty = useStrategyMode ? positionSize : 1.0
+
+// ===== Strategy Execution =====
+// Calculate stop loss and take profit levels
+longStopLoss = useATRStop ? close - (atr * atrMultiplier) : finalSupport - (atr * 0.5)
+shortStopLoss = useATRStop ? close + (atr * atrMultiplier) : finalResistance + (atr * 0.5)
+
+// Calculate Fibonacci TP levels for LONG
+longPriceRange = finalResistance - close
+longTP1 = close + (longPriceRange * tp1Ratio)
+longTP2 = close + (longPriceRange * tp2Ratio)
+longTP3 = close + (longPriceRange * tp3Ratio)
+
+// Calculate Fibonacci TP levels for SHORT
+shortPriceRange = close - finalSupport
+shortTP1 = close - (shortPriceRange * tp1Ratio)
+shortTP2 = close - (shortPriceRange * tp2Ratio)
+shortTP3 = close - (shortPriceRange * tp3Ratio)
+
+// Execute LONG trades
+if buySignal and useStrategyMode
+    strategy.entry("LONG", strategy.long, qty=qty, comment="BUY at Support")
+    strategy.exit("LONG SL", "LONG", stop=longStopLoss, comment="Stop Loss")
+    strategy.exit("LONG TP1", "LONG", limit=longTP1, qty_percent=33, comment="TP1 (23.6%)")
+    strategy.exit("LONG TP2", "LONG", limit=longTP2, qty_percent=33, comment="TP2 (38.2%)")
+    strategy.exit("LONG TP3", "LONG", limit=longTP3, qty_percent=34, comment="TP3 (61.8%)")
+    
+    lastBuyBar := bar_index
+    
+    // Create label for visualization
+    label.new(bar_index, low - atr, "BUY\nEntry: " + str.tostring(close, "#.##") + 
+              "\nSL: " + str.tostring(longStopLoss, "#.##") +
+              "\nTP1: " + str.tostring(longTP1, "#.##") +
+              "\nTP2: " + str.tostring(longTP2, "#.##") +
+              "\nTP3: " + str.tostring(longTP3, "#.##"),
+              color=color.green, style=label.style_label_up, textcolor=color.white, size=size.small)
+
+// Execute SHORT trades
+if sellSignal and useStrategyMode
+    strategy.entry("SHORT", strategy.short, qty=qty, comment="SELL at Resistance")
+    strategy.exit("SHORT SL", "SHORT", stop=shortStopLoss, comment="Stop Loss")
+    strategy.exit("SHORT TP1", "SHORT", limit=shortTP1, qty_percent=33, comment="TP1 (23.6%)")
+    strategy.exit("SHORT TP2", "SHORT", limit=shortTP2, qty_percent=33, comment="TP2 (38.2%)")
+    strategy.exit("SHORT TP3", "SHORT", limit=shortTP3, qty_percent=34, comment="TP3 (61.8%)")
+    
+    lastSellBar := bar_index
+    
+    // Create label for visualization
+    label.new(bar_index, high + atr, "SELL\nEntry: " + str.tostring(close, "#.##") + 
+              "\nSL: " + str.tostring(shortStopLoss, "#.##") +
+              "\nTP1: " + str.tostring(shortTP1, "#.##") +
+              "\nTP2: " + str.tostring(shortTP2, "#.##") +
+              "\nTP3: " + str.tostring(shortTP3, "#.##"),
+              color=color.red, style=label.style_label_down, textcolor=color.white, size=size.small)
+
+// Close positions on trend reversal
+if inLongPosition and downtrend and useStrategyMode
+    strategy.close("LONG", comment="Trend Reversal")
+    label.new(bar_index, high + atr, "EXIT - Trend Reversal", color=color.blue, style=label.style_label_down, textcolor=color.white, size=size.tiny)
+
+if inShortPosition and uptrend and useStrategyMode
+    strategy.close("SHORT", comment="Trend Reversal")
+    label.new(bar_index, low - atr, "EXIT - Trend Reversal", color=color.blue, style=label.style_label_up, textcolor=color.white, size=size.tiny)
+
+// ===== Plotting =====
+// Plot EMAs
+plot(ema20, "EMA 20", color=color.new(color.blue, 0), linewidth=2)
+plot(ema50, "EMA 50", color=color.new(color.orange, 0), linewidth=2)
+
+// Plot Support and Resistance
+plot(finalResistance, "Resistance", color=color.new(color.red, 30), linewidth=2, style=plot.style_line)
+plot(finalSupport, "Support", color=color.new(color.green, 30), linewidth=2, style=plot.style_line)
+
+// Plot position levels when in trade
+plot(inLongPosition ? strategy.position_avg_price : na, "Long Entry", color=color.new(color.yellow, 0), linewidth=2, style=plot.style_cross)
+plot(inShortPosition ? strategy.position_avg_price : na, "Short Entry", color=color.new(color.yellow, 0), linewidth=2, style=plot.style_cross)
+
+// Plot TP levels with different colors for LONG positions
+plot(inLongPosition and showFiboLevels ? longTP1 : na, "Long TP1 (23.6%)", color=color.new(color.lime, 0), linewidth=1, style=plot.style_circles)
+plot(inLongPosition and showFiboLevels ? longTP2 : na, "Long TP2 (38.2%)", color=color.new(color.green, 0), linewidth=1, style=plot.style_circles)
+plot(inLongPosition and showFiboLevels ? longTP3 : na, "Long TP3 (61.8%)", color=color.new(color.teal, 0), linewidth=2, style=plot.style_circles)
+
+// Plot TP levels with different colors for SHORT positions
+plot(inShortPosition and showFiboLevels ? shortTP1 : na, "Short TP1 (23.6%)", color=color.new(color.lime, 0), linewidth=1, style=plot.style_circles)
+plot(inShortPosition and showFiboLevels ? shortTP2 : na, "Short TP2 (38.2%)", color=color.new(color.green, 0), linewidth=1, style=plot.style_circles)
+plot(inShortPosition and showFiboLevels ? shortTP3 : na, "Short TP3 (61.8%)", color=color.new(color.teal, 0), linewidth=2, style=plot.style_circles)
+
+// Background color for trend
+bgcolor(uptrend ? color.new(color.green, 95) : downtrend ? color.new(color.red, 95) : na)
+
+// ===== Alerts =====
+alertcondition(buySignal, "BUY Signal", "BUY Signal at Support - Price: {{close}}")
+alertcondition(sellSignal, "SELL Signal", "SELL Signal at Resistance - Price: {{close}}")
+alertcondition(inLongPosition and high >= longTP1, "Long TP1 Reached", "Long TP1 Target Reached")
+alertcondition(inLongPosition and high >= longTP2, "Long TP2 Reached", "Long TP2 Target Reached")
+alertcondition(inLongPosition and high >= longTP3, "Long TP3 Reached", "Long TP3 Target Reached")
+alertcondition(inShortPosition and low <= shortTP1, "Short TP1 Reached", "Short TP1 Target Reached")
+alertcondition(inShortPosition and low <= shortTP2, "Short TP2 Reached", "Short TP2 Target Reached")
+alertcondition(inShortPosition and low <= shortTP3, "Short TP3 Reached", "Short TP3 Target Reached")
+
+// ===== Info Table =====
+// Determine table position
+tablePos = tablePosition == "Top Left" ? position.top_left : 
+           tablePosition == "Top Right" ? position.top_right :
+           tablePosition == "Bottom Left" ? position.bottom_left : position.bottom_right
+
+// Determine table size
+tableTextSize = tableSize == "Small" ? size.small : tableSize == "Medium" ? size.normal : size.large
+
+var table infoTable = showInfoTable ? table.new(tablePos, 2, 6, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.new(color.gray, 50)) : na
+
+if barstate.islast and showInfoTable
+    table.cell(infoTable, 0, 0, "Trend", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=tableTextSize)
+    table.cell(infoTable, 1, 0, uptrend ? "UP ↑" : downtrend ? "DOWN ↓" : "NEUTRAL", 
+               text_color= uptrend ? color.green : downtrend ? color.red : color.gray, text_size=tableTextSize)
+    
+    table.cell(infoTable, 0, 1, "Position", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=tableTextSize)
+    positionText = inLongPosition ? "LONG" : inShortPosition ? "SHORT" : "NONE"
+    positionColor = inLongPosition ? color.green : inShortPosition ? color.red : color.gray
+    table.cell(infoTable, 1, 1, positionText, text_color=positionColor, text_size=tableTextSize)
+    
+    table.cell(infoTable, 0, 2, "Position Size", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=tableTextSize)
+    table.cell(infoTable, 1, 2, str.tostring(strategy.position_size, "#.##"), text_color=color.yellow, text_size=tableTextSize)
+    
+    table.cell(infoTable, 0, 3, "Resistance", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=tableTextSize)
+    table.cell(infoTable, 1, 3, str.tostring(finalResistance, "#.##"), text_color=color.red, text_size=tableTextSize)
+    
+    table.cell(infoTable, 0, 4, "Support", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=tableTextSize)
+    table.cell(infoTable, 1, 4, str.tostring(finalSupport, "#.##"), text_color=color.green, text_size=tableTextSize)
+    
+    table.cell(infoTable, 0, 5, "ATR", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=tableTextSize)
+    table.cell(infoTable, 1, 5, str.tostring(atr, "#.##"), text_color=color.yellow, text_size=tableTextSize)
+
+View in Pine Editor・218 lines
+Use on chart
+5
+5
+1 503
+Trend Following S/R Fibonacci Strategy 2
+Trend Following S/R Fibonacci Strategy 2

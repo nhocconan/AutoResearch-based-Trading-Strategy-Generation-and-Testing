@@ -1,0 +1,21 @@
+//@version=4
+strategy("Volty Expan Close Strategy", overlay=true)
+length = input(11)
+numATRs = input(0.55)
+
+atrs = sma(tr, length)*numATRs
+
+if (not na(close[length]))
+    strategy.entry("VltClsLE", strategy.long, stop=close+atrs, comment = "VltClsLE")
+    strategy.entry("VltClsSE", strategy.short, stop=close-atrs, comment = "VltClsSE")
+
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+View in Pine Editor・12 lines
+Use on chart
+1
+6
+2
+9
+7 999
+Volty Expan Close Strategy, didnt really do anything except for change the parameters, would like to use a genetic algo to find the best params but i will leave it like this.

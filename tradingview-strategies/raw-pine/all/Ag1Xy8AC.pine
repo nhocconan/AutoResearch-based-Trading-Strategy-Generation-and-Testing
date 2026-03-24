@@ -1,0 +1,121 @@
+//@version=5
+strategy("Visual Pro Trend Master", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04)
+
+// --- Parameter Filter ---
+bbLen      = input.int(20, "Bollinger Period", group="Sideways Filter")
+bbMult     = input.float(2.0, "BB StdDev", group="Sideways Filter")
+adxThresh  = input.int(25, "Min ADX Power", group="Sideways Filter")
+atrLen     = input.int(14, "ATR Period (RR Ratio)", group="Risk Management")
+rrRatio    = input.float(2.0, "Risk:Reward Ratio (1:X)", step=0.1, group="Risk Management")
+
+// --- Perhitungan Indikator ---
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, bbLen, bbMult)
+[diplus, diminus, adx] = ta.dmi(14, 14)
+vwapVal = ta.vwap(close)
+ema9    = ta.ema(close, 9)
+ema21   = ta.ema(close, 21)
+atr     = ta.atr(atrLen)
+
+// --- LOGIKA ANTI-SIDEWAYS ---
+bbWidth = (bbUpper - bbLower) / bbMiddle
+isSqueezing = bbWidth < ta.sma(bbWidth, 20)
+isStrongTrend = adx > adxThresh and adx > adx[1] // ADX harus mendaki
+
+// --- Penentuan Arah Tren Utama ---
+// Jika EMA 9 di atas EMA 21 DAN harga di atas VWAP
+isBullishTrend = ema9 > ema21 and close > vwapVal and isStrongTrend
+// Jika EMA 9 di bawah EMA 21 DAN harga di bawah VWAP
+isBearishTrend = ema9 < ema21 and close < vwapVal and isStrongTrend
+
+// --- Logika Entry 1:2 ---
+longCondition  = ta.crossover(ema9, ema21) and close > vwapVal and not isSqueezing and isStrongTrend
+shortCondition = ta.crossunder(ema9, ema21) and close < vwapVal and not isSqueezing and isStrongTrend
+
+// --- Eksekusi & Kalkulasi RR 1:2 ---
+if (longCondition and strategy.position_size == 0)
+    float sl = close - (atr * 1.5)
+    float tp = close + ((close - sl) * rrRatio)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit", "Long", stop=sl, limit=tp)
+
+if (shortCondition and strategy.position_size == 0)
+    float sl = close + (atr * 1.5)
+    float tp = close - ((sl - close) * rrRatio)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit", "Short", stop=sl, limit=tp)
+
+// --- VISUALISASI CHART LEBIH MENARIK ---
+
+// 1. Dynamic Ribbon Trend (Fill antara EMA)
+p1 = plot(ema9, "Fast EMA", color=color.new(color.aqua, 0), linewidth=2)
+p2 = plot(ema21, "Slow EMA", color=color.new(color.orange, 0), linewidth=2)
+fill(p1, p2, color=isBullishTrend ? color.new(color.lime, 80) : isBearishTrend ? color.new(color.red, 80) : color.new(color.gray, 90), title="Trend Ribbon")
+
+// 2. Candle Color Coding
+barcolor(isBullishTrend ? color.new(color.green, 10) : isBearishTrend ? color.new(color.red, 10) : na)
+
+// 3. Bollinger Band Shading (Zona Volatilitas)
+bbMidPlot = plot(bbMiddle, "BB Middle", color=color.new(color.blue, 50), style=plot.style_line)
+bbUpperPlot = plot(bbUpper, "BB Upper", color=color.new(color.navy, 70), style=plot.style_stepline)
+bbLowerPlot = plot(bbLower, "BB Lower", color=color.new(color.navy, 70), style=plot.style_stepline)
+fill(bbUpperPlot, bbLowerPlot, color=color.new(color.blue, 95), title="Bollinger Band Zone") // Area di antara band
+
+// 4. VWAP Plot
+plot(vwapVal, "VWAP", color=color.new(color.fuchsia, 0), linewidth=2, style=plot.style_linebr, title="Institutional VWAP")
+
+// 5. Dashboard Info (Tetap ada, tapi lebih rapi)
+var table panel = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 70), border_width=1, border_color=color.gray)
+if barstate.islast
+    table.cell(panel, 0, 0, "TREND STATUS", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 0, (isBullishTrend ? "BULLISH ⬆️" : isBearishTrend ? "BEARISH ⬇️" : "SIDEWAYS ↔️"), text_color=(isBullishTrend ? color.lime : isBearishTrend ? color.red : color.gray), text_size=size.small)
+    table.cell(panel, 0, 1, "ADX (Power)", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 1, str.tostring(math.round(adx, 2)), text_color=(adx > adxThresh ? color.lime : color.yellow), text_size=size.small)
+    table.cell(panel, 0, 2, "RR Ratio", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 2, "1:" + str.tostring(rrRatio), text_color=color.aqua, text_size=size.small)
+
+// 6. Label Sinyal
+plotshape(longCondition, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 10), text="BUY", textcolor=color.white, size=size.tiny)
+plotshape(shortCondition, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 10), text="SELL", textcolor=color.white, size=size.tiny)
+
+View in Pine Editor・78 lines
+Use on chart
+1
+8
+1 596
+Scalping Reaper Elite by Herman Sangivera ( Papuan Trader )
+Overview
+Scalping Reaper Elite V5 is a high-precision quantitative trading strategy specifically engineered for scalpers operating on lower timeframes (1m, 3m, 5m). The strategy focuses on execution efficiency with a fixed 1:2 Risk-to-Reward (RR) Ratio, powered by a multi-layered filtration system designed to eliminate "whipsaws" and fake signals commonly found in sideways markets.
+
+By integrating institutional volume confirmation (VWAP), trend momentum (ADX Slope), and dynamic volatility sensing (Bollinger Band Squeeze), this script ensures that entries are only triggered when the market exhibits high-probability directional intent.
+
+Key Technical Features
+Anti-Sideways Engine: Utilizes Bollinger Band Width to calculate market compression. The strategy automatically enters "standby mode" during a Squeeze, filtering out low-volatility traps.
+
+Trend Acceleration Filter: Not only does it check for ADX strength, but it specifically looks for a rising ADX slope. This ensures you enter as momentum is building, not when it is exhausting.
+
+Institutional Alignment (VWAP): Acts as the ultimate trend arbiter. The strategy restricts Long positions to prices above VWAP and Short positions to prices below VWAP.
+
+Dynamic Risk Management (1:2 RR): Stop Loss (SL) is mathematically determined by the Average True Range (ATR) to account for current market noise. The Take Profit (TP) is automatically set at 2x the risk distance.
+
+Professional UI Dashboard: A real-time heads-up display (HUD) in the corner of your chart showing Trend Status, ADX Power, and active Risk Ratios.
+
+Visual Interpretation
+Trend Ribbon (Green/Red): Displays the primary trend zone between EMAs. A gray ribbon indicates a transition or a non-trending phase.
+
+Candle Color Coding: Real-time bar coloring provides instant psychological confirmation of trend strength.
+
+Gray Background Shading: Indicates a Bollinger Squeeze. This is a "No-Trade Zone" where fakeouts are most likely to occur.
+
+Fuchsia Line (VWAP): The "Line in the Sand" for institutional sentiment.
+
+Execution Guide
+Best Timeframes: 1-Minute, 3-Minute, or 5-Minute.
+
+Recommended Assets: High-liquidity pairs such as Gold (XAUUSD), Major Forex (EURUSD, GBPUSD), and Top-tier Crypto (BTCUSDT, ETHUSDT).
+
+Optimization Tips: * Optimal performance is usually seen during the London and New York session overlaps.
+
+Monitor the Dashboard: If ADX Power is below 25, the market lacks the "fuel" needed to hit a 1:2 TP.
+
+Disclaimer
+While this strategy includes advanced risk management and volatility filters, past performance does not guarantee future results. It is highly recommended to paper-trade this strategy first to understand its behavior during high-impact news events.

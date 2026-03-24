@@ -1,0 +1,7 @@
+//@version=4
+##root(root_metainfo,rm_0,'shape_label_up',input__string,plotshape,style)
+##root(root_metainfo,rm_1,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_2,'tiny',const__string,plotshape,size)
+##root(root_metainfo,rm_3,'shape_label_down',input__string,plotshape,style)
+##root(root_metainfo,rm_4,'AboveBar',input__string,plotshape,location)
+##root(root_metainfo,rm_5,'tiny',const__string,plotshape,size)

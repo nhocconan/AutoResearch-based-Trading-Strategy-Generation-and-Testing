@@ -1,0 +1,6 @@
+//@version=5
+thicknesSwitch=##input(defval=1,type='INPUT_INTEGER',##id='in_13')
+transpSwitch=##input(defval=40,type='INPUT_INTEGER',##id='in_14')
+##root(root_metainfo,rm_0,thicknesSwitch,input__integer)
+##root(root_metainfo,rm_1,thicknesSwitch,input__integer)
+##root(root_metainfo,rm_2,transpSwitch,input__integer)

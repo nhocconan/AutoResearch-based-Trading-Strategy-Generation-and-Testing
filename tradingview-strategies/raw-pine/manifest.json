@@ -1,0 +1,26 @@
+[
+  {
+    "url": "https://www.tradingview.com/script/w45uet8E/",
+    "title": "BTC Re-Entry Alpha 1H \u2014 Strategy by laiyanjun8015 \u2014 TradingView",
+    "line_count": 83,
+    "file": "tradingview-strategies/raw-pine/w45uet8E.pine"
+  },
+  {
+    "url": "https://www.tradingview.com/script/nd8EpyQ5-Kinetic-Kalman-Breakout/",
+    "title": "Kinetic Kalman Breakout \u2014 Strategy by egoigor1976 \u2014 TradingView",
+    "line_count": 128,
+    "file": "tradingview-strategies/raw-pine/nd8EpyQ5-Kinetic-Kalman-Breakout.pine"
+  },
+  {
+    "url": "https://www.tradingview.com/script/bE05CfsO-BTC-USD-Quant-Trend-Engine-Long-Only-v3-BTC-USD-4H-Timeframe/",
+    "title": "BTC/USD Quant Trend Engine Long Only v3 - BTC/USD, 4H Timeframe \u2014 Strategy by finnick1111 \u2014 TradingView",
+    "line_count": 203,
+    "file": "tradingview-strategies/raw-pine/bE05CfsO-BTC-USD-Quant-Trend-Engine-Long-Only-v3-BTC-USD-4H-Timeframe.pine"
+  },
+  {
+    "url": "https://www.tradingview.com/script/2o1g6Qo5/",
+    "title": "macd trend \u2014 Strategy by Zhuanxinlianjian \u2014 TradingView",
+    "line_count": 69,
+    "file": "tradingview-strategies/raw-pine/2o1g6Qo5.pine"
+  }
+]

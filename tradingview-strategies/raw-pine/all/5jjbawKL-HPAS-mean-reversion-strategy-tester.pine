@@ -1,0 +1,78 @@
+//@version=5
+strategy("HPAS mean reversion strategy", overlay=true, pyramiding=0, process_orders_on_close=true)
+
+// === CONFIGURABLE MULTIPLIERS ===
+long_tp_mult   = input.float(1.0, "Long TP StdDev Multiplier", step=0.1, minval=0.1)
+long_sl_mult   = input.float(1.0, "Long SL StdDev Multiplier", step=0.1, minval=0.1)
+short_tp_mult  = input.float(1.0, "Short TP StdDev Multiplier", step=0.1, minval=0.1)
+short_sl_mult  = input.float(1.0, "Short SL StdDev Multiplier", step=0.1, minval=0.1)
+
+// ---- HARDCODED TABLE VALUES by weekday (0=Sunday, ... 6=Saturday) ----
+gain_avg     = array.from(1.59, 2.34, 1.98, 2.57, 1.91, 2.03, 0.74)
+gain_stdev   = array.from(1.68, 2.40, 1.55, 2.34, 1.84, 1.89, 0.84)
+loss_avg_abs = array.from(1.22, 1.92, 1.78, 1.67, 1.86, 1.78, 0.66)
+loss_stdev   = array.from(1.32, 1.81, 1.71, 1.29, 1.54, 1.65, 0.98)
+
+// Day-of-week: Sunday=0, ..., Saturday=6
+d = dayofweek - 1
+if d < 0
+    d := 6
+
+// Fetch daily table values
+today_gain    = array.get(gain_avg, d)
+today_gain_sd = array.get(gain_stdev, d)
+today_loss    = array.get(loss_avg_abs, d)
+today_loss_sd = array.get(loss_stdev, d)
+
+// --- Sticky daily open for each UTC day ---
+var float daily_open = na
+if ta.change(time("D"))
+    daily_open := open
+today_open = na(daily_open) ? open : daily_open
+
+// --- Entry and TP/SL calculations using stdev_mult ---
+long_entry  = today_open * (1 - today_loss / 100)
+short_entry = today_open * (1 + today_gain / 100)
+long_tp     = long_entry * (1 + long_tp_mult * today_loss_sd / 100)
+long_sl     = long_entry * (1 - long_sl_mult * today_loss_sd / 100)
+short_tp    = short_entry * (1 - short_tp_mult * today_gain_sd / 100)
+short_sl    = short_entry * (1 + short_sl_mult * today_gain_sd / 100)
+
+// --- One limit order per day logic ---
+year_   = year(time)
+month_  = month(time)
+day_    = dayofmonth(time)
+today_key = year_ * 10000 + month_ * 100 + day_
+
+var int last_trade_key = na
+can_trade_today = na(last_trade_key) or today_key != last_trade_key
+
+// --- Place independent limit orders if flat and it's a new day ---
+if can_trade_today and strategy.position_size == 0
+    strategy.order("Long", strategy.long, limit=long_entry, comment="Long Limit")
+    strategy.order("Short", strategy.short, limit=short_entry, comment="Short Limit")
+    last_trade_key := today_key
+
+// --- Exits by TP/SL (at your level) ---
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", limit=long_tp, stop=long_sl, comment="Long TP/SL")
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", limit=short_tp, stop=short_sl, comment="Short TP/SL")
+
+// --- EOD robust close: always flat on first bar of new UTC day, any timeframe ---
+if ta.change(time("D")) and strategy.position_size != 0
+    strategy.close_all(comment="EOD Close")
+
+// --- Plot for visualization ---
+plot(long_entry,  "Long Entry",  color=color.green)
+plot(long_tp,     "Long TP",     color=color.aqua)
+plot(long_sl,     "Long SL",     color=color.maroon)
+plot(short_entry, "Short Entry", color=color.red)
+plot(short_tp,    "Short TP",    color=color.orange)
+plot(short_sl,    "Short SL",    color=color.purple)
+
+View in Pine Editor・72 lines
+Use on chart
+8
+647
+Takes Krown HPAS values hardcoded and simulates longs and short with configurable standard deviation multiplier TP/SL. Best used on lower timeframes

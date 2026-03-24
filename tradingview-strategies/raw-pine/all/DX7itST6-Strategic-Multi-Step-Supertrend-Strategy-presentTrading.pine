@@ -1,0 +1,196 @@
+//@version=5
+strategy("Strategic Multi-Step Supertrend Trader - Strategy [presentTrading]", overlay=true, precision=3, commission_value=0.1, commission_type=strategy.commission.percent, slippage=1, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000)
+
+// this strategy utilizes a double Supertrend indicator to determine entry and exit conditions for both long and short trades, with user-configurable take profit levels and trade direction settings. 
+// The strategy dynamically updates highest and lowest prices during trades and exits positions based on multi-step profit targets or opposing Supertrend signals.
+
+
+// User inputs for take profit settings
+// Grouping Take Profit settings
+useTakeProfit = input.bool(true, title="Use Take Profit", group="Take Profit Settings")
+takeProfitPercent1 = input.float(6.0, title="Take Profit % Step 1", group="Take Profit Settings")
+takeProfitPercent2 = input.float(12.0, title="Take Profit % Step 2", group="Take Profit Settings")
+takeProfitPercent3 = input.float(18.0, title="Take Profit % Step 3", group="Take Profit Settings")
+takeProfitPercent4 = input.float(50.0, title="Take Profit % Step 4", group="Take Profit Settings")
+
+takeProfitAmount1 = input.float(12, title="Take Profit Amount % Step 1", group="Take Profit Settings")
+takeProfitAmount2 = input.float(8, title="Take Profit Amount % Step 2", group="Take Profit Settings")
+takeProfitAmount3 = input.float(4, title="Take Profit Amount % Step 3", group="Take Profit Settings")
+takeProfitAmount4 = input.float(0, title="Take Profit Amount % Step 4", group="Take Profit Settings")
+
+numberOfSteps = input.int(3, title="Number of Take Profit Steps", minval=1, maxval=4, group="Take Profit Settings")
+
+// Grouping Trade Direction
+tradeDirection = input.string("Both", title="Trade Direction", options=["Long", "Short", "Both"], group="Trade Direction")
+
+// Grouping Supertrend settings
+atrPeriod1 = input(10, title="ATR Length for Supertrend 1", group="Supertrend Settings")
+factor1 = input.float(3.0, title="Factor for Supertrend 1", step=0.01, group="Supertrend Settings")
+
+atrPeriod2 = input(5, title="ATR Length for Supertrend 2", group="Supertrend Settings")
+factor2 = input.float(4.0, title="Factor for Supertrend 2", step=0.01, group="Supertrend Settings")
+
+
+// Function to calculate Supertrend
+supertrend(factor, atrPeriod) =>
+    [_, direction] = ta.supertrend(factor, atrPeriod)
+    direction
+
+// Calculate Double Supertrend
+supertrend1 = supertrend(factor1, atrPeriod1)
+supertrend2 = supertrend(factor2, atrPeriod2)
+
+// Entry conditions
+longCondition = (supertrend1 < 0 and supertrend2 < 0) and (tradeDirection == "Long" or tradeDirection == "Both")
+shortCondition = (supertrend1 > 0 and supertrend2 > 0) and (tradeDirection == "Short" or tradeDirection == "Both")
+
+// Exit conditions
+longExitCondition = (supertrend1 > 0 and supertrend2 > 0) and (tradeDirection == "Long" or tradeDirection == "Both")
+shortExitCondition = (supertrend1 < 0 and supertrend2 < 0) and (tradeDirection == "Short" or tradeDirection == "Both")
+
+// Variables to store the highest and lowest prices during the trade
+var float highestPrice = na
+var float lowestPrice = na
+
+// Get the entry price from open trades
+entryPrice = strategy.opentrades.entry_price(strategy.opentrades - 1)
+
+// Reset highestPrice or lowestPrice when entering new trades
+if (longCondition and strategy.position_size <= 0)
+    highestPrice := na // Reset the highest price
+    strategy.entry("My Long Entry Id", strategy.long) // Enter long position
+    strategy.close("My Short Entry Id", "Short Exit") // Close short position if any
+
+if (shortCondition and strategy.position_size >= 0)
+    lowestPrice := na // Reset the lowest price
+    strategy.entry("My Short Entry Id", strategy.short) // Enter short position
+    strategy.close("My Long Entry Id", "Long Exit") // Close long position if any
+
+// Exit trades based on conditions
+if (longExitCondition and strategy.position_size > 0)
+    strategy.close("My Long Entry Id", "Long Exit") // Exit long position
+
+if (shortExitCondition and strategy.position_size < 0)
+    strategy.close("My Short Entry Id", "Short Exit") // Exit short position
+
+if (strategy.position_size > 0)
+    // Update the highest price for long positions
+    highestPrice := na(highestPrice) ? high : math.max(highestPrice, high)
+
+    // Step 1
+    if (useTakeProfit and numberOfSteps >= 1)
+        strategy.exit("Take Profit 1", from_entry="My Long Entry Id", qty_percent=takeProfitAmount1, limit=entryPrice * (1 + takeProfitPercent1 / 100))
+    // Step 2
+    if (useTakeProfit and numberOfSteps >= 2)
+        strategy.exit("Take Profit 2", from_entry="My Long Entry Id", qty_percent=takeProfitAmount2, limit=entryPrice * (1 + takeProfitPercent2 / 100))
+    // Step 3
+    if (useTakeProfit and numberOfSteps >= 3)
+        strategy.exit("Take Profit 3", from_entry="My Long Entry Id", qty_percent=takeProfitAmount3, limit=entryPrice * (1 + takeProfitPercent3 / 100))
+    // Step 4
+    if (useTakeProfit and numberOfSteps == 4)
+        strategy.exit("Take Profit 4", from_entry="My Long Entry Id", qty_percent=takeProfitAmount4, limit=entryPrice * (1 + takeProfitPercent4 / 100))
+
+if (strategy.position_size < 0)
+    // Update the lowest price for short positions
+    lowestPrice := na(lowestPrice) ? low : math.min(lowestPrice, low)
+
+    // Step 1
+    if (useTakeProfit and numberOfSteps >= 1)
+        strategy.exit("Take Profit 1", from_entry="My Short Entry Id", qty_percent=takeProfitAmount1, limit=entryPrice * (1 - takeProfitPercent1 / 100))
+    // Step 2
+    if (useTakeProfit and numberOfSteps >= 2)
+        strategy.exit("Take Profit 2", from_entry="My Short Entry Id", qty_percent=takeProfitAmount2, limit=entryPrice * (1 - takeProfitPercent2 / 100))
+    // Step 3
+    if (useTakeProfit and numberOfSteps >= 3)
+        strategy.exit("Take Profit 3", from_entry="My Short Entry Id", qty_percent=takeProfitAmount3, limit=entryPrice * (1 - takeProfitPercent3 / 100))
+    // Step 4
+    if (useTakeProfit and numberOfSteps == 4)
+        strategy.exit("Take Profit 4", from_entry="My Short Entry Id", qty_percent=takeProfitAmount4, limit=entryPrice * (1 - takeProfitPercent4 / 100))
+
+View in Pine Editor・108 lines
+Use on chart
+5
+8
+9
+4
+11 198
+The code is mainly developed for me to stimulate the multi-step taking profit function for strategies. The result shows the drawdown can be reduced but at the same time reduced the profit as well. It can be a heuristic for futures leverage traders.
+
+█ Introduction and How it is Different
+
+The "Strategic Multi-Step Supertrend" is a trading strategy designed to leverage the power of multiple steps to optimize trade entries and exits across the Supertrend indicator. Unlike traditional strategies that rely on single entry and exit points, this strategy employs a multi-step approach to take profit, allowing traders to lock in gains incrementally. Additionally, the strategy is adaptable to both long and short trades, providing a comprehensive solution for dynamic market conditions.
+
+This template strategy lies in its dual Supertrend calculation, which enhances the accuracy of trend detection and provides more reliable signals for trade entries and exits. This approach minimizes false signals and increases the overall profitability of trades by ensuring that positions are entered and exited at optimal points.
+
+BTC 6h L/S Performance
+
+
+
+█ Strategy, How It Works: Detailed Explanation
+
+The "Strategic Multi-Step Supertrend Trader" strategy utilizes two Supertrend indicators calculated with different parameters to determine the direction and strength of the market trend. This dual approach increases the robustness of the signals, reducing the likelihood of entering trades based on false signals. Here is a detailed breakdown of how the strategy operates:
+
+🔶 Supertrend Indicator Calculation
+
+The Supertrend indicator is a trend-following overlay on the price chart, typically used to identify the direction of the trend. It is calculated using the Average True Range (ATR) to ensure that the indicator adapts to market volatility. The formula for the Supertrend indicator is:
+
+Upper Band = (High + Low) / 2 + (Factor * ATR)
+Lower Band = (High + Low) / 2 - (Factor * ATR)
+
+Where:
+- High and Low are the highest and lowest prices of the period.
+- Factor is a user-defined multiplier.
+- ATR is the Average True Range over a specified period.
+
+The Supertrend changes its direction based on the closing price in relation to these bands.
+
+🔶 Entry-Exit Conditions
+
+The strategy enters long positions when both Supertrend indicators signal an uptrend, and short positions when both indicate a downtrend. Specifically:
+- Long Condition: Supertrend1 < 0 and Supertrend2 < 0
+- Short Condition: Supertrend1 > 0 and Supertrend2 > 0
+
+- Long Exit Condition: Supertrend1 > 0 and Supertrend2 > 0
+- Short Exit Condition: Supertrend1 < 0 and Supertrend2 < 0
+
+🔶 Multi-Step Take Profit Mechanism
+
+The strategy features a multi-step take profit mechanism, which allows traders to lock in profits incrementally. This is achieved through four user-configurable take profit levels. For each level, the strategy specifies a percentage increase (for long trades) or decrease (for short trades) in the entry price at which a portion of the position is exited:
+- Step 1: Exit a portion of the trade at Entry Price * (1 + Take Profit Percent1 / 100)
+- Step 2: Exit a portion of the trade at Entry Price * (1 + Take Profit Percent2 / 100)
+- Step 3: Exit a portion of the trade at Entry Price * (1 + Take Profit Percent3 / 100)
+- Step 4: Exit a portion of the trade at Entry Price * (1 + Take Profit Percent4 / 100)
+
+This staggered exit strategy helps in locking profits at multiple levels, thereby reducing risk and increasing the likelihood of capturing the maximum possible profit from a trend.
+
+BTC Local
+
+
+
+█ Trade Direction
+
+The strategy is highly flexible, allowing users to specify the trade direction. There are three options available:
+- Long Only: The strategy will only enter long trades.
+- Short Only: The strategy will only enter short trades.
+- Both: The strategy will enter both long and short trades based on the Supertrend signals.
+
+This flexibility allows traders to adapt the strategy to various market conditions and their own trading preferences.
+
+█ Usage
+1. Add the strategy to your trading platform and apply it to the desired chart.
+2. Configure the take profit settings under the "Take Profit Settings" group.
+3. Set the trade direction under the "Trade Direction" group.
+4. Adjust the Supertrend settings in the "Supertrend Settings" group to fine-tune the indicator calculations.
+5. Monitor the chart for entry and exit signals as indicated by the strategy.
+
+█ Default Settings
+
+- Use Take Profit: True
+- Take Profit Percentages: Step 1 - 6%, Step 2 - 12%, Step 3 - 18%, Step 4 - 50%
+- Take Profit Amounts: Step 1 - 12%, Step 2 - 8%, Step 3 - 4%, Step 4 - 0%
+- Number of Take Profit Steps: 3
+- Trade Direction: Both
+- Supertrend Settings: ATR Length 1 - 10, Factor 1 - 3.0, ATR Length 2 - 11, Factor 2 - 4.0
+
+These settings provide a balanced starting point, which can be customized further based on individual trading preferences and market conditions.
+

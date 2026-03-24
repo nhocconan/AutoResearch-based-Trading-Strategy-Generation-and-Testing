@@ -1,0 +1,55 @@
+//@version=4
+strategy("Cryptopians - MA Trading Strategy", shorttitle="MA Trading Strategy", overlay=true)
+
+ha_symbol = heikinashi(syminfo.tickerid)
+ha_period = "D"
+
+ha_open = security(ha_symbol, ha_period, open)
+ha_close = security(ha_symbol, ha_period, close)
+
+fast = sma(close, 10)
+slow = sma(close, 20)
+
+plot(fast, color=color.green, linewidth=3, editable=false)
+plot(slow, color=color.red, linewidth=3, editable=false)
+
+long_condition = ha_close > fast
+long_exit_condition = ha_close < ha_open
+
+short_condition = ha_close < fast
+short_exit_condition = ha_close > ha_open
+
+strategy.entry("long", strategy.long, when=long_condition, comment="LONG")
+strategy.close("long", when=long_exit_condition)
+
+strategy.entry("short", strategy.short, when=short_condition, comment="SHORT")
+strategy.close("short", when=short_exit_condition)
+
+View in Pine Editor・26 lines
+Use on chart
+3
+4
+1 641
+Aug 28, 2019
+Simple moving average trading strategy.
+
+Based on:
+
+10 MA
+
+20 MA
+
+Daily timeframe
+
+Sep 2, 2019
+Release Notes
+Sharper entries and exits
+Sep 2, 2019
+Release Notes
+Added short signal
+Sep 2, 2019
+Release Notes
+Use fixed daily period in script (as this strategy is only applied to daily charts)
+Sep 2, 2019
+Release Notes
+Add long & short labels

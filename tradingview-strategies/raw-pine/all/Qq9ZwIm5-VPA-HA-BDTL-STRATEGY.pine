@@ -1,0 +1,475 @@
+//@version=6
+strategy("VPA + BDTL + VOLUME v10.0", overlay=true, calc_on_every_tick=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// ==========================================
+// 1. 🛠️ SETTINGS
+// ==========================================
+grp_vpa = "VPA Sniper Settings"
+vol_multiplier  = input.float(1.2, "Volume Spike Factor", step=0.1, group=grp_vpa)
+spread_mult     = input.float(1.1, "Wide Spread Factor", step=0.1, group=grp_vpa)
+
+grp_dtl = "Structural DTL Settings"
+pivot_lookback  = input.int(10, "DTL Pivot Strength", minval=3, group=grp_dtl)
+
+grp_trade = "Trade Management"
+tsl_mult        = input.float(2.0, "TSL Sensitivity (ATR Mult)", step=0.1, group=grp_trade)
+
+grp_vis = "Dashboard & Visuals"
+dash_pos_input  = input.string("Top Right", "Dashboard Position", options=["Top Right", "Middle Right", "Bottom Right", "Top Left", "Middle Left", "Bottom Left"], group=grp_vis)
+
+// ==========================================
+// 2. 📊 GLOBAL MATH (CALCULATED EVERY BAR)
+// ==========================================
+vol_avg = ta.sma(volume, 20)
+is_high_vol = volume > (vol_avg * vol_multiplier)
+spread = high - low
+avg_spread = ta.sma(spread, 20)
+is_wide_spread = spread > (avg_spread * spread_mult)
+is_narrow_spread = spread < (avg_spread * 0.7)
+
+// Indicators
+rsi_val = ta.rsi(close, 14)
+ema_slow = ta.ema(close, 50)
+atr = ta.atr(14)
+
+// VPA Logic (Anna Coulling)
+vpa_bull_valid = (close > open) and is_high_vol and is_wide_spread
+vpa_bear_valid = (close < open) and is_high_vol and is_wide_spread
+vpa_squat_anomaly = is_high_vol and is_narrow_spread
+
+// Wick Pressure Logic
+body_size = math.abs(close - open)
+lower_wick = math.min(open, close) - low
+upper_wick = high - math.max(open, close)
+bool buying_pressure = lower_wick > (body_size * 2) and is_high_vol
+bool selling_pressure = upper_wick > (body_size * 2) and is_high_vol
+
+// Trend Strength Logic
+ema_slope = (ema_slow - ema_slow[5]) / ema_slow[5] * 100
+string trend_strength = ema_slope > 0.1 ? "STRONG BULL" : ema_slope > 0 ? "WEAK BULL" : ema_slope > -0.1 ? "WEAK BEAR" : "STRONG BEAR"
+color trend_color = ema_slope > 0.1 ? color.green : ema_slope > 0 ? color.lime : ema_slope > -0.1 ? color.orange : color.red
+
+// ==========================================
+// 3. 📐 STRUCTURAL DTL MATH (GLOBAL)
+// ==========================================
+float ph = ta.pivothigh(high, pivot_lookback, pivot_lookback)
+var float p1_y = na, var int p1_x = na
+var float p2_y = na, var int p2_x = na
+
+if not na(ph)
+    p2_y := p1_y
+    p2_x := p1_x
+    p1_y := ph
+    p1_x := bar_index[pivot_lookback]
+
+bool dtl_exists = not na(p1_y) and not na(p2_y) and p1_y < p2_y
+float slope = dtl_exists ? (p1_y - p2_y) / (p1_x - p2_x) : na
+float dtl_current_price = dtl_exists ? p1_y + (slope * (bar_index - p1_x)) : na
+
+// Global crossover calculation to avoid compiler warnings
+bool is_crossing_dtl = ta.crossover(close, dtl_current_price)
+bool dtl_breakout_confirmed = dtl_exists and is_crossing_dtl
+
+// Trendline Drawing
+var line trend_line = na
+if dtl_exists
+    line.delete(trend_line)
+    trend_line := line.new(p2_x, p2_y, bar_index, dtl_current_price, color=color.new(color.red, 30), width=2, style=line.style_dashed, extend=extend.right)
+
+// ==========================================
+// 4. 🎯 STRATEGY EXECUTION & ALERTS
+// ==========================================
+buy_signal = vpa_bull_valid and dtl_breakout_confirmed and (ema_slope > -0.05)
+
+float long_stop_calc = close - (atr * tsl_mult)
+var float tsl_price = na
+
+if strategy.position_size > 0
+    tsl_price := math.max(na(tsl_price) ? 0 : tsl_price, long_stop_calc)
+else
+    tsl_price := na
+
+// Strategy Execution with Dynamic Alerts
+if buy_signal
+    strategy.entry("Sniper Long", strategy.long, alert_message = "BUY ALERT: " + syminfo.ticker + " VPA+DTL Breakout confirmed at " + str.tostring(close))
+
+if strategy.position_size > 0
+    if (close < tsl_price) or vpa_bear_valid
+        msg = vpa_bear_valid ? "VPA Bearish Exit" : "Trailing Stop Triggered"
+        strategy.close("Sniper Long", comment=msg, alert_message = "EXIT ALERT: " + syminfo.ticker + " " + msg)
+
+// ==========================================
+// 5. 🎨 VISUALS & DASHBOARD
+// ==========================================
+plot(ema_slow, "Institutional Trend", color=trend_color, linewidth=2)
+plot(not na(tsl_price) ? tsl_price : na, "TSL", color=color.red, style=plot.style_linebr, linewidth=2)
+
+// Candle Painting
+color bar_col = vpa_squat_anomaly ? color.orange : vpa_bull_valid ? #00ffbb : vpa_bear_valid ? #ff1155 : na
+barcolor(bar_col)
+
+// Labels
+plotshape(dtl_breakout_confirmed, "DTL Break", shape.triangleup, location.belowbar, color=color.yellow, size=size.small, text="VPA+DTL")
+plotshape(vpa_squat_anomaly, "Squat", shape.labeldown, location.abovebar, color=color.orange, text="SQUAT", textcolor=color.white, size=size.small)
+plotshape(buying_pressure, "Buy Pressure", shape.triangleup, location.belowbar, color=color.green, size=size.tiny)
+plotshape(selling_pressure, "Sell Pressure", shape.triangledown, location.abovebar, color=color.red, size=size.tiny)
+
+// Comprehensive Dashboard
+var table dash = table.new(dash_pos_input == "Top Right" ? position.top_right : position.bottom_right, 2, 8, bgcolor=color.new(color.black, 40), border_width=1)
+if barstate.islast
+    sz = size.small
+    table.cell(dash, 0, 0, "MASTER VPA v10.0", text_color=color.white, bgcolor=color.blue, text_size=sz)
+    table.cell(dash, 1, 0, str.tostring(timeframe.period) + "M", text_color=color.white, bgcolor=color.blue, text_size=sz)
+    table.cell(dash, 0, 1, "RSI (14)", text_color=color.white, text_size=sz)
+    table.cell(dash, 1, 1, str.tostring(rsi_val, "#.##"), bgcolor=rsi_val > 70 ? color.red : rsi_val < 30 ? color.green : color.gray, text_color=color.white, text_size=sz)
+    table.cell(dash, 0, 2, "Trend Strength", text_color=color.white, text_size=sz)
+    table.cell(dash, 1, 2, trend_strength, bgcolor=trend_color, text_color=color.white, text_size=sz)
+    table.cell(dash, 0, 3, "VPA Status", text_color=color.white, text_size=sz)
+    vpa_label = vpa_squat_anomaly ? "SQUAT TRAP" : vpa_bull_valid ? "VALID BULL" : vpa_bear_valid ? "VALID BEAR" : "NEUTRAL"
+    table.cell(dash, 1, 3, vpa_label, bgcolor=vpa_squat_anomaly ? color.orange : vpa_bull_valid ? color.green : vpa_bear_valid ? color.red : color.gray, text_color=color.white, text_size=sz)
+    table.cell(dash, 0, 4, "AI Suggestion", text_color=color.white, text_size=sz)
+    table.cell(dash, 1, 4, buy_signal ? "BUY NOW" : vpa_squat_anomaly ? "CAUTION" : "WAIT", bgcolor=buy_signal ? color.green : vpa_squat_anomaly ? color.orange : color.black, text_color=color.white, text_size=sz)
+
+View in Pine Editor・131 lines
+Use on chart
+5
+1
+1 133
+Feb 21
+VPA + HA + BDTL STRATEGY: Institutional Breakout with Volume
+
+The Philosophy
+Most retail traders lose money because they trade the "noise." They buy random dips, get shaken out by tiny red wicks, and completely ignore the footprint of institutional money (Volume).
+
+Designed for traders who want to treat the markets like a highly structured business, this script fuses three of the most powerful concepts in quantitative trading into one automated system: Anna Coulling's Volume Price Analysis (VPA), Heikin Ashi (HA) Trend Smoothing, and Automated Structural Down-Trend Line (DTL) Breakouts.
+
+This is not a "get rich quick" indicator. It is a highly restrictive "Sniper" system that forces you to sit on your hands until the perfect storm of Price Action, Momentum, and Volume aligns.
+
+🏛️ The Three Pillars of the Engine
+
+
+1. Heikin Ashi (HA) Momentum Filtering
+Standard candlesticks lie to you with volatility. This script calculates Heikin Ashi values internally to find the "pure" trend.
+
+It explicitly scans for "Flat Bottoms" (zero lower wicks on green candles) to confirm maximum bullish momentum.
+
+It features a "Trend Life Counter" that tracks the exact age of a trend, keeping you out of exhausted, late-stage FOMO entries.
+
+2. Volume Price Analysis (VPA) Validation
+A breakout without volume is a trap. The script uses a customizable Volume Threshold (default 1.2x the 20-day SMA).
+
+Effort vs. Result: A buy signal will not fire unless the institutional effort (Volume Spike) matches the result (Price Breakout).
+
+3. Automated Structural DTL (Down-Trend Line)
+Forget manually drawing subjective lines. The script's array scanner memorizes the last 5 major pivot highs, identifies the absolute peak (Anchor), finds the next prominent lower high (Trigger), and draws a structural, diagonal resistance line extending into the future.
+
+🧰 Key Features & Visual Toolkit
+The Pro Dashboard: A fully customizable, 6-position heads-up display. It gives you live intelligence on the HA Trend Life, DTL Status, Volume Strength, RSI (14), and an AI-driven "Action Plan" (e.g., EXECUTE BUY, HOLD POSITION, STAY OUT).
+
+Dynamic Institutional Volume Scaler: Overlays scaled volume bars and a Volume Moving Average directly onto the bottom 15% of your price chart, allowing you to read the tape without taking your eyes off the price action.
+
+Smart Hybrid Mode: If a stock goes parabolic and no downward structure exists, the script automatically defaults to a 50 EMA baseline filter so you never miss a primary trend entry.
+
+🎯 The Sniper Playbook (How to Trade It)
+The Long Entry (Buy):
+Wait for the Green "BUY HA" label to appear below the candle. This guarantees:
+
+Price has shattered the Red Dashed DTL (or the 50 EMA in hybrid mode).
+
+The Volume Bar is spiking above its moving average.
+
+The internal Heikin Ashi candle is Green with a perfect Flat Bottom.
+(Pro Tip: Check the Dashboard. Only take entries if the "HA Trend Life" is young, ideally between 1 and 5 bars).
+
+The Exit (Sell):
+Wait for the Red "SELL HA" label. This triggers when:
+
+The Heikin Ashi trend flips Red with a "Flat Top".
+
+Volume validates the selling pressure.
+
+Price breaks down below the structural EMA trend.
+
+⚙️ Customization
+This script is built to adapt to your specific market (Crypto, US Tech, or Bursa Malaysia). Open the settings to adjust the Volume Spike Factor (lower it for illiquid stocks, raise it for volatile ones) or toggle the Wick Tolerance for markets prone to micro-wicks.
+
+(Disclaimer: This script is an analytical tool, not financial advice. Always use strict risk management and backtest thoroughly on your specific tickers before deploying real capital.)
+
+#VPA #VolumePriceAnalysis #HeikinAshi #Trendline #BreakoutStrategy #SwingTrading #RSI #EMA #SmartMoney #SniperEntry #AlgorithmicTrading #TrendLife
+Feb 21
+Release Notes
+Renaming.
+Feb 22
+Release Notes
+Look at Row 3 on the Dashboard. It is now labeled "Raw Volume". The script intercepts the exact numerical volume traded on that specific candle, abbreviates it cleanly (e.g., 2.3M or 500K), and evaluates whether it breached your custom moving average threshold in real time.
+Feb 22
+Release Notes
+Master Configuration: How to Tune Your Settings
+
+Open the indicator settings (click the gear icon next to the script name) to access your control panel. Here is exactly what every dial and switch does.
+
+1. Signal Sensitivity (The Core Engine)
+
+This section controls how strict the algorithm is before it allows a "BUY" or "SELL" signal to print.
+
+Require DTL for Buy? (Checkbox):
+
+What it does: By default, this is OFF. When OFF, the script acts as a hybrid: it will trigger a buy if price breaks the Diagonal Down-Trend Line (DTL) OR if it breaks above the baseline EMA.
+
+When to turn it ON: Check this box if you want maximum safety. It forces the script to only buy if a mathematical, multi-point Down-Trend Line exists and is broken. Use this for highly structured swing trades.
+
+Volume Spike Factor (Number, Default: 1.2):
+
+What it does: This dictates how much "Institutional Effort" is required. A value of 1.2 means volume must be 20% higher than the 20-day average. A value of 2.0 means volume must be double the average.
+
+How to tune it: For highly liquid, noisy stocks (like Tesla or Capital A), raise this to 1.5 or 1.8 to filter out fake retail volume. For slower, heavy stocks, leave it at 1.2.
+
+Allow Tiny Wicks? (Checkbox):
+
+What it does: Pure Heikin Ashi theory demands a completely flat bottom (zero lower wick) for a strong uptrend. However, live data feeds often have 1-cent micro-wicks that ruin the signal. This setting mathematically forgives these microscopic errors.
+
+Recommendation: Leave this ON for 99% of your trading.
+
+2. Trend Detection (The Structural Framework)
+
+This section controls how the script maps the architecture of the chart.
+
+Pivot Lookback (Number, Default: 10):
+
+What it does: Tells the array scanner how far left to look to find the major "Peaks" (Pivot Highs) to draw the red dashed Down-Trend Line.
+
+How to tune it: If the red trendline is drawing too erratically, increase this number to 15 or 20. This forces the script to ignore minor bumps and only connect major, multi-week structural highs.
+
+Fallback EMA Trend (Number, Default: 50):
+
+What it does: Determines the length of the yellow baseline trend (Exponential Moving Average). This is your safety net when a stock is moving sideways or parabolic and a DTL cannot be drawn.
+
+How to tune it: 50 is the institutional standard for medium-term swing trading. Change it to 20 for aggressive day-trading or 200 for long-term investing.
+
+3. Dashboard Settings (The Command Center)
+
+Keep your workspace clean. You need to see the price action without data blocking your view.
+
+Position (Dropdown): Move the Master's Dashboard to any of the 6 corners/sides of your screen (Top Right, Bottom Left, Middle Right, etc.).
+
+Size (Dropdown): Choose between Tiny, Small, or Normal. Pro Tip: If you are trading on the TradingView mobile app, set this to "Tiny" so it doesn't cover your candles.
+
+4. Visual Enhancements (The Tape)
+
+Show Integrated Volume Sub-Chart? (Checkbox):
+
+What it does: Toggles the Dynamic Volume Scaler on or off. When ON, it mathematically shrinks the volume bars and the moving average line to fit perfectly into the bottom 15% of your chart.
+
+Recommendation: Keep this ON to visualize the "Effort" without needing to open a separate, screen-wasting volume indicator at the bottom of your monitor.
+
+👨‍🏫 A Final Word from the Developer
+
+Do not fall into the trap of "overfitting." When you backtest this strategy, do not tweak the Volume Spike Factor to 1.47 just because it gave you a 100% win rate in 2024. Markets change. Find robust, logical whole numbers that perform well across all market conditions, and trust and follow whatever SOP you are currently using. This is just to guide you.
+Feb 25
+Release Notes
+UPDATED GUIDE-THROUGH
+
+PURE VPA + DTL STRATEGY: Anna Coulling Tape Reader
+
+The Philosophy: Why We Removed the Averages
+
+Retail traders rely on lagging indicators and smoothed averages to tell them what the market did. Institutional traders read the tape to see what the market is doing right now.
+
+This upgraded algorithm strips away all lagging price-smoothing techniques. It is built purely on Anna Coulling’s Volume Price Analysis (VPA) and Automated Structural Down-Trend Line (DTL) Breakouts. It reads the raw, unfiltered footprint of institutional money by constantly measuring the Effort (Volume) against the Result (Candle Spread).
+
+If the Billionaires are accumulating or distributing, they cannot hide their volume. This script forces you to trade alongside them.
+
+🏛️ The Core Engine: Pure VPA
+1. VPA Validation (The True Breakout)
+A breakout is only valid if the Effort matches the Result.
+
+If the script detects a massive Volume Spike (High Effort) combined with a Wide Spread Candle (Massive Result) breaking through structural resistance, it paints the candle Deep Blue and issues a BUY signal.
+
+2. VPA Anomaly Detection (The "Squat" / Trap)
+This is where retail traders get trapped. If volume explodes (Massive Effort) but the candle spread is tiny (No Result), it means the market makers are absorbing the move.
+
+The script instantly flags this as an "Anomaly," paints the candle Orange, and prints a "SQUAT" warning label above the price. It stops you from buying the top or shorting the bottom.
+
+3. Automated Structural DTL (Down-Trend Line)
+The script’s internal array scanner memorizes the last 5 major pivot highs. It dynamically identifies the absolute peak (Anchor) and the next prominent lower high (Trigger) to draw a structural, diagonal resistance line extending into the future. You only buy when this roof is shattered with validated VPA.
+
+🧰 The Pro Visual Toolkit
+The Pure VPA Dashboard: A fully customizable, 6-position heads-up display. It reads the exact raw volume (e.g., 15.2M), measures the spread, and prints a definitive "VPA Verdict" (Valid Bull, Valid Bear, or Anomaly) in real-time. It also provides an AI-driven Action Plan.
+
+Dynamic Institutional Volume Scaler: Overlays scaled volume bars and a Volume Moving Average directly onto the bottom 15% of your price chart. Teal bars indicate bullish volume, Maroon indicates bearish volume.
+
+Smart Hybrid Mode: If a stock goes parabolic and no downward structure exists to draw a DTL, the script automatically defaults to a 50 EMA baseline filter so you never miss a primary trend entry.
+
+🎯 How to Trade Like a Sniper
+The Long Entry (Buy):
+Wait for the "BUY (VPA)" label. This guarantees:
+
+Price has closed above the Red Dashed DTL (or the 50 EMA).
+
+The Volume Bar is spiking above its moving average (High Effort).
+
+The Candle Spread is wide (High Result).
+
+The Trap Warning (Hold/Avoid):
+If you see an Orange Candle with an "X SQUAT" label, sit on your hands. The institutional money is fighting the retail money, and the trend is likely about to reverse or consolidate.
+
+The Exit (Sell):
+Wait for the "SELL (VPA)" label. This triggers when price drops below the structural EMA with validated Bearish VPA (High Sell Volume + Wide Red Spread).
+
+⚙️ Customization
+Adapt the engine to your market. Open the settings to adjust the Volume Spike Factor (lower it for illiquid stocks, raise it for noisy/volatile stocks) and the Wide Spread Factor to tighten your validation rules.
+
+Applying the "Wide Spread Factor"
+
+This is the dial you control in the settings. By default, I set it to 1.2.
+
+The script takes the baseline (RM 0.10) and multiplies it by 1.2.
+
+The new target is RM 0.12.
+
+The Rule: For the script to validate a breakout and paint the candle Deep Blue (a confirmed BUY), today's candle spread must be larger than RM 0.12.
+
+In the stock market, if you see a massive Volume Spike but the candle is tiny (a narrow spread), it means the Market Movers are hitting a brick wall. They are buying heavily, but someone else is selling just as heavily to keep the price flat. This is a trap. By adjusting the Wide Spread Factor, you are telling the script exactly how big the "Result" needs to be before you are willing to risk your capital.
+
+If you set it to 1.0: The spread just needs to be above average. (More aggressive, more signals).
+
+If you set it to 1.5: The spread must be 50% larger than normal. (Very strict, sniper-only signals).
+
+(Disclaimer: This script is an analytical quantitative tool, not financial advice. Always use strict risk management and backtest thoroughly on your specific tickers before deploying real capital.)
+
+#VPA #VolumePriceAnalysis #AnnaCoulling #Trendline #BreakoutStrategy #SwingTrading #SmartMoneyConcepts #SniperEntry #AlgorithmicTrading #TapeReading #OrderFlow
+Feb 25
+Release Notes
+The Professional Philosophy
+
+In the top-tier world of intraday and swing trading, price action alone is a lie. To find the "Truth," you must look at the Effort vs. Result. This script is the ultimate manifestation of Anna Coulling’s Volume Price Analysis (VPA), designed to identify where Billionaires are entering and where they are trapping retail traders.
+
+This engine doesn't just look for breakouts; it looks for Validated Structural Shifts. By combining automated Diagonal Down-Trend Lines (DTL) with raw VPA, we ensure we only enter when the "Roof" is broken by massive institutional force.
+
+The Three Pillars of Execution
+
+1. Pure VPA Validation (Effort vs. Result)
+
+Every candle is analyzed for its spread (Result) relative to its volume (Effort).
+
+Blue Candles (Valid Bull): High Volume + Wide Spread. Institutions are aggressively buying.
+
+Maroon Candles (Valid Bear): High Volume + Wide Spread. Institutions are aggressively selling.
+
+Orange Candles (The Squat Anomaly): High Volume + Narrow Spread. This is a Trap. Massive institutional effort is being absorbed. If seen at the top, it’s Distribution; at the bottom, it’s Accumulation.
+
+2. Automated Structural DTL (The Breakout)
+
+The script’s internal array scanner memorizes major pivot highs to draw a mathematical diagonal resistance.
+
+A "DTL BREAK" signal only fires when the price shatters this resistance on high volume. This is the "Moment of Truth" that separates a dead-cat bounce from a true trend reversal.
+
+3. Dynamic Trend Strength (The CEO View)
+
+The script calculates the mathematical slope of the 50 EMA.
+
+Strong Bull: Billionaires are in full control.
+
+Strong Bear: Stay away. Even a VPA signal is risky in a crashing market.
+
+The 50 EMA changes color dynamically to show you the "Path of Least Resistance."
+
+The Pro Dashboard & Visuals
+
+
+VPA Status: Instantly tells you if the current tape is Valid Bull, Valid Bear, or a Squat Trap.
+
+Trend Strength: Measures the momentum angle so you don't trade against the macro trend.
+
+ATR Trailing Stop (TSL): A red volatility-adjusted line that protects your capital. It tightens during intraday noise and widens for long-term swing runs.
+
+Buying/Selling Pressure: Triangle markers identify long-wick rejections where institutions absorbed orders at the highs or lows.
+
+How to Trade This Strategy
+
+The "Champion" Long Entry:
+
+A Yellow Triangle appears with a "VPA+DTL" label.
+
+The candle is Blue (Validated Bull).
+
+The Trend Strength is at least "Weak Bull" or better.
+
+Action: Enter Long. The TSL will automatically appear to protect your risk.
+
+The "Trap" Warning (Avoidance):
+
+An Orange Candle appears with a "SQUAT" label.
+
+The Dashboard switches to "CAUTION."
+
+Action: Do not enter. If you are holding, tighten your stops. The institutions are battling and the direction is uncertain.
+
+Master Manual: Settings & Calibration
+
+1. VPA Sniper Settings (The "Engine" Calibration)
+
+This section controls how the script interprets the relationship between Effort (Volume) and Result (Price).
+
+Volume Spike Factor (Default: 1.2)
+
+Function: Determines the "Effort" threshold. A value of 1.2 means the current volume must be 20% higher than the 20-day average.
+
+How to Use: * Intraday (30m): Keep at 1.1–1.2. Intraday volume is erratic; you need to see spikes quickly.
+
+Swing (Daily): Increase to 1.5. This filters out "retail noise" and ensures only true institutional "Smart Money" triggers the signal.
+
+Wide Spread Factor (Default: 1.1)
+
+Function: Measures the "Result." It compares the current candle's range (High to Low) against the 20-day average spread.
+
+How to Use: * If the market is "choppy," increase this to 1.3. This forces the script to only label candles that show a definitive, wide-ranging move, ignoring small, indecisive candles.
+
+2. Structural DTL Settings (The "Geometry" Calibration)
+
+This manages the automated detection of the "Roof" (Down Trend-Line).
+
+DTL Pivot Strength (Default: 10)
+
+Function: Defines the "significance" of a peak. A value of 10 means the script looks for a high that is the highest in a 21-candle window (10 before, 10 after).
+
+How to Use: * Intraday (30m): Lower to 5–8. Market structures form faster on lower timeframes.
+
+Swing (Daily): Increase to 15–20. This ensures the trendline is drawn across major, macro peaks that the entire market is watching.
+
+3. Trade Management (The "Guardian" Calibration)
+
+
+This is your safety net. It converts a raw signal into a managed trade.
+
+Activate Trailing Stop? (Checkbox)
+
+Function: Toggles the red ATR-based trailing line. When price closes below this line, the strategy exits.
+
+TSL Sensitivity (ATR Mult) (Default: 2.0)
+
+Function: Determines how much "breathing room" you give the stock. It uses the Average True Range (ATR) to calculate volatility.
+
+How to Use: * Day Trading (Intraday): Use 1.5. You want to lock in profits fast and exit if the momentum stalls.
+
+Swing Trading: Use 3.0–3.5. This allows the stock to have minor pullbacks or "shakeouts" without kicking you out of a long-term winner.
+
+4. Dashboard & Visuals (The "Command Center")
+
+Your chart should be clean enough for a CEO to read in 5 seconds.
+
+Dashboard Position (Dropdown)
+
+Function: Moves the data matrix to any of the 6 corners/sides of the chart.
+
+Pro Tip: If you trade on a phone, use "Bottom Right" or "Top Left" to stay clear of the price scale.
+
+(Disclaimer: This is a quantitative tool for experienced traders. Always backtest on your specific tickers—like Bursa Malaysia or NASDAQ—before deploying real capital. Use strict risk management.)
+
+#VPA #VolumePriceAnalysis #AnnaCoulling #DTL #Breakout #TapeReading #OrderFlow #IntradayTrading #SwingTrading #SmartMoneyConcepts #SniperEntry #TechnicalAnalysis
+Mar 4
+Release Notes
+Putting alert functionalities.
+Mar 4
+Release Notes
+Re-update codes including alerts.

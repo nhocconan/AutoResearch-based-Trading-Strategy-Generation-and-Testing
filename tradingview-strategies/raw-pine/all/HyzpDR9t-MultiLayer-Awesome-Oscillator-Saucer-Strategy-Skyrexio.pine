@@ -1,0 +1,345 @@
+//@version=6
+//_______ <licence>
+strategy(title = "MultiLayer Awesome Oscillator Saucer Strategy [Skyrexio]", 
+         shorttitle = "AO Saucer", 
+         overlay = true, 
+         format = format.inherit, 
+         pyramiding = 5, 
+         calc_on_order_fills = false, 
+         calc_on_every_tick = false, 
+         default_qty_type = strategy.percent_of_equity, 
+         default_qty_value = 10, 
+         initial_capital = 10000, 
+         currency = currency.NONE,  
+         commission_type = strategy.commission.percent, 
+         commission_value = 0.1,
+         slippage = 5,
+         use_bar_magnifier = true)
+
+
+//_______ <constant_declarations>
+var const color skyrexGreen               = color.new(#2ECD99, 0)
+var const color skyrexGray                = color.new(#F2F2F2, 0)
+var const color skyrexWhite               = color.new(#FFFFFF, 0)
+
+
+//________<variables declarations>
+var int trend                             = 0
+var float upFractalLevel                  = na
+var float upFractalActivationLevel        = na
+var float downFractalLevel                = na
+var float downFractalActivationLevel      = na
+var float saucerActivationLevel           = na
+bool highCrossesUpfractalLevel            = ta.crossover(high, upFractalActivationLevel)
+bool lowCrossesDownFractalLevel           = ta.crossunder(low, downFractalActivationLevel)
+var int signalsQtyInRow                   = 0
+
+
+//_______ <inputs>
+// Trading bot settings
+sourceUuid               = input.string(title = "sourceUuid:", defval = "yourBotSourceUuid", group = "🤖Trading Bot Settings🤖")
+secretToken              = input.string(title = "secretToken:", defval = "yourBotSecretToken", group = "🤖Trading Bot Settings🤖")
+
+
+// Trading period settings
+lookBackPeriodStart      = input.time(title = "Trade Start Date/Time", defval = timestamp('2023-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+lookBackPeriodStop       = input.time(title = "Trade Stop Date/Time", defval = timestamp('2025-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+
+
+// Strategy settings
+EMaLength                = input.int(100, minval = 10, step = 10, title = "EMA Length", group = "📈Strategy settings📈")
+
+
+//_______ <function_declarations>
+//@function       Used to calculate Simple moving average for Alligator
+//@param src      Sourse for smma Calculations
+//@param length   Number of bars to calculate smma
+//@returns        The calculated smma value 
+smma(src, length) =>
+    var float smma = na
+    sma_value = ta.sma(src, length)
+    smma := na(smma) ? sma_value : (smma * (length - 1) + src) / length
+    smma
+
+//_______ <calculations>
+
+
+//Upfractal calculation 
+upFractalPrice = ta.pivothigh(2, 2)
+upFractal = not na(upFractalPrice) 
+
+
+//Downfractal calculation 
+downFractalPrice = ta.pivotlow(2, 2)
+downFractal = not na(downFractalPrice)
+
+
+//Calculating Alligator's teeth 
+teeth = smma(hl2, 8)[5]
+
+
+//Calculating upfractal and downfractal levels
+if upFractal 
+    upFractalLevel := upFractalPrice
+else
+    upFractalLevel := upFractalLevel[1]
+
+
+if downFractal
+    downFractalLevel := downFractalPrice
+else
+    downFractalLevel := downFractalLevel[1]
+
+
+//Calculating upfractal activation level, downfractal activation level to approximate the trend and this current trend 
+if upFractalLevel > teeth
+    upFractalActivationLevel := upFractalLevel
+
+if highCrossesUpfractalLevel
+    trend := 1
+    upFractalActivationLevel := na 
+    downFractalActivationLevel := downFractalLevel
+
+
+if downFractalLevel < teeth
+    downFractalActivationLevel := downFractalLevel
+
+if lowCrossesDownFractalLevel
+    trend := -1
+    downFractalActivationLevel := na 
+    upFractalActivationLevel := upFractalLevel
+
+
+if trend == 1
+    upFractalActivationLevel := na
+
+if trend == -1
+    downFractalActivationLevel := na
+
+
+//Calculating filter EMA 
+filterEMA = ta.ema(close, EMaLength)
+
+
+//Сalculating AO saucer signal
+ao = ta.sma(hl2,5) - ta.sma(hl2,34)
+diff = ao - ao[1]
+saucerSignal = ao > ao[1] and ao[1] < ao[2] and ao > 0 and ao[1] > 0 and ao[2] > 0 and trend == 1 and close > filterEMA
+
+
+//Calculating sauser activation level
+if saucerSignal
+    saucerActivationLevel := high    
+else 
+    saucerActivationLevel := saucerActivationLevel[1]
+
+
+if not na(saucerActivationLevel[1]) and high < saucerActivationLevel[1] and diff > 0
+    saucerActivationLevel := high
+    saucerSignal := true
+    
+
+if (high > saucerActivationLevel[1] and not na(saucerActivationLevel)) or diff < 0
+    saucerActivationLevel := na 
+
+
+//Calculating number of valid saucer signal in current trading cycle 
+if saucerSignal and not saucerSignal[1]
+    signalsQtyInRow := signalsQtyInRow + 1
+
+
+if not na(saucerActivationLevel[1]) and diff < 0 and na(saucerActivationLevel) and not (strategy.opentrades[1] <= strategy.opentrades - 1)
+    signalsQtyInRow := signalsQtyInRow - 1
+
+
+if trend == -1 and trend[1] == 1 
+    signalsQtyInRow := 0
+
+
+//_______ <strategy_calls>
+//Defining trade close condition
+closeCondition =  trend[1] == 1 and trend == -1
+
+
+//Cancel stop buy order if current Awesome oscillator column lower, than prevoius 
+if diff < 0 
+    strategy.cancel_all()
+
+//Strategy entry
+if (signalsQtyInRow == 1 and not na(saucerActivationLevel) and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry1", direction = strategy.long, stop = saucerActivationLevel + syminfo.mintick,  alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry1",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+if (signalsQtyInRow == 2 and not na(saucerActivationLevel) and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry2", direction = strategy.long, stop = saucerActivationLevel + syminfo.mintick,  alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry2",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+if (signalsQtyInRow == 3 and not na(saucerActivationLevel) and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry3", direction = strategy.long, stop = saucerActivationLevel + syminfo.mintick,  alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry3",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+if (signalsQtyInRow == 4 and not na(saucerActivationLevel) and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry4", direction = strategy.long, stop = saucerActivationLevel + syminfo.mintick,  alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry4",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+if (signalsQtyInRow == 5 and not na(saucerActivationLevel) and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry5", direction = strategy.long, stop = saucerActivationLevel + syminfo.mintick,  alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry5",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+//Strategy exit 
+if (closeCondition)
+    strategy.close_all(alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "close",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+
+//_______ <visuals>
+//Plotting shapes for adding to current long trades
+gradPercent = if strategy.opentrades == 2
+    90
+else if strategy.opentrades == 3
+    80
+else if strategy.opentrades == 4
+    70
+else if strategy.opentrades == 5
+    60
+
+pricePlot = plot(close, title="Price", color=color.new(color.blue, 100))
+teethPlot = plot(strategy.opentrades > 1 ? teeth : na, title="Teeth", color= skyrexGreen, style=plot.style_linebr, linewidth = 2)
+fill(pricePlot, teethPlot, color = color.new(skyrexGreen, gradPercent))
+if strategy.opentrades != 1 and  strategy.opentrades[1] == strategy.opentrades - 1
+    label.new(bar_index, teeth, style = label.style_label_up, color = color.lime, size = size.tiny, text="Buy More", textcolor = color.black, text_formatting = text.format_bold)
+
+
+//_______ <alerts>
+
+View in Pine Editor・210 lines
+Use on chart
+2
+3
+8
+1
+4 957
+Overview
+MultiLayer Awesome Oscillator Saucer Strategy [Skyrexio] leverages the combination of Awesome Oscillator (AO), Williams Alligator, Williams Fractals and Exponential Moving Average (EMA) to obtain the high probability long setups. Moreover, strategy uses multi trades system, adding funds to long position if it considered that current trend has likely became stronger. Awesome Oscillator is used for creating signals, while Alligator and Fractal are used in conjunction as an approximation of short-term trend to filter them. At the same time EMA (default EMA's period = 100) is used as high probability long-term trend filter to open long trades only if it considers current price action as an uptrend. More information in "Methodology" and "Justification of Methodology" paragraphs. The strategy opens only long trades.
+
+Unique Features
+
+No fixed stop-loss and take profit: Instead of fixed stop-loss level strategy utilizes technical condition obtained by Fractals and Alligator to identify when current uptrend is likely to be over (more information in "Methodology" and "Justification of Methodology" paragraphs)
+
+Configurable Trading Periods: Users can tailor the strategy to specific market windows, adapting to different market conditions.
+
+Multilayer trades opening system: strategy uses only 10% of capital in every trade and open up to 5 trades at the same time if script consider current trend as strong one.
+
+Short and long term trend trade filters: strategy uses EMA as high probability long-term trend filter and Alligator and Fractal combination as a short-term one.
+
+
+
+Methodology
+The strategy opens long trade when the following price met the conditions:
+
+1. Price closed above EMA (by default, period = 100). Crossover is not obligatory.
+2. Combination of Alligator and Williams Fractals shall consider current trend as an upward (all details in "Justification of Methodology" paragraph)
+3. Awesome Oscillator shall create the "Saucer" long signal (all details in "Justification of Methodology" paragraph). Buy stop order is placed one tick above the candle's high of last created "Saucer signal".
+4. If price reaches the order price, long position is opened with 10% of capital.
+5. If currently we have opened position and price creates and hit the order price of another one "Saucer" signal another one long position will be added to the previous with another one 10% of capital. Strategy allows to open up to 5 long trades simultaneously.
+6. If combination of Alligator and Williams Fractals shall consider current trend has been changed from up to downtrend, all long trades will be closed, no matter how many trades has been opened.
+
+Script also has additional visuals. If second long trade has been opened simultaneously the Alligator's teeth line is plotted with the green color. Also for every trade in a row from 2 to 5 the label "Buy More" is also plotted just below the teeth line. With every next simultaneously opened trade the green color of the space between teeth and price became less transparent.
+
+Strategy settings
+In the inputs window user can setup strategy setting: EMA Length (by default = 100, period of EMA, used for long-term trend filtering EMA calculation). User can choose the optimal parameters during backtesting on certain price chart.
+
+Justification of Methodology
+Let's go through all concepts used in this strategy to understand how they works together. Let's start from the easies one, the EMA. Let's briefly explain what is EMA. The Exponential Moving Average (EMA) is a type of moving average that gives more weight to recent prices, making it more responsive to current price changes compared to the Simple Moving Average (SMA). It is commonly used in technical analysis to identify trends and generate buy or sell signals. It can be calculated with the following steps:
+
+1.Calculate the Smoothing Multiplier:
+Multiplier = 2 / (n + 1), Where n is the number of periods.
+
+2. EMA Calculation
+EMA = (Current Price) × Multiplier + (Previous EMA) × (1 − Multiplier)
+
+In this strategy uses EMA an initial long term trend filter. It allows to open long trades only if price close above EMA (by default 50 period). It increases the probability of taking long trades only in the direction of the trend.
+
+Let's go to the next, short-term trend filter which consists of Alligator and Fractals. Let's briefly explain what do these indicators means. The Williams Alligator, developed by Bill Williams, is a technical indicator designed to spot trends and potential market reversals. It uses three smoothed moving averages, referred to as the jaw, teeth, and lips:
+
+
+Jaw (Blue Line): The slowest of the three, based on a 13-period smoothed moving average shifted 8 bars ahead.
+
+Teeth (Red Line): The medium-speed line, derived from an 8-period smoothed moving average shifted 5 bars forward.
+
+Lips (Green Line): The fastest line, calculated using a 5-period smoothed moving average shifted 3 bars forward.
+
+
+When these lines diverge and are properly aligned, the "alligator" is considered "awake," signaling a strong trend. Conversely, when the lines overlap or intertwine, the "alligator" is "asleep," indicating a range-bound or sideways market. This indicator assists traders in identifying when to act on or avoid trades.
+
+The Williams Fractals, another tool introduced by Bill Williams, are used to pinpoint potential reversal points on a price chart. A fractal forms when there are at least five consecutive bars, with the middle bar displaying the highest high (for an up fractal) or the lowest low (for a down fractal), relative to the two bars on either side.
+
+Key Points:
+
+Up Fractal: Occurs when the middle bar has a higher high than the two preceding and two following bars, suggesting a potential downward reversal.
+
+Down Fractal: Happens when the middle bar shows a lower low than the surrounding two bars, hinting at a possible upward reversal.
+
+
+Traders often combine fractals with other indicators to confirm trends or reversals, improving the accuracy of trading decisions.
+
+How we use their combination in this strategy? Let’s consider an uptrend example. A breakout above an up fractal can be interpreted as a bullish signal, indicating a high likelihood that an uptrend is beginning. Here's the reasoning: an up fractal represents a potential shift in market behavior. When the fractal forms, it reflects a pullback caused by traders selling, creating a temporary high. However, if the price manages to return to that fractal’s high and break through it, it suggests the market has "changed its mind" and a bullish trend is likely emerging.
+
+The moment of the breakout marks the potential transition to an uptrend. It’s crucial to note that this breakout must occur above the Alligator's teeth line. If it happens below, the breakout isn’t valid, and the downtrend may still persist. The same logic applies inversely for down fractals in a downtrend scenario.
+
+So, if last up fractal breakout was higher, than Alligator's teeth and it happened after last down fractal breakdown below teeth, algorithm considered current trend as an uptrend. During this uptrend long trades can be opened if signal was flashed. If during the uptrend price breaks down the down fractal below teeth line, strategy considered that uptrend is finished with the high probability and strategy closes all current long trades. This combination is used as a short term trend filter increasing the probability of opening profitable long trades in addition to EMA filter, described above.
+
+Now let's talk about Awesome Oscillator's "Sauser" signals. Briefly explain what is the Awesome Oscillator. The Awesome Oscillator (AO), created by Bill Williams, is a momentum-based indicator that evaluates market momentum by comparing recent price activity to a broader historical context. It assists traders in identifying potential trend reversals and gauging trend strength.
+
+AO = SMA5(Median Price) − SMA34(Median Price)
+
+where:
+Median Price = (High + Low) / 2
+SMA5 = 5-period Simple Moving Average of the Median Price
+SMA 34 = 34-period Simple Moving Average of the Median Price
+
+Now we know what is AO, but what is the "Saucer" signal? This concept was introduced by Bill Williams, let's briefly explain it and how it's used by this strategy. Initially, this type of signal is a combination of the following AO bars: we need 3 bars in a row, the first one shall be higher than the second, the third bar also shall be higher, than second. All three bars shall be above the zero line of AO. The price bar, which corresponds to third "saucer's" bar is our signal bar. Strategy places buy stop order one tick above the price bar which corresponds to signal bar.
+
+After that we can have the following scenarios.
+Price hit the order on the next candle in this case strategy opened long with this price.
+Price doesn't hit the order price, the next candle set lower low. If current AO bar is increasing buy stop order changes by the script to the high of this new bar plus one tick. This procedure repeats until price finally hit buy order or current AO bar become decreasing. In the second case buy order cancelled and strategy wait for the next "Saucer" signal.
+
+If long trades has been opened strategy use all the next signals until number of trades doesn't exceed 5. All trades are closed when the trend changes to downtrend according to combination of Alligator and Fractals described above.
+
+Why we use "Saucer" signals? If AO above the zero line there is a high probability that price now is in uptrend if we take into account our two trend filters. When we see the decreasing bars on AO and it's above zero it's likely can be considered as a pullback on the uptrend. When we see the stop of AO decreasing and the first increasing bar has been printed there is a high probability that this local pull back is finished and strategy open long trade in the likely direction of a main trend.
+
+Why strategy use only 10% per signal? Sometimes we can see the false signals which appears on sideways. Not risking that much script use only 10% per signal. If the first long trade has been open and price continue going up and our trend approximation by Alligator and Fractals is uptrend, strategy add another one 10% of capital to every next saucer signal while number of active trades no more than 5. This capital allocation allows to take part in long trades when current uptrend is likely to be strong and use only 10% of capital when there is a high probability of sideways.
+
+Backtest Results
+
+Operating window: Date range of backtests is 2023.01.01 - 2024.11.25. It is chosen to let the strategy to close all opened positions.
+
+Commission and Slippage: Includes a standard Binance commission of 0.1% and accounts for possible slippage over 5 ticks.
+
+Initial capital: 10000 USDT
+
+Percent of capital used in every trade: 10%
+
+Maximum Single Position Loss: -5.10%
+
+Maximum Single Profit: +22.80%
+
+Net Profit: +2838.58 USDT (+28.39%)
+
+Total Trades: 107 (42.99% win rate)
+
+Profit Factor: 3.364
+
+Maximum Accumulated Loss: 373.43 USDT (-2.98%)
+
+Average Profit per Trade: 26.53 USDT (+2.40%)
+
+Average Trade Duration: 78 hours
+
+
+
+
+These results are obtained with realistic parameters representing trading conditions observed at major exchanges such as Binance and with realistic trading portfolio usage parameters.
+
+How to Use
+Add the script to favorites for easy access.
+Apply to the desired timeframe and chart (optimal performance observed on 3h BTC/USDT).
+Configure settings using the dropdown choice list in the built-in menu.
+Set up alerts to automate strategy positions through web hook with the text: {{strategy.order.alert_message}}
+
+Disclaimer:
+Educational and informational tool reflecting Skyrex commitment to informed trading. Past performance does not guarantee future results. Test strategies in a simulated environment before live implementation

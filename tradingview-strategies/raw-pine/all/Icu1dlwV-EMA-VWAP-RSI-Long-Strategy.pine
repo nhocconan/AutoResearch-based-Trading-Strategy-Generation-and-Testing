@@ -1,0 +1,128 @@
+//@version=6
+strategy("EMA-VWAP-RSI Long Strategy", overlay=true, initial_capital=100000, default_qty_type=strategy.cash, default_qty_value=100000, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// ============================================
+// INPUT PARAMETERS
+// ============================================
+ema5_length = input.int(5, "EMA 5 Length", minval=1)
+ema13_length = input.int(13, "EMA 13 Length", minval=1)
+ema21_length = input.int(21, "EMA 21 Length", minval=1)
+rsi_length = input.int(14, "RSI Length", minval=1)
+rsi_threshold = input.float(45, "RSI Threshold", minval=0, maxval=100)
+
+// MACD Parameters (for visual indicator only)
+macd_fast = input.int(12, "MACD Fast Length", group="MACD Visual")
+macd_slow = input.int(26, "MACD Slow Length", group="MACD Visual")
+macd_signal = input.int(9, "MACD Signal Length", group="MACD Visual")
+
+// ============================================
+// INDICATOR CALCULATIONS
+// ============================================
+// EMAs
+ema5 = ta.ema(close, ema5_length)
+ema13 = ta.ema(close, ema13_length)
+ema21 = ta.ema(close, ema21_length)
+
+// VWAP
+vwap = ta.vwap(close)
+
+// RSI
+rsi = ta.rsi(close, rsi_length)
+rsi_rising = rsi > rsi[1]
+
+// MACD (Visual Only)
+[macdLine, signalLine, histLine] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+
+// ============================================
+// ENTRY CONDITIONS
+// ============================================
+// EMA 5 crosses above EMA 13
+ema_cross = ta.crossover(ema5, ema13)
+
+// Price above or equal to VWAP and EMA 21
+price_above_vwap = close >= vwap
+price_above_ema21 = close >= ema21
+
+// RSI above threshold and rising
+rsi_condition = rsi > rsi_threshold and rsi_rising
+
+// All conditions for long entry
+long_entry = ema_cross and price_above_vwap and price_above_ema21 and rsi_condition
+
+// ============================================
+// EXIT CONDITIONS
+// ============================================
+// Price closes below both VWAP and EMA 21
+exit_condition = close < ema21 and close < vwap
+
+// ============================================
+// STOP LOSS TRACKING
+// ============================================
+var float stop_loss_level = na
+
+// When we enter a trade, store the low of the previous candle
+if long_entry and strategy.position_size == 0
+    stop_loss_level := low[1]  // Low of candle before entry
+
+// Stop loss hit: current close below the stop loss level
+stop_loss_hit = not na(stop_loss_level) and close < stop_loss_level
+
+// ============================================
+// STRATEGY EXECUTION
+// ============================================
+// Enter long position
+if long_entry
+    strategy.entry("Long", strategy.long, alert_message="🟢 LONG ENTRY - EMA Cross with VWAP/RSI Confirmation")
+
+// Exit on exit condition or stop loss
+if exit_condition
+    strategy.close("Long", alert_message="🔴 EXIT - Price below VWAP and EMA21")
+    stop_loss_level := na
+
+if stop_loss_hit
+    strategy.close("Long", alert_message="🛑 STOP LOSS HIT - Price below entry candle low")
+    stop_loss_level := na
+
+// Reset stop loss when position is closed
+if strategy.position_size == 0
+    stop_loss_level := na
+
+// ============================================
+// PLOTTING
+// ============================================
+// Plot EMAs
+plot(ema5, "EMA 5", color=color.new(color.blue, 0), linewidth=2)
+plot(ema13, "EMA 13", color=color.new(color.orange, 0), linewidth=2)
+plot(ema21, "EMA 21", color=color.new(color.red, 0), linewidth=2)
+
+// Plot VWAP
+plot(vwap, "VWAP", color=color.new(color.purple, 0), linewidth=2, style=plot.style_circles)
+
+// Plot Stop Loss Level
+plot(strategy.position_size > 0 ? stop_loss_level : na, "Stop Loss", color=color.new(color.red, 0), linewidth=2, style=plot.style_cross)
+
+// Plot Buy/Sell Signals
+plotshape(long_entry, "Buy Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.normal)
+plotshape(exit_condition or stop_loss_hit, "Sell Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.normal)
+
+// ============================================
+// MACD INDICATOR (Visual - Separate Panel)
+// ============================================
+hline(0, "Zero Line", color=color.gray, linestyle=hline.style_dashed)
+plot(macdLine, "MACD Line", color=color.blue)
+plot(signalLine, "Signal Line", color=color.orange)
+plot(histLine, "Histogram", color=histLine >= 0 ? color.green : color.red, style=plot.style_histogram)
+
+// ============================================
+// ALERTS
+// ============================================
+// Alert conditions
+alertcondition(long_entry, title="Long Entry Alert", message="🟢 BUY SIGNAL: EMA5 crossed above EMA13 with VWAP/RSI/EMA21 confirmation")
+alertcondition(exit_condition, title="Exit Alert", message="🔴 EXIT SIGNAL: Price closed below VWAP and EMA21")
+alertcondition(stop_loss_hit, title="Stop Loss Alert", message="🛑 STOP LOSS: Price closed below entry candle low")
+
+View in Pine Editor・122 lines
+Use on chart
+7
+432
+This is an intraday long only strategy for options scalping. The key entry criteria are EMA 5 crossover EMA 13 provided the price is above or equal to VWAP AND EMA 21 ( trend filter for short term) . Also RSI si rising and at least 46. Exit is on stock closing below the low of the candle before the entry candle.

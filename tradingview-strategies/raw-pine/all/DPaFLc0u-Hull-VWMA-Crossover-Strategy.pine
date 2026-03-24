@@ -1,0 +1,263 @@
+//@version=6
+strategy(title="Hull Volume Weighted Moving Average Strategy [Kevin-Patrick]", shorttitle="HVWMA Strategy [Kevin-Patrick]", overlay=true, 
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1,
+         calc_on_every_tick=false, calc_on_order_fills=false, 
+         process_orders_on_close=false, max_bars_back=5000)
+
+// ============================================
+// INDICATOR SETTINGS
+// ============================================
+len = input.int(100, minval=1, title="Hull VWMA Length")
+src = input.source(close, title="Source")
+geometric = input.bool(false, title="Geometric Mean")
+show_hvwma = input.bool(true, title="Show Hull VWMA Line")
+linewidth = input.int(3, minval=1, title="Line Width")
+
+// ============================================
+// VISUAL SETTINGS
+// ============================================
+show_signals = input.bool(false, title="Show Buy/Sell Signals", group="Visual Settings")
+show_background = input.bool(false, title="Show Position Background Color", group="Visual Settings")
+show_trades = input.bool(false, title="Show Trades on Chart", group="Visual Settings")
+show_labels = input.bool(false, title="Show Trade Labels", group="Visual Settings")
+
+// ============================================
+// STRATEGY SETTINGS
+// ============================================
+trade_direction = input.string(title="Trade Direction", defval="Long Only", options=["Long Only", "Short Only", "Both"])
+
+// Stop Loss
+use_stop_loss = input.bool(true, title="Use Stop Loss", group="Risk Management")
+stop_loss_percent = input.float(2.0, title="Stop Loss %", minval=0.1, step=0.1, group="Risk Management")
+
+// Multiple Take Profit Levels
+use_tp1 = input.bool(true, title="Use TP1", group="Take Profit Levels")
+tp1_percent = input.float(2.0, title="TP1 %", minval=0.1, step=0.1, group="Take Profit Levels")
+tp1_qty = input.float(33.0, title="TP1 Quantity %", minval=1, maxval=100, step=1, group="Take Profit Levels")
+
+use_tp2 = input.bool(true, title="Use TP2", group="Take Profit Levels")
+tp2_percent = input.float(4.0, title="TP2 %", minval=0.1, step=0.1, group="Take Profit Levels")
+tp2_qty = input.float(33.0, title="TP2 Quantity %", minval=1, maxval=100, step=1, group="Take Profit Levels")
+
+use_tp3 = input.bool(true, title="Use TP3", group="Take Profit Levels")
+tp3_percent = input.float(6.0, title="TP3 %", minval=0.1, step=0.1, group="Take Profit Levels")
+tp3_qty = input.float(34.0, title="TP3 Quantity %", minval=1, maxval=100, step=1, group="Take Profit Levels")
+
+use_trailing_stop = input.bool(false, title="Use Trailing Stop", group="Risk Management")
+trailing_stop_percent = input.float(1.5, title="Trailing Stop %", minval=0.1, step=0.1, group="Risk Management")
+
+// ============================================
+// ADDITIONAL FILTERS
+// ============================================
+use_trend_filter = input.bool(false, title="Use Trend Filter (SMA)", group="Filters")
+trend_sma_length = input.int(200, title="Trend SMA Length", group="Filters")
+use_volatility_filter = input.bool(false, title="Use Volatility Filter (ATR)", group="Filters")
+atr_length = input.int(14, title="ATR Length", group="Filters")
+min_atr_multiplier = input.float(1.0, title="Minimum ATR Multiplier", minval=0.1, step=0.1, group="Filters")
+
+// ============================================
+// RSI CONFLUENCE SETTINGS
+// ============================================
+use_rsi_entry = input.bool(false, title="Use RSI for Entry", group="RSI Confluence")
+rsi_length = input.int(14, title="RSI Length", minval=1, group="RSI Confluence")
+rsi_overbought = input.float(70, title="RSI Overbought Level", minval=50, maxval=100, step=1, group="RSI Confluence")
+rsi_oversold = input.float(30, title="RSI Oversold Level", minval=0, maxval=50, step=1, group="RSI Confluence")
+
+use_rsi_exit = input.bool(false, title="Use RSI for Exit", group="RSI Confluence")
+rsi_exit_long = input.float(70, title="RSI Exit Long Level", minval=50, maxval=100, step=1, group="RSI Confluence")
+rsi_exit_short = input.float(30, title="RSI Exit Short Level", minval=0, maxval=50, step=1, group="RSI Confluence")
+
+// ============================================
+// DATE RANGE FILTER
+// ============================================
+use_date_filter = input.bool(false, title="Use Date Range Filter", group="Date Range")
+start_year = input.int(2020, title="Start Year", group="Date Range")
+start_month = input.int(1, title="Start Month", minval=1, maxval=12, group="Date Range")
+start_day = input.int(1, title="Start Day", minval=1, maxval=31, group="Date Range")
+end_year = input.int(2025, title="End Year", group="Date Range")
+end_month = input.int(12, title="End Month", minval=1, maxval=12, group="Date Range")
+end_day = input.int(31, title="End Day", minval=1, maxval=31, group="Date Range")
+
+// ============================================
+// HULL VWMA CALCULATION
+// ============================================
+lsrc = math.log(src)
+corrvol = nz(volume) + 1  // Makes it properly handle charts where volume is only available for part of its history
+
+volume_wma(series, length) =>
+    ta.wma(series * corrvol, length) / ta.wma(corrvol, length)
+
+volume_hma(series, length) =>
+    ta.wma(2 * volume_wma(series, length / 2) - volume_wma(series, length), math.round(math.sqrt(length)))
+
+volume_hullma = volume_hma(geometric ? lsrc : src, len)
+hvwma = geometric ? math.exp(volume_hullma) : volume_hullma
+
+// ============================================
+// INDICATOR VISUALIZATION
+// ============================================
+oscillator_coloring(series) =>
+    series > 0 ? color.green : color.red
+
+plot(show_hvwma ? hvwma : na, color=oscillator_coloring(ta.change(hvwma)), 
+     linewidth=linewidth, title="Hull VWMA")
+
+// ============================================
+// FILTERS
+// ============================================
+// Trend Filter
+trend_sma = ta.sma(close, trend_sma_length)
+plot(use_trend_filter ? trend_sma : na, color=color.orange, linewidth=1, title="Trend SMA")
+long_trend_ok = not use_trend_filter or close > trend_sma
+short_trend_ok = not use_trend_filter or close < trend_sma
+
+// Volatility Filter
+atr_value = ta.atr(atr_length)
+volatility_ok = not use_volatility_filter or atr_value > (atr_value[1] * min_atr_multiplier)
+
+// RSI Confluence Filter
+rsi = ta.rsi(close, rsi_length)
+rsi_long_ok = not use_rsi_entry or rsi < rsi_oversold
+rsi_short_ok = not use_rsi_entry or rsi > rsi_overbought
+
+// RSI Exit Conditions
+rsi_exit_long_signal = use_rsi_exit and rsi > rsi_exit_long
+rsi_exit_short_signal = use_rsi_exit and rsi < rsi_exit_short
+
+// Date Range Filter
+date_ok = true
+if use_date_filter
+    start_time = timestamp(start_year, start_month, start_day, 0, 0)
+    end_time = timestamp(end_year, end_month, end_day, 23, 59)
+    date_ok := time >= start_time and time <= end_time
+
+// ============================================
+// SIGNAL GENERATION
+// ============================================
+// Crossover signals
+price_cross_above = ta.crossover(src, hvwma)
+price_cross_below = ta.crossunder(src, hvwma)
+
+// Alternative: HVWMA slope change (momentum shift)
+hvwma_rising = hvwma > hvwma[1]
+hvwma_falling = hvwma < hvwma[1]
+
+// Combine signals with filters
+long_signal = price_cross_above and long_trend_ok and volatility_ok and rsi_long_ok and date_ok
+short_signal = price_cross_below and short_trend_ok and volatility_ok and rsi_short_ok and date_ok
+
+// ============================================
+// STRATEGY EXECUTION
+// ============================================
+// Entry conditions based on trade direction
+can_long = trade_direction == "Long Only" or trade_direction == "Both"
+can_short = trade_direction == "Short Only" or trade_direction == "Both"
+
+// Long Entry
+if (long_signal and can_long)
+    strategy.entry("Long", strategy.long)
+
+// Short Entry
+if (short_signal and can_short)
+    strategy.entry("Short", strategy.short)
+
+// Exit opposite position on crossover
+if (long_signal and strategy.position_size < 0)
+    strategy.close("Short")
+
+if (short_signal and strategy.position_size > 0)
+    strategy.close("Long")
+
+// RSI-based exits
+if (rsi_exit_long_signal and strategy.position_size > 0)
+    strategy.close("Long", comment="RSI Exit")
+
+if (rsi_exit_short_signal and strategy.position_size < 0)
+    strategy.close("Short", comment="RSI Exit")
+
+// ============================================
+// RISK MANAGEMENT - MULTIPLE TAKE PROFITS
+// ============================================
+// Calculate stop loss and take profit levels for LONG positions
+long_stop_loss = strategy.position_avg_price * (1 - stop_loss_percent / 100)
+long_tp1 = strategy.position_avg_price * (1 + tp1_percent / 100)
+long_tp2 = strategy.position_avg_price * (1 + tp2_percent / 100)
+long_tp3 = strategy.position_avg_price * (1 + tp3_percent / 100)
+
+// Calculate stop loss and take profit levels for SHORT positions
+short_stop_loss = strategy.position_avg_price * (1 + stop_loss_percent / 100)
+short_tp1 = strategy.position_avg_price * (1 - tp1_percent / 100)
+short_tp2 = strategy.position_avg_price * (1 - tp2_percent / 100)
+short_tp3 = strategy.position_avg_price * (1 - tp3_percent / 100)
+
+// Long Position Exits with Multiple TPs
+if (strategy.position_size > 0)
+    if use_stop_loss
+        strategy.exit("Long SL", "Long", stop=long_stop_loss)
+    
+    if use_tp1
+        strategy.exit("Long TP1", "Long", limit=long_tp1, qty_percent=tp1_qty)
+    
+    if use_tp2
+        strategy.exit("Long TP2", "Long", limit=long_tp2, qty_percent=tp2_qty)
+    
+    if use_tp3
+        strategy.exit("Long TP3", "Long", limit=long_tp3, qty_percent=tp3_qty)
+
+// Short Position Exits with Multiple TPs
+if (strategy.position_size < 0)
+    if use_stop_loss
+        strategy.exit("Short SL", "Short", stop=short_stop_loss)
+    
+    if use_tp1
+        strategy.exit("Short TP1", "Short", limit=short_tp1, qty_percent=tp1_qty)
+    
+    if use_tp2
+        strategy.exit("Short TP2", "Short", limit=short_tp2, qty_percent=tp2_qty)
+    
+    if use_tp3
+        strategy.exit("Short TP3", "Short", limit=short_tp3, qty_percent=tp3_qty)
+
+// ============================================
+// VISUAL AIDS
+// ============================================
+// Plot buy/sell signals (only if enabled)
+plotshape(show_signals and long_signal and can_long, title="Long Signal", location=location.belowbar, 
+          color=color.green, style=shape.triangleup, size=size.small)
+plotshape(show_signals and short_signal and can_short, title="Short Signal", location=location.abovebar, 
+          color=color.red, style=shape.triangledown, size=size.small)
+
+// Background color for active positions (only if enabled)
+bgcolor(show_background and strategy.position_size > 0 ? color.new(color.green, 95) : show_background and strategy.position_size < 0 ? color.new(color.red, 95) : na)
+
+// Plot TP levels for visualization (optional)
+plot(strategy.position_size > 0 and use_tp1 ? long_tp1 : na, title="Long TP1", color=color.new(color.green, 70), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size > 0 and use_tp2 ? long_tp2 : na, title="Long TP2", color=color.new(color.green, 60), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size > 0 and use_tp3 ? long_tp3 : na, title="Long TP3", color=color.new(color.green, 50), style=plot.style_linebr, linewidth=1)
+
+plot(strategy.position_size < 0 and use_tp1 ? short_tp1 : na, title="Short TP1", color=color.new(color.red, 70), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and use_tp2 ? short_tp2 : na, title="Short TP2", color=color.new(color.red, 60), style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 and use_tp3 ? short_tp3 : na, title="Short TP3", color=color.new(color.red, 50), style=plot.style_linebr, linewidth=1)
+
+// Plot stop loss levels
+plot(strategy.position_size > 0 and use_stop_loss ? long_stop_loss : na, title="Long SL", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size < 0 and use_stop_loss ? short_stop_loss : na, title="Short SL", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+
+// ============================================
+// ALERTS
+// ============================================
+alertcondition(long_signal, title="Long Signal Alert", message="Hull VWMA: Long Entry Signal")
+alertcondition(short_signal, title="Short Signal Alert", message="Hull VWMA: Short Entry Signal")
+
+View in Pine Editor・251 lines
+Use on chart
+1
+5
+2
+860
+Nov 23, 2025
+A simple variation on the Hull Moving Average which reacts faster to high volume events, making it more responsive in those cases than even the standard Hull average -- CREDIT GOES TO Saolof - tradingview.com/v/Tmhea110/ -- Edited into a strategy with some more options that im going to continue to refine. LMK if theres any features or confluence you want me to add -- cheers!
+Nov 24, 2025
+Release Notes
+updates

@@ -1,0 +1,255 @@
+//@version=4
+strategy("KD base strategy", overlay=true, pyramiding=1000, process_orders_on_close=true, precision=6, max_bars_back=720)
+//strategy("KD base strategy", overlay=true, pyramiding=1000, precision=6, max_bars_back=720)
+
+
+max=input(defval=20, title="庫存上限(share)", type=input.integer)
+min=input(defval=-20, title="庫存下限(share)", type=input.integer)
+period=input(defval=9, title="KD 週期(KD period)", type=input.integer, minval=2)
+
+diff=input(defval=0.1, title="KD 週期(KD period)", type=input.float, minval=0.1)
+
+k=0.0
+rsv=0.0
+dir=0
+sum=0.0
+share2=0.0
+first=0
+up=0.0
+bottom=0.0
+k80=0.0
+k50=0.0
+k20=0.0
+k801=0.0
+k501=0.0
+k201=0.0
+show=0
+show:=0
+rate=0.0
+last=0.0
+
+inc=false
+dec=false
+inc:=false
+dec:=false
+clean=false
+clean:=false
+
+share=strategy.position_size
+
+rsv:=stoch(close, high, low, period)
+
+up:=highest(high,period)
+bottom:=lowest(low,period)
+
+if bar_index <= period
+    k:=rsv
+    dir:=0
+    sum:=0
+    share2:=0
+    last:=close
+else
+    k:=k[1]*2/3 + rsv/3
+    dir := dir[1]
+    sum := sum[1]
+    share2:=share2[1]
+    rate:= rate[1]
+    last:= last[1]
+
+// filter
+yearbegin=input(defval=1978, title="起始年 (begin year)", type=input.integer, minval=0)
+monthbegin=input(defval=1, title="起始月 (begin month)", type=input.integer, minval=0)
+dayofmonthbegin=input(defval=1, title="起始日 (begin day)", type=input.integer, minval=0)
+
+condition99=(year >= yearbegin) and (month >= monthbegin) and (dayofmonth > dayofmonthbegin)
+
+// rsv = 100 * (close - lowest(low, period)) / (highest(high, period) - lowest(low, period))
+// k=k[1]*2/3 + rsv/3
+// 3k=k[1]*2 + rsv
+// 3k-k[1]*2= 100 * (close - lowest(low, period)) / (highest(high, period) - lowest(low, period))
+// (3k-k[1]*2)/100*(highest(high, period) - lowest(low, period)) + lowest(low, period) = close
+// let k = 80, close = (3*80-k[1]*2)/100*(highest(high, period) - lowest(low, period)) + lowest(low, period)
+k80:=(3*80-k[1]*2)/100*(highest(high, period) - lowest(low, period)) + lowest(low, period)
+k50:=(3*50-k[1]*2)/100*(highest(high, period) - lowest(low, period)) + lowest(low, period)
+k20:=(3*20-k[1]*2)/100*(highest(high, period) - lowest(low, period)) + lowest(low, period)
+// tomorrow k
+k801:=(3*80-k*2)/100*(highest(high, period-1) - lowest(low, period-1)) + lowest(low, period-1)
+k501:=(3*50-k*2)/100*(highest(high, period-1) - lowest(low, period-1)) + lowest(low, period-1)
+k201:=(3*20-k*2)/100*(highest(high, period-1) - lowest(low, period-1)) + lowest(low, period-1)
+
+if (dir == 1 and low < k50 and close < close[1] and open > close)
+    // rule1, strong target, buy at low price
+    sum := sum + 1
+else if (dir == -1 and high > k50 and close > close[1] and open < close)
+    // rule2, weak target, sell at high price
+    sum := sum - 1
+else if (dir == 1 and k[1] > 80 and k < 80 and share > 3)
+    // rule5, end the positive order
+    sum := 1
+else if (dir == -1 and k[1] < 20 and k > 20 and share < -3)
+    // rule6, end the engitive order
+    sum := -1
+else if (dir == 1 and high > k50 and close > close[1] and rate < -diff/100 and share > 2)
+    // rule7, reduce the order when the rate is poor
+    sum := sum - 1
+else if (dir == -1 and low < k50 and close < close[1] and rate > diff/100 and share < -2)
+    // rule8, reduce the order when the rate is poor
+    sum := sum + 1
+
+// become to strong    
+if (k >= 80) 
+    dir := 1
+
+// become to weak
+if (k <= 20) 
+    dir := -1
+
+// rule 3, strong become to weak, clean when k < 20
+if (dir == 1 and share < 0 and close > last and k < 20)
+    clean := true
+// rule 4, weak become to strong, clean when k > 80
+if (dir == -1 and share > 0 and close < last and k > 80)
+    clean := true
+
+// rule 9, the first negtive order    
+if (dir == 1 and k > 80 and rate > diff/100 and share == 0)
+    inc:= true
+    sum := 1
+
+// rule 10, the first negtive order
+if (dir == -1 and k < 20 and rate < -diff/100 and share == 0)
+    dec:= true
+    sum := -1
+
+if sum > 0
+    share2 := sum
+else if sum < 0
+    share2 := sum
+else
+    share2 := 0
+
+if share2 > max
+    share2 := max
+if share2 < min
+    share2 := min
+    
+if (k > 80 and k[1] < 80)
+    rate:= high/last - 1
+    last:= high
+if (k < 20 and k[1] > 20)
+    rate:= low/last - 1
+    last:= low
+if (dir > 0 and low < k50 and low[1] > k50)
+    rate:= low/last - 1
+    last:= low
+if (dir < 0 and high > k50 and high[1] <k50)
+    rate:= high/last - 1
+    last:= high
+
+strategy.close_all(when=clean and condition99, comment="stop")
+strategy.order(id='buy', long=true, qty=share2-share, limit=k501, when=share2 > share and condition99)
+strategy.order(id="sell", long=false, qty=share-share2, limit=k501, when=share2 < share and condition99)
+strategy.order(id='increase', long=true, qty=1, when=share2 != share and inc and condition99)
+strategy.order(id="decrease", long=false, qty=1, when=share2 != share and dec and condition99)
+
+plot(share, "持股(share)",transp=100)
+//plot(share2, "持股(share)",transp=100)
+plot(dir, "方向(direction)",transp=100)
+plot(k80, "Strong (轉強)", color.red)
+plot(k50, "Middle (中線)", color.white)
+plot(k20, "Weak (轉弱)", color.green)
+
+k_color=color.black
+if k80 != k801[1]
+    k_color:=color.red
+plot(k801, "S+1", k_color, transp=100)
+
+k_color:=color.black
+if k50 != k501[1]
+    k_color:=color.white
+plot(k501, "M+1", k_color, transp=100)
+
+k_color:=color.black
+if k20 != k201[1]
+    k_color:=color.green
+plot(k201, title="W+1", color=k_color, transp=100)
+
+plot(k, "k",transp=100)
+
+// Colour background
+plotColour = rate > 0 ? color.red :
+     rate < 0 ? color.green :
+     color.yellow
+plot(series=rate*100, title="rate",color=plotColour, style=plot.style_histogram, linewidth=1, transp=100)
+
+//plot(last, "last",transp=100)
+
+View in Pine Editor・188 lines
+Use on chart
+8
+7
+5 458
+May 15, 2020
+This is a base and easy trading strategy for comparing my other strategy.
+The strategy consider K >= 80 is strong target in the last high period,
+and consider K <=20 is the weak target in the last low period.
+
+In the strong target, the strategy may increase long at the first day when K < 50, until 2/3 max order limitation or strong target become to weak.
+In the weak target, the strategy may increase short at the first day when K > 50, until 2/3 max order limitation or strong target become to strong.
+
+there are three orders for this strategy.
+when the strong become to weak, it may use the remain 1/3 to save itself, and change the direction at the next k > 50
+when the weak become to weak, it may use the remain 1/3 to save itself, and change the direction at the next k < 50
+
+這是一個簡單的雙向交易策略，用來對照我其他的策略。
+當 K>=80 它會認為目前是強勢股，偏多操作
+當 K<=20 它會認為目前是強勢股，偏空操作
+
+當標的為強勢股時，當第一次 K<50 會加碼多單，最多買進2/3的持股，直到轉弱
+當標的為弱勢股時，當第一次 K>50 會加碼空單，最多買進2/3的持股，直到轉強
+
+當強勢轉弱勢時，會使用剩下的1/3來拯救持股，在下次 k > 50 出清持股
+當弱勢轉強勢時，會使用剩下的1/3來拯救持股，在下次 k < 50 出清持股
+May 15, 2020
+Release Notes
+update the description
+read line is close transform to k = 80
+white line is close transform to k = 50
+green line is close transform to k = 20
+
+更新說明
+紅線代表 k=80 趨勢轉強
+白線代表 k=50 執行策略操作
+綠線代表 k=20 趨勢轉弱
+May 15, 2020
+Release Notes
+update the example
+May 15, 2020
+Release Notes
+remove rule 5, 6
+rule 3, 4, clear share
+May 18, 2020
+Release Notes
+set transp=100, (share, direction, k), only show the value
+May 20, 2020
+Release Notes
+add tomorrow value, k80, k50, k20
+May 20, 2020
+Release Notes
+1. enhance the order strategy
+2. change rule 1 and rule 2
+May 20, 2020
+Release Notes
+1. update the tag
+Aug 5, 2020
+Release Notes
+add the shadow arrow, if you want to buy or sell more.
+加入加碼點箭頭
+Aug 5, 2020
+Release Notes
+update the example
+Nov 8, 2020
+Release Notes
+1. add rule 5 ~ rule 10
+2. add rate to enhance the effectiveness
+3. remove the shadow

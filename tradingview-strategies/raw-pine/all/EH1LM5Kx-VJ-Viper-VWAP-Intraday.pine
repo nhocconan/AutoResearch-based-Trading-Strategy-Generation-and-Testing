@@ -1,0 +1,134 @@
+//@version=4
+strategy("[VJ] Viper VWAP Intraday", overlay=true, calc_on_every_tick = false)
+
+// ********** Strategy inputs - Start **********
+
+// Used for intraday handling
+// Session value should be from market start to the time you want to square-off 
+// your intraday strategy
+// Important: The end time should be at least 2 minutes before the intraday
+// square-off time set by your broker
+var i_marketSession = input(title="Market session", type=input.session, 
+     defval="0915-1455", confirm=true)
+     
+// Make inputs that set the take profit % (optional)
+longProfitPerc = input(title="Long Take Profit (%)",
+     type=input.float, minval=0.0, step=0.1, defval=1) * 0.01
+
+shortProfitPerc = input(title="Short Take Profit (%)",
+     type=input.float, minval=0.0, step=0.1, defval=1) * 0.01
+     
+// Set stop loss level with input options (optional)
+longLossPerc = input(title="Long Stop Loss (%)",
+     type=input.float, minval=0.0, step=0.1, defval=0.5) * 0.01
+
+shortLossPerc = input(title="Short Stop Loss (%)",
+     type=input.float, minval=0.0, step=0.1, defval=0.5) * 0.01    
+     
+
+
+
+
+// ********** Strategy inputs - End **********
+
+
+// ********** Supporting functions - Start **********
+
+// A function to check whether the bar or period is in intraday session
+barInSession(sess) => time(timeframe.period, sess) != 0
+
+
+// Figure out take profit price
+longExitPrice  = strategy.position_avg_price * (1 + longProfitPerc)
+shortExitPrice = strategy.position_avg_price * (1 - shortProfitPerc)
+
+// Determine stop loss price
+longStopPrice  = strategy.position_avg_price * (1 - longLossPerc)
+shortStopPrice = strategy.position_avg_price * (1 + shortLossPerc)
+
+// ********** Supporting functions - End **********
+
+
+// ********** Strategy - Start **********
+
+cilength = input(title="Length", type=input.integer, defval=14, minval=1, maxval=2000)
+src = hlc3
+upper = sum(volume * (change(src) <= 0 ? 0 : src), cilength)
+lower = sum(volume * (change(src) >= 0 ? 0 : src), cilength)
+_rsi(upper, lower) =>
+    100.0 - (100.0 / (1.0 + upper / lower))
+mf = _rsi(upper, lower)
+ci = 100 * log10(sum(atr(1), cilength) / (highest(cilength) - lowest(cilength))) / log10(cilength)
+// bcod = mf < 25 and ci <50 
+// scod = mf >75 and ci <50 
+citrendfactor = input(title="Trend Factor", type=input.float, defval=38.2, minval=1.0, maxval=100.0)
+bcod = mf < 25 
+scod = mf >75
+
+
+//Vol Confirmation
+vol = volume > volume[1]
+
+//Engulfing candle confirm
+// bullishEC = close > open[1] and close[1] < open[1]
+// bearishEC = close < open[1] and close[1] > open[1]
+
+//Candles colors
+greenCandle = (close > open)
+redCandle = (close < open)
+
+
+
+// See if intraday session is active
+bool intradaySession = barInSession(i_marketSession)
+
+// Trade only if intraday session is active
+ 
+ 
+//Final Long/Short Condition
+longCondition = redCandle and vol and vwap > vwap[1] and ci <citrendfactor
+shortCondition =greenCandle and vol and vwap < vwap[1] and ci <citrendfactor
+
+ 
+// Long position
+// When longCondition and intradaySession both are true
+strategy.entry(id = "Long", long = strategy.long, 
+     when = longCondition and intradaySession)
+ 
+// Short position
+// When shortCondition and intradaySession both are true
+strategy.entry(id = "Short", long = strategy.short, 
+     when = shortCondition and intradaySession)
+ 
+// Square-off position (when session is over and position is open)
+squareOff = (not intradaySession) and (strategy.position_size != 0)
+strategy.close_all(when = squareOff, comment = "Square-off")
+
+// ********** Strategy - End **********
+
+View in Pine Editor・110 lines
+Use on chart
+2
+5
+7
+9 116
+Hello Traders, this is a simple intraday strategy involving the ever reliable VWAP and a chop index to add twist to the traditional style . You can modify the values on the stock and see what are your best picks. Comment below if you found something with good returns
+
+Strategy: VWAP based strategy but uses an additional powerful indicator Chop index to help us stay out of false trades.
+Indicators used :
+VWAP identifies the true average price of a stock by factoring the volume of transactions at a specific price point and not based on the closing price. VWAP can add more value than your standard 10, 50, or 200 moving average indicators because VWAP reacts to price movements based on the volume during a given period.
+
+The Choppiness Index is designed to determine whether the market is choppy or trading sideways, or not choppy and trading within a trend in either direction. Using a scale from 1 - 100, the market is considered to be choppy as values near 100 (over 61.80) and trending when values are lower than 38.20)
+
+Buying/Selling typically happens at VWAP Breakouts which is then validated with extreme CI to ascertain the entries
+Aggressive trade stop can be employed by using the % for long and shorts in the strategy.
+
+Usage & Best setting :
+Choose a good volatile stock and a time frame - 10m.
+CI Index : 14
+Trend Factor - anything below 38.2 is considered in trend, you can experiment from 50
+
+There is stop loss and take profit that can be used to optimise your trade
+
+
+The template also includes daily square off based on your time.

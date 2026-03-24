@@ -1,0 +1,401 @@
+//@version=5
+strategy("Imbalance RSI Divergence Strategy", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+// =================== AYARLAR ===================
+rsi_period = input.int(14, "RSI Period", minval=1)
+atr_period = input.int(10, "ATR Period", minval=1)
+atr_multiplier = input.float(2.0, "ATR Stop Loss Multiplier", minval=0.1)
+risk_reward = input.float(4.0, "Risk:Reward Ratio", minval=0.1)
+use_rsi_divergence = input.bool(true, "Use RSI Divergence Filter")
+
+// =================== İMBALANCE FİLTRELERİ ===================
+min_imbalance_atr = input.float(0.3, "Minimum Imbalance Size (ATR)", minval=0.0, step=0.1, group="Imbalance Filter")
+use_lookback_limit = input.bool(false, "Enable Lookback Limit", group="Imbalance Filter")
+max_lookback_bars = input.int(300, "Maximum Lookback Bars", minval=10, maxval=5000, group="Imbalance Filter")
+
+show_imbalance_size = input.bool(true, "Show Imbalance Size (ATR)")
+
+// =================== RSI DIVERGENCE ÇİZGİ AYARLARI ===================
+show_divergence_lines = input.bool(true, "Show RSI Divergence Lines", group="RSI Divergence")
+bull_div_line_color = input.color(color.new(color.green, 30), "Bullish Divergence Line Color", group="RSI Divergence")
+bear_div_line_color = input.color(color.new(color.red, 30), "Bearish Divergence Line Color", group="RSI Divergence")
+divergence_line_width = input.int(2, "Divergence Line Width", minval=1, maxval=5, group="RSI Divergence")
+
+// =================== DEĞİŞKENLER ===================
+var box[] bull_imbalances_active = array.new<box>()
+var box[] bear_imbalances_active = array.new<box>()
+var line[] bull_mid_lines_active = array.new<line>()
+var line[] bear_mid_lines_active = array.new<line>()
+
+var box[] bull_imbalances_touched = array.new<box>()
+var box[] bear_imbalances_touched = array.new<box>()
+var line[] bull_mid_lines_touched = array.new<line>()
+var line[] bear_mid_lines_touched = array.new<line>()
+
+// RSI divergence çizgileri için array
+var line[] divergence_lines = array.new<line>()
+
+rsi = ta.rsi(close, rsi_period)
+atr = ta.atr(atr_period)
+
+// =================== İMBALANCE TESPİTİ ===================
+
+is_red_1 = close[2] < open[2]
+is_red_2 = close[1] < open[1] 
+is_red_3 = close < open
+
+is_green_1 = close[2] > open[2]
+is_green_2 = close[1] > open[1]
+is_green_3 = close > open
+
+three_red_candles = is_red_1 and is_red_2 and is_red_3
+
+three_green_candles = is_green_1 and is_green_2 and is_green_3
+
+bear_imbalance_condition = three_red_candles and low[2] > high
+
+bull_imbalance_condition = three_green_candles and high[2] < low
+
+// =================== İMBALANCE ÇİZİMİ ===================
+
+if bear_imbalance_condition
+    top = low[2]   
+    bottom = high   
+    mid = (top + bottom) / 2
+    imbalance_size = top - bottom
+    imbalance_atr_ratio = imbalance_size / atr
+    
+    if imbalance_atr_ratio >= min_imbalance_atr
+        bear_box = box.new(bar_index[2], top, bar_index + 1, bottom, 
+                           border_color=color.new(color.red, 60), 
+                           bgcolor=color.new(color.red, 90),
+                           border_width=1,
+                           extend=extend.right)
+        array.push(bear_imbalances_active, bear_box)
+        
+        mid_line = line.new(bar_index[2], mid, bar_index + 1, mid, color=color.new(color.red, 50), width=1, style=line.style_dashed,extend=extend.right)
+        array.push(bear_mid_lines_active, mid_line)
+        
+        if show_imbalance_size and barstate.isconfirmed
+            label.new(bar_index[2], mid, str.tostring(imbalance_atr_ratio, "#.##") + " ATR", 
+                      color=color.new(color.red, 20), 
+                      textcolor=color.white,
+                      style=label.style_label_left, 
+                      size=size.small)
+
+if bull_imbalance_condition
+    top = low       
+    bottom = high[2] 
+    mid = (top + bottom) / 2
+    imbalance_size = top - bottom 
+    imbalance_atr_ratio = imbalance_size / atr  
+    
+    if imbalance_atr_ratio >= min_imbalance_atr
+        bull_box = box.new(bar_index[2], top, bar_index + 1, bottom,
+                           border_color=color.new(color.green, 60),
+                           bgcolor=color.new(color.green, 90),
+                           border_width=1,
+                           extend=extend.right)
+        array.push(bull_imbalances_active, bull_box)
+        
+        mid_line = line.new(bar_index[2], mid, bar_index + 1, mid,color=color.new(color.green, 50),width=1,style=line.style_dashed,extend=extend.right)
+        array.push(bull_mid_lines_active, mid_line)
+        
+        if show_imbalance_size and barstate.isconfirmed
+            label.new(bar_index[2], mid, str.tostring(imbalance_atr_ratio, "#.##") + " ATR", 
+                      color=color.new(color.green, 20), 
+                      textcolor=color.white,
+                      style=label.style_label_left, 
+                      size=size.small)
+
+// =================== YARDIMCI FONKSİYONLAR ===================
+
+find_last_low() =>
+    var float last_low_price = na
+    var int last_low_bar = na
+    var float last_low_rsi = na
+    
+    if ta.pivotlow(low, 2, 2)
+        last_low_price := low[2]
+        last_low_bar := bar_index[2]
+        last_low_rsi := rsi[2]
+    
+    [last_low_price, last_low_bar, last_low_rsi]
+
+find_last_high() =>
+    var float last_high_price = na
+    var int last_high_bar = na
+    var float last_high_rsi = na
+    
+    if ta.pivothigh(high, 2, 2)
+        last_high_price := high[2]
+        last_high_bar := bar_index[2] 
+        last_high_rsi := rsi[2]
+        
+    [last_high_price, last_high_bar, last_high_rsi]
+
+draw_divergence_line(x1, y1, x2, y2, line_color, is_bullish) =>
+    if show_divergence_lines and not na(x1) and not na(y1) and not na(x2) and not na(y2)
+        div_line = line.new(x1, y1, x2, y2, 
+                           color=line_color, 
+                           width=divergence_line_width, 
+                           style=line.style_solid)
+        array.push(divergence_lines, div_line)
+        
+        mid_x = math.round((x1 + x2) / 2)
+        mid_y = (y1 + y2) / 2
+        if is_bullish
+            label.new(mid_x, mid_y - atr, "BULL DIV", 
+                      color=color.new(color.green, 80), 
+                      textcolor=color.green,
+                      style=label.style_label_up, 
+                      size=size.small)
+        else
+            label.new(mid_x, mid_y + atr, "BEAR DIV", 
+                      color=color.new(color.red, 80), 
+                      textcolor=color.red,
+                      style=label.style_label_down, 
+                      size=size.small)
+
+// =================== TEMAS KONTROLÜ VE SINYAL TESPİTİ ===================
+
+[last_low_price, last_low_bar, last_low_rsi] = find_last_low()
+[last_high_price, last_high_bar, last_high_rsi] = find_last_high()
+
+current_bar = bar_index
+lookback_start = use_lookback_limit ? math.max(0, current_bar - max_lookback_bars) : 0
+
+
+bull_signal = false
+if array.size(bull_imbalances_active) > 0
+    for i = array.size(bull_imbalances_active) - 1 to 0
+        bull_box = array.get(bull_imbalances_active, i)
+        box_left = box.get_left(bull_box)
+        
+        is_within_lookback = not use_lookback_limit or box_left >= lookback_start
+        
+        if bar_index > box_left and is_within_lookback
+            box_top = box.get_top(bull_box)
+            box_bottom = box.get_bottom(bull_box)
+            box_mid = (box_top + box_bottom) / 2
+            
+            price_touched_mid = (low <= box_mid and high >= box_mid)
+            
+
+            if price_touched_mid
+                rsi_condition = true
+                if use_rsi_divergence
+                    if not na(last_low_price) and not na(last_low_rsi) and last_low_price > 0
+                        current_low = close
+                        current_rsi = rsi
+                        
+                        rsi_condition := current_low > last_low_price and current_rsi < last_low_rsi
+                        
+                        if rsi_condition
+                            draw_divergence_line(last_low_bar, last_low_price, bar_index, current_low, bull_div_line_color, true)
+                    else
+                        rsi_condition := false
+                
+                if rsi_condition
+                    bull_signal := true
+                
+                box.set_right(bull_box, bar_index)
+                box.set_extend(bull_box, extend.none)
+                
+                if i < array.size(bull_mid_lines_active)
+                    mid_line = array.get(bull_mid_lines_active, i)
+                    line.set_x2(mid_line, bar_index)
+                    line.set_extend(mid_line, extend.none)
+                    
+                    array.push(bull_mid_lines_touched, mid_line)
+                    array.remove(bull_mid_lines_active, i)
+                
+                array.push(bull_imbalances_touched, bull_box)
+                array.remove(bull_imbalances_active, i)
+                
+                break
+        else
+            if use_lookback_limit and box_left < lookback_start
+                box.set_extend(bull_box, extend.none)
+                if i < array.size(bull_mid_lines_active)
+                    mid_line = array.get(bull_mid_lines_active, i)
+                    line.set_extend(mid_line, extend.none)
+                    array.push(bull_mid_lines_touched, mid_line)
+                    array.remove(bull_mid_lines_active, i)
+                
+                array.push(bull_imbalances_touched, bull_box)
+                array.remove(bull_imbalances_active, i)
+
+bear_signal = false
+if array.size(bear_imbalances_active) > 0
+    for i = array.size(bear_imbalances_active) - 1 to 0
+        bear_box = array.get(bear_imbalances_active, i)
+        box_left = box.get_left(bear_box)
+        
+        is_within_lookback = not use_lookback_limit or box_left >= lookback_start
+        
+        if bar_index > box_left and is_within_lookback
+            box_top = box.get_top(bear_box)
+            box_bottom = box.get_bottom(bear_box)
+            box_mid = (box_top + box_bottom) / 2
+            
+            price_touched_mid = (low <= box_mid and high >= box_mid)
+            
+            if price_touched_mid
+                rsi_condition = true
+                if use_rsi_divergence
+                    if not na(last_high_price) and not na(last_high_rsi) and last_high_price > 0
+                        current_high = close
+                        current_rsi = rsi
+                        
+                        rsi_condition := current_high < last_high_price and current_rsi > last_high_rsi
+                        
+                        if rsi_condition
+                            draw_divergence_line(last_high_bar, last_high_price, bar_index, current_high, bear_div_line_color, false)
+                    else
+                        rsi_condition := false
+                
+                if rsi_condition
+                    bear_signal := true
+
+                
+                box.set_right(bear_box, bar_index)
+                box.set_extend(bear_box, extend.none)
+                
+                if i < array.size(bear_mid_lines_active)
+                    mid_line = array.get(bear_mid_lines_active, i)
+                    line.set_x2(mid_line, bar_index)
+                    line.set_extend(mid_line, extend.none)
+                    
+                    array.push(bear_mid_lines_touched, mid_line)
+                    array.remove(bear_mid_lines_active, i)
+                
+                array.push(bear_imbalances_touched, bear_box)
+                array.remove(bear_imbalances_active, i)
+               
+                break
+        else
+            if use_lookback_limit and box_left < lookback_start
+                box.set_extend(bear_box, extend.none)
+                if i < array.size(bear_mid_lines_active)
+                    mid_line = array.get(bear_mid_lines_active, i)
+                    line.set_extend(mid_line, extend.none)
+                    array.push(bear_mid_lines_touched, mid_line)
+                    array.remove(bear_mid_lines_active, i)
+                
+                array.push(bear_imbalances_touched, bear_box)
+                array.remove(bear_imbalances_active, i)
+
+
+if bull_signal and strategy.position_size == 0
+    entry_price = close
+    stop_loss = entry_price - (atr_multiplier * atr)
+    take_profit = entry_price + (risk_reward * atr_multiplier * atr)
+    
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=stop_loss, limit=take_profit)
+    
+
+if bear_signal and strategy.position_size == 0
+    entry_price = close
+    stop_loss = entry_price + (atr_multiplier * atr)
+    take_profit = entry_price - (risk_reward * atr_multiplier * atr)
+    
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=stop_loss, limit=take_profit)
+
+View in Pine Editor・305 lines
+Use on chart
+6
+8
+2 111
+# Imbalance RSI Divergence Strategy - User Guide
+
+## What is This Strategy?
+
+This strategy identifies **imbalance** zones in the market and combines them with **RSI divergence** to generate trading signals. It aims to capitalize on price gaps left by institutional investors and large volume movements.
+
+
+### Main Settings
+- **RSI Period (14)**: Period used for RSI calculation. Lower values = more sensitive, higher values = more stable signals.
+- **ATR Period (10)**: Period for volatility measurement using Average True Range.
+- **ATR Stop Loss Multiplier (2.0)**: How many ATR units to use for stop loss calculation.
+- **Risk:Reward Ratio (4.0)**: Risk-reward ratio. 2.0 = 2 units of reward for 1 unit of risk.
+- **Use RSI Divergence Filter (true)**: Enables/disables the RSI divergence filter.
+
+### Imbalance Filters
+- **Minimum Imbalance Size (ATR) (0.3)**: Minimum imbalance size in ATR units to filter out small imbalances.
+- **Enable Lookback Limit (false)**: Activates historical lookback limitations.
+- **Maximum Lookback Bars (300)**: Maximum number of bars to look back.
+
+### Visual Settings
+- **Show Imbalance Size**: Displays imbalance size in ATR units.
+- **Show RSI Divergence Lines**: Shows/hides divergence lines.
+- **Divergence Line Colors**: Colors for bullish/bearish divergence lines.
+
+
+### Volatility-Based Adjustments
+- **Low volatility markets**:
+- Minimum Imbalance Size: 0.2-0.4 ATR
+- ATR Stop Loss Multiplier: 1.5-2.0
+- **High volatility markets**:
+- Minimum Imbalance Size: 0.5-1.0 ATR
+- ATR Stop Loss Multiplier: 2.5-3.5
+
+### Risk Tolerance
+- **Conservative approach**:
+- Risk:Reward Ratio: 2.0-3.0
+- RSI Divergence Filter: Enabled
+- Minimum Imbalance Size: Higher (0.5+ ATR)
+- **Aggressive approach**:
+- Risk:Reward Ratio: 4.0-6.0
+- Minimum Imbalance Size: Lower (0.2-0.3 ATR)
+
+###Market Conditions
+- **Trending markets**: Higher RSI Period (21-28)
+- **Sideways markets**: Lower RSI Period (10-14)
+- **Volatile markets**: Higher ATR Multiplier
+
+## Recommended Testing Procedure
+
+1. **Start with default settings** and backtest on 3-6 months of historical data
+2. **Adjust RSI Period** to see which value produces better results
+3. **Optimize ATR Multiplier** for stop loss levels
+4. **Test different Risk:Reward ratios** comparatively
+5. **Fine-tune Minimum Imbalance Size** to improve signal quality
+
+## Important Considerations
+
+- **False positive signals**: Imbalances may be less reliable during low volatility periods
+- **Market openings**: First hours often produce more imbalances but can be riskier
+- **News events**: Consider disabling strategy during major news releases
+- **Backtesting**: Test across different market conditions (trending, sideways, volatile)
+
+## Recommended Settings for Beginners
+
+**Safe settings for new users:**
+- RSI Period: 14
+- ATR Period: 14
+- ATR Stop Loss Multiplier: 2.5
+- Risk:Reward Ratio: 3.0
+- Minimum Imbalance Size: 0.5 ATR
+- RSI Divergence Filter: Enabled
+
+## Advanced Tips
+
+### Signal Quality Improvement
+- **Combine with market structure**: Look for imbalances near key support/resistance levels
+- **Volume confirmation**: Higher volume during imbalance formation increases reliability
+- **Multiple timeframe analysis**: Confirm signals on higher timeframes
+
+### Risk Management
+- **Position sizing**: Never risk more than 1-2% of account per trade
+- **Maximum drawdown**: Set overall stop loss for the strategy
+- **Market hours**: Consider avoiding low liquidity periods
+
+### Performance Monitoring
+- **Win rate**: Track percentage of profitable trades
+- **Average R:R**: Monitor actual risk-reward achieved vs. target
+- **Maximum consecutive losses**: Set alerts for strategy review
+
+This strategy works best when combined with proper risk management and market analysis. Always backtest thoroughly before using real money and adjust parameters based on your specific market and trading style.

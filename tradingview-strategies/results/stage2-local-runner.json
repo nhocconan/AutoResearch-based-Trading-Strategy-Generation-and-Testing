@@ -1,0 +1,43 @@
+{
+  "updated_at": "2026-03-24T04:59:46.748459+00:00",
+  "status": "running",
+  "started_at": "2026-03-24T04:01:03.700312+00:00",
+  "queue_total": 5036,
+  "lanes": {
+    "lane-0": {
+      "queue_total": 2478,
+      "processed_reports": 250,
+      "terminal_reports": 59,
+      "remaining": 2419,
+      "status": "running",
+      "process_state": "running",
+      "updated_at": "2026-03-24T04:59:24.439709+00:00"
+    },
+    "lane-1": {
+      "queue_total": 2558,
+      "processed_reports": 246,
+      "terminal_reports": 55,
+      "remaining": 2503,
+      "status": "running",
+      "process_state": "running",
+      "updated_at": "2026-03-24T04:59:10.623186+00:00"
+    }
+  },
+  "aggregate": {
+    "generated_at": "2026-03-24T04:59:46.742827+00:00",
+    "model": "qwen3.5-plus",
+    "provider": "openai",
+    "base_url_set": true,
+    "queue_candidates_available": 5036,
+    "processed_reports": 465,
+    "terminal_reports": 96,
+    "converted": 52,
+    "unsupported": 44,
+    "errors": 0,
+    "retryable": 369,
+    "remaining_candidates": 4940,
+    "last_processed_url": "https://www.tradingview.com/script/BjLwxoH4/",
+    "last_processed_slug": "range-trading-sol",
+    "active_lanes": 2
+  }
+}

@@ -1,0 +1,49 @@
+//@version=5
+
+/// Open Saturday with BTCUSDT // Work well with 1h btcusdt chart
+strategy(title='Saturday Strategy By Kzi', shorttitle='Saturday Strategy by Kzi', overlay=true, initial_capital=75, currency=currency.USD, commission_value=0.01,commission_type=strategy.commission.percent)
+
+bgcolor(dayofweek == 7 ? #FEFD01 : na, transp=50)
+ID1 = input.symbol('BINANCE:BTCUSDTPERP', group='Symbol inputs')
+
+ID1DailyClose = request.security(ID1, 'D', close[1])
+ID1DailyOpen = request.security(ID1, 'D', open[1])
+
+greenCandle = (ID1DailyClose > ID1DailyOpen)
+
+
+if greenCandle and dayofweek == 7 
+    strategy.entry('Buy_long', strategy.long)
+    
+strategy.close("Buy_long",when=(close >=strategy.position_avg_price*1.007))
+strategy.close("Buy_long",when=(dayofweek < 7))
+
+if greenCandle==false and dayofweek == 7
+    strategy.entry('Buy_short', strategy.short)
+    
+strategy.close("Buy_short",when=(close <=strategy.position_avg_price*0.093))
+strategy.close("Buy_short",when=(dayofweek < 7))
+
+View in Pine Editor・25 lines
+Use on chart
+1
+0
+5
+1
+3 252
+I take the hypothèse that saturday is the most stable day of the week because, no SP500, no fed announcement and no weekly closure.
+My Strategy is very simple:
+Take the friday color (Red = Short // Green = Long)
+Then open at the friday close price
+Take a small pourcentage (1 or 2 %) then close.
+What ever close on midnight.
+
+Work Well on the 1h chart.
+
+The Yellow is the saturday.
+
+Maybe we can add the monthly close information to avoid opening trade on saturday if we are at this event.
+
+Enjoy and give me your comment.
+
+Kzi

@@ -1,0 +1,141 @@
+//@version=5
+strategy("HV Structure Strategy [Atlas v2]", overlay=true, pyramiding=3, default_qty_type=strategy.fixed)
+
+// ========== USER INPUTS ==========
+riskPct         = input.float(0.5, "Risk per Trade (% equity)", step=0.1)   // percent of equity to risk each trade
+maxPyramids     = input.int(3, "Max Pyramid Entries (including first)", minval=1)
+hvMult          = input.float(1.6, "HV Volume Multiplier", step=0.1)
+volLen          = input.int(20, "Volume SMA Length")
+atrLen          = input.int(14, "ATR Length")
+atrSLmult       = input.float(1.0, "SL = ATR *", step=0.1)
+maFastLen       = input.int(20, "Fast EMA")
+maSlowLen       = input.int(50, "Slow EMA")
+rsiLen          = input.int(14, "RSI Length")
+macdFast        = input.int(12, "MACD Fast")
+macdSlow        = input.int(26, "MACD Slow")
+macdSig         = input.int(9, "MACD Signal")
+riskReward      = input.float(2.0, "Risk:Reward (TP multiplier)", step=0.1)
+minDistanceBars = input.int(3, "Min bars between pyramid entries", minval=1)
+
+// ========== INDICATORS & FILTERS ==========
+volSMA = ta.sma(volume, volLen)
+isHV   = volume > volSMA * hvMult
+
+emaFast = ta.ema(close, maFastLen)
+emaSlow = ta.ema(close, maSlowLen)
+trendUp = emaFast > emaSlow
+trendDn = emaFast < emaSlow
+
+rsiVal = ta.rsi(close, rsiLen)
+rsiLong = rsiVal > 50
+rsiShort= rsiVal < 50
+
+macdLine = ta.ema(close, macdFast) - ta.ema(close, macdSlow)
+macdSigL  = ta.ema(macdLine, macdSig)
+macdLong  = macdLine > macdSigL
+macdShort = macdLine < macdSigL
+
+atrVal = ta.atr(atrLen)
+slDistance = atrVal * atrSLmult
+
+// tightened confirmation: price above/below fast ema
+priceAboveFast = close > emaFast
+priceBelowFast = close < emaFast
+
+// ========== SIGNAL LOGIC ==========
+baseLongSignal  = isHV and trendUp and priceAboveFast and rsiLong and macdLong
+baseShortSignal = isHV and trendDn and priceBelowFast and rsiShort and macdShort
+
+// we will only allow a new pyramid entry if X bars have passed since last entry
+var int lastEntryBar = na
+barsSinceLastEntry = bar_index - (na(lastEntryBar) ? -999999 : lastEntryBar)
+allowNewPyramid = barsSinceLastEntry >= minDistanceBars
+
+// track number of entries in current direction (reset when flat)
+var int longEntries = 0
+var int shortEntries = 0
+if strategy.position_size == 0
+    longEntries := 0
+    shortEntries := 0
+
+// ========== POSITION SIZING (fixed dollar risk) ==========
+dollarRisk = strategy.equity * (riskPct / 100.0)
+
+// helper to calc qty based on current price & stop distance
+f_calc_qty(_entryPrice, _stopPrice) =>
+    sl = math.abs(_entryPrice - _stopPrice)
+    _qty = sl > 0 ? (dollarRisk / sl) : 0
+    // shares must be >= 1 for most instruments; floor to integer
+    _qty := math.floor(_qty)
+    _qty
+
+// ========== ENTRIES & PYRAMIDING ==========
+if (baseLongSignal)
+    if strategy.position_size <= 0
+        // no long open — open first long
+        stopP = close - slDistance
+        qty = f_calc_qty(close, stopP)
+        if qty >= 1
+            strategy.entry("Long", strategy.long, qty=qty)
+            // set exits: partial at 1R (50%), remainder at RR
+            take1 = close + slDistance * 1.0
+            take2 = close + slDistance * riskReward
+            strategy.exit("TP1 Long", from_entry="Long", limit=take1, qty_percent=50, stop=stopP)
+            strategy.exit("TP2 Long", from_entry="Long", limit=take2, stop=stopP)
+            longEntries += 1
+            lastEntryBar := bar_index
+    else
+        // already long — allow pyramid add if same-direction signal and not exceeded pyramids
+        if strategy.position_size > 0 and longEntries < maxPyramids and allowNewPyramid
+            stopP = close - slDistance
+            qty = f_calc_qty(close, stopP)
+            if qty >= 1
+                strategy.entry("LongAdd" + str.tostring(longEntries+1), strategy.long, qty=qty)
+                // update exits for all from the same entry name (they share from_entry "Long")
+                take1 = close + slDistance * 1.0
+                take2 = close + slDistance * riskReward
+                strategy.exit("TP1 Long", from_entry="Long", limit=take1, qty_percent=50, stop=stopP)
+                strategy.exit("TP2 Long", from_entry="Long", limit=take2, stop=stopP)
+                longEntries += 1
+                lastEntryBar := bar_index
+
+if (baseShortSignal)
+    if strategy.position_size >= 0
+        // no short open — open first short
+        stopP = close + slDistance
+        qty = f_calc_qty(close, stopP)
+        if qty >= 1
+            strategy.entry("Short", strategy.short, qty=qty)
+            take1 = close - slDistance * 1.0
+            take2 = close - slDistance * riskReward
+            strategy.exit("TP1 Short", from_entry="Short", limit=take1, qty_percent=50, stop=stopP)
+            strategy.exit("TP2 Short", from_entry="Short", limit=take2, stop=stopP)
+            shortEntries += 1
+            lastEntryBar := bar_index
+    else
+        // already short — pyramid add
+        if strategy.position_size < 0 and shortEntries < maxPyramids and allowNewPyramid
+            stopP = close + slDistance
+            qty = f_calc_qty(close, stopP)
+            if qty >= 1
+                strategy.entry("ShortAdd" + str.tostring(shortEntries+1), strategy.short, qty=qty)
+                take1 = close - slDistance * 1.0
+                take2 = close - slDistance * riskReward
+                strategy.exit("TP1 Short", from_entry="Short", limit=take1, qty_percent=50, stop=stopP)
+                strategy.exit("TP2 Short", from_entry="Short", limit=take2, stop=stopP)
+                shortEntries += 1
+                lastEntryBar := bar_index
+
+// ========== PLOTTING ==========
+plot(emaFast, title="EMA Fast", linewidth=2)
+plot(emaSlow, title="EMA Slow", linewidth=1)
+plotshape(baseLongSignal, title="LongSignal", style=shape.triangleup, location=location.belowbar, size=size.small)
+plotshape(baseShortSignal, title="ShortSignal", style=shape.triangledown, location=location.abovebar, size=size.small)
+hline(50, color=color.gray, linestyle=hline.style_dotted)
+
+View in Pine Editor・134 lines
+Use on chart
+1
+0
+814
+created to spot key area needed to take valid trades in most market conditions. use beside RSI MACD

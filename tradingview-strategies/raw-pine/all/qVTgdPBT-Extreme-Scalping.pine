@@ -1,0 +1,67 @@
+//@version=4
+strategy("Extreme Scalping", overlay=true, calc_on_every_tick=false, pyramiding=0,default_qty_type=strategy.fixed,default_qty_value=100,currency=currency.USD, initial_capital=1000)
+src = input(close,title="Source")
+len = input(defval=14, minval=1, title="Length")
+offset = input(1)
+out = linreg(src, len, offset)
+plot(out)
+
+gap_tick=input(100)
+fixedTP=input(300)
+fixedSL=input(100)
+useFixedSLTP=input(true)
+direction=input(defval="ALL",title="Direction of order",options=["ALL","BUY ONLY","SELL ONLY"])
+gap=gap_tick*syminfo.mintick
+plot(out+gap,color=color.red)
+plot(out-gap,color=color.green)
+
+tp=useFixedSLTP?fixedTP:gap_tick
+sl=useFixedSLTP?fixedSL:gap_tick
+
+longCondition = close<(out-gap) and (direction=="ALL" or direction=="BUY ONLY")
+shortCondition = close>(out+gap) and (direction=="ALL" or direction=="SELL ONLY")
+
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("exit long","Long",profit = tp,loss = sl)
+    
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("exit short","Short",profit =tp,loss=sl)
+    
+// === Backtesting Dates === thanks to Trost
+
+testPeriodSwitch = input(true, "Custom Backtesting Dates")
+testStartYear = input(2019, "Backtest Start Year")
+testStartMonth = input(10, "Backtest Start Month")
+testStartDay = input(3, "Backtest Start Day")
+testStartHour = input(0, "Backtest Start Hour")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,testStartHour,0)
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(31, "Backtest Stop Day")
+testStopHour = input(23, "Backtest Stop Hour")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,testStopHour,0)
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+isPeriod = testPeriodSwitch == true ? testPeriod() : true
+// === /END
+
+if not isPeriod
+    strategy.cancel_all()
+    strategy.close_all()
+
+View in Pine Editor・53 lines
+Use on chart
+2.2 K
+12
+71 709
+This is a test of an easy scalping method: buy if actual close is below forecast close and sell if actual close is above forecast close. Take profit and stop loss shall be very small (few pips) as in most of scalping strategies.
+No filter is used for only long or only short positions, but you can select buy only or sell only based on other indicators or whatever you feel is the direction of trading.
+
+NOTE: you can add this strategy to your chart but you should modify the backtest day otherwise you will get an error due to calculation limits of pine script. For example, on one minute chart, you should set the backtest day from today only. For past days, set both start day and and day.
+
+I have also a study with alarms.
+
+Please use comment section for any feedback.

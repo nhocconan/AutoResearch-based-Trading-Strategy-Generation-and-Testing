@@ -1,0 +1,105 @@
+//@version=5
+strategy(title="Micro Rejection Scalping v6 - XAUUSD 15s", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+         commission_type=strategy.commission.percent, commission_value=0,
+         max_lines_count=500, max_labels_count=500)
+
+// =============================================================
+// INPUTS
+// =============================================================
+
+// -- Trend --
+ema_fast_len  = input.int(9,  "Fast EMA Length", group="Trend")
+ema_slow_len  = input.int(21, "Slow EMA Length", group="Trend")
+
+// -- Exit --
+sl_atr_mult = input.float(0.8, "Stop Loss (x ATR)",   minval=0.1, step=0.1, group="Exit")
+tp_atr_mult = input.float(2.0, "Take Profit (x ATR)", minval=0.5, step=0.1, group="Exit")
+
+// -- Filters --
+cooldown_bars = input.int(12,   "Cooldown Between Trades (bars)", minval=1, maxval=50, group="Filters")
+use_session   = input.bool(true, "Use Session Filter (New York ET)", group="Filters")
+ses_start     = input.int(7,  "Session Start Hour (ET)",  minval=0, maxval=23, group="Filters")
+ses_end       = input.int(11, "Session End Hour (ET)",    minval=0, maxval=23, group="Filters")
+
+// =============================================================
+// CORE CALCULATIONS
+// =============================================================
+ema_fast = ta.ema(close, ema_fast_len)
+ema_slow = ta.ema(close, ema_slow_len)
+atr14    = ta.atr(14)
+safe_atr = na(atr14) ? 1.0 : atr14
+
+// =============================================================
+// SESSION FILTER  (New York ET - handles EST/EDT automatically)
+// =============================================================
+h_et       = hour(time, "America/New_York")
+in_session = h_et >= ses_start and h_et < ses_end
+session_ok = not use_session or in_session
+
+// =============================================================
+// COOLDOWN
+// =============================================================
+var int last_trade_bar = 0
+cool_ok = (bar_index - last_trade_bar) >= cooldown_bars
+
+// =============================================================
+// ENTRY SIGNALS  (short-only EMA cross)
+// =============================================================
+sell_signal = ta.crossunder(ema_fast, ema_slow) and session_ok and cool_ok and strategy.position_size == 0
+
+// =============================================================
+// STOP LOSS & TAKE PROFIT  (min 1:1 RR enforced)
+// =============================================================
+sell_sl      = high + safe_atr * sl_atr_mult
+sell_sl_dist = math.max(sell_sl - close, safe_atr * 0.1)
+sell_tp      = close - math.max(safe_atr * tp_atr_mult, sell_sl_dist)
+
+// =============================================================
+// TRADE EXECUTION  (short only)
+// =============================================================
+if sell_signal
+    last_trade_bar := bar_index
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", from_entry="Short", stop=sell_sl, limit=sell_tp)
+
+// =============================================================
+// SIGNAL MARKER + SL/TP BARS
+// =============================================================
+var line sl_line = na
+var line tp_line = na
+
+if sell_signal
+    // Remove previous bars
+    line.delete(sl_line)
+    line.delete(tp_line)
+    // Solid thick horizontal bars extending 60 bars to the right
+    sl_line := line.new(bar_index, sell_sl, bar_index + 60, sell_sl,
+         color=color.red, width=3, style=line.style_solid)
+    tp_line := line.new(bar_index, sell_tp, bar_index + 60, sell_tp,
+         color=color.lime, width=3, style=line.style_solid)
+
+// =============================================================
+// VISUALS
+// =============================================================
+plot(ema_fast, "EMA Fast", color=color.new(color.orange, 20), linewidth=1)
+plot(ema_slow, "EMA Slow", color=color.new(color.yellow, 20), linewidth=2)
+
+// Entry signal arrow
+plotshape(sell_signal, title="Short Entry", location=location.abovebar,
+     style=shape.triangledown, color=color.red, size=size.normal, text="SHORT")
+
+bgcolor(use_session and in_session ? color.new(color.blue, 93) : na, title="Session Window")
+
+View in Pine Editor・95 lines
+Use on chart
+4
+158
+Short-only scalping strategy for XAUUSD on the 15-second timeframe. Entries trigger on a fast/slow EMA crossunder near dynamic swing resistance levels. Exits are managed with ATR-based stop loss and take profit.
+Session filter restricts trading to 7:00–11:00 AM New York time (ET), covering the NY open — automatically adjusts for EST/EDT. A cooldown prevents back-to-back trades on the same swing.
+Settings: EMA 9/21 | Pivot lookback 5 | SL 0.8x ATR | TP 2.0x ATR | Cooldown 12 bars
+Release Notes
+Micro Rejection Scalping v6 — XAUUSD 15s
+Short-only scalping strategy for XAUUSD on the 15-second timeframe. Entries trigger on a fast/slow EMA crossunder near dynamic swing resistance levels. Exits are managed with ATR-based stop loss and take profit.
+Session filter restricts trading to 7:00–11:00 AM New York time (ET), covering the NY open — automatically adjusts for EST/EDT. A cooldown prevents back-to-back trades on the same swing.
+Settings: EMA 9/21 | Pivot lookback 5 | SL 0.8x ATR | TP 2.0x ATR | Cooldown 12 bars

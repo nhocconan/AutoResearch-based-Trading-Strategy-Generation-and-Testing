@@ -1,0 +1,223 @@
+//@version=5
+strategy("Symmetrical Triangle Strategy (Real and Trap confirmation)", 
+     overlay = true, 
+     initial_capital = 10000, 
+     default_qty_type = strategy.percent_of_equity, 
+     default_qty_value = 10,
+     pyramiding = 5
+     )
+
+// 1. ENTRADAS
+var GRP_PATTERN = "Detección del Patrón"
+pivotLeftInput = input.int(6, "Fuerza del Pivote (Velas a la Izquierda)", group = GRP_PATTERN)
+pivotRightInput = input.int(6, "Retraso de Detección (Velas a la Derecha - Puntos 1 y 2)", group = GRP_PATTERN)
+pivotRightSensitiveInput = input.int(1, "Retraso de Detección (Velas a la Derecha - Último Punto)", group = GRP_PATTERN, minval=0)
+upperLineColorInput = input.color(color.new(color.red, 50), "Color Líneas Históricas (Sup)", group = GRP_PATTERN)
+lowerLineColorInput = input.color(color.new(color.green, 50), "Color Líneas Históricas (Inf)", group = GRP_PATTERN)
+maxPatternsInput = input.int(50, "Máximo de Patrones a Dibujar", minval=1, group = GRP_PATTERN)
+
+var GRP_POINTS = "Marcadores de Puntos"
+showPointsInput = input.bool(true, "Mostrar Puntos del Patrón", group = GRP_POINTS)
+highPointColorInput = input.color(color.new(color.maroon, 20), "Color Puntos Superiores", group = GRP_POINTS)
+lowPointColorInput = input.color(color.new(color.teal, 20), "Color Puntos Inferiores", group = GRP_POINTS)
+pointSizeInput = input.string(size.small, "Tamaño de los Puntos", options=[size.tiny, size.small, size.normal, size.large, size.huge], group = GRP_POINTS)
+
+var GRP_STRATEGY = "Gestión de la Estrategia Híbrida"
+// Filtros para Ruptura Real
+useVolumeFilterInput = input.bool(true, "Usar Filtro de Volumen?", group = GRP_STRATEGY)
+volumeAvgLengthInput = input.int(20, "Períodos Media de Volumen", group = GRP_STRATEGY)
+volumeMultiplierInput = input.float(1.5, "Multiplicador de Volumen", minval=1.0, group = GRP_STRATEGY)
+useRsiFilterInput = input.bool(true, "Usar Filtro de RSI?", group = GRP_STRATEGY)
+rsiLengthInput = input.int(14, "Períodos RSI", group = GRP_STRATEGY)
+rsiThresholdInput = input.int(50, "Umbral RSI", group = GRP_STRATEGY)
+// Filtros para Confirmación de Trampa
+useTrapConfirmationInput = input.bool(true, "Usar Confirmación para Trampas?", group = GRP_STRATEGY, tooltip="Espera una señal extra (cruce de EMAs) antes de entrar en una operación de trampa.")
+emaFastLengthInput = input.int(5, "EMA Rápida para Confirmación de Trampa", group = GRP_STRATEGY)
+emaSlowLengthInput = input.int(10, "EMA Lenta para Confirmación de Trampa", group = GRP_STRATEGY)
+trapTimeoutBarsInput = input.int(10, "Velas para Expiración de Trampa", minval=1, group=GRP_STRATEGY)
+
+// 2. ESTRUCTURAS DE DATOS
+type PivotPoint
+    float price
+    int barIndex
+type ActiveTriangle
+    int id
+    line upperLine
+    line lowerLine
+    float breakoutLevelHigh 
+    float breakoutLevelLow
+    string state // "monitoring", "bull_trap_armed", "bear_trap_armed", "confirming_bull_trap", "confirming_bear_trap"
+    int trapArmedBar 
+var array<PivotPoint> highPivots = array.new<PivotPoint>(), var array<PivotPoint> lowPivots = array.new<PivotPoint>()
+var array<PivotPoint> highPivotsSensitive = array.new<PivotPoint>(), var array<PivotPoint> lowPivotsSensitive = array.new<PivotPoint>()
+var array<line> drawnLines = array.new<line>(), var array<label> drawnPoints = array.new<label>()
+var array<ActiveTriangle> activeTriangles = array.new<ActiveTriangle>()
+var int patternCounter = 0, var int lastPatternBarH = -1, var int lastPatternBarL = -1
+
+// 3. FUNCIÓN DE CÁLCULO
+calculateIntersection(PivotPoint p1_top, PivotPoint p2_top, PivotPoint p1_bot, PivotPoint p2_bot) =>
+    float m_top = (p2_top.price - p1_top.price) / (p2_top.barIndex - p1_top.barIndex), float m_bot = (p2_bot.price - p1_bot.price) / (p2_bot.barIndex - p1_bot.barIndex)
+    if m_top == m_bot or m_top > m_bot
+        [int(na), float(na)]
+    else
+        float c_top = p1_top.price - m_top * p1_top.barIndex, float c_bot = p1_bot.price - m_bot * p1_bot.barIndex
+        float intersect_bar_float = (c_bot - c_top) / (m_top - m_bot)
+        [int(math.round(intersect_bar_float)), m_top * intersect_bar_float + c_top]
+
+// 4. LÓGICA PRINCIPAL
+// --- Detección de Pivotes y Patrones ---
+pivotHighPrice = ta.pivothigh(high, pivotLeftInput, pivotRightInput), pivotLowPrice = ta.pivotlow(low, pivotLeftInput, pivotRightInput)
+if not na(pivotHighPrice)
+    highPivots.push(PivotPoint.new(pivotHighPrice, bar_index - pivotRightInput))
+if not na(pivotLowPrice)
+    lowPivots.push(PivotPoint.new(pivotLowPrice, bar_index - pivotRightInput))
+pivotHighPrice_sens = ta.pivothigh(high, pivotLeftInput, pivotRightSensitiveInput), pivotLowPrice_sens = ta.pivotlow(low, pivotLeftInput, pivotRightSensitiveInput)
+if not na(pivotHighPrice_sens)
+    highPivotsSensitive.push(PivotPoint.new(pivotHighPrice_sens, bar_index - pivotRightSensitiveInput))
+if not na(pivotLowPrice_sens)
+    lowPivotsSensitive.push(PivotPoint.new(pivotLowPrice_sens, bar_index - pivotRightSensitiveInput))
+if highPivots.size() >= 2 and lowPivots.size() >= 2 and highPivotsSensitive.size() >= 1 and lowPivotsSensitive.size() >= 1
+    PivotPoint h1 = highPivots.get(highPivots.size() - 2), PivotPoint h2 = highPivots.get(highPivots.size() - 1)
+    PivotPoint l1 = lowPivots.get(lowPivots.size() - 2), PivotPoint l2 = lowPivots.get(lowPivots.size() - 1)
+    PivotPoint h3 = highPivotsSensitive.last(), PivotPoint l3 = lowPivotsSensitive.last()
+    bool isLowerHighs = h3.price < h2.price and h2.price < h1.price, bool isHigherLows = l3.price > l2.price and l2.price > l1.price
+    bool isChronologyOK = h3.barIndex > h2.barIndex and h2.barIndex > h1.barIndex and l3.barIndex > l2.barIndex and l2.barIndex > l1.barIndex
+    bool isNewPattern = h3.barIndex > lastPatternBarH and l3.barIndex > lastPatternBarL
+    if isLowerHighs and isHigherLows and isChronologyOK and isNewPattern
+        [intersectBar, intersectPrice] = calculateIntersection(h1, h3, l1, l3)
+        if not na(intersectBar)
+            patternCounter += 1, lastPatternBarH := h3.barIndex, lastPatternBarL := l3.barIndex
+            if showPointsInput
+                drawnPoints.push(label.new(h1.barIndex, h1.price, style=label.style_circle, color=highPointColorInput, size=pointSizeInput, tooltip="")), drawnPoints.push(label.new(h2.barIndex, h2.price, style=label.style_circle, color=highPointColorInput, size=pointSizeInput, tooltip="")), drawnPoints.push(label.new(h3.barIndex, h3.price, style=label.style_circle, color=highPointColorInput, size=pointSizeInput, tooltip=""))
+                drawnPoints.push(label.new(l1.barIndex, l1.price, style=label.style_circle, color=lowPointColorInput, size=pointSizeInput, tooltip="")), drawnPoints.push(label.new(l2.barIndex, l2.price, style=label.style_circle, color=lowPointColorInput, size=pointSizeInput, tooltip="")), drawnPoints.push(label.new(l3.barIndex, l3.price, style=label.style_circle, color=lowPointColorInput, size=pointSizeInput, tooltip=""))
+            line historicalUpper = line.new(h1.barIndex, h1.price, intersectBar, intersectPrice, color=upperLineColorInput, width=1), line historicalLower = line.new(l1.barIndex, l1.price, intersectBar, intersectPrice, color=lowerLineColorInput, width=1)
+            drawnLines.push(historicalUpper), drawnLines.push(historicalLower)
+            line activeUpper = line.copy(historicalUpper), line activeLower = line.copy(historicalLower)
+            activeUpper.set_color(color.new(color.blue, 0)), activeUpper.set_width(2), activeLower.set_color(color.new(color.blue, 0)), activeLower.set_width(2)
+            newTriangle = ActiveTriangle.new(patternCounter, activeUpper, activeLower, h3.price, l3.price, "monitoring", na)
+            activeTriangles.push(newTriangle)
+
+// --- LÓGICA DE TRADING HÍBRIDA ---
+if activeTriangles.size() > 0
+    // Calcular indicadores una vez por vela
+    float avgVolume = ta.sma(volume, volumeAvgLengthInput)
+    float currentRsi = ta.rsi(close, rsiLengthInput)
+    float emaFast = ta.ema(close, emaFastLengthInput)
+    float emaSlow = ta.ema(close, emaSlowLengthInput)
+
+    for i = activeTriangles.size() - 1 to 0
+        ActiveTriangle currentTriangle = activeTriangles.get(i)
+        bool removeTriangle = false
+
+        float triggerLongPrice = currentTriangle.breakoutLevelHigh
+        float triggerShortPrice = currentTriangle.breakoutLevelLow
+        string currentState = currentTriangle.state
+
+        switch currentState
+            "monitoring" =>
+                if (close > triggerLongPrice)
+                    bool isVolumeConfirmed = not useVolumeFilterInput or (volume > avgVolume * volumeMultiplierInput)
+                    bool isRsiConfirmed = not useRsiFilterInput or (currentRsi > rsiThresholdInput)
+                    if (isVolumeConfirmed and isRsiConfirmed)
+                        strategy.entry("L-Real-" + str.tostring(currentTriangle.id), strategy.long)
+                        removeTriangle := true
+                    else
+                        currentTriangle.state := "bull_trap_armed"
+                        currentTriangle.trapArmedBar := bar_index
+                else if (close < triggerShortPrice)
+                    bool isVolumeConfirmed = not useVolumeFilterInput or (volume > avgVolume * volumeMultiplierInput)
+                    bool isRsiConfirmed = not useRsiFilterInput or (currentRsi < rsiThresholdInput)
+                    if (isVolumeConfirmed and isRsiConfirmed)
+                        strategy.entry("S-Real-" + str.tostring(currentTriangle.id), strategy.short)
+                        removeTriangle := true
+                    else
+                        currentTriangle.state := "bear_trap_armed"
+                        currentTriangle.trapArmedBar := bar_index
+
+            "bull_trap_armed" =>
+                if (close < triggerLongPrice)
+                    if useTrapConfirmationInput
+                        currentTriangle.state := "confirming_bull_trap"
+                    else
+                        strategy.entry("S-Trap-" + str.tostring(currentTriangle.id), strategy.short)
+                        removeTriangle := true
+                else if (bar_index - currentTriangle.trapArmedBar >= trapTimeoutBarsInput)
+                    removeTriangle := true 
+            
+            "bear_trap_armed" =>
+                if (close > triggerShortPrice)
+                    if useTrapConfirmationInput
+                        currentTriangle.state := "confirming_bear_trap"
+                    else
+                        strategy.entry("L-Trap-" + str.tostring(currentTriangle.id), strategy.long)
+                        removeTriangle := true
+                else if (bar_index - currentTriangle.trapArmedBar >= trapTimeoutBarsInput)
+                    removeTriangle := true
+
+            "confirming_bull_trap" =>
+                if ta.crossunder(emaFast, emaSlow)
+                    strategy.entry("S-Trap-Conf-" + str.tostring(currentTriangle.id), strategy.short)
+                    removeTriangle := true
+                else if (bar_index - currentTriangle.trapArmedBar >= trapTimeoutBarsInput)
+                    removeTriangle := true
+
+            "confirming_bear_trap" =>
+                if ta.crossover(emaFast, emaSlow)
+                    strategy.entry("L-Trap-Conf-" + str.tostring(currentTriangle.id), strategy.long)
+                    removeTriangle := true
+                else if (bar_index - currentTriangle.trapArmedBar >= trapTimeoutBarsInput)
+                    removeTriangle := true
+
+        if removeTriangle
+            line.delete(currentTriangle.upperLine)
+            line.delete(currentTriangle.lowerLine)
+            activeTriangles.remove(i)
+
+// --- Gestión de Dibujos Antiguos ---
+while drawnLines.size() > maxPatternsInput * 2
+    line.delete(drawnLines.shift())
+while drawnPoints.size() > maxPatternsInput * 6
+    label.delete(drawnPoints.shift())
+
+// --- Visualización ---
+bgcolor(activeTriangles.size() > 0 ? color.new(color.blue, 90) : na, title="Triángulo(s) Activo(s)")
+
+View in Pine Editor・183 lines
+Use on chart
+6
+0
+1 457
+Overview
+
+This is an advanced strategy that not only detects symmetrical triangle patterns but also attempts to differentiate between a genuine breakout and a false breakout (a trap) to trade accordingly.
+
+Instead of blindly following every breakout, it analyzes the "quality" of the move using Volume and RSI filters. If the breakout appears weak, it prepares to trade in the opposite direction, capitalizing on the pattern's failure.
+
+How It Works
+
+The strategy employs a dual logic that activates after the price breaks the last pivot (H3 or L3):
+
+1. Scenario A: The Real Breakout
+* If the price breaks the triangle AND the breakout is confirmed by a surge in volume and/or a favorable RSI, the strategy considers the move genuine and enters in the direction of the breakout.
+
+2. Scenario B: The False Breakout (Trap)
+* If the price breaks the triangle BUT the indicators fail to confirm it (e.g., low volume), the strategy interprets it as a potential trap.
+* It waits for the price to return inside the pattern.
+* Once the price has re-entered, it opens a trade AGAINST the initial breakout, betting that the first move was a fake-out.
+
+Key Features
+
+* Hybrid Logic: It's not just a simple breakout strategy; it adapts to market conditions.
+* Confirmation Filters: Uses Volume and RSI to validate the strength of a breakout (fully configurable).
+* Capitalizes on Traps: Its greatest strength is the ability to identify and trade false breakouts, a common market scenario.
+* Optional Confirmation: For trap trades, an extra confirmation via an EMA crossover can be enabled for added safety.
+* Opportunity Timeout: Potential traps have a time limit to be confirmed, preventing the strategy from getting stuck in an undecided scenario.
+
+Important Disclaimer
+
+This strategy is designed as an entry system and DOES NOT INCLUDE A STOP LOSS OR TAKE PROFIT.
+
+Automation Ready
+
+Want to automate this or ANY strategy on your broker or MetaTrader (MT4/MT5) without keeping your computer on or needing a VPS? You can use WebhookTrade.
+

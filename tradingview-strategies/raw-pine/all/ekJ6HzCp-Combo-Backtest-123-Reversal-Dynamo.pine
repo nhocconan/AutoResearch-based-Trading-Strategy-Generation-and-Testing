@@ -1,0 +1,104 @@
+//@version=4
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 31/03/2020
+// This is combo strategies for get a cumulative signal. 
+//
+// First strategy
+// This System was created from the Book "How I Tripled My Money In The 
+// Futures Market" by Ulf Jensen, Page 183. This is reverse type of strategies.
+// The strategy buys at market, if close price is higher than the previous close 
+// during 2 days and the meaning of 9-days Stochastic Slow Oscillator is lower than 50. 
+// The strategy sells at market, if close price is lower than the previous close price 
+// during 2 days and the meaning of 9-days Stochastic Fast Oscillator is higher than 50.
+//
+// Second strategy
+// In July 1996 Futures magazine, E. Marshall Wall introduces the 
+// Dynamic Momentum Oscillator (Dynamo). Please refer to this article 
+// for interpretation.
+// The Dynamo oscillator is a normalizing function which adjusts the 
+// values of a standard oscillator for trendiness by taking the difference 
+// between the value of the oscillator and a moving average of the oscillator 
+// and then subtracting that value from the oscillator midpoint.
+//
+// WARNING:
+// - For purpose educate only
+// - This script to change bars colors.
+////////////////////////////////////////////////////////////
+Reversal123(Length, KSmoothing, DLength, Level) =>
+    vFast = sma(stoch(close, high, low, Length), KSmoothing) 
+    vSlow = sma(vFast, DLength)
+    pos = 0.0
+    pos := iff(close[2] < close[1] and close > close[1] and vFast < vSlow and vFast > Level, 1,
+             iff(close[2] > close[1] and close < close[1] and vFast > vSlow and vFast < Level, -1, nz(pos[1], 0))) 
+    pos
+
+D(OscLen, MALen, HiBand, LowBand) =>
+    pos = 0
+    xOscK = stoch(close, high, low, OscLen)
+    xOscAvg = sma(xOscK, OscLen)
+    xMAVal = sma(xOscAvg, MALen)
+    maxNum = 9999999
+    LowestSoFar = 0.0
+    HighestSoFar  = 0.0
+    LowestSoFar :=  iff(xOscAvg < nz(LowestSoFar[1], maxNum), xOscAvg, nz(LowestSoFar[1], maxNum))
+    HighestSoFar :=  iff(xOscAvg > nz(HighestSoFar[1]), xOscAvg, nz(HighestSoFar[1]))
+    MidPnt = (LowestSoFar + HighestSoFar) / 2
+    nRes = MidPnt - (xMAVal - xOscAvg)
+    pos := iff(nRes > HiBand, 1,
+             iff(nRes < LowBand, -1, nz(pos[1], 0)))     
+    pos
+
+strategy(title="Combo Backtest 123 Reversal & Dynamo", shorttitle="Combo", overlay = true)
+Length = input(14, minval=1)
+KSmoothing = input(1, minval=1)
+DLength = input(3, minval=1)
+Level = input(50, minval=1)
+//-------------------------
+OscLen = input(10, minval=1)
+MALen = input(20, minval=1)
+HiBand = input(77, minval=1)
+LowBand = input(23)
+reverse = input(false, title="Trade reverse")
+posReversal123 = Reversal123(Length, KSmoothing, DLength, Level)
+posD = D(OscLen, MALen, HiBand, LowBand)
+pos = iff(posReversal123 == 1 and posD == 1 , 1,
+       iff(posReversal123 == -1 and posD == -1, -1, 0)) 
+possig = iff(reverse and pos == 1, -1,
+          iff(reverse and pos == -1 , 1, pos))       
+if (possig == 1) 
+    strategy.entry("Long", strategy.long)
+if (possig == -1)
+    strategy.entry("Short", strategy.short)     
+if (possig == 0) 
+    strategy.close_all()
+barcolor(possig == -1 ? #b50404: possig == 1 ? #079605 : #0536b3 )
+
+View in Pine Editor・74 lines
+Use on chart
+4
+3
+9
+4
+7 723
+This is combo strategies for get a cumulative signal.
+
+First strategy
+This System was created from the Book "How I Tripled My Money In The
+Futures Market" by Ulf Jensen, Page 183. This is reverse type of strategies.
+The strategy buys at market, if close price is higher than the previous close
+during 2 days and the meaning of 9-days Stochastic Slow Oscillator is lower than 50.
+The strategy sells at market, if close price is lower than the previous close price
+during 2 days and the meaning of 9-days Stochastic Fast Oscillator is higher than 50.
+
+Second strategy
+In July 1996 Futures magazine, E. Marshall Wall introduces the
+Dynamic Momentum Oscillator (Dynamo). Please refer to this article
+for interpretation.
+The Dynamo oscillator is a normalizing function which adjusts the
+values of a standard oscillator for trendiness by taking the difference
+between the value of the oscillator and a moving average of the oscillator
+and then subtracting that value from the oscillator midpoint.
+
+WARNING:
+- For purpose educate only
+- This script to change bars colors.

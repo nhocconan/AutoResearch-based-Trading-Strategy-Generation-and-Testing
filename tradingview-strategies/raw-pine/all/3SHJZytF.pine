@@ -1,0 +1,136 @@
+//@version=5
+strategy("Strategy: HMA 50 + Supertrend Sniper", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// --- 1. Settings ---
+// HMA Settings
+hmaLength = input.int(50, title="HMA Length (Trend)", minval=1)
+
+// Supertrend Settings
+atrPeriod = input.int(10, title="ATR Period")
+factor = input.float(3.0, title="ATR Multiplier (ความกว้างของจุดคัท)", step=0.1)
+
+// Strategy Settings
+exitOnChoppy = input.bool(true, title="Exit when Choppy? (ปิดออเดอร์เมื่อเข้าโซนสีเทา)")
+useDateFilter = input.bool(false, title="Use Date Filter")
+startDate = input.time(timestamp("1 Jan 2024 00:00"), title="Start Date")
+endDate = input.time(timestamp("1 Jan 2030 00:00"), title="End Date")
+
+// --- 2. Calculations ---
+
+// HMA
+hmaValue = ta.hma(close, hmaLength)
+hmaRising = hmaValue > hmaValue[1]
+hmaFalling = hmaValue < hmaValue[1]
+
+// Supertrend
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+// direction: -1 = uptrend (Green), 1 = downtrend (Red)
+
+// --- 3. Logic (The Confluence) ---
+
+// เงื่อนไข Buy: HMA ขึ้น + Supertrend เขียว
+isBullish = hmaRising and direction == -1
+// เงื่อนไข Sell: HMA ลง + Supertrend แดง
+isBearish = hmaFalling and direction == 1
+// เงื่อนไข Choppy (ขัดแย้งกัน)
+isChoppy = (hmaRising and direction == 1) or (hmaFalling and direction == -1)
+
+// Date Filter Check
+inDateRange = useDateFilter ? (time >= startDate and time <= endDate) : true
+
+// --- 4. Strategy Execution ---
+
+if inDateRange
+    // เปิด Long
+    if isBullish
+        strategy.entry("Long", strategy.long, comment="LONG")
+    
+    // เปิด Short
+    if isBearish
+        strategy.entry("Short", strategy.short, comment="SHORT")
+        
+    // ปิดสถานะเมื่อเข้าโซนไม่ชัดเจน (Optional: เพื่อความปลอดภัย)
+    if exitOnChoppy and isChoppy
+        strategy.close_all(comment="Close (Choppy)")
+
+// --- 5. Plotting & Visuals (เหมือนในรูป) ---
+
+// สี HMA
+hmaColor = isChoppy ? color.gray : (isBullish ? #00ff08 : #ff0000)
+
+// Plot HMA
+plot(hmaValue, title="HMA 50 Main", color=hmaColor, linewidth=3)
+
+// Plot Supertrend
+plot(supertrend, title="Stop Loss Line", color=direction == -1 ? color.new(color.green, 50) : color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+
+// Plot Visual Signals (เพื่อให้เห็นจุดเข้าบนกราฟเหมือนเดิม)
+// ใช้ logic state เพื่อไม่ให้รก
+var int visualState = 0
+visualBuy = isBullish and visualState != 1
+visualSell = isBearish and visualState != -1
+
+if visualBuy
+    visualState := 1
+if visualSell
+    visualState := -1
+if isChoppy
+    visualState := 0
+
+plotshape(visualBuy, title="Long Visual", location=location.belowbar, color=#00ff08, style=shape.cross, text="LONG", textcolor=color.white, size=size.small)
+plotshape(visualSell, title="Short Visual", location=location.abovebar, color=#ff0000, style=shape.xcross, text="SHORT", textcolor=color.white, size=size.small)
+
+// Bar Color
+barcolor(isBullish ? #00ff08 : isBearish ? #ff0000 : color.gray)
+
+View in Pine Editor・84 lines
+Use on chart
+1.1 K
+3
+14 900
+HMA 50 + Supertrend Confluence Strategy (Trend Following with Noise Filtering)
+
+Description:
+Introduction and Concept This strategy is designed to solve a common problem in trend-following trading: Lag vs. False Signals. Standard Moving Averages often lag too much, while price action indicators can generate false signals during choppy markets. This script combines the speed of the Hull Moving Average (HMA) with the volatility-based filtering of the Supertrend indicator to create a robust "Confluence System."
+
+The primary goal of this script is not just to overlay two indicators, but to enforce a strict rule where a trade is only taken when Momentum (HMA) and Volatility Direction (Supertrend) are in perfect agreement.
+
+Why this combination? (The Logic Behind the Mashup)
+
+Hull Moving Average (HMA 50): We use the HMA because it significantly reduces lag compared to SMA or EMA by using weighted calculations. It acts as our primary Trend Direction detector. However, HMA can be too sensitive and "whipsaw" during sideways markets.
+
+Supertrend (ATR-based): We use the Supertrend (Factor 3.0, Period 10) as our Volatility Filter. It uses Average True Range (ATR) to determine the significant trend boundary.
+
+How it Works (Methodology) The strategy uses a boolean logic system to filter out low-quality trades:
+
+Bullish Confluence: The HMA must be rising (Slope > 0) AND the Close Price must be above the Supertrend line (Uptrend).
+
+Bearish Confluence: The HMA must be falling (Slope < 0) AND the Close Price must be below the Supertrend line (Downtrend).
+
+The "Choppy Zone" (Noise Filter): This is a unique feature of this script. If the HMA indicates one direction (e.g., Rising) but the Supertrend indicates the opposite (e.g., Downtrend), the market is considered "Choppy" or indecisive. In this state, the script paints the candles or HMA line Gray and exits all positions (optional setting) to preserve capital.
+
+Visual Guide & Signals To make the script easy to interpret for traders who do not read Pine Script, I have implemented specific visual cues:
+
+Green Cross (+): Indicates a LONG entry signal. Both HMA and Supertrend align bullishly.
+
+Red Cross (X): Indicates a SHORT entry signal. Both HMA and Supertrend align bearishly.
+
+Thick Line (HMA): The main line changes color based on the trend.
+
+Green: Bullish Confluence.
+
+Red: Bearish Confluence.
+
+Gray: Divergence/Choppy (No Trade Zone).
+
+Thin Step Line: This is the Supertrend line, serving as your dynamic Trailing Stop Loss.
+
+Strategy Settings
+
+HMA Length: Default is 50 (Mid-term trend).
+
+ATR Factor/Period: Default is 3.0/10 (Standard for trend catching).
+
+Exit on Choppy: A toggle switch allowing users to decide whether to hold through noise or exit immediately when indicators disagree.
+
+Risk Warning This strategy performs best in trending markets (Forex, Crypto, Indices). Like all trend-following systems, it may experience drawdown during prolonged accumulation/distribution phases. Please backtest with your specific asset before using it with real capital.

@@ -1,0 +1,455 @@
+//@version=3
+//
+//▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                ██████    ██      ██   ██      ██   ██    ██                 ██                ██      ██  ██████████    ██████    ██      ██
+//              ██          ████  ████    ██    ██    ██   ██                ██████                ██  ██        ██      ██      ██  ████  ████
+//              ██          ██  ██  ██      █  █      █████                 ████████                 ██          ██      ██▄▄▄▄▄▄██  ██  ██  ██
+//              ██          ██      ██       ██       ██   ██                ██████                ██  ██        ██      ██▀▀▀▀▀▀██  ██      ██
+//                ██████    ██      ██       ██       ██    ██                 ██                ██      ██  ██████████  ██      ██  ██      ██
+//
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+//
+//                                                                              STRATEGY SETTINGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+strategy(title='░▒▓█ CMYK ◊ XIAM █▓▒░',shorttitle='░▒▓█ CMYK ◊ XIAM █▓▒░', overlay=true,pyramiding=10,  default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=9000000, currency='EUR', slippage=1, commission_type=strategy.commission.percent , commission_value=0.25)
+// study(title='░▒▓█ CMYK ◊ XIAM █▓▒░',shorttitle='░▒▓█ CMYK ◊ XIAM █▓▒░', overlay=true)
+//                                                                              COLORSPACE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+oker        = #FF9900   , reds          = #FF6600   , dreds         = #5d2b0a   ,
+cyan        = #00CCCC   , blues         = #0099CC   , dblues        = #0a3f51   , 
+magenta     = #FF00FF   , purples       = #6633CC   , KBBB          = #BBBBBB   , 
+K111        = #111111   , K555          = #555555   , K999          = #999999   , 
+//                                                                              FUNCTIONS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              RMI
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ 
+rmi(MOMENTUM,LENGHT)=>
+    INC             = ema   (max(close              - close[MOMENTUM]   , 0)    , LENGHT)
+    DEC             = ema   (max(close[MOMENTUM]    - close             , 0)    , LENGHT)
+    RMI             = DEC   == 0    ? 0     : 50 - 100 / (1     + INC / DEC)
+
+//                                                                              INPUTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              SMA PHASE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒                                          
+XSMA_PHASE          = input(defval=240                                          , type=integer  , title="XSMA PHASE FOR OFFSET"     )
+SMA_SOURCE_CLOSE    = close
+SMA_SOURCE_OPEN     = open
+SMA_SOURCE_FAST     = close
+SMA_LENGHT_FAST     = input(defval=21       , minval=1                                          , title="SMA EMA FAST"              )
+
+//                                                              MOVEMENT / FORCE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+PRICE               = SMA_SOURCE_CLOSE
+CLEANVOLUME         = input     (defval=open                                        , type=source   , title="CLEANSIGNAL ◊ VOLUME SOURCE" )
+USECLEANNO          = input     (defval=true                                        , type=bool     , title="USE TICKER VOLUME INSTEAD" )
+PERIOD              = input     (defval=250     , minval=1                          , type=integer  , title="PERIOD"        )
+SLOW                = input     (defval=250     , minval=1                          , type=integer  , title="SLOW"          )
+FAST                = input     (defval=130     , minval=1                          , type=integer  , title="FAST"          )
+
+EXIT_SWEEP          = input     (defval=200     , minval=1      , maxval=500        , type=integer  , title="EXIT ORDER SWEEP LENGHT"   )
+
+VOLUME              = iff       (USECLEANNO     , volume        , CLEANVOLUME)
+//                                                              MOMENTUM
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+RMI_SWEEP           = EXIT_SWEEP
+//                    RMI TREND for boundary correction
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//XRMI_LENGHT         = input(defval=2500     , minval=1                          , type=integer  , title="RMI TREND EMA LENGHT"      )
+//XRMI_MOMENTUM       = input(defval=5        , minval=1                                          , title="RMI TREND MOMENTUM"        )
+//                    RMI PHASE for event detection
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_LENGHT          = input(defval=250      , minval=1                          , type=integer  , title="RMI EMA LENGHT"            )
+RMI_MOMENTUM        = input(defval=20       , minval=1                                          , title="RMI MOMENTUM"              )
+//                    RMI ACTIVE for dip/top selection
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+ARMI_LENGHT         = input(defval=20       , minval=1                          , type=integer  , title="RMI ACTIVE EMA LENGHT"     )
+ARMI_MOMENTUM       = input(defval=5        , minval=1                                          , title="RMI ACTIVE MOMENTUM"       )
+//                    RMI PHASE     BOUNDARIES
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_HIGH            = input(defval=15       , minval=00     , maxval=50         , type=integer  , title="RMI PHASE BOUNDARY HIGH"   )
+RMI_LOW             = input(defval=-15      , minval=-50    , maxval=00         , type=integer  , title="RMI PHASE BOUNDARY LOW"    )
+//                    RMI ACTITVE   BOUNDARIES
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+ARMI_HIGH           = input(defval=40       , minval=00     , maxval=50         , type=integer  , title="RMI ACTIVE BOUNDARY HIGH"  )
+ARMI_LOW            = input(defval=-40      , minval=-50    , maxval=00         , type=integer  , title="RMI ACTIVE BOUNDARY LOW"   )
+
+//                                                              ASSET MANAGEMENT
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//AM_DELAY            = input(defval=25       , minval=1      , maxval=500        , type=integer  , title="DELAY AFTER ENTRIES"       )
+//AM_OPD              = input(defval=false                                        , type=bool     , title="BUY ONCE PER DIP / TOP"    )
+//AM_AMOUNT           = input(defval=1        , minval=1                          , type=integer  , title="AMOUNT PER ENTRY"          )
+//AM_MARGIN           = input(defval=1        , minval=1      , maxval=5          , type=integer  , title="MARGIN OF ENTRY"           )
+
+//                                                                              CALCULATIONS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              SMA PHASE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                    TREND BY OFFSET SMA
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+XSMA                = sma       (   SMA_SOURCE_CLOSE    , XSMA_PHASE)
+XSMA_OFFSET         = offset    (   SMA_SOURCE_CLOSE    , XSMA_PHASE    / 2)
+//                    JITTER & VARIANCE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+XSMA_DIFFERENCE     =               XSMA_OFFSET         - XSMA
+XSMA_HIGHEST        = highest   (   XSMA_DIFFERENCE     , XSMA_PHASE    * 2)
+XSMA_LOWEST         = lowest    (   XSMA_DIFFERENCE     , XSMA_PHASE    * 2)
+
+JITTER              = sin       (   XSMA_HIGHEST        - XSMA_LOWEST)  / (XSMA_PHASE*(1+close))         // ODD BEHATVIOR REDO
+SPREAD              = change    (   XSMA                , XSMA_PHASE)
+VARIANCE            =               SPREAD              * 2
+//                    BANDS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+XSMA_HIGH           =               XSMA                + XSMA_HIGHEST
+XSMA_LOW            =               XSMA                + XSMA_LOWEST 
+XSMA_HL2            =           (   XSMA_HIGH           + XSMA_LOW)     / 2
+//                    TREND BY OFFSET OPEN / CLOSE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+XSMA_OFFSET_OPEN    = offset    (   XSMA                , 0)
+XSMA_OFFSET_CLOSE   = offset    (   SMA_SOURCE_CLOSE    , XSMA_PHASE    / 2)                           // DITVIDING BY 2 :: this is the average factor, not the true factor (true factor variates by angle and momentum of movement within averaging lenght) abs(1+cos(x))Y?
+//                    DIRECTION AND ANGLE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+CLOSE_DIR           = rising    (   SMA_SOURCE_CLOSE    , 2)            ? +1    : falling   (   SMA_SOURCE_CLOSE    , 2)            ? -1    : 0
+CLOSE_COLOR         =               CLOSE_DIR           > 0             ? reds  :               CLOSE_DIR           < 0             ? blues : na
+
+SMA_EMA_FAST        = ema       (   SMA_SOURCE_FAST     , SMA_LENGHT_FAST)
+SMA_DIR_FAST        = rising    (   SMA_EMA_FAST        , 2)            ? +1    : falling   (   SMA_EMA_FAST        , 2)            ? -1    : 0
+SMA_FAST_COLOR      =               SMA_DIR_FAST        > 0             ? reds  :               SMA_DIR_FAST        < 0             ? blues : na
+
+XSMA_ANGLE_COLOR    = change    (   sma(XSMA,XSMA_PHASE), 1)            > (0+(XSMA*JITTER)) ? oker :  change(sma(XSMA,XSMA_PHASE),1) < (0-(XSMA*JITTER)) ? cyan : magenta  // ODD BEHATVIOR REDO
+
+//                                                              MOTVEMENT / FORCE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+SMA_PRICE               = sma       ( PRICE      , PERIOD)
+SMA_VOLUME              = sma       ( VOLUME     , PERIOD)/10000
+
+MOVEMENT                = change    ( SMA_PRICE  , 1)
+FORCE                   =             MOVEMENT / offset (     SMA_VOLUME    , 1)
+FORCE_SLOW              = sma       ( FORCE                 , SLOW)
+FORCE_FAST              = sma       ( FORCE                 , FAST)
+
+//                                                              MOMENTUM
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                    RMI PHASE for event detection
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI                 = rmi       (RMI_MOMENTUM           , RMI_LENGHT)
+//                    RMI ACTIVE for dip/top selection
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+ARMI                = rmi       (ARMI_MOMENTUM          , ARMI_LENGHT)
+//                    RMI TREND for boundary correction
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//XRMI                = rmi       (XRMI_MOMENTUM          , XRMI_LENGHT)
+
+//                                                                              CONDITIONS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              SMA PHASE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                    XSMA
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+XSMA_XO_OPEN        = crossover (   XSMA                , SMA_SOURCE_OPEN)
+XSMA_XU_OPEN        = crossunder(   XSMA                , SMA_SOURCE_OPEN)
+
+XSMA_PHASE_LONG     = fixnan    (iff(XSMA_XO_OPEN       , 1             , iff(XSMA_XU_OPEN      , 0     ,na)))
+XSMA_PHASE_SHORT    = fixnan    (iff(XSMA_XU_OPEN       , 1             , iff(XSMA_XO_OPEN      , 0     ,na)))
+
+XSMA_PHASE_COLOR    =               XSMA_PHASE_LONG     > 0             ? oker  : XSMA_PHASE_SHORT      > 0         ? cyan  : na
+//                    XSMA OFFSET
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+XSMA_XO_OFFSET      = crossover (sma(XSMA*(1+SPREAD)    , XSMA_PHASE)   , sma(XSMA*(1-SPREAD)   ,XSMA_PHASE))
+XSMA_XU_OFFSET      = crossunder(sma(XSMA*(1+SPREAD)    , XSMA_PHASE)   , sma(XSMA*(1-SPREAD)   ,XSMA_PHASE))
+
+XSMA_OFFSET_LONG    = fixnan    (iff(XSMA_XO_OFFSET     , 1             , iff(XSMA_XU_OFFSET    , 0     ,na)))
+XSMA_OFFSET_SHORT   = fixnan    (iff(XSMA_XU_OFFSET     , 1             , iff(XSMA_XO_OFFSET    , 0     ,na)))
+    
+XSMA_OFFSET_COLOR   =               XSMA_OFFSET_LONG    > 0             ? oker  : XSMA_OFFSET_SHORT     > 0         ? cyan : na
+
+//                                                              MOVEMENT / FORCE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+REVERSAL                = cross     ( FORCE_FAST            , FORCE_SLOW )
+
+PHASE_BULL_INIT         = crossover ( FORCE_FAST            , FORCE_SLOW ) and ( FORCE_SLOW            < 0 )
+PHASE_BULL_EXIT         = crossunder( FORCE_FAST            , FORCE_SLOW ) and ( FORCE_SLOW            < 0 )
+
+PHASE_BEAR_INIT         = crossunder( FORCE_FAST            , FORCE_SLOW ) and ( FORCE_SLOW            > 0 )
+PHASE_BEAR_EXIT         = crossover ( FORCE_FAST            , FORCE_SLOW ) and ( FORCE_SLOW            > 0 )
+
+
+//                    MF PHASE SWITCH
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+BULL                    = fixnan    ( PHASE_BULL_INIT       ? 1 :                PHASE_BULL_EXIT ? 0 :           PHASE_BEAR_INIT ? 0 :           na)
+BEAR                    = fixnan    ( PHASE_BEAR_INIT       ? 1 :                PHASE_BEAR_EXIT ? 0 :           PHASE_BULL_INIT ? 0 :           na)
+
+//                    MF SWEEP
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+BULL_EXIT_SWEEP         = sma       ( PHASE_BULL_EXIT       ? 1 :   0           , EXIT_SWEEP)    > 0    and     BULL != 1 ? 1 : 0
+BULL_EXIT_SWEEP_OUT     = change    ( BULL_EXIT_SWEEP       , 1 ) < 0
+BULL_EXIT_FINALIZE      = offset    ( BULL_EXIT_SWEEP_OUT   ? 1 : 0,1)          > 0                     and     BULL != 1 ? 1 : 0
+
+BEAR_EXIT_SWEEP         = sma       ( PHASE_BEAR_EXIT       ? 1 : 0,EXIT_SWEEP) > 0                     and     BEAR != 1 ? 1 : 0
+BEAR_EXIT_SWEEP_OUT     = change    ( BEAR_EXIT_SWEEP       , 1 ) < 0
+BEAR_EXIT_FINALIZE      = offset    ( BEAR_EXIT_SWEEP_OUT   ? 1 : 0,1)          > 0                     and BEAR != 1 ? 1 : 0
+
+//                                                              MOMENTUM
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                    RMI PHASE for event detection
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_XO_HIGH         = crossover (   RMI                 , RMI_HIGH  ) //      + XRMI)
+RMI_XU_HIGH         = crossunder(   RMI                 , RMI_HIGH  ) //     + XRMI)
+RMI_XO_LOW          = crossover (   RMI                 , RMI_LOW   ) //      + XRMI)
+RMI_XU_LOW          = crossunder(   RMI                 , RMI_LOW   ) //     + XRMI)
+
+RMI_O_HIGH          =               RMI                 > (RMI_HIGH ) //  + XRMI)
+RMI_U_LOW           =               RMI                 < (RMI_LOW  ) //      + XRMI)
+//                    RMI ACTIVE for dip/top selection
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+ARMI_O_HIGH         =               ARMI                > (ARMI_HIGH) //    + XRMI)
+ARMI_U_LOW          =               ARMI                < (ARMI_LOW ) //    + XRMI)
+
+//                                                                              DIFFERENTIATORS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              SMA PHASE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+
+//                                                              MOMENTUM
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                    RMI PHASE INIT
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 
+RMI_IN_HIGH         = fixnan    (iff(RMI_XO_LOW         , 1             , iff(RMI_XU_HIGH   , 0, na)))
+RMI_IN_LOW          = fixnan    (iff(RMI_XU_HIGH        , 1             , iff(RMI_XO_LOW    , 0, na)))
+
+RMI_IV_HIGH         = fixnan    (iff(RMI_IN_HIGH        and RMI_XO_HIGH , close             , na))
+RMI_IV_LOW          = fixnan    (iff(RMI_IN_LOW         and RMI_XU_LOW  , close             , na))
+//                    RMI PHASE END
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_EV_HIGH         = fixnan    (iff(RMI_XU_HIGH        , close         , na))
+RMI_EV_LOW          = fixnan    (iff(RMI_XO_LOW         , close         , na))
+//                    RMI PHASE LARGEST
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+///////////////////// ON AND LARGER THAN INIT     VALUE
+RMI_LI_HIGH         = fixnan    (iff(RMI_IN_HIGH        , close         , iff(RMI_IV_HIGH   < close, close, na)))
+RMI_LI_LOW          = fixnan    (iff(RMI_IN_LOW         , close         , iff(RMI_IV_LOW    > close, close, na)))
+
+///////////////////// LARGER THAN ANY PREVIOUS    CONDITION
+RMI_LX_HIGH         =               RMI_LI_HIGH         >= highest  (     RMI_LI_HIGH       , RMI_SWEEP)
+RMI_LX_LOW          =               RMI_LI_LOW          <= lowest   (     RMI_LI_LOW        , RMI_SWEEP)
+
+///////////////////// LARGER THAN ANY PREVIOUS    VALUE
+RMI_LC_HIGH         = fixnan    (iff(RMI_LX_HIGH        , RMI_LI_HIGH   , na))
+RMI_LC_LOW          = fixnan    (iff(RMI_LX_LOW         , RMI_LI_LOW    , na))
+
+///////////////////// ONLY OVER AND UNDER         CONDITION
+RMI_LV_HIGH         = fixnan    (iff(RMI_O_HIGH         , RMI_LC_HIGH   , na))
+RMI_LV_LOW          = fixnan    (iff(RMI_U_LOW          , RMI_LC_LOW    , na))
+
+///////////////////// NOCHANGE         CONDITION
+RMI_LN_HIGH         = iff(change(RMI_LV_HIGH,1) > 0,0,1)
+RMI_LN_LOW          = iff(change(RMI_LV_LOW,1) > 0,0,1)
+
+    
+//                                                                              PLACEMENT VARIABLES
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              SMA PHASE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+
+//                                                              MOMENTUM
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+RMI_IVLV_HIGH       =           (   RMI_IV_HIGH         + RMI_LV_HIGH)  / 2
+RMI_IVLV_HIGH_SMA   = sma       (   RMI_IVLV_HIGH       , SMA_LENGHT_FAST)
+
+RMI_IVLV_LOW        =           (   RMI_IV_LOW          + RMI_LV_LOW)   / 2
+RMI_IVLV_LOW_SMA    = sma       (   RMI_IVLV_LOW        , SMA_LENGHT_FAST)
+
+//                                                                              PLOT                                                                            
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   
+//                                                              SMA PHASE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                    ZERO
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+ZERO_PLOT           = plot      (   00             , transp=25 , color=CLOSE_COLOR      , linewidth=1  , style=line                 , title="CLOSE"                 , editable=true)
+//                    CLOSE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+CLOSE_PLOT          = plot      (   close          , transp=25 , color=CLOSE_COLOR      , linewidth=1  , style=line                 , title="CLOSE"                 , editable=true)
+//                    SMA FAST
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+SMA_PLOT_FAST       = plot      (   SMA_EMA_FAST   , transp=25 , color=XSMA_PHASE_COLOR , linewidth=2  , style=line                 , title="SMA FAST"              , editable=true)
+//                    XSMA OFFSET TREND
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+XSMA_PLOT           = plot      (   XSMA            , transp=25 , color=XSMA_ANGLE_COLOR , linewidth=1  , style=line                 , title="XSMA ANGLE"            , editable=true)
+//XSMA_HIGH_PLOT   = plot      (   XSMA_HIGH          , transp=25 , color=white            , linewidth=1  , style=line                 , title="XSMA HIGH"          , editable=true)
+//XSMA_LOW_PLOT    = plot      (   XSMA_LOW           , transp=25 , color=white            , linewidth=1  , style=line                 , title="XSMA LOW"           , editable=true)
+//                    SMA / XSMA :: RMI FILLER
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+SMA_DIR_DOWN        =               SMA_DIR_FAST    < 0         ? 1     : 0
+SMA_DIR_UP          =               SMA_DIR_FAST    > 0         ? 1     : 0
+
+RMI_O_HIGH_OUT      = iff       (   RMI_O_HIGH      and SMA_DIR_DOWN    , 1     , 0)
+RMI_U_LOW_OUT       = iff       (   RMI_U_LOW       and SMA_DIR_UP      , 1     , 0)
+
+RMI_O_HIGH_IN       = iff       (abs(1              - RMI_O_HIGH_OUT)   and RMI_O_HIGH  , 1     , 0)
+RMI_U_LOW_IN        = iff       (abs(1              - RMI_U_LOW_OUT)    and RMI_U_LOW   , 1     , 0)
+
+RMI_COLOR_FILL      =               RMI_O_HIGH_IN               ? oker  : RMI_O_HIGH_OUT    ? reds  : RMI_U_LOW_IN              ? cyan : RMI_U_LOW_OUT  ? blues     : K555
+ARMI_COLOR_FILL     =               ARMI_O_HIGH and RMI_O_HIGH  ? oker  : ARMI_O_HIGH       ? dreds : ARMI_U_LOW and RMI_U_LOW  ? cyan : ARMI_U_LOW     ? dblues    :  K111
+
+fill                ( XSMA_PLOT ,   SMA_PLOT_FAST   , transp=75 , color=RMI_COLOR_FILL                                              , title='RMI FILL'              , editable=false)
+fill                ( CLOSE_PLOT,   SMA_PLOT_FAST   , transp=25 , color=ARMI_COLOR_FILL                                             , title='ARMI FILL'             , editable=false)
+
+//                                                              MOMENTUM
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                    RMI PHASE VALUES
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+plot                ( RMI_IV_HIGH                   , transp=00 , color=oker            , linewidth=1   , style=line                , title="RMI HIGH INIT"         , editable=true)
+plot                ( RMI_LV_HIGH                   , transp=00 , color=reds            , linewidth=1   , style=line                , title="RMI HIGH LARGEST"      , editable=true)
+plot                ( RMI_EV_HIGH                   , transp=00 , color=magenta         , linewidth=1   , style=line                , title="RMI HIGH END"          , editable=true)
+
+plot                ( RMI_IV_LOW                    , transp=00 , color=cyan            , linewidth=1   , style=line                , title="RMI LOW  INIT"         , editable=true)
+plot                ( RMI_LV_LOW                    , transp=00 , color=blues           , linewidth=1   , style=line                , title="RMI LOW  LARGEST"      , editable=true)
+plot                ( RMI_EV_LOW                    , transp=00 , color=purples         , linewidth=1   , style=line                , title="RMI LOW  END"          , editable=true)
+
+plot                ( RMI_IVLV_HIGH_SMA             , transp=00 , color=K999            , linewidth=1   , style=line                , title="RMI LIMIT TOP"         , editable=true)
+plot                ( RMI_IVLV_LOW_SMA              , transp=00 , color=K999            , linewidth=1   , style=line                , title="RMI LIMIT DIP"         , editable=true)
+
+plotshape           ((change(RMI_IV_LOW,1) != 0)    , transp=50 , color=cyan            , size=size.huge, location=location.bottom  , text="RMI LOW  INIT"          , editable=false)
+plotshape           ((change(RMI_IV_HIGH,1) != 0)   , transp=50 , color=oker            , size=size.huge, location=location.bottom  , text="RMI HIGH INIT"          , editable=false)
+
+//                                                              BACKGROUND
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//bgcolor             (                                 transp=00 , color= K111                                                       , title="BLACKGROUND"           , editable=true)
+
+//                                                                              ASSET MANAGEMENT                                                                
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    
+//                                                              SHORTS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+//
+//                                                              LONGS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+
+
+//                                                              PLOT
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+// LEVEL 0 EXITS
+// plotshape           ( ARMI_U_LOW   and  BULL_EXIT_SWEEP                     , transp=25 , color=magenta            , size=size.small, style=shape.triangleup   , location=location.belowbar , title="EXIT SHORT" )
+// plotshape           ( ARMI_O_HIGH  and  BEAR_EXIT_SWEEP                     , transp=25 , color=magenta            , size=size.small, style=shape.triangledown , location=location.abovebar , title="EXIT LONG" )
+// LEVEL 0 EXITS B
+plotshape           ( BULL_EXIT_FINALIZE                     , transp=25 , color=magenta            , size=size.small, style=shape.triangleup   , location=location.belowbar , title="EXIT SHORT" )
+plotshape           ( BEAR_EXIT_FINALIZE                     , transp=25 , color=magenta            , size=size.small, style=shape.triangledown , location=location.abovebar , title="EXIT LONG" )
+// LEVEL 1
+plotshape           ( ARMI_U_LOW    and XSMA > close and close < RMI_EV_LOW     , transp=90 , color=cyan            , size=size.small, style=shape.triangleup   , location=location.belowbar , title="LONG" )
+plotshape           ( ARMI_O_HIGH   and XSMA < close and close > RMI_EV_HIGH    , transp=90 , color=oker            , size=size.small, style=shape.triangledown , location=location.abovebar , title="SHORT" )
+// LEVEL 2
+// plotshape           ( ARMI_U_LOW and RMI_U_LOW                                 , transp=80 , color=cyan            , size=size.large, style=shape.triangleup   , location=location.belowbar , title="LONG" )
+// plotshape           ( ARMI_O_HIGH and RMI_O_HIGH                               , transp=80 , color=oker            , size=size.large, style=shape.triangledown , location=location.abovebar , title="SHORT" )
+// LEVEL 2A
+plotshape           ( ARMI_U_LOW and RMI_U_LOW  and BULL                        , transp=50 , color=cyan            , size=size.large, style=shape.triangleup   , location=location.belowbar , title="LONG" )
+plotshape           ( ARMI_O_HIGH and RMI_O_HIGH    and BEAR                    , transp=50 , color=oker            , size=size.large, style=shape.triangledown , location=location.abovebar , title="SHORT" )
+
+// LEVEL 3
+// plotshape           ( ARMI_U_LOW and RMI_U_LOW  and close < XSMA_LOW and RMI_LN_LOW < 1  , transp=10 , color=cyan            , size=size.small, style=shape.triangleup   , location=location.belowbar , title="LONG" )
+// plotshape           ( ARMI_O_HIGH and RMI_O_HIGH and close > XSMA_HIGH and RMI_LN_HIGH < 1  , transp=10 , color=oker            , size=size.small, style=shape.triangledown , location=location.abovebar , title="SHORT" )
+
+
+MF_COLOR_FILL           =             BULL                  ? oker              : BEAR                  ? cyan      : K555 
+BG_COLOR_FILL           =             BULL_EXIT_SWEEP       ? K555             : BEAR_EXIT_SWEEP       ? K555    : BULL_EXIT_FINALIZE ? oker : BEAR_EXIT_FINALIZE ? cyan : K111 
+
+fill                (CLOSE_PLOT, ZERO_PLOT, color=MF_COLOR_FILL, transp=95)
+bgcolor(BG_COLOR_FILL , transp=75 , title="SWEEP" , editable=false)
+
+//                                                              ENTRIES
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+if (ARMI_O_HIGH and RMI_O_HIGH and BEAR)
+    strategy.entry("SHORT", strategy.short)
+   
+if (ARMI_U_LOW and RMI_U_LOW  and BULL)
+    strategy.entry("LONG", strategy.long)
+
+//                                                                                                                                                              
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                      _________   ____________  _____  _________                                                              
+//                                                     /     \   \ /  \______   \/     \ \_   ___ \                                                             
+//                                                    /  \ /  \   Y   /|     ___/  \ /  \/    \  \/                                                             
+//                                                   /    Y    \     / |    |  /    Y    \     \____                                                            
+//                                                   \____|__  /\___/  |____|  \____|__  /\______  /                                                            
+//                                                           \/                        \/        \/                                                             
+//                                                                                                                                                              
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+View in Pine Editor・381 lines
+Use on chart
+2
+2
+3
+8
+4 357
+Mar 20, 2018
+◊ Introduction
+This is project XIAM, a work in progress.
+
+Recently i came across the repainting problem.
+Since then i haven't seen any bot-code that makes > 5% profit in two weeks with 0.25% fees/trade.
+
+People who make good bots either bluff or don't share the code.
+they let you rent it.
+
+I aim to understand, learn it, write it myself. And share my findings with whoever shares with me.
+
+◊ Origin
+Based on RMI (RSI with momentum) and SMA, and values derived from those.
+
+◊ Usage
+Currently an investigative script.
+
+◊ Theoretical Approaches
+Philosophy α :: Cleansignal
+:: Cleaning up the signal, from irregularities that cause unpredictable results.
+
+Merging available tickers of a pair into one.
+
+Merging available tickers of different coins into one in the correct proportion. (eg. Crypto market cap)
+
+Removing Jitter, and smoothing signal without delay.
+
+
+
+Philosophy β :: Rythmic
+:: Syncing into the rythm's, to never miss the que, and trade on every theoretical low/high
+
+Searching Amplitude, Period, Phase Shift, Frequency's of the carrier waves.
+
+Marking Acrivity/inactivity of the carrier waves.
+
+Partial Fractal repetition asses-able with above data?
+
+
+
+Philosophy γ :: consequential
+:: Seeking for Indicatory events and causal relations
+
+Probability / reward.
+
+Confirmation and culmination.
+
+...
+
+
+
+◊ Community
+Wanna share your findings ? or need help resolving a problem ?
+CMYK :: discord.gg/AnkZuA
+
+AUTOTVIEW :: discordapp.com/invite/BFz8VPn
+
+
+
+Mar 23, 2018
+Release Notes
+◊ Adjustments
+
+Added : Movement / Force , Phase detection with volume.
+

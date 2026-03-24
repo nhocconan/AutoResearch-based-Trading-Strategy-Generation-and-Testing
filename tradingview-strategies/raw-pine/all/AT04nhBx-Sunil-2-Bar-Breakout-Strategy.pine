@@ -1,0 +1,127 @@
+//@version=6
+strategy("Sunil 2 Bar Breakout Strategy", overlay = true)
+
+long_cond = (close > close[1]) and (high[1] > high[2]) and (high[1] > high[3])
+short_cond = (close < close[1]) and (low[1] < low[2]) and (low[1] < low[3])
+
+long_sl = low[1]
+short_sl = high[1]
+
+if long_cond
+    strategy.entry('long', direction = strategy.long, stop = close[1], comment = "Enter Long")
+    strategy.exit('Exit Long', from_entry = 'long', stop = long_sl, comment = "Long SL Hit")
+
+if short_cond
+    strategy.close('long', comment = "Close Long")
+
+if short_cond
+    strategy.entry('short', strategy.short, stop = close[1], comment = "Enter Short")
+    strategy.exit('Exit Short', from_entry = 'short', stop = short_sl, comment = "Short SL Hit")
+if long_cond
+    strategy.close('short', comment = "Close Short")
+
+View in Pine Editor・24 lines
+Use on chart
+4
+5
+1 567
+Detailed Explanation of the Sunil 2 Bar Breakout Strategy
+Introduction
+The Sunil 2 Bar Breakout Strategy is a simple yet effective price-action-based approach designed to identify breakout opportunities in financial markets. This strategy analyzes the movement of the last three candles to detect momentum and initiates trades in the direction of the breakout. It is equipped with a built-in stop-loss mechanism to protect capital, making it suitable for traders looking for a structured and disciplined trading system.
+
+The strategy works well across different timeframes and asset classes, including indices, stocks, forex, and cryptocurrencies. Its versatility makes it ideal for both intraday and swing trading.
+
+Core Concept
+The strategy revolves around two primary conditions: breakout identification and risk management.
+
+Breakout Identification:
+
+Long Trade Setup: The strategy identifies bullish breakouts when:
+The current candle's closing price is higher than the previous candle's closing price.
+The high of the previous candle is greater than the highs of the two candles before it.
+Short Trade Setup: The strategy identifies bearish breakouts when:
+The current candle's closing price is lower than the previous candle's closing price.
+The low of the previous candle is lower than the lows of the two candles before it.
+Risk Management:
+
+Stop-Loss: For each trade, a stop-loss is automatically set:
+For long trades, the stop-loss is set to the low of the previous candle.
+For short trades, the stop-loss is set to the high of the previous candle.
+This ensures that losses are minimized if the breakout fails.
+Exit Logic:
+
+The trade is closed automatically when the stop-loss is hit.
+This approach maintains discipline and prevents emotional trading.
+Strategy Workflow
+Entry Criteria:
+
+Long Entry: A long trade is triggered when:
+The current close is greater than the previous close.
+The high of the previous candle exceeds the highs of the two candles before it.
+Short Entry: A short trade is triggered when:
+The current close is less than the previous close.
+The low of the previous candle is below the lows of the two candles before it.
+Stop-Loss Placement:
+
+For long trades, the stop-loss is set at the low of the previous candle.
+For short trades, the stop-loss is set at the high of the previous candle.
+Trade Management:
+
+Trades are exited automatically if the stop-loss level is hit.
+The strategy avoids re-entering trades until new breakout conditions are met.
+Default Settings
+Position Sizing:
+The default position size is set to 1% of the account equity. This ensures proper risk management and prevents overexposure to the market.
+Stop-Loss:
+Stop-loss levels are automatically calculated based on the previous candle’s high or low.
+Timeframes:
+The strategy is versatile and works across multiple timeframes. However, it is recommended to test it on 15-minute, 1-hour, and daily charts for optimal performance.
+Key Features
+Automated Trade Execution:
+The strategy handles both trade entry and exit automatically based on pre-defined conditions.
+Built-In Risk Management:
+The automatic stop-loss placement ensures losses are minimized on failed breakouts.
+Works Across Markets:
+The strategy is compatible with a wide range of instruments, including indices, stocks, forex, and cryptocurrencies.
+Clear Signals:
+Entry and exit points are straightforward and based on objective conditions, reducing ambiguity.
+Versatility:
+Can be used for both day trading and swing trading, depending on the chosen timeframe.
+Best Practices for Using This Strategy
+Backtesting:
+Test the strategy on your chosen instrument and timeframe using TradingView's Strategy Tester to evaluate its performance.
+Market Conditions:
+The strategy performs best in trending markets or during periods of high volatility. Avoid using it in range-bound or choppy markets.
+Position Sizing:
+Use the default position size (1% of equity) or adjust based on your risk tolerance and account size.
+Instrument Selection:
+Focus on instruments with good liquidity and volatility, such as indices (e.g., NIFTY, BANKNIFTY), forex pairs, or major cryptocurrencies (e.g., Bitcoin, Ethereum).
+Potential Enhancements
+To make the strategy even more robust, consider adding the following optional features:
+
+Stop-Loss Multiplier:
+Allow users to customize the stop-loss distance as a multiple of the default level (e.g., 1.5x the low or high of the previous candle).
+Take-Profit Levels:
+Add user-defined take-profit levels, such as a fixed risk-reward ratio (e.g., 1:2).
+Time Filter:
+Include an option to restrict trading to specific market hours (e.g., avoid low-liquidity times).
+Conclusion
+The Sunil 2 Bar Breakout Strategy is an excellent tool for traders looking to capitalize on breakout opportunities while maintaining disciplined risk management. Its simplicity, combined with its effectiveness, makes it suitable for traders of all experience levels. By adhering to the clearly defined rules, traders can achieve consistent results while avoiding emotional trading decisions.
+
+This strategy is a reliable addition to any trader’s toolbox and is designed to work seamlessly across different market conditions and instruments.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

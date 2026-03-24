@@ -1,0 +1,46 @@
+//@version=3
+strategy(title="Bollinger + sar", shorttitle="Bollinger + sar",
+     overlay=true, calc_on_every_tick=true, commission_type=strategy.commission.cash_per_contract, commission_value=0.02,
+     pyramiding = 0, calc_on_order_fills=true, backtest_fill_limits_assumption=0, default_qty_type=strategy.percent_of_equity, default_qty_value= 20, 
+     initial_capital=10000, currency=currency.USD) 
+
+start = input(0.02)
+increment = input(0.02)
+maximum = input(0.2)
+
+psar = sar(start, increment, maximum)
+plot(psar)
+
+
+source = close
+length = input(20, minval=1)
+mult = input(2, minval=0.001, maxval=50)
+
+basis = sma(source, length)
+dev = mult * stdev(source, length)
+
+upper = basis + dev
+lower = basis - dev
+
+plot(upper)
+plot(lower)
+
+if (lower >= low)
+    strategy.entry("BBandLE", strategy.long, stop=lower, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
+else
+    strategy.cancel(id="BBandLE")
+
+if (psar <= low)
+    strategy.entry("BBandSE", strategy.short, stop=psar, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
+else
+    strategy.cancel(id="BBandSE")
+
+View in Pine Editor・36 lines
+Use on chart
+3
+8
+3 493
+Problem with change in bollingerbands when adding psar short condition - and i dont know why.
+
+Anyone - any ideas?
+

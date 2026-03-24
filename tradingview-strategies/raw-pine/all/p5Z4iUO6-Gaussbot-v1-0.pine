@@ -1,0 +1,76 @@
+//@version=2
+strategy("Gaussbot v1.0", overlay=true)
+
+p = input(20, minval=1, title="Length")
+hi = heikenashi(tickerid)
+price = security(hi, period, open)
+plow = security(hi, period, low[1])
+phigh = security(hi, period, high[1])
+
+
+closezero = na(closezero[1]) ? close : closezero[1]
+dirup = na(dirup[1]) ? false : dirup[1]
+pi=3.1415926535*2.0
+
+
+w=2*pi/p
+beta = (1 - cos(w))/(pow(1.414,2.0/3) - 1)
+alfa = -beta + sqrt(beta*beta + 2*beta)
+ret=  pow(alfa,4)*price+4*(1-alfa)*nz(ret[1])-6*pow(1-alfa,2)*nz(ret[2])+4*pow(1-alfa,3)*nz(ret[3])-pow(1-alfa,4)*nz(ret[4])
+ret2 = pow(alfa,4)*ret+4*(1-alfa)*nz(ret2[1])-6*pow(1-alfa,2)*nz(ret2[2])+4*pow(1-alfa,3)*nz(ret2[3])-pow(1-alfa,4)*nz(ret2[4])
+ret3 = pow(alfa,4)*ret2+4*(1-alfa)*nz(ret3[1])-6*pow(1-alfa,2)*nz(ret3[2])+4*pow(1-alfa,3)*nz(ret3[3])-pow(1-alfa,4)*nz(ret3[4])
+ret4 = 3*ret-3*ret2+ret3
+
+
+diff2 = nz(ret[1]) - nz(ret[2]) - (nz(ret[2]) - nz(ret[3]) )  
+diff22 = nz(ret2[1]) - nz(ret2[2]) - (nz(ret2[2]) - nz(ret2[3]) ) 
+diff23 = nz(ret3[1]) - nz(ret3[2]) - (nz(ret3[2]) - nz(ret3[3]) )  
+diff24 = nz(ret4[1]) - nz(ret4[2]) - (nz(ret4[2]) - nz(ret4[3]) )  
+
+
+longCondition =    diff24 > 0
+shortCondition =  diff24 < 0
+
+if(longCondition and shortCondition)
+    longCondition = longCondition[1]
+    shortCondition = shortCondition[1]
+if(longCondition==false and shortCondition==false)
+    longCondition = longCondition[1]
+    shortCondition = shortCondition[1]
+
+
+    
+if(longCondition==true and shortCondition == false and dirup == false and close > closezero)
+    strategy.entry("Gaussbot Long", strategy.long )
+
+
+if (longCondition==true and shortCondition == false) 
+    strategy.entry("Gaussbot Long", strategy.long)
+
+    closezero = close
+    dirup = true
+    
+if(longCondition==false and shortCondition == true and dirup == true and close < closezero)
+    strategy.entry("Gaussbot Short", strategy.short)
+    
+    
+if (longCondition==false and shortCondition == true) 
+    strategy.entry("Gaussbot Short", strategy.short)
+    
+
+
+    closezero = close
+    dirup = false
+
+View in Pine Editor・63 lines
+Use on chart
+2
+8
+5
+8
+5 742
+Jun 30, 2016
+Gaussbot in action. No repaint, based on open price.
+Jun 5, 2018
+Release Notes
+smacznego

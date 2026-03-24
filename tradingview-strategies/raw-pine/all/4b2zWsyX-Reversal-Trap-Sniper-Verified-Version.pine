@@ -1,0 +1,90 @@
+//@version=5
+strategy("Reversal Trap Sniper – Verified Version", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=25, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1)
+
+// === INPUTS ===
+rsiLength     = input.int(14, title="RSI Length")
+rsiOverbought = input.int(70, title="Overbought Level")
+rsiOversold   = input.int(30, title="Oversold Level")
+riskReward    = input.float(2.0, title="Risk-Reward Ratio")
+maxBars       = input.int(30, title="Max Holding Bars")
+atrLen        = input.int(14, title="ATR Length")
+
+// === INDICATORS ===
+rsi = ta.rsi(close, rsiLength)
+atr = ta.atr(atrLen)
+
+// === SIMPLIFIED TRAP DETECTION ===
+// Trap: RSI önce 70 üzerindeydi, şimdi 70 altı ve aynı zamanda fiyat yükselmeye devam ediyor
+
+rsiTrapLong  = rsi[3] > rsiOverbought and rsi < rsiOverbought and close > close[1]
+rsiTrapShort = rsi[3] < rsiOversold and rsi > rsiOversold and close < close[1]
+
+// === ENTRY ===
+if (rsiTrapLong)
+    strategy.entry("Trap Long", strategy.long)
+
+if (rsiTrapShort)
+    strategy.entry("Trap Short", strategy.short)
+
+// === SL & TP ===
+longSL  = strategy.position_avg_price - atr
+longTP  = strategy.position_avg_price + atr * riskReward
+
+shortSL = strategy.position_avg_price + atr
+shortTP = strategy.position_avg_price - atr * riskReward
+
+strategy.exit("Long Exit", from_entry="Trap Long", stop=longSL, limit=longTP, when=bar_index - strategy.opentrades.entry_bar_index(0) >= maxBars)
+strategy.exit("Short Exit", from_entry="Trap Short", stop=shortSL, limit=shortTP, when=bar_index - strategy.opentrades.entry_bar_index(0) >= maxBars)
+
+// === VISUAL DEBUGGING ===
+plotshape(rsiTrapLong, title="Long Trap", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(rsiTrapShort, title="Short Trap", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+View in Pine Editor・41 lines
+Use on chart
+5
+2
+2 231
+Reversal Trap Sniper
+Overview
+Reversal Trap Sniper is a counterintuitive momentum-following strategy that identifies "reversal traps"—situations where traders expect a market reversal based on RSI, but the price continues trending. By detecting these failed reversal signals, the strategy enters trades in the trend direction, often catching strong follow-through moves.
+
+How It Works
+
+The system monitors the Relative Strength Index (RSI). When RSI moves above the overbought level (e.g., 70) and then drops back below it, many traders interpret this as a sell signal.
+
+However, this strategy treats such moves with caution. If the RSI pulls back below the overbought threshold but the price continues to rise, the system considers it a "reversal trap"—a fakeout.
+
+In such cases, instead of going short, the strategy enters a long position, assuming that the trend is still valid and those betting on a reversal may fuel a breakout.
+
+Similarly, if RSI rises above the oversold level from below, but price continues falling, a short trade is triggered.
+
+Entries are followed by ATR-based stop-loss and dynamic take-profit (2× risk), with a fallback time-based exit after 30 bars.
+
+Key Features
+- Detects failed RSI-based reversals ("traps")
+- Follows momentum after the trap is triggered
+- Uses ATR for dynamic stop-loss and take-profit
+- Auto-exit after a fixed bar count (30 bars)
+- Visual markers on chart for transparency
+- Realistic trading assumptions: 0.05% commission, slippage, and capped pyramiding
+
+Parameter Explanation
+
+RSI Length (14): Standard RSI calculation period
+
+Overbought/Oversold Levels (70/30): Common thresholds used by many traders
+
+ATR Length (14): Used to define stop-loss and target dynamically
+
+Risk-Reward Ratio (2.0): Take-profit is set at 2× the stop-loss distance
+
+Max Holding Bars (30): Ensures trades don’t remain open indefinitely
+
+Pyramiding (10): Allows scaling into trades, simulating real-world strategy stacking
+
+Originality Note
+This strategy inverts traditional RSI logic. Instead of treating overbought/oversold conditions as signals for reversal, it waits for those signals to fail. Only after such failures, confirmed by continued price action in the same direction, does the system enter trades. This logic is based on the behavioral observation that failed reversal signals often trigger stronger trend continuation—making this strategy uniquely positioned to exploit trap scenarios.
+
+Disclaimer
+This script is for educational and research purposes only. Trading involves risk, and past performance does not guarantee future results. Always test thoroughly before applying with live capital.

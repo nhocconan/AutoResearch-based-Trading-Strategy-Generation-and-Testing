@@ -1,0 +1,119 @@
+//@version=5
+strategy("Trend Revisit Pullback Strategy (Final Working Box)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === INPUT SETTINGS ===
+lookbackBars     = input.int(15, title="Revisit Window (Bars)")
+pullbackThreshold = input.float(0.002, title="Min Pullback %")
+trendStrength    = input.float(0.005, title="Min Trend %")
+riskRewardRatio  = input.float(3.0, title="Reward to Risk Ratio")
+stopLossPercent  = input.float(0.003, title="Stop Loss %")
+takeProfitEnable = input.bool(true, title="Enable TP/SL")
+showLabels       = input.bool(true, title="Show Labels")
+showZones        = input.bool(true, title="Show Entry Zones")
+
+// === STATE VARIABLES ===
+var float originalEntryPrice = na
+var int entryBarIndex = na
+var bool activeTrade = false
+var bool averagedIn = false
+var box myBox = na
+
+// === TREND CONDITIONS ===
+trendUp = close > close[1] * (1 + trendStrength)
+trendDown = close < close[1] * (1 - trendStrength)
+enterLong = trendUp and not trendUp[1]
+enterShort = trendDown and not trendDown[1]
+
+// === LONG ENTRY ===
+if enterLong and not activeTrade
+    strategy.entry("Long", strategy.long)
+    originalEntryPrice := close
+    entryBarIndex := bar_index
+    activeTrade := true
+    averagedIn := false
+    if showLabels
+        label.new(bar_index, close, "Long Entry", style=label.style_label_up, color=color.green)
+    if showZones
+        if not na(myBox)
+            box.delete(myBox)
+        myBox := box.new(entryBarIndex, originalEntryPrice * (1 + stopLossPercent), entryBarIndex + lookbackBars, originalEntryPrice * (1 - stopLossPercent))
+        box.set_border_color(myBox, color.gray)
+        box.set_bgcolor(myBox, color.new(color.yellow, 90))
+
+// === SHORT ENTRY ===
+if enterShort and not activeTrade
+    strategy.entry("Short", strategy.short)
+    originalEntryPrice := close
+    entryBarIndex := bar_index
+    activeTrade := true
+    averagedIn := false
+    if showLabels
+        label.new(bar_index, close, "Short Entry", style=label.style_label_down, color=color.red)
+    if showZones
+        if not na(myBox)
+            box.delete(myBox)
+        myBox := box.new(entryBarIndex, originalEntryPrice * (1 + stopLossPercent), entryBarIndex + lookbackBars, originalEntryPrice * (1 - stopLossPercent))
+        box.set_border_color(myBox, color.gray)
+        box.set_bgcolor(myBox, color.new(color.yellow, 90))
+
+// === PULLBACK AVERAGE-IN ===
+if activeTrade and not averagedIn and bar_index - entryBarIndex <= lookbackBars
+    if strategy.position_size > 0 and close < originalEntryPrice * (1 - pullbackThreshold)
+        strategy.entry("Long Add", strategy.long)
+        averagedIn := true
+        if showLabels
+            label.new(bar_index, close, "Avg In", style=label.style_label_up, color=color.orange)
+    if strategy.position_size < 0 and close > originalEntryPrice * (1 + pullbackThreshold)
+        strategy.entry("Short Add", strategy.short)
+        averagedIn := true
+        if showLabels
+            label.new(bar_index, close, "Avg In", style=label.style_label_down, color=color.orange)
+
+// === EXIT ON RETURN TO ENTRY ===
+revisitLong = activeTrade and strategy.position_size > 0 and close >= originalEntryPrice and bar_index - entryBarIndex <= lookbackBars
+revisitShort = activeTrade and strategy.position_size < 0 and close <= originalEntryPrice and bar_index - entryBarIndex <= lookbackBars
+
+if revisitLong or revisitShort
+    strategy.close_all()
+    activeTrade := false
+    originalEntryPrice := na
+    averagedIn := false
+    entryBarIndex := na
+    if showLabels
+        label.new(bar_index, close, "Exit @ BE", style=label.style_label_right, color=color.gray)
+    if not na(myBox)
+        box.delete(myBox)
+        myBox := na
+
+// === TAKE PROFIT / STOP LOSS ===
+if takeProfitEnable and activeTrade
+    if strategy.position_size > 0
+        sl = originalEntryPrice * (1 - stopLossPercent)
+        tp = originalEntryPrice * (1 + stopLossPercent * riskRewardRatio)
+        strategy.exit("TP/SL", from_entry="Long", limit=tp, stop=sl)
+    if strategy.position_size < 0
+        sl = originalEntryPrice * (1 + stopLossPercent)
+        tp = originalEntryPrice * (1 - stopLossPercent * riskRewardRatio)
+        strategy.exit("TP/SL", from_entry="Short", limit=tp, stop=sl)
+
+View in Pine Editor・97 lines
+Use on chart
+1
+9
+1 825
+📈 Trend Revisit Pullback Strategy
+This TradingView Pine Script strategy identifies strong trend breakouts and accounts for natural pullbacks by:
+
+Entering long or short on strong 1-bar breakouts
+
+Allowing for pullback averaging if price retraces after entry
+
+Expecting a revisit to the original entry price within 15 bars
+
+Automatically exiting at break-even or using a custom TP/SL
+
+Drawing a visual trade zone (entry → SL → revisit window) for easy reference
+
+Optional labels and color-coded boxes to track each trade’s lifecycle
+
+Ideal for trend traders who anticipate a pullback and prefer to manage risk with break-even exits or reward-to-risk parameters.

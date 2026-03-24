@@ -1,0 +1,66 @@
+//@version=2
+strategy("TEMA Cross", overlay = true, precision = 7, overlay=true, pyramiding = 100, commission_type = strategy.commission.percent, commission_value = 0.25)
+
+tema(src, len) =>
+    3*ema(src, len) - 3*ema(ema(src, len), len) + ema(ema(ema(src, len),len),len)
+
+smma(src, len) =>
+    sa = 0.0
+    sa := na(sa[1]) ? sma(src, len) : (sa[1] * (len - 1) + src) / len
+    sa
+
+temaLength = input(5)
+smaLength = input(3)
+smmaLength = input(30)
+tema1 = tema(close, temaLength)
+sma1 = sma(tema1, smaLength)
+smma1 = smma(close,smmaLength)
+
+
+plot(tema1, color = green, title = "TEMA")
+plot(sma1, color = orange, title = "SMA")
+plot(smma1, color = red, title = "SMMA")
+
+minGainPercent = input(2)
+gainMultiplier = minGainPercent * 0.01 + 1
+
+avg_protection = input(1)
+gain_protection = input(1)
+
+longCondition = crossover(tema1, sma1) and tema1 < smma1
+shortCondition = crossunder(tema1, sma1)
+
+strategy.entry("Buy", strategy.long, qty = 1, when = longCondition and time > timestamp(2017, 9, 22, 4, 20)  and (avg_protection >= 1 ? (na(strategy.position_avg_price) ? true : close <= strategy.position_avg_price) : true))
+strategy.close_all(when = shortCondition and time > timestamp(2017, 9, 22, 4, 20) and (gain_protection >=1 ? (close >= gainMultiplier * strategy.position_avg_price) : true))
+
+View in Pine Editor・34 lines
+Use on chart
+2
+3
+8
+1
+8 643
+This is a pretty simple microprofit strategy with a couple twists:
+
+Renko boxes plot fixed price changes over variable amounts of time, rather than plotting varying price changes over fixed amounts of time like conventional candlesticks. This makes price trends much simpler to identify, and that's what we ultimately care about.
+
+Triple exponential moving average
+ is a moving average that has considerably less lag compared to a regular EMA.
+
+Buying and selling is simple, buy when TEMA crosses above a short-term SMA, and sell when TEMA crosses below the short-term SMA. The use of Renko candles makes these crosses more reliable, and TEMA gives us more optimal entries and exits.
+
+We also avoid buying if the price is above a longer-term smoothed moving average. This is an attempt to avoid bags but it means we might miss a few trades right after a pump.
+
+Also included are
+avg_protection -- if > 0 we only buy if it will reduce our average bought price
+gain_protection -- if >0 only sell once we have met our min_gain
+
+
+I prefer to use a fixed price increment (traditional Renko) rather than ATR. I start with an increment roughly 0.1% of the current price level and see how the chart looks. It's better if the chart has a lot of big zig-zags. Larger price increments will be less noisy and more reliable, and is more suited for longer-term swing trading.
+
+
+This strat needs to be used with tiny tiny order sizes and can definitely be improved upon. It does not maximize gains on very rapid pumps.
+
+It basically accumulates a long position with many small buys over and over when the price is below average, until there is an opportunity to sell for a profit. In a pump there is not a lot of time to re-accumulate a position after the first sell.
+
+

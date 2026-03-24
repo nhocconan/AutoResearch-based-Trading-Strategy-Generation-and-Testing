@@ -1,0 +1,27 @@
+//@version=2
+strategy("MA Pt.4", overlay=true)
+change = change(close)
+gain = change >= 0 ? change : 0.0
+loss = change < 0 ? (-1) * change : 0.0
+avgGain = rma(gain, 14)
+avgLoss = rma(loss, 14)
+rs = avgGain / avgLoss
+rsi = 100 - (100 / (1 + rs))
+piriod = 720
+s8sma = sma(close, 8)
+s21sma = sma(close, 21)
+s50ema = ema(close, 50)
+s80ema = ema(close, 80)
+s200ema = ema(close, 200)
+s50sma = sma(close, 50)
+longCond = crossover(s8sma, s80ema) 
+shortCond = crossunder(s8sma, s80ema)
+plotshape(series=longCond, title="Long", style=shape.triangleup, location=location.belowbar, color=green, text="8/80", size=size.small)
+plotshape(series=shortCond, title="Short", style=shape.triangledown, location=location.abovebar, color=red, text="8/80", size=size.small)
+
+View in Pine Editor・20 lines
+Use on chart
+1
+4
+761
+Need #4 my bad :$

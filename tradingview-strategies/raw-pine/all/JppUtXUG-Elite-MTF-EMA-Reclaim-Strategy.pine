@@ -1,0 +1,600 @@
+//@version=6
+strategy(
+     "Elite MTF EMA Reclaim — 6m (1:1 Signals + Full Presets + Global Signal Toggle) [NA-Safe]",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.01,
+     slippage=1,
+     process_orders_on_close=true,
+     calc_on_order_fills=true,
+     max_labels_count=200,
+     max_lines_count=200
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// MODE + GLOBAL SIGNAL DISPLAY
+//──────────────────────────────────────────────────────────────────────────────
+mode = input.string("Strategy (Backtest)", "Mode", options=["Strategy (Backtest)","Indicator (Signals Only)"])
+allowOrders = (mode == "Strategy (Backtest)")
+showSignals = input.bool(true, "Show Signals (All Modes)")
+
+//──────────────────────────────────────────────────────────────────────────────
+// MARKET + PRESET
+//──────────────────────────────────────────────────────────────────────────────
+market = input.string("Forex", "Market", options=["Forex","XAUUSD","Crypto","Indices"])
+preset = input.string("Elite", "Preset", options=["Elite","Balanced","Aggressive"])
+
+// HTF selection (optimized + toggle)
+tfH1  = input.string("60", "HTF2 TF (minutes)")
+tfD   = input.string("D",  "HTF1 TF")
+htfMode = input.string("D + H1", "HTF Alignment Mode", options=["Off","D only","H1 only","D + H1"])
+
+// Base behavior toggles
+strictStackIn   = input.bool(true, "Base: Require STRICT EMA stack (5>10>20>50)")
+requireRetestIn = input.bool(true, "Base: Require Retest")
+
+// Optional looseners
+looserLTF          = input.bool(false, "Looser LTF Mode (more 6m signals)")
+allowReclaimNoPull = input.bool(false, "Allow reclaim without prior Pullback state")
+
+// Dynamic default handled via "Preset" option:
+reclaimTimingDefault = input.string("Preset", "Reclaim Timing Default",
+     options=["Preset","Reclaim close","Next bar confirmation"])
+
+// EMAs
+len5  = input.int(5,  "EMA 5",  minval=1)
+len10 = input.int(10, "EMA 10", minval=1)
+len20 = input.int(20, "EMA 20", minval=1)
+len50 = input.int(50, "EMA 50", minval=1)
+
+// Base thresholds (override knobs)
+curvMinIn        = input.float(0.0, "Base: Min Curvature Threshold", step=0.00001)
+minSpreadIn      = input.float(0.0006, "Base: Min EMA20-50 Spread (% of price)", step=0.0001)
+adxLen           = input.int(14, "ADX Length", minval=1)
+minAdxIn         = input.float(14.0, "Base: Min ADX", step=0.5)
+atrLen           = input.int(14, "ATR Length", minval=1)
+minAtrPctIn      = input.float(0.0010, "Base: Min ATR (% of price)", step=0.0001)
+crossLookbackIn  = input.int(30, "Base: Block if EMA20/50 crossed within N bars", minval=1)
+
+// Base entry mechanics (override knobs)
+pullbackToIn      = input.string("EMA10", "Base: Pullback To", options=["EMA5","EMA10","EMA20"])
+reclaimOnIn       = input.string("EMA10", "Base: Reclaim On", options=["EMA5","EMA10","EMA20"])
+retestOnIn        = input.string("EMA10", "Base: Retest On", options=["EMA5","EMA10","EMA20"])
+maxBarsToRetestIn = input.int(18, "Base: Max bars allowed for retest after reclaim", minval=1)
+
+// Visuals
+showEma     = input.bool(true, "Show EMAs")
+showBlocks  = input.bool(true, "Show BLOCK markers")
+useChopKill = input.bool(true, "Kill Chop")
+
+//──────────────────────────────────────────────────────────────────────────────
+// ATR STOP + RR TARGETS
+//──────────────────────────────────────────────────────────────────────────────
+riskGroup = "Risk (ATR Stops / RR Targets)"
+useAtrRisk     = input.bool(true, "Use ATR Stop + RR Target", group=riskGroup)
+atrStopMultIn  = input.float(1.8, "ATR Stop Multiplier", step=0.1, group=riskGroup)
+rrTargetIn     = input.float(2.0, "RR Target (TP = risk*RR)", step=0.25, group=riskGroup)
+useBreakeven   = input.bool(false, "Move stop to breakeven at +1R", group=riskGroup)
+useTrailAfterR = input.bool(false, "Trail stop after +1R (ATR)", group=riskGroup)
+trailAtrMult   = input.float(1.0, "Trail ATR Multiplier", step=0.1, group=riskGroup)
+
+//──────────────────────────────────────────────────────────────────────────────
+// EFFECTIVE PARAMS (start from base, then overwrite by market+preset)
+//──────────────────────────────────────────────────────────────────────────────
+float minSpread       = minSpreadIn
+float minAtrPct       = minAtrPctIn
+float minAdx          = minAdxIn
+float curvMin         = curvMinIn
+int   crossLookback   = crossLookbackIn
+int   maxBarsToRetest = maxBarsToRetestIn
+bool  strictStack     = strictStackIn
+bool  requireRetest   = requireRetestIn
+string pullbackTo     = pullbackToIn
+string reclaimOn      = reclaimOnIn
+string retestOn       = retestOnIn
+
+float atrStopMult = atrStopMultIn
+float rrTarget    = rrTargetIn
+
+//──────────────────────────────────────────────────────────────────────────────
+// PRESET RECLAIM TIMING (best defaults per market/preset)
+//──────────────────────────────────────────────────────────────────────────────
+string presetReclaimTiming = "Reclaim close"
+if market == "Forex"
+    presetReclaimTiming := (preset == "Elite") ? "Next bar confirmation" : "Reclaim close"
+else if market == "XAUUSD"
+    presetReclaimTiming := (preset == "Aggressive") ? "Reclaim close" : "Next bar confirmation"
+else if market == "Crypto"
+    presetReclaimTiming := "Reclaim close"
+else
+    presetReclaimTiming := (preset == "Elite") ? "Next bar confirmation" : "Reclaim close"
+
+string reclaimEntryTiming =
+     reclaimTimingDefault == "Preset" ? presetReclaimTiming : reclaimTimingDefault
+
+//──────────────────────────────────────────────────────────────────────────────
+// FULL MARKET + PRESET OVERWRITE (matches your indicator presets)
+//──────────────────────────────────────────────────────────────────────────────
+if market == "Forex"
+    if preset == "Elite"
+        minSpread := 0.0006
+        minAtrPct := 0.0010
+        minAdx := 14.0
+        curvMin := 0.0
+        crossLookback := 30
+        maxBarsToRetest := 18
+        strictStack := true
+        requireRetest := true
+        pullbackTo := "EMA10"
+        reclaimOn  := "EMA10"
+        retestOn   := "EMA10"
+        atrStopMult := 1.8
+        rrTarget := 2.0
+    else if preset == "Balanced"
+        minSpread := 0.00045
+        minAtrPct := 0.0008
+        minAdx := 12.0
+        curvMin := 0.0
+        crossLookback := 25
+        maxBarsToRetest := 20
+        strictStack := true
+        requireRetest := true
+        pullbackTo := "EMA10"
+        reclaimOn  := "EMA10"
+        retestOn   := "EMA10"
+        atrStopMult := 1.6
+        rrTarget := 1.75
+    else
+        minSpread := 0.0003
+        minAtrPct := 0.0006
+        minAdx := 10.0
+        curvMin := 0.0
+        crossLookback := 20
+        maxBarsToRetest := 24
+        strictStack := false
+        requireRetest := false
+        pullbackTo := "EMA20"
+        reclaimOn  := "EMA20"
+        retestOn   := "EMA20"
+        atrStopMult := 1.4
+        rrTarget := 1.5
+
+else if market == "XAUUSD"
+    if preset == "Elite"
+        minSpread := 0.0009
+        minAtrPct := 0.0013
+        minAdx := 16.0
+        curvMin := 0.0
+        crossLookback := 40
+        maxBarsToRetest := 18
+        strictStack := true
+        requireRetest := true
+        pullbackTo := "EMA10"
+        reclaimOn  := "EMA10"
+        retestOn   := "EMA10"
+        atrStopMult := 2.0
+        rrTarget := 2.0
+    else if preset == "Balanced"
+        minSpread := 0.0007
+        minAtrPct := 0.0011
+        minAdx := 14.0
+        curvMin := 0.0
+        crossLookback := 35
+        maxBarsToRetest := 22
+        strictStack := true
+        requireRetest := true
+        pullbackTo := "EMA20"
+        reclaimOn  := "EMA10"
+        retestOn   := "EMA20"
+        atrStopMult := 1.8
+        rrTarget := 1.75
+    else
+        minSpread := 0.0005
+        minAtrPct := 0.0009
+        minAdx := 12.0
+        curvMin := 0.0
+        crossLookback := 28
+        maxBarsToRetest := 26
+        strictStack := false
+        requireRetest := false
+        pullbackTo := "EMA20"
+        reclaimOn  := "EMA20"
+        retestOn   := "EMA20"
+        atrStopMult := 1.6
+        rrTarget := 1.5
+
+else if market == "Crypto"
+    if preset == "Elite"
+        minSpread := 0.0008
+        minAtrPct := 0.0015
+        minAdx := 14.0
+        curvMin := 0.0
+        crossLookback := 28
+        maxBarsToRetest := 18
+        strictStack := true
+        requireRetest := true
+        pullbackTo := "EMA20"
+        reclaimOn  := "EMA10"
+        retestOn   := "EMA20"
+        atrStopMult := 2.2
+        rrTarget := 2.0
+    else if preset == "Balanced"
+        minSpread := 0.0006
+        minAtrPct := 0.0012
+        minAdx := 12.0
+        curvMin := 0.0
+        crossLookback := 24
+        maxBarsToRetest := 22
+        strictStack := true
+        requireRetest := true
+        pullbackTo := "EMA20"
+        reclaimOn  := "EMA20"
+        retestOn   := "EMA20"
+        atrStopMult := 2.0
+        rrTarget := 1.75
+    else
+        minSpread := 0.00045
+        minAtrPct := 0.0010
+        minAdx := 10.0
+        curvMin := 0.0
+        crossLookback := 18
+        maxBarsToRetest := 26
+        strictStack := false
+        requireRetest := false
+        pullbackTo := "EMA20"
+        reclaimOn  := "EMA20"
+        retestOn   := "EMA20"
+        atrStopMult := 1.8
+        rrTarget := 1.5
+
+else
+    if preset == "Elite"
+        minSpread := 0.0007
+        minAtrPct := 0.0010
+        minAdx := 14.0
+        curvMin := 0.0
+        crossLookback := 30
+        maxBarsToRetest := 18
+        strictStack := true
+        requireRetest := true
+        pullbackTo := "EMA10"
+        reclaimOn  := "EMA10"
+        retestOn   := "EMA10"
+        atrStopMult := 1.8
+        rrTarget := 2.0
+    else if preset == "Balanced"
+        minSpread := 0.00055
+        minAtrPct := 0.00085
+        minAdx := 12.0
+        curvMin := 0.0
+        crossLookback := 26
+        maxBarsToRetest := 22
+        strictStack := true
+        requireRetest := true
+        pullbackTo := "EMA20"
+        reclaimOn  := "EMA10"
+        retestOn   := "EMA20"
+        atrStopMult := 1.6
+        rrTarget := 1.75
+    else
+        minSpread := 0.0004
+        minAtrPct := 0.0007
+        minAdx := 10.0
+        curvMin := 0.0
+        crossLookback := 20
+        maxBarsToRetest := 26
+        strictStack := false
+        requireRetest := false
+        pullbackTo := "EMA20"
+        reclaimOn  := "EMA20"
+        retestOn   := "EMA20"
+        atrStopMult := 1.4
+        rrTarget := 1.5
+
+if looserLTF
+    strictStack := false
+    requireRetest := false
+    pullbackTo := "EMA20"
+    reclaimOn  := "EMA20"
+    retestOn   := "EMA20"
+
+//──────────────────────────────────────────────────────────────────────────────
+// WARMUP GATING (NA-safety + reliable backtest on 6m)
+//──────────────────────────────────────────────────────────────────────────────
+warmupBars = math.max(math.max(len50, atrLen), adxLen) + 10
+ready = (bar_index >= warmupBars)
+
+//──────────────────────────────────────────────────────────────────────────────
+// HELPERS (NA-safe)
+//──────────────────────────────────────────────────────────────────────────────
+f_pick(_e5,_e10,_e20,_c)=>
+    float o = _e20
+    if _c == "EMA5"
+        o := _e5
+    else if _c == "EMA10"
+        o := _e10
+    o
+
+f_stackL(_e5,_e10,_e20,_e50,_strict)=>
+    _strict ? (_e5 > _e10 and _e10 > _e20 and _e20 > _e50) : (_e20 > _e50)
+
+f_stackS(_e5,_e10,_e20,_e50,_strict)=>
+    _strict ? (_e5 < _e10 and _e10 < _e20 and _e20 < _e50) : (_e20 < _e50)
+
+f_curv(_x)=>
+    float c = 0.0
+    if bar_index >= 2 and not na(_x) and not na(_x[1]) and not na(_x[2])
+        float slope0 = _x - _x[1]
+        float slope1 = _x[1] - _x[2]
+        c := (slope0 - slope1)
+    c
+
+f_adx(_len)=>
+    float out = na
+    if bar_index >= 2
+        float upMove   = high - high[1]
+        float downMove = low[1] - low
+        float plusDM  = (upMove > downMove and upMove > 0) ? upMove : 0.0
+        float minusDM = (downMove > upMove and downMove > 0) ? downMove : 0.0
+
+        float tr1 = high - low
+        float tr2 = math.abs(high - close[1])
+        float tr3 = math.abs(low  - close[1])
+        float tr  = math.max(tr1, math.max(tr2, tr3))
+
+        float trur = ta.rma(tr, _len)
+        float plusDI  = trur == 0 ? 0.0 : 100.0 * ta.rma(plusDM, _len) / trur
+        float minusDI = trur == 0 ? 0.0 : 100.0 * ta.rma(minusDM, _len) / trur
+
+        float denom = plusDI + minusDI
+        float dx = denom == 0 ? 0.0 : (100.0 * math.abs(plusDI - minusDI) / denom)
+        out := ta.rma(dx, _len)
+    out
+
+//──────────────────────────────────────────────────────────────────────────────
+// LOCAL TF
+//──────────────────────────────────────────────────────────────────────────────
+ema5  = ta.ema(close,len5)
+ema10 = ta.ema(close,len10)
+ema20 = ta.ema(close,len20)
+ema50 = ta.ema(close,len50)
+
+s20 = bar_index >= 1 ? (ema20 - ema20[1]) : 0.0
+s50 = bar_index >= 1 ? (ema50 - ema50[1]) : 0.0
+c20 = f_curv(ema20)
+c50 = f_curv(ema50)
+
+atr = ta.atr(atrLen)
+adx = f_adx(adxLen)
+
+spreadPct = close != 0 ? math.abs(ema20-ema50)/close : 0.0
+atrPct    = close != 0 ? atr/close : 0.0
+recentX   = ta.barssince(ta.cross(ema20,ema50))
+
+// Treat "not ready" / "na ADX" as chop (safe, prevents early weirdness)
+isChop = useChopKill and (
+    (not ready) or
+    spreadPct < minSpread or
+    (na(adx) or adx < minAdx) or
+    atrPct < minAtrPct or
+    (recentX >= 0 and recentX < crossLookback)
+)
+
+localLongOk  = ready and f_stackL(ema5,ema10,ema20,ema50,strictStack) and (s20 > 0 and s50 > 0) and (c20 > curvMin and c50 > curvMin)
+localShortOk = ready and f_stackS(ema5,ema10,ema20,ema50,strictStack) and (s20 < 0 and s50 < 0) and (c20 < -curvMin and c50 < -curvMin)
+
+//──────────────────────────────────────────────────────────────────────────────
+// HTF ALIGNMENT
+//──────────────────────────────────────────────────────────────────────────────
+sec(_tf, _expr)=>
+    request.security(syminfo.tickerid, _tf, _expr, barmerge.gaps_off, barmerge.lookahead_off)
+
+d20 = (htfMode == "D only" or htfMode == "D + H1") ? sec(tfD, ta.ema(close,len20)) : na
+d50 = (htfMode == "D only" or htfMode == "D + H1") ? sec(tfD, ta.ema(close,len50)) : na
+h20 = (htfMode == "H1 only" or htfMode == "D + H1") ? sec(tfH1, ta.ema(close,len20)) : na
+h50 = (htfMode == "H1 only" or htfMode == "D + H1") ? sec(tfH1, ta.ema(close,len50)) : na
+
+dOkLong  = (htfMode == "D only" or htfMode == "D + H1") ? (not na(d20) and not na(d50) and d20 > d50) : true
+dOkShort = (htfMode == "D only" or htfMode == "D + H1") ? (not na(d20) and not na(d50) and d20 < d50) : true
+hOkLong  = (htfMode == "H1 only" or htfMode == "D + H1") ? (not na(h20) and not na(h50) and h20 > h50) : true
+hOkShort = (htfMode == "H1 only" or htfMode == "D + H1") ? (not na(h20) and not na(h50) and h20 < h50) : true
+
+htfLong  = (htfMode == "Off") ? true : (dOkLong and hOkLong)
+htfShort = (htfMode == "Off") ? true : (dOkShort and hOkShort)
+
+//──────────────────────────────────────────────────────────────────────────────
+// ENTRY STATE (Pullback → Reclaim → Retest) — unchanged logic (1:1)
+//──────────────────────────────────────────────────────────────────────────────
+pullLvl   = f_pick(ema5,ema10,ema20,pullbackTo)
+reclLvl   = f_pick(ema5,ema10,ema20,reclaimOn)
+retestLvl = f_pick(ema5,ema10,ema20,retestOn)
+
+var int lState=0
+var int sState=0
+var int lBar=na
+var int sBar=na
+
+allow = ready and (not isChop)
+
+lPull = allow and htfLong  and localLongOk  and (low <= pullLvl)  and (close > ema50)
+sPull = allow and htfShort and localShortOk and (high >= pullLvl) and (close < ema50)
+
+prevClose = bar_index >= 1 ? close[1] : na
+lRecl = allow and htfLong  and localLongOk  and (close > reclLvl) and (not na(prevClose) and prevClose <= reclLvl)
+sRecl = allow and htfShort and localShortOk and (close < reclLvl) and (not na(prevClose) and prevClose >= reclLvl)
+
+lRet  = allow and htfLong  and localLongOk  and (low <= retestLvl)  and (close > retestLvl)
+sRet  = allow and htfShort and localShortOk and (high >= retestLvl) and (close < retestLvl)
+
+if lState==0 and lPull
+    lState:=1
+if sState==0 and sPull
+    sState:=1
+
+if allowReclaimNoPull
+    if lState==0 and lRecl
+        lState := 2
+        lBar := bar_index
+    if sState==0 and sRecl
+        sState := 2
+        sBar := bar_index
+
+if lState==1 and lRecl
+    lState:=2
+    lBar:=bar_index
+if sState==1 and sRecl
+    sState:=2
+    sBar:=bar_index
+
+if lState==2 and not na(lBar) and (bar_index - lBar > maxBarsToRetest)
+    lState:=0
+if sState==2 and not na(sBar) and (bar_index - sBar > maxBarsToRetest)
+    sState:=0
+
+bool longReclaimTrigger  = false
+bool shortReclaimTrigger = false
+if reclaimEntryTiming == "Reclaim close"
+    longReclaimTrigger  := lRecl
+    shortReclaimTrigger := sRecl
+else
+    longReclaimTrigger  := (bar_index >= 1 ? lRecl[1] : false) and (close > reclLvl)
+    shortReclaimTrigger := (bar_index >= 1 ? sRecl[1] : false) and (close < reclLvl)
+
+bool longEntry  = false
+bool shortEntry = false
+if barstate.isconfirmed
+    if allow and htfLong and localLongOk
+        longEntry := requireRetest ? (lState==2 and lRet) : longReclaimTrigger
+    if allow and htfShort and localShortOk
+        shortEntry := requireRetest ? (sState==2 and sRet) : shortReclaimTrigger
+
+if longEntry
+    lState := 0
+if shortEntry
+    sState := 0
+
+//──────────────────────────────────────────────────────────────────────────────
+// ATR RISK ENGINE
+//──────────────────────────────────────────────────────────────────────────────
+var float longStop = na
+var float longTp   = na
+var float longR    = na
+var float shortStop = na
+var float shortTp   = na
+var float shortR    = na
+
+if allowOrders and longEntry
+    strategy.entry("LONG", strategy.long)
+    if useAtrRisk
+        float risk = atr * atrStopMult
+        longStop := close - risk
+        longTp   := close + (risk * rrTarget)
+        longR    := risk
+
+if allowOrders and shortEntry
+    strategy.entry("SHORT", strategy.short)
+    if useAtrRisk
+        float risk = atr * atrStopMult
+        shortStop := close + risk
+        shortTp   := close - (risk * rrTarget)
+        shortR    := risk
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+avg     = strategy.position_avg_price
+
+if allowOrders and useAtrRisk
+    if inLong and not na(longStop) and not na(longTp)
+        float stopL = longStop
+        if useBreakeven and not na(longR) and close >= avg + longR
+            stopL := math.max(stopL, avg)
+        if useTrailAfterR and not na(longR) and close >= avg + longR
+            stopL := math.max(stopL, close - (atr * trailAtrMult))
+        strategy.exit("L-Exit", from_entry="LONG", stop=stopL, limit=longTp)
+
+    if inShort and not na(shortStop) and not na(shortTp)
+        float stopS = shortStop
+        if useBreakeven and not na(shortR) and close <= avg - shortR
+            stopS := math.min(stopS, avg)
+        if useTrailAfterR and not na(shortR) and close <= avg - shortR
+            stopS := math.min(stopS, close + (atr * trailAtrMult))
+        strategy.exit("S-Exit", from_entry="SHORT", stop=stopS, limit=shortTp)
+
+if strategy.position_size == 0
+    longStop := na
+    longTp := na
+    longR := na
+    shortStop := na
+    shortTp := na
+    shortR := na
+
+//──────────────────────────────────────────────────────────────────────────────
+// PLOTS + BLOCKS + ALERTS
+//──────────────────────────────────────────────────────────────────────────────
+plot(ema5,  "EMA 5",  display = showEma ? display.all : display.none)
+plot(ema10, "EMA 10", display = showEma ? display.all : display.none)
+plot(ema20, "EMA 20", display = showEma ? display.all : display.none)
+plot(ema50, "EMA 50", display = showEma ? display.all : display.none)
+
+plotshape(showSignals and longEntry,  title="Long",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, text="LONG")
+plotshape(showSignals and shortEntry, title="Short", style=shape.triangledown, location=location.abovebar, size=size.tiny, text="SHORT")
+
+showRiskLines = allowOrders and useAtrRisk
+plot(showRiskLines and inLong  ? longStop  : na, "Long Stop",  style=plot.style_linebr)
+plot(showRiskLines and inLong  ? longTp    : na, "Long TP",    style=plot.style_linebr)
+plot(showRiskLines and inShort ? shortStop : na, "Short Stop", style=plot.style_linebr)
+plot(showRiskLines and inShort ? shortTp   : na, "Short TP",   style=plot.style_linebr)
+
+blockChop = showBlocks and isChop
+blockHtf  = showBlocks and ready and (not isChop) and (htfMode != "Off") and (not htfLong and not htfShort)
+
+plotshape(showBlocks and blockChop, title="Blocked: Chop", style=shape.circle, location=location.top, size=size.tiny, text="CHOP")
+plotshape(showBlocks and blockHtf,  title="Blocked: HTF",  style=shape.circle, location=location.top, size=size.tiny, text="HTF")
+
+alertcondition(longEntry,  "Long Entry",  "Elite EMA Reclaim LONG on {{ticker}}")
+alertcondition(shortEntry, "Short Entry", "Elite EMA Reclaim SHORT on {{ticker}}")
+
+View in Pine Editor・560 lines
+Use on chart
+1
+4
+794
+This script is a 6-minute execution MTF EMA “retest → reclaim” strategy. It looks for trend-aligned pullbacks into fast EMAs, then enters when price reclaims and (optionally) retests the reclaim level—while filtering out chop (low trend strength/volatility or recent EMA20/50 crosses) and enforcing higher-timeframe alignment (Daily + 1H, or whichever you select).
+
+How to use
+
+Run it on a 6-minute chart (that’s what the presets are tuned for).
+
+Pick your Market (Forex / XAUUSD / Crypto / Indices) and a Preset:
+
+Elite = strictest, cleanest (fewer signals)
+
+Balanced = middle ground
+
+Aggressive = most signals, loosest filters
+
+Set HTF Alignment Mode:
+
+D + H1 (recommended) for highest quality
+
+Off if you want more trades / LTF-only testing
+
+Leave Kill Chop = ON (recommended). If you’re not getting trades, this is usually the blocker.
+
+Choose entry behavior:
+
+If Require Retest = true, entries happen on the retest after reclaim (cleaner, later).
+
+If Require Retest = false, entries trigger on reclaim using Reclaim Timing Default:
+
+“Preset” uses the strategy’s recommended default per market/preset
+
+or force Reclaim close / Next bar confirmation
+
+For backtesting, keep Mode = Strategy (Backtest). For alerts/visual-only, set Mode = Indicator (Signals Only).
+
+Use Show Signals (All Modes) to toggle triangles on/off without affecting trades.
+
+Tip: If TradingView says “not enough data,” switch symbol history to “All,” reduce HTF alignment (try H1 only), or backtest a more recent date range.

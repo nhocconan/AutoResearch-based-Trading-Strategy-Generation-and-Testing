@@ -1,0 +1,5 @@
+//@version=4
+issl=##input(defval=false,type='INPUT_BOOL',##id='in_21')
+istp=##input(defval=false,type='INPUT_BOOL',##id='in_24')
+##root(root_metainfo,rm_0,(istp?70:100),input__integer)
+##root(root_metainfo,rm_1,(issl?70:100),input__integer)

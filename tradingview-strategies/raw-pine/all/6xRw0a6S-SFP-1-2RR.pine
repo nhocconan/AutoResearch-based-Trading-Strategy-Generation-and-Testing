@@ -1,0 +1,287 @@
+//@version=5
+strategy("1H Swings → 1H Mitigation → 5m Displacement → 5m FVG Entry (1:2RR)",
+     overlay=true,
+     pyramiding=0,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+//==============================
+// Inputs
+//==============================
+htfTf     = input.timeframe("60", "HTF (Swings/Mitigation) TF")
+rr        = input.float(2.0, "Risk:Reward (TP = RR * Risk)", step=0.25)
+pivotL    = input.int(1, "HTF Pivot Left (3-candle = 1)", minval=1)
+pivotR    = input.int(1, "HTF Pivot Right (3-candle = 1)", minval=1)
+
+useDisplacement = input.bool(true, "Require displacement AFTER mitigation")
+atrLen    = input.int(14, "ATR length (5m)", minval=5)
+dispMult  = input.float(0.8, "Displacement body ≥ ATR *", step=0.1)
+
+slBufferTicks = input.int(2, "SL buffer (ticks) beyond 1H wick", minval=0)
+oneTradePerMitigation = input.bool(true, "One trade per mitigation")
+
+//==============================
+// Helpers
+//==============================
+atr = ta.atr(atrLen)
+tick = syminfo.mintick
+slBuffer = slBufferTicks * tick
+
+//==============================
+// HTF logic: swings + mitigation (SFP-like)
+// Confirmed swing = pivot high/low with (1,1) on HTF
+// Mitigation:
+//  - Bearish: HTF high sweeps lastSwingHigh AND HTF close back below it
+//  - Bullish: HTF low sweeps lastSwingLow AND HTF close back above it
+//==============================
+f_htf() =>
+    var float lastSwingHigh = na
+    var float lastSwingLow  = na
+
+    ph = ta.pivothigh(high, pivotL, pivotR)
+    pl = ta.pivotlow(low,  pivotL, pivotR)
+
+    if not na(ph)
+        lastSwingHigh := ph
+    if not na(pl)
+        lastSwingLow := pl
+
+    bearMit = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+    bullMit = not na(lastSwingLow)  and low  < lastSwingLow  and close > lastSwingLow
+
+    // Return direction + sweep wick anchor levels (for SL)
+    // dir: +1 bull, -1 bear, 0 none
+    dir = bullMit ? 1 : bearMit ? -1 : 0
+    sweepHi = bearMit ? high : na
+    sweepLo = bullMit ? low  : na
+
+    [dir, sweepHi, sweepLo, lastSwingHigh, lastSwingLow]
+
+[htfDir, htfSweepHi, htfSweepLo, htfSwingHigh, htfSwingLow] = request.security(syminfo.tickerid, htfTf, f_htf(), barmerge.gaps_off, barmerge.lookahead_off)
+
+//==============================
+// Track mitigation events (state)
+//==============================
+var int   activeDir     = 0          // +1 long, -1 short
+var float activeSweepSL = na         // SL anchor from 1H wick (beyond)
+var int   mitBarIndex   = na         // where mitigation became active (LTF bar index)
+var int   lastMitStamp  = na         // to avoid re-triggering on same HTF bar
+
+// detect "new mitigation" only once per HTF event
+newMit = (htfDir != 0) and (htfDir != activeDir)  // direction flip OR new direction
+// Better: also ensure it is a new HTF bar event by stamping time
+htfTime = request.security(syminfo.tickerid, htfTf, time, barmerge.gaps_off, barmerge.lookahead_off)
+newMitConfirmed = (htfDir != 0) and (na(lastMitStamp) or htfTime != lastMitStamp)
+
+if newMitConfirmed
+    activeDir := htfDir
+    mitBarIndex := bar_index
+    lastMitStamp := htfTime
+    if activeDir == -1 and not na(htfSweepHi)
+        activeSweepSL := htfSweepHi + slBuffer
+    if activeDir ==  1 and not na(htfSweepLo)
+        activeSweepSL := htfSweepLo - slBuffer
+
+//==============================
+// 5m Displacement AFTER mitigation
+// (optional but recommended; reduces chop)
+//==============================
+body = math.abs(close - open)
+isBullDisp = close > open and body >= atr * dispMult
+isBearDisp = close < open and body >= atr * dispMult
+
+dispOk = not useDisplacement ? true :
+     activeDir ==  1 ? isBullDisp :
+     activeDir == -1 ? isBearDisp : false
+
+//==============================
+// 5m FVG (ICT style, 3-candle)
+// Bullish FVG: low > high[2] => zone [high[2]..low]
+// Bearish FVG: high < low[2] => zone [high..low[2]]
+// We ONLY accept FVGs that appear AFTER the mitigation event.
+//==============================
+bullFvg = low > high[2]
+bullTop = low
+bullBot = high[2]
+
+bearFvg = high < low[2]
+bearTop = low[2]
+bearBot = high
+
+var float fvgTop = na
+var float fvgBot = na
+var int   fvgDir = 0
+var int   fvgSetBar = na
+
+afterMit = not na(mitBarIndex) and bar_index > mitBarIndex
+
+// “Arm” the FVG only when:
+// - we are after mitigation
+// - displacement condition occurred at least once after mitigation
+var bool dispSeen = false
+if newMitConfirmed
+    dispSeen := false
+    fvgTop := na
+    fvgBot := na
+    fvgDir := 0
+    fvgSetBar := na
+
+if afterMit and dispOk
+    dispSeen := true
+
+if afterMit and dispSeen
+    if activeDir == 1 and bullFvg
+        fvgTop := bullTop
+        fvgBot := bullBot
+        fvgDir := 1
+        fvgSetBar := bar_index
+    if activeDir == -1 and bearFvg
+        fvgTop := bearTop
+        fvgBot := bearBot
+        fvgDir := -1
+        fvgSetBar := bar_index
+
+//==============================
+// Entry: retrace into the armed FVG zone
+// (enter NEXT bar to avoid same-candle clutter)
+//==============================
+inFvg = fvgDir != 0 and not na(fvgTop) and not na(fvgBot) and (low <= fvgTop) and (high >= fvgBot)
+
+// one trade per mitigation
+var bool tradedThisMit = false
+if newMitConfirmed
+    tradedThisMit := false
+
+canTrade = strategy.position_size == 0 and (not oneTradePerMitigation or not tradedThisMit)
+
+// We trigger entry on the bar AFTER "inFvg" is detected
+longSetup  = canTrade and fvgDir == 1 and inFvg
+shortSetup = canTrade and fvgDir == -1 and inFvg
+
+if longSetup[1]
+    entry = open
+    sl    = activeSweepSL  // SL anchored to 1H sweep wick
+    risk  = entry - sl
+    tp    = entry + risk * rr
+    if risk > syminfo.mintick
+        strategy.entry("L", strategy.long)
+        strategy.exit("L-TP/SL", "L", stop=sl, limit=tp)
+        tradedThisMit := true
+
+if shortSetup[1]
+    entry = open
+    sl    = activeSweepSL
+    risk  = sl - entry
+    tp    = entry - risk * rr
+    if risk > syminfo.mintick
+        strategy.entry("S", strategy.short)
+        strategy.exit("S-TP/SL", "S", stop=sl, limit=tp)
+        tradedThisMit := true
+
+//==============================
+// Visuals (clean)
+//==============================
+// Show HTF swing levels
+plot(htfSwingHigh, "1H Swing High", color=color.new(color.red, 70), style=plot.style_linebr)
+plot(htfSwingLow,  "1H Swing Low",  color=color.new(color.lime, 70), style=plot.style_linebr)
+
+// Show mitigation markers
+plotshape(newMitConfirmed and activeDir == 1, title="1H Bull Mitigation", style=shape.labelup,
+     text="1H MIT↑", location=location.belowbar, color=color.new(color.lime, 0), textcolor=color.black, size=size.tiny)
+
+plotshape(newMitConfirmed and activeDir == -1, title="1H Bear Mitigation", style=shape.labeldown,
+     text="1H MIT↓", location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+// Draw current FVG zone
+var box fvgBox = na
+if not na(fvgBox)
+    box.delete(fvgBox)
+
+if fvgDir != 0 and not na(fvgTop) and not na(fvgBot)
+    fvgBox := box.new(bar_index-2, fvgTop, bar_index+15, fvgBot, bgcolor = fvgDir==1 ? color.new(color.lime, 88) : color.new(color.red, 88), border_color = fvgDir==1 ? color.new(color.lime, 65) : color.new(color.red, 65))
+
+View in Pine Editor・201 lines
+Use on chart
+2
+1
+699
+This strategy is a top-down liquidity model that combines higher timeframe swing structure with lower timeframe imbalance entries.
+
+Overview
+
+The model identifies confirmed swing highs and swing lows on the 1H timeframe.
+It waits for a liquidity sweep (SFP-style mitigation) of those swings, followed by displacement away from the level.
+
+Execution is performed on the 5-minute timeframe using Fair Value Gap (FVG) retracement entries.
+
+The strategy enforces a fixed 1:2 Risk:Reward structure.
+
+Logic Flow
+Step 1 – 1H Swing Identification
+
+Confirmed 3-candle pivot highs and lows are marked.
+
+These represent external liquidity pools.
+
+Step 2 – 1H Mitigation (SFP Condition)
+
+Bearish: Price wicks above a prior 1H swing high and closes back below it.
+
+Bullish: Price wicks below a prior 1H swing low and closes back above it.
+
+This indicates liquidity has been taken.
+
+Step 3 – Displacement Confirmation
+
+After mitigation, a strong directional impulse must form.
+
+This reduces false sweeps in consolidation.
+
+Step 4 – 5M Fair Value Gap Formation
+
+An FVG must form in the direction of displacement.
+
+This defines the retracement entry zone.
+
+Step 5 – Entry
+
+Trade is triggered when price retraces into the 5M FVG.
+
+Stop loss is placed beyond the 1H sweep wick.
+
+Take profit is fixed at 2x risk (1:2 RR).
+
+Risk Management
+
+Fixed 1:2 Risk:Reward.
+
+One trade per mitigation event (optional).
+
+No pyramiding.
+
+Entries are executed on the next bar to avoid same-candle execution artifacts.
+
+Strategy Characteristics
+
+Moderate win rate (typically 35–50% depending on market regime).
+
+Performs best in trending or directional environments.
+
+Avoids mid-range chop by requiring displacement after mitigation.
+
+Designed for structured continuation rather than pure scalping.
+
+Intended Use
+
+Best applied to:
+
+Major FX pairs
+
+Indices
+
+Gold
+
+High-liquidity instruments
+
+Recommended execution timeframe: 5-minute
+Higher timeframe bias: 1-hour

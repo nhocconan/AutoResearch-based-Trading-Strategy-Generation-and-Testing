@@ -1,0 +1,72 @@
+//@version=5
+strategy("Supertrend 3H Strategy", overlay=true, margin_long=100, margin_short=100, process_orders_on_close=true)
+
+//---------------------------
+// Supertrend Inputs
+//---------------------------
+Periods     = input.int(10, title="ATR Period")
+Multiplier  = input.float(3.0, title="ATR Multiplier", step=0.1)
+
+//---------------------------
+// Request 3H Data
+//---------------------------
+src    = request.security(syminfo.tickerid, "180", hl2)
+close3 = request.security(syminfo.tickerid, "180", close)
+atr3   = request.security(syminfo.tickerid, "180", ta.atr(Periods))
+
+//---------------------------
+// Supertrend Calculation (3H)
+//---------------------------
+up  = src - Multiplier * atr3
+dn  = src + Multiplier * atr3
+
+var float upTrend   = na
+var float downTrend = na
+var int trend       = na
+
+up1 = nz(upTrend[1], up)
+dn1 = nz(downTrend[1], dn)
+
+upTrend   := close3[1] > up1 ? math.max(up, up1) : up
+downTrend := close3[1] < dn1 ? math.min(dn, dn1) : dn
+
+trend := na(trend[1]) ? 1 : trend[1]
+trend := trend == -1 and close3 > dn1 ? 1 : trend == 1 and close3 < up1 ? -1 : trend
+
+buySignal  = trend == 1 and trend[1] == -1
+sellSignal = trend == -1 and trend[1] == 1
+
+supertrendLine = trend == 1 ? upTrend : downTrend
+
+plot(supertrendLine, "3H Supertrend", color = trend == 1 ? color.green : color.red, linewidth=2)
+
+//---------------------------
+// Strategy Logic
+//---------------------------
+// Long Entry: Only after buySignal, wait for *next bullish candle* close > supertrend
+bullishCondition = buySignal[1] and close > supertrendLine and close > open
+
+// Short Entry: Only after sellSignal, wait for *next bearish candle* close < supertrend
+bearishCondition = sellSignal[1] and close < supertrendLine and close < open
+
+//---------------------------
+// Orders with Fixed TP/SL
+//---------------------------
+tpPoints = 400.0
+slPoints = 200.0
+
+if (bullishCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop = strategy.position_avg_price - slPoints, limit = strategy.position_avg_price + tpPoints)
+
+if (bearishCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop = strategy.position_avg_price + slPoints, limit = strategy.position_avg_price - tpPoints)
+
+View in Pine Editor・64 lines
+Use on chart
+3
+0
+1 272
+Supertrend 3H Strategy Vinay-
+Buy or sell using Supertrend, 200 points SL and 400 points target

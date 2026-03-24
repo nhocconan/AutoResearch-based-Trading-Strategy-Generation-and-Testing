@@ -1,0 +1,87 @@
+//@version=5
+strategy("Supertrend Strategy with Money Ocean Trade", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Input parameters
+supertrendLength = input.int(6, title="Supertrend Length")
+supertrendFactor = input.float(0.25, title="Supertrend Factor")
+
+// Supertrend calculation
+[supertrend, direction] = ta.supertrend(supertrendFactor, supertrendLength)
+
+// Plot Supertrend line
+supertrendColor = direction == 1 ? color.green : color.red
+plot(supertrend, title="Supertrend", color=supertrendColor, linewidth=2, style=plot.style_line)
+
+// Variables to track trend change and candle break
+var bool trendChanged = false
+var float prevSupertrend = na
+
+if (not na(prevSupertrend) and direction != nz(ta.valuewhen(prevSupertrend != supertrend, direction, 1)))
+    trendChanged := true
+else
+    trendChanged := false
+
+prevSupertrend := supertrend
+
+longEntry = trendChanged and close[1] < supertrend[1] and close > supertrend
+shortEntry = trendChanged and close[1] > supertrend[1] and close < supertrend
+
+// Strategy execution
+if (longEntry)
+    strategy.entry("Long", strategy.long)
+
+if (shortEntry)
+    strategy.entry("Short", strategy.short)
+
+// Plot entry signals on the chart
+plotshape(series=longEntry, location=location.belowbar, color=color.green, style=shape.labelup, title="BUY")
+plotshape(series=shortEntry, location=location.abovebar, color=color.red, style=shape.labeldown, title="SELL")
+
+// Alerts
+alertcondition(longEntry, title="Buy Signal", message="Buy Signal Triggered!")
+alertcondition(shortEntry, title="Short Signal", message="Short Signal Triggered!")
+
+View in Pine Editor・42 lines
+Use on chart
+7
+6
+2 047
+Strategy Overview
+The Supertrend Strategy with Trend Change Confirmation leverages the Supertrend indicator to identify potential buy and sell signals based on changes in trend direction and subsequent price action. The strategy is designed to work with any financial instrument (symbol) and aims to provide clear entry and exit signals.
+
+Key Components
+Supertrend Indicator: The core of this strategy is the Supertrend indicator, calculated using a length of 3 and a factor of 1. The Supertrend line is plotted on the chart to visually represent trend direction.
+
+Direction 1: Indicates an uptrend (bullish).
+
+Direction -1: Indicates a downtrend (bearish).
+
+Trend Change Detection: The strategy monitors changes in the trend direction. When a trend change is detected, it checks if the next candle confirms the trend change by breaking above or below the Supertrend line.
+
+Entry Conditions:
+
+Long Entry (Buy): When the Supertrend direction changes to 1 (uptrend) and the next candle closes above the Supertrend line.
+
+Short Entry (Sell): When the Supertrend direction changes to -1 (downtrend) and the next candle closes below the Supertrend line.
+
+Exit Conditions: The strategy closes the position based on the opposite signal.
+
+Long Exit: When the Supertrend direction changes to -1 (downtrend) and the next candle closes below the Supertrend line.
+
+Short Exit: When the Supertrend direction changes to 1 (uptrend) and the next candle closes above the Supertrend line.
+
+Visual Signals: The strategy plots buy and sell signals on the chart using plotshape:
+
+BUY: A green label below the bar when a long entry is triggered.
+
+SELL: A red label above the bar when a short entry is triggered.
+
+Alerts: Alerts are set up to notify when a buy or sell signal is triggered.
+
+
+Script Summary
+This strategy helps traders identify potential trading opportunities based on trend changes and confirms the trend by checking the next candle's price action. The visual signals and dashboard enhance the user's ability to monitor and manage trades effectively.
+
+Feel free to test and adjust the parameters to suit your trading preferences! If you need further customizations or explanations, let me know.
+
+

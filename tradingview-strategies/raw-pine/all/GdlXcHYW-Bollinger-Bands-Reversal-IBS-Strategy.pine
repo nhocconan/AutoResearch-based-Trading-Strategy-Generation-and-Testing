@@ -1,0 +1,92 @@
+//@version=6
+strategy("Bollinger Bands Reversal + IBS Strategy", overlay=true, fill_orders_on_standard_ohlc = true, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true)
+
+in_start_time = input.time(timestamp('1 Jan 1900'), title = 'Start Time', group = 'Time Settings')
+in_end_time = input.time(timestamp('1 Jan 2099'), title = 'End Time', group = 'Time Settings')
+in_window = time >= in_start_time and time <= in_end_time
+
+length = input.int(20, minval = 1)
+mult = input.float(2.0, minval = 0.001, maxval = 50)
+
+basis = ta.sma(close, length)
+dev = mult * ta.stdev(close, length)
+
+upper = basis + dev
+lower = basis - dev
+
+// plot(basis, 'Basis', color = color.white)
+// plot(upper, 'Upper', color = color.red)
+plot(lower, 'Lower', color = color.green)
+
+ibs = (close - low) / (high - low)
+
+buy_condition  = ibs<0.2 and close<lower and in_window 
+sell_condition = ibs>0.8
+
+if buy_condition
+    strategy.entry("long", strategy.long)
+if ibs>0.8
+    strategy.close_all()
+
+View in Pine Editor・32 lines
+Use on chart
+1
+0
+2
+2 866
+█ STRATEGY DESCRIPTION
+The "Bollinger Bands Reversal Strategy" is a mean-reversion strategy designed to identify potential buying opportunities when the price deviates below the lower Bollinger Band and the Internal Bar Strength (IBS) indicates oversold conditions. It enters a long position when specific conditions are met and exits when the IBS indicates overbought conditions. This strategy is suitable for use on various timeframes.
+
+█ WHAT ARE BOLLINGER BANDS?
+Bollinger Bands consist of three lines:
+- **Basis**: A Simple Moving Average (SMA) of the price over a specified period.
+- **Upper Band**: The basis plus a multiple of the standard deviation of the price.
+- **Lower Band**: The basis minus a multiple of the standard deviation of the price.
+
+Bollinger Bands help identify periods of high volatility and potential reversal points.
+
+█ WHAT IS INTERNAL BAR STRENGTH (IBS)?
+Internal Bar Strength (IBS) is a measure of where the closing price is relative to the high and low of the bar. It is calculated as:
+
+Pine Script®
+IBS = (Close - Low) / (High - Low)
+
+
+A low IBS value (e.g., below 0.2) indicates that the close is near the low of the bar, suggesting oversold conditions. A high IBS value (e.g., above 0.8) indicates that the close is near the high of the bar, suggesting overbought conditions.
+
+█ SIGNAL GENERATION
+1. LONG ENTRY
+A Buy Signal is triggered when:
+
+The IBS value is below 0.2, indicating oversold conditions.
+
+The close price is below the lower Bollinger Band.
+
+The signal occurs within the specified time window (between `Start Time` and `End Time`).
+
+
+
+2. EXIT CONDITION
+
+A Sell Signal is generated when the IBS value exceeds 0.8, indicating overbought conditions. This prompts the strategy to exit the position.
+
+
+
+█ ADDITIONAL SETTINGS
+
+Length: The lookback period for calculating the Bollinger Bands. Default is 20.
+
+Multiplier: The number of standard deviations used to calculate the upper and lower Bollinger Bands. Default is 2.0.
+
+Start Time and End Time: The time window during which the strategy is allowed to execute trades.
+
+
+
+█ PERFORMANCE OVERVIEW
+
+This strategy is designed for mean-reverting markets and performs best when the price frequently deviates from the Bollinger Bands.
+
+It is sensitive to oversold and overbought conditions, as indicated by the IBS, which helps to identify potential reversals.
+
+Backtesting results should be analyzed to optimize the Length and Multiplier parameters for specific instruments.
+

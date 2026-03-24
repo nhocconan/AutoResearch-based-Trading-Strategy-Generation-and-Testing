@@ -1,0 +1,54 @@
+//@version=3
+strategy("RSI Alligator", overlay=false)
+
+jaws = rsi(close, 34)
+teeth = rsi(close, 5)
+lips = rsi(close, 13)
+plot(jaws, color=blue, title="Jaw")
+plot(teeth, color=green, title="Teeth")
+plot(lips, color=red, title="Lips")
+
+
+
+longCondition = crossover(rsi(close, 13), rsi(close, 34)) and (rsi(close, 5) > rsi(close, 34))
+longCondition1 = crossover(rsi(close, 5), rsi(close, 34)) and (rsi(close, 13) > rsi(close, 34))
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+if (longCondition1)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = crossunder(rsi(close, 13), rsi(close, 34)) and (rsi(close, 5) < rsi(close, 34))
+shortCondition1 = crossunder(rsi(close, 5), rsi(close, 34)) and (rsi(close, 13) < rsi(close, 34))
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+if (shortCondition1)
+    strategy.entry("Short", strategy.short)
+    
+    // === BACKTESTING: EXIT strategy ===
+sl_inp = input(10, title='Stop Loss %', type=float)/100
+tp_inp = input(90, title='Take Profit %', type=float)/100
+
+stop_level = strategy.position_avg_price * (1 - sl_inp)
+take_level = strategy.position_avg_price * (1 + tp_inp)
+
+strategy.exit("Stop Loss/Profit", "Long", stop=stop_level, limit=take_level)
+
+View in Pine Editor・34 lines
+Use on chart
+5
+1
+9
+3
+19 982
+Hello trading family! Just wanted to give a quick write up and share the new code for the RSI Alligator Strategy. I amended it to show every crossover signal, weak and strong, so we can accurately gauge its effectiveness.
+
+Having played with this for a couple hours now I have learned a few things
+-Using Heikin Ashi seems to smooth it out a bit and provides about 20% fewer signals, leading to overall more accuracy. However, it can be misleading as the Heikin Ashi opening price doesn't always line up with the market price, especially in cases of large moves. Overall though it didn't seem too far off except for a few instances.
+-Also, using the Heikin Ashi gives you a better idea of the trend, which this indicator is primarily used to detect and exploit.
+-Having tested on TF of 1H-1D, overall profitability is found to be highest between 4H-12H, with 1D giving the "safest" longer term signals, and lower TF's generating many more signals due to volatility.
+-Instead of waiting for the next signal in order to close, you can often use a crossover/crossunder of the 5 and 13 to close the previous trade, especially if paired with a Heikin Ashi of opposite color (green to close a short, red to close a long)
+-You will also notice several instances where the Green 5 period show divergences that aren't visible on the regular RSI, another handy little feature
+
+So far I have still only tested this on BTCUSD. Feel free to apply it to any coin and let me know what you find.
+
+Here is the script. If you have any ideas or suggestions please let me know!

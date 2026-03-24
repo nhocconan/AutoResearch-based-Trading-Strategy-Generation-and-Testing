@@ -1,0 +1,469 @@
+//@version=5
+// Sửa lỗi: Sử dụng input của người dùng cho Vốn ban đầu (initial_capital)
+strategy(title='[STRATEGY] ALGO', shorttitle='[STRATEGY] ALGO', overlay=true, initial_capital = 1000, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1)
+
+//================================================== FUNCTIONS ==================================================\\
+// FUNCTIONS
+RoundUp(number, decimals) =>
+    factor = math.pow(10, decimals)
+    math.ceil(number * factor) / factor
+
+calc_rr(float entry_price, float sl_price, float take_price) =>
+    entry_price > sl_price ? (take_price - entry_price) / (entry_price - sl_price) : (entry_price - take_price) / (sl_price - entry_price)
+
+create_trend_line(float sensitivity, float fib) =>
+    high_line = ta.highest(high, int(sensitivity))
+    low_line = ta.lowest(low, int(sensitivity))
+    channel_range = high_line - low_line
+    high_line - channel_range * fib
+
+// **HÀM TÍNH TOÁN KHỐI LƯỢNG MỚI (ĐÃ SỬA: BỎ LÀM TRÒN CỨNG)
+calc_qty(float entry_price, float sl_price, bool is_fixed_qty_mode, float fixed_qty_value, float initial_depo, float risk_pct) =>
+    float calculated_qty = 1.0
+    if is_fixed_qty_mode
+        // CHẾ ĐỘ USDT CỐ ĐỊNH: Khối lượng = Giá trị USDT cố định / Giá vào lệnh
+        if entry_price > 0
+            calculated_qty := fixed_qty_value / entry_price
+        else
+            calculated_qty := 1.0 // Ngăn chia cho 0
+    else
+        // Chế độ Quản lý Rủi ro (Risk Management)
+        max_risk_amount = initial_depo * risk_pct / 100
+        risk_per_unit = math.abs(entry_price - sl_price)
+
+        if risk_per_unit > 0
+            calculated_qty := math.max(1.0, max_risk_amount / risk_per_unit)
+        else
+            calculated_qty := 1.0
+
+    // TradingView sẽ tự động xử lý làm tròn theo tick size của cặp giao dịch.
+    calculated_qty
+//FUNCTIONS
+
+//================================================== TYPES AND METHODS (REMOVED: Strategy handles this) ==================================================\\
+type Strategy_settings
+    float sensitivity = 0
+    float risk_percent = 0
+    string break_even_target = "1"
+    float tp1_percent = 0
+    float tp1_percent_fix = 0
+    float tp2_percent = 0
+    float tp2_percent_fix = 0
+    float tp3_percent = 0
+    float tp3_percent_fix = 0
+    float tp4_percent = 0
+    float tp4_percent_fix = 0
+    bool fixed_stop = false
+    float sl_percent = 0
+
+selector(string strategy_name) =>
+    strategy_settings = Strategy_settings.new()
+    switch strategy_name
+        "MANUAL" =>
+            strategy_settings.sensitivity := 18
+            strategy_settings.risk_percent := 1
+            strategy_settings.break_even_target := "1"
+            strategy_settings.tp1_percent := 1
+            strategy_settings.tp1_percent_fix := 40
+            strategy_settings.tp2_percent := 2
+            strategy_settings.tp2_percent_fix := 30
+            strategy_settings.tp3_percent := 3
+            strategy_settings.tp3_percent_fix := 20
+            strategy_settings.tp4_percent := 4
+            strategy_settings.tp4_percent_fix := 10
+            strategy_settings.fixed_stop := false
+            strategy_settings.sl_percent := 0.0
+        "UNIVERSAL 15m" =>
+            strategy_settings.sensitivity := 20
+            strategy_settings.risk_percent := 1
+            strategy_settings.break_even_target := "1"
+            strategy_settings.tp1_percent := 1
+            strategy_settings.tp1_percent_fix := 40
+            strategy_settings.tp2_percent := 2
+            strategy_settings.tp2_percent_fix := 30
+            strategy_settings.tp3_percent := 3
+            strategy_settings.tp3_percent_fix := 20
+            strategy_settings.tp4_percent := 4
+            strategy_settings.tp4_percent_fix := 10
+            strategy_settings.fixed_stop := false
+            strategy_settings.sl_percent := 0.0
+        "SOL 5m" =>
+            strategy_settings.sensitivity := 20
+            strategy_settings.risk_percent := 1
+            strategy_settings.break_even_target := "1"
+            strategy_settings.tp1_percent := 1
+            strategy_settings.tp1_percent_fix := 40
+            strategy_settings.tp2_percent := 2
+            strategy_settings.tp2_percent_fix := 30
+            strategy_settings.tp3_percent := 3
+            strategy_settings.tp3_percent_fix := 20
+            strategy_settings.tp4_percent := 4
+            strategy_settings.tp4_percent_fix := 10
+            strategy_settings.fixed_stop := false
+            strategy_settings.sl_percent := 0.0
+    strategy_settings
+//=================================================================================================================\\
+
+// Constants (giữ nguyên)
+string STRATEGIES = "STRATEGIES"
+string POSITION = "POSITION"
+string ENTRY = "ENTRY"
+string TAKE_PROFITS = "TAKE PROFITS"
+string STOP_LOSS = "STOPLOSS"
+string rsi_group = "RSI"
+string main_group = "MAIN"
+string info_panel_group = "INFOPANELS"
+string dev_settings = "DEVELOPER MODE"
+
+int fibo_lines_transparend = 60
+int fill_best_transparend = 95
+int fill_worst_transparend = 98
+
+color high_line_color = color.rgb(36, 255, 44, fibo_lines_transparend)
+color fib_236_color = color.rgb(130, 228, 74, fibo_lines_transparend)
+color fib_382_color = color.rgb(171, 224, 174, fibo_lines_transparend)
+color fib_618_color = color.rgb(235, 255, 51, fibo_lines_transparend)
+color fib_786_color = color.rgb(255, 131, 73, fibo_lines_transparend)
+color low_line_color = color.rgb(255, 82, 82, fibo_lines_transparend)
+
+color high_best_fill_color = color.rgb(48, 255, 55, fill_best_transparend)
+color high_worst_fill_color = color.rgb(37, 255, 44, fill_worst_transparend)
+color low_best_fill_color = color.rgb(255, 54, 54, fill_best_transparend)
+color low_worst_fill_color = color.rgb(255, 43, 43, fill_worst_transparend)
+
+tp_sl_entry_transparent = 30
+color tp_color = color.new(color.green, tp_sl_entry_transparent)
+color entry_color = color.rgb(255, 255, 255, 50)
+color sl_color = color.new(color.red, tp_sl_entry_transparent)
+line_style_plot = plot.style_linebr
+
+
+//---------------------------------------------------SETTINGS----------------------------------------------------------\\
+// STRATS
+var float sensitivity = 18.0
+float risk_percent = 1.0
+string break_even_target = "2"
+float tp1_percent = 0.0
+float tp1_percent_fix = 0.0
+float tp2_percent = 0.0
+float tp2_percent_fix = 0.0
+float tp3_percent = 0.0
+float tp3_percent_fix = 0.0
+float tp4_percent = 0.0
+float tp4_percent_fix = 0.0
+bool fixed_stop = false
+float sl_percent = 0.0
+var bool fixed_qty_mode_var = false
+var float fixed_qty_input_var = 10000.0
+
+
+strategy_input = input.string(title = "STRATEGY", options = [
+     "MANUAL",
+     "UNIVERSAL 15m",
+     "===============",
+     "-------A-------",
+     "SOL 5m",
+     //... (Giữ nguyên các tùy chọn) ...
+     "-------Z-------"
+     ], defval = "MANUAL", tooltip = "EN:\nTo manually configure the strategy, select MANUAL otherwise, changing the settings won't have any effect\nRU:\nЧтобы настроить стратегию вручную, выберите MANUAL в противном случае изменение настроек не будет иметь никакого эффекта")
+
+// MAIN
+sensitivity_input = input.float(title = 'Sensitive', step = 0.1, defval = 18)
+start_date_input = input.time(defval = timestamp("1 June 2023"), title = "Start calculating date")
+
+// POSITION
+show_tp_enty_sl = input.bool(defval = true, title = "Show TP/SL", group = POSITION, inline = "2.1")
+fill_positions = input.bool(defval = true, title = "Fill", group = POSITION, inline = "2.1")
+
+// THAY ĐỔI: Thêm chế độ Khối lượng Cố định (Fixed Quantity Mode)
+fixed_qty_mode_input = input.bool(defval = false, title = "Fixed USDT Mode (Cố định giá trị vào lệnh)", group = POSITION, inline = "qty_settings", tooltip = "Nếu chọn: Khối lượng vị thế sẽ được tính dựa trên giá trị USDT cố định, bỏ qua Risk %.")
+// SỬA ĐỔI: Thay đổi giá trị defval mặc định sang 10000.0 theo yêu cầu
+fixed_qty_input_val = input.float(title = "Fixed USDT Value", defval = 10000.0, step = 1.0, group = POSITION, inline = "qty_settings", tooltip = "Giá trị USDT cố định cho mỗi lệnh (Ví dụ: 10000 USDT). KHÔNG phải là khối lượng.")
+
+risk_percent_input = input.float(title = "Risk %", step = 1, defval = 1, group = POSITION, tooltip = "EN:\nMaximum allowable loss % of the deposit per 1 trade\nRU:\nМаксимально допустимая потеря % от депозита на 1 сделку")
+initial_deposit_input = input.float(title = "Initial deposit", defval = 1000, step = 100, group = POSITION)
+break_even_target_input = input.string(title = "BE target", options = ["WITHOUT","1","2","3"], defval = "1", group = POSITION)
+
+// STOPLOSS
+fixed_stop_input = input.bool(defval = false, title = "Fixed stoploss %", group = STOP_LOSS, tooltip = "EN:\nIf choosed: stoploss will be calculated manually \nIf NOT choosed: stoploss will be calculated automatic\nRU:\nЕсли выбрано: стоп будет рассчитываться вручную \nЕсли НЕ выбрано: стоп будет рассчитываться автоматически")
+sl_percent_input = input.float(title="SL %", step = 0.1, defval=0.00, group = STOP_LOSS)
+// TAKE PROFITS
+tp1_percent_input = input.float(title="TP 1", step = 0.05, defval=1.00, minval = 0, group = TAKE_PROFITS, inline = "2.2")
+tp1_percent_fix_input = input.float(title = "Fix %", step = 5, defval=40, group = TAKE_PROFITS, inline = "2.2")
+tp2_percent_input = input.float(title="TP 2", step = 0.05, defval=2.00, minval = 0, group = TAKE_PROFITS, inline = "2.3")
+tp2_percent_fix_input = input.float(title = "Fix %", step = 5, defval=30, group = TAKE_PROFITS, inline = "2.3")
+tp3_percent_input = input.float(title="TP 3", step = 0.05, defval=3.00, minval = 0, group = TAKE_PROFITS, inline = "2.4")
+tp3_percent_fix_input = input.float(title = "Fix %", step = 5, defval=20, group = TAKE_PROFITS, inline = "2.4")
+tp4_percent_input = input.float(title="TP 4", step = 0.05, defval=4.00, minval = 0, group = TAKE_PROFITS, inline = "2.5")
+tp4_percent_fix_input = input.float(title = "Fix %", step = 5, defval=10, group = TAKE_PROFITS, inline = "2.5")
+
+// RSI (giữ nguyên để không làm thay đổi các tùy chọn)
+show_rsi = input.bool(defval = false, title = "Show", group = rsi_group, inline = "3.1")
+len = input(title="Length", defval=14, group = rsi_group, inline = "3.2")
+overbought = input(title="Overbought", defval=78, group = rsi_group, inline = "3.3")
+oversold = input(title="Oversold", defval=22, group = rsi_group, inline = "3.3")
+// INFO PANEL
+show_profit_panel = input.bool(defval = true, title = "Show profit panel", group = info_panel_group)
+show_strategy_panel = input.bool(defval = false, title = "Show strategy panel", group = info_panel_group)
+show_old_panel = input.bool(defval = false, title = "Show old panel", group = info_panel_group)
+// DEV
+show_dev_labels = input.bool(defval = false, title = "Show", group = dev_settings, tooltip = "Shows all possible events")
+
+
+//-----------------------------------------------GLOBAL VARIABLES------------------------------------------------------\\
+var int entry_bar_index = na
+var Strategy_settings strategy_s = na
+var float current_sl_price = na
+var float current_tp1_price = na
+var float current_tp2_price = na
+var float current_tp3_price = na
+var float current_tp4_price = na
+var float current_entry_price = na
+
+// Biến lưu trữ giá vẽ cho hàm plot (Giá trị cố định tại Entry)
+var float plot_entry = na
+var float plot_sl = na
+var float plot_tp1 = na
+var float plot_tp2 = na
+var float plot_tp3 = na
+var float plot_tp4 = na
+
+// Tính toán khối lượng giao dịch dựa trên rủi ro (Risk Management)
+var float trade_quantity = na
+// TÍNH TOÁN VỐN MỚI CHO HÀM strategy()
+initial_capital_final = initial_deposit_input
+
+//-----------------------------------------------------MAIN------------------------------------------------------------\\
+// STRATEGY
+strategy_s := strategy_input == "MANUAL" ? Strategy_settings.new(sensitivity_input, risk_percent_input, break_even_target_input, tp1_percent_input, tp1_percent_fix_input, tp2_percent_input, tp2_percent_fix_input, tp3_percent_input, tp3_percent_fix_input, tp4_percent_input, tp4_percent_fix_input, fixed_stop_input, sl_percent_input) : selector(strategy_input)
+
+sensitivity := strategy_s.sensitivity
+risk_percent := strategy_s.risk_percent
+// FIX LỖI: Thay strategy_en thành strategy_s
+break_even_target := strategy_s.break_even_target
+tp1_percent := strategy_s.tp1_percent
+tp1_percent_fix := strategy_s.tp1_percent_fix
+tp2_percent := strategy_s.tp2_percent
+tp2_percent_fix := strategy_s.tp2_percent_fix
+// Đã sửa lỗi: .tp3.percent thành .tp3_percent
+tp3_percent := strategy_s.tp3_percent
+tp3_percent_fix := strategy_s.tp3_percent_fix
+tp4_percent := strategy_s.tp4_percent
+tp4_percent_fix := strategy_s.tp4_percent_fix
+fixed_stop := strategy_s.fixed_stop
+sl_percent := strategy_s.sl_percent
+// CẬP NHẬT BIẾN TỪ INPUT
+fixed_qty_mode_var := fixed_qty_mode_input
+fixed_qty_input_var := fixed_qty_input_val
+
+
+sensitivity *= 10
+tp1_percent /= 100
+tp2_percent /= 100
+tp3_percent /= 100
+tp4_percent /= 100
+tp1_percent_fix /= 100
+tp2_percent_fix /= 100
+tp3_percent_fix /= 100
+tp4_percent_fix /= 100
+sl_percent /= 100
+
+
+high_line = ta.highest(high, int(sensitivity))
+low_line = ta.lowest(low, int(sensitivity))
+channel_range = high_line - low_line
+fib_236 = high_line - channel_range * (0.236)
+fib_382 = high_line - channel_range * 0.382
+fib_5 = high_line - channel_range * 0.5
+fib_618 = high_line - channel_range * 0.618
+fib_786 = high_line - channel_range * (0.786)
+imba_trend_line = fib_5
+
+// CAN LONG/SHORT (Logic xu hướng giữ nguyên)
+var bool is_long_trend = false
+var bool is_short_trend = false
+var bool is_long_trend_started = false
+var bool is_short_trend_started = false
+var bool is_trend_change = na
+
+if time >= start_date_input
+    bool can_long = close >= imba_trend_line and close >= fib_236 and not is_long_trend
+    bool can_short = close <= imba_trend_line and close <= fib_786 and not is_short_trend
+
+    if can_long
+        is_long_trend := true
+        is_short_trend := false
+        is_long_trend_started := true
+        is_short_trend_started := false
+    else if can_short
+        is_short_trend := true
+        is_long_trend := false
+        is_short_trend_started := true
+        is_long_trend_started := false
+    else
+        is_short_trend_started := false
+        is_long_trend_started := false
+
+is_trend_change := is_short_trend_started or is_long_trend_started
+plotshape(is_long_trend and is_long_trend_started ? imba_trend_line : na, title="Long", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(is_short_trend and is_short_trend_started ? imba_trend_line : na, title="Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plot(imba_trend_line, color = is_long_trend[1] ? color.green : color.red, linewidth = 3)
+
+// LOGIC XỬ LÝ GIAO DỊCH (Strategy Calls) - ĐÃ CẬP NHẬT ĐỂ ĐẢO CHIỀU NGAY LẬP TỨC VÀ KHẮC PHỤC LỖI NGƯỢC
+long_entry_name = "LongEntry"
+short_entry_name = "ShortEntry"
+
+if is_long_trend_started
+    // --- BƯỚC 1: XỬ LÝ ĐẢO CHIỀU (Nếu đang Short) ---
+    if strategy.position_size < 0
+        strategy.close(short_entry_name, comment="REVERSE TO LONG") // Đóng vị thế Short đang mở
+    
+    // --- BƯỚC 2: MỞ LỆNH LONG (chỉ khi không có lệnh nào hoặc lệnh Long cũ đã đóng) ---
+    if strategy.position_size <= 0
+        // Reset các biến plot
+        plot_entry := na
+        plot_sl := na
+        plot_tp1 := na
+        plot_tp2 := na
+        plot_tp3 := na
+        plot_tp4 := na
+        
+        current_entry_price := close
+        // Tính toán SL Price (SL Long phải nằm dưới Entry)
+        sl_price_long = fixed_stop ? current_entry_price * (1 - sl_percent) : fib_786 * (1 - sl_percent)
+        current_sl_price := math.round_to_mintick(sl_price_long)
+
+        // TÍNH TOÁN QTY DÙNG HÀM MỚI (ĐÃ SỬA ĐỔI)
+        trade_quantity := calc_qty(current_entry_price, current_sl_price, fixed_qty_mode_var, fixed_qty_input_var, initial_deposit_input, risk_percent)
+
+        // Tính toán TP (TP Long phải nằm trên Entry)
+        current_tp1_price := math.round_to_mintick(current_entry_price * (1 + tp1_percent))
+        current_tp2_price := math.round_to_mintick(current_entry_price * (1 + tp2_percent))
+        current_tp3_price := math.round_to_mintick(current_entry_price * (1 + tp3_percent))
+        current_tp4_price := math.round_to_mintick(current_entry_price * (1 + tp4_percent))
+        entry_bar_index := bar_index
+
+        // CẬP NHẬT GIÁ VẼ
+        plot_entry := current_entry_price
+        plot_sl := current_sl_price
+        plot_tp1 := current_tp1_price
+        plot_tp2 := current_tp2_price
+        plot_tp3 := current_tp3_price
+        plot_tp4 := current_tp4_price
+
+        // 3. ENTRY LONG
+        strategy.entry(long_entry_name, strategy.long, qty=trade_quantity, comment="LONG")
+
+        // 4. EXITS (Partial Take Profits)
+        strategy.exit("TP1_L", from_entry=long_entry_name, qty_percent=tp1_percent_fix * 100, limit=current_tp1_price)
+        strategy.exit("TP2_L", from_entry=long_entry_name, qty_percent=tp2_percent_fix * 100, limit=current_tp2_price)
+        strategy.exit("TP3_L", from_entry=long_entry_name, qty_percent=tp3_percent_fix * 100, limit=current_tp3_price)
+        strategy.exit("TP4_L", from_entry=long_entry_name, qty_percent=tp4_percent_fix * 100, limit=current_tp4_price)
+
+        // 5. STOP LOSS
+        strategy.exit("SL_L", from_entry=long_entry_name, stop=current_sl_price)
+
+
+if is_short_trend_started
+    // --- BƯỚC 1: XỬ LÝ ĐẢO CHIỀU (Nếu đang Long) ---
+    if strategy.position_size > 0
+        strategy.close(long_entry_name, comment="REVERSE TO SHORT") // Đóng vị thế Long đang mở
+
+    // --- BƯỚC 2: MỞ LỆNH SHORT (chỉ khi không có lệnh nào hoặc lệnh Short cũ đã đóng) ---
+    if strategy.position_size >= 0
+        // Reset các biến plot
+        plot_entry := na
+        plot_sl := na
+        plot_tp1 := na
+        plot_tp2 := na
+        plot_tp3 := na
+        plot_tp4 := na
+
+        current_entry_price := close
+        // Tính toán SL Price (SL Short phải nằm trên Entry)
+        sl_price_short = fixed_stop ? current_entry_price * (1 + sl_percent) : fib_236 * (1 + sl_percent)
+        current_sl_price := math.round_to_mintick(sl_price_short)
+
+        // TÍNH TOÁN QTY DÙNG HÀM MỚI (ĐÃ SỬA ĐỔI)
+        trade_quantity := calc_qty(current_entry_price, current_sl_price, fixed_qty_mode_var, fixed_qty_input_var, initial_deposit_input, risk_percent)
+
+        // Tính toán TP (TP Short phải nằm dưới Entry)
+        current_tp1_price := math.round_to_mintick(current_entry_price * (1 - tp1_percent))
+        current_tp2_price := math.round_to_mintick(current_entry_price * (1 - tp2_percent))
+        current_tp3_price := math.round_to_mintick(current_entry_price * (1 - tp3_percent))
+        current_tp4_price := math.round_to_mintick(current_entry_price * (1 - tp4_percent))
+        entry_bar_index := bar_index
+
+        // CẬP NHẬT GIÁ VẼ
+        plot_entry := current_entry_price
+        plot_sl := current_sl_price
+        plot_tp1 := current_tp1_price
+        plot_tp2 := current_tp2_price
+        plot_tp3 := current_tp3_price
+        plot_tp4 := current_tp4_price
+
+        // 3. ENTRY SHORT
+        strategy.entry(short_entry_name, strategy.short, qty=trade_quantity, comment="SHORT")
+
+        // 4. EXITS (Partial Take Profits)
+        strategy.exit("TP1_S", from_entry=short_entry_name, qty_percent=tp1_percent_fix * 100, limit=current_tp1_price)
+        strategy.exit("TP2_S", from_entry=short_entry_name, qty_percent=tp2_percent_fix * 100, limit=current_tp2_price)
+        strategy.exit("TP3_S", from_entry=short_entry_name, qty_percent=tp3_percent_fix * 100, limit=current_tp3_price)
+        strategy.exit("TP4_S", from_entry=short_entry_name, qty_percent=tp4_percent_fix * 100, limit=current_tp4_price)
+
+        // 5. STOP LOSS
+        strategy.exit("SL_S", from_entry=short_entry_name, stop=current_sl_price)
+
+
+//-----------------------------------------------------VISUALS------------------------------------------------------------\\
+// LOGIC VẼ MỚI DÙNG HÀM plot (Di chuyển logic kiểm soát giá trị ra ngoài hàm plot)
+
+float entry_plot_val = strategy.position_size != 0 and show_tp_enty_sl ? plot_entry : na
+float sl_plot_val = strategy.position_size != 0 and show_tp_enty_sl ? plot_sl : na
+float tp1_plot_val = strategy.position_size != 0 and show_tp_enty_sl ? plot_tp1 : na
+float tp2_plot_val = strategy.position_size != 0 and show_tp_enty_sl ? plot_tp2 : na
+float tp3_plot_val = strategy.position_size != 0 and show_tp_enty_sl ? plot_tp3 : na
+float tp4_plot_val = strategy.position_size != 0 and show_tp_enty_sl ? plot_tp4 : na
+
+// Vẽ đường Entry
+plot(entry_plot_val, "Entry Price", color.white, style=line_style_plot, linewidth=1)
+
+// Vẽ đường SL cố định
+plot(sl_plot_val, "Stop Loss (Fixed)", color.red, style=line_style_plot, linewidth=1)
+
+// Vẽ đường TP
+plot(tp1_plot_val, "TP 1", color.green, style=line_style_plot, linewidth=1)
+plot(tp2_plot_val, "TP 2", color.green, style=line_style_plot, linewidth=1)
+plot(tp3_plot_val, "TP 3", color.green, style=line_style_plot, linewidth=1)
+plot(tp4_plot_val, "TP 4", color.green, style=line_style_plot, linewidth=1)
+
+// Cảnh báo (Alerts)
+alertcondition(is_long_trend_started, "Long signal", "Long")
+alertcondition(is_short_trend_started, "Short signal", "Short")
+
+// TẠO TIN NHẮN CẢNH BÁO (Chỉ kích hoạt khi có tín hiệu bắt đầu Trend mới)
+// Sử dụng thêm biến check bar_index để đảm bảo chỉ gửi 1 lần tại nến xác nhận
+if (is_long_trend_started or is_short_trend_started)
+    pos_side = is_long_trend_started ? "🟢 LONG" : "🔴 SHORT" 
+    coin_ticker = syminfo.ticker
+    
+    alert_msg = "🚀 *TrueBlock Trading Signal*" + 
+                 "\n--- " + str.upper(coin_ticker) + " ---" + 
+                 "\n📌 *Lệnh:* " + pos_side + 
+                 "\n💰 *Entry:* `" + str.tostring(current_entry_price) + "`" +
+                 "\n\n🎯 *Mục tiêu:* " +
+                 "\n   • TP1: `" + str.tostring(current_tp1_price) + "`" +
+                 "\n   • TP2: `" + str.tostring(current_tp2_price) + "`" +
+                 "\n   • TP3: `" + str.tostring(current_tp3_price) + "`" +
+                 "\n   • TP4: `" + str.tostring(current_tp4_price) + "`" +
+                 "\n\n🛡️ *Stoploss:* `" + str.tostring(current_sl_price) + "`"
+
+    // Gửi alert với tần suất 1 lần mỗi nến (tại thời điểm đóng nến có tín hiệu)
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+View in Pine Editor・462 lines
+Use on chart
+8
+4
+1 579
+Chiến lược của TrueBlock Trading dựa vào đường Fibo để xác định xu hướng thị trường

@@ -1,0 +1,140 @@
+//@version=5
+strategy('PercentX Trend Follower [Trendoscope]', shorttitle='pX-TF [Trendoscope]', 
+     overlay=false, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, 
+     commission_type=strategy.commission.percent, pyramiding=4, commission_value=0.01, explicit_plot_zorder=true, 
+     margin_long=100.0, margin_short=100.0, max_bars_back=5000)
+
+import HeWhoMustNotBeNamed/ta/1 as eta
+bandType = input.string('Keltner Channel', '', ['Keltner Channel', 'Bollinger Bands'], tooltip = 'Select the band type', group='Band', inline= 'ma', display = display.none)
+maType = input.string(title='', defval='hma', options=['ema', 'sma', 'hma', 'rma', 'vwma', 'wma'], group='Band', inline='ma', display = display.none)
+maLength = input.int(40, '', minval=5, step=10, group='Band', inline='ma', display = display.none)
+useTrueRange = input.bool(true, 'Use True Range (KC)', tooltip = 'Use true range - applicable only for Keltner Channel', group='Band', display = display.none)
+
+rangeMethod = input.string('highlow', title='', group='Range Calculation',
+             options=['highlow', 'sma', 'ema', 'rma', 'hma', 'wma', 'vwma', 'swma'], inline='l', display = display.none)
+loopbackPeriod = input.int(80, step=10, title='', group='Range Calculation', inline="l", display = display.none)
+loopbackPeriodLast = input.int(20, step=10, title='', group='Range Calculation', inline='l', display = display.none, tooltip = 'Range Calculation method, length and range length')
+stickyBorders = input.bool(true, title='Sticky Borders', group='Range Calculation', inline="b", display = display.none)
+
+outerRangeMethod = input.string('highlow', title='', group='Outer Range Calculation',
+             options=['highlow', 'sma', 'ema', 'rma', 'hma', 'wma', 'vwma', 'swma'], inline='l', display = display.none)
+outerLoopback = input.int(80, step=10, title='', group='Outer Range Calculation', inline="l", display = display.none,
+                             tooltip='Method and length for calculating outer range. Outer range is extreme of oversold and overbought ranges')
+
+doubleSided = input.bool(true, 'Double Sided', group='Trade', display = display.none)
+useInitialStop = input.bool(true, 'Enable Stop', group = 'Trade', inline='s', display = display.none)
+atrLength = input.int(14, '', 1, step = 10, group = 'Trade', inline='s', display = display.none)
+trendMultiplier = input.int(1, '', 1, 10, 1, group = 'Trade', inline='s', display = display.none)
+reverseMultiplier = input.int(3, '', 1, 10, 1, group = 'Trade', inline='s', tooltip = 'Enable Stop and Configure ATR length, Trend and reverse Multiplier for the stop', display = display.none)
+
+tradeDirection = input.string(strategy.direction.all, 'Direction', [strategy.direction.long, strategy.direction.short, strategy.direction.all], display = display.none)
+strategy.risk.allow_entry_in(tradeDirection)
+
+[bbMiddle, bbUpper, bbLower] = eta.bb(close, maType, maLength, 0.01, false)
+[kcMiddle, kcUpper, kcLower] = eta.kc(close, maType, maLength, 0.01, useTrueRange, false)
+
+middle = bandType == 'Bollinger Bands'? bbMiddle : kcMiddle
+upper = bandType == 'Bollinger Bands'? bbUpper : kcUpper
+lower = bandType == 'Bollinger Bands'? bbLower : kcLower
+
+distance = close - middle
+oscillator = distance/(middle-lower)
+
+offset = 0
+
+[overbought, oversold] = eta.oscillatorRange(oscillator, rangeMethod, loopbackPeriod, loopbackPeriodLast, stickyBorders)
+oversold := oversold + offset
+overbought := overbought - offset
+
+var upOverflow = false
+var downOverflow = false
+
+highOverboughtMa = eta.ma(overbought, outerRangeMethod, outerLoopback)
+highestOverbought = ta.highest(overbought, outerLoopback)
+
+lowOversoldMa = eta.ma(oversold, outerRangeMethod, outerLoopback)
+lowestOversold = ta.lowest(oversold, outerLoopback)
+
+upperRange = outerRangeMethod == 'highlow'? highestOverbought: highOverboughtMa
+lowerRange = outerRangeMethod == 'highlow'? lowestOversold : lowOversoldMa
+
+longSignal = ta.crossover(oscillator, upperRange)
+shortSignal = ta.crossunder(oscillator, lowerRange)
+
+upOverflow := longSignal or (upOverflow and oscillator > overbought)
+downOverflow := shortSignal or (downOverflow and oscillator < oversold)
+
+transparency = 60
+
+STATE = plot(oscillator, title='PercentX Oscillator', color=color.new(color.blue, upOverflow or downOverflow? 0 : transparency), style=plot.style_linebr)
+
+lowerBandFill = plot(downOverflow? oversold : na, "Lower Overflow", color= color.orange, style=plot.style_linebr)
+fill(STATE, lowerBandFill, color=color.orange)
+lowerBand = plot(oversold, "Lower", color= color.new(color.orange, downOverflow? 0 : transparency), style=plot.style_linebr)
+llowerBand = plot(lowerRange, "Extreme Lower", color= color.new(color.red, downOverflow? 0 : transparency), style=plot.style_linebr)
+
+upperBandFill = plot(upOverflow? overbought : na, "Upper Overflow", color= color.lime, style=plot.style_linebr)
+fill(STATE, upperBandFill, color=color.lime)
+upperBand = plot(overbought, "Upper", color= color.new(color.lime, upOverflow? 0 : transparency), style=plot.style_linebr)
+uupperBand = plot(upperRange, "Extreme Upper", color= color.new(color.green, upOverflow? 0 : transparency), style=plot.style_linebr)
+
+atr = ta.atr(atrLength)
+
+longtrade(multiplier, stopMultiplier)=>
+    strategy.entry('Long', strategy.long, oca_name='oca', oca_type=strategy.oca.none, stop = high + atr*multiplier, comment='Long - New Position')
+    if(useInitialStop)
+        strategy.exit('ExitLong', 'Long', stop = low - atr*stopMultiplier)
+
+shorttrade(multiplier, stopMultiplier)=>
+    strategy.entry('Short', strategy.short, oca_name='oca', oca_type=strategy.oca.none, stop = low - atr*multiplier, comment='Short - New Position')
+    if(useInitialStop)
+        strategy.exit('ExitShort', 'Short', stop = high + atr*stopMultiplier)
+
+if(longSignal)
+    longtrade(trendMultiplier, reverseMultiplier)
+    if(doubleSided)
+        shorttrade(reverseMultiplier, trendMultiplier)
+
+if(shortSignal)
+    shorttrade(trendMultiplier, reverseMultiplier)
+    if(doubleSided)
+        longtrade(reverseMultiplier, trendMultiplier)
+
+View in Pine Editor・122 lines
+Use on chart
+1.1 K
+13
+24 894
+"Trendoscope" was born from our trading journey, where we first delved into the world of trend-following methods. Over time, we discovered the captivating allure of pattern analysis and the exciting challenges it presented, drawing us into exploring new horizons. However, our dedication to trend-following methodologies remains steadfast and continues to be an integral part of our core philosophy.
+
+Here we are, introducing another effective trend-following methodology, employing straightforward yet powerful techniques.
+
+🎲 Concepts
+
+Introducing the innovative PercentX Oscillator, a representation of Bollinger PercentB and Keltner Percent K. This powerful tool offers users the flexibility to customize their PercentK oscillator, including options for the type of moving average and length.
+
+The Oscillator Range is derived dynamically, utilizing two lengths - inner and outer. The inner length initiates the calculation of the oscillator's highest and lowest range, while the outer length is used for further calculations, involving either a moving average or the opposite side of the highest/lowest range, to obtain the oscillator ranges.
+
+Next, the Oscillator Boundaries are derived by applying another round of high/low or moving average calculations on the oscillator range values.
+
+Breakouts occur when the close price crosses above the upper boundary or below the lower boundary, signaling potential trading opportunities.
+
+🎲 How to trade a breakout?
+
+To reduce false signals, we employ a simple yet effective approach. Instead of executing market trades, we use stop orders on both sides at a certain distance from the current close price.
+
+In case of an upper side breakout, a long stop order is placed at 1XATR above the close, and a short stop order is placed at 2XATR below the close. Conversely, for a lower side breakout, a short stop order is placed at 1XATR below the close, and a long stop order is placed at 2XATR above the ATR. As a trend following method, our first inclination is to trade on the side of breakout and not to find the reversals. Hence, higher multiplier is used for the direction opposite to the breakout.
+
+The script provides users with the option to specify ATR multipliers for both sides.
+
+Once a trade is initiated, the opposite side of the trade is converted into a stop-loss order. In the event of a breakout, the script will either place new long and short stop orders (if no existing trade is present) or update the stop-loss orders if a trade is currently running.
+
+As a trend-following strategy, this script does not rely on specific targets or target levels. The objective is to run the trade as long as possible to generate profits. The trade is only stopped when the stop-loss is triggered, which is updated with every breakout to secure potential gains and minimize risks.
+
+🎲 Default trade parameters
+Script uses 10% equity per trade and up to 4 pyramid orders. Hence, the maximum invested amount at a time is 40% of the equity. Due to this, the comparison between buy and hold does not show a clear picture for the trade.
+
+Feel free to explore and optimize the parameters further for your favorite symbols.
+
+🎲 Visual representation
+The blue line represents the PercentX Oscillator, orange and lime colored lines represent oscillator ranges. And red/green lines represent oscillator boundaries. Oscillator spikes upon breakout are highlighted with color fills.

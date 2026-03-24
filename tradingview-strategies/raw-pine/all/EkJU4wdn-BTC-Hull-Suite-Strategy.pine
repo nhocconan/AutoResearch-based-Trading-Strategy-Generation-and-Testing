@@ -1,0 +1,161 @@
+//@version=6
+strategy("BTC_Hull Suite Strategy",                
+     overlay           = true,
+     pyramiding        = 1,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 20,
+     slippage          = 0,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0)
+
+// ── Inputs ─────────────────────────────────────────────────────
+hullLen  = input.int(55,  "Hull length", minval=1)
+smaLen   = input.int(130, "SMA filter length", minval=1)
+trailPct = input.float(5.0, "Trailing-stop (%)", step=0.1) / 100.0
+
+// Date window (kept; end pushed far out to avoid auto-disabling later)
+startDate   = input.time(timestamp("2020-01-01 00:00 +0000"), title="Start Date")
+endDate     = input.time(timestamp("2099-12-31 00:00 +0000"), title="End Date")
+inDateRange = time >= startDate and time <= endDate
+
+// ── HMA helper (one line) ─────────────────────────────────────
+hma(src, len) =>
+    ta.wma(2.0 * ta.wma(src, math.round(len / 2.0)) - ta.wma(src, len), math.round(math.sqrt(len)))
+
+// ── Series ─────────────────────────────────────────────────────
+h   = hma(close, hullLen)
+h3  = nz(h[3])                          // HMA three bars back
+sma = ta.sma(close, smaLen)
+
+// Plots
+plot(h,   title="Hull",       color=h > h3 ? color.green : color.red, linewidth=1)
+plot(sma, title="SMA filter", color=color.orange, linewidth=1)
+
+// ── Trading logic (signals on prior bar; entries next open) ───
+longSig = h[1] > h3[1] and h[2] <= h3[2] and close[1] > sma[1] and inDateRange
+flatSig = h[1] < h3[1] and h[2] >= h3[2]
+
+var float peak  = na
+var float tstop = na
+
+// Entry on next bar open
+if strategy.position_size == 0 and longSig
+    strategy.entry("Long", strategy.long)
+    peak  := close
+    tstop := peak * (1.0 - trailPct)
+
+// Manage trailing stop & exit at close
+if strategy.position_size > 0
+    peak  := math.max(peak, close)
+    tstop := peak * (1.0 - trailPct)
+    if flatSig or close < tstop
+        strategy.close("Long", comment = flatSig ? "Hull X-down" : "Trail stop")
+        peak  := na
+        tstop := na
+
+// ── Entry/Exit markers (actual execution bars) ────────────────
+openedThisBar = strategy.opentrades   > strategy.opentrades[1]
+closedThisBar = strategy.closedtrades > strategy.closedtrades[1]
+
+plotshape(openedThisBar, title="Long Entry", style=shape.triangleup,
+     location=location.belowbar, color=color.green, size=size.small, text="Buy")
+plotshape(closedThisBar, title="Exit", style=shape.triangledown,
+     location=location.abovebar, color=color.red, size=size.small, text="Sell")
+
+// ── Performance Table (same pane) ─────────────────────────────
+posChoice = input.string("Top Right", "Performance table corner",
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"])
+posEnum = posChoice == "Top Left" ? position.top_left :
+          posChoice == "Bottom Right" ? position.bottom_right :
+          posChoice == "Bottom Left" ? position.bottom_left : position.top_right
+
+var string lastPosChoice = posChoice
+var table perfTable = table.new(posEnum, 2, 7, border_width=1)
+if posChoice != lastPosChoice
+    table.delete(perfTable)
+    perfTable := table.new(posEnum, 2, 7, border_width=1)
+    lastPosChoice := posChoice
+
+totalTrades       = strategy.closedtrades
+totalPnL          = strategy.netprofit
+maxDrawdown       = strategy.max_drawdown
+profitableTrades  = strategy.wintrades
+profitablePercent = totalTrades > 0 ? (profitableTrades / totalTrades) * 100.0 : na
+
+var float grossProfit   = 0.0
+var float grossLoss     = 0.0
+var float lastNetProfit = 0.0
+var float bestTrade     = na
+var float worstTrade    = na
+var float profitFactor  = na
+
+if (totalTrades > 0 and totalPnL != lastNetProfit)
+    tradeProfit = totalPnL - lastNetProfit
+    lastNetProfit := totalPnL
+    if (tradeProfit > 0)
+        grossProfit += tradeProfit
+    else
+        grossLoss += tradeProfit
+    bestTrade  := na(bestTrade) or tradeProfit > bestTrade ? tradeProfit : bestTrade
+    worstTrade := na(worstTrade) or tradeProfit < worstTrade ? tradeProfit : worstTrade
+
+profitFactor := grossLoss != 0 ? math.abs(grossProfit / grossLoss) : na
+
+if (barstate.islastconfirmedhistory)
+    table.cell(perfTable, 0, 0, "📊 Total Trades", text_color=color.white)
+    table.cell(perfTable, 1, 0, str.tostring(totalTrades), text_color=color.white)
+    table.cell(perfTable, 0, 1, "✅ % Profitable", text_color=color.white)
+    table.cell(perfTable, 1, 1, str.tostring(profitablePercent, "#.##") + "%",
+       text_color=profitablePercent >= 50 ? color.lime : color.red)
+    table.cell(perfTable, 0, 2, "💰 Total P&L", text_color=color.white)
+    table.cell(perfTable, 1, 2, "$" + str.tostring(totalPnL, "#.##"),
+       text_color=totalPnL > 0 ? color.lime : color.red)
+    table.cell(perfTable, 0, 3, "⚖️ Profit Factor", text_color=color.white)
+    table.cell(perfTable, 1, 3, str.tostring(profitFactor, "#.##"),
+       text_color=profitFactor > 1 ? color.lime : color.red)
+    table.cell(perfTable, 0, 4, "🏁 Max Drawdown", text_color=color.white)
+    table.cell(perfTable, 1, 4, "$" + str.tostring(maxDrawdown, "#.##"), text_color=color.white)
+    table.cell(perfTable, 0, 5, "🌟 Best Trade", text_color=color.white)
+    table.cell(perfTable, 1, 5, "$" + str.tostring(bestTrade, "#.##"), text_color=color.lime)
+    table.cell(perfTable, 0, 6, "⚠️ Worst Trade", text_color=color.white)
+    table.cell(perfTable, 1, 6, "$" + str.tostring(worstTrade, "#.##"), text_color=color.red)
+
+View in Pine Editor・122 lines
+Use on chart
+4
+7
+1 366
+Overview
+
+BTC_Hull Suite Strategy is a trend-following system designed to keep drawdowns modest while staying exposed during genuine uptrends. It uses the Hull Moving Average (HMA) for fast, low-lag trend turns, a long-term SMA filter to avoid chop, and a percentage trailing stop to protect gains.
+
+🔧 What the strategy includes
+- Hull Moving Average (HMA) with configurable length (default 55)
+- SMA filter (default 130) to trade only with higher-timeframe bias
+- Trailing stop in percent (default 5%) based on the running peak of close
+- Execution model: signals are evaluated on the previous bar and entries are placed at the next bar’s open (TradingView default)
+
+📈 How it works:
+
+✅ Entry (Long):
+Detects a bullish Hull turn by comparing the current HMA to its value 3 bars ago:
+h[1] > h3[1] and h[2] <= h3[2] → HMA just turned up on the prior bar
+The SMA filter must confirm: close[1] > sma[1]
+If both are true (and within the date window), a long is opened next bar at the open
+
+❌ Exit:
+Hull turn down: h[1] < h3[1] and h[2] >= h3[2], or
+Trailing stop: price closes below peak * (1 – trailingPct)
+Either condition closes the position at the current bar’s close
+
+Notes:
+pyramiding = 1 → allows one add-on (maximum two concurrent long positions)
+Position sizing defaults to 20% of equity per entry (adjustable in Properties)
+
+Who is this for?
+This strategy is tailored for Bitcoin traders (spot or perpetuals) who want a rules-based, low-lag trend system with built-in drawdown protection.
+It works best on Daily or 4H charts, but parameters can be adapted for other timeframes.
+
+⚠️ Disclaimer
+This strategy is provided for educational and research purposes only.
+It is not financial advice. Markets are risky — always test on your own data, include realistic fees/slippage, and forward-test before using real capital.

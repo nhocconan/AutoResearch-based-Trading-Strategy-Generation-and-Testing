@@ -1,0 +1,46 @@
+//@version=5
+strategy("I11L - Risk Adjusted Leveraging", overlay=false, pyramiding=25, default_qty_value=20, initial_capital=20000, default_qty_type=strategy.percent_of_equity,process_orders_on_close=false, calc_on_every_tick=false)
+
+atr = ta.atr(14) / close
+avg_atr = ta.sma(atr,100)
+ratio = atr / avg_atr
+
+targetLeverage = 2 / ratio
+targetOpentrades = 5 * targetLeverage
+
+plot(targetOpentrades)
+plot(strategy.opentrades)
+isBuy = strategy.opentrades < targetOpentrades
+isClose = strategy.opentrades > targetOpentrades + 1
+
+var string[] openTrades = array.new_string(0)
+
+if(isBuy)
+    strategy.entry("Buy"+str.tostring(array.size(openTrades)),strategy.long)
+    array.push(openTrades, "Buy" + str.tostring(array.size(openTrades)))
+
+if(isClose)
+    if array.size(openTrades) > 0
+        strategy.close(array.get(openTrades, array.size(openTrades) - 1))
+        array.pop(openTrades)
+View in Pine Editor・25 lines
+Use on chart
+6
+9
+2 312
+This trading system, called "I11L - Risk Adjusted Leveraging", is designed to manage trades based on the current market volatility relative to its historical average. The system calculates the target number of open trades based on the ATR (Average True Range) indicator and adjusts the leverage accordingly. The system opens and closes trades using a pyramiding approach, allowing multiple positions to be opened at the same time.
+
+Here's a step-by-step explanation of the system:
+
+1. Calculate the ATR with a 14-day period and normalize it by dividing it by the current closing price.
+2. Calculate the 100-day simple moving average (SMA) of the normalized ATR.
+3. Calculate the ratio of the normalized ATR to its 100-day SMA.
+4. Determine the target leverage based on the inverse of the ratio (2 / ratio).
+5. Calculate the target number of open trades by multiplying the target leverage by 5.
+6. Plot the target number of open trades and the current number of open trades on the chart.
+7. Check if there's an opportunity to buy (if the current number of open trades is less than the target) or close a trade (if the current number of open trades is more than the target plus 1).
+8. If there's an opportunity to buy, open a long trade and add the trade's name to the openTrades array.
+9. If there's an opportunity to close a trade and there are trades in the openTrades array, close the most recent trade by referencing the array and remove it from the array.
+
+This system aims to capture trends in the market by dynamically adjusting the number of open trades and leverage based on the market's volatility. It uses an array to keep track of open trades, allowing for better control over the opening and closing of individual trades.
+

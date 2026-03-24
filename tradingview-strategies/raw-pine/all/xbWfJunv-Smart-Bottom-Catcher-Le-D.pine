@@ -1,0 +1,29 @@
+//@version=5
+strategy("Smart Bottom Catcher @ Le D", overlay=false, pyramiding=3, default_qty_value=10000, initial_capital=10000, default_qty_type=strategy.cash,process_orders_on_close=true, calc_on_every_tick=false)
+
+lowestPointBars = input.int(7)
+rsiLength = input.int(2)
+sellBarrier = input.int(70, step=55)
+onlyBuyWhenAbove55Average = input.bool(false)
+
+isLowest = ta.lowest(close,lowestPointBars*(strategy.opentrades+1)) == close
+isHighest = ta.rsi(close,rsiLength) > sellBarrier
+
+isBuy = isLowest and (strategy.position_avg_price * (1-0.01*strategy.opentrades) > close or strategy.opentrades == 0) and (close > ta.sma(close, 55) or not(onlyBuyWhenAbove55Average))
+isClose = isHighest
+
+plot(ta.rsi(close,rsiLength), color=isBuy ? color.green : isLowest ? color.yellow : color.white)
+plot(sellBarrier, color=color.red)
+
+if(isBuy)
+    strategy.entry("Buy"+str.tostring(strategy.opentrades+1),strategy.long, comment="#"+str.tostring(strategy.opentrades+1))
+
+if(isClose)
+    strategy.exit("Close",limit=close)
+
+View in Pine Editor・25 lines
+Use on chart
+2
+5
+728
+Reversal strategy using recent lowest lows and a fast RSI. Long entries trigger on extreme drops, exits occur when RSI crosses a set threshold. Includes optional SMA55 filter and allows up to 3 pyramids.

@@ -1,0 +1,519 @@
+//@version=6
+strategy("Optimized ADX DI CCI Strategy", shorttitle="ADXCCI Opt", overlay=true, format=format.price, precision=2, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=50, pyramiding=2, commission_type=strategy.commission.percent, commission_value=0.2, margin_long=100, margin_short=100, calc_on_every_tick=true)
+
+// Input Groups
+group_indicators = "Indicator Settings"
+indicator_timeframe = input.timeframe("", "Indicator Timeframe", options=["", "1", "5", "15", "30", "60", "240", "D", "W"], group=group_indicators, tooltip="Empty uses chart timeframe")
+
+group_adx = "ADX & DI Settings"
+adx_di_len = input.int(30, "DI Length", minval=1, group=group_adx)
+adx_smooth_len = input.int(14, "ADX Smoothing Length", minval=1, group=group_adx)
+use_adx_filter = input.bool(false, "Use ADX Filter", group=group_adx)
+adx_threshold = input.int(25, "ADX Threshold", minval=0, group=group_adx)
+
+group_cci = "CCI Settings"
+cci_length = input.int(20, "CCI Length", minval=1, group=group_cci)
+cci_src = input.source(hlc3, "CCI Source", group=group_cci)
+ma_type = input.string("SMA", "CCI MA Type", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group=group_cci)
+ma_length = input.int(14, "CCI MA Length", minval=1, group=group_cci)
+
+group_rsi = "RSI Filter Settings"
+use_rsi_filter = input.bool(false, "Use RSI Filter", group=group_rsi)
+rsi_length = input.int(14, "RSI Length", minval=1, group=group_rsi)
+rsi_lower_limit = input.int(30, "RSI Lower Limit", minval=0, maxval=100, group=group_rsi)
+rsi_upper_limit = input.int(70, "RSI Upper Limit", minval=0, maxval=100, group=group_rsi)
+
+group_atr = "ATR Filter Settings"
+use_atr_filter = input.bool(false, "Use ATR Filter", group=group_atr, tooltip="If enabled, requires ATR to exceed threshold for signals")
+atr_length = input.int(14, "ATR Length", minval=1, group=group_atr)
+atr_threshold = input.float(1.0, "ATR Threshold", minval=0.0, step=0.1, group=group_atr, tooltip="Minimum ATR value for valid signals")
+
+group_volume = "Volume Filter Settings"
+use_volume_filter = input.bool(false, "Use Volume Filter", group=group_volume, tooltip="If enabled, requires volume to exceed threshold for signals")
+volume_length = input.int(20, "Volume MA Length", minval=1, group=group_volume, tooltip="Period for volume moving average")
+volume_threshold_multiplier = input.float(1.5, "Volume Threshold Multiplier", minval=0.1, step=0.1, group=group_volume, tooltip="Volume must exceed MA by this factor")
+
+group_signal = "Signal Settings"
+cross_window = input.int(0, "Cross Window (Bars)", minval=0, maxval=5, group=group_signal, tooltip="0 means exact same bar, higher allows recent crosses")
+allow_long = input.bool(true, "Allow Long Trades", group=group_signal, tooltip="Only allows new Long trades, closing open trades still possible")
+allow_short = input.bool(true, "Allow Short Trades", group=group_signal, tooltip="Only allows new Short trades, closing open trades still possible")
+buy_di_cross = input.bool(true, "Require DI+/DI- Cross for Buy", group=group_signal, tooltip="If unchecked, DI+ > DI- is enough")
+buy_cci_cross = input.bool(true, "Require CCI Cross for Buy", group=group_signal, tooltip="If unchecked, CCI > MA is enough")
+sell_di_cross = input.bool(true, "Require DI+/DI- Cross for Sell", group=group_signal, tooltip="If unchecked, DI+ < DI- is enough")
+sell_cci_cross = input.bool(true, "Require CCI Cross for Sell", group=group_signal, tooltip="If unchecked, CCI < MA is enough")
+countertrade = input.bool(true, "Countertrade", group=group_signal, tooltip="If checked, open opposite trade after closing one")
+color_background = input.bool(true, "Color Background for Open Trades", group=group_signal, tooltip="Green for Long, Red for Short")
+
+group_exit = "Exit Settings"
+use_ma_exit = input.bool(true, "Use MA Cross for Exit", group=group_exit)
+ma_exit_length = input.int(20, "MA Length for Exit", minval=1, group=group_exit)
+ma_exit_type = input.string("SMA", "MA Type for Exit", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group=group_exit)
+use_adx_stop = input.bool(false, "Use ADX Change Stop-Loss", group=group_exit)
+adx_change_percent = input.float(5.0, "ADX % Change for Stop-Loss", minval=0.0, step=0.1, group=group_exit, tooltip="Close trade if ADX changes by this % vs previous bar")
+use_perf_stop = input.bool(false, "Use Performance Stop-Loss", group=group_exit, tooltip="Close trade if performance reaches this % loss")
+perf_stop_percent = input.float(-10.0, "Performance Stop-Loss (%)", minval=-100.0, maxval=0.0, step=0.1, group=group_exit, tooltip="Negative % value for loss threshold")
+
+// Trade Statistics Variables
+var bool in_long = false
+var bool in_short = false
+var bool can_trade = strategy.equity > 0
+var float initial_capital = strategy.initial_capital
+var string open_trade_status = "No Open Trade"
+var float long_trades = 0
+var float short_trades = 0
+var float long_wins = 0
+var float short_wins = 0
+var float entry_price = 0
+
+// Calculations with Timeframe
+[di_plus, di_minus, adx] = request.security(syminfo.tickerid, indicator_timeframe, ta.dmi(adx_di_len, adx_smooth_len))
+cci = request.security(syminfo.tickerid, indicator_timeframe, ta.cci(cci_src, cci_length))
+rsi = request.security(syminfo.tickerid, indicator_timeframe, ta.rsi(close, rsi_length))
+atr = request.security(syminfo.tickerid, indicator_timeframe, ta.atr(atr_length))
+volume_ma = request.security(syminfo.tickerid, indicator_timeframe, ta.sma(volume, volume_length))
+
+ma_func(source, length, type, tf) =>
+    switch type
+        "SMA" => request.security(syminfo.tickerid, tf, ta.sma(source, length))
+        "EMA" => request.security(syminfo.tickerid, tf, ta.ema(source, length))
+        "SMMA (RMA)" => request.security(syminfo.tickerid, tf, ta.rma(source, length))
+        "WMA" => request.security(syminfo.tickerid, tf, ta.wma(source, length))
+        "VWMA" => request.security(syminfo.tickerid, tf, ta.vwma(source, length))
+
+cci_ma = ma_func(cci, ma_length, ma_type, indicator_timeframe)
+ma_exit = ma_func(close, ma_exit_length, ma_exit_type, indicator_timeframe)
+
+// Plot MA if enabled (Global Scope)
+plot(use_ma_exit ? ma_exit : na, "Exit MA", color=color.blue, linewidth=2)
+
+// ADX Change Calculation
+adx_change = ta.change(adx)
+adx_prev = nz(adx[1], adx)
+adx_percent_change = adx_prev != 0 ? math.abs(adx_change / adx_prev * 100) : 0
+adx_stop_condition = use_adx_stop and adx_percent_change >= adx_change_percent
+
+// Performance Stop-Loss Calculation
+bool perf_stop_condition = false
+if in_long and use_perf_stop
+    perf_stop_condition := (close - entry_price) / entry_price * 100 <= perf_stop_percent
+if in_short and use_perf_stop
+    perf_stop_condition := (entry_price - close) / entry_price * 100 <= perf_stop_percent
+
+// ATR Filter
+atr_filter = not use_atr_filter or atr >= atr_threshold
+
+// Volume Filter
+volume_filter = not use_volume_filter or volume >= volume_ma * volume_threshold_multiplier
+
+// Cross Detection
+buy_cross_di = ta.crossover(di_plus, di_minus)
+sell_cross_di = ta.crossover(di_minus, di_plus)
+buy_cross_cci = ta.crossover(cci, cci_ma)
+sell_cross_cci = ta.crossunder(cci, cci_ma)
+long_exit_ma = ta.crossunder(close, ma_exit)
+short_exit_ma = ta.crossover(close, ma_exit)
+
+// Recent Cross Checks
+buy_di_recent = ta.barssince(buy_cross_di) <= cross_window
+sell_di_recent = ta.barssince(sell_cross_di) <= cross_window
+buy_cci_recent = ta.barssince(buy_cross_cci) <= cross_window
+sell_cci_recent = ta.barssince(sell_cross_cci) <= cross_window
+
+// Signal Conditions
+adx_filter = not use_adx_filter or adx > adx_threshold
+rsi_buy_filter = not use_rsi_filter or rsi < rsi_lower_limit
+rsi_sell_filter = not use_rsi_filter or rsi > rsi_upper_limit
+buy_di_condition = buy_di_cross ? buy_di_recent : di_plus > di_minus
+buy_cci_condition = buy_cci_cross ? buy_cci_recent : cci > cci_ma
+sell_di_condition = sell_di_cross ? sell_di_recent : di_plus < di_minus
+sell_cci_condition = sell_cci_cross ? sell_cci_recent : cci < cci_ma
+buy_signal = buy_di_condition and buy_cci_condition and adx_filter and rsi_buy_filter and atr_filter and volume_filter
+sell_signal = sell_di_condition and sell_cci_condition and adx_filter and rsi_sell_filter and atr_filter and volume_filter
+
+// Alarms
+alertcondition(buy_signal, title="Buy Signal Alert", message="ADXCCI Strategy: Buy Signal Triggered")
+alertcondition(sell_signal, title="Sell Signal Alert", message="ADXCCI Strategy: Sell Signal Triggered")
+
+// Strategy Entries and Labels
+float chart_bottom = ta.lowest(low, 100)
+if buy_signal and not in_long and allow_long and can_trade
+    strategy.entry("Buy", strategy.long)
+    label.new(bar_index, chart_bottom, "↑", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+    label.new(bar_index, chart_bottom, "BUY", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+    in_long := true
+    in_short := false
+    long_trades := long_trades + 1
+    entry_price := close
+
+if sell_signal and not in_short and allow_short and can_trade
+    strategy.entry("Sell", strategy.short)
+    label.new(bar_index, chart_bottom, "↓", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+    label.new(bar_index, chart_bottom, "SELL", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+    in_short := true
+    in_long := false
+    short_trades := short_trades + 1
+    entry_price := close
+
+// Reverse Exits (only if MA exit, ADX stop, and Perf stop are not used)
+if not use_ma_exit and not adx_stop_condition and not perf_stop_condition
+    if sell_signal and in_long
+        strategy.close("Buy")
+        label.new(bar_index, chart_bottom, "↓", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+        if close > entry_price
+            long_wins := long_wins + 1
+        in_long := false
+        if countertrade and allow_short and can_trade
+            strategy.entry("Sell", strategy.short)
+            label.new(bar_index, chart_bottom, "↓", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+            label.new(bar_index, chart_bottom, "SELL", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+            in_short := true
+            in_long := false
+            short_trades := short_trades + 1
+            entry_price := close
+    if buy_signal and in_short
+        strategy.close("Sell")
+        label.new(bar_index, chart_bottom, "↑", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+        if close < entry_price
+            short_wins := short_wins + 1
+        in_short := false
+        if countertrade and allow_long and can_trade
+            strategy.entry("Buy", strategy.long)
+            label.new(bar_index, chart_bottom, "↑", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+            label.new(bar_index, chart_bottom, "BUY", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+            in_long := true
+            in_short := false
+            long_trades := long_trades + 1
+            entry_price := close
+
+// MA Exit
+if use_ma_exit
+    if in_long and long_exit_ma
+        strategy.close("Buy")
+        label.new(bar_index, chart_bottom, "↓", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+        if close > entry_price
+            long_wins := long_wins + 1
+        in_long := false
+        if countertrade and allow_short and can_trade
+            strategy.entry("Sell", strategy.short)
+            label.new(bar_index, chart_bottom, "↓", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+            label.new(bar_index, chart_bottom, "SELL", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+            in_short := true
+            in_long := false
+            short_trades := short_trades + 1
+            entry_price := close
+    if in_short and short_exit_ma
+        strategy.close("Sell")
+        label.new(bar_index, chart_bottom, "↑", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+        if close < entry_price
+            short_wins := short_wins + 1
+        in_short := false
+        if countertrade and allow_long and can_trade
+            strategy.entry("Buy", strategy.long)
+            label.new(bar_index, chart_bottom, "↑", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+            label.new(bar_index, chart_bottom, "BUY", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+            in_long := true
+            in_short := false
+            long_trades := long_trades + 1
+            entry_price := close
+
+// ADX Stop-Loss
+if adx_stop_condition
+    if in_long
+        strategy.close("Buy")
+        label.new(bar_index, chart_bottom, "↓", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+        if close > entry_price
+            long_wins := long_wins + 1
+        in_long := false
+        if countertrade and allow_short and can_trade
+            strategy.entry("Sell", strategy.short)
+            label.new(bar_index, chart_bottom, "↓", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+            label.new(bar_index, chart_bottom, "SELL", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+            in_short := true
+            in_long := false
+            short_trades := short_trades + 1
+            entry_price := close
+    if in_short
+        strategy.close("Sell")
+        label.new(bar_index, chart_bottom, "↑", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+        if close < entry_price
+            short_wins := short_wins + 1
+        in_short := false
+        if countertrade and allow_long and can_trade
+            strategy.entry("Buy", strategy.long)
+            label.new(bar_index, chart_bottom, "↑", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+            label.new(bar_index, chart_bottom, "BUY", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+            in_long := true
+            in_short := false
+            long_trades := long_trades + 1
+            entry_price := close
+
+// Performance Stop-Loss
+if perf_stop_condition
+    if in_long
+        strategy.close("Buy")
+        label.new(bar_index, chart_bottom, "↓", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+        if close > entry_price
+            long_wins := long_wins + 1
+        in_long := false
+        if countertrade and allow_short and can_trade
+            strategy.entry("Sell", strategy.short)
+            label.new(bar_index, chart_bottom, "↓", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+            label.new(bar_index, chart_bottom, "SELL", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+            in_short := true
+            in_long := false
+            short_trades := short_trades + 1
+            entry_price := close
+    if in_short
+        strategy.close("Sell")
+        label.new(bar_index, chart_bottom, "↑", color=color.red, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+        if close < entry_price
+            short_wins := short_wins + 1
+        in_short := false
+        if countertrade and allow_long and can_trade
+            strategy.entry("Buy", strategy.long)
+            label.new(bar_index, chart_bottom, "↑", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.normal, yloc=yloc.price)
+            label.new(bar_index, chart_bottom, "BUY", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.large, yloc=yloc.price)
+            in_long := true
+            in_short := false
+            long_trades := long_trades + 1
+            entry_price := close
+
+// Warn if Equity is Negative
+if not can_trade and (buy_signal or sell_signal)
+    label.new(bar_index, close, "No Equity", color=color.yellow, style=label.style_label_center, textcolor=color.black, size=size.tiny)
+
+// Background Coloring (Global Scope)
+bgcolor(color_background ? (in_long ? color.new(color.green, 90) : in_short ? color.new(color.red, 90) : na) : na)
+
+// Trade Statistics Table
+var table stats_table = na
+if ta.change(time) != 0 or strategy.opentrades != strategy.opentrades[1] or strategy.closedtrades != strategy.closedtrades[1]
+    float current_capital = strategy.equity
+    float capital_growth = initial_capital != 0 ? (current_capital - initial_capital) / initial_capital * 100 : 0
+    float win_rate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0
+    float long_win_rate = long_trades > 0 ? long_wins / long_trades * 100 : 0
+    float short_win_rate = short_trades > 0 ? short_wins / short_trades * 100 : 0
+    float profit_factor = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+    open_trade_status := in_long ? "Long Open" : in_short ? "Short Open" : "No Open Trade"
+    stats_table := table.new(position=position.top_center, columns=2, rows=13, bgcolor=color.new(color.gray, 80), border_width=1, frame_width=1)
+    // Capital Group
+    table.cell(stats_table, 0, 0, "Capital", text_color=color.yellow, text_size=size.small)
+    table.cell(stats_table, 1, 0, "", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 1, "Initial Capital", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 1, str.tostring(initial_capital, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 2, "Current Capital", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 2, str.tostring(current_capital, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 3, "Capital Growth (%)", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 3, str.tostring(capital_growth, "#.##") + "%", text_color=color.white, text_size=size.small)
+    // Trade Summary Group
+    table.cell(stats_table, 0, 4, "Trade Summary", text_color=color.yellow, text_size=size.small)
+    table.cell(stats_table, 1, 4, "", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 5, "Total Trades", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 5, str.tostring(strategy.closedtrades), text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 6, "Long Trades", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 6, str.tostring(long_trades, "#"), text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 7, "Short Trades", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 7, str.tostring(short_trades, "#"), text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 8, "Win Rate (%)", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 8, str.tostring(win_rate, "#.##") + "%", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 9, "Long Win Rate (%)", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 9, str.tostring(long_win_rate, "#.##") + "%", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 10, "Short Win Rate (%)", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 10, str.tostring(short_win_rate, "#.##") + "%", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 11, "Profit Factor", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 11, na(profit_factor) ? "N/A" : str.tostring(profit_factor, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 0, 12, "Open Trade", text_color=color.white, text_size=size.small)
+    table.cell(stats_table, 1, 12, open_trade_status, text_color=color.white, text_size=size.small)
+
+View in Pine Editor・326 lines
+Use on chart
+6
+2
+1 860
+### Key Features:
+- Combines ADX, DI+/-, CCI, and RSI for signal generation.
+- Supports customizable timeframes for indicators.
+- Offers multiple exit conditions (Moving Average cross, ADX change, performance-based stop-loss).
+- Tracks and displays trade statistics (e.g., win rate, capital growth, profit factor).
+- Visualizes trades with labels and optional background coloring.
+- Allows countertrading (opening an opposite trade after closing one).
+
+1. **Indicator Calculation**:
+- **ADX and DI+/-**: Calculated using the `ta.dmi` function with user-defined lengths for DI and ADX smoothing.
+- **CCI**: Computed using the `ta.cci` function with a configurable source (default: `hlc3`) and length.
+- **RSI (optional)**: Calculated using the `ta.rsi` function to filter overbought/oversold conditions.
+- **Moving Averages**: Used for CCI signal smoothing and trade exits, with support for SMA, EMA, SMMA (RMA), WMA, and VWMA.
+
+2. **Signal Generation**:
+- **Buy Signal**: Triggered when DI+ > DI- (or DI+ crosses over DI-), CCI > MA (or CCI crosses over MA), and optional ADX/RSI filters are satisfied.
+- **Sell Signal**: Triggered when DI+ < DI- (or DI- crosses over DI+), CCI < MA (or CCI crosses under MA), and optional ADX/RSI filters are satisfied.
+
+3. **Trade Execution**:
+- **Entry**: Long or short trades are opened using `strategy.entry` when signals are detected, provided trading is allowed (`allow_long`/`allow_short`) and equity is positive.
+- **Exit**: Trades can be closed based on:
+- Opposite signal (if no other exit conditions are used).
+- MA cross (price crossing below/above the exit MA for long/short trades).
+- ADX percentage change exceeding a threshold.
+- Performance-based stop-loss (trade loss exceeding a percentage).
+- **Countertrading**: If enabled, closing a trade triggers an opposite trade (e.g., closing a long opens a short).
+
+4. **Visualization**:
+- Labels are plotted at trade entries/exits (e.g., "BUY," "SELL," arrows).
+- Optional background coloring highlights open trades (green for long, red for short).
+- A statistics table displays real-time metrics (e.g., capital, win rates).
+
+5. **Trade Tracking**:
+- Tracks the number of long/short trades, wins, and overall performance.
+- Monitors equity to prevent trading if it falls to zero.
+
+### 2.3 Key Components
+- **Indicator Calculations**: Uses `request.security` to fetch indicator data for the specified timeframe.
+- **MA Function**: A custom `ma_func` handles different MA types for CCI and exit conditions.
+- **Signal Logic**: Combines crossover/under checks with recent bar windows for flexibility.
+- **Exit Conditions**: Multiple configurable exit strategies for risk management.
+- **Statistics Table**: Updates dynamically with trade and capital metrics.
+
+## 3. Configuration Options
+The script provides extensive customization through input parameters, grouped for clarity in the TradingView settings panel. Below is a detailed breakdown of each setting and its impact.
+
+### 3.1 Strategy Settings (Global)
+- **Initial Capital**: Default `10000`. Sets the starting capital for backtesting.
+- **Effect**: Determines the base equity for calculating position sizes and performance metrics.
+- **Default Quantity Type**: `strategy.percent_of_equity` (50% of equity).
+- **Effect**: Controls the size of each trade as a percentage of available equity.
+- **Pyramiding**: Default `2`. Allows up to 2 simultaneous trades in the same direction.
+- **Effect**: Enables multiple entries if conditions are met, increasing exposure.
+- **Commission**: 0.2% per trade.
+- **Effect**: Simulates trading fees, reducing net profit in backtesting.
+- **Margin**: 100% for long and short trades.
+- **Effect**: Assumes no leverage; adjust for margin trading simulations.
+- **Calc on Every Tick**: `true`.
+- **Effect**: Ensures real-time signal updates for precise execution.
+
+### 3.2 Indicator Settings
+- **Indicator Timeframe** (`indicator_timeframe`):
+- **Options**: `""` (chart timeframe), `1`, `5`, `15`, `30`, `60`, `240`, `D`, `W`.
+- **Default**: `""` (uses chart timeframe).
+- **Effect**: Determines the timeframe for ADX, DI, CCI, and RSI calculations. A higher timeframe reduces noise but may delay signals.
+
+### 3.3 ADX & DI Settings
+- **DI Length** (`adx_di_len`):
+- **Default**: `30`.
+- **Range**: Minimum `1`.
+- **Effect**: Sets the period for calculating DI+ and DI-. Longer periods smooth trends but reduce sensitivity.
+- **ADX Smoothing Length** (`adx_smooth_len`):
+- **Default**: `14`.
+- **Range**: Minimum `1`.
+- **Effect**: Smooths the ADX calculation. Longer periods produce smoother ADX values.
+- **Use ADX Filter** (`use_adx_filter`):
+- **Default**: `false`.
+- **Effect**: If `true`, requires ADX to exceed the threshold for signals to be valid, filtering out weak trends.
+- **ADX Threshold** (`adx_threshold`):
+- **Default**: `25`.
+- **Range**: Minimum `0`.
+- **Effect**: Sets the minimum ADX value for valid signals when the filter is enabled. Higher values restrict trades to stronger trends.
+
+### 3.4 CCI Settings
+- **CCI Length** (`cci_length`):
+- **Default**: `20`.
+- **Range**: Minimum `1`.
+- **Effect**: Sets the period for CCI calculation. Longer periods reduce noise but may lag.
+- **CCI Source** (`cci_src`):
+- **Default**: `hlc3` (average of high, low, close).
+- **Effect**: Defines the price data for CCI. `hlc3` is standard, but users can choose other sources (e.g., `close`).
+- **CCI MA Type** (`ma_type`):
+- **Options**: `SMA`, `EMA`, `SMMA (RMA)`, `WMA`, `VWMA`.
+- **Default**: `SMA`.
+- **Effect**: Determines the moving average type for CCI signal smoothing. EMA is more responsive; VWMA weights by volume.
+- **CCI MA Length** (`ma_length`):
+- **Default**: `14`.
+- **Range**: Minimum `1`.
+- **Effect**: Sets the period for the CCI MA. Longer periods smooth the MA but may delay signals.
+
+### 3.5 RSI Filter Settings
+- **Use RSI Filter** (`use_rsi_filter`):
+- **Default**: `false`.
+- **Effect**: If `true`, applies RSI-based overbought/oversold filters to signals.
+- **RSI Length** (`rsi_length`):
+- **Default**: `14`.
+- **Range**: Minimum `1`.
+- **Effect**: Sets the period for RSI calculation. Longer periods reduce sensitivity.
+- **RSI Lower Limit** (`rsi_lower_limit`):
+- **Default**: `30`.
+- **Range**: `0` to `100`.
+- **Effect**: Defines the oversold threshold for buy signals. Lower values allow trades in more extreme conditions.
+- **RSI Upper Limit** (`rsi_upper_limit`):
+- **Default**: `70`.
+- **Range**: `0` to `100`.
+- **Effect**: Defines the overbought threshold for sell signals. Higher values allow trades in more extreme conditions.
+
+### 3.6 Signal Settings
+- **Cross Window** (`cross_window`):
+- **Default**: `0`.
+- **Range**: `0` to `5` bars.
+- **Effect**: Specifies the lookback period for detecting DI+/- or CCI crosses. `0` requires crosses on the current bar; higher values allow recent crosses, increasing signal frequency.
+- **Allow Long Trades** (`allow_long`):
+- **Default**: `true`.
+- **Effect**: Enables/disables new long trades. If `false`, only closing existing longs is allowed.
+- **Allow Short Trades** (`allow_short`):
+- **Default**: `true`.
+- **Effect**: Enables/disables new short trades. If `false`, only closing existing shorts is allowed.
+- **Require DI+/DI- Cross for Buy** (`buy_di_cross`):
+- **Default**: `true`.
+- **Effect**: If `true`, requires a DI+ crossover DI- for buy signals; if `false`, DI+ > DI- is sufficient.
+- **Require CCI Cross for Buy** (`buy_cci_cross`):
+- **Default**: `true`.
+- **Effect**: If `true`, requires a CCI crossover MA for buy signals; if `false`, CCI > MA is sufficient.
+- **Require DI+/DI- Cross for Sell** (`sell_di_cross`):
+- **Default**: `true`.
+- **Effect**: If `true`, requires a DI- crossover DI+ for sell signals; if `false`, DI+ < DI- is sufficient.
+- **Require CCI Cross for Sell** (`sell_cci_cross`):
+- **Default**: `true`.
+- **Effect**: If `true`, requires a CCI crossunder MA for sell signals; if `false`, CCI < MA is sufficient.
+- **Countertrade** (`countertrade`):
+- **Default**: `true`.
+- **Effect**: If `true`, closing a trade triggers an opposite trade (e.g., close long, open short) if allowed.
+- **Color Background for Open Trades** (`color_background`):
+- **Default**: `true`.
+- **Effect**: If `true`, colors the chart background green for long trades and red for short trades.
+
+### 3.7 Exit Settings
+- **Use MA Cross for Exit** (`use_ma_exit`):
+- **Default**: `true`.
+- **Effect**: If `true`, closes trades when the price crosses the exit MA (below for long, above for short).
+- **MA Length for Exit** (`ma_exit_length`):
+- **Default**: `20`.
+- **Range**: Minimum `1`.
+- **Effect**: Sets the period for the exit MA. Longer periods delay exits.
+- **MA Type for Exit** (`ma_exit_type`):
+- **Options**: `SMA`, `EMA`, `SMMA (RMA)`, `WMA`, `VWMA`.
+- **Default**: `SMA`.
+- **Effect**: Determines the MA type for exit signals. EMA is more responsive; VWMA weights by volume.
+- **Use ADX Change Stop-Loss** (`use_adx_stop`):
+- **Default**: `false`.
+- **Effect**: If `true`, closes trades when the ADX changes by a specified percentage.
+- **ADX % Change for Stop-Loss** (`adx_change_percent`):
+- **Default**: `5.0`.
+- **Range**: Minimum `0.0`, step `0.1`.
+- **Effect**: Specifies the percentage change in ADX (vs. previous bar) that triggers a stop-loss. Higher values reduce premature exits.
+- **Use Performance Stop-Loss** (`use_perf_stop`):
+- **Default**: `false`.
+- **Effect**: If `true`, closes trades when the loss exceeds a percentage threshold.
+- **Performance Stop-Loss (%)** (`perf_stop_percent`):
+- **Default**: `-10.0`.
+- **Range**: `-100.0` to `0.0`, step `0.1`.
+- **Effect**: Specifies the loss percentage that triggers a stop-loss. More negative values allow larger losses before exiting.
+
+## 4. Visual and Statistical Output
+- **Labels**: Displayed at trade entries/exits with arrows (↑ for buy, ↓ for sell) and text ("BUY," "SELL"). A "No Equity" label appears if equity is zero.
+- **Background Coloring**: Optionally colors the chart background (green for long, red for short) to indicate open trades.
+- **Statistics Table**: Displayed at the top center of the chart, updated on timeframe changes or trade events. Includes:
+- **Capital Metrics**: Initial capital, current capital, capital growth (%).
+- **Trade Metrics**: Total trades, long/short trades, win rate, long/short win rates, profit factor.
+- **Open Trade Status**: Indicates if a long, short, or no trade is open.
+
+## 5. Alerts
+- **Buy Signal Alert**: Triggered when `buy_signal` is true ("Cross Buy Signal").
+- **Sell Signal Alert**: Triggered when `sell_signal` is true ("Cross Sell Signal").
+- **Usage**: Users can set up TradingView alerts to receive notifications for trade signals.
+

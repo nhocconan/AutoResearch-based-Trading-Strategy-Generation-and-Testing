@@ -1,0 +1,98 @@
+//@version=3
+
+strategy(title = "Ultimate Moving Average Strategy", shorttitle = "UMA Strategy", overlay = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, max_bars_back=2000)
+
+//Created by user ChrisMoody 4-24-2014
+//Converted to strategy by Virtual_Machinist 7-16-2018
+//Plots The Majority of Moving Averages
+//Defaults to Current Chart Time Frame --- But Can Be Changed to Higher Or Lower Time Frames
+//2nd MA Capability with Show Crosses Feature
+
+//inputs
+src = close
+useCurrentRes = input(true, title="Use Current Chart Resolution?")
+resCustom = input(title="Use Different Timeframe? Uncheck Box Above", type=resolution, defval="D")
+len = input(14, title="Moving Average Length - LookBack Period")
+atype = input(1,minval=1,maxval=7,title="1=SMA, 2=EMA, 3=WMA, 4=HullMA, 5=VWMA, 6=RMA, 7=TEMA")
+cc = input(true,title="Change Color Based On Direction?")
+smoothe = input(2, minval=1, maxval=10, title="Color Smoothing - 1 = No Smoothing")
+doma2 = input(false, title="Optional 2nd Moving Average")
+len2 = input(50, title="Moving Average Length - Optional 2nd MA")
+atype2 = input(1,minval=1,maxval=7,title="1=SMA, 2=EMA, 3=WMA, 4=HullMA, 5=VWMA, 6=RMA, 7=TEMA")
+cc2 = input(true,title="Change Color Based On Direction 2nd MA?")
+warn = input(false, title="***You Can Turn On The Show Dots Parameter Below Without Plotting 2nd MA to See Crosses***")
+warn2 = input(false, title="***If Using Cross Feature W/O Plotting 2ndMA - Make Sure 2ndMA Parameters are Set Correctly***")
+sd = input(false, title="Show Dots on Cross of Both MA's")
+
+useStop     = input(defval = true, title = "Use Trailing Stop?")
+slPoints    = input(defval = 200, title = "Stop Loss Trail Points", minval = 1)
+slOffset    = input(defval = 400, title = "Stop Loss Trail Offset", minval = 1)
+
+res = useCurrentRes ? period : resCustom
+//hull ma definition
+hullma = wma(2*wma(src, len/2)-wma(src, len), round(sqrt(len)))
+//TEMA definition
+ema1 = ema(src, len)
+ema2 = ema(ema1, len)
+ema3 = ema(ema2, len)
+tema = 3 * (ema1 - ema2) + ema3
+
+avg = atype == 1 ? sma(src,len) : atype == 2 ? ema(src,len) : atype == 3 ? wma(src,len) : atype == 4 ? hullma : atype == 5 ? vwma(src, len) : atype == 6 ? rma(src,len) : tema
+//2nd Ma - hull ma definition
+hullma2 = wma(2*wma(src, len2/2)-wma(src, len2), round(sqrt(len2)))
+//2nd MA TEMA definition
+sema1 = ema(src, len2)
+sema2 = ema(sema1, len2)
+sema3 = ema(sema2, len2)
+stema = 3 * (sema1 - sema2) + sema3
+
+avg2 = atype2 == 1 ? sma(src,len2) : atype2 == 2 ? ema(src,len2) : atype2 == 3 ? wma(src,len2) : atype2 == 4 ? hullma2 : atype2 == 5 ? vwma(src, len2) : atype2 == 6 ? rma(src,len2) : tema
+
+out = avg 
+out_two = avg2
+
+
+ma_up = out >= out[smoothe]
+ma_down = out < out[smoothe]
+
+col = cc ? ma_up ? lime : ma_down ? red : aqua : aqua
+col2 = cc2 ? ma_up ? lime : ma_down ? red : aqua : aqua
+
+circleYPosition = out_two
+
+plot(out, title="Multi-Timeframe Moving Avg", style=line, linewidth=4, color = col)
+plot(doma2 and out_two ? out_two : na, title="2nd Multi-TimeFrame Moving Average", style=circles, linewidth=4, color=col2)
+plot(sd and cross(out, out_two) ? circleYPosition : na,style=cross, linewidth=5, color=yellow)
+
+// Strategy conditions
+
+longCond    = ma_up
+shortCond   = ma_down
+// entries and base exit
+strategy.entry("long", strategy.long, when = longCond)
+strategy.entry("short", strategy.short, when = shortCond)
+
+if (useStop)
+    strategy.exit("XL", from_entry = "long", trail_points = slPoints, trail_offset = slOffset)
+    strategy.exit("XS", from_entry = "short", trail_points = slPoints, trail_offset = slOffset)
+// not sure needed, but just incase..
+strategy.exit("XL", from_entry = "long", when = shortCond)
+strategy.exit("XS", from_entry = "short", when = longCond)
+
+View in Pine Editor・80 lines
+Use on chart
+5
+8
+8
+17
+13 160
+Jul 11, 2018
+Converted famous indicator CM_Ultimate_MA_MTF to strategy.
+Works well only at big timeframes from 8H and with stop-losses.
+Jul 16, 2018
+Release Notes
+Updated to Pine script version 3. The strategy is changed to show that it doesn't use repaint.
+8H timeframe.
+Jul 16, 2018
+Release Notes
+Fixed inputs

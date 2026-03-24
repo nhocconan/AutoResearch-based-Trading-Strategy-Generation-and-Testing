@@ -1,0 +1,66 @@
+//@version=6
+strategy(title="MA20 Crossover Strategy with 0.5% Threshold and Color Change", shorttitle="MA20 Strategy Threshold Color", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Nhập liệu
+src = close
+useCurrentRes = input.bool(true, title="Sử dụng độ phân giải hiện tại của biểu đồ?")
+resCustom = input.timeframe("D", title="Sử dụng khung thời gian khác? (Bỏ chọn ở trên)")
+len = input.int(20, title="Độ dài của Đường trung bình di động (MA20)", minval=1)
+atype = input.string("EMA", title="Loại MA", options=["SMA", "EMA", "WMA", "HullMA", "VWMA", "RMA", "TEMA"])
+threshold_pct = input.float(0.5, title="Ngưỡng phần trăm (%)", minval=0.0) / 100
+cc = input.bool(true, title="Thay đổi màu dựa trên hướng đi?")
+
+// Hàm tùy chỉnh cho HullMA và TEMA
+hullma(src, len) => ta.wma(2 * ta.wma(src, len / 2) - ta.wma(src, len), math.round(math.sqrt(len)))
+
+tema(src, len) =>
+    ema1 = ta.ema(src, len)
+    ema2 = ta.ema(ema1, len)
+    ema3 = ta.ema(ema2, len)
+    3 * (ema1 - ema2) + ema3
+
+// Tính toán MA dựa trên lựa chọn
+avg_raw = switch atype
+    "SMA" => ta.sma(src, len)
+    "EMA" => ta.ema(src, len)
+    "WMA" => ta.wma(src, len)
+    "HullMA" => hullma(src, len)
+    "VWMA" => ta.vwma(src, len)
+    "RMA" => ta.rma(src, len)
+    "TEMA" => tema(src, len)
+
+// Lấy MA từ khung thời gian khác
+res = useCurrentRes ? timeframe.period : resCustom
+ma20 = request.security(syminfo.tickerid, res, avg_raw)
+
+// Logic thay đổi màu
+var color ma_color = na
+if (cc)
+    ma_color := ma20 > ma20[1] ? color.lime : ma20 < ma20[1] ? color.red : color.blue
+else
+    ma_color := color.blue
+
+// Vẽ MA
+plot(ma20, title="MA20", color=ma_color, linewidth=2)
+
+// Định nghĩa điều kiện tín hiệu
+buy_signal = ta.crossover(close, ma20) and close > ma20 * (1 + threshold_pct)
+sell_signal = ta.crossunder(close, ma20) and close < ma20 * (1 - threshold_pct)
+
+// Chiến lược vào lệnh
+if (buy_signal)
+    strategy.entry("Buy", strategy.long)
+
+if (sell_signal)
+    strategy.entry("Sell", strategy.short)
+
+// Vẽ tín hiệu lên biểu đồ
+plotshape(series=buy_signal, title="Buy Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.labelup, text="BUY", textcolor=color.white)
+plotshape(series=sell_signal, title="Sell Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.labeldown, text="SELL", textcolor=color.white)
+
+View in Pine Editor・59 lines
+Use on chart
+1
+6
+791
+Một chiến lược cơ bản dựa trên EMA20. Giá cắt lên MA20 hay EMA20 thi báo mua và ngược lại

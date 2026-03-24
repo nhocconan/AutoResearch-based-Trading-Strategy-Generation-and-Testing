@@ -1,0 +1,80 @@
+//@version=6
+strategy("Nifty Futures 45m | 200 EMA + RSI 50 Cross + Relative ATR",
+     overlay=true,
+     initial_capital=500000,
+     pyramiding=0,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02)
+
+// ===== Inputs =====
+emaTrendLen   = input.int(200, "Trend EMA Length", minval=1)
+emaExitLen    = input.int(50, "Exit EMA Length", minval=1)
+rsiLen        = input.int(14, "RSI Length", minval=1)
+atrLen        = input.int(14, "ATR Length", minval=1)
+atrMaLen      = input.int(20, "ATR SMA Length", minval=1)
+atrMultiplier = input.float(1.0, "ATR Multiplier", step=0.1)
+
+// ===== Calculations =====
+ema200 = ta.ema(close, emaTrendLen)
+ema50  = ta.ema(close, emaExitLen)
+
+rsiVal = ta.rsi(close, rsiLen)
+
+atrVal = ta.atr(atrLen)
+atrSma = ta.sma(atrVal, atrMaLen)
+
+// Relative ATR filter
+atrFilter = atrVal > atrSma * atrMultiplier
+
+// ===== Entry Conditions =====
+// Long:
+// 1. Price above 200 EMA
+// 2. RSI crosses above 50
+// 3. ATR above its own average
+
+longCondition =
+     close > ema200 and
+     ta.crossover(rsiVal, 50) and
+     atrFilter
+
+// Short:
+// 1. Price below 200 EMA
+// 2. RSI crosses below 50
+// 3. ATR above its own average
+
+shortCondition =
+     close < ema200 and
+     ta.crossunder(rsiVal, 50) and
+     atrFilter
+
+// ===== Entries =====
+if longCondition and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+
+if shortCondition and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+
+// ===== Exits =====
+if strategy.position_size > 0 and close < ema50
+    strategy.close("Long")
+
+if strategy.position_size < 0 and close > ema50
+    strategy.close("Short")
+
+// ===== Plots =====
+plot(ema200, title="EMA 200", color=color.red, linewidth=2)
+plot(ema50, title="EMA 50", color=color.blue, linewidth=2)
+
+plot(rsiVal, title="RSI", color=color.purple, display=display.none)
+hline(50, "RSI 50", color=color.gray, linestyle=hline.style_dotted, display=display.none)
+
+plotshape(longCondition, title="Buy", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, text="BUY")
+plotshape(shortCondition, title="Sell", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, text="SELL")
+
+View in Pine Editor・74 lines
+Use on chart
+7
+279
+well driven and tested strategy with weklk defined entry and exit rule

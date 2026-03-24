@@ -1,0 +1,125 @@
+//@version=6
+strategy("Trading Report Generator from CSV", margin_long = 0, margin_short = 0, overlay = true)
+
+tradesCSV = input.text_area(title = "Transactions CSV:", defval = "Symbol,Side,Qty,Fill Price,Closing Time\nCRYPTO:BTCUSD,Buy,200,107900,2025-07-08 01:59:29\nCRYPTO:BTCUSD,Sell,100,123000,2025-07-14 07:00:00\nCRYPTO:BTCUSD,Sell,100,115000,2025-07-25 07:00:00")
+
+type Trade
+    string tickerId
+    bool isBuy
+    float qty
+    float price
+    int execTime
+
+var supportedHeader1 = "Symbol,Side,Qty,Fill Price,Commission,Closing Time"
+var supportedHeader2 = "Symbol,Side,Qty,Fill Price,Closing Time"
+
+method tostring(Trade this)=>
+    str.format("{0} {1} {2} shares at {3}", this.isBuy ? "buy" : "sell", this.tickerId, this.qty, this.price)
+
+parseTimestamp(string timeStamp)=>
+    // timeStamp in yyyy-MM-DD hh:mm:ss format
+    parts = str.split(timeStamp, ' ')
+    date = str.split(parts.get(0), '-')
+    y = str.tonumber(date.get(0))
+    m = str.tonumber(date.get(1))
+    d = str.tonumber(date.get(2))
+
+    tm = str.split(parts.get(1), ':')
+    h = str.tonumber(tm.get(0))
+    min = str.tonumber(tm.get(1))
+    s = str.tonumber(tm.get(2))
+
+    timestamp(int(y), int(m), int(d), int(h), int(min), int(s))
+
+checkSize(array<string> elems, int minCount, int lineNumber)=>
+    if elems.size() < minCount
+        runtime.error(str.format("Expected {0} values, founded less: {1} on the line with number {2}", minCount, elems, lineNumber))
+
+parseTrade(string ln, int lineNumber, bool header1) =>
+    elems = str.split(str.trim(ln), ',')
+    ticker = elems.get(0)
+    isTrade = ticker != '$CASH' // skip not trade transactions (the Portfolio export csv can contains $CASH transactions)
+    if isTrade
+        checkSize(elems, header1 ? 6 : 5, lineNumber)
+        qty = str.tonumber(elems.get(2))
+        price = str.tonumber(elems.get(3))
+        tm = parseTimestamp(elems.get(header1 ? 5 : 4))
+        Trade.new(ticker, str.lower(elems.get(1))=="buy", qty, price, tm)
+
+var mainTicker = ticker.standard(syminfo.tickerid)
+
+parseTrades()=>
+    result = map.new<int,Trade>()
+    lines = str.split(tradesCSV, '\n')
+    if lines.size() > 0
+        header = str.trim(lines.get(0))
+        if header != supportedHeader1 and header != supportedHeader2
+            runtime.error('Unsupported csv format. Expecting csv with columns: "' + supportedHeader1 + '" or "' + supportedHeader2 + '"\nFounded "' + header + '"')
+        for i = 1 to lines.size()-1
+            t = parseTrade(lines.get(i), i + 1, header == supportedHeader1)
+            if not na(t) and mainTicker == t.tickerId
+                result.put(t.execTime, t)
+    result
+
+var trades = parseTrades()
+
+sortedKeys()=>
+    result = trades.keys()
+    result.sort(order.descending)
+    result
+
+var times = sortedKeys()
+
+var barDurationMs = timeframe.in_seconds("") * 1000
+
+nextId()=>
+    varip uniqueId = 0
+    uniqueId += 1
+    str.tostring(uniqueId)
+
+while times.size() > 0
+    firstT = times.last()
+    if time_close + barDurationMs > firstT
+        first = trades.remove(firstT)
+        strategy.order(id = (first.isBuy ? "buy " : "sell ") + nextId(), direction = first.isBuy ? strategy.long : strategy.short, qty = first.qty, limit = first.price, comment = first.isBuy ? "buy" : "sell")
+        times.pop()
+        continue
+    else
+        break
+
+View in Pine Editor・91 lines
+Use on chart
+9
+8
+6
+4
+40 737
+Jul 30, 2025
+Many people use the Trading Panel. Unfortunately, it doesn't have a Performance Report. However, TradingView has strategies, and they have a Performance Report :-D
+What if we combine the first and second? It's easy!
+This script is a special strategy that parses transactions in csv format from Paper Trading (and it will also work for other brokers) and “plays” them. As a result, we get a Performance Report for a specific instrument based on our real trades in Paper or another broker.
+
+How to use it:
+First, we need to get a CSV file with transactions. To do this, go to the Trading Panel and connect the desired broker. Select the History tab, then the Filled sub-tab, and configure the columns there, leaving only: Side, Qty, Fill Price, Closing Time. After that, open the Export data dialog, select History, and click Export. Open the downloaded CSV file in a regular text editor (Notepad or similar). It will contain a text like this:
+
+
+Symbol,Side,Qty,Fill Price,Closing Time
+FX:EURUSD,Buy,1000,1.0938700000000001,2023-04-05 14:29:23
+COINBASE:ETHUSD,Sell,1,1332.05,2023-01-11 17:41:33
+CME_MINI:ESH2023,Sell,1,3961.75,2023-01-11 17:30:40
+CME_MINI:ESH2023,Buy,1,3956.75,2023-01-11 17:08:53
+
+
+Next select all the text (Ctrl+A) and copy it to the clipboard.
+Now apply the "Trading Report Generator from CSV" strategy to the chart with the desired symbol and TF, open the settings/input dialog, paste the contents of the clipboard into the single text input field of the strategy, and click Ok.
+That's it.
+In the Strategy Tester, we see a detailed Performance Report based on our real transactions.
+P.S. The CSV file may contain transactions for different instruments, for example, you may have transactions for CRYPTO:BTCUSD and NASDAQ:AAPL. To view the report is based on CRYPTO:BTCUSD trades, simply change the symbol on the chart to CRYPTO:BTCUSD. To view the report is based on NASDAQ:AAPL trades, simply change the symbol on the chart to NASDAQ:AAPL. No changes to the strategy are required.
+
+How it works:
+At the beginning of the calculation, we parse the csv once, create trade objects (Trade) and sort them in chronological order. Next, on each bar, we check whether we have trades for the time period of the next bar. If there are, we place a limit order for each trade, with limit price == Fill Price of the trade. Here, we assume that if the trade is real, its execution price will be within the bar range, and the Pine strategy engine will execute this order at the specified limit price.
+
+Jul 31, 2025
+Release Notes
+There is existing Pine limitation for maximum string length (it is 4096 chars) and therefor we can't paste more than 60-80 trades for now.
+It would be great if Pine Team will increase this limit.

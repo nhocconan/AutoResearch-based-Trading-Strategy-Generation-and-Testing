@@ -1,0 +1,155 @@
+//@version=5
+strategy("Weekend Trend Trader - Presets",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=5,
+     initial_capital=10000,
+     process_orders_on_close=true)
+
+// === PRESET UNIQUEMENT === //
+preset = input.string("Original", "Preset", options=["Original", "Performance", "Optimised"])
+
+// (optionnel) tu peux aussi figer SPX si tu veux 0 réglage
+spxTicker = input.symbol("SPX", "Index Symbol ($SPX)", inline="SPX")
+
+// === PARAMS (définis par preset) === //
+float rocThreshold = na
+int   rocLength = na
+int   maLength = na
+int   breakoutLength = na
+float initialStopPct = na
+float tightStopPct = na
+
+switch preset
+    "Original" =>
+        rocThreshold   := 30
+        rocLength      := 20
+        maLength       := 10
+        breakoutLength := 20
+        initialStopPct := 40
+        tightStopPct   := 10
+
+    "Performance" =>
+        rocThreshold   := 40
+        rocLength      := 10
+        maLength       := 10
+        breakoutLength := 30
+        initialStopPct := 50
+        tightStopPct   := 30
+
+    =>
+        // fallback (ne devrait jamais arriver)
+        rocThreshold   := 30
+        rocLength      := 20
+        maLength       := 10
+        breakoutLength := 20
+        initialStopPct := 40
+        tightStopPct   := 10
+
+// === TIMEFRAME VERIFICATION === //
+if not timeframe.isweekly
+    runtime.error("Utilise ce script sur un graphique WEEKLY")
+
+// === FILTRE INDEX ($SPX) === //
+spxClose = request.security(spxTicker, "W", close)
+spxMA = ta.sma(spxClose, maLength)
+indexUp = spxClose > spxMA
+
+// === BREAKOUT === //
+breakoutLevel = ta.highest(high, breakoutLength)
+isBreakout = close > breakoutLevel[1]
+
+// === ROC === //
+roc = 100 * (close - close[rocLength]) / close[rocLength]
+momentumOk = roc > rocThreshold
+
+// === SIGNAL D'ENTRÉE === //
+longCondition = isBreakout and momentumOk // and indexUp
+if longCondition and strategy.position_size == 0
+    strategy.entry("Buy", strategy.long)
+
+// === TRAILING STOP === //
+var float highestHigh = na
+var float trailingStop = na
+var bool wasIndexUp = na
+
+if strategy.position_size > 0
+    highestHigh := na(highestHigh) ? high : math.max(highestHigh, high)
+
+    trendChanged = not na(wasIndexUp) and (indexUp != wasIndexUp)
+    wasIndexUp := indexUp
+
+    float stopPct = indexUp ? initialStopPct : tightStopPct
+    float newStop = highestHigh * (1 - stopPct / 100)
+    trailingStop := math.max(nz(trailingStop, newStop), newStop)
+
+    if close < trailingStop
+        strategy.close("Buy")
+
+else if longCondition
+    // Initialisation immédiate du stop dès le signal, avant que position_size > 0
+    highestHigh  := high
+    wasIndexUp   := indexUp
+    float stopPct = indexUp ? initialStopPct : tightStopPct
+    trailingStop := high * (1 - stopPct / 100)
+
+else
+    highestHigh  := na
+    trailingStop := na
+    wasIndexUp   := na
+
+// === VISU === //
+plotshape(true, title="SPX Trend", location=location.bottom, style=shape.square, color=indexUp ? color.green : color.red, size=size.small)
+plot(breakoutLevel, title="Breakout High", color=color.aqua, linewidth=1, style=plot.style_line)
+plot(strategy.position_size > 0 or longCondition ? trailingStop : na, title="Trailing Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+bgcolor(momentumOk ? color.new(color.purple, 85) : na, title="Momentum OK Background")
+
+View in Pine Editor・105 lines
+Use on chart
+5
+369
+Weekend Trend Trader – Presets
+
+This strategy is an implementation of the Weekend Trend Trader concept popularized by Nick Radge.
+
+It is designed to run on a WEEKLY chart and aims to capture medium-term breakouts with a rules-based trailing stop.
+
+
+This is a systematic framework. It does not guarantee results. Markets can remain range-bound for long periods and generate false breakouts.
+
+
+How it works
+
+
+[]Timeframe constraint: the script enforces Weekly charts only. []Breakout entry: a trade triggers when price closes above the previous N-week highest high. []Momentum filter (ROC): the breakout must occur with sufficient momentum. display on the chart with purple background []Market regime (SPX): the strategy monitors the trend of an index (default SPX). Display on the chart with square on the bottom
+
+
+Presets
+
+The script provides fixed presets designed to keep the system simple and consistent.
+
+
+[]Original – baseline parameters inspired by the original approach []Performance – wider and fixed trailing stop
+
+
+Stops / exits
+
+The strategy uses a trailing stop based on the highest high since entry.
+
+
+[]The stop follows the position as the trade moves higher []If the broader index trend weakens, the stop becomes tighter
+The position closes when price breaks the trailing stop
+
+
+Visual elements
+
+
+[]Breakout level (previous highest high) []Trailing stop line []Momentum regime background []Index trend indicator
+
+
+Important notes
+
+
+This strategy focuses on capturing sustained trends rather than predicting short-term movements.
+
+The goal is consistency and disciplined execution, not catching every move in the market.

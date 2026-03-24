@@ -1,0 +1,66 @@
+//@version=5
+strategy("Donchian BO with SAR & Fixed Target", shorttitle="DBO-SAR-FT", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ───────── INPUTS ─────────
+length = input.int(20, minval=1, title="Donchian Channel Length")
+
+exitOption = input.int(1, minval=1, maxval=3,
+     title="Exit Option (1=Donchian | 2=SAR | 3=Fixed Target %)")
+
+profitTargetPercent = input.float(2.0, minval=0.1, title="Fixed Target %")
+
+tradeType = input.string("Both", options=["Long", "Short", "Both"], title="Trade Type")
+
+// ───────── DONCHIAN CHANNEL ─────────
+lower = ta.lowest(low, length)
+upper = ta.highest(high, length)
+basis = (upper + lower) / 2
+
+pLower = plot(lower, title="Lower", color=color.blue)
+pUpper = plot(upper, title="Upper", color=color.blue)
+pBasis = plot(basis, title="Basis", color=color.orange)
+fill(pUpper, pLower, color=color.new(color.blue, 90))
+
+// ───────── ENTRY SIGNALS ─────────
+longSignal  = ta.crossover(close, upper[1])
+shortSignal = ta.crossunder(close, lower[1])
+
+allowLong  = tradeType == "Long" or tradeType == "Both"
+allowShort = tradeType == "Short" or tradeType == "Both"
+
+if longSignal and allowLong
+    strategy.entry("Long", strategy.long)
+
+if shortSignal and allowShort
+    strategy.entry("Short", strategy.short)
+
+// ───────── EXIT OPTION 1: DONCHIAN ─────────
+if exitOption == 1
+    if strategy.position_size > 0 and ta.crossunder(close, lower[1])
+        strategy.close("Long")
+    if strategy.position_size < 0 and ta.crossover(close, upper[1])
+        strategy.close("Short")
+
+// ───────── EXIT OPTION 2: SAR (REVERSE SIGNAL) ─────────
+if exitOption == 2
+    if strategy.position_size > 0 and shortSignal
+        strategy.close("Long")
+    if strategy.position_size < 0 and longSignal
+        strategy.close("Short")
+
+// ───────── EXIT OPTION 3: FIXED TARGET % ─────────
+if exitOption == 3
+    if strategy.position_size > 0
+        strategy.exit("LT", from_entry="Long",
+             limit=strategy.position_avg_price * (1 + profitTargetPercent / 100))
+    if strategy.position_size < 0
+        strategy.exit("ST", from_entry="Short",
+             limit=strategy.position_avg_price * (1 - profitTargetPercent / 100))
+
+View in Pine Editor・59 lines
+Use on chart
+1
+5
+472
+Donchian breakout Strategy for Long & Short. Helps in identifying trades.

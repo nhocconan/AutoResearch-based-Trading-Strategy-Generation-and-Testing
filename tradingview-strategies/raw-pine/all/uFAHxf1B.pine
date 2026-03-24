@@ -1,0 +1,50 @@
+//@version=5
+strategy("Ichimoku Cloud Breakout Only Long", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Parametry Ichimoku
+tenkanLen = input(9, title="Tenkan-Sen Length")
+kijunLen = input(26, title="Kijun-Sen Length")
+senkouLen = input(52, title="Senkou Span B Length")
+
+// Obliczanie składników Ichimoku
+tenkan = (ta.highest(high, tenkanLen) + ta.lowest(low, tenkanLen)) / 2
+kijun = (ta.highest(high, kijunLen) + ta.lowest(low, kijunLen)) / 2
+senkouSpanA = (tenkan + kijun) / 2
+senkouSpanB = (ta.highest(high, senkouLen) + ta.lowest(low, senkouLen)) / 2
+
+// Przesunięcie chmury
+senkouAShifted = senkouSpanA[26]
+senkouBShifted = senkouSpanB[26]
+
+// Sygnały wejścia i wyjścia
+buySignal = ta.crossover(close, math.max(senkouAShifted, senkouBShifted))
+sellSignal = ta.crossunder(close, math.min(senkouAShifted, senkouBShifted))
+
+// Wykonywanie zleceń
+if (buySignal)
+    strategy.entry("Buy", strategy.long)
+if (sellSignal)
+    strategy.close("Buy")
+
+// Wizualizacja składników Ichimoku na wykresie
+plot(senkouAShifted, color=color.new(color.green, 0), title="Senkou Span A")
+plot(senkouBShifted, color=color.new(color.red, 0), title="Senkou Span B")
+fill(plot(senkouAShifted, color=color.green), plot(senkouBShifted, color=color.red), 
+     color=color.new(senkouAShifted > senkouBShifted ? color.green : color.red, 80))
+
+// Wizualizacja sygnałów na wykresie
+plotshape(series=buySignal, location=location.belowbar, color=color.green, style=shape.labelup, title="Buy Signal", text="BUY")
+plotshape(series=sellSignal, location=location.abovebar, color=color.red, style=shape.labeldown, title="Sell Signal", text="SELL")
+
+View in Pine Editor・37 lines
+Use on chart
+5
+7
+1 966
+This is a very simple trading strategy based exclusively on the Ichimoku Cloud. There are no additional indicators or complex rules involved. The key condition is that we only open long positions when the price is clearly above the cloud — indicating a bullish trend.
+
+For optimal results, the recommended timeframes are 1D (daily) or 1W (weekly) charts. These higher timeframes help filter out market noise and provide more reliable trend signals.
+
+We do not short the market under any circumstances. The focus is purely on riding upward momentum when the price breaks out or stays above the cloud.
+
+This strategy works best when applied to growth stocks with strong upward trends and good fundamentals — such as Google (GOOGL), Tesla (TSLA), Apple (AAPL), or NVIDIA (NVDA).

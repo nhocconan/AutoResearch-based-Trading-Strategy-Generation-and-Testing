@@ -1,0 +1,122 @@
+//@version=5
+strategy("NQ Scalper (EMA Trend + Pullback Reclaim) [v5]",
+     overlay=true,
+     calc_on_every_tick=true,
+     process_orders_on_close=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.5)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+groupTrend = "Trend / Signals"
+emaTrendLen  = input.int(100, "Trend EMA Length", minval=1, group=groupTrend)
+emaFastLen   = input.int(21,  "Fast EMA Length", minval=1, group=groupTrend)
+rsiLen       = input.int(14,  "RSI Length", minval=1, group=groupTrend)
+rsiLongMin   = input.int(52,  "RSI Min for Long", minval=1, maxval=99, group=groupTrend)
+rsiShortMax  = input.int(48,  "RSI Max for Short", minval=1, maxval=99, group=groupTrend)
+useVWAP      = input.bool(false, "Use VWAP filter (optional)", group=groupTrend)
+
+groupRisk = "Risk / Exits"
+atrLen     = input.int(14, "ATR Length", minval=1, group=groupRisk)
+stopATR    = input.float(1.2, "Stop = ATR x", minval=0.1, step=0.1, group=groupRisk)
+targetATR  = input.float(1.6, "Target = ATR x", minval=0.1, step=0.1, group=groupRisk)
+useTrail   = input.bool(false, "Use Trailing Stop", group=groupRisk)
+trailATR   = input.float(1.0, "Trail = ATR x", minval=0.1, step=0.1, group=groupRisk)
+
+groupSession = "Session Filter"
+useSession   = input.bool(true, "Trade only in session", group=groupSession)
+sessionInput = input.session("0930-1600", "Session (exchange time)", group=groupSession)
+
+// Position sizing (simple)
+groupSize = "Position Sizing"
+qtyContracts = input.int(1, "Contracts", minval=1, group=groupSize)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Indicators
+// ─────────────────────────────────────────────────────────────────────────────
+emaTrend = ta.ema(close, emaTrendLen)
+emaFast  = ta.ema(close, emaFastLen)
+rsiVal   = ta.rsi(close, rsiLen)
+atrVal   = ta.atr(atrLen)
+vwapVal  = ta.vwap(hlc3)
+
+// Session logic
+inSession = not na(time(timeframe.period, sessionInput))
+allowTrade = useSession ? inSession : true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Signal Logic (Pullback + Reclaim)
+// Long idea:
+// 1) Overall trend bullish: close > EMA trend
+// 2) Price pulls back under fast EMA, then reclaims it (cross up)
+// 3) RSI confirms strength
+// Short idea is inverse.
+// ─────────────────────────────────────────────────────────────────────────────
+trendLong  = close > emaTrend
+trendShort = close < emaTrend
+
+vwapLongOk  = useVWAP ? close >= vwapVal : true
+vwapShortOk = useVWAP ? close <= vwapVal : true
+
+pullbackLong   = close[1] < emaFast[1] and ta.crossover(close, emaFast)
+pullbackShort  = close[1] > emaFast[1] and ta.crossunder(close, emaFast)
+
+rsiLongOk  = rsiVal >= rsiLongMin
+rsiShortOk = rsiVal <= rsiShortMax
+
+longSignal  = allowTrade and trendLong and pullbackLong and rsiLongOk and vwapLongOk
+shortSignal = allowTrade and trendShort and pullbackShort and rsiShortOk and vwapShortOk
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entries
+// ─────────────────────────────────────────────────────────────────────────────
+if (longSignal) and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, qty=qtyContracts)
+
+if (shortSignal) and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, qty=qtyContracts)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exits (ATR-based)
+// ─────────────────────────────────────────────────────────────────────────────
+longStop   = strategy.position_avg_price - atrVal * stopATR
+longTarget = strategy.position_avg_price + atrVal * targetATR
+
+shortStop   = strategy.position_avg_price + atrVal * stopATR
+shortTarget = strategy.position_avg_price - atrVal * targetATR
+
+// Optional trailing stop
+trailPts = atrVal * trailATR
+
+if strategy.position_size > 0
+    if useTrail
+        strategy.exit("L-Exit", from_entry="Long", limit=longTarget, trail_points=trailPts)
+    else
+        strategy.exit("L-Exit", from_entry="Long", stop=longStop, limit=longTarget)
+
+if strategy.position_size < 0
+    if useTrail
+        strategy.exit("S-Exit", from_entry="Short", limit=shortTarget, trail_points=trailPts)
+    else
+        strategy.exit("S-Exit", from_entry="Short", stop=shortStop, limit=shortTarget)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Visuals
+// ─────────────────────────────────────────────────────────────────────────────
+plot(emaTrend, "EMA Trend", linewidth=2)
+plot(emaFast,  "EMA Fast", linewidth=1)
+plot(useVWAP ? vwapVal : na, "VWAP", linewidth=1)
+
+plotshape(longSignal,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, text="L")
+plotshape(shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar, size=size.tiny, text="S")
+
+View in Pine Editor・113 lines
+Use on chart
+2
+4
+677
+NQ Scalper (EMA Trend + Pullback Reclaim) [v5] is a fast intraday strategy built for 1–5 minute charts. It trades pullbacks in the direction of trend using a 100 EMA trend filter and a fast EMA reclaim trigger. RSI confirmation helps filter weak setups, and an optional VWAP filter can further align entries with intraday bias.
+
+The strategy uses ATR-based stop loss and take profit, with an optional trailing stop. Designed primarily for NQ/MNQ scalping during regular market hours. Best used for backtesting, optimization, and forward testing with proper risk management.

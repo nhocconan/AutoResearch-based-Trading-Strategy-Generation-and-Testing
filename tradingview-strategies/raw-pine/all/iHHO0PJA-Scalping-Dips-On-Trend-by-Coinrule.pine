@@ -1,0 +1,79 @@
+//@version=3
+strategy(shorttitle='Scalping Dips On Trend',title='Scalping Dips On Trend (by Coinrule)', overlay=true, initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_value = 30, commission_type=strategy.commission.percent, commission_value=0.1)
+
+//Backtest dates
+fromMonth = input(defval = 1,  title = "From Month")     
+fromDay   = input(defval = 10,    title = "From Day")       
+fromYear  = input(defval = 2020, title = "From Year")       
+thruMonth = input(defval = 1,    title = "Thru Month")     
+thruDay   = input(defval = 1,    title = "Thru Day")     
+thruYear  = input(defval = 2112, title = "Thru Year")       
+
+showDate  = input(defval = true, title = "Show Date Range")
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+
+inp_lkb = input(1, title='Lookback Period')
+ 
+perc_change(lkb) =>
+    overall_change = ((close[0] - close[lkb]) / close[lkb]) * 100
+
+// Call the function    
+overall = perc_change(inp_lkb)
+
+//MA inputs and calculations
+MA=input(50, title='Moving Average')
+
+MAsignal = sma(close, MA)
+
+//Entry
+
+dip= -(input(2))
+
+strategy.entry(id="long", long = true, when = overall< dip and MAsignal > close and window()) 
+
+//Exit
+Stop_loss= ((input (10))/100)
+Take_profit= ((input (3))/100)
+
+longStopPrice  = strategy.position_avg_price * (1 - Stop_loss)
+longTakeProfit = strategy.position_avg_price * (1 + Take_profit)
+
+strategy.close("long", when = close < longStopPrice or close > longTakeProfit and window())
+
+View in Pine Editor・47 lines
+Use on chart
+6
+6
+6
+4
+28 436
+Coinrule's Community is an excellent source of inspiration for our trading strategies.
+
+In these months of Bull Market, our traders opted mostly on buy-the-dips strategies, which resulted in great returns recently. But there has been an element that turned out to be the cause for deep division among the Community.
+
+Is it advisable or not to use a stop-loss during a Bull Market?
+
+This strategy comes with a large stop-loss to offer a safer alternative for those that are not used to trade with a downside protection.
+
+Entry
+
+The strategy buys only when the price is above the Moving Average 50, making it less risky to buy the dip, which is set to 2%.
+
+The preferred time frame is 1-hour.
+
+The stop-loss is set to be quite loose to increase the chances of closing the trade in profit, yet protecting from unexpected larger drawdowns that could undermine the allocation's liquidity.
+
+Exit
+
+Stop loss: 10%
+Take Profit: 3%
+
+In times of Bull Market, such a trading system has a very high percentage of trades closed in profit (ranging between 70% to 80%), which makes it still overall profitable to have a stop-loss three times larger than the take profit.
+
+Pro tip: use a larger stop-loss only when you expect to close in profit most of the trades!
+
+
+The strategy assumes each order to trade 30% of the available capital and opens a trade at a time. A trading fee of 0.1% is taken into account.

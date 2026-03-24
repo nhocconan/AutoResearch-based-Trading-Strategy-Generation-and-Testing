@@ -1,0 +1,96 @@
+//@version=4
+strategy("Donchian Channel Strategy Idea",
+         shorttitle="Donchian", 
+         overlay=true,
+         pyramiding=0,     
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=100, 
+         initial_capital=1000,           
+         commission_type=strategy.commission.percent, 
+         commission_value=0.075)
+
+// ____ Inputs
+
+high_period = input(title="High Period", defval=10) 
+low_period = input(title="Low Period", defval=10)
+long_only = input(title="Long Only", defval=false)
+slp = input(title="Stop-loss (%)", minval=1.0, maxval=25.0, defval=5.0)
+use_sl = input(title="Use Stop-Loss", defval=false)
+
+// ____ Logic
+
+highest_high = highest(high, high_period)
+lowest_low = lowest(low, low_period)
+base_line = (highest_high + lowest_low) / 2
+    
+enter_long = (close > highest_high[1])
+exit_long = (close < base_line)
+enter_short = (close < lowest_low[1])
+exit_short = (close > base_line)
+
+strategy.entry("Long", strategy.long, when=enter_long)
+strategy.close("Long", when=exit_long) 
+if (not long_only)
+    strategy.entry("Short", strategy.short, when=enter_short)
+    strategy.close("Short", when=exit_short) 
+   
+// ____ SL
+
+sl_long = strategy.position_avg_price * (1- (slp/100))
+sl_short = strategy.position_avg_price * (1 + (slp/100))
+if (use_sl)
+    strategy.exit(id="SL", from_entry="Long", stop=sl_long)
+    strategy.exit(id="SL", from_entry="Short", stop=sl_short)
+    
+// ____ Plots
+
+colors = 
+ strategy.position_size > 0 ? #27D600 :
+ strategy.position_size < 0 ? #E30202 :
+ color.orange
+
+highest_high_plot = plot(highest_high, color=colors)
+lowest_low_plot = plot(lowest_low, color=colors)
+plot(base_line, color=color.silver)
+fill(highest_high_plot, lowest_low_plot, color=colors, transp=90)
+
+View in Pine Editor・58 lines
+Use on chart
+2
+6
+5
+3
+8 189
+This strategy idea is a variation of the "Donchian Channel" trading strategy. It is built with a highest-high band, a lowest-low band, and a baseline which is average the highest-high and the lowest-low bands. This strategy is very useful in trending instruments on 1W and 1D timeframes. This is the implementation used in the QuantCT app.
+
+You can set the operation mode to be Long/Short or long-only.
+You also can set a fixed stop-loss or ignore it so that the strategy acts solely based on entry and exit signals.
+
+Trade Idea
+
+When the close price breaks up the previous highest-high, it is a long signal, the market is considered rising (bullish), and the plotted indicator becomes green. Long positions are held until the close price crosses under the baseline.
+
+When the close price breaks down the previous lowest-low, it is a short signal, the market is considered falling (bearish), and the plotted indicator becomes red. Short positions are held until the close price crosses above the baseline.
+
+Otherwise, if we have no position in the market, the market is considered ranging, and the plotted indicator becomes orange.
+
+
+
+Entry/Exit rules
+
+Enter LONG if the close price breaks up the previous highest-high (i.e. when the plotted indicator becomes green).
+
+Exit LONG if the close price crosses under the baseline (i.e. when the plotted indicator becomes orange).
+
+Enter SHORT if the close price breaks down the previous lowest-low (i.e. when the plotted indicator becomes red).
+
+Exit SHORT if the close price crosses above the baseline (i.e. when the plotted indicator becomes orange).
+
+
+
+CAUTION
+
+It's just a bare trading idea - a profitable one. However, you can enhance this idea and turn it into a full trading strategy with enhanced risk/money management and optimizing it, and you ABSOLUTELY should do this!
+
+DON'T insist on using Long/Short mode on all instruments! This strategy performs much better in Long-Only mode on many (NOT All) trending instruments (Like BTC, ETH, etc.).
+

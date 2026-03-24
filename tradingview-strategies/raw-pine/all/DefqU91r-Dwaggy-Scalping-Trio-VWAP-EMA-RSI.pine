@@ -1,0 +1,58 @@
+//@version=6
+strategy("Scalping Trio (VWAP + EMA + RSI) with Backtest - Fixed plotshape", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ---------- INPUTS ----------
+emaFastLen   = input.int(9, "Fast EMA Length")
+emaSlowLen   = input.int(21, "Slow EMA Length")
+rsiLen       = input.int(7, "RSI Length")
+rsiOB        = input.int(80, "RSI Overbought")
+rsiOS        = input.int(20, "RSI Oversold")
+takeProfitPc = input.float(0.3, "Take Profit (%)", step=0.1)
+stopLossPc   = input.float(0.2, "Stop Loss (%)", step=0.1)
+showSignals  = input.bool(true, "Show Buy/Sell Labels")
+
+// ---------- CALCULATIONS ----------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+vwapValue = ta.vwap(hlc3)
+rsi = ta.rsi(close, rsiLen)
+
+// ---------- CONDITIONS ----------
+bullTrend   = emaFast > emaSlow and close > vwapValue
+bearTrend   = emaFast < emaSlow and close < vwapValue
+longSignal  = bullTrend and rsi < rsiOS
+shortSignal = bearTrend and rsi > rsiOB
+
+// ---------- EXIT TICKS (integers required) ----------
+longTPticks  = int(math.round((takeProfitPc / 100.0) * close / syminfo.mintick))
+longSLticks  = int(math.round((stopLossPc   / 100.0) * close / syminfo.mintick))
+shortTPticks = longTPticks
+shortSLticks = longSLticks
+
+// ---------- STRATEGY EXECUTION ----------
+if (longSignal)
+    strategy.entry("Long", strategy.long)
+
+if (shortSignal)
+    strategy.entry("Short", strategy.short)
+
+// Exits must be called in global scope (they'll apply when the corresponding entry is open)
+strategy.exit(id="Long TP/SL", from_entry="Long", profit=longTPticks, loss=longSLticks)
+strategy.exit(id="Short TP/SL", from_entry="Short", profit=shortTPticks, loss=shortSLticks)
+
+// ---------- PLOTTING ----------
+fastPlot = plot(emaFast, title="EMA Fast", color=color.new(color.green,0))
+slowPlot = plot(emaSlow, title="EMA Slow", color=color.new(color.red,0))
+fill(fastPlot, slowPlot, color = emaFast > emaSlow ? color.new(color.green, 80) : color.new(color.red, 80))
+plot(vwapValue, title="VWAP", linewidth=2, color=color.new(color.yellow,0))
+
+// plotshape must be in global scope — use 'series' to control when it's drawn
+plotshape(series = showSignals and longSignal,  title="Buy",  style=shape.labelup,   location=location.belowbar, color=color.green,  text="BUY",  size=size.small)
+plotshape(series = showSignals and shortSignal, title="Sell", style=shape.labeldown, location=location.abovebar, color=color.red,    text="SELL", size=size.small)
+
+View in Pine Editor・51 lines
+Use on chart
+3
+1
+1 538
+First attempt at pine script this is a scalping indicator that combines VWAP, EMA, and RSI to signal entry/exit for scalping lower time frames

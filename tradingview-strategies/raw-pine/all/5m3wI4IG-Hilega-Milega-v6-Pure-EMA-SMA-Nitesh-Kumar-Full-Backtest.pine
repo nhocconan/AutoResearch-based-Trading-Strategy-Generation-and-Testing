@@ -1,0 +1,241 @@
+//@version=6
+strategy("Hilega Milega v6 - Pure EMA/SMA (Nitesh Kumar) + Full Backtest",
+     overlay=true, initial_capital=100000,
+     commission_type=strategy.commission.percent, commission_value=0.05,
+     pyramiding=0, calc_on_order_fills=true, calc_on_every_tick=false,
+     max_labels_count=200, max_boxes_count=0)
+
+// ============================
+// Backtest Controls
+// ============================
+string G_BT = "Backtest"
+bool   useDateRange = input.bool(false, "Use Date Range (OFF = all history)", group=G_BT)
+int    bt_from      = input.time(timestamp("2022-01-01T00:00:00"), "From", group=G_BT)
+int    bt_to        = input.time(timestamp("2099-12-31T23:59:59"),  "To",   group=G_BT)
+string sess         = input.session("0000-2359:1234567", "Session (Exchange Time)", group=G_BT)
+bool   mon          = input.bool(true,  "Mon", group=G_BT)
+bool   tue          = input.bool(true,  "Tue", group=G_BT)
+bool   wed          = input.bool(true,  "Wed", group=G_BT)
+bool   thu          = input.bool(true,  "Thu", group=G_BT)
+bool   fri          = input.bool(true,  "Fri", group=G_BT)
+bool   sat          = input.bool(true,  "Sat", group=G_BT)
+bool   sun          = input.bool(true,  "Sun", group=G_BT)
+int    cooldownBars = input.int(3, "Cooldown bars after flat", 0, 500, group=G_BT)
+int    timeExitBars = input.int(0, "Time-based exit (0 = off)", 0, 5000, group=G_BT)
+bool   allowLongs   = input.bool(true,  "Allow Longs", group=G_BT)
+bool   allowShorts  = input.bool(true,  "Allow Shorts", group=G_BT)
+
+// ============================
+// Hilega Milega Inputs
+// ============================
+string G_HM = "Hilega Milega Filters (Side Rules)"
+bool needSMA20  = input.bool(true,  "Long above SMA20 / Short below SMA20", group=G_HM)
+bool needSMA50  = input.bool(true,  "Long above SMA50 / Short below SMA50", group=G_HM)
+bool needSMA200 = input.bool(false, "Long above SMA200 / Short below SMA200", group=G_HM)
+bool useSlope200= input.bool(false, "200 SMA slope filter (up for long / down for short)", group=G_HM)
+int  slopeLook  = input.int(5, "Slope lookback (bars)", 1, 200, group=G_HM)
+
+// ============================
+// Risk / Targets
+// ============================
+string G_RM = "Risk / Targets"
+string stopMode = input.string("EMA20", "Stop Type", options=["EMA20","ATR","Percent","Swing"], group=G_RM)
+int    atrLen   = input.int(14, "ATR Length (for ATR/Swing calc)", 1, 200, group=G_RM)
+float  atrMult  = input.float(2.0, "ATR Stop Mult (if Stop=ATR)", 0.1, 10, group=G_RM)
+float  pctSL    = input.float(1.5, "Percent Stop % (if Stop=Percent)", 0.1, 50, group=G_RM)
+int    swingLen = input.int(10, "Swing lookback (if Stop=Swing)", 1, 200, group=G_RM)
+float  rrTarget = input.float(1.5, "Take Profit at R (x Risk)", 0.5, 20, group=G_RM)
+bool   riskPctMode = input.bool(true, "Position size by Risk % of equity", group=G_RM)
+float  riskPct     = input.float(1.0, "Risk %", 0.05, 20, group=G_RM)
+float  fixedQty    = input.float(1, "Fixed Qty (if Risk% OFF)", 0.0001, 1e9, group=G_RM)
+
+// ============================
+// Guards
+// ============================
+bool inDate = not useDateRange or (time >= bt_from and time <= bt_to)
+bool inSess = not na(time(timeframe.period, sess))
+bool inDOW  = (dayofweek == dayofweek.monday   and mon) or
+              (dayofweek == dayofweek.tuesday  and tue) or
+              (dayofweek == dayofweek.wednesday and wed) or
+              (dayofweek == dayofweek.thursday and thu) or
+              (dayofweek == dayofweek.friday   and fri) or
+              (dayofweek == dayofweek.saturday and sat) or
+              (dayofweek == dayofweek.sunday   and sun)
+bool canCalc = inDate and inSess and inDOW
+
+// ============================
+// Indicators (Pure HM stack)
+// ============================
+float ema1   = ta.ema(close, 1)
+float ema5   = ta.ema(close, 5)
+float ema10  = ta.ema(close, 10)
+float ema20  = ta.ema(close, 20)
+float sma20  = ta.sma(close, 20)
+float sma50  = ta.sma(close, 50)
+float sma200 = ta.sma(close, 200)
+float atrVal = ta.atr(atrLen)
+
+// Visuals
+plot(ema1,  "EMA 1",  linewidth=1)
+plot(ema5,  "EMA 5",  linewidth=1)
+plot(ema10, "EMA 10", linewidth=1)
+plot(ema20, "EMA 20", linewidth=2)
+plot(sma20, "SMA 20", linewidth=2)
+plot(sma50, "SMA 50", linewidth=2)
+plot(sma200,"SMA 200",linewidth=3)
+
+// ============================
+// Hilega Milega Conditions
+// ============================
+bool emaBull = ema1 > ema5 and ema5 > ema10 and ema10 > ema20
+bool emaBear = ema1 < ema5 and ema5 < ema10 and ema10 < ema20
+
+bool sideLong  = (not needSMA20  or close > sma20)  and (not needSMA50 or close > sma50) and (not needSMA200 or close > sma200)
+bool sideShort = (not needSMA20  or close < sma20)  and (not needSMA50 or close < sma50) and (not needSMA200 or close < sma200)
+
+bool slopeUp   = not useSlope200 or sma200 > sma200[slopeLook]
+bool slopeDown = not useSlope200 or sma200 < sma200[slopeLook]
+
+// Entry triggers (classic HM: EMA5/EMA10 cross)
+bool trigLong  = ta.crossover(ema5, ema10)
+bool trigShort = ta.crossunder(ema5, ema10)
+
+bool setupLong  = emaBull and sideLong and slopeUp
+bool setupShort = emaBear and sideShort and slopeDown
+
+// ============================
+// Cooldown & Signals
+// ============================
+var int barsSinceFlat = 1000000000
+barsSinceFlat += 1
+bool posChanged = strategy.position_size != nz(strategy.position_size[1], 0)
+bool flatNow    = posChanged and strategy.position_size == 0
+if flatNow
+    barsSinceFlat := 0
+bool coolOK = barsSinceFlat >= cooldownBars
+
+bool longSignal  = canCalc and allowLongs  and setupLong  and trigLong  and coolOK
+bool shortSignal = canCalc and allowShorts and setupShort and trigShort and coolOK
+
+plotshape(longSignal,  title="BUY",  style=shape.triangleup,   size=size.tiny, location=location.belowbar, text="Buy")
+plotshape(shortSignal, title="SELL", style=shape.triangledown, size=size.tiny, location=location.abovebar, text="Sell")
+
+// ============================
+// Position Sizing & Orders
+// ============================
+var float entrySLlong  = na
+var float entrySLshort = na
+
+// Compute dynamic stops with simple if/else
+float slLongByMode = na
+if stopMode == "EMA20"
+    slLongByMode := ema20
+else if stopMode == "ATR"
+    slLongByMode := close - atrMult * atrVal
+else if stopMode == "Percent"
+    slLongByMode := close * (1 - pctSL/100.0)
+else
+    slLongByMode := ta.lowest(low, swingLen)
+
+float slShortByMode = na
+if stopMode == "EMA20"
+    slShortByMode := ema20
+else if stopMode == "ATR"
+    slShortByMode := close + atrMult * atrVal
+else if stopMode == "Percent"
+    slShortByMode := close * (1 + pctSL/100.0)
+else
+    slShortByMode := ta.highest(high, swingLen)
+
+// Entries
+if longSignal and strategy.position_size <= 0
+    float riskPerUnit = math.max(close - slLongByMode, syminfo.mintick)
+    float qty = riskPctMode ? (strategy.equity * (riskPct/100.0) / riskPerUnit) : fixedQty
+    entrySLlong := slLongByMode
+    strategy.entry("Long", strategy.long, qty=qty)
+
+if shortSignal and strategy.position_size >= 0
+    float riskPerUnitS = math.max(slShortByMode - close, syminfo.mintick)
+    float qtyS = riskPctMode ? (strategy.equity * (riskPct/100.0) / riskPerUnitS) : fixedQty
+    entrySLshort := slShortByMode
+    strategy.entry("Short", strategy.short, qty=qtyS)
+
+// Track entry bar index for time-based exits (no valuewhen)
+var int entryBarL = na
+var int entryBarS = na
+if posChanged
+    if strategy.position_size > 0 and strategy.position_size[1] == 0
+        entryBarL := bar_index
+        entryBarS := na
+    if strategy.position_size < 0 and strategy.position_size[1] == 0
+        entryBarS := bar_index
+        entryBarL := na
+
+// Exits (stop + RR limit) and optional time exit
+if strategy.position_size > 0
+    float ep    = strategy.position_avg_price
+    float rBase = math.max(ep - nz(entrySLlong, ep - atrVal), syminfo.mintick)
+    float tp    = ep + rrTarget * rBase
+    float st    = nz(entrySLlong, ep - atrVal)
+    strategy.exit("LX", from_entry="Long", stop=st, limit=tp)
+    if timeExitBars > 0 and not na(entryBarL) and (bar_index - entryBarL >= timeExitBars)
+        strategy.close("Long", comment="TimeExitL")
+
+if strategy.position_size < 0
+    float epS   = strategy.position_avg_price
+    float rBaseS= math.max(nz(entrySLshort, epS + atrVal) - epS, syminfo.mintick)
+    float tpS   = epS - rrTarget * rBaseS
+    float stS   = nz(entrySLshort, epS + atrVal)
+    strategy.exit("SX", from_entry="Short", stop=stS, limit=tpS)
+    if timeExitBars > 0 and not na(entryBarS) and (bar_index - entryBarS >= timeExitBars)
+        strategy.close("Short", comment="TimeExitS")
+
+// Reset snapshots when flat
+if strategy.position_size == 0
+    entrySLlong  := na
+    entrySLshort := na
+
+// ============================
+// Alerts
+// ============================
+alertcondition(longSignal,  title="HM Long",  message="Hilega Milega LONG: EMA1>5>10>20; 5 crossed above 10; side filters OK")
+alertcondition(shortSignal, title="HM Short", message="Hilega Milega SHORT: EMA1<5<10<20; 5 crossed below 10; side filters OK")
+
+View in Pine Editor・202 lines
+Use on chart
+3
+7
+1 650
+Hilega to milega
+
+he Hilega Milega Strategy, inspired by the technique of Nitesh Kumar, is designed for intraday and swing traders who want structured entries and exits with clear demand–supply logic.
+
+🔑 Core Features
+
+Demand & Supply Zones – Automatically plots potential strong buying and selling zones for high-probability trades.
+
+Trend Identification – Uses a blend of EMAs/SMA crossovers to identify bullish and bearish market bias.
+
+Buy & Sell Signals – Generates real-time visual signals based on “Hilega Milega” rules for quick decision-making.
+
+Risk Management – Suggested stop-loss levels are derived from recent demand–supply areas to minimize drawdowns.
+
+Backtesting Enabled – Traders can test the performance across multiple assets (stocks, forex, crypto, commodities).
+
+📊 How It Works
+
+Buy Signal → When price action confirms a bullish zone with supporting trend filters.
+
+Sell Signal → When price action confirms a bearish zone or reversal pattern.
+
+Flat/Exit → Position closed when opposite signal triggers or demand–supply imbalance fades.
+
+⚡ Best Use Cases
+
+Intraday trading (5m, 15m, 1H charts).
+
+Swing trading (4H, Daily charts).
+
+Works across stocks, crypto, commodities, and forex.
+
+⚠️ Disclaimer: This strategy is for educational purposes. Backtest thoroughly and apply proper risk management before live trading.

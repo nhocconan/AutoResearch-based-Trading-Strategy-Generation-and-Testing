@@ -1,0 +1,34 @@
+//@version=3
+strategy("Kozlod - MA Strategy - 1 minute - ETHUSD", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// Inputs
+length     = input(15)
+price      = input(close)
+
+// RSI
+ma = sma(price, length)
+
+plot(ma)
+
+if (crossover(close, ma))
+    strategy.entry("MaLong", strategy.long, comment="MaLong")
+if (crossunder(close, ma))
+    strategy.entry("MaShort", strategy.short, comment="MaLong")
+View in Pine Editor・16 lines
+Use on chart
+2
+1
+2
+2
+6 930
+May 30, 2019
+Interesting performance for simple MA strategy on 1m ETHUSD. I used only close price and 15 SMA in it.
+Performance is 55% over 10 days with a drawdown of only 3.5%.
+Percent profitable is only 30% with almost 2k trades.
+For sure this won't work as a standalone strategy, with 2k trades commission and slippage will destroy all your PNL but it can be a pretty good base for a more complicated strategy with good filters.
+
+And remember:
+Past performance does not guarantee future results.
+Oct 14, 2020
+Release Notes
+Cleaning the code

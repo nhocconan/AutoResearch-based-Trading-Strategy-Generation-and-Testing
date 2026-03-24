@@ -1,0 +1,9 @@
+//@version=5
+textColorH=##input(defval=#363A45,type='INPUT_COLOR',##id='in_2')
+labelColorH=##input(defval=#FFFFFF,type='INPUT_COLOR',##id='in_3')
+textColorL=##input(defval=#363A45,type='INPUT_COLOR',##id='in_6')
+labelColorL=##input(defval=#FFFFFF,type='INPUT_COLOR',##id='in_7')
+##root(root_metainfo,rm_ic_0,textColorH,input__color)
+##root(root_metainfo,rm_ic_1,labelColorH,input__color)
+##root(root_metainfo,rm_ic_2,textColorL,input__color)
+##root(root_metainfo,rm_ic_3,labelColorL,input__color)

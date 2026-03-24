@@ -1,0 +1,643 @@
+//@version=5
+strategy(title='Fibonacci + RSI - Strategy', overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, currency=currency.USD)
+
+// Inputs
+    // RSI Inputs
+len = input.int(title='[RSI] Length', minval=0, step=1, defval=14)
+overSold = input(title='[RSI] Over Sold %', defval=30)
+overBought = input(title='[RSI] Over Bought %', defval=60)
+    // Fibonacci Levels 
+length = input.int(title='[Fibonacci] Length', defval=60, minval=1)
+src = hlc3
+mult = input.float(title='[Fibonacci] Multiplier', defval=2.0, minval=0.001, maxval=50)
+level = input(title='[Fibonacci] Level', defval=500)
+adx_max = input.int(51,"ADX Max")
+
+var int longEntryBar  = na
+var int shortEntryBar = na
+
+// Calculate Fibonacci
+basis = ta.vwma(src, length)
+dev = mult * ta.stdev(src, length)
+targetDown = basis + 0.001 * level * dev
+fu1 = basis + 1 * dev
+targetUp = basis - 0.001 * level * dev
+fd1 = basis - 1 * dev
+
+// Calculate RSI
+vrsi = ta.rsi(close, len)
+
+    // Actual Targets
+bought = strategy.position_size[0] > strategy.position_size[1]
+exit_long = ta.valuewhen(bought, targetUp, 0)
+sold = strategy.position_size[0] < strategy.position_size[1]
+exit_short = ta.valuewhen(sold, targetDown, 0)
+
+
+
+
+// Conditions to Open Trades
+openLong = low < fd1 and ta.crossover(vrsi[1], overSold)
+openShort = high > fu1 and ta.crossunder(vrsi[1], overBought)
+
+[a,b,adx_htf ] = request.security(syminfo.tickerid,"60", ta.dmi(14,14), barmerge.gaps_off, barmerge.lookahead_off)
+
+adx_ok = adx_htf < adx_max
+
+// === Time Filter Inputs ===
+use_time_filter  = input.bool(true,  "Use Time Filter (UTC)")
+start_hour       = input.int(16, "Start Hour", minval=0, maxval=23)
+end_hour         = input.int(22, "End Hour", minval=0, maxval=23)
+
+use_lunch_filter = input.bool(false,  "Avoid Lunch Chop")
+lunch_start      = input.int(19, "Lunch Start", minval=0, maxval=23)
+lunch_end        = input.int(20, "Lunch End", minval=0, maxval=23)
+
+// === Current Hour (Exchange Time) ===
+h =   hour(time, "UTC")
+
+// === Time Conditions ===
+in_main_session  = h >= start_hour and h < end_hour
+in_lunch         = h >= lunch_start and h < lunch_end
+
+time_ok = not use_time_filter or (in_main_session and (not use_lunch_filter or not in_lunch))
+
+
+openLong := openLong and adx_ok 
+openShort := openShort and adx_ok 
+
+
+// Conditions to Close Trades
+closeLong = high > exit_long
+closeShort = low < exit_short
+
+
+// Plots
+plot(basis, color=color.new(color.blue, 0), linewidth=2, title='[Fibonacci Level] Basis')
+plot(fu1, color=color.new(color.red, 0), linewidth=2, title='1', title='[Fibonacci Level] Top')
+plot(fd1, color=color.new(color.green, 0), linewidth=2, title='1', title='[Fibonacci Level] Bottom')
+plot(targetUp, color=color.new(color.gray, 0), linewidth=2, title='1', title='[Fibonacci Level] Top')
+
+
+// Strategy Orders
+
+// Entry Orders
+strategy.entry(id='Long', direction=strategy.long, when=openLong and high < targetUp and time_ok, limit=close)
+strategy.entry(id='Short', direction=strategy.short, when=openShort and low > targetDown and time_ok, limit=close)
+
+
+
+if closeLong and strategy.position_size > 0
+    strategy.close("Long")
+
+if closeShort and strategy.position_size < 0
+    strategy.close("Short")
+
+// === ATR Inputs ===
+atr_len = input.int(14, title='[ATR] Length')
+atr_sl_mult = input.float(3.0, title='[ATR] SL Multiplier', step=0.1)
+atr_tp_mult = input.float(3.0, title='[ATR] TP Multiplier', step=0.1)
+
+atr = ta.atr(atr_len)
+
+// === ATR based SL / TP ===
+sl_long  = strategy.position_avg_price - atr * atr_sl_mult
+tp_long  = strategy.position_avg_price + atr * atr_tp_mult
+
+sl_short = strategy.position_avg_price + atr * atr_sl_mult
+tp_short = strategy.position_avg_price - atr * atr_tp_mult
+
+strategy.exit(id="ATR_Long", from_entry="Long",stop=sl_long, limit=tp_long)
+
+strategy.exit(id="ATR_Short",from_entry="Short",stop=sl_short, limit=tp_short)
+
+pip = syminfo.mintick * 10
+
+rsi_val = ""
+if len != 14
+    rsi_val := "_" + str.tostring(len) 
+alarm_id = syminfo.prefix + ""+ syminfo.ticker + "_" + str.tostring(timeframe.period) + "_" + str.tostring(overSold) + "_" + str.tostring(overBought) + "_" + str.tostring(length) + "_" + str.tostring(mult) + "_"  + str.tostring(level) + "_"  + str.tostring(adx_max) + "_"  + str.tostring(atr_sl_mult) + "_"  + str.tostring(atr_tp_mult) + rsi_val
+
+
+if openLong and high < targetUp
+    sl_pips_long = atr * atr_sl_mult / pip
+    tp_pips_long = atr * atr_tp_mult / pip
+    sl_pips = math.round(sl_pips_long * 10) / 10
+    tp_pips = math.round(tp_pips_long * 10) / 10
+    label.new(bar_index, high, str.tostring(h),style = label.style_label_down)
+
+    alert('{"signal":"BUY", "strategy": "FIB" ,"symbol":"' + syminfo.ticker + '","broker":"' + syminfo.prefix  + '","tp":' + str.tostring(tp_pips_long) + ',"sl":' + str.tostring(sl_pips) +  ',"period":' + str.tostring(timeframe.period) + ',"sl_diff":' + str.tostring(0) + ',"tp_diff":' + str.tostring(0) + ',"factor":' + str.tostring(1) + ',"atr":' + str.tostring(1) + ',"dataset":"No", "alarm_id":"' + alarm_id + '"}', alert.freq_once_per_bar_close)
+
+if openShort and low > targetDown
+    sl_pips_short = atr * atr_sl_mult / pip
+    tp_pips_short = atr * atr_tp_mult / pip
+    sl_pips = math.round(sl_pips_short * 10) / 10
+    tp_pips = math.round(tp_pips_short * 10) / 10
+    alert('{"signal":"SELL","strategy": "FIB" ,"symbol":"' + syminfo.ticker + '","broker":"' + syminfo.prefix  + '","tp":' + str.tostring(tp_pips_short) + ',"sl":' + str.tostring(sl_pips) +  ',"period":' + str.tostring(timeframe.period) + ',"sl_diff":' + str.tostring(0) + ',"tp_diff":' + str.tostring(0) + ',"factor":' + str.tostring(1) + ',"atr":' + str.tostring(1) + ',"dataset":"No", "alarm_id":' + alarm_id + '"}', alert.freq_once_per_bar_close)
+
+
+if strategy.position_size > 0 and closeLong
+    alert('{"signal":"EXIT","strategy": "FIB" ,"symbol":"' + syminfo.ticker + '","broker":"' + syminfo.prefix  + '","tp":' + str.tostring(0) + ',"sl":' + str.tostring(0) +  ',"period":' + str.tostring(timeframe.period) + ',"sl_diff":' + str.tostring(0) + ',"tp_diff":' + str.tostring(0) + ',"factor":' + str.tostring(1) + ',"atr":' + str.tostring(1) + ',"dataset":"No", "alarm_id":"' + alarm_id + '"}', alert.freq_once_per_bar_close)
+
+if strategy.position_size < 0 and closeShort
+    alert('{"signal":"EXIT","strategy": "FIB" ,"symbol":"' + syminfo.ticker + '","broker":"' + syminfo.prefix  + '","tp":' + str.tostring(0) + ',"sl":' + str.tostring(0) +  ',"period":' + str.tostring(timeframe.period) + ',"sl_diff":' + str.tostring(0) + ',"tp_diff":' + str.tostring(0) + ',"factor":' + str.tostring(1) + ',"atr":' + str.tostring(1) + ',"dataset":"No", "alarm_id":"' + alarm_id + '"}', alert.freq_once_per_bar_close)
+
+
+newLong  = strategy.position_size > 0 and strategy.position_size[1] == 0
+newShort = strategy.position_size < 0 and strategy.position_size[1] == 0
+if newLong
+    line.new(x1 = bar_index, y1 = sl_long,x2 = bar_index + 10,y2 = sl_long,color = color.red,width = 2,style = line.style_solid )
+    line.new(x1 = bar_index, y1 = targetUp,x2 = bar_index + 10,y2 = targetUp,color = color.green,width = 2,style = line.style_solid )
+if newShort
+    line.new(x1 = bar_index, y1 = targetDown,x2 = bar_index + 10,y2 = targetDown,color = color.green,width = 2,style = line.style_solid )
+    line.new(x1 = bar_index,y1 = sl_short, x2 = bar_index + 10,y2 = sl_short,color = color.red,width = 2,style = line.style_solid )
+
+if newLong
+    longEntryBar := bar_index
+
+if newShort
+    shortEntryBar := bar_index
+
+View in Pine Editor・166 lines
+Use on chart
+3
+5
+921
+Jan 10
+Overview
+
+This is an intraday mean-reversion strategy designed for short timeframes (1–30 minutes).
+It combines volatility-based Fibonacci bands with RSI momentum signals to identify temporary price extremes and trade pullbacks back toward fair value.
+
+The strategy trades both long and short, uses limit entries, a manual exit logic, and a hard stop-loss as risk protection.
+
+Market Context
+
+The strategy assumes that, on intraday timeframes:
+
+price frequently deviates from its short-term fair value,
+
+extreme deviations tend to revert,
+
+momentum (RSI) can confirm exhaustion.
+
+It is not a trend-following system.
+Trades are taken against short-term extremes, not in the direction of breakouts.
+
+Indicators Used
+1. Fibonacci Volatility Bands
+
+The bands are calculated using:
+
+VWMA (Volume Weighted Moving Average) as the central price,
+
+Standard Deviation as a volatility measure,
+
+a multiplier to create upper and lower bands.
+
+Key levels:
+
+Upper Band (fu1) – overextended price zone
+
+Lower Band (fd1) – oversold price zone
+
+Intermediate targets (fu764 / fd764) – mean-reversion profit targets
+
+These bands behave similarly to dynamic volatility channels.
+
+2. RSI (Relative Strength Index)
+
+RSI length: typically 14
+
+Oversold level: 30
+
+Overbought level: 70
+
+The strategy uses RSI crossovers to confirm momentum reversal:
+
+crossing up from oversold → potential long
+
+crossing down from overbought → potential short
+
+Entry Rules
+Long Entry
+
+A long position is considered when:
+
+Price trades below the lower Fibonacci band (fd1)
+
+RSI crosses upward from the oversold level
+
+Price is still below the predefined upside target
+
+The trade is entered using a limit order at the candle close.
+
+Short Entry
+
+A short position is considered when:
+
+Price trades above the upper Fibonacci band (fu1)
+
+RSI crosses downward from the overbought level
+
+Price is still above the predefined downside target
+
+The trade is entered using a limit order at the candle close.
+
+Exit Rules
+Manual Exit (Primary Exit)
+
+Positions are closed manually when price reaches predefined Fibonacci target levels:
+
+Long: price moves back up into the target zone
+
+Short: price moves back down into the target zone
+
+This exit represents the mean-reversion objective of the strategy.
+
+Stop-Loss (Risk Protection)
+
+A hard stop-loss is always active to protect against adverse moves.
+
+Long stop: below entry price
+
+Short stop: above entry price
+
+The stop is calculated as a fixed percentage (or ATR-based in later versions) from the entry price.
+
+The stop-loss is not the primary exit, but a safety mechanism.
+
+Order Management Philosophy
+
+Limit entries are used to avoid market slippage.
+
+Manual exits control trade logic.
+
+Stop-loss exits control risk only.
+
+Only one position per direction is managed at a time.
+
+Alerts are generated at signal or entry time for automation or monitoring.
+
+Risk & Characteristics
+
+Designed for frequent, small trades
+
+Low average drawdown per trade
+
+Performance depends heavily on:
+
+volatility regime
+
+correct stop sizing
+
+disciplined risk management
+
+Without proper position sizing, the strategy must not be traded live.
+
+Suitable Markets
+
+Forex pairs
+
+Indices
+
+Liquid crypto pairs
+
+Best performance is expected in ranging or mildly trending markets.
+
+Summary
+
+This strategy attempts to exploit short-term price overextensions by combining volatility bands with momentum confirmation.
+It relies on mean reversion, controlled risk, and disciplined execution rather than large directional moves.
+Jan 13
+Release Notes
+Strategy Description
+
+Name: Fibonacci + RSI Intraday Strategy
+
+Overview
+
+This is an intraday mean-reversion strategy designed for short timeframes (1–30 minutes).
+It combines volatility-based Fibonacci bands with RSI momentum signals to identify temporary price extremes and trade pullbacks back toward fair value.
+
+The strategy trades both long and short, uses limit entries, a manual exit logic, and a hard stop-loss as risk protection.
+
+Market Context
+
+The strategy assumes that, on intraday timeframes:
+
+price frequently deviates from its short-term fair value,
+
+extreme deviations tend to revert,
+
+momentum (RSI) can confirm exhaustion.
+
+It is not a trend-following system.
+Trades are taken against short-term extremes, not in the direction of breakouts.
+
+Indicators Used
+1. Fibonacci Volatility Bands
+
+The bands are calculated using:
+
+VWMA (Volume Weighted Moving Average) as the central price,
+
+Standard Deviation as a volatility measure,
+
+a multiplier to create upper and lower bands.
+
+Key levels:
+
+Upper Band (fu1) – overextended price zone
+
+Lower Band (fd1) – oversold price zone
+
+Intermediate targets (fu764 / fd764) – mean-reversion profit targets
+
+These bands behave similarly to dynamic volatility channels.
+
+2. RSI (Relative Strength Index)
+
+RSI length: typically 14
+
+Oversold level: 30
+
+Overbought level: 70
+
+The strategy uses RSI crossovers to confirm momentum reversal:
+
+crossing up from oversold → potential long
+
+crossing down from overbought → potential short
+
+Entry Rules
+Long Entry
+
+A long position is considered when:
+
+Price trades below the lower Fibonacci band (fd1)
+
+RSI crosses upward from the oversold level
+
+Price is still below the predefined upside target
+
+The trade is entered using a limit order at the candle close.
+
+Short Entry
+
+A short position is considered when:
+
+Price trades above the upper Fibonacci band (fu1)
+
+RSI crosses downward from the overbought level
+
+Price is still above the predefined downside target
+
+The trade is entered using a limit order at the candle close.
+
+Exit Rules
+Manual Exit (Primary Exit)
+
+Positions are closed manually when price reaches predefined Fibonacci target levels:
+
+Long: price moves back up into the target zone
+
+Short: price moves back down into the target zone
+
+This exit represents the mean-reversion objective of the strategy.
+
+Stop-Loss (Risk Protection)
+
+A hard stop-loss is always active to protect against adverse moves.
+
+Long stop: below entry price
+
+Short stop: above entry price
+
+The stop is calculated as a fixed percentage (or ATR-based in later versions) from the entry price.
+
+The stop-loss is not the primary exit, but a safety mechanism.
+
+Order Management Philosophy
+
+Limit entries are used to avoid market slippage.
+
+Manual exits control trade logic.
+
+Stop-loss exits control risk only.
+
+Only one position per direction is managed at a time.
+
+Alerts are generated at signal or entry time for automation or monitoring.
+Jan 13
+Release Notes
+Strategy Description
+
+Name: Fibonacci + RSI Intraday Strategy
+
+Overview
+
+This is an intraday mean-reversion strategy designed for short timeframes (1–30 minutes).
+It combines volatility-based Fibonacci bands with RSI momentum signals to identify temporary price extremes and trade pullbacks back toward fair value.
+
+The strategy trades both long and short, uses limit entries, a manual exit logic, and a hard stop-loss as risk protection.
+
+Market Context
+
+The strategy assumes that, on intraday timeframes:
+
+price frequently deviates from its short-term fair value,
+
+extreme deviations tend to revert,
+
+momentum (RSI) can confirm exhaustion.
+
+It is not a trend-following system.
+Trades are taken against short-term extremes, not in the direction of breakouts.
+
+Indicators Used
+1. Fibonacci Volatility Bands
+
+The bands are calculated using:
+
+VWMA (Volume Weighted Moving Average) as the central price,
+
+Standard Deviation as a volatility measure,
+
+a multiplier to create upper and lower bands.
+
+Key levels:
+
+Upper Band (fu1) – overextended price zone
+
+Lower Band (fd1) – oversold price zone
+
+Intermediate targets (fu764 / fd764) – mean-reversion profit targets
+
+These bands behave similarly to dynamic volatility channels.
+
+2. RSI (Relative Strength Index)
+
+RSI length: typically 14
+
+Oversold level: 30
+
+Overbought level: 70
+
+The strategy uses RSI crossovers to confirm momentum reversal:
+
+crossing up from oversold → potential long
+
+crossing down from overbought → potential short
+
+Entry Rules
+Long Entry
+
+A long position is considered when:
+
+Price trades below the lower Fibonacci band (fd1)
+
+RSI crosses upward from the oversold level
+
+Price is still below the predefined upside target
+
+The trade is entered using a limit order at the candle close.
+
+Short Entry
+
+A short position is considered when:
+
+Price trades above the upper Fibonacci band (fu1)
+
+RSI crosses downward from the overbought level
+
+Price is still above the predefined downside target
+
+The trade is entered using a limit order at the candle close.
+
+Exit Rules
+Manual Exit (Primary Exit)
+
+Positions are closed manually when price reaches predefined Fibonacci target levels:
+
+Long: price moves back up into the target zone
+
+Short: price moves back down into the target zone
+
+This exit represents the mean-reversion objective of the strategy.
+
+Stop-Loss (Risk Protection)
+
+A hard stop-loss is always active to protect against adverse moves.
+
+Long stop: below entry price
+
+Short stop: above entry price
+
+The stop is calculated as a fixed percentage (or ATR-based in later versions) from the entry price.
+
+The stop-loss is not the primary exit, but a safety mechanism.
+
+Order Management Philosophy
+
+Limit entries are used to avoid market slippage.
+
+Manual exits control trade logic.
+
+Stop-loss exits control risk only.
+
+Only one position per direction is managed at a time.
+
+Alerts are generated at signal or entry time for automation or monitoring.
+
+Risk & Characteristics
+
+Designed for frequent, small trades
+
+Low average drawdown per trade
+
+Performance depends heavily on:
+
+volatility regime
+
+correct stop sizing
+
+disciplined risk management
+
+Without proper position sizing, the strategy must not be traded live.
+
+Suitable Markets
+
+Forex pairs
+
+Indices
+
+Liquid crypto pairs
+
+Best performance is expected in ranging or mildly trending markets.
+
+Summary
+
+This strategy attempts to exploit short-term price overextensions by combining volatility bands with momentum confirmation.
+It relies on mean reversion, controlled risk, and disciplined execution rather than large directional moves.
+Jan 16
+Release Notes
+This strategy is an intraday trading system designed for very short timeframes (2–5 minutes).
+It combines Fibonacci volatility bands, RSI momentum signals, and strict risk control to capture short-term price reversals within active market phases.
+
+🔧 Core Components
+
+1. Fibonacci Volatility Bands
+
+Based on a VWMA (Volume Weighted Moving Average).
+
+Upper and lower bands are calculated using standard deviation multipliers.
+
+These bands define:
+
+Overextended price zones
+
+Dynamic take-profit targets
+
+Mean-reversion areas
+
+2. RSI Confirmation
+
+RSI is used to detect oversold and overbought conditions.
+
+Trades are only triggered when RSI crosses back from extreme levels, confirming momentum reversal.
+
+📈 Trade Logic
+Long Entry
+
+Price reaches the lower Fibonacci band
+
+RSI crosses upward from oversold
+
+Market conditions allow sufficient distance to the target
+
+Short Entry
+
+Price reaches the upper Fibonacci band
+
+RSI crosses downward from overbought
+
+Market conditions allow sufficient distance to the target
+Jan 23
+Release Notes
+new version
+Jan 25
+Release Notes
+Update
+Feb 12
+Release Notes
+New Time Filter
+Feb 18
+Release Notes
+rsi added
+Mar 5
+Release Notes
+newV
+Mar 5
+Release Notes
+V?

@@ -1,0 +1,744 @@
+//@version=5
+strategy("Gold By Ann v.4.1 (Smart Pivot + Volume Breakout Optimized)",
+     overlay=true, margin_long=100, margin_short=100)
+
+// === Inputs ===
+leftBars        = input.int(4, "Pivot Lookback Left")
+rightBars       = input.int(2, "Pivot Lookback Right")
+atrLength       = input.int(14, "ATR Length")
+atrMult         = input.float(2.0, "ATR Multiplier")
+atrThreshold    = input.float(0.2, "ATR Threshold")
+cooldownBars    = input.int(20, "Cooldown Bars (replaces time-based cooldown)")
+waitBarsInput   = input.int(10, "Bars to Wait After TP")
+volMult         = input.float(1.5, "Volume Strength Multiplier")
+
+
+atr_length = input.int(14, title="ATR Length for Dot Offset", minval=1)
+offset_multiplier = input.float(0.1, title="Dot Offset Multiplier", minval=0.01)
+
+// --- 1. GET DAILY DATA (Prev Day for Pivots, Current Day for Momentum) ---
+// We use request.security(..., close[1]) to ensure we get the fully closed bar's data 
+// from the previous day for a non-repainting Pivot calculation.
+prev_day_high = request.security(syminfo.tickerid, "1D", high[1])
+prev_day_low = request.security(syminfo.tickerid, "1D", low[1])
+prev_day_close = request.security(syminfo.tickerid, "1D", close[1])
+
+// Current day close for momentum check (updated in real-time on lower TFs)
+daily_close = request.security(syminfo.tickerid, "1D", close[0])
+// --- INPUTS ---
+
+
+// Requesting the 'close' of the PREVIOUS Daily bar (the last closed 1D candle).
+prev_daily_close = request.security(syminfo.tickerid, "1D", close[1])
+
+is_green = daily_close > prev_daily_close
+is_red = daily_close < prev_daily_close
+
+
+offset = request.security(syminfo.tickerid, "1D", ta.atr(atr_length)) * offset_multiplier 
+
+// Plotting values: only plot 'high + offset' if 'is_green' is true.
+plot_value_green = is_green ? high + offset : na
+plot_value_red = is_red ? low - offset : na
+
+// Plot the markers
+plot(plot_value_green, title="1D Green Dot", color=color.new(color.green, 0), style=plot.style_circles, linewidth=2)
+plot(plot_value_red, title="1D Red Dot", color=color.new(color.red, 0), style=plot.style_circles, linewidth=2)
+
+
+
+// --- State Variables ---
+var bool subTpTaken = false
+var bool subTpTakenLong = false
+var bool waitForSqueezeRelease = false
+var spikeDirection = 0
+var int cooldownCount = 0
+var bool cooldownActive = false
+var bool spikeGate = true // prevents double close
+var bool isReEntry = false
+var int waitBars = 0
+var int lastPos = 0 // 1=long, -1=short
+var float price_of_sub_tp = na
+var bool pullback_entry_taken = false
+
+
+bool add_on_pullback = strategy.position_size > 0 and subTpTakenLong and (close < price_of_sub_tp) and (not pullback_entry_taken) // <--- This is the new, important check
+fastMA = ta.ema(close, 50)
+slowMA = ta.ema(close, 200)
+
+// Define Average Volume
+avgVolume = ta.sma(volume, 20)
+
+
+// === ADX Filter ===
+adxLength = input.int(14, "ADX Length")
+adxThreshold = input.int(20, "ADX Trend Threshold")
+[di_plus, di_minus, adx] = ta.dmi(adxLength, adxLength)
+isTrending = adx > adxThreshold
+
+// === Pivots & Trend ===
+ph = ta.pivothigh(leftBars, rightBars)
+pl = ta.pivotlow(leftBars, rightBars)
+lastHighPivot = ta.valuewhen(not na(ph), ph, 0)
+lastLowPivot  = ta.valuewhen(not na(pl), pl, 0)
+
+// === ADDED: 1-HOUR PIVOT CHECK ===
+// Helper function to calculate 1H pivots
+f_get_1H_pivots() =>
+    float ph_1H = ta.pivothigh(leftBars, rightBars)
+    float pl_1H = ta.pivotlow(leftBars, rightBars)
+    [ph_1H, pl_1H]
+
+// Request the 1H pivot data. 
+// This gets the pivot status from the *last closed* 1H bar.
+[ph_1H_series, pl_1H_series] = request.security(syminfo.tickerid, "180", f_get_1H_pivots(), lookahead=barmerge.lookahead_off)
+
+// Check if a 1H pivot was confirmed on the corresponding 1H bar
+bool is1HPivotHigh = not na(ph_1H_series)
+bool is1HPivotLow  = not na(pl_1H_series)
+// === END OF 1-HOUR PIVOT CHECK ===
+
+ma = ta.sma(close, 50)
+bullishTrend = close > ma
+bearishTrend = close < ma
+
+// === RSI & ATR ===
+rsi = ta.rsi(close, 14)
+atrValue = ta.atr(atrLength)
+
+// === Volume Confirmation ===
+volAvg = ta.sma(volume, 20)
+strongVolUp = volume > volAvg * volMult and close > open
+strongVolDown = volume > volAvg * volMult and close < open
+
+// === Cooldown Logic (bar-based) ===
+if atrValue < atrThreshold and not cooldownActive
+    cooldownActive := true
+    cooldownCount := cooldownBars
+if cooldownActive
+    cooldownCount -= 1
+    if cooldownCount <= 0
+        cooldownActive := false
+inCooldown = cooldownActive
+
+// === Candle Filter ===
+rangeBar = high - low
+isTall = rangeBar > ta.atr(5) * atrMult
+
+// Example Multiplier
+isConsolidation = (high - low) < ta.atr(10) * atrMult
+
+
+// === Sub-TP Settings ===
+baseClose = ta.sma(close, 35)
+subTpPercentShort = input.float(0.005, "Sub-TP % (Short)")
+subTpReEntryPercentShort = input.float(0.0015, "Sub-TP Re-Entry % (Short)")
+subTpPercentLong = input.float(0.0045, "Sub-TP % (Long)")
+subTpReEntryPercentLong = input.float(0.0045, "Sub-TP Re-Entry % (Long)")
+
+subTpValueShort = baseClose * subTpPercentShort
+subTpReValueShort = baseClose * subTpReEntryPercentShort
+subTpValueLong = baseClose * subTpPercentLong
+subTpReValueLong = baseClose * subTpReEntryPercentLong
+
+// === SL & TP Settings ===
+slPercent = 0.0050               /// 15min use 0.0045
+tpPercent = 0.0065 /// 15min use 0.0067
+tpReEntryPercent = 0.0035
+stopReEntryPercent = 0.0020
+
+//slPercent = 0.0045 
+//tpPercent = 0.0060
+//tpReEntryPercent = 0.0030
+//stopReEntryPercent = 0.0020
+
+slValue   = baseClose * slPercent
+tpValue   = baseClose * tpPercent
+tpReValue = baseClose * tpReEntryPercent
+stopReEntryValue = baseClose * stopReEntryPercent
+
+// === Position Sizing ===
+riskPercent = input.float(0.05, "Risk Per Trade %", minval=0.05)
+riskAmount = (riskPercent / 100) * strategy.equity
+maxRiskValue = input.float(30, "Max Position Value ($)")
+calculatedSize = riskAmount / slValue
+maxSizeByValue = maxRiskValue / close
+positionSize = math.min(calculatedSize, maxSizeByValue)
+
+// ======== 1-Minute Spike Detector ========
+
+
+f_get_15m_bgcolor() =>
+    // --- We use the literal values from your inputs ---
+    length_f = 20     // From input.int(30, "BB Length")
+    mult_f = 2.5      // From input.float(2, "BB MultFactor")
+    lengthKC_f = 3   // From input.int(20, "KC Length")
+    multKC_f = 2.5    // From input.float(3, "KC MultFactor")
+    useTrueRange_f = true // From input.bool(true, "Use TrueRange for KC")
+    source_f = close  // From input.source(close, "Source")
+
+    // --- Squeeze calculations ---
+    basis = ta.sma(source_f, length_f)
+    // NOTE: Your original code used multKC_f for BB deviation. I have kept that logic.
+    dev = multKC_f * ta.stdev(source_f, length_f) 
+    upperBB = basis + dev
+    lowerBB = basis - dev
+    
+    ma2 = ta.sma(source_f, lengthKC_f)
+    ranger = useTrueRange_f ? ta.tr : (high - low)
+    rangema = ta.sma(ranger, lengthKC_f)
+    upperKC = ma2 + rangema * multKC_f
+    lowerKC = ma2 - rangema * multKC_f
+
+    sqzOn = (lowerBB > lowerKC) and (upperBB < upperKC)
+    
+    // --- Momentum calculations ---
+    val = ta.linreg(source_f - math.avg(math.avg(ta.highest(high, lengthKC_f), ta.lowest(low, lengthKC_f)), ta.sma(close, lengthKC_f)), lengthKC_f, 0)
+    
+    // --- Determine final color ---
+    momentumColor = val > 0 ? (val > nz(val[1]) ? color.lime : color.green) : (val < nz(val[1]) ? color.red : color.maroon)
+    bgColor = sqzOn ? color.new(color.gray, 100) : momentumColor
+    
+    // Return the color
+    [bgColor]
+
+min1_timeWindow      = input.int(1, "1m Spike Check (Minutes)", minval=1)
+min1_priceThreshold  = input.float(10.0, "1m Price Spike Threshold ($)", step=0.1)
+min1_volumeMultiplier= input.float(1.5, "1m Volume Spike Multiplier", step=0.1)
+use_programmatic_alerts = input.bool(true, "Use script alert() (programmatic)")
+
+// === Spike detection on current 1m bar (intrabar/high-low updates every tick on a 1m chart) ===
+priceRange_1m = ta.highest(high, min1_timeWindow) - ta.lowest(low, min1_timeWindow)
+recentAvgVolume_1m = ta.sma(volume, math.max(1, min1_timeWindow))
+baselineAvgVolume_1m = ta.sma(volume, 40)
+isUpMove = close > open[min1_timeWindow - 1]
+priceSpike = priceRange_1m >= min1_priceThreshold
+volumeSpike = recentAvgVolume_1m > baselineAvgVolume_1m * min1_volumeMultiplier
+
+isBullishSpike_1m = (priceSpike and volumeSpike and isUpMove)
+isBearishSpike_1m = (priceSpike and volumeSpike and not isUpMove)
+
+// === Visuals ===
+plotshape(isBullishSpike_1m, title="1m Bullish Spike", style=shape.labelup, location=location.belowbar,
+     color=color.new(color.lime, 0), text="BULL", textcolor=color.black, size=size.tiny)
+plotshape(isBearishSpike_1m, title="1m Bearish Spike", style=shape.labeldown, location=location.abovebar,
+     color=color.new(color.red, 0), text="BEAR", textcolor=color.white, size=size.tiny)
+
+// optional subtle background flash while spike is true this tick
+bgcolor(isBullishSpike_1m ? color.new(color.green, 90) : isBearishSpike_1m ? color.new(color.red, 90) : na)
+
+// === Per-bar / per-spike gating to avoid spamming ===
+var int lastSpikeBarIndex = na
+var string lastSpikeType = ""  // "BULL" or "BEAR"
+
+// reset gating at bar open: allow new spike detection for the new bar
+if barstate.isnew
+    lastSpikeType := ""
+    // keep lastSpikeBarIndex as the previous bar index (prevents duplicate across ticks)
+
+// Programmatic alerting only on realtime ticks
+if barstate.isrealtime
+    if isBullishSpike_1m and lastSpikeType != "BULL"
+        // programmatic alert (fires once when the condition first appears this bar)
+        if use_programmatic_alerts
+            alert("📈 Real-Time Bullish 1m Spike detected on " + str.tostring(syminfo.ticker) + " @ " + str.tostring(close), alert.freq_once_per_bar)
+        lastSpikeType := "BULL"
+        lastSpikeBarIndex := bar_index
+    if isBearishSpike_1m and lastSpikeType != "BEAR"
+        if use_programmatic_alerts
+            alert("📉 Real-Time Bearish 1m Spike detected on " + str.tostring(syminfo.ticker) + " @ " + str.tostring(close), alert.freq_once_per_bar)
+        lastSpikeType := "BEAR"
+        lastSpikeBarIndex := bar_index
+
+// === alertconditions for TradingView alert dialog (recommended to create an Alert in UI) ===
+alertcondition(isBullishSpike_1m, title="1m Bullish Spike (cond)", message="📈 Bullish 1m Spike detected on {{ticker}} at {{close}}")
+alertcondition(isBearishSpike_1m, title="1m Bearish Spike (cond)", message="📉 Bearish 1m Spike detected on {{ticker}} at {{close}}")
+
+// === Optional printed debug (comment out in production) ===
+// label.new(bar_index, high, "rng:" + str.tostring(priceRange_1m) + " vol:" + str.tostring(recentAvgVolume_1m), yloc=yloc.abovebar, color=color.new(color.gray, 90), textcolor=color.white, size=size.small)
+// === Inputs ===
+doji_threshold = input.float(0.1, title="Doji Body/Range Threshold")
+volume_factor = input.float(1.3, title="Down Volume Multiplier (x Average)")
+
+// === Candle data ===
+body_size = math.abs(close - open)
+candle_range = high - low
+
+// === Detect Doji ===
+is_doji = candle_range > 0 and (body_size / candle_range) <= doji_threshold
+
+atr_multiplier = input.float(0.2, title="Max Body Size (x ATR)", minval=0.1) 
+average_range = ta.atr(atr_length) // Use the input ATR length
+
+// === Detect Small Body / Indecision ===
+// The body size must be less than the average market volatility (ATR) multiplied by the input factor.
+is_small_body = body_size <= average_range * atr_multiplier
+
+// === Plotting the Shape ===
+// Draw a small circle under the bar when the 'is_small_body' condition is TRUE.
+plotshape(series=is_small_body, title="Small Body Bar", style=shape.circle, location=location.belowbar, color=color.rgb(255, 165, 0), size=size.tiny)
+
+// === Detect Strong Down Volume (on next bar) ===
+// Use simple moving average for reference
+vol_ma = ta.sma(volume, 30)
+is_strong_down_vol = close < open and volume > (volume_factor * vol_ma)
+
+// === Detect condition: Doji followed by strong down volume ===
+doji_then_down = is_doji[1] and is_strong_down_vol
+
+// === Highlight the down candle ===
+barcolor(doji_then_down ? color.new(color.red, 0) : na)
+
+// === Optional: show small label above it ===
+if doji_then_down
+    label.new(bar_index, high, "📉 Doji → Strong Down", style=label.style_label_down, color=color.red, textcolor=color.white)
+
+// === Smart Filter Functions ===
+f_should_reenter_long() =>
+    bullishTrend and rsi <30  and strongVolUp and close > lastHighPivot
+
+f_should_flip_short() =>
+    bearishTrend and strongVolDown and close > lastLowPivot
+
+f_should_reenter_short() =>
+    bearishTrend and rsi < 45 and strongVolDown and close < lastLowPivot
+
+f_should_flip_long() =>
+    bullishTrend and rsi > 55 and strongVolUp and close > lastHighPivot
+
+isBullishBreakout() =>
+    isTrending and bullishTrend and ta.crossover(rsi, 55) and strongVolUp and close > lastHighPivot
+
+isBearishBreakdown() =>
+    isTrending and bearishTrend and ta.crossunder(rsi, 45) and strongVolDown and close < lastLowPivot
+
+should_close_long = f_should_flip_short() 
+
+// === Spike Close Logic (gated) ===
+if not spikeGate
+    if isBearishSpike_1m or doji_then_down
+        spikeGate := true
+        waitForSqueezeRelease := true
+        spikeDirection := -1
+        if strategy.position_size > 0
+            if subTpTakenLong
+                strategy.close("PivExtLE", comment="Spike or Doji SL Long (Final)")
+                label.new(bar_index, high, "TP already taken ✅")
+            if should_close_long
+                strategy.entry("PivExtSE", strategy.short,comment="Entry Short (Flip)")
+                label.new(bar_index, high, "Flip")
+            else
+        // 👉 Do something if false
+                strategy.close("PivExtLE", comment="Spike or Doji SL Long (Full)")
+        subTpTakenLong := false
+
+        if strategy.position_size < 0 
+            if subTpTaken
+        // 👉 Do something if true
+                strategy.close("PivExtSE", comment="Spike SL Short (Final)")
+                label.new(bar_index, low, "Short TP taken ✅")
+            else
+        // 👉 Do something if false
+                strategy.close("PivExtSE", comment="sl short spike(full)")
+                subTpTaken := false
+        
+        
+        lastPos := 1
+
+    if isBullishSpike_1m
+        spikeGate := true
+        waitForSqueezeRelease := true
+        spikeDirection := 1
+        if strategy.position_size < 0
+            if subTpTakenLong
+                strategy.close("PivExtSE", comment="Spike SL Short (Final)")
+            else
+                strategy.close("PivExtSE", comment="Spike SL Short (Full)")
+            subTpTaken := false
+        
+        waitBars := waitBarsInput
+        lastPos := 1
+       
+else
+    spikeGate := false // reset next bar
+
+// === Entry Logic ===
+if not inCooldown and not isTall
+    isBelowMAConfirmation = close < fastMA and close < slowMA
+    isMACrossoverBearish = fastMA < slowMA // Simple check: fast MA is below slow MA
+    isVolumeConfirmed = volume > avgVolume * 1.5 // Volume is 50% higher than average
+
+    if strategy.position_size == 0 and waitBars == 0 and not waitForSqueezeRelease
+        // MODIFIED: Added 1H Pivot High check
+        // We only enter long if a local pivot low forms AND a 1H pivot high did NOT just form.
+        if not na(pl) and not is1HPivotHigh and not isMACrossoverBearish
+            strategy.entry("PivExtLE", strategy.long, comment="Long Entry (Pivot Low)")
+            isReEntry := false
+            subTpTakenLong := false
+
+        // MODIFIED: Added Trend and RSI confirmation for initial short entry
+        // We only enter short if a local pivot high forms AND a 1H pivot low did NOT just form.
+        
+
+        // Combine all conditions for a stronger short signal
+        if (not na(ph) and bearishTrend and not is1HPivotLow)
+            
+            strategy.entry("PivExtSE", strategy.short, comment="Short Entry (Pivot High)")
+            isReEntry := false
+            subTpTaken := false
+
+isDoubleBear = isBearishSpike_1m[1] and isBearishSpike_1m and not isTall and close[2]<open[2]
+
+if isDoubleBear
+    strategy.entry("PivExtBear", strategy.short, comment="Short Entry (Double Bear)")
+    isReEntry := false
+    subTpTaken := false
+
+if not is_small_body
+    if strategy.position_size < 0
+        strategy.close(id="PivExtBear", comment="Closed by Bullish Reversal Bar")
+
+
+bullishSignal = isBullishBreakout()
+bearishSignal = isBearishBreakdown()
+
+// === Manage LONG positions ===
+if strategy.position_size > 0 and not isTall
+    // === NEW PYRAMID ENTRY LOGIC ===
+    
+    entryPrice = strategy.position_avg_price
+    currentTpValue = isReEntry ? tpReValue : tpValue
+    currentSubTpValue = isReEntry ? subTpReValueLong : subTpValueLong
+    tpLevel = entryPrice + currentTpValue
+    subTpLevel = entryPrice + currentSubTpValue
+
+    if isReEntry and close <= entryPrice - stopReEntryValue
+        strategy.close("PivExtLE", comment="Stop Re-Entry Long")
+        isReEntry := false
+        subTpTakenLong := false
+    else if not subTpTakenLong and ((close >= subTpLevel+2 )or(close <= entryPrice-25))
+        strategy.exit("SubTPLE", from_entry="PivExtLE", qty_percent=50, limit=subTpLevel, comment="Sub-TP Long")
+        subTpTakenLong := true
+        price_of_sub_tp := subTpLevel
+    else if close >= tpLevel+4
+        strategy.close("PivExtLE", comment="TP Long (Final)")
+        waitBars := waitBarsInput
+        lastPos := 1
+    else if close <entryPrice-slValue
+        if subTpTakenLong
+            strategy.close("PivExtLE", comment="SL Long (Final)")
+        else
+            strategy.close("PivExtLE", comment="SL Long (Full)")
+            subTpTakenLong := false
+        if f_should_flip_short() or bearishSignal
+            strategy.entry("FlipShort", strategy.short, qty=positionSize, comment="Flip Short (SL)")
+
+// === Manage SHORT positions ===
+if strategy.position_size < 0 and not isTall
+    entryPrice = strategy.position_avg_price
+    currentTpValue = isReEntry ? tpReValue : tpValue
+    currentSubTpValue = isReEntry ? subTpReValueShort : subTpValueShort
+    tpLevel = entryPrice - currentTpValue
+    subTpLevel = entryPrice - currentSubTpValue
+
+    if isReEntry and close >= entryPrice + stopReEntryValue
+        strategy.close("PivExtSE", comment="Stop Re-Entry Short")
+        isReEntry := false
+        subTpTaken := false
+    else if not subTpTaken and close <= subTpLevel
+        strategy.exit("SubTPSE", from_entry="PivExtSE", qty_percent=50, limit=subTpLevel, comment="Sub-TP Short")
+        subTpTaken := true
+        price_of_sub_tp:= subTpLevel
+    else if close <= tpLevel
+        strategy.close("PivExtSE", comment="TP Short")
+        waitBars := waitBarsInput
+        lastPos := -1
+        subTpTaken := false
+    else if close >= entryPrice + slValue
+        strategy.close("PivExtSE", comment="SL Short")
+        if f_should_flip_long() or bullishSignal
+            strategy.entry("FlipLong", strategy.long, qty=positionSize, comment="Flip Long (SL)")
+
+// === Wait After TP (Re-Entry or Flip) ===
+if waitBars > 0
+    waitBars -= 1
+    if waitBars == 1 and not waitForSqueezeRelease
+        if lastPos == 1
+            if f_should_reenter_long() or bullishSignal
+                strategy.entry("ReEnterLong", strategy.long, qty=positionSize, comment="Re-Enter Long")
+                isReEntry := true
+                subTpTakenLong := false
+            else if f_should_flip_short() or bearishSignal
+                strategy.entry("FlipShort", strategy.short, qty=positionSize, comment="Flip Short")
+                isReEntry := false
+                subTpTaken := false
+        if lastPos == -1
+            if f_should_reenter_short() or bearishSignal
+                strategy.entry("ReEnterShort", strategy.short, qty=positionSize, comment="Re-Enter Short")
+                isReEntry := true
+                subTpTaken := false
+            else if f_should_flip_long() or bullishSignal
+                strategy.entry("FlipLong", strategy.long, qty=positionSize, comment="Flip Long")
+                isReEntry := false
+                subTpTakenLong := false
+
+// === Squeeze Momentum (TTM-like) ===
+    
+// --- 1. Get the Background Color from 15-Minutes ---
+// This calls the new function you added in Step 1
+// We use 'barmerge.lookahead_off' to get data from the *last closed* 15m bar
+[bgColor_15m] = request.security(syminfo.tickerid, "60", f_get_15m_bgcolor(), lookahead=barmerge.lookahead_off)
+
+// Apply the 15-minute background color
+// We use nz() to prevent an error on the first bars
+bgcolor(nz(bgColor_15m, color.new(color.black, 100)), transp=70)
+
+
+// --- 2. Calculate Momentum on CURRENT Timeframe (for Spike Logic) ---
+// This part is still needed for your 'waitForSqueezeRelease' logic
+length = input.int(30, "BB Length")
+mult = input.float(2, "BB MultFactor")
+lengthKC = input.int(20, "KC Length")
+multKC = input.float(3, "KC MultFactor")
+useTrueRange = input.bool(true, "Use TrueRange for KC")
+source = input.source(close, "Source")
+
+// We only need 'val' and the momentum flags from this section
+val = ta.linreg(source - math.avg(math.avg(ta.highest(high, lengthKC), ta.lowest(low, lengthKC)), ta.sma(close, lengthKC)), lengthKC, 0)
+isBullishMomentum = val > 0
+isBearishMomentum = val <= 0
+
+// Wait for opposite momentum after spike
+if waitForSqueezeRelease
+    if spikeDirection == -1 and isBullishMomentum
+        waitForSqueezeRelease := false
+        spikeDirection := 0
+    else if spikeDirection == 1 and isBearishMomentum
+        waitForSqueezeRelease := false
+        spikeDirection := 0
+
+// === Plots ===
+plot(ma, "50 SMA", color=color.new(color.blue, 0))
+plot(rsi, "RSI(14)", color=color.new(color.purple, 0))
+plot(lastHighPivot, "Pivot High", color=color.new(color.red, 60))
+plot(lastLowPivot, "Pivot Low", color=color.new(color.green, 60))
+plot(volAvg, "Volume Avg", color=color.new(color.gray, 50))
+
+// === ADDED: Plot 1-HOUR PIVOT ALERTS ===
+// These shapes will appear on the bars of your current timeframe
+// that correspond to the 1-Hour bar where a pivot was confirmed.
+
+// --- END OF ADDED PLOTS ---
+// === Persistent variables ===
+var int barsSinceLong = na
+var int contCount = 0
+var bool waitOver = false
+isLongCondition = strategy.position_size > 0 and strategy.position_size[1] <= 0
+if isLongCondition
+    barsSinceLong := 0
+    waitOver := false
+else if not na(barsSinceLong)
+    barsSinceLong += 1
+    if barsSinceLong >= 11
+        waitOver := true
+if waitOver and strategy.position_size > 0
+    if is1HPivotLow
+        contCount += 1
+    else
+        contCount := 0
+else
+    contCount := 0
+
+// <-- IMPORTANT: Reset the count so it only fires once
+ // === END OF NEW LOGIC ===
+plotshape(contCount == 8, title="Continuous 1H Pivot Low (10 bars after long entry)", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.large, text="!", textcolor=color.black)
+posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+var label lbl = na
+label.delete(lbl)
+//lbl := label.new(bar_index, high, "Pos: " + posText + "\nWaitOver: " + str.tostring(waitOver) + "\nCount: " + str.tostring(contCount), style=label.style_label_down, color=color.new(color.teal, 0), textcolor=color.white)
+
+//bool pyramidLongCondition = contCount == 8// and strongVolDown
+
+
+
+// --- Define Candle Properties ---
+// Get the body size of the last 3 candles
+body1 = math.abs(close[2] - open[2])
+body2 = math.abs(close[1] - open[1])
+body3 = math.abs(close[0] - open[0])
+
+// --- Logic for Morning Star (Bullish / UP) ---
+ms_c1_is_bearish = close[2] < open[2] 
+c2_is_small = body2 < body1 and body2 < body3
+c2_gaps_down = math.max(open[1], close[1]) < close[2]
+c3_is_bullish = close > open
+c3_confirms = close > (open[2] + close[2]) / 2
+morningStar = ms_c1_is_bearish and c2_is_small and c2_gaps_down and c3_is_bullish and c3_confirms
+
+// --- Logic for Evening Star (Bearish / DOWN) ---
+es_c1_is_bullish = close[2] > open[2] 
+c2_is_small_bearish = body2 < body1 and body2 < body3 
+c2_gaps_up = math.min(open[1], close[1]) > close[2]
+c3_is_bearish = close < open
+c3_confirms_bearish = close < (open[2] + close[2]) / 2
+eveningStar = es_c1_is_bullish and es_c1_is_bullish and c2_is_small_bearish and c2_gaps_up and c3_is_bearish and c3_confirms_bearish
+
+
+// --- Draw Boxes Around the 3-Candle Patterns ---
+float patternHigh = math.max(high, high[1], high[2])
+float patternLow = math.min(low, low[1], low[2])
+
+if (morningStar)
+    box.new(left = bar_index[2],   
+             top = patternHigh,   
+             right = bar_index,   
+             bottom = patternLow, 
+             border_color=color.green, 
+             border_width=2, 
+             bgcolor=color.new(color.green, 90)) 
+    
+    if (strategy.position_size > 0 and subTpTakenLong and close > price_of_sub_tp)
+        strategy.close("PivExtLE", comment="TP Long (Final) MS")
+    
+    // Reset all your variables
+        subTpTakenLong := false
+        price_of_sub_tp := na
+        pullback_entry_taken := false // <-- RESET THE NEW VARIABLE
+    // isReEntry := false
+if (eveningStar)
+    box.new(left = bar_index[2],   
+             top = patternHigh,   
+             right = bar_index,   
+             bottom = patternLow, 
+             border_color=color.red, 
+             border_width=2, 
+             bgcolor=color.new(color.red, 90)) 
+
+
+// --- Plot the Labels on the Chart ---
+plotshape(morningStar, 
+     style=shape.labelup, 
+     location=location.belowbar, 
+     color=color.new(color.green, 0), 
+     text="MS", 
+     textcolor=color.white, 
+     size=size.small)
+
+plotshape(eveningStar, 
+     style=shape.labeldown, 
+     location=location.abovebar, 
+     color=color.new(color.red, 0), 
+     text="ES", 
+     textcolor=color.white, 
+     size=size.small)
+
+
+if (add_on_pullback)
+    // Use a NEW, UNIQUE ID for this entry
+    strategy.entry("PivExtLE_Add", strategy.long, comment="Adding on pullback")
+    
+    // Set this to TRUE so it does not enter again and again
+    pullback_entry_taken := true
+
+//use_programmatic_alerts = input.bool(true, "Use script alert() (programmatic)")
+
+// === Spike detection on current 1m bar (intrabar/high-low updates every tick on a 1m chart) ===
+//priceRange_1m = ta.highest(high, min1_timeWindow) - ta.lowest(low, min1_timeWindow)
+//recentAvgVolume_1m = ta.sma(volume, math.max(1, min1_timeWindow))
+//baselineAvgVolume_1m = ta.sma(volume, 40)
+//isUpMove = close > open[min1_timeWindow - 1]
+//priceSpike = priceRange_1m >= min1_priceThreshold
+//volumeSpike = recentAvgVolume_1m > baselineAvgVolume_1m * min1_volumeMultiplier
+
+
+
+// === Visuals ===
+plotshape(isBullishSpike_1m, title="1m Bullish Spike", style=shape.labelup, location=location.belowbar,
+     color=color.new(color.lime, 0), text="BULL", textcolor=color.black, size=size.tiny)
+plotshape(isBearishSpike_1m, title="1m Bearish Spike", style=shape.labeldown, location=location.abovebar,
+     color=color.new(color.red, 0), text="BEAR", textcolor=color.white, size=size.tiny)
+
+// optional subtle background flash while spike is true this tick
+bgcolor(isBullishSpike_1m ? color.new(color.green, 90) : isBearishSpike_1m ? color.new(color.red, 90) : na)
+
+// === Per-bar / per-spike gating to avoid spamming ===
+//var int lastSpikeBarIndex = na
+//var string lastSpikeType = ""  // "BULL" or "BEAR"
+
+// reset gating at bar open: allow new spike detection for the new bar
+if barstate.isnew
+    lastSpikeType := ""
+    // keep lastSpikeBarIndex as the previous bar index (prevents duplicate across ticks)
+
+// Programmatic alerting only on realtime ticks
+if barstate.isrealtime
+    if isBullishSpike_1m and lastSpikeType != "BULL"
+        // programmatic alert (fires once when the condition first appears this bar)
+        if use_programmatic_alerts
+            alert("📈 Real-Time Bullish 1m Spike detected on " + str.tostring(syminfo.ticker) + " @ " + str.tostring(close), alert.freq_once_per_bar)
+        lastSpikeType := "BULL"
+        lastSpikeBarIndex := bar_index
+    if isBearishSpike_1m and lastSpikeType != "BEAR"
+        if use_programmatic_alerts
+            alert("📉 Real-Time Bearish 1m Spike detected on " + str.tostring(syminfo.ticker) + " @ " + str.tostring(close), alert.freq_once_per_bar)
+        lastSpikeType := "BEAR"
+        lastSpikeBarIndex := bar_index
+
+// --- 1. Fetch Weekly High and Low (Monday to Friday) ---
+
+// Use request.security() to pull data from the "W" (Weekly) timeframe.
+// The data will be the value of the most recently closed week.
+weekly_high = request.security(syminfo.tickerid, "240", high[1], lookahead=barmerge.lookahead_on)
+weekly_low = request.security(syminfo.tickerid, "240", low[1], lookahead=barmerge.lookahead_on)
+
+// Note on [1]: Using [1] ensures we only use the data from the *closed* weekly bar (the previous week)
+// to avoid repainting or using incomplete data from the current, open week.
+
+// --- 2. Calculate the Weekly Midpoint ---
+
+// Midpoint = (High + Low) / 2
+weekly_midpoint = (weekly_high + weekly_low) / 2
+
+// --- 3. Comparison Condition ---
+
+// Check if the current bar's closing price is higher than the weekly midpoint.
+is_above_weekly_midpoint = close > weekly_midpoint
+
+// --- 4. Plotting and Visualization ---
+
+// Plot the weekly midpoint as a step line
+plot(weekly_midpoint, title="Weekly Midpoint", color=color.new(color.fuchsia, 0), linewidth=2)
+
+// Optional: Change the color of the bars based on the comparison
+barcolor(is_above_weekly_midpoint ? color.new(color.green, 70) : color.new(color.red, 70))
+
+// Optional: Plot a label showing the state
+//plotchar(is_above_weekly_midpoint, title="Above Midpoint", char='▲', location=location.top, color=color.green, size=size.small)
+//plotchar(not is_above_weekly_midpoint, title="Below Midpoint", char='▼', location=location.bottom, color=color.red, size=size.small)
+
+View in Pine Editor・717 lines
+Use on chart
+2
+9
+1
+1 274
+Sep 19, 2025
+for trading gold 15 min timeframe . with stoploss and tp
+Oct 21, 2025
+Release Notes
+use for 15 min
+Oct 23, 2025
+Release Notes
+when have spike then close some trade and hold for trend again, so it stop some lose
+Oct 23, 2025
+Release Notes
+error of sub TP and final TP
+Oct 24, 2025
+Release Notes
+edit about sub TP and full TP
+Oct 27, 2025
+Release Notes
+Remove cal every tick because it make alert and back test differently
+Dec 11, 2025
+Release Notes
+Less SL value and add SL when have spike

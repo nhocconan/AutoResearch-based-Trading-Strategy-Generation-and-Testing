@@ -1,0 +1,41 @@
+//@version=4
+strategy("Trading Public School", overlay=true)
+source = close
+length = input(20, minval=1)
+mult = input(2.0, minval=0.001, maxval=50)
+
+basis = sma(source, length)
+dev = mult * stdev(source, length)
+
+upper = basis + dev
+lower = basis - dev
+
+buyEntry = crossover(source, lower)
+sellEntry = crossunder(source, upper)
+
+if (crossover(source, lower))
+    strategy.entry("BBandLE", strategy.long, stop=lower, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
+else
+    strategy.cancel(id="BBandLE")
+
+if (crossunder(source, upper))
+    strategy.entry("BBandSE", strategy.short, stop=upper, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
+else
+    strategy.cancel(id="BBandSE")
+
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+View in Pine Editor・26 lines
+Use on chart
+1
+3
+1
+2
+3 319
+This is a derivative of Trading Public School "TTM Squeeze" volatility indicator, as discussed in his book "Mastering the Trade" (chapter 11).
+
+Black crosses on the midline show that the market just entered a squeeze ( Bollinger Bands are with in Keltner Channel). This signifies low volatility , market preparing itself for an explosive move (up or down). Gray crosses signify "Squeeze release".
+
+Mr.Carter suggests waiting till the first gray after a black cross, and taking a position in the direction of the momentum (for ex., if momentum value is above zero, go long). Exit the position when the momentum changes (increase or decrease --- signified by a color change). My (limited) experience with this shows, an additional indicator like ADX / WaveTrend, is needed to not miss good entry points. Also, Mr.Carter uses simple momentum indicator , while I have used a different method (linreg based) to plot the histogram. 100% Profit & loss 10% Only
+
+

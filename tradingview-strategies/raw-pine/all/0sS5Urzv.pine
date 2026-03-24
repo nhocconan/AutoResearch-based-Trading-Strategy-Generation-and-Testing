@@ -1,0 +1,41 @@
+//@version=4
+strategy("WMA + MACD strategy", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=20, commission_type=strategy.commission.percent, commission_value=0.39)
+
+[_, _, histogram] = macd(close, 10, 20, 10)
+
+ma = wma(close, 120)
+
+a = close - (close * 0.03)
+b = close[1] - (close[1] * 0.03)
+
+sl = iff(a > b, a, b)
+
+plot(sl, color=color.yellow, style=plot.style_stepline)
+
+longCondition = close > ma and histogram > 0
+closeCondition = close <= sl
+
+if (longCondition)
+    strategy.entry("Kup", strategy.long)
+
+if (closeCondition)
+    strategy.exit("Sprzedaj", stop = sl)
+
+View in Pine Editor・25 lines
+Use on chart
+1
+0
+0
+1
+7 234
+Hi!
+
+That's my first strategy. I already learn pine, so i will work on it more. Now i search how to make trailing stop working.
+
+"WMA + MACD strategy with traiing stop" is very simple strategy which is designated for stocks market. It is created only to take long positions.
+
+Buy signal is when WMA(120) is below price and macd(10,20,10) histogram is higher than 0.
+
+Position should be automaticly closed when price hits stoploss level.
+
+One transaction should be max 20% of our capital and stoploss is set 3% lower than last closing price.

@@ -1,0 +1,307 @@
+//@version=6
+strategy("Quantum Flux Universal Strategy v1.0", shorttitle="Quantum Flux Universal", overlay=false, max_labels_count=200)
+
+// =============== GROUPS
+group_input  = "Inputs"
+group_adapt  = "Adaptive Engine"
+group_norm   = "Normalization"
+group_gate   = "Dynamic Gate"
+group_vol    = "Volume Weighting"
+group_ui     = "UI"
+
+// =============== INPUTS
+// Core
+srcx           = input.source(ohlc4, "Price source", group=group_input,
+     tooltip="Which price to feed into the Quantum Flux engine. ohlc4 is stable and reduces single print noise.")
+fast_span     = input.int(12, "Fast span",  minval=2, group=group_input,
+     tooltip="Nominal length for the fast one pole filter. Smaller is more reactive. Adaptive engine will rescale this.")
+slow_span     = input.int(28, "Slow span",  minval=3, group=group_input,
+     tooltip="Nominal length for the slow one pole filter. Sets baseline trend horizon and is also adaptively rescaled.")
+
+// Adaptive Engine
+guide_span    = input.int(6,  "Guide span", minval=2, group=group_adapt,
+     tooltip="Smoothing span for the guide line applied on the normalized core with a small phase assist.")
+blend_power   = input.float(0.60, "Adapt strength 0..1", minval=0.0, maxval=1.0, step=0.05, group=group_adapt,
+     tooltip="How strongly drivers modulate base gains. 0 means fixed spans. 1 means full influence of intensity, efficiency, and volatility.")
+vol_win       = input.int(40,  "Vol window", minval=10, group=group_adapt,
+     tooltip="Lookback used for directional intensity and volatility scaling. Larger is smoother, smaller is faster.")
+eff_win       = input.int(20,  "Efficiency window", minval=5, group=group_adapt,
+     tooltip="Lookback for Kaufman style path efficiency. High efficiency favors trend, low efficiency favors chop.")
+eff_gamma     = input.float(1.20, "Efficiency gamma", minval=0.1, maxval=3.0, step=0.05, group=group_adapt,
+     tooltip="Shapes the efficiency curve. Above 1 increases contrast in clean trends. Below 1 flattens the response.")
+min_gain      = input.float(0.50, "Min alpha multiplier", minval=0.10, maxval=1.00, step=0.05, group=group_adapt,
+     tooltip="Lower clamp for adaptive gain. 0.50 halves the base gain which lengthens smoothing.")
+max_gain      = input.float(2.00, "Max alpha multiplier", minval=1.00, maxval=4.00, step=0.05, group=group_adapt,
+     tooltip="Upper clamp for adaptive gain. 2.00 doubles the base gain which shortens smoothing.")
+phase_profile = input.string("Robust", "Phase profile", options=["Reactive","Balanced","Robust"], group=group_adapt,
+     tooltip="Sets the lead factor used in phase assist. Reactive is lowest lag with more overshoot. Robust is calmer with more lag.")
+reactive = input.float(0.90, step=0.01, group=group_adapt, tooltip="Lead factor used if Reactive is selected.")
+robust   = input.float(0.50, step=0.01, group=group_adapt, tooltip="Lead factor used if Robust is selected.")
+
+// Normalization
+dist_win      = input.int(200, "Distribution window", minval=50, group=group_norm,
+     tooltip="Window for distribution estimates used to normalize the core. Larger windows reduce drift in the baseline.")
+dist_mode     = input.string("zscore", "Mode", options=["zscore","percentrank","madz"], group=group_norm,
+     tooltip="Normalization method. zscore uses mean and stdev. percentrank maps to [-1, 1]. madz uses robust median absolute deviation.")
+clamp_abs     = input.float(3.0, "Clip normalized at ±", minval=1.0, maxval=10.0, step=0.1, group=group_norm,
+     tooltip="Hard limits for the normalized core to prevent extreme spikes from dominating signals.")
+
+// Colors
+col_pos       = color.new(color.teal, 0)
+col_neg       = color.new(color.red,  0)
+col_guide     = color.new(color.gray, 0)
+col_core      = color.new(color.white, 0)
+
+// =============== CORE CALC
+src = srcx
+
+// UTIL
+binary_intensity(dir, length) =>
+    p  = ta.rma(dir ? 1.0 : 0.0, length)
+    hp = -(p > 0 ? p * math.log(p) : 0) - ((1 - p) > 0 ? (1 - p) * math.log(1 - p) : 0)
+    h  = hp / math.log(2.0)
+    1.0 - h
+
+z_norm(x, length) =>
+    m = ta.sma(x, length)
+    s = ta.stdev(x, length)
+    s == 0 ? 0 : (x - m) / s
+
+m_norm(x, length) =>
+    m   = ta.sma(x, length)
+    dev = math.abs(x - m)
+    mad = ta.sma(dev, length)
+    mad == 0 ? 0 : 0.6745 * (x - m) / mad
+
+pr_norm(x, length) => ta.percentrank(x, length) / 100.0
+
+path_eff(x, length) =>
+    net   = math.abs(x - x[length])
+    denom = math.sum(math.abs(ta.change(x)), length)
+    denom == 0 ? 0 : math.min(1.0, net / denom)
+
+base_gain(len) => 2.0 / (len + 1.0)
+
+// =============== ADAPTIVE ENGINE
+dir_up     = src > src[1]
+dir_int    = binary_intensity(dir_up, vol_win)
+
+step       = ta.change(src)
+vol_kz     = z_norm(math.abs(step), vol_win)
+vol_squash = math.max(0.0, math.min(1.0, 0.5 + 0.5 * math.atan(vol_kz)))
+
+eff_raw    = path_eff(src, eff_win)
+eff_shaped = math.pow(eff_raw, eff_gamma)
+
+gain_map(a0) =>
+    w_int = 0.50
+    w_eff = 0.30
+    w_vol = 0.20
+    drive = w_int * dir_int + w_eff * eff_shaped + w_vol * vol_squash
+    boost = blend_power * drive
+    a_min = a0 * min_gain
+    a_max = a0 * max_gain
+    a_min + (a_max - a_min) * boost
+
+g_fast = gain_map(base_gain(fast_span))
+g_slow = gain_map(base_gain(slow_span))
+feed   = src
+
+// Filters
+var float int_a = na
+var float int_b = na
+int_a := na(int_a[1]) ? feed : int_a[1] + g_fast * (feed - int_a[1])
+int_b := na(int_b[1]) ? feed : int_b[1] + g_slow * (feed - int_b[1])
+
+// Differential with phase assist
+diff_raw  = int_a - int_b
+lag_bars  = int(math.round(slow_span * 0.5))
+lead_gain = phase_profile == "Reactive" ? reactive : phase_profile == "Robust" ? robust : 0.5
+flux_zl   = nz(diff_raw) * (1 + lead_gain) - lead_gain * nz(diff_raw[lag_bars])
+
+// Normalization and clamp
+flux_n_unclipped = switch dist_mode
+    "zscore"      => z_norm(flux_zl, dist_win)
+    "percentrank" => pr_norm(flux_zl, dist_win) * 2.0 - 1.0
+    => m_norm(flux_zl, dist_win)
+flux_n = math.max(-clamp_abs, math.min(clamp_abs, flux_n_unclipped))
+
+// Guide line
+guide_lag  = math.max(1, int(math.floor((guide_span - 1) * 0.5)))
+guide_line = ta.ema(flux_n + (flux_n - nz(flux_n[guide_lag])), guide_span)
+
+// Optional impulse
+impulse = flux_n - guide_line
+
+// Regime
+polarity = (flux_n > 0 and guide_line > 0) ? 1 : (flux_n < 0 and guide_line < 0 ? -1 : 0)
+bg_col   = polarity > 0 ? color.new(col_pos, 90) : polarity < 0 ? color.new(col_neg, 90) : color.new(color.gray, 95)
+bgcolor(bg_col)
+
+// =============== PLOTS
+plot(polarity, "Quantum Flux Polarity", color=col_core, linewidth=2)
+hline(0, title="Zen", color=color.blue, linestyle=hline.style_dotted, linewidth=4)
+
+// =============== ORDERS
+if polarity > 0
+    strategy.entry("long", strategy.long)
+
+if polarity < 0 and nz(polarity[1]) > 0
+    strategy.close("long")
+    strategy.entry("short", strategy.short)
+
+if ta.crossover(flux_n, guide_line)
+    strategy.close("short")
+
+View in Pine Editor・156 lines
+Use on chart
+5
+0
+1 813
+Summary in one paragraph
+Quantum Flux Universal is a regime switching strategy for stocks, ETFs, index futures, major FX pairs, and liquid crypto on intraday and swing timeframes. It helps you act only when the normalized core signal and its guide agree on direction. It is original because the engine fuses three adaptive drivers into the smoothing gains itself. Directional intensity is measured with binary entropy, path efficiency shapes trend quality, and a volatility squash preserves contrast. Add it to a clean chart, watch the polarity lane and background, and trade from positive or negative alignment. For conservative workflows use on bar close in the alert settings when you add alerts in a later version.
+
+Scope and intent
+• Markets. Large cap equities and ETFs. Index futures. Major FX pairs. Liquid crypto
+• Timeframes. One minute to daily
+• Default demo used in the publication. QQQ on one hour
+• Purpose. Provide a robust and portable way to detect when momentum and confirmation align, while dampening chop and preserving turns
+• Limits. This is a strategy. Orders are simulated on standard candles only
+
+
+Originality and usefulness
+• Unique concept or fusion. The novelty sits in the gain map. Instead of gating separate indicators, the model mixes three drivers into the adaptive gains that power two one pole filters. Directional entropy measures how one sided recent movement has been. Kaufman style path efficiency scores how direct the path has been. A volatility squash stabilizes step size. The drivers are blended into the gains with visible inputs for strength, windows, and clamps.
+• What failure mode it addresses. False starts in chop and whipsaw after fast spikes. Efficiency and the squash reduce over reaction in noise.
+• Testability. Every component has an input. You can lengthen or shorten each window and change the normalization mode. The polarity plot and background provide a direct readout of state.
+• Portable yardstick. The core is normalized with three options. Z score, percent rank mapped to a symmetric range, and MAD based Z score. Clamp bounds define the effective unit so context transfers across symbols.
+
+
+Method overview in plain language
+The strategy computes two smoothed tracks from the chart price source. The fast track and the slow track use gains that are not fixed. Each gain is modulated by three drivers. A driver for directional intensity, a driver for path efficiency, and a driver for volatility. The difference between the fast and the slow tracks forms the raw flux. A small phase assist reduces lag by subtracting a portion of the delayed value. The flux is then normalized. A guide line is an EMA of a small lead on the flux. When the flux and its guide are both above zero, the polarity is positive. When both are below zero, the polarity is negative. Polarity changes create the trade direction.
+
+Base measures
+• Return basis. The step is the change in the chosen price source. Its absolute value feeds the volatility estimate. Mean absolute step over the window gives a stable scale.
+• Efficiency basis. The ratio of net move to the sum of absolute step over the window gives a value between zero and one. High values mean trend quality. Low values mean chop.
+• Intensity basis. The fraction of up moves over the window plugs into binary entropy. Intensity is one minus entropy, which maps to zero in uncertainty and one in very one sided moves.
+
+Components
+• Directional Intensity. Measures how one sided recent bars have been. Smoothed with RMA. More intensity increases the gain and makes the fast and slow tracks react sooner.
+• Path Efficiency. Measures the straightness of the price path. A gamma input shapes the curve so you can make trend quality count more or less. Higher efficiency lifts the gain in clean trends.
+• Volatility Squash. Normalizes the absolute step with Z score then pushes it through an arctangent squash. This caps the effect of spikes so they do not dominate the response.
+• Normalizer. Three modes. Z score for familiar units, percent rank for a robust monotone map to a symmetric range, and MAD based Z for outlier resistance.
+• Guide Line. EMA of the flux with a small lead term that counteracts lag without heavy overshoot.
+
+Fusion rule
+• Weighted sum of the three drivers with fixed weights visible in the code comments. Intensity has fifty percent weight. Efficiency thirty percent. Volatility twenty percent.
+• The blend power input scales the driver mix. Zero means fixed spans. One means full driver control.
+• Minimum and maximum gain clamps bound the adaptive gain. This protects stability in quiet or violent regimes.
+
+Signal rule
+• Long suggestion appears when flux and guide are both above zero. That sets polarity to plus one.
+• Short suggestion appears when flux and guide are both below zero. That sets polarity to minus one.
+• When polarity flips from plus to minus, the strategy closes any long and enters a short.
+• When flux crosses above the guide, the strategy closes any short.
+
+What you will see on the chart
+• White polarity plot around the zero line
+• A dotted reference line at zero named Zen
+• Green background tint for positive polarity and red background tint for negative polarity
+• Strategy long and short markers placed by the TradingView engine at entry and at close conditions
+• No table in this version to keep the visual clean and portable
+
+Inputs with guidance
+
+Setup
+• Price source. Default ohlc4. Stable for noisy symbols.
+• Fast span. Typical range 6 to 24. Raising it slows the fast track and can reduce churn. Lowering it makes entries more reactive.
+• Slow span. Typical range 20 to 60. Raising it lengthens the baseline horizon. Lowering it brings the slow track closer to price.
+
+Logic
+• Guide span. Typical range 4 to 12. A small guide smooths without eating turns.
+• Blend power. Typical range 0.25 to 0.85. Raising it lets the drivers modulate gains more. Lowering it pushes behavior toward fixed EMA style smoothing.
+• Vol window. Typical range 20 to 80. Larger values calm the volatility driver. Smaller values adapt faster in intraday work.
+• Efficiency window. Typical range 10 to 60. Larger values focus on smoother trends. Smaller values react faster but accept more noise.
+• Efficiency gamma. Typical range 0.8 to 2.0. Above one increases contrast between clean trends and chop. Below one flattens the curve.
+• Min alpha multiplier. Typical range 0.30 to 0.80. Lower values increase smoothing when the mix is weak.
+• Max alpha multiplier. Typical range 1.2 to 3.0. Higher values shorten smoothing when the mix is strong.
+• Normalization window. Typical range 100 to 300. Larger values reduce drift in the baseline.
+• Normalization mode. Z score, percent rank, or MAD Z. Use MAD Z for outlier heavy symbols.
+• Clamp level. Typical range 2.0 to 4.0. Lower clamps reduce the influence of extreme runs.
+
+Filters
+• Efficiency filter is implicit in the gain map. Raising efficiency gamma and the efficiency window increases the preference for clean trends.
+• Micro versus macro relation is handled by the fast and slow spans. Increase separation for swing, reduce for scalping.
+• Location filter is not included in v1.0. If you need distance gates from a reference such as VWAP or a moving mean, add them before publication of a new version.
+
+
+Alerts
+• This version does not include alertcondition lines to keep the core minimal. If you prefer alerts, add names Long Polarity Up, Short Polarity Down, Exit Short on Flux Cross Up in a later version and select on bar close for conservative workflows.
+
+
+Strategy has been currently adapted for the QQQ asset with 30/60min timeframe.
+For other assets may require new optimization
+
+Properties visible in this publication
+• Initial capital 25000
+• Base currency Default
+• Default order size method percent of equity with value 5
+• Pyramiding 1
+• Commission 0.05 percent
+• Slippage 10 ticks
+• Process orders on close ON
+• Bar magnifier ON
+• Recalculate after order is filled OFF
+• Calc on every tick OFF
+
+Honest limitations and failure modes
+• Past results do not guarantee future outcomes
+• Economic releases, circuit breakers, and thin books can break the assumptions behind intensity and efficiency
+• Gap heavy symbols may benefit from the MAD Z normalization
+• Very quiet regimes can reduce signal contrast. Use longer windows or higher guide span to stabilize context
+• Session time is the exchange time of the chart
+• If both stop and target can be hit in one bar, tie handling would matter. This strategy has no fixed stops or targets. It uses polarity flips for exits. If you add stops later, declare the preference
+
+Open source reuse and credits
+• None beyond public domain building blocks and Pine built ins such as EMA, SMA, standard deviation, RMA, and percent rank
+• Method and fusion are original in construction and disclosure
+
+Legal
+Education and research only. Not investment advice. You are responsible for your decisions. Test on historical data and in simulation before any live use. Use realistic costs.
+
+Strategy add on block
+
+Strategy notice
+Orders are simulated by the TradingView engine on standard candles. No request.security() calls are used.
+
+Entries and exits
+• Entry logic. Enter long when both the normalized flux and its guide line are above zero. Enter short when both are below zero
+• Exit logic. When polarity flips from plus to minus, close any long and open a short. When the flux crosses above the guide line, close any short
+• Risk model. No initial stop or target in v1.0. The model is a regime flipper. You can add a stop or trail in later versions if needed
+• Tie handling. Not applicable in this version because there are no fixed stops or targets
+
+Position sizing
+• Percent of equity in the Properties panel. Five percent is the default for examples. Risk per trade should not exceed five to ten percent of equity. One to two percent is a common choice
+
+Properties used on the published chart
+• Initial capital 25000
+• Base currency Default
+• Default order size percent of equity with value 5
+• Pyramiding 1
+• Commission 0.05 percent
+• Slippage 10 ticks
+• Process orders on close ON
+• Bar magnifier ON
+• Recalculate after order is filled OFF
+• Calc on every tick OFF
+
+Dataset and sample size
+• Test window Jan 2, 2014 to Oct 16, 2025 on QQQ one hour
+• Trade count in sample 324 on the example chart
+
+
+Release notes template for future updates
+Version 1.1.
+• Add alertcondition lines for long, short, and exit short
+• Add optional table with component readouts
+• Add optional stop model with a distance unit expressed as ATR or a percent of price
+Notes. Backward compatibility Yes. Inputs migrated Yes.

@@ -1,0 +1,301 @@
+//@version=6
+strategy("Power Hour Money Strategy", overlay=false, calc_on_every_tick=true, process_orders_on_close = true, scale =scale.none)
+group_core = "Core"
+onlyTradeMoneyHours = input.string("NY Session 9:30-11:30", title="Trade NY sessions", options= ['NY Session 9:30-11:30', 'Extended NY Session 8-4', 'All Sessions'], group=group_core)
+
+eodCloseSessions = input.string("Close Positions", title="End of Day Close Positions", options= ['Keep Positions', 'Close Positions'], group=group_core)  == "Keep Positions" ? false : true // input.bool(false, "Trade the sessions")
+
+showPlots = input.string("Show Plots", title="Show Entry Shapes", options= ['Show Plots', 'No Plots'], group=group_core)  == "No Plots" ? false : true 
+
+group_trail = "Trail Stop Settings"
+useTrailStopLoss = input.bool(true, "Trail Stop Mechanism", group=group_trail)
+longTrailPerc = input.float(0.2, title="Trail Long Loss (%)", minval=0.0, step=0.05, group=group_trail) * 0.01
+shortTrailPerc = input.float(0.2, title="Trail Short Loss (%)", minval=0.0, step=0.05, group=group_trail) * 0.01
+
+group_timeframes = "Timeframe Settings"
+tf1 = input.timeframe("240", title="Timeframe 1 (Longest)", group=group_timeframes)
+tf2 = input.timeframe("60", title="Timeframe 2", group=group_timeframes)
+tf3 = input.timeframe("15", title="Timeframe 3", group=group_timeframes)
+tf4 = input.timeframe("3", title="Timeframe 4 (Shortest)", group=group_timeframes)
+
+// Function to convert timeframe to readable format
+f_timeframe_label(_tf) =>
+    string label = _tf
+    if not na(str.tonumber(_tf))
+        mins = str.tonumber(_tf)
+        if mins >= 1440
+            days = mins / 1440
+            label := str.tostring(days) + (days == 1 ? "D" : "D")
+        else if mins >= 60
+            hours = mins / 60
+            label := str.tostring(hours) + (hours == 1 ? "H" : "H")
+        else
+            label := str.tostring(mins) + (mins == 1 ? "m" : "m")
+    else if _tf == "D"
+        label := "1D"
+    else if _tf == "W"
+        label := "1W"
+    else if _tf == "M"
+        label := "1M"
+    label
+
+// Function to determine if a time frame is green or red
+f_is_green(_open, _close) =>
+    _close > _open
+
+// Get higher time frame open and close prices
+tf1Open = request.security(syminfo.tickerid, tf1, open, lookahead = barmerge.lookahead_off)
+tf1Close = close
+
+tf2Open = request.security(syminfo.tickerid, tf2, open, lookahead = barmerge.lookahead_off)
+tf2Close = close
+
+tf3Open = request.security(syminfo.tickerid, tf3, open, lookahead = barmerge.lookahead_off)
+tf3Close = close
+show = ta.change(time("D"))
+
+tf4Open = request.security(syminfo.tickerid, tf4, open, lookahead = barmerge.lookahead_off)
+tf4Close = close
+
+// Create readable labels for timeframes
+tf1Label = f_timeframe_label(tf1)
+tf2Label = f_timeframe_label(tf2)
+tf3Label = f_timeframe_label(tf3)
+tf4Label = f_timeframe_label(tf4)
+
+// Determine if each time frame is green or red
+tf1Green = f_is_green(tf1Open, tf1Close)
+tf2Green = f_is_green(tf2Open, tf2Close)
+tf3Green = f_is_green(tf3Open, tf3Close)
+tf4Green = f_is_green(tf4Open, tf4Close)
+
+tf1Red = not tf1Green
+tf2Red = not tf2Green
+tf3Red = not tf3Green
+tf4Red = not tf4Green
+
+
+startSession = timestamp("GMT-5", year, month, dayofmonth, 09, 30)
+endSession = timestamp("GMT-5", year, month, dayofmonth, 11, 30)
+
+extendedStartSession = timestamp("GMT-5", year, month, dayofmonth, 08, 00)
+extendedEndSession = timestamp("GMT-5", year, month, dayofmonth, 16, 00)
+
+isTradeWindow = (time >= extendedStartSession and time <= extendedEndSession)
+
+isTradeable = false
+if(onlyTradeMoneyHours == "NY Session 9:30-11:30")
+    isTradeable := time >= startSession and time <= endSession
+else if onlyTradeMoneyHours == "Extended NY Session 8-4"
+    isTradeable := time >= extendedStartSession and time <= extendedEndSession
+else
+    isTradeable := true
+// Enter long if all time frames are green
+
+callLong = isTradeable and tf1Green and tf2Green and tf3Green and tf4Green
+callShort = isTradeable and tf1Red and tf2Red and tf3Red and tf4Red
+
+if(callLong and strategy.position_size == 0)
+    alert("Power Hour Long", alert.freq_once_per_bar)
+
+if(callShort and strategy.position_size == 0)
+    alert("Power Hour Short", alert.freq_once_per_bar)
+
+if (callLong and barstate.isconfirmed)
+    strategy.entry("Long", strategy.long)
+
+// Enter short if all time frames are red
+if (callShort and barstate.isconfirmed)
+    strategy.entry("Short", strategy.short)
+
+longStopPrice = 0.0
+shortStopPrice = 0.0
+
+
+
+longStopPrice := if strategy.position_size > 0
+    stopValue = close * (1 - longTrailPerc)
+    math.max(stopValue, longStopPrice[1])
+else
+    0
+
+shortStopPrice := if strategy.position_size < 0
+    stopValue = close * (1 + shortTrailPerc)
+    math.min(stopValue, shortStopPrice[1])
+else
+    999999999999999999999999999999  
+
+
+if useTrailStopLoss //and close <= longStopPrice //and (longDelta >= longTicks)
+    if strategy.position_size > 0
+        strategy.exit("Trail Close", stop=longStopPrice, alert_message='{ "action": "Close", "Type": "Trade", "comment": "Close Long - Trail Stop" }')
+
+if useTrailStopLoss //and close >= shortStopLoss 
+    if strategy.position_size < 0
+        strategy.exit("Trail Close", stop=shortStopPrice, alert_message='{ "action": "Close", "Type": "Trade", "comment": "Close Short - Trail Stop" }')
+
+
+
+
+tf4GreenLabel = label.new(bar_index + 2, 0.725, tf4Label + "  ", style = label.style_none, textcolor = color.white, size=size.tiny)
+tf3GreenLabel = label.new(bar_index + 2, 0.475, tf3Label, style = label.style_none, textcolor = color.white, size=size.tiny)
+tf2GreenLabel = label.new(bar_index + 2, 0.225, tf2Label + " ", style = label.style_none, textcolor = color.white, size=size.tiny)
+tf1GreenLabel = label.new(bar_index + 2, -0.025, tf1Label + " ", style = label.style_none, textcolor = color.white, size=size.tiny)
+
+label.delete(tf4GreenLabel[1])
+label.delete(tf3GreenLabel[1])
+label.delete(tf2GreenLabel[1])
+label.delete(tf1GreenLabel[1])
+
+// tf1RedLabel = label.new(bar_index + 2, -3, tf1 + " ", style = label.style_none, textcolor = color.white, size=size.tiny)
+// tf2RedLabel = label.new(bar_index + 2, -5, tf2 + " ", style = label.style_none, textcolor = color.white, size=size.tiny)
+// tf3RedLabel = label.new(bar_index + 2, -7, tf3, style = label.style_none, textcolor = color.white, size=size.tiny)
+// tf4RedLabel = label.new(bar_index + 2, -9, tf4 + "  ", style = label.style_none, textcolor = color.white, size=size.tiny)
+
+// label.delete(tf4RedLabel[1])
+// label.delete(tf3RedLabel[1])
+// label.delete(tf2RedLabel[1])
+// label.delete(tf1RedLabel[1])
+
+plotshape(callLong and showPlots, "Pump", style = shape.triangleup, location = location.belowbar, force_overlay = true, size = size.tiny, color = color.blue)
+plotshape(callShort and showPlots, "Dump", style = shape.triangledown, location = location.abovebar, force_overlay = true, size = size.tiny, color = color.red)
+
+plot(0.75, "tf4", tf4Green ? color.blue: color.new(color.black, 100), 2, plot.style_circles, display = display.pane)
+plot(0.5, "tf3", tf3Green ?color.blue: color.new(color.black, 100), 2, plot.style_circles, display = display.pane)
+plot(0.25, "tf2", tf2Green ?color.blue: color.new(color.black, 100), 2, plot.style_circles, display = display.pane)
+plot(0, "tf1", tf1Green ? color.blue : color.new(color.black, 100), 2, plot.style_circles, display = display.pane)
+plot(0, "tf1", tf1Red ? color.red : color.new(color.black, 100), 2, plot.style_circles, display = display.pane)
+plot(0.25, "tf2", tf2Red ? color.red : color.new(color.black, 100), 2, plot.style_circles, display = display.pane)
+plot(0.5, "tf3",  tf3Red ? color.red : color.new(color.black, 100), 2, plot.style_circles, display = display.pane)
+plot(0.75, "tf4", tf4Red ? color.red : color.new(color.black, 100), 2, plot.style_circles, display = display.pane)
+
+//if(barstate.isconfirmed)
+// log.info("-----------")
+// log.info(tf1Label + " Green: "  + str.tostring(tf1Green))
+// log.info(tf1Label + " Open: "  + str.tostring(tf1Open))
+// log.info(tf1Label + " Close: " + str.tostring(tf1Close)) 
+// log.info(tf2Label + " Green: "  + str.tostring(tf2Green))
+// log.info(tf2Label + " Open: "  + str.tostring(tf2Open))
+// log.info(tf2Label + " Close: " + str.tostring(tf2Close))
+// log.info(tf3Label + " Green: "  + str.tostring(tf3Green))
+// log.info(tf3Label + " Open: "  + str.tostring(tf3Open))
+// log.info(tf3Label + " Close: " + str.tostring(tf3Close))
+// log.info(tf4Label + " Green: "  + str.tostring(tf4Green))
+// log.info(tf4Label + " Open: "  + str.tostring(tf4Open))
+// log.info(tf4Label + " Close: " + str.tostring(tf4Close))
+
+var close_hour = 16
+var close_minutes = 45   
+var new_day = dayofmonth
+var new_month = month
+var new_year = year
+var int close_trades_at_time_of_day = na
+
+if dayofmonth != dayofmonth[1]
+    new_day := dayofmonth
+if month != month[1]
+    new_month := month
+if year != year[1]
+    new_year := year
+close_trades_at_time_of_day := timestamp("GMT-4",new_year,new_month,new_day,close_hour,close_minutes)
+
+if(eodCloseSessions and time == close_trades_at_time_of_day)
+    strategy.close_all(comment = "End of Day")
+
+View in Pine Editor・205 lines
+Use on chart
+1
+7
+9
+2
+4 718
+Jul 1, 2024
+Description of the Pine Script Code: "Power Hour Money Strategy"
+
+This Pine Script strategy, "Power Hour Money Strategy," is designed to trade based on the alignment of multiple time frames (month, week, day, and hour). The strategy aims to enter long or short positions depending on whether all selected time frames are in sync (all green for long positions, all red for short positions). Additionally, the script includes configurations for trading during specific sessions and automatically closing positions at the end of the trading day.
+
+Core Features:
+
+1. Time Frame Sync Check:
+- The strategy evaluates whether the current price is higher than the opening price for the month, week, day, and hour to determine if each time frame is "green" (bullish) or "red" (bearish).
+
+2. Session Control:
+- The user can select between different trading sessions:
+- "NY Session 9:30-11:30"
+- "Extended NY Session 8-4"
+- "All Sessions"
+- Trades are only executed if the current time falls within the selected session.
+
+3. Trailing Stop Mechanism:
+- The strategy includes an optional trailing stop mechanism for both long and short positions.
+- The trailing stop is configured with a percentage loss from the current price to protect gains.
+
+4. End-of-Day Position Management:
+- An option is provided to automatically close all positions at the end of the trading day (5:45 PM Eastern Time).
+
+Detailed Code Breakdown:
+
+1. Input Settings:
+- **Session Selection**: Allows the user to choose the trading session.
+- **End-of-Day Close**: Option to automatically close positions at the end of the day.
+- **Trailing Stop Loss**: Enables or disables the trailing stop loss feature and sets the percentage for long and short positions.
+
+2. Time Frame Calculations:
+- The script uses `request.security` to get the opening prices for higher time frames (monthly, weekly, daily, and hourly).
+- It compares the current close price to these opening prices to determine if each time frame is green or red.
+
+3. Session Time Definitions:
+- Defines the start and end times for the NY session (9:30-11:30 AM) and the extended session (8:00 AM - 4:00 PM).
+
+4. Trade Execution:
+- The strategy checks if all selected time frames are in sync and if the current time falls within the trading session.
+- If all conditions are met, it enters a long or short position.
+
+5. Trailing Stop Loss Implementation:
+- Adjusts the stop price based on the trailing percentage and the current position's size.
+- Automatically exits positions if the trailing stop condition is met.
+
+6. End-of-Day Close Implementation:
+- Uses a timestamp to check if the current time is 5:45 PM Eastern Time.
+- Closes all positions if the end-of-day condition is met.
+
+7. Plotting and Logging:
+- Plots indicators to visualize the green/red status of each time frame.
+- Logs information about the status of each time frame for debugging and analysis.
+
+Example Usage:
+
+Entering a Long Position: If the month, week, day, and hour are all green and the current time is within the selected session, a long position is entered.
+
+Entering a Short Position: If the month, week, day, and hour are all red and the current time is within the selected session, a short position is entered.
+
+Trailing Stop: Protects gains by exiting the position if the price moves against the set trailing stop percentage.
+
+End-of-Day Close: Automatically closes all open positions at 5:45 PM Eastern Time if enabled.
+
+
+
+This strategy is particularly useful for traders who want to ensure that multiple time frames are in alignment before entering a trade and who wish to manage positions effectively throughout the trading day with specific session controls and trailing stops.
+Jul 1, 2024
+Release Notes
+
+
+Minor update. Removed irrelevant price scale.
+
+Jul 1, 2024
+Release Notes
+
+
+Minor Update. Changed Default Settings.
+
+Jul 15, 2024
+Release Notes
+
+
+Only triggers strategy alert on confirmed bar
+
+New Alert for unconfirmed bar
+
+Dec 10, 2025
+Release Notes
+Upgrade to version 6. Visual enhancements. Ability to now pick the four time frames.

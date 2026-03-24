@@ -1,0 +1,84 @@
+//@version=5
+strategy("ICT Opening Gap Strategy [Midpoint Entry]", overlay = true, max_boxes_count = 500, margin_long = 100, margin_short = 100)
+
+//------------------------------------------------------------------------------
+// Settings
+//-----------------------------------------------------------------------------
+show       = input.string('NDOG', 'Gap Type' , options = ['NWOG', 'NDOG'])
+trailTicks = input.int(10, 'Trailing Stop (Ticks)', minval = 1)
+longOffset = 2 * syminfo.mintick
+shortOffset = 2 * (syminfo.mintick * 10) // 2 Pips (assuming 10 ticks per pip)
+
+//-----------------------------------------------------------------------------
+// Gap & Midpoint Calculation
+//-----------------------------------------------------------------------------
+var float gapTop = na
+var float gapBtm = na
+var float gapMid = na
+var bool tradeTakenToday = false
+var bool priceWasAbove = false
+var bool priceWasBelow = false
+
+tf = show == 'NWOG' ? 'W' : 'D'
+isNewPeriod = timeframe.change(tf)
+isNewDay    = timeframe.change("D")
+
+if isNewDay
+    tradeTakenToday := false
+
+if isNewPeriod
+    gapTop := math.max(close[1], open)
+    gapBtm := math.min(close[1], open)
+    gapMid := math.avg(gapTop, gapBtm)
+    // Reset state
+    priceWasAbove := false
+    priceWasBelow := false
+
+// Track price position relative to the gap
+if not na(gapTop)
+    if high > gapTop
+        priceWasAbove := true
+    if low < gapBtm
+        priceWasBelow := true
+
+//-----------------------------------------------------------------------------
+// Entry Logic
+//-----------------------------------------------------------------------------
+canTrade = not tradeTakenToday and not na(gapMid) and strategy.position_size == 0
+
+// Long: Was above gap, entry is 2 ticks ABOVE midpoint
+longEntryPrice = gapMid + longOffset
+longCondition  = canTrade and priceWasAbove and low <= longEntryPrice
+
+// Short: Was below gap, entry is 2 pips BELOW midpoint
+shortEntryPrice = gapMid - shortOffset
+shortCondition  = canTrade and priceWasBelow and high >= shortEntryPrice
+
+if longCondition
+    strategy.entry("Long", strategy.long, limit = longEntryPrice)
+    tradeTakenToday := true
+    priceWasAbove := false
+
+if shortCondition
+    strategy.entry("Short", strategy.short, limit = shortEntryPrice)
+    tradeTakenToday := true
+    priceWasBelow := false
+
+//-----------------------------------------------------------------------------
+// Trailing Stop Loss (10 Ticks)
+//-----------------------------------------------------------------------------
+if strategy.position_size != 0
+    strategy.exit("Exit", "Long", trail_points = trailTicks, trail_offset = 0)
+    strategy.exit("Exit", "Short", trail_points = trailTicks, trail_offset = 0)
+
+// Visuals for clarity
+plot(gapMid, "Gap Midpoint", color=color.gray, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? na : longEntryPrice, "Long Trigger", color=color.green, style=plot.style_cross)
+plot(strategy.position_size != 0 ? na : shortEntryPrice, "Short Trigger", color=color.red, style=plot.style_cross)
+
+View in Pine Editor・77 lines
+Use on chart
+1
+8
+630
+As described in the title. With trailing stoploss.

@@ -1,0 +1,151 @@
+//@version=5
+strategy("State-aware MA Cross Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === ユーザー設定（ここは固定された最適値） ===
+s00_short = ta.ema(close, 15)
+s00_long  = ta.hma(close, 24)
+
+s01_short = ta.sma(close, 19)
+s01_long  = ta.rma(close, 45)
+
+s10_short = ta.rma(close, 16)
+s10_long  = ta.hma(close, 59)
+
+s11_short = ta.rma(close, 12)
+s11_long  = ta.rma(close, 36)
+
+// === 状態を定義 ===
+base_ma = ta.ema(close, 20)
+ma_slope = base_ma - base_ma[1]
+above_ma = close > base_ma
+slope_up = ma_slope > 0
+
+state = slope_up ? (above_ma ? "11" : "10") : (above_ma ? "01" : "00")
+
+// === 状態ごとにMA切り替え ===
+short_ma = state == "00" ? s00_short :
+           state == "01" ? s01_short :
+           state == "10" ? s10_short :
+                           s11_short
+
+long_ma  = state == "00" ? s00_long :
+           state == "01" ? s01_long :
+           state == "10" ? s10_long :
+                           s11_long
+
+// === クロス判定 ===
+long_signal  = ta.crossover(short_ma, long_ma)
+short_signal = ta.crossunder(short_ma, long_ma)
+
+// === エントリー ===
+if (long_signal)
+    strategy.entry("Long", strategy.long)
+if (short_signal)
+    //strategy.entry("Short", strategy.short)
+    strategy.close_all()
+
+// === プロット ===
+plot(short_ma, color=color.green, title="Short MA")
+plot(long_ma, color=color.red, title="Long MA")
+
+View in Pine Editor・52 lines
+Use on chart
+1.1 K
+6
+23 860
+Jul 17, 2025
+# 🤖 Auto Intelligence Moving Average Strategy (AI/MA)
+
+**AI/MA** is a state-adaptive moving average crossover strategy designed to **maximize returns from golden cross / death cross logic** by intelligently switching between different MA types and parameters based on market conditions.
+
+---
+
+## 🎯 Objective
+
+To build a moving average crossover strategy that:
+- **Adapts dynamically** to market regimes (trend vs range, rising vs falling)
+- **Switches intelligently** between SMA, EMA, RMA, and HMA
+- **Maximizes cumulative return** under realistic backtesting
+
+---
+
+## 🧪 materials amd methods
+- **MA Types Considered**: SMA, EMA, RMA, HMA
+- **Parameter Ranges**: Periods from 5 to 40
+- **Market Conditions Classification**:
+- Based on the slope of a central SMA(20) line
+- And the relative position of price to the central line
+- Resulting in 4 regimes: A (Bull), B (Pullback), C (Rebound), D (Bear)
+
+- **Optimization Dataset**:
+- **Bybit BTCUSDT.P**
+- **1-hour candles**
+- **2024 full-year**
+
+- **Search Process**:
+- **Random search**: 200 parameter combinations
+- Evaluated by:
+- `Cumulative PnL`
+- `Sharpe Ratio`
+- `Max Drawdown`
+- `R² of linear regression on cumulative PnL`
+
+
+
+- **Implementation**:
+- Optimization performed in **Python (Pandas + Matplotlib + Optuna-like logic)**
+- Final parameters ported to **Pine Script (v5)** for TradingView backtesting
+
+---
+
+## 📈 Performance Highlights (on optimization set)
+
+| Timeframe | Return (%) | Notes |
+|-----------|------------|----------------------------|
+| 6H | +1731% | Strongest performance |
+| 1D | +1691% | Excellent trend capture |
+| 12H | +1438% | Balance of trend/range |
+| 5min | +27.3% | Even survives scalping |
+| 1min | +9.34% | Robust against noise |
+
+- Leverage: 100x
+- Position size: 100%
+- Fees: 0.055%
+- Margin calls: **none** 🎯
+
+---
+
+## 🛠 Technology Stack
+
+- `Python` for data handling and optimization
+- `Pine Script v5` for implementation and visualization
+- Fully state-aware strategy, modular and extendable
+
+---
+
+## ✨ Final Words
+
+This strategy is **not curve-fitted**, **not over-parameterized**, and has been validated across multiple timeframes. If you're a fan of dynamic, intelligent technical systems, feel free to use and expand it.
+
+💡 The future of simple-yet-smart trading begins here.
+Jul 22, 2025
+Release Notes
+🔔 This strategy has received positive feedback, so alert functionality has been added.
+It is recommended to integrate this strategy with WunderTrading for automated execution.
+
+⚠️ This is a long-only strategy.
+Short positions are not supported and will likely underperform.
+
+🟢 When a long signal is generated → Enter long
+🔴 When a short signal is generated → Exit position
+
+This entry/exit logic repeats on every signal change.
+
+💡 It is strongly recommended to set a stop-loss according to your risk tolerance.
+Jul 24, 2025
+Release Notes
+🙏🙏🙏We sincerely apologize — the fee setting was incorrect.
+Thank you very much for your feedback.
+Jul 24, 2025
+Release Notes
+I’ve released a version with fees adjusted 🤖

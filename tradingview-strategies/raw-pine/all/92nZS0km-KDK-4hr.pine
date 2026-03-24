@@ -1,0 +1,53 @@
+//@version=5
+strategy("4H Candle Enty | 0.125% SL / 0.75% TP with Risk Control", overlay=true, initial_capital=10000)
+// === User Inputs ===
+capitalRiskPercent = input.float(1.0, "Capital Risk % per Trade", step=0.1) * 0.01
+maxPosSize = input.int(1000, "Max Position Size", minval=1)
+tf = input.timeframe("240", "Higher Timeframe for Candle")  // 4H timeframe
+
+// === Fixed Stop Loss & Take Profit % ===
+slPercent = 0.0025  // 0.5%
+tpPercent = 0.005// 2%
+
+// === Get previous 4H candle's high and low ===
+ph = request.security(syminfo.tickerid, tf, high[1])
+pl = request.security(syminfo.tickerid, tf, low[1])
+
+// === Current price ===
+currentPrice = close
+
+// === Calculate SL and TP distances ===
+slDistance = currentPrice * slPercent
+tpDistance = currentPrice * tpPercent
+
+// === Calculate position size based on risk per trade ===
+riskPerTrade = strategy.equity * capitalRiskPercent
+posSizeRaw = riskPerTrade / slDistance
+posSize = math.min(posSizeRaw, maxPosSize)  // Cap to avoid over-sizing
+
+// === Only one open trade at a time ===
+noOpenTrades = strategy.position_size == 0
+
+// === Buy Trade ===
+if (noOpenTrades and close < pl)
+    entryBuy = pl
+    stopLossBuy = entryBuy - slDistance
+    takeProfitBuy = entryBuy + tpDistance
+    strategy.entry("Long", strategy.long, stop=entryBuy, qty=posSize)
+    strategy.exit("Long Exit", from_entry="Long", stop=stopLossBuy, limit=takeProfitBuy)
+
+// === Sell Trade ===
+if (noOpenTrades and close > ph)
+    entrySell = ph
+    stopLossSell = entrySell + slDistance
+    takeProfitSell = entrySell - tpDistance
+    strategy.entry("Short", strategy.short, stop=entrySell, qty=posSize)
+    strategy.exit("Short Exit", from_entry="Short", stop=stopLossSell, limit=takeProfitSell)
+
+View in Pine Editor・45 lines
+Use on chart
+7
+6
+3
+1 972
+crazy strategy ever shit could make a millions if you found it by luck

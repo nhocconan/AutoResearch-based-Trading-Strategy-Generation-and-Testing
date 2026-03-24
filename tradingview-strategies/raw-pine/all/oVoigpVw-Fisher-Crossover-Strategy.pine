@@ -1,0 +1,59 @@
+//@version=5
+strategy("Fisher Crossover Strategy", 
+     overlay=true, 
+     default_qty_type=strategy.cash, 
+     default_qty_value=20000, 
+     calc_on_every_tick=false)
+
+// Fisher Transform parameters
+length = input.int(9, "Fisher Length")
+
+// Calculate the raw value
+value = 0.33 * 2 * ((close - ta.lowest(low, length)) / (ta.highest(high, length) - ta.lowest(low, length)) - 0.5)
+value := value + 0.67 * nz(value[1])
+
+// Fisher transform
+fisher = 0.5 * math.log((1 + value) / (1 - value))
+fisher := fisher + 0.5 * nz(fisher[1])
+
+// Trigger line is previous Fisher value
+trigger = nz(fisher[1])
+
+// Conditions
+longCondition  = ta.crossover(fisher, trigger) and fisher < 1
+exitCondition  = ta.crossunder(fisher, trigger) and fisher > 1
+
+// Ensure one trade at a time
+inTrade = strategy.position_size != 0
+
+// Entry and exit only at candle close
+if barstate.isconfirmed
+    if (longCondition and not inTrade)
+        strategy.entry("Long", strategy.long, comment="Buy")
+    if (exitCondition and inTrade)
+        strategy.close("Long", comment="Exit")
+
+// Plot Fisher & Trigger
+plot(fisher, color=color.new(color.green, 0), title="Fisher")
+plot(trigger, color=color.new(color.red, 0), title="Trigger")
+
+// Reference line at 1 for clarity
+hline(1, "Level 1", color=color.red)
+
+View in Pine Editor・41 lines
+Use on chart
+1
+8
+843
+Aug 4, 2025
+The Fisher Crossover Strategy is a popular technical trading method that uses the Fisher Transform indicator developed by John Ehlers. This indicator mathematically converts price data into a normal Gaussian distribution, making market turning points sharper and easier to identify. The strategy is based on two lines: the Fisher line, which is the main transformed price value, and the Trigger line, which is a one-period lag of the Fisher line. Traders use the crossover of these lines to determine buy and sell opportunities.
+
+A buy signal is generated when the Fisher line crosses above the Trigger line, indicating that bullish momentum may be starting, while a sell signal occurs when the Fisher line crosses below the Trigger line, suggesting a possible bearish reversal. Signals that occur relative to the zero line are often considered stronger; for example, a buy signal below the zero line may indicate a deeper market reversal. The strategy is simple to follow and can be applied to various markets including stocks, forex, commodities, and cryptocurrencies.
+
+However, like all crossover strategies, it can produce false signals during sideways or ranging markets. To reduce whipsaws, traders often combine the Fisher Crossover Strategy with other tools such as support and resistance levels, volume analysis, or moving averages. Proper risk management with stop-loss and take-profit levels is also essential. Overall, the Fisher Crossover Strategy is valued for its clear entry and exit rules and its ability to highlight potential market reversals earlier than many other indicators.
+Aug 4, 2025
+Release Notes
+The **Fisher Crossover Strategy** is a momentum-based trading strategy that uses the Fisher Transform indicator to identify potential bullish reversals. The Fisher Transform mathematically converts market prices into a Gaussian normal distribution, making turning points sharper and more visible. In this strategy, a **Fisher line** and a **Trigger line** (the previous bar’s Fisher value) are plotted. A long entry is generated when the Fisher line crosses above the Trigger line and is below the level of 1, signaling a potential shift from bearish to bullish momentum. The trade is exited when the Fisher line crosses back below the Trigger line and is above the level of 1, indicating a loss of momentum.
+
+The strategy is designed to take **only one trade at a time** and confirms entries and exits only at candle close to reduce false signals. It uses a fixed cash amount of ₹20,000 per trade and is applied directly on the price chart. The Fisher line is plotted in green, the Trigger line in red, and a horizontal reference line at level 1 helps visually identify overbought or strong momentum conditions. Overall, this strategy works best in trending or volatile markets and may produce false signals during sideways movements.
+

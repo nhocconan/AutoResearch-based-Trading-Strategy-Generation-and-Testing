@@ -1,0 +1,101 @@
+//@version=5
+strategy("ATM Option Selling Strategy", overlay=true, default_qty_type=strategy.fixed, default_qty_value=375)
+
+// Input parameters
+ema9 = ta.ema(close, 9)
+ema15 = ta.ema(close, 15)
+ma50 = ta.sma(close, 50)
+ma80 = ta.sma(close, 80)
+rsi = ta.rsi(close, 14)
+
+// Define ATM Strike Price (Rounding to nearest 50)
+atmStrike = math.round(close / 50) * 50  // Corrected function
+
+// Sell ATM Call & Put Conditions
+sellCallCondition = close < ma50 and close < ma80 and ta.crossunder(ema9, ema15) and rsi < 50
+sellPutCondition = close > ma50 and close > ma80 and ta.crossover(ema9, ema15) and rsi > 50
+
+// Define Stop Loss & Take Profit (50 Points)
+pointValue = syminfo.mintick * 100  // Assuming 1 point = 1 price unit
+takeProfit = 50 * pointValue
+stopLoss = 50 * pointValue
+
+// Market Close Exit Time (3:24 PM IST) - Ensures exit before next day
+exitTime = (hour == 15 and minute == 24)
+
+// Plot EMAs & MAs
+plot(ema9, color=color.blue, title="9 EMA")
+plot(ema15, color=color.orange, title="15 EMA")
+plot(ma50, color=color.green, title="50 MA")
+plot(ma80, color=color.red, title="80 MA")
+
+// Sell ATM Call Option when Sell Condition Triggers
+if sellCallCondition
+    strategy.entry("Sell ATM Call", strategy.short, qty=375)
+    strategy.exit("Exit Call", from_entry="Sell ATM Call", limit=close - takeProfit, stop=close + stopLoss)
+
+// Sell ATM Put Option when Buy Condition Triggers
+if sellPutCondition
+    strategy.entry("Sell ATM Put", strategy.short, qty=375)
+    strategy.exit("Exit Put", from_entry="Sell ATM Put", limit=close - takeProfit, stop=close + stopLoss)
+
+// **Force Exit All Trades at 3:24 PM IST**
+if exitTime
+    strategy.close_all(comment="Market Close Exit")
+
+// Plot Sell Signals
+plotshape(series=sellCallCondition, location=location.abovebar, color=color.red, style=shape.labeldown, title="Sell Call")
+plotshape(series=sellPutCondition, location=location.belowbar, color=color.green, style=shape.labelup, title="Sell Put")
+
+View in Pine Editor・48 lines
+Use on chart
+7
+2
+2 835
+ATM Option Selling Strategy – Explained
+This strategy is designed for intraday option selling based on the 9/15 EMA crossover, 50/80 MA trend filter, and RSI 50 level. It ensures that all trades are exited before market close (3:24 PM IST).
+
+. Indicators Used:
+9 EMA & 15 EMA → For short-term trend identification.
+
+50 MA & 80 MA → To determine the overall trend.
+
+RSI (14) → To confirm momentum (above or below 50 level).
+
+2. Entry Conditions:
+🔴 Sell ATM Call (CE) when:
+
+Price is below 50 & 80 MA (Bearish trend).
+
+9 EMA crosses below 15 EMA (Short-term trend turns bearish).
+
+RSI is below 50 (Momentum confirms weakness).
+
+🟢 Sell ATM Put (PE) when:
+
+Price is above 50 & 80 MA (Bullish trend).
+
+9 EMA crosses above 15 EMA (Short-term trend turns bullish).
+
+RSI is above 50 (Momentum confirms strength).
+
+3. Position Sizing & Risk Management:
+Sell 375 quantity per trade (Lot size).
+
+50-Point Stop Loss → If option premium moves against us by 50 points, exit.
+
+50-Point Take Profit → If option premium moves in our favor by 50 points, book profit.
+
+Exit all trades at 3:24 PM IST → No overnight positions.
+
+4. Exit Conditions:
+✅ Stop Loss or Take Profit Hits → Automatically exits based on a 50-point move.
+✅ Time-Based Exit at 3:24 PM → Ensures no open positions at market close.
+
+Why This Works?
+✔ Trend Confirmation → 50/80 MA ensures we only sell options in the direction of the market trend.
+✔ Momentum Confirmation → RSI prevents entering weak trades.
+✔ Controlled Risk → SL and TP protect against large losses.
+✔ No Overnight Risk → All trades close before market close.
+
+

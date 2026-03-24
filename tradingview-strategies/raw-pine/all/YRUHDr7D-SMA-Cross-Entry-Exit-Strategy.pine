@@ -1,0 +1,73 @@
+//@version=3
+//strategy(title="MA Cross Entry & Exit w/Date Range", overlay=true, initial_capital=10000, currency='USD')
+
+strategy(title="SMA Cross Entry & Exit Strategy", overlay=true, pyramiding=4, calc_on_order_fills=true, default_qty_value=50, initial_capital=10000, currency="USD")
+
+// Credit goes to this developer for the "Date Range Code"
+// https://www.tradingview.com/script/62hUcP6O-How-To-Set-Backtest-Date-Range/
+
+
+// === GENERAL INPUTS ===
+// short ma
+maFastSource   = input(defval = open, title = "Fast MA Source")
+maFastLength   = input(defval = 36, title = "Fast MA Period", minval = 1)
+// long ma
+maSlowSource   = input(defval = open , title = "Slow MA Source")
+maSlowLength   = input(defval = 46, title = "Slow MA Period", minval = 1)
+
+// === SERIES SETUP ===
+// a couple of ma's..
+maFast = sma(maFastSource, maFastLength)
+maSlow = sma(maSlowSource, maSlowLength)
+
+
+// === PLOTTING ===
+fast = plot(maFast, title = "Fast MA", color = red, linewidth = 2, style = line, transp = 30)
+slow = plot(maSlow, title = "Slow MA", color = green, linewidth = 2, style = line, transp = 30)
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 9, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2018, title = "From Year", minval = 2017)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 9999, title = "To Year", minval = 2017)
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+// === LOGIC ===
+//enterLong = crossover(maFast, maSlow)
+//exitLong = crossover(maSlow, maFast)
+enterLong = crossover(maSlow, maFast)
+exitLong = crossover(maFast, maSlow)
+
+
+// Entry //
+strategy.entry(id="Long Entry", long=true, when=window() and enterLong)
+strategy.entry(id="Short Entry", long=false, when=window() and exitLong)
+
+// === FILL ====
+
+fill(fast, slow, color = maFast > maSlow ? green : red)
+
+View in Pine Editor・54 lines
+Use on chart
+4
+6
+5
+1
+19 628
+This is a TradingView Strategy Script meaning you can't execute real trades using your exchange API connected to your TradingView account, it is designed for backtesting only
+
+This is a basic backtesting script for charting the bullish and bearish cross of two user defined simple moving averages, select the cog next to the name of the script ON the price chart in the left hand corner. The script will print to the screen either "Long Entry" or "Short Entry" depending on the direction of the cross. The script using TradingView strategies will subsequently close the opposite of the position that is executed when the bullish or bearish cross occurs. Simply put, if you are short and a bullish cross occurs, your short trade will close and be logged in strategies and the long will fire. You can pyramid the long and short positions to continue entering as long as the trend doesn't flip. You will find this in the script settings. Since this script is for backtesting you can manually set the "backtesting range" for TradingView Strategies and firing the "Long Entry" and "Short Entry". This as well, is in the settings.
+
+
+Notice: When the SMA cross occurs, you have to wait till the next candle before TradingView Strategy will print the "Long Entry" or "Short Entry" to the screen
+
+
+
+
+TradingView - How To Use Strategies: tradingview.com/wiki/Strategies

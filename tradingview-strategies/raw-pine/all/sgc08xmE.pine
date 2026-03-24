@@ -1,0 +1,499 @@
+//@version=6
+strategy(title='Master Trend Strategy 1.2 - by jake_theboss', overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=50, pyramiding=100, max_lines_count=500)
+
+// === TIMEZONE OFFSET ===
+timezoneOffset = input.int(6, title='Timezone Offset (UTC)', minval=-12, maxval=12)
+
+// === MASTER TREND SETTINGS ===
+rsiMTPeriod = input.int(14, title='RSI Period', group="Master Trend")
+ema4Period = input.int(4, title='EMA 4 Period', group="Master Trend")
+ema5Period = input.int(5, title='EMA 5 Period', group="Master Trend")
+ema21Period = input.int(21, title='EMA 21 Period', group="Master Trend")
+sma50Period = input.int(50, title='SMA 50 Period', group="Master Trend")
+ema55Period = input.int(55, title='EMA 55 Period', group="Master Trend")
+ema89Period = input.int(89, title='EMA 89 Period', group="Master Trend")
+ema750Period = input.int(750, title='EMA 750 Period', group="Master Trend")
+
+// === PYRAMIDING SETTINGS ===
+enablePyramiding = input.bool(true, title='Enable Pyramiding', group="Pyramiding", tooltip="Allow multiple entries in the same direction")
+maxPyramidOrders = input.int(2, title='Max Pyramid Orders', minval=1, maxval=200, group="Pyramiding", tooltip="Maximum number of orders in the same direction")
+pyramidQtyPercent = input.float(100, title='Pyramid Order Size (% of equity)', minval=10, maxval=1000, step=10, group="Pyramiding", tooltip="Size of each pyramid order as % of equity")
+
+// === VISUALIZATION SETTINGS ===
+showEMAs = input.bool(false, title='Show EMAs', group="Visualization")
+showSignals = input.bool(true, title='Show Entry Signals', group="Visualization")
+masterTrendBullColor = input.color(color.rgb(0, 255, 0, 0), title='Bullish Signal Color', group="Visualization")
+masterTrendBearColor = input.color(color.rgb(255, 0, 0, 0), title='Bearish Signal Color', group="Visualization")
+
+// === VWAP FILTER ===
+enableVWAPFilter = input.bool(true, title='Enable VWAP Filter', group="Filters", tooltip="Show only bullish signals above VWAP and bearish signals below VWAP")
+
+// === TIME FILTER ===
+enableTimeFilter = input.bool(false, title='Enable Time Filter', group="Filters")
+startHour = input.int(9, title='Start hour (0-23)', minval=0, maxval=23, group="Filters")
+startMinute = input.int(0, title='Start minute (0-59)', minval=0, maxval=59, group="Filters")
+endHour = input.int(18, title='End hour (0-23)', minval=0, maxval=23, group="Filters")
+endMinute = input.int(0, title='End minute (0-59)', minval=0, maxval=59, group="Filters")
+
+// === STOP LOSS & TAKE PROFIT ===
+useStopLoss = input.bool(true, title='Use Stop Loss', group="Risk Management")
+stopLossPerc = input.float(0.22, title='Stop Loss %', minval=0.01, maxval=10.0, step=0.01, group="Risk Management")
+useTakeProfit = input.bool(true, title='Use Take Profit', group="Risk Management")
+takeProfitPerc = input.float(0.65, title='Take Profit %', minval=0.01, maxval=20.0, step=0.01, group="Risk Management")
+
+// === BREAKEVEN SETTINGS ===
+useBreakeven = input.bool(true, title='Use Breakeven Stop', group="Risk Management")
+breakevenTriggerPerc = input.float(0.35, title='Breakeven Trigger %', minval=0.01, maxval=10.0, step=0.01, group="Risk Management", tooltip="Move stop to breakeven when profit reaches this %")
+breakevenOffsetPerc = input.float(0.09, title='Breakeven Offset %', minval=0.0, maxval=1.0, step=0.01, group="Risk Management", tooltip="Offset from entry price (0 = exact breakeven, positive = small profit)")
+
+// === VARIABLES FOR LINES AND TRACKING ===
+var array<line> entryLines = array.new_line()
+var array<line> stopLossLines = array.new_line()
+var array<line> takeProfitLines = array.new_line()
+var array<line> tradeConnectorLines = array.new_line()
+var line currentEntryLine = na
+var line currentStopLossLine = na
+var line currentTakeProfitLine = na
+var float entryPrice = na
+var float stopLossPrice = na
+var float takeProfitPrice = na
+var int entryBar = na
+var int pyramidCount = 0
+
+// === ARRAYS TO TRACK INDIVIDUAL TRADES ===
+var array<float> tradeEntryPrices = array.new_float()
+var array<float> tradeStopLosses = array.new_float()
+var array<float> tradeTakeProfits = array.new_float()
+var array<string> tradeIds = array.new_string()
+var array<bool> tradeBreakevenMoved = array.new_bool()
+var array<int> tradeEntryBars = array.new_int()
+
+// === CALCULATIONS ===
+vwap = ta.vwap(hl2)
+ema750 = ta.ema(close, ema750Period)
+rsiMT = ta.rsi(close, rsiMTPeriod)
+ema4 = ta.ema(close, ema4Period)
+ema5 = ta.ema(close, ema5Period)
+ema21 = ta.ema(close, ema21Period)
+sma50 = ta.sma(close, sma50Period)
+ema55 = ta.ema(close, ema55Period)
+ema89 = ta.ema(close, ema89Period)
+
+// === STOCHASTIC FOR BARCOLOR ===
+stoK = ta.sma(ta.stoch(close, high, low, 10), 3)
+
+// === EMA89 BREAKOUT ===
+ema89BullBreakout = ta.crossover(close, ema89)
+ema89BearBreakout = ta.crossunder(close, ema89)
+
+// === VWAP CROSS ===
+vwapCloseBull = close > vwap and close[1] <= vwap[1]
+vwapCloseBear = close < vwap and close[1] >= vwap[1]
+
+// === BARCOLOR CONDITIONS (matching original indicator) ===
+isBullishCandle = stoK > 52 or ema89BullBreakout or vwapCloseBull
+isBearishCandle = stoK < 48 or ema89BearBreakout or vwapCloseBear
+
+// === TIME FILTER FUNCTION ===
+isInTimeRange() =>
+    if not enableTimeFilter
+        true
+    else
+        startTimeUTC = (startHour - timezoneOffset + 24) % 24
+        endTimeUTC = (endHour - timezoneOffset + 24) % 24
+        
+        startTimeInMinutes = startTimeUTC * 60 + startMinute
+        endTimeInMinutes = endTimeUTC * 60 + endMinute
+        currentTimeInMinutes = hour * 60 + minute
+        
+        if startTimeInMinutes <= endTimeInMinutes
+            currentTimeInMinutes >= startTimeInMinutes and currentTimeInMinutes <= endTimeInMinutes
+        else
+            currentTimeInMinutes >= startTimeInMinutes or currentTimeInMinutes <= endTimeInMinutes
+
+// === MASTER TREND LOGIC ===
+ema4CrossAbove5 = ta.crossover(ema4, ema5)
+ema4CrossBelow5 = ta.crossunder(ema4, ema5)
+
+// Master Trend Signals (matching original indicator exactly)
+masterTrendBullSignal = ema4CrossAbove5 and rsiMT > 50 and close > ema21 and close > sma50 and close > ema55 and close > ema89 and close > ema750 and isBullishCandle and isInTimeRange() and (not enableVWAPFilter or close > vwap)
+
+masterTrendBearSignal = ema4CrossBelow5 and rsiMT < 50 and close < ema21 and close < sma50 and close < ema55 and close < ema89 and close < ema750 and isBearishCandle and isInTimeRange() and (not enableVWAPFilter or close < vwap)
+
+// === BREAKEVEN MANAGEMENT ===
+if useBreakeven and array.size(tradeIds) > 0
+    for i = 0 to array.size(tradeIds) - 1
+        if not array.get(tradeBreakevenMoved, i)
+            entryPriceIndiv = array.get(tradeEntryPrices, i)
+            tradeId = array.get(tradeIds, i)
+            isLongTrade = str.contains(tradeId, "Long")
+            
+            breakevenTrigger = entryPriceIndiv * (1 + breakevenTriggerPerc / 100)
+            breakevenPrice = entryPriceIndiv * (1 + breakevenOffsetPerc / 100)
+            
+            if isLongTrade
+                if high >= breakevenTrigger
+                    array.set(tradeStopLosses, i, breakevenPrice)
+                    array.set(tradeBreakevenMoved, i, true)
+            else
+                breakevenTriggerShort = entryPriceIndiv * (1 - breakevenTriggerPerc / 100)
+                breakevenPriceShort = entryPriceIndiv * (1 - breakevenOffsetPerc / 100)
+                if low <= breakevenTriggerShort
+                    array.set(tradeStopLosses, i, breakevenPriceShort)
+                    array.set(tradeBreakevenMoved, i, true)
+
+// === INDIVIDUAL STOP LOSS AND TAKE PROFIT MANAGEMENT ===
+if array.size(tradeIds) > 0
+    for i = array.size(tradeIds) - 1 to 0
+        tradeId = array.get(tradeIds, i)
+        entryPriceIndiv = array.get(tradeEntryPrices, i)
+        stopLossIndiv = array.get(tradeStopLosses, i)
+        takeProfitIndiv = array.get(tradeTakeProfits, i)
+        entryBarIndiv = array.get(tradeEntryBars, i)
+        
+        isLongTrade = str.contains(tradeId, "Long")
+        
+        if isLongTrade
+            if useStopLoss and low <= stopLossIndiv
+                strategy.close(tradeId, comment="SL Hit")
+                exitPrice = stopLossIndiv
+                connectorLine = line.new(entryBarIndiv, entryPriceIndiv, bar_index, exitPrice, color=color.new(color.red, 0), width=1, style=line.style_dotted)
+                array.push(tradeConnectorLines, connectorLine)
+                
+                array.remove(tradeIds, i)
+                array.remove(tradeEntryPrices, i)
+                array.remove(tradeStopLosses, i)
+                array.remove(tradeTakeProfits, i)
+                array.remove(tradeBreakevenMoved, i)
+                array.remove(tradeEntryBars, i)
+                pyramidCount := pyramidCount - 1
+            else if useTakeProfit and high >= takeProfitIndiv
+                strategy.close(tradeId, comment="TP Hit")
+                exitPrice = takeProfitIndiv
+                connectorLine = line.new(entryBarIndiv, entryPriceIndiv, bar_index, exitPrice, color=color.new(color.green, 0), width=1, style=line.style_dotted)
+                array.push(tradeConnectorLines, connectorLine)
+                
+                array.remove(tradeIds, i)
+                array.remove(tradeEntryPrices, i)
+                array.remove(tradeStopLosses, i)
+                array.remove(tradeTakeProfits, i)
+                array.remove(tradeBreakevenMoved, i)
+                array.remove(tradeEntryBars, i)
+                pyramidCount := pyramidCount - 1
+        else
+            if useStopLoss and high >= stopLossIndiv
+                strategy.close(tradeId, comment="SL Hit")
+                exitPrice = stopLossIndiv
+                connectorLine = line.new(entryBarIndiv, entryPriceIndiv, bar_index, exitPrice, color=color.new(color.red, 50), width=1, style=line.style_dotted)
+                array.push(tradeConnectorLines, connectorLine)
+                
+                array.remove(tradeIds, i)
+                array.remove(tradeEntryPrices, i)
+                array.remove(tradeStopLosses, i)
+                array.remove(tradeTakeProfits, i)
+                array.remove(tradeBreakevenMoved, i)
+                array.remove(tradeEntryBars, i)
+                pyramidCount := pyramidCount - 1
+            else if useTakeProfit and low <= takeProfitIndiv
+                strategy.close(tradeId, comment="TP Hit")
+                exitPrice = takeProfitIndiv
+                connectorLine = line.new(entryBarIndiv, entryPriceIndiv, bar_index, exitPrice, color=color.new(color.green, 50), width=1, style=line.style_dotted)
+                array.push(tradeConnectorLines, connectorLine)
+                
+                array.remove(tradeIds, i)
+                array.remove(tradeEntryPrices, i)
+                array.remove(tradeStopLosses, i)
+                array.remove(tradeTakeProfits, i)
+                array.remove(tradeBreakevenMoved, i)
+                array.remove(tradeEntryBars, i)
+                pyramidCount := pyramidCount - 1
+
+if strategy.position_size == 0 and (pyramidCount > 0 or array.size(tradeIds) > 0)
+    pyramidCount := 0
+    array.clear(tradeEntryPrices)
+    array.clear(tradeStopLosses)
+    array.clear(tradeTakeProfits)
+    array.clear(tradeIds)
+    array.clear(tradeBreakevenMoved)
+    array.clear(tradeEntryBars)
+    if not na(currentEntryLine)
+        line.set_x2(currentEntryLine, bar_index)
+        currentEntryLine := na
+    if not na(currentStopLossLine)
+        line.set_x2(currentStopLossLine, bar_index)
+        currentStopLossLine := na
+    if not na(currentTakeProfitLine)
+        line.set_x2(currentTakeProfitLine, bar_index)
+        currentTakeProfitLine := na
+
+// === STRATEGY LOGIC ===
+if masterTrendBullSignal
+    if strategy.position_size < 0
+        strategy.close_all()
+        pyramidCount := 0
+        array.clear(tradeEntryPrices)
+        array.clear(tradeStopLosses)
+        array.clear(tradeTakeProfits)
+        array.clear(tradeIds)
+        array.clear(tradeBreakevenMoved)
+        array.clear(tradeEntryBars)
+        if not na(currentEntryLine)
+            line.set_x2(currentEntryLine, bar_index)
+            currentEntryLine := na
+        if not na(currentStopLossLine)
+            line.set_x2(currentStopLossLine, bar_index)
+            currentStopLossLine := na
+        if not na(currentTakeProfitLine)
+            line.set_x2(currentTakeProfitLine, bar_index)
+            currentTakeProfitLine := na
+    
+    if pyramidCount > 0 and not na(currentEntryLine)
+        line.set_x2(currentEntryLine, bar_index - 1)
+    if pyramidCount > 0 and not na(currentStopLossLine)
+        line.set_x2(currentStopLossLine, bar_index - 1)
+    if pyramidCount > 0 and not na(currentTakeProfitLine)
+        line.set_x2(currentTakeProfitLine, bar_index - 1)
+    
+    bool shouldEnter = false
+    
+    if strategy.position_size <= 0
+        shouldEnter := true
+    else if strategy.position_size > 0 and enablePyramiding and pyramidCount < maxPyramidOrders
+        shouldEnter := true
+    
+    if shouldEnter
+        entryId = "Long_" + str.tostring(pyramidCount + 1)
+        strategy.entry(entryId, strategy.long)
+        
+        entryPrice := close
+        entryBar := bar_index
+        
+        stopLossPrice := close * (1 - stopLossPerc / 100)
+        takeProfitPrice := close * (1 + takeProfitPerc / 100)
+        
+        array.push(tradeEntryPrices, entryPrice)
+        array.push(tradeStopLosses, stopLossPrice)
+        array.push(tradeTakeProfits, takeProfitPrice)
+        array.push(tradeIds, entryId)
+        array.push(tradeBreakevenMoved, false)
+        array.push(tradeEntryBars, bar_index)
+        
+        pyramidCount := pyramidCount + 1
+        
+        currentEntryLine := line.new(bar_index, entryPrice, bar_index + 1, entryPrice, color=color.new(color.blue, 0), width=1, style=line.style_solid)
+        array.push(entryLines, currentEntryLine)
+        
+        if useStopLoss
+            currentStopLossLine := line.new(bar_index, stopLossPrice, bar_index + 1, stopLossPrice, color=color.new(color.red, 0), width=1, style=line.style_dashed)
+            array.push(stopLossLines, currentStopLossLine)
+        
+        if useTakeProfit
+            currentTakeProfitLine := line.new(bar_index, takeProfitPrice, bar_index + 1, takeProfitPrice, color=color.new(color.green, 0), width=1, style=line.style_dashed)
+            array.push(takeProfitLines, currentTakeProfitLine)
+
+if masterTrendBearSignal
+    if strategy.position_size > 0
+        strategy.close_all()
+        pyramidCount := 0
+        array.clear(tradeEntryPrices)
+        array.clear(tradeStopLosses)
+        array.clear(tradeTakeProfits)
+        array.clear(tradeIds)
+        array.clear(tradeBreakevenMoved)
+        array.clear(tradeEntryBars)
+        if not na(currentEntryLine)
+            line.set_x2(currentEntryLine, bar_index)
+            currentEntryLine := na
+        if not na(currentStopLossLine)
+            line.set_x2(currentStopLossLine, bar_index)
+            currentStopLossLine := na
+        if not na(currentTakeProfitLine)
+            line.set_x2(currentTakeProfitLine, bar_index)
+            currentTakeProfitLine := na
+    
+    if pyramidCount > 0 and not na(currentEntryLine)
+        line.set_x2(currentEntryLine, bar_index - 1)
+    if pyramidCount > 0 and not na(currentStopLossLine)
+        line.set_x2(currentStopLossLine, bar_index - 1)
+    if pyramidCount > 0 and not na(currentTakeProfitLine)
+        line.set_x2(currentTakeProfitLine, bar_index - 1)
+    
+    bool shouldEnter = false
+    
+    if strategy.position_size >= 0
+        shouldEnter := true
+    else if strategy.position_size < 0 and enablePyramiding and pyramidCount < maxPyramidOrders
+        shouldEnter := true
+    
+    if shouldEnter
+        entryId = "Short_" + str.tostring(pyramidCount + 1)
+        strategy.entry(entryId, strategy.short)
+        
+        entryPrice := close
+        entryBar := bar_index
+        
+        stopLossPrice := close * (1 + stopLossPerc / 100)
+        takeProfitPrice := close * (1 - takeProfitPerc / 100)
+        
+        array.push(tradeEntryPrices, entryPrice)
+        array.push(tradeStopLosses, stopLossPrice)
+        array.push(tradeTakeProfits, takeProfitPrice)
+        array.push(tradeIds, entryId)
+        array.push(tradeBreakevenMoved, false)
+        array.push(tradeEntryBars, bar_index)
+        
+        pyramidCount := pyramidCount + 1
+        
+        currentEntryLine := line.new(bar_index, entryPrice, bar_index + 1, entryPrice, color=color.new(color.blue, 0), width=1, style=line.style_solid)
+        array.push(entryLines, currentEntryLine)
+        
+        if useStopLoss
+            currentStopLossLine := line.new(bar_index, stopLossPrice, bar_index + 1, stopLossPrice, color=color.new(color.red, 0), width=1, style=line.style_dashed)
+            array.push(stopLossLines, currentStopLossLine)
+        
+        if useTakeProfit
+            currentTakeProfitLine := line.new(bar_index, takeProfitPrice, bar_index + 1, takeProfitPrice, color=color.new(color.green, 0), width=1, style=line.style_dashed)
+            array.push(takeProfitLines, currentTakeProfitLine)
+
+if not na(currentEntryLine) and strategy.position_size != 0
+    line.set_x2(currentEntryLine, bar_index)
+    
+    if useStopLoss and not na(currentStopLossLine)
+        line.set_x2(currentStopLossLine, bar_index)
+    
+    if useTakeProfit and not na(currentTakeProfitLine)
+        line.set_x2(currentTakeProfitLine, bar_index)
+
+// === PLOT IMPORTANT EMAs ===
+plot(showEMAs ? ema4 : na, title='EMA 4', color=color.new(color.blue, 0), linewidth=1)
+plot(showEMAs ? ema5 : na, title='EMA 5', color=color.new(color.orange, 0), linewidth=1)
+plot(showEMAs ? ema21 : na, title='EMA 21', color=color.new(color.purple, 50), linewidth=1)
+plot(showEMAs ? ema89 : na, title='EMA 89', color=color.new(color.yellow, 50), linewidth=1)
+plot(showEMAs ? ema750 : na, title='EMA 750', color=color.new(color.white, 0), linewidth=1)
+plot(showEMAs ? vwap : na, title='VWAP', color=color.new(color.red, 35), linewidth=1)
+
+// === PLOT SIGNALS ===
+plotshape(showSignals and masterTrendBullSignal, title='Master Trend Bull', location=location.belowbar, color=masterTrendBullColor, style=shape.triangleup, size=size.normal)
+plotshape(showSignals and masterTrendBearSignal, title='Master Trend Bear', location=location.abovebar, color=masterTrendBearColor, style=shape.triangledown, size=size.normal)
+
+// === STRATEGY STATISTICS TABLE ===
+if barstate.islast
+    // Calculate statistics
+    riskRewardRatio = takeProfitPerc / stopLossPerc
+    totalTrades = strategy.closedtrades
+    totalProfitPct = (strategy.netprofit / strategy.initial_capital) * 100
+    maxDrawdownPct = (strategy.max_drawdown / strategy.initial_capital) * 100
+    winningTrades = strategy.grossprofit > 0 ? int(strategy.wintrades) : 0
+    winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0
+
+    // Create table (2 columns, 18 rows)
+    var table statsTable = table.new(position.top_right, 2, 18, bgcolor=color.new(color.black, 10), border_width=2, border_color=color.gray)
+
+    // Header row
+    // Title and version
+    table.cell(statsTable, 0, 0, "Master Trend Strategy", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 30))
+    table.cell(statsTable, 1, 0, "v1.2", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 30))
+    
+    // Strategy Parameters
+    table.cell(statsTable, 0, 1, "Stop Loss %", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 1, str.tostring(stopLossPerc, "#.##") + "%", text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 2, "Take Profit %", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 2, str.tostring(takeProfitPerc, "#.##") + "%", text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 3, "Risk/Reward", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 3, str.tostring(riskRewardRatio, "#.##"), text_color=color.yellow, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 4, "Breakeven", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 4, useBreakeven ? "ON" : "OFF", text_color=useBreakeven ? color.green : color.red, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 5, "BE Trigger %", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 5, str.tostring(breakevenTriggerPerc, "#.##") + "%", text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 6, "BE Offset %", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 6, str.tostring(breakevenOffsetPerc, "#.##") + "%", text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 7, "Time Filter", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 7, enableTimeFilter ? "ON" : "OFF", text_color=enableTimeFilter ? color.green : color.red, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 8, "Start Hour", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 8, str.tostring(startHour) + ":" + (startMinute < 10 ? "0" : "") + str.tostring(startMinute), text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 9, "End Hour", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 9, str.tostring(endHour) + ":" + (endMinute < 10 ? "0" : "") + str.tostring(endMinute), text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 10, "Pyramiding", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 10, enablePyramiding ? "ON" : "OFF", text_color=enablePyramiding ? color.green : color.red, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 11, "Pyramid Value", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 11, str.tostring(maxPyramidOrders), text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 12, "Pyramid Size", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 12, str.tostring(pyramidQtyPercent, "#") + "% equity", text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 13, "VWAP Filter", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 13, enableVWAPFilter ? "ON" : "OFF", text_color=enableVWAPFilter ? color.green : color.red, text_size=size.small, text_halign=text.align_right)
+    
+    // Performance Statistics
+    table.cell(statsTable, 0, 14, "Total Trades", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 14, str.tostring(totalTrades), text_color=color.aqua, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 15, "Total P&L", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    plColor = strategy.netprofit >= 0 ? color.green : color.red
+    table.cell(statsTable, 1, 15, str.tostring(strategy.netprofit, "#.##") + " (" + str.tostring(totalProfitPct, "#.##") + "%)", text_color=plColor, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 16, "Max Drawdown", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(statsTable, 1, 16, str.tostring(strategy.max_drawdown, "#.##") + " (" + str.tostring(maxDrawdownPct, "#.##") + "%)", text_color=color.orange, text_size=size.small, text_halign=text.align_right)
+    
+    table.cell(statsTable, 0, 17, "Win Rate", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    winRateColor = winRate >= 50 ? color.green : color.white
+    table.cell(statsTable, 1, 17, str.tostring(winningTrades) + "/" + str.tostring(totalTrades) + " (" + str.tostring(winRate, "#.##") + "%)", text_color=winRateColor, text_size=size.small, text_halign=text.align_right)
+
+View in Pine Editor・450 lines
+Use on chart
+5
+1
+6
+2
+8 645
+Oct 19, 2025
+Master Trend Strategy
+This strategy combines multiple technical indicators to identify high-probability trend entries across all asset classes.
+Core Signal Logic:
+
+Entry triggered when EMA 4 crosses above/below EMA 5
+Confirmation required from RSI (>50 for long, <50 for short)
+Price must be above/below key moving averages: EMA 21, SMA 50, EMA 55, EMA 89, and EMA 750
+Additional confirmation from Stochastic (>52 bullish, <48 bearish) or EMA 89 breakout or VWAP cross
+
+Key Features:
+
+VWAP filter: Only takes bullish signals above VWAP and bearish signals below VWAP
+Optional pyramiding: Allows multiple entries in the same direction (up to 200 orders)
+Individual stop loss and take profit management for each pyramid level
+Time filter: Customizable trading hours with timezone offset
+Risk management: Adjustable stop loss (default 0.3%) and take profit (default 0.6%)
+
+Visualization:
+
+Entry, stop loss, and take profit levels drawn as horizontal lines
+Customizable signal markers (triangles) for bull/bear entries
+Optional EMA overlay display
+
+The strategy is designed for trend-following on lower timeframes, with strict multi-indicator confirmation to filter out false signals.
+Oct 21, 2025
+Release Notes
+New version 1.1
+-Added breakeven
+-Added trade lines from entry to exit
+Oct 21, 2025
+Release Notes
+New version 1.2
+-Added info table (is a little bit slow to update, il will do my best to fix it, sorry)
+-Changed default value to fit a XAUUSD 1 minute 1:3 RR setup
+Oct 27, 2025
+Release Notes
+-Best settings for XAUUSD m1 (with FPmarkets Broker)
+Oct 27, 2025
+Release Notes
+-Enabled Pyramiding with max 2 positions

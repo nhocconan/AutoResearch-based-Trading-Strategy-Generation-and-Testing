@@ -1,0 +1,498 @@
+//@version=6
+strategy("MES Scalperino",
+     overlay=true,
+     initial_capital=2500000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=4,
+     pyramiding=0,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.624,
+     slippage=0,
+     process_orders_on_close=false,
+     calc_on_every_tick=false)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// --- Direction (selects which signal dropdown is active) ---
+tradeDirection = input.string("Long Only", "Direction",
+     options=["Long Only", "Short Only", "Both"],
+     group="Direction",
+     tooltip="Selects trade direction AND which signal preset to use. Long Only / Short Only use their respective dropdown below. Both auto-pairs each signal with its natural opposite (e.g., crossover up for longs + crossunder for shorts).")
+
+// --- Signal Presets (one per direction mode, only the active one matters) ---
+longSignal = input.string("SMA(20) x> SMA(50)", "Long Signal",
+     options=[
+         "SMA(20) x> SMA(50)",
+         "EMA(50) x> EMA(100)",
+         "RSI(9) <20",
+         "RSI(14) <25",
+         "RSI(14) <20",
+         "SMA(50) > SMA(200)",
+         "EMA(50) > EMA(100)",
+         "All Crossovers Up",
+         "All RSI Oversold"
+     ],
+     group="Long Signal",
+     tooltip="Active when Direction = Long Only. Crossover/oversold signals for long entries.")
+
+shortSignal = input.string("SMA(20) x< SMA(50)", "Short Signal",
+     options=[
+         "SMA(20) x< SMA(50)",
+         "EMA(50) x< EMA(100)",
+         "RSI(9) >80",
+         "RSI(14) >75",
+         "RSI(14) >80",
+         "SMA(50) < SMA(200)",
+         "EMA(50) < EMA(100)",
+         "All Crossovers Down",
+         "All RSI Overbought"
+     ],
+     group="Short Signal",
+     tooltip="Active when Direction = Short Only. Crossunder/overbought signals for short entries.")
+
+bothSignal = input.string("SMA(20)/SMA(50) Cross", "Both Signal",
+     options=[
+         "SMA(20)/SMA(50) Cross",
+         "EMA(50)/EMA(100) Cross",
+         "RSI(9) Extremes",
+         "RSI(14) 25/75",
+         "RSI(14) 20/80",
+         "SMA(50)/SMA(200) State",
+         "EMA(50)/EMA(100) State",
+         "All Crossovers",
+         "All RSI"
+     ],
+     group="Both Signal",
+     tooltip="Active when Direction = Both. Each option auto-pairs a long signal with its short counterpart. Must be flat to enter either side.")
+
+allowReversal = input.bool(false, "Allow Reversal",
+     group="Both Signal",
+     tooltip="When checked and Direction = Both: an opposite signal while in a position will close the current trade and immediately enter the other direction. When unchecked, must be flat to enter.")
+
+// --- Risk ---
+tpPoints = input.float(1.5, "Take Profit (points)", minval=0.25, step=0.25, group="Risk",
+     tooltip="TP distance from entry in index points. Default 1.5 = $7.50/contract on MES.")
+slPoints = input.float(50.0, "Stop Loss (points)", minval=1.0, step=5.0, group="Risk",
+     tooltip="SL distance from entry in index points. Backtested: SL=50 evening has PF~4, SL=100 has PF~18+.")
+maxHoldBars = input.int(480, "Max Hold (bars)", minval=10, step=10, group="Risk",
+     tooltip="Close trade after this many bars if neither TP nor SL hit. 480 bars = 8 hours on 1-min.")
+gapExitMin = input.int(120, "Session Gap Exit (minutes)", minval=0, step=30, group="Risk",
+     tooltip="If gap between bars exceeds this, close at open of next bar. 120 = exit on session gaps. Set 0 to disable.")
+
+// --- Session Filter ---
+sessionFilter = input.string("Evening ETH 18-01", "Session Filter",
+     options=[
+         "No Filter",
+         "RTH 9:30-16:00",
+         "Core RTH 10-15",
+         "Evening ETH 18-01",
+         "Full ETH (outside RTH)",
+         "Custom"
+     ],
+     group="Session",
+     tooltip="Evening ETH (18:00-01:00 ET) had the best net PF across all signals in backtesting.")
+
+customSessionStart = input.int(18, "Custom Session Start (hour ET)", minval=0, maxval=23, group="Session")
+customSessionEnd = input.int(1, "Custom Session End (hour ET)", minval=0, maxval=23, group="Session",
+     tooltip="If end < start, session wraps past midnight (e.g., 18-01 = 6pm to 1am).")
+
+// --- Display ---
+showLevels = input.bool(true, "Show TP/SL Lines on Chart", group="Display")
+showSignalMarkers = input.bool(true, "Show Signal Markers", group="Display")
+
+// ============================================================================
+// SESSION FILTER LOGIC
+// ============================================================================
+
+currentHour = hour(time, "America/New_York")
+
+inSessionWindow(int startH, int endH) =>
+    if startH <= endH
+        currentHour >= startH and currentHour < endH
+    else
+        currentHour >= startH or currentHour < endH
+
+sessionAllowed = switch sessionFilter
+    "No Filter"            => true
+    "RTH 9:30-16:00"       => currentHour >= 9 and currentHour < 16
+    "Core RTH 10-15"       => currentHour >= 10 and currentHour < 15
+    "Evening ETH 18-01"    => inSessionWindow(18, 1)
+    "Full ETH (outside RTH)" => currentHour < 9 or currentHour >= 16
+    "Custom"               => inSessionWindow(customSessionStart, customSessionEnd)
+    => true
+
+// ============================================================================
+// INDICATORS
+// ============================================================================
+
+sma20  = ta.sma(close, 20)
+sma50  = ta.sma(close, 50)
+sma100 = ta.sma(close, 100)
+sma200 = ta.sma(close, 200)
+
+ema50  = ta.ema(close, 50)
+ema100 = ta.ema(close, 100)
+
+rsi9  = ta.rsi(close, 9)
+rsi14 = ta.rsi(close, 14)
+
+// ============================================================================
+// SIGNAL GENERATION (causal: signal on this bar, enter next bar)
+// ============================================================================
+
+// Crossover / crossunder signals (event-based)
+smaCrossOver    = ta.crossover(sma20, sma50) and not na(sma50)
+emaCrossOver    = ta.crossover(ema50, ema100)
+smaCrossUnder   = ta.crossunder(sma20, sma50) and not na(sma50)
+emaCrossUnder   = ta.crossunder(ema50, ema100)
+
+// RSI signals (split by direction)
+rsi9Oversold    = rsi9 < 20 and not na(rsi9)
+rsi14Under25    = rsi14 < 25 and not na(rsi14)
+rsi14Under20    = rsi14 < 20 and not na(rsi14)
+rsi9Overbought  = rsi9 > 80 and not na(rsi9)
+rsi14Over75     = rsi14 > 75 and not na(rsi14)
+rsi14Over80     = rsi14 > 80 and not na(rsi14)
+
+// State signals
+smaStateBull = sma50 > sma200 and not na(sma200)
+emaStateBull = ema50 > ema100
+smaStateBear = sma50 < sma200 and not na(sma200)
+emaStateBear = ema50 < ema100
+
+// ============================================================================
+// SIGNAL ROUTING — derive longSignalFired / shortSignalFired from active mode
+// ============================================================================
+
+var bool longSignalFired  = false
+var bool shortSignalFired = false
+
+if tradeDirection == "Long Only"
+    longSignalFired := switch longSignal
+        "SMA(20) x> SMA(50)"   => smaCrossOver
+        "EMA(50) x> EMA(100)"  => emaCrossOver
+        "RSI(9) <20"           => rsi9Oversold
+        "RSI(14) <25"          => rsi14Under25
+        "RSI(14) <20"          => rsi14Under20
+        "SMA(50) > SMA(200)"   => smaStateBull
+        "EMA(50) > EMA(100)"   => emaStateBull
+        "All Crossovers Up"    => smaCrossOver or emaCrossOver
+        "All RSI Oversold"     => rsi9Oversold or rsi14Under25
+        => false
+    shortSignalFired := false
+
+else if tradeDirection == "Short Only"
+    longSignalFired := false
+    shortSignalFired := switch shortSignal
+        "SMA(20) x< SMA(50)"   => smaCrossUnder
+        "EMA(50) x< EMA(100)"  => emaCrossUnder
+        "RSI(9) >80"           => rsi9Overbought
+        "RSI(14) >75"          => rsi14Over75
+        "RSI(14) >80"          => rsi14Over80
+        "SMA(50) < SMA(200)"   => smaStateBear
+        "EMA(50) < EMA(100)"   => emaStateBear
+        "All Crossovers Down"  => smaCrossUnder or emaCrossUnder
+        "All RSI Overbought"   => rsi9Overbought or rsi14Over75
+        => false
+
+else // "Both" — auto-paired
+    longSignalFired := switch bothSignal
+        "SMA(20)/SMA(50) Cross"   => smaCrossOver
+        "EMA(50)/EMA(100) Cross"  => emaCrossOver
+        "RSI(9) Extremes"         => rsi9Oversold
+        "RSI(14) 25/75"           => rsi14Under25
+        "RSI(14) 20/80"           => rsi14Under20
+        "SMA(50)/SMA(200) State"  => smaStateBull
+        "EMA(50)/EMA(100) State"  => emaStateBull
+        "All Crossovers"          => smaCrossOver or emaCrossOver
+        "All RSI"                 => rsi9Oversold or rsi14Under25
+        => false
+    shortSignalFired := switch bothSignal
+        "SMA(20)/SMA(50) Cross"   => smaCrossUnder
+        "EMA(50)/EMA(100) Cross"  => emaCrossUnder
+        "RSI(9) Extremes"         => rsi9Overbought
+        "RSI(14) 25/75"           => rsi14Over75
+        "RSI(14) 20/80"           => rsi14Over80
+        "SMA(50)/SMA(200) State"  => smaStateBear
+        "EMA(50)/EMA(100) State"  => emaStateBear
+        "All Crossovers"          => smaCrossUnder or emaCrossUnder
+        "All RSI"                 => rsi9Overbought or rsi14Over75
+        => false
+
+// Final entry conditions: signal on previous bar (causal), session filter
+// Reversal: if enabled in Both mode, opposite signal while in a position closes + reverses
+canReverse = tradeDirection == "Both" and allowReversal
+canEnterLong  = strategy.position_size == 0 or (canReverse and strategy.position_size < 0)
+canEnterShort = strategy.position_size == 0 or (canReverse and strategy.position_size > 0)
+
+enterLong  = longSignalFired[1]  and sessionAllowed and canEnterLong
+enterShort = shortSignalFired[1] and sessionAllowed and canEnterShort
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+var float entryPrice = na
+var int   entryBar   = na
+
+if enterLong
+    entryPrice := open
+    entryBar   := bar_index
+    // strategy.entry auto-closes any existing opposite position
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL", "Long",
+         profit = tpPoints / syminfo.mintick,
+         loss   = slPoints / syminfo.mintick)
+
+if enterShort
+    entryPrice := open
+    entryBar   := bar_index
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL", "Short",
+         profit = tpPoints / syminfo.mintick,
+         loss   = slPoints / syminfo.mintick)
+
+// Session gap detection: exit if gap between bars > threshold
+barGapMinutes = (time - time[1]) / 60000
+isSessionGap = gapExitMin > 0 and barGapMinutes > gapExitMin
+
+// Time-based exit and gap exit (handles both long and short)
+if strategy.position_size != 0 and not na(entryBar)
+    barsHeld = bar_index - entryBar
+    exitId = strategy.position_size > 0 ? "Long" : "Short"
+    if isSessionGap
+        strategy.close(exitId, comment="Gap Exit")
+    else if barsHeld >= maxHoldBars
+        strategy.close(exitId, comment="Time Exit")
+
+// ============================================================================
+// CHART OVERLAY: TP/SL LEVELS
+// ============================================================================
+
+var line lineTP = na
+var line lineSL = na
+var label lblTP = na
+var label lblSL = na
+
+line.delete(lineTP)
+line.delete(lineSL)
+label.delete(lblTP)
+label.delete(lblSL)
+
+if showLevels and strategy.position_size != 0 and not na(entryPrice) and not na(entryBar)
+    isLong = strategy.position_size > 0
+    float tpLevel = isLong ? entryPrice + tpPoints : entryPrice - tpPoints
+    float slLevel = isLong ? entryPrice - slPoints : entryPrice + slPoints
+    int rightX = bar_index + 5
+
+    lineTP := line.new(entryBar, tpLevel, rightX, tpLevel,
+         color=color.new(#00E676, 30), style=line.style_dashed, width=1)
+    lblTP := label.new(rightX, tpLevel,
+         "TP " + str.tostring(tpLevel, format.mintick) + " (+" + str.tostring(tpPoints) + ")",
+         color=color.new(color.black, 100), textcolor=#00E676,
+         style=label.style_label_left, size=size.small)
+
+    lineSL := line.new(entryBar, slLevel, rightX, slLevel,
+         color=color.new(#FF5252, 30), style=line.style_dashed, width=1)
+    lblSL := label.new(rightX, slLevel,
+         "SL " + str.tostring(slLevel, format.mintick) + " (-" + str.tostring(slPoints) + ")",
+         color=color.new(color.black, 100), textcolor=#FF5252,
+         style=label.style_label_left, size=size.small)
+
+// ============================================================================
+// SIGNAL MARKERS
+// ============================================================================
+
+// Long signal markers (triangle up, below bar)
+plotshape(showSignalMarkers and longSignalFired and sessionAllowed,
+     title="Long Signal", style=shape.triangleup, location=location.belowbar,
+     color=#42A5F5, size=size.tiny)
+
+plotshape(showSignalMarkers and longSignalFired and not sessionAllowed,
+     title="Long Signal (filtered)", style=shape.triangleup, location=location.belowbar,
+     color=color.new(#42A5F5, 80), size=size.tiny)
+
+// Short signal markers (triangle down, above bar)
+plotshape(showSignalMarkers and shortSignalFired and sessionAllowed,
+     title="Short Signal", style=shape.triangledown, location=location.abovebar,
+     color=#FF5252, size=size.tiny)
+
+plotshape(showSignalMarkers and shortSignalFired and not sessionAllowed,
+     title="Short Signal (filtered)", style=shape.triangledown, location=location.abovebar,
+     color=color.new(#FF5252, 80), size=size.tiny)
+
+// ============================================================================
+// MA OVERLAYS (context, dimmed — show for whichever mode is active)
+// ============================================================================
+
+activeSignalName = tradeDirection == "Long Only" ? longSignal : tradeDirection == "Short Only" ? shortSignal : bothSignal
+
+showSma20  = str.contains(activeSignalName, "SMA(20)") or str.contains(activeSignalName, "All Crossovers")
+showSma50  = showSma20 or str.contains(activeSignalName, "SMA(50)")
+showSma200 = str.contains(activeSignalName, "SMA(200)") or str.contains(activeSignalName, "SMA(50)/SMA(200)")
+showEma50  = str.contains(activeSignalName, "EMA(50)") or str.contains(activeSignalName, "All Crossovers")
+showEma100 = str.contains(activeSignalName, "EMA(100)") or str.contains(activeSignalName, "EMA(50)")
+
+plot(showSma20 ? sma20 : na, "SMA(20)", color=color.new(#FF9800, 40), linewidth=1)
+plot(showSma50 ? sma50 : na, "SMA(50)", color=color.new(#2196F3, 40), linewidth=1)
+plot(showSma200 ? sma200 : na, "SMA(200)", color=color.new(#9C27B0, 40), linewidth=1)
+plot(showEma50 ? ema50 : na, "EMA(50)", color=color.new(#FF9800, 40), linewidth=1)
+plot(showEma100 ? ema100 : na, "EMA(100)", color=color.new(#2196F3, 40), linewidth=1)
+
+// ============================================================================
+// SESSION BACKGROUND
+// ============================================================================
+
+bgcolor(sessionAllowed ? color.new(#1B5E20, 95) : color.new(#B71C1C, 97),
+     title="Session Zone")
+
+// ============================================================================
+// INFO TABLE
+// ============================================================================
+
+var table infoTbl = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 85), border_width=1,
+     border_color=color.new(color.gray, 70))
+
+if barstate.islast
+    table.cell(infoTbl, 0, 0, "MES SCALP", text_color=color.white,
+         bgcolor=color.new(#1976D2, 30), text_size=size.small)
+    table.cell(infoTbl, 1, 0, "v2.0", text_color=color.white,
+         bgcolor=color.new(#1976D2, 30), text_size=size.small)
+
+    table.cell(infoTbl, 0, 1, "Signal", text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 1, 1, activeSignalName, text_color=#42A5F5, text_size=size.small)
+
+    table.cell(infoTbl, 0, 2, "TP / SL", text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 1, 2, str.tostring(tpPoints) + " / " + str.tostring(slPoints) + " pts",
+         text_color=color.white, text_size=size.small)
+
+    table.cell(infoTbl, 0, 3, "Session", text_color=color.gray, text_size=size.small)
+    sessColor = sessionAllowed ? #00E676 : #FF5252
+    sessText = sessionAllowed ? "ACTIVE" : "FILTERED"
+    table.cell(infoTbl, 1, 3, sessionFilter + " " + sessText,
+         text_color=sessColor, text_size=size.small)
+
+    table.cell(infoTbl, 0, 4, "Hour (ET)", text_color=color.gray, text_size=size.small)
+    table.cell(infoTbl, 1, 4, str.tostring(currentHour) + ":00",
+         text_color=color.white, text_size=size.small)
+
+    table.cell(infoTbl, 0, 5, "Position", text_color=color.gray, text_size=size.small)
+    posText = strategy.position_size > 0 ? "LONG " + str.tostring(strategy.position_size, "#") : strategy.position_size < 0 ? "SHORT " + str.tostring(math.abs(strategy.position_size), "#") : "FLAT"
+    posColor = strategy.position_size > 0 ? #00E676 : strategy.position_size < 0 ? #FF5252 : color.gray
+    table.cell(infoTbl, 1, 5, posText, text_color=posColor, text_size=size.small)
+
+    table.cell(infoTbl, 0, 6, "Direction", text_color=color.gray, text_size=size.small)
+    dirColor = tradeDirection == "Both" ? #42A5F5 : tradeDirection == "Long Only" ? #00E676 : #FF5252
+    table.cell(infoTbl, 1, 6, tradeDirection, text_color=dirColor, text_size=size.small)
+
+    table.cell(infoTbl, 0, 7, "Net P&L", text_color=color.gray, text_size=size.small)
+    netPnl = strategy.netprofit
+    pnlColor = netPnl >= 0 ? #00E676 : #FF5252
+    table.cell(infoTbl, 1, 7, "$" + str.tostring(netPnl, "#,###.##"),
+         text_color=pnlColor, text_size=size.small)
+
+View in Pine Editor・402 lines
+Use on chart
+1
+8
+496
+Mar 4
+MES Scalp — Multi-Signal Evening Strategy
+
+A long-only scalping strategy for MES/ES futures built around session-filtered entries on any-minute bars. The core idea is straightforward: certain technical signals tend to behave differently depending on the time of day.
+
+─── The Concept ───
+
+This strategy watches for a selected technical signal, waits for confirmation at bar close, then enters at the open of the following bar to keep entries fully causal. Only one position is held at a time.
+
+─── Signals ───
+
+Choose one active signal from the inputs panel:
+
+SMA(20) x> SMA(50) — classic short-term momentum crossover (fires once on the event)
+EMA(50) x> EMA(100) — smoother crossover with less whipsaw (fires once on the event)
+RSI(9) <20 or >80 — extreme momentum, tight RSI window
+
+RSI(14) <25 or >75 — moderate RSI extreme
+
+RSI(14) <20 or >80 — stricter RSI extreme
+
+SMA(50) > SMA(200) — broad trend state (fires every bar condition holds)
+EMA(50) > EMA(100) — trend state via EMAs (fires every bar)
+All Crossovers — combines SMA and EMA crossover signals
+
+All RSI — combines RSI(9) and RSI(14) extreme signals
+
+
+
+Blue triangle markers appear below signal bars. Faded triangles indicate the signal fired but was filtered out by the session window.
+
+─── Exits ───
+
+Three mechanisms handle trade closure — whichever triggers first wins:
+
+Take Profit — fixed point target from entry (default 1.5 pts = $7.50/contract on MES)
+
+Stop Loss — fixed point stop below entry (default 50 pts; wider stops give trends more room)
+
+Max Hold — time-based close after N bars regardless of P&L (default 480 bars = 8 hours)
+
+Session Gap Exit — closes at the next bar open if a gap larger than the threshold (default 0 but change to a number of your choosing conditional upon your chosen timeframe) is detected, avoiding exposure across session breaks
+
+
+
+─── Session Filter ───
+
+
+No Filter
+
+RTH 9:30–16:00
+
+Core RTH 10:00–15:00
+
+Evening ETH 18:00–01:00 ← default
+
+Full ETH (all non-RTH hours)
+
+Custom (set your own start/end hour in ET)
+
+
+
+The chart background shows green when inside the active session and red when filtered out.
+
+─── Chart Overlays ───
+
+
+Dashed TP and SL lines with price labels drawn from entry (toggle in Display settings)
+
+Relevant MAs plotted automatically based on your selected signal
+
+Info table (top-right) showing current signal, TP/SL levels, session status, ET hour, live RSI(9), and running net P&L
+
+
+
+─── Notes ───
+
+
+Originally built for MES on 1-minute bars; works on ES with adjusted commission settings
+
+Default commission is $0.624/contract (IBKR MES rate), 4 contracts
+
+The wide SL is intentional — it keeps positions alive through overnight volatility while the tight TP targets small, repeatable wins
+
+All signals and sessions are independently configurable — explore combinations to match your own read of market conditions
+
+Mar 6
+Release Notes
+Added SHORT or BOTH (Long + Short) as positioning options
+
+Will need to select from respective dropdown for how you want to play it.
+
+E.g., Long > Select from the Long dropdown area (anything in the Short or Both dropdown will be ignored)
+
+Both Option will let you select "long above, short below this condition"
+
+Only relevant to "both" option: added a "reversal" checkbox to allow mid-position swap to an opposite position if a signal triggers. E.g., currently in a LONG but SHORT signal triggers -> will exit the Long and change to a Short

@@ -1,0 +1,43 @@
+//@version=4
+strategy("EVWMA VWAP MACD Strategy [QuantNomad]", shorttitle="EVWMA_VWAP_MACD[QN]", overlay=false)
+
+// Inputs
+sum_length     = input(30, title = "EVWMA Length",       type = input.integer)
+signal_length1 = input(5,  title = "Signal Smoothing 1", type = input.integer)
+signal_length2 = input(20, title = "Signal Smoothing 2", type = input.integer)
+
+// Calculate EVWMA
+vol_period = sum(volume, sum_length)
+
+evwma = 0.0
+evwma := ((vol_period - volume) * nz(evwma[1], close) + volume * close) / (vol_period)
+
+// Calculate MACD
+diff = vwap - evwma
+macd   = ema(diff, signal_length1)
+signal = ema(diff, signal_length2)
+hist = macd - signal
+
+// Plot 
+plot(hist,   title="Histogram", style=plot.style_columns, color=(hist>=0 ? (hist[1] < hist ? #26A69A : #B2DFDB) : (hist[1] < hist ? #FFCDD2 : #EF5350) ), transp=0 )
+plot(macd,   title="MACD",   color= #0094ff, transp=0)
+plot(signal, title="Signal", color= #ff6a00, transp=0)
+
+// Strategy
+strategy.entry("short",  false, when = crossunder(macd, signal))
+strategy.entry("long",   true,  when = crossover(macd, signal) )
+
+View in Pine Editor・28 lines
+Use on chart
+3.5 K
+22
+118 084
+Based on comment of Coondawg71 I tried to compare VWAP and EVWMA.
+Both are sort of moving averages so I decided to create a MACD based on these 2 indicators.
+In parameters you can set EVWMA Length and 2 smoothing lengths for "macd" and "signal".
+
+Strategy seems to work pretty good at 2h-8h timeframes for crypto.
+
+What do you thing about it?
+
+

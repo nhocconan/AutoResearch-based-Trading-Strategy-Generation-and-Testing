@@ -1,0 +1,118 @@
+//@version=4
+strategy(title="BB9_MA200_Strategy", overlay=true, pyramiding=0,       initial_capital=10000,  default_qty_type=strategy.cash, default_qty_value=100, currency=currency.USD)  //default_qty_value=10, default_qty_type=strategy.fixed, 
+
+
+var stopLossVal=0.00
+//var qty1=0.00
+
+//variables BEGIN
+smaLength=input(200,title="MA Length")
+bbLength=input(21,title="BB Length")  
+
+bbsrc = input(close, title="BB Source")
+mult = input(2.0, minval=0.001, maxval=50, title="StdDev")
+
+
+stopLoss = input(title="Stop Loss%", defval=5, minval=1)
+
+riskCapital = input(title="Risk % of capital  == Based on this trade size is claculated    numberOfShares = (AvailableCapital*risk/100) / stopLossPoints", defval=10, minval=1)
+
+
+sma200=ema(close,smaLength)
+
+plot(sma200, title="SMA 200", color=color.orange)
+
+
+//bollinger calculation
+basis = sma(bbsrc, bbLength)
+dev = mult * stdev(bbsrc, bbLength)
+upperBand = basis + dev
+lowerBand = basis - dev
+offset = input(0, "Offset", type = input.integer, minval = -500, maxval = 500)
+
+//plot bb
+plot(basis, "Basis", color=color.teal, style=plot.style_circles , offset = offset)
+p1 = plot(upperBand, "Upper", color=color.teal, offset = offset)
+p2 = plot(lowerBand, "Lower", color=color.teal, offset = offset)
+fill(p1, p2, title = "Background", color=color.teal, transp=95)
+
+
+
+
+//Echeck how many units can be purchased based on risk manage ment and stop loss
+qty1 = (strategy.equity  * riskCapital / 100 ) /  (close*stopLoss/100)  
+
+//check if cash is sufficient  to buy qty1  , if capital not available use the available capital only
+qty1:= (qty1 * close >= strategy.equity ) ? (strategy.equity / close) : qty1
+
+//strategy.risk.max_position_size(100)
+
+strategy.entry(id="LE", comment="LE  equity="+tostring(strategy.equity ,"######.##")+"  risk = " +tostring(strategy.equity * riskCapital * 0.01, "####") + "  SL = " +tostring(close * stopLoss * 0.01, "####.##"), qty=qty1 , long=true,  when=strategy.position_size<1 and upperBand>sma200 and lowerBand > sma200 and crossover(close, basis) )     //  // aroonOsc<0  //(strategy.initial_capital * 0.10)/close
+
+
+barcolor(color=strategy.position_size>=1? color.blue: na)
+
+//partial Exit
+tpVal=strategy.position_size>1 ? strategy.position_avg_price * (1+(stopLoss/100) ) : 0.00
+strategy.close(id="LE", comment="Partial points="+tostring(close - strategy.position_avg_price, "####.##"),  qty_percent=30 , when=abs(strategy.position_size)>=1 and close>tpVal and crossunder(lowerBand, sma200)   )   //close<ema55 and rsi5Val<20 //ema34<ema55
+
+
+//close All on stop loss
+//stoploss
+stopLossVal:=   strategy.position_size>1 ? strategy.position_avg_price * (1-(stopLoss/100) ) : 0.00
+
+strategy.close_all( comment="SL Exit points="+tostring(close - strategy.position_avg_price, "####.##"),  when=abs(strategy.position_size)>=1 and close < stopLossVal  )  //close<ema55 and rsi5Val<20 //ema34<ema55  //close<ema89//
+
+strategy.close_all( comment="BB9 X SMA200 points="+tostring(close - strategy.position_avg_price, "####.##"),  when=abs(strategy.position_size)>=1 and  crossunder(basis, sma200)  )  //close<ema55 and rsi5Val<20 //ema34<ema55  //close<ema89
+View in Pine Editor・69 lines
+Use on chart
+1
+5
+7
+1
+2 877
+Oct 24, 2020
+This strategy follows the trend and keeps you in the trend until it breaks SMA 200
+
+SMA setting is 200
+BB setting is 21
+
+BUY
+====
+when BB is (lower band and upper band) above SMA 200 and price crossing above BB middle line
+
+
+Partial Exit
+==========
+When Lower BB crossing down SMA200 , exit 30%
+
+
+Total Exit
+=========
+When BB middle band crosses down SMA200 , exit ALL
+
+
+Stop Loss
+======
+default is set to 5%
+
+
+Risk Management
+================
+This is new parameter I have introduced in my strategies. Default value is 10% . That means , if your capital is 10000 , you are willing to risk 10% of it ... i.e 1000.
+
+It doesnot mean that you are buying shares/units for 1000 only. It is different ...see below
+
+Your trade size is calculated based on Risk% .... capital x risk 5 / stop Loss units
+
+for further explanation you can check Alexander Elder's risk management rule. He mentioned 2% rule for 100K account. But most of us dont have 100K accounts .. . so I have defaulted 10% on 10K account. You can change this values and see the results. It wont change the number of trades or profit factor. It will increase the net profit.
+
+
+Warning
+=======
+For educational purposes only
+Oct 24, 2020
+Release Notes
+Number of units calculation has been fixed.
+
+earlier , it took more trades even though equity is not available. That has been fixed.

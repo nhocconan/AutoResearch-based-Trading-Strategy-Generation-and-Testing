@@ -1,0 +1,58 @@
+//@version=6
+strategy("Mean Reversion VP Strategy", overlay=true, initial_capital=10000)
+
+// 1. Inputs
+lookback = input.int(100, "Số lượng nến để tính VP", minval=20)
+v_area_pct = input.float(70.0, "Value Area (%)", minval=1.0, maxval=99.0) / 100
+
+// 2. Hàm tính toán POC, VAH, VAL đơn giản
+// Lưu ý: Đây là cách xấp xỉ để chạy backtest hiệu năng cao
+var float[] prices = array.new_float(0)
+var float[] volumes = array.new_float(0)
+
+if bar_index >= lookback
+    array.push(prices, close)
+    array.push(volumes, volume)
+    if array.size(prices) > lookback
+        array.shift(prices)
+        array.shift(volumes)
+
+// Logic xác định POC/VAH/VAL (Đơn giản hóa cho backtest)
+// Trong thực tế, bạn sẽ cần thuật toán histogram chính xác hơn
+// Ở đây ta dùng hàm thống kê cơ bản của TradingView
+poc = ta.mode(close, lookback) 
+std_dev = ta.stdev(close, lookback)
+vah = poc + std_dev
+val = poc - std_dev
+
+// 3. Điều kiện giao dịch
+// Long khi giá chạm VAL (quá bán) và POC ở trên
+// Short khi giá chạm VAH (quá mua) và POC ở dưới
+longCondition = ta.crossover(close, val)
+shortCondition = ta.crossunder(close, vah)
+
+// 4. Thực thi lệnh
+if (longCondition)
+    strategy.entry("Long", strategy.long, comment="Buy VAL")
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short, comment="Sell VAH")
+
+// 5. Thoát lệnh (Mean Reversion về POC)
+if (strategy.position_size > 0)
+    strategy.exit("Exit Long", "Long", limit=poc)
+
+if (strategy.position_size < 0)
+    strategy.exit("Exit Short", "Short", limit=poc)
+
+// 6. Vẽ chart
+plot(poc, color=color.yellow, title="POC", linewidth=2)
+plot(vah, color=color.red, title="VAH", style=plot.style_circles)
+plot(val, color=color.green, title="VAL", style=plot.style_circles)
+
+View in Pine Editor・51 lines
+Use on chart
+1
+1
+500
+Best for scalping in 5 minute by using volume profile

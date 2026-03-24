@@ -1,0 +1,104 @@
+//@version=5
+strategy("Percentile Interpolation One", shorttitle = "PIO", overlay=false, default_qty_type = strategy.cash, default_qty_value = 5000, calc_on_order_fills = false, calc_on_every_tick = false)
+
+// Input parameters
+stopLossPercentage = input(3, title="Stop Loss (%)")
+trailStopPercentage = input(1.5, title="Trailing Stop (%)")
+lookback = input.int(20, title="Lookback Period", minval=1)
+yellowLine_length = input.int(10, "Yellow", minval=1)
+purplLine_length = input.int(20, "Purple", minval=1)
+holdPeriod = input.int(200, title="Minimum Holding Period", minval=10)
+startDate = timestamp("2020 04 04")
+
+// Calculate Moving Averages
+yellowLine = ta.ema(close, yellowLine_length)
+purplLine = ta.ema(close, purplLine_length)
+
+// Calculate 25th and 75th percentiles
+p25 = ta.percentile_linear_interpolation(close, lookback, 25)
+p75 = ta.percentile_linear_interpolation(close, lookback, 75)
+
+// Generate buy/sell signals
+longSignal = ta.crossover(close, p75) and close > yellowLine
+sellSignal = ta.crossunder(close, yellowLine)
+longSignal1 = ta.crossover(close, p75) and close > purplLine
+sellSignal1 = ta.crossunder(close, purplLine)
+
+// Set start time and trade conditions
+if(time >= startDate)
+    if (longSignal)
+        strategy.entry("Long", strategy.long)
+    if (sellSignal)
+        strategy.close("Long")
+    if (sellSignal1)
+        strategy.entry("Short", strategy.short)
+    if (longSignal1)
+        strategy.close("Short")
+
+// Plot 25th and 75th percentile levels
+plot(p25, title="25th Percentile", color=color.green, linewidth=1, style=plot.style_circles)
+plot(p75, title="75th Percentile", color=color.red, linewidth=1, style=plot.style_circles)
+
+// Plot Moving Averages
+plot(yellowLine, color = color.rgb(254, 242, 73, 2), linewidth = 2, style = plot.style_stepline)
+plot(purplLine, color = color.rgb(255, 77, 234, 2), linewidth = 2, style = plot.style_stepline)
+
+View in Pine Editor・44 lines
+Use on chart
+8
+6
+4
+4 817
+Jun 2, 2023
+
+This script is designed to execute a trading strategy based on Heikin Ashi candlesticks, moving averages, and percentile levels.
+
+Please note that you should keep your original chart in normal candlestick mode and not switch it to Heikin Ashi mode. The script itself calculates Heikin Ashi values from regular candlesticks. If your chart is already in Heikin Ashi mode, the script would be calculating Heikin Ashi values based on Heikin Ashi values, which would produce incorrect results.
+
+The strategy begins trading from a start date that you can specify by modifying the `startDate` parameter. The format of the date is "YYYY MM DD". So, for example, to start the strategy from January 1, 2022, you would set `startDate = timestamp("2022 01 01")`.
+
+The script uses Heikin Ashi candlesticks, which are plotted in the chart. This approach can be useful for spotting trends and reversals more easily than with regular candlestick charts. This is particularly useful when backtesting in TradingView's "Rewind" mode, as you can see how the Heikin Ashi candles behaved at each step of the strategy.
+
+Buy and sell signals are generated based on two factors:
+
+1. The crossing over or under of the Heikin Ashi close price and the 75th percentile price level.
+2. The Heikin Ashi close price being above certain moving averages.
+
+You have the flexibility to adjust several parameters in the script, including:
+
+1. The stop loss and trailing stop percentages (`stopLossPercentage` and `trailStopPercentage`). These parameters allow the strategy to exit trades if the price moves against you by a certain percentage.
+
+2. The lookback period (`lookback`) used to calculate percentile levels. This determines the range of past bars used in the percentile calculation.
+
+3. The lengths of the two moving averages (`yellowLine_length` and `purplLine_length`). These determine how sensitive the moving averages are to recent price changes.
+
+4. The minimum holding period (`holdPeriod`). This sets the minimum number of bars that a trade must be kept open before it can be closed.
+
+Please adjust these parameters according to your trading preferences and risk tolerance. Happy trading!
+Sep 22, 2023
+Release Notes
+What the Original Strategy Does:
+Inputs & Parameters: The original strategy provides several user-adjustable parameters, such as stop loss percentage, trailing stop percentage, lookback period, lengths for two different EMAs (Exponential Moving Averages), minimum holding period, and a start date for the strategy.
+
+Heikin Ashi Candles: The strategy initially used Heikin Ashi candles for smoother price data. These candles are calculated using a combination of the open, high, low, and close prices from the current and previous bars.
+
+Moving Averages: Two EMAs were calculated based on the Heikin Ashi candle's closing prices. These EMAs were colored yellow and purple.
+
+Percentile Calculation: It calculates the 25th and 75th percentiles of the Heikin Ashi closing prices over a given lookback period.
+
+Trade Signals:
+
+A long entry signal (longSignal) is generated when the Heikin Ashi closing price crosses over the 75th percentile and is greater than the yellow EMA.
+A long exit signal (sellSignal) is generated when the Heikin Ashi closing price crosses under the yellow EMA.
+Additionally, the strategy has a similar set of conditions for short entries and exits (longSignal1 and sellSignal1) but uses the purple EMA.
+Why the Updates Were Necessary:
+Repainting: Your original script had the potential for repainting, particularly due to the setting calc_on_every_tick = true. Repainting can distort backtesting results, making the strategy look more effective than it actually is.
+
+Look-Ahead Bias: Your script used calc_on_order_fills = true, which could introduce look-ahead bias by giving the strategy access to intra-bar high and low values. This is unrealistic in live trading.
+
+Heikin Ashi Candles: While Heikin Ashi candles are useful for identifying trends, they are derived from actual price data and can sometimes lag behind. They can also cause issues with backtesting, as TradingView may handle these candles differently.
+
+What the Updated Strategy Does:
+Standard Candles: The updated strategy uses standard OHLC candles instead of Heikin Ashi. This makes the strategy more straightforward and potentially more reliable in backtesting and live trading.
+
+Removed Potential for Repainting and Look-Ahead Bias: The updated strategy sets calc_on_order_fills = false and calc_on_every_tick = false to avoid repainting and look-ahead bias, making backtesting results more reliable.

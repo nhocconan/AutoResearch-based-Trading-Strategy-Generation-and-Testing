@@ -1,0 +1,5 @@
+//@version=5
+up_col=##input(defval=#39ff14,type='INPUT_COLOR',##id='in_4')
+dn_col=##input(defval=#ff1100,type='INPUT_COLOR',##id='in_5')
+##root(root_metainfo,rm_ic_0,up_col,input__color)
+##root(root_metainfo,rm_ic_1,dn_col,input__color)

@@ -1,0 +1,48 @@
+//@version=3
+strategy(title="Derivative Based Strategy", shorttitle="DER", currency="USD", calc_on_order_fills=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=1000)
+len = input(1, minval=1, title="Derivatives Length")
+sm = input(4, minval=1, title="HMA Length")
+longTrailPerc=input(title="Trail Long Loss %", type=float,minval=0.0,step=0.1,defval=25)*0.01
+shortTrailPerc=input(title="Trail Short Loss %",type=float,minval=0.0,step=0.1,defval=25)*0.01
+longStopPrice=0.0
+shortStopPrice=0.0
+src = input(ohlc4, title="Source")
+hullma = wma(2*wma(src,sm/2)-wma(src,sm),round(sqrt(sm)))
+speed = (hullma-hullma[len])/len
+accel = (speed-speed[len])/len
+jerk = (accel-accel[len])/len
+jounce = (jerk-jerk[len])/len
+plot(speed, color=green)
+plot(accel, color=purple)
+plot(jerk, color=red)
+plot(jounce, color=blue)
+hline(0, linestyle=solid, color=black)
+if accel>0 and jerk>0 and jounce>0// and strategy.opentrades==0
+    strategy.entry("openlong", strategy.long)
+if accel<0 and jerk<0 and jounce<0// and strategy.opentrades==0
+    strategy.entry("openshort",strategy.short)
+speed_profit = (strategy.openprofit-strategy.openprofit[1])/len
+accel_profit = (speed_profit-speed_profit[1])/len
+jerk_profit = (accel_profit-accel_profit[1])/len
+longStopPrice:=if(strategy.position_size>0)
+    stopValue=ohlc4*(1-longTrailPerc)
+    max(stopValue,longStopPrice[1])
+else
+    0
+shortStopPrice:=if(strategy.position_size<0)
+    stopValue=ohlc4*(1+shortTrailPerc)
+    min(stopValue,shortStopPrice[1])
+else
+    999999
+if(strategy.position_size>0)
+    strategy.exit(id="closelong",stop=longStopPrice)
+if(strategy.position_size<0)
+    strategy.exit(id="closeshort",stop=shortStopPrice)
+
+View in Pine Editor・40 lines
+Use on chart
+5
+4
+1
+2 414
+This strategy is based on utilizing the 1st, 2nd, 3rd, and 4th time derivatives of the HMA for investing equal percentages of some capital. Entry points are identified by trends in the 2nd, 3rd, and 4th derivatives while exit points are created at either a new entry point or a trailing stop loss %.

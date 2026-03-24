@@ -1,0 +1,101 @@
+//@version=5
+strategy(title='Moving Stop-Loss mechanism', commission_type=strategy.commission.cash_per_order, commission_value=0.00003, overlay=true, default_qty_value=100000, initial_capital=1000)
+
+// This script was created for educational purposes only and it is a spin-off of my previous script:
+// https://www.tradingview.com/script/9MJO3AgE-TradingView-Alerts-to-MT4-MT5-dynamic-variables-NON-REPAINTING/
+// This spin-off adds very often requested Moving Stop-Loss Mechanism - the logic here moves the stop-loss each time 
+// a new pivot is detected.
+//
+// Last lines of the script include alert() function calls, with a syntax compatible with TradingConnector
+// for execution in Forex/indices/commodities/crypto markets via MetaTrader.
+// Please note that "tradeid=" variable must be passed with each alert, so that MetaTrader knows which
+// trade to modify.
+
+TakeProfitLevel = input(400)
+
+// **** Entries logic, based on Stoch **** {
+periodK = 13  //input(13, title="K", minval=1)
+periodD = 3  //input(3, title="D", minval=1)
+smoothK = 4  //input(4, title="Smooth", minval=1)
+k = ta.sma(ta.stoch(close, high, low, periodK), smoothK)
+d = ta.sma(k, periodD)
+
+GoLong = ta.crossover(k, d) and k < 80
+GoShort = ta.crossunder(k, d) and k > 20
+// } End of entries logic
+
+// **** Pivot-points and stop-loss logic **** {
+piv_high = ta.pivothigh(high, 1, 1)
+piv_low = ta.pivotlow(low, 1, 1)
+var float stoploss_long = low
+var float stoploss_short = high
+
+pl = ta.valuewhen(piv_low, piv_low, 0)
+ph = ta.valuewhen(piv_high, piv_high, 0)
+
+if GoLong
+    stoploss_long := low < pl ? low : pl
+    stoploss_long
+if GoShort
+    stoploss_short := high > ph ? high : ph
+    stoploss_short
+
+plot(stoploss_long, color=color.new(color.red, 0), title='stoploss_long')
+plot(stoploss_short, color=color.new(color.lime, 0), title='stoploss_short')
+
+// Stop-Loss Updating mechanism
+enable_stoploss_mechanism = input(true, title='Enable Stoploss Modification Mechanism')
+UpdateLongStopLoss = strategy.position_size > 0 and strategy.position_size[1] > 0 and piv_low and pl != stoploss_long and not GoLong and enable_stoploss_mechanism
+UpdateShortStopLoss = strategy.position_size < 0 and strategy.position_size[1] < 0 and piv_high and ph != stoploss_short and not GoShort and enable_stoploss_mechanism
+if UpdateLongStopLoss
+    stoploss_long := pl
+    stoploss_long
+if UpdateShortStopLoss
+    stoploss_short := ph
+    stoploss_short
+
+plotshape(UpdateLongStopLoss ? stoploss_long[1] - 300 * syminfo.mintick : na, location=location.absolute, style=shape.labelup, color=color.new(color.lime, 0), textcolor=color.new(color.white, 0), text='SL\nmove')
+plotshape(UpdateShortStopLoss ? stoploss_short[1] + 300 * syminfo.mintick : na, location=location.absolute, style=shape.labeldown, color=color.new(color.red, 0), textcolor=color.new(color.black, 0), text='SL\nmove')
+// } End of Pivot-points and stop-loss logic
+
+
+strategy.entry('Long', strategy.long, when=GoLong)
+strategy.exit('XLong', from_entry='Long', stop=stoploss_long, profit=TakeProfitLevel)
+strategy.entry('Short', strategy.short, when=GoShort)
+strategy.exit('XShort', from_entry='Short', stop=stoploss_short, profit=TakeProfitLevel)
+
+if GoLong
+    alertsyntax_golong = 'long slprice=' + str.tostring(stoploss_long) + ' tp=' + str.tostring(TakeProfitLevel)
+    alert(message=alertsyntax_golong, freq=alert.freq_once_per_bar_close)
+if GoShort
+    alertsyntax_goshort = 'short slprice=' + str.tostring(stoploss_short) + ' tp=' + str.tostring(TakeProfitLevel)
+    alert(message=alertsyntax_goshort, freq=alert.freq_once_per_bar_close)
+if UpdateLongStopLoss
+    alertsyntax_updatelongstoploss = 'slmod slprice=' + str.tostring(stoploss_long)
+    alert(message=alertsyntax_updatelongstoploss, freq=alert.freq_once_per_bar_close)
+if UpdateShortStopLoss
+    alertsyntax_updateshortstoploss = 'slmod slprice=' + str.tostring(stoploss_short)
+    alert(message=alertsyntax_updateshortstoploss, freq=alert.freq_once_per_bar_close)
+
+View in Pine Editor・81 lines
+Use on chart
+8
+0
+7
+6
+22 972
+Jul 7, 2021
+"How to code moving stop-loss mechanism", is one of the most often repeating questions in private messages I receive, so just to focus on this mechanism, I made a spin-off from my previous script: TradingView-Alerts-to-MT4-MT5-dynamic-variables-NON-REPAINTING.
+
+The logic here moves the stop-loss each time a trade is running and a new pivot high/low is detected. When such event occurs (UpdateLongStopLoss or UpdateShortStopLoss), stoploss_long or stoploss_short mutable variable is modified. And it needs to be coded inside strategy.exit() line as "stop=stoploss_long" or "stop=stoploss_short". Entries are pretty straightforward - on Stoch crosses.
+
+Last lines of the script show how to wrap information about such updates and send send alerts to MetaTrader via TradingConnector for execution in Forex/indices/commodities/crypto markets via MetaTrader. Please note that "tradeid=" variable must be passed with each alert, to let MetaTrader know which trade to modify. SLMOD, TPMOD are recently added commands, along with BE (as in "move stop-loss to breakeven" - but that's another topic).
+
+Please disregard strategy backtest results, as this script is for coding education purposes only. However, it seems with the stop-loss mechanism enabled, the results are even better, than in original version of the script :)
+Mar 5, 2022
+Release Notes
+Thanks to the recent update of TradingConnectorEA to version 1.35, some functionalities and syntax of TradingConnector got simplified, and that's why I'm posting this update. To be exact:
+
+If you're using Moving StopLoss mechanism ('slmod' command) and trading only 1 position at a time (no pyramiding), you don't need to use tradeid= parameter anymore. So it was removed from this script. Tradeid= functionality still exists and performs well - used to point which position exactly has to modified or closed - but is unnecessary coding overhead in single-position-trading. Previously it was required.
+
+P.S. There are further new features, like multiple take-profit levels, breakeven exit, delay or separating from TradingConnector-dedicated alerts from all the others - these features will be covered in other publications soon.

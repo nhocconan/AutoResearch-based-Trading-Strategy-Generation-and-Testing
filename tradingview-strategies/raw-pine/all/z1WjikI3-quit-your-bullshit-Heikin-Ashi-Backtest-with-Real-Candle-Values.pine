@@ -1,0 +1,47 @@
+//@version=3
+strategy("bt_heikinashi", overlay=true)
+
+h_a = heikinashi(tickerid)
+vp = input(3, "Validation Period")
+
+c = security(h_a, period, close)
+o = security(h_a, period, open)
+
+lt = true
+st = true
+
+for i = 0 to vp-1
+    lt:= lt and c[i] > o[i]
+    st:= st and c[i] < o[i]
+
+l = lt and c[vp] < o[vp]
+s = st and c[vp] > o[vp]
+
+strategy.entry("long", strategy.long, when=l)
+strategy.entry("short", strategy.short, when=s)
+
+View in Pine Editor・21 lines
+Use on chart
+9
+5
+5
+17
+47 791
+Made in a few minutes to debunk all the bullshit going around tradingview and everywhere about "heikin-ashi" being a holy grail trend indicator.
+Do not be deceived.
+Heikin-Ashi is a beautiful way to remove much of the noise in markets, and is light on the eyes. (nice and smooth!)
+I personally use heikin-ashi as a way to remove a lot of the clutter in the markets, allowing me to trade with less emotion.
+
+While heikin-ashi is a great way to visualize trends, it is NOT a good trend indicator because its displayed values do not align with actual trading values.
+Therefore, entry and exit points for many of the ideas published about heikin-ashi for trade are inaccurate.
+
+::: When Heikin-Ashi changes colour for x candles, a new trade is created on the open of the following real candle.
+
+In practice, Heikin-Ashi is much closer to break even.
+As tested, Heikin-Ashi trend trading works better on pairs that have clearer definitions of trends and are less often in consolidation. (ex. USDJPY)
+
+Usage:
+Switch to normal candlestick chart.
+
+Features:
+Change the period for new trades. (For example: x amount of red candles after a green candle to signify short trade)

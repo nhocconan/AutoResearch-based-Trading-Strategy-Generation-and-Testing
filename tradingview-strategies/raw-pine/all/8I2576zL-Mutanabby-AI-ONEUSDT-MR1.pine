@@ -1,0 +1,170 @@
+//@version=5
+strategy("ONEUSDT(1)_MR1", overlay=true, initial_capital=100, default_qty_type=strategy.fixed, default_qty_value=100)
+
+// Input Parameters
+var float TRAIL_ATR_MULT = 11.0
+var int ATR_LENGTH = 14
+var float ACCOUNT_SIZE = 100.0
+
+
+// Tracking Variables
+var int profx = 0
+var float trailLevel = na
+var int barsInTrade = 0
+
+// Calculate Technical Indicators
+atr = ta.atr(ATR_LENGTH)
+
+// Position Size Calculation
+positionSize = math.floor(ACCOUNT_SIZE / close)
+
+// Calculate Price Changes
+percentChange2Bars(offset) =>
+    ((close[offset] - close[offset+2]) / close[offset+2]) * 100
+
+// Entry Conditions
+
+priorMove = percentChange2Bars(3) >= -7
+currentMove = percentChange2Bars(0) <= 0
+threeBarBack = percentChange2Bars(3) <= -5
+
+longCondition =  priorMove and currentMove and threeBarBack
+
+// Exit Conditions
+exitCondition = close > high[1] and open[1] <= close[9]
+
+// Track Trade Duration and Profitable Closes
+if (strategy.position_size > 0)
+    barsInTrade := barsInTrade + 1
+    if (close >= strategy.position_avg_price)
+        profx := profx + 1
+else
+    barsInTrade := 0
+
+// Trailing Stop Logic
+if (strategy.position_size > 0)
+    float newTrail = close - (atr * TRAIL_ATR_MULT)
+    trailLevel := na(trailLevel) ? newTrail : math.max(trailLevel, newTrail)
+else
+    trailLevel := na
+
+// Execute Strategy
+if (longCondition)
+    strategy.entry("Long", strategy.long, qty=positionSize)
+    profx := 0
+
+// Exit Conditions
+if (strategy.position_size > 0)
+    // Trailing Stop
+    strategy.exit("Trail", "Long", stop=trailLevel)
+    
+    // Signal Exit
+    if (exitCondition)
+        strategy.close("Long", comment="Signal Exit")
+    
+
+
+// Visualization
+plot(strategy.position_size > 0 ? trailLevel : na, "Trailing Stop", color=color.red, style=plot.style_stepline)
+plotshape(longCondition, "Entry", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(exitCondition and strategy.position_size > 0, "Exit", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+View in Pine Editor・70 lines
+Use on chart
+1
+0
+7
+1
+3 850
+
+ONEUSDT Mean-Reversion Strategy | 74.68% Win Rate | 417% Net Profit
+
+
+This is a long-only mean-reversion strategy designed specifically for ONEUSDT on the 1-hour timeframe. The core logic identifies oversold conditions following sharp declines and enters positions when selling pressure exhausts, capturing the subsequent recovery bounce.
+
+Backtested Period: June 2019 – December 2025 (~6 years)
+
+Performance Summary
+
+| Metric | Value |
+|--------|-------|
+| Net Profit | +417.68% |
+| Win Rate | 74.68% |
+| Profit Factor | 4.019 |
+| Total Trades | 237 |
+| Sharpe Ratio | 0.364 |
+| Sortino Ratio | 1.917 |
+| Max Drawdown | 51.08% |
+| Avg Win | +3.14% |
+| Avg Loss | -2.30% |
+| Buy & Hold Return | -80.44% |
+
+
+Strategy Logic :
+
+Entry Conditions (Long Only):
+
+The strategy seeks confluence of three conditions that identify exhausted selling:
+
+1. Prior Move Filter:*The price change from 5 bars ago to 3 bars ago must be ≥ -7% (ensures we're not entering during freefall)
+
+2. Current Move Filter: The price change over the last 2 bars must be ≤ 0% (confirms momentum is stalling or reversing)
+
+3. Three-Bar Decline: The price change from 5 bars ago to 3 bars ago must be ≤ -5% (confirms a significant recent drop occurred)
+
+When all three conditions align, the strategy identifies a potential reversal point where sellers are exhausted.
+
+Exit Conditions:
+
+- Primary Exit: Close above the previous bar's high while the open of the previous bar is at or below the close from 9 bars ago (profit-taking on strength)
+- Trailing Stop: 11x ATR trailing stop that locks in profits as price rises
+
+
+Risk Management
+
+- Position Sizing:Fixed position based on account equity divided by entry price
+- Trailing Stop:11× ATR (14-period) provides wide enough room for crypto volatility while protecting gains
+- Pyramiding:Up to 4 orders allowed (can scale into winning positions)
+- **Commission:** 0.1% per trade (realistic exchange fees included)
+
+
+
+Important Disclaimers
+
+
+⚠️ This is NOT financial advice.
+
+- Past performance does not guarantee future results
+- Backtest results may contain look-ahead bias or curve-fitting
+- Real trading involves slippage, liquidity issues, and execution delays
+- This strategy is optimized for ONEUSDT specifically — results may differ on other pairs
+- Always test before risking real capital
+
+
+Recommended Usage
+
+- Timeframe:*1H (as designed)
+- Pair: ONEUSDT (Binance)
+- Account Size: Ensure sufficient capital to survive max drawdown
+
+
+Source Code
+
+
+
+Feedback Welcome
+
+
+I'm sharing this strategy freely for educational purposes. Please:
+- Drop a comment with your backtesting results any you analysis
+- Share any modifications that improve performance
+- Let me know if you spot any issues in the logic
+
+Happy trading
+
+
+
+
+As a quant trader, do you think this strategy will survive in live trading?
+Yes or No? And why?
+I want to hear from you guys

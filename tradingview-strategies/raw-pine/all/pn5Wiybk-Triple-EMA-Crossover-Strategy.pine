@@ -1,0 +1,106 @@
+//@version=5
+strategy("Trend Following Triple MA Strategy", overlay=true)
+
+// Define input parameters
+sma1Period = input.int(9, title="SMA1 Period", minval=1)
+sma2Period = input.int(21, title="SMA2 Period", minval=1)
+sma3Period = input.int(55, title="SMA3 Period", minval=1)
+stopLossTicks = input.int(200, title="Stop Loss in Ticks", minval=1)
+takeProfitTicks = input.int(200, title="Take Profit in Ticks", minval=1)
+adxPeriod = input.int(14, title="ADX Period", minval=1)
+adxThreshold = input.int(25, title="ADX Threshold", minval=1)
+
+// Calculate indicators
+sma1 = ta.sma(close, sma1Period)
+sma2 = ta.sma(close, sma2Period)
+sma3 = ta.sma(close, sma3Period)
+// adx = ta.adx(adxPeriod)
+
+// Plot SMAs
+plot(sma1, color=color.green, title="SMA1")
+plot(sma2, color=color.orange, title="SMA2")
+plot(sma3, color=color.red, title="SMA3")
+
+// Define trend conditions
+uptrend = sma1 > sma2 and sma2 > sma3
+downtrend = sma1 < sma2 and sma2 < sma3
+
+// Define entry conditions
+longCondition = ta.crossover(sma1, sma2) and uptrend and  strategy.position_size == 0
+shortCondition = ta.crossunder(sma1, sma2) and downtrend and strategy.position_size == 0
+
+// Define exit conditions
+exitLong = ta.crossunder(close, sma1) and strategy.position_size > 0
+exitShort = ta.crossover(close, sma1) and strategy.position_size < 0
+
+// Execute trades
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Take Profit/Stop Loss", "Long", stop=close - stopLossTicks * syminfo.mintick, limit=close + takeProfitTicks * syminfo.mintick)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Take Profit/Stop Loss", "Short", stop=close + stopLossTicks * syminfo.mintick, limit=close - takeProfitTicks * syminfo.mintick)
+
+if (exitLong)
+    strategy.close("Long")
+
+if (exitShort)
+    strategy.close("Short")
+
+// Color bars based on position
+// barcolor(strategy.position_size == 0 ? color.yellow : strategy.position_size > 0 ? color.green : color.red)
+
+View in Pine Editor・52 lines
+Use on chart
+2
+0
+2
+6 601
+Oct 26, 2024
+Triple EMA Crossover Strategy
+Overview
+The Triple EMA Crossover Strategy is a trend-following trading system that utilizes three Exponential Moving Averages (EMAs) to identify potential entry and exit points in the market. This strategy is based on the principle that when shorter-term prices cross above longer-term prices, it can indicate a bullish trend, and conversely when they cross below, it can signal a bearish trend.
+
+Components
+Exponential Moving Averages (EMAs):
+
+Short EMA: A fast-moving average that reacts quickly to price changes (commonly set to 9 periods).
+Medium EMA: A medium-term average that smooths out price data and helps confirm trends (commonly set to 21 periods).
+Long EMA: A slow-moving average that helps identify the overall trend direction (commonly set to 55 periods).
+Trading Signals:
+
+Buy Signal: A long entry is triggered when:
+The Short EMA (9) crosses above the Medium EMA (21).
+The Medium EMA (21) is above the Long EMA (55).
+Sell Signal: A short entry is signaled when:
+The Short EMA (9) crosses below the Medium EMA (21).
+The Medium EMA (21) is below the Long EMA (55).
+Stop Loss and Take Profit:
+
+Stop Loss: Implement a predefined percentage or ATR-based stop loss to limit potential losses.
+Take Profit: Set a target based on a risk-to-reward ratio that reflects your trading strategy's goals.
+Advantages
+Trend Identification: The EMA crossover system allows traders to identify the current trend dynamically, focusing on upward or downward price movements.
+Simplicity: The strategy is straightforward, making it accessible for both new and experienced traders.
+Flexibility: This method can be applied across multiple timeframes and asset classes, making it versatile for various trading styles.
+Disadvantages
+Lagging Indicator: Moving averages are lagging indicators, meaning signals may come later than the actual price movement, which can lead to missed opportunities.
+Whipsaw Effect: In ranging markets, the strategy may produce false signals leading to potential losses.
+Feb 11, 2025
+Release Notes
+The Triple EMA Crossover Strategy is a trend-following indicator designed to identify high-probability trade opportunities by leveraging three Exponential Moving Averages (EMAs) of different periods. This strategy aims to capture momentum in trending markets while filtering out false signals in choppy conditions.
+
+Key Features:
+✅ Three EMAs for Trend Confirmation – Uses short-, medium-, and long-term EMAs to identify strong uptrends and downtrends.
+✅ ADX Filter for Trend Strength – Avoids trades in weak or ranging markets by ensuring trend strength meets a predefined threshold.
+✅ Automatic Trade Execution – Includes built-in long and short entries with stop-loss and take-profit levels.
+✅ Visual Aids – Plots EMAs, ADX, and trend-based bar coloring to make trend recognition intuitive.
+
+How It Works:
+A bullish signal occurs when the shortest EMA crosses above the medium EMA while both remain above the longest EMA, with ADX confirming a strong trend.
+A bearish signal occurs when the shortest EMA crosses below the medium EMA while both remain below the longest EMA, with ADX confirming downward momentum.
+The strategy implements a dynamic stop-loss and take-profit system based on tick values to manage risk effectively.
+This indicator is ideal for traders looking to capitalize on strong trends while minimizing exposure to weak, sideways markets. Perfect for swing traders and intraday traders alike! 🚀
+
+Let me know if you’d like any modifications! 📈

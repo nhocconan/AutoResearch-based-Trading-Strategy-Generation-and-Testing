@@ -1,0 +1,3 @@
+//@version=5
+##var_3=##input(defval=#00000000,type='INPUT_COLOR',##id='__chart_fgcolor')
+##root(root_metainfo,rm_ic_0,##var_3,input__color)

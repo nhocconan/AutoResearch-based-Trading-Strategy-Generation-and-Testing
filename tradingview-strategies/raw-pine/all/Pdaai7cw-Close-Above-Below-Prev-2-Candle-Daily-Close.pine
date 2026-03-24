@@ -1,0 +1,76 @@
+//@version=5
+strategy("Close Above/Below Prev 2 Candle (Daily Close)", overlay=true, pyramiding=0)
+
+// === Inputs ===
+rr = input.float(2.0, "Risk/Reward Ratio", step=0.1)
+
+// === Previous candle highs/lows on daily timeframe ===
+prevHigh1 = request.security(syminfo.tickerid, "D", high[1])
+prevHigh2 = request.security(syminfo.tickerid, "D", high[2])
+prevLow1  = request.security(syminfo.tickerid, "D", low[1])
+prevLow2  = request.security(syminfo.tickerid, "D", low[2])
+
+// === Current daily close ===
+dailyClose = request.security(syminfo.tickerid, "D", close)
+
+// === Conditions based on daily candle close ===
+closeAbovePrev2 = dailyClose > prevHigh1 and dailyClose > prevHigh2
+closeBelowPrev2 = dailyClose < prevLow1 and dailyClose < prevLow2
+
+// === Plot signals on intraday chart ===
+plotshape(closeAbovePrev2, title="Daily Close Above Prev 2 Highs", location=location.abovebar, style=shape.triangleup, color=color.green, size=size.tiny)
+plotshape(closeBelowPrev2, title="Daily Close Below Prev 2 Lows", location=location.belowbar, style=shape.triangledown, color=color.red, size=size.tiny)
+
+// === Strategy entries (optional) ===
+if closeAbovePrev2
+    stopLoss   = dailyClose - (prevHigh1 - prevHigh2) // example
+    takeProfit = dailyClose + (dailyClose - stopLoss) * rr
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=stopLoss, limit=takeProfit)
+
+if closeBelowPrev2
+    stopLoss   = dailyClose + (prevLow1 - prevLow2) // example
+    takeProfit = dailyClose - (stopLoss - dailyClose) * rr
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=stopLoss, limit=takeProfit)
+
+// === Alerts ===
+alertcondition(closeAbovePrev2, title="Daily Close Above Prev 2 Highs", message="Daily candle closed above the previous two daily highs")
+alertcondition(closeBelowPrev2, title="Daily Close Below Prev 2 Lows", message="Daily candle closed below the previous two daily lows")
+
+View in Pine Editor・39 lines
+Use on chart
+1
+4
+793
+This strategy identifies potential trend continuation or breakout signals by analyzing the daily candle closes relative to the previous two daily candles. It generates clear alerts and trade signals only after the daily candle has fully closed, reducing false intraday triggers.
+
+How it works:
+
+Long Entry (Bullish Signal): Triggered when the daily candle closes above the highs of the previous two daily candles.
+
+Short Entry (Bearish Signal): Triggered when the daily candle closes below the lows of the previous two daily candles.
+
+Visual Indicators: Green triangles indicate bullish signals, red triangles indicate bearish signals.
+
+Strategy Features:
+
+Optional long and short entries with configurable risk/reward ratio.
+
+Automatic stop-loss and take-profit calculation based on candle structure.
+
+Works on intraday charts using daily candle analysis.
+
+Alerts:
+
+Alerts trigger only after the daily candle closes above/below the previous two daily candles.
+
+Helps traders receive precise notifications for potential breakout trades.
+
+Benefits:
+
+Reduces noise by using daily candle closes.
+
+Easy to integrate with other swing or trend strategies.
+
+Provides clear visual and alert signals for both bullish and bearish setups.

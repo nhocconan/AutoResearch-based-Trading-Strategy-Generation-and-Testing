@@ -1,0 +1,33 @@
+//@version=3
+strategy("Parabolic SAR Strategy", overlay=true)
+
+start = input(0.02)
+increment = input(0.02)
+maximum = input(0.2)
+
+psar = sar(start, increment, maximum)
+
+if (psar > high)
+    strategy.entry("ParLE", strategy.long, stop=psar, comment="ParLE")
+else
+    strategy.cancel("ParLE")
+
+if (psar < low)
+    strategy.entry("ParSE", strategy.short, stop=psar, comment="ParSE")
+else
+    strategy.cancel("ParSE")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・20 lines
+Use on chart
+3
+4
+8
+2
+12 574
+I tested it on EURUSD with 2% profit:
+
+Set input parameters like here: screenshots.firefox.com/pAeszpnO8afOPQW5/www.tradingview.com
+
+

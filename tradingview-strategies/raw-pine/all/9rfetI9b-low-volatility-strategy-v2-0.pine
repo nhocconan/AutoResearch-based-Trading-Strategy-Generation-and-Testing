@@ -1,0 +1,31 @@
+//@version=2
+strategy("Low Volatility Strategy v2.0", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, pyramiding = 0)
+
+length = input(3, "Length")
+koif = input(0.1, "Coefficient", defval = 0.1, minval = 0, maxval = 10, step = 0.1)
+fromyear = input(2018, defval = 2018, minval = 1900, maxval = 2100, title = "From Year")
+toyear = input(2018, defval = 2018, minval = 1900, maxval = 2100, title = "To Year")
+frommonth = input(01, defval = 01, minval = 01, maxval = 12, title = "From Month")
+tomonth = input(10, defval = 10, minval = 01, maxval = 12, title = "To Month")
+fromday = input(01, defval = 01, minval = 01, maxval = 31, title = "From day")
+today = input(31, defval = 31, minval = 01, maxval = 31, title = "To day")
+
+mf = atr(length)
+
+strategy.entry("Long", strategy.long, stop = high * (1 + mf * koif/1000), when=(time > timestamp(fromyear, frommonth, fromday, 00, 00) and time < timestamp(toyear, tomonth, today, 23, 59)))
+
+strategy.entry("Short", strategy.short, stop = low * (1 - mf * koif/1000), when=(time > timestamp(fromyear, frommonth, fromday, 00, 00) and time < timestamp(toyear, tomonth, today, 23, 59)))
+    
+if time > timestamp(toyear, tomonth, today, 23, 59)
+    strategy.close_all()
+
+View in Pine Editor・20 lines
+Use on chart
+1
+2
+4
+3 278
+Low Volatility Strategy v2.0.
+
+For Bitmex BTC/USD
+Timeframe 4H.

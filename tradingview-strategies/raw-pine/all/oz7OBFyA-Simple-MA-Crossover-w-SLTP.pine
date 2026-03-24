@@ -1,0 +1,67 @@
+//@version=6
+strategy('Simple MA Crossover w/ SLTP', overlay = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+// ——— Inputs ———
+maType = input.string(defval = 'EMA', title = 'MA Type', options = ['EMA', 'SMA'])
+fastLen = input.int(9, title = 'Fast MA Length', minval = 1)
+slowLen = input.int(21, title = 'Slow MA Length', minval = 1)
+slPerc = input.float(1.0, title = 'Stop Loss (%)', step = 0.1)
+tpPerc = input.float(2.0, title = 'Take Profit (%)', step = 0.1)
+
+// ——— Helper MA ———
+ma(src, length) =>
+    maType == 'EMA' ? ta.ema(src, length) : ta.sma(src, length)
+
+// ——— Core MAs ———
+fastMA = ma(close, fastLen)
+slowMA = ma(close, slowLen)
+
+// ——— Signals ———
+longSignal = ta.crossover(fastMA, slowMA)
+shortSignal = ta.crossunder(fastMA, slowMA)
+
+// ——— Entries ———
+if longSignal
+    if strategy.position_size < 0
+        strategy.close('Short')
+    strategy.entry('Long', strategy.long)
+
+if shortSignal
+    if strategy.position_size > 0
+        strategy.close('Long')
+    strategy.entry('Short', strategy.short)
+
+// ——— Dynamic SL/TP (percent from avg price) ———
+longStop = strategy.position_avg_price * (1 - slPerc / 100)
+longTarget = strategy.position_avg_price * (1 + tpPerc / 100)
+shortStop = strategy.position_avg_price * (1 + slPerc / 100)
+shortTarget = strategy.position_avg_price * (1 - tpPerc / 100)
+
+if strategy.position_size > 0
+    strategy.exit('Exit Long', 'Long', stop = longStop, limit = longTarget)
+if strategy.position_size < 0
+    strategy.exit('Exit Short', 'Short', stop = shortStop, limit = shortTarget)
+
+// ——— Plots ———
+plot(fastMA, color = color.new(color.blue, 0), title = 'Fast MA')
+plot(slowMA, color = color.new(color.orange, 0), title = 'Slow MA')
+
+plot(strategy.position_size > 0 ? longStop : na, color = color.new(color.green, 0), title = 'Long SL')
+plot(strategy.position_size > 0 ? longTarget : na, color = color.new(color.green, 60), title = 'Long TP')
+plot(strategy.position_size < 0 ? shortStop : na, color = color.new(color.red, 0), title = 'Short SL')
+plot(strategy.position_size < 0 ? shortTarget : na, color = color.new(color.red, 60), title = 'Short TP')
+
+// ——— Entry markers ———
+plotshape(longSignal, title = 'Long Entry', location = location.belowbar, style = shape.triangleup, color = color.new(color.lime, 0), size = size.tiny, text = 'BUY')
+plotshape(shortSignal, title = 'Short Entry', location = location.abovebar, style = shape.triangledown, color = color.new(color.red, 0), size = size.tiny, text = 'SELL')
+
+// ——— Alerts ———
+alertcondition(longSignal, title = 'Long Entry', message = 'LONG')
+alertcondition(shortSignal, title = 'Short Entry', message = 'SHORT')
+
+View in Pine Editor・60 lines
+Use on chart
+5
+622
+Picture two cheetahs on a racetrack made of price candles. One cheetah is fast and twitchy (the short-term EMA). The other is chill, lumbering, and takes its sweet time (the long-term EMA). When the twitchy cheetah sprints ahead and crosses above the chill one → “BUY, YOU MAGNIFICENT DEGEN!” When the twitchy one gets tired, slows down, and gets lapped from above → “SELL before this turns into a horror movie!”
+That, my friend, is the EMA crossover strategy in its purest, most dramatic form.

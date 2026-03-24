@@ -1,0 +1,178 @@
+//@version=5
+strategy("Hyper Insight MA Strategy [Universal]", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// =============================================================================
+// 1. INPUTS & CONFIGURATION
+// =============================================================================
+grp_ma = "Moving Average Settings"
+
+// MA Types Options
+ma_options = input.string("SMA", "MA Type Options", options=["SMA", "EMA", "WMA", "HMA", "RMA", "T3", "ALMA", "VWMA", "LSMA", "SWMA", "DEMA", "TEMA", "ZLEMA"], group=grp_ma, tooltip="Select the type of Moving Average calculation")
+
+// Fast MA Inputs (Default: 5)
+fastType = input.string("SMA", "Fast MA Type", options=["SMA", "EMA", "WMA", "HMA", "RMA", "T3", "ALMA", "VWMA", "LSMA", "SWMA", "DEMA", "TEMA", "ZLEMA"], group=grp_ma)
+fastLen  = input.int(5, "Fast MA Length", minval=1, group=grp_ma)
+
+// Slow MA Inputs (Default: 10)
+slowType = input.string("HMA", "Slow MA Type", options=["SMA", "EMA", "WMA", "HMA", "RMA", "T3", "ALMA", "VWMA", "LSMA", "SWMA", "DEMA", "TEMA", "ZLEMA"], group=grp_ma)
+slowLen  = input.int(10, "Slow MA Length", minval=1, group=grp_ma)
+
+// =============================================================================
+// 2. HELPER FUNCTIONS
+// =============================================================================
+
+// T3 Moving Average
+t3(src, len) =>
+    v = 0.7
+    e1 = ta.ema(src, len)
+    e2 = ta.ema(e1, len)
+    e3 = ta.ema(e2, len)
+    c1 = -math.pow(v, 3)
+    c2 = 3*math.pow(v, 2) + 3*math.pow(v, 3)
+    c3 = -6*math.pow(v, 2) - 3*v - 3*math.pow(v, 3)
+    c4 = 1 + 3*v + math.pow(v, 3) + 3*math.pow(v, 2)
+    c1*e3 + c2*e2 + c3*e1 + c4*src
+
+// DEMA (Double Exponential Moving Average)
+dema(src, len) =>
+    e1 = ta.ema(src, len)
+    e2 = ta.ema(e1, len)
+    2 * e1 - e2
+
+// TEMA (Triple Exponential Moving Average)
+tema(src, len) =>
+    e1 = ta.ema(src, len)
+    e2 = ta.ema(e1, len)
+    e3 = ta.ema(e2, len)
+    3 * e1 - 3 * e2 + e3
+
+// ZLEMA (Zero Lag Exponential Moving Average)
+zlema(src, len) =>
+    lag = math.floor((len - 1) / 2)
+    ema_data = src + (src - src[lag])
+    ta.ema(ema_data, len)
+
+// Universal MA Switcher
+get_ma(type, len) =>
+    float res = na
+    if type == "SMA"
+        res := ta.sma(close, len)
+    else if type == "EMA"
+        res := ta.ema(close, len)
+    else if type == "WMA"
+        res := ta.wma(close, len)
+    else if type == "HMA"
+        res := ta.hma(close, len)
+    else if type == "RMA"
+        res := ta.rma(close, len)
+    else if type == "T3"
+        res := t3(close, len)
+    else if type == "ALMA"
+        res := ta.alma(close, len, 0.85, 6)
+    else if type == "VWMA"
+        res := ta.vwma(close, len)
+    else if type == "LSMA"
+        res := ta.linreg(close, len, 0)
+    else if type == "SWMA"
+        res := ta.swma(close) // Note: SWMA usually has fixed length 4 in Pine, but we keep structure
+    else if type == "DEMA"
+        res := dema(close, len)
+    else if type == "TEMA"
+        res := tema(close, len)
+    else if type == "ZLEMA"
+        res := zlema(close, len)
+    res
+
+// =============================================================================
+// 3. LOGIC CALCULATION
+// =============================================================================
+// Get MAs
+fastMA = get_ma(fastType, fastLen)
+slowMA = get_ma(slowType, slowLen)
+
+// =============================================================================
+// 4. STRATEGY EXECUTION
+// =============================================================================
+// Conditions
+crossover_bull = ta.crossover(fastMA, slowMA)
+crossunder_bear = ta.crossunder(fastMA, slowMA)
+
+// Entry/Exit
+if crossover_bull
+    strategy.entry("Long", strategy.long)
+
+if crossunder_bear
+    strategy.close("Long")
+    // Uncomment below to enable Shorting
+    // strategy.entry("Short", strategy.short)
+
+// =============================================================================
+// 5. VISUALIZATION
+// =============================================================================
+plot(fastMA, color=color.rgb(0, 255, 0), title="Fast MA", linewidth=2)
+plot(slowMA, color=color.rgb(255, 0, 0), title="Slow MA", linewidth=2)
+
+// Fill background between MAs for visual trend
+fill(plot(fastMA, display=display.none), plot(slowMA, display=display.none), color = fastMA > slowMA ? color.new(color.green, 90) : color.new(color.red, 90), title="Trend Cloud")
+
+View in Pine Editor・116 lines
+Use on chart
+2
+4
+902
+Hyper Insight MA Strategy [Universal]** is a comprehensive trend-following engine designed for traders who require precision and flexibility. Unlike standard indicators that lock you into a single calculation method, this strategy serves as a "Universal Adapter," allowing you to **Mix & Match 13 different Moving Average types** for both the Fast and Slow trend lines independently.
+
+Whether you need the smoothness of T3, the responsiveness of HMA, or the classic reliability of SMA, this script enables you to backtest thousands of combinations to find the perfect edge for your specific asset class.
+
+---
+
+🔬 Deep Dive: Calculation Logic of Included MAs
+
+This strategy includes 13 distinct calculation methods. Understanding the math behind them will help you choose the right tool for your specific market conditions.
+
+#### 1. Standard Averages
+* **SMA (Simple Moving Average):** The unweighted mean of the previous $n$ data points.
+* *Logic:* Treats every price point in the period with equal importance. Good for identifying long-term macro trends but reacts slowly to recent volatility.
+* **WMA (Weighted Moving Average):** A linear weighted average.
+* *Logic:* Assigns heavier weight to current data linearly (e.g., $1, 2, 3... n$). It reacts faster than SMA but is still relatively smooth.
+* **SWMA (Symmetrically Weighted Moving Average):**
+* *Logic:* Uses a fixed-length window (usually 4 bars) with symmetrical weights $[1/6, 2/6, 2/6, 1/6]$. It prioritizes the center of the recent data window.
+
+#### 2. Exponential & Lag-Reducing Averages
+* **EMA (Exponential Moving Average):**
+* *Logic:* Applies an exponential decay weighting factor. Recent prices have significantly more impact on the average than older prices, reducing lag compared to SMA.
+* **RMA (Running Moving Average):** Also known as Wilder's Smoothing (used in RSI).
+* *Logic:* It is essentially an EMA but with a slower alpha weight of $1/length$. It provides a very smooth, stable line that filters out noise effectively.
+* **DEMA (Double Exponential Moving Average):**
+* *Logic:* Calculated as $2 \times EMA - EMA(EMA)$. By subtracting the "lag" (the smoothed EMA) from the original EMA, DEMA provides a much faster reaction to price changes with less noise than a standard EMA.
+* **TEMA (Triple Exponential Moving Average):**
+* *Logic:* Calculated as $3 \times EMA - 3 \times EMA(EMA) + EMA(EMA(EMA))$. This effectively eliminates the lag inherent in single and double EMAs, making it an extremely fast-tracking indicator for scalping.
+
+#### 3. Advanced & Adaptive Averages
+* **HMA (Hull Moving Average):**
+* *Logic:* A composite formula involving Weighted Moving Averages: 
+WMA
+(2 \times Integer(n/2)) - WMA(n)$. The result is then smoothed by a $\sqrt{n}$ WMA.
+* *Effect:* It eliminates lag almost entirely while managing to improve curve smoothness, solving the traditional trade-off between speed and noise.
+* **ZLEMA (Zero Lag Exponential Moving Average):**
+* *Logic:* This calculation attempts to remove lag by modifying the data source before smoothing. It calculates a "lag" value $(length-1)/2$ and applies an EMA to the data: $Source + (Source - Source[lag])$. This creates a projection effect that tracks price tightly.
+* **T3 (Tillson T3 Moving Average):**
+* *Logic:* A complex smoothing technique that runs an EMA through a filter multiple times using a "Volume Factor" (set to 0.7 in this script).
+* *Effect:* It produces a curve that is incredibly smooth and free of "overshoot," making it excellent for filtering out market chop.
+* **ALMA (Arnaud Legoux Moving Average):**
+* *Logic:* Uses a Gaussian distribution (bell curve) to assign weights. It allows the user to offset the moving average (moving the peak of the weight) to align it perfectly with the price, balancing smoothness and responsiveness.
+* **LSMA (Least Squares Moving Average):**
+* *Logic:* Calculates the endpoint of a Linear Regression line for the lookback period. It essentially guesses where the price "should" be based on the best-fit line of the recent trend.
+* **VWMA (Volume Weighted Moving Average):**
+* *Logic:* Weights the closing price by the volume of that bar.
+* *Effect:* Prices on high volume days pull the MA harder than prices on low volume days. This is excellent for validating true trend strength (i.e., a breakout on high volume will move the VWMA significantly).
+
+---
+
+### 🛠 Features & Settings
+* **Universal Switching:** Change the `Fast MA` and `Slow MA` types instantly via the settings menu.
+* **Trend Cloud:** A dynamic background fill (Green/Red) highlights the crossover zone for immediate visual trend identification.
+* **Strategy Mode:** Built-in Backtesting logic triggers `LONG` entries when Fast MA crosses over Slow MA, and `EXIT` when Fast MA crosses under.
+
+### ⚠️ Disclaimer
+This script is intended for educational and research purposes. The wide variety of MA combinations can produce vastly different results. Past performance is not indicative of future results. Please use proper risk management.

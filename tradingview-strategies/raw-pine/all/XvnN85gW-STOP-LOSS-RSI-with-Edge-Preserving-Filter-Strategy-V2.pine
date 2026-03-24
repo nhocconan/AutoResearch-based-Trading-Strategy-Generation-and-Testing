@@ -1,0 +1,179 @@
+//@version=3
+//Idea by Alexgrover https://www.tradingview.com/u/alexgrover/#published-scripts
+//Edge-Preserving Filter by Alexgrover https://www.tradingview.com/u/alexgrover/#published-scripts
+//RSI by J.Dow's orginal script https://www.tradingview.com/u/J.Dow/
+//Also thanking the developer of the Strategy used to assist in establishing the potential P/L
+strategy("STOP-LOSS-RSI with Edge-Preserving Filter Strategy V2", overlay=true, pyramiding=100, default_qty_value=100)
+
+/////////////// Component Code Start ///////////////
+testStartYear = input(2018, "Backtest Start Year") 
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2020, "Backtest Stop Year")
+testStopMonth = input(1, "Backtest Stop Month")
+testStopDay = input(1, "Backtest Stop Day")
+// testStopDay = testStartDay + 1
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+// A switch to control background coloring of the test period
+testPeriodBackground = input(title="Color Background?", type=bool, defval=true)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00FF00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+/////////////// Component Code Stop ///////////////
+
+HiLoRsk = input(false, title='Take higher risk?')
+//###################################################||
+//   Relative Strength Index Section                 ||
+//###################################################||
+show_rsi = input(false,title='Display RSI Line -----------------------')
+RSI = input(4, title="=> Length of RSI", minval=1, maxval = 100)
+rsiHiBnd = input(97, title="=> RSI Upper Band", minval=55, maxval = 100)
+rsiLoBnd = input(3,title="=> RSI Lower Band", minval=0, maxval = 45)
+src = input(hl2,title="=> RSI Source")
+//RSI Calculation
+ep = 2 * RSI - 1
+auc = ema( max( src - src[1], 0 ), ep )
+adc = ema( max( src[1] - src, 0 ), ep )
+x1 = (RSI - 1) * ( adc * rsiHiBnd / (100-rsiHiBnd) - auc)
+ub = iff( x1 >= 0, src + x1, src + x1 * (100-rsiHiBnd)/rsiHiBnd )
+x2 = (RSI - 1) * ( adc * rsiLoBnd / (100-rsiLoBnd) - auc)
+lb = iff( x2 >= 0, src + x2, src + x2 * (100-rsiLoBnd)/rsiLoBnd )
+z = avg(ub, lb)
+plot(show_rsi?z:na,color=silver,linewidth=1,transp=0)
+
+//###################################################||
+//   Edge-Preserving Filter Section                  ||
+//###################################################||
+show_epf = input(true,title='Display Modified RSI Line -----------------------')
+length = input(20,title="=> Length for RSI Edge-Preserving Filter")
+smooth = input(2,title="=> Smoothness of RSI Edge-Preserving Filter")
+//Edge-Preserving Filter Calculation
+os = z-sma(z,length)
+p1 = linreg(abs(os),smooth,0)
+h = p1/highest(p1,length)
+cnd = h == 1 and h[1] != 1
+sign = cnd and os < 0 ? 1 : cnd and os > 0 ? -1 : 0
+condition = sign != 0
+a1 = 0.0, b1 = 0.0
+a1 := condition ? 1 : nz(a1[1],1) + 1
+b1 := a1 == 1 ? z : nz(b1[1],z) + z
+c11 = b1/a1
+plot(show_epf?c11:na,color=#FE2E64,linewidth=2,transp=0)
+
+//###################################################||
+//   Heikin Ashi True Close                  ||
+//###################################################||
+len=input(1)
+t = tickerid(syminfo.prefix, ticker, session.regular)
+tc_po = security(t,period,close[1],false)
+tc_pos = ema(tc_po, len)
+
+EPFLong = HiLoRsk?crossunder(c11,tc_pos):open>c11 and close>c11 ?1:0
+EPFShort= HiLoRsk?crossover(c11,tc_pos):open<c11 and close<c11 ?1:0
+
+shortCon = EPFShort==1
+longCon  = EPFLong ==1
+
+/////////////// STRATEGY ///////////////
+ts = input(99999, "Trailing Stop") / 10000
+tp = input(3, "Take Profit") / 10000
+sl = input(3, "Stop Loss") / 10000
+
+pyr = input(1, "Pyramiding")
+
+short = shortCon
+long = longCon
+
+totalLongs = 0
+totalLongs := nz(totalLongs[1])
+totalShorts = 0
+totalShorts := nz(totalShorts[1])
+
+totalLongsPrice = 0
+totalLongsPrice := nz(totalLongsPrice[1])
+totalShortsPrice = 0
+totalShortsPrice := nz(totalShortsPrice[1])
+
+sectionLongs = 0
+sectionLongs := nz(sectionLongs[1])
+sectionShorts = 0
+sectionShorts := nz(sectionShorts[1])
+
+if long
+    sectionLongs := sectionLongs + 1
+    sectionShorts := 0
+
+if short
+    sectionLongs := 0
+    sectionShorts := sectionShorts + 1
+
+longCondition = long and sectionLongs <= pyr
+shortCondition = short and sectionShorts <= pyr
+
+last_long = na
+last_short = na
+last_long := longCondition ? time : nz(last_long[1])
+last_short := shortCondition ? time : nz(last_short[1])
+
+last_open_longCondition = na
+last_open_shortCondition = na
+last_open_longCondition := longCondition ? open : nz(last_open_longCondition[1])
+last_open_shortCondition := shortCondition ? open : nz(last_open_shortCondition[1])
+
+last_longCondition = na
+last_shortCondition = na
+last_longCondition := longCondition ? time : nz(last_longCondition[1])
+last_shortCondition := shortCondition ? time : nz(last_shortCondition[1])
+
+in_longCondition = last_longCondition > last_shortCondition
+in_shortCondition = last_shortCondition > last_longCondition
+
+last_high = na
+last_low = na
+last_high := not in_longCondition ? na : in_longCondition and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_shortCondition ? na : in_shortCondition and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+
+long_ts = not na(last_high) and high <= (last_high - ts) //and high >= last_open_longCondition
+short_ts = not na(last_low) and low >= (last_low + ts) //and low <= last_open_shortCondition
+
+long_tp = high >= (last_open_longCondition + tp)
+short_tp = low <= (last_open_shortCondition - tp)
+
+long_sl = low <= (last_open_longCondition - sl)
+short_sl = high >= (last_open_shortCondition + sl)
+
+leverage = input(5, "Leverage")
+long_call = last_open_longCondition - (0.8 + 0.2 * (1/leverage)) / leverage * last_open_longCondition
+short_call = last_open_shortCondition + (0.78 + 0.2 * (1/leverage)) / leverage * last_open_shortCondition
+long_call_signal = low <= long_call
+short_call_signal = high >= short_call
+
+if testPeriod()
+    strategy.entry("Long", strategy.long, when=longCondition)
+    strategy.entry("Short", strategy.short, when=shortCondition)
+    
+    strategy.close("Long", when=long_call_signal)
+    strategy.close("Short", when=short_call_signal)
+    strategy.close("Long", when=long_tp)
+    strategy.close("Short", when=short_tp)
+    strategy.close("Long", when=long_sl)
+    strategy.close("Short", when=short_sl)
+    strategy.close("Long", when=long_ts)
+    strategy.close("Short", when=short_ts)
+
+View in Pine Editor・167 lines
+Use on chart
+1
+6
+2
+3
+5 729
+Modified RSI strategy with entry and exit points.
+I have allowed for High and Low risk for anyone interested in using it (NO GUARANTEES. DO YOUR OWN RESEARCH).
+I will later consider incorporating the standard RSI for exit points. I am sure returns will increase based on current test runs :)
+Returns look good based on the strategy result.

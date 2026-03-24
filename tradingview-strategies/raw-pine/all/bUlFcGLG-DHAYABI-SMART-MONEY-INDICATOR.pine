@@ -1,0 +1,199 @@
+//@version=5
+strategy("Mentfx Style BOS - Fib & Vol Profile", overlay=true, initial_capital=10000, pyramiding=0)
+
+// --- Inputs ---
+userLength  = input.int(10, "Structure Sensitivity", tooltip="Default 10. Lower = more aggressive pivots.")
+entryMode   = input.string("Fibonacci", "Entry Trigger", options=["Fibonacci", "Volume Profile (VAL)"])
+fibLevel    = input.float(0.62, "Fib Entry Level", options=[0.382, 0.5, 0.62, 0.705, 0.786]) 
+riskPercent = input.float(2.0, "Risk % Per Trade")
+boxBars     = input.int(20, "RR Box Width")
+rrRatio     = input.float(1.0, "Reward-to-Risk Ratio", minval=0.1, step=0.1)
+expiryBars  = input.int(100, "Cancel After X Bars", minval=1)
+
+// Break Even Inputs
+useBE       = input.bool(true, "Use Break Even?", group="Break Even")
+beTrigger   = input.float(0.5, "BE Trigger (0.5 = 50% to TP)", minval=0.1, maxval=0.9, step=0.1, group="Break Even")
+
+// --- Mentfx Structure Engine ---
+var float structHigh = na
+var float structLow  = na
+
+hiH = ta.highest(high, userLength)
+loL = ta.lowest(low, userLength)
+
+if na(structHigh)
+    structHigh := hiH
+if na(structLow)
+    structLow := loL
+
+// BOS Detection (Close-Based)
+if close > structHigh
+    structLow  := loL
+    structHigh := hiH
+if close < structLow
+    structHigh := hiH
+    structLow  := loL
+
+// --- State Variables ---
+var bool  sweptTarget     = false
+var bool  pulledBack      = false
+var bool  tradeTaken      = false
+var bool  visualsDrawn    = false   // tracks if visuals drawn for current trade
+var float firstBreakLevel = na
+var float stopLossLevel   = na
+var int   signalBar       = 0
+var float entryPrice      = na
+var float stopPrice       = na
+var float takeProfit      = na
+var bool  movedBE         = false
+
+// Visual Objects
+var box   rrBoxProfit = na
+var box   rrBoxLoss   = na
+var label entryLabel  = na
+var label slLabel     = na
+var label tpLabel     = na
+
+// --- Detection Logic ---
+isLong         = true
+triggerSweep   = low < structLow
+triggerRecover = close > structLow
+
+if triggerSweep and not sweptTarget
+    sweptTarget       := true
+    pulledBack        := false
+    tradeTaken        := false
+    visualsDrawn      := false
+    firstBreakLevel   := structHigh
+    stopLossLevel     := na
+
+if sweptTarget and triggerRecover
+    pulledBack := true
+
+if sweptTarget and pulledBack
+    stopLossLevel := na(stopLossLevel) ? low : math.min(stopLossLevel, low)
+
+// --- Signal ---
+triggerBOS   = close > firstBreakLevel
+signalActive = sweptTarget and pulledBack and triggerBOS and not tradeTaken
+
+// --- Order Placement (fires ONCE on signal) ---
+if signalActive and not na(stopLossLevel)
+    tradeTaken        := true
+    visualsDrawn      := false   // visuals will wait for actual fill
+    sweptTarget       := false
+    pulledBack        := false
+    firstBreakLevel   := na
+    movedBE           := false
+    signalBar         := bar_index
+
+    mHigh     = high
+    mLow      = stopLossLevel
+    moveRange = mHigh - mLow
+
+    float calcEntry = na
+    if entryMode == "Fibonacci"
+        calcEntry := mHigh - (moveRange * fibLevel)
+    else
+        int   lookbackBars  = bar_index - ta.valuewhen(triggerSweep, bar_index, 0)
+        float totalVol      = 0.0
+        for i = 0 to math.min(lookbackBars, 500)
+            totalVol += volume[i]
+        float cumulativeVol = 0.0
+        float targetVol     = totalVol * 0.70
+        float vpPrice       = mHigh
+        for i = 0 to math.min(lookbackBars, 500)
+            cumulativeVol += volume[i]
+            if cumulativeVol >= targetVol
+                vpPrice := low[i]
+                break
+        calcEntry := vpPrice
+
+    entryPrice := calcEntry
+    stopPrice  := stopLossLevel
+    risk        = math.abs(entryPrice - stopPrice)
+
+    if risk > 0
+        accountRisk = strategy.equity * riskPercent / 100
+        qty         = accountRisk / risk
+        takeProfit := entryPrice + (risk * rrRatio)
+
+        strategy.entry("LONG", strategy.long, qty=qty, limit=entryPrice)
+        strategy.exit("TP/SL", "LONG", stop=stopPrice, limit=takeProfit)
+
+// --- Draw visuals ONLY when the limit order is actually filled ---
+posJustOpened = strategy.position_size > 0 and strategy.position_size[1] == 0
+if posJustOpened and not visualsDrawn
+    visualsDrawn := true
+
+    rrBoxProfit := box.new(bar_index, takeProfit, bar_index + boxBars, entryPrice,
+                           bgcolor=color.new(color.green, 85), border_color=color.green)
+    rrBoxLoss   := box.new(bar_index, entryPrice,  bar_index + boxBars, stopPrice,
+                           bgcolor=color.new(color.red, 85),   border_color=color.red)
+
+    label_text  = entryMode == "Fibonacci" ? "FIB " + str.tostring(fibLevel) : "VOL VAL"
+    entryLabel  := label.new(bar_index, entryPrice, "ENTRY: " + label_text,
+                             style=label.style_label_right, color=color.green, textcolor=color.white)
+    slLabel     := label.new(bar_index, stopPrice,  "SL",
+                             style=label.style_label_right, color=color.gray,  textcolor=color.white)
+    tpLabel     := label.new(bar_index, takeProfit, "TP",
+                             style=label.style_label_right, color=color.blue,  textcolor=color.white)
+
+// --- CLEANUP on expiry (limit order never filled within expiryBars) ---
+if tradeTaken and strategy.position_size == 0 and (bar_index - signalBar) >= expiryBars
+    strategy.cancel_all()
+    tradeTaken   := false
+    visualsDrawn := false
+    label.delete(entryLabel)
+    label.delete(slLabel)
+    label.delete(tpLabel)
+    box.delete(rrBoxProfit)
+    box.delete(rrBoxLoss)
+
+// --- Break Even ---
+if useBE and strategy.position_size != 0 and not movedBE
+    if high >= entryPrice + (takeProfit - entryPrice) * beTrigger
+        stopPrice := entryPrice
+        movedBE   := true
+        strategy.exit("TP/SL", "LONG", stop=stopPrice, limit=takeProfit)
+
+// --- Reset state when trade closes ---
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    tradeTaken   := false
+    visualsDrawn := false
+
+// --- Plotting Mentfx Staircase ---
+plot(structHigh, "Struct High", color.new(color.blue, 0), 2, plot.style_stepline)
+plot(structLow,  "Struct Low",  color.new(color.blue, 0), 2, plot.style_stepline)
+
+View in Pine Editor・167 lines
+Use on chart
+3
+9
+946
+Feb 10
+the best indicator using strategy that i developed through years of testing
+
+the principle is basically break of the high of structure then buy
+
+Feb 12
+Release Notes
+I HAVE BEEN TESTING MY STRATGEY FOR YEARS THIS INDICATOR IS YEARS OF STUDYING AND TESTING
+Feb 16
+Release Notes
+now the stratgey modifed to buy after fib retracement for gold usually 0.32 working better for stocks 0.5. test it before you use it
+
+
+Feb 16
+Release Notes
+now the buy signal will be when price hit Volume area low of the price after the price break high ...
+i tested it mutiple times its working better than FIB
+Feb 20
+Release Notes
+this updates fix issue with strcutre whrere was not selecting the high correctly now you will find better result
+Feb 21
+Release Notes
+canceling short mode where i found it not working properly so i will stick for longs mode only
+Mar 13
+Release Notes
+fixed some bugs with long postion tool

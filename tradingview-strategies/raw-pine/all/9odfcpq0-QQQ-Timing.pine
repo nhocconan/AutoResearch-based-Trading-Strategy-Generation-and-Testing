@@ -1,0 +1,140 @@
+//@version=5
+strategy("QQQ Timing", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value=100, currency = currency.USD, initial_capital=100000)
+
+// 💡 Note: Only intended and backtested for trading QQQ, QLD.   Long term results are worse than QLD with TQQQ as of backtesting in 2025
+// Use QQQ chart for manually drawing downtrend lines (attaching lower highs, falling tops) and greatly enhancing false buys and slightly 
+// better entries in some cases during corrections/bear markets. Don't use QLD or TQQQ for drawing downtrend lines as the daily reset distorts the trend.
+
+// --- 📊 Index Data (SPX) ---
+// Index ticker to use for signals (S&P 500).  Found better results with S&P as root
+indexTicker = "SP:SPX"
+spxClose = request.security("SPX", 'D', close)
+spxLow = request.security("SPX", 'D', low)
+
+// --- 📈 Index Moving Averages ---
+spxShortMA = ta.sma(spxClose, 7)
+spxMediumMA = ta.ema(spxClose, 14)
+spxLongMA = ta.sma(spxClose, 107)
+spx21ema = ta.ema(spxClose, 21)
+
+shortMA = ta.sma(close, 7)
+mediumMA = ta.ema(close, 14)
+longMA = ta.sma(close, 107)
+
+// --- 📉 Current Ticker Plotting MAs ---
+_14ema = ta.ema(close, 14)
+_21ema = ta.ema(close, 21)
+_50sma = ta.sma(close, 50)
+
+// --- 🛑 Stop Loss Calculation, 3.7% from initial buy point, no trail ---
+longLossPerc = input.float(title="Long Stop Loss (%)",
+     minval=0.0, step=0.1, defval=1) * 0.037
+longStopPrice = strategy.position_avg_price * (1 - longLossPerc)
+
+// --- ✅ Entry Condition ---
+// SPX Low must be above the 21 EMA for 3 consecutive days.
+spxLowAbove21ema_3days = spxLow > spx21ema and spxLow[1] > spx21ema[1] and spxLow[2] > spx21ema[2]
+longCondition = spxLowAbove21ema_3days
+
+// --- Exit Condition ---
+exitCondition = (
+   ((ta.crossunder(spxShortMA, spxLongMA) and spxClose < spxShortMA and spxClose < spxMediumMA) and (close < _14ema)) or 
+   (low < longStopPrice and low < _50sma))
+
+// --- 📅 Date Range Filter ---
+startDate = input.int(title="Start Date",
+     defval=8, minval=1, maxval=24)
+startMonth = input.int(title="Start Month",
+     defval=6, minval=1, maxval=12)
+startYear = input.int(title="Start Year",
+     defval=1970, minval=1970, maxval=2100)
+inDateRange = (time >= timestamp(syminfo.timezone, startYear, startMonth, startDate, 0, 0))
+
+// --- 🔁 Strategy Execution ---
+if longCondition and inDateRange
+    strategy.entry("Buy", strategy.long)
+
+if exitCondition and inDateRange
+    strategy.close("Buy")
+
+// --- 🎨 Plotting & Background ---
+// Get the background color's RGB values
+r = color.r(chart.bg_color)
+g = color.g(chart.bg_color)
+b = color.b(chart.bg_color)
+bool darkMode = r < 80 and g < 80 and b < 80
+color color21ema = color.green
+color colorShortMA = color.new(color.orange, 30)
+color colorMediumMA = color.new(color.purple, 0)
+color colorLongMA = color.new(color.blue, 35)
+color buyBackground = color.new(#90EE90, 50)
+
+plot(_21ema, color=color21ema, title="21 EMA")
+plot(_50sma, color=color.new(color.red, 0), title="50 EMA")
+plot(shortMA, color=colorShortMA, title="7 SMA")
+plot(mediumMA, color=colorMediumMA, title="14 EMA")
+plot(longMA, color=colorLongMA, title="107 SMA")
+
+
+mycolor = strategy.position_size > 0 ? buyBackground : na
+bgcolor(mycolor)
+
+View in Pine Editor・83 lines
+Use on chart
+7
+9
+2
+1 797
+Nov 10, 2025
+This is a trend-following position trading strategy designed for the QQQ and the leveraged ETF QLD (ProShares Ultra QQQ). The primary goal is to capture multi-month holds for maximal profit.
+
+Key Instruments & Performance
+
+The strategy performs best with QLD, which yields far superior results compared to QQQ.
+
+TQQQ (triple-leveraged) results in higher drawdowns and is not the optimal choice.
+
+Important: The system is not intended for use with other indexes, individual stocks, or investments (like crypto or gold), as performance can vary widely.
+
+Buy Signals
+
+The strategy's signals are rooted in the S&P 500 Index (SPX), as testing showed it provides more reliable triggers than using QQQ itself.
+
+Primary Buy Signal (Credit to IBD/Mike Webster): The SPX triggers a buy when its low closes above the 21-day Exponential Moving Average (EMA) for three consecutive days.
+
+Refinement with Downtrend Lines: During corrective or bear periods, results and drawdowns can be significantly improved by incorporating downtrend lines. These lines connect lower highs. The strategy waits for the price to close above a drawn downtrend line before executing a buy. This refinement can modify the primary signal, either by allowing for an earlier entry or, in some cases, completely nullifying a false signal until the trend change proves itself.
+
+Risk Management & Exit Strategy
+
+Initial Buy Risk: A 3.7% stop loss is applied immediately upon the initial entry.
+
+Initial Exit Rule: An exit is required if the QQQ's low drops below the 50-day Simple Moving Average (SMA).
+
+Note: The 3.7% stop often provides protection when the initial buy occurs below the 50-day SMA. However, if QQQ is already trading above its 50-day SMA at the time of the SPX signal (indicating relative strength), historically, it has been better to use the 50-day SMA rule to give the position more room to run.
+
+Trend Exit (Profit-Taking): To stay in a strong trend for the optimal amount of time, the long position is exited when a moving average crossover to the downside is triggered, based around the 107-day Simple Moving Average (SMA).
+Nov 10, 2025
+Release Notes
+This is a trend-following position trading strategy designed for the QQQ and the leveraged ETF QLD (ProShares Ultra QQQ). The primary goal is to capture multi-month holds for maximal profit.
+
+Key Instruments & Performance
+
+The strategy performs best with QLD, which yields far superior results compared to QQQ.
+
+TQQQ (triple-leveraged) results in higher drawdowns and is not the optimal choice.
+
+Important: The system is not intended for use with other indexes, individual stocks, or investments (like crypto or gold), as performance can vary widely.
+
+Buy Signals
+
+The strategy's signals are rooted in the S&P 500 Index (SPX), as testing showed it provides more reliable triggers than using QQQ itself.
+
+Primary Buy Signal (Credit to IBD/Mike Webster): The SPX triggers a buy when its low closes above the 21-day Exponential Moving Average (EMA) for three consecutive days.
+
+Refinement with Downtrend Lines: During corrective or bear periods, results and drawdowns can be significantly improved by incorporating downtrend lines. These lines connect lower highs. The strategy waits for the price to close above a drawn downtrend line before executing a buy. This refinement can modify the primary signal, either by allowing for an earlier entry or, in some cases, completely nullifying a false signal until the trend change proves itself.
+
+Risk Management & Exit Strategy
+
+A 3.7% stop loss is applied immediately upon the initial entry and provides protection when the initial buy occurs below the 50-day SMA. However, if QQQ is already trading above its 50-day SMA at the time of the SPX signal (indicating relative strength), historically, it has been better to give the position more room to run.
+
+Trend Exit (Profit-Taking): To stay in a strong trend for the optimal amount of time, the long position is exited when a moving average crossover to the downside is triggered, based around the 107-day Simple Moving Average (SMA).

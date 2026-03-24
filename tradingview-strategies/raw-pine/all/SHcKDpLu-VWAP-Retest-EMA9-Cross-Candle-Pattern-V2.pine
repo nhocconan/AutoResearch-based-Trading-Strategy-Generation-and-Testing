@@ -1,0 +1,154 @@
+//@version=6
+strategy('VWAP Retest + EMA9 Cross + Candle Pattern [3% TP, -0.5% VWAP SL, Above YH, Slippage Simulated]', overlay = true, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, commission_type = strategy.commission.percent, commission_value = 0.03, slippage = 1)
+// — Inputs
+emaLength = input.int(9, title = 'EMA Length')
+tpPct = input.float(3, title = 'Take Profit %', step = 0.1)
+retestBuffer = input.float(0.2, title = 'VWAP Retest Buffer ($)', step = 0.01)
+
+// — Time Filter (US session 9:30–12:30 EST)
+inSession = hour >= 9 and hour < 12 or hour == 12 and minute <= 30
+
+// — Indicators
+vwap = ta.vwap
+ema9 = ta.ema(close, emaLength)
+
+
+// — Yesterday's High
+prevHigh = request.security(syminfo.tickerid, 'D', high[1], lookahead = barmerge.lookahead_on)
+
+// — Candle Patterns
+isBullishHammer = close > open and open - low > 2 * math.abs(close - open) and high - close < 2 * math.abs(close - open)
+isBullishEngulfing = close > open and close > close[1] and open < open[1] and close > open[1]
+bodySize = math.abs(close - open)
+avgBodySize = ta.sma(bodySize, 5)
+isMomentumCandle = close > open and bodySize > avgBodySize and close > high - (high - low) * 0.2
+hasCandlePattern = isBullishHammer or isBullishEngulfing or isMomentumCandle
+
+// — Entry Conditions
+emaCrossUp = ta.crossover(ema9, vwap)
+recentCross = emaCrossUp or emaCrossUp[1] or emaCrossUp[2] // New: Check if crossover occurred within last 2 bars
+retestVWAP = low <= vwap + retestBuffer and low >= vwap - retestBuffer
+priceAboveVWAP = close > vwap
+closeAboveYHigh = close > prevHigh // replaced high > prevHigh
+rawBuySignal = recentCross and retestVWAP and priceAboveVWAP and closeAboveYHigh and hasCandlePattern and inSession
+
+
+
+// — Simulate Slippage or Entry Delay by shifting signal forward
+buySignal = rawBuySignal
+
+
+// — Persistent VWAP at entry
+var float vwapAtEntry = na
+
+if buySignal
+    vwapAtEntry := vwap
+    
+if strategy.position_size == 0
+    vwapAtEntry := na
+
+
+// — Entry & Exit Logic
+entryPrice = close
+takeProfitPrice = entryPrice * (1 + tpPct / 100)
+stopLossPrice = vwapAtEntry * 0.995
+
+if buySignal
+    strategy.entry('BUY', strategy.long)
+    strategy.exit('TP/SL', from_entry = 'BUY', limit = takeProfitPrice, stop = stopLossPrice)
+
+// — Force Close at 1:00 PM EST
+forceCloseTime = hour == 13 and minute == 0
+if forceCloseTime and strategy.position_size > 0
+    strategy.close('BUY', comment = 'Force Close 1PM')
+
+// — Visual Markers
+plotshape(buySignal, title = 'Buy Signal', location = location.belowbar, color = color.fuchsia, style = shape.labelup, text = 'SETUP')
+plotshape(isBullishHammer, title = 'Hammer', location = location.abovebar, color = color.green, style = shape.triangleup, text = 'H')
+plotshape(isBullishEngulfing, title = 'Engulfing', location = location.abovebar, color = color.green, style = shape.triangleup, text = 'BE')
+plotshape(isMomentumCandle, title = 'Momentum', location = location.abovebar, color = color.green, style = shape.triangleup, text = 'M')
+
+
+// — Visual Help
+plot(vwap, title = 'VWAP', color = color.white, linewidth = 2)
+plot(ema9, title = 'EMA 9', color = color.orange)
+
+
+// — Get yesterday's high/low from daily timeframe
+// prevHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+prevLow = request.security(syminfo.tickerid, 'D', low[1], lookahead = barmerge.lookahead_on)
+// — Get today's date
+todayDay = dayofmonth(time)
+todayMonth = month(time)
+todayYear = year(time)
+// — Get current candle's date from intraday timeframe
+barDay = dayofmonth(time)
+barMonth = month(time)
+barYear = year(time)
+// — Only show labels for today’s intraday bars
+isToday = barDay == todayDay and barMonth == todayMonth and barYear == todayYear
+// — Plot labels only once per day (to avoid clutter)
+plotLabelHigh = isToday and bar_index == ta.highest(bar_index, 1)
+plotLabelLow = isToday and bar_index == ta.highest(bar_index, 1)
+// — Show label at previous high and low
+if plotLabelHigh
+    label.new(x = bar_index, y = prevHigh, text = 'YH', style = label.style_label_down, color = color.green, textcolor = color.white, size = size.tiny)
+if plotLabelLow
+    label.new(x = bar_index, y = prevLow, text = 'YL', style = label.style_label_up, color = color.red, textcolor = color.white, size = size.tiny)
+
+View in Pine Editor・97 lines
+Use on chart
+2
+1
+4
+5 809
+📈 VWAP Retest + EMA9 Cross + Candle Pattern Strategy_V2
+Setup: This intraday momentum strategy combines 3 core elements:
+• VWAP Retest: Price retests VWAP within a small buffer zone
+• EMA9 Crossover: EMA9 crosses above VWAP within the last 3 bars
+• Bullish Candle Pattern: At least one bullish signal — Hammer, Engulfing, or Momentum candle
+A trade is triggered only during the US morning session (9:30–12:30 EST) and only if price is above yesterday’s high, suggesting strong momentum.
+
+⚙️ Strategy Settings
+• Initial Capital: $100,000
+• Position Sizing: 10% of equity per trade
+• Commission: 0.03% per trade
+• Slippage: 1 tick
+• Take Profit: +3% from entry
+• Stop Loss: 0.5% below VWAP at entry
+• Forced Exit: 1:00 PM EST
+
+📊 Strategy Logic
+• VWAP Retest Filter ensures entry is near a value zone.
+• EMA9 Cross Confirmation aligns short-term momentum with volume-weighted price.
+• Bullish Candle Patterns provide price action confirmation:
+○ ✅ Hammer
+○ ✅ Bullish Engulfing
+○ ✅ Large momentum body
+• Above Yesterday’s High (YH) acts as a bullish bias filter.
+
+🧪 Backtest Results (Jan 2023 – Oct 2025)
+• Total Trades: 120
+• Win Rate: 52.5%
+• Profit Factor: 1.18
+• Max Drawdown: 1.22%
+• Net P&L: +$1,064 (+1.06%)
+Due to chart data limits, only part of the period may be visible on publication charts.
+
+🔍 Chart Visuals
+This strategy plots:
+• VWAP (white) and EMA9 (orange)
+• Candle pattern markers:
+○ “H” = Hammer
+○ “BE” = Bullish Engulfing
+○ “M” = Momentum Candle
+• “SETUP” label when all conditions are met
+• YH/YL labels for context — previous day’s high/low
+
+💡 Use Case
+This setup is designed for intraday momentum scalping, ideal for traders who:
+• Trade morning breakouts
+• Use VWAP as a dynamic support/resistance
+• Want clear, rule-based entries based on both trend and price action
+
+Educational and research use - not financial advice.

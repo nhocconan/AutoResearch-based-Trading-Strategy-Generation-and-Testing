@@ -1,0 +1,43 @@
+//@version=5
+strategy(
+     title                   = "TEST - Verificacion Ordenes",
+     shorttitle              = "TEST_ORD",
+     overlay                 = true,
+     initial_capital         = 1000000,
+     default_qty_type        = strategy.percent_of_equity,
+     default_qty_value       = 10000,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.01,
+     process_orders_on_close = true
+     )
+
+// EMA simple para dirección
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+
+plot(ema20, color=color.yellow, linewidth=2)
+plot(ema50, color=color.blue,   linewidth=2)
+
+// Señal Long: EMA20 cruza arriba EMA50
+signal_long  = ta.crossover(ema20, ema50)
+// Señal Short: EMA20 cruza abajo EMA50
+signal_short = ta.crossunder(ema20, ema50)
+
+// Entradas a mercado (no límite) para confirmar que ejecuta
+if signal_long
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+
+if signal_short
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+
+// Señales visuales
+plotshape(signal_long,  style=shape.triangleup,   location=location.belowbar, color=color.lime,  size=size.large)
+plotshape(signal_short, style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.large)
+
+View in Pine Editor・37 lines
+Use on chart
+3
+250
+prueba de estrategia estoy aprendiendo, que ms quieres que te diga

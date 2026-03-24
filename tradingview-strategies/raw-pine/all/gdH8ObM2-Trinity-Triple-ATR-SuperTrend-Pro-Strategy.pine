@@ -1,0 +1,173 @@
+//@version=5
+strategy("Trinity Triple ATR SuperTrend Pro Strategy", shorttitle="Trinity ATR ST Pro Strat", overlay=true, max_labels_count=500)
+
+// ───── GROUP 1: SuperTrend 1 (e.g. Current / Fast) ─────
+group1 = "SuperTrend 1 (Fast / Current TF)"
+enableST1 = input.bool(true, "Enable SuperTrend 1", group=group1)
+useTF1 = input.bool(false, "Use Custom Timeframe for ST1?", group=group1)
+tf1 = input.timeframe("", "ST1 Timeframe (blank = chart TF)", group=group1)
+atrLen1 = input.int(10, "ST1 ATR Length", minval=1, group=group1)
+mult1 = input.float(1, "ST1 Multiplier", step=0.1, minval=0.1, group=group1)
+showLine1 = input.bool(true, "Show ST1 Line", group=group1)
+colorBull1 = input.color(color.new(#00ffea, 0), "ST1 Bullish Color", group=group1)
+colorBear1 = input.color(color.new(#ff006e, 0), "ST1 Bearish Color", group=group1)
+linewidth1 = input.int(1, "ST1 Line Width", minval=1, maxval=5, group=group1)
+// ST1 Fill Settings
+showFill1 = input.bool(true, "Show Fill Area for ST1", group=group1)
+fillTransp1 = input.int(85, "ST1 Fill Transparency", minval=0, maxval=100, group=group1)
+bgTransp1 = input.int(96, "ST1 Background Tint Transparency", minval=0, maxval=100, group=group1)
+// ───── GROUP 2: SuperTrend 2 (e.g. Higher / Confirmation) ─────
+group2 = "SuperTrend 2 (Higher / Confirmation TF)"
+enableST2 = input.bool(true, "Enable SuperTrend 2", group=group2)
+useTF2 = input.bool(true, "Use Custom Timeframe for ST2?", group=group2)
+tf2 = input.timeframe("60", "ST2 Timeframe (blank = chart TF)", group=group2)
+atrLen2 = input.int(10, "ST2 ATR Length", minval=1, group=group2)
+mult2 = input.float(1, "ST2 Multiplier", step=0.1, minval=0.1, group=group2)
+showLine2 = input.bool(true, "Show ST2 Line", group=group2)
+colorBull2 = input.color(color.new(#00d4ff, 0), "ST2 Bullish Color", group=group2)
+colorBear2 = input.color(color.new(#d600ff, 0), "ST2 Bearish Color", group=group2)
+linewidth2 = input.int(3, "ST2 Line Width", minval=1, maxval=5, group=group2)
+// ST2 Fill Settings
+showFill2 = input.bool(true, "Show Fill Area for ST2", group=group2)
+fillTransp2 = input.int(85, "ST2 Fill Transparency", minval=0, maxval=100, group=group2)
+bgTransp2 = input.int(96, "ST2 Background Tint Transparency", minval=0, maxval=100, group=group2)
+// ───── GROUP 3: SuperTrend 3 (e.g. Highest / Bias TF) ─────
+group3 = "SuperTrend 3 (Highest / Bias TF)"
+enableST3 = input.bool(true, "Enable SuperTrend 3", group=group3)
+useTF3 = input.bool(true, "Use Custom Timeframe for ST3?", group=group3)
+tf3 = input.timeframe("240", "ST3 Timeframe (blank = chart TF)", group=group3)
+atrLen3 = input.int(10, "ST3 ATR Length", minval=1, group=group3)
+mult3 = input.float(1, "ST3 Multiplier", step=0.1, minval=0.1, group=group3)
+showLine3 = input.bool(true, "Show ST3 Line", group=group3)
+colorBull3 = input.color(color.new(#00ff00, 0), "ST3 Bullish Color", group=group3)
+colorBear3 = input.color(color.new(#ff0000, 0), "ST3 Bearish Color", group=group3)
+linewidth3 = input.int(5, "ST3 Line Width", minval=1, maxval=5, group=group3)
+// ST3 Fill Settings
+showFill3 = input.bool(true, "Show Fill Area for ST3", group=group3)
+fillTransp3 = input.int(85, "ST3 Fill Transparency", minval=0, maxval=100, group=group3)
+bgTransp3 = input.int(96, "ST3 Background Tint Transparency", minval=0, maxval=100, group=group3)
+// ───── VISUALS & SIGNALS ─────
+visGroup = "Visuals & Signals"
+showLabels = input.bool(true, "Show BUY/SELL Labels (HTF flips)", group=visGroup)
+showArrows = input.bool(false, "Show Arrows Instead of Labels", group=visGroup)
+showAligned = input.bool(true, "Show Aligned Signals (LTF flip + HTF alignment)", group=visGroup)
+// ───── STRATEGY SETTINGS ─────
+stratGroup = "Strategy Settings"
+slMult = input.float(1.0, "Stop Loss Multiplier (x HTF ATR)", minval=0.1, step=0.1, group=stratGroup)
+tpMult = input.float(1.0, "Take Profit Multiplier (x HTF ATR)", minval=0.1, step=0.1, group=stratGroup)
+useHTFATR = input.bool(true, "Use HTF ATR for SL/TP", group=stratGroup)
+
+// ───── SuperTrend Calculation Function ─────
+f_supertrend(_high, _low, _close, _len, _mult) =>
+    atr = ta.atr(_len)
+    hl2 = (_high + _low) / 2
+    up = hl2 - _mult * atr
+    dn = hl2 + _mult * atr
+    up := _close[1] > up[1] ? math.max(up, up[1]) : up
+    dn := _close[1] < dn[1] ? math.min(dn, dn[1]) : dn
+    var int dir = 1
+    dir := _close > dn[1] ? -1 : _close < up[1] ? 1 : nz(dir[1], 1)
+    st = dir == -1 ? up : dn
+    [st, dir]
+
+// ───── Calculate ST1 ─────
+res1 = useTF1 ? tf1 : timeframe.period
+[st1, dir1] = request.security(syminfo.tickerid, res1, f_supertrend(high, low, close, atrLen1, mult1), lookahead=barmerge.lookahead_on)
+
+// ───── Calculate ST2 ─────
+res2 = useTF2 ? tf2 : timeframe.period
+[st2, dir2] = request.security(syminfo.tickerid, res2, f_supertrend(high, low, close, atrLen2, mult2), lookahead=barmerge.lookahead_on)
+
+// ───── Calculate ST3 ─────
+res3 = useTF3 ? tf3 : timeframe.period
+[st3, dir3] = request.security(syminfo.tickerid, res3, f_supertrend(high, low, close, atrLen3, mult3), lookahead=barmerge.lookahead_on)
+
+// ───── Fetch HTF ATR ─────
+atrHTF = request.security(syminfo.tickerid, res2, ta.atr(atrLen2), lookahead=barmerge.lookahead_on)
+
+// ───── Plotting Lines ─────
+plot(enableST1 and showLine1 ? st1 : na, "ST1 Line", color = dir1 == -1 ? colorBull1 : colorBear1, linewidth = linewidth1)
+plot(enableST2 and showLine2 ? st2 : na, "ST2 Line", color = dir2 == -1 ? colorBull2 : colorBear2, linewidth = linewidth2)
+plot(enableST3 and showLine3 ? st3 : na, "ST3 Line", color = dir3 == -1 ? colorBull3 : colorBear3, linewidth = linewidth3)
+
+// ───── Fill Areas ─────
+fill1_color = dir1 == -1 ? color.new(colorBull1, fillTransp1) : color.new(colorBear1, fillTransp1)
+fill2_color = dir2 == -1 ? color.new(colorBull2, fillTransp2) : color.new(colorBear2, fillTransp2)
+fill3_color = dir3 == -1 ? color.new(colorBull3, fillTransp3) : color.new(colorBear3, fillTransp3)
+p1 = plot(enableST1 and showFill1 ? st1 : na, display = display.none)
+fill(p1, plot(close, display=display.none), color = enableST1 and showFill1 ? fill1_color : na, title="ST1 Fill")
+p2 = plot(enableST2 and showFill2 ? st2 : na, display = display.none)
+fill(p2, plot(close, display=display.none), color = enableST2 and showFill2 ? fill2_color : na, title="ST2 Fill")
+p3 = plot(enableST3 and showFill3 ? st3 : na, display = display.none)
+fill(p3, plot(close, display=display.none), color = enableST3 and showFill3 ? fill3_color : na, title="ST3 Fill")
+
+// ───── Background Tints (optional per ST) ─────
+bgcolor(enableST1 ? color.new(dir1 == -1 ? colorBull1 : colorBear1, bgTransp1) : na, title="ST1 BG Tint")
+bgcolor(enableST2 ? color.new(dir2 == -1 ? colorBull2 : colorBear2, bgTransp2) : na, title="ST2 BG Tint")
+bgcolor(enableST3 ? color.new(dir3 == -1 ? colorBull3 : colorBear3, bgTransp3) : na, title="ST3 BG Tint")
+
+// ───── Signals ─────
+// HTF (ST2) flips
+bullFlipHTF = enableST2 and (dir2 == -1 and dir2[1] == 1)
+bearFlipHTF = enableST2 and (dir2 == 1 and dir2[1] == -1)
+// Highest TF (ST3) flips
+bullFlipHighest = enableST3 and (dir3 == -1 and dir3[1] == 1)
+bearFlipHighest = enableST3 and (dir3 == 1 and dir3[1] == -1)
+// LTF (ST1) triple aligned flips
+bullFlipAligned = enableST1 and enableST2 and enableST3 and (dir1 == -1 and dir1[1] == 1) and (dir2 == -1) and (dir3 == -1)
+bearFlipAligned = enableST1 and enableST2 and enableST3 and (dir1 == 1 and dir1[1] == -1) and (dir2 == 1) and (dir3 == 1)
+
+// ───── Plot HTF signals ─────
+plotshape(showLabels and bullFlipHTF, "BUY HTF", shape.labelup, location.belowbar, colorBull2, text="BUY HTF", textcolor=color.black, size=size.normal)
+plotshape(showLabels and bearFlipHTF, "SELL HTF", shape.labeldown, location.abovebar, colorBear2, text="SELL HTF", textcolor=color.white, size=size.normal)
+plotshape(showArrows and bullFlipHTF, "", shape.triangleup, location.belowbar, colorBull2, size=size.small)
+plotshape(showArrows and bearFlipHTF, "", shape.triangledown, location.abovebar, colorBear2, size=size.small)
+
+// ───── Plot Highest TF signals ─────
+plotshape(showLabels and bullFlipHighest, "BUY Highest", shape.labelup, location.belowbar, colorBull3, text="BUY Highest", textcolor=color.black, size=size.normal)
+plotshape(showLabels and bearFlipHighest, "SELL Highest", shape.labeldown, location.abovebar, colorBear3, text="SELL Highest", textcolor=color.white, size=size.normal)
+plotshape(showArrows and bullFlipHighest, "", shape.triangleup, location.belowbar, colorBull3, size=size.small)
+plotshape(showArrows and bearFlipHighest, "", shape.triangledown, location.abovebar, colorBear3, size=size.small)
+
+// ───── Plot Aligned signals ─────
+plotshape(showAligned and showLabels and bullFlipAligned, "Small Buy", shape.labelup, location.belowbar, colorBull1, text="Small Buy", textcolor=color.black, size=size.small)
+plotshape(showAligned and showLabels and bearFlipAligned, "Small Sell", shape.labeldown, location.abovebar, colorBear1, text="Small Sell", textcolor=color.white, size=size.small)
+plotshape(showAligned and showArrows and bullFlipAligned, "", shape.triangleup, location.belowbar, colorBull1, size=size.tiny)
+plotshape(showAligned and showArrows and bearFlipAligned, "", shape.triangledown, location.abovebar, colorBear1, size=size.tiny)
+
+// ───── Strategy Logic ─────
+atrForRisk = useHTFATR ? atrHTF : ta.atr(atrLen1)  // Use HTF ATR by default, or LTF if disabled
+
+if bullFlipAligned
+    strategy.entry("Long", strategy.long)
+    sl = close - atrForRisk * slMult
+    tp = close + atrForRisk * tpMult
+    strategy.exit("Exit Long", "Long", stop=sl, limit=tp)
+
+if bearFlipAligned
+    strategy.entry("Short", strategy.short)
+    sl = close + atrForRisk * slMult
+    tp = close - atrForRisk * tpMult
+    strategy.exit("Exit Short", "Short", stop=sl, limit=tp)
+
+// ───── Alerts ─────
+if bullFlipHTF
+    alert("HTF SuperTrend → BULLISH (BUY signal)", alert.freq_once_per_bar_close)
+if bearFlipHTF
+    alert("HTF SuperTrend → BEARISH (SELL signal)", alert.freq_once_per_bar_close)
+if bullFlipHighest
+    alert("Highest TF SuperTrend → BULLISH (BUY signal)", alert.freq_once_per_bar_close)
+if bearFlipHighest
+    alert("Highest TF SuperTrend → BEARISH (SELL signal)", alert.freq_once_per_bar_close)
+if bullFlipAligned
+    alert("Triple Aligned Signal: LTF flipped BULLISH while HTF and Highest are BULLISH", alert.freq_once_per_bar_close)
+if bearFlipAligned
+    alert("Triple Aligned Signal: LTF flipped BEARISH while HTF and Highest are BEARISH", alert.freq_once_per_bar_close)
+
+View in Pine Editor・167 lines
+Use on chart
+1
+1
+3
+1 631
+ATR Strategy tester to allow up to 3 ATR's and then backtesting to refine the settings and win rate for based on the commodity and timeframe you want to evaluate include the take profits and stop loss levels

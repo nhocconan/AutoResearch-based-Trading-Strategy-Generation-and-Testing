@@ -1,0 +1,640 @@
+//@version=6
+strategy("ILM v6 + BOS/CHOCH + HTF + Sweeps + IFVG + Partials + FontSize + PD Filter",
+     overlay = true,
+     fill_orders_on_standard_ohlc = true)
+
+//────────────────────────────────────────────────────────────
+// INPUTS
+//────────────────────────────────────────────────────────────
+pivotLen          = input.int(2, "Swing length (SSL/BSL)", minval = 1)
+htfOn             = input.bool(true, "Use HTF Liquidity?")
+htfTF             = input.timeframe("15", "HTF Timeframe (Liquidity & Filter)")
+barsAfterSweepMax = input.int(40, "Max bars after sweep", minval = 5)
+
+useSessionFilter  = input.bool(false, "Use session filter?")
+sessionTimes      = input.session("0700-1700", "Session (exchange time)")
+
+useRangeFilter    = input.bool(true, "Use ATR filter?")
+atrLen            = input.int(14, "ATR Length", minval = 1)
+minAtrPerc        = input.float(0.1, "Min ATR% of price (0 = off)", minval = 0.0, step = 0.1)
+
+// LTF structure filter & labels
+useStructureFilter   = input.bool(true, "Use LTF BOS/CHOCH structure filter?")
+showStructureLabels  = input.bool(true, "Show LTF BOS/CHOCH labels?")
+
+// HTF expansion / structure filter
+useHtfExpansionFilter  = input.bool(true, "Use HTF expansion (structure) filter?")
+showHtfStructureLabels = input.bool(false, "Show HTF BOS/CHOCH labels?")
+
+// Sweep lines
+showSweepLines = input.bool(true, "Show sweep lines?")
+sweepLineWidth = input.int(2, "Sweep line width", minval = 1, maxval = 5)
+
+// Improved FVG / IFVG detection
+useBodyGapFVG      = input.bool(true, "FVG uses body gaps (vs wicks)?")
+useDisplacementFVG = input.bool(true, "Require displacement candle for FVG?")
+dispAtrMult        = input.float(1.0, "Min displacement (ATR multiples)", minval = 0.0, step = 0.1)
+
+// Partial targets / runner
+usePartialTargets  = input.bool(true, "Use partial targets / runner?")
+tp1QtyPercent      = input.float(50.0, "TP1 quantity %", minval = 1.0, maxval = 99.0)
+tp1FractionOfPath  = input.float(0.5, "TP1 fraction between entry & final target", minval = 0.1, maxval = 0.9, step = 0.05)
+
+// Label font size
+labelFontSizeInput = input.string("small", "Label Font Size",
+     options = ["tiny", "small", "normal", "large", "huge"])
+
+labelFontSize =
+     labelFontSizeInput == "tiny"  ? size.tiny  :
+     labelFontSizeInput == "small" ? size.small :
+     labelFontSizeInput == "normal" ? size.normal :
+     labelFontSizeInput == "large" ? size.large :
+     size.huge
+
+// NEW: Premium/Discount filter (17:00 CST session midline)
+usePremiumDiscountFilter = input.bool(true, "Use premium/discount filter?")
+pdSession                = input.session("1700-1659", "Premium/Discount session (exchange time)")
+showPdMidLine            = input.bool(true, "Show premium/discount 50% line?")
+
+showIFVG    = input.bool(true, "Show IFVG boxes?")
+showEntries = input.bool(true, "Show entries?")
+showTargets = input.bool(true, "Show targets?")
+
+//────────────────────────────────────────────────────────────
+// SESSION & RANGE FILTERS
+//────────────────────────────────────────────────────────────
+inSession = useSessionFilter ? not na(time(timeframe.period, sessionTimes)) : true
+
+atrValue = ta.atr(atrLen)
+atrPerc  = atrValue / close * 100.0
+rangeOk  = not useRangeFilter or (minAtrPerc <= 0.0 or atrPerc >= minAtrPerc)
+
+//────────────────────────────────────────────────────────────
+// PREMIUM / DISCOUNT MIDLINE (17:00 CST STYLE SESSION)
+//────────────────────────────────────────────────────────────
+pdSessTime = time(timeframe.period, pdSession)
+// New PD session when time() for that session changes from 0→non-zero
+newPdSession = ta.change(pdSessTime) > 0
+
+var float pdHigh = na
+var float pdLow  = na
+
+if newPdSession or na(pdHigh) or na(pdLow)
+    // First bar of the PD session: reset range
+    pdHigh := high
+    pdLow  := low
+else if pdSessTime != 0
+    // Inside PD session: extend range
+    pdHigh := math.max(pdHigh, high)
+    pdLow  := math.min(pdLow, low)
+
+// Midline
+pdMid = (pdHigh + pdLow) / 2.0
+
+// Plot PD midline
+plot(showPdMidLine and not na(pdMid) ? pdMid : na,
+     title = "Premium/Discount Mid (17:00 session)",
+     style = plot.style_linebr,
+     color = color.new(color.yellow, 0),
+     linewidth = 2)
+
+// PD filters for entries
+pdOkLong  = not usePremiumDiscountFilter or (not na(pdMid) and close < pdMid)  // discount
+pdOkShort = not usePremiumDiscountFilter or (not na(pdMid) and close > pdMid)  // premium
+
+//────────────────────────────────────────────────────────────
+// LIQUIDITY LEVELS (SSL / BSL)
+//────────────────────────────────────────────────────────────
+pivHigh = ta.pivothigh(high, pivotLen, pivotLen)
+pivLow  = ta.pivotlow(low, pivotLen, pivotLen)
+
+htfHigh = htfOn ? request.security(syminfo.tickerid, htfTF, ta.pivothigh(high, pivotLen, pivotLen)) : na
+htfLow  = htfOn ? request.security(syminfo.tickerid, htfTF, ta.pivotlow(low, pivotLen, pivotLen))  : na
+
+var float ssl = na
+var float bsl = na
+
+if htfOn
+    if not na(htfLow)
+        ssl := htfLow
+    if not na(htfHigh)
+        bsl := htfHigh
+else
+    if not na(pivLow)
+        ssl := pivLow
+    if not na(pivHigh)
+        bsl := pivHigh
+
+//────────────────────────────────────────────────────────────
+// LTF BOS / CHOCH STRUCTURE DETECTION
+//────────────────────────────────────────────────────────────
+var float structHigh   = na
+var float structLow    = na
+var int   structTrend  = 0   // 1 = uptrend, -1 = downtrend, 0 = unknown
+
+var bool bosUp     = false
+var bool bosDown   = false
+var bool chochUp   = false
+var bool chochDown = false
+
+if not na(pivHigh)
+    structHigh := pivHigh
+if not na(pivLow)
+    structLow := pivLow
+
+bosUp     := false
+bosDown   := false
+chochUp   := false
+chochDown := false
+
+if not na(structHigh) and close > structHigh
+    if structTrend == -1
+        chochUp := true
+    else
+        bosUp := true
+    structTrend := 1
+    structHigh := close
+
+if not na(structLow) and close < structLow
+    if structTrend == 1
+        chochDown := true
+    else
+        bosDown := true
+    structTrend := -1
+    structLow := close
+
+if showStructureLabels and bosUp
+    label.new(bar_index, high, "BOS↑",
+        style = label.style_label_down,
+        color = color.new(color.green, 0),
+        textcolor = color.white,
+        size = labelFontSize)
+
+if showStructureLabels and bosDown
+    label.new(bar_index, low, "BOS↓",
+        style = label.style_label_up,
+        color = color.new(color.red, 0),
+        textcolor = color.white,
+        size = labelFontSize)
+
+if showStructureLabels and chochUp
+    label.new(bar_index, high, "CHOCH↑",
+        style = label.style_label_down,
+        color = color.new(color.teal, 0),
+        textcolor = color.white,
+        size = labelFontSize)
+
+if showStructureLabels and chochDown
+    label.new(bar_index, low, "CHOCH↓",
+        style = label.style_label_up,
+        color = color.new(color.orange, 0),
+        textcolor = color.white,
+        size = labelFontSize)
+
+structureOkLong  = not useStructureFilter or structTrend == 1
+structureOkShort = not useStructureFilter or structTrend == -1
+
+//────────────────────────────────────────────────────────────
+// HTF BOS / CHOCH STRUCTURE (EXPANSION FILTER)
+//────────────────────────────────────────────────────────────
+htfClose   = request.security(syminfo.tickerid, htfTF, close)
+htfPivHigh = request.security(syminfo.tickerid, htfTF, ta.pivothigh(high, pivotLen, pivotLen))
+htfPivLow  = request.security(syminfo.tickerid, htfTF, ta.pivotlow(low, pivotLen, pivotLen))
+
+var float htfStructHigh  = na
+var float htfStructLow   = na
+var int   htfStructTrend = 0   // 1 = up, -1 = down, 0 = unknown
+
+var bool htfBosUp     = false
+var bool htfBosDown   = false
+var bool htfChochUp   = false
+var bool htfChochDown = false
+
+if not na(htfPivHigh)
+    htfStructHigh := htfPivHigh
+if not na(htfPivLow)
+    htfStructLow := htfPivLow
+
+htfBosUp     := false
+htfBosDown   := false
+htfChochUp   := false
+htfChochDown := false
+
+if not na(htfStructHigh) and htfClose > htfStructHigh
+    if htfStructTrend == -1
+        htfChochUp := true
+    else
+        htfBosUp := true
+    htfStructTrend := 1
+    htfStructHigh := htfClose
+
+if not na(htfStructLow) and htfClose < htfStructLow
+    if htfStructTrend == 1
+        htfChochDown := true
+    else
+        htfBosDown := true
+    htfStructTrend := -1
+    htfStructLow := htfClose
+
+if showHtfStructureLabels and htfBosUp
+    label.new(bar_index, high, "HTF BOS↑",
+        style = label.style_label_down,
+        color = color.new(color.green, 60),
+        textcolor = color.white,
+        size = labelFontSize)
+
+if showHtfStructureLabels and htfBosDown
+    label.new(bar_index, low, "HTF BOS↓",
+        style = label.style_label_up,
+        color = color.new(color.red, 60),
+        textcolor = color.white,
+        size = labelFontSize)
+
+if showHtfStructureLabels and htfChochUp
+    label.new(bar_index, high, "HTF CHOCH↑",
+        style = label.style_label_down,
+        color = color.new(color.teal, 60),
+        textcolor = color.white,
+        size = labelFontSize)
+
+if showHtfStructureLabels and htfChochDown
+    label.new(bar_index, low, "HTF CHOCH↓",
+        style = label.style_label_up,
+        color = color.new(color.orange, 60),
+        textcolor = color.white,
+        size = labelFontSize)
+
+htfOkLong  = not useHtfExpansionFilter or htfStructTrend == 1
+htfOkShort = not useHtfExpansionFilter or htfStructTrend == -1
+
+//────────────────────────────────────────────────────────────
+// IMPROVED FVG -> IFVG DETECTION
+//────────────────────────────────────────────────────────────
+midRange = high[1] - low[1]
+dispOk   = not useDisplacementFVG or midRange >= ta.atr(atrLen) * dispAtrMult
+
+bullFVG_raw = low[1] > high[2]
+bearFVG_raw = high[1] < low[2]
+
+bullFVG_body = math.min(open[1], close[1]) > high[2]
+bearFVG_body = math.max(open[1], close[1]) < low[2]
+
+bullFVG = (useBodyGapFVG ? bullFVG_body : bullFVG_raw) and dispOk
+bearFVG = (useBodyGapFVG ? bearFVG_body : bearFVG_raw) and dispOk
+
+var float bfTop = na
+var float bfBot = na
+var float sfTop = na
+var float sfBot = na
+
+if bullFVG
+    bfTop := low[1]
+    bfBot := high[2]
+
+if bearFVG
+    sfTop := high[1]
+    sfBot := low[2]
+
+var bool  ifvgLong  = false
+var float ifvgLT    = na
+var float ifvgLB    = na
+
+var bool  ifvgShort = false
+var float ifvgST    = na
+var float ifvgSB    = na
+
+if not na(sfTop) and close > sfTop
+    ifvgLong := true
+    ifvgLT   := sfTop
+    ifvgLB   := sfBot
+
+if not na(bfBot) and close < bfBot
+    ifvgShort := true
+    ifvgST    := bfTop
+    ifvgSB    := bfBot
+
+//────────────────────────────────────────────────────────────
+// DRAW IFVG BOXES
+//────────────────────────────────────────────────────────────
+var box longBox  = na
+var box shortBox = na
+
+if showIFVG and ifvgLong and not na(ifvgLT) and not na(ifvgLB)
+    if na(longBox)
+        longBox := box.new(
+            left   = bar_index - 1,
+            top    = ifvgLT,
+            right  = bar_index,
+            bottom = ifvgLB,
+            xloc   = xloc.bar_index,
+            bgcolor      = color.new(color.lime, 80),
+            border_color = color.new(color.lime, 0))
+    else
+        box.set_left(longBox, bar_index - 1)
+        box.set_right(longBox, bar_index)
+        box.set_top(longBox, ifvgLT)
+        box.set_bottom(longBox, ifvgLB)
+else
+    if not na(longBox)
+        box.delete(longBox)
+        longBox := na
+
+if showIFVG and ifvgShort and not na(ifvgST) and not na(ifvgSB)
+    if na(shortBox)
+        shortBox := box.new(
+            left   = bar_index - 1,
+            top    = ifvgST,
+            right  = bar_index,
+            bottom = ifvgSB,
+            xloc   = xloc.bar_index,
+            bgcolor      = color.new(color.red, 80),
+            border_color = color.new(color.red, 0))
+    else
+        box.set_left(shortBox, bar_index - 1)
+        box.set_right(shortBox, bar_index)
+        box.set_top(shortBox, ifvgST)
+        box.set_bottom(shortBox, ifvgSB)
+else
+    if not na(shortBox)
+        box.delete(shortBox)
+        shortBox := na
+
+//────────────────────────────────────────────────────────────
+// LIQUIDITY SWEEPS, SWEEP LINES & TARGETS
+//────────────────────────────────────────────────────────────
+var bool  sweptLong   = false
+var bool  sweptShort  = false
+var float sweepLow    = na
+var float sweepHigh   = na
+var int   sweepLongBar  = na
+var int   sweepShortBar = na
+
+var float longTarget  = na
+var float shortTarget = na
+
+var line sslSweepLine = na
+var line bslSweepLine = na
+
+// SSL sweep → long bias
+longSweep = not na(ssl) and low < ssl and close > ssl
+
+if longSweep
+    sweptLong    := true
+    sweepLongBar := bar_index
+    sweepLow     := low
+    longTarget   := na
+
+    if showSweepLines
+        if not na(sslSweepLine)
+            line.delete(sslSweepLine)
+        sslSweepLine := line.new(
+            x1 = bar_index,
+            y1 = sweepLow,
+            x2 = bar_index + 1,
+            y2 = sweepLow,
+            xloc = xloc.bar_index,
+            extend = extend.right,
+            color = color.new(color.teal, 0),
+            width = sweepLineWidth)
+
+// BSL sweep → short bias
+shortSweep = not na(bsl) and high > bsl and close < bsl
+
+if shortSweep
+    sweptShort     := true
+    sweepShortBar  := bar_index
+    sweepHigh      := high
+    shortTarget    := na
+
+    if showSweepLines
+        if not na(bslSweepLine)
+            line.delete(bslSweepLine)
+        bslSweepLine := line.new(
+            x1 = bar_index,
+            y1 = sweepHigh,
+            x2 = bar_index + 1,
+            y2 = sweepHigh,
+            xloc = xloc.bar_index,
+            extend = extend.right,
+            color = color.new(color.orange, 0),
+            width = sweepLineWidth)
+
+// Targets from next swing high/low
+if sweptLong and not na(pivHigh) and bar_index > sweepLongBar
+    longTarget := pivHigh
+
+if sweptShort and not na(pivLow) and bar_index > sweepShortBar
+    shortTarget := pivLow
+
+// Timeout sweeps
+if sweptLong and bar_index - sweepLongBar > barsAfterSweepMax
+    sweptLong    := false
+    sweepLongBar := na
+    sweepLow     := na
+    longTarget   := na
+    if not na(sslSweepLine)
+        line.delete(sslSweepLine)
+        sslSweepLine := na
+
+if sweptShort and bar_index - sweepShortBar > barsAfterSweepMax
+    sweptShort     := false
+    sweepShortBar  := na
+    sweepHigh      := na
+    shortTarget    := na
+    if not na(bslSweepLine)
+        line.delete(bslSweepLine)
+        bslSweepLine := na
+
+//────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+//────────────────────────────────────────────────────────────
+baseFilter = inSession and rangeOk
+
+longRetest  = sweptLong  and ifvgLong  and not na(ifvgLT) and not na(ifvgLB) and high >= ifvgLB and low <= ifvgLT
+shortRetest = sweptShort and ifvgShort and not na(ifvgST) and not na(ifvgSB) and high >= ifvgSB and low <= ifvgST
+
+// Add PD filter to the stack
+longSignal  = baseFilter and structureOkLong  and htfOkLong  and pdOkLong  and longRetest  and not na(longTarget)  and close > open
+shortSignal = baseFilter and structureOkShort and htfOkShort and pdOkShort and shortRetest and not na(shortTarget) and close < open
+
+//────────────────────────────────────────────────────────────
+// EXECUTION – PARTIAL TARGETS + RUNNER
+//────────────────────────────────────────────────────────────
+if longSignal and not na(sweepLow) and not na(longTarget)
+    longStop = sweepLow - syminfo.mintick
+
+    if usePartialTargets
+        longTp1 = close + (longTarget - close) * tp1FractionOfPath
+
+        strategy.entry("ILM Long", strategy.long)
+        strategy.exit("ILM L TP1", "ILM Long",
+            stop        = longStop,
+            limit       = longTp1,
+            qty_percent = tp1QtyPercent)
+        strategy.exit("ILM L TP2", "ILM Long",
+            stop        = longStop,
+            limit       = longTarget,
+            qty_percent = 100)
+    else
+        strategy.entry("ILM Long", strategy.long)
+        strategy.exit("ILM L TP/SL", "ILM Long",
+            stop  = longStop,
+            limit = longTarget)
+
+    sweptLong    := false
+    sweepLongBar := na
+    longTarget   := na
+    sweepLow     := na
+    if not na(sslSweepLine)
+        line.delete(sslSweepLine)
+        sslSweepLine := na
+
+if shortSignal and not na(sweepHigh) and not na(shortTarget)
+    shortStop = sweepHigh + syminfo.mintick
+
+    if usePartialTargets
+        shortTp1 = close + (shortTarget - close) * tp1FractionOfPath
+
+        strategy.entry("ILM Short", strategy.short)
+        strategy.exit("ILM S TP1", "ILM Short",
+            stop        = shortStop,
+            limit       = shortTp1,
+            qty_percent = tp1QtyPercent)
+        strategy.exit("ILM S TP2", "ILM Short",
+            stop        = shortStop,
+            limit       = shortTarget,
+            qty_percent = 100)
+    else
+        strategy.entry("ILM Short", strategy.short)
+        strategy.exit("ILM S TP/SL", "ILM Short",
+            stop  = shortStop,
+            limit = shortTarget)
+
+    sweptShort    := false
+    sweepShortBar := na
+    shortTarget   := na
+    sweepHigh     := na
+    if not na(bslSweepLine)
+        line.delete(bslSweepLine)
+        bslSweepLine := na
+
+//────────────────────────────────────────────────────────────
+// VISUALS
+//────────────────────────────────────────────────────────────
+plotshape(showEntries and longSignal,
+     title     = "ILM Long Entry",
+     location  = location.belowbar,
+     style     = shape.triangleup,
+     color     = color.new(color.lime, 0),
+     text      = "ILM L",
+     size      = size.small,
+     textcolor = color.black)
+
+plotshape(showEntries and shortSignal,
+     title     = "ILM Short Entry",
+     location  = location.abovebar,
+     style     = shape.triangledown,
+     color     = color.new(color.red, 0),
+     text      = "ILM S",
+     size      = size.small,
+     textcolor = color.white)
+
+plot(showTargets and not na(longTarget)  ? longTarget  : na,
+     title = "ILM Long Target",
+     style = plot.style_linebr,
+     linewidth = 1,
+     color = color.new(color.green, 0))
+
+plot(showTargets and not na(shortTarget) ? shortTarget : na,
+     title = "ILM Short Target",
+     style = plot.style_linebr,
+     linewidth = 1,
+     color = color.new(color.maroon, 0))
+
+View in Pine Editor・552 lines
+Use on chart
+2
+5
+2 119
+Please feel free to adjust in any way possible. Let me know if you can create something better from this initial coding.
+
+//═══════════════════════════════════════════════════════════════════════
+// Inverted Liquidity Model (ILM) – Strategy
+//═══════════════════════════════════════════════════════════════════════
+//
+// The **Inverted Liquidity Model (ILM)** is a liquidity-based algorithm
+// built to capture high-probability reversals after:
+//
+// • A liquidity sweep (SSL/BSL taken)
+// • Rejection back inside the range
+// • A Fair Value Gap (FVG) forms
+// • That FVG becomes invalidated → becomes an IFVG entry zone
+//
+// ILM combines:
+// • LTF BOS / CHOCH structure confirmation
+// • HTF structure (expansion) filtering
+// • Premium / Discount filter (17:00 CST session midline)
+// • Optional ATR volatility filter
+// • Optional trading session restrictions
+// • Optional partial profit-taking + runners
+//
+// When all conditions align, the strategy enters:
+// ✔ Long after sweep of SSL + valid long IFVG + trend confirmation
+// ✔ Short after sweep of BSL + valid short IFVG + trend confirmation
+//
+// Stops are placed at the sweep wick.
+// Full target is set at the next structural high/low.
+// Optional partial TP sends a runner to full target.
+//
+// Visual tools (labels, sweep lines, IFVG boxes, midline) assist
+// with review and forward testing.
+//
+//───────────────────────────────────────────────────────────────────────
+// USER CONFIGURABLE FEATURES
+//───────────────────────────────────────────────────────────────────────
+//
+// • **Liquidity & Structure**
+// - pivotLen → swing length for pivots / liquidity
+// - htfOn → toggle higher-timeframe pivots
+// - htfTF → timeframe for HTF structure/liquidity
+// - useStructureFilter → enforce LTF BOS/CHOCH trend
+// - useHtfExpansionFilter → enforce HTF trend
+// - showStructureLabels → show BOS/CHOCH labels
+// - showHtfStructureLabels → show HTF BOS/CHOCH labels
+//
+// • **Premium / Discount Midline**
+// - usePremiumDiscountFilter → only long in discount / short in premium
+// - pdSession → session used for midline (default 17:00 CST)
+// - showPdMidLine → show 50% midline
+//
+// • **FVG / IFVG Detection**
+// - useBodyGapFVG → FVG uses candle bodies instead of wicks
+// - useDisplacementFVG → require displacement bar
+// - dispAtrMult → minimum ATR threshold for displacement
+// - showIFVG → draw IFVG boxes
+//
+// • **ATR / Volatility / Sessions**
+// - useRangeFilter → require minimum ATR%
+// - atrLen → ATR period
+// - minAtrPerc → minimum ATR% of price
+// - useSessionFilter → restrict trading hours
+// - sessionTimes → allowed trading session
+//
+// • **Sweep Visualization**
+// - showSweepLines → draw sweep lines at SSL/BSL sweeps
+// - sweepLineWidth → thickness of sweep lines
+//
+// • **Exits: Partial Targets & Runners**
+// - usePartialTargets → enable partial TP logic
+// - tp1QtyPercent → percent closed at TP1
+// - tp1FractionOfPath → TP1 relative to path to full target
+//
+// • **Formatting / Visibility**
+// - labelFontSizeInput → tiny / small / normal / large / huge
+// - showEntries → entry markers
+// - showTargets → target lines
+//
+//═══════════════════════════════════════════════════════════════════════
+// END OF STRATEGY DESCRIPTION
+//═══════════════════════════════════════════════════════════════════════
+

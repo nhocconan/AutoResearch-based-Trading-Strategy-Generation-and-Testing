@@ -1,0 +1,138 @@
+//@version=6
+strategy('[SHORT ONLY] Consecutive Bars Above MA Strategy', overlay = false, precision = 0, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true)
+
+//#region INPUTS SECTION
+// ============================================
+// Time Settings
+// ============================================
+startTimeInput = input.time(timestamp("1 Jan 2014"), "Start Time", group = "Time Settings")
+endTimeInput = input.time(timestamp("1 Jan 2099"), "End Time", group = "Time Settings")
+isWithinTradingWindow = time >= startTimeInput and time <= endTimeInput
+
+// ============================================
+// Strategy Settings
+// ============================================
+threshold = input.int(defval=3, minval = 1, title = 'Signal Threshold', group = "Strategy Signal")
+maType = input.string('SMA', title = "MA Type", options = ['SMA', 'EMA'], group = 'Strategy Signal')
+maLength = input.int(5, title = 'MA Length', minval = 1, group = 'Strategy Signal')
+
+// ============================================
+// EMA Filter Settings
+// ============================================
+useEmaFilter = input.bool(true, "Use EMA Filter", group = "Trend Filter")
+emaPeriodInput = input.int(200, "EMA Period", minval = 1, group = "Trend Filter")
+//#endregion
+
+// MA for calculating signals
+signalMa = maType == 'SMA' ? ta.sma(close, maLength) : ta.ema(close, maLength)
+plot(signalMa, color = color.white, force_overlay = true)
+
+//#region INDICATOR CALCULATIONS
+// ============================================
+// Consecutive Bars Above MA Counter
+// ============================================
+var int bullCount = na
+bullCount := close > signalMa ? (na(bullCount) ? 1 : bullCount + 1) : 0
+
+plot(bullCount, color = color.green, style = plot.style_columns)
+hline(threshold, title="Signal Threshold")
+
+// ============================================
+// Trend Filter
+// ============================================
+ma200 = ta.ema(close, emaPeriodInput)
+plot(ma200, color=color.red, force_overlay=true)
+
+//#region TRADING CONDITIONS
+// ============================================
+// Entry/Exit Logic
+// ============================================ 
+shortCondition = bullCount >= threshold and isWithinTradingWindow and close>high[1]
+exitCondition = close<low[1]
+
+// Apply EMA Filter if enabled
+if useEmaFilter
+    shortCondition := shortCondition and close < ma200
+//#endregion
+
+//#region STRATEGY EXECUTION
+// ============================================
+// Order Management
+// ============================================
+if shortCondition
+    strategy.entry('short', strategy.short)
+if exitCondition
+    strategy.close_all()
+//#endregion
+
+View in Pine Editor・66 lines
+Use on chart
+4
+4
+1 545
+█ STRATEGY DESCRIPTION
+The "Consecutive Bars Above MA Strategy" is a contrarian trading system aimed at exploiting overextended bullish moves in stocks and ETFs. It monitors the number of consecutive bars that close above a chosen short-term moving average (which can be either a Simple Moving Average or an Exponential Moving Average). Once the count reaches a preset threshold and the current bar’s close exceeds the previous bar’s high within a designated trading window, a short entry is initiated. An optional EMA filter further refines entries by requiring that the current close is below the 200-period EMA, helping to ensure that trades are taken in a bearish environment.
+
+█ HOW ARE THE CONSECUTIVE BULLISH COUNTS CALCULATED?
+The strategy utilizes a counter variable, `bullCount`, to track consecutive bullish bars based on their relation to the short-term moving average. Here’s how the count is determined:
+
+Initialize the Counter
+The counter is initialized at the start:
+
+Pine Script®
+var int bullCount = na
+
+Bullish Bar Detection
+For each bar, if the close is above the selected moving average (either SMA or EMA, based on user input), the counter is incremented:
+
+Pine Script®
+bullCount := close > signalMa ? (na(bullCount) ? 1 : bullCount + 1) : 0
+
+Reset on Non-Bullish Condition
+If the close does not exceed the moving average, the counter resets to zero, indicating a break in the consecutive bullish streak.
+
+
+
+█ SIGNAL GENERATION
+
+1. SHORT ENTRY
+A short signal is generated when:
+
+The number of consecutive bullish bars (i.e., bars closing above the short-term MA) meets or exceeds the defined threshold (default: 3).
+
+The current bar’s close is higher than the previous bar’s high.
+
+The signal occurs within the specified trading window (between Start Time and End Time).
+
+Additionally, if the EMA filter is enabled, the entry is only executed when the current close is below the 200-period EMA.
+
+
+2. EXIT CONDITION
+
+An exit signal is triggered when the current close falls below the previous bar’s low, prompting the strategy to close the short position.
+
+
+█ ADDITIONAL SETTINGS
+
+Threshold: The number of consecutive bullish bars required to trigger a short entry (default is 3).
+
+Trading Window: The Start Time and End Time inputs define when the strategy is active.
+
+Moving Average Settings: Choose between SMA and EMA, and set the MA length (default is 5), which is used to assess each bar’s bullish condition.
+
+EMA Filter (Optional): When enabled, this filter requires that the current close is below the 200-period EMA, supporting entries in a downtrend.
+
+
+
+█ PERFORMANCE OVERVIEW
+
+This strategy is designed for stocks and ETFs and can be applied across various timeframes.
+
+It seeks to capture mean reversion by shorting after a series of bullish bars suggests an overextended move.
+
+The approach employs a contrarian short entry by waiting for a breakout (close > previous high) following consecutive bullish bars.
+
+The adjustable moving average settings and optional EMA filter allow for further optimization based on market conditions.
+
+Comprehensive backtesting is recommended to fine-tune the threshold, moving average parameters, and filter settings for optimal performance.
+

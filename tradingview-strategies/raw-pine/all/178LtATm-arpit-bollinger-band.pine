@@ -1,0 +1,85 @@
+//@version=5
+strategy("Bollinger Band Strategy with Early Signal (v5)", overlay=true)
+
+// Inputs
+length = 20
+mult = 1.5
+src = close
+riskRewardRatio = input(3.0, title="Risk-Reward Ratio")
+
+// Calculating Bollinger Bands
+basis = ta.ema(src, length)
+dev = mult * ta.stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+
+// Plotting Bollinger Bands
+plot(upper, "Upper Band", color=color.red)
+plot(lower, "Lower Band", color=color.green)
+
+// Tracking Two Candles Ago Crossing Bollinger Bands
+var float twoCandlesAgoUpperCrossLow = na
+var float twoCandlesAgoLowerCrossHigh = na
+
+if (close[2] > upper[2])
+    twoCandlesAgoUpperCrossLow := low[2]
+if (close[2] < lower[2])
+    twoCandlesAgoLowerCrossHigh := high[2]
+
+// Entry Conditions
+longCondition = (not na(twoCandlesAgoLowerCrossHigh)) and (high > twoCandlesAgoLowerCrossHigh)
+shortCondition = (not na(twoCandlesAgoUpperCrossLow)) and (low < twoCandlesAgoUpperCrossLow)
+
+// Plotting Entry Points
+plotshape(longCondition, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(shortCondition, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// Strategy Execution
+if (longCondition)
+    stopLoss = low - (high - low) * 0.05
+    takeProfit = close + (close - stopLoss) * riskRewardRatio
+    strategy.entry("Buy", strategy.long)
+    strategy.exit("Exit Buy", "Buy", stop=stopLoss, limit=takeProfit)
+
+if (shortCondition)
+    stopLoss = high + (high - low) * 0.05
+    takeProfit = close - (stopLoss - close) * riskRewardRatio
+    strategy.entry("Sell", strategy.short)
+    strategy.exit("Exit Sell", "Sell", stop=stopLoss, limit=takeProfit)
+
+View in Pine Editor・51 lines
+Use on chart
+2
+5
+2 028
+Strategy Overview:
+This strategy utilizes Bollinger Bands based on a 20-period Exponential Moving Average (EMA) with a standard deviation multiplier of 1.5. It is designed to generate early trading signals based on the relationship between the price action and the Bollinger Bands.
+
+Bollinger Bands Calculation:
+
+The upper Bollinger Band is calculated as the 20-period EMA of the closing prices plus 1.5 times the standard deviation of the same period.
+The lower Bollinger Band is calculated as the 20-period EMA of the closing prices minus 1.5 times the standard deviation.
+Entry Criteria:
+
+Buy Signal: A buy signal is generated when the current candle's high exceeds the high of the candle two periods ago, which had closed below the lower Bollinger Band. This condition implies an anticipation of a bullish reversal.
+Sell Signal: A sell signal is generated when the current candle's low falls below the low of the candle two periods ago, which had closed above the upper Bollinger Band. This condition suggests an anticipated bearish reversal.
+Stop Loss and Take Profit:
+
+The stop loss for a buy order is set slightly below the low of the current candle, and for a sell order, it is set slightly above the high of the current candle.
+The take profit level is determined based on a predefined risk-reward ratio of 1:3. This means the take profit target is set at a distance three times greater than the distance between the entry price and the stop loss.
+Risk Management:
+The strategy includes an input option to adjust the risk-reward ratio, allowing for flexibility in managing the trade's potential risk versus reward.
+
+Trade Execution:
+The strategy automatically plots the buy and sell signals on the chart and executes the trades according to the defined conditions. It also visually indicates the stop loss levels for each trade.
+
+Usage Notes:
+
+This strategy is designed for use in the TradingView platform using Pine Script version 5.
+It is important to backtest and paper trade the strategy before using it in live trading to understand its performance characteristics and risk profile.
+The strategy should be used as part of a comprehensive trading plan, considering market conditions, trader risk tolerance, and personal trading goals.
+
+
+
+
+

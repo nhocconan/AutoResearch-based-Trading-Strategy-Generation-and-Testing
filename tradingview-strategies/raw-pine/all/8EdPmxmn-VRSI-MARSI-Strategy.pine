@@ -1,0 +1,119 @@
+//@version=4
+strategy("VRSI-MARSI Strategy", shorttitle="(V/MA)RSI Str.", overlay=false, default_qty_type=strategy.percent_of_equity, calc_on_order_fills=true, calc_on_every_tick=true, pyramiding=0, default_qty_value=5, initial_capital=100)
+
+// RSI(close, ="RSI") and RSI(Volume, ="VRSI")
+src = close, len = input(9, minval=1, title="Length RSI")
+src2 = volume, len2 = input(9, minval=1, title="Length VRSI)")
+up = rma(max(change(src), 0), len)
+down = rma(-min(change(src), 0), len)
+up2 = rma(max(change(src2), 0), len2)
+down2 = rma(-min(change(src2), 0), len2)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+rsi2 = down2 == 0 ? 100 : up2 == 0 ? 0 : 100 - (100 / (1 + up2 / down2))
+
+// MA(=Moving Average) of RSI(close, ="MARSI") and RSI(Volume, ="MAVRSI")
+len3 = input(5, minval=1, title="Length MARSI")
+marsi = sma(rsi, len3)
+len4 = input(5, minval=1, title="Length MAVRSI")
+marsi2 = sma(rsi2, len4)
+
+// Plot: 
+// Default plot of RSI and VRSI: not visible but can be made visible
+// Default plot MARSI and MAVRSI: visible
+p1 = plot(rsi, linewidth=2, transp=100, color=color.yellow, title="RSI")
+p2 = plot(rsi2, linewidth=2, transp=100, color=color.orange, title="VRSI")
+m1 = plot(marsi, color=(marsi>=0 ? (marsi[1] < marsi ? color.yellow : color.blue) : (marsi[1] < marsi ? color.yellow : color.blue) ), linewidth = 2, transp = 0, title="MARSI")
+m2 = plot(marsi2, color=color.orange, linewidth = 2, transp = 0, title="MAVRSI")
+
+// Color fill:
+// Default color fill "RSI - VRSI": not visible but can be made visible
+// Default color fill "MARSI - MAVRSI": visible
+fill(p1,p2, color = rsi>rsi2 ? color.green : color.red, transp=100, title="BG RSI-VRSI")
+fill(m1,m2, color = marsi>marsi2 ? color.green : color.red, transp=75, title="BG MARSI-MAVRSI")
+
+// Lines:
+h2=hline(20, color=color.green, linestyle=hline.style_dotted, title="Extreme Oversold Rsi")
+h3=hline(30, color=color.black, linestyle=hline.style_dotted, title="Oversold Rsi")
+h5=hline(50, color=color.yellow, linestyle=hline.style_dashed, title="Middle line")
+h7=hline(70, color=color.black, linestyle=hline.style_dotted, title="Overbought Rsi")
+h8=hline(80, color=color.red, linestyle=hline.style_dotted, title="Extreme Overbought Rsi")
+
+// Color fill between Lines "20-30" and "70-80" represents the crossing of "MARSI" and "MAVRSI":
+fill(h2, h3, color=(marsi2 > marsi ? color.red : color.green), transp=80, title="20-30 BG color X MARSI/MAVRSI")
+fill(h7, h8, color=(marsi2 > marsi ? color.red : color.green), transp=80, title="70-80 BG color X MARSI/MAVRSI")
+
+///Long Entry///
+longCondition = marsi > marsi[1] 
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+///Long exit///
+Xlong =input(true)
+closeConditionLong = marsi < marsi[1] and Xlong
+if (closeConditionLong)
+    strategy.close("Long")
+
+///Short Entry///
+shortCondition = marsi < marsi[1] 
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    
+///Short exit///
+Xshort =input(true)
+closeConditionShort = marsi > marsi[1] and Xshort
+if (closeConditionShort)
+    strategy.close("Short")
+
+View in Pine Editor・65 lines
+Use on chart
+3
+8
+5
+9
+12 282
+I wanted to create an indicator which resembles price movement, aside to volume movement.
+The "yellow-blue" line is the MA(5) of the RSI (9) of closing price.
+The "orange" line is the MA(5) of the RSI (9) of Volume .
+
+(Default plot of RSI and VRSI is not visible but can be made visible ("Settings" > "Style" > set "Opacity" of "RSI & VRSI"))
+
+The Long (Buy) condition is triggered when the MA(5) of the RSI (9, close) goes up.
+The Short (Sell) condition is triggered when the MA(5) of the RSI (9, close) goes down.
+
+Comparing the price movement with the "orange" Volume line helps to spot a possible trend change,
+for example when price goes up and an ascending Volume line starts to flatten or starts descending,
+this could be a sign that the Bullish trend is weakening, predicting a possible trend change.
+Or, when for example a downwards price movement is accompanied with a rising Volume line, this can be a sign of large Bearish power.
+
+Because it still is a RSI indicator, the midline (50), and Oversold/Overbought area's (20-30 & 70-80) are important to watch, especially the MARSI!
+
+A second strategy is made (VRSI-MARSI Strategy 2) where the Long/Short condition is triggered when "MA RSI (close) - MA RSI ( Volume )" crosses.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+The Long & Short entries, as well as the Entry Close are visible 1 bar after the trigger.
+
+
+
+When the blue line changes in a yellow line (and vice versa) it will show a candle earlier (see yellow dashed lines = (1)).
+Also, the condition is fulfilled when the candle closes (2), but the order doesn't take place in the same bar, but the next (3).
+Because this is a strategy the "actual Order" will not take place at the "Close" of the candle (2), but at the "Open" at the NEXT candle (3).
+
+I also have this strategy as a study (A+B), where the "Buy" & "Sell" shows a candle earlier.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+The entries are default 5% of equity, without pyramiding, which already gives large profits.
+
+A large part of the profit is because of the Entry Close of the Long & Short entries.
+You can easily turn these off (Settings > Inputs) to see what profit the strategy gives without Entry Close.
+
+Here they are disabled:
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+More information available in the script ;-)
+
+

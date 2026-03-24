@@ -1,0 +1,190 @@
+//@version=4
+strategy("Grid System With Fake Martingale",process_orders_on_close=true, initial_capital=100)
+point = input(1.)
+os    = input(1,"Order Size")
+mf    = input(2.,"Martingale Multiplier")
+anti  = input(false,"Anti Martingale")
+//------------------------------------------------------------------------------
+baseline = 0.
+baseline := nz(close > baseline[1] + point or close < baseline[1] - point ? 
+  close : baseline[1],close)
+//------------------------------------------------------------------------------
+size = 0.
+lossnew = change(strategy.losstrades)
+win = change(strategy.wintrades)
+if anti
+    size := win ? size[1]*mf : lossnew ? 1 : nz(size[1],os)
+else
+    size := lossnew ? size[1]*mf : win ? 1 : nz(size[1],os)
+upper = baseline + point*size
+lower = baseline - point*size
+//------------------------------------------------------------------------------
+if baseline > baseline[1] and strategy.opentrades == 0
+    strategy.entry("Buy",strategy.long,qty=os)
+    strategy.exit("buy/tp/sl","Buy",stop=lower,limit=upper)
+if baseline < baseline[1] and strategy.opentrades == 0
+    strategy.entry("Sell",strategy.short,qty=os)
+    strategy.exit("sell/tp/sl","Sell",stop=upper,limit=lower)
+    
+    
+//------------------------------------------------------------------------------
+// STRATEGY TESTER ENGINE - ON CHART DISPLAY - PLUG & PLAY
+//@FiatDropout   
+
+
+eq = strategy.equity //+ strategy.openprofit //USE THIS IF YOU NEED TO CHECK MAX GAINED BASED ON UNREALISED PnL and CANDLE MOVEMENT. THIS WILL CHANGE DD CALCCULATION AS WELL // CURRENT EQUITY
+loss = strategy.grossloss //GROSS LOSS SINCE START 
+gain = strategy.grossprofit //GROSS LOSS SINCE START
+in = strategy.initial_capital-100 //STARTING CAPITAL IN PERCENT
+total = strategy.closedtrades
+winners = strategy.wintrades
+losers = strategy.losstrades
+
+rmax = 0.
+rmax := max(eq,nz(rmax[1]))
+
+lmax = 0.
+lmax := max(loss,nz(loss[1]))
+
+gmax = 0.
+gmax := max(gain,nz(gain[1]))
+
+inmax = 0.
+inmax := max(in,nz(in[1]))
+
+tmax = 0.
+tmax := max(total,nz(total[1]))
+
+
+
+dd = -((rmax-eq)/rmax*100) //CURRENT DRAWDOWN
+
+ddm = lowest(dd,200) //MAX DRAWDOWN
+
+pfactor = gmax/lmax //PROFIT FACTOR
+
+ppercent = winners/total*100 //PROFIT PERCENTAGE
+
+//----
+css = eq > in ? #0cb51a : #e65100
+css2 = eq > loss ? color.blue : color.blue
+css3 = dd > 0 ? color.red : color.red
+css4 = dd > ddm ? color.orange : na
+
+
+a = plot(eq,"Current Profit(%)",#2196f3,2,transp=0)
+b = plot(rmax,"Maximum Gained(%)",css,2,transp=0)
+c = plot(inmax, "Starting Cap(%)", color.white,2,transp=0)
+d = plot(dd, "Current Drawdown(%)", color.fuchsia,2,transp=0)
+e = plot(ddm, "Max Drawdown(%)", color.red,2,transp=0)
+
+plot(lmax, "Gross Loss(%)", color.red,2,transp=0)
+
+plot(gmax, "Gross Gain(%)", color.green,2,transp=0)
+
+plot(pfactor, "Profit Factor", color.orange,2,transp=0)
+
+plot(tmax,"Total CLosed Trades", color.aqua,2,transp=0)
+
+plot(winners,"Trades Won", color.green,2,transp=0)
+
+plot(losers, "Trades Lost", color.red,2,transp=0)
+
+plot(ppercent,"Profit Percentage(%)", color.lime,2,transp=0)
+
+bgcolor(eq <= 0 and dd <= -100 ? color.red : na,title= "LIQUIDATION",transp=55)
+
+fill(a,b,css,80)
+fill(a,c,css2,60)
+fill(c,d,css3,35)
+fill(d,e,css4,30)
+
+View in Pine Editor・103 lines
+Use on chart
+1
+7
+2
+12 720
+So i had this idea while ago when @alexgrover published a script and dropped a nugget in between which replicates the result of strategy tester on chart as an indicator.
+
+So it seemed fair to use one of his strategy to display the results.
+
+This strategy tester can now be used in replay mode like an indicator and you can see what happen at a particular section of the chart which was is not possible in default strategy tester results of TV.
+
+Please read how each result is calculated so you will know what you are using.
+
+This engine shows most common results of strategy tester in a single screen, which are as follows:
+
+1. Starting Capital
+2. Current Profit Percentage
+3. Max Profit Percentage
+4. Gross Profit
+5. Gross Loss
+6. Total Closed Trades
+7. Total Trades Won
+8. Total Trades Lost
+9. Percentage Profitable
+10. Profit Factor
+11. Current Drawdown
+12. Max Drawdown
+13. Liquidation
+
+
+So elaborating on what is what:
+
+1. Starting Capital - This stays 0, which signifies your starting balance as 0%. It is set to 0 so we can compare all other results without any change in variables. If set to 100, then all the results will be increased by 100. Some users might find it useful to set it to 100, then they can change code on line 41 from to and it should show starting balance as 100%.
+
+2. Current Profit Percentage - This shows your current profit adjusted to current price of the candle, not like TV which shows after candle is close. There is a comment on the line 38 which can be removed and your can see unrealized profit as well in this section. Please note that this will affect Draw-down calculations later in this section.
+
+3. Max Profit Percentage - This will show you your max profit achieved during your strategy run, which was not possible yet to see via strategy tester. So, now you can see how much profit was achieved by your strategy during the run and you can compare it with chart to see what happens during bull-run or bear-run, so you can further optimize your strategy to best suit your desired results.
+
+4. Gross Profit - This is total percentage of profit your strategy achieved during entire run as if you never had any losses.
+
+5. Gross Loss - This is total percentage of loss your strategy achieved during entire run as if you never had any profits.
+
+6. Total Closed Trades - This is total number of trades that your strategy has executed so far.
+
+7. Total Trades Won - This is the total number of trades that your strategy has executed that resulted in positive increase in equity.
+
+8. Totals Trades Lost - This is the total number of trades that your strategy has executed that resulted in decrease in equity.
+
+9. Percentage Profitable - This is the ratio between your current total winning trades divided by total closed trades, and finally multiplied by 100 to get percentage results.
+
+10. Profit Factor - This is the ratio between Gross Profit and Gross Loss, so if profit factor is 2, then it indicates that you are set to gain 2 times per your risk per trade on average when total trades are executed.
+
+11. Current Drawdown - This is important section and i want you to read this carefully. Here draw-down is calculated very differently than what TV shows. TV has access to candle data and calculates draw-down accordingly as per number of trades closed, but here DD is calculated as difference between max profit achieved and current profit. This way you can see how much percentage you are down from max peak of equity at current point in time. You can do back-test of the data and see when peak was achieved and how much your strategy did a draw-down candle by candle.
+
+12. Max Drawdown - This is also calculated differently same as above, current draw-down. Here you can see how much max DD your strategy did from a peak profit of equity. This is not set as max profit percentage is set because you will see single number on display, while idea is to keep it custom. I will explain.
+
+So lets say, your max DD on TV is 30%. Here this is of no use to see Max DD , as some people might want to see what was there max DD 1000 candles back or 10 candle back. So this will show you your max DD from the data you select. TV shows 25000 candle data in a chart if you go back, you can set the counter to 24999 and it will show you max DD as shown on TV, but if you want custom section to show max DD , it is now possible which was not possible before.
+
+Also, now let's say you put DD as 24999 and open a chart of an asset that was listed 1 week ago, now on 1H chart max DD will never show up until you reach 24999 candle in data history, but with this you can now enter a manual number and see the data.
+
+13. Liquidation - This is an interesting feature, so now when your equity balance is less than 0 and your draw-down goes to -100, it will show you where and at what point in time you got liquidated by adding a red background color in the entire section. This is the most fun part of this script, while you can only see max DD on TV.
+
+------------------------------------------------------------------------------
+
+How to Use -
+
+1 word, plug and play. Yes. Actual codes start from line 33.
+
+select overlay=false or remove it from the title in your strategy on first line,
+Just copy the codes from line 33 to 103,
+then go to end section of your strategy and paste the entire code from line 33 to line 103,
+see if you have any duplicate variable, edit it,
+Add to chart.
+
+What you see above is very contracted view. Here is how it looks when zoomed in.
+
+
+imgur.com/LnDHTPu
+
+
+<a href="imgur.com/LnDHTPu"><img
+ src="i.imgur.com/LnDHTPu.jpg"
+ title="source: imgur.com" /></a>
+
+
+----------------------------------------------------------------------------------
+
+Feel free to edit and share and use. If you use it in your scripts, drop me tag. Cheers.

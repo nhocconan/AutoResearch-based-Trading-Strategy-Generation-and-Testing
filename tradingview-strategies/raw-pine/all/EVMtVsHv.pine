@@ -1,0 +1,47 @@
+//@version=3 
+// Pivot high-low Strategy_zyz
+strategy("Pivot high-low Strategy_zyz", shorttitle="Phl_zyz", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=720, default_qty_value=25, calc_on_order_fills= false, calc_on_every_tick=true, pyramiding=0) 
+//study("profit taker", shorttitle="PT", overlay=false) 
+SL = input(defval=-5000, title="Stop Loss in $", type=float, step=1) 
+TP = input(defval=5000, title="Target Point in $", type=float, step=1) 
+price = input(ohlc4,type=source,title="Price data") 
+leftBars = input(5, title="Pivot LeftBars") 
+rightBars = input(7, title="Pivot RightBars") 
+swh = pivothigh(leftBars, rightBars) 
+swl = pivotlow(leftBars, rightBars) 
+swh_cond = not na(swh) 
+hprice = 0.0 
+hprice := swh_cond ? swh : hprice 
+le = false 
+le := swh_cond ? true : (le and high > hprice ? false : le) 
+if (le) 
+    strategy.entry("buy", strategy.long, comment="BUY", stop=hprice + syminfo.mintick)
+swl_cond = not na(swl) 
+lprice = 0.0 
+lprice := swl_cond ? swl : lprice 
+se = false 
+se := swl_cond ? true : (se and low < lprice ? false : se) 
+if (se) 
+    strategy.entry("sell", strategy.short, comment="SELL", stop=lprice - syminfo.mintick) 
+    strategy.close_all(when = strategy.openprofit<SL or strategy.openprofit>TP) 
+//buy = price > price and strategy.openprofit>0 
+//buy2 = price > price and strategy.opentrades<1 
+//sell = price < price and strategy.openprofit>0 
+//strategy.entry("buy", true, 1, when=buy2) 
+//strategy.entry("buy", true, 1, when=buy) 
+//strategy.entry("sell", false, 1, when=sell) 
+//alertlong = long?1:0 
+//alertshort = short?1:0 
+//plot(alertlong, color=green) 
+//plot(alertshort, color=red) 
+//alertcondition(long, "Long") 
+//alertcondition(short, "Short")
+
+View in Pine Editor・38 lines
+Use on chart
+4
+2
+2
+7
+13 586
+Pivot high-low Strategy_zyz

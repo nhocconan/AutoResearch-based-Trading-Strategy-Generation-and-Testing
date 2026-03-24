@@ -1,0 +1,58 @@
+//@version=4
+strategy(shorttitle='MARSI',title='Moving Average', overlay=true, initial_capital=1000,  default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+//Backtest dates
+fromMonth = input(defval = 1,    title = "From Month",      type = input.integer, minval = 1, maxval = 12)
+fromDay   = input(defval = 1,    title = "From Day",        type = input.integer, minval = 1, maxval = 31)
+fromYear  = input(defval = 2020, title = "From Year",       type = input.integer, minval = 1970)
+thruMonth = input(defval = 1,    title = "Thru Month",      type = input.integer, minval = 1, maxval = 12)
+thruDay   = input(defval = 1,    title = "Thru Day",        type = input.integer, minval = 1, maxval = 31)
+thruYear  = input(defval = 2112, title = "Thru Year",       type = input.integer, minval = 1970)
+
+showDate  = input(defval = true, title = "Show Date Range", type = input.bool)
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+
+//MA inputs and calculations
+inshort=input(9, title='MA short period')
+MAshort= sma(close, inshort)
+
+// RSI inputs and calculations
+lengthRSI = input(14, title = 'RSI period', minval=1)
+RSI = rsi(close, lengthRSI)
+
+//Entry 
+strategy.entry(id="long", long = true, when = MAshort<close and RSI<40 and window())
+
+//Exit
+longLossPerc = input(title="Long Stop Loss (%)",
+     type=input.float, minval=0.0, step=0.1, defval=1.5) * 0.01
+longTakePerc = input(title="Long Take Profit (%)",
+     type=input.float, minval=0.0, step=0.1, defval=3) * 0.01
+longSL  = strategy.position_avg_price * (1 - longLossPerc)
+longTP  = strategy.position_avg_price * (1 + longTakePerc)
+if (strategy.position_size > 0 and window())
+    strategy.exit(id="TP/SL", stop=longSL, limit=longTP)
+
+
+bgcolor(color = showDate and window() ? color.gray : na, transp = 90)  
+plot(MAshort, color=color.purple, linewidth=4)
+
+View in Pine Editor・44 lines
+Use on chart
+7
+7
+4 439
+The most common way to use the RSI to spot a good buy opportunity is to check for values lower than 30. Unfortunately, the RSI can remain in oversold territory for long periods, and that could leave you trapped in a trade in loss. It would be appropriate to wait for a confirmation of the trend reversal.
+
+In the example above I use a short-term Moving Average (in this case, the MA9) coupled with an RSI lower than 40. This combination of events is relatively rare as reversal confirmations usually come when RSI values are already higher. As unusual as this setup is, it provides buy-opportunities with much higher chances of success.
+
+The parameters of this strategy would be:
+
+ENTRY: RSI lower than 40 and MA9 lower than the price
+
+TAKE PROFIT and STOP-LOSS with a ratio of at least 2. That means that if you set up a take profit of 3%, your stop-loss shouldn’t be larger than 1.5%.
+
+The advantage of this approach is that it has a high rate of success and allows you the flexibility of setting up the percentages of the take profit and stop-loss according to your preferences and risk appetite.

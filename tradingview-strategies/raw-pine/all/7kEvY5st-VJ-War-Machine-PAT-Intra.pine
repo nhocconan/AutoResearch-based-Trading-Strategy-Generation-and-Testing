@@ -1,0 +1,146 @@
+//@version=4
+strategy("[VJ]War Machine PAT Intra", overlay=true, calc_on_every_tick = false)
+
+// ********** Strategy inputs - Start **********
+
+// Used for intraday handling
+// Session value should be from market start to the time you want to square-off 
+// your intraday strategy
+// Important: The end time should be at least 2 minutes before the intraday
+// square-off time set by your broker
+var i_marketSession = input(title="Market session", type=input.session, 
+     defval="0915-1455", confirm=true)
+
+// Make inputs that set the take profit % (optional)
+longProfitPerc = input(title="Long Take Profit (%)",
+     type=input.float, minval=0.0, step=0.1, defval=5.0) * 0.01
+
+shortProfitPerc = input(title="Short Take Profit (%)",
+     type=input.float, minval=0.0, step=0.1, defval=5.0) * 0.01
+     
+// Set stop loss level with input options (optional)
+longLossPerc = input(title="Long Stop Loss (%)",
+     type=input.float, minval=0.0, step=0.1, defval=5.0) * 0.01
+
+shortLossPerc = input(title="Short Stop Loss (%)",
+     type=input.float, minval=0.0, step=0.1, defval=5.0) * 0.01    
+
+trendFactor = input(title="Trend Factor(Lower means trending)", type=input.integer, minval=1, step=1, defval=50)
+
+oversold = input(title="Oversold", type=input.integer, minval=1, step=1, defval=25)
+
+overbought = input(title="Overbought", type=input.integer, minval=1, step=1, defval=75)
+
+// ********** Strategy inputs - End **********
+
+
+// ********** Supporting functions - Start **********
+
+// A function to check whether the bar or period is in intraday session
+barInSession(sess) => time(timeframe.period, sess) != 0
+// Figure out take profit price
+longExitPrice  = strategy.position_avg_price * (1 + longProfitPerc)
+shortExitPrice = strategy.position_avg_price * (1 - shortProfitPerc)
+
+// Determine stop loss price
+longStopPrice  = strategy.position_avg_price * (1 - longLossPerc)
+shortStopPrice = strategy.position_avg_price * (1 + shortLossPerc)
+
+
+// ********** Supporting functions - End **********
+
+
+// ********** Strategy - Start **********
+// See if intraday session is active
+bool intradaySession = barInSession(i_marketSession)
+
+// Trade only if intraday session is active
+
+//=================Strategy logic goes in here===========================
+//Vol Confirmation
+vol = volume > volume[1]
+
+//Engulfing candle confirm
+bullishEC = close > open[1] and close[1] < open[1]
+bearishEC = close < open[1] and close[1] > open[1]
+
+//Candles colors
+greenCandle = (close > open)
+redCandle = (close < open)
+
+length = input(title="Length", type=input.integer, defval=14, minval=1, maxval=2000)
+src = hlc3
+upper = sum(volume * (change(src) <= 0 ? 0 : src), length)
+lower = sum(volume * (change(src) >= 0 ? 0 : src), length)
+_rsi(upper, lower) =>
+    100.0 - (100.0 / (1.0 + upper / lower))
+mf = _rsi(upper, lower)
+ci = 100 * log10(sum(atr(1), length) / (highest(length) - lowest(length))) / log10(length)
+
+//tradeSignal = ((rsiOS or rsiOS[1]) and bullishEC) or ((rsiOB or rsiOB[1]) and bearishEC)
+
+
+
+
+//Final Long/Short Condition
+longCondition =  redCandle and mf < oversold and ci <trendFactor and vol
+shortCondition = greenCandle and mf >overbought and ci <trendFactor and vol
+ 
+//Long Strategy - buy condition and exits with Take profit and SL
+if (longCondition and intradaySession)
+    stop_level = longStopPrice
+    profit_level = longExitPrice
+    strategy.entry("My Long Entry Id", strategy.long)
+    strategy.exit("TP/SL", "My Long Entry Id", stop=stop_level, limit=profit_level)
+
+
+//Short Strategy - sell condition and exits with Take profit and SL
+if (shortCondition and intradaySession)
+    stop_level = shortStopPrice
+    profit_level = shortExitPrice
+    strategy.entry("My Short Entry Id", strategy.short)
+    strategy.exit("TP/SL", "My Short Entry Id", stop=stop_level, limit=profit_level)
+ 
+ 
+// Square-off position (when session is over and position is open)
+squareOff = (not intradaySession) and (strategy.position_size != 0)
+strategy.close_all(when = squareOff, comment = "Square-off")
+
+// ********** Strategy - End **********
+
+View in Pine Editor・112 lines
+Use on chart
+7
+1
+1
+6 102
+This is a simple intraday strategy for working on Stocks . You can modify the values on the stock and see what are your best picks. Comment below if you found something with good returns
+
+Strategy:
+Indicators used :
+The Choppiness Index is designed to determine whether the market is choppy or trading sideways, or not choppy and trading within a trend in either direction. Using a scale from 1 - 100, the market is considered to be choppy as values near 100 (over 61.80) and trending when values are lower than 38.20)
+
+The Money Flow Index (MFI) is a momentum indicator that measures the flow of money into and out of a security over a specified period of time. It is related to the Relative Strength Index (RSI) but incorporates volume, whereas the RSI only considers price. The MFI is calculated by accumulating positive and negative Money Flow values (see Money Flow), then creating a Money Ratio. The Money Ratio is then normalized into the MFI oscillator form.
+
+Using the combination of CI (trend factor as constant) and varying MFI, we can buy/sell when conditions are met
+
+Buying with MFI
+
+1. MFI drops below 20 and enters inside oversold zone.
+2. MFI bounces back above 20.
+3. MFI pulls back but remains above 20.
+4. A MFI break out above its previous high is a good buy signal.
+
+Selling with MFI
+1. MFI rises above 80 and enters inside overbought zone.
+2. MFI drops back below 80.
+3. MFI rises slightly but remains below 80.
+4. MFI drops lower than its previous low is a signal to short sell or profit booking
+
+Usage & Best setting :
+Choose a good volatile stock and a time frame - 5m.
+Trending factor : 50
+Overbought & Oversold - can be varied as per user
+There is stop loss and take profit that can be used to optimise your trade
+
+The template also includes daily square off based on your time.

@@ -1,0 +1,126 @@
+//@version=6
+strategy("EMA9/EMA20 + RSI + MACD + Fibonacci (v6)", overlay = true,
+     default_qty_type = strategy.percent_of_equity, default_qty_value = 1,
+     initial_capital = 10000, commission_type = strategy.commission.percent, commission_value = 0.0)
+
+//──────────────────────────────
+// Inputs
+//──────────────────────────────
+emaShortLen = input.int(9, "EMA Short Length")
+emaLongLen  = input.int(20, "EMA Long Length")
+
+rsiLen   = input.int(14, "RSI Length")
+rsiLower = input.int(40, "RSI Buy Min")
+rsiUpper = input.int(75, "RSI Buy Max")
+
+macdFast = input.int(12, "MACD Fast")
+macdSlow = input.int(26, "MACD Slow")
+macdSig  = input.int(9,  "MACD Signal")
+
+fibLookback = input.int(50, "Fibonacci Lookback", minval = 5)
+tpExtension = input.float(1.618, "TP Extension Multiplier", minval = 1.0)
+
+useATRbuffer   = input.bool(false, "Use ATR for Stop Buffer?")
+atrLen         = input.int(14, "ATR Length")
+atrMultiplier  = input.float(0.5, "ATR Multiplier")
+stopPctBuffer  = input.float(0.2, "Stop Buffer % (if not ATR)") / 100.0
+
+//──────────────────────────────
+// Indicator Calculations
+//──────────────────────────────
+emaShort = ta.ema(close, emaShortLen)
+emaLong  = ta.ema(close, emaLongLen)
+
+rsiVal = ta.rsi(close, rsiLen)
+
+macdLine   = ta.ema(close, macdFast) - ta.ema(close, macdSlow)
+macdSignal = ta.ema(macdLine, macdSig)
+macdHist   = macdLine - macdSignal
+
+emaCrossUp   = ta.crossover(emaShort, emaLong)
+emaCrossDown = ta.crossunder(emaShort, emaLong)
+
+//──────────────────────────────
+// Fibonacci Levels
+//──────────────────────────────
+swingHigh = ta.highest(high, fibLookback)
+swingLow  = ta.lowest(low, fibLookback)
+rangeDiff = swingHigh - swingLow
+
+fib0   = swingHigh
+fib236 = swingHigh - 0.236 * rangeDiff
+fib382 = swingHigh - 0.382 * rangeDiff
+fib50  = swingHigh - 0.5   * rangeDiff
+fib618 = swingHigh - 0.618 * rangeDiff
+fib100 = swingLow
+
+//──────────────────────────────
+// Stop Buffer
+//──────────────────────────────
+atrVal = ta.atr(atrLen)
+
+buyStopBuffer  = useATRbuffer ? atrVal * atrMultiplier : swingLow  * stopPctBuffer
+sellStopBuffer = useATRbuffer ? atrVal * atrMultiplier : swingHigh * stopPctBuffer
+
+buyStop  = swingLow  - buyStopBuffer
+buyTP    = swingHigh + rangeDiff * tpExtension
+
+sellStop = swingHigh + sellStopBuffer
+sellTP   = swingLow  - rangeDiff * tpExtension
+
+//──────────────────────────────
+// Entry Conditions
+//──────────────────────────────
+macdBull = macdHist > 0 and macdLine > macdSignal
+macdBear = macdHist < 0 and macdLine < macdSignal
+
+rsiBuyOk  = rsiVal >= rsiLower and rsiVal <= rsiUpper
+rsiSellOk = rsiVal >= (100 - rsiUpper) and rsiVal <= (100 - rsiLower)
+
+buySignal  = emaCrossUp and macdBull and rsiBuyOk
+sellSignal = emaCrossDown and macdBear and rsiSellOk
+
+validBuy  = not na(buyStop)  and buyStop < close and buyTP > close
+validSell = not na(sellStop) and sellStop > close and sellTP < close
+
+//──────────────────────────────
+// Strategy Orders
+//──────────────────────────────
+longID  = "Long"
+shortID = "Short"
+
+// Long Entry
+if buySignal and validBuy and strategy.position_size <= 0
+    strategy.entry(longID, strategy.long)
+    strategy.exit(id = "Exit Long", from_entry = longID, stop = buyStop, limit = buyTP)
+
+// Short Entry
+if sellSignal and validSell and strategy.position_size >= 0
+    strategy.entry(shortID, strategy.short)
+    strategy.exit(id = "Exit Short", from_entry = shortID, stop = sellStop, limit = sellTP)
+
+//──────────────────────────────
+// Plotting
+//──────────────────────────────
+plot(emaShort, "EMA Short", color = color.orange)
+plot(emaLong,  "EMA Long",  color = color.blue)
+
+plot(macdHist, "MACD Histogram", style = plot.style_columns, color = color.new(color.yellow, 60))
+
+plot(fib0,   "Fib 0%",   color = color.new(color.green, 70))
+plot(fib236, "Fib 23.6%", color = color.new(color.gray, 70))
+plot(fib382, "Fib 38.2%", color = color.new(color.gray, 60))
+plot(fib50,  "Fib 50%",  color = color.new(color.gray, 70))
+plot(fib618, "Fib 61.8%", color = color.new(color.gray, 60))
+plot(fib100, "Fib 100%", color = color.new(color.red, 70))
+
+plotshape(buySignal and validBuy,  title = "Buy",  style = shape.labelup,   color = color.green, text = "BUY")
+plotshape(sellSignal and validSell, title = "Sell", style = shape.labeldown, color = color.red,   text = "SELL")
+
+View in Pine Editor・118 lines
+Use on chart
+2
+2
+833
+FOR PAIRS WHICH HAS A MOMENTUM , trade only using manually not algo , use proper RR.
+good luck

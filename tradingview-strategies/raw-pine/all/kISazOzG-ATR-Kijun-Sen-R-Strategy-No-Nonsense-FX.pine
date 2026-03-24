@@ -1,0 +1,5 @@
+//@version=4
+up=##input(defval=-20,type='INPUT_INTEGER',##id='in_1')
+down=##input(defval=-80,type='INPUT_INTEGER',##id='in_2')
+##root(root_metainfo,rm_0,up)
+##root(root_metainfo,rm_1,down)

@@ -1,0 +1,86 @@
+//@version=5
+strategy("Pro SMA Trend Strategy", overlay=true, initial_capital=10000)
+
+// ==========================================
+// ============= SETTINGS ===================
+// ==========================================
+grp_strat = "Strategy & Leverage Settings"
+tradeDirection = input.string("Both", title="Trade Direction", options=["Both", "Long Only", "Short Only"], group=grp_strat)
+longLeverage   = input.float(2.0, title="Long Leverage (e.g., 2.0 = 2x)", step=0.1, minval=0.1, group=grp_strat)
+shortLeverage  = input.float(1.0, title="Short Leverage (e.g., 1.0 = 1x)", step=0.1, minval=0.1, group=grp_strat)
+
+grp_ind = "Indicator Settings"
+smaLength = input.int(44, title="SMA Length (Custom - Try 11, 37, 44, 58, 125)", minval=1, group=grp_ind)
+
+// ==========================================
+// ============= LOGIC ======================
+// ==========================================
+// Calculate the Simple Moving Average
+smaValue = ta.sma(close, smaLength)
+
+// Determine the cross signals based on candle closes
+longCondition  = ta.crossover(close, smaValue)
+shortCondition = ta.crossunder(close, smaValue)
+
+// Calculate dynamic position size based on current equity and chosen leverage
+longQty  = (strategy.equity * longLeverage) / close
+shortQty = (strategy.equity * shortLeverage) / close
+
+// ==========================================
+// ============= EXECUTION ==================
+// ==========================================
+if longCondition
+    if tradeDirection == "Both" or tradeDirection == "Long Only"
+        strategy.entry("Long", strategy.long, qty=longQty)
+    if tradeDirection == "Short Only"
+        strategy.close("Short") // Just close the short, don't enter long
+
+if shortCondition
+    if tradeDirection == "Both" or tradeDirection == "Short Only"
+        strategy.entry("Short", strategy.short, qty=shortQty)
+    if tradeDirection == "Long Only"
+        strategy.close("Long") // Just close the long, don't enter short
+
+// ==========================================
+// ============= VISUALS ====================
+// ==========================================
+// 1. Professional colored SMA line (Green when price is above, Red when price is below)
+smaColor = close > smaValue ? color.rgb(38, 166, 154) : color.rgb(239, 83, 80)
+plot(smaValue, color=smaColor, linewidth=3, title="Trend SMA")
+
+// 2. Clear Buy and Short Labels on the chart
+plotshape(longCondition, title="Buy Signal", text="BUY", location=location.belowbar, style=shape.labelup, size=size.small, color=color.rgb(38, 166, 154), textcolor=color.white)
+plotshape(shortCondition, title="Short Signal", text="SHORT", location=location.abovebar, style=shape.labeldown, size=size.small, color=color.rgb(239, 83, 80), textcolor=color.white)
+
+// 3. Subtle background shading to indicate the current trend zone
+bgcolor(close > smaValue ? color.new(color.rgb(38, 166, 154), 90) : color.new(color.rgb(239, 83, 80), 90), title="Trend Background")
+
+View in Pine Editor・56 lines
+Use on chart
+1
+1
+385
+Title: Pro SMA Trend Strategy (with Dynamic Leverage & Direction Control)
+Overview
+The Pro SMA Trend Strategy is a clean, highly customizable, and visually intuitive trend-following system designed specifically for Bitcoin (BTC) on the Daily timeframe, though it can be adapted to any asset. By utilizing a Simple Moving Average (SMA) crossover system, this strategy captures major macro trends while keeping your charts looking professional and uncluttered.
+How It Works
+The core logic is simple but powerful:
+Long Condition: A Buy signal is triggered when the daily candle closes above the chosen SMA.
+Short Condition: A Short signal is triggered when the daily candle closes below the chosen SMA.
+Key Features
+Asymmetric Dynamic Leverage: Not all trends are created equal. This script allows you to set independent leverage profiles for your trades. By default, it is set to 2x for Longs and 1x for Shorts, allowing you to capitalize heavier on upward momentum while playing defensive on the way down.
+Trade Direction Toggles: Easily switch between trading environments. You can set the script to trade "Both" ways, "Long Only" (closes longs if the trend flips, but won't short), or "Short Only".
+Fully Customizable SMA: The length of the Simple Moving Average is 100% adjustable in the settings. You can quickly switch between popular institutional lengths or custom inputs like 11, 37, 44, 58, or 125.
+Professional UI & Visuals: No messy charts. The indicator includes:
+A dynamically colored SMA line (Teal for Bullish, Red for Bearish).
+Clean, highly visible "BUY" and "SHORT" chart labels precisely where execution happens.
+Subtle background shading to instantly identify the current macro-trend zone.
+Settings Guide
+Once applied to your chart, click the Gear Icon (⚙️) to access the following inputs:
+Trade Direction: Choose between Both, Long Only, or Short Only.
+Long Leverage: Adjust your long multiplier (e.g., 2.0 = 2x your total equity).
+Short Leverage: Adjust your short multiplier (e.g., 1.0 = 1x your total equity).
+SMA Length: Input your preferred moving average period.
+Best Practices
+Designed for the Daily (1D) chart on BTC. Since this is a trend-following system, it thrives in directional markets. Slippage and commissions are deliberately left out of the code so you can test the raw, pure mathematical edge of the strategy before applying exchange-specific fees.
+

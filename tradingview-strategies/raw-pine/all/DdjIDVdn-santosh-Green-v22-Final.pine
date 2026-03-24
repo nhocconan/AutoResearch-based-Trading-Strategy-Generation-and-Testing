@@ -1,0 +1,378 @@
+//@version=5
+strategy("Yoona Green v22", shorttitle="YG v22", overlay=true, initial_capital=500000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=5, slippage=1, calc_on_every_tick=false)
+
+// -----------------------------------------------
+// INPUTS - ENTRY TIME WINDOWS (NY TIME)
+// -----------------------------------------------
+
+i_run_all_day  = input.bool(false, "Run All Day (overrides all choices below)", group="Entry (NY Time)")
+
+i_ny_on        = input.bool(false, "New York",     group="Entry (NY Time)")
+i_ny_from      = input.int(830,  "New York From", minval=0, maxval=2359, group="Entry (NY Time)")
+i_ny_to        = input.int(1100, "New York To",   minval=0, maxval=2359, group="Entry (NY Time)")
+
+i_au_on        = input.bool(false, "Australia",    group="Entry (NY Time)")
+i_au_from      = input.int(1800, "Australia From",minval=0, maxval=2359, group="Entry (NY Time)")
+i_au_to        = input.int(1900, "Australia To",  minval=0, maxval=2359, group="Entry (NY Time)")
+
+i_as_on        = input.bool(false, "Asia",         group="Entry (NY Time)")
+i_as_from      = input.int(2000, "Asia From",     minval=0, maxval=2359, group="Entry (NY Time)")
+i_as_to        = input.int(2100, "Asia To",       minval=0, maxval=2359, group="Entry (NY Time)")
+
+i_lo_on        = input.bool(true,  "London",       group="Entry (NY Time)")
+i_lo_from      = input.int(200,  "London From",   minval=0, maxval=2359, group="Entry (NY Time)")
+i_lo_to        = input.int(300,  "London To",     minval=0, maxval=2359, group="Entry (NY Time)")
+
+i_cu_on        = input.bool(false, "Custom",       group="Entry (NY Time)")
+i_cu_from      = input.int(1500, "Custom From",   minval=0, maxval=2359, group="Entry (NY Time)")
+i_cu_to        = input.int(1545, "Custom To",     minval=0, maxval=2359, group="Entry (NY Time)")
+
+// -----------------------------------------------
+// INPUTS - EXIT
+// -----------------------------------------------
+
+i_exit_445     = input.bool(true, "Exit All Trades at 4:45pm NY", group="Exit")
+i_exit_type    = input.string("Daily", "Exit Type", options=["Daily", "Weekly"], group="Exit")
+
+// -----------------------------------------------
+// INPUTS - HIGHER TIMEFRAMES
+// -----------------------------------------------
+
+i_htf1_on      = input.bool(true,  "HTF 1 Active",    group="Higher Timeframes")
+i_htf1_tf      = input.timeframe("30",  "HTF 1 Timeframe", group="Higher Timeframes")
+i_htf1_len     = input.int(25, "HTF 1 HMA Length",    minval=1, group="Higher Timeframes")
+
+i_htf2_on      = input.bool(false, "HTF 2 Active",    group="Higher Timeframes")
+i_htf2_tf      = input.timeframe("60",  "HTF 2 Timeframe", group="Higher Timeframes")
+i_htf2_len     = input.int(25, "HTF 2 HMA Length",    minval=1, group="Higher Timeframes")
+
+i_htf3_on      = input.bool(false, "HTF 3 Active",    group="Higher Timeframes")
+i_htf3_tf      = input.timeframe("240", "HTF 3 Timeframe", group="Higher Timeframes")
+i_htf3_len     = input.int(20, "HTF 3 HMA Length",    minval=1, group="Higher Timeframes")
+
+// -----------------------------------------------
+// INPUTS - FILTER
+// -----------------------------------------------
+
+i_htf_mult     = input.int(1,    "HTF Strength Multiplier",          minval=1, group="Filter")
+i_smooth       = input.int(8,    "Smooth Sensitivity",               minval=1, group="Filter")
+
+i_vwap_on      = input.bool(false, "VWAP Direction",                  group="Filter")
+i_vwap_mult    = input.float(1.0, "VWAP Multiplier",  minval=0.1, step=0.1, group="Filter")
+
+i_macd_on      = input.bool(false, "MACD Confluence",                 group="Filter")
+i_pa_on        = input.bool(false, "Require Price Action Confluence",  group="Filter")
+i_vol_on       = input.bool(false, "Require Above-Average Volume",     group="Filter")
+
+i_ema_on       = input.bool(true,  "EMA Confluence",                   group="Filter")
+i_ema_fast     = input.int(9,    "EMA Fast",  minval=1,               group="Filter")
+i_ema_slow     = input.int(13,   "EMA Slow",  minval=1,               group="Filter")
+
+i_rsi_on       = input.bool(true,  "RSI Momentum",                     group="Filter")
+i_rsi_long     = input.float(60,  "RSI Long",  minval=50, maxval=90,   group="Filter")
+i_rsi_short    = input.float(40,  "RSI Short", minval=10, maxval=50,   group="Filter")
+
+// -----------------------------------------------
+// INPUTS - RISK
+// -----------------------------------------------
+
+i_tp_usd       = input.float(30,   "Profit Target ($)",     minval=5,   step=5,   group="Risk")
+i_sl_usd       = input.float(150,  "Stop Loss ($)",         minval=25,  step=25,  group="Risk")
+i_atr_len      = input.int(10,    "ATR Trailing Stop Length", minval=1,           group="Risk")
+i_atr_mult     = input.float(3.5, "ATR Multiplier",         minval=0.1, step=0.1, group="Risk")
+
+// -----------------------------------------------
+// INPUTS - SHOW STATUS
+// -----------------------------------------------
+
+i_show_table   = input.bool(true,   "Show Status Table",    group="Show Status")
+i_table_pos    = input.string("Bottom Right", "Position", options=["Bottom Right", "Bottom Left", "Top Right", "Top Left"], group="Show Status")
+i_up_color     = input.color(color.green, "Trending Up",    group="Show Status")
+i_dn_color     = input.color(color.red,   "Trending Down",  group="Show Status")
+
+// -----------------------------------------------
+// TICK / POINT MATH
+// -----------------------------------------------
+
+pt_val      = syminfo.pointvalue
+tick_val    = syminfo.mintick
+tp_ticks    = math.round(i_tp_usd  / pt_val / tick_val)
+sl_ticks    = math.round(i_sl_usd  / pt_val / tick_val)
+
+// -----------------------------------------------
+// HMA FUNCTION
+// HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+// -----------------------------------------------
+
+hma(src, length) =>
+    h  = math.round(length / 2)
+    s  = math.round(math.sqrt(length))
+    ta.wma(2.0 * ta.wma(src, h) - ta.wma(src, length), s)
+
+// -----------------------------------------------
+// INDICATORS
+// -----------------------------------------------
+
+// HTF HMAs via request.security
+htf1_close  = request.security(syminfo.tickerid, i_htf1_tf,  close, lookahead=barmerge.lookahead_off)
+htf2_close  = request.security(syminfo.tickerid, i_htf2_tf,  close, lookahead=barmerge.lookahead_off)
+htf3_close  = request.security(syminfo.tickerid, i_htf3_tf,  close, lookahead=barmerge.lookahead_off)
+
+hma1        = hma(htf1_close, i_htf1_len)
+hma2        = hma(htf2_close, i_htf2_len)
+hma3        = hma(htf3_close, i_htf3_len)
+
+hma1_up     = hma1 > hma1[1]
+hma2_up     = hma2 > hma2[1]
+hma3_up     = hma3 > hma3[1]
+hma1_dn     = hma1 < hma1[1]
+hma2_dn     = hma2 < hma2[1]
+hma3_dn     = hma3 < hma3[1]
+
+// HTF alignment check (only active HTFs must agree)
+htf_bull    = (i_htf1_on ? hma1_up : true) and (i_htf2_on ? hma2_up : true) and (i_htf3_on ? hma3_up : true)
+htf_bear    = (i_htf1_on ? hma1_dn : true) and (i_htf2_on ? hma2_dn : true) and (i_htf3_on ? hma3_dn : true)
+
+// EMA confluence
+ema_f       = ta.ema(close, i_ema_fast)
+ema_s       = ta.ema(close, i_ema_slow)
+ema_bull    = (not i_ema_on) or (ema_f > ema_s)
+ema_bear    = (not i_ema_on) or (ema_f < ema_s)
+ema_cross_up = ta.crossover(ema_f,  ema_s)
+ema_cross_dn = ta.crossunder(ema_f, ema_s)
+
+// RSI
+rsi         = ta.rsi(close, 14)
+rsi_bull    = (not i_rsi_on) or (rsi > i_rsi_long)
+rsi_bear    = (not i_rsi_on) or (rsi < i_rsi_short)
+rsi_ok_long = (not i_rsi_on) or (rsi < i_rsi_long)
+rsi_ok_shrt = (not i_rsi_on) or (rsi > i_rsi_short)
+
+// VWAP
+vwap_val    = ta.vwap(hlc3)
+vwap_bull   = (not i_vwap_on) or (close > vwap_val * i_vwap_mult)
+vwap_bear   = (not i_vwap_on) or (close < vwap_val * i_vwap_mult)
+
+// MACD
+[macd_l, macd_s, macd_h] = ta.macd(close, 12, 26, 9)
+macd_bull   = (not i_macd_on) or (macd_l > macd_s)
+macd_bear   = (not i_macd_on) or (macd_l < macd_s)
+
+// Volume filter
+vol_avg     = ta.sma(volume, 20)
+vol_ok      = (not i_vol_on) or (volume > vol_avg)
+
+// Price action confluence (higher high / lower low structure)
+pa_bull     = (not i_pa_on) or (high > high[1] and low > low[1])
+pa_bear     = (not i_pa_on) or (high < high[1] and low < low[1])
+
+// ATR trailing stop
+atr_val     = ta.atr(i_atr_len)
+atr_trail   = atr_val * i_atr_mult
+
+// Smoothed signal (Smooth Sensitivity = period for confirmation)
+smooth_long = ta.ema(ema_cross_up ? 1.0 : 0.0, i_smooth) > 0.5
+smooth_shrt = ta.ema(ema_cross_dn ? 1.0 : 0.0, i_smooth) > 0.5
+
+// -----------------------------------------------
+// TIME WINDOWS (NY Time)
+// -----------------------------------------------
+
+t_hr   = hour(time,   "America/New_York")
+t_mn   = minute(time, "America/New_York")
+t_dow  = dayofweek(time, "America/New_York")
+t_hhmm = t_hr * 100 + t_mn
+
+// Convert HHMM input to comparable integer
+in_win(from_hhmm, to_hhmm) =>
+    f_hr  = from_hhmm / 100
+    f_mn  = from_hhmm - f_hr * 100
+    t_h   = to_hhmm   / 100
+    t_m   = to_hhmm   - t_h * 100
+    f_tot = f_hr * 60 + f_mn
+    t_tot = t_h  * 60 + t_m
+    now   = t_hr * 60 + t_mn
+    now >= f_tot and now <= t_tot
+
+in_ny  = i_ny_on and in_win(i_ny_from, i_ny_to)
+in_au  = i_au_on and in_win(i_au_from, i_au_to)
+in_as  = i_as_on and in_win(i_as_from, i_as_to)
+in_lo  = i_lo_on and in_win(i_lo_from, i_lo_to)
+in_cu  = i_cu_on and in_win(i_cu_from, i_cu_to)
+
+in_session = i_run_all_day or in_ny or in_au or in_as or in_lo or in_cu
+
+// 4:45 PM exit
+is_445pm   = (t_hr == 16) and (t_mn == 45)
+
+// -----------------------------------------------
+// DAILY COUNTER
+// -----------------------------------------------
+
+var float day_open_pnl = 0.0
+var int   last_day     = 0
+
+cur_day    = dayofmonth(time, "America/New_York")
+is_new_day = cur_day != last_day
+
+if is_new_day
+    day_open_pnl := strategy.netprofit
+    last_day     := cur_day
+
+daily_pnl = strategy.netprofit - day_open_pnl
+
+// -----------------------------------------------
+// ENTRY SIGNALS
+// -----------------------------------------------
+
+// Long: EMA cross up + all active filters aligned bullish
+long_sig = ema_cross_up and htf_bull and ema_bull and rsi_ok_long and vwap_bull and macd_bull and vol_ok and pa_bull
+
+// Short: EMA cross down + all active filters aligned bearish
+shrt_sig = ema_cross_dn and htf_bear and ema_bear and rsi_ok_shrt and vwap_bear and macd_bear and vol_ok and pa_bear
+
+// -----------------------------------------------
+// MASTER GATE
+// -----------------------------------------------
+
+can_trade = in_session and (strategy.position_size == 0) and (not is_445pm)
+
+// -----------------------------------------------
+// ENTRIES
+// -----------------------------------------------
+
+if can_trade and long_sig
+    strategy.entry("Long",  strategy.long,  comment="LONG")
+
+if can_trade and shrt_sig
+    strategy.entry("Short", strategy.short, comment="SHORT")
+
+// -----------------------------------------------
+// EXITS
+// -----------------------------------------------
+
+// Fixed TP / SL
+if strategy.position_size > 0
+    strategy.exit("Long Exit", from_entry="Long",  loss=sl_ticks, profit=tp_ticks)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", from_entry="Short", loss=sl_ticks, profit=tp_ticks)
+
+// ATR trailing stop as secondary exit
+long_trail_price  = close - atr_trail
+short_trail_price = close + atr_trail
+
+if strategy.position_size > 0
+    strategy.exit("Long Trail", from_entry="Long",  stop=long_trail_price)
+
+if strategy.position_size < 0
+    strategy.exit("Short Trail", from_entry="Short", stop=short_trail_price)
+
+// Exit all at 4:45 PM daily
+if i_exit_445 and is_445pm and (strategy.position_size != 0)
+    strategy.close_all(comment="4:45pm Exit")
+
+// -----------------------------------------------
+// PLOTS
+// -----------------------------------------------
+
+hma1_color = hma1_up ? i_up_color : i_dn_color
+hma2_color = hma2_up ? i_up_color : i_dn_color
+hma3_color = hma3_up ? i_up_color : i_dn_color
+ema_color  = ema_bull  ? i_up_color : i_dn_color
+
+plot(i_htf1_on ? hma1 : na, "HMA 1", color=hma1_color, linewidth=2)
+plot(i_htf2_on ? hma2 : na, "HMA 2", color=hma2_color, linewidth=1)
+plot(i_htf3_on ? hma3 : na, "HMA 3", color=hma3_color, linewidth=1)
+plot(i_ema_on  ? ema_f : na, "EMA Fast", color=color.new(color.teal,   20), linewidth=1)
+plot(i_ema_on  ? ema_s : na, "EMA Slow", color=color.new(color.orange, 20), linewidth=1)
+plot(i_vwap_on ? vwap_val : na, "VWAP", color=color.new(color.purple, 20), linewidth=1, style=plot.style_stepline)
+
+// Session backgrounds
+bgcolor(in_ny  ? color.new(color.teal,   93) : na, title="New York Window")
+bgcolor(in_au  ? color.new(color.orange, 93) : na, title="Australia Window")
+bgcolor(in_as  ? color.new(color.yellow, 93) : na, title="Asia Window")
+bgcolor(in_lo  ? color.new(color.blue,   93) : na, title="London Window")
+bgcolor(in_cu  ? color.new(color.green,  93) : na, title="Custom Window")
+
+// Entry arrows
+// ------- BUY / SELL SIGNALS ON CHART -------
+
+// BUY signal - triangle + label below bar
+plotshape(can_trade and long_sig, title="BUY Signal", style=shape.triangleup, location=location.belowbar, color=i_up_color, size=size.normal)
+
+// SELL signal - triangle + label above bar
+plotshape(can_trade and shrt_sig, title="SELL Signal", style=shape.triangledown, location=location.abovebar, color=i_dn_color, size=size.normal)
+
+// BUY text label
+if can_trade and long_sig
+    label.new(bar_index, low - atr_val, "BUY", style=label.style_label_up, color=i_up_color, textcolor=color.white, size=size.normal)
+
+// SELL text label
+if can_trade and shrt_sig
+    label.new(bar_index, high + atr_val, "SELL", style=label.style_label_down, color=i_dn_color, textcolor=color.white, size=size.normal)
+
+// -----------------------------------------------
+// STATUS TABLE
+// -----------------------------------------------
+
+tbl_pos = i_table_pos == "Bottom Right" ? position.bottom_right : i_table_pos == "Bottom Left" ? position.bottom_left : i_table_pos == "Top Right" ? position.top_right : position.top_left
+
+var table dash = table.new(tbl_pos, 2, 14, bgcolor=color.new(color.black, 55), border_color=color.new(color.gray, 50), border_width=1, frame_color=color.new(color.gray, 30), frame_width=1)
+
+if barstate.islast and i_show_table
+    pnl_c   = strategy.netprofit >= 0 ? color.teal : color.red
+    wp      = strategy.closedtrades > 0 ? math.round(strategy.wintrades / strategy.closedtrades * 100, 1) : 0.0
+    wr_c    = wp >= 70 ? color.teal : wp >= 55 ? color.orange : color.red
+    dp_c    = daily_pnl >= 0 ? color.teal : color.red
+    aw      = strategy.wintrades  > 0 ? math.round(strategy.grossprofit / strategy.wintrades,  0) : 0
+    al      = strategy.losstrades > 0 ? math.round(strategy.grossloss   / strategy.losstrades, 0) : 0
+    pf      = strategy.grossloss  != 0 ? math.round(strategy.grossprofit / math.abs(strategy.grossloss), 2) : 0.0
+    tr_str  = htf_bull ? "BULL" : htf_bear ? "BEAR" : "MIXED"
+    tr_c    = htf_bull ? i_up_color : htf_bear ? i_dn_color : color.gray
+    win_str = in_ny ? "NY" : in_au ? "AU" : in_as ? "ASIA" : in_lo ? "LONDON" : in_cu ? "CUSTOM" : i_run_all_day ? "ALL DAY" : "NO WINDOW"
+    win_c   = in_session ? color.teal : color.gray
+    table.cell(dash, 0, 0,  "Yoona Green v22",    bgcolor=color.new(color.gray, 20), text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0,  "HMA Strategy",       bgcolor=color.new(color.gray, 20), text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 1,  "Net P&L",            text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 1,  str.tostring(math.round(strategy.netprofit, 0), "$#,##0"), text_color=pnl_c, text_size=size.tiny)
+    table.cell(dash, 0, 2,  "Win Rate",           text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 2,  str.tostring(wp) + "%", text_color=wr_c, text_size=size.tiny)
+    table.cell(dash, 0, 3,  "Total Trades",       text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 3,  str.tostring(strategy.closedtrades), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 0, 4,  "Profit Factor",      text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 4,  str.tostring(pf), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 0, 5,  "Avg Win",            text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 5,  str.tostring(aw, "$#,##0"), text_color=color.teal, text_size=size.tiny)
+    table.cell(dash, 0, 6,  "Avg Loss",           text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 6,  str.tostring(al, "$#,##0"), text_color=color.red, text_size=size.tiny)
+    table.cell(dash, 0, 7,  "Max Drawdown",       text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 7,  str.tostring(math.round(strategy.max_drawdown, 0), "$#,##0"), text_color=color.orange, text_size=size.tiny)
+    table.cell(dash, 0, 8,  "Today P&L",          text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 8,  str.tostring(math.round(daily_pnl, 0), "$#,##0"), text_color=dp_c, text_size=size.tiny)
+    table.cell(dash, 0, 9,  "Profit Target",      text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 9,  "$" + str.tostring(i_tp_usd), text_color=color.teal, text_size=size.tiny)
+    table.cell(dash, 0, 10, "Stop Loss",          text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 10, "$" + str.tostring(i_sl_usd), text_color=color.red, text_size=size.tiny)
+    table.cell(dash, 0, 11, "HMA Trend",          text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 11, tr_str, text_color=tr_c, text_size=size.tiny)
+    table.cell(dash, 0, 12, "Active Window",      text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 12, win_str, text_color=win_c, text_size=size.tiny)
+    table.cell(dash, 0, 13, "4:45 Exit",          text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 13, i_exit_445 ? "ON" : "OFF", text_color=i_exit_445 ? color.teal : color.gray, text_size=size.tiny)
+
+View in Pine Editor・362 lines
+Use on chart
+1
+4
+219
+Done. The script now shows 4 visual elements for every signal on the chart:
+BUY signal:
+
+Green triangle pointing up below the bar
+Green "BUY" label box below the bar (positioned using ATR so it never overlaps the candle)
+
+SELL signal:
+
+Red triangle pointing down above the bar
+Red "SELL" label box above the bar

@@ -1,0 +1,124 @@
+//@version=6
+strategy("SMC breakout", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// ───── Inputs ────────────────────────────────────────────────────────────────
+groupCore = "Core Settings"
+period      = input.int(20, "Swing Length", group=groupCore)
+candleType  = input.string("Wicks", "Breakout Type", options=["Wicks","Body"], group=groupCore)
+rr          = input.float(1.1, "Risk Reward Ratio", step=0.1, group=groupCore)
+slType      = input.string("Close", "SL Type", options=["Close","High/Low"], group=groupCore)
+showSignals = input.bool(true, "Show Signals", group=groupCore)
+
+// Optional risk inputs (for future use)
+stopLossPct   = input.float(1.0, "Stop Loss % (optional)", group="Risk")
+takeProfitPct = input.float(2.0, "Take Profit % (optional)", group="Risk")
+riskPct       = input.float(1.0, "Risk % (optional)", group="Risk")
+
+// ───── Colors ────────────────────────────────────────────────────────────────
+GREEN  = color.rgb(2,133,69)
+RED    = color.rgb(246,7,7)
+_Green = color.rgb(2,106,89)
+
+// ───── Variables ─────────────────────────────────────────────────────────────
+var float UpdatedHigh = na
+var float UpdatedLow  = na
+var bool  phActive    = false
+var bool  plActive    = false
+var bool  TradeisON   = false
+var bool  LongTrade   = false
+var bool  ShortTrade  = false
+
+var float TP = na
+var float SL = na
+
+// ───── ATR Based Stop Distance (same logic as indicator) ─────────────────────
+atr = ta.rma(ta.tr(true), 14)
+
+x2 = low - atr * 1.5
+xz = atr * 1.5 + high
+
+longDiffSL  = math.abs(close - x2)
+longDiffSL2 = math.abs(close - xz)
+
+// ───── Pivot Detection ───────────────────────────────────────────────────────
+PH = ta.pivothigh(high, period, period)
+PL = ta.pivotlow(low, period, period)
+
+ScrHigh = candleType == "Wicks" ? high : close
+ScrLow  = candleType == "Wicks" ? low  : close
+
+if not na(PH)
+    UpdatedHigh := PH
+    phActive := true
+
+if not na(PL)
+    UpdatedLow := PL
+    plActive := true
+
+// ───── Breakout Signals ──────────────────────────────────────────────────────
+BUY  = ScrHigh > UpdatedHigh and phActive
+SELL = ScrLow  < UpdatedLow  and plActive
+
+if BUY
+    phActive := false
+
+if SELL
+    plActive := false
+
+// ───── Entry Conditions (Candle Close Only) ──────────────────────────────────
+longCondition  = BUY  and not TradeisON and barstate.isconfirmed
+shortCondition = SELL and not TradeisON and barstate.isconfirmed
+
+// ───── Long Entry ────────────────────────────────────────────────────────────
+if longCondition
+    LongTrade  := true
+    ShortTrade := false
+    TradeisON  := true
+    
+    // Stop Loss calculation
+    SL := close - longDiffSL
+    
+    // Take Profit using RR
+    TP := close + (rr * longDiffSL)
+    
+    strategy.entry("Long", strategy.long)
+
+    // Exit order with SL and TP
+    strategy.exit("Long Exit", "Long", stop=SL, limit=TP)
+
+// ───── Short Entry ───────────────────────────────────────────────────────────
+if shortCondition
+    LongTrade  := false
+    ShortTrade := true
+    TradeisON  := true
+    
+    // Stop Loss calculation
+    SL := close + longDiffSL2
+    
+    // Take Profit using RR
+    TP := close - (rr * longDiffSL2)
+    
+    strategy.entry("Short", strategy.short)
+
+    // Exit order with SL and TP
+    strategy.exit("Short Exit", "Short", stop=SL, limit=TP)
+
+// ───── Detect Position Closed ────────────────────────────────────────────────
+if strategy.position_size == 0
+    TradeisON := false
+
+// ───── Signal Plotting ───────────────────────────────────────────────────────
+plotshape(showSignals and longCondition, title="BUY", location=location.belowbar, style=shape.triangleup, color=GREEN, size=size.small)
+plotshape(showSignals and shortCondition, title="SELL", location=location.abovebar, style=shape.triangledown, color=RED, size=size.small)
+
+// ───── Candle Coloring ───────────────────────────────────────────────────────
+BearCon = TradeisON and ShortTrade
+BullCon = TradeisON and LongTrade
+
+barcolor(BearCon ? RED : BullCon ? _Green : na)
+
+View in Pine Editor・121 lines
+Use on chart
+5
+362
+SMC breakout pattern, codes for buy and sell signals

@@ -1,0 +1,12 @@
+//@version=5
+ovb=##input(defval=0.8,type='INPUT_FLOAT',##id='in_4')
+ovs=##input(defval=0.2,type='INPUT_FLOAT',##id='in_5')
+##root(root_metainfo,rm_0,ovb,input__float)
+##root(root_metainfo,rm_1,ovs,input__float)
+##root(root_metainfo,rm_2,hline.style_dotted,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_3,'shape_circle',input__string,plotshape,style)
+##root(root_metainfo,rm_4,'Absolute',input__string,plotshape,location)
+##root(root_metainfo,rm_5,'shape_circle',input__string,plotshape,style)
+##root(root_metainfo,rm_6,'Absolute',input__string,plotshape,location)
+##root(root_metainfo,rm_7,'shape_circle',input__string,plotshape,style)
+##root(root_metainfo,rm_8,'Absolute',input__string,plotshape,location)

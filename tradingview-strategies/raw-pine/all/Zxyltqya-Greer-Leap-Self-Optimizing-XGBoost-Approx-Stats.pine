@@ -1,0 +1,42 @@
+//@version=6
+strategy("DEPRECATED - DO NOT USE", overlay=true)
+
+// only trigger once on the very first bar
+if bar_index == 0
+    strategy.entry("DEMO", strategy.long)
+
+// immediately close it on next bar
+if bar_index == 1
+    strategy.close("DEMO")
+
+plot(na, display=display.none)
+
+View in Pine Editor・12 lines
+Use on chart
+7
+3
+3
+1 055
+using the XGBoost for the competition as a test.
+Only a test for the Leap competition
+Release Notes
+All Credit to fenyesk who created the XGBoost. I converted this to a strategy and removed the alerts since that was redundant and removed the long and short signals because the trades show up so also redundant and I plan on using this for the Leap competition. Feel free to copy this but make sure to give credit to fenyesk
+Release Notes
+Added barstate.isconfirmed to help reduce the number of alerts when to buy and sell.
+Release Notes
+Fix to use strategy strategy.position_size instead of current_pos. Hopefully this will reduce the false positives?
+Release Notes
+Fixed the ta.crossunder and ta.crossover The "ta.crossunder()" call inside the conditional expression might not execute on every bar, which can cause inconsistent calculations because the function depends on historical results. For consistency, assign the call's result to a global variable and use that variable in the expression instead
+Release Notes
+this script is flawed
+medium.com/@techacademies/why-your-perfect-tradingview-strategy-fails-in-live-trading-30a875226d6b
+
+read that medium post.
+I'm going to continue to play around with this but be warned !!!!!
+Release Notes
+🚫 DEPRECATED — DO NOT USE
+
+This script is no longer maintained and has been disabled.
+
+It does not provide trading signals and should not be relied upon for analysis.
+This publication is kept for historical/reference purposes only.

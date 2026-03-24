@@ -1,0 +1,95 @@
+//@version=6
+strategy("6AM–10AM 50% Strategy (Capital Safe)",
+     overlay=true,
+     default_qty_type=strategy.cash,
+     default_qty_value=0)
+
+// ===== INPUTS =====
+sessionInput = input.session("0600-1000", "Session Time")
+riskPercent = input.float(0.75, "Risk % Per Trade", step=0.25)
+rr = input.float(1.5, "Risk/Reward", step=0.1)
+minRange = input.float(0.4, "Minimum Session Range %", step=0.1)
+
+// ===== WEEKDAY FILTER =====
+isWeekday = dayofweek >= dayofweek.monday and dayofweek <= dayofweek.friday
+
+// ===== SESSION LOGIC =====
+inSession     = not na(time(timeframe.period, sessionInput)) and isWeekday
+newSession    = inSession and not inSession[1]
+sessionEnded  = not inSession and inSession[1]
+newDay        = ta.change(time("D")) != 0
+
+// ===== VARIABLES =====
+var float sessOpen  = na
+var float sessClose = na
+var float sessHigh  = na
+var float sessLow   = na
+var float wickMid   = na
+var float bodyMid   = na
+var bool  levelsReady = false
+var bool  tradedToday = false
+
+if newDay
+    tradedToday := false
+    levelsReady := false
+
+// ===== BUILD SESSION =====
+if newSession
+    sessOpen := open
+    sessHigh := high
+    sessLow  := low
+
+if inSession
+    sessHigh := math.max(sessHigh, high)
+    sessLow  := math.min(sessLow, low)
+    sessClose := close
+
+// ===== CALCULATE LEVELS =====
+if sessionEnded
+    wickMid := (sessHigh + sessLow) / 2.0
+    bodyMid := (math.max(sessOpen, sessClose) + math.min(sessOpen, sessClose)) / 2.0
+    levelsReady := true
+
+// ===== FILTERS =====
+sessionRangePercent = ((sessHigh - sessLow) / close) * 100
+rangeValid = sessionRangePercent >= minRange
+
+bullishSession = sessClose > sessOpen
+bearishSession = sessClose < sessOpen
+
+strongLong  = close > wickMid and close[1] > wickMid
+strongShort = close < wickMid and close[1] < wickMid
+
+// ===== ENTRY =====
+if levelsReady and rangeValid and not tradedToday
+
+    equity = strategy.equity
+    riskAmount = equity * (riskPercent / 100)
+
+    if bullishSession and strongLong and close > bodyMid
+        stopDistance = close - sessLow
+        positionSize = riskAmount / stopDistance
+        tp = close + (stopDistance * rr)
+
+        strategy.entry("Long", strategy.long, qty=positionSize)
+        strategy.exit("Long Exit", from_entry="Long", stop=sessLow, limit=tp)
+        tradedToday := true
+
+    if bearishSession and strongShort and close < bodyMid
+        stopDistance = sessHigh - close
+        positionSize = riskAmount / stopDistance
+        tp = close - (stopDistance * rr)
+
+        strategy.entry("Short", strategy.short, qty=positionSize)
+        strategy.exit("Short Exit", from_entry="Short", stop=sessHigh, limit=tp)
+        tradedToday := true
+
+// ===== PLOTS =====
+plot(wickMid, "Wick 50%", color=color.orange, linewidth=2)
+plot(bodyMid, "Body 50%", color=color.green, linewidth=2)
+
+View in Pine Editor・91 lines
+Use on chart
+2
+307
+Minimum session range filter. This an indicator that will help you filter out session during London and NY session.

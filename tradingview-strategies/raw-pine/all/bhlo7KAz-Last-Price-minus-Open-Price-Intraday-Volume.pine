@@ -1,0 +1,54 @@
+//@version=5
+strategy(title="Lp-Op vol",shorttitle="LPV", max_bars_back = 5000,overlay=false,format=format.volume )
+
+//Resolutions
+
+Resn=input.timeframe(defval="",title="resolution")
+Resn1=input.timeframe(defval="D",title="resolution")
+
+//Intraday Open and Last Price and Last price- Open Price calculations.
+
+Last_Price=math.round_to_mintick(close)
+Open_Price = request.security(syminfo.tickerid ,Resn1,close[1],barmerge.gaps_off, barmerge.lookahead_on) 
+Op_Cl=math.round_to_mintick(Last_Price-Open_Price)
+
+
+//length from Intra Day Open Price 
+ 
+Nifnum= ta.change(Open_Price)
+Length_Intraday=int(math.max(1, nz(ta.barssince(Nifnum)) + 1))
+
+//Input for Length for Volume 
+
+Length_Vol=input(defval=20, title="L for Vol")
+
+// Last Price- Open price Volume, Average Intraday Last price-Open Price Volume 
+//and  Volume Bars  calculations.
+
+Op_Cl_Vol=(Op_Cl*volume)
+Avg_Vol_Opcl=ta.sma(Op_Cl_Vol,Length_Intraday)
+Vol_Bars=ta.sma(volume,Length_Vol)
+
+//Plots 
+plot(Op_Cl_Vol,color=Op_Cl_Vol>0 ? color.green:color.red,title="OPCLV")
+plot(Avg_Vol_Opcl, title="Avg Vol", color=color.fuchsia)
+plot(Vol_Bars, title="Vol Bars", color=color.yellow)
+
+//Strategy parameters 
+
+startst=timestamp(2015,10,1)
+
+strategy.entry("lo",strategy.long,when= ta.crossover(Op_Cl_Vol,Avg_Vol_Opcl) and ta.crossover(volume,Vol_Bars))
+strategy.entry("sh",strategy.short,when=ta.crossunder(Op_Cl_Vol,Avg_Vol_Opcl)and ta.crossunder(volume,Vol_Bars ))
+
+View in Pine Editor・45 lines
+Use on chart
+8
+0
+5 494
+Last Price minus Open Price Intraday Volume
+
+Change in price from day Open price to Last Price indicate the stock price movement. Last Price minus Open Price Intraday Volume indicator is framed on volume change during change in price from day Open price to Last Price. It takes into account the average intraday volume based on intraday length of bars and actual volume attributed to change in price from day Open Price to Last Price. The indicator reflects the change in trend .By analyzing the position of price on the basis of average change in volume during intraday with that of volume attributed to change in price from day open Price to Last price one may decide upon the course of trade.
+
+DISCLAIMER: For educational and entertainment purposes only. Nothing in this content should be interpreted as financial advice or a recommendation to buy or sell any sort of security or investment including all types of crypto.
+

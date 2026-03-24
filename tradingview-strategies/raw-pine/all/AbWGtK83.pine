@@ -1,0 +1,186 @@
+//@version=5
+strategy("CCI and MACD Auto Trading Strategy with Risk/Reward", overlay=true)
+
+// CCI settings
+length = input.int(14, minval=1, title="CCI Length")
+cciSrc = input(hlc3, title="CCI Source")
+cciMa = ta.sma(cciSrc, length)
+cci = (cciSrc - cciMa) / (0.015 * ta.dev(cciSrc, length))
+
+// MACD settings
+fast_length = input.int(title="MACD Fast Length", defval=12)
+slow_length = input.int(title="MACD Slow Length", defval=26)
+macdSrc = input(close, title="MACD Source")
+signal_length = input.int(title="MACD Signal Smoothing", minval=1, maxval=50, defval=9)
+sma_source = input.string(title="MACD Oscillator MA Type", defval="EMA", options=["SMA", "EMA"])
+sma_signal = input.string(title="MACD Signal Line MA Type", defval="EMA", options=["SMA", "EMA"])
+
+// MACD calculations
+fast_ma = (sma_source == "SMA") ? ta.sma(macdSrc, fast_length) : ta.ema(macdSrc, fast_length)
+slow_ma = (sma_source == "SMA") ? ta.sma(macdSrc, slow_length) : ta.ema(macdSrc, slow_length)
+macd = fast_ma - slow_ma
+signal = (sma_signal == "SMA") ? ta.sma(macd, signal_length) : ta.ema(macd, signal_length)
+hist = macd - signal
+
+// Detect recent lows and highs
+lookbackPeriod = input.int(10, title="Lookback Period")
+recentLow = ta.lowest(low, lookbackPeriod)
+recentHigh = ta.highest(high, lookbackPeriod)
+
+// Plot options
+showCCI = input.bool(false, title="Show CCI")
+showMACD = input.bool(false, title="Show MACD")
+showRecentLowHigh = input.bool(false, title="Show Recent Low/High")
+
+
+
+// Trading logic
+longCondition = (hist > 0) and (ta.crossover(cci, -100))
+shortCondition = (hist < 0) and (ta.crossunder(cci, 100))
+
+// Risk/Reward ratio
+riskRewardRatio = 1.5
+
+if (longCondition) 
+    var float stopLossPrice = na
+    var float takeProfitPrice = na
+    stopLossPrice := recentLow
+    takeProfitPrice := close + (close - stopLossPrice) * riskRewardRatio
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Take Profit/Stop Loss", "Long", stop=stopLossPrice, limit=takeProfitPrice)
+
+if (shortCondition) 
+    var float stopLossPrice = na
+    var float takeProfitPrice = na
+    stopLossPrice := recentHigh
+    takeProfitPrice := close - (stopLossPrice - close) * riskRewardRatio
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Take Profit/Stop Loss", "Short", stop=stopLossPrice, limit=takeProfitPrice)
+
+View in Pine Editor・61 lines
+Use on chart
+2
+3
+3
+6 982
+Jun 28, 2024
+Overview:
+This strategy combines the Commodity Channel Index (CCI) and the Moving Average Convergence Divergence (MACD) indicators to automate trading decisions. It dynamically sets stop-loss and take-profit levels based on recent lows and highs, ensuring a risk/reward ratio of 1:1.5. This script aims to leverage trend and momentum signals while maintaining effective risk management.
+
+Originality and Usefulness:
+This script is not just a simple mashup of CCI and MACD indicators; it incorporates dynamic risk management by setting stop-loss and take-profit levels based on recent price action. This approach helps traders to:
+
+・Identify potential trend reversals using the combination of CCI and MACD signals.
+・Manage trades effectively by setting realistic stop-loss and take-profit levels based on recent market data.
+・Maintain a balanced risk/reward ratio, which is essential for sustainable trading.
+
+Indicators Used:
+・CCI (Commodity Channel Index):
+　・Measures the deviation of the price from its average over a specified period, typically ranging from -100 to +100.
+　・Helps identify overbought and oversold conditions.
+
+・MACD (Moving Average Convergence Divergence):
+　・Utilizes the difference between short-term and long-term moving averages to indicate trend strength and direction.
+　・Provides momentum signals that can be used for timing entries and exits.
+
+How It Works:
+Entry Conditions:
+
+Long Entry:
+　・The MACD histogram is above zero.
+　・The CCI crosses above the -100 line.
+
+Short Entry:
+　・The MACD histogram is below zero.
+　・The CCI crosses below the +100 line.
+
+Exit Conditions:
+
+Long Positions:
+　・The stop-loss is set at the recent low.
+　・The take-profit is set at 1.5 times the distance between the entry price and the stop-loss.
+
+Short Positions:
+　・The stop-loss is set at the recent high.
+　・The take-profit is set at 1.5 times the distance between the entry price and the stop-loss.
+
+Risk Management:
+
+・The script dynamically adjusts stop-loss and take-profit levels based on recent market data, ensuring that the risk/reward ratio is maintained at 1:1.5.
+　・This approach helps in managing the risk effectively while aiming for consistent profits.
+
+Strategy Properties:
+　・Account Size: Configured for a realistic account size suitable for the average trader.
+　・Commission and Slippage: Includes settings for realistic commission and slippage to reflect real market conditions.
+　・Risk per Trade: Designed to risk no more than 5-10% of equity per trade, aligning with sustainable trading practices.
+　・Backtesting Results: Configured to generate a sufficient sample size (ideally more than 100 trades) for reliable backtesting results.
+
+Revised Backtesting Settings
+Ensure that your backtesting settings are realistic:
+
+・Account Size: Set a realistic initial capital suitable for the average trader.
+・Commission and Slippage: Include realistic commission fees and slippage.
+・Risk Management: Ensure that each trade risks no more than 5-10% of the account equity.
+・Sufficient Sample Size: Choose a dataset that will generate more than 100 trades to provide a 　　　　　　robust sample size.
+Jun 30, 2024
+Release Notes
+Overview:
+This strategy combines the Commodity Channel Index (CCI) and the Moving Average Convergence Divergence (MACD) indicators to automate trading decisions. It dynamically sets stop-loss and take-profit levels based on recent lows and highs, ensuring a risk/reward ratio of 1:1.5. This script aims to leverage trend and momentum signals while maintaining effective risk management.
+
+Originality and Usefulness:
+This script is not just a simple mashup of CCI and MACD indicators; it incorporates dynamic risk management by setting stop-loss and take-profit levels based on recent price action. This approach helps traders to:
+
+・Identify potential trend reversals using the combination of CCI and MACD signals.
+・Manage trades effectively by setting realistic stop-loss and take-profit levels based on recent market data.
+・Maintain a balanced risk/reward ratio, which is essential for sustainable trading.
+
+Indicators Used:
+・CCI (Commodity Channel Index):
+　・Measures the deviation of the price from its average over a specified period, typically ranging from -100 to +100.
+　・Helps identify overbought and oversold conditions.
+
+・MACD (Moving Average Convergence Divergence):
+　・Utilizes the difference between short-term and long-term moving averages to indicate trend strength and direction.
+　・Provides momentum signals that can be used for timing entries and exits.
+
+How It Works:
+Entry Conditions:
+
+Long Entry:
+　・The MACD histogram is above zero.
+　・The CCI crosses above the -100 line.
+
+Short Entry:
+　・The MACD histogram is below zero.
+　・The CCI crosses below the +100 line.
+
+Exit Conditions:
+
+Long Positions:
+　・The stop-loss is set at the recent low.
+　・The take-profit is set at 1.5 times the distance between the entry price and the stop-loss.
+
+Short Positions:
+　・The stop-loss is set at the recent high.
+　・The take-profit is set at 1.5 times the distance between the entry price and the stop-loss.
+
+Risk Management:
+
+・The script dynamically adjusts stop-loss and take-profit levels based on recent market data, ensuring that the risk/reward ratio is maintained at 1:1.5.
+　・This approach helps in managing the risk effectively while aiming for consistent profits.
+
+Strategy Properties:
+　・Account Size: Configured for a realistic account size suitable for the average trader.
+　・Commission and Slippage: Includes settings for realistic commission and slippage to reflect real market conditions.
+　・Risk per Trade: Designed to risk no more than 5-10% of equity per trade, aligning with sustainable trading practices.
+　・Backtesting Results: Configured to generate a sufficient sample size (ideally more than 100 trades) for reliable backtesting results.
+
+Revised Backtesting Settings
+Ensure that your backtesting settings are realistic:
+
+・Account Size: 100万yen
+・Commission and Slippage: 0.03銭と1スリッページ
+・Risk Management: 証拠金の10％
+・Sufficient Sample Size: 190回のバックテストトレード実行
+
+

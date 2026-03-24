@@ -1,0 +1,52 @@
+//@version=3
+strategy("GBP combine", overlay=true, initial_capital=100, pyramiding = 3, default_qty_value = 1000)
+length = input( 8 )
+overSold = input( 23 )
+overBought = input( 75 )
+price = close
+overSoldP = input( 35 )
+overBoughtP = input (78)
+ProfitL = input(406)
+LossL = input(189)
+ProfitS = input(370)
+LossS = input(152)
+BarssinceL = input(16)
+BarssinceS = input(26)
+
+vrsi = rsi(price, length)
+
+longCondition() => crossunder(vrsi, overSold)
+closeLPLCondition() => crossover(vrsi, overBoughtP)
+closeLCondition() => barssince(longCondition())>BarssinceL
+
+shortCondition() => crossover (vrsi, overBought)
+closeLPSCondition() => crossunder(vrsi, overSoldP)
+closeSCondition() => barssince(shortCondition())>BarssinceS
+
+if (longCondition())
+    strategy.entry("Long", strategy.long)
+    strategy.exit ("Exit", "Long", profit=ProfitL,loss=LossL)
+strategy.close("Long", when = closeLPLCondition() or closeLCondition())
+
+if (shortCondition())
+    strategy.entry("Short", strategy.short)
+    strategy.exit ("Exit", "Short", profit=ProfitS,loss=LossS)
+strategy.close("Short", when = closeLPSCondition() or closeSCondition())
+
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・37 lines
+Use on chart
+2
+8
+1 486
+1. stop trading in one side market
+- use what kind of TA to decide one side market?
+2. TA might react differently in different session
+- inactive session need to RSI 60-40?
+3. need to stop trading once daily target is complete?
+- what is the daily target?
+4. How to loss less?
+- (1)
+- develop more restriction in strategy?

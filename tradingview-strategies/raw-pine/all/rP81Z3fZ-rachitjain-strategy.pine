@@ -1,0 +1,25 @@
+//@version=2
+strategy("rachitjain strategy", overlay=true)
+
+reflines= input(50)
+crosslines= input(15)
+refhigh=ema(high,reflines)
+reflow=ema(low,reflines)
+refcross=ema(close,crosslines)
+
+if (refcross>reflow and refcross>refhigh)
+    strategy.entry("Buy", strategy.long, comment="Buy")
+
+if (refcross<refhigh and refcross<reflow)
+    strategy.entry("Sell", strategy.short, comment="Sell")
+
+plot(reflow, title="low ema", color=red, linewidth=1)
+plot(refhigh, title="high ema", color=green, linewidth=1)
+plot(refcross, title="cross ema", color=orange, linewidth=1)
+
+View in Pine Editor・18 lines
+Use on chart
+3
+8
+1 640
+EMA 15 Crosses over or under 50 EMA

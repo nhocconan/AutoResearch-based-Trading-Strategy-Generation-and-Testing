@@ -1,0 +1,81 @@
+//@version=5
+strategy("BTCUSD Momentum After Abnormal Days", overlay=false, initial_capital=50000, slippage=1, commission_type=strategy.commission.cash_per_contract, commission_value=0.001)
+
+// === Inputs ===
+n_length = input.int(5, title="Lookback Period", minval=1)  // Period for mean and standard deviation
+k_factor = input.float(1.6, title="Abnormal Return Threshold (k)", step=0.1)  // Multiplier for standard deviation
+capital_allocation = input.float(1000, title="Capital per Trade", step=100)  // Capital allocation per trade
+
+// === Calculations ===
+// Daily return: (Close - Open) / Open
+day_return = (close - open) / open * 100
+
+// Mean and standard deviation of daily returns
+mean_return = ta.sma(day_return, n_length)
+std_dev_return = ta.stdev(day_return, n_length)
+
+// Abnormal return thresholds
+upper_threshold = mean_return + k_factor * std_dev_return
+lower_threshold = mean_return - k_factor * std_dev_return
+
+// Identification of abnormal days
+is_abnormal_positive = day_return > upper_threshold
+is_abnormal_negative = day_return < lower_threshold
+
+// Momentum strategy: Trade in the direction of the abnormal day
+if (is_abnormal_positive)
+    strategy.entry("Long", strategy.long, qty=capital_allocation / close, comment="Abnormal Positive Day")
+if (is_abnormal_negative)
+    strategy.entry("Short", strategy.short, qty=capital_allocation / close, comment="Abnormal Negative Day")
+
+// Close positions at the end of the day
+if (hour == 23 and minute == 59)
+    strategy.close_all(comment="End of Day Closure")
+
+// === Visualization ===
+plot(mean_return, color=color.blue, title="Mean Return")
+plot(upper_threshold, color=color.green, title="Upper Threshold", linewidth=1)
+plot(lower_threshold, color=color.red, title="Lower Threshold", linewidth=1)
+
+View in Pine Editor・38 lines
+Use on chart
+5
+7
+1 774
+This indicator identifies abnormal days in the Bitcoin market (BTCUSD) based on daily returns exceeding specific thresholds defined by a statistical approach. It is inspired by the findings of Caporale and Plastun (2020), who analyzed the cryptocurrency market's inefficiencies and identified exploitable patterns, particularly around abnormal returns.
+
+Key Concept:
+
+Abnormal Days:
+
+Days where the daily return significantly deviates (positively or negatively) from the historical average.
+
+Positive abnormal days: Returns exceed the mean return plus k times the standard deviation.
+
+Negative abnormal days: Returns fall below the mean return minus k times the standard deviation.
+
+Momentum Effect:
+
+As described in the academic paper, on abnormal days, prices tend to move in the direction of the abnormal return until the end of the trading day, creating momentum effects. This can be leveraged by traders for profit opportunities.
+
+How It Works:
+
+Calculation:
+
+The script calculates the daily return as the percentage difference between the open and close prices. It then derives the mean and standard deviation of returns over a configurable lookback period.
+
+Thresholds:
+
+The script dynamically computes upper and lower thresholds for abnormal days using the mean and standard deviation. Days exceeding these thresholds are flagged as abnormal.
+
+Visualization:
+
+The mean return and thresholds are plotted as dynamic lines.
+
+Abnormal days are visually highlighted with transparent green (positive) or red (negative) backgrounds on the chart.
+
+References:
+
+This indicator is based on the methodology discussed in "Momentum Effects in the Cryptocurrency Market After One-Day Abnormal Returns" by Caporale and Plastun (2020). Their research demonstrates that hourly returns during abnormal days exhibit a strong momentum effect, moving in the same direction as the abnormal return. This behavior contradicts the efficient market hypothesis and suggests profitable trading opportunities.
+
+"Prices tend to move in the direction of abnormal returns till the end of the day, which implies the existence of a momentum effect on that day giving rise to exploitable profit opportunities" (Caporale & Plastun, 2020).

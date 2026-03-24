@@ -1,0 +1,23 @@
+//@version=4
+strategy("Buy_Only", overlay=false)
+
+H = highest(open,31)
+L = lowest(open,31)
+
+HM = mom(high,10)
+HL = mom(low,20)
+
+
+longCondition = crossover(HL, HM) and low < H
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+    strategy.exit("My Long Entry Id", profit=1000,loss=500,trail_points=50)
+
+View in Pine Editor・14 lines
+Use on chart
+1
+8
+3
+1
+2 629
+Buy_Only

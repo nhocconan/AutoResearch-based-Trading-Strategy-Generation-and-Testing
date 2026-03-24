@@ -1,0 +1,40 @@
+//@version=2
+strategy("Trend + EMA", overlay=true, initial_capital=10000, currency=currency.USD, pyramiding=0)
+
+tim=input("180", title="Period for trend")
+ema_period=input(180, type=integer, title="EMA period")
+
+opn = security(tickerid, tim, open)
+cls = security(tickerid, tim, close)
+
+emaline = ema(close, ema_period)
+
+plot(opn, color=red)
+plot(cls, color=green)
+plot(emaline, color=black)
+
+if (crossover(low, emaline))
+    strategy.entry("long", strategy.long)
+
+if (crossover(cls, opn) and emaline < opn and strategy.position_size == 0)
+    strategy.entry("long", strategy.long)
+
+if (crossunder(cls, opn) and strategy.position_size > 0)
+    strategy.close_all()
+
+if (crossunder(high, emaline) and high < emaline)
+    strategy.entry("short", strategy.short)
+
+if (crossunder(cls, opn) and emaline > opn and strategy.position_size == 0)
+    strategy.entry("short", strategy.short)
+
+if (crossover(cls, opn) and strategy.position_size < 0)
+    strategy.close_all()
+
+View in Pine Editor・32 lines
+Use on chart
+5
+9
+3
+2 763
+Just my first experiment

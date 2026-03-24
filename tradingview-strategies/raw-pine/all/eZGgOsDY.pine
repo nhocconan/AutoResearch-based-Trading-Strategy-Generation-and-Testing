@@ -1,0 +1,134 @@
+//@version=5
+strategy("2 Dip/Tepe + Destek/Direnç + Tek Sinyal Stratejisi", overlay=true, margin_long=100, margin_short=100, initial_capital=100000)
+
+// ———————————————————————————
+// Pivot Ayarları
+// ———————————————————————————
+left  = input.int(5, "Sol Pivot")
+right = input.int(5, "Sağ Pivot")
+
+pivotLow  = ta.pivotlow(low, left, right)
+pivotHigh = ta.pivothigh(high, left, right)
+
+// ———————————————————————————
+// Son iki dip (HL için) ve son iki tepe (LH için)
+// ———————————————————————————
+var float lastLow1  = na
+var float lastLow2  = na
+var float lastHigh1 = na
+var float lastHigh2 = na
+
+if not na(pivotLow)
+    lastLow2 := lastLow1
+    lastLow1 := pivotLow
+
+if not na(pivotHigh)
+    lastHigh2 := lastHigh1
+    lastHigh1 := pivotHigh
+
+// Koşulların var olması
+validLows  = not na(lastLow1)  and not na(lastLow2)
+validHighs = not na(lastHigh1) and not na(lastHigh2)
+
+// Yükselen Dip (HL) → LONG setup
+isHL = validLows and lastLow1 > lastLow2
+
+// Alçalan Tepe (LH) → SHORT setup
+isLH = validHighs and lastHigh1 < lastHigh2
+
+// ———————————————————————————
+// Destek & Direnç çizgileri
+// ———————————————————————————
+var float resistance = na
+var float support    = na
+
+if not na(pivotHigh)
+    resistance := pivotHigh
+
+if not na(pivotLow)
+    support := pivotLow
+
+plot(resistance, "Direnç", color=color.red, linewidth=2)
+plot(support, "Destek", color=color.green, linewidth=2)
+
+// ———————————————————————————
+// SINYAL TEKRARLAMASINI ENGELLEME
+// ———————————————————————————
+var bool longTriggered  = false
+var bool shortTriggered = false
+
+// LONG sinyali mantığı
+longSignal = isHL and not na(resistance) and close > resistance and not longTriggered
+
+// SHORT sinyali mantığı
+shortSignal = isLH and not na(support) and close < support and not shortTriggered
+
+// Sinyal geldiğinde sadece 1 kez tetikle
+if longSignal
+    strategy.entry("LONG", strategy.long)
+    longTriggered := true
+    shortTriggered := false   // yön değişince reset
+
+if shortSignal
+    strategy.entry("SHORT", strategy.short)
+    shortTriggered := true
+    longTriggered := false    // yön değişince reset
+
+// ———————————————————————————
+// Opsiyonel Stop-Loss / Take-Profit
+// ———————————————————————————
+slPct = input.float(3.0, "Stop-Loss %", step=0.1)
+tpPct = input.float(6.0, "Take-Profit %", step=0.1)
+
+if strategy.position_size > 0
+    strategy.exit("Exit Long", from_entry="LONG", stop = strategy.position_avg_price * (1 - slPct/100), limit = strategy.position_avg_price * (1 + tpPct/100))
+
+if strategy.position_size < 0
+    strategy.exit("Exit Short", from_entry="SHORT", stop = strategy.position_avg_price * (1 + slPct/100), limit = strategy.position_avg_price * (1 - tpPct/100))
+
+// ———————————————————————————
+// Görsel işaretler
+// ———————————————————————————
+plotshape(longSignal,  title="Long Sinyal",  color=color.green, style=shape.labelup,   text="LONG")
+plotshape(shortSignal, title="Short Sinyal", color=color.red,   style=shape.labeldown, text="SHORT")
+
+View in Pine Editor・93 lines
+Use on chart
+3
+8
+1 219
+⭐ A Brief Summary of What the Strategy Does
+🎯 1) Market analysis is being released (bottom-top analysis)
+
+It automatically finds pivot bottoms and pivot tops on the strategic chart. Then:
+
+If the bottoms are rising (HL – High Low): the trend is upward
+
+If the tops are falling (LH – Lower High): the trend is downward
+
+it interprets this.
+
+🎯 2) Support and resistance lines are formed
+
+Last pivot top = resistance line
+
+Last pivot bottom = support line
+
+These lines are automatically drawn on the chart.
+
+🎯 3) Breakout is expected according to the trend structure
+For LONG:
+
+The last two bottoms will be rising bottoms
+
+The price will rise above the last resistance line
+
+This gives a single LONG signal.
+
+For SHORT:
+
+The last two peaks will be falling peaks
+
+The price will fall below the support line
+
+This gives a single SHORT signal.

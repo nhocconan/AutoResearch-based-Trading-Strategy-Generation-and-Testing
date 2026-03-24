@@ -1,0 +1,46 @@
+//@version=3
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 06/11/2018
+//
+//    This is a bullish reversal pattern formed by two candlesticks. Following a downtrend, 
+//    the first candlestick is a down candlestick which is followed by an up candlestick 
+//    which has a long real body that engulfs or contains the real body of the prior bar. 
+//    The Engulfing pattern is the reverse of the Harami pattern. 
+//
+// WARNING:
+// - For purpose educate only
+// - This script to change bars colors.
+////////////////////////////////////////////////////////////
+
+strategy(title = "Bullish Engulfing Backtest", overlay = true)
+input_takeprofit = input(40, title="Take Profit pip")
+input_stoploss = input(20, title="Stop Loss pip")
+input_minsizebody = input(2, title="Min. Size Body pip")
+barcolor(open[1] > close[1] ? close > open ? close >= open[1] ? close[1] >= open ? close - open > open[1] - close[1] ? yellow :na :na : na : na : na)
+pos = 0.0
+barcolor(nz(pos[1], 0) == -1 ? red: nz(pos[1], 0) == 1 ? green : blue ) 
+posprice = 0.0
+posprice := abs(close[1] - open[1]) >= input_minsizebody? open[1] > close[1] ? close > open ? close >= open[1] ? close[1] >= open ? close - open > open[1] - close[1] ? close :nz(posprice[1], 0) :nz(posprice[1], 0) : nz(posprice[1], 0) : nz(posprice[1], 0) : nz(posprice[1], 0): nz(posprice[1], 0)
+pos := iff(posprice > 0, 1, 0)
+if (pos == 0) 
+    strategy.close_all()
+if (pos == 1)
+    strategy.entry("Long", strategy.long)               
+posprice := iff(low <= posprice - input_takeprofit and posprice > 0, 0 ,  nz(posprice, 0))
+posprice := iff(high >= posprice + input_stoploss and posprice > 0, 0 ,  nz(posprice, 0))
+
+View in Pine Editor・30 lines
+Use on chart
+4
+8
+9
+1
+19 135
+This is a bullish reversal pattern formed by two candlesticks. Following a downtrend,
+the first candlestick is a down candlestick which is followed by an up candlestick
+which has a long real body that engulfs or contains the real body of the prior bar.
+The Engulfing pattern is the reverse of the Harami pattern.
+
+WARNING:
+- For purpose educate only
+- This script to change bars colors.

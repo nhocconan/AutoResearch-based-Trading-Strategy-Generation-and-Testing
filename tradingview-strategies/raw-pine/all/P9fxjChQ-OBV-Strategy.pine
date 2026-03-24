@@ -1,0 +1,26 @@
+//@version=3
+strategy("OBV Strategy", overlay=true)
+
+src = close
+len = input(9, minval=1, title="Length")
+obv = cum(change(src) > 0 ? volume : change(src) < 0 ? -volume : 0*volume)
+ema = ema(obv, len)
+
+
+longCondition = crossover(obv, ema)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = crossunder(obv, ema)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・17 lines
+Use on chart
+9
+0
+3 189
+A simple strategy to give buy/sell signals based on OBV and EMA crossover/crossunder.
+When OBV crossunder the EMA it gives a sell signal. When OBV crossover EMA it gives a buy signal.
+
+You can adjust the length of the EMA . By default it is set to 9

@@ -1,0 +1,161 @@
+//@version=6
+strategy(
+     title = "BTC Scalping 3m | Supertrend + MACD Squeeze (NY) [v6 FINAL]",
+     overlay = true,
+     calc_on_every_tick = false,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100
+)
+
+// =====================
+// INPUTS
+// =====================
+st_len  = input.int(10, "Supertrend Length")
+st_mult = input.float(2.0, "Supertrend Multiplier")
+
+// =====================
+// NEW YORK SESSION (13:00–21:00 UTC)
+// =====================
+ny_session = not na(time(timeframe.period, "1300-2100", "UTC"))
+
+// =====================
+// SUPERTREND (3m EXECUTION)
+// =====================
+[st_3m, st_dir_3m] = ta.supertrend(st_mult, st_len)
+
+// =====================
+// SUPERTREND (15m BIAS)
+// =====================
+[st_15m, st_dir_15m] = request.security(
+     syminfo.tickerid,
+     "15",
+     ta.supertrend(st_mult, st_len)
+)
+
+// =====================
+// MACD SQUEEZE (LazyBear-style)
+// =====================
+
+// Bollinger Bands
+bb_len  = 20
+bb_mult = 2.0
+basis   = ta.sma(close, bb_len)
+dev     = bb_mult * ta.stdev(close, bb_len)
+upperBB = basis + dev
+lowerBB = basis - dev
+
+// Keltner Channels
+kc_len  = 20
+kc_mult = 1.5
+maKC    = ta.sma(close, kc_len)
+rangeKC = ta.sma(ta.tr(true), kc_len)
+upperKC = maKC + kc_mult * rangeKC
+lowerKC = maKC - kc_mult * rangeKC
+
+// Squeeze state
+squeeze_on  = lowerBB > lowerKC and upperBB < upperKC
+squeeze_off = lowerBB < lowerKC and upperBB > upperKC
+
+// RED → GREEN transition
+squeeze_release = squeeze_on[1] and squeeze_off
+
+// MACD Histogram
+[macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+
+// =====================
+// LONG ENTRY CONDITIONS (3m)
+// =====================
+long_condition =
+     ny_session and                     // NY only
+     st_dir_15m == 1 and                // 15m Supertrend GREEN
+     squeeze_release and                // Squeeze ON → OFF
+     hist > 0 and hist > hist[1] and    // Momentum expanding
+     close > st_3m                      // Above execution Supertrend
+
+// =====================
+// EXECUTE ENTRY
+// =====================
+if long_condition
+    strategy.entry("LONG", strategy.long)
+
+// =====================
+// RISK, TP, SL (FIXED)
+// =====================
+entry_price = strategy.position_avg_price
+risk        = entry_price - st_3m
+tp_price    = entry_price + 0.5 * risk
+
+strategy.exit(
+     id = "TP/SL",
+     from_entry = "LONG",
+     stop  = st_3m,
+     limit = tp_price
+)
+
+// =====================
+// HARD EXIT CONDITIONS (SAFE)
+// =====================
+exit_condition =
+     close < st_3m or       // Close below Supertrend
+     st_dir_3m == -1 or     // Supertrend flip
+     hist < 0               // Momentum invalidation
+
+if strategy.position_size > 0 and exit_condition
+    strategy.close("LONG")
+
+// =====================
+// PLOTS
+// =====================
+plot(st_3m,
+     title = "Supertrend 3m",
+     color = st_dir_3m == 1 ? color.green : color.red,
+     linewidth = 2)
+
+View in Pine Editor・112 lines
+Use on chart
+9
+6
+1 970
+BTC 3-Minute Scalping Strategy
+
+
+Supertrend Bias + MACD Squeeze (New York Session)
+
+
+This is a fully mechanical BTC scalping strategy designed to capture short momentum bursts that occur when volatility expands in the direction of the higher-timeframe trend.
+The strategy combines trend confirmation, volatility compression/expansion, and strict session filtering to reduce noise and improve consistency.
+How It Works
+Trend Bias
+Uses a 15-minute Supertrend to define market direction.
+Trades are taken only in the direction of the higher-timeframe trend.
+Counter-trend signals are ignored.
+Timing & Entry
+Executes on the 3-minute chart.
+Waits for volatility compression using a LazyBear-style MACD Squeeze.
+Enters only when the squeeze releases and momentum turns positive.
+Entry occurs on candle close above the execution-timeframe Supertrend.
+Session Filter
+Trades only during the New York session (13:00–21:00 UTC).
+This avoids low-liquidity periods and reduces false breakouts.
+Risk & Exits
+Dynamic stop-loss placed at the execution-timeframe Supertrend.
+Risk is calculated using the actual filled entry price for accurate R-based exits.
+Primary profit target is 0.5R, optimized for scalping.
+Positions are exited immediately if:
+Price closes against Supertrend
+Supertrend flips direction
+Momentum (MACD histogram) turns negative
+Trades are typically short-lived (1–3 candles), keeping exposure minimal.
+Key Characteristics
+Non-repainting logic
+Fully rule-based (no discretion)
+High win-rate, low-RR scalping profile
+Designed for BTC futures/perpetuals
+Optimized for New York session volatility
+Usage Notes
+Run on BTC 3-minute charts
+Best results during active NY hours
+Performance will vary by exchange, fees, and slippage
+This strategy is intended for education and testing, not financial advice
+Summary
+This strategy focuses on trading volatility expansion aligned with trend, using Supertrend for structure and MACD Squeeze for timing. By restricting trades to high-liquidity hours and enforcing strict exits, it aims for consistent, repeatable scalps rather than large directional bets.

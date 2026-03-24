@@ -1,0 +1,42 @@
+//@version=2
+strategy("BarUpDn time limited", overlay=true, pyramiding=1, default_qty_type = strategy.fixed, default_qty_value = 1 )
+
+//input boxes for the limit date
+yearLimit = input(2016,title="year") 
+monthLimit = input(9, title="month")
+dayLimit = input(1, title="day")
+
+//function that checks if the current date is more recent than the limit
+dateOk(yl,ml,dl) =>
+    ok = timestamp(yl,ml,dl,0,1) < time
+    
+checkDate = dateOk(yearLimit,monthLimit,dayLimit)
+conditionUp = close > open ? true : false
+conditionDown = close < open ? true : false
+if ( checkDate  )
+    strategy.entry("BarUp", strategy.long, when = conditionUp)
+    strategy.entry("BarDn", strategy.short, when = conditionDown)
+
+View in Pine Editor・18 lines
+Use on chart
+1
+2
+6
+7
+19 203
+This simple strat fires up on green bars, down on red bars. cannot get any simpler. So, it's a good example to check how returns are calculated.
+
+First, the internal firing mechanism for the strategy.entry function is something hardcore. As result, the entry points can be confusing, and seem to appear in a wrong bar (as the 2nd and 3rd signals are good examples), but i'll put that aside to keep it simple. And, because i don't yet get it myself ;)
+
+The example is simple, so that numbers can be followed easy. Chart in BTC/USD, so USD is the "base" currency used by strat to calculate. A contract/unit is the value of 1 unit in base currency. 1 Apple share is 600$, 1 bitcoin is 600$, 1 oz gold is 1330 bucks. So, here in each bar, the value of 1 contract is the value of the BTC in USD. simple as that.
+
+The strat properties, can be passed as input fields (line 2) or accessed/changed in the right click->properties pop-up. To make it easier, initial capital is 1000 bucks, and "order size" is 1 contract. This means that the strat will open a position of 1 BTC when it fires. Value "Initial capital" makes no difference at all, at least with these choices. It's just for show. Try to put 1$ and 1 contract, the strat will still trade anyway. It manages to trade 1 contract(or BTC) values at ~600$, with a single dollar. nice ;)
+
+Check the chart. see the little blue "BarUp +1" ? that's it, strat goes long 1 BTC. there's a little blue triangle on the bar, points to the value of entry.
+Then later, on second move, the "BarDn -2", the strat goes short 2BTC. 1BTC to close the long +1 more to open a short.
+The profit here is the difference between the value of the long opening and the long closing. The extra BTC (shorted) is part of the next position. Since this dumb strat just reverses the direction, there are always +2, -2 , +2.... 1 to close previous position, 1 to open another. At the strategy tester tab, the option "list of trades" shows in details each of the moves
+Checking each move and comparing what we see with the chart itself helps to achieve ilumination :)
+
+Bonus feature: as soon as you get it, try to increase the option "pyramiding" and see how the strat adds more contracts, and how it reverses the positions. sometimes it even makes sense!!!! :)
+
+

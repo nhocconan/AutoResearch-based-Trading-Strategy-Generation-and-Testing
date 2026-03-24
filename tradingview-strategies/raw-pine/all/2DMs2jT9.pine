@@ -1,0 +1,81 @@
+//@version=5
+strategy("Larry Connors 3 Day High/Low Strategy", overlay=true)
+
+// Definition of Moving Averages
+sma200 = ta.sma(close, 200)
+sma5 = ta.sma(close, 5)
+
+// Strategy Conditions
+condition1 = close > sma200                        // Condition 1: Close is above the 200-day moving average
+condition2 = close < sma5                          // Condition 2: Close is below the 5-day moving average
+
+// High and Low conditions for the last three days
+condition3 = high[2] < high[3] and low[2] < low[3] // Condition 3: Two days ago, both high and low were lower than the previous day
+condition4 = high[1] < high[2] and low[1] < low[2] // Condition 4: Yesterday, both high and low were lower than the day before
+condition5 = high < high[1] and low < low[1]       // Condition 5: Today, both high and low are lower than yesterday
+
+// Combined Buy Condition
+buyCondition = condition1 and condition2 and condition3 and condition4 and condition5
+
+// Sell Condition: Close is above the 5-day moving average
+sellCondition = close > sma5
+
+// Entry command to buy when the conditions are met
+if buyCondition
+    strategy.entry("Buy", strategy.long)
+
+// Exit command to sell when the sell condition is met
+if sellCondition
+    strategy.close("Buy")
+
+View in Pine Editor・29 lines
+Use on chart
+5
+8
+2 866
+The Larry Connors 3 Day High/Low Strategy is a short-term mean-reversion trading strategy that is designed to identify potential buying opportunities when a security is oversold. This strategy is based on the principles developed by Larry Connors, a well-known trading system developer and author.
+
+Key Strategy Elements:
+
+1. Trend Confirmation: The strategy first confirms that the security is in a long-term uptrend by ensuring that the closing price is above the 200-day moving average (condition1). This rule helps filter trades to align with the longer-term trend.
+
+2. Short-Term Pullback: The strategy looks for a short-term pullback by ensuring that the closing price is below the 5-day moving average (condition2). This identifies potential entry points when the price temporarily moves against the longer-term trend.
+
+3. Three Consecutive Lower Highs and Lows:
+• The high and low two days ago are lower than those of the day before (condition3).
+• The high and low yesterday are lower than those of two days ago (condition4).
+• Today’s high and low are lower than yesterday’s (condition5).
+
+These conditions are used to identify a sequence of declining highs and lows, signaling a short-term pullback or oversold condition in the context of an overall uptrend.
+
+4. Entry and Exit Signals:
+
+• Buy Signal: A buy order is triggered when all the above conditions are met (buyCondition).
+
+• Sell Signal: A sell order is executed when the closing price is above the 5-day moving average (sellCondition), indicating that the pullback might be ending.
+
+Risks of the Strategy
+
+1. Mean Reversion Failure: This strategy relies on the assumption that prices will revert to the mean after a short-term pullback. In strong downtrends or during market crashes, prices may continue to decline, leading to significant losses.
+
+2. Whipsaws and False Signals: The strategy may generate false signals, especially in choppy or sideways markets where the price does not follow a clear trend. This can lead to frequent small losses that can add up over time.
+
+3. Dependence on Historical Patterns: The strategy is based on historical price patterns, which do not always predict future price movements accurately. Sudden market news or economic changes can disrupt the pattern.
+
+4. Lack of Risk Management: The strategy as written does not include stop losses or position sizing rules, which can expose traders to larger-than-expected losses if conditions change rapidly.
+
+About Larry Connors
+
+Larry Connors is a renowned trader, author, and founder of Connors Research and TradingMarkets.com. He is widely recognized for his development of quantitative trading strategies, especially those focusing on short-term mean reversion techniques. Connors has authored several books on trading, including “Short-Term Trading Strategies That Work” and “Street Smarts,” co-authored with Linda Raschke. His strategies are known for their systematic, rules-based approach and have been widely used by traders and investment professionals.
+
+Connors’ research often emphasizes the importance of trading with the trend, managing risk, and using statistically validated techniques to improve trading outcomes. His work has been influential in the field of quantitative trading, providing accessible strategies for traders at various skill levels.
+
+References
+
+1. Connors, L., & Raschke, L. (1995). Street Smarts: High Probability Short-Term Trading Strategies.
+
+2. Connors, L. (2009). Short-Term Trading Strategies That Work.
+
+3. Fama, E. F., & French, K. R. (1988). Permanent and Temporary Components of Stock Prices. Journal of Political Economy, 96(2), 246-273.
+
+This strategy and its variations are popular among traders looking to capitalize on short-term price movements while aligning with longer-term trends. However, like all trading strategies, it requires rigorous backtesting and risk management to ensure its effectiveness under different market conditions.

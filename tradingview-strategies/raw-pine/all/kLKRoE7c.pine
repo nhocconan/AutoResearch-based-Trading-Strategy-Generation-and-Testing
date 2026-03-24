@@ -1,0 +1,76 @@
+//@version=5
+strategy("BTC V67 - TOTAL CONTROL SCREENER", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_value=0.08)
+
+// --- 1. PARAMÈTRES ---
+h_len = input.int(16, "Vitesse Hull")
+s_mult = input.float(3.2, "SuperTrend Factor")
+vol_m = input.float(0.95, "Volume Multiplier")
+
+// --- 2. MOTEUR HEIKIN-ASHI (POINTS BAS) ---
+var float ho = na
+hc = (open + high + low + close) / 4
+ho := na(ho[1]) ? (open + close) / 2 : (ho[1] + hc[1]) / 2
+ha_bull = hc > ho
+
+// --- 3. MOTEUR QUANT ---
+hma = ta.hma(close, h_len)
+ema200 = ta.ema(close, 200)
+[st_l, st_d] = ta.supertrend(s_mult, 10)
+rsi = ta.rsi(close, 14)
+cci = ta.cci(close, 20)
+
+// --- 4. LIGNE JAUNE POC (INSTITUTIONNELLE) ---
+v_max = ta.highest(volume, 25)
+var float poc = na
+if volume == v_max
+    poc := close
+plot(poc, "POC Jaune", color.new(color.yellow, 0), 2, plot.style_linebr)
+
+// --- 5. CARTOGRAPHIE HTF (RÉSISTANCES MENSUELLES) ---
+m_h = request.security(syminfo.tickerid, "M", ta.highest(high, 12), gaps=barmerge.gaps_on)
+m_l = request.security(syminfo.tickerid, "M", ta.lowest(low, 12), gaps=barmerge.gaps_on)
+plot(m_h, "Resist Mensuelle", color.new(color.red, 60), 1, plot.style_linebr)
+plot(m_l, "Supp Mensuel", color.new(color.green, 60), 1, plot.style_linebr)
+
+// --- 6. SIGNAUX LTF (DIAMANTS DAILY) ---
+l_h = request.security(syminfo.tickerid, "D", ta.hma(close, 20))
+l_rsi = request.security(syminfo.tickerid, "D", ta.rsi(close, 14))
+ltf_up = ta.crossover(close, l_h) and l_rsi > 50
+ltf_dn = ta.crossunder(close, l_h) and l_rsi < 45
+
+// --- 7. LOGIQUE DE SIGNAL DÉCOUPÉE (ANTI-ERREUR) ---
+cond_hull = ta.crossover(close, hma)
+cond_ha   = ha_bull
+cond_st   = close > st_l
+cond_vol  = volume >= ta.sma(volume, 10) * vol_m
+cond_struct = close > poc or close > ema200
+cond_momen  = rsi < 70 and cci > 0
+
+buy_signal = cond_hull and cond_ha and cond_st and cond_vol and cond_struct and cond_momen
+exit_signal = ta.crossunder(close, st_l) or (ta.crossunder(close, hma) and rsi > 75)
+
+// --- 8. EXÉCUTION ---
+if buy_signal
+    strategy.entry("L", strategy.long)
+if exit_signal
+    strategy.close("L")
+
+// --- 9. VISUELS ---
+plot(ema200, "EMA 200", color.new(color.white, 70), 2)
+plot(hma, "Hull", hma > hma[1] ? color.lime : color.red, 3)
+plot(st_l, "SuperTrend", st_d == -1 ? color.new(color.green, 80) : color.new(color.red, 80))
+
+plotshape(ltf_up, "LTF UP", shape.diamond, location.top, color.yellow, size=size.tiny)
+plotshape(ltf_dn, "LTF DOWN", shape.diamond, location.top, color.orange, size=size.tiny)
+plotshape(buy_signal, "BUY", shape.labelup, location.belowbar, color.green, text="BUY", textcolor=color.white)
+plotshape(exit_signal, "EXIT", shape.labeldown, location.abovebar, color=color.red, text="EXIT", textcolor=color.white)
+plotshape(true, "Flux HA", shape.circle, location.bottom, color=ha_bull ? color.yellow : color.red, size=size.tiny)
+
+// --- 10. CONNEXION SCREENER 2.0 (FORFAIT ESSENTIAL) ---
+// Filtrez sur cette
+
+View in Pine Editor・70 lines
+Use on chart
+3
+402
+au top avec prix au dessus de ligne jaune et achat vente par signal

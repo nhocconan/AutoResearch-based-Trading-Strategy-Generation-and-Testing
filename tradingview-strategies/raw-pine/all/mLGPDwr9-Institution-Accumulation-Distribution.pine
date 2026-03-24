@@ -1,0 +1,54 @@
+//@version=5
+strategy("Williams %R Forced Flip Strategy (-79/-21) + ATR(5) Trend Filter [No SL/TP]", overlay=true, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Inputs
+len    = input.int(60, "Williams %R Length", minval=1)
+buyLvl = input.float(-79.0, "Buy Level", minval=-100, maxval=0, step=0.1)
+sellLvl= input.float(-21.0, "Sell Level", minval=-100, maxval=0, step=0.1)
+atrLen = input.int(5, "ATR Length", minval=1)
+
+// Indicators
+wr  = ta.wpr(len)     // Williams %R (-100..0)
+atr = ta.atr(atrLen)  // ATR(5)
+atrUp   = atr > atr[1]  // rising ATR
+atrDown = atr < atr[1]  // falling ATR
+
+// Entry signals
+longSignal  = ta.crossover(wr, buyLvl)   and atrUp   // cross above -79 + ATR rising
+shortSignal = ta.crossunder(wr, sellLvl) and atrDown // cross below -21 + ATR falling
+
+// --- Forced Flip Logic ---
+// If long signal → close shorts and go long
+if (longSignal)
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+
+// If short signal → close longs and go short
+if (shortSignal)
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+
+// --- Plots ---
+// Williams %R
+plot(wr, title="Williams %R", color=color.blue)
+hline(buyLvl,  "Buy Trigger (-79)", color=color.green)
+hline(sellLvl, "Sell Trigger (-21)", color=color.red)
+hline(-50, "Midline (-50)", color=color.orange)
+
+// ATR + slope markers
+plot(atr, title="ATR(5)", color=color.purple)
+plotchar(atrUp,   title="ATR Rising", char="▲", location=location.bottom, color=color.green, size=size.tiny)
+plotchar(atrDown, title="ATR Falling", char="▼", location=location.bottom, color=color.red,   size=size.tiny)
+
+View in Pine Editor・41 lines
+Use on chart
+1
+4
+4
+3
+3 645
+Leveraging the Williams%R oscillator, the script has been optimized to pick out key turning point in the market specifically at Resistance (Overbought) or Support (Oversold)
+
+The algo has been programmed to print both buy and sell alerts at extremes/when conditions flip eg a long position will be closed simultaneously opening a short position above resistance.
+
+Best used as a scalping tool targeting 30m and below works well with currency pairs

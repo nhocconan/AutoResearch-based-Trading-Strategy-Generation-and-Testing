@@ -1,0 +1,147 @@
+//@version=4
+strategy("INTELLECT_city - World Cycle - ATH & ATL - Timeframe 1D and 1W - Logarithmic - Strategy.", shorttitle="INTELLECT_city - World Cycle - ATH & ATL - Timeframe 1D and 1W - Logarithmic - Strategy.", overlay=true)
+
+// Common Inputs
+resolution = input('D', type=input.string, title="Time interval")
+is_show_ma = input(true, type=input.bool, title="Show Moving Averages ?")
+is_alert = input(true, type=input.bool, title="Send an alert on Pi Cycle Top?")
+show_signals = input(true, type=input.bool, title="Show Signals?")
+
+// ATH Inputs
+len_ma_long_ath = input(350, minval=1, title="ATH Long Moving Average")
+len_ma_short_ath = input(111, minval=1, title="ATH Short Moving Average")
+
+// ATL Inputs
+len_ma_long_atl = input(471, minval=1, title="ATL Long Moving Average")
+len_ma_short_atl = input(150, minval=1, title="ATL Short Moving Average")
+
+// Calculations
+ma_long_ath = security(syminfo.tickerid, resolution, sma(close, len_ma_long_ath) * 2)
+ma_short_ath = security(syminfo.tickerid, resolution, sma(close, len_ma_short_ath))
+ma_long_atl = security(syminfo.tickerid, resolution, sma(close, len_ma_long_atl) * 0.745)
+ma_short_atl = security(syminfo.tickerid, resolution, ema(close, len_ma_short_atl))
+src = security(syminfo.tickerid, resolution, close)
+
+// ATH Logic
+PiCycleTop_ATH = crossunder(ma_long_ath, ma_short_ath)
+plot(is_show_ma ? ma_long_ath : na, color=color.blue, title="ATH Long MA")
+plot(is_show_ma ? ma_short_ath : na, color=color.blue, title="ATH Short MA")
+plotshape(show_signals and PiCycleTop_ATH, style=shape.diamond, size=size.normal, text="ATH LINE CROSSING IN A CYCLE \n Selling Accuracy \n SELL", color=color.blue, textcolor=color.blue, location=location.abovebar)
+alertcondition(condition=PiCycleTop_ATH, title="INTELLECT_city - ATH", message="SELL")
+bgcolor(PiCycleTop_ATH ? color.blue : na, transp=60)
+
+// Strategy for ATH
+if (PiCycleTop_ATH)
+    strategy.entry("Sell", strategy.short)
+    if (is_alert)
+        alert("INTELLECT_city World Cycle ATH - SELL", alert.freq_once_per_bar)
+
+// ATL Logic
+PiCycleTop_ATL = crossover(ma_long_atl, ma_short_atl)
+plot(is_show_ma ? ma_long_atl : na, color=color.green, title="ATL Long MA")
+plot(is_show_ma ? ma_short_atl : na, color=color.green, title="ATL Short MA")
+plotshape(show_signals and PiCycleTop_ATL, style=shape.diamond, size=size.normal, text="ATL CROSSING LINES IN A CYCLE \n Purchase Accuracy \n BUY", color=color.green, textcolor=color.green, location=location.belowbar)
+alertcondition(condition=PiCycleTop_ATL, title="INTELLECT_city - ATL", message="BUY")
+bgcolor(PiCycleTop_ATL ? color.green : na, transp=60)
+
+// Strategy for ATL
+if (PiCycleTop_ATL)
+    strategy.entry("Buy", strategy.long)
+    if (is_alert)
+        alert("INTELLECT_city World Cycle ATL - BUY", alert.freq_once_per_bar)
+
+View in Pine Editor・53 lines
+Use on chart
+2.1 K
+9
+30 834
+Jun 7, 2024
+Overview
+
+Indicators: Strategy !
+
+INTELLECT_city - World Cycle - ATH & ATL - Timeframe 1D and 1W - Logarithmic - Strategy - The Pi Cycle Top and Bottom Oscillator is an adaptation of the original Pi Cycle Top chart. It compares the 111-Day Moving Average circle and the 2 * 350-Day Moving Average circle of Bitcoin’s Price. These two moving averages were selected as 350 / 111 = 3.153; An approximation of the important mathematical number Pi.
+
+When the 111-Day Moving Average circle reaches the 2 * 350-Day Moving Average circle, it indicates that the market is becoming overheated. That is because the mid time frame momentum reference of the 111-Day Moving Average has caught up with the long timeframe momentum reference of the 2 * 350-Day Moving Average.
+
+Historically this has occurred within 3 days of the very top of each market cycle.
+
+When the 111 Day Moving Average circle falls back beneath the 2 * 350 Day Moving Average circle, it indicates that the market momentum of that cycle is significantly cooling down. The oscillator drops down into the lower green band shown where the 111 Day Moving Average is moving at a 75% discount relative to the 2 * 350 Day Moving Average.
+
+Historically, this has highlighted broad areas of bear market lows.
+
+
+
+IMPORTANT: You need to set a LOGARITHMIC graph. (The function is located at the bottom right of the screen)
+
+IMPORTANT: The INTELLECT_city indicator is made for a buy-sell strategy; there is also a signal indicator from INTELLECT_city
+
+IMPORTANT: The Chart shows all cycles, both buying and selling.
+
+IMPORTANT: Suitable timeframes are 1 daily (recommended) and 1 weekly
+
+
+
+
+-----------------------------
+Описание на русском:
+-----------------------------
+
+Обзор индикатора
+INTELLECT_city - World Cycle - ATH & ATL - Timeframe 1D and 1W - Logarithmic - Strategy - Логарифмический - Сигнал - Осциллятор вершины и основания цикла Пи представляет собой адаптацию оригинального графика вершины цикла Пи. Он сравнивает круг 111-дневной скользящей средней и круг 2 * 350-дневной скользящей средней цены Биткойна. Эти две скользящие средние были выбраны как 350/111 = 3,153; Приближение важного математического числа Пи.
+
+Когда круг 111-дневной скользящей средней достигает круга 2 * 350-дневной скользящей средней, это указывает на то, что рынок перегревается. Это происходит потому, что опорный моментум среднего временного интервала 111-дневной скользящей средней догнал опорный момент импульса длинного таймфрейма 2 * 350-дневной скользящей средней.
+
+Исторически это происходило в течение трех дней после вершины каждого рыночного цикла.
+
+Когда круг 111-дневной скользящей средней опускается ниже круга 2 * 350-дневной скользящей средней, это указывает на то, что рыночный импульс этого цикла значительно снижается. Осциллятор опускается в нижнюю зеленую полосу, показанную там, где 111-дневная скользящая средняя движется со скидкой 75% относительно 2 * 350-дневной скользящей средней.
+
+Исторически это высветило широкие области минимумов медвежьего рынка.
+
+
+ВАЖНО: Выставлять нужно ЛОГАРИФМИЧЕСКИЙ график. (Находиться функция с правой нижней части экрана)
+
+ВАЖНО: Индикатор INTELLECT_city сделан для стратегии покупок продаж, есть также и сигнальный от INTELLECT_сity
+
+ВАЖНО: На Графике видны все циклы, как на покупку так и на продажу.
+
+ВАЖНО: Подходящие таймфреймы 1 дневной (рекомендовано) и 1 недельный
+
+
+-----------------------------
+Beschreibung - Deutsch
+-----------------------------
+
+
+Indikatorübersicht
+INTELLECT_city – Weltzyklus – ATH & ATL – Zeitrahmen 1T und 1W – Logarithmisch – Strategy – Der Pi-Zyklus-Top- und Bottom-Oszillator ist eine Anpassung des ursprünglichen Pi-Zyklus-Top-Diagramms. Er vergleicht den 111-Tage-Gleitenden-Durchschnittskreis und den 2 * 350-Tage-Gleitenden-Durchschnittskreis des Bitcoin-Preises. Diese beiden gleitenden Durchschnitte wurden als 350 / 111 = 3,153 ausgewählt; eine Annäherung an die wichtige mathematische Zahl Pi.
+
+Wenn der 111-Tage-Gleitenden-Durchschnittskreis den 2 * 350-Tage-Gleitenden-Durchschnittskreis erreicht, deutet dies darauf hin, dass der Markt überhitzt. Das liegt daran, dass der Momentum-Referenzwert des 111-Tage-Gleitenden-Durchschnitts im mittleren Zeitrahmen den Momentum-Referenzwert des 2 * 350-Tage-Gleitenden-Durchschnitts im langen Zeitrahmen eingeholt hat.
+
+Historisch gesehen geschah dies innerhalb von 3 Tagen nach dem Höhepunkt jedes Marktzyklus.
+
+Wenn der Kreis des 111-Tage-Durchschnitts wieder unter den Kreis des 2 x 350-Tage-Durchschnitts fällt, deutet dies darauf hin, dass die Marktdynamik dieses Zyklus deutlich nachlässt. Der Oszillator fällt in das untere grüne Band, in dem der 111-Tage-Durchschnitt mit einem Abschlag von 75 % gegenüber dem 2 x 350-Tage-Durchschnitt verläuft.
+
+Historisch hat dies breite Bereiche mit Tiefstständen in der Baisse hervorgehoben.
+
+
+WICHTIG: Sie müssen ein logarithmisches Diagramm festlegen. (Die Funktion befindet sich unten rechts auf dem Bildschirm)
+
+WICHTIG: Der INTELLECT_city-Indikator ist für eine Kauf-Verkaufs-Strategie konzipiert; es gibt auch einen Signalindikator von INTELLECT_city
+
+WICHTIG: Das Diagramm zeigt alle Zyklen, sowohl Kauf- als auch Verkaufszyklen.
+
+WICHTIG: Geeignete Zeitrahmen sind 1 täglich (empfohlen) und 1 wöchentlich
+Jun 7, 2024
+Release Notes
+English:
+Update (color)
+When the lines of the corresponding color intersect for the first time. Magic happens and the price turns over, the second time lines of the same (corresponding) color intersect, magic also happens and the price turns over, and this happens all the time when lines of the corresponding color intersect.
+
+Russian:
+Update (color)
+Когда первый раз пересекаются линии соответствующего цвета. Происходит магия, и цена переворачивается, второй раз пересекаются линии одинакового (соответствующего) цвета также происходит магия и цена переворачивается, и так происходит постоянно когда линии соответствующего цвета пересекаются.
+
+German:
+Update (Farbe)
+Wenn sich die Linien der entsprechenden Farbe zum ersten Mal schneiden. Magie passiert und der Preis dreht sich, das zweite Mal, wenn Linien derselben (entsprechenden) Farbe sich schneiden, passiert auch Magie und der Preis dreht sich, und das passiert jedes Mal, wenn sich Linien der entsprechenden Farbe schneiden.

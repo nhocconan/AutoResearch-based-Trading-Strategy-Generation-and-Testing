@@ -1,0 +1,7 @@
+//@version=4
+##root(root_metainfo,rm_0,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_1,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_2,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_4,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_5,'shape_triangle_down',input__string,plotshape,style)

@@ -1,0 +1,267 @@
+//@version=5
+strategy("Hermes Strategy", overlay=false, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, pyramiding=20)
+
+// ============================================================================
+// ALMA FILTER PARAMETERS (optimized for Giovanni-style macro trend capture)
+// ============================================================================
+shortPeriod = input.int(30, "Short Period", minval=10, maxval=200)
+longPeriod = input.int(250, "Long Period", minval=50, maxval=400)
+almaOffset = input.float(0.95, "ALMA Offset", minval=0.0, maxval=1.0, step=0.01)
+almaSigma = input.float(4, "ALMA Sigma", minval=1.0, maxval=10.0, step=0.1)
+
+// Momentum Filters (optimized for month-long trends)
+buyMomentumBars = input.int(6, "Buy Lookback", minval=1)
+sellMomentumBars = input.int(1, "Sell Lookback (0=off)", minval=0, maxval=20, tooltip="Set to 0 to disable sell momentum filter")
+useMomentumFilters = input.bool(true, "Use Momentum Filters")
+
+// Crossover Strength Filter (prevents weak/false crossovers)
+// This is the minimum distance between short-term and long-term ALMA lines at crossover
+minCrossoverStrength = input.float(0.0002, "Min Crossover Strength", step=0.0001, minval=0.0001, maxval=0.001)
+useCrossoverStrengthFilter = input.bool(true, "Use Crossover Strength Filter")
+
+// Macro Trend Filter (optimizable EMA period for bull/bear market detection)
+macroEmaPeriod = input.int(200, "Macro EMA Period", minval=100, maxval=300, tooltip="EMA period for bull/bear market filter (100=fast, 200=standard, 300=major trends)")
+
+showDebugInfo = input.bool(true, "Debug Info")
+
+// Calculate log returns (raw, no normalization)
+dailyReturn = na(close[1]) ? 1.0 : close / close[1]
+logReturn = math.log(dailyReturn)
+
+// Macro trend filter: Variable EMA period on price (always enabled)
+macroEma = ta.ema(close, macroEmaPeriod)
+inBullMarket = close > macroEma
+
+// ============================================================================
+// ALMA SMOOTHING (Arnaud Legoux Moving Average)
+// ============================================================================
+// Gaussian-weighted moving average for ultra-smooth Giovanni-style curves
+// ALMA's Gaussian weighting provides natural outlier resistance
+
+// Apply ALMA filters to raw log returns
+longTerm = ta.alma(logReturn, longPeriod, almaOffset, almaSigma)
+shortTerm = ta.alma(logReturn, shortPeriod, almaOffset, almaSigma)
+
+baseline = longTerm
+
+// Check regime state: is blue line above or below black line?
+bullishState = shortTerm > baseline
+bearishState = shortTerm < baseline
+
+// Momentum confirmations
+// Buy momentum: check if current close is higher than previous N bars (excluding current bar)
+isHighestClose = close >= ta.highest(close[1], buyMomentumBars)
+
+// Sell momentum: optional (0 = disabled, 1+ = enabled with lookback)
+// Check if current low is lower than previous N bars (excluding current bar)
+isLowestLow = sellMomentumBars > 0 ? low <= ta.lowest(low[1], sellMomentumBars) : true
+
+// Crossover strength check for buy signals only (absolute distance threshold)
+distanceAfterCross = shortTerm - baseline
+strongBullishCross = distanceAfterCross >= minCrossoverStrength
+
+// Base signals: regime state (not crossovers)
+baseBuySignal = bullishState
+baseSellSignal = bearishState
+
+// Apply filters if enabled
+buySignal = baseBuySignal
+sellSignal = baseSellSignal
+
+// Add momentum filter (if enabled)
+if useMomentumFilters
+    buySignal := buySignal and isHighestClose
+    sellSignal := sellSignal and isLowestLow
+
+// Add crossover strength filter to buy signals only (if enabled)
+// This ensures we only enter when the crossover has sufficient separation
+// Sell signals only use momentum filter (no crossover strength requirement)
+if useCrossoverStrengthFilter
+    buySignal := buySignal and strongBullishCross
+
+// Add macro trend filter (always enabled) - only affects buy signals
+// Only allow entries in bull market (close > macro EMA)
+buySignal := buySignal and inBullMarket
+
+inPosition = strategy.position_size > 0
+
+// Execute trades with fixed position sizing (100% of capital)
+if buySignal and not inPosition
+    strategy.entry("Long", strategy.long)
+
+if sellSignal and inPosition
+    strategy.close("Long")
+
+// Plot lines
+plot(shortTerm, color=color.blue, linewidth=2, title="Short-Term Signal")
+plot(baseline, color=color.black, linewidth=2, title="Long-Term Baseline")
+hline(0, "Zero", color=color.gray, linestyle=hline.style_dotted)
+
+// Visual feedback
+bgcolor(inPosition ? color.new(color.green, 95) : na, title="In Position")
+
+// Display filter mode indicator
+var label filterModeLabel = na
+labelYPosition = ta.highest(shortTerm, 100)
+
+if barstate.islast
+    labelText = "📊 ALMA FILTER"
+    labelColor = color.new(color.blue, 80)
+    if na(filterModeLabel)
+        filterModeLabel := label.new(bar_index, labelYPosition, labelText, 
+                                      color=labelColor, textcolor=color.white, 
+                                      style=label.style_label_down, size=size.small)
+    else
+        label.set_xy(filterModeLabel, bar_index, labelYPosition)
+        label.set_text(filterModeLabel, labelText)
+        label.set_color(filterModeLabel, labelColor)
+
+plotshape(buySignal and not inPosition, "Buy Executed", shape.triangleup, location.bottom, color.green, size=size.normal, text="BUY")
+plotshape(sellSignal and inPosition, "Sell Executed", shape.triangledown, location.top, color.red, size=size.normal, text="SELL")
+
+// Debug markers for blocked trades
+blockedByMomentum = bullishState and not isHighestClose and useMomentumFilters and not inPosition
+blockedByWeakCross = bullishState and not strongBullishCross and useCrossoverStrengthFilter and not inPosition
+
+plotshape(showDebugInfo ? blockedByMomentum : na, "Blocked by Momentum", shape.xcross, location.bottom, color.orange, size=size.tiny, text="M")
+plotshape(showDebugInfo ? blockedByWeakCross : na, "Blocked by Weak Crossover", shape.xcross, location.bottom, color.purple, size=size.tiny, text="W")
+
+View in Pine Editor・127 lines
+Use on chart
+1
+5
+0
+3
+3 027
+HERMES STRATEGY - TRADINGVIEW DESCRIPTION
+
+OVERVIEW
+
+Hermes is an adaptive trend-following strategy that uses dual ALMA (Arnaud Legoux Moving Average) filters to identify high-quality entry and exit points. It's designed for swing and position traders who want smooth, low-lag signals with minimal whipsaws.
+
+Unlike traditional moving averages that operate on price, Hermes analyzes price returns (percentage changes) to create signals that work consistently across any asset class and price range.
+
+
+HOW IT WORKS
+
+DUAL ALMA SYSTEM
+
+The strategy uses two ALMA lines applied to price returns:
+
+• Fast ALMA (Blue Line): Short-term trend signal (default: 80 periods)
+• Slow ALMA (Black Line): Long-term baseline trend (default: 250 periods)
+
+ALMA is superior to simple or exponential moving averages because it provides:
+• Smoother curves with less noise
+• Significantly reduced lag
+• Natural resistance to outliers and flash crashes
+
+TRADING LOGIC
+
+BUY SIGNAL:
+• Fast ALMA crosses above Slow ALMA (bullish regime)
+• Price makes new N-bar high (momentum confirmation)
+• Optional: Price above 200 EMA (macro trend filter)
+• Optional: ALMA lines sufficiently separated (strength filter)
+
+SELL SIGNAL:
+• Fast ALMA crosses below Slow ALMA (bearish regime)
+• Optional: Price makes new N-bar low (momentum confirmation)
+
+The strategy stays in position during the entire bullish regime, allowing you to ride trends for weeks or months.
+
+
+VISUAL INDICATORS
+
+LINES:
+• Blue Line: Fast ALMA (short-term signal)
+• Black Line: Slow ALMA (long-term baseline)
+
+TRADE MARKERS:
+• Green Triangle Up: Buy executed
+• Red Triangle Down: Sell executed
+• Orange "M": Buy blocked by momentum filter
+• Purple "W": Buy blocked by weak crossover strength
+
+
+KEY PARAMETERS
+
+ALMA SETTINGS:
+• Short Period (default: 30) - Fast signal responsiveness
+• Long Period (default: 250) - Baseline stability
+• ALMA Offset (default: 0.90) - Balance between lag and smoothness
+• ALMA Sigma (default: 7.5) - Gaussian curve width
+
+ENTRY/EXIT FILTERS:
+• Buy Lookback (default: 7) - Bars for momentum confirmation (required)
+• Sell Lookback (default: 0) - Exit momentum bars (0 = disabled for faster exits)
+• Min Crossover Strength (default: 0.0) - Required ALMA separation (0 = disabled)
+• Use Macro Filter (default: true) - Only enter above 200 EMA
+
+
+BEST PRACTICES
+
+RECOMMENDED ASSETS - Works well on:
+• Cryptocurrencies (Bitcoin, Ethereum, etc.)
+• Major indices (S&P 500, Nasdaq)
+• Large-cap stocks
+• Commodities (Gold, Oil)
+
+RECOMMENDED TIMEFRAMES:
+• Daily: Primary timeframe for swing trading
+• 4-Hour: More active trading (increase trade frequency)
+• Weekly: Long-term position trading
+
+PARAMETER TUNING:
+• More trades: Lower Short Period (60-80)
+• Fewer trades: Raise Short Period (100-120)
+• Faster exits: Set Sell Lookback = 0
+• Safer entries: Enable Macro Filter (Use Macro Filter = true)
+
+STRATEGY ADVANTAGES
+
+1. Low Lag - ALMA provides faster signals than traditional moving averages
+2. Smooth Signals - Minimal whipsaws compared to crossover strategies
+3. Asset Agnostic - Same parameters work across different markets
+4. Trend Capture - Stays positioned during entire bullish regimes
+5. Risk Management - Multiple filters prevent poor entries
+6. Visual Clarity - Easy to interpret regime and filter states
+
+WHEN TO USE HERMES
+
+BEST FOR:
+• Trending markets (crypto bull runs, equity uptrends)
+• Swing trading (hold days to weeks)
+• Position trading (hold weeks to months)
+• Clear trend identification
+• Risk-managed exposure
+
+NOT SUITABLE FOR:
+• Ranging/sideways markets
+• Scalping or day trading
+• High-frequency trading
+• Mean reversion strategies
+
+
+RISK DISCLAIMER
+
+This indicator is for educational purposes only. Past performance does not guarantee future results. Always use proper position sizing and risk management. Test thoroughly on historical data before live trading.
+
+CREDITS
+
+Inspired by Giovanni Santostasi's Power Law Volatility Indicator, generalized for universal application across all assets using adaptive ALMA filtering.
+
+Strategy by Hermes Trading Systems
+
+QUICK START
+
+1. Add indicator to chart
+2. Use on daily timeframe for best results
+3. Look for green buy signals when blue line crosses above black line
+4. Exit on red sell signals when blue line crosses below black line
+5. Adjust parameters based on your trading style:
+• Conservative: Enable Macro Filter, increase Buy Lookback to 10
+• Aggressive: Disable Macro Filter, lower Short Period to 60
+• Default settings work well for most assets
+
+

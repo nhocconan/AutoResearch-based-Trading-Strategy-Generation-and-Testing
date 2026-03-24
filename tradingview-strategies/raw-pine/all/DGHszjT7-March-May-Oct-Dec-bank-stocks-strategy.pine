@@ -1,0 +1,101 @@
+//@version=5
+strategy("March-May Oct-Dec bank stocks strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1000, pyramiding=10)
+
+// === Inputs
+buyDate = input.int(7, "Earliest day-of-month", minval=1, maxval=31)
+profitPct = input.float(10, "Profit threshold for timed sell (%)", minval=0.1, step=0.1)
+// Shade settings
+shadeWhenFlat = input.bool(true, "Shade when out of market (shares = 0)")
+flatShadeColor = input.color(color.new(color.blue, 60), "Flat period shade color")
+
+// === Helpers
+isTradeDate(targetMonth) =>
+    year >= 2022 and month == targetMonth and dayofmonth >= buyDate and (month[1] != targetMonth or dayofmonth[1] < buyDate)
+
+getOpenTradeIndex(entryId) =>
+    idx = -1
+    for i = 0 to strategy.opentrades - 1
+        if strategy.opentrades.entry_id(i) == entryId
+            idx := i
+    idx
+
+// === Per-pair pending flags
+var bool pending_10_12 = false
+var bool pending_3_5 = false
+
+// === Core logic per pair; returns updated pending flag
+doTrade(buyMonth, sellMonth, labelPrefix, buyColor, sellColor, pendingIn) =>
+    id = "Buy " + labelPrefix
+    pending = pendingIn
+
+    // Timed BUY: open only if not already open for this id
+    if isTradeDate(buyMonth)
+        openIdx = getOpenTradeIndex(id)
+        if openIdx == -1
+            strategy.entry(id, strategy.long)
+            label.new(bar_index, open, "B:" + str.tostring(strategy.position_size), style=label.style_label_up, color=buyColor, textcolor=color.white)
+            pending := false
+
+    // Timed SELL: only if ≥ profitPct gain; otherwise set pending
+    if isTradeDate(sellMonth)
+        sIdx = getOpenTradeIndex(id)
+        if sIdx != -1
+            entryPrice = strategy.opentrades.entry_price(sIdx)
+            haveProfit = close >= entryPrice * (1 + profitPct/100.0)
+            if haveProfit
+                // compute shares after closing THIS id's open trade
+                tradeSz = strategy.opentrades.size(sIdx)
+                sharesAfter = strategy.position_size - tradeSz
+                strategy.close(id)
+                label.new(bar_index, open, "S:" + str.tostring(sharesAfter), style=label.style_label_down, color=sellColor, textcolor=color.white)
+                pending := false
+            else
+                // label.new(bar_index, high, "X:" + str.tostring(strategy.position_size), style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white)
+                pending := true
+
+    // Month-start check: if pending and now ≥ profitPct, close the id
+    isMonthStart = ta.change(time("M"))
+    if isMonthStart > 0 and pending
+        mIdx = getOpenTradeIndex(id)
+        if mIdx != -1
+            ePrice = strategy.opentrades.entry_price(mIdx)
+            okProfit = close >= ePrice * (1 + profitPct/100.0)
+            if okProfit
+                tradeSz2 = strategy.opentrades.size(mIdx)
+                sharesAfter2 = strategy.position_size - tradeSz2
+                strategy.close(id)
+                label.new(bar_index, high, "C:" + str.tostring(sharesAfter2), style=label.style_label_down, color=color.orange, textcolor=color.white)
+                pending := false
+    pending
+
+// === Your month-pairs
+pending_10_12 := doTrade(10, 12, "10/12", color.blue, color.purple, pending_10_12)
+pending_3_5   := doTrade(3, 5, "3/5", color.blue, color.purple, pending_3_5)
+
+// === Out-of-market shading (covers entire pane for bars where position_size == 0)
+flatNow = strategy.position_size > 0
+bgcolor(shadeWhenFlat and flatNow ? flatShadeColor : na, title="Out of market shading")
+
+View in Pine Editor・77 lines
+Use on chart
+3
+6
+1
+810
+Feb 4
+In the Indian market, banking stocks have some sort of cyclic nature.
+
+If you buy at the start of March and sell at the start of May and then buy at the start of Oct and sell at the start of December, you can make gains close to to "buy and hold", while being invested only for 4 months out of 12.
+
+This seems to backtest well for post 2021 on all Bank stocks I tested, including BANKNIFTY as well
+
+Caveat: Not calculating STCG and other expenses caused by selling and buying 2 times every year.
+Feb 4
+Release Notes
+In the Indian market, banking stocks have some sort of cyclic nature.
+
+If you buy at the start of March and sell at the start of May and then buy at the start of Oct and sell at the start of December, you can make gains close to to "buy and hold", while being invested only for 4 months out of 12.
+
+This seems to backtest well for post 2021 on all Bank stocks I tested, including BANKNIFTY as well
+
+Caveat: Not calculating STCG and other expenses caused by selling and buying 2 times every year.

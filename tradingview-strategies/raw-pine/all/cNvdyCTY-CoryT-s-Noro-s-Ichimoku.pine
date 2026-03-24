@@ -1,0 +1,492 @@
+//@version=3
+// Learn more about Autoview and how you can automate strategies like this one here: https://autoview.with.pink/
+strategy("CoryT's Noro's Ichimoku", "Ichimoku Strategy", overlay=true, pyramiding=0, initial_capital=100000, currency=currency.USD, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type=strategy.commission.percent, commission_value=0.26)
+//study("CoryT's Noro's Ichimoku Alerts", "Ichimoku Alerts" overlay=true)
+
+// Thanks to Noro for creating the original version
+// https://www.tradingview.com/u/noro/
+// https://www.tradingview.com/script/2GWcpQfq-noro-s-ichimoku-strategy-v1-0/
+
+// Thanks to JustUncleL for helping traders like me learn how to style my charts
+// https://www.tradingview.com/u/JustUncleL/
+// https://www.tradingview.com/script/byHd2CqX-Autoview-Alerts-Dual-MA-Ribbons-R0-12-by-JustUncleL/
+// https://www.tradingview.com/script/KpbbCOzp-Autoview-BackTest-Dual-MA-Ribbons-R0-12-by-JustUncleL/
+
+// Thanks to CryptoRox for Autoview
+// https://www.tradingview.com/u/CryptoRox/
+
+///////////////////////////////////////////////
+//* Backtesting Period Selector | Component *//
+///////////////////////////////////////////////
+
+//* https://www.tradingview.com/script/eCC1cvxQ-Backtesting-Period-Selector-Component *//
+//* https://www.tradingview.com/u/pbergden/ *//
+//* Modifications made *//
+
+testStartYear = input(2017, minval = 1900, title = "Backtest Start Year")
+testStartMonth = input(5, minval = 1, title = "Backtest Start Month")
+testStartDay = input(1, minval = 1, title = "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,00,00)
+
+testStopYear = input(77777777, title = "Backtest Stop Year")
+testStopMonth = input(11, minval = 1, title = "Backtest Stop Month")
+testStopDay = input(15, minval = 1, title = "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+/////////////////////////////////////
+//* Put your strategy logic below *//
+/////////////////////////////////////
+
+//
+high_  = high
+low_   = low
+
+
+AQUA = #00FFFFFF
+BLUE = #0000FFFF
+RED  = #FF0000FF
+LIME = #00FF00FF
+GRAY = #808080FF
+DARKRED   = #8B0000FF
+DARKGREEN = #006400FF
+
+
+//Settings
+conversionPeriods = input(9, minval = 1, title = "Conversion Periods")
+basePeriods = input(26, minval = 1, title = "Base Periods")
+laggingSpan2Periods = input(52, minval = 1, title = "Lagging Span")
+displacement = input(26, minval = 1, title = "Displacement")
+cloud = input(false, defval = false, title = "Use Cloud Strategy")
+usebf = input(true, defval = true, title = "Use Body Filter")
+usecf = input(true, defval = true, title = "Use Color Filter")
+
+//Ichimoku
+donchian(len) => avg(lowest(len), highest(len))
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+//Lines
+plot(conversionLine, color=red, title="Conversion Line")
+plot(baseLine, color=blue, title="Base Line")
+plot(close, offset = -displacement, color=green, title="Lagging Span")
+p1 = plot(leadLine1, offset = displacement, color=green, title="Lead 1")
+p2 = plot(leadLine2, offset = displacement, color=red, title="Lead 2")
+fill(p1, p2, leadLine1 > leadLine2 ? green : red )
+
+//Body Filter
+nbody = abs(close - open)
+abody = sma(nbody, 10)
+body = nbody > abody / 3 or usebf == false
+
+//Color Filter
+bar = close > open ? 1 : close < open ? -1 : 0
+gb = bar == 1 or usecf == false
+rb = bar == -1 or usecf == false
+
+//Signals
+up1 = low > baseLine and rb and body and cloud == false
+dn1 = high < baseLine and gb and body and cloud == false
+up2 = low > leadLine1[displacement] and low > leadLine2[displacement] and rb and body and cloud
+dn2 = high < leadLine1[displacement] and high < leadLine2[displacement] and gb and body and cloud
+
+// Long/Short Logic
+longLogic = up1 or up2 ? 1 : 0
+shortLogic = dn1 or dn2 ? 1 : 0
+
+//////////////////////////
+//* Strategy Component *//
+//////////////////////////
+
+clrBars   = input(true,title="Colour Candles to Trade Order state")
+
+orderType = "Longs+Shorts"//input("LongsOnly",title="What type of Orders", options=["Longs+Shorts","LongsOnly","ShortsOnly","Flip"])
+
+//
+isLong   = (orderType != "ShortsOnly")
+isShort  = (orderType != "LongsOnly")
+//
+long = longLogic
+short = shortLogic
+
+if orderType=="Flip"
+    long := shortLogic
+    short := longLogic
+
+//isLong = input(false, "Longs Only")
+//isShort = input(false, "Shorts Only")
+//isFlip = input(false, "Flip the Opens")
+
+//long = longLogic
+//short = shortLogic
+
+//if isFlip
+//    long := shortLogic
+//    short := longLogic
+//else
+//    long := longLogic
+//    short := shortLogic
+
+//if isLong
+//    long := long
+    //short := na
+
+//if isShort
+//    long := na
+//    short := short
+    
+////////////////////////////////
+//======[ Signal Count ]======//
+////////////////////////////////
+
+sectionLongs = 0
+sectionLongs := nz(sectionLongs[1])
+sectionShorts = 0
+sectionShorts := nz(sectionShorts[1])
+
+if long
+    sectionLongs := sectionLongs + 1
+    sectionShorts := 0
+
+if short
+    sectionLongs := 0
+    sectionShorts := sectionShorts + 1
+
+//////////////////////////////
+//======[ Pyramiding ]======//
+//////////////////////////////
+
+pyrl = 1 //input(1, "Pyramiding less than") // If your count is less than this number
+pyre = 0 //input(0, "Pyramiding equal to") // If your count is equal to this number
+pyrg = 1000000// input(1000000, "Pyramiding greater than") // If your count is greater than this number
+
+longCondition = long and sectionLongs <= pyrl or long and sectionLongs >= pyrg or long and sectionLongs == pyre ? 1 : 0
+shortCondition = short and sectionShorts <= pyrl or short and sectionShorts >= pyrg or short and sectionShorts == pyre ? 1 : 0
+
+////////////////////////////////
+//======[ Entry Prices ]======//
+////////////////////////////////
+
+last_open_longCondition = na
+last_open_shortCondition = na
+last_open_longCondition := longCondition ? close : nz(last_open_longCondition[1])
+last_open_shortCondition := shortCondition ? close : nz(last_open_shortCondition[1])
+
+////////////////////////////////////
+//======[ Open Order Count ]======//
+////////////////////////////////////
+
+sectionLongConditions = 0
+sectionLongConditions := nz(sectionLongConditions[1])
+sectionShortConditions = 0
+sectionShortConditions := nz(sectionShortConditions[1])
+
+if longCondition
+    sectionLongConditions := sectionLongConditions + 1
+    sectionShortConditions := 0
+
+if shortCondition
+    sectionLongConditions := 0
+    sectionShortConditions := sectionShortConditions + 1
+    
+///////////////////////////////////////////////
+//======[ Position Check (long/short) ]======//
+///////////////////////////////////////////////
+
+last_longCondition = na
+last_shortCondition = na
+last_longCondition := longCondition ? time : nz(last_longCondition[1])
+last_shortCondition := shortCondition ? time : nz(last_shortCondition[1])
+
+in_longCondition = last_longCondition > last_shortCondition
+in_shortCondition = last_shortCondition > last_longCondition
+
+/////////////////////////////////////
+//======[ Position Averages ]======//
+/////////////////////////////////////
+
+totalLongs = 0.0
+totalLongs := nz(totalLongs[1])
+totalShorts = 0.0
+totalShorts := nz(totalShorts[1])
+averageLongs = 0.0
+averageLongs := nz(averageLongs[1])
+averageShorts = 0.0
+averageShorts := nz(averageShorts[1]) 
+
+if longCondition
+    totalLongs := totalLongs + last_open_longCondition
+    totalShorts := 0.0
+
+if shortCondition
+    totalLongs := 0.0
+    totalShorts := totalShorts + last_open_shortCondition
+
+averageLongs := totalLongs / sectionLongConditions
+averageShorts := totalShorts / sectionShortConditions
+
+/////////////////////////////////
+//======[ Trailing Stop ]======//
+/////////////////////////////////
+
+isTS = false //input(false, "Trailing Stop")
+ts = 0 //input(3.5, "Trailing Stop (%)", minval=0, step=0.1, type=float) / 100
+
+last_high = na
+last_low = na
+last_high_short = na
+last_low_long = na
+last_high := not in_longCondition ? na : in_longCondition and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_high_short := not in_shortCondition ? na : in_shortCondition and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_shortCondition ? na : in_shortCondition and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+last_low_long := not in_longCondition ? na : in_longCondition and (na(last_low[1]) or low_ < nz(last_low[1])) ? low_ : nz(last_low[1])
+
+long_ts = isTS and not na(last_high) and low <= last_high - last_high / 100 * ts // and longCondition == 0 and last_high >= averageLongs + averageLongs / 100 * tsi
+short_ts = isTS and not na(last_low) and high >= last_low + last_low / 100 * ts  // and shortCondition == 0 and last_low <= averageShorts - averageShorts/ 100 * tsi
+
+///////////////////////////////
+//======[ Take Profit ]======//
+///////////////////////////////
+
+isTP = input(false, "Take Profit")
+tp = input(10.0, "Take Profit (%)", minval=0, step=0.1, type=float) / 100
+ttp = input(2.0, "Trailing Profit (%)",minval=0,step=0.1,type=float) / 100
+ttp := ttp>tp ? tp : ttp
+
+// long_tp = isTP and close > averageLongs + averageLongs / 100 * tp and not longCondition
+// short_tp = isTP and close < averageShorts - averageShorts / 100 * tp and not shortCondition
+
+long_tp = isTP and (last_high >= last_open_longCondition + last_open_longCondition * tp)   and (low_ <= last_high - last_high * ttp)
+short_tp = isTP and (last_low <= last_open_shortCondition - last_open_shortCondition * tp) and (high_ >= last_low + last_low * ttp)
+
+/////////////////////////////
+//======[ Stop Loss ]======//
+/////////////////////////////
+
+isSL = false//input(false, "Stop Loss")
+sl = 0 //input(5.0, "Stop Loss (%)", minval=0, step=0.1, type=float) / 100
+//long_sl = isSL and close < averageLongs - averageLongs / 100 * sl and longCondition == 0
+//short_sl = isSL and close > averageShorts + averageShorts / 100 * sl and shortCondition == 0
+
+long_sl = isSL and (low_ <= last_open_longCondition - last_open_longCondition * sl)
+short_sl = isSL and (high_ >= last_open_shortCondition + last_open_shortCondition * sl)
+
+/////////////////////////////////
+//======[ Close Signals ]======//
+/////////////////////////////////
+
+// longClose = long_tp or long_sl or long_ts ? 1 : 0
+// shortClose = short_tp or short_sl or short_ts ? 1: 0
+
+longClose = isLong and (long_tp or long_sl or long_ts) and not longCondition
+shortClose = isShort and (short_tp or short_sl or short_ts) and not shortCondition
+
+in_closeLong = longClose
+in_closeLong := not isLong? false : longClose ? true : longCondition? false : in_closeLong[1] 
+in_closeShort = shortClose
+in_closeShort := not isShort? false : shortClose ? true : shortCondition? false : in_closeShort[1] 
+
+///////////////////////////////
+//======[ Plot Colors ]======//
+///////////////////////////////
+
+longCloseCol = na
+shortCloseCol = na
+longCloseCol := long_tp ? purple : long_sl ? maroon : long_ts ? blue : longCloseCol[1]
+shortCloseCol := short_tp ? purple : short_sl ? maroon : short_ts ? blue : shortCloseCol[1]
+
+//tpColor = isTP and in_longCondition ? purple : isTP and in_shortCondition ? purple : white
+//slColor = isSL and in_longCondition ? red : isSL and in_shortCondition ? red : white
+tpColor = isTP and in_longCondition ? lime : isTP and in_shortCondition ? lime : na
+slColor = isSL and in_longCondition ? red : isSL and in_shortCondition ? red : na
+
+//////////////////////////////////
+//======[ Strategy Plots ]======//
+//////////////////////////////////
+
+//plot(isTS and in_longCondition ? averageLongs + averageLongs / 100 * tsi : na, "Long Trailing Activate", blue, style=3, linewidth=2)
+//plot(isTS and in_longCondition and last_high >= averageLongs +  averageLongs / 100 * tsi ? last_high - last_high / 100 * ts : na, "Long Trailing", fuchsia, style=2, linewidth=3)
+//plot(isTS and in_shortCondition ? averageShorts - averageShorts/ 100 * tsi : na, "Short Trailing Activate", blue, style=3, linewidth=2)
+//plot(isTS and in_shortCondition and last_low <= averageShorts - averageShorts/ 100 * tsi ? last_low + last_low / 100 * ts : na, "Short Trailing", fuchsia, style=2, linewidth=3)
+//plot(isTP and in_longCondition and last_high < averageLongs + averageLongs / 100 * tp ? averageLongs + averageLongs / 100 * tp : na, "Long TP", tpColor, style=3, linewidth=2)
+//plot(isTP and in_shortCondition and last_low > averageShorts - averageShorts / 100 * tp ? averageShorts - averageShorts / 100 * tp : na, "Short TP", tpColor, style=3, linewidth=2)
+//plot(isSL and in_longCondition and last_low_short > averageLongs - averageLongs / 100 * sl ? averageLongs - averageLongs / 100 * sl : na, "Long SL", slColor, style=3, linewidth=2)
+//plot(isSL and in_shortCondition and last_high_short < averageShorts + averageShorts / 100 * sl ? averageShorts + averageShorts / 100 * sl : na, "Short SL", slColor, style=3, linewidth=2)
+
+plot(isTS and in_longCondition and isLong and not in_closeLong?
+     last_high - last_high * ts : na, "Long Trailing", fuchsia, style=2, linewidth=2,offset=1)
+plot(isTP and in_longCondition and isLong and not in_closeLong and last_high < last_open_longCondition + last_open_longCondition * tp ? 
+     last_open_longCondition + last_open_longCondition * tp : na, "Long TP Active", tpColor, style=3,join=false, linewidth=2,offset=1)
+plot(isTP and in_longCondition and isLong and not in_closeLong and last_high >= last_open_longCondition +  last_open_longCondition * tp ? 
+     last_high - last_high * ttp : na, "Long Trailing", black, style=2, linewidth=2,offset=1)
+plot(isSL and in_longCondition and isLong and not in_closeLong and last_low_long > last_open_longCondition - last_open_longCondition * sl ? 
+     last_open_longCondition - last_open_longCondition * sl : na, "Long SL", slColor, style=3,join=false, linewidth=2,offset=1)
+//
+plot(isTS and in_shortCondition and isShort and not in_closeShort?
+     last_low + last_low * ts : na, "Short Trailing", fuchsia, style=2, linewidth=2,offset=1)
+plot(isTP and in_shortCondition and isShort and not in_closeShort and last_low > last_open_shortCondition - last_open_shortCondition * tp ? 
+     last_open_shortCondition - last_open_shortCondition * tp : na, "Short TP Active", tpColor, style=3,join=false, linewidth=2,offset=1)
+plot(isTP and in_shortCondition and isShort and not in_closeShort and last_low <= last_open_shortCondition -  last_open_shortCondition * tp ? 
+     last_low + last_low * ttp : na, "Short Trailing", black, style=2, linewidth=2,offset=1)
+plot(isSL and in_shortCondition and isShort and not in_closeShort and last_high_short < last_open_shortCondition + last_open_shortCondition * sl ? 
+     last_open_shortCondition + last_open_shortCondition * sl : na, "Short SL", slColor, style=3,join=false, linewidth=2,offset=1)
+//
+bclr = not clrBars ? na : in_closeLong and in_closeShort ? GRAY : 
+                          in_longCondition and not in_closeLong and isLong ? close<last_open_longCondition? DARKGREEN : LIME :
+                          in_shortCondition and not in_closeShort and isShort ? close>last_open_shortCondition? DARKRED : RED : GRAY
+barcolor(bclr,title="Trade State Bar Colouring")
+
+///////////////////////////////
+//======[ Alert Plots ]======//
+///////////////////////////////
+
+//plotshape(longCondition?close:na, title="Long", color=green, textcolor=green, transp=0, 
+//          style=shape.triangleup, location=location.belowbar, size=size.small,text="LONG",offset=0)
+//plotshape(longClose and not in_closeLong[1]?close:na, title="Long Close", color=longCloseCol, textcolor=white, transp=0, 
+//          style=shape.labeldown, location=location.abovebar, size=size.small,text="Long\nClose",offset=0)
+
+//plotshape(shortCondition?close:na, title="Short", color=red, textcolor=red, transp=0, 
+//          style=shape.triangledown, location=location.abovebar, size=size.small,text="SHORT",offset=0)
+//plotshape(shortClose and not in_closeShort[1]?close:na, title="Short Close", color=shortCloseCol, textcolor=white, transp=0, 
+//          style=shape.labelup, location=location.belowbar, size=size.small,text="Short\nClose",offset=0)
+
+// Autoview alert syntax - This assumes you are trading coins BUY and SELL on Binance Exchange
+// WARNING*** Only use Autoview to automate a strategy after you've sufficiently backtested and forward tested the strategy.
+// You can learn more about the syntax here:
+//      http://autoview.with.pink/#syntax and you can watch this video here: https://www.youtube.com/watch?v=epN5Tjinuxw
+
+// For the opens you will want to trigger BUY orders on LONGS (eg ETHBTC) with alert option "Once Per Bar Close"
+// and SELL orders on SHORTS (eg BTCUSDT)
+//      b=buy q=0.001 e=binance s=ethbtc t=market  ( LONG )
+// or   b=sell q=0.001 e=binance s=btcusdt t=market ( SHORT )
+//alertcondition(longCondition, "Open Long", "LONG")
+//alertcondition(shortCondition, "Open Short", "SHORT")
+
+// For the closes you will want to trigger these alerts on condition with alert option "Once Per Bar"
+// (NOTE: with Renko you can only use "Once Per Bar Close" option)
+//      b=sell q=99% e=binance s=ethbtc t=market  ( CLOSE LONGS )
+// or   b=buy q=99% e=binance s=btcusdt t=market  ( CLOSE SHORTS )
+// This gets it as it happens and typically results in a better exit live than in the backtest. 
+// It works really well for counteracting some market slippage
+//alertcondition(longClose and not in_closeLong[1], "Close Longs", "CLOSE LONGS")
+//alertcondition(shortClose and not in_closeShort[1], "Close Shorts", "CLOSE SHORTS")
+
+//alertcondition(condition=longCondition, title="Long", message="")
+//alertcondition(condition=shortCondition, title="Short", message="")
+//alertcondition(condition=longClose, title="Long Close", message="")
+//alertcondition(condition=shortClose, title="Short Close", message="")
+
+///////////////////////////////////
+//======[ Reset Variables ]======//
+///////////////////////////////////
+
+//if longClose or not in_longCondition
+//    averageLongs := 0
+//    totalLongs := 0.0
+//    sectionLongs := 0
+//    sectionLongConditions := 0
+
+//if shortClose or not in_shortCondition
+//   averageShorts := 0
+//    totalShorts := 0.0
+//    sectionShorts := 0
+//    sectionShortConditions := 0
+
+////////////////////////////////////////////
+//======[ Strategy Entry and Exits ]======//
+////////////////////////////////////////////
+
+//if testPeriod()
+//    strategy.entry("Long", 1, when=longCondition)
+//    strategy.entry("Short", 0,  when=shortCondition)
+//    strategy.close("Long", when=longClose)
+//    strategy.close("Short", when=shortClose)
+
+////////////////////////////////////////////
+//======[ Strategy Entry and Exits ]======//
+////////////////////////////////////////////
+
+if testPeriod() and isLong
+    strategy.entry("Long", 1, when=longCondition)
+    strategy.close("Long", when=longClose and not in_closeLong[1])
+
+if testPeriod() and isShort
+    strategy.entry("Short", 0,  when=shortCondition)
+    strategy.close("Short", when=shortClose and not in_closeShort[1])
+    
+// --- Debugs
+//plotchar(longExit,location=location.bottom)
+//plotchar(longCondition,location=location.bottom)
+//plotchar(in_longCondition,location=location.bottom)
+//plotchar(longClose,location=location.bottom)
+//plotchar(in_closeLong,location=location.bottom)
+// --- /Debugs
+
+///////////////////////////////////
+//======[ Reset Variables ]======//
+///////////////////////////////////
+
+if longClose or not in_longCondition or not isLong
+    last_high := na
+    last_high_short := na
+    sectionLongs := 0
+    
+//if longClose and isLong and not in_closeLong[1] and bsState==1
+//    bsState := 0
+    
+if shortClose or not in_shortCondition or not isShort
+    last_low := na
+    last_low_long := na
+    sectionShorts := 0
+
+//if shortClose and isShort and not in_closeShort[1] and bsState==-1
+//    bsState := 0
+    
+    
+//plotchar(bsState,location=location.bottom)
+// EOF
+
+View in Pine Editor・451 lines
+Use on chart
+2
+5
+4
+3
+4 863
+Jun 7, 2018
+A few months ago I took Noro's Ichimoku Cloud and used the AV bot template to throw stops on it. I took some code from JustUncleL
+to make it not so hideous. Trailing Stops are turned off, stop losses are turned off (you really don't need them with this), and this is currently a Long/Short strategy, the Longs Only and Shorts Only options are broken right now, I'm tired and you guys can either fix it yourselves or deal with it like this for now.
+
+Hint: If you wanna use this as a long-only strategy just have AV close your buy orders whenever a short is triggered.
+Jun 9, 2018
+Release Notes
+Something always bugged me about Noro's Ichimoku Strategy. Every trader that uses the cloud knows that the default cloud settings are
+
+Tenkan Sen or Conversion Line Periods: 9
+Kijun Sen or Base Line Periods: 26
+Senkou Span B or 2nd Leading Line Period: 52
+Chikou Span(Lagging Line)/ Senkou Span A/B(Leading Lines) Displacement: 26
+
+Or more concise 9/26/52/26 and the crypto settings are 20/60/120/30. I don't think that Noro knew about the crypto settings for the cloud because what bugged me about his cloud was it only allowed for the first 3 settings 9/26/52.
+
+I never really gave it another thought until I started to compare CryptoWatch charts next to my TradingView charts and noticed that my clouds on TradingView we being drawn about 2x as far into the future as on CryptoWatch.
+
+Taking a look into the Trading View public library to see how they computed the cloud I noticed that the code is almost exactly the same as Noro's except that instead of having a separate variable for the leading/lagging spans' displacement, Noro was using the Base Line Period for the displacement.
+
+Knowing this it is obvious why my clouds on the TradingView charts are being plotted twice as far into the future, using the crypto settings of 20/60/120 on Noro's original script will use the Base Line Period of 60 instead of the widely used 30. So it was using 20/60/120/60
+
+This problem will only affect people who are using the "Cloud Strategy" and who are using a displacement value different from the Kijun-Sen(Base Line) period; without the cloud strategy Noro's Ichimoku Strategy only uses the Kijun-Sen (Base Line) to make buying or selling decisions along with some other non-cloud related indicators(the body/color filter).
+
+Using the correct crypto optimized settings more than doubles the returns over the last year just from my light experiments I leave this as an exercise for the curious trader.
+
+
+Want to learn more about the Ichimoku Kinko Hyu? Check out the free Ichimoku Cloud E-book
+
+
+Keep your eyes peeled on this script I plan on implementing more Ichimoku signals soon.
+
+O yeah I also disabled trailing profit by default sorry for the minor inconvenience.

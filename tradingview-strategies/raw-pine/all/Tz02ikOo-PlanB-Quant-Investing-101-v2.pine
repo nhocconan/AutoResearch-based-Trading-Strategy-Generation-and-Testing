@@ -1,0 +1,75 @@
+//@version=4
+
+strategy("PlanB Quant Investing 101", shorttitle="PlanB RSI Strategy", overlay=true,calc_on_every_tick=false,pyramiding=0, default_qty_type=strategy.cash,default_qty_value=1000, currency=currency.USD, initial_capital=1000,commission_type=strategy.commission.percent, commission_value=0.0)
+
+
+r=rsi(close,14)
+
+//SELL CONDITION
+//RSI was above 90% last six months AND drops below 65%
+
+//RSI above 90% last six month
+
+selllevel = input(90)
+maxrsi = highest(rsi(close,14),6)[1]
+
+rsisell = maxrsi > selllevel 
+
+
+//RSIdrops below 65%
+drop = input(65)
+
+rsidrop= r < drop
+
+//sellsignal
+sellsignal = rsisell and rsidrop 
+
+
+//BUY CONDITION
+//IF (RSI was below 50% last six months AND jumps +2% from the low) THEN buy, ELSE hold.
+
+//RSI was below 50% last six months
+
+buylevel = input(50)
+minrsi = lowest(rsi(close,14),6)[1]
+
+rsibuy = minrsi < buylevel 
+
+//IF (RSI jumps +2% from the low) THEN buy, ELSE hold.
+
+
+rsibounce= r > (minrsi + 2)
+
+//buysignal=buyrsi AND rsidrop
+
+//buysignal
+
+buysignal = rsibuy and rsibounce 
+
+//Strategy
+
+strategy.entry("Buy Signal",strategy.long, when = buysignal)
+strategy.entry("Sell Signal",strategy.short, when = sellsignal)
+
+View in Pine Editor・55 lines
+Use on chart
+7
+8
+6
+3
+16 087
+This script has been Inspired by PlanB Article Quant Investing 101.
+
+With this script, I implemented Plan B strategy outlined in that article, trying to reproduce his findings independently and allowing TradeView Users to do the same.
+
+PlabB is aware of this effort, and he's positive about it, via Twitter commenting, liking and sharing of this resource .
+
+Trading Idea:
+This script uses RSI index to determine the Buy And Sell signal.
+
+As per the original PlanB article:
+
+IF ( RSI was above 90% last six months AND drops below 65%) THEN sell,
+IF ( RSI was below 50% last six months AND jumps +2% from the low) THEN buy, ELSE hold
+
+My simple code is aimed at replicating his study in Pine so that every TV user can check his signal.

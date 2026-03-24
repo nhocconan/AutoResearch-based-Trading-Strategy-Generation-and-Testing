@@ -1,0 +1,58 @@
+//@version=5
+strategy("World-Class Crypto Strategy version 9 - BTC/ETH/SOL/XRP + ML", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=33, currency=currency.USD, pyramiding=3)
+
+// --- Inputs (Pro-Grade for version 9) ---
+fastLen = input.int(12, "Fast EMA (Pro: 12)", minval=1)
+slowLen = input.int(26, "Slow EMA (Pro: 26)", minval=1)
+rsiLen = input.int(14, "RSI Length", minval=1)
+rsiBull = input.int(50, "RSI Bull Filter (>50)", minval=0, maxval=100)
+volLen = input.int(20, "Volume MA Length", minval=1)
+volMultiplier = input.float(1.2, "Volume Spike (1.2x Avg)", minval=1.0, step=0.1)
+atrLen = input.int(14, "ATR Length", minval=1)
+atrStopMult = input.float(2.0, "ATR Stop Loss Multiplier", minval=0.1, step=0.1)
+atrProfitMult = input.float(4.0, "ATR Take Profit Multiplier", minval=0.1, step=0.1)
+secondarySym = input.string("ETHUSD", "Secondary Symbol (e.g., ETHUSD for BTC)")
+linregLen = input.int(14, "ML LinReg Length (Prediction Window)", minval=1)
+linregExitBars = input.int(3, "Bars Below LinReg to Exit", minval=1)
+
+// --- Indicators (Elite for version 9: EMA, RSI, Volume, ML) ---
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+rsiVal = ta.rsi(close, rsiLen)
+volMA = ta.sma(volume, volLen)
+atrVal = ta.atr(atrLen)
+linregVal = ta.linreg(close, linregLen, 0)  // ML Linear Regression
+
+// --- Secondary Symbol Confirmation (e.g., ETH for BTC) ---
+secFastEMA = request.security(secondarySym, timeframe.period, ta.ema(close, fastLen))
+secSlowEMA = request.security(secondarySym, timeframe.period, ta.ema(close, slowLen))
+secBull = ta.crossover(secFastEMA, secSlowEMA)
+
+// --- Exit Counters (ML Only) ---
+var int linregBelowCount = 0
+linregBelowCount := close < linregVal ? linregBelowCount + 1 : 0
+linregExit = linregBelowCount >= linregExitBars
+
+// --- Entry Logic (Trend + ML + Filters) ---
+bullCross = ta.crossover(fastEMA, slowEMA)
+volSpike = volume > volMA * volMultiplier
+mlBull = close > linregVal
+entryCond = bullCross and rsiVal > rsiBull and volSpike and mlBull and secBull
+
+// --- Trade Management (Pyramiding + ATR Exits) ---
+if (entryCond)
+    strategy.entry("Long", strategy.long)
+    stopPrice = close - atrVal * atrStopMult
+    profitPrice = close + atrVal * atrProfitMult
+    strategy.exit("Exit Long", "Long", stop=stopPrice, limit=profitPrice)
+
+// --- Exit on Trend Flip or ML Breach ---
+if (ta.crossunder(fastEMA, slowEMA) or linregExit)
+    strategy.close("Long", comment="Trend Flip or ML Exit")
+
+View in Pine Editor・51 lines
+Use on chart
+1
+5
+1 026
+Script intended to mirror BlackRock strategies and be used with fully integrated trading bot

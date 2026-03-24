@@ -1,0 +1,99 @@
+//@version=5
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Coinrule
+
+
+strategy("Bollinger Band Below Price with RSI",
+         overlay=true,
+         initial_capital=1000,
+         process_orders_on_close=true,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=70,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1)
+
+showDate = input(defval=true, title='Show Date Range')
+timePeriod = time >= timestamp(syminfo.timezone, 2022, 1, 1, 0, 0)
+notInTrade = strategy.position_size <= 0
+
+//Bollinger Bands Indicator
+length = input.int(20, minval=1)
+src = input(close, title="Source")
+mult = input.float(2.0, minval=0.001, maxval=50, title="StdDev")
+basis = ta.sma(src, length)
+dev = mult * ta.stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+offset = input.int(0, "Offset", minval = -500, maxval = 500)
+plot(basis, "Basis", color=#FF6D00, offset = offset)
+p1 = plot(upper, "Upper", color=#2962FF, offset = offset)
+p2 = plot(lower, "Lower", color=#2962FF, offset = offset)
+fill(p1, p2, title = "Background", color=color.rgb(33, 150, 243, 95))
+
+// RSI inputs and calculations
+lengthRSI = 14
+RSI = ta.rsi(close, lengthRSI)
+
+
+
+// Configure trail stop level with input options
+longTrailPerc = input.float(title='Trail Long Loss (%)', minval=0.0, step=0.1, defval=3) * 0.01
+shortTrailPerc = input.float(title='Trail Short Loss (%)', minval=0.0, step=0.1, defval=3) * 0.01
+
+// Determine trail stop loss prices
+//longStopPrice = 0.0
+shortStopPrice = 0.0
+
+//longStopPrice := if strategy.position_size > 0
+    //stopValue = close * (1 - longTrailPerc)
+    //math.max(stopValue, longStopPrice[1])
+//else
+    //0
+
+shortStopPrice := if strategy.position_size < 0
+    stopValue = close * (1 + shortTrailPerc)
+    math.min(stopValue, shortStopPrice[1])
+else
+    999999
+
+
+//Entry and Exit
+strategy.entry(id="short", direction=strategy.short, when=ta.crossover(close, upper) and RSI < 70 and timePeriod and notInTrade)
+
+if (ta.crossover(upper, close) and RSI > 70 and timePeriod)
+    strategy.exit(id='close', limit = shortStopPrice)
+
+View in Pine Editor・64 lines
+Use on chart
+1
+6
+1
+1
+5 729
+The Bollinger Bands are among the most famous and widely used indicators. A Bollinger Band is a technical analysis tool defined by a set of trendlines plotted two standard deviations (positively and negatively) away from a simple moving average ( SMA ) of a security's price, but which can be adjusted to user preferences. They can suggest when an asset is oversold or overbought in the short term, thus providing the best time for buying and selling it.
+
+The relative strength index ( RSI ) is a momentum indicator used in technical analysis. RSI measures the speed and magnitude of a security's recent price changes to evaluate overvalued or undervalued conditions in the price of that security. The RSI can do more than point to overbought and oversold securities. It can also indicate securities primed for a trend reversal or corrective pullback in price. It can signal when to buy and sell. Traditionally, an RSI reading of 70 or above indicates an overbought situation. A reading of 30 or below indicates an oversold condition.
+
+The short order is placed on assets that present strong momentum when it's more likely that it is about to reverse. The rule strategy places and closes the order when the following conditions are met:
+
+ENTRY
+The closing price is greater than the upper standard deviation of the Bollinger Bands
+The RSI is less than 70.
+
+EXIT
+The trade is closed when the RSI is less than 70
+The lower standard deviation of the Bollinger Band is less than the closing price.
+
+
+This strategy was backtested from the beginning of 2022 to capture how this strategy would perform in a bear market.
+
+The strategy assumes each order to trade 70% of the available capital to make the results more realistic. A trading fee of 0.1% is taken into account. The fee is aligned to the base fee applied on Binance, which is the largest cryptocurrency exchange by volume.
+
+
+
+
+
+
+
+
+

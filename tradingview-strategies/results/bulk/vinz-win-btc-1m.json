@@ -1,0 +1,28 @@
+{
+  "slug": "vinz-win-btc-1m",
+  "chart_url": "https://www.tradingview.com/script/bt8HJINE/",
+  "name": "Vinz Win BTC \u2013 STRATEGY AUTO 1m",
+  "pine_file": "raw-pine/bulk/bt8HJINE.pine",
+  "classification": "direct",
+  "strategy_name": "vinz-win-btc-1m",
+  "timeframe": "1m",
+  "reason": "No lookahead or security requests; uses standard OHLC logic and fixed stop/target levels.",
+  "adaptations": [
+    "Configure contract specs for syminfo.pointvalue/mintick",
+    "Implement session filtering via datetime",
+    "Align order execution timing to next-bar open"
+  ],
+  "queue_rank": 51,
+  "updated_at": "2026-03-22T08:29:43.913578+00:00",
+  "conversion_notes": [
+    "Session filter implemented using UTC hour from open_time (00:00-09:00).",
+    "SL/TP logic converted to next-bar exit signals to avoid lookahead.",
+    "Position sizing removed; signal indicates direction only.",
+    "Pine syminfo/mintick approximated with fixed 5.0 price buffer.",
+    "Stateful loop used to track positions and exits accurately.",
+    "Returns numpy array matching input prices length."
+  ],
+  "python_file": "python-strategies/bulk/vinz-win-btc-1m.py",
+  "repair_attempts_used": 0,
+  "import_ok": true
+}

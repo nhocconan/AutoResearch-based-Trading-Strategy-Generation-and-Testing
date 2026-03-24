@@ -1,0 +1,228 @@
+//@version=6
+strategy("Multi-divergence Strategy (MACD / RSI / OBV / etc.) v6",
+     overlay = true,
+     initial_capital = 100000,
+     pyramiding = 0,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.01,
+     calc_on_every_tick = true)
+
+// === INPUTS ===
+
+// Divergence logic
+divLookback     = input.int(21, "Divergence lookback (bars per swing)", minval = 3, maxval = 100)
+minBullConfirm  = input.int(3,  "Min indicators for bullish divergence", minval = 1, maxval = 10)
+minBearConfirm  = input.int(3,  "Min indicators for bearish divergence", minval = 1, maxval = 10)
+
+// Indicator parameters
+// MACD
+fastLen         = input.int(12, "MACD Fast length", minval = 1)
+slowLen         = input.int(26, "MACD Slow length", minval = 2)
+sigLen          = input.int(9,  "MACD Signal length", minval = 1)
+
+// RSI
+rsiLen          = input.int(14, "RSI length", minval = 2)
+
+// Stoch
+stochLen        = input.int(14, "Stoch length", minval = 2)
+kLen            = input.int(3,  "%K Smoothing", minval = 1)
+dLen            = input.int(3,  "%D Smoothing", minval = 1)
+
+// CCI / CMF / MFI / MOM / VWMA
+cciLen          = input.int(20, "CCI length", minval = 2)
+cmfLen          = input.int(20, "CMF length", minval = 2)
+mfiLen          = input.int(14, "MFI length", minval = 2)
+momLen          = input.int(10, "Momentum length", minval = 1)
+vwmaLen         = input.int(20, "VWMA length for VWMACD", minval = 2)
+
+// Trading parameters
+useLongs        = input.bool(true,  "Enable LONGs")
+useShorts       = input.bool(true,  "Enable SHORTs")
+slPerc          = input.float(4.0, "Stop Loss %", minval = 0.0, step = 0.1)
+tpPerc          = input.float(11.0, "Take Profit %", minval = 0.0, step = 0.1)
+
+
+// === INDICATORS ===
+
+// MACD & Histogram
+[macdLine, macdSignal, macdHist] = ta.macd(close, fastLen, slowLen, sigLen)
+
+// RSI
+rsi = ta.rsi(close, rsiLen)
+
+// Stochastic (%K, %D)
+rawK = ta.stoch(high, low, close, stochLen)
+k    = ta.sma(rawK, kLen)
+d    = ta.sma(k,    dLen)  // not used in divergence, but available
+
+// CCI
+cci = ta.cci(close, cciLen)
+
+// OBV (manual implementation: cumulative signed volume)
+obvChange = close > close[1] ? volume : close < close[1] ? -volume : 0.0
+obv       = ta.cum(obvChange)
+
+// CMF (no ta.sum available → use SMA ratio)
+mfMult = (high != low) ? ((close - low) - (high - close)) / (high - low) : 0.0
+mfVol  = mfMult * volume
+mfSma  = ta.sma(mfVol, cmfLen)
+volSma = ta.sma(volume, cmfLen)
+cmf    = volSma != 0.0 ? mfSma / volSma : 0.0
+
+// MFI (v6)
+mfi = ta.mfi(close, mfiLen)
+
+// Momentum
+mom = ta.mom(close, momLen)
+
+// VWMACD: MACD on VWMA price
+vwPrice = ta.vwma(close, vwmaLen)
+[vwMacdLine, vwMacdSignal, vwMacdHist] = ta.macd(vwPrice, fastLen, slowLen, sigLen)
+
+
+// === DIVERGENCE FUNCTIONS ===
+// Bullish: price lower low, oscillator higher low
+// Bearish: price higher high, oscillator lower high
+
+f_bull_divergence(priceLowSeries, oscSeries, lb) =>
+    priceLowNow  = ta.lowest(priceLowSeries,     lb)
+    oscLowNow    = ta.lowest(oscSeries,          lb)
+    priceLowPrev = ta.lowest(priceLowSeries[lb], lb)
+    oscLowPrev   = ta.lowest(oscSeries[lb],      lb)
+    (priceLowNow < priceLowPrev) and (oscLowNow > oscLowPrev)
+
+f_bear_divergence(priceHighSeries, oscSeries, lb) =>
+    priceHighNow  = ta.highest(priceHighSeries,     lb)
+    oscHighNow    = ta.highest(oscSeries,           lb)
+    priceHighPrev = ta.highest(priceHighSeries[lb], lb)
+    oscHighPrev   = ta.highest(oscSeries[lb],       lb)
+    (priceHighNow > priceHighPrev) and (oscHighNow < oscHighPrev)
+
+
+// === DIVERGENCE DETECTION PER INDICATOR ===
+
+// MACD line
+bull_macd     = f_bull_divergence(low,  macdLine,   divLookback)
+bear_macd     = f_bear_divergence(high, macdLine,   divLookback)
+
+// MACD Histogram
+bull_hist     = f_bull_divergence(low,  macdHist,   divLookback)
+bear_hist     = f_bear_divergence(high, macdHist,   divLookback)
+
+// RSI
+bull_rsi      = f_bull_divergence(low,  rsi,        divLookback)
+bear_rsi      = f_bear_divergence(high, rsi,        divLookback)
+
+// Stochastic %K
+bull_stoch    = f_bull_divergence(low,  k,          divLookback)
+bear_stoch    = f_bear_divergence(high, k,          divLookback)
+
+// CCI
+bull_cci      = f_bull_divergence(low,  cci,        divLookback)
+bear_cci      = f_bear_divergence(high, cci,        divLookback)
+
+// OBV
+bull_obv      = f_bull_divergence(low,  obv,        divLookback)
+bear_obv      = f_bear_divergence(high, obv,        divLookback)
+
+// CMF
+bull_cmf      = f_bull_divergence(low,  cmf,        divLookback)
+bear_cmf      = f_bear_divergence(high, cmf,        divLookback)
+
+// MFI
+bull_mfi      = f_bull_divergence(low,  mfi,        divLookback)
+bear_mfi      = f_bear_divergence(high, mfi,        divLookback)
+
+// Momentum
+bull_mom      = f_bull_divergence(low,  mom,        divLookback)
+bear_mom      = f_bear_divergence(high, mom,        divLookback)
+
+// VWMACD line
+bull_vwmacd   = f_bull_divergence(low,  vwMacdLine, divLookback)
+bear_vwmacd   = f_bear_divergence(high, vwMacdLine, divLookback)
+
+
+// === AGGREGATION OF SIGNALS ===
+
+bullCount = 0
+bullCount += bull_macd   ? 1 : 0
+bullCount += bull_hist   ? 1 : 0
+bullCount += bull_rsi    ? 1 : 0
+bullCount += bull_stoch  ? 1 : 0
+bullCount += bull_cci    ? 1 : 0
+bullCount += bull_obv    ? 1 : 0
+bullCount += bull_cmf    ? 1 : 0
+bullCount += bull_mfi    ? 1 : 0
+bullCount += bull_mom    ? 1 : 0
+bullCount += bull_vwmacd ? 1 : 0
+
+bearCount = 0
+bearCount += bear_macd   ? 1 : 0
+bearCount += bear_hist   ? 1 : 0
+bearCount += bear_rsi    ? 1 : 0
+bearCount += bear_stoch  ? 1 : 0
+bearCount += bear_cci    ? 1 : 0
+bearCount += bear_obv    ? 1 : 0
+bearCount += bear_cmf    ? 1 : 0
+bearCount += bear_mfi    ? 1 : 0
+bearCount += bear_mom    ? 1 : 0
+bearCount += bear_vwmacd ? 1 : 0
+
+bullSignal = bullCount >= minBullConfirm
+bearSignal = bearCount >= minBearConfirm
+
+
+// === TRADING LOGIC ===
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// Entries
+if bullSignal and not bearSignal and useLongs and not inLong
+    strategy.entry("Long", strategy.long)
+
+if bearSignal and not bullSignal and useShorts and not inShort
+    strategy.entry("Short", strategy.short)
+
+// Exits (SL / TP, symmetric)
+if inLong and slPerc > 0
+    longStop  = strategy.position_avg_price * (1 - slPerc / 100.0)
+    longLimit = tpPerc > 0 ? strategy.position_avg_price * (1 + tpPerc / 100.0) : na
+    strategy.exit("Long Exit", "Long", stop = longStop, limit = longLimit)
+
+if inShort and slPerc > 0
+    shortStop  = strategy.position_avg_price * (1 + slPerc / 100.0)
+    shortLimit = tpPerc > 0 ? strategy.position_avg_price * (1 - tpPerc / 100.0) : na
+    strategy.exit("Short Exit", "Short", stop = shortStop, limit = shortLimit)
+
+
+// === VISUALIZATION ===
+
+plotshape(bullSignal,
+     title     = "Bullish multi-divergence",
+     style     = shape.triangleup,
+     location  = location.belowbar,
+     size      = size.tiny,
+     color     = color.new(color.lime, 0),
+     text      = "Bull Div")
+
+plotshape(bearSignal,
+     title     = "Bearish multi-divergence",
+     style     = shape.triangledown,
+     location  = location.abovebar,
+     size      = size.tiny,
+     color     = color.new(color.red, 0),
+     text      = "Bear Div")
+
+// Optional: counts (hidden by default)
+plot(bullCount, title = "Bullish divergence count",
+     color = color.new(color.lime, 50), display = display.none)
+plot(bearCount, title = "Bearish divergence count",
+     color = color.new(color.red, 50), display = display.none)
+
+View in Pine Editor・221 lines
+Use on chart
+2
+3
+910
+Multi-divergence Strategy based on MACD / RSI / OBV / etc.

@@ -1,0 +1,51 @@
+//@version=5
+strategy("Backtest Adapter", overlay=true)
+useDateFilter = input.bool(true, title="Begin Backtest at Start Date", group="Backtest Time Period")
+backtestStartDate = input.time(timestamp("11 May 2022"), title="Start Date", group="Backtest Time Period")
+inTradeWindow = not useDateFilter or time >= backtestStartDate
+
+src = input.source(title="Source", defval=close, tooltip="Source of the input data", group="General Settings")
+
+// Set up your entry and exit conditions for positions based on the indicator stream. 
+// The values here must correspond to the values in the Source indicator.
+startLongTrade = src == 1
+endLongTrade = src == 2
+startShortTrade = src == -1
+endShortTrade = src == -2
+
+if startLongTrade and inTradeWindow
+    strategy.order("Enter Long", strategy.long) 
+    
+if endLongTrade and strategy.position_size > 0 and inTradeWindow
+    strategy.order("Exit Long", strategy.short)
+
+if startShortTrade and inTradeWindow
+    strategy.order("Enter Short", strategy.short)
+
+if endShortTrade and strategy.position_size < 0 and inTradeWindow
+    strategy.order("Exit Short", strategy.long)
+
+View in Pine Editor・28 lines
+Use on chart
+6.1 K
+51
+95 575
+Feb 10, 2023
+This is a proof-of-concept Backtest Adapter that can be used with my recent publication "Machine Learning: Lorentzian Classification" located here:
+
+
+
+
+This adapter is helpful because it enables interactive backtesting with TradingView's built-in "Strategy Tester" framework without the need to translate the logic from an "indicator" script to a "strategy" script.
+
+To use this, one must have the "Machine Learning: Lorentzian Classification" script and this Backtest Adapter open simultaneously on the same chart. From there, simply change the "Source" setting of the Backtest Adapter to "Lorentzian Classification: Backtest Stream" to transfer the entry/exit signals stream to the Backtest Adapter.
+
+For an example of how to implement your own backtest stream in your indicators, please refer to the "Backtesting" section in the source code of the "Machine Learning: Lorentzian Classification" script, which is shown below for convenience:
+
+
+Feb 10, 2023
+Release Notes
+Updated the Source of the Backtest Adapter to be set to "Lorentzian Classification: Backtest Stream"
+Feb 12, 2024
+Release Notes
+Removed hardcoded `transactionQty` to use default strategy quantity, simplifying order execution code.

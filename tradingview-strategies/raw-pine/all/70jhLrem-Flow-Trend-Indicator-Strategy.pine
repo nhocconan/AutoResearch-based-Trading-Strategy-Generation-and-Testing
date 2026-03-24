@@ -1,0 +1,128 @@
+//@version=3
+strategy(title="Flow Trend Indicator Strategy", shorttitle="FlowTi", initial_capital=10000, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=5.0, overlay=true, calc_on_every_tick=true, pyramiding=1)
+
+tradeType = input("Long/Short", title="Trade Type ", options=["Long", "Short", "Long/Short"])
+strategy = input("ATR", title="Strategy", options=["RSI", "ATR"])
+coloring = input(title = "Coloring", type = bool, defval = true)
+//Backtest range
+fromYear = input(defval = 2000, title = "From Year", minval = 2000)
+fromMonth = input(defval = 01, title = "From Month", minval = 1)  
+toYear = input(defval = 2020, title = "To Year", minval = 2000)
+toMonth = input(defval = 01, title = "To Month", minval = 1)
+//ATR
+atrTsSource = close //input(type = source, defval = close, title = "ATR Trailing Stop Source") 
+atrTiSource = close //input(type = source, defval = close, title = "ATR Trend Indication Source")
+nATRPeriod = input(title = "ATR Length", type = integer, defval = 5)
+nATRMultip = input(title = "ATR Stop Loss Multiplier", type = float, defval = 3, step = 0.05)
+//RSI Offset
+rsiTiOffset = input(title="RSI Offset", type=integer, defval=4)
+
+//Init variables
+atrTs = 0.0
+atrTsHtf = 0.0
+atrBuySell = 0
+buySell = 0
+color = na
+
+//Check if we are in a backtesting period
+backTestPeriod() =>
+    (time > timestamp(fromYear, fromMonth, 01, 00, 00)) and (time < timestamp(toYear, toMonth, 01, 00, 00)) 
+
+//Function ATR Trailing Stop
+AtrTrailingStop(atrTsSource, atrTsPrev) =>
+    atr = atr(nATRPeriod)
+    nLoss = nATRMultip * atr
+
+    if(atrTsSource > nz(atrTsPrev) and atrTsSource[1] > nz(atrTsPrev))
+        max(nz(atrTsPrev), atrTsSource - nLoss)
+    else 
+        if(atrTsSource < nz(atrTsPrev) and atrTsSource[1] < nz(atrTsPrev))
+            min(nz(atrTsPrev), atrTsSource + nLoss)
+        else
+            if(atrTsSource > nz(atrTsPrev))
+                atrTsSource - nLoss
+            else
+                atrTsSource + nLoss
+
+//ATR Trend indication
+AtrTrendIndication(atrTiSource, atrTsPrev, atrBuySellPrev) =>
+    if(atrTiSource[1] < nz(atrTsPrev) and atrTiSource > nz(atrTsPrev))
+        1
+    else
+        if(atrTiSource[1] > nz(atrTsPrev) and atrTiSource < nz(atrTsPrev)) 
+            -1
+        else
+            nz(atrBuySellPrev)
+
+//Function Trend indication
+RsiTrendIndication(rsiTiSource) =>
+    trendFastLength = 20
+    trendSlowLength = 50
+    upFast = rma(max(change(rsiTiSource), 0), trendFastLength)
+    downFast = rma(-min(change(rsiTiSource), 0), trendFastLength)
+    rsiFast = downFast == 0 ? 100 : upFast == 0 ? 0 : 100 - (100 / (1 + upFast / downFast))
+    upSlow = rma(max(change(rsiTiSource), 0), trendSlowLength)
+    downSlow = rma(-min(change(rsiTiSource), 0), trendSlowLength)
+    rsiSlow = downSlow == 0 ? 100 : upSlow == 0 ? 0 : 100 - (100 / (1 + upSlow / downSlow))
+    rsiDiff = rsiFast - rsiSlow
+
+//Calculate ATR trailing stop
+atrTs := AtrTrailingStop(atrTsSource, atrTs[1])
+
+//ATR Buy/Sell signals
+atrBuySell := AtrTrendIndication(atrTiSource, atrTs[1], atrBuySell[1])
+
+//Calculate RSI Trend indication
+rsiTrend = RsiTrendIndication(close)
+
+//Buy/Sell signals and coloring
+if (strategy == "ATR")
+    buySell := atrBuySell
+    color := buySell == 1 ? green : buySell == -1 ? maroon : na
+else
+    if (strategy == "RSI")
+        buySell := crossover(rsiTrend, rsiTiOffset) ? 1 : crossunder(rsiTrend, -rsiTiOffset) ? -1 : na
+        color := rsiTrend > 0 ? green : rsiTrend < 0 ? maroon : na
+
+//Color bars depending on trend       
+barcolor(coloring ? color : na)
+
+if (backTestPeriod())
+    if (tradeType == "Long/Short")
+        if (buySell == 1)
+            strategy.entry("Long", strategy.long) 
+        else
+            if (buySell == -1)
+                strategy.entry("Short", strategy.short)
+    
+    if (tradeType == "Long")
+        if (buySell == 1)
+            strategy.entry("Long", strategy.long)
+        else
+            if (buySell == -1)
+                strategy.close("Long")
+        
+    if (tradeType == "Short")
+        if (buySell == 1)
+            strategy.close("Short")   
+        else
+            if (buySell == -1)
+                strategy.entry("Short", strategy.short)
+
+//plot(buySell, color=orange, title="BuySell")        
+plot(strategy == "ATR" ? atrTs : na, color=red, title="ATR Trailing Stop")
+
+View in Pine Editor・113 lines
+Use on chart
+9
+0
+2 784
+Mar 9, 2019
+Implemented the trend indication part of the CHOP_LRSI indicator as a strategy.
+Mar 21, 2019
+Release Notes
+Experimental version supporting following features:
+- RSI strategy
+- ATR strategy
+- Selectable backtest range
+- Support of pyramiding

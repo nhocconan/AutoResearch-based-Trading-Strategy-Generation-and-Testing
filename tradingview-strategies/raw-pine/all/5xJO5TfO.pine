@@ -1,0 +1,5 @@
+//@version=4
+upLine=##input(defval=80,type='INPUT_INTEGER',##id='in_3')
+lowLine=##input(defval=20,type='INPUT_INTEGER',##id='in_4')
+##root(root_metainfo,rm_0,upLine)
+##root(root_metainfo,rm_1,lowLine)

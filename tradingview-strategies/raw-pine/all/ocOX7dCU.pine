@@ -1,0 +1,81 @@
+//@version=6
+strategy("CE+ZLSMA RovTrading Stratery", shorttitle="CE+ZLSMA RovTrading Stratery", overlay=true, margin_long=100, margin_short=100)
+
+//=== Cài đặt Chandelier Exit ===
+length = input.int(22, title='ATR Period', group='Chandelier Exit')
+mult = input.float(3.0, step=0.1, title='ATR Multiplier', group='Chandelier Exit')
+useClose = input.bool(true, title='Use Close Price for Extremums', group='Chandelier Exit')
+
+//=== Cài đặt ZLSMA ===
+length_zlsma = input.int(32, title="Length", group="ZLSMA")
+offset_zlsma = input.int(0, title="Offset", group="ZLSMA")
+src_zlsma = input(close, title="Source", group="ZLSMA")
+
+//=== Tính toán Chandelier Exit ===
+atr = mult * ta.atr(length)
+
+longStop = (useClose ? ta.highest(close, length) : ta.highest(length)) - atr
+longStopPrev = nz(longStop[1], longStop)
+longStop := close[1] > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+shortStop = (useClose ? ta.lowest(close, length) : ta.lowest(length)) + atr
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop := close[1] < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+var int dir = 1
+dir := close > shortStopPrev ? 1 : close < longStopPrev ? -1 : dir
+
+//=== Tính toán ZLSMA ===
+lsma = ta.linreg(src_zlsma, length_zlsma, offset_zlsma)
+lsma2 = ta.linreg(lsma, length_zlsma, offset_zlsma)
+eq = lsma - lsma2
+zlsma = lsma + eq
+
+//=== Xác định tín hiệu với điều kiện mới ===
+buySignal = dir == 1 and dir[1] == -1
+sellSignal = dir == -1 and dir[1] == 1
+
+bullish = dir == 1 and zlsma > zlsma[1]
+bearish = dir == -1 and zlsma < zlsma[1]
+
+// ĐIỀU KIỆN: Giá phải nằm trên ZLSMA để có tín hiệu Buy
+// và phải nằm dưới ZLSMA để có tín hiệu Sell
+strongBuySignal = bullish and buySignal and (close > zlsma)
+strongSellSignal = bearish and sellSignal and (close < zlsma)
+
+//=== Vẽ ZLSMA ===
+plot(zlsma, color=color.yellow, linewidth=3, title="ZLSMA")
+
+//=== Vẽ Strong Buy và Strong Sell ===
+plotshape(strongBuySignal, title="Strong Buy", text="Strong Buy", 
+          style=shape.labelup, location=location.belowbar, 
+          color=color.new(color.green, 0), textcolor=color.white, 
+          size=size.normal)
+
+plotshape(strongSellSignal, title="Strong Sell", text="Strong Sell", 
+          style=shape.labeldown, location=location.abovebar, 
+          color=color.new(color.red, 0), textcolor=color.white, 
+          size=size.normal)
+
+//=== Chiến lược giao dịch ===
+if (strongBuySignal)
+    strategy.entry("Long", strategy.long)
+    
+if (strongSellSignal)
+    strategy.entry("Short", strategy.short)
+
+//=== Cảnh báo ===
+alertcondition(strongBuySignal, title="Strong Buy Alert", 
+               message="Strong Buy Signal - Price above ZLSMA")
+alertcondition(strongSellSignal, title="Strong Sell Alert", 
+               message="Strong Sell Signal - Price below ZLSMA")
+
+View in Pine Editor・71 lines
+Use on chart
+1
+0
+8
+2 463
+The strategy is optimized for scalping in small timeframes like M15 and M30, as well as M5.
+It combines two indicators: CE and ZLSMA.
+Try it now!

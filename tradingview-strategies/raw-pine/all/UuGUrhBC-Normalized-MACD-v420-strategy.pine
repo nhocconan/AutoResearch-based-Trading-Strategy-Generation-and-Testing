@@ -1,0 +1,52 @@
+//@version=2
+// Normalized MACD but heavily modified by SeaSide420. Normalized MACD v420
+strategy("Normalized MACD (v420)",shorttitle="NmacD(v420)",overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=1440, default_qty_value=100, calc_on_order_fills= true, calc_on_every_tick=true, pyramiding=0) 
+p=input(ohlc4,type=source)
+jah=input(title="HullMA cross",type=integer,defval=21)
+tsp = input(34,title='Trigger')
+np = input(50,title='Normalize')
+SL = input(defval=-420.00, title="Stop Loss in $", type=float, step=1)
+TP = input(defval=31.00, title="Target Point in $", type=float, step=1)
+ot=1
+n2ma=2*wma(p,round(jah/2))
+nma=wma(p,jah)
+diff=n2ma-nma
+sqn=round(sqrt(jah))
+n2ma1=2*wma(p[2],round(jah/2))
+nma1=wma(p[2],jah)
+diff1=n2ma1-nma1
+sqn1=round(sqrt(jah))
+n1=wma(diff,sqn)
+n2=wma(diff1,sqn)
+sh=n1
+lon=n2
+ratio = min(sh,lon)/max(sh,lon)
+Mac = (iff(sh>lon,2-ratio,ratio)-1)
+MacNorm = ((Mac-lowest(Mac, np)) /(highest(Mac, np)-lowest(Mac, np)+.000001)*2)- 1
+MacNorm2 = iff(np<2,Mac,MacNorm)
+Trigger = wma(MacNorm2, tsp)
+Hist =(MacNorm2-Trigger)
+Hist2= Hist>1?1:Hist<-1?-1:Hist
+teh=MacNorm2+MacNorm2[2]-MacNorm2[1]
+closelong = strategy.openprofit<SL or strategy.openprofit>TP or teh[1]<Trigger[1] and n1<n2[1]
+if (closelong)
+    strategy.close("Long")
+closeshort = strategy.openprofit<SL or strategy.openprofit>TP or  teh[1]>Trigger[1] and n1>n2[1]
+if (closeshort)
+    strategy.close("Short")
+longCondition = Trigger<0 and teh>Trigger and MacNorm>Trigger and strategy.opentrades<ot 
+if (longCondition)
+    strategy.entry("Long",strategy.long)
+shortCondition = Trigger>0 and teh<Trigger and MacNorm<Trigger and strategy.opentrades<ot 
+if (shortCondition)
+    strategy.entry("Short",strategy.short)
+
+View in Pine Editor・42 lines
+Use on chart
+2
+0
+8
+5 747
+Normalized MACD but heavily modified for example hullMA instead of EMA
+
+the strategy

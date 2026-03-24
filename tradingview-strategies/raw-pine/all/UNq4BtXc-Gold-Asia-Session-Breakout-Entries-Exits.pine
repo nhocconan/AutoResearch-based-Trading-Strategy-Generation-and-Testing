@@ -1,0 +1,127 @@
+//@version=5
+strategy("GC Asia Session Breakout (Entries + Exits)", overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.0,
+     calc_on_every_tick=true, process_orders_on_close=true)
+
+// ─────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────
+tz          = input.string("America/New_York", "Session Timezone")
+asiaSess    = input.session("1800-0000", "Asia Range Session (build range)", confirm=true)  // 6pm–12am NY (typical Asia window)
+tradeSess   = input.session("0000-0300", "Trade Window (entries allowed)", confirm=true)     // trade after range built
+
+useEma      = input.bool(true, "Use EMA Trend Filter")
+emaLen      = input.int(100, "EMA Length", minval=1)
+
+useAtrStops = input.bool(true, "Use ATR stop/target")
+atrLen      = input.int(14, "ATR Length", minval=1)
+stopATR     = input.float(1.2, "Stop = ATR x", minval=0.1, step=0.1)
+targetATR   = input.float(2.0, "Target = ATR x", minval=0.1, step=0.1)
+
+useFixed    = input.bool(false, "Use fixed $ stop/target (overrides ATR if ON)")
+stopDollars = input.float(4.0, "Stop ($)", minval=0.1, step=0.1)
+tgtDollars  = input.float(8.0, "Target ($)", minval=0.1, step=0.1)
+
+useTimeExit = input.bool(true, "Time-based exit at end of Trade Window")
+oneTradePerDay = input.bool(true, "Max 1 trade per day")
+
+// ─────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────
+inAsia  = not na(time(timeframe.period, asiaSess, tz))
+inTrade = not na(time(timeframe.period, tradeSess, tz))
+
+ema = ta.ema(close, emaLen)
+atr = ta.atr(atrLen)
+
+plot(useEma ? ema : na, "EMA", color=color.new(color.yellow, 0))
+
+// New day detection (in chosen tz)
+dayKey = time("D", tz)
+newDay = ta.change(dayKey)
+
+// ─────────────────────────────────────────────────────────────
+// Build Asia session range (High/Low)
+// ─────────────────────────────────────────────────────────────
+var float asiaHigh = na
+var float asiaLow  = na
+
+if newDay
+    asiaHigh := na
+    asiaLow  := na
+
+if inAsia
+    asiaHigh := na(asiaHigh) ? high : math.max(asiaHigh, high)
+    asiaLow  := na(asiaLow)  ? low  : math.min(asiaLow,  low)
+
+// Plot range
+plot(asiaHigh, "Asia High", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=2)
+plot(asiaLow,  "Asia Low",  color=color.new(color.red,  0), style=plot.style_linebr, linewidth=2)
+
+// ─────────────────────────────────────────────────────────────
+// Entry logic: breakouts of Asia range during Trade Window
+// ─────────────────────────────────────────────────────────────
+trendLongOk  = not useEma or close > ema
+trendShortOk = not useEma or close < ema
+
+rangeReady = not na(asiaHigh) and not na(asiaLow) and (asiaHigh > asiaLow)
+
+// One trade per day gate
+var bool tradedToday = false
+if newDay
+    tradedToday := false
+
+canTrade = (not oneTradePerDay) or (oneTradePerDay and not tradedToday)
+
+// Breakout conditions (use close confirmation)
+longBreak  = rangeReady and inTrade and canTrade and trendLongOk  and ta.crossover(close, asiaHigh)
+shortBreak = rangeReady and inTrade and canTrade and trendShortOk and ta.crossunder(close, asiaLow)
+
+// ─────────────────────────────────────────────────────────────
+// Risk management: choose ATR-based or fixed dollar distances
+// For GC, 1 point = $1 in price terms; use what matches your chart.
+// If your broker/data is scaled differently, adjust inputs accordingly.
+// ─────────────────────────────────────────────────────────────
+stopDist  = useFixed ? stopDollars : atr * stopATR
+tgtDist   = useFixed ? tgtDollars  : atr * targetATR
+
+// Entries
+if longBreak
+    strategy.entry("L", strategy.long)
+    tradedToday := true
+
+if shortBreak
+    strategy.entry("S", strategy.short)
+    tradedToday := true
+
+// Exits (attached to positions for Strategy Tester report)
+if useAtrStops or useFixed
+    // Long exit
+    longStop  = strategy.position_avg_price - stopDist
+    longLimit = strategy.position_avg_price + tgtDist
+    strategy.exit("L-Exit", from_entry="L", stop=longStop, limit=longLimit)
+
+    // Short exit
+    shortStop  = strategy.position_avg_price + stopDist
+    shortLimit = strategy.position_avg_price - tgtDist
+    strategy.exit("S-Exit", from_entry="S", stop=shortStop, limit=shortLimit)
+
+// Optional time-based exit at end of Trade Window
+tradeEndingNow = useTimeExit and (not inTrade) and (inTrade[1])  // just transitioned out of trade window
+if tradeEndingNow
+    strategy.close("L", comment="Time Exit")
+    strategy.close("S", comment="Time Exit")
+
+// ─────────────────────────────────────────────────────────────
+// Visuals
+// ─────────────────────────────────────────────────────────────
+plotshape(longBreak,  title="Long Break",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="L")
+plotshape(shortBreak, title="Short Break", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  size=size.tiny, text="S")
+
+View in Pine Editor・120 lines
+Use on chart
+1
+8
+456
+This strategy trades Gold (GC) using an Asia session breakout model. It first identifies the high and low of the Asia trading session to establish a range. When price breaks above or below this range during the defined trade window, the strategy enters a position in the direction of the breakout. Optional EMA trend filtering can be used to align trades with the prevailing trend. Risk management includes configurable ATR-based or fixed stop losses and profit targets, along with an optional time-based exit at the end of the session. The strategy is designed for intraday traders looking to capture volatility expansion following the typically tighter Asia session range.

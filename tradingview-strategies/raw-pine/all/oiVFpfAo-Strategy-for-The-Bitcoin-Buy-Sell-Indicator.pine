@@ -1,0 +1,34 @@
+//@version=4
+strategy("SMA Crossover Strategy", overlay=true)
+
+shortSma = sma(close, 20)
+longSma = sma(close, 100)
+
+if crossover(shortSma, longSma)
+    strategy.entry("Buy", strategy.long)
+
+if crossunder(shortSma, longSma)
+    strategy.entry("Sell", strategy.short)
+
+plot(shortSma, color=color.red)
+plot(longSma, color=color.blue)
+
+View in Pine Editor・14 lines
+Use on chart
+2
+6
+1
+1
+8 224
+Aug 27, 2019
+This is the strategy for
+
+
+Starting with a capital of $3,000 XBT, one might have $15,975 dollar worth of XBT plus whatever the bitcoin has appreciated over the years.
+The Sharpe Ratio: 0.586, Net Profit is 532%, 57 closed trades from 2017 till today, Profit factor of 3.745 (aka for every dollar loss, there is 3.745 dollar profit) with 14% drawdown.
+
+Let that sink in.
+
+Jul 22, 2023
+Release Notes
+Code no longer useful. Updated to show only a crossover of 20,100

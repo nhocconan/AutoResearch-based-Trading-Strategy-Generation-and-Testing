@@ -1,0 +1,181 @@
+//@version=5
+strategy("Penguin Volatility State Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_value=0.075)
+
+// ===================================================================
+//                             INPUTS
+// ===================================================================
+// --- Indicator Settings ---
+string group_indicators = "Indicator Settings"
+bb_len = input.int(20, "BB/KC Length", group=group_indicators)
+bb_mult = input.float(2.0, "BB Multiplier", group=group_indicators)
+kc_mult = input.float(2.0, "KC Multiplier", group=group_indicators)
+ema_fast_len = input.int(12, "Fast EMA Length", group=group_indicators)
+ema_slow_len = input.int(26, "Slow EMA Length", group=group_indicators)
+rsi_diff_len = input.int(14, "RSI of Diff Length", group=group_indicators)
+rsi_avg_len = input.int(7, "SMA of RSI Length", group=group_indicators)
+
+// --- Strategy Filter Settings ---
+string group_filters = "Strategy Filters"
+trade_direction = input.string("Long Only", "Trade Direction", options=["Both", "Long Only", "Short Only"], group=group_filters)
+use_regime_filter = input.bool(false, "RULE 1: Filter Sideways Markets (Yellow & Blue)?", group=group_filters)
+use_strength_filter = input.bool(false, "RULE 2: Trade Only on Strong Momentum (RSI Accel)?", group=group_filters)
+use_timing_filter = input.bool(false, "RULE 3: Enter/Exit on Exact Transition?", group=group_filters)
+// --- NEW INPUT ---
+use_diff_filter = input.bool(false, "RULE 4: Trade only when Volatility Expanding (diff > 0)?", group=group_filters)
+
+
+// ===================================================================
+//                       INDICATOR CALCULATIONS
+// ===================================================================
+// --- Bollinger Bands & Keltner Channel ---
+basisBB = ta.sma(close, bb_len)
+dev = bb_mult * ta.stdev(close, bb_len)
+upperBB = basisBB + dev
+lowerBB = basisBB - dev
+atr = ta.atr(bb_len)
+upperKC = basisBB + kc_mult * atr
+lowerKC = basisBB - kc_mult * atr
+
+// --- Diff & RSI of Diff Calculation ---
+diff = (upperBB - upperKC) / upperKC * 100
+diff_change = ta.change(diff)
+up = ta.rma(math.max(diff_change, 0), rsi_diff_len)
+down = ta.rma(-math.min(diff_change, 0), rsi_diff_len)
+rsi_diff = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+rsi_diff2 = ta.sma(rsi_diff, rsi_avg_len)
+
+// --- EMAs for Market State ---
+fast_ma = ta.ema(close, ema_fast_len)
+slow_ma = ta.ema(close, ema_slow_len)
+apcdc = ta.ema(ohlc4, 2)
+
+// ===================================================================
+//                         STATE DEFINITIONS
+// ===================================================================
+isBullishTrend = fast_ma > slow_ma
+isBearishTrend = fast_ma < slow_ma
+isGreen = isBullishTrend and apcdc > fast_ma
+isRed = isBearishTrend and apcdc < fast_ma
+isYellow = isBullishTrend and apcdc < fast_ma
+isBlue = isBearishTrend and apcdc > fast_ma
+isRsiAccel = rsi_diff > rsi_diff2
+
+// --- NEW CONDITION ---
+isVolatilityExpanding = diff > 0
+
+// ===================================================================
+//                         STRATEGY LOGIC
+// ===================================================================
+// --- Apply Filters to define tradable conditions ---
+can_long_base = use_regime_filter ? isGreen : (isGreen or isYellow)
+can_short_base = use_regime_filter ? isRed : (isRed or isBlue)
+
+// --- MODIFIED LOGIC ---
+long_condition_filtered = use_strength_filter ? can_long_base and isRsiAccel : can_long_base
+short_condition_filtered = use_strength_filter ? can_short_base and isRsiAccel : can_short_base
+long_condition = use_diff_filter ? long_condition_filtered and isVolatilityExpanding : long_condition_filtered
+short_condition = use_diff_filter ? short_condition_filtered and isVolatilityExpanding : short_condition_filtered
+
+entry_long_timing = ta.crossunder(rsi_diff2, rsi_diff) and can_long_base and (use_diff_filter ? isVolatilityExpanding : true)
+exit_long_timing = ta.crossunder(rsi_diff, rsi_diff2)
+entry_short_timing = ta.crossunder(rsi_diff2, rsi_diff) and can_short_base and (use_diff_filter ? isVolatilityExpanding : true)
+exit_short_timing = ta.crossunder(rsi_diff, rsi_diff2)
+
+// --- Determine Final Entry/Exit Conditions ---
+final_entry_long = use_timing_filter ? entry_long_timing : long_condition
+final_exit_long = use_timing_filter ? exit_long_timing : not long_condition
+final_entry_short = use_timing_filter ? entry_short_timing : short_condition
+final_exit_short = use_timing_filter ? exit_short_timing : not short_condition
+
+// --- Check Trade Direction permission ---
+allow_long = trade_direction == "Both" or trade_direction == "Long Only"
+allow_short = trade_direction == "Both" or trade_direction == "Short Only"
+
+// --- Execute Trades ---
+if (final_entry_long and allow_long)
+    strategy.entry("Long", strategy.long)
+
+if (final_exit_long)
+    strategy.close("Long")
+
+if (final_entry_short and allow_short)
+    strategy.entry("Short", strategy.short)
+
+if (final_exit_short)
+    strategy.close("Short")
+
+// ===================================================================
+//                           VISUALIZATION
+// ===================================================================
+bgcolor(isGreen ? color.new(color.green, 85) : isRed ? color.new(color.red, 85) : isYellow ? color.new(color.yellow, 85) : isBlue ? color.new(color.blue, 85) : na)
+
+View in Pine Editor・132 lines
+Use on chart
+5
+3
+1 465
+The Penguin Volatility State Strategy is a comprehensive technical analysis framework designed to identify the underlying "state" or "regime" of the market. Instead of just providing simple buy or sell signals, its primary goal is to classify the market into one of four distinct states by combining trend, momentum, and volatility analysis.
+
+The core idea is to trade only when these three elements align, focusing on periods of volatility expansion (a "squeeze breakout") that occur in the direction of a confirmed trend and are supported by strong momentum.
+
+Key Components
+
+The strategy is built upon two main engines
+
+The Volatility Engine (Bollinger Bands vs. Keltner Channels)
+
+This engine detects periods of rapidly increasing volatility. It measures the percentage difference (diff) between the upper bands of Bollinger Bands (which are based on standard deviation) and Keltner Channels (based on Average True Range). During a volatility "squeeze," both bands are close. When price breaks out, the Bollinger Band expands much faster than the Keltner Channel, causing the diff value to become positive. A positive diff signals a volatility breakout, which is the moment the strategy becomes active.
+
+The Trend & Momentum Engine (Multi-EMA System)
+
+This engine determines the market's direction and strength. It uses:
+
+A Fast EMA (e.g., 12-period) and a Slow EMA (e.g., 26-period): The crossover of these two moving averages defines the primary, underlying trend (similar to a MACD).
+
+An Ultra-Fast EMA (e.g., 2-period of ohlc4): This is used to measure the immediate, short-term momentum of the price.
+
+The Four Market States
+
+By combining the Trend and Momentum engines, the strategy categorizes the market into four visually distinct states, represented by the chart's background color. This is the most crucial aspect of the system.
+
+💚 Green State: Strong Bullish
+
+The primary trend is UP (Fast EMA > Slow EMA) AND the immediate momentum is STRONG (Price > Fast EMA).
+
+Interpretation: This represents a healthy, robust uptrend where both the underlying trend and short-term price action are aligned. It is considered the safest condition for taking long positions.
+
+❤️ Red State: Strong Bearish
+
+Condition: The primary trend is DOWN (Fast EMA < Slow EMA) AND the immediate momentum is WEAK (Price < Fast EMA).
+
+Interpretation: This represents a strong, confirmed downtrend. It is considered the safest condition for taking short positions.
+
+💛 Yellow State: Weakening Bullish / Pullback
+
+Condition: The primary trend is UP (Fast EMA > Slow EMA) BUT the immediate momentum is WEAK (Price < Fast EMA).
+
+Interpretation: This is a critical warning signal for bulls. While the larger trend is still up, the short-term price action is showing weakness. This could be a minor pullback, a period of consolidation, or the very beginning of a trend reversal. Caution is advised.
+
+💙 Blue State: Weakening Bearish / Relief Rally
+
+Condition: The primary trend is DOWN (Fast EMA < Slow EMA) BUT the immediate momentum is STRONG (Price > Fast EMA).
+
+Interpretation: This signals that a downtrend is losing steam. It often represents a short-covering rally (a "bear market rally") or the first potential sign of a market bottom. Bears should be cautious and consider taking profits.
+
+How the Strategy Functions
+
+The strategy uses these four states as its foundation for making trading decisions. The entry and exit arrows (Long, Short, Close) are generated based on a set of rules that can be customized by the user. For instance, a trader can configure the strategy to
+
+Only take long trades during the Green State.
+
+Require a confirmed volatility breakout (diff > 0) before entering a trade.
+
+Use the "RSI on Diff" indicator to ensure that the breakout is supported by accelerating momentum.
+
+Summary
+
+In essence, the Penguin Volatility State Strategy provides a powerful "dashboard" for viewing the market. It moves beyond simple indicators to offer a contextual understanding of price action. By waiting for the alignment of Trend (the State), Volatility (the Breakout), and Momentum (the Acceleration), it helps traders to identify higher-probability setups and, just as importantly, to know when it is better to stay out of the market.
+
+
+License / disclaimer
+© waranyu.trkm — MIT License. Educational use only; not financial advice.

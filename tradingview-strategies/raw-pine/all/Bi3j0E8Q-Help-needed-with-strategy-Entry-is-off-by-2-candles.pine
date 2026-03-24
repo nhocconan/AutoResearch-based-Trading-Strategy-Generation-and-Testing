@@ -1,0 +1,55 @@
+//@version=3
+strategy(title="Help needed with basic strategy", shorttitle="Help Needed", overlay=true)
+
+// Revision:        1
+// Author:          @GordonR 
+
+//=== Inputs ===
+fastMAPeriod    = input(defval = 10, title = "Fast MA Period", minval=1)
+slowMAPeriod    = input(defval = 20, title = "Slow MA Period", minval=1)
+
+//=== Calculations ===
+fastMA = sma(close, fastMAPeriod)
+slowMA = sma(close, slowMAPeriod)
+
+//=== Drawing ===
+//Plot the moving average lines
+fastMAPlot = plot(fastMA, color = blue, linewidth = 1, title='Fast MA')
+slowMAPlot = plot(slowMA, color = navy, linewidth = 2, title='Slow MA')
+
+//=== Buy / Sell indicators ===
+longEntryCondition = crossover(fastMA,slowMA)
+plotshape(longEntryCondition, color=green, style=shape.arrowup, text="Buy")
+strategy.entry(id = "Long", long = true, when = longEntryCondition)             //Why is this off by 1 compared to the arrow we just drew?
+
+shortEntryCondition = crossunder(fastMA,slowMA)
+plotshape(shortEntryCondition, color=red, style=shape.arrowdown, text="Sell")
+strategy.entry(id = "Short", long = false, when = shortEntryCondition)          //Why is this off by 1 compared to the arrow we just drew?
+
+View in Pine Editor・27 lines
+Use on chart
+1
+3
+7
+26
+21 526
+Hi,
+
+I'm new to TradingView, and would greatly appreciate some help with figuring out where I'm going wrong with this script.
+
+This is a overly simplified version of what I'm actually trying to do, but hopefully it's easier to see the problem.
+
+Here I'd like to create a Buy signal when the fast moving average crosses over the slow moving average, and Sell when the reverse happens.
+
+
+If I draw arrows when the condition is met then they are one candle later than expected (probably because I'm using the closing values ??).
+That not great, but workable.
+
+My real problem comes when I try turning this into a strategy.
+Now the signal only triggers 2 candles after the crossover.
+
+What am I doing wrong here?
+
+Thanks,
+Gordon
+

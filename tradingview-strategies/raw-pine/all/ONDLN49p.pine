@@ -1,0 +1,57 @@
+//@version=5
+// English version
+strategy(title='Stochastic & MA', calc_on_order_fills=false, calc_on_every_tick=true, max_bars_back=5000, initial_capital=20000, commission_type=strategy.commission.cash_per_order, commission_value=50, overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=90)
+// INPUTS : all default value have already been optimized
+length = input.int(21, 'period', minval=1)
+lossp = input.int(13, 'stop loss %', minval=2, step=1)
+leverage = input.int(1, 'leverage', minval=1, step=1)
+// leverage has been introduced for modifying stop loss levels for financial instruments with leverage, like ETF 
+n = input(2, 'n days ago')
+filtro = input.int(65, 'k filter for throwbacks', minval=20, step=1)
+OverSold = input.int(25, 'Oversold value', minval=5, step=5)
+// Building indicators
+smoothK = input.int(6, 'k', minval=1)
+smoothD = input.int(4, 'd', minval=1)
+k = ta.sma(ta.stoch(close, high, low, length), smoothK)
+d = ta.sma(k, smoothD)
+//Empowerment: introducing EMA
+sma_period = input.int(38, 'periodo Sma', minval=1)
+emaf = ta.ema(close, sma_period)
+//ENTRY condition and order
+// First of all, it's better not trade shares with a quaterly loss or with a bad surprise towards to analysts' expectations or ipevaluated (P/E > 50), but on your choice
+// You entry when Stochastic's K is higher than D in Oversold area (you may personalize), applying the condition that today's close should be higher than one of n-days ago (default of the day before yesterday or 2 candles ago)
+entry1 = k > d and k <= OverSold and close >= close[n]
+strategy.entry('Long', strategy.long, comment='k basso', when=entry1)
+//EXIT CONDITIONS
+//  1) close crosses under exponential movinig average with filter that k >= fixed level (65), in order to distinguish a violent movement of prices with a possibile beginning of a trend from an almost exhausted "ordinary" throwback
+// 2) fixed stop loss on percentage
+exit1 = ta.crossunder(close, emaf) and k >= filtro
+losspel = strategy.position_avg_price * (1 - lossp / 100 * leverage)
+exit2 = close < losspel
+strategy.close('Long', when=exit1, comment='sma')
+strategy.close('Long', when=exit2, comment='stop loss')
+// plotting indicators (add Ema on your choice)
+plot(k, color=color.new(color.blue, 0), linewidth=1, title='k Stoch')
+plot(d, color=color.new(color.red, 0), linewidth=1, title='d stoch signal')
+plot(OverSold, title='Oversold', color=color.new(color.aqua, 0))
+plot(filtro, color=color.new(color.gray, 0), title='k-filter for ema')
+
+View in Pine Editor・37 lines
+Use on chart
+1
+0
+0
+1
+3 728
+This trading system comes from the experience of having a "fast" signal for entry at low prices (such as the stoscastic) and then "following" the stock with a "slower" indicator such as the exponential moving average. Both the input and output signals are filtered.
+The use of the trading system only carries out long operations and has been tested on shares and ETFs, including indices, on daily bases (End Of Day).
+
+ENTRY CONDITION: when stochastic's k is higher than d (on the default value of 21 periods) we enter the lower part of the oversold, to which we apply a filter or the confirmation that the closing of the day of the crossing is higher than that of the n -th previous bar (the 2nd previous bar recommended).
+Other default settings are k = 6 and d = 4; the oversold level is also customizable (recommended = 25).
+
+EXIT CONDITIONS: once the entry has "gone well", we follow the upward trend of the stock not with a stochastic oscillator - which tends to exit too soon, especially in case of strong trends - but with a simple moving average exponential (by default at 38 periods). Also in this case a filter is added, that is, k must be> to a filter threshold (recommended = 65) which is used to distinguish the decline between a "physiological" tracking. "(k drops" slowly "together with the approach of prices to the moving average) from a more" violent "tracking (prices are below the moving average and k consequently fall" suddenly ", in a few bars).
+
+MONEY MANAGEMENT: 13% stop loss inserted (the physiological level of tracking of the shares is generally max 8-12% so we also consider a 1% margin due to trading). For more volatile stocks, the level can be extended to 20%.
+
+LEVERAGE: the default value is equal to 1, but it is advisable, for simulations on shares, to use higher levers (x2, x3, ...) if you trade the relative CFD or on the index in case of buying and selling of Leveraged ETFs (e.g. LEVMIB which is 2x leveraged ETFs on Italian index).
+

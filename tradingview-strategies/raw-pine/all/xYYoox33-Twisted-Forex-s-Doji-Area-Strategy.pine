@@ -1,0 +1,918 @@
+//@version=6
+strategy("Twisted Forex's Doji + Area Strategy",
+     overlay=true, max_boxes_count=300, max_lines_count=140,
+     initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.0,
+     slippage=1,
+     default_qty_type=strategy.percent_of_equity,   // allow Properties to control size if desired
+     default_qty_value=1,                            // fallback 1% if TV drives size
+     calc_on_every_tick=false, calc_on_order_fills=true, pyramiding=0,
+     max_bars_back=5000)
+
+// ——— Inputs (zones & filters)
+pivotLen        = input.int(7,  "Swing pivot length", minval=2)
+atrLen          = input.int(14, "ATR length")
+zoneHalfATR     = input.float(0.30, "Zone half-height (×ATR)", minval=0.05, step=0.05)
+maxZonesSide    = input.int(30, "Max zones stored per side (0 = unlimited)", minval=0, maxval=200)
+extendRight     = input.bool(true, "Extend zones to the right")
+leftBars        = input.int(1,  "Left width (bars) at pivot", minval=1)
+showZones       = input.bool(true, "Show zones (visual only)")
+
+minDepartureATR = input.float(1.5, "Min departure from pivot (×ATR)", minval=0, step=0.1)
+expiryBars      = input.int(500,   "Fade after N bars (0 = never)", minval=0)
+breakATR        = input.float(0.20,"Fade if broken by (×ATR) beyond edge", minval=0, step=0.05)
+showNearestK    = input.int(2,     "Brighten nearest K zones/side (visual)", minval=0, maxval=10)
+
+minRetestsToShow  = input.int(1, "Min retests to consider a zone confirmed", minval=0, maxval=10)
+bounceATR         = input.float(0.20,"Bounce distance after touch (×ATR)", minval=0, step=0.05)
+
+// Confirmation behaviour
+confirmWindowBars = input.int(5, "Confirm retest window (bars)", minval=1, maxval=50)
+confirmOnWickPen  = input.bool(true, "Count deep wick rejection as a retest")
+confirmWickATR    = input.float(0.05, "Retest wick depth (×ATR)", minval=0.0, step=0.01)
+
+strongTransp    = input.int(70, "Bright zone transparency (0–100)", minval=0, maxval=100)
+faintTransp     = input.int(93, "Faint zone transparency (0–100)",  minval=0, maxval=100)
+zoneColor       = input.color(color.teal, "Zone color")
+
+// Doji
+strictDoji      = input.bool(false,  "Strict doji (tiny body + both wicks)")
+dojiBodyFrac    = input.float(0.12, "Doji: body ≤ fraction of range", minval=0.03, step=0.01)
+minWickFrac     = input.float(0.25, "Each wick ≥ fraction of range", minval=0.05, step=0.05)
+minRangeATR     = input.float(0.30, "Doji min candle range (×ATR)", minval=0, step=0.05)
+proxATR         = input.float(0.50, "Doji near-zone distance (×ATR)", minval=0.05, step=0.05)
+minBarsBetween  = input.int(3,      "Bars between signals", minval=0)
+
+// Side resolver options
+emaFastLen      = input.int(21, "Trend EMA fast", minval=1)
+emaSlowLen      = input.int(55, "Trend EMA slow", minval=2)
+useTrend        = input.bool(true, "Use trend to resolve supply/demand overlap")
+usePenetration  = input.bool(true, "Use penetration (candle overlaps zone) to resolve overlap")
+needNextBarConf = input.bool(false, "Require 1-bar confirmation (safer, fewer trades)")
+confirmATR      = input.float(0.15,  "Confirmation close away (×ATR)", minval=0, step=0.05)
+
+hideUnconfirmed         = input.bool(false, "Hide unconfirmed zones (visual only)")
+signalsOnlyConfirmed    = input.bool(false, "Only use confirmed zones for signals")
+maxConfirmedDrawPerSide = input.int(3,      "Max confirmed zones drawn per side (visual)", minval=0, maxval=20)
+
+dedupeATR               = input.float(0.20, "De-dupe threshold by center distance (×ATR)", minval=0.05, step=0.05)
+flipOnBreak             = input.bool(true,  "Create opposite zone when a zone breaks (flip)")
+
+// ——— Quality filters (k-of-4)
+qualityMode    = input.string("Off", "Quality mode", options=["Off","Soft","Strict"])  // default OFF
+minQualPass    = input.int(3, "Soft mode: require at least K of 4 checks", minval=1, maxval=4)
+kStrict        = input.int(3, "Strict mode: require at least K of 4 checks", minval=1, maxval=4)
+wickPenATR     = input.float(0.05, "Min wick penetration beyond edge (×ATR)", minval=0.0, step=0.01)
+edgeBandFrac   = input.float(0.40, "Edge band fraction of zone height", minval=0.05, maxval=0.9, step=0.05)
+approachLookback = input.int(5,    "Approach lookback bars", minval=1, maxval=50)
+approachMinATR = input.float(0.30, "Min approach impulse (×ATR)", minval=0.0, step=0.05)
+freshTouchBars = input.int(2,      "Min bars since last touch of that zone", minval=0)
+
+// Strict auto-tightening — friendlier defaults
+autoTightenStrict   = input.bool(true,  "Strict mode: auto-tighten thresholds")
+strictWickMult      = input.float(1.4,  "Strict: wick penetration ×", minval=1.0, step=0.1)
+strictEdgeBandMult  = input.float(0.85, "Strict: edge band ×",        minval=0.1, maxval=1.0, step=0.05)
+strictApproachMult  = input.float(1.15, "Strict: approach impulse ×", minval=1.0, step=0.05)
+strictFreshTouchAdd = input.int(1,      "Strict: +bars since last touch", minval=0)
+
+// ——— Strategy inputs
+tradeSide      = input.string("Both", "Trade side", options=["Both","Longs only","Shorts only"])
+rrMultiple     = input.float(3.0, "Risk:Reward (e.g., 3 = 1:3 RR)", minval=0.5, step=0.5)
+useMicropips   = input.bool(true, "Stop buffer in micropips (FX). If off → ticks.")
+stopMicropips  = input.int(50, "Stop buffer (micropips or ticks)", minval=0)
+
+// Position sizing (robust)
+posSizingMode       = input.string("Fixed qty", "Position sizing", options=["Fixed qty","Risk % of equity"])
+fixedQty            = input.float(1, "Fixed quantity (contracts/units)", minval=0.0001, step=0.0001)
+riskPercent         = input.float(1.0, "Risk per trade (% of equity — if 'Risk % of equity')", minval=0.0, maxval=100.0)
+useTVOrderSize      = input.bool(false, "Use TV Properties → Order size (ignore qty inputs)")
+useAutoQtyFloors    = input.bool(true,  "Auto qty floors by market (FX=1000, else 1)")
+manualMinQtyFloor   = input.float(1,    "Manual min order size floor", minval=0.0001)
+qtyStep             = input.float(1,    "Qty rounding step (1=contracts; 1000=FX micro)", minval=0.0001)
+maxQtyCap           = input.float(5e8,  "Maximum order size cap", minval=1)
+
+// ——— HTF bias / confluence (optional)
+useHTFTrend    = input.bool(false,  "Gate by HTF trend?")  // default OFF
+htfTf          = input.timeframe("240", "HTF for bias (e.g., 240=4H)")
+htfFastLen     = input.int(34, "HTF EMA fast")
+htfSlowLen     = input.int(89, "HTF EMA slow")
+
+useHTFZoneProx = input.bool(false, "Require HTF swing-band proximity?")
+htfPivotLen    = input.int(5, "HTF swing length")
+htfATRmult     = input.float(0.5, "HTF zone half-height (×HTF ATR)", step=0.1)
+
+// Zone strength gating
+minStrengthSoft   = input.float(3.0, "Min zone strength (Soft)",  minval=0, maxval=10, step=0.5)
+minStrengthStrict = input.float(5.0, "Min zone strength (Strict)", minval=0, maxval=10, step=0.5)
+
+// Debug
+debugWhy = input.bool(false, "Debug: show veto reasons")
+
+// ——— Basics
+atr   = ta.atr(atrLen)
+rng   = high - low
+body  = math.abs(close - open)
+upper = high - math.max(open, close)
+lower = math.min(open, close) - low
+
+isDojiStrict() => (rng > 0) and (body <= dojiBodyFrac*rng) and (upper/rng >= minWickFrac) and (lower/rng >= minWickFrac) and (rng >= minRangeATR*atr)
+isDojiLoose()  => (rng > 0) and (body <= dojiBodyFrac*rng) and (rng >= minRangeATR*atr)
+
+// Swings / windows
+isSwHigh   = ta.pivothigh(high, pivotLen, pivotLen)
+isSwLow    = ta.pivotlow(low,  pivotLen, pivotLen)
+lowestWin  = ta.lowest(low,  pivotLen)
+highestWin = ta.highest(high, pivotLen)
+
+// Storage
+var box[]   supplyBoxes = array.new_box()
+var int[]   supplyBorn  = array.new_int()
+var bool[]  supplyDead  = array.new_bool()
+var int[]   supplyTouch = array.new_int()
+var int[]   supplyTests = array.new_int()
+var int[]   supplyLastSig = array.new_int()
+
+var box[]   demandBoxes = array.new_box()
+var int[]   demandBorn  = array.new_int()
+var bool[]  demandDead  = array.new_bool()
+var int[]   demandTouch = array.new_int()
+var int[]   demandTests = array.new_int()
+var int[]   demandLastSig = array.new_int()
+
+var float[] pendingToDemand = array.new_float()
+var float[] pendingToSupply = array.new_float()
+
+// Helpers (visual + safety)
+setBoxFade(bx, fade) =>
+    if not na(bx)
+        tFill = fade ? faintTransp : strongTransp
+        tBord = math.min(100, tFill + 10)
+        box.set_bgcolor(bx, color.new(zoneColor, tFill))
+        box.set_border_color(bx, color.new(zoneColor, tBord))
+
+hideBox(bx) =>
+    if not na(bx)
+        box.set_bgcolor(bx, color.new(zoneColor, 100))
+        box.set_border_color(bx, color.new(zoneColor, 100))
+
+boxCenter(bx) =>
+    (box.get_top(bx) + box.get_bottom(bx)) * 0.5
+
+newZoneBox(y, pivotBarIndex) =>
+    half  = zoneHalfATR * atr
+    top   = y + half
+    bot   = y - half
+    left  = math.max(0, pivotBarIndex - (leftBars - 1))
+    right = pivotBarIndex + 1
+    ext   = extendRight ? extend.right : extend.none
+    box.new(left, top, right, bot, bgcolor=color.new(zoneColor, faintTransp), border_color=color.new(zoneColor, math.min(100, faintTransp+10)), extend=ext)
+
+safeGetBox(arr, i) =>
+    (i >= 0 and i < array.size(arr)) ? array.get(arr, i) : na
+safeGetInt(arr, i, d) =>
+    (i >= 0 and i < array.size(arr)) ? array.get(arr, i) : d
+safeGetBool(arr, i, d) =>
+    (i >= 0 and i < array.size(arr)) ? array.get(arr, i) : d
+
+// SAFE: no array.get in boolean chain
+isConfirmedIdx(testArr, i) =>
+    ok = false
+    if (i >= 0) and (i < array.size(testArr))
+        ok := array.get(testArr, i) >= minRetestsToShow
+    ok
+
+// ——— Prune oldest zones if over the cap
+pruneSide(bxArr, bornArr, deadArr, touchArr, testArr, lastSigArr) =>
+    if maxZonesSide > 0
+        while array.size(bxArr) > maxZonesSide
+            box bx = array.shift(bxArr)
+            if not na(bx)
+                box.delete(bx)
+            if array.size(bornArr) > 0
+                array.shift(bornArr)
+            if array.size(deadArr) > 0
+                array.shift(deadArr)
+            if array.size(touchArr) > 0
+                array.shift(touchArr)
+            if array.size(testArr) > 0
+                array.shift(testArr)
+            if array.size(lastSigArr) > 0
+                array.shift(lastSigArr)
+    0
+
+// ——— Add a zone at pivot if not a duplicate (by center distance)
+addIfNotDuplicate(isSupply, y, pivotBarIndex) =>
+    dup = false
+    if isSupply
+        for i = 0 to array.size(supplyBoxes) - 1
+            box bx = safeGetBox(supplyBoxes, i)
+            if not na(bx)
+                if math.abs(boxCenter(bx) - y) <= dedupeATR * atr
+                    dup := true
+        if not dup
+            box bxNew = newZoneBox(y, pivotBarIndex)
+            array.push(supplyBoxes, bxNew)
+            array.push(supplyBorn, pivotBarIndex)
+            array.push(supplyDead, false)
+            array.push(supplyTouch, -1)
+            array.push(supplyTests, 0)
+            array.push(supplyLastSig, na)
+            pruneSide(supplyBoxes, supplyBorn, supplyDead, supplyTouch, supplyTests, supplyLastSig)
+    else
+        for i = 0 to array.size(demandBoxes) - 1
+            box bx = safeGetBox(demandBoxes, i)
+            if not na(bx)
+                if math.abs(boxCenter(bx) - y) <= dedupeATR * atr
+                    dup := true
+        if not dup
+            box bxNew = newZoneBox(y, pivotBarIndex)
+            array.push(demandBoxes, bxNew)
+            array.push(demandBorn, pivotBarIndex)
+            array.push(demandDead, false)
+            array.push(demandTouch, -1)
+            array.push(demandTests, 0)
+            array.push(demandLastSig, na)
+            pruneSide(demandBoxes, demandBorn, demandDead, demandTouch, demandTests, demandLastSig)
+
+// Nearest index by center distance
+nearestIdx(bxArr, testsArr, confirmedOnly) =>
+    n = array.size(bxArr)
+    bestI = -1
+    bestD = 1e10
+    if n > 0
+        for i = 0 to n - 1
+            box bx = safeGetBox(bxArr, i)
+            if not na(bx)
+                ok = not confirmedOnly or isConfirmedIdx(testsArr, i)
+                if ok
+                    d = math.abs(close - boxCenter(bx))
+                    if d < bestD
+                        bestD := d
+                        bestI := i
+    bestI
+
+// ——— Spawn zones from swings (ALWAYS build; showZones is visual-only)
+if not na(isSwHigh)
+    pivotBar = bar_index - pivotLen
+    swing    = high[pivotLen]
+    if (swing - lowestWin) >= (minDepartureATR * atr)
+        addIfNotDuplicate(true, swing, pivotBar)
+if not na(isSwLow)
+    pivotBar = bar_index - pivotLen
+    swing    = low[pivotLen]
+    if (highestWin - swing) >= (minDepartureATR * atr)
+        addIfNotDuplicate(false, swing, pivotBar)
+
+// ——— Maintain (windowed confirmation + optional wick-based confirmation)
+maintainSide(bxArr, bornArr, deadArr, touchArr, testArr, lastSigArr, isSupply) =>
+    n = math.min(array.size(bxArr), array.size(bornArr), array.size(deadArr), array.size(touchArr), array.size(testArr), array.size(lastSigArr))
+    if n <= 0
+        0
+    else
+        for i = 0 to n - 1
+            box bx = safeGetBox(bxArr, i)
+            born = safeGetInt(bornArr, i, bar_index)
+            dead = safeGetBool(deadArr, i, false)
+            broken = false
+            if not na(bx)
+                t = box.get_top(bx)
+                b = box.get_bottom(bx)
+
+                // mark touch
+                if (low <= t) and (high >= b)
+                    array.set(touchArr, i, bar_index)
+
+                // confirmation within window
+                lastTouch = safeGetInt(touchArr, i, -1)
+                if (lastTouch >= 0) and (lastTouch < bar_index)
+                    barsSince = bar_index - lastTouch
+                    if barsSince > 0 and barsSince <= confirmWindowBars
+                        // compute min/max over last barsSince bars (consistency-friendly)
+                        float lowSinceCalc  = low
+                        float highSinceCalc = high
+                        for k = 0 to confirmWindowBars - 1
+                            if k < barsSince
+                                if not na(low[k])
+                                    lowSinceCalc  := math.min(lowSinceCalc, low[k])
+                                if not na(high[k])
+                                    highSinceCalc := math.max(highSinceCalc, high[k])
+
+                        bounced = isSupply ? (lowSinceCalc <= (b - bounceATR*atr)) : (highSinceCalc >= (t + bounceATR*atr))
+
+                        bool wickOk = false
+                        if confirmOnWickPen
+                            hb = high[barsSince]
+                            lb = low[barsSince]
+                            cb = close[barsSince]
+                            if isSupply
+                                wickOk := ((hb - t) >= (confirmWickATR*atr)) and (cb <= t)
+                            else
+                                wickOk := ((b - lb) >= (confirmWickATR*atr)) and (cb >= b)
+
+                        if bounced or wickOk
+                            array.set(testArr, i, safeGetInt(testArr, i, 0) + 1)
+                            array.set(touchArr, i, -1)
+
+                // broken?
+                broken := isSupply ? (close > (t + breakATR*atr)) : (close < (b - breakATR*atr))
+
+            // expiry + flag
+            expired = (expiryBars > 0) and ((bar_index - born) > expiryBars)
+            array.set(deadArr, i, dead or expired or broken)
+
+            // flips queue
+            if flipOnBreak and broken and not na(bx)
+                c = boxCenter(bx)
+                if isSupply
+                    array.push(pendingToDemand, c)
+                else
+                    array.push(pendingToSupply, c)
+        0
+
+maintainSide(supplyBoxes, supplyBorn, supplyDead, supplyTouch, supplyTests, supplyLastSig, true)
+maintainSide(demandBoxes, demandBorn, demandDead, demandTouch, demandTests, demandLastSig, false)
+
+// Process flips
+processFlips() =>
+    if array.size(pendingToDemand) > 0
+        for i = 0 to array.size(pendingToDemand) - 1
+            c = array.get(pendingToDemand, i)
+            if not na(c)
+                addIfNotDuplicate(false, c, bar_index)
+    array.clear(pendingToDemand)
+    if array.size(pendingToSupply) > 0
+        for i = 0 to array.size(pendingToSupply) - 1
+            c2 = array.get(pendingToSupply, i)
+            if not na(c2)
+                addIfNotDuplicate(true, c2, bar_index)
+    array.clear(pendingToSupply)
+    0
+processFlips()
+
+// Measures
+penetrationWithBox(bx) =>
+    t = box.get_top(bx)
+    b = box.get_bottom(bx)
+    overlapHigh = math.min(high, t)
+    overlapLow  = math.max(low,  b)
+    math.max(0.0, overlapHigh - overlapLow)
+
+maxPenetration(arr, testsArr, onlyConfirmed) =>
+    n = array.size(arr)
+    pmax = 0.0
+    for i = 0 to n - 1
+        bx = safeGetBox(arr, i)
+        if not na(bx)
+            ok = not onlyConfirmed or isConfirmedIdx(testsArr, i)
+            if ok
+                p = penetrationWithBox(bx)
+                pmax := math.max(pmax, p)
+    pmax
+
+minDistToBoxes(arr, testsArr, onlyConfirmed) =>
+    n = array.size(arr)
+    dmin = 1e10
+    for i = 0 to n - 1
+        bx = safeGetBox(arr, i)
+        if not na(bx)
+            ok = not onlyConfirmed or isConfirmedIdx(testsArr, i)
+            if ok
+                t = box.get_top(bx)
+                b = box.get_bottom(bx)
+                d = close > t ? (close - t) : (close < b ? (b - close) : 0.0)
+                dmin := math.min(dmin, d)
+    dmin
+
+distToBox(bx) =>
+    if na(bx)
+        1e10
+    else
+        t = box.get_top(bx)
+        b = box.get_bottom(bx)
+        close > t ? (close - t) : (close < b ? (b - close) : 0.0)
+
+// Distances / penetrations with fallback to all if no confirmed exist
+anyConfirmed(testArr) =>
+    n = array.size(testArr)
+    ok = false
+    if n > 0
+        for i = 0 to n - 1
+            if array.get(testArr, i) >= minRetestsToShow
+                ok := true
+    ok
+
+useConfirmedForSignals = signalsOnlyConfirmed and (anyConfirmed(supplyTests) or anyConfirmed(demandTests))
+dSup = minDistToBoxes(supplyBoxes, supplyTests, useConfirmedForSignals)
+dDem = minDistToBoxes(demandBoxes, demandTests, useConfirmedForSignals)
+pSup = maxPenetration(supplyBoxes, supplyTests, useConfirmedForSignals)
+pDem = maxPenetration(demandBoxes, demandTests, useConfirmedForSignals)
+
+prox = proxATR * atr
+nearSupOrInside = dSup <= prox
+nearDemOrInside = dDem <= prox
+nearEither      = nearSupOrInside or nearDemOrInside
+
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+trendUp = emaFast > emaSlow
+trendDn = emaFast < emaSlow
+
+resolveSide(nearSup, nearDem, pS, pD, dS, dD) =>
+    if nearSup and not nearDem
+        true
+    else if nearDem and not nearSup
+        false
+    else
+        if usePenetration and (pS > pD)
+            true
+        else if usePenetration and (pD > pS)
+            false
+        else if useTrend and trendDn
+            true
+        else if useTrend and trendUp
+            false
+        else
+            dS <= dD
+
+// ——— Approach-direction override
+rNearestSupplyI = nearestIdx(supplyBoxes, supplyTests, useConfirmedForSignals)
+rNearestDemandI = nearestIdx(demandBoxes, demandTests, useConfirmedForSignals)
+bxSup = safeGetBox(supplyBoxes, rNearestSupplyI)
+bxDem = safeGetBox(demandBoxes, rNearestDemandI)
+useSupNear = distToBox(bxSup) <= distToBox(bxDem)
+bxNear = useSupNear ? bxSup : bxDem
+
+sideForceInt = int(na)   // 1=supply, 0=demand, na=undecided
+if not na(bxNear)
+    tN = box.get_top(bxNear)
+    bN = box.get_bottom(bxNear)
+    touchFromBelow = (close <= bN) and (high >= bN)
+    touchFromAbove = (close >= tN) and (low  <= tN)
+    if touchFromBelow and not touchFromAbove
+        sideForceInt := 1
+    else if touchFromAbove and not touchFromBelow
+        sideForceInt := 0
+sideIsSupply = na(sideForceInt) ? resolveSide(nearSupOrInside, nearDemOrInside, pSup, pDem, dSup, dDem) : (sideForceInt == 1)
+
+// ——— Doji + optional next-bar confirmation (WITH PREV-CANDLE FLIP)
+isDojiNow = strictDoji ? isDojiStrict() : isDojiLoose()
+mid = (open + close) * 0.5
+bearishDoji = close <= mid
+bullishDoji = close >= mid
+upperWickIntoSupply = pSup > 0.0
+lowerWickIntoDemand = pDem > 0.0
+
+usePrevCandleFlip = input.bool(true, "Use previous candle direction to pick side")
+prevBull = close[1] > open[1]
+prevBear = close[1] < open[1]
+
+// Base signals
+baseBull = usePrevCandleFlip ? (isDojiNow and nearEither and prevBear and lowerWickIntoDemand) : (isDojiNow and nearEither and (not sideIsSupply) and bullishDoji and lowerWickIntoDemand)
+baseBear = usePrevCandleFlip ? (isDojiNow and nearEither and prevBull and upperWickIntoSupply) : (isDojiNow and nearEither and sideIsSupply and bearishDoji and upperWickIntoSupply)
+
+// Confirmation
+prevBaseBull = bar_index > 0 ? baseBull[1] : false
+prevBaseBear = bar_index > 0 ? baseBear[1] : false
+confirmAwayFromDemand() =>
+    close > (close[1] + confirmATR*atr)
+confirmAwayFromSupply() =>
+    close < (close[1] - confirmATR*atr)
+
+var int lastBullBar = na
+var int lastBearBar = na
+canBullGlobal = na(lastBullBar) or (bar_index - lastBullBar >= minBarsBetween)
+canBearGlobal = na(lastBearBar) or (bar_index - lastBearBar >= minBarsBetween)
+
+bullDojiRaw = needNextBarConf ? (prevBaseBull and confirmAwayFromDemand()) : baseBull
+bearDojiRaw = needNextBarConf ? (prevBaseBear and confirmAwayFromSupply()) : baseBear
+
+// --- Quality helpers (Strict auto-tighten aware)
+softMode   = (qualityMode == "Soft")
+strictMode = (qualityMode == "Strict")
+offMode    = (qualityMode == "Off")
+
+// Effective thresholds (mode-aware)
+effWickPenATR     = (strictMode and autoTightenStrict) ? wickPenATR    * strictWickMult     : wickPenATR
+effEdgeBandFrac   = (strictMode and autoTightenStrict) ? edgeBandFrac  * strictEdgeBandMult : edgeBandFrac
+effApproachMinATR = (strictMode and autoTightenStrict) ? approachMinATR* strictApproachMult : approachMinATR
+effFreshTouchBars = (strictMode and autoTightenStrict) ? (freshTouchBars + strictFreshTouchAdd) : freshTouchBars
+effWickPenATR   := math.max(0.0, effWickPenATR)
+effEdgeBandFrac := math.max(0.01, math.min(0.9, effEdgeBandFrac))
+
+if strictMode and autoTightenStrict
+    effWickPenATR     := math.min(effWickPenATR,     wickPenATR * 1.5)
+    effEdgeBandFrac   := math.max(effEdgeBandFrac,   edgeBandFrac * 0.80)
+    effApproachMinATR := math.min(effApproachMinATR, approachMinATR * 1.3)
+    effFreshTouchBars := math.min(effFreshTouchBars, freshTouchBars + 2)
+
+zoneHeight(bx) =>
+    na(bx) ? 0.0 : (box.get_top(bx) - box.get_bottom(bx))
+inTopBand(price, bx) =>
+    na(bx) ? false : price >= (box.get_top(bx) - effEdgeBandFrac * zoneHeight(bx))
+inBottomBand(price, bx) =>
+    na(bx) ? false : price <= (box.get_bottom(bx) + effEdgeBandFrac * zoneHeight(bx))
+wickInCloseOutSupply(bx) =>
+    na(bx) ? false : ((high - box.get_top(bx)) >= (effWickPenATR * atr)) and (close < box.get_top(bx))
+wickInCloseOutDemand(bx) =>
+    na(bx) ? false : ((box.get_bottom(bx) - low) >= (effWickPenATR * atr)) and (close > box.get_bottom(bx))
+freshTouchOK(isSupply, idx) =>
+    if idx < 0
+        true
+    else
+        int lastT = isSupply ? safeGetInt(supplyTouch, idx, -1) : safeGetInt(demandTouch, idx, -1)
+        (lastT < 0) or (bar_index - lastT >= effFreshTouchBars)
+approachImpulseOK(isSupply) =>
+    upMove   = high - ta.lowest(low,  approachLookback)
+    downMove = ta.highest(high, approachLookback) - low
+    isSupply ? (upMove >= effApproachMinATR * atr) : (downMove >= effApproachMinATR * atr)
+passKof4(a, b, c, d, k) =>
+    ((a?1:0) + (b?1:0) + (c?1:0) + (d?1:0)) >= k
+
+// Precompute approach checks every bar
+apprLongOK  = approachImpulseOK(false)
+apprShortOK = approachImpulseOK(true)
+
+// Precompute the 4 checks per side
+qB_wick  = wickInCloseOutDemand(bxDem)
+qB_band  = inBottomBand(close, bxDem)
+qB_fresh = freshTouchOK(false, rNearestDemandI)
+qB_appr  = apprLongOK
+
+qS_wick  = wickInCloseOutSupply(bxSup)
+qS_band  = inTopBand(close, bxSup)
+qS_fresh = freshTouchOK(true,  rNearestSupplyI)
+qS_appr  = apprShortOK
+
+// —— Zone strength (looped min/max, no ta.lowest/highest here)
+zoneStrength(isSupply, idx) =>
+    if idx < 0
+        0.0
+    else
+        int  tests = isSupply ? safeGetInt(supplyTests, idx, 0) : safeGetInt(demandTests, idx, 0)
+        int  lastT = isSupply ? safeGetInt(supplyTouch, idx, -1) : safeGetInt(demandTouch, idx, -1)
+        int  born  = isSupply ? safeGetInt(supplyBorn,  idx, bar_index) : safeGetInt(demandBorn,  idx, bar_index)
+        box  bx    = isSupply ? safeGetBox(supplyBoxes, idx) : safeGetBox(demandBoxes, idx)
+        bool broke = isSupply ? safeGetBool(supplyDead, idx, false) : safeGetBool(demandDead, idx, false)
+
+        float scTests = math.min(5.0, float(tests))
+        float scBounce = 0.0
+
+        if (lastT >= 0) and (lastT < bar_index) and not na(bx)
+            int barsBack = bar_index - lastT
+            int hardCap  = 5000
+            int winClamped = math.max(1, math.min(barsBack, hardCap))
+            float lowSince    = close
+            float highSince   = close
+            for kk = 1 to winClamped
+                if not na(low[kk])
+                    lowSince  := math.min(lowSince,  low[kk])
+                if not na(high[kk])
+                    highSince := math.max(highSince, high[kk])
+            float refClose = close[winClamped]
+            float move = isSupply ? (refClose - lowSince) : (highSince - refClose)
+            scBounce := math.min(3.0, move / atr)
+
+        int   age   = bar_index - born
+        float scAge = age < 300 ? 2.0 : (age < 800 ? 1.0 : 0.0)
+        float scInt = broke ? 0.0 : 0.5
+        scTests + scBounce + scAge + scInt
+
+strDem = zoneStrength(false, rNearestDemandI)
+strSup = zoneStrength(true,  rNearestSupplyI)
+
+// Ensure strict can't be looser than soft
+kStrictEff = strictMode ? math.max(kStrict, minQualPass) : kStrict
+
+// Anchors: at least one of wick or band must be true
+anchorBull = qB_wick or qB_band
+anchorBear = qS_wick or qS_band
+
+// Base K-of-4
+baseQualBull = passKof4(qB_wick, qB_band, qB_fresh, qB_appr, softMode ? minQualPass : kStrictEff)
+baseQualBear = passKof4(qS_wick, qS_band, qS_fresh, qS_appr, softMode ? minQualPass : kStrictEff)
+
+// Strict rescue
+sideIsSupplyNear = useSupNear
+sideStrengthNear = sideIsSupplyNear ? strSup : strDem
+strictRescueBull = strictMode and (not sideIsSupplyNear) and (sideStrengthNear >= 7.0) and anchorBull
+strictRescueBear = strictMode and (sideIsSupplyNear)      and (sideStrengthNear >= 7.0) and anchorBear
+
+// Qual passes
+qualBull = offMode ? true : (softMode ? baseQualBull : ((baseQualBull and anchorBull) or strictRescueBull))
+qualBear = offMode ? true : (softMode ? baseQualBear : ((baseQualBear and anchorBear) or strictRescueBear))
+
+// Final signals (pre-gates)
+bullDoji = bullDojiRaw and canBullGlobal and qualBull
+bearDoji = bearDojiRaw and canBearGlobal and qualBear
+
+// ensure mutual exclusivity
+if bullDoji and bearDoji
+    if sideIsSupply
+        bullDoji := false
+    else
+        bearDoji := false
+
+if bullDoji
+    lastBullBar := bar_index
+if bearDoji
+    lastBearBar := bar_index
+
+// ——— HTF CONFLUENCE
+htfClose   = request.security(syminfo.tickerid, htfTf, close)
+htfEmaF    = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfFastLen))
+htfEmaS    = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfSlowLen))
+htfUp      = htfEmaF > htfEmaS
+htfDown    = htfEmaF < htfEmaS
+if useHTFTrend
+    bullDoji := bullDoji and htfUp
+    bearDoji := bearDoji and htfDown
+
+// HTF zone proximity via swing bands (approx)
+htfATR     = request.security(syminfo.tickerid, htfTf, ta.atr(atrLen))
+htfSwH     = request.security(syminfo.tickerid, htfTf, ta.pivothigh(high, htfPivotLen, htfPivotLen))
+htfSwL     = request.security(syminfo.tickerid, htfTf, ta.pivotlow(low,  htfPivotLen, htfPivotLen))
+
+// split declarations
+var float htfSupTop = na
+var float htfSupBot = na
+var float htfDemTop = na
+var float htfDemBot = na
+
+if not na(htfSwH)
+    yH = request.security(syminfo.tickerid, htfTf, high[htfPivotLen])
+    htfSupTop := yH + htfATRmult*htfATR
+    htfSupBot := yH - htfATRmult*htfATR
+if not na(htfSwL)
+    yL = request.security(syminfo.tickerid, htfTf, low[htfPivotLen])
+    htfDemTop := yL + htfATRmult*htfATR
+    htfDemBot := yL - htfATRmult*htfATR
+
+nearHTFSupply = not na(htfSupTop) and (low <= htfSupTop) and (high >= htfSupBot)
+nearHTFDemand = not na(htfDemTop) and (low <= htfDemTop) and (high >= htfDemBot)
+if useHTFZoneProx
+    bullDoji := bullDoji and nearHTFDemand
+    bearDoji := bearDoji and nearHTFSupply
+
+// ——— Strength gate (after HTF gates)
+needStrSoft   = (qualityMode == "Soft")   ? ((strDem >= minStrengthSoft)   or (strSup >= minStrengthSoft))   : true
+needStrStrict = (qualityMode == "Strict") ? ((strDem >= minStrengthStrict) or (strSup >= minStrengthStrict)) : true
+
+bullDoji := bullDoji and needStrSoft and needStrStrict
+bearDoji := bearDoji and needStrSoft and needStrStrict
+
+// ——— VISUAL RENDERING (respects showZones + hideUnconfirmed + nearest K highlight)
+renderZones() =>
+    if not showZones
+        // hide all visuals quickly if toggled off
+        for i = 0 to array.size(supplyBoxes) - 1
+            hideBox(safeGetBox(supplyBoxes, i))
+        for j = 0 to array.size(demandBoxes) - 1
+            hideBox(safeGetBox(demandBoxes, j))
+        0
+    else
+        // baseline: faint for all alive; hide dead or (if chosen) unconfirmed
+        for i = 0 to array.size(supplyBoxes) - 1
+            box bx = safeGetBox(supplyBoxes, i)
+            if not na(bx)
+                dead = safeGetBool(supplyDead, i, false)
+                conf = not hideUnconfirmed or isConfirmedIdx(supplyTests, i)
+                if dead or (hideUnconfirmed and not conf)
+                    hideBox(bx)
+                else
+                    setBoxFade(bx, true)
+        for j = 0 to array.size(demandBoxes) - 1
+            box bx2 = safeGetBox(demandBoxes, j)
+            if not na(bx2)
+                dead2 = safeGetBool(demandDead, j, false)
+                conf2 = not hideUnconfirmed or isConfirmedIdx(demandTests, j)
+                if dead2 or (hideUnconfirmed and not conf2)
+                    hideBox(bx2)
+                else
+                    setBoxFade(bx2, true)
+
+        // highlight nearest K per side — SAFE against empty arrays
+        k = math.min(showNearestK, 10)
+        if k > 0
+            // Supply side
+            ns = array.size(supplyBoxes)
+            if ns > 0
+                selS = array.new_int()
+                for pick = 0 to k - 1
+                    bestI = -1
+                    bestD = 1e10
+                    for i = 0 to ns - 1
+                        box bx = safeGetBox(supplyBoxes, i)
+                        if not na(bx)
+                            dead = safeGetBool(supplyDead, i, false)
+                            conf = not hideUnconfirmed or isConfirmedIdx(supplyTests, i)
+                            already = false
+                            szS = array.size(selS)
+                            if szS > 0
+                                for t = 0 to szS - 1
+                                    if t < array.size(selS)
+                                        if array.get(selS, t) == i
+                                            already := true
+                            if (not dead) and conf and (not already)
+                                d = math.abs(close - boxCenter(bx))
+                                if d < bestD
+                                    bestD := d
+                                    bestI := i
+                    if bestI >= 0
+                        array.push(selS, bestI)
+                        setBoxFade(safeGetBox(supplyBoxes, bestI), false)
+
+            // Demand side
+            nd = array.size(demandBoxes)
+            if nd > 0
+                selD = array.new_int()
+                for pick2 = 0 to k - 1
+                    bestI2 = -1
+                    bestD2 = 1e10
+                    for j2 = 0 to nd - 1
+                        box bx3 = safeGetBox(demandBoxes, j2)
+                        if not na(bx3)
+                            dead3 = safeGetBool(demandDead, j2, false)
+                            conf3 = not hideUnconfirmed or isConfirmedIdx(demandTests, j2)
+                            already2 = false
+                            szD = array.size(selD)
+                            if szD > 0
+                                for t2 = 0 to szD - 1
+                                    if t2 < array.size(selD)
+                                        if array.get(selD, t2) == j2
+                                            already2 := true
+                            if (not dead3) and conf3 and (not already2)
+                                d2 = math.abs(close - boxCenter(bx3))
+                                if d2 < bestD2
+                                    bestD2 := d2
+                                    bestI2 := j2
+                    if bestI2 >= 0
+                        array.push(selD, bestI2)
+                        setBoxFade(safeGetBox(demandBoxes, bestI2), false)
+        0
+
+renderZones()
+
+// ——— Strategy orders
+allowLong  = (tradeSide == "Both") or (tradeSide == "Longs only")
+allowShort = (tradeSide == "Both") or (tradeSide == "Shorts only")
+
+pipUnit = syminfo.mintick
+bufPrice = stopMicropips * pipUnit
+
+dojiBarForStops = needNextBarConf ? 1 : 0
+dojiHigh = high[dojiBarForStops]
+dojiLow  = low[dojiBarForStops]
+
+// ===== Sizing helpers (robust Risk% + Properties override) =====
+calcQtyByRisk(riskPerTrade, entry, stop) =>
+    risk = math.max(math.abs(entry - stop), syminfo.mintick)
+    eq   = strategy.equity
+    cashRisk = eq * (riskPerTrade / 100.0)
+    cashRisk / risk  // raw qty
+
+qtyFinal(entry, stop) =>
+    autoFloor = (syminfo.type == "forex") ? 1000.0 : 1.0
+    floorUse  = useAutoQtyFloors ? autoFloor : manualMinQtyFloor
+    qraw      = posSizingMode == "Fixed qty" ? fixedQty : calcQtyByRisk(riskPercent, entry, stop)
+    qclamped  = math.max(floorUse, math.min(qraw, maxQtyCap))
+    qrnd      = math.round(qclamped / qtyStep) * qtyStep
+    math.max(floorUse, qrnd)
+
+// Optional: show computed qty in Data Window
+showQtyDebug = input.bool(false, "Debug: show computed qty (data window)")
+plot(showQtyDebug and not useTVOrderSize and not na(dojiLow)  ? qtyFinal(close, dojiLow  - bufPrice) : na, title="Qty Long (computed)",  display=display.data_window)
+plot(showQtyDebug and not useTVOrderSize and not na(dojiHigh) ? qtyFinal(close, dojiHigh + bufPrice) : na, title="Qty Short (computed)", display=display.data_window)
+
+// LONG
+longSignal = bullDoji and allowLong and not na(dojiLow)
+longEntry  = close
+longStop   = dojiLow - bufPrice
+riskLong   = math.max(longEntry - longStop, syminfo.mintick)
+longTP     = longEntry + rrMultiple * riskLong
+if longSignal
+    if useTVOrderSize
+        strategy.entry(id="L", direction=strategy.long, comment="")
+    else
+        qL = qtyFinal(longEntry, longStop)
+        strategy.entry(id="L", direction=strategy.long, qty=qL, comment="")
+    strategy.exit(id="LX", from_entry="L", stop=longStop, limit=longTP, comment="")
+
+// SHORT
+shortSignal = bearDoji and allowShort and not na(dojiHigh)
+shortEntry  = close
+shortStop   = dojiHigh + bufPrice
+riskShort   = math.max(shortStop - shortEntry, syminfo.mintick)
+shortTP     = shortEntry - rrMultiple * riskShort
+if shortSignal
+    if useTVOrderSize
+        strategy.entry(id="S", direction=strategy.short, comment="")
+    else
+        qS = qtyFinal(shortEntry, shortStop)
+        strategy.entry(id="S", direction=strategy.short, qty=qS, comment="")
+    strategy.exit(id="SX", from_entry="S", stop=shortStop, limit=shortTP, comment="" )
+
+// ——— Visual trades
+showFlags = input.bool(true, "Show BUY/SELL flags & dots")
+plotshape(showFlags and bullDoji, title="BUY",  style=shape.labelup,   location=location.belowbar, size=size.normal, color=color.new(color.lime, 0), text="BUY")
+plotshape(showFlags and bearDoji, title="SELL", style=shape.labeldown, location=location.abovebar, size=size.normal, color=color.new(color.red,  0), text="SELL")
+plot(showFlags and bullDoji ? longEntry : na,  title="Long Entry dot",  style=plot.style_circles, linewidth=3, color=color.lime)
+plot(showFlags and bullDoji ? longStop  : na,  title="Long SL dot",     style=plot.style_circles, linewidth=3, color=color.red)
+plot(showFlags and bullDoji ? longTP    : na,  title="Long TP dot",     style=plot.style_circles, linewidth=3, color=color.teal)
+plot(showFlags and bearDoji ? shortEntry : na, title="Short Entry dot", style=plot.style_circles, linewidth=3, color=color.red)
+plot(showFlags and bearDoji ? shortStop  : na, title="Short SL dot",    style=plot.style_circles, linewidth=3, color=color.fuchsia)
+plot(showFlags and bearDoji ? shortTP    : na, title="Short TP dot",    style=plot.style_circles, linewidth=3, color=color.orange)
+
+// ===== Debug: why signal failed? =====
+failedBull = debugWhy and not bullDoji and baseBull
+failedBear = debugWhy and not bearDoji and baseBear
+
+gateQualBull = qualBull
+gateQualBear = qualBear
+gateHTFBull = not useHTFTrend or htfUp
+gateHTFBear = not useHTFTrend or htfDown
+gateStrength = needStrSoft and needStrStrict
+gatePrevFlipBull = usePrevCandleFlip ? prevBear : true
+gatePrevFlipBear = usePrevCandleFlip ? prevBull : true
+gateConfBull = needNextBarConf ? (prevBaseBull and confirmAwayFromDemand()) : baseBull
+gateConfBear = needNextBarConf ? (prevBaseBear and confirmAwayFromSupply()) : baseBear
+
+reasonBull = "BULL veto: " + (gateQualBull ? "" : "quality ") + (gateHTFBull ? "" : "HTF ") + (gateStrength ? "" : "strength ") + (gatePrevFlipBull ? "" : "prevFlip ") + (gateConfBull ? "" : "confirm ")
+reasonBear = "BEAR veto: " + (gateQualBear ? "" : "quality ") + (gateHTFBear ? "" : "HTF ") + (gateStrength ? "" : "strength ") + (gatePrevFlipBear ? "" : "prevFlip ") + (gateConfBear ? "" : "confirm ")
+
+if failedBull
+    label.new(bar_index, high, reasonBull, style=label.style_label_down, textcolor=color.white, size=size.tiny, color=color.new(color.green, 55))
+if failedBear
+    label.new(bar_index, low,  reasonBear, style=label.style_label_up,   textcolor=color.white, size=size.tiny, color=color.new(color.red,   55))
+
+View in Pine Editor・844 lines
+Use on chart
+2
+0
+4
+4 293
+Title
+Twisted Forex’s Doji + Area Strategy
+
+Description
+What this strategy does
+This strategy looks for doji candles forming inside or near supply/demand areas. Areas are built from swing pivots and sized with ATR, then tracked for retests (“confirmations”). When a doji prints close to an area and quality checks pass, the strategy places a trade with the stop beyond the doji and a configurable R:R target.
+
+How areas (zones) are built
+• Swings are detected with a user-set pivot length.
+• Each swing spawns a horizontal area centered at the pivot price with half-height = zoneHalfATR × ATR.
+• Duplicates are de-duplicated by center distance (ATR-scaled).
+• Areas fade when broken beyond a buffer or after an optional age (expiry).
+• Retests are recorded when price touches and then bounces away from the area; repeated reactions increase the zone’s “strength”.
+
+Signal logic (summary)
+
+Doji detection: strict or loose body criteria with optional minimum wick fractions and ATR-scaled minimum range.
+
+Proximity: price must be inside/near a supply or demand area (proxATR × ATR).
+
+Side resolution: overlap is resolved by (a) which side price penetrates more, (b) fast/slow EMA trend, or (c) nearest distance. Optional “previous candle flip” can bias long after a bearish candle and short after a bullish one.
+
+Optional 1-bar confirmation: the bar after the doji must close away from the area by confirmATR × ATR.
+
+Quality filter (Off/Soft/Strict): four checks—(i) wick rejection past the edge, (ii) doji closes in an edge “band” of the area, (iii) fresh touch (cooldown), (iv) approach impulse over a short lookback. In Strict, thresholds auto-tighten.
+
+Orders & exits
+• Long: stop below doji low minus buffer; Short: above doji high plus buffer.
+• Target = rrMultiple × risk distance.
+• Pyramiding is off by default.
+
+Position sizing
+You can size from the script or from Strategy Properties:
+• Script-driven (default): set Position sizing = “Risk % of equity” and choose riskPercent (e.g., 1.0%). The script applies safe floors/rounding (FX micro-lots by default) so quantity never rounds to zero.
+• Properties-driven: toggle Use TV Properties → Order size ON, then pick “Percent of equity” in Properties (e.g., 1%). The header includes safe defaults so trades still place.
+
+Key inputs to explore
+• Zone building: pivotLen, zoneHalfATR, minDepartureATR, expiryBars, breakATR, leftBars, dedupeATR.
+• Doji & proximity: strictDoji, dojiBodyFrac, minWickFrac, minRangeATR, proxATR, minBarsBetween.
+• Overlap resolution: usePenetration, useTrend (EMA 21/55), “previous candle flip”, needNextBarConf & confirmATR.
+• Quality: qualityMode (Off/Soft/Strict), minQualPass/kStrict, wickPenATR, edgeBandFrac, approachLookback, approachMinATR, freshTouchBars.
+• Zone strength gating: minStrengthSoft / minStrengthStrict.
+• HTF confluence (optional): useHTFTrend (HTF EMA 34/89) and/or useHTFZoneProx (HTF swing bands).
+
+Tips to make it cleaner / higher quality
+• Turn needNextBarConf ON and use confirmATR = 0.10–0.15.
+• Increase approachMinATR (e.g., 0.35–0.45) to require a stronger pre-touch impulse.
+• Raise minStrengthSoft/Strict (e.g., 4–6) so only well-reacted zones can signal.
+• Use signalsOnlyConfirmed ON if you prefer trades only from zones with retests (the script falls back gracefully when none exist yet).
+• Nudge proxATR to 0.5–0.6 to demand tighter proximity to the level.
+• Optional: enable useHTFTrend to filter counter-trend setups.
+
+Default settings used in this publication
+• Initial capital: 100,000 (illustrative).
+• Slippage: 1 tick; Commission: 0% (you can raise commission if you prefer—spread is partly modeled by slippage).
+• Sizing: Risk % of equity via inputs; riskPercent = 1.0%; FX uses micro-lot floors by default.
+• Quality: Off by default (Soft/Strict available).
+• HTF trend gate: Off by default.
+
+Backtesting notes
+For a meaningful sample size, test on liquid symbols/timeframes that yield 100+ trades (e.g., majors on 5–15m over 1–2 years). Backtests are modelled and broker costs/spread vary—validate on your feed and forward-test.
+
+How to read the chart
+Shaded bands are supply (above) and demand (below). Brighter bands are the nearest K per side (visual aid). BUY/SELL labels mark entries; colored dots show entry/SL/TP levels. You can hide zones or unconfirmed zones for a cleaner view.
+
+Disclaimer
+This is educational material, not financial advice. Trading involves risk. Always test and size responsibly.

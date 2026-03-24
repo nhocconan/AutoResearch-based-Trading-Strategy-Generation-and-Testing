@@ -1,0 +1,11 @@
+//@version=5
+ob=##input(defval=80,type='INPUT_INTEGER',##id='in_3')
+os=##input(defval=20,type='INPUT_INTEGER',##id='in_4')
+##root(root_metainfo,rm_0,os,input__float)
+##root(root_metainfo,rm_1,ob,input__float)
+##root(root_metainfo,rm_2,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'Bottom',input__string,plotshape,location)
+##root(root_metainfo,rm_4,'tiny',const__string,plotshape,size)
+##root(root_metainfo,rm_5,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_6,'Top',input__string,plotshape,location)
+##root(root_metainfo,rm_7,'tiny',const__string,plotshape,size)

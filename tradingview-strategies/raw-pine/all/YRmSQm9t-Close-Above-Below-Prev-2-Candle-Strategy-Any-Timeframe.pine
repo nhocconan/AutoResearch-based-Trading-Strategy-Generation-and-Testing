@@ -1,0 +1,76 @@
+//@version=5
+strategy("Close Above/Below Prev 2 Candle Strategy (Any Timeframe)", overlay=true, pyramiding=0)
+
+// === Inputs ===
+rr = input.float(2.0, "Risk/Reward Ratio", step=0.1)
+
+// === Previous 2 candle highs/lows (current chart timeframe) ===
+prevHigh1 = high[1]
+prevHigh2 = high[2]
+prevLow1  = low[1]
+prevLow2  = low[2]
+
+// === Conditions ===
+closeAbovePrev2 = close > prevHigh1 and close > prevHigh2
+closeBelowPrev2 = close < prevLow1 and close < prevLow2
+
+// === Plot signals ===
+plotshape(closeAbovePrev2, title="Close Above Prev 2 Highs", location=location.abovebar, style=shape.triangleup, color=color.green, size=size.tiny)
+plotshape(closeBelowPrev2, title="Close Below Prev 2 Lows", location=location.belowbar, style=shape.triangledown, color=color.red, size=size.tiny)
+
+// === Long entry ===
+if closeAbovePrev2
+    stopLoss   = low
+    takeProfit = close + (close - stopLoss) * rr
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=stopLoss, limit=takeProfit)
+
+// === Short entry ===
+if closeBelowPrev2
+    stopLoss   = high
+    takeProfit = close - (stopLoss - close) * rr
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=stopLoss, limit=takeProfit)
+
+// === Alerts ===
+alertcondition(closeAbovePrev2, title="Close Above Prev 2 Highs", message="Price closed above the previous two candle highs")
+alertcondition(closeBelowPrev2, title="Close Below Prev 2 Lows", message="Price closed below the previous two candle lows")
+
+View in Pine Editor・37 lines
+Use on chart
+8
+844
+Title: Close Above/Below Previous 2 Candle Strategy (Any Timeframe)
+
+Description:
+This strategy identifies potential breakout and trend continuation signals by analyzing the closing price relative to the highs and lows of the previous two candles. It works on any chart timeframe, making it versatile for intraday, swing, and daily trading.
+
+How it works:
+
+Long Entry (Bullish Signal): Triggered when the current candle closes above the highs of the previous two candles.
+
+Short Entry (Bearish Signal): Triggered when the current candle closes below the lows of the previous two candles.
+
+Visual Indicators:
+
+Green triangles above the bar indicate bullish signals.
+
+Red triangles below the bar indicate bearish signals.
+
+Strategy Features:
+
+Works on any timeframe, from 1-minute charts to daily/weekly charts.
+
+Configurable risk/reward ratio for automatic stop-loss and take-profit levels.
+
+Alerts trigger immediately when the condition is met, helping traders react to potential breakouts.
+
+Provides clean visual signals for easy chart reading and decision-making.
+
+Benefits:
+
+Reduces noise by focusing on candle close confirmations.
+
+Versatile and suitable for intraday, swing, and long-term trading.
+
+Easy to combine with other indicators or strategies.

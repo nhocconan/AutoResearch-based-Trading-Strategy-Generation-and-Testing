@@ -1,0 +1,157 @@
+//@version=5
+strategy("FTSE Santa - Late Dec 12d (Optimised Exit)",
+     overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=20)   // 20% of equity per trade (as per your sizing)
+
+// ---------- INPUTS ----------
+
+// Seasonal window
+santaStartDay = input.int(18, "Late Dec Start Day", minval=1, maxval=31)
+santaEndDay   = input.int(23, "Last Day to Look for Entry", minval=1, maxval=31)
+maxSantaBars  = input.int(11, "Bars to Hold (Trading Days)", minval=1)
+
+// Anti-spike entry
+useAntiSpikeVeto   = input.bool(true,  "Use Anti-Spike Veto?")
+antiSpikeThreshold = input.float(2.0,  "Max Up Move for Entry (%)", step=0.1)
+
+// Exit / risk controls
+useStopLoss      = input.bool(true,   "Use Initial Stop-Loss (%)?")
+stopLossPct      = input.float(4.0,   "Initial Stop-Loss (%) below entry", step=0.1)
+useTrailingExit  = input.bool(true,   "Use Trailing Exit?")
+trailTriggerPct  = input.float(2.0,   "Trail Trigger: Gain Needed (%)", step=0.1)
+trailDistancePct = input.float(1.5,   "Trail Distance Below High (%)", step=0.1)
+
+// ---------- DATE HELPERS ----------
+
+y = year(time)
+m = month(time)
+d = dayofmonth(time)
+
+// Only one Santa trade per calendar year
+var int lastEntryYear = na
+canEnterThisYear      = na(lastEntryYear) or (y != lastEntryYear)
+
+// Late December entry window
+inEntryWindow = (m == 12) and (d >= santaStartDay) and (d <= santaEndDay)
+
+// ---------- RETURN / SPIKE CHECK ----------
+
+// Today’s % move vs yesterday
+retToday = (close / close[1] - 1.0) * 100.0
+
+// Spike = big up day; we don't want to chase this on the primary entry
+isSpikeUp = retToday > antiSpikeThreshold
+
+// ---------- ENTRY CONTROL ----------
+
+// Track bars since entry for time-based exit
+var int barsSinceEntry = 0
+
+// Track entry price & highest high since entry for trailing logic
+var float entryPrice    = na
+var float highestHigh   = na
+
+if strategy.position_size != 0
+    barsSinceEntry += 1
+    highestHigh := na(highestHigh) ? high : math.max(highestHigh, high)
+else
+    barsSinceEntry := 0
+    entryPrice     := na
+    highestHigh    := na
+
+// Basic candidate: in window, flat, haven't traded this year
+pureEntryCandidate = inEntryWindow and
+                     canEnterThisYear and
+                     (strategy.position_size == 0)
+
+// Primary entry:
+//  - if veto is ON  -> only if not a spike day
+//  - if veto is OFF -> just use pure date-based entry
+primaryEntry = useAntiSpikeVeto? (pureEntryCandidate and not isSpikeUp): pureEntryCandidate
+
+// Fallback entry:
+//  - if we reach the last day in the window, still flat & allowed to trade,
+//    enter regardless of whether today is a spike
+fallbackEntry = (m == 12) and (d == santaEndDay) and canEnterThisYear and (strategy.position_size == 0)
+
+// Final entry signal
+enterLong = primaryEntry or fallbackEntry
+
+// ---------- ENTRY ----------
+
+if enterLong
+    strategy.entry("SantaFTSELong", strategy.long)
+    lastEntryYear  := y
+    barsSinceEntry := 0
+    entryPrice     := close
+    highestHigh    := high
+
+// ---------- EXIT (STOP + TRAIL + TIME) ----------
+
+var float dynStopPrice = na
+
+// Only compute dynamic stop when in a trade
+if strategy.position_size > 0 and not na(entryPrice)
+    // 1) Base stop-loss, if enabled
+    float baseStop = na
+    if useStopLoss
+        baseStop := entryPrice * (1.0 - stopLossPct / 100.0)
+
+    // 2) Trailing stop, if enabled and trade has moved enough in your favour
+    float trailStop = na
+    unrealisedPct = (close / entryPrice - 1.0) * 100.0
+
+    if useTrailingExit and unrealisedPct >= trailTriggerPct and not na(highestHigh)
+        // Stop trailDistancePct below highest high since entry
+        trailStop := highestHigh * (1.0 - trailDistancePct / 100.0)
+
+        // Never let trail go below entry if you want to lock at least breakeven:
+        trailStop := math.max(trailStop, entryPrice)
+
+    // 3) Combine: take the *tightest* valid stop (highest price)
+    dynStopPrice := na
+
+    if not na(baseStop) and not na(trailStop)
+        dynStopPrice := math.max(baseStop, trailStop)
+    else
+        dynStopPrice := na(baseStop) ? trailStop : baseStop
+
+    // Submit / update exit order if we have a valid stop
+    if not na(dynStopPrice)
+        strategy.exit("SantaExit", from_entry="SantaFTSELong", stop=dynStopPrice)
+
+// Time-based exit: force flat after maxSantaBars, regardless of stop/trail
+exitByTime = (strategy.position_size > 0) and (barsSinceEntry >= maxSantaBars)
+
+if exitByTime
+    strategy.close("SantaFTSELong")
+
+// ---------- PLOTTING ----------
+
+plotshape(enterLong,
+     title="Santa Entry",
+     style=shape.triangleup,
+     location=location.belowbar,
+     size=size.small,
+     text="IN",
+     textcolor=color.white)
+
+plotshape(exitByTime,
+     title="Santa Exit (Time)",
+     style=shape.triangledown,
+     location=location.abovebar,
+     size=size.small,
+     text="OUT",
+     textcolor=color.white)
+
+// Optional: plot dynamic stop for visual debugging
+plot(dynStopPrice, title="Dynamic Stop", style=plot.style_linebr)
+
+View in Pine Editor・150 lines
+Use on chart
+2
+2
+606
+Simple Santa Rally Strategy. Once a year, in late December, it waits for a sensible (non-spiky) day to get long FTSE, then either stops out around −4%, gets trailed out in profit if it rallies, or exits after about 12 trading days.

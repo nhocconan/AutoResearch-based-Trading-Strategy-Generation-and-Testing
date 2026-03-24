@@ -1,0 +1,30 @@
+//@version=2
+strategy(title="JSC_5/13 EMAs", shorttitle="5/13 EMAs", overlay = true)
+lns = input(true, title="long positions only if checked, long and short positions if unchecked")
+lo = lns ? 0:1
+lenshort = input(5, minval=1, title="Length")
+lenlong = input(13, minval=1, title="Length")
+src = input(close, title="Source")
+outshort = ema(src, lenshort)
+outlong = ema(src,lenlong)
+plot(outshort, title="EMA", color=blue)
+plot(outlong, title="EMA", color=blue)
+
+longCondition = cross(outshort,outlong) and outshort > outlong ? 1:0
+shortCondition = cross(outshort,outlong) and outshort < outlong ? 1:0
+//plot(longCondition)
+//plot(shortCondition)
+
+if (longCondition)
+    strategy.entry("5/13 EMAs", strategy.long)
+strategy.close("5/13 EMAs", when = shortCondition and lo ==1)    
+    
+if (shortCondition and lns)
+    strategy.entry("5/13 EMAs", strategy.short)
+
+View in Pine Editor・23 lines
+Use on chart
+3
+0
+1 163
+Simple EMA trading strategy

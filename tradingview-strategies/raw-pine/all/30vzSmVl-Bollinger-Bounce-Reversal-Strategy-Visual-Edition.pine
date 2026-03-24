@@ -1,0 +1,161 @@
+//@version=5
+// Bollinger Bounce Reversal Strategy - Visual Edition
+//
+// Description:
+// This strategy seeks to capture reversal moves at extreme price levels (“bounce points”) using Bollinger Bands.
+// A long entry is triggered when the price, after being below the lower Bollinger Band, crosses upward above it,
+// provided that the MACD line is above its signal line (indicating bullish momentum) and volume is strong.
+// Conversely, a short entry is triggered when the price, after being above the upper Bollinger Band, crosses downward
+// below it, with the MACD line below its signal line and high volume.
+// To help avoid overtrading, the strategy limits entries to a maximum of 5 trades per day.
+// Risk management is applied via fixed stop‑loss and take‑profit orders.
+// This version overlays many visual cues on the chart: filled Bollinger Bands, signal markers, background colors,
+// and an on‑chart information table displaying key values.
+//
+// Backtesting Parameters:
+// • Initial Capital: $10,000  
+// • Commission: 0.1% per trade  
+// • Slippage: 1 tick per bar
+//
+// Disclaimer:
+// Past performance is not indicative of future results. This strategy is experimental and provided solely for educational
+// purposes. Please backtest and paper trade under your own conditions before live deployment.
+//
+// Author: [Your Name]
+// Date: [Date]
+
+strategy("Bollinger Bounce Reversal Strategy - Visual Edition", overlay=true, initial_capital=10000, 
+     default_qty_type=strategy.percent_of_equity, default_qty_value=5, 
+     commission_type=strategy.commission.percent, commission_value=0.1, slippage=1)
+
+// ─── INPUTS ─────────────────────────────────────────────────────────────
+bbPeriod        = input.int(20, "Bollinger Bands Period", minval=1)
+bbStd           = input.float(2.0, "BB StdDev Multiplier", step=0.1)
+macdFast        = input.int(12, "MACD Fast Length", minval=1)
+macdSlow        = input.int(26, "MACD Slow Length", minval=1)
+macdSignal      = input.int(9,  "MACD Signal Length", minval=1)
+volAvgPeriod    = input.int(20, "Volume MA Period", minval=1)
+volFactor       = input.float(1.0, "Volume Spike Factor", step=0.1)  // Volume must be >= volAvg * factor
+stopLossPerc    = input.float(2.0,  "Stop Loss (%)", step=0.1) * 0.01
+takeProfitPerc  = input.float(4.0,  "Take Profit (%)", step=0.1) * 0.01
+
+// ─── CALCULATIONS ─────────────────────────────────────────────────────────
+basis    = ta.sma(close, bbPeriod)
+dev      = bbStd * ta.stdev(close, bbPeriod)
+upperBB  = basis + dev
+lowerBB  = basis - dev
+
+[macdLine, signalLine, _] = ta.macd(close, macdFast, macdSlow, macdSignal)
+volAvg   = ta.sma(volume, volAvgPeriod)
+
+// ─── VISUALS: Bollinger Bands & Fill ───────────────────────────────────────
+pBasis = plot(basis, color=color.gray, title="BB Basis")
+pUpper = plot(upperBB, color=color.red, title="Upper BB")
+pLower = plot(lowerBB, color=color.green, title="Lower BB")
+fill(pUpper, pLower, color=color.new(color.blue, 90), title="BB Fill")
+
+// ─── DAILY TRADE LIMIT ─────────────────────────────────────────────────────
+// Reset the daily trade count at the start of each new day; limit entries to 5 per day.
+var int tradesToday = 0
+if ta.change(time("D"))
+    tradesToday := 0
+
+// ─── SIGNAL LOGIC ─────────────────────────────────────────────────────────
+// Define a "bounce" signal:
+// For a long signal, require that the previous bar was below the lower band and the current bar crosses above it,
+// the MACD line is above its signal, and volume is high.
+longSignal = (close[1] < lowerBB and close > lowerBB) and (macdLine > signalLine) and (volume >= volFactor * volAvg)
+// For a short signal, require that the previous bar was above the upper band and the current bar crosses below it,
+// the MACD line is below its signal, and volume is high.
+shortSignal = (close[1] > upperBB and close < upperBB) and (macdLine < signalLine) and (volume >= volFactor * volAvg)
+
+// Plot visual signal markers on the chart.
+plotshape(longSignal, title="Long Signal", style=shape.labelup, location=location.belowbar, color=color.green, text="Long", size=size.small)
+plotshape(shortSignal, title="Short Signal", style=shape.labeldown, location=location.abovebar, color=color.red, text="Short", size=size.small)
+
+// Change background color on signal bars for an extra cue.
+bgcolor(longSignal ? color.new(color.green, 80) : shortSignal ? color.new(color.red, 80) : na, title="Signal BG")
+
+// Only enter trades if fewer than 5 have been taken today.
+if longSignal and (tradesToday < 5)
+    strategy.entry("Long", strategy.long)
+    tradesToday += 1
+
+if shortSignal and (tradesToday < 5)
+    strategy.entry("Short", strategy.short)
+    tradesToday += 1
+
+// ─── RISK MANAGEMENT: STOP-LOSS & TAKE-PROFIT ─────────────────────────────
+// For long positions: set stop loss and take profit relative to the entry price.
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=strategy.position_avg_price*(1 - stopLossPerc), limit=strategy.position_avg_price*(1 + takeProfitPerc))
+// For short positions: set stop loss and take profit relative to the entry price.
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=strategy.position_avg_price*(1 + stopLossPerc), limit=strategy.position_avg_price*(1 - takeProfitPerc))
+
+// ─── ON-CHART INFORMATION TABLE ───────────────────────────────────────────
+var table infoTable = table.new(position.top_left, 5, 2, border_width=1, frame_color=color.gray)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "MACD", text_color=color.white, bgcolor=color.blue)
+    table.cell(infoTable, 1, 0, str.tostring(macdLine, "#.###"), text_color=color.white, bgcolor=color.black)
+    table.cell(infoTable, 0, 1, "Signal", text_color=color.white, bgcolor=color.blue)
+    table.cell(infoTable, 1, 1, str.tostring(signalLine, "#.###"), text_color=color.white, bgcolor=color.black)
+    table.cell(infoTable, 0, 2, "Volume", text_color=color.white, bgcolor=color.blue)
+    table.cell(infoTable, 1, 2, str.tostring(volume, "#.###"), text_color=color.white, bgcolor=color.black)
+    table.cell(infoTable, 0, 3, "VolAvg", text_color=color.white, bgcolor=color.blue)
+    table.cell(infoTable, 1, 3, str.tostring(volAvg, "#.###"), text_color=color.white, bgcolor=color.black)
+    table.cell(infoTable, 0, 4, "Trades Today", text_color=color.white, bgcolor=color.blue)
+    table.cell(infoTable, 1, 4, str.tostring(tradesToday), text_color=color.white, bgcolor=color.black)
+
+View in Pine Editor・108 lines
+Use on chart
+4
+4
+2 301
+Overview:
+The Bollinger Bounce Reversal Strategy – Visual Edition is designed to capture potential reversal moves at price extremes—often termed “bounce points”—by using a combination of technical indicators. The strategy integrates Bollinger Bands, MACD, and volume analysis, and it provides rich on‑chart visual cues to help traders understand its signals and conditions. Additionally, the strategy enforces a maximum of 5 trades per day and uses fixed risk management parameters. This publication is intended for educational purposes and offers a systematic, transparent approach that you can further adjust to fit your market or risk profile.
+
+How It Works:
+
+Bollinger Bands:
+
+A 20‑period simple moving average (SMA) and a user‑defined standard deviation multiplier (default 2.0) are used to calculate the Bollinger Bands.
+When the price reaches or crosses these bands (i.e. falls below the lower band or rises above the upper band), it suggests that the price is in an extreme, potentially oversold or overbought, state.
+MACD Filter:
+
+The MACD (calculated with standard lengths, e.g. 12, 26, 9) provides momentum information.
+For a bullish (long) signal, the MACD line should be above its signal line; for a bearish (short) signal, the MACD line should be below.
+Volume Confirmation:
+
+The strategy uses a 20‑period volume moving average to determine if current volume is strong enough to validate a signal.
+A signal is confirmed only if the current volume is at or above a specified multiple (by default, 1.0×) of this moving average, ensuring that the move is supported by increased market participation.
+Visual Cues:
+
+Bollinger Bands and Fill: The basis (SMA), upper, and lower Bollinger Bands are plotted, and the area between the upper and lower bands is filled with a semi‑transparent color.
+Signal Markers: When a long or short signal is generated, corresponding markers (labels) appear on the chart.
+Background Coloring: The chart’s background changes color (green for long signals and red for short signals) on the bars where signals occur.
+Information Table: An on‑chart table displays key indicator values (MACD, signal line, volume, average volume) and the number of trades executed that day.
+Entry Conditions:
+
+Long Entry:
+A long trade is triggered when the previous bar’s close is below the lower Bollinger Band and the current bar’s close crosses above it, combined with a bullish MACD condition and strong volume.
+Short Entry:
+A short trade is triggered when the previous bar’s close is above the upper Bollinger Band and the current bar’s close crosses below it, with a bearish MACD condition and high volume.
+Risk Management:
+
+Daily Trade Limit: The strategy restricts trading to no more than 5 trades per day.
+Stop-Loss and Take-Profit:
+For each position, a stop loss is set at a fixed percentage away from the entry price (typically 2%), and a take profit is set to target a 1:2 risk-reward ratio (typically 4% from the entry price).
+Backtesting Setup:
+
+Initial Capital: $10,000
+Commission: 0.1% per trade
+Slippage: 1 tick per bar
+These realistic parameters help ensure that backtesting results reflect the conditions of an average trader.
+Disclaimer:
+Past performance is not indicative of future results. This strategy is experimental and provided solely for educational purposes. It is essential to backtest extensively and paper trade before any live deployment. All risk management practices are advisory, and you should adjust parameters to suit your own trading style and risk tolerance.
+
+Conclusion:
+By combining Bollinger Bands, MACD, and volume analysis, the Bollinger Bounce Reversal Strategy – Visual Edition provides a clear, systematic method to identify potential reversal opportunities at price extremes. The added visual cues help traders quickly interpret signals and assess market conditions, while strict risk management and a daily trade cap help keep trading disciplined. Adjust and refine the settings as needed to better suit your specific market and risk profile.
+
+

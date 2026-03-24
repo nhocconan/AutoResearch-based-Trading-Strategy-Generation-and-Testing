@@ -1,0 +1,101 @@
+//@version=5
+strategy("Katik EMA BUY SELL", overlay=true, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.02)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+// EMA Calculations
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+ema9   = ta.ema(close, 9)
+ema20  = ta.ema(close, 20)
+ema200 = ta.ema(close, 200)
+
+// Plot EMAs
+plot(ema9,  "EMA 9",  color=color.new(color.green, 0), linewidth=3)
+plot(ema20, "EMA 20", color=color.new(color.orange, 0), linewidth=3)
+plot(ema200,"EMA 200",color=color.new(color.blue, 0), linewidth=3)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Swing High / Low
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+swingLow  = ta.pivotlow(low, 5, 5)
+swingHigh = ta.pivothigh(high, 5, 5)
+
+var float SL_long  = na
+var float SL_short = na
+
+if not na(swingLow)
+    SL_long := swingLow
+
+if not na(swingHigh)
+    SL_short := swingHigh
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Entry Conditions
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+longEntry  = ta.crossover(ema9, ema20)
+shortEntry = ta.crossunder(ema9, ema20)
+
+// Long Entry
+if (longEntry)
+    strategy.entry("Long", strategy.long)
+
+// Short Entry
+if (shortEntry)
+    strategy.entry("Short", strategy.short)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Target Conditions (Common)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+targetHit = ta.cross(ema9, ema200) or (ema9 == ema200)
+
+// Exit Long at Target
+if (strategy.position_size > 0 and targetHit)
+    strategy.close("Long")
+
+// Exit Short at Target
+if (strategy.position_size < 0 and targetHit)
+    strategy.close("Short")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Stoploss (Swing High / Low)
+//━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Long SL = Swing Low
+if (strategy.position_size > 0 and SL_long)
+    strategy.exit("SL Long", from_entry="Long", stop=SL_long)
+
+// Short SL = Swing High
+if (strategy.position_size < 0 and SL_short)
+    strategy.exit("SL Short", from_entry="Short", stop=SL_short)
+
+View in Pine Editor・68 lines
+Use on chart
+2
+3
+656
+This strategy uses EMA 9, EMA 20, and EMA 200 to generate Buy and Sell signals.
+
+BUY Conditions
+
+EMA 9 crosses above EMA 20
+
+Stoploss: Recent Swing Low
+
+Target: EMA 9 touches or crosses EMA 200
+
+SELL Conditions
+
+EMA 9 crosses below EMA 20
+
+Stoploss: Recent Swing High
+
+Target: EMA 9 touches or crosses EMA 200
+
+Features
+
+Automatic Long & Short entries
+
+Dynamic swing-based stoploss
+
+Clear EMA plots with line width 3
+
+Works on all timeframes

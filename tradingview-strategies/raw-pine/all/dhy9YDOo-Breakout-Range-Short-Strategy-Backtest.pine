@@ -1,0 +1,32 @@
+//@version = 2
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 29/11/2016
+// Breakout Range Short Strategy
+// You can change long to short in the Input Settings
+// Please, use it only for learning or paper trading. Do not for real trading.
+////////////////////////////////////////////////////////////
+strategy(title="Breakout Range Short Strategy Bacltest", overlay = true)
+look_bak = input(4, minval=1, title="Look Bak")
+reverse = input(false, title="Trade reverse")
+xLowest = lowest(low, look_bak)
+pos =    iff(low < xLowest[1], 1, 0) 
+if (pos == 1 and strategy.position_size == 0 and reverse == true) 
+    strategy.entry("Long", strategy.long)
+if (pos == 1 and strategy.position_size == 0 and reverse == false) 
+    strategy.entry("Short", strategy.short)
+if (pos == 0 and strategy.position_size > 0)
+    strategy.close("Long")
+if (pos == 0 and strategy.position_size < 0)
+    strategy.close("Short")
+barcolor(strategy.position_size > 0 ? green: strategy.position_size < 0 ? red: blue)   
+plotshape(pos, style=shape.triangledown, location = location.abovebar, color = red)
+
+View in Pine Editor・22 lines
+Use on chart
+1
+8
+0
+3 909
+Breakout Range Short Strategy
+You can change long to short in the Input Settings
+Please, use it only for learning or paper trading. Do not for real trading.

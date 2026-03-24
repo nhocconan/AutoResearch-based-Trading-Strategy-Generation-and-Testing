@@ -1,0 +1,269 @@
+//@version=5
+strategy("MES ORB Bulletproof + PSAR + SMA200 + BB(21)",
+     overlay=true,
+     pyramiding=0,
+     calc_on_every_tick=false,
+     process_orders_on_close=true,
+     initial_capital=100000)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────────────
+sess           = input.session("0930-1600", "RTH Session (Exchange TZ)")
+orMinutes      = input.int(15, "Opening Range Minutes", minval=1, maxval=120)
+
+acceptBars     = input.int(2, "Acceptance: N consecutive closes outside OR", minval=1, maxval=10)
+requireCloseBreak = input.bool(true, "Break trigger requires CLOSE beyond OR (otherwise wick)")
+
+// Volatility regime filter (Crabel-ish)
+atrLen         = input.int(14, "ATR Length", minval=1)
+atrTF          = input.timeframe("D", "ATR Timeframe (recommended: D)")
+minOR_ATR      = input.float(0.15, "Min OR size as fraction of ATR", step=0.01)
+
+// Risk / exits
+stopATRmult    = input.float(0.40, "Stop distance = ATR *", step=0.05)
+tp1_Rmult      = input.float(1.0, "TP1 distance = R *", step=0.25)
+tp2_ORmult     = input.float(1.0, "TP2 distance = OR * (measured move)", step=0.25)
+runnerPct      = input.int(30, "Runner % (TP2). Core exits at TP1", minval=0, maxval=100)
+
+tradeLongs     = input.bool(true, "Enable Longs")
+tradeShorts    = input.bool(true, "Enable Shorts")
+
+flatEnd        = input.bool(true, "Flat at RTH close")
+
+// Plot toggles
+showOR         = input.bool(true, "Plot OR High/Low")
+showLiveLevels = input.bool(true, "Plot live stop/targets while in position")
+
+//──────────────────────────────────────────────────────────────────────────────
+// PSAR (visual + filter + runner trail)
+//──────────────────────────────────────────────────────────────────────────────
+showPSAR      = input.bool(true, "Show PSAR")
+usePSARFilter = input.bool(true, "Use PSAR as entry filter")
+usePSARTrail  = input.bool(true, "Use PSAR as runner trailing stop")
+
+psarStart = input.float(0.02, "PSAR Start", step=0.01)
+psarInc   = input.float(0.02, "PSAR Increment", step=0.01)
+psarMax   = input.float(0.20, "PSAR Max", step=0.01)
+
+psar = ta.sar(psarStart, psarInc, psarMax)
+psarBull = close > psar
+psarBear = close < psar
+
+//──────────────────────────────────────────────────────────────────────────────
+// SMA 200 + Bollinger Bands (21) context
+//──────────────────────────────────────────────────────────────────────────────
+showSMA200 = input.bool(true, "Show SMA 200")
+showBB     = input.bool(true, "Show Bollinger Bands (21)")
+
+bbLen  = input.int(21, "BB Length", minval=1)
+bbMult = input.float(2.0, "BB StdDev", step=0.1)
+
+sma200  = ta.sma(close, 200)
+bbBasis = ta.sma(close, bbLen)
+bbDev   = bbMult * ta.stdev(close, bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+
+//──────────────────────────────────────────────────────────────────────────────
+// Helpers
+//──────────────────────────────────────────────────────────────────────────────
+f_consecutive(cond, n) =>
+    ok = true
+    for i = 0 to n - 1
+        ok := ok and cond[i]
+    ok
+
+// In-session detection (uses chart's symbol exchange timezone)
+inSess  = not na(time(timeframe.period, sess))
+newSess = inSess and not inSess[1]
+endSess = not inSess and inSess[1]
+
+//──────────────────────────────────────────────────────────────────────────────
+// Time-based Opening Range (bulletproof)
+//──────────────────────────────────────────────────────────────────────────────
+var float orHigh = na
+var float orLow  = na
+var bool  orDone = false
+var int   sessStartTime = na
+
+if newSess
+    orHigh := na
+    orLow  := na
+    orDone := false
+    sessStartTime := time
+
+minutesFromOpen = inSess and not na(sessStartTime) ? (time - sessStartTime) / 60000.0 : na
+orDone := inSess and not na(minutesFromOpen) and (minutesFromOpen >= orMinutes) ? true : (inSess ? orDone : false)
+
+// Build OR only until it is done
+if inSess and not orDone
+    orHigh := na(orHigh) ? high : math.max(orHigh, high)
+    orLow  := na(orLow)  ? low  : math.min(orLow, low)
+
+orSize = (orHigh - orLow)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Volatility filter
+//──────────────────────────────────────────────────────────────────────────────
+atrVal = request.security(syminfo.tickerid, atrTF, ta.atr(atrLen), barmerge.gaps_off, barmerge.lookahead_off)
+volOk  = orDone and not na(orSize) and not na(atrVal) and (orSize >= (minOR_ATR * atrVal))
+
+//──────────────────────────────────────────────────────────────────────────────
+// Break + Acceptance
+//──────────────────────────────────────────────────────────────────────────────
+breakUp   = requireCloseBreak ? (close > orHigh) : (high > orHigh)
+breakDown = requireCloseBreak ? (close < orLow)  : (low < orLow)
+
+// Acceptance = N consecutive closes beyond OR boundary
+acceptUp   = orDone and f_consecutive(close > orHigh, acceptBars)
+acceptDown = orDone and f_consecutive(close < orLow,  acceptBars)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Single-attempt per side per session
+//──────────────────────────────────────────────────────────────────────────────
+var bool tradedLongThisSess  = false
+var bool tradedShortThisSess = false
+
+if newSess
+    tradedLongThisSess  := false
+    tradedShortThisSess := false
+
+//──────────────────────────────────────────────────────────────────────────────
+// Entry conditions (+ PSAR filter)
+//──────────────────────────────────────────────────────────────────────────────
+flat = strategy.position_size == 0
+canTrade = inSess and orDone and volOk and flat
+
+longSignal  = canTrade and tradeLongs  and not tradedLongThisSess  and breakUp   and acceptUp
+shortSignal = canTrade and tradeShorts and not tradedShortThisSess and breakDown and acceptDown
+
+if usePSARFilter
+    longSignal  := longSignal  and psarBull
+    shortSignal := shortSignal and psarBear
+
+if longSignal
+    strategy.entry("L", strategy.long)
+    tradedLongThisSess := true
+
+if shortSignal
+    strategy.entry("S", strategy.short)
+    tradedShortThisSess := true
+
+//──────────────────────────────────────────────────────────────────────────────
+// Exits
+// Core: base stop + TP1
+// Runner: base stop tightened by PSAR + TP2 (measured move)
+//──────────────────────────────────────────────────────────────────────────────
+corePct  = 100 - runnerPct
+stopDist = atrVal * stopATRmult
+tp2Dist  = orSize * tp2_ORmult
+
+inPos  = strategy.position_size != 0
+isLong = strategy.position_size > 0
+isShort= strategy.position_size < 0
+ep     = strategy.position_avg_price
+
+// Runner stop series for plotting (computed here so it matches exit logic)
+var float runnerStopL = na
+var float runnerStopS = na
+
+if inPos and not na(stopDist) and not na(tp2Dist)
+    // Long exits
+    if isLong
+        stopL_base = ep - stopDist
+        tp1L       = ep + (tp1_Rmult * stopDist)
+        tp2L       = ep + tp2Dist
+
+        stopL_psar   = (usePSARTrail and psar < close) ? psar : na
+        stopL_runner = not na(stopL_psar) ? math.max(stopL_base, stopL_psar) : stopL_base
+        runnerStopL  := stopL_runner
+        runnerStopS  := na
+
+        if corePct > 0
+            strategy.exit("L-TP1", from_entry="L", qty_percent=corePct, stop=stopL_base, limit=tp1L)
+        if runnerPct > 0
+            strategy.exit("L-TP2", from_entry="L", qty_percent=runnerPct, stop=stopL_runner, limit=tp2L)
+
+    // Short exits
+    if isShort
+        stopS_base = ep + stopDist
+        tp1S       = ep - (tp1_Rmult * stopDist)
+        tp2S       = ep - tp2Dist
+
+        stopS_psar   = (usePSARTrail and psar > close) ? psar : na
+        stopS_runner = not na(stopS_psar) ? math.min(stopS_base, stopS_psar) : stopS_base
+        runnerStopS  := stopS_runner
+        runnerStopL  := na
+
+        if corePct > 0
+            strategy.exit("S-TP1", from_entry="S", qty_percent=corePct, stop=stopS_base, limit=tp1S)
+        if runnerPct > 0
+            strategy.exit("S-TP2", from_entry="S", qty_percent=runnerPct, stop=stopS_runner, limit=tp2S)
+else
+    runnerStopL := na
+    runnerStopS := na
+
+// Flat at RTH close
+if flatEnd and endSess and inPos
+    strategy.close_all(comment="RTH End Flat")
+
+//──────────────────────────────────────────────────────────────────────────────
+// Plotting (GLOBAL SCOPE SAFE)
+//──────────────────────────────────────────────────────────────────────────────
+
+// OR plots
+orHighPlot = (showOR and orDone) ? orHigh : na
+orLowPlot  = (showOR and orDone) ? orLow  : na
+plot(orHighPlot, "OR High", linewidth=2)
+plot(orLowPlot,  "OR Low",  linewidth=2)
+
+// PSAR dots
+plot(showPSAR ? psar : na, title="PSAR", style=plot.style_circles, linewidth=2)
+
+// SMA 200
+plot(showSMA200 ? sma200 : na, title="SMA 200", linewidth=2)
+
+// Bollinger Bands (21)
+bbUpperPlot = showBB ? bbUpper : na
+bbLowerPlot = showBB ? bbLower : na
+bbBasisPlot = showBB ? bbBasis : na
+plot(bbUpperPlot, title="BB Upper (21)", linewidth=1)
+plot(bbLowerPlot, title="BB Lower (21)", linewidth=1)
+plot(bbBasisPlot, title="BB Basis (21)", linewidth=1)
+
+// Vol OK marker
+plotchar(volOk ? 1 : 0, title="Vol OK", char="V", location=location.top, size=size.tiny)
+
+// Entry markers
+plotshape(longSignal,  title="Long ORB",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, text="ORB L")
+plotshape(shortSignal, title="Short ORB", style=shape.triangledown, location=location.abovebar, size=size.tiny, text="ORB S")
+
+// Live levels (base stop/targets)
+stopLPlot = (showLiveLevels and inPos and isLong  and not na(stopDist)) ? (ep - stopDist) : na
+tp1LPlot  = (showLiveLevels and inPos and isLong  and not na(stopDist)) ? (ep + (tp1_Rmult * stopDist)) : na
+tp2LPlot  = (showLiveLevels and inPos and isLong  and not na(tp2Dist))  ? (ep + tp2Dist) : na
+
+stopSPlot = (showLiveLevels and inPos and isShort and not na(stopDist)) ? (ep + stopDist) : na
+tp1SPlot  = (showLiveLevels and inPos and isShort and not na(stopDist)) ? (ep - (tp1_Rmult * stopDist)) : na
+tp2SPlot  = (showLiveLevels and inPos and isShort and not na(tp2Dist))  ? (ep - tp2Dist) : na
+
+plot(stopLPlot, "Stop L (base)", style=plot.style_linebr, linewidth=1)
+plot(tp1LPlot,  "TP1 L",         style=plot.style_linebr, linewidth=1)
+plot(tp2LPlot,  "TP2 L",         style=plot.style_linebr, linewidth=1)
+
+plot(stopSPlot, "Stop S (base)", style=plot.style_linebr, linewidth=1)
+plot(tp1SPlot,  "TP1 S",         style=plot.style_linebr, linewidth=1)
+plot(tp2SPlot,  "TP2 S",         style=plot.style_linebr, linewidth=1)
+
+// Runner stop (PSAR-tightened) plot
+plotRunnerStop = input.bool(true, "Plot Runner Stop (PSAR-tightened)")
+runnerStopPlot = plotRunnerStop ? (isLong ? runnerStopL : isShort ? runnerStopS : na) : na
+plot(runnerStopPlot, title="Runner Stop (PSAR-tightened)", style=plot.style_linebr, linewidth=2)
+
+View in Pine Editor・262 lines
+Use on chart
+2
+6
+904
+MES ORB Bulletproof + PSAR + SMA200 + BB(21) by Pantelis

@@ -1,0 +1,80 @@
+//@version=5
+strategy("OMEGA-1: Momentum Rotation", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Assets: SPY, QQQ, IWM (S&P 500, Nasdaq, Russell 2000)
+spy = request.security("SPY", "D", close)
+qqq = request.security("QQQ", "D", close)
+iwm = request.security("IWM", "D", close)
+
+// 3-month momentum (63 trading days)
+spy_mom = (spy - spy[63]) / spy[63] * 100
+qqq_mom = (qqq - qqq[63]) / qqq[63] * 100
+iwm_mom = (iwm - iwm[63]) / iwm[63] * 100
+
+// Trend filter: Price > 200-day MA
+spy_trend = spy > ta.sma(spy, 200)
+qqq_trend = qqq > ta.sma(qqq, 200)
+iwm_trend = iwm > ta.sma(iwm, 200)
+
+// Score: Momentum + Trend bonus
+spy_score = spy_mom + (spy_trend ? 5 : -5)
+qqq_score = qqq_mom + (qqq_trend ? 5 : -5)
+iwm_score = iwm_mom + (iwm_trend ? 5 : -5)
+
+// Select best
+best_score = math.max(spy_score, math.max(qqq_score, iwm_score))
+spy_best = spy_score == best_score and spy_trend
+qqq_best = qqq_score == best_score and qqq_trend and not spy_best
+iwm_best = iwm_score == best_score and iwm_trend and not spy_best and not qqq_best
+
+// Cash if no trend
+cash = not spy_best and not qqq_best and not iwm_best
+
+// Monthly rebalance (first trading day of month)
+rebalance = dayofmonth != dayofmonth[1] and dayofmonth <= 5
+
+if rebalance and spy_best
+    strategy.close_all()
+    strategy.entry("SPY", strategy.long)
+    alert("BUY SPY", alert.freq_once_per_bar_close)
+if rebalance and qqq_best
+    strategy.close_all()
+    strategy.entry("QQQ", strategy.long)
+    alert("BUY QQQ", alert.freq_once_per_bar_close)
+if rebalance and iwm_best
+    strategy.close_all()
+    strategy.entry("IWM", strategy.long)
+    alert("BUY IWM", alert.freq_once_per_bar_close)
+if rebalance and cash
+    strategy.close_all()
+    alert("SELL ALL - CASH", alert.freq_once_per_bar_close)
+
+// Info
+var table info = table.new(position.top_right, 2, 5, bgcolor=color.black)
+if barstate.islast
+    table.cell(info, 0, 0, "SPY Mom:", text_color=color.white)
+    table.cell(info, 1, 0, str.tostring(spy_mom, "#.#") + "%", text_color=spy_mom > 0 ? color.green : color.red)
+    table.cell(info, 0, 1, "QQQ Mom:", text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(qqq_mom, "#.#") + "%", text_color=qqq_mom > 0 ? color.green : color.red)
+    table.cell(info, 0, 2, "IWM Mom:", text_color=color.white)
+    table.cell(info, 1, 2, str.tostring(iwm_mom, "#.#") + "%", text_color=iwm_mom > 0 ? color.green : color.red)
+    table.cell(info, 0, 3, "Best:", text_color=color.white)
+    table.cell(info, 1, 3, spy_best ? "SPY" : qqq_best ? "QQQ" : iwm_best ? "IWM" : "CASH", text_color=color.yellow)
+    table.cell(info, 0, 4, "Position:", text_color=color.white)
+    table.cell(info, 1, 4, strategy.position_size > 0 ? strategy.opentrades.entry_id(0) : "FLAT", text_color=strategy.position_size > 0 ? color.green : color.gray)
+
+View in Pine Editor・64 lines
+Use on chart
+1
+9
+534
+Omega 1 Qqq 1 week temporality
+SPY
+IWM
+Omega 1 Qqq 1 week temporality
+SPY
+IWM
+
+Omega 1 Qqq 1 week temporality
+SPY
+IWM

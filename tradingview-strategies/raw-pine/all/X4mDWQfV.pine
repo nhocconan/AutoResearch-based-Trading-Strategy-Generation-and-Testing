@@ -1,0 +1,140 @@
+//@version=5
+strategy("Trend Magic with EMA, SMA, and Auto-Trading", shorttitle="TM_Trading", overlay=true, format=format.price, precision=2)
+
+// Inputs
+period = input.int(21, "CCI period")
+coeff = input.float(1.0, "ATR Multiplier")
+AP = input.int(7, "ATR Period")
+riskRewardRatio = input.float(1.5, "Risk/Reward Ratio")  // Risk/Reward Ratio for take profit
+
+// Calculations
+ATR = ta.sma(ta.tr, AP)
+src = input(close)
+upT = low - ATR * coeff
+downT = high + ATR * coeff
+var MagicTrend = 0.0
+MagicTrend := ta.cci(src, period) >= 0 ? (upT < nz(MagicTrend[1]) ? nz(MagicTrend[1]) : upT) : (downT > nz(MagicTrend[1]) ? nz(MagicTrend[1]) : downT)
+
+// Define colors for Trend Magic
+color1 = ta.cci(src, period) >= 0 ? color.rgb(0, 34, 252) : color.rgb(252, 4, 0)
+isBlue = ta.cci(src, period) >= 0
+isRed = ta.cci(src, period) < 0
+
+// Convert bool to float (1 for true, 0 for false)
+isBlueFloat = isBlue ? 1 : 0
+isRedFloat = isRed ? 1 : 0
+
+// Moving Averages
+ema45 = ta.ema(close, 45)
+sma90 = ta.sma(close, 90)
+sma180 = ta.sma(close, 180)
+
+// Plot Trend Magic
+plot(MagicTrend, color=color1, linewidth=3)
+
+// Alerts
+alertcondition(ta.cross(close, MagicTrend), title="Cross Alert", message="Price - MagicTrend Crossing!")
+alertcondition(ta.crossover(low, MagicTrend), title="CrossOver Alarm", message="BUY SIGNAL!")
+alertcondition(ta.crossunder(high, MagicTrend), title="CrossUnder Alarm", message="SELL SIGNAL!")
+
+// Perfect Order conditions
+bullishPerfectOrder = ema45 > sma90 and sma90 > sma180  // Bullish Perfect Order
+bearishPerfectOrder = ema45 < sma90 and sma90 < sma180  // Bearish Perfect Order
+
+// Trend Magic color change detection
+trendMagicTurnedBlue = ta.crossover(isBlueFloat, isRedFloat)  // Red to Blue crossover (For long entry)
+trendMagicTurnedRed = ta.crossunder(isBlueFloat, isRedFloat)  // Blue to Red crossover (For short entry)
+
+// Variables to store SMA90 at the entry
+var float longSma90 = na
+var float shortSma90 = na
+
+// Trading logic based on Perfect Order and color change
+longCondition = bullishPerfectOrder and trendMagicTurnedBlue  // Buy when Perfect Order is bullish and Trend Magic turns red to blue
+shortCondition = bearishPerfectOrder and trendMagicTurnedRed  // Sell when Perfect Order is bearish and Trend Magic turns blue to red
+
+// Strategy Entry
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+    longSma90 := sma90  // Store SMA90 at entry for long position
+
+if (shortCondition)
+    strategy.entry("Sell", strategy.short)
+    shortSma90 := sma90  // Store SMA90 at entry for short position
+
+// Stop-Loss and Take-Profit calculations
+// For Long Positions: stop at SMA90 (fixed at entry), take profit at 1.5x risk
+if (longCondition and not na(longSma90))
+    longStopLoss = longSma90  // Use SMA90 at the time of entry
+    longRisk = close - longSma90  // Calculate risk
+    longTakeProfit = close + longRisk * riskRewardRatio  // Calculate take profit
+    strategy.exit("Take Profit/Stop Loss", "Buy", stop=longStopLoss, limit=longTakeProfit)
+
+// For Short Positions: stop at SMA90 (fixed at entry), take profit at 1.5x risk
+if (shortCondition and not na(shortSma90))
+    shortStopLoss = shortSma90  // Use SMA90 at the time of entry
+    shortRisk = shortSma90 - close  // Calculate risk
+    shortTakeProfit = close - shortRisk * riskRewardRatio  // Calculate take profit
+    strategy.exit("Take Profit/Stop Loss", "Sell", stop=shortStopLoss, limit=shortTakeProfit)
+
+// Plot Moving Averages
+plot(ema45, color=color.green, title="EMA 45")
+plot(sma90, color=color.blue, title="SMA 90")
+plot(sma180, color=color.red, title="SMA 180")
+
+View in Pine Editor・86 lines
+Use on chart
+1
+6
+4
+6 806
+Release Notes
+Strategy Name: Trend Magic with EMA, SMA, and Auto-Trading
+Purpose: This strategy is designed to capture entry and exit points in the market using the Trend Magic indicator and three moving averages (EMA45, SMA90, and SMA180). Specifically, it uses the perfect order of the moving averages and the color changes in Trend Magic to identify trend reversals and potential trading opportunities.
+
+Uniqueness and Usefulness
+Uniqueness: The strategy utilizes the Trend Magic indicator, which is based on price and volatility, along with three moving averages to assess the strength of trends. The signals are generated only when the moving averages are in perfect order, and the Trend Magic color changes, ensuring that the entry is made during established trends. This combination provides a higher degree of reliability compared to strategies that rely solely on price action or single indicators.
+Usefulness: This strategy is particularly useful for traders looking to capture trends over longer periods. It is effective at reducing noise in the market, only providing signals when the moving averages align and the Trend Magic indicator confirms a trend reversal. It works well in both trending and volatile markets.
+
+Entry Conditions
+Long Entry:
+
+Condition: A perfect order (EMA45 > SMA90 > SMA180) is established, and Trend Magic changes color from red to blue.
+Signal: A buy signal is generated, indicating the start of an uptrend.
+Short Entry:
+
+Condition: A perfect order (EMA45 < SMA90 < SMA180) is established, and Trend Magic changes color from blue to red.
+Signal: A sell signal is generated, indicating the start of a downtrend.
+Exit Conditions
+Exit Strategy:
+This strategy automatically enters and exits trades based on signals, but traders are encouraged to manage exits manually according to their own risk management preferences. The strategy includes stop loss and take profit settings based on risk-to-reward ratios for better risk management.
+
+Risk Management
+The strategy includes built-in risk management by using the SMA90 level at the time of entry as the stop-loss point and setting the take profit at a 1:1.5 risk-to-reward ratio. The stop-loss level is fixed at the entry point and does not move as the market progresses. Traders are advised to implement additional risk management, such as trailing stops, for added protection.
+
+Account Size: ¥100,000
+Commissions and Slippage: Assumes 94 pips for commissions and 1 pip for slippage per trade
+Risk per Trade: 10% of account equity (adjust this based on personal risk tolerance)
+
+Configurable Options
+Configurable Options:
+
+CCI Period: Set the period for the CCI used to calculate the Trend Magic indicator (default is 21).
+ATR Multiplier: Set the multiplier for ATR used in the Trend Magic calculation (default is 1.0).
+EMA/SMA Periods: The periods for the three moving averages (default is EMA45, SMA90, and SMA180).
+Signal Display Control: An option to toggle the display of buy and sell signals on the chart.
+Adequate Sample Size
+To ensure the robustness and reliability of this strategy, it is recommended to backtest it with a sufficiently long period of historical data. Testing across different market conditions, including high and low volatility periods, is also advised.
+
+Credits
+Acknowledgments:
+This strategy is based on the Trend Magic indicator combined with moving averages and draws on contributions from the technical analysis and trading community.
+
+Clean Chart Description
+Chart Appearance:
+To maintain a clean and simple chart, this strategy includes options to turn off the display of Trend Magic, moving averages, and entry signals. Traders can adjust these display settings as needed to minimize visual clutter and focus on effective trend analysis.
+
+Addressing the House Rule Violations
+Omissions and Unrealistic Claims
+Clarification:
+This strategy does not make any unrealistic or unsupported claims about its performance. All signals are intended for educational purposes only and do not guarantee future results. It is important to note that past performance does not guarantee future outcomes, and proper risk management is crucial.

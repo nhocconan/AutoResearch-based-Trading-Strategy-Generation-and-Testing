@@ -1,0 +1,35 @@
+//@version=5
+strategy("Short Only Bot (3Commas Webhook Uyumlu)", overlay=true, pyramiding=0, margin_long=0, margin_short=100)
+
+// === Göstergeler ===
+fastLength = input.int(9, "Hızlı Ortalama")
+slowLength = input.int(21, "Yavaş Ortalama")
+fastMA = ta.sma(close, fastLength)
+slowMA = ta.sma(close, slowLength)
+
+// === Short giriş ve çıkış koşulları ===
+shortCondition = ta.crossover(fastMA, slowMA)
+exitCondition  = ta.crossunder(fastMA, slowMA)
+
+// === İşlem mantığı ===
+if (shortCondition)
+    strategy.entry("Short Giriş", strategy.short)
+if (exitCondition)
+    strategy.close("Short Giriş")
+
+// === Görsel işaretler ===
+plotshape(shortCondition, title="Short Giriş", color=color.red, style=shape.triangleup, location=location.abovebar, size=size.small, text="Short Giriş")
+plotshape(exitCondition, title="Çıkış", color=color.green, style=shape.triangledown, location=location.belowbar, size=size.small, text="Çıkış")
+
+// === Webhook sinyalleri (3Commas uyumlu JSON) ===
+if (shortCondition)
+    alert('{"action":"start_trade","bot_id":"YOUR_BOT_ID","position":"short"}', alert.freq_once_per_bar_close)
+if (exitCondition)
+    alert('{"action":"close_at_market_price","bot_id":"YOUR_BOT_ID"}', alert.freq_once_per_bar_close)
+
+View in Pine Editor・28 lines
+Use on chart
+2
+3
+819
+Short işlem açmaya ce 3commans ile uyumlu hacim odaklı indikatör. halka açık herkes kullanabilir.

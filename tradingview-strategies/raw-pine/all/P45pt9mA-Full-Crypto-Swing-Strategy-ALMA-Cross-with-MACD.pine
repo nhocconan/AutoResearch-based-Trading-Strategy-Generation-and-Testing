@@ -1,0 +1,91 @@
+//@version=4
+strategy(title = "Full Crypto Swing Strategy ALMA Cross", overlay = true,  pyramiding=1,initial_capital = 1, default_qty_type= strategy.percent_of_equity, default_qty_value = 100, calc_on_order_fills=false, slippage=0,commission_type=strategy.commission.percent,commission_value=0.03)
+
+//time condition
+fromDay = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+fromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+fromYear = input(defval = 2010, title = "From Year", minval = 1970)
+ //monday and session 
+// To Date Inputs
+toDay = input(defval = 31, title = "To Day", minval = 1, maxval = 31)
+toMonth = input(defval = 12, title = "To Month", minval = 1, maxval = 12)
+toYear = input(defval = 2021, title = "To Year", minval = 1970)
+
+startDate = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+finishDate = timestamp(toYear, toMonth, toDay, 00, 00)
+time_cond = time >= startDate and time <= finishDate
+
+UseHAcandles    = input(false, title="Use Heikin Ashi Candles in Algo Calculations")
+
+haClose = UseHAcandles ? security(heikinashi(syminfo.tickerid), timeframe.period, close) : close
+haOpen  = UseHAcandles ? security(heikinashi(syminfo.tickerid), timeframe.period, open) : open
+haHigh  = UseHAcandles ? security(heikinashi(syminfo.tickerid), timeframe.period, high) : high
+haLow   = UseHAcandles ? security(heikinashi(syminfo.tickerid), timeframe.period, low) : low
+
+//alma fast and slow
+src = haClose
+windowsize = input(title="Length Size Fast", type=input.integer, defval=20)
+windowsize2 = input(title="Length Size Slow", type=input.integer, defval=40)
+offset = input(title="Offset", type=input.float, defval=0.9, step=0.05)
+sigma = input(title="Sigma", type=input.float, defval=5)
+outfast=alma(src, windowsize, offset, sigma)
+outslow=alma(src, windowsize2, offset, sigma)
+
+//macd
+fast_length = input(title="Fast Length", type=input.integer, defval=6)
+slow_length = input(title="Slow Length", type=input.integer, defval=25)
+signal_length = input(title="Signal Smoothing", type=input.integer, minval = 1, maxval = 50, defval = 9)
+
+// Calculating
+fast_ma = ema(src, fast_length)
+slow_ma =  ema(src, slow_length)
+macd = fast_ma - slow_ma
+signal = ema(macd, signal_length)
+hist = macd - signal
+
+long=crossover(outfast,outslow) and hist > hist[1] and time_cond
+short=crossunder(outfast,outslow) and hist < hist[1] and time_cond
+
+takeProfit_long=input(2.0, step=0.005)
+stopLoss_long=input(0.2, step=0.005)
+takeProfit_short=input(0.05, step=0.005)
+stopLoss_short=input(1.0, step=0.005)
+
+strategy.entry("long",1,when=long)
+strategy.entry("short",0,when=short)
+
+strategy.exit("short_tp/sl", "long", profit=close * takeProfit_long / syminfo.mintick, loss=close * stopLoss_long / syminfo.mintick, comment='LONG EXIT',  alert_message = 'closeshort')
+strategy.exit("short_tp/sl", "short", profit=close * takeProfit_short / syminfo.mintick, loss=close * stopLoss_short / syminfo.mintick, comment='SHORT EXIT',  alert_message = 'closeshort')
+
+View in Pine Editor・61 lines
+Use on chart
+2
+4
+8
+10
+8 759
+This is a full crypto swing strategy designed.
+From my testing it looks like it perform the best on timeframes 4h +.
+
+The below example has been adapted to BNB/USDT, using the entire period since 2017 until present day, with a comission of 0.03% ( which is the comission for the futures on binance).
+
+Its components are :
+ALMA Fast
+ALMA Slow
+MACD Histogram
+
+
+Rules for entry
+For long, we have a crossover of the fast alma with the slow one and the histogram is ascending.
+For short, we have a crossunder of the fast alma with the slow one and the histogram is descending.
+
+Rules for exit
+We exit based on a risk management system for TP and SL, or when we receive an opposite condition than the initial one.
+
+Regarding risk management
+0.05 = 5% movement
+2 = 200% movement
+0.001 = 0.1% movement
+
+If you have any questions, let me know !
+

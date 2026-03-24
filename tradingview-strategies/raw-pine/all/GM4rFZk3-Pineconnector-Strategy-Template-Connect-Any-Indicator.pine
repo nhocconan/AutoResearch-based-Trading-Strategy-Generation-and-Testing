@@ -1,0 +1,148 @@
+//@version=5
+indicator("Supertrend", overlay = true, timeframe = "", timeframe_gaps = true)
+
+atrPeriod = input.int(10,    "ATR Length", minval = 1)
+factor =    input.float(3.0, "Factor",     minval = 0.01, step = 0.01)
+
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+supertrend := barstate.isfirst ? na : supertrend
+bodyMiddle = plot(barstate.isfirst ? na : (open + close) / 2, display = display.none)
+upTrend =    plot(direction < 0 ? supertrend : na, "Up Trend",   color = color.green, style = plot.style_linebr)
+downTrend =  plot(direction < 0 ? na : supertrend, "Down Trend", color = color.red,   style = plot.style_linebr)
+
+fill(bodyMiddle, upTrend,   color.new(color.green, 90), fillgaps = false)
+fill(bodyMiddle, downTrend, color.new(color.red,   90), fillgaps = false)
+
+buy  = ta.crossunder(direction, 0)
+sell = ta.crossunder(direction, 0)
+
+//////// CONNECTOR SECTION //////// 
+
+Signal = buy ? 1 : sell ? -1 : 0
+plot(Signal, title = "Signal", display = display.data_window)
+
+//////// CONNECTOR SECTION ////////
+
+Expand 20 lines
+
+
+Important Notes
+
+🔥 The Strategy Template expects the value to be exactly 1 for the bullish signal and -1 for the bearish signal
+
+Now, you can connect your indicator to the Strategy Template using the method below or that one.
+
+Step 2: Connect the connector
+
+1) Add your updated indicator to a TradingView chart
+2) Add the Strategy Template as well to the SAME chart
+3) Open the Strategy Template settings, and in the Data Source field, select your 🔌Connector🔌 (which comes from your indicator)
+
+Note it doesn’t have to be named 🔌Connector🔌 - you can name it as you want - however, I recommend an explicit name you can easily remember.
+
+From then, you should start seeing the signals and plenty of other stuff on your chart.
+
+🔥 Note that whenever you update your indicator values, the strategy statistics and visuals on your chart will update in real-time
+
+II) Customizable Risk Management
+
+- Choose between percentage or USD modes for maximum drawdown.
+- Set max consecutive losing days and max losing streak length. 
+- I used the code from my friend @JosKodify for the maximum losing streak. :)  
+
+Will halt the EA and backtest orders fill whenever either of the safeguards above are “broken”
+
+III) Intraday Risk Management
+
+- Limit the maximum intraday losses both in percentage or USD.
+- Option to set a maximum number of intraday trades.
+- If your EA gets halted on an intraday chart, auto-restart it the next day.
+
+IV) Spread and Account Filters
+
+- Trade only if the spread is below a certain pip value.
+- Set requirements based on account balance or equity.
+
+V) Order Types and Position Sizing
+
+- Choose between market, limit, or stop orders.
+- Set your position size directly in the template.
+
+Please use the position size from the “Inputs” and not the “Properties” tab.
+
+Reason: The template sends the order on the same candle as the entry signals - at those entry signals candles, the position size isn’t computed yet, and the template can’t then send it to Pineconnector.
+
+However, you can use the position size type (USD, contracts, %) from the “Properties” tab for backtesting.
+In the EA, you can define the position size type for your orders in USD or lots or %.
+
+VI) Advanced Take-Profit and Stop-Loss Options
+
+- Choose to set your SL/TP in either pips or percentages.
+- Option for multiple take-profit levels and trailing stop losses.
+- Move your stop loss to break even +/- offset in pips for “risk-free” trades.
+
+VII) Logger
+
+The Pineconnector commands are logged in the TradingView logger.
+You'll find more information about it in this TradingView blog post.
+
+WHY YOU MIGHT NEED THIS TEMPLATE
+
+1) Transform your indicator into a Pineconnector trading bot more easily than before
+
+Connect your indicator to the template
+
+Create your alerts
+
+Set your EA settings
+
+
+
+2) Save Time
+Auto-generated alert messages for Pineconnector.
+I tested them all, and I checked with the support team what could/can’t be done
+
+3) Be in Control
+Manage your trading risks with advanced features.
+
+4) Customizable
+Fits various trading styles and asset classes.
+
+REQUIREMENTS
+
+* Make sure you have your Pineconnector license ID.
+* Create your alerts with the Pineconnector webhook URL
+* If there is any issue with the template, ask me in the comments section - I’ll answer quickly.
+
+BACKTEST RESULTS FROM THIS POST
+
+1) I connected this strategy template to a dummy Supertrend script.
+I could have selected any other indicator or concept for this script post.
+I wanted to share an example of how you can quickly upgrade your strategy, making it compatible with Pineconnector.
+
+2) The backtest results aren't relevant for this educational script publication.
+I used realistic backtesting data but didn't look too much into optimizing the results, as this isn't the point of why I'm publishing this script. This strategy is a template to be connected to any indicator - the sky is the limit. :)
+
+3) This template is made to take 1 trade per direction at any given time.
+Pyramiding is set to 1 on TradingView.
+
+The strategy default settings are:
+
+* Initial Capital: 100000 USD
+* Position Size: 1 contract
+* Commission Percent: 0.075%
+* Slippage: 1 tick
+* No margin/leverage used
+
+WHAT’S COMING NEXT FOR YOU GUYS?
+
+I’ll make the same template for ProfitView, then for AutoView, and then for Alertatron.
+All of those are free and open-source.
+I have no affiliations with any of those companies - I'm publishing those templates as they will be useful to many of you.
+
+Dave
+Oct 11, 2023
+Release Notes
+Version 1.1
+Fixed the position size - it was missing from the strategy inputs

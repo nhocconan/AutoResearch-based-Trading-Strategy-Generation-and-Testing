@@ -1,0 +1,403 @@
+//@version=6
+// NY Pre-Session Sweep – FIXED VERSION (minimal settings).
+// Pre-Session 14:30–16:30 Berlin, Trading 16:30–22:00 Berlin. No pause. CRV=3, timezone fixed.
+strategy("NY Pre-Session Sweep – XAUUSD (Fixed)", overlay=true, process_orders_on_close=false, default_qty_type=strategy.percent_of_equity, default_qty_value=1, pyramiding=0)
+
+// === FIXED VALUES (no inputs) ===
+// Pre-Session: 14:30–16:30 Berlin | Trading: 16:30–22:00 Berlin | CRV: 3.0 | Timezone: Europe/Berlin
+const float RR = 3.0
+const string TZ = "Europe/Berlin"
+const int MAX_TRADES = 3
+const bool HALF_WICK_SL = true
+const float HALF_WICK_THRESH = 0.5
+
+// Minimal inputs (visuals only)
+show_box = input.bool(true, "Show Pre-Session Box", group="Visuals")
+show_sweep_markers = input.bool(true, "Attempted-Kerzen markieren", group="Visuals")
+
+// Half-wick SL: bei langem Docht SL auf halbe Kerze (fest einprogrammiert)
+getAdjustedSL(float raw_sl, bool is_long, float c_low, float c_high, float c_open, float c_close) =>
+    c_range = c_high - c_low
+    float result = raw_sl
+    if HALF_WICK_SL and c_range > 0
+        if is_long
+            lower_wick = math.min(c_open, c_close) - c_low
+            if lower_wick > c_range * HALF_WICK_THRESH
+                result := c_low + lower_wick / 2
+        else
+            upper_wick = c_high - math.max(c_open, c_close)
+            if upper_wick > c_range * HALF_WICK_THRESH
+                result := c_high - upper_wick / 2
+    result
+
+// === SESSIONS – FIXED (Europe/Berlin) ===
+y_berlin = year(time, TZ)
+m_berlin = month(time, TZ)
+d_berlin = dayofmonth(time, TZ)
+
+pre_start  = timestamp(TZ, y_berlin, m_berlin, d_berlin, 14, 30)
+pre_end    = timestamp(TZ, y_berlin, m_berlin, d_berlin, 16, 30)
+trad_start = timestamp(TZ, y_berlin, m_berlin, d_berlin, 16, 30)
+trad_end   = timestamp(TZ, y_berlin, m_berlin, d_berlin, 22, 0)
+
+in_pre_session = time >= pre_start and time < pre_end
+in_trading     = time >= trad_start and time < trad_end
+
+// Handelstage: Mo–Fr (fixed)
+dow = dayofweek(time, TZ)
+allowed_day = dow >= 2 and dow <= 6
+allowed_session = in_trading
+
+// === DAILY RESET ===
+is_new_day = ta.change(time("D", TZ)) != 0
+
+var float box_high = na
+var float box_low  = na
+var int   box_left_bar = na
+var int   box_right_bar = na
+
+if is_new_day
+    box_high := na
+    box_low  := na
+    box_left_bar := na
+    box_right_bar := na
+
+if in_pre_session
+    box_high := na(box_high) ? high : math.max(box_high, high)
+    box_low  := na(box_low)  ? low  : math.min(box_low, low)
+    if na(box_left_bar)
+        box_left_bar := bar_index
+    box_right_bar := bar_index
+
+box_ready = not na(box_high) and not na(box_low) and not in_pre_session
+
+var float prev_gross = 0.0
+var float session_lowest_low  = na
+var float session_highest_high = na
+var float reference_high = na
+var float reference_low  = na
+var float max_high_while_short = na
+var float min_low_while_short  = na
+var float min_low_while_long  = na
+
+if is_new_day
+    session_lowest_low  := na
+    session_highest_high := na
+    reference_high := na
+    reference_low  := na
+    max_high_while_short := na
+    min_low_while_short  := na
+    min_low_while_long  := na
+if box_ready and in_trading and na(session_lowest_low)
+    session_lowest_low  := box_low
+    session_highest_high := box_high
+if box_ready and na(reference_high)
+    reference_high := box_high
+    reference_low  := box_low
+
+position_just_closed = strategy.position_size == 0 and strategy.position_size[1] != 0
+just_entered_short = strategy.position_size < 0 and strategy.position_size[1] >= 0
+just_entered_long  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+
+if just_entered_short
+    max_high_while_short := math.max(high, high[1])
+    min_low_while_short  := math.min(low, low[1])
+if strategy.position_size < 0
+    max_high_while_short := math.max(nz(max_high_while_short), high)
+    min_low_while_short  := math.min(nz(min_low_while_short), low)
+if just_entered_long
+    min_low_while_long := math.min(low, low[1])
+if strategy.position_size > 0
+    min_low_while_long := math.min(nz(min_low_while_long), low)
+
+if position_just_closed
+    if strategy.position_size[1] < 0
+        reference_high := math.max(reference_high, nz(max_high_while_short), high)
+        reference_low  := math.min(reference_low, nz(min_low_while_short), low)
+    if strategy.position_size[1] > 0
+        reference_low  := math.min(reference_low, nz(min_low_while_long), low)
+    max_high_while_short := na
+    min_low_while_short  := na
+    min_low_while_long  := na
+
+// === ATTEMPTED CANDLE (no Williams %R filter) ===
+swept_high_curr = box_ready and not na(session_highest_high) and high > session_highest_high
+swept_low_curr  = box_ready and not na(session_lowest_low)  and low < session_lowest_low
+attempted_long  = swept_low_curr and (close > open) and (low < low[1])
+attempted_short = swept_high_curr and (close < open) and (high > high[1])
+
+long_signal  = allowed_day and allowed_session and attempted_long
+short_signal = allowed_day and allowed_session and attempted_short
+
+// === TRADE MANAGEMENT ===
+var int   entries_today = 0
+var bool  had_win_today = false
+var int   first_trade_id = -1
+var bool  first_trade_was_loss = false
+var int   first_direction = -1
+var bool  sweep_since_last_trade = true
+var bool  pending_opposite = false
+var int   pending_opposite_dir = -1
+var float pending_opposite_sl = na
+var bool  do_opposite_next_bar = false
+var float opposite_sl = na
+var int   stored_opposite_dir = -1
+var bool  entered_from_opposite = false
+
+if is_new_day
+    entries_today := 0
+    had_win_today := false
+    first_trade_id := -1
+    first_trade_was_loss := false
+    first_direction := -1
+    sweep_since_last_trade := true
+    pending_opposite := false
+    pending_opposite_dir := -1
+    pending_opposite_sl := na
+    do_opposite_next_bar := false
+    opposite_sl := na
+    stored_opposite_dir := -1
+    entered_from_opposite := false
+
+if swept_high_curr or swept_low_curr
+    sweep_since_last_trade := true
+
+if strategy.position_size > 0 and short_signal
+    pending_opposite := true
+    pending_opposite_dir := 1
+    pending_opposite_sl := getAdjustedSL(high, false, low, high, open, close)
+if strategy.position_size < 0 and long_signal
+    pending_opposite := true
+    pending_opposite_dir := 0
+    pending_opposite_sl := getAdjustedSL(low, true, low, high, open, close)
+
+trade_just_closed = ta.change(strategy.closedtrades) > 0
+if position_just_closed and strategy.closedtrades > 0
+    last_pl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    had_win_today := had_win_today or (last_pl > 0)
+    if first_trade_id >= 0 and strategy.closedtrades == first_trade_id + 1
+        first_trade_was_loss := last_pl <= 0
+        if last_pl <= 0 and pending_opposite
+            do_opposite_next_bar := true
+            opposite_sl := pending_opposite_sl
+            stored_opposite_dir := pending_opposite_dir
+            pending_opposite := false
+            pending_opposite_dir := -1
+            pending_opposite_sl := na
+prev_gross := strategy.grossprofit
+
+no_open_position = strategy.position_size == 0
+opposite_dir = (long_signal and first_direction == 1) or (short_signal and first_direction == 0)
+allow_opposite = first_trade_was_loss and opposite_dir
+
+can_long  = no_open_position and not had_win_today and entries_today < MAX_TRADES and sweep_since_last_trade and long_signal  and (first_direction == -1 or first_direction == 0 or allow_opposite)
+can_short = no_open_position and not had_win_today and entries_today < MAX_TRADES and sweep_since_last_trade and short_signal and (first_direction == -1 or first_direction == 1 or allow_opposite)
+
+// === EXECUTION (no pause: entry always on next bar after ATP) ===
+float entry_price = open
+float sl_long = getAdjustedSL(low[1], true, low[1], high[1], open[1], close[1])
+float sl_short = getAdjustedSL(high[1], false, low[1], high[1], open[1], close[1])
+float risk_long = math.abs(entry_price - sl_long)
+float risk_short = math.abs(sl_short - entry_price)
+float tp_long = entry_price + RR * risk_long
+float tp_short = entry_price - RR * risk_short
+
+// Gegentrade nach SL
+if do_opposite_next_bar and no_open_position and entries_today < MAX_TRADES and not had_win_today
+    if stored_opposite_dir == 0 and long_signal
+        strategy.entry("Long", strategy.long, comment="L")
+        strategy.exit("Exit Long", "Long", limit=open + RR * (open - opposite_sl), stop=opposite_sl)
+        entries_today += 1
+        sweep_since_last_trade := false
+        do_opposite_next_bar := false
+        opposite_sl := na
+        stored_opposite_dir := -1
+        entered_from_opposite := true
+    else if stored_opposite_dir == 1 and short_signal
+        strategy.entry("Short", strategy.short, comment="S")
+        strategy.exit("Exit Short", "Short", limit=open - RR * (opposite_sl - open), stop=opposite_sl)
+        entries_today += 1
+        sweep_since_last_trade := false
+        do_opposite_next_bar := false
+        opposite_sl := na
+        stored_opposite_dir := -1
+        entered_from_opposite := true
+
+// Normal entry (next bar after ATP)
+if can_long
+    entries_today += 1
+    sweep_since_last_trade := false
+    if first_direction == -1
+        first_trade_id := strategy.closedtrades
+        first_direction := 0
+    strategy.entry("Long", strategy.long, comment="L")
+
+if can_short
+    entries_today += 1
+    sweep_since_last_trade := false
+    if first_direction == -1
+        first_trade_id := strategy.closedtrades
+        first_direction := 1
+    strategy.entry("Short", strategy.short, comment="S")
+
+if just_entered_long
+    if not entered_from_opposite
+        strategy.exit("Exit Long", "Long", limit=tp_long, stop=sl_long)
+    else
+        entered_from_opposite := false
+
+if just_entered_short
+    if not entered_from_opposite
+        strategy.exit("Exit Short", "Short", limit=tp_short, stop=sl_short)
+    else
+        entered_from_opposite := false
+
+// === ALERT ===
+time_str = str.tostring(hour(time, TZ), "00") + ":" + str.tostring(minute(time, TZ), "00")
+alert_long  = just_entered_long  ? "{\"symbol\":\"" + syminfo.ticker + "\",\"direction\":\"LONG\",\"entry\":" + str.tostring(entry_price) + ",\"sl\":" + str.tostring(sl_long) + ",\"tp\":" + str.tostring(tp_long) + ",\"rr\":" + str.tostring(RR) + ",\"time\":\"" + time_str + "\"}" : na
+alert_short = just_entered_short ? "{\"symbol\":\"" + syminfo.ticker + "\",\"direction\":\"SHORT\",\"entry\":" + str.tostring(entry_price) + ",\"sl\":" + str.tostring(sl_short) + ",\"tp\":" + str.tostring(tp_short) + ",\"rr\":" + str.tostring(RR) + ",\"time\":\"" + time_str + "\"}" : na
+if just_entered_long
+    alert(alert_long, alert.freq_once_per_bar_close)
+if just_entered_short
+    alert(alert_short, alert.freq_once_per_bar_close)
+
+// === VISUALS ===
+first_bar_box_ready = show_box and box_ready and not na(box_left_bar) and not box_ready[1]
+if first_bar_box_ready
+    box.new(box_left_bar, box_high, box_right_bar, box_low, border_color=color.blue, bgcolor=color.new(color.blue, 90), xloc=xloc.bar_index)
+
+plotshape(show_sweep_markers and attempted_long, "Attempted Long", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(show_sweep_markers and attempted_short, "Attempted Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(just_entered_long, "Entry Long", shape.triangleup, location.belowbar, color.green, size=size.normal)
+plotshape(just_entered_short, "Entry Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
+if show_sweep_markers and (just_entered_long or just_entered_short)
+    label.new(bar_index, just_entered_long ? high : low, "ATP←", style=just_entered_long ? label.style_label_down : label.style_label_up, color=color.new(color.gray, 80), textcolor=color.gray, size=size.tiny)
+
+if box_ready and in_trading
+    if not na(session_lowest_low)
+        session_lowest_low := math.min(session_lowest_low, low)
+    if not na(session_highest_high)
+        session_highest_high := math.max(session_highest_high, high)
+
+View in Pine Editor・280 lines
+Use on chart
+1
+5
+570
+Feb 18
+# NY Pre-Session Sweep
+
+## Overview
+
+Session-based strategy for the New York Pre-Session (14:30–16:30 Berlin). Uses "Attempted Candles" after a sweep of the Pre-Session box. Optimized for XAUUSD on the 5-minute chart. Integrated with Telegram and Pine Connector for alerts and external bots.
+
+---
+
+## Strategy Concept
+
+The strategy uses the Pre-Session box (14:30–16:30 Berlin) as a reference range. Trades are only taken when the market sweeps a session extreme and the candle closes in the direction of the sweep (Attempted Candle).
+
+---
+
+## Time Structure (Berlin, DST-safe)
+
+| Phase | Time (Berlin) | Description |
+|-------|---------------|-------------|
+| **Pre-Session Box** | 14:30 – 16:30 | High/Low of the box are collected as reference |
+| **Trading 1** | 16:30 – 19:00 | First trading phase |
+| **Pause** | 19:00 – 19:00 | Brief pause |
+| **Trading 2** | 19:00 – 22:00 | Second trading phase |
+
+**Note:** Signal on the last candle of Trading 1 (18:55) → Entry only at the open of the first candle of Trading 2 (19:00).
+
+---
+
+## Entry Logic (Attempted Candle)
+
+**Long Signal:**
+- Current candle low < Session Lowest Low (lowest low since session start)
+- Candle closes bullish (Close > Open)
+- Candle low < Previous candle low (new low)
+
+**Short Signal:**
+- Current candle high > Session Highest High (highest high since session start)
+- Candle closes bearish (Close < Open)
+- Candle high > Previous candle high (new high)
+
+**Entry:** At the open of the candle **after** the Attempted Candle (no entry on the ATP candle itself).
+
+---
+
+## Risk Management
+
+- **Stop Loss:** Low of the Attempted Candle (Long) or High (Short)
+- **Take Profit:** Entry ± (Risk × R), default R = 3.0
+- **Half-Wick SL:** With very long wicks, SL is set to half the candle body so TP remains reachable (threshold configurable)
+- **Position Size:** 1% of equity (adjustable)
+
+---
+
+## Trade Management
+
+- **Max Trades per Day:** 3 (default)
+- **After TP:** No further trades that day (unless "Allow opposite after TP" is enabled)
+- **After SL:** Opposite trade allowed if a counter-direction Attempted signal occurred while in position
+- **Reference Update:** After each trade, reference levels (Session High/Low) are updated
+
+---
+
+## Optional Filters
+
+**Williams %R Filter (default: off):**
+- Long only when Williams %R is in the Long zone (e.g. -75 to -25)
+- Short only when Williams %R is in the Short zone (e.g. -100 to 0)
+- Reduces trades in sideways conditions
+
+---
+
+## Integration
+
+**Pine Connector / Webhook:**
+- JSON alert with symbol, direction, entry, SL, TP, R and session label
+- For bots, trade copiers or webhooks
+
+**Telegram:**
+- Optional: Alert includes chat_id and HTML text for Telegram webhook
+- Signal format: Symbol, direction, SL, TP
+
+**Signal Tester:**
+- Periodic test alerts (e.g. every 15 min.) to verify connection
+
+---
+
+## Chart Settings
+
+- **Timeframe:** 5 minutes (required)
+- **Symbol:** XAUUSD recommended, works with any symbol
+- **Timezone:** Strategy uses Europe/Berlin (DST-safe)
+
+---
+
+## Visual Elements
+
+- **Pre-Session Box** (blue): High/Low of the Pre-Session
+- **Pause Box** (orange): High/Low during the pause
+- **Attempted Candles:** Green/red triangles below/above the candle
+- **Entry Markers:** Larger triangles at entry
+- **SL/TP Lines:** Red (SL) and green (TP) lines
+
+---
+
+## Notes
+
+- No hedging: Only one direction per day (except opposite trade after SL)
+- Trading days: Monday–Friday configurable (default: Mon–Fri)
+- Strategy designed for systematic trading and backtesting
+
+---
+
+*Not financial advice. Past performance is not indicative of future results. Trading involves risk.*
+
+Feb 19
+Release Notes
+adapted for public usage

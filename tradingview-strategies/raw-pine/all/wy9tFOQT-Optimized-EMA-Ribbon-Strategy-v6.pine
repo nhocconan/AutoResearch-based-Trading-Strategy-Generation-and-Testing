@@ -1,0 +1,122 @@
+//@version=6
+strategy("Optimized EMA Ribbon Strategy v6", overlay=true, 
+     initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=20,
+     commission_type=strategy.commission.percent, commission_value=0.04,
+     pyramiding=0)
+
+// === OPTIMIZED INPUT PARAMETERS ===
+// EMA Parameters
+fastLen = input.int(10, "Fast EMA Length", minval=1)
+slowLen = input.int(21, "Slow EMA Length", minval=1)
+trendFilterLen = input.int(50, "Trend Filter EMA", minval=1)
+
+// ADX Parameters
+adxLen = input.int(14, "ADX Length", minval=1)
+adxThreshold = input.int(22, "ADX Minimum Threshold", minval=15)
+
+// Volume Filter
+volLen = input.int(15, "Volume MA Length", minval=1)
+useVolumeFilter = input.bool(true, "Use Volume Filter")
+
+// Risk Management
+riskMult = input.float(2.2, "ATR Stop Multiplier", minval=1.5, maxval=4.0)
+rewardMult = input.float(2.8, "ATR Take Profit Multiplier", minval=2.0, maxval=5.0)
+maxRiskPercent = input.float(2.0, "Max Risk % per Trade", minval=0.5, maxval=3.0)
+useStopLoss = input.bool(true, "Use Stop Loss")
+useTakeProfit = input.bool(true, "Use Take Profit")
+
+// Exit Conditions
+useTrailingStop = input.bool(false, "Use Trailing Stop")
+exitOnOppositeSignal = input.bool(true, "Exit on Opposite Signal")
+
+// === CALCULATIONS ===
+// EMA Ribbon with Trend Filter
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+emaTrend = ta.ema(close, trendFilterLen)
+
+// ADX with DI
+[diplus, diminus, adx] = ta.dmi(adxLen, adxLen)
+
+// Volume Filter
+volMA = ta.sma(volume, volLen)
+volFilter = not useVolumeFilter or volume > volMA * 1.05
+
+// ATR for Risk Management
+atr = ta.atr(14)
+
+// Price Action Filters
+priceAboveTrend = close > emaTrend
+priceBelowTrend = close < emaTrend
+
+// Entry Conditions
+bullCross = ta.crossover(emaFast, emaSlow)
+bearCross = ta.crossunder(emaFast, emaSlow)
+
+// Additional Confirmation
+rsi = ta.rsi(close, 14)
+notOverbought = rsi < 75
+notOversold = rsi > 25
+
+// ADX condition
+strongTrend = adx >= adxThreshold
+
+// MACD for long trade improvement
+[macdLine, macdSignal, _] = ta.macd(close, 12, 26, 9)
+macdBullish = macdLine > macdSignal
+
+// Enhanced Entry Conditions
+longCondition = bullCross and priceAboveTrend and strongTrend and 
+               diplus > diminus and volFilter and notOverbought and macdBullish
+               
+shortCondition = bearCross and priceBelowTrend and strongTrend and diminus > diplus and volFilter and notOversold
+
+// === POSITION SIZING ===
+riskPerShare = atr * riskMult
+positionValue = strategy.equity * (maxRiskPercent / 100)
+positionSize = math.max(0.001, positionValue / riskPerShare) // Ensure positive quantity
+
+// === PLOTTING ===
+plot(emaFast, "EMA Fast", color=color.teal, linewidth=2)
+plot(emaSlow, "EMA Slow", color=color.orange, linewidth=2)
+plot(emaTrend, "Trend Filter", color=color.purple, linewidth=1)
+
+// Entry markers
+plotshape(longCondition and strategy.position_size == 0, "Long Entry", 
+          location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(shortCondition and strategy.position_size == 0, "Short Entry", 
+          location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+// === STRATEGY EXECUTION ===
+// Calculate exit levels
+longStop = useStopLoss ? close - atr * riskMult : na
+longProfit = useTakeProfit ? close + atr * rewardMult : na
+shortStop = useStopLoss ? close + atr * riskMult : na
+shortProfit = useTakeProfit ? close - atr * rewardMult : na
+
+// Execute long trades
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=positionSize)
+    if useStopLoss
+        strategy.exit("Long Exit", "Long", stop=longStop, limit=longProfit)
+
+// Execute short trades  
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=positionSize)
+    if useStopLoss
+        strategy.exit("Short Exit", "Short", stop=shortStop, limit=shortProfit)
+
+// Opposite signal exits
+if strategy.position_size > 0 and exitOnOppositeSignal and bearCross
+    strategy.close("Long")
+    
+if strategy.position_size < 0 and exitOnOppositeSignal and bullCross
+    strategy.close("Short")
+
+View in Pine Editor・114 lines
+Use on chart
+3
+2
+1
+721
+Based on EMA rotations, ADX we create a system of entering trades. Watch out for the sell and buy signals.

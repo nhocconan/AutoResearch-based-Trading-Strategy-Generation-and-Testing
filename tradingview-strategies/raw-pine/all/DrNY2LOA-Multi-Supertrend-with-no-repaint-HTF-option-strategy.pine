@@ -1,0 +1,13 @@
+//@version=4
+##root(root_metainfo,rm_0,'shape_square',input__string,plotshape,style)
+##root(root_metainfo,rm_1,'Bottom',input__string,plotshape,location)
+##root(root_metainfo,rm_2,'shape_square',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'Top',input__string,plotshape,location)
+larger_style_flag=##input(defval=false,type='INPUT_BOOL',##id='in_0')
+##root(root_metainfo,rm_4,(larger_style_flag?2:1),input__integer)
+##root(root_metainfo,rm_5,(larger_style_flag?3:6),input__integer,plot,style)
+##root(root_metainfo,rm_6,(larger_style_flag?2:1),input__integer)
+##root(root_metainfo,rm_7,(larger_style_flag?3:6),input__integer,plot,style)
+##root(root_metainfo,rm_8,6,input__integer,plot,style)
+##root(root_metainfo,rm_9,6,input__integer,plot,style)
+##root(root_metainfo,rm_10,6,input__integer,plot,style)

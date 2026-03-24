@@ -1,0 +1,76 @@
+//@version=5
+strategy("DRACO TOMAS EMA Trend Follower", overlay=true, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=10)
+
+// === INPUTS ===
+emaS_len = input.int(12, "EMA Fast Length", minval=1)
+emaB_len = input.int(21, "EMA Slow Length", minval=1)
+
+// === CALCULATE EMAs & COLOR ===
+emaS = ta.ema(close, emaS_len)
+emaB = ta.ema(close, emaB_len)
+emaUp = emaS >= emaB
+emaDn = emaS <  emaB
+
+plot(emaS, title="EMA Fast", color=emaUp ? color.green : color.red, linewidth=2)
+plot(emaB, title="EMA Slow", color=emaUp ? color.green : color.red, linewidth=2)
+
+// === ENTRY SIGNALS ===
+// When the fast EMA crosses above the slow → go long
+if ta.crossover(emaS, emaB)
+    strategy.entry("Long", strategy.long)
+
+// When the fast EMA crosses below the slow → go short
+if ta.crossunder(emaS, emaB)
+    strategy.entry("Short", strategy.short)
+
+// === EXIT LOGIC ===
+// Exit longs as soon as EMA turns red (fast EMA < slow EMA)
+if strategy.position_size > 0 and emaDn
+    strategy.close("Long")
+
+// Exit shorts as soon as EMA turns green (fast EMA >= slow EMA)
+if strategy.position_size < 0 and emaUp
+    strategy.close("Short")
+
+View in Pine Editor・35 lines
+Use on chart
+2
+8
+2
+1 021
+🐉 DRACO TOMAS EMA Trend Follower
+
+Description:
+The DRACO TOMAS EMA Trend Follower is a simple yet powerful trend-following strategy designed to capture directional moves based on exponential moving average (EMA) crossovers. It automatically detects trend changes and manages positions dynamically.
+
+Core Logic:
+
+The strategy uses two EMAs — a Fast EMA (default 12) and a Slow EMA (default 21) — to identify the market trend.
+
+When the Fast EMA crosses above the Slow EMA, the strategy opens a long position, signaling bullish momentum.
+
+When the Fast EMA crosses below the Slow EMA, the strategy opens a short position, signaling bearish momentum.
+
+The color of the EMAs changes dynamically: green for uptrends, red for downtrends.
+
+Exit rules:
+
+Longs are closed when the EMAs turn red (trend reversal to bearish).
+
+Shorts are closed when the EMAs turn green (trend reversal to bullish).
+
+Position Sizing:
+The system uses 10% of equity per trade by default, allowing flexible risk management and compounding.
+
+Purpose:
+Designed for traders who want a clean and efficient EMA crossover system to follow trends automatically on any timeframe or asset.
+
+Best Used For:
+
+Swing trading and trend confirmation
+
+Identifying major directional shifts
+
+Testing EMA-based momentum systems

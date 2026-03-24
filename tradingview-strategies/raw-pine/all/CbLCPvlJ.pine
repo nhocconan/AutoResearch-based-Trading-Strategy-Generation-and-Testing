@@ -1,0 +1,57 @@
+//@version = 2
+strategy(title="Average True Range long strategy v2.01", overlay = true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+nATRPeriod = input(4)
+nATRMultip = input(4)
+xATR = atr(nATRPeriod)
+nLoss = nATRMultip * xATR
+xATRTrailingStop =  iff(close > nz(xATRTrailingStop[1], 0) and close[1] > nz(xATRTrailingStop[1], 0), max(nz(xATRTrailingStop[1]), close - nLoss),
+                     iff(close < nz(xATRTrailingStop[1], 0) and close[1] < nz(xATRTrailingStop[1], 0), min(nz(xATRTrailingStop[1]), close + nLoss), 
+                      iff(close > nz(xATRTrailingStop[1], 0), close - nLoss, close + nLoss)))
+pos = iff(close[1] < nz(xATRTrailingStop[1], 0) and close > nz(xATRTrailingStop[1], 0), -1,
+       iff(close[1] > nz(xATRTrailingStop[1], 0) and close < nz(xATRTrailingStop[1], 0), 1, nz(pos[1], 0))) 
+
+stdev3 = 14*stdev(xATR, nATRPeriod)
+band1 = xATRTrailingStop+stdev3
+band2 = xATRTrailingStop-stdev3
+
+FromMonth = input(defval = 8, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 18, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2007, title = "From Year", minval = 2007)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 2020, title = "To Year", minval = 2019)
+
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)       
+startTimeOk()  => time >= start and time <= finish ? true : false 
+initial_capital = 100000
+
+take = close > xATRTrailingStop
+
+if( startTimeOk() ) and (pos == 1) //and sma(close,1) > sma(close, 5)
+//if (pos == 1) 
+    strategy.entry("KOP", strategy.long, comment = "KOP")
+    strategy.exit("KOP", when = take)
+   
+if( startTimeOk() ) and (pos == -1)
+//if (pos == -1)
+    strategy.entry("SALJ", strategy.short, comment = "SALJ")
+   
+barcolor(pos == -1 ? red: pos == 1 ? green : blue )
+a0 = plot(xATRTrailingStop, color=red, title="ATR Trailing Stop")
+a1 = plot(band1, title="band1", color=green, transp=50, linewidth=2)
+a2 = plot(band2, title="band2", color=red, transp=50, linewidth=2)
+//plot(sma(close,5), color= black, linewidth=3)
+fill(a0, a1, color=green, transp=97)
+fill(a0, a2, color=red, transp=97)
+
+View in Pine Editor・46 lines
+Use on chart
+4
+0
+1 912
+Nov 21, 2019
+ATR with stdev bands.
+Nov 25, 2019
+Release Notes
+ATR with stdev bands, new version.

@@ -1,0 +1,66 @@
+//@version=5
+strategy("Prev Day Liquidity Takeout + Indecision Breakout with Exit", overlay=true)
+
+// Get previous day high and low
+prev_day_high = request.security(syminfo.tickerid, "D", high[1])
+prev_day_low = request.security(syminfo.tickerid, "D", low[1])
+
+// Define liquidity takeout conditions
+low_liquidity_takeout = low < prev_day_low
+high_liquidity_takeout = high > prev_day_high
+
+// Indecision candle (previous bar)
+body_prev = math.abs(close[1] - open[1])
+range_prev = high[1] - low[1]
+upper_wick = high[1] - math.max(close[1], open[1])
+lower_wick = math.min(close[1], open[1]) - low[1]
+is_indecision = (body_prev <= range_prev * 0.25) and (upper_wick > body_prev) and (lower_wick > body_prev)
+
+// Entry conditions (shifted to align bars: liquidity takeout at [2], indecision at [1], entry at current)
+long_entry = low_liquidity_takeout[2] and is_indecision[1] and close > high[1]
+short_entry = high_liquidity_takeout[2] and is_indecision[1] and close < low[1]
+
+// Exit conditions
+// For long: close below indecision candle low exits long
+long_exit = strategy.position_size > 0 and close < low[1]
+// For short: close above indecision candle high exits short
+short_exit = strategy.position_size < 0 and close > high[1]
+
+// Plot previous day high/low
+plot(prev_day_high, color=color.red, linewidth=1, title="Prev Day High")
+plot(prev_day_low, color=color.green, linewidth=1, title="Prev Day Low")
+
+// Entries
+if (long_entry)
+    strategy.entry("Long", strategy.long)
+if (short_entry)
+    strategy.entry("Short", strategy.short)
+
+// Exits
+if (long_exit)
+    strategy.close("Long")
+if (short_exit)
+    strategy.close("Short")
+
+// Plot entry signals
+plotshape(long_entry, location=location.belowbar, color=color.green, style=shape.triangleup, title="Buy Entry")
+plotshape(short_entry, location=location.abovebar, color=color.red, style=shape.triangledown, title="Sell Entry")
+
+// Plot exit signals
+plotshape(long_exit, location=location.abovebar, color=color.red, style=shape.cross, title="Long Exit")
+plotshape(short_exit, location=location.belowbar, color=color.green, style=shape.cross, title="Short Exit")
+
+View in Pine Editor・51 lines
+Use on chart
+2
+0
+1 876
+Sep 21, 2025
+Indecision Candle with 2 Candle Confirmation + 500 EMA
+Indecision Candle with 2 Candle Confirmation + 500 EMA
+Indecision Candle with 2 Candle Confirmation + 500 EMAIndecision Candle with 2 Candle Confirmation + 500 EMAIndecision Candle with 2 Candle Confirmation + 500 EMA
+Sep 22, 2025
+Release Notes
+Indecision Candle with 2 Candle Confirmation + 500 EMA - parthib
+Indecision Candle with 2 Candle Confirmation + 500 EMA - parthib
+Indecision Candle with 2 Candle Confirmation + 500 EMA - parthibIndecision Candle with 2 Candle Confirmation + 500 EMA - parthib

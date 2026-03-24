@@ -1,0 +1,61 @@
+//@version=5
+strategy("HMA Crossover 1H with RSI, Stochastic RSI, and Trailing Stop", overlay=true)
+
+hma50 = ta.hma(close, 5)
+hma100 = ta.hma(close, 20)
+rsi = ta.rsi(close, 14)
+k = ta.sma(ta.stoch(close, high, low, 14), 3)
+
+buySignal = ta.crossover(hma50, hma100) and rsi < 45 and k < 39
+sellSignal = ta.crossunder(hma50, hma100) and rsi > 60 and k > 63
+
+plot(hma50, color=color.blue, linewidth=2)
+plot(hma100, color=color.red, linewidth=2)
+
+plotshape(series=buySignal, location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(series=sellSignal, location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+if (buySignal)
+    strategy.entry("Buy", strategy.long, stop=na, limit=na, oca_name="Buy", oca_type=strategy.oca.cancel, comment="Buy Signal", when=buySignal)
+
+if (sellSignal)
+    strategy.entry("Sell", strategy.short, stop=na, limit=na, oca_name="Sell", oca_type=strategy.oca.cancel, comment="Sell Signal", when=sellSignal)
+
+strategy.exit("Trailing Stop", from_entry="Buy", trail_offset=0.05, trail_points=na)
+strategy.exit("Trailing Stop", from_entry="Sell", trail_offset=0.05, trail_points=250)
+
+View in Pine Editor・25 lines
+Use on chart
+4
+1
+1
+4
+8 490
+The strategy script provided is a trading algorithm designed to help traders make informed buy and sell decisions based on certain technical indicators. Here’s a breakdown of what each part of the script does and how the strategy works:
+
+Key Components:
+Hull Moving Averages (HMA):
+
+HMA 5: This is a Hull Moving Average calculated over 5 periods. HMAs are used to smooth out price data and identify trends more quickly than traditional moving averages.
+HMA 20: This is another HMA but calculated over 20 periods, providing a broader view of the trend.
+Relative Strength Index (RSI):
+
+RSI 14: This is a momentum oscillator that measures the speed and change of price movements over a 14-period timeframe. It helps identify overbought or oversold conditions in the market.
+Stochastic RSI:
+
+%K: This is the main line of the Stochastic RSI, which combines the RSI and the Stochastic Oscillator to provide a more sensitive measure of overbought and oversold conditions. It is smoothed with a 3-period simple moving average.
+Trading Signals:
+Buy Signal:
+
+Generated when the 5-period HMA crosses above the 20-period HMA, indicating a potential upward trend.
+Additionally, the RSI must be below 45, suggesting that the market is not overbought.
+The Stochastic RSI %K must also be below 39, confirming the oversold condition.
+Sell Signal:
+
+Generated when the 5-period HMA crosses below the 20-period HMA, indicating a potential downward trend.
+The RSI must be above 60, suggesting that the market is not oversold.
+The Stochastic RSI %K must also be above 63, confirming the overbought condition.
+Trailing Stop Loss:
+This feature helps protect profits by automatically selling the position if the price moves against the trade by 5%.
+For sell positions, an additional trailing stop of 100 points is included.
+

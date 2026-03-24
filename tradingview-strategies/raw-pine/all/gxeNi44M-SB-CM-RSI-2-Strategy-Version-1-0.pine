@@ -1,0 +1,52 @@
+//@version=3
+//Based on Larry Connors RSI-2 Strategy - Lower RSI
+strategy("SB_CM_RSI_2_Strategy_Version 1.0", overlay=true)
+
+src = close
+entry= input(defval=0,title="Entry area")
+entry:=nz(entry[1])
+overBought=input(90)
+overSold=input(10)
+//RSI CODE
+up = rma(max(change(src), 0), 2)
+down = rma(-min(change(src), 0), 2)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+//Criteria for Moving Avg rules
+ma5 = sma(close,5)
+ma200= sma(close, 200)
+
+//Rule for RSI Color
+col = close > ma200 and close < ma5 and rsi < 10 ? lime : close < ma200 and close > ma5 and rsi > 90 ? red : silver
+chk= col==red?-1:col==lime?1:0
+
+if (not na(rsi))
+    if (crossover(rsi, overSold))
+        if(chk[1]==1)
+            strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+    if (crossunder(rsi, overBought))
+        if(chk[1]==-1)
+            strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+
+View in Pine Editor・29 lines
+Use on chart
+6
+4
+2 350
+The strategy is based on the indicator posted by ChrisMoody "CM RSI-2 Strategy Lower Indicator" which is based on "Larry Connors RSI-2 Strategy - Lower RSI"
+
+In this strategy the longs are placed when a green color is encountered in the rsi and short when red color is encountered in the rsi.
+Although the profits can be booked at different interval.
+Just message in the script if you have any different idea regarding this indicator.
+
+For the original indicator you can refer to :
+
+
+
+
+
+
+
+For Tips to continue :) :
+BTC: 1BjswGcRR6c23pka7qh5t5k56j46cuyyy2
+ETH: 0x64fed71c9d6c931639c7ba4671aeb6b05e6b3781
+LTC: LKT2ykQ8QSzzfTDB6Tnsf12xwYPjgq95h4

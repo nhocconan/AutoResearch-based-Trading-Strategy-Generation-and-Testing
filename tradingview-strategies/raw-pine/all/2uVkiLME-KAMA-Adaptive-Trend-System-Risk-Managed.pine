@@ -1,0 +1,164 @@
+//@version=6
+strategy('KAMA Strategy', overlay = true, max_lines_count = 500, max_boxes_count = 100, initial_capital = 100000, currency = currency.USD, commission_type = strategy.commission.percent, commission_value = 0.05, default_qty_type = strategy.fixed)
+
+// === KAMA Setup ===
+kama_group = 'KAMA Settings'
+lookback_period = input.int(10, title = 'Length', group = kama_group)
+ma_source = input(close, 'KAMA Soruce', group = kama_group)
+fastma_length = input.int(5, 'Fast MA Legnth', minval = 1, group = kama_group)
+slowma_length = input.int(50, 'Slow MA Legnth', minval = 1, group = kama_group)
+
+// === Strategy Setup ===
+strategy_group = 'Strategy Settings'
+input_order_direction = input.string('Long', options = ['Long', 'Short', 'Long and Short'], title = 'Order Direction', group = strategy_group)
+kama_rising_perid = input.int(10, title = 'Rising Period', group = strategy_group)
+kama_falling_perid = input.int(10, title = 'Falling Period', group = strategy_group)
+
+
+// === GEMINI MODIFICATION: ADD RISK MANAGEMENT & FILTERS ===
+risk_group = 'Risk Management & Filters'
+// 1. Regime Filter Input
+filter_ma_len = input.int(200, title = 'Regime Filter MA Length', group = risk_group)
+// 2. Risk Per Trade Input
+risk_percent = input.float(1.0, title = 'Risk per Trade %', minval = 0.1, maxval = 10, step = 0.1, group = risk_group)
+// 3. Stop-Loss Inputs
+atr_period = input.int(14, title = 'ATR Period for Stop-Loss', group = risk_group)
+atr_multiplier = input.float(2.5, title = 'ATR Multiplier for Stop-Loss', group = risk_group)
+// 4. Momentum Filter Inputs
+rsi_period = input.int(14, title = 'RSI Period for Momentum', group = risk_group)
+rsi_midline = input.int(50, title = 'RSI Midline (Momentum Trigger)', group = risk_group)
+
+
+// === KAMA Calculation Function (Unchanged) ===
+pine_kama(source) =>
+    price_change = math.abs(source - source[lookback_period])
+    sum_price_change = math.sum(math.abs(source - source[1]), lookback_period)
+    fastest = 2 / (fastma_length + 1)
+    slowest = 2 / (slowma_length + 1)
+    ER = price_change / sum_price_change
+    SC = math.pow(ER * (fastest - slowest) + slowest, 2)
+
+    alpha = SC
+    sum = 0.0
+    sum := na(sum[1]) ? source : sum[1] + SC * (close - nz(sum[1]))
+    sum
+
+kama = pine_kama(ma_source)
+
+
+// === GEMINI MODIFICATION: CALCULATE RISK & FILTER INDICATORS ===
+// 1. Calculate Regime Filter
+filter_ma = ta.sma(close, filter_ma_len)
+is_bullish_regime = close > filter_ma
+is_bearish_regime = close < filter_ma
+
+// 2. Calculate ATR for stop-loss
+atr_value = ta.atr(atr_period)
+
+// 3. Calculate Momentum Filter
+rsi_value = ta.rsi(close, rsi_period)
+is_bullish_momentum = rsi_value > rsi_midline
+is_bearish_momentum = rsi_value < rsi_midline
+
+// === Strategy Entry Conditions (used for backtest) ===
+bool long_condition = ta.rising(kama, kama_rising_perid) and is_bullish_regime and is_bullish_momentum
+bool short_condition = ta.falling(kama, kama_falling_perid) and is_bearish_regime and is_bearish_momentum
+
+
+// === CORE STRATEGY LOGIC (MODIFIED) ===
+// Calculate position size and risk
+stop_loss_points = atr_value * atr_multiplier
+stop_loss_risk_per_share = stop_loss_points * syminfo.pointvalue
+account_risk_per_trade = strategy.equity * (risk_percent / 100)
+calculated_position_size = math.max(1, account_risk_per_trade / stop_loss_risk_per_share) // Ensure at least 1 share
+
+// --- ENTRY LOGIC ---
+// Long Entry
+if long_condition
+    strategy.close('Short', comment = 'Short Reversal')
+    if input_order_direction != 'Short' and strategy.opentrades == 0
+        strategy.entry('Long', strategy.long, qty = calculated_position_size)
+        long_stop_price = close - stop_loss_points
+        strategy.exit('Long Stop', 'Long', stop = long_stop_price)
+
+// Short Entry
+else if short_condition
+    strategy.close('Long', comment = 'Long Reversal')
+    if input_order_direction != 'Long' and strategy.opentrades == 0
+        strategy.entry('Short', strategy.short, qty = calculated_position_size)
+        short_stop_price = close + stop_loss_points
+        strategy.exit('Short Stop', 'Short', stop = short_stop_price)
+
+
+// --- EXIT LOGIC (FOR LABELS - Unchanged) ---
+is_pos_closed = strategy.position_size[1] != 0 and strategy.position_size == 0
+is_short = strategy.position_size < 0
+is_long = strategy.position_size > 0
+
+if is_pos_closed and is_short[1]
+    label.new(bar_index, low, '🟢 Close Short', color = #9cff87, style = label.style_label_up)
+
+else if is_pos_closed and is_long[1]
+    label.new(bar_index, high, '🔴 Close Long', color = #f9396a, style = label.style_label_down, textcolor = color.white)
+
+
+// === GEMINI MODIFICATION: ADD ALERT() FUNCTION CALLS (CORRECTED LOGIC) ===
+
+// Alert Trigger: We *only* care about the KAMA line flipping, which controls the color.
+bool is_kama_rising = ta.rising(kama, kama_rising_perid)
+bool is_kama_falling = ta.falling(kama, kama_falling_perid)
+
+bool alert_turn_green_trigger = is_kama_rising and not is_kama_rising[1]
+bool alert_turn_red_trigger = is_kama_falling and not is_kama_falling[1]
+
+// Send the alerts
+if alert_turn_green_trigger
+    alert('KAMA: Color Turns GREEN', freq = alert.freq_once_per_bar)
+
+if alert_turn_red_trigger
+    alert('KAMA: Color Turns RED', freq = alert.freq_once_per_bar)
+
+
+// --- PLOTTING (MODIFIED) ---
+closelinePlot = plot(close, '', display = display.none)
+kamaPlot = plot(kama, title = 'KAMA', color = #ffffff)
+fill(kamaPlot, closelinePlot, math.max(kama, close), kama, color.new(#9cff87, 75), color.new(#9cff87, 60))
+fill(kamaPlot, closelinePlot, kama, math.min(kama, close), color.new(#f9396a, 60), color.new(#f9396a, 75))
+
+// MOD: Plot the Regime Filter MA
+plot(filter_ma, title = 'Regime Filter MA', color = color.orange, linewidth = 2)
+
+View in Pine Editor・132 lines
+Use on chart
+1
+5
+546
+Overview
+This script is a professional-grade adaptation of the Kaufman Adaptive Moving Average (KAMA). While standard KAMA scripts focus solely on price smoothing, this version (V5) is designed as a complete trading system with a focus on institutional-style risk management and trend hygiene.
+
+How It Works
+The strategy uses a three-layer confirmation process before entering a trade:
+
+The Core (KAMA): Tracks price efficiency to identify trend shifts.
+
+The Regime Filter: A 200-period SMA ensures you are only trading with the long-term trend (Longs above, Shorts below).
+
+Momentum Filter: An RSI check (Midline 50) confirms there is actual strength behind the move.
+
+
+Key Features
+
+Dynamic Position Sizing: Automatically calculates quantity based on a fixed % of account equity (default 1%).
+
+ATR-Based Volatility Stops: Uses a 2.5x ATR multiplier to set hard stop-losses that breathe with market volatility.
+
+Smart Alerts: Alerts are programmed to trigger on KAMA Color Changes only. This prevents "alert fatigue" caused by fluctuating filters while keeping you informed of trend flips.
+
+
+How to Use
+Bullish Setup: KAMA turns green, price is > 200 SMA, and RSI > 50.
+Bearish Setup: KAMA turns red, price is < 200 SMA, and RSI < 50.
+Settings: You can toggle the "Order Direction" to focus on Long-only or Short-only setups depending on your market bias.
+
+Credits
+Based on the original KAMA logic by tradedots. Modifications by Gemini Assistant include risk management integration and alert logic optimization.

@@ -1,0 +1,44 @@
+//@version=5
+strategy("Stoch Trader", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// --- Inputs ---
+kLength    = input.int(14, "Stoch %K Length")
+dLength    = input.int(4, "Stoch %D Smoothing")
+smoothK    = input.int(2, "Stoch %K Smoothing")
+overbought = input.int(80, "Overbought Level")
+oversold   = input.int(20, "Oversold Level")
+
+// --- Stochastic Calculation ---
+k = ta.sma(ta.stoch(close, high, low, kLength), smoothK)
+d = ta.sma(k, dLength)
+
+// --- Entry / Exit Conditions ---
+// Buy when %K crosses ABOVE oversold (20)
+longCondition = ta.crossover(k, d) and k < oversold
+// longCondition = ta.crossover(d, oversold) 
+
+// Sell when %K crosses BELOW overbought (80)
+shortCondition = ta.crossunder(k, d) and k > overbought
+// shortCondition = ta.crossunder(d, overbought) 
+
+// --- Strategy Execution ---
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// --- Plotting ---
+plot(k, color=color.blue, title="%K")
+plot(d, color=color.orange, title="%D")
+hline(overbought, "Overbought", color=color.red)
+hline(oversold, "Oversold", color=color.green)
+
+View in Pine Editor・37 lines
+Use on chart
+1
+1
+7
+2
+2 393
+Simple example strategy that has greater than 60% win rate on 1m, 3m, and 5m views. Using something as simple as this with leverage can produce decent returns within 15-30min. It's also very easy to lose money doing this.

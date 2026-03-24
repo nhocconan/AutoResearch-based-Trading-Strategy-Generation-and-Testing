@@ -1,0 +1,112 @@
+//@version=6
+strategy("EQL/EQH Reversal System", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === INPUTS ===
+i_look = input.int(30, "Lookback Bars")
+i_tol = input.float(5.0, "Tolerance (pts)")
+i_sess = input.session("0945-1400", "Session")
+
+// ATR Settings
+i_atrLen = input.int(14, "ATR Length")
+i_atrStopMult = input.float(1.5, "ATR Stop Multiplier")
+i_atrTargetMult = input.float(2.5, "ATR Target Multiplier")
+
+// === SESSION ===
+inSess = not na(time(timeframe.period, i_sess))
+
+// === ATR ===
+atr = ta.atr(i_atrLen)
+stopDist = atr * i_atrStopMult
+targetDist = atr * i_atrTargetMult
+
+// === FIND HIGHEST/LOWEST ===
+hh = ta.highest(high, i_look)
+ll = ta.lowest(low, i_look)
+
+// === COUNT TOUCHES ===
+eqhCount = 0
+eqlCount = 0
+for i = 1 to i_look
+    if high[i] >= hh - i_tol
+        eqhCount += 1
+    if low[i] <= ll + i_tol
+        eqlCount += 1
+
+// === ENTRY CONDITIONS ===
+shortCond = eqhCount >= 2 and high >= hh - i_tol
+longCond = eqlCount >= 2 and low <= ll + i_tol
+
+shortSig = inSess and strategy.position_size == 0 and shortCond
+longSig = inSess and strategy.position_size == 0 and longCond and not shortSig
+
+// === TRADES ===
+if shortSig
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", "Short", limit=close - targetDist, stop=close + stopDist)
+
+if longSig
+    strategy.entry("Long", strategy.long)
+    strategy.exit("LX", "Long", limit=close + targetDist, stop=close - stopDist)
+
+// === PLOTS ===
+plot(eqhCount >= 2 ? hh : na, "EQH", color.red, 2)
+plot(eqlCount >= 2 ? ll : na, "EQL", color.green, 2)
+plotshape(shortSig, "Short", style=shape.triangledown, location=location.abovebar, color=color.red)
+plotshape(longSig, "Long", style=shape.triangleup, location=location.belowbar, color=color.green)
+
+View in Pine Editor・55 lines
+Use on chart
+1
+7
+346
+EQL/EQH Reversal System
+
+A counter-trend strategy that identifies and trades reversals at Equal Highs (EQH) and Equal Lows (EQL) — institutional liquidity levels where stop-loss orders cluster. The strategy anticipates liquidity grabs followed by price reversals.
+
+---
+
+Strategy Logic:
+
+This system scans for price levels that have been tested multiple times within a configurable tolerance. These "equal" levels represent liquidity pools that attract institutional order flow:
+
+• Equal Highs (EQH): When price touches the same high level 2+ times, shorts are triggered on the next touch — anticipating a reversal after the liquidity sweep.
+
+• Equal Lows (EQL): When price touches the same low level 2+ times, longs are triggered on the next touch — anticipating a bounce after stops are taken.
+
+---
+
+Key Features:
+
+• Session Filter (9:45–14:00 ET): Avoids the volatile opening 15 minutes and late-day chop, focusing on the most tradeable hours.
+
+• ATR-Based Risk Management: Dynamic stop-loss (1.5x ATR) and profit target (2.5x ATR) adapt to current market volatility, maintaining a 1.67:1 reward-to-risk ratio.
+
+• Clean Execution: One position at a time, no pyramiding, flat by session end.
+
+---
+
+Settings:
+
+Parameter | Default | Description
+-------------------|--------------|----------------------------------
+Lookback Bars | 30 | Period to scan for equal levels
+Tolerance | 5.0 pts | How close prices must be to count as "equal"
+Session | 9:45–14:00 | Active trading window
+ATR Length | 14 | Volatility measurement period
+ATR Stop Mult | 1.5 | Stop-loss distance
+ATR Target Mult | 2.5 | Take-profit distance
+
+---
+
+Recommended Use:
+
+• Designed for NQ/MNQ futures on 1-minute or 5-minute charts
+• Works on other liquid instruments — adjust tolerance for price scale
+• Backtest on your specific market before live trading
+
+---
+
+Risk Disclosure:
+
+Trading futures involves substantial risk of loss. Past performance does not guarantee future results. This strategy is provided for educational purposes. Always use appropriate position sizing and never risk more than you can afford to lose.
+

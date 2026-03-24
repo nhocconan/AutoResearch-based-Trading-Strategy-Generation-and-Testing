@@ -1,0 +1,745 @@
+//@version=6
+strategy(title="KCandle Strategy 1.7", overlay=true, pyramiding=10, default_qty_type=strategy.percent_of_equity, default_qty_value=10, max_lines_count = 500)
+
+// ========== INPUT ==========
+emaLen = input.int(25, "Lunghezza EMA (filtro)", minval=1)
+stopLossPips = input.float(50, "Stop Loss (pips)", minval=1, step=1)
+riskReward = input.float(2.0, "Risk/Reward Ratio", minval=0.5, step=0.1)
+maxLines = input.int(500, "Numero massimo di linee da mantenere", minval=10)
+extendBars = input.int(20, "Estensione linea (barre)", minval=1)
+
+// NUOVA OPZIONE: Percentuale KCandle
+kcandlePercentage = input.float(25.0, "Percentuale KCandle (%)", minval=0.0, maxval=100.0, step=5.0, tooltip="0% = Chiusura corpo candela\n100% = Apertura corpo candela\nControlla il livello di entry nel corpo della candela")
+
+showLevels = input.bool(true, "Mostra linee SL/TP/BE", group="Visual")
+showLabels = input.bool(true, "Mostra etichette sui livelli", group="Visual")
+showHistoricalLevels = input.bool(true, "Mostra livelli storici", group="Visual")
+maxHistoricalLines = input.int(50, "Numero max linee storiche", minval=5, maxval=100, group="Visual")
+showBeTriggerLine = input.bool(true, "Mostra linea trigger BE", group="Visual")
+tableTextSize = input.string("Tiny", "Dimensione Testo Tabella", options=["Tiny", "Small", "Normal", "Large"], group="Visual")
+
+// Time Filter Settings
+useTimeFilter = input.bool(false, "Attiva Filtro Orario", group="Time Filter")
+userTimezone = input.string("Europe/Rome", "Fuso Orario", options=["UTC", "Europe/Rome", "Europe/London", "Europe/Frankfurt", "America/New_York", "America/Chicago", "America/Los_Angeles", "Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata", "Australia/Sydney"], group="Time Filter", tooltip="Seleziona il tuo fuso orario locale")
+enableSession1 = input.bool(true, "Abilita Fascia 1", group="Time Filter")
+session1Start = input.session("0800-1200", "Fascia Oraria 1", group="Time Filter", tooltip="Orari nel tuo fuso orario selezionato")
+enableSession2 = input.bool(false, "Abilita Fascia 2", group="Time Filter")
+session2Start = input.session("1400-1800", "Fascia Oraria 2", group="Time Filter", tooltip="Orari nel tuo fuso orario selezionato")
+showTimeFilterInfo = input.bool(true, "Mostra sfondo Filtro Orario", group="Time Filter")
+
+// Pyramiding settings - MODIFICATO: da riduzione ad aumento
+allowPyramiding = input.bool(false, "Attiva Piramidazione", group="Pyramiding")
+maxPyramidLevels = input.int(3, "Numero max posizioni", minval=1, maxval=10, group="Pyramiding")
+pyramidSizeMultiplier = input.float(1, "Moltiplicatore size per livello", minval=0, maxval=10.0, step=0.1, group="Pyramiding", tooltip="1.0 = size uguale\n1.5 = +50% ad ogni livello\n2.0 = raddoppia ad ogni livello")
+
+// Break-even settings
+useBreakeven = input.bool(true, "Attiva Stop a Pareggio", group="Break-Even")
+breakevenRR = input.float(1.0, "R:R per attivare pareggio", minval=0.1, step=0.1, group="Break-Even")
+breakevenOffset = input.float(5, "Offset pareggio (punti)", step=1, group="Break-Even")
+debugBreakeven = input.bool(false, "Debug Break-Even", group="Break-Even")
+
+// Trailing Stop settings
+useTrailingStop = input.bool(true, "Attiva Trailing Stop", group="Trailing Stop")
+trailingActivationRR = input.float(1.5, "R:R per attivare trailing", minval=0.1, step=0.1, group="Trailing Stop")
+trailingDistance = input.float(1.0, "Distanza trailing (in R)", minval=0.1, step=0.1, group="Trailing Stop")
+trailingStep = input.float(0.5, "Step trailing (in R)", minval=0.1, step=0.1, group="Trailing Stop")
+debugTrailing = input.bool(false, "Debug Trailing Stop", group="Trailing Stop")
+
+// ========== FILTRO ORARIO ==========
+// Funzione per convertire la stringa della dimensione in size
+getTableTextSize() =>
+    switch tableTextSize
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+        "Large" => size.large
+        => size.small
+
+tableSize = getTableTextSize()
+
+// Funzione per verificare se siamo in una fascia oraria valida
+isInTimeFilter() =>
+    if not useTimeFilter
+        true
+    else
+        inSession1 = enableSession1 ? time(timeframe.period, session1Start, userTimezone) : na
+        inSession2 = enableSession2 ? time(timeframe.period, session2Start, userTimezone) : na
+        not na(inSession1) or not na(inSession2)
+
+// Variabile per tracking dello stato del filtro orario
+timeFilterActive = isInTimeFilter()
+
+// ========== CALCOLI DI BASE ==========
+ema750 = ta.ema(close, emaLen)
+
+// Corpo e direzione candela corrente e precedente
+bull(cOpen, cClose) => cClose > cOpen
+bear(cOpen, cClose) => cClose < cOpen
+
+openPrev = open[1]
+closePrev = close[1]
+
+// Engulfing di corpo
+isBullEngulf = bear(openPrev, closePrev) and bull(open, close) and open <= closePrev and close >= openPrev
+isBearEngulf = bull(openPrev, closePrev) and bear(open, close) and open >= closePrev and close <= openPrev
+
+// Filtro EMA750
+isBullValid = isBullEngulf and close > ema750
+isBearValid = isBearEngulf and close < ema750
+
+// Candela arancione (evento valido) - ora include filtro orario
+isOrange = (isBullValid or isBearValid) and timeFilterActive
+
+// ========== COLORAZIONE CANDELE ==========
+barcolor(isOrange ? color.orange : na)
+
+// ========== LIVELLI ENTRY - MODIFICATO PER PERCENTUALE KCANDLE ==========
+// Calcolo dei livelli basato sulla percentuale del corpo della candela
+levelBull = float(na)
+levelBear = float(na)
+
+if isBullValid
+    // Per long entry su candela bullish (close > open)
+    // 0% = close, 100% = open
+    bodySize = close - open  // Dimensione del corpo (positiva per candela bullish)
+    levelBull := close - (kcandlePercentage / 100.0) * bodySize
+
+if isBearValid
+    // Per short entry su candela bearish (close < open)  
+    // 0% = close, 100% = open
+    bodySize = open - close  // Dimensione del corpo (positiva per candela bearish)
+    levelBear := close + (kcandlePercentage / 100.0) * bodySize
+
+// ========== GESTIONE DISEGNO LINEE ==========
+var line[] lines = array.new_line()
+var line[] historicalStopLines = array.new_line()
+var line[] historicalTpLines = array.new_line()
+var line[] historicalEntryLines = array.new_line()
+
+if isOrange and not na(levelBull) and isBullValid and timeFilterActive
+    l = line.new(bar_index, levelBull, bar_index + extendBars, levelBull)
+    line.set_color(l, color.green)
+    line.set_width(l, 1)
+    line.set_style(l, line.style_dashed)
+    array.push(lines, l)
+    
+if isOrange and not na(levelBear) and isBearValid and timeFilterActive
+    l = line.new(bar_index, levelBear, bar_index + extendBars, levelBear)
+    line.set_color(l, color.red)
+    line.set_width(l, 1)
+    line.set_style(l, line.style_dashed)
+    array.push(lines, l)
+
+if array.size(lines) > maxLines
+    old = array.shift(lines)
+    line.delete(old)
+
+// ========== LOGICA STRATEGIA MODIFICATA ==========
+// Calcolo pips (adattato per diversi timeframe e strumenti)
+pipValue = syminfo.mintick * (syminfo.type == "forex" ? 10 : 1)
+
+// Variabili per tracking ordini con scadenza
+var float longEntryPrice = na
+var float shortEntryPrice = na
+var bool longOrderActive = false
+var bool shortOrderActive = false
+var int currentPyramidLevel = 0
+var int longOrderBarIndex = na
+var int shortOrderBarIndex = na
+
+// Variabili per plot shapes e livelli
+var bool showLongSignal = false
+var bool showShortSignal = false
+var float longSignalPrice = na
+var float shortSignalPrice = na
+var float currentStopLoss = na
+var float currentTakeProfit = na
+var int entryBarIndex = na
+var bool breakevenTriggered = false
+var float originalStopLoss = na
+var float breakevenTriggerPrice = na
+
+// Variabili per Trailing Stop
+var bool trailingStopActive = false
+var float highestProfitablePrice = na
+var float lowestProfitablePrice = na
+var float trailingStopPrice = na
+var float lastTrailingLevel = na
+var bool showTrailingSignal = false
+
+// MODIFICATO: Funzione per calcolare la size della posizione per il livello di piramidazione
+getPositionSize(level) =>
+    baseSize = 10.0  // Default size %
+    if level <= 0
+        baseSize
+    else
+        // Ora aumentiamo invece di ridurre: ogni livello moltiplica per pyramidSizeMultiplier
+        baseSize * math.pow(pyramidSizeMultiplier, level)
+
+// Condizioni per aprire nuove posizioni - ora include filtro orario
+canOpenLong = allowPyramiding ? (strategy.position_size >= 0 and currentPyramidLevel < maxPyramidLevels) : strategy.position_size == 0
+canOpenShort = allowPyramiding ? (strategy.position_size <= 0 and currentPyramidLevel < maxPyramidLevels) : strategy.position_size == 0
+
+// CANCELLAZIONE ORDINI SCADUTI - mantiene ordini attivi per extendBars
+if longOrderActive and not na(longOrderBarIndex) and (bar_index > longOrderBarIndex + extendBars)
+    strategy.cancel("Long")
+    longOrderActive := false
+    longOrderBarIndex := na
+    if debugBreakeven
+        label.new(bar_index, high, "Long Order Expired", color=color.gray, textcolor=color.white, style=label.style_label_down, size=size.tiny)
+
+if shortOrderActive and not na(shortOrderBarIndex) and (bar_index > shortOrderBarIndex + extendBars)
+    strategy.cancel("Short")
+    shortOrderActive := false
+    shortOrderBarIndex := na
+    if debugBreakeven
+        label.new(bar_index, low, "Short Order Expired", color=color.gray, textcolor=color.white, style=label.style_label_up, size=size.tiny)
+
+// LONG SETUP - ordine rimane attivo per extendBars - MODIFICATO: aggiunta qty personalizzata
+if isBullValid and canOpenLong and not longOrderActive and timeFilterActive and not na(levelBull)
+    longEntryPrice := levelBull
+    stopLossLong = longEntryPrice - (stopLossPips * pipValue)
+    takeProfitLong = longEntryPrice + (stopLossPips * pipValue * riskReward)
+    
+    // Calcola la size per questo livello di piramidazione
+    positionSize = getPositionSize(currentPyramidLevel)
+    
+    strategy.entry("Long", strategy.long, limit=longEntryPrice, qty=positionSize, comment="Buy L" + str.tostring(currentPyramidLevel + 1))
+    strategy.exit("Long_Exit", "Long", stop=stopLossLong, limit=takeProfitLong)
+    
+    longOrderActive := true
+    longOrderBarIndex := bar_index
+    showLongSignal := true
+    longSignalPrice := longEntryPrice
+    currentStopLoss := stopLossLong
+    currentTakeProfit := takeProfitLong
+    entryBarIndex := bar_index
+    currentPyramidLevel := currentPyramidLevel + 1
+    
+    if debugBreakeven
+        label.new(bar_index, levelBull, "Long Order Placed\nSize: " + str.tostring(positionSize, "#.##") + "%\nValid for " + str.tostring(extendBars) + " bars", color=color.green, textcolor=color.white, style=label.style_label_up, size=size.tiny)
+
+// SHORT SETUP - ordine rimane attivo per extendBars - MODIFICATO: aggiunta qty personalizzata
+if isBearValid and canOpenShort and not shortOrderActive and timeFilterActive and not na(levelBear)
+    shortEntryPrice := levelBear
+    stopLossShort = shortEntryPrice + (stopLossPips * pipValue)
+    takeProfitShort = shortEntryPrice - (stopLossPips * pipValue * riskReward)
+    
+    // Calcola la size per questo livello di piramidazione
+    positionSize = getPositionSize(currentPyramidLevel)
+    
+    strategy.entry("Short", strategy.short, limit=shortEntryPrice, qty=positionSize, comment="Sell L" + str.tostring(currentPyramidLevel + 1))
+    strategy.exit("Short_Exit", "Short", stop=stopLossShort, limit=takeProfitShort)
+    
+    shortOrderActive := true
+    shortOrderBarIndex := bar_index
+    showShortSignal := true
+    shortSignalPrice := shortEntryPrice
+    currentStopLoss := stopLossShort
+    currentTakeProfit := takeProfitShort
+    entryBarIndex := bar_index
+    currentPyramidLevel := currentPyramidLevel + 1
+    
+    if debugBreakeven
+        label.new(bar_index, levelBear, "Short Order Placed\nSize: " + str.tostring(positionSize, "#.##") + "%\nValid for " + str.tostring(extendBars) + " bars", color=color.red, textcolor=color.white, style=label.style_label_down, size=size.tiny)
+
+// ========== GESTIONE BREAK-EVEN E TRAILING STOP ==========
+if strategy.position_size == 0
+    breakevenTriggered := false
+    breakevenTriggerPrice := na
+    originalStopLoss := na
+    trailingStopActive := false
+    highestProfitablePrice := na
+    lowestProfitablePrice := na
+    trailingStopPrice := na
+    lastTrailingLevel := na
+
+if strategy.position_size != 0 and not na(strategy.position_avg_price)
+    entryPrice = strategy.position_avg_price
+    stopDistance = stopLossPips * pipValue
+    
+    if na(originalStopLoss)
+        if strategy.position_size > 0
+            originalStopLoss := entryPrice - stopDistance
+        else
+            originalStopLoss := entryPrice + stopDistance
+    
+    // BREAK-EVEN LOGIC
+    if useBreakeven and not breakevenTriggered and not trailingStopActive
+        if strategy.position_size > 0
+            triggerDistance = stopDistance * breakevenRR
+            breakevenTriggerPrice := entryPrice + triggerDistance
+            
+            if high >= breakevenTriggerPrice
+                newStopPrice = entryPrice + (breakevenOffset * pipValue)
+                strategy.cancel("Long_Exit")
+                strategy.exit("Long_BE", "Long", stop=newStopPrice, limit=currentTakeProfit)
+                currentStopLoss := newStopPrice
+                breakevenTriggered := true
+        
+        else if strategy.position_size < 0
+            triggerDistance = stopDistance * breakevenRR
+            breakevenTriggerPrice := entryPrice - triggerDistance
+            
+            if low <= breakevenTriggerPrice
+                newStopPrice = entryPrice - (breakevenOffset * pipValue)
+                strategy.cancel("Short_Exit")
+                strategy.exit("Short_BE", "Short", stop=newStopPrice, limit=currentTakeProfit)
+                currentStopLoss := newStopPrice
+                breakevenTriggered := true
+    
+    // TRAILING STOP LOGIC
+    if useTrailingStop and not trailingStopActive
+        if strategy.position_size > 0
+            trailingActivationPrice = entryPrice + (stopDistance * trailingActivationRR)
+            if high >= trailingActivationPrice
+                trailingStopActive := true
+                highestProfitablePrice := high
+                trailingStopPrice := entryPrice + (stopDistance * trailingDistance)
+                lastTrailingLevel := trailingActivationRR
+                showTrailingSignal := true
+                
+                strategy.cancel("Long_Exit")
+                strategy.cancel("Long_BE")
+                strategy.exit("Long_Trail", "Long", stop=trailingStopPrice, limit=currentTakeProfit)
+                currentStopLoss := trailingStopPrice
+                
+                if debugTrailing
+                    label.new(bar_index, high, "Trailing Activated\nPrice: " + str.tostring(trailingStopPrice), color=color.purple, textcolor=color.white, style=label.style_label_down, size=size.small)
+        
+        else if strategy.position_size < 0
+            trailingActivationPrice = entryPrice - (stopDistance * trailingActivationRR)
+            if low <= trailingActivationPrice
+                trailingStopActive := true
+                lowestProfitablePrice := low
+                trailingStopPrice := entryPrice - (stopDistance * trailingDistance)
+                lastTrailingLevel := trailingActivationRR
+                showTrailingSignal := true
+                
+                strategy.cancel("Short_Exit")
+                strategy.cancel("Short_BE")
+                strategy.exit("Short_Trail", "Short", stop=trailingStopPrice, limit=currentTakeProfit)
+                currentStopLoss := trailingStopPrice
+                
+                if debugTrailing
+                    label.new(bar_index, low, "Trailing Activated\nPrice: " + str.tostring(trailingStopPrice), color=color.purple, textcolor=color.white, style=label.style_label_up, size=size.small)
+    
+    // UPDATE TRAILING STOP
+    if trailingStopActive
+        if strategy.position_size > 0
+            if high > highestProfitablePrice
+                highestProfitablePrice := high
+                
+                // Calcola il nuovo livello R raggiunto
+                currentRLevel = (highestProfitablePrice - entryPrice) / stopDistance
+                
+                // Controlla se siamo avanzati di almeno trailingStep R
+                if currentRLevel >= lastTrailingLevel + trailingStep
+                    newTrailingStopPrice = entryPrice + (stopDistance * trailingDistance) + (math.floor((currentRLevel - trailingActivationRR) / trailingStep) * trailingStep * stopDistance)
+                    
+                    if newTrailingStopPrice > trailingStopPrice
+                        trailingStopPrice := newTrailingStopPrice
+                        lastTrailingLevel := lastTrailingLevel + trailingStep
+                        
+                        strategy.cancel("Long_Trail")
+                        strategy.exit("Long_Trail", "Long", stop=trailingStopPrice, limit=currentTakeProfit)
+                        currentStopLoss := trailingStopPrice
+                        
+                        if debugTrailing
+                            label.new(bar_index, high, "Trail Updated\nNew SL: " + str.tostring(trailingStopPrice), color=color.fuchsia, textcolor=color.white, style=label.style_label_down, size=size.tiny)
+        
+        else if strategy.position_size < 0
+            if low < lowestProfitablePrice
+                lowestProfitablePrice := low
+                
+                // Calcola il nuovo livello R raggiunto
+                currentRLevel = (entryPrice - lowestProfitablePrice) / stopDistance
+                
+                // Controlla se siamo avanzati di almeno trailingStep R
+                if currentRLevel >= lastTrailingLevel + trailingStep
+                    newTrailingStopPrice = entryPrice - (stopDistance * trailingDistance) - (math.floor((currentRLevel - trailingActivationRR) / trailingStep) * trailingStep * stopDistance)
+                    
+                    if newTrailingStopPrice < trailingStopPrice
+                        trailingStopPrice := newTrailingStopPrice
+                        lastTrailingLevel := lastTrailingLevel + trailingStep
+                        
+                        strategy.cancel("Short_Trail")
+                        strategy.exit("Short_Trail", "Short", stop=trailingStopPrice, limit=currentTakeProfit)
+                        currentStopLoss := trailingStopPrice
+                        
+                        if debugTrailing
+                            label.new(bar_index, low, "Trail Updated\nNew SL: " + str.tostring(trailingStopPrice), color=color.fuchsia, textcolor=color.white, style=label.style_label_up, size=size.tiny)
+
+// ========== GESTIONE LINEE TRADING ATTIVE ==========
+var line activeStopLine = na
+var line activeTpLine = na
+var line activeEntryLine = na
+var line activeBeTriggerLine = na
+
+if (strategy.position_size == 0 or not showLevels) and not na(activeStopLine)
+    line.delete(activeStopLine)
+    line.delete(activeTpLine) 
+    line.delete(activeEntryLine)
+    if not na(activeBeTriggerLine)
+        line.delete(activeBeTriggerLine)
+    activeStopLine := na
+    activeTpLine := na
+    activeEntryLine := na
+    activeBeTriggerLine := na
+
+if strategy.position_size != 0 and na(activeStopLine) and showLevels
+    entryPrice = strategy.position_avg_price
+    stopColor = trailingStopActive ? color.purple : breakevenTriggered ? color.orange : color.red
+    
+    activeStopLine := line.new(bar_index, currentStopLoss, bar_index + 50, currentStopLoss)
+    line.set_color(activeStopLine, stopColor)
+    line.set_width(activeStopLine, 2)
+    line.set_style(activeStopLine, line.style_dashed)
+    line.set_extend(activeStopLine, extend.right)
+    
+    activeTpLine := line.new(bar_index, currentTakeProfit, bar_index + 50, currentTakeProfit)
+    line.set_color(activeTpLine, color.green)
+    line.set_width(activeTpLine, 2)
+    line.set_style(activeTpLine, line.style_dashed)
+    line.set_extend(activeTpLine, extend.right)
+    
+    activeEntryLine := line.new(bar_index, entryPrice, bar_index + 50, entryPrice)
+    line.set_color(activeEntryLine, color.blue)
+    line.set_width(activeEntryLine, 1)
+    line.set_style(activeEntryLine, line.style_dotted)
+    line.set_extend(activeEntryLine, extend.right)
+    
+    if useBreakeven and not breakevenTriggered and not trailingStopActive and not na(breakevenTriggerPrice) and showBeTriggerLine
+        activeBeTriggerLine := line.new(bar_index, breakevenTriggerPrice, bar_index + 50, breakevenTriggerPrice)
+        line.set_color(activeBeTriggerLine, color.yellow)
+        line.set_width(activeBeTriggerLine, 1)
+        line.set_style(activeBeTriggerLine, line.style_dashed)
+        line.set_extend(activeBeTriggerLine, extend.right)
+
+if strategy.position_size != 0 and not na(activeStopLine) and showLevels
+    if (breakevenTriggered or trailingStopActive) and line.get_y1(activeStopLine) != currentStopLoss
+        line.delete(activeStopLine)
+        stopColor = trailingStopActive ? color.purple : color.orange
+        activeStopLine := line.new(bar_index, currentStopLoss, bar_index + 50, currentStopLoss)
+        line.set_color(activeStopLine, stopColor)
+        line.set_width(activeStopLine, 2)
+        line.set_style(activeStopLine, line.style_dashed)
+        line.set_extend(activeStopLine, extend.right)
+        
+        if not na(activeBeTriggerLine)
+            line.delete(activeBeTriggerLine)
+            activeBeTriggerLine := na
+
+// ========== GESTIONE LINEE STORICHE ==========
+var bool wasInPosition = false
+
+if strategy.position_size != 0 and not wasInPosition
+    wasInPosition := true
+
+if strategy.position_size == 0 and wasInPosition and showHistoricalLevels
+    if not na(currentStopLoss) and not na(entryBarIndex)
+        stopLine = line.new(entryBarIndex, currentStopLoss, bar_index, currentStopLoss)
+        line.set_color(stopLine, color.new(color.red, 70))
+        line.set_width(stopLine, 1)
+        line.set_style(stopLine, line.style_solid)
+        array.push(historicalStopLines, stopLine)
+        
+    if not na(currentTakeProfit) and not na(entryBarIndex)
+        tpLine = line.new(entryBarIndex, currentTakeProfit, bar_index, currentTakeProfit)
+        line.set_color(tpLine, color.new(color.green, 70))
+        line.set_width(tpLine, 1)
+        line.set_style(tpLine, line.style_solid)
+        array.push(historicalTpLines, tpLine)
+        
+    if not na(strategy.position_avg_price) and not na(entryBarIndex)
+        entryLine = line.new(entryBarIndex, strategy.position_avg_price, bar_index, strategy.position_avg_price)
+        line.set_color(entryLine, color.new(color.blue, 70))
+        line.set_width(entryLine, 1)
+        line.set_style(entryLine, line.style_dotted)
+        array.push(historicalEntryLines, entryLine)
+    
+    wasInPosition := false
+
+if array.size(historicalStopLines) > maxHistoricalLines
+    oldStop = array.shift(historicalStopLines)
+    line.delete(oldStop)
+    
+if array.size(historicalTpLines) > maxHistoricalLines
+    oldTp = array.shift(historicalTpLines)
+    line.delete(oldTp)
+    
+if array.size(historicalEntryLines) > maxHistoricalLines
+    oldEntry = array.shift(historicalEntryLines)
+    line.delete(oldEntry)
+
+// Reset flags quando la posizione si chiude - MODIFICATO
+if strategy.position_size == 0 and not wasInPosition
+    // NON resettare gli order flags qui - potrebbero esserci ordini pendenti
+    breakevenTriggered := false
+    originalStopLoss := na
+    currentPyramidLevel := 0
+    trailingStopActive := false
+    highestProfitablePrice := na
+    lowestProfitablePrice := na
+    trailingStopPrice := na
+    lastTrailingLevel := na
+
+// Reset signal flags dopo una barra - MODIFICATO: non resetta più order flags
+if barstate.isconfirmed
+    showLongSignal := false
+    showShortSignal := false
+    showTrailingSignal := false
+    // RIMOSSO il reset di longOrderActive e shortOrderActive
+    // Ora gli ordini rimangono attivi fino alla scadenza naturale
+
+// ========== ETICHETTE LIVELLI ==========
+var label stopLabel = na
+var label tpLabel = na
+var label entryLabel = na
+
+if showLabels and strategy.position_size != 0 and barstate.islast and showLevels
+    if not na(stopLabel)
+        label.delete(stopLabel)
+    if not na(tpLabel)
+        label.delete(tpLabel)
+    if not na(entryLabel)
+        label.delete(entryLabel)
+    
+    stopText = trailingStopActive ? "TRAIL: " + str.tostring(currentStopLoss, format.mintick) : breakevenTriggered ? "BE: " + str.tostring(currentStopLoss, format.mintick) : "SL: " + str.tostring(currentStopLoss, format.mintick)
+    stopColor = trailingStopActive ? color.purple : breakevenTriggered ? color.orange : color.red
+    
+    stopLabel := label.new(bar_index + 3, currentStopLoss, stopText, color=stopColor, textcolor=color.white, style=label.style_label_left, size=size.small)
+    tpLabel := label.new(bar_index + 3, currentTakeProfit, "TP: " + str.tostring(currentTakeProfit, format.mintick), color=color.green, textcolor=color.white, style=label.style_label_left, size=size.small)
+    entryLabel := label.new(bar_index + 3, strategy.position_avg_price, "Entry: " + str.tostring(strategy.position_avg_price, format.mintick), color=color.blue, textcolor=color.white, style=label.style_label_left, size=size.small)
+
+if (strategy.position_size == 0 or not showLevels or not showLabels)
+    if not na(stopLabel)
+        label.delete(stopLabel)
+        stopLabel := na
+    if not na(tpLabel)
+        label.delete(tpLabel)
+        tpLabel := na
+    if not na(entryLabel)
+        label.delete(entryLabel)
+        entryLabel := na
+
+// ========== PLOT SEGNALI ==========
+plotshape(showLongSignal, location=location.belowbar, style=shape.triangleup, color=color.green, size=size.small, title="Long Signal")
+plotshape(showShortSignal, location=location.abovebar, style=shape.triangledown, color=color.red, size=size.small, title="Short Signal")
+
+var bool showBreakevenSignal = false
+if useBreakeven and breakevenTriggered and barstate.isconfirmed
+    showBreakevenSignal := true
+
+plotshape(showBreakevenSignal, location=location.absolute, style=shape.diamond, color=color.orange, size=size.tiny, title="Break-Even Activated")
+plotshape(showTrailingSignal, location=location.absolute, style=shape.diamond, color=color.purple, size=size.small, title="Trailing Stop Activated")
+
+if barstate.isconfirmed
+    showBreakevenSignal := false
+
+// ========== PLOT EMA ==========
+plot(ema750, "EMA Filter", color=color.new(color.orange, 50), linewidth=2)
+
+// ========== EVIDENZIAZIONE FASCE ORARIE ==========
+bgcolor(showTimeFilterInfo and timeFilterActive ? color.new(color.green, 95) : na, title="Time Filter Active")
+
+// ========== INFO PANEL ==========
+var table infoTable = table.new(position.top_right, 2, 32, bgcolor=color.white, border_width=1, frame_width=1, frame_color=color.gray)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Stop Loss", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 0, str.tostring(stopLossPips) + " pips", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 1, "Risk/Reward", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 1, str.tostring(riskReward) + ":1", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 2, "Order Validity", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 2, str.tostring(extendBars) + " bars", text_color=color.blue, text_size=tableSize)
+    
+    // NUOVA RIGA: Percentuale KCandle
+    table.cell(infoTable, 0, 3, "KCandle %", text_color=color.black, bgcolor=color.lime, text_size=tableSize)
+    table.cell(infoTable, 1, 3, str.tostring(kcandlePercentage) + "%", text_color=color.black, text_size=tableSize)
+    
+    // TIME FILTER INFO
+    table.cell(infoTable, 0, 4, "Fuso Orario", text_color=color.black, bgcolor=color.aqua, text_size=tableSize)
+    table.cell(infoTable, 1, 4, userTimezone, text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 5, "Filtro Orario", text_color=color.black, bgcolor=color.aqua, text_size=tableSize)
+    table.cell(infoTable, 1, 5, useTimeFilter ? "ON" : "OFF", text_color=useTimeFilter ? color.green : color.red, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 6, "Stato Filtro", text_color=color.black, bgcolor=color.aqua, text_size=tableSize)
+    table.cell(infoTable, 1, 6, useTimeFilter ? (timeFilterActive ? "ATTIVO" : "INATTIVO") : "-", text_color=timeFilterActive and useTimeFilter ? color.green : useTimeFilter ? color.red : color.gray, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 7, "Fascia 1", text_color=color.black, bgcolor=color.aqua, text_size=tableSize)
+    session1Status = enableSession1 ? (not na(time(timeframe.period, session1Start, userTimezone)) ? "ATTIVA" : "INATTIVA") : "DISABILITATA"
+    table.cell(infoTable, 1, 7, session1Status, text_color=enableSession1 and not na(time(timeframe.period, session1Start, userTimezone)) ? color.green : enableSession1 ? color.red : color.gray, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 8, "Fascia 2", text_color=color.black, bgcolor=color.aqua, text_size=tableSize)
+    session2Status = enableSession2 ? (not na(time(timeframe.period, session2Start, userTimezone)) ? "ATTIVA" : "INATTIVA") : "DISABILITATA"
+    table.cell(infoTable, 1, 8, session2Status, text_color=enableSession2 and not na(time(timeframe.period, session2Start, userTimezone)) ? color.green : enableSession2 ? color.red : color.gray, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 9, "Piramidazione", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 9, allowPyramiding ? "ON" : "OFF", text_color=allowPyramiding ? color.green : color.red, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 10, "Max Livelli", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 10, allowPyramiding ? str.tostring(maxPyramidLevels) : "-", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 11, "Livello Corrente", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 11, strategy.position_size != 0 ? str.tostring(currentPyramidLevel) + "/" + str.tostring(maxPyramidLevels) : "-", text_color=color.blue, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 12, "Size Multiplier", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 12, allowPyramiding ? str.tostring(pyramidSizeMultiplier) + "x" : "-", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 13, "Break-Even", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 13, useBreakeven ? "ON" : "OFF", text_color=useBreakeven ? color.green : color.red, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 14, "BE R:R", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 14, useBreakeven ? str.tostring(breakevenRR) + ":1" : "-", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 15, "BE Offset", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 15, useBreakeven ? str.tostring(breakevenOffset) + "pts" : "-", text_color=color.black, text_size=tableSize)
+    
+    // TRAILING STOP INFO
+    table.cell(infoTable, 0, 16, "Trailing Stop", text_color=color.black, bgcolor=color.purple, text_size=tableSize)
+    table.cell(infoTable, 1, 16, useTrailingStop ? "ON" : "OFF", text_color=useTrailingStop ? color.green : color.red, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 17, "Trail Activation", text_color=color.black, bgcolor=color.purple, text_size=tableSize)
+    table.cell(infoTable, 1, 17, useTrailingStop ? str.tostring(trailingActivationRR) + ":1" : "-", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 18, "Trail Distance", text_color=color.black, bgcolor=color.purple, text_size=tableSize)
+    table.cell(infoTable, 1, 18, useTrailingStop ? str.tostring(trailingDistance) + "R" : "-", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 19, "Trail Step", text_color=color.black, bgcolor=color.purple, text_size=tableSize)
+    table.cell(infoTable, 1, 19, useTrailingStop ? str.tostring(trailingStep) + "R" : "-", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 20, "Trail Status", text_color=color.black, bgcolor=color.purple, text_size=tableSize)
+    table.cell(infoTable, 1, 20, strategy.position_size != 0 ? (trailingStopActive ? "ACTIVE" : "WAITING") : "NO_POS", text_color=trailingStopActive ? color.purple : strategy.position_size != 0 ? color.blue : color.gray, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 21, "Position Size", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 21, str.tostring(strategy.position_size), text_color=color.black, text_size=tableSize)
+               
+    table.cell(infoTable, 0, 22, "BE Status", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 22, strategy.position_size != 0 ? (breakevenTriggered ? "TRIGGERED" : "WAITING") : "NO_POS", text_color=breakevenTriggered ? color.orange : strategy.position_size != 0 ? color.blue : color.gray, text_size=tableSize)
+               
+    table.cell(infoTable, 0, 23, "BE Trigger", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 23, strategy.position_size != 0 and not na(breakevenTriggerPrice) ? str.tostring(breakevenTriggerPrice, format.mintick) : "-", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 24, "Current SL", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    stopColor = trailingStopActive ? color.purple : breakevenTriggered ? color.orange : color.red
+    table.cell(infoTable, 1, 24, strategy.position_size != 0 ? str.tostring(currentStopLoss, format.mintick) : "-", text_color=stopColor, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 25, "Entry Price", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 25, strategy.position_size != 0 ? str.tostring(strategy.position_avg_price, format.mintick) : "-", text_color=color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 26, "Unrealized P&L", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 26, strategy.position_size != 0 ? str.tostring(strategy.openprofit, "#.##") : "-", text_color=strategy.openprofit > 0 ? color.green : strategy.openprofit < 0 ? color.red : color.black, text_size=tableSize)
+               
+    table.cell(infoTable, 0, 27, "Total Trades", text_color=color.black, bgcolor=color.gray, text_size=tableSize)
+    table.cell(infoTable, 1, 27, str.tostring(strategy.closedtrades), text_color=color.black, text_size=tableSize)
+    
+    // NUOVE METRICHE AGGIUNTE
+    table.cell(infoTable, 0, 28, "P&L Totale", text_color=color.black, bgcolor=color.yellow, text_size=tableSize)
+    pnlPercent = strategy.initial_capital != 0 ? (strategy.netprofit / strategy.initial_capital) * 100 : 0
+    table.cell(infoTable, 1, 28, str.tostring(strategy.netprofit, "#.##") + " (" + str.tostring(pnlPercent, "#.##") + "%)", text_color=strategy.netprofit > 0 ? color.green : strategy.netprofit < 0 ? color.red : color.black, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 29, "Max Drawdown", text_color=color.black, bgcolor=color.yellow, text_size=tableSize)
+    ddPercent = strategy.initial_capital != 0 ? (strategy.max_drawdown / strategy.initial_capital) * 100 : 0
+    table.cell(infoTable, 1, 29, str.tostring(strategy.max_drawdown, "#.##") + " (" + str.tostring(ddPercent, "#.##") + "%)", text_color=color.red, text_size=tableSize)
+    
+    table.cell(infoTable, 0, 30, "Win Rate", text_color=color.black, bgcolor=color.yellow, text_size=tableSize)
+    winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    table.cell(infoTable, 1, 30, str.tostring(winRate, "#.##") + "% (" + str.tostring(strategy.wintrades) + "/" + str.tostring(strategy.closedtrades) + ")", text_color=winRate >= 50 ? color.green : color.red, text_size=tableSize)
+
+View in Pine Editor・651 lines
+Use on chart
+2
+3
+997
+Sep 20, 2025
+# KCandle Strategy 1.0 - Trading Strategy Description
+
+## Overview
+The **KCandle Strategy** is an advanced Pine Script trading system based on bullish and bearish engulfing candlestick patterns, enhanced with sophisticated risk management and position optimization features.
+
+## Core Logic
+
+### Entry Signal Generation
+- **Pattern Recognition**: Detects bullish and bearish engulfing candlestick formations
+- **EMA Filter**: Uses a customizable EMA (default 25) to filter trades in the direction of the trend
+- **Entry Levels**:
+- **Long entries** at 25% of the candlestick range from the low
+- **Short entries** at 75% of the candlestick range from the low
+- **Signal Validation**: Orange candlesticks indicate valid setup conditions
+
+### Risk Management System
+
+#### 1. **Stop Loss & Take Profit**
+- Configurable stop loss in pips
+- Risk-reward ratio setting (default 2:1)
+- Visual representation with colored lines and labels
+
+#### 2. **Break-Even Management**
+- Automatically moves stop loss to break-even when specified R:R is reached
+- Customizable break-even offset for added protection
+- Prevents losing trades after reaching profitability
+
+#### 3. **Trailing Stop System**
+- **Activation Trigger**: Activates when position reaches specified R:R level
+- **Distance Control**: Maintains trailing stop at defined distance from entry
+- **Step Management**: Moves stop loss forward in incremental R steps
+- **Dynamic Protection**: Locks in profits while allowing for continued upside
+
+### Advanced Features
+
+#### Position Management
+- **Pyramiding Support**: Optional multiple position entries with size reduction
+- **Order Expiration**: Pending orders automatically cancel after specified bars
+- **Position Sizing**: Percentage-based allocation with pyramid level adjustments
+
+#### Visual Interface
+- **Real-time Monitoring**: Comprehensive information panel with all strategy metrics
+- **Historical Tracking**: Visual representation of past trades and levels
+- **Color-coded Indicators**: Different colors for break-even, trailing, and standard stops
+- **Debug Options**: Optional labels for troubleshooting and optimization
+
+## Key Parameters
+
+### Basic Settings
+- **EMA Length**: Trend filter period
+- **Stop Loss**: Risk per trade in pips
+- **Risk/Reward**: Target profit ratio
+- **Order Validity**: Duration of pending orders
+
+### Risk Management
+- **Break-Even R:R**: Profit level to trigger break-even
+- **Trailing Activation**: R:R level to start trailing
+- **Trailing Distance**: Stop distance from entry when trailing
+- **Trailing Step**: Increment for stop loss advancement
+
+## Strategy Benefits
+
+1. **Objective Entry Signals**: Based on proven candlestick patterns
+2. **Trend Alignment**: EMA filter ensures trades align with market direction
+3. **Robust Risk Control**: Multiple layers of protection (SL, BE, Trailing)
+4. **Profit Optimization**: Trailing stops maximize winning trade potential
+5. **Flexibility**: Extensive customization options for different market conditions
+6. **Visual Clarity**: Complete visual feedback for trade management
+
+## Ideal Use Cases
+- **Swing Trading**: Medium-term positions with trend-following approach
+- **Breakout Trading**: Capturing momentum from engulfing patterns
+- **Risk-Conscious Trading**: Suitable for traders prioritizing capital preservation
+- **Multi-Timeframe**: Adaptable to various timeframes and instruments
+
+---
+
+*The KCandle Strategy combines traditional technical analysis with modern risk management techniques, providing traders with a comprehensive tool for systematic market participation.*
+Sep 20, 2025
+Release Notes
+-Bug fix
+Sep 22, 2025
+Release Notes
+-Fixed limit orders expiration
+Sep 22, 2025
+Release Notes
+- Reduced infotable

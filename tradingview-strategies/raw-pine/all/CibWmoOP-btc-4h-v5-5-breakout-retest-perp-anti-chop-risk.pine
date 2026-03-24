@@ -1,0 +1,231 @@
+//@version=6
+strategy("BTC 15m v5.5 Breakout→Retest (Perp) + Anti-Chop + Risk", overlay=true,
+     initial_capital=10000,
+     pyramiding=0,
+     process_orders_on_close=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.04)
+
+//==================== INPUTS ====================
+groupCore = "Core"
+lenRange      = input.int(40, "Donchian range length", minval=10, group=groupCore)
+breakByClose  = input.bool(true, "Breakout by CLOSE (else wick)", group=groupCore)
+retestBars    = input.int(10, "Max bars to wait retest", minval=1, group=groupCore)
+
+groupReg = "Regime filters (can disable)"
+useATRReg   = input.bool(true, "Use ATR expansion", group=groupReg)
+atrFastLen  = input.int(5, "ATR fast", group=groupReg)
+atrSlowLen  = input.int(20, "ATR slow", group=groupReg)
+atrMult     = input.float(1.05, "ATRfast > ATRslow *", step=0.05, group=groupReg)
+
+useChopReg  = input.bool(true, "Use Choppiness filter", group=groupReg)
+chopLen     = input.int(14, "CHOP length", minval=5, group=groupReg)
+chopMax     = input.float(61.0, "Trade only if CHOP <", step=0.5, group=groupReg)
+
+groupRet = "Retest / Confirm"
+atrLen        = input.int(14, "ATR (for retest/SL)", minval=1, group=groupRet)
+retestTolAtr  = input.float(0.30, "Retest tolerance (x ATR)", step=0.05, group=groupRet)
+maxBackAtr    = input.float(0.80, "Max back into range (x ATR)", step=0.05, group=groupRet)
+confirmMode   = input.string("Reclaim or Candle", "Confirm mode",
+                 options=["Reclaim","Candle","Reclaim or Candle","Break again"], group=groupRet)
+
+groupRisk = "Stops / Targets"
+slBufAtr = input.float(0.20, "SL buffer (x ATR)", step=0.05, group=groupRisk)
+rr       = input.float(1.20, "RR", step=0.05, group=groupRisk)
+
+groupTrail = "Trailing"
+trailEnabled = input.bool(true, "Enable trailing", group=groupTrail)
+trailAfterR  = input.float(1.10, "Start trail after R", step=0.05, group=groupTrail)
+trailLen     = input.int(6, "Trail length", minval=1, group=groupTrail)
+
+groupSafety = "Risk control"
+maxLossStreak = input.int(3, "Max losses in a row → pause", minval=1, group=groupSafety)
+pauseBarsAfterKill = input.int(20, "Pause bars after loss-streak", minval=1, group=groupSafety)
+dailyMaxDDPct = input.float(2.5, "Daily max DD% → pause until next day", step=0.25, group=groupSafety)
+
+groupDbg = "Debug"
+dbg = input.bool(false, "Show debug markers", group=groupDbg)
+
+//==================== CALCS ====================
+atr  = ta.atr(atrLen)
+atrF = ta.atr(atrFastLen)
+atrS = ta.atr(atrSlowLen)
+
+// Donchian range (exclude current bar)
+rangeHigh = ta.highest(high[1], lenRange)
+rangeLow  = ta.lowest(low[1], lenRange)
+
+// Breakouts
+breakUp   = breakByClose ? close > rangeHigh : high > rangeHigh
+breakDown = breakByClose ? close < rangeLow  : low < rangeLow
+
+//==================== CHOP ====================
+var float trSum = 0.0
+trSum := 0.0
+for i = 0 to chopLen - 1
+    trSum += ta.tr(true)[i]
+
+hh = ta.highest(high, chopLen)
+ll = ta.lowest(low, chopLen)
+den = math.max(hh - ll, syminfo.mintick)
+chop = 100 * math.log10(trSum / den) / math.log10(chopLen)
+
+// Regime
+atrOk  = not useATRReg or (atrF > atrS * atrMult)
+chopOk = not useChopReg or (chop < chopMax)
+regimeOk = atrOk and chopOk
+
+//==================== RISK CONTROL (proper) ====================
+var int lossStreak = 0
+var int lastClosedCount = 0
+closedCount = strategy.closedtrades
+
+if closedCount > lastClosedCount
+    lastProfit = strategy.closedtrades.profit(closedCount - 1)
+    if lastProfit < 0
+        lossStreak += 1
+    else
+        lossStreak := 0
+    lastClosedCount := closedCount
+
+var int killPauseUntil = na
+if lossStreak >= maxLossStreak
+    killPauseUntil := bar_index + pauseBarsAfterKill
+    lossStreak := 0
+
+killOk = na(killPauseUntil) ? true : (bar_index > killPauseUntil)
+
+// Daily DD stop
+var int curDay = na
+var float dayEquityStart = na
+var int ddPauseDay = na
+today = dayofmonth(time)
+
+if na(curDay) or today != curDay
+    curDay := today
+    dayEquityStart := strategy.equity
+    ddPauseDay := na
+
+dayDDPct = dayEquityStart > 0 ? (dayEquityStart - strategy.equity) / dayEquityStart * 100.0 : 0.0
+if dayDDPct >= dailyMaxDDPct
+    ddPauseDay := curDay
+
+ddOk = na(ddPauseDay) ? true : (curDay != ddPauseDay)
+
+riskOk = killOk and ddOk
+
+//==================== STATE MACHINE ====================
+var int state = 0          // 0 idle, 1 wait long retest, -1 wait short retest
+var int stateBar = na
+var float lvl = na
+
+canArm = strategy.position_size == 0 and regimeOk and riskOk
+
+if state == 0 and canArm
+    if breakUp
+        state := 1
+        stateBar := bar_index
+        lvl := rangeHigh
+    else if breakDown
+        state := -1
+        stateBar := bar_index
+        lvl := rangeLow
+
+// Expire waiting
+if state != 0 and (bar_index - stateBar) > retestBars
+    state := 0
+    lvl := na
+    stateBar := na
+
+//==================== RETEST + CONFIRM ====================
+tol = atr * retestTolAtr
+maxBack = atr * maxBackAtr
+
+bull = close > open
+bear = close < open
+
+// touch near level
+retestLongTouch  = state == 1 and low <= (lvl + tol)
+retestShortTouch = state == -1 and high >= (lvl - tol)
+
+// depth: don’t go too deep back into range
+retestLongDepthOk  = state == 1 and low >= (lvl - maxBack)
+retestShortDepthOk = state == -1 and high <= (lvl + maxBack)
+
+// reclaim
+reclaimLong  = close > lvl
+reclaimShort = close < lvl
+
+confirmLong =
+     confirmMode == "Reclaim" ? reclaimLong :
+     confirmMode == "Candle"  ? bull :
+     confirmMode == "Break again" ? close > rangeHigh :
+     (reclaimLong or bull)
+
+confirmShort =
+     confirmMode == "Reclaim" ? reclaimShort :
+     confirmMode == "Candle"  ? bear :
+     confirmMode == "Break again" ? close < rangeLow :
+     (reclaimShort or bear)
+
+enterLong  = strategy.position_size == 0 and riskOk and retestLongTouch and retestLongDepthOk and confirmLong
+enterShort = strategy.position_size == 0 and riskOk and retestShortTouch and retestShortDepthOk and confirmShort
+
+//==================== ORDERS ====================
+if enterLong
+    sl = math.min(low, lvl) - atr * slBufAtr
+    tp = close + (close - sl) * rr
+    strategy.entry("L", strategy.long, alert_message="ENTER LONG")
+    strategy.exit("LX", "L", stop=sl, limit=tp, alert_message="EXIT LONG")
+    label.new(bar_index, low, "LONG", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 0))
+    state := 0
+
+if enterShort
+    sl = math.max(high, lvl) + atr * slBufAtr
+    tp = close - (sl - close) * rr
+    strategy.entry("S", strategy.short, alert_message="ENTER SHORT")
+    strategy.exit("SX", "S", stop=sl, limit=tp, alert_message="EXIT SHORT")
+    label.new(bar_index, high, "SHORT", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0))
+    state := 0
+
+//==================== TRAIL ====================
+lowestLow   = ta.lowest(low, trailLen)
+highestHigh = ta.highest(high, trailLen)
+
+if trailEnabled and strategy.position_size > 0
+    entry = strategy.position_avg_price
+    if high >= entry + atr * trailAfterR
+        strategy.exit("LXT", "L", stop=lowestLow - atr * 0.05)
+
+if trailEnabled and strategy.position_size < 0
+    entry = strategy.position_avg_price
+    if low <= entry - atr * trailAfterR
+        strategy.exit("SXT", "S", stop=highestHigh + atr * 0.05)
+
+//==================== VISUAL ====================
+plot(rangeHigh, "Range High", color=color.new(color.green, 0))
+plot(rangeLow,  "Range Low",  color=color.new(color.red, 0))
+plot(chop, "CHOP", color=color.new(color.white, 0), display=display.none)
+
+// Optional debug markers
+plotshape(dbg and regimeOk, title="Regime OK", style=shape.circle, location=location.bottom, size=size.tiny, color=color.new(color.teal, 0), text="R")
+plotshape(dbg and breakUp, title="BreakUp", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.lime, text="B+")
+plotshape(dbg and breakDown, title="BreakDn", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.red, text="B-")
+plotshape(dbg and state == 1, title="Wait L", style=shape.circle, location=location.belowbar, size=size.tiny, color=color.lime, text="W")
+plotshape(dbg and state == -1, title="Wait S", style=shape.circle, location=location.abovebar, size=size.tiny, color=color.red, text="W")
+
+plotshape(dbg and not riskOk, title="Risk blocked", style=shape.square, location=location.top, size=size.tiny, color=color.new(color.orange, 0), text="X")
+
+View in Pine Editor・219 lines
+Use on chart
+1
+0
+555
+my sdfgsdgsdg
+fgsdgsdgs
+FGsdgsdfgsdgs
+
+fgsdgdsfgsdgsdgsdg
+sfdgsdgf dfgsgsgsdgs. sdgsfsgsdg

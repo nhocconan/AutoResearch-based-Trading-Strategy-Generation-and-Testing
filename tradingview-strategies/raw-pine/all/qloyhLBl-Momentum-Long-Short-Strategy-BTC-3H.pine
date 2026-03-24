@@ -1,0 +1,204 @@
+//@version=6
+strategy("Momentum Long + Short Strategy (BTC 3H)", overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     initial_capital=1000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     slippage=1,
+     pyramiding=1)
+
+
+// ==============================================================================
+// === LONG TRADE SETTINGS
+// ==============================================================================
+enableLongs     = input.bool(true,  "Enable Long Trades", group="LONG TRADE SETTINGS")
+slPercentLong   = input.float(3.0, "Long Stop Loss %", minval=0.1, group="LONG TRADE SETTINGS")
+
+useRSIFilter     = input.bool(false, "Enable RSI Filter", group="LONG FILTER SETTINGS")
+useADXFilter     = input.bool(false, "Enable ADX Filter", group="LONG FILTER SETTINGS")
+useATRFilter     = input.bool(false, "Enable ATR Filter", group="LONG FILTER SETTINGS")
+useTrendFilter   = input.bool(true,  "Require MA100 > MA500", group="LONG FILTER SETTINGS")
+
+smoothType      = input.string("EMA", "Smoothing Type", options=["EMA", "SMA"], group="LONG FILTER SETTINGS")
+smoothingLength = input.int(100, "Smoothing Length (for filters)", group="LONG FILTER SETTINGS")
+
+rsiLengthLong   = input.int(14, "RSI Length", group="RSI FILTER")
+adxLength       = input.int(14, "ADX Length", group="ADX FILTER")
+atrLength       = input.int(14, "ATR Length", group="ATR FILTER")
+
+
+// ==============================================================================
+// === SHORT TRADE SETTINGS
+// ==============================================================================
+enableShorts         = input.bool(false, "Enable Short Trades", group="SHORT TRADE SETTINGS")
+slPercentShort       = input.float(3.0, "Short Stop Loss %", minval=0.1, group="SHORT TRADE SETTINGS")
+tpPercentShort       = input.float(4.0, "Short Take Profit %", minval=0.1, group="SHORT TRADE SETTINGS")
+rsiLengthShort       = input.int(14, "RSI Length", group="SHORT FILTER SETTINGS")
+rsiThresholdShort    = input.float(33, "RSI Threshold", minval=1, maxval=100, group="SHORT FILTER SETTINGS")
+bbLength             = input.int(20, "Bollinger Band Length", group="SHORT FILTER SETTINGS")
+useATRFilterShort    = input.bool(true, "Enable ATR Filter (Short)", group="SHORT FILTER SETTINGS")
+useStrongUptrendBlock = input.bool(true, "Block Shorts if MA100 > MA500 by (%)", group="SHORT FILTER SETTINGS")
+shortTrendGapPct     = input.float(2.0, "Threshold (%) for Blocking Shorts", minval=0.1, group="SHORT FILTER SETTINGS")
+
+
+// ==============================================================================
+// === COMMON INDICATORS
+// ==============================================================================
+ma100 = smoothType == "EMA" ? ta.ema(close, 100) : ta.sma(close, 100)
+ma500 = smoothType == "EMA" ? ta.ema(close, 500) : ta.sma(close, 500)
+priceAboveMAs = close > ma100 and close > ma500
+trendAlignment = not useTrendFilter or ma100 > ma500
+
+plot(ma100, title="MA 100", color=color.orange)
+plot(ma500, title="MA 500", color=color.blue)
+
+
+// ==============================================================================
+// === LONG FILTER LOGIC
+// ==============================================================================
+rsiLong = ta.rsi(close, rsiLengthLong)
+rsiSmooth = smoothType == "EMA" ? ta.ema(rsiLong, smoothingLength) : ta.sma(rsiLong, smoothingLength)
+rsiPass = not useRSIFilter or rsiLong > rsiSmooth
+
+dmi(len) =>
+    up       = ta.change(high)
+    down     = -ta.change(low)
+    plusDM   = na(up) ? na : (up > down and up > 0 ? up : 0)
+    minusDM  = na(down) ? na : (down > up and down > 0 ? down : 0)
+    trur     = ta.rma(ta.tr, len)
+    plusDI   = 100 * ta.rma(plusDM, len) / trur
+    minusDI  = 100 * ta.rma(minusDM, len) / trur
+    dx       = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+    ta.rma(dx, len)
+
+adx = dmi(adxLength)
+adxSmooth = smoothType == "EMA" ? ta.ema(adx, smoothingLength) : ta.sma(adx, smoothingLength)
+adxPass = not useADXFilter or adx > adxSmooth
+
+atr = ta.atr(atrLength)
+atrSmooth = smoothType == "EMA" ? ta.ema(atr, smoothingLength) : ta.sma(atr, smoothingLength)
+atrPass = not useATRFilter or atr > atrSmooth
+
+
+// ==============================================================================
+// === SHORT FILTER LOGIC
+// ==============================================================================
+rsiShort = ta.rsi(close, rsiLengthShort)
+bbBasis = ta.sma(close, bbLength)
+bbDev   = ta.stdev(close, bbLength)
+bbLower = bbBasis - bbDev * 2
+priceBelowBB = close < bbLower
+priceBelowMAs = close < ma100 and close < ma500
+rsiOversold = rsiShort < rsiThresholdShort
+
+atrShort = ta.atr(atrLength)
+atrShortSmoothed = smoothType == "EMA" ? ta.ema(atrShort, smoothingLength) : ta.sma(atrShort, smoothingLength)
+atrShortPass = not useATRFilterShort or atrShort > atrShortSmoothed
+
+emaGapTooWide = (ma100 - ma500) / ma500 * 100 > shortTrendGapPct
+strongUptrendBlock = not useStrongUptrendBlock or not emaGapTooWide
+
+
+// ==============================================================================
+// === ENTRY CONDITIONS
+// ==============================================================================
+longCondition = enableLongs and priceAboveMAs and trendAlignment and rsiPass and adxPass and atrPass
+shortCondition = enableShorts and priceBelowMAs and priceBelowBB and rsiOversold and atrShortPass and strongUptrendBlock
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+
+// ==============================================================================
+// === EXIT CONDITIONS
+// ==============================================================================
+longStop = strategy.position_avg_price * (1 - slPercentLong / 100)
+strategy.exit("SL Long", from_entry="Long", stop=longStop)
+
+if strategy.position_size > 0 and close < ma500
+    strategy.close("Long", comment="TP Below MA500")
+
+shortStop = strategy.position_avg_price * (1 + slPercentShort / 100)
+shortTP   = strategy.position_avg_price * (1 - tpPercentShort / 100)
+
+strategy.exit("SL/TP Short", from_entry="Short", stop=shortStop, limit=shortTP)
+
+View in Pine Editor・128 lines
+Use on chart
+1
+8
+4
+3 569
+Momentum Long + Short Strategy (BTC 3H)
+
+🔍 How It Works, Step by Step
+
+Detect the Trend (📈/📉)
+
+Calculate two moving averages (100-period and 500-period), either EMA or SMA.
+
+For longs, we require MA100 > MA500 (uptrend).
+
+For shorts, we block entries if MA100 exceeds MA500 by more than a set percentage (to avoid fading a powerful uptrend).
+
+Apply Momentum Filters (⚡️)
+
+RSI Filter: Measures recent strength—only allow longs when RSI crosses above its smoothed average, and shorts when RSI dips below the oversold threshold.
+
+ADX Filter: Gauges trend strength—ensures we only enter when a meaningful trend exists (optional).
+
+ATR Filter: Confirms volatility—avoids choppy, low-volatility conditions by requiring ATR to exceed its smoothed value (optional).
+
+Confirm Entry Conditions (✅)
+
+Long Entry:
+
+Price is above both MAs
+
+Trend alignment & optional filters pass ✅
+
+Short Entry:
+
+Price is below both MAs and below the lower Bollinger Band
+
+RSI is sufficiently oversold
+
+Trend-blocker & ATR filter pass ✅
+
+Position Sizing & Risk (💰)
+
+Each trade uses 100 % of account equity by default.
+
+One pyramid addition allowed, so you can scale in if the move continues.
+
+Commission and slippage assumptions built in for realistic backtests.
+
+Stops & Exits (🛑)
+
+Long Stop-Loss: e.g. 3 % below entry.
+
+Long Auto-Exit: If price falls back under the 500-period MA.
+
+Short Stop-Loss: e.g. 3 % above entry.
+
+Short Take-Profit: e.g. 4 % below entry.
+
+🎨 Why It’s Powerful & Customizable
+
+Modular Filters: Turn on/off RSI, ADX, ATR filters to suit different market regimes.
+
+Adjustable Thresholds: Fine-tune stop-loss %, take-profit %, RSI lengths, MA gaps and more.
+
+Multi-Timeframe Potential: Although coded for 3 h BTC, you can adapt it to stocks, forex or other cryptos—just recalibrate!
+
+Backtest Fine-Tuned: Default settings were optimized via backtesting on historical BTC data—but they’re not guarantees of future performance.
+
+⚠️ Warning & Disclaimer
+
+This strategy is for educational purposes only and designed for a toy fund. Crypto markets are highly volatile—you can lose 100 % of your capital. It is not a predictive “holy grail” but a rules-based framework using past data. The parameters have been fine-tuned on historical data and are not valid for future trades without fresh calibration. Always practice with paper-trading first, use proper risk management, and do your own research before risking real money. 🚨🔒
+
+Good luck exploring and experimenting! 🚀📊

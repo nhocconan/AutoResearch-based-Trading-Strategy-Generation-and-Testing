@@ -1,0 +1,5 @@
+//@version=3
+upperband=##input(defval=89,type='INPUT_INTEGER',##id='in_2')
+lowerband=##input(defval=10,type='INPUT_INTEGER',##id='in_3')
+##root(root_metainfo,rm_0,upperband)
+##root(root_metainfo,rm_1,lowerband)

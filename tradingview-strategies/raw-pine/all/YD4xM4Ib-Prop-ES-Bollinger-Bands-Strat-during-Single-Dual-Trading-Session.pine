@@ -1,0 +1,121 @@
+//@version=5
+//Grok assisted script
+strategy("Prop ES Bollinger Bands", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// ──────────────────────────────────────────────────────────────
+// Inputs
+// ──────────────────────────────────────────────────────────────
+
+// Bollinger Bands
+length = input.int(20, "Length", minval=1, group="Bollinger Bands", inline='1')
+mult = input.float(2.0, "Multiplier", minval=0.001, maxval=50, group="Bollinger Bands", inline='1')
+
+// Trade direction
+tradeDirection = input.string("Both", "Trade Direction", options=["Long Only", "Short Only", "Both"], group="Trade Direction")
+
+// TP/SL
+tp_ticks = input.int(250, "Take Profit Ticks", minval=1, group="Trade Management")
+sl_ticks = input.int(150, "Stop Loss Ticks", minval=1, group="Trade Management")
+
+// ─── Trading Sessions (New York time) ───────────────────────────────────
+
+entry_start1_hour = input.int(2,  "Start Hour",   minval=0, maxval=23, group="Session 1 (NY time)", inline='1')
+entry_start1_min  = input.int(30, "Start Min",    minval=0, maxval=59, group="Session 1 (NY time)", inline='1')
+entry_end1_hour   = input.int(5,  "End Hour",     minval=0, maxval=23, group="Session 1 (NY time)", inline='2')
+entry_end1_min    = input.int(0,  "End Min",      minval=0, maxval=59, group="Session 1 (NY time)", inline='2')
+
+useSession2 = input.bool(false, "Use Second Trading Session", group="Trading Sessions", tooltip="Check to use a 2nd trading session")
+
+entry_start2_hour = input.int(7,  "Start Hour",   minval=0, maxval=23, group="Session 2 (NY time)", inline='1')
+entry_start2_min  = input.int(0,  "Start Min",    minval=0, maxval=59, group="Session 2 (NY time)", inline='1')
+entry_end2_hour   = input.int(9,  "End Hour",     minval=0, maxval=23, group="Session 2 (NY time)", inline='2')
+entry_end2_min    = input.int(30, "End Min",      minval=0, maxval=59, group="Session 2 (NY time)", inline='2')
+
+// Force close
+force_close_hour = input.int(16, "Hour (24h)", minval=0, maxval=23, group="Force Close", inline='1')
+force_close_min  = input.int(49, "Minute",     minval=0, maxval=59, group="Force Close", inline='1')
+
+// ──────────────────────────────────────────────────────────────
+// Calculations
+// ──────────────────────────────────────────────────────────────
+
+basis = ta.sma(close, length)
+dev = mult * ta.stdev(close, length)
+upper = basis + dev
+lower = basis - dev
+
+// Signals
+longCondition  = ta.crossover(close, lower)
+shortCondition = ta.crossunder(close, upper)
+
+// Timezone
+ny_tz = "America/New_York"
+
+// Bar close time in NY
+ny_close_hour   = hour(time_close, ny_tz)
+ny_close_minute = minute(time_close, ny_tz)
+
+// Session 1 check
+in_window1 = ((ny_close_hour > entry_start1_hour) or (ny_close_hour == entry_start1_hour and ny_close_minute >= entry_start1_min)) and 
+             ((ny_close_hour < entry_end1_hour)  or (ny_close_hour == entry_end1_hour  and ny_close_minute <= entry_end1_min))
+
+// Session 2 check (only if enabled)
+in_window2 = useSession2 and 
+             ((ny_close_hour > entry_start2_hour) or (ny_close_hour == entry_start2_hour and ny_close_minute >= entry_start2_min)) and 
+             ((ny_close_hour < entry_end2_hour)  or (ny_close_hour == entry_end2_hour  and ny_close_minute <= entry_end2_min))
+
+// Final entry window
+entry_allowed = in_window1 or in_window2
+
+// Direction filter
+allowLong  = tradeDirection == "Long Only" or tradeDirection == "Both"
+allowShort = tradeDirection == "Short Only" or tradeDirection == "Both"
+
+// ─── Entry Logic ────────────────────────────────────────────────────────
+if (longCondition and entry_allowed and allowLong)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", profit=tp_ticks, loss=sl_ticks)
+
+if (shortCondition and entry_allowed and allowShort)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", profit=tp_ticks, loss=sl_ticks)
+
+// ─── Force Close at end of day ──────────────────────────────────────────
+ny_year  = year(time_close, ny_tz)
+ny_month = month(time_close, ny_tz)
+ny_day   = dayofmonth(time_close, ny_tz)
+
+daily_close_time = timestamp(ny_tz, ny_year, ny_month, ny_day, force_close_hour, force_close_min, 0)
+
+bar_duration = time_close - time
+force_close_bar = time_close < daily_close_time and (time_close + bar_duration) >= daily_close_time
+
+if (force_close_bar and strategy.position_size != 0)
+    strategy.close_all("Force Close")
+
+// ─── Visuals ────────────────────────────────────────────────────────────
+plot(basis, color=color.rgb(33, 149, 243, 90), title="Basis")
+plot(upper, color=color.rgb(255, 82, 82, 50), title="Upper")
+plot(lower, color=color.rgb(76, 175, 79, 50), title="Lower")
+
+plotshape(longCondition  and entry_allowed and allowLong, title="Buy",  location=location.belowbar, color=color.new(color.green, 30), style=shape.labelup,   text="BUY")
+plotshape(shortCondition and entry_allowed and allowShort, title="Sell", location=location.abovebar,  color=color.new(color.red,   30), style=shape.labeldown, text="SELL")
+
+View in Pine Editor・102 lines
+Use on chart
+2
+9
+9
+2
+3 794
+Bollinger Band strategy for ES futures optimized for prop firm rules.
+
+Choose long-only, short-only, or both directions.
+
+Customizable BB length and multiplier.
+
+Enter trades during one or two configurable sessions specified in New York time.
+
+Fixed TP/SL in ticks with forced close by 4:59 PM NY time.
+
+

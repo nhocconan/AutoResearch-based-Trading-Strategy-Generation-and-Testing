@@ -1,0 +1,88 @@
+//@version=5
+strategy("VWAP/MVWAP/EMA Crossover Strategy (Long & Short, One-Trade-At-A-Time)",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0,
+     process_orders_on_close=true)
+
+// ====== Inputs ======
+vwapLength  = input.int(1,  "VWAP Length", minval=1)
+mvwapLength = input.int(21, "MVWAP Length", minval=1)
+
+emaLen1     = input.int(7,  "EMA 1 Length", minval=1)
+emaSrc1     = input.source(close, "EMA 1 Source")
+emaLen2     = input.int(25, "EMA 2 Length", minval=1)
+emaSrc2     = input.source(close, "EMA 2 Source")
+
+tpPoints    = input.float(9, "Take Profit (points)", minval=0.0, step=0.1)
+slPoints    = input.float(29, "Stop Loss (points)",   minval=0.0, step=0.1)
+
+// 可选：是否“反向信号直接平仓”（不等TP/SL）
+closeOnOpp  = input.bool(false, "Close on opposite signal (optional)")
+
+// ====== Core lines ======
+mvwap = ta.ema(ta.vwap, mvwapLength)
+cvwap = ta.ema(ta.vwap, vwapLength)
+
+ema1  = ta.ema(emaSrc1, emaLen1)
+ema2  = ta.ema(emaSrc2, emaLen2)
+
+// ====== Conditions ======
+longCond  = (ema1 >= mvwap) and (ema2 >= mvwap) and (cvwap >= mvwap)
+shortCond = (ema1 <= mvwap) and (ema2 <= mvwap) and (cvwap <= mvwap)
+
+// 用“刚成立”作为信号，避免持续条件重复触发
+longSignal  = longCond and not longCond[1]
+shortSignal = shortCond and not shortCond[1]
+
+// ====== One trade at a time ======
+flat = strategy.position_size == 0
+
+if flat and longSignal
+    strategy.entry("Long", strategy.long)
+
+if flat and shortSignal
+    strategy.entry("Short", strategy.short)
+
+// ====== Exits: TP/SL ======
+if strategy.position_size > 0
+    longStop  = strategy.position_avg_price - slPoints
+    longLimit = strategy.position_avg_price + tpPoints
+    strategy.exit("Long-TP/SL", from_entry="Long", stop=longStop, limit=longLimit)
+
+if strategy.position_size < 0
+    shortStop  = strategy.position_avg_price + slPoints
+    shortLimit = strategy.position_avg_price - tpPoints
+    strategy.exit("Short-TP/SL", from_entry="Short", stop=shortStop, limit=shortLimit)
+
+// ====== Optional: close on opposite signal ======
+if closeOnOpp and strategy.position_size > 0 and shortSignal
+    strategy.close("Long")
+
+if closeOnOpp and strategy.position_size < 0 and longSignal
+    strategy.close("Short")
+
+// ====== Plots (for visual reference) ======
+plot(mvwap,  color=color.fuchsia, linewidth=2, title="MVWAP")
+plot(cvwap,  color=color.yellow,  linewidth=3, title="VWAP (smoothed)")
+plot(ema1,   color=color.aqua,    linewidth=1, title="EMA 1")
+plot(ema2,   color=color.orange,  linewidth=1, title="EMA 2")
+
+View in Pine Editor・71 lines
+Use on chart
+1
+6
+571
+Strategy Description
+
+This strategy is based on the confluence of VWAP, MVWAP, and EMA crossover structure, designed to identify short-term trend continuation opportunities in both long and short directions.
+
+A trade signal is generated only when the fast EMA, slow EMA, and smoothed VWAP are all positioned on the same side of the MVWAP, indicating directional alignment and structural confirmation. Entries occur only at the moment the condition first becomes true, which helps reduce overtrading during ranging or choppy market conditions.
+
+The strategy enforces a one-trade-at-a-time rule, ensuring that no new positions are opened while an existing trade is active.
+
+Risk management is handled through predefined take-profit and stop-loss levels, which are automatically placed upon entry to maintain clear and consistent risk control. An optional setting allows positions to be closed early if an opposite signal appears.
+
+This strategy is suitable for short-term and intraday trading, emphasizing disciplined execution, structural confirmation, and controlled risk exposure.

@@ -1,0 +1,22 @@
+//@version=3
+
+
+//use overlay=false to create plot below chart, overlay=true will intergrate it
+strategy("RSI Crossover 8rookz", overlay=false)
+length = input( 13 )
+lengthfast = input( 5 )
+
+price = close
+
+vrsi = rsi(price, length)
+vrsiFast = rsi(price, lengthfast)
+
+plot(vrsi, color=purple)
+plot(vrsiFast, color=green)
+
+View in Pine Editor・15 lines
+Use on chart
+1
+4
+1 565
+RSI using 2 different time frames

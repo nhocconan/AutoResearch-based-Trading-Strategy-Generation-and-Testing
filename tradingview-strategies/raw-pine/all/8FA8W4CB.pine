@@ -1,0 +1,3 @@
+//@version=5
+color=##input(defval=#FFFFFF,type='INPUT_COLOR',##id='in_1')
+##root(root_metainfo,rm_ic_0,color,input__color)

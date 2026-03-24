@@ -1,0 +1,57 @@
+//@version=5
+strategy("Williams %R Strategy", overlay=true, initial_capital=100000, shorttitle="W%R Strategy")
+
+// Parameters
+length = input(14, "Length")
+overboughtLevel = input(-20, "Overbought Level")
+oversoldLevel = input(-80, "Oversold Level")
+enableShort = input(false, "Enable Short Positions")
+
+// Calculation of Williams %R
+williamsR = -100 * (ta.highest(high, length) - close) / (ta.highest(high, length) - ta.lowest(low, length))
+
+// Buy and sell conditions
+buySignal = ta.crossover(williamsR, oversoldLevel)
+sellSignal = ta.crossunder(williamsR, overboughtLevel)
+
+// Enter long position
+if buySignal
+    strategy.entry("Buy", strategy.long)
+
+// Exit long position
+if sellSignal
+    strategy.close("Buy")
+
+// Enter short position if enabled
+if enableShort and sellSignal
+    strategy.entry("Sell", strategy.short)
+
+// Exit short position if enabled
+if enableShort and buySignal
+    strategy.close("Sell")
+
+View in Pine Editor・33 lines
+Use on chart
+3
+6
+8
+1
+8 710
+Jun 7, 2023
+
+The Williams %R Strategy is a trading approach that is based on the Williams Percent Range indicator, available on the TradingView platform.
+
+This strategy aims to identify potential overbought and oversold conditions in the market, providing clear buy and sell signals for entry and exit.
+
+The strategy utilizes the Williams %R indicator, which measures the momentum of the market by comparing the current close price with the highest high and lowest low over a specified period. When the Williams %R crosses above the oversold level, a buy signal is generated, indicating a potential upward price movement. Conversely, when the indicator crosses below the overbought level, a sell signal is generated, suggesting a possible downward price movement.
+
+Position management is straightforward with this strategy. Upon receiving a buy signal, a long position is initiated, and the position is closed when a sell signal is generated. This strategy allows traders to capture potential price reversals and take advantage of short-term market movements.
+
+To manage risk, it is recommended to adjust the position size based on the available capital. In this strategy, the position size is set to 10% of the initial capital, ensuring proper risk allocation and capital preservation.
+
+It is important to note that the Williams %R Strategy should be used in conjunction with other technical analysis tools and risk management techniques. Backtesting and paper trading can help evaluate the strategy's performance and fine-tune the parameters before deploying it with real funds.
+
+Remember, trading involves risks, and past performance is not indicative of future results. It is always advised to do thorough research, seek professional advice, and carefully consider your financial goals and risk tolerance before making any investment decisions.
+Jun 9, 2023
+Release Notes
+enable short positions

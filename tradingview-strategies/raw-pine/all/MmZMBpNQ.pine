@@ -1,0 +1,442 @@
+//@version=6
+strategy("ChartStein 200/20 MA", overlay=true, initial_capital=1000000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04, slippage=1)
+
+// ==========================================
+// 1. 설정 (Inputs)
+// ==========================================
+startYear = input.int(2018, "시작 연도")
+
+// [Cornix] 설정
+grp_cornix = "Cornix Settings"
+leverage = input.int(1, "레버리지", minval=1, group=grp_cornix)
+cornix_sl_per = input.float(5.0, "안전장치 손절 (%)", minval=0.1, group=grp_cornix) / 100
+
+// MA 설정
+grp_ma = "MA Settings"
+len_trend = input.int(200, "대세 추세선 (장기 MA)", minval=50, maxval=500, step=10, group=grp_ma)
+len_entry = input.int(20, "진입 기준선 (단기 MA)", minval=5, maxval=500, step=5, group=grp_ma)
+
+// 필터
+grp_filter = "Filter"
+use_slope_filter = input.bool(false, "200일선 기울기 필터", group=grp_filter)
+
+// [휩쏘 방지 필터]
+grp_whipsaw = "Anti-Whipsaw"
+use_adx = input.bool(false, "ADX 필터 사용 (횡보장 회피)", group=grp_whipsaw)
+adx_limit = input.int(20, "ADX 기준값 (20~25 권장)", group=grp_whipsaw)
+
+// [시각화] 설정
+grp_visual = "Visuals"
+show_labels = input.bool(false, "진입 라벨 표시", group=grp_visual)
+showPanel = input.bool(true, "통계 패널 표시", group=grp_visual)
+
+
+// ==========================================
+// 2. 지표 계산
+// ==========================================
+sma200 = ta.sma(close, len_trend)
+sma20 = ta.sma(close, len_entry)
+slope200 = sma200 - sma200[5]
+[_, _, adx] = ta.dmi(14, 14)
+
+
+// ==========================================
+// 3. Cornix 메시지 생성
+// ==========================================
+sym = syminfo.ticker 
+msg_entry = "LONG " + sym + "\n" + "Leverage: " + str.tostring(leverage) + "x\n" + "Entry: Market\n" + "SL: " + str.tostring(close * (1 - cornix_sl_per), "#.##")
+msg_close = "CLOSE " + sym
+
+
+// ==========================================
+// 4. 진입/청산 로직
+// ==========================================
+var int wins = 0
+var int losses = 0
+
+// 진입 조건
+cond_trend_up = (close > sma200) and (use_slope_filter ? slope200 > 0 : true)
+cond_breakout = ta.crossover(close, sma20)
+cond_adx_ok = use_adx ? (adx > adx_limit) : true
+
+// 200일선 골든크로스 조건 (20일선 무관, 무조건 매수)
+cond_golden_cross = ta.crossover(close, sma200)
+
+buy_condition = cond_golden_cross or (cond_trend_up and cond_breakout and cond_adx_ok)
+inDateRange = time >= timestamp(syminfo.timezone, startYear, 1, 1, 0, 0)
+
+// 진입
+if buy_condition and strategy.position_size == 0 and inDateRange
+    strategy.entry("진입", strategy.long, alert_message=msg_entry)
+
+// 청산
+if strategy.position_size > 0
+    if ta.crossunder(close, sma20)
+        bool is_win = close > strategy.position_avg_price
+        if is_win
+            wins += 1
+        else
+            losses += 1
+        
+        string exit_text = is_win ? "익절" : "손절"
+        string record = str.tostring(wins) + "승 " + str.tostring(losses) + "패"
+        color label_color = is_win ? color.red : color.blue
+        
+        if show_labels
+            label.new(bar_index, high, text=exit_text + "\n" + record, color=label_color, style=label.style_label_down, textcolor=color.white, size=size.small)
+        
+        strategy.close("진입", comment=exit_text, alert_message=msg_close)
+    
+    strategy.exit("스탑로스", "진입", stop=strategy.position_avg_price * (1 - cornix_sl_per))
+
+
+// ==========================================
+// 5. 시각화
+// ==========================================
+plot(sma200, "SMA 200", color= color.rgb(26, 62, 190), linewidth=4, display=display.all)
+plot(sma20, "SMA 20", color=color.rgb(225, 40, 43), linewidth=3, display=display.all)
+
+if show_labels and buy_condition and strategy.position_size == 0 and inDateRange
+    label.new(bar_index, low, text="진입", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.small)
+
+
+// ==========================================
+// 6. 통계 계산
+// ==========================================
+var float[] trade_returns = array.new_float(0)
+var float[] daily_returns = array.new_float(0)
+var float start_price = na
+var float prev_day_equity = strategy.initial_capital
+var int prev_day = 0
+
+// 기간별 통계 변수
+// 하락장 (2021.12 ~ 2023.01)
+var float bear_start_equity = na
+var float bear_end_equity = na
+var float bear_peak_equity = na
+var float bear_mdd = 0.0
+
+// 상승장 (2023.02 ~ 2025.10)
+var float bull_start_equity = na
+var float bull_end_equity = na
+var float bull_peak_equity = na
+var float bull_mdd = 0.0
+
+// 최근 기간 수익률 계산용
+var float eq_3m = na
+var float eq_6m = na
+var float eq_1y = na
+
+// 기간 정의 (밀리초)
+bear_start = timestamp(2021, 12, 1, 0, 0)
+bear_end = timestamp(2023, 1, 31, 23, 59)
+bull_start = timestamp(2023, 2, 1, 0, 0)
+bull_end = timestamp(2025, 10, 31, 23, 59)
+
+// 하락장 기간 추적
+if time >= bear_start and time <= bear_end
+    if na(bear_start_equity)
+        bear_start_equity := strategy.equity
+        bear_peak_equity := strategy.equity
+    bear_peak_equity := math.max(bear_peak_equity, strategy.equity)
+    float dd = (bear_peak_equity - strategy.equity) / bear_peak_equity * 100
+    bear_mdd := math.max(bear_mdd, dd)
+    bear_end_equity := strategy.equity
+
+// 상승장 기간 추적
+if time >= bull_start and time <= bull_end
+    if na(bull_start_equity)
+        bull_start_equity := strategy.equity
+        bull_peak_equity := strategy.equity
+    bull_peak_equity := math.max(bull_peak_equity, strategy.equity)
+    float dd = (bull_peak_equity - strategy.equity) / bull_peak_equity * 100
+    bull_mdd := math.max(bull_mdd, dd)
+    bull_end_equity := strategy.equity
+
+// 최근 3개월, 6개월, 1년 시점 equity 저장
+ms_per_day = 24 * 60 * 60 * 1000
+target_3m = timenow - 90 * ms_per_day
+target_6m = timenow - 180 * ms_per_day
+target_1y = timenow - 365 * ms_per_day
+
+if time <= target_3m
+    eq_3m := strategy.equity
+if time <= target_6m
+    eq_6m := strategy.equity
+if time <= target_1y
+    eq_1y := strategy.equity
+
+// 시작 가격 저장 (Buy and Hold 계산용)
+if na(start_price) and inDateRange
+    start_price := close
+
+// 거래 종료 시 수익률 기록
+if strategy.closedtrades > strategy.closedtrades[1]
+    float exit_price = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    float entry_price = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+    float trade_pct = entry_price != 0 ? (exit_price - entry_price) / entry_price * 100 : 0.0
+    array.push(trade_returns, trade_pct)
+
+// 일간 수익률 기록 (날짜가 바뀔 때마다)
+int current_day = dayofmonth(time)
+if current_day != prev_day
+    if prev_day != 0 and prev_day_equity > 0
+        float daily_ret = (strategy.equity - prev_day_equity) / prev_day_equity
+        array.push(daily_returns, daily_ret)
+    prev_day_equity := strategy.equity
+    prev_day := current_day
+
+// 통계 함수
+f_avg(arr) =>
+    array.size(arr) > 0 ? array.avg(arr) : 0.0
+
+f_stdev(arr) =>
+    array.size(arr) > 1 ? array.stdev(arr) : 0.0
+
+// 하방 표준편차 (음수 수익률만)
+f_downside_std(arr) =>
+    cnt = array.size(arr)
+    if cnt > 1
+        neg_arr = array.new_float(0)
+        for i = 0 to cnt - 1
+            val = array.get(arr, i)
+            if val < 0
+                array.push(neg_arr, val)
+        array.size(neg_arr) > 1 ? array.stdev(neg_arr) : 0.0
+    else
+        0.0
+
+f_skewness(arr, avg, std) =>
+    cnt = array.size(arr)
+    if cnt > 0 and std > 0.000001
+        sum_cube_diff = 0.0
+        for i = 0 to cnt - 1
+            diff = array.get(arr, i) - avg
+            sum_cube_diff += math.pow(diff, 3)
+        (sum_cube_diff / cnt) / math.pow(std, 3)
+    else
+        0.0
+
+// Sharpe Ratio (일간 수익률 기반, √365 연율화)
+f_sharpe(arr) =>
+    cnt = array.size(arr)
+    if cnt > 1
+        avg_ret = array.avg(arr)
+        std_ret = array.stdev(arr)
+        std_ret > 0 ? (avg_ret / std_ret) * math.sqrt(365.0) : 0.0
+    else
+        0.0
+
+// Sortino Ratio (일간 수익률 기반, √365 연율화)
+f_sortino(arr) =>
+    cnt = array.size(arr)
+    if cnt > 1
+        avg_ret = array.avg(arr)
+        down_std = f_downside_std(arr)
+        down_std > 0 ? (avg_ret / down_std) * math.sqrt(365.0) : 0.0
+    else
+        0.0
+
+
+// ==========================================
+// 7. 통계 패널 (4열: 지표, 값, 기준, O/X)
+// ==========================================
+var table dash = na
+if showPanel and na(dash)
+    dash := table.new(position.top_right, columns=4, rows=20, border_width=1, border_color=color.new(color.gray, 0))
+
+if showPanel and not na(dash)
+    // 통계 계산
+    float mdd = strategy.max_drawdown_percent
+    float avg_trade = f_avg(trade_returns)
+    float std_trade = f_stdev(trade_returns)
+    float pf = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : 0
+    
+    // Sharpe/Sortino (일간 수익률 기반)
+    float sharpe = f_sharpe(daily_returns)
+    float sortino = f_sortino(daily_returns)
+    
+    // 왜도 (거래별)
+    float skew = f_skewness(trade_returns, avg_trade, std_trade)
+    
+    // CAGR 계산
+    float total_days = (time - timestamp(startYear, 1, 1, 0, 0)) / (1000 * 60 * 60 * 24)
+    float total_years = total_days / 365.0
+    float total_return = strategy.equity / strategy.initial_capital
+    float cagr = (total_years > 0.1 and total_return > 0) ? (math.pow(total_return, 1.0 / total_years) - 1.0) * 100 : 0.0
+    
+    // Buy and Hold CAGR 계산
+    float bh_return = not na(start_price) and start_price > 0 ? close / start_price : 1.0
+    float bh_cagr = (total_years > 0.1 and bh_return > 0) ? (math.pow(bh_return, 1.0 / total_years) - 1.0) * 100 : 0.0
+    
+    // 칼마 (CAGR / MDD)
+    float calmar = mdd != 0 ? cagr / mdd : 0.0
+    
+    // 승률
+    float winRate = (wins + losses) > 0 ? wins / (wins + losses) * 100.0 : 0.0
+
+    // 기준 충족 여부
+    bool winRate_ok = winRate >= 50
+    bool cagr_ok = cagr > bh_cagr  // Buy and Hold 대비
+    bool pf_ok = pf >= 1.5
+    bool calmar_ok = calmar >= 2   // 기준 2로 변경
+    bool mdd_ok = mdd < 30
+    bool sharpe_ok = sharpe >= 1
+    bool sortino_ok = sortino >= 2
+    bool skew_ok = skew > 2.5     // 기준 2.5로 변경
+    bool avg_ok = avg_trade >= 1.2 // 기준 1.2%로 변경
+
+    // 테이블 클리어
+    table.clear(table_id=dash, start_row=0, start_column=0, end_row=19, end_column=3)
+    
+    // 헤더
+    table.merge_cells(dash, 0, 0, 3, 0)
+    table.cell(table_id=dash, column=0, row=0, text="ChartStein Stats", text_color=color.white, text_halign=text.align_center, bgcolor=color.new(color.blue, 35))
+    
+    // 배경색 정의
+    color bg1 = color.new(color.black, 20)
+    color bg2 = color.new(color.black, 35)
+    color c_value = color.new(color.white, 0)  // 값 색상 (밝은 흰색)
+    color c_label = color.new(color.white, 20) // 라벨 색상
+    color c_std = color.new(color.silver, 0)   // 기준 색상 (밝은 회색)
+    
+    // 1. 승/패
+    table.cell(table_id=dash, column=0, row=1, text="승/패", text_color=c_label, text_halign=text.align_left, bgcolor=bg1)
+    table.cell(table_id=dash, column=1, row=1, text=str.tostring(wins) + "/" + str.tostring(losses), text_color=c_value, text_halign=text.align_right, bgcolor=bg1)
+    table.cell(table_id=dash, column=2, row=1, text="-", text_color=c_std, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=3, row=1, text="-", text_color=c_std, text_halign=text.align_center, bgcolor=bg1)
+    
+    // 2. 승률
+    table.cell(table_id=dash, column=0, row=2, text="승률", text_color=c_label, text_halign=text.align_left, bgcolor=bg2)
+    table.cell(table_id=dash, column=1, row=2, text=str.tostring(winRate, "#.#") + "%", text_color=winRate_ok ? color.lime : color.yellow, text_halign=text.align_right, bgcolor=bg2)
+    table.cell(table_id=dash, column=2, row=2, text="≥50%", text_color=c_std, text_halign=text.align_center, bgcolor=bg2)
+    table.cell(table_id=dash, column=3, row=2, text=winRate_ok ? "O" : "X", text_color=winRate_ok ? color.lime : color.red, text_halign=text.align_center, bgcolor=bg2)
+    
+    // 3. CAGR (기준: Buy and Hold 대비)
+    table.cell(table_id=dash, column=0, row=3, text="CAGR", text_color=c_label, text_halign=text.align_left, bgcolor=bg1)
+    table.cell(table_id=dash, column=1, row=3, text=str.tostring(cagr, "#.##") + "%", text_color=cagr_ok ? color.lime : color.yellow, text_halign=text.align_right, bgcolor=bg1)
+    table.cell(table_id=dash, column=2, row=3, text=">" + str.tostring(bh_cagr, "#.#") + "%", text_color=c_std, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=3, row=3, text=cagr_ok ? "O" : "X", text_color=cagr_ok ? color.lime : color.red, text_halign=text.align_center, bgcolor=bg1)
+    
+    // 4. Profit Factor
+    table.cell(table_id=dash, column=0, row=4, text="수익지수(PF)", text_color=c_label, text_halign=text.align_left, bgcolor=bg2)
+    table.cell(table_id=dash, column=1, row=4, text=str.tostring(pf, "#.##"), text_color=pf_ok ? color.lime : color.yellow, text_halign=text.align_right, bgcolor=bg2)
+    table.cell(table_id=dash, column=2, row=4, text="≥1.5", text_color=c_std, text_halign=text.align_center, bgcolor=bg2)
+    table.cell(table_id=dash, column=3, row=4, text=pf_ok ? "O" : "X", text_color=pf_ok ? color.lime : color.red, text_halign=text.align_center, bgcolor=bg2)
+    
+    // 5. Calmar (기준: 2)
+    table.cell(table_id=dash, column=0, row=5, text="칼마", text_color=c_label, text_halign=text.align_left, bgcolor=bg1)
+    table.cell(table_id=dash, column=1, row=5, text=str.tostring(calmar, "#.##"), text_color=calmar_ok ? color.lime : color.yellow, text_halign=text.align_right, bgcolor=bg1)
+    table.cell(table_id=dash, column=2, row=5, text="≥2", text_color=c_std, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=3, row=5, text=calmar_ok ? "O" : "X", text_color=calmar_ok ? color.lime : color.red, text_halign=text.align_center, bgcolor=bg1)
+    
+    // 6. MDD
+    table.cell(table_id=dash, column=0, row=6, text="MDD", text_color=c_label, text_halign=text.align_left, bgcolor=bg2)
+    table.cell(table_id=dash, column=1, row=6, text=str.tostring(mdd, "#.##") + "%", text_color=mdd_ok ? color.lime : color.yellow, text_halign=text.align_right, bgcolor=bg2)
+    table.cell(table_id=dash, column=2, row=6, text="<30%", text_color=c_std, text_halign=text.align_center, bgcolor=bg2)
+    table.cell(table_id=dash, column=3, row=6, text=mdd_ok ? "O" : "X", text_color=mdd_ok ? color.lime : color.red, text_halign=text.align_center, bgcolor=bg2)
+    
+    // 7. Sharpe
+    table.cell(table_id=dash, column=0, row=7, text="샤프", text_color=c_label, text_halign=text.align_left, bgcolor=bg1)
+    table.cell(table_id=dash, column=1, row=7, text=str.tostring(sharpe, "#.##"), text_color=sharpe_ok ? color.lime : color.yellow, text_halign=text.align_right, bgcolor=bg1)
+    table.cell(table_id=dash, column=2, row=7, text="≥1", text_color=c_std, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=3, row=7, text=sharpe_ok ? "O" : "X", text_color=sharpe_ok ? color.lime : color.red, text_halign=text.align_center, bgcolor=bg1)
+    
+    // 8. Sortino
+    table.cell(table_id=dash, column=0, row=8, text="소티노", text_color=c_label, text_halign=text.align_left, bgcolor=bg2)
+    table.cell(table_id=dash, column=1, row=8, text=str.tostring(sortino, "#.##"), text_color=sortino_ok ? color.lime : color.yellow, text_halign=text.align_right, bgcolor=bg2)
+    table.cell(table_id=dash, column=2, row=8, text="≥2", text_color=c_std, text_halign=text.align_center, bgcolor=bg2)
+    table.cell(table_id=dash, column=3, row=8, text=sortino_ok ? "O" : "X", text_color=sortino_ok ? color.lime : color.red, text_halign=text.align_center, bgcolor=bg2)
+    
+    // 9. Skewness (기준: 2.5)
+    table.cell(table_id=dash, column=0, row=9, text="왜도", text_color=c_label, text_halign=text.align_left, bgcolor=bg1)
+    table.cell(table_id=dash, column=1, row=9, text=str.tostring(skew, "#.##"), text_color=skew_ok ? color.lime : color.yellow, text_halign=text.align_right, bgcolor=bg1)
+    table.cell(table_id=dash, column=2, row=9, text=">2.5", text_color=c_std, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=3, row=9, text=skew_ok ? "O" : "X", text_color=skew_ok ? color.lime : color.red, text_halign=text.align_center, bgcolor=bg1)
+    
+    // 10. Avg Trade % (기준: 1.2%)
+    table.cell(table_id=dash, column=0, row=10, text="평균거래%", text_color=c_label, text_halign=text.align_left, bgcolor=bg2)
+    table.cell(table_id=dash, column=1, row=10, text=str.tostring(avg_trade, "#.##") + "%", text_color=avg_ok ? color.lime : color.yellow, text_halign=text.align_right, bgcolor=bg2)
+    table.cell(table_id=dash, column=2, row=10, text="≥1.2%", text_color=c_std, text_halign=text.align_center, bgcolor=bg2)
+    table.cell(table_id=dash, column=3, row=10, text=avg_ok ? "O" : "X", text_color=avg_ok ? color.lime : color.red, text_halign=text.align_center, bgcolor=bg2)
+
+    // ==========================================
+    // 기간별 성과 테이블
+    // ==========================================
+    
+    // 빈 행 (구분선)
+    table.cell(table_id=dash, column=0, row=11, text="", bgcolor=color.new(color.black, 100))
+    table.cell(table_id=dash, column=1, row=11, text="", bgcolor=color.new(color.black, 100))
+    table.cell(table_id=dash, column=2, row=11, text="", bgcolor=color.new(color.black, 100))
+    table.cell(table_id=dash, column=3, row=11, text="", bgcolor=color.new(color.black, 100))
+    
+    // 기간별 헤더
+    table.merge_cells(dash, 0, 12, 3, 12)
+    table.cell(table_id=dash, column=0, row=12, text="📊 기간별 성과", text_color=color.white, text_halign=text.align_center, bgcolor=color.new(color.purple, 35))
+    
+    // 열 헤더
+    table.cell(table_id=dash, column=0, row=13, text="지표", text_color=c_label, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=1, row=13, text="하락장\n21.12~23.01", text_color=color.new(color.red, 0), text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=2, row=13, text="상승장\n23.02~25.10", text_color=color.new(color.lime, 0), text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=3, row=13, text="", bgcolor=bg1)
+    
+    // 기간별 CAGR 계산
+    float bear_years = (bear_end - bear_start) / (1000.0 * 60 * 60 * 24 * 365)
+    float bull_years = (bull_end - bull_start) / (1000.0 * 60 * 60 * 24 * 365)
+    
+    float bear_return = (not na(bear_start_equity) and bear_start_equity > 0) ? bear_end_equity / bear_start_equity : 1.0
+    float bull_return = (not na(bull_start_equity) and bull_start_equity > 0) ? bull_end_equity / bull_start_equity : 1.0
+    
+    float bear_cagr = (bear_years > 0.1 and bear_return > 0) ? (math.pow(bear_return, 1.0 / bear_years) - 1.0) * 100 : 0.0
+    float bull_cagr = (bull_years > 0.1 and bull_return > 0) ? (math.pow(bull_return, 1.0 / bull_years) - 1.0) * 100 : 0.0
+    
+    // CAGR 행
+    table.cell(table_id=dash, column=0, row=14, text="CAGR", text_color=c_label, text_halign=text.align_left, bgcolor=bg2)
+    table.cell(table_id=dash, column=1, row=14, text=str.tostring(bear_cagr, "#.##") + "%", text_color=bear_cagr >= 0 ? color.lime : color.yellow, text_halign=text.align_center, bgcolor=bg2)
+    table.cell(table_id=dash, column=2, row=14, text=str.tostring(bull_cagr, "#.##") + "%", text_color=bull_cagr >= 0 ? color.lime : color.yellow, text_halign=text.align_center, bgcolor=bg2)
+    table.cell(table_id=dash, column=3, row=14, text="", bgcolor=bg2)
+    
+    // MDD 행
+    table.cell(table_id=dash, column=0, row=15, text="MDD", text_color=c_label, text_halign=text.align_left, bgcolor=bg1)
+    table.cell(table_id=dash, column=1, row=15, text=str.tostring(bear_mdd, "#.##") + "%", text_color=bear_mdd < 30 ? color.lime : color.yellow, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=2, row=15, text=str.tostring(bull_mdd, "#.##") + "%", text_color=bull_mdd < 30 ? color.lime : color.yellow, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=3, row=15, text="", bgcolor=bg1)
+
+    // ==========================================
+    // 최근 기간별 수익률
+    // ==========================================
+    
+    // 빈 행 (구분선)
+    table.cell(table_id=dash, column=0, row=16, text="", bgcolor=color.new(color.black, 100))
+    table.cell(table_id=dash, column=1, row=16, text="", bgcolor=color.new(color.black, 100))
+    table.cell(table_id=dash, column=2, row=16, text="", bgcolor=color.new(color.black, 100))
+    table.cell(table_id=dash, column=3, row=16, text="", bgcolor=color.new(color.black, 100))
+    
+    // 최근 수익 헤더
+    table.merge_cells(dash, 0, 17, 3, 17)
+    table.cell(table_id=dash, column=0, row=17, text="📈 최근 수익률", text_color=color.white, text_halign=text.align_center, bgcolor=color.new(color.teal, 35))
+    
+    // 열 헤더
+    table.cell(table_id=dash, column=0, row=18, text="", bgcolor=bg1)
+    table.cell(table_id=dash, column=1, row=18, text="3개월", text_color=c_label, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=2, row=18, text="6개월", text_color=c_label, text_halign=text.align_center, bgcolor=bg1)
+    table.cell(table_id=dash, column=3, row=18, text="1년", text_color=c_label, text_halign=text.align_center, bgcolor=bg1)
+    
+    // 수익률 계산
+    float curr_eq = strategy.equity
+    float ret_3m = (not na(eq_3m) and eq_3m > 0) ? (curr_eq - eq_3m) / eq_3m * 100 : na
+    float ret_6m = (not na(eq_6m) and eq_6m > 0) ? (curr_eq - eq_6m) / eq_6m * 100 : na
+    float ret_1y = (not na(eq_1y) and eq_1y > 0) ? (curr_eq - eq_1y) / eq_1y * 100 : na
+    
+    // 수익률 행
+    table.cell(table_id=dash, column=0, row=19, text="수익률", text_color=c_label, text_halign=text.align_left, bgcolor=bg2)
+    table.cell(table_id=dash, column=1, row=19, text=na(ret_3m) ? "-" : str.tostring(ret_3m, "#.##") + "%", text_color=na(ret_3m) ? color.gray : (ret_3m >= 0 ? color.lime : color.red), text_halign=text.align_center, bgcolor=bg2)
+    table.cell(table_id=dash, column=2, row=19, text=na(ret_6m) ? "-" : str.tostring(ret_6m, "#.##") + "%", text_color=na(ret_6m) ? color.gray : (ret_6m >= 0 ? color.lime : color.red), text_halign=text.align_center, bgcolor=bg2)
+    table.cell(table_id=dash, column=3, row=19, text=na(ret_1y) ? "-" : str.tostring(ret_1y, "#.##") + "%", text_color=na(ret_1y) ? color.gray : (ret_1y >= 0 ? color.lime : color.red), text_halign=text.align_center, bgcolor=bg2)
+
+View in Pine Editor・435 lines
+Use on chart
+9
+663
+- 350, 23 MA line shoud be used.
+- trend follow strategy

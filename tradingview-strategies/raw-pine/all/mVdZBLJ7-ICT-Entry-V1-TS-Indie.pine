@@ -1,0 +1,1348 @@
+//@version=6
+strategy("ICT Entry V1 [TS_Indie]" , overlay=true, max_labels_count=500 , max_lines_count = 500 ,max_boxes_count = 500, max_bars_back = 5000 , margin_long=0, margin_short=0 , initial_capital = 100000 )
+
+get_text_style(style) =>
+    out = switch style
+        'Auto' => size.auto
+        'Tiny'  => size.tiny
+        'Small' => size.small
+        'Normal' => size.normal
+
+get_line_style(style) =>
+    out = switch style
+        '⎯⎯⎯'  => line.style_solid
+        '----' => line.style_dashed
+        '····' => line.style_dotted
+
+add_int_unshift(array, new_value_to_add) =>
+    array.remove(array,array.size(array)-1)
+    array.unshift(array, new_value_to_add)
+
+Delete_Box_Push(array,i) =>
+    box.delete(array.get(array, i))
+    array.remove(array,i)
+    array.push(array, na)
+
+add_array_unshift(array, new_value_to_add) =>
+    box.delete(array.get(array, array.size(array)-1))
+    array.remove(array,array.size(array)-1)
+    array.unshift(array, new_value_to_add)
+
+value_unshift_noremove(a1,v1,a2,v2,a3,v3) =>
+    array.unshift(a1,v1) , array.unshift(a2,v2) , array.unshift(a3,v3)
+
+value_unshift(a1,v1,a2,v2,a3,v3) =>
+    array.unshift(a1,v1) , array.unshift(a2,v2) , array.unshift(a3,v3)
+    array.remove(a1,array.size(a1)-1) , array.remove(a2,array.size(a2)-1) , array.remove(a3,array.size(a3)-1)
+
+value_remove(a1,a2,a3,i) =>
+    array.remove(a1,i) , array.push(a1, na)
+    array.remove(a2,i) , array.push(a2, na)
+    array.remove(a3,i) , array.push(a3, na)
+
+unshift_remove(array, new_value_to_add) =>
+    array.unshift(array, new_value_to_add)
+    array.remove(array,array.size(array)-1)
+
+value_delet_Push1(a1,i) =>
+    array.remove(a1,i)
+    array.push(a1, na)
+
+Delete_line_lbl_Push(array,l_bel,i) =>
+    line.delete(array.get(array, i)) , label.delete(array.get(l_bel, i))
+    array.remove(array,i) , array.remove(l_bel,i)
+    array.push(array, na) , array.push(l_bel, na)
+
+Line_mit_unshift(array, new_value_to_add) =>
+    line.delete(array.get(array, array.size(array)-1))
+    array.remove(array,array.size(array)-1)
+    array.unshift(array, new_value_to_add)
+
+label_mit_unshift(array, new_value_to_add) =>
+    label.delete(array.get(array, array.size(array)-1))
+    array.remove(array,array.size(array)-1)
+    array.unshift(array, new_value_to_add)
+
+color TRANSP = #ffffff00
+//-----------------------------------------------------------------------------{
+
+Entry_Position = "========= Entry Condition ========="
+
+rr_ratio = input.float(4, "Risk Reward Ratio", step=0.1 , inline="0.1" , group = Entry_Position )
+
+length_atr = input.int(title="Stop loss ATR", defval=50, minval=1 , inline="0.2" , group = Entry_Position )
+x_ATR = input.float( 0.5 , "X", step=0.1 , inline="0.2" , tooltip = 'Stop loss ATR 50 is the average ATR over 50 candles, which is then multiplied by the value in the second field to calculate the stop loss. \n\n (If the second field is set to 0, this function will be disabled.)', group = Entry_Position )
+
+fibo_entry = input.float(0, "Entry Zone", step= 1 , inline="0.21" , tooltip = 'Set the entry zone within the FVG where the order will be placed. \n\n For example, if the value is set to 50, the order will be placed at the midpoint of the FVG.' , group = Entry_Position )
+
+iFVG_be_FVG = input.bool( false ," iFVG Overlap FVGㅤㅤ", inline="0.212", group = Entry_Position)
+Con_FVG_mix = input.bool( false ,"Mix ", inline="0.212", tooltip = '"iFVG Overlap FVG is false" For example, on the Buy side: the lower iFVG box must be higher than the upper FVG box. \n\n When "iFVG Overlap FVG is false", the lower iFVG box must be lower than the upper FVG box. \n\n When “Mix is true” is enabled, both conditions will be accepted and filtered together.' , group = Entry_Position)
+
+FVG_min_ATR = input.float( 0.02 , "Gap Min", step=0.1 , inline="0.215" , group = Entry_Position )
+FVG_max_ATR = input.float( 0.07 , "Max", step=0.1 , inline="0.215" , tooltip = 'Filter the gap between FVG and iFVG according to the trading system rules. \n\n The gap must be greater than Min x ATR[50] and less than Max x ATR[50].' , group = Entry_Position )
+
+Filter_size_FVG = input.bool(false,'Filter Size FVG for entry signals', inline="0.22", tooltip = 'Filter the size of FVG by setting Min and Max values below' , group=Entry_Position)
+FVG_min = input.float( 0.1 , "Min", step=0.1 , inline="0.23" , group = Entry_Position )
+FVG_max = input.float( 0.5 , "Max", step=0.1 , inline="0.23" , tooltip = 'The Min & Max values will be multiplied by the ATR 50 average and compared with the FVG size. \n\n The FVG size must be greater than (Min x ATR[50]) and less than (Max x ATR[50]).' , group = Entry_Position )
+Filter_size_iFVG = input.bool(false,'Filter Size iFVG for entry signals', inline="0.232", tooltip = 'Filter the size of iFVG by setting Min and Max values below' , group=Entry_Position)
+iFVG_min = input.float( 0.1 , "Min", step=0.1 , inline="0.233" , group = Entry_Position )
+iFVG_max = input.float( 0.5 , "Max", step=0.1 , inline="0.233" , tooltip = 'The Min & Max values will be multiplied by the ATR 50 average and compared with the iFVG size. \n\n The iFVG size must be greater than (Min x ATR[50]) and less than (Max x ATR[50]).' , group = Entry_Position )
+
+Len = input.int(title="Liquidity Pivot Strength", defval = 5 , minval=1, inline="0.3", tooltip = 'This mechanism is derived from the indicator “Smallest Swing [Truth Indie]”. \n\n As the value increases, the strength of the swing increases, resulting in larger swings, which may also affect liquidity.', group=Entry_Position)
+
+//[++++ Valid Pullback Market Structure ++++]
+Follow_trend = input.bool( true ,"Trend Following Conditions" , inline="0.35", tooltip = 'When enabled, orders are placed only in the direction of the trend (Buy in bullish trend, Sell in bearish trend). \n\n When disabled, orders are placed without trend filtering.', group = Entry_Position)
+Len_in = input.int(title="Strength", defval=1, minval=1, inline="0.4", group=Entry_Position)
+valid_con = input.string(defval='Close',title='Valid by', options=['Close','High/Low'],inline = '0.4', tooltip = 'The Strength parameter represents the pivot length mechanism, used in combination with price action.\n\n It validates a swing by detecting a structure break formed by candles making new highs or new lows.\n\n The break can be defined using either the candle body or the wick.' , group = Entry_Position ) 
+EQ_con = input.bool( false ,"Premium / Discount Zone" , inline="0.5" , tooltip = 'When enabled, the system filters and allows only orders that are within the Premium and Discount zones.' , group = Entry_Position)
+Pre_Dis = input.float(50,"Min" ,step=1 , inline="0.55" , group= Entry_Position)
+Pre_Dis2 = input.float(80,"Max" ,step=1 , inline="0.55" , group= Entry_Position)
+
+cancel_pending_A = input.bool( true ,"Cancel Pending Order [A]" , inline="0.6" , tooltip = 'Cancel the pending order when liquidity is swept on the opposite side.' , group = Entry_Position)
+cancel_pending_B = input.bool( true ,"Cancel Pending Order [B]" , inline="0.7", tooltip = 'Cancel the pending order when new Buy and Sell signals appear.' , group = Entry_Position)
+cancel_pending_C = input.bool( true ,"Cancel Pending Order [C]" , inline="0.8", tooltip = 'Cancel the pending order when exiting the selected time zone.' , group = Entry_Position)
+
+B_long = input.bool( true ,"Entry Longㅤㅤ" , inline="1", group = Entry_Position)
+S_short = input.bool( true ,"Entry Short", inline="1", group = Entry_Position)
+
+//====== Time Filter ======
+Time_Filter = "========== Time Filter =========="
+s_date = input.time(timestamp("01 Jan 1970"),"Start" , inline="1" , group = Time_Filter )
+en_date = input.time(timestamp("01 Jan 2500"), "End " , inline="2" , group = Time_Filter )
+
+con_date = time >= s_date and time <= en_date
+//======== session ======== 
+_session(sess) =>
+    not na(time(timeframe.period, sess, "UTC+0" ))
+
+s_New_York = input.bool( false ,"New York" , inline = "3" , group = Time_Filter )
+t_New = input.session( '1300-2200', "" , inline = "3" , group = Time_Filter )
+Session_1 = _session(t_New) , cf_ses1 = s_New_York ? Session_1 : false
+
+s_London = input.bool( false ,"London" , inline = "4" , group = Time_Filter )
+t_Lon = input.session( '0700-1600' , "" , inline = "4" , group = Time_Filter )
+Session_2 = _session(t_Lon) , cf_ses2 = s_London ? Session_2 : false
+
+s_Tokyo = input.bool( false ,"Tokyo" , inline = "5" , group = Time_Filter )
+t_Tokyo = input.session( '0000-0900' , "" , inline = "5" , group = Time_Filter )
+Session_3 = _session(t_Tokyo) , cf_ses3 = s_Tokyo ? Session_3 : false
+
+s_Sydney = input.bool( false ,"Sydney" , inline = "6" , group = Time_Filter )
+t_Syd = input.session( '2100-0600' , "" , inline = "6" , group = Time_Filter )
+Session_4 = _session(t_Syd) , cf_ses4 = s_Sydney ? Session_4 : false
+
+ses_check = s_New_York or s_London or s_Tokyo or s_Sydney
+time_con = cf_ses1 or cf_ses2 or cf_ses3 or cf_ses4
+con_time = ses_check ? time_con : true
+
+//======== Table ======== 
+position(select) =>
+    switch select
+        "bottom_right"  => position.bottom_right
+        "bottom_center" => position.bottom_center
+        "bottom_left"   => position.bottom_left
+        "top_center"    => position.top_center
+        "top_left"      => position.top_left
+        "top_right"     => position.top_right
+        "mid_center"    => position.middle_center
+        "mid_left"      => position.middle_left
+        "mid_right"     => position.middle_right
+
+display_group = "========= Display FVG and iFVG ========="
+lbl_SnD = input.bool(true, "Show Label |" , inline="0.4", group= display_group)
+Size_SnD = input.string('Tiny', 'Size', options = ['Tiny', 'Small', 'Normal'] , inline="0.4" , group= display_group)
+Col_SnD = input(color.rgb(255, 255, 255), '|' , inline="0.4", group = display_group )
+
+qty_pi = input.int(1,"Q'ty", inline="0.5"  , group= display_group)
+Mit_Pi = input.bool(true, "His" , inline="0.5", group= display_group)
+qty_mit_pi = input.int(4,"", inline="0.5" ,tooltip = 'Quantity of Demand / Supply and Quantity of History' , group= display_group)
+
+SD_fvg = input.bool(true, "FVG" , inline="1", group= display_group)
+Col_fvg_d = input(color.rgb(76, 175, 79, 75), '' , inline="1", group = display_group)
+Col_fvg_s = input(color.rgb(242, 54, 70, 75), '/' , inline="1", group = display_group)
+Col_fvg_mit = input(color.rgb(76, 175, 79, 85), '||' , inline="1", group = display_group)
+Col_fvg_mit2 = input(color.rgb(242, 54, 70, 85), '/' , inline="1", group = display_group , tooltip = 'Demand / Supply || History of Demand / Supply')
+
+SD_i_fvg = input.bool(true, "iFVG" , inline="2", group= display_group)
+Col_ifvg_d = input(color.rgb(41, 98, 255, 75), '' , inline="2", group = display_group)
+Col_ifvg_s = input(color.rgb(155, 39, 176, 75), '/' , inline="2", group = display_group)
+Col_ifvg_mit = input(color.rgb(41, 98, 255, 85), '||' , inline="2", group = display_group)
+Col_ifvg_mit2 = input(color.rgb(155, 39, 176, 85), '/' , inline="2", group = display_group , tooltip = 'Demand / Supply || History of Demand / Supply')
+
+gap_col_min = input(color.rgb(242, 255, 0, 5), 'Gap Min' , inline="3", group = display_group)
+gap_col_max = input(color.rgb(255, 0, 238, 45), 'ㅤㅤMax' , inline="3", group = display_group)
+
+liquidity = "===== Display Liquidity and Swing ====="
+show_swing_lid = input.bool(true,'Show Swing', inline="3", group=liquidity)
+sw_line_style = input.string('⎯⎯⎯', 'ㅤㅤstyle' , options = ['⎯⎯⎯', '----', '····'] , inline = '3' , group = liquidity)
+sw_Size = input.string('Small', 'Swing Size', options = ['Tiny', 'Small' , 'Normal'] , inline="4" , group= liquidity)
+Color_sw = input(title="", defval=color.rgb(255, 0, 0), inline="4", group=liquidity)
+txt_lid = input.string("$", 'Text', inline="5", group= liquidity )
+lbl_Size = input.string('Small', 'Label Size', options = ['Tiny', 'Small', 'Normal'] , inline="5" , group= liquidity)
+Lid_show = input.int(2,"Q'ty", inline="6", minval=1 , group= liquidity )
+mi_lid = input.bool(true,'His', inline="6", group=liquidity)
+Lid_ss = input.int(4,"", inline="6", group= liquidity )
+show_lid = input.bool(true,'Show Liquidity', inline="7", group=liquidity)
+Lid_style = input.string('····', 'ㅤㅤstyle' , options = ['⎯⎯⎯', '----', '····'] , inline = '7' , group = liquidity)
+Lid_color = input(color.rgb(255, 255, 255), 'Line' , inline="7.5", group = liquidity)
+Lid_txt_color = input(color.rgb(255, 255, 255), 'ㅤㅤText' , inline="7.5", group = liquidity)
+
+Internal = "=========== Display Structure ==========="
+Show_Structure = input.bool(true, "Show", inline="0.55", group= Internal)
+In_Size = input.string('Tiny', '', options = ['Tiny', 'Small', 'Normal'] , inline="0.55" , group= Internal)
+In_Line_style = input.string('----', 'Line' , options = ['⎯⎯⎯', '----', '····'] , inline = '0.55' , group = Internal)
+In_up_color = input(color.teal, 'Bullish' , inline="0.6", group = Internal)
+In_down_color = input(#f23645, 'ㅤㅤBearish' , inline="0.6", group = Internal)
+Color_Mark_Swing = input(color.rgb(77, 208, 225), 'Swing' , inline="0.7", group = Internal)
+color_Eq_In = input(#1848cc, "ㅤㅤEquilibrium" , inline="0.7", group = Internal)
+var In_Size_CF = In_Size == 'Tiny' ? size.tiny : In_Size == 'Small' ? size.small : size.normal 
+distance_bar_line = input.int(40,"Distance Line", inline="8", group= Internal )
+distance_bar_label = input.int(20,"Label", inline="8", group= Internal )
+
+time_set = last_bar_time + ((time-time[1])*distance_bar_line)
+time_lbl = last_bar_time + ((time-time[1])*distance_bar_label)
+n_bar = (timeframe.in_seconds(timeframe.period) *1000)*5
+gap_bar = (timeframe.in_seconds(timeframe.period) *1000)
+
+result_group = "========== Trading Result Table =========="
+Show_result = input.bool( true ,"Show Result" , inline = "1" , group = result_group ,tooltip = "The Profit Factor here is calculated using the formula:\n\(Number of Wins x Risk-Reward Ratio) / Number of Losses\n\This formula is based on the assumption that the risk per losing trade is fixed — for example, every losing trade costs exactly 1% of the account.\n\Because of this assumption, the calculated Profit Factor will not match TradingView’s result, since TradingView uses:\n\Gross Profit / Gross Loss\n\And in actual TradingView trades, the loss amount of each trade is not always equal, because the system doesn’t enforce a fixed-risk rule for every losing trade. " )
+select_position = input.string("bottom_right", "", options = ["bottom_right", "bottom_center", "bottom_left", "top_center", "top_left" , "top_right" , "mid_center" , "mid_left" , "mid_right" ], group = result_group  , inline="1" , display = display.data_window)
+Factor_up = input.float( 1.3 ,"Profit Factor > " , step=0.1 , inline = "2" , group = result_group )
+Factor_up_color = input(title = "   " , defval = #a5d6a7  , inline = "2" , group = result_group)
+Factor_donw = input.float( 1 ,"Profit Factor < " , step=0.1 , inline = "3" , group = result_group )
+Factor_donw_color = input(title = "   " , defval = #faa1a4  , inline = "3" , group = result_group)
+
+//===================== show pending ===================== 
+Display_Entry = "============= Display Entry Box ============="
+Entry_box = input.bool(true, "Show Boxㅤㅤ" , inline="1", group= Display_Entry)
+col_1 = input(color.rgb(8, 153, 129, 80), 'TP' , inline="1", group = Display_Entry)
+col_2 = input(color.rgb(242, 54, 70, 80) , 'ㅤㅤSL' , inline="1", group = Display_Entry)
+
+close_all = input.bool(false, "Turn off all displays" , inline="2", group= Display_Entry)
+Turn_off = not close_all ? true : false
+
+atr_sl = ta.ema(ta.tr(true), length_atr)
+
+atr_check_FVG_min = atr_sl * FVG_min_ATR
+atr_check_FVG_max = atr_sl * FVG_max_ATR
+
+Check_min_FVG = FVG_min * atr_sl
+Check_max_FVG = FVG_max * atr_sl
+
+Check_min_iFVG = iFVG_min * atr_sl
+Check_max_iFVG = iFVG_max * atr_sl
+
+qty_fvg = 9000
+//----------------------Demand & Supply------------------------------------//
+//FVG
+var dfvg_top = array.new_float(qty_fvg,na) , var dfvg_bot = array.new_float(qty_fvg,na) , var dfvg_bar = array.new_int(qty_fvg,na) , var dfvg_col = array.new_color(qty_fvg,na)
+var sfvg_top = array.new_float(qty_fvg,na) , var sfvg_bot = array.new_float(qty_fvg,na) , var sfvg_bar = array.new_int(qty_fvg,na) , var sfvg_col = array.new_color(qty_fvg,na)
+//BOX FVG
+var d_fvg_zone = array.new_box(qty_pi,na) , var s_fvg_zone = array.new_box(qty_pi,na) 
+// Mitigate
+var d_fvg_mit = array.new_box(qty_mit_pi,na) , var s_fvg_mit = array.new_box(qty_mit_pi,na)
+
+//Pre-Inversion FVG
+var dfvg_R_top = array.new_float(qty_fvg,na) , var dfvg_R_bot = array.new_float(qty_fvg,na) , var dfvg_bar_R = array.new_int(qty_fvg,na)
+var sfvg_R_top = array.new_float(qty_fvg,na) , var sfvg_R_bot = array.new_float(qty_fvg,na) , var sfvg_bar_R = array.new_int(qty_fvg,na)
+
+//FVG
+if bar_index > 1
+    if low <= array.get(dfvg_bot,0)
+        for i = 0 to qty_fvg-1
+            if SD_fvg and Turn_off
+                if Mit_Pi
+                    lbl_sd = lbl_SnD ? "FVG" : ""
+                    add_array_unshift(d_fvg_mit,box.new(xloc = xloc.bar_time,left = array.get(dfvg_bar,0), top = array.get(dfvg_top,0), right = time, bottom = array.get(dfvg_bot,0), border_color = Col_fvg_mit ,bgcolor = Col_fvg_mit, text = lbl_sd ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center))
+            value_remove(dfvg_top,dfvg_bot,dfvg_bar,0) , array.remove(dfvg_col,0) , array.push(dfvg_col, na)
+            Delete_Box_Push(d_fvg_zone,0)
+            if low > array.get(dfvg_bot,0) or na(array.get(dfvg_bot,0))
+                break
+    //FVG change
+    if low <= array.get(dfvg_top,0)
+        for i = 0 to qty_fvg-1
+            if low <= array.get(dfvg_top,i)
+                array.set(dfvg_col, i, Col_fvg_mit)
+            if low > array.get(dfvg_top,i) or na(array.get(dfvg_top,i))
+                break
+    //Add FVG
+    if low > high[2] and barstate.isconfirmed 
+        value_unshift(dfvg_top,low,dfvg_bot,high[2],dfvg_bar,time[2])
+        add_int_unshift(dfvg_col,Col_fvg_d)
+        value_unshift(dfvg_R_top,low,dfvg_R_bot,high[2],dfvg_bar_R,time[2])
+
+    if high >= array.get(sfvg_top,0)
+        for i = 0 to qty_fvg-1  
+            if SD_fvg and Turn_off
+                if Mit_Pi
+                    lbl_sd = lbl_SnD ? "FVG" : ""
+                    add_array_unshift(s_fvg_mit,box.new( xloc = xloc.bar_time,left = array.get(sfvg_bar,0), top = array.get(sfvg_top,0), right = time, bottom = array.get(sfvg_bot,0), border_color = Col_fvg_mit2 ,bgcolor = Col_fvg_mit2, text = lbl_sd ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center))
+            value_remove(sfvg_top,sfvg_bot,sfvg_bar,0) , array.remove(sfvg_col,0) , array.push(sfvg_col, na)
+            Delete_Box_Push(s_fvg_zone,0)
+            if high < array.get(sfvg_top,0) or na(array.get(sfvg_top,0))
+                break
+    //FVG change
+    if high >= array.get(sfvg_bot,0) 
+        for i = 0 to qty_fvg-1
+            if high >= array.get(sfvg_bot,i)
+                array.set(sfvg_col, i, Col_fvg_mit2)
+            if high < array.get(sfvg_bot,i) or na(array.get(sfvg_bot,i))
+                break
+    //Add FVG
+    if high < low[2] and barstate.isconfirmed 
+        value_unshift(sfvg_top,low[2],sfvg_bot,high,sfvg_bar,time[2])
+        add_int_unshift(sfvg_col,Col_fvg_s)
+        value_unshift(sfvg_R_top,low[2],sfvg_R_bot,high,sfvg_bar_R,time[2])
+
+// Show FVG    
+if SD_fvg and Turn_off
+    //Demand
+    if not na(array.get(dfvg_bot,0))
+        for i = 0 to qty_pi-1
+            if na(array.get(dfvg_bot,i))
+                break
+            col_fvg = array.get(dfvg_col,i)
+            lbl_sd = lbl_SnD ? "FVG" : "" 
+            box.delete(array.get(d_fvg_zone,i))
+            array.set(d_fvg_zone,i,box.new(xloc = xloc.bar_time, left = array.get(dfvg_bar,i) , top = array.get(dfvg_top,i) , right = time_set , bottom = array.get(dfvg_bot,i)  , border_color = col_fvg ,bgcolor = col_fvg, text = lbl_sd ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center))
+
+    //Supply
+    if not na(array.get(sfvg_bot,0))
+        for i = 0 to qty_pi-1
+            if na(array.get(sfvg_bot,i))
+                break
+            lbl_sd = lbl_SnD ? "FVG" : "" 
+            col_sfvg = array.get(sfvg_col,i)
+            box.delete(array.get(s_fvg_zone,i))
+            array.set(s_fvg_zone,i,box.new(xloc = xloc.bar_time, left = array.get(sfvg_bar,i) , top = array.get(sfvg_top,i) , right = time_set , bottom = array.get(sfvg_bot,i) , border_color = col_sfvg ,bgcolor = col_sfvg, text = lbl_sd ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center))
+
+//Inversion FVG Demand to Supply
+// Mitigate
+var d_fvg_R_mit = array.new_box(qty_mit_pi,na) , var s_fvg_R_mit = array.new_box(qty_mit_pi,na)
+
+//Pre-Inversion FVG
+var dfvg_R2_top = array.new_float(qty_fvg,na) , var dfvg_R2_bot = array.new_float(qty_fvg,na) , var dfvg_bar_R2 = array.new_int(qty_fvg,na)
+var sfvg_R2_top = array.new_float(qty_fvg,na) , var sfvg_R2_bot = array.new_float(qty_fvg,na) , var sfvg_bar_R2 = array.new_int(qty_fvg,na)
+
+var d_i_fvg_col = array.new_color(qty_fvg,na)
+var s_i_fvg_col = array.new_color(qty_fvg,na)
+//Box Inversion FVG or //BOX FVG2 
+var d_f_r_zone = array.new_box(qty_pi,na) , var s_f_r_zone = array.new_box(qty_pi,na)
+
+// [================I-FVG Supply to Demand===============]
+if bar_index > 1
+    // [============Add Inversion FVG Demand=============]
+    //I-FVG remove
+    if low <= array.get(dfvg_R2_bot,0)
+        for i = 0 to qty_fvg-1
+            if low <= array.get(dfvg_R2_bot,0)
+                lbl_sd = lbl_SnD ? "iFVG" : ""
+                if Turn_off and Mit_Pi and SD_i_fvg
+                    add_array_unshift(d_fvg_R_mit,box.new(xloc = xloc.bar_time,left = array.get(dfvg_bar_R2,0), top = array.get(dfvg_R2_top,0), right = time, bottom = array.get(dfvg_R2_bot,0), border_color = Col_ifvg_mit ,bgcolor = Col_ifvg_mit, text = lbl_sd ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center))
+                value_remove(dfvg_R2_top,dfvg_R2_bot,dfvg_bar_R2,0) , array.remove(d_i_fvg_col,0) , array.push(d_i_fvg_col, na)
+                Delete_Box_Push(d_f_r_zone,0)
+            if low > array.get(dfvg_R2_bot,0) or na(array.get(dfvg_R2_bot,0))
+                break
+    //I-FVG change
+    if low <= array.get(dfvg_R2_top,0)
+        for i = 0 to qty_fvg-1
+            if low > array.get(dfvg_R2_top,i) or na(array.get(dfvg_R2_top,i))
+                break
+            if low <= array.get(dfvg_R2_top,i)
+                array.set(d_i_fvg_col, i, Col_ifvg_mit)
+    // Add Inversion FVG Demand
+    if close > array.get(sfvg_R_top,0) and barstate.isconfirmed
+        for i = 0 to qty_fvg-1
+            if close > array.get(sfvg_R_top,0)
+                value_unshift(dfvg_R2_top,array.get(sfvg_R_top,0),dfvg_R2_bot,array.get(sfvg_R_bot,0),dfvg_bar_R2,array.get(sfvg_bar_R,0))
+                add_int_unshift(d_i_fvg_col,Col_ifvg_d)
+                value_remove(sfvg_R_top,sfvg_R_bot,sfvg_bar_R,0)
+            if close <= array.get(sfvg_R_top,0) or na(array.get(sfvg_R_top,0))
+                break
+    // [============Add Inversion FVG Supply=============]
+    //I-FVG remove
+    if high >= array.get(sfvg_R2_top,0)
+        for i = 0 to qty_fvg-1
+            if high >= array.get(sfvg_R2_top,0)
+                lbl_sd = lbl_SnD ? "iFVG" : ""
+                if Turn_off and Mit_Pi and SD_i_fvg
+                    add_array_unshift(s_fvg_R_mit,box.new(xloc = xloc.bar_time,left = array.get(sfvg_bar_R2,0), top = array.get(sfvg_R2_top,0), right = time, bottom = array.get(sfvg_R2_bot,0), border_color = Col_ifvg_mit2 ,bgcolor = Col_ifvg_mit2, text = lbl_sd ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center))
+                value_remove(sfvg_R2_top,sfvg_R2_bot,sfvg_bar_R2,0) , array.remove(s_i_fvg_col,0) , array.push(s_i_fvg_col, na)
+                Delete_Box_Push(s_f_r_zone,0)
+            if high < array.get(sfvg_R2_top,0) or na(array.get(sfvg_R2_top,0))
+                break
+    //I-FVG change
+    if high >= array.get(sfvg_R2_bot,0)
+        for i = 0 to qty_fvg-1
+            if high < array.get(sfvg_R2_bot,i) or na(array.get(sfvg_R2_bot,i))
+                break
+            if high >= array.get(sfvg_R2_bot,i)
+                array.set(s_i_fvg_col, i, Col_ifvg_mit2)
+    // Add Inversion FVG Supply
+    if close < array.get(dfvg_R_bot,0) and barstate.isconfirmed
+        for i = 0 to qty_fvg-1
+            if close < array.get(dfvg_R_bot,0)
+                value_unshift(sfvg_R2_top,array.get(dfvg_R_top,0),sfvg_R2_bot,array.get(dfvg_R_bot,0),sfvg_bar_R2,array.get(dfvg_bar_R,0))
+                add_int_unshift(s_i_fvg_col,Col_ifvg_s)
+                value_remove(dfvg_R_top,dfvg_R_bot,dfvg_bar_R,0)
+            if close >= array.get(dfvg_R_bot,0) or na(array.get(dfvg_R_bot,0))
+                break
+//[================Show I-FVG===============] 
+if SD_i_fvg and Turn_off
+    if not na(array.get(dfvg_R2_top,0))
+        for i = 0 to qty_pi-1
+            col_fvg = array.get(d_i_fvg_col,i)
+            lbl_sd = lbl_SnD ? "iFVG" : "" 
+            if na(array.get(dfvg_R2_top,i))
+                break
+            box.delete(array.get(d_f_r_zone,i))
+            array.set(d_f_r_zone,i,box.new(xloc = xloc.bar_time, left = array.get(dfvg_bar_R2,i) , top = array.get(dfvg_R2_top,i) , right = time_set , bottom = array.get(dfvg_R2_bot,i) , border_color = col_fvg ,bgcolor = col_fvg, text = lbl_sd ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center))
+
+    //Supply
+    if not na(array.get(sfvg_R2_bot,0))
+        for i = 0 to qty_pi-1
+            col_sfvg = array.get(s_i_fvg_col,i)
+            lbl_sd = lbl_SnD ? "iFVG" : "" 
+            if na(array.get(sfvg_R2_bot,i))
+                break
+            box.delete(array.get(s_f_r_zone,i))
+            array.set(s_f_r_zone,i,box.new(xloc = xloc.bar_time, left = array.get(sfvg_bar_R2,i) , top = array.get(sfvg_R2_top,i) , right = time_set , bottom = array.get(sfvg_R2_bot,i) , border_color = col_sfvg ,bgcolor = col_sfvg, text = lbl_sd ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center))
+
+// ============================= Lidqudity ======================
+sw_H = ta.pivothigh(high,Len, Len)
+sw_L = ta.pivotlow(low,Len, Len)
+//------------------------------------------------------------------------------//
+var int sw_Dir_small = 0
+var float sw_high = na , var float sw_low = na
+var int Bar_sw_high = 0 , var int Bar_sw_low = 0
+var float ss_high = na , var float ss_low = na
+var int b_sw_high = 0 , var int b_sw_low = 0
+bool sw_skip = false 
+bool Ch_swh = false ,bool Ch_swl = false
+bool swh_check = false ,bool swl_check = false
+
+if na(sw_high) and not na(sw_H)
+    sw_high := sw_H ,sw_Dir_small := -1
+if na(sw_low) and not na(sw_L)
+    sw_low := sw_L ,sw_Dir_small := 1
+
+if (high > ss_high or na(ss_high)) and barstate.isconfirmed
+    ss_high := high  , b_sw_high := bar_index 
+if (low < ss_low or na(ss_low)) and barstate.isconfirmed
+    ss_low := low  , b_sw_low := bar_index 
+
+display_swing = show_swing_lid and Turn_off
+
+b_len = Len+1
+if not na(sw_L) and not na(sw_H) and barstate.isconfirmed
+    if sw_Dir_small == 1
+        for i = 1 to Len*2
+            if not na(sw_L[i])
+                swl_check := true
+                break
+        sw_low := sw_L , Bar_sw_low := bar_index[Len]
+        sw_high := sw_H , Bar_sw_high := bar_index[Len]
+        ch = close[Len] > open[Len]
+        s_h = ch ? ss_high[b_len] :sw_H , s_b = ch ? b_sw_high[b_len] : bar_index[Len]
+        ch2 = (sw_high < sw_low or (ss_high[b_len] > sw_high and not swl_check)) and Len >1
+        s_l2 = ch ? sw_low : sw_low[b_len] , s_b2 = ch ? Bar_sw_low : Bar_sw_low[b_len]
+        if display_swing
+            sw_line = line.new(Bar_sw_low, sw_low , Bar_sw_high ,sw_high,xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            sw_line2 = line.new(s_b2, s_l2, s_b ,s_h,xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+        if ch and not ch2
+            if display_swing
+                sw_line3 = line.new(Bar_sw_low[b_len], sw_low[b_len] , s_b , s_h,xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            if display_swing
+                label.new(s_b, s_h , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw  ,size = get_text_style(sw_Size))
+        if ch2
+            if display_swing
+                sw_line3 = line.new(Bar_sw_low[b_len], sw_low[b_len] , b_sw_high[b_len] ,ss_high[b_len],xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+                if not ch
+                    sw_line4 = line.new(b_sw_low[b_len], ss_low[b_len] , b_sw_high[b_len] ,ss_high[b_len],xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            if display_swing
+                if not ch
+                    label.new(b_sw_low[b_len], ss_low[b_len] , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+                label.new(b_sw_high[b_len], ss_high[b_len] , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+        sw_Dir_small := ch ? -1 : 1 
+        sw_skip := true
+    if sw_Dir_small == -1 and not sw_skip
+        if not na(sw_L)
+            for i = 1 to Len*2
+                if not na(sw_H[i])
+                    swh_check := true
+                    break
+        sw_low := sw_L , Bar_sw_low := bar_index[Len]
+        sw_high := sw_H , Bar_sw_high := bar_index[Len]
+        ch = close[Len] < open[Len] 
+        s_l = ch ? ss_low[b_len] :sw_L , s_b = ch?b_sw_low[b_len]:bar_index[Len]
+        ch2 = (sw_high <= sw_low or (ss_low[b_len] < sw_low and not swh_check)) and Len >1
+        s_h2 = ch ? sw_high : sw_high[b_len] , s_b2 = ch ? Bar_sw_high : Bar_sw_high[b_len]
+        if display_swing
+            sw_line = line.new(Bar_sw_low, sw_low , Bar_sw_high ,sw_high,xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            sw_line2 = line.new(s_b, s_l ,s_b2 ,s_h2, xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+        if ch and not ch2
+            if display_swing
+                sw_line3 = line.new(s_b, s_l ,Bar_sw_high[b_len] ,sw_high[b_len], xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            if display_swing
+                label.new(s_b, s_l , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+        if ch2
+            if display_swing
+                sw_line3 = line.new(b_sw_low[b_len], ss_low[b_len] , Bar_sw_high[b_len] ,sw_high[b_len],xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+                if not ch
+                    sw_line4 = line.new(b_sw_low[b_len], ss_low[b_len] , b_sw_high[b_len] ,ss_high[b_len],xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            if display_swing
+                label.new(b_sw_low[b_len], ss_low[b_len] , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+                if not ch
+                    label.new(b_sw_high[b_len], ss_high[b_len] , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+        sw_Dir_small := ch ? 1 : -1 
+        sw_skip := true
+    Ch_swl := true , Ch_swh := true
+
+if sw_Dir_small == 1 and not sw_skip and barstate.isconfirmed
+    if not na(sw_H)
+        for i = 0 to Len*2
+            if not na(sw_L[i])
+                swl_check := true
+                break
+        sw_high := sw_H , Bar_sw_high := bar_index[Len]
+        Ch_swh := true , sw_Dir_small := -1
+        ch = sw_high < sw_low or (ss_high[b_len] > sw_high and not swl_check)
+        s_l = ch ? ss_low[b_len] : sw_low , s_b = ch? b_sw_low[b_len]: Bar_sw_low
+        if display_swing
+            sw_line = line.new(s_b, s_l, Bar_sw_high ,sw_high,xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+        if ch
+            if display_swing
+                sw_line1 = line.new(Bar_sw_low, sw_low , b_sw_high[b_len] ,ss_high[b_len],xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+                sw_line2 = line.new(b_sw_low[b_len], ss_low[b_len] , b_sw_high[b_len] ,ss_high[b_len],xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            if display_swing
+                label.new(b_sw_low[b_len], ss_low[b_len] , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+                label.new(b_sw_high[b_len], ss_high[b_len] , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+        sw_skip := true
+    if not na(sw_L)
+        sw_low := sw_L , Bar_sw_low := bar_index[Len]
+        sw_high := ss_high[b_len] , Bar_sw_high := b_sw_high[b_len]
+        Ch_swl := true , Ch_swh := true , sw_Dir_small := 1
+        if display_swing
+            sw_line = line.new(Bar_sw_low[Len], sw_low[Len] , Bar_sw_high ,sw_high,xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            sw_line2 = line.new(Bar_sw_low, sw_low , Bar_sw_high ,sw_high,xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+        sw_skip := true
+
+if sw_Dir_small == -1 and not sw_skip and barstate.isconfirmed
+    if not na(sw_L)
+        for i = 0 to Len*2
+            if not na(sw_H[i])
+                swh_check := true
+                break
+        sw_low := sw_L , Bar_sw_low := bar_index[Len]
+        Ch_swl := true , sw_Dir_small := 1
+        ch = sw_high <= sw_low or (ss_low[b_len] < sw_low and not swh_check)
+        s_h = ch ? ss_high[b_len] : sw_high , s_b = ch? b_sw_high[b_len]: Bar_sw_high
+        if display_swing
+            sw_line = line.new(Bar_sw_low, sw_low , s_b ,s_h ,xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+        if ch
+            if display_swing
+                sw_line1 = line.new(Bar_sw_high, sw_high  , b_sw_low[b_len] ,ss_low[b_len],xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+                sw_line2 = line.new(b_sw_low[b_len], ss_low[b_len] , b_sw_high[b_len] ,ss_high[b_len],xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            if display_swing
+                label.new(b_sw_low[b_len], ss_low[b_len] , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+                label.new(b_sw_high[b_len], ss_high[b_len] , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+    if not na(sw_H)
+        sw_high := sw_H , Bar_sw_high := bar_index[Len]
+        sw_low := ss_low[b_len] , Bar_sw_low := b_sw_low[b_len]
+        Ch_swl := true , Ch_swh := true , sw_Dir_small := -1
+        if display_swing
+            sw_line = line.new(Bar_sw_low, sw_low , Bar_sw_high[Len],sw_high[Len],xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+            sw_line2 = line.new(Bar_sw_low, sw_low , Bar_sw_high ,sw_high,xloc = xloc.bar_index , color = Color_sw, style = get_line_style(sw_line_style))
+if display_swing
+    if Ch_swh
+        label.new(Bar_sw_high, sw_high , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+    if Ch_swl
+        label.new(Bar_sw_low, sw_low , text = "●" , style= label.style_label_center , color= TRANSP , textcolor = Color_sw ,size = get_text_style(sw_Size))
+
+diff_ph = sw_Dir_small == 1 ? 0 : 1
+diff_pl = sw_Dir_small == -1 ? 0 : 1
+ph = Len == 1 ? high : ta.highest(Len-diff_ph)
+b_ph = Len == 1 ? bar_index : bar_index[math.abs(ta.highestbars(Len-diff_ph))]
+pl = Len == 1 ? low : ta.lowest(Len-diff_pl)
+b_pl = Len == 1 ? bar_index : bar_index[math.abs(ta.lowestbars(Len-diff_pl))]
+
+b_ss = 0 
+if Ch_swh
+    ss_low := pl[b_ss] , b_sw_low := b_pl[b_ss] , ss_high := ph[b_ss] , b_sw_high := b_ph[b_ss]
+if Ch_swl
+    ss_low := pl[b_ss]  , b_sw_low := b_pl[b_ss] , ss_high := ph[b_ss] , b_sw_high := b_ph[b_ss]
+
+//=========================================================================================================================================
+ar_q = 9000
+var line_lid_s = array.new_line(Lid_show,na) , var line_lid_d = array.new_line(Lid_show,na)
+var label_lid_s = array.new_label(Lid_show,na) , var label_lid_d = array.new_label(Lid_show,na)
+
+var mit_lid_s = array.new_line(Lid_ss,na) , var mit_lid_d = array.new_line(Lid_ss,na)
+var mit_lid_lbl_s = array.new_label(Lid_ss,na) , var mit_lid_lbl_d = array.new_label(Lid_ss,na)
+
+var lid_sup = array.new_float(ar_q,na) , var lid_dem = array.new_float(ar_q,na)
+var lid_bar_sup = array.new_int(ar_q,na) , var lid_bar_dem = array.new_int(ar_q,na)
+
+var float value_dem_lid = na , var int pre_bar_Dlid_left = na , var int pre_bar_Dlid_right = na
+var float value_sup_lid = na , var int pre_bar_Slid_left = na , var int pre_bar_Slid_right = na
+
+var float pre_dem_lid = na , var int pre2_bar_Dlid_left = na , var int pre2_bar_Dlid_right = na
+var float pre_sup_lid = na , var int pre2_bar_Slid_left = na , var int pre2_bar_Slid_right = na
+
+bool break_dem = false , bool break_sup = false
+var bool con_buy = false , var bool con_sell = false
+
+var float FVG_gap_buy = na , var float FVG_gap_sell = na
+bool Check_gap_buy = false , bool Check_gap_sell = false
+
+if Ch_swh and sw_high >= ph
+    unshift_remove(lid_sup,sw_high) , unshift_remove(lid_bar_sup,time[bar_index-Bar_sw_high])
+if Ch_swl and sw_low <= pl
+    unshift_remove(lid_dem,sw_low) , unshift_remove(lid_bar_dem,time[bar_index-Bar_sw_low])
+
+txt_size = get_text_style(lbl_Size)
+//Liquidity
+if not na(array.get(lid_dem,0))
+    if low <= array.get(lid_dem,0)
+        for i = 0 to ar_q-1
+            value_dem_lid := array.get(lid_dem,0) , pre_bar_Dlid_left := array.get(lid_bar_dem,0) , pre_bar_Dlid_right := time
+            if show_lid and Turn_off
+                x_value = array.get(lid_bar_dem,0)  , y_value = array.get(lid_dem,0) , bar_lbl = (x_value + time) /2
+                label_mit_unshift(mit_lid_lbl_d,label.new(bar_lbl, y_value ,xloc = xloc.bar_time, text= txt_lid,color = TRANSP ,textcolor = Lid_txt_color ,size = txt_size , style=label.style_label_center))
+                Line_mit_unshift(mit_lid_d,line.new(x_value , y_value , time , y_value ,xloc = xloc.bar_time , color = Lid_color, style = get_line_style(Lid_style)))
+            value_delet_Push1(lid_dem,0) , value_delet_Push1(lid_bar_dem,0)
+            Delete_line_lbl_Push(line_lid_d,label_lid_d,0)
+            if low > array.get(lid_dem,0) or na(array.get(lid_dem,0))
+                break
+        break_dem := true
+
+if not na(array.get(lid_sup,0))
+    if high >= array.get(lid_sup,0)
+        for i = 0 to ar_q-1
+            value_sup_lid := array.get(lid_sup,0) , pre_bar_Slid_left := array.get(lid_bar_sup,0) , pre_bar_Slid_right := time
+            if show_lid and Turn_off
+                x_value = array.get(lid_bar_sup,0) , y_value = array.get(lid_sup,0) , bar_lbl = (x_value + time) /2
+                label_mit_unshift(mit_lid_lbl_s,label.new(bar_lbl, y_value ,xloc = xloc.bar_time, text= txt_lid,color = TRANSP ,textcolor = Lid_txt_color ,size = txt_size , style=label.style_label_center))
+                Line_mit_unshift(mit_lid_s,line.new( x_value , y_value , time , y_value ,xloc = xloc.bar_time , color = Lid_color, style = get_line_style(Lid_style)))
+            value_delet_Push1(lid_sup,0) , value_delet_Push1(lid_bar_sup,0)
+            Delete_line_lbl_Push(line_lid_s,label_lid_s,0)
+            if high < array.get(lid_sup,0) or na(array.get(lid_sup,0))
+                break
+        break_sup := true
+
+// Show Lidqudity
+if show_lid and Turn_off
+    //Demand
+    if not na(array.get(lid_dem,0))
+        for i = 0 to Lid_show-1
+            line.delete(array.get(line_lid_d,i)) , label.delete(array.get(label_lid_d,i))
+            if na(array.get(lid_dem,i))
+                break
+            x_value = array.get(lid_bar_dem,i)  , y_value = array.get(lid_dem,i)
+            array.set(line_lid_d,i,line.new(x_value , y_value , time_set , y_value ,xloc = xloc.bar_time , color = Lid_color, style = get_line_style(Lid_style)))
+            array.set(label_lid_d,i,label.new(time_lbl, y_value ,xloc = xloc.bar_time, text= txt_lid,color = TRANSP ,textcolor = Lid_txt_color ,size = txt_size , style=label.style_label_center))
+    //Supply
+    if not na(array.get(lid_sup,0))
+        for i = 0 to Lid_show-1
+            line.delete(array.get(line_lid_s,i)) , label.delete(array.get(label_lid_s,i))
+            if na(array.get(lid_sup,i))
+                break
+            x_value = array.get(lid_bar_sup,i)  , y_value = array.get(lid_sup,i)
+            array.set(line_lid_s,i,line.new(x_value , y_value , time_set , y_value ,xloc = xloc.bar_time , color = Lid_color, style = get_line_style(Lid_style)))
+            array.set(label_lid_s,i,label.new(time_lbl, y_value ,xloc = xloc.bar_time, text= txt_lid,color = TRANSP ,textcolor = Lid_txt_color ,size = txt_size , style=label.style_label_center))
+
+
+//======================================= Internal Structure =======================================//
+var int In_Dir_Big = 0 , var int In_Dir_small = 0
+var float In_High = na , var float In_Low = na
+var int Bar_In_High = 0 , var int Bar_In_Low = 0
+
+var float i_high = na , var float i_low = na
+var int Bar_i_high = 0 , var int Bar_i_low = 0
+
+var bool CF_In_High = false ,var bool CF_In_low = false
+bool Ch_In_H = false ,bool Ch_In_L = false
+bool In_skip = false
+bool In_ChoCH_Down = false , bool In_ChoCH_Up = false
+bool I_BoS_Down = false , bool I_BoS_Up = false
+
+var bool valid_cf_high = false , var bool valid_cf_low = false
+var bool valid_pivot_high = false , var bool valid_pivot_low = false
+
+var line line_in = na , var label label_in = na
+
+//valid Pullback con1
+cf_high_in = not na(ta.pivothigh(high,Len_in, Len_in))
+if cf_high_in
+    valid_pivot_high := true
+cf_low_in = not na(ta.pivotlow(low,Len_in, Len_in))
+if cf_low_in
+    valid_pivot_low := true
+
+if (high > i_high or na(i_high)) and barstate.isconfirmed
+    i_high := high  , Bar_i_high := bar_index , valid_cf_high := false , valid_pivot_high := false
+if (low < i_low or na(i_low)) and barstate.isconfirmed
+    i_low := low  , Bar_i_low := bar_index , valid_cf_low := false , valid_pivot_low := false
+
+//valid Pullback con2
+if ( valid_con == 'Close' ? close : low ) < low[bar_index-Bar_i_high]
+    valid_cf_high := true
+if ( valid_con == 'Close' ? close : high ) > high[bar_index-Bar_i_low]
+    valid_cf_low := true
+
+if CF_In_High and CF_In_low
+    valid_cf_high := false , valid_cf_low := false
+    valid_pivot_high := false , valid_pivot_low := false
+
+//Default_rule
+In_Break_Up = barstate.isconfirmed and close > In_High
+In_Break_Down = barstate.isconfirmed and close < In_Low
+
+var int con_first = 0
+// Direction Internal up
+if In_Dir_Big == 1 and barstate.isconfirmed
+    if (In_Break_Down and CF_In_low) or (In_Break_Up and CF_In_High)
+        if Turn_off and Show_Structure
+            txt = In_Break_Down ? "MSS" : "BOS"
+            Swingtrend = In_Break_Down ? In_Low : In_High
+            bar_trend = In_Break_Down ? Bar_In_Low : Bar_In_High
+            Time_Bar = In_Break_Down ? time[bar_index-Bar_In_Low] : time[bar_index-Bar_In_High]
+            txt_Collor = In_Break_Down ? In_down_color : In_up_color
+            line_in := line.new(Time_Bar, Swingtrend , time , Swingtrend,xloc = xloc.bar_time , color = txt_Collor, style = get_line_style(In_Line_style))
+            label_in := label.new(int(math.avg(bar_trend, bar_index)), Swingtrend, txt ,xloc = xloc.bar_index, color = TRANSP, textcolor = txt_Collor, style = In_Break_Up ? label.style_label_down : label.style_label_up, size = In_Size_CF)
+    //CHoCH
+    if In_Break_Down and CF_In_low
+        CF_In_High := true , CF_In_low := false
+        Ch_In_H := true , In_ChoCH_Down := true
+    //find High
+    if not na(In_High) and In_Dir_small == 1 and ( valid_cf_high and valid_pivot_high )
+        CF_In_High := true , Ch_In_H := true
+    //find low Continue to break up
+    if In_Dir_small == -1 and In_Break_Up and CF_In_High
+        CF_In_High := false , CF_In_low := true
+        Ch_In_L := true , I_BoS_Up := true
+
+//Direction Internal down
+if In_Dir_Big == -1 and barstate.isconfirmed
+    if (In_Break_Down and CF_In_low) or (In_Break_Up and CF_In_High)
+        if Turn_off and Show_Structure
+            txt = In_Break_Up ? "MSS" : "BOS"
+            Swingtrend = In_Break_Down ? In_Low : In_High
+            bar_trend = In_Break_Down ? Bar_In_Low : Bar_In_High
+            Time_Bar = In_Break_Down ? time[bar_index-Bar_In_Low] : time[bar_index-Bar_In_High]
+            txt_Collor = In_Break_Up ? In_up_color : In_down_color
+            line_in := line.new(Time_Bar, Swingtrend , time , Swingtrend,xloc = xloc.bar_time , color = txt_Collor, style = get_line_style(In_Line_style))
+            label_in := label.new(int(math.avg(bar_trend, bar_index)), Swingtrend, txt ,xloc = xloc.bar_index, color = TRANSP, textcolor = txt_Collor, style = In_Break_Up ? label.style_label_down : label.style_label_up, size = In_Size_CF)
+    //CHoCH
+    if In_Break_Up and CF_In_High
+        CF_In_High := false , CF_In_low := true
+        Ch_In_L := true , In_ChoCH_Up := true
+
+    //find Low
+    if not na(In_Low) and In_Dir_small == -1 and ( valid_cf_low and valid_pivot_low)
+        CF_In_low := true , Ch_In_L := true
+    //find low Continue to break up
+    if In_Dir_small == 1 and In_Break_Down and CF_In_low
+        CF_In_High := true , CF_In_low := false
+        Ch_In_H := true , I_BoS_Down := true
+
+//Change H&L Internal Structure
+if Ch_In_L
+    In_Low := i_low  , Bar_In_Low := Bar_i_low
+    In_Dir_small := 1
+
+if Ch_In_H
+    In_High := i_high  , Bar_In_High := Bar_i_high
+    In_Dir_small := -1
+
+// var int C_F = 0
+if na(In_High) and not na(i_high) and cf_high_in and barstate.isconfirmed
+    i_low := low , Bar_i_low := bar_index , CF_In_High := true , con_first += 1 , Ch_In_H := true
+    In_High := i_high  , Bar_In_High := Bar_i_high , In_Dir_small := -1 
+    if con_first == 2
+        In_Dir_small := 1
+    if not CF_In_low
+        In_Dir_Big := 1
+
+if na(In_Low) and not na(i_low) and cf_low_in and barstate.isconfirmed
+    i_high := high  , Bar_i_high := bar_index , CF_In_low := true, con_first += 1 , Ch_In_L := true
+    In_Low := i_low  , Bar_In_Low := Bar_i_low , In_Dir_small := 1
+    if con_first == 2
+        In_Dir_small := -1
+    if not CF_In_High
+        In_Dir_Big := -1
+
+if CF_In_High and CF_In_low and barstate.isconfirmed
+    con_first := 0
+
+if ( not CF_In_High and high >= i_high[1] ) or In_ChoCH_Up or I_BoS_Up
+    i_low := na
+if ( not CF_In_low and low <= i_low[1] ) or In_ChoCH_Down or I_BoS_Down
+    i_high := na
+
+if In_ChoCH_Up or I_BoS_Up
+    if Bar_In_Low > Bar_i_high[1]
+        i_high := high  , Bar_i_high := bar_index
+
+if In_ChoCH_Down or I_BoS_Down
+    if Bar_In_High > Bar_i_low[1]
+        i_low := low , Bar_i_low := bar_index
+
+//Change Trend H&L Internal Structure
+if In_Break_Down and CF_In_High and In_Dir_Big == 1
+    In_Dir_Big := -1 , In_skip := true
+if not In_skip and In_Break_Up and CF_In_low and In_Dir_Big == -1
+    In_Dir_Big := 1
+
+cf_ud = I_BoS_Up or In_ChoCH_Up or I_BoS_Down or In_ChoCH_Down
+if Turn_off and Show_Structure and (CF_In_low or CF_In_low[1]) and cf_ud
+    bar = CF_In_low ? Bar_In_Low : Bar_In_Low[1] , PP = CF_In_low ? In_Low : In_Low[1]
+    i_Mark_lbl_L = label.new(bar, PP ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing,size = get_text_style(sw_Size))
+if Turn_off and Show_Structure and (CF_In_High or CF_In_High[1]) and cf_ud
+    bar = CF_In_High ? Bar_In_High : Bar_In_High[1] , PP = CF_In_High ? In_High : In_High[1]
+    i_Mark_lbl_H = label.new(bar, PP ,xloc = xloc.bar_index, text = "●", color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing,size = get_text_style(sw_Size))
+
+//Drawing Swing
+var line In_H_line = na , var line In_L_line = na , var label In_H_lbl = na , var label In_L_lbl = na
+
+if Turn_off and Show_Structure and CF_In_High 
+    line.delete(In_H_line[1])
+    In_H_line := line.new(time[bar_index-Bar_In_High], In_High , time_set , In_High ,xloc = xloc.bar_time , color = In_up_color, style = get_line_style(In_Line_style))
+    label.delete(In_H_lbl[1])
+    txt = In_Dir_Big == 1 ? "BOS" : "MSS"
+    In_H_lbl := label.new(bar_index+distance_bar_label, In_High , txt,xloc = xloc.bar_index, color = TRANSP, textcolor = In_up_color, style = label.style_label_down, size = In_Size_CF, textalign =text.align_center)
+
+if Turn_off and Show_Structure and CF_In_low
+    line.delete(In_L_line[1])
+    In_L_line := line.new(time[bar_index-Bar_In_Low], In_Low , time_set , In_Low ,xloc = xloc.bar_time , color = In_down_color, style = get_line_style(In_Line_style))
+    label.delete(In_L_lbl[1])
+    txt = In_Dir_Big == -1 ? "BOS" : "MSS"
+    In_L_lbl := label.new(bar_index+distance_bar_label, In_Low , txt,xloc = xloc.bar_index, color = TRANSP, textcolor = In_down_color, style = label.style_label_up , size = In_Size_CF, textalign =text.align_center)
+
+if Turn_off and Show_Structure and not CF_In_High 
+    line.delete(In_H_line[1]) , label.delete(In_H_lbl)
+if not CF_In_low
+    line.delete(In_L_line[1]) , label.delete(In_L_lbl)
+
+//Internal_Equilibrium
+var line In_line_Eq = na , var label In_lbl_Eq = na
+var float Premium = na , var float Discount = na
+var line In_line_Eq2 = na , var label In_lbl_Eq2 = na
+var float Premium2 = na , var float Discount2 = na 
+
+Pre_Dis_Cal = Pre_Dis / 100 , Pre_Dis_Cal2 = Pre_Dis2 / 100
+if CF_In_low and not CF_In_High
+    Discount := i_high-math.abs(Pre_Dis_Cal*(i_high-In_Low)) , text_pre_dis = "% Discount"
+    if EQ_con
+        Discount2 := i_high-math.abs(Pre_Dis_Cal2*(i_high-In_Low))
+    if Turn_off and Show_Structure
+        line.delete(In_line_Eq[1]) , label.delete(In_lbl_Eq[1])
+        Bar_Eq = Bar_In_High < Bar_In_Low ? Bar_In_High : Bar_In_Low
+        In_line_Eq := line.new(time[bar_index-Bar_Eq], Discount , time_set , Discount ,xloc = xloc.bar_time , color = color_Eq_In, style = get_line_style(In_Line_style))        
+        In_lbl_Eq := label.new(bar_index+distance_bar_label, Discount , str.tostring(Pre_Dis)+text_pre_dis,xloc = xloc.bar_index, color = TRANSP , textcolor = In_up_color, style = label.style_label_up, size = In_Size_CF)
+        if EQ_con
+            line.delete(In_line_Eq2[1]) , label.delete(In_lbl_Eq2[1])
+            In_line_Eq2 := line.new(time[bar_index-Bar_Eq], Discount2 , time_set , Discount2 ,xloc = xloc.bar_time , color = color_Eq_In, style = get_line_style(In_Line_style))        
+            In_lbl_Eq2 := label.new(bar_index+distance_bar_label, Discount2 , str.tostring(Pre_Dis2)+text_pre_dis,xloc = xloc.bar_index, color = TRANSP , textcolor = In_up_color, style = label.style_label_up, size = In_Size_CF)
+
+if CF_In_High and not CF_In_low
+    Premium := i_low+(Pre_Dis_Cal*(In_High-i_low)) , text_pre_dis = "% Premium"
+    if EQ_con
+        Premium2 := i_low+(Pre_Dis_Cal2*(In_High-i_low))
+    if Turn_off and Show_Structure
+        line.delete(In_line_Eq[1]) , label.delete(In_lbl_Eq[1])
+        Bar_Eq = Bar_In_High < Bar_In_Low ? Bar_In_High : Bar_In_Low
+        In_line_Eq := line.new(time[bar_index-Bar_Eq], Premium , time_set , Premium ,xloc = xloc.bar_time , color = color_Eq_In, style = get_line_style(In_Line_style))        
+        In_lbl_Eq := label.new(bar_index+distance_bar_label, Premium , str.tostring(Pre_Dis)+text_pre_dis,xloc = xloc.bar_index, color = TRANSP , textcolor = In_down_color, style = label.style_label_down, size = In_Size_CF)
+        if EQ_con
+            line.delete(In_line_Eq2[1]) , label.delete(In_lbl_Eq2[1])
+            In_line_Eq2 := line.new(time[bar_index-Bar_Eq], Premium2 , time_set , Premium2 ,xloc = xloc.bar_time , color = color_Eq_In, style = get_line_style(In_Line_style))        
+            In_lbl_Eq2 := label.new(bar_index+distance_bar_label, Premium2 , str.tostring(Pre_Dis2)+text_pre_dis,xloc = xloc.bar_index, color = TRANSP , textcolor = In_down_color, style = label.style_label_down, size = In_Size_CF)
+
+if CF_In_low and CF_In_High
+    Premium := In_Low+(Pre_Dis_Cal*(In_High-In_Low))
+    Discount := In_High-math.abs(Pre_Dis_Cal*(In_High-In_Low))
+    if EQ_con
+        Premium2 := In_Low+(Pre_Dis_Cal2*(In_High-In_Low))
+        Discount2 := In_High-math.abs(Pre_Dis_Cal2*(In_High-In_Low))
+    if Turn_off and Show_Structure
+        Equilibrium = In_Dir_Big == 1 ? Discount : Premium
+        text_pre_dis = In_Dir_Big == -1 ? "% Premium" : "% Discount"
+        col_text =  In_Dir_Big == -1 ? In_down_color : In_up_color
+        style_txt = In_Dir_Big == -1 ? label.style_label_down  : label.style_label_up
+        line.delete(In_line_Eq[1]) , label.delete(In_lbl_Eq[1])
+        Bar_Eq = Bar_In_High < Bar_In_Low ? Bar_In_High : Bar_In_Low
+        In_line_Eq := line.new(time[bar_index-Bar_Eq], Equilibrium , time_set , Equilibrium ,xloc = xloc.bar_time , color = color_Eq_In, style = get_line_style(In_Line_style))        
+        In_lbl_Eq := label.new(bar_index+distance_bar_label, Equilibrium , str.tostring(Pre_Dis)+text_pre_dis,xloc = xloc.bar_index, color = TRANSP , textcolor = col_text, style = style_txt, size = In_Size_CF)
+        if EQ_con
+            Equilibrium2 = In_Dir_Big == 1 ? Discount2 : Premium2
+            line.delete(In_line_Eq2[1]) , label.delete(In_lbl_Eq2[1])
+            In_line_Eq2 := line.new(time[bar_index-Bar_Eq], Equilibrium2 , time_set , Equilibrium2 ,xloc = xloc.bar_time , color = color_Eq_In, style = get_line_style(In_Line_style))        
+            In_lbl_Eq2 := label.new(bar_index+distance_bar_label, Equilibrium2 , str.tostring(Pre_Dis2)+text_pre_dis,xloc = xloc.bar_index, color = TRANSP , textcolor = col_text, style = style_txt, size = In_Size_CF)
+
+if Turn_off and Show_Structure and not CF_In_High or not CF_In_low
+    line.delete(In_line_Eq[1]) , label.delete(In_lbl_Eq[1])
+    if EQ_con
+        line.delete(In_line_Eq2[1]) , label.delete(In_lbl_Eq2[1])
+//=============================== History ===============================
+//lid_qudity
+var his_dem_lid = array.new_float(0,na) , var his_Dbar_left = array.new_int(0,na) , var his_Dbar_right = array.new_int(0,na)
+var his_sup_lid = array.new_float(0,na) , var his_Sbar_left = array.new_int(0,na) , var his_Sbar_right = array.new_int(0,na)
+
+var line_his_lid_s = array.new_line(10,na) , var line_his_lid_d = array.new_line(10,na)
+var label_his_lid_s = array.new_label(10,na) , var label_his_lid_d = array.new_label(10,na)
+
+//=============================== Entry Condition ===============================
+var int c_order_buy = 0 , var int c_order_sell = 0
+var float stop_loss_long = 0 , var float stop_loss_short = 0
+var float take_profit_long = 0 , var float take_profit_short = 0
+var float open_long = 0 , var float open_short = 0
+var int time_buy = 0 , var int time_sell = 0
+
+bool cencel_buy = false , bool cencel_sell = false
+bool im_buy_signal = false , bool im_sell_signal = false
+bool buy_signal = false , bool sell_signal = false
+var bool pending_buy = false , var bool pending_sell = false
+
+var bool up_trend = false , var bool down_trend = false
+//Trend Following Conditions
+if Follow_trend and barstate.isconfirmed
+    if not up_trend and In_Dir_Big == 1 
+        up_trend := true , down_trend := false
+    if not down_trend and In_Dir_Big == -1
+        down_trend := true , up_trend := false
+
+if not Follow_trend and not up_trend and barstate.isconfirmed
+    up_trend := true , down_trend := true
+
+//================ condition buy ================
+if break_dem and close > value_dem_lid and open > value_dem_lid and barstate.isconfirmed and strategy.position_size == 0
+    if B_long
+        con_buy := true
+        pre_dem_lid := value_dem_lid , pre2_bar_Dlid_left := pre_bar_Dlid_left , pre2_bar_Dlid_right := pre_bar_Dlid_right
+    if pending_sell and cancel_pending_A
+        strategy.cancel("Short "+str.tostring(c_order_sell))
+        alert("Cancel Pending Short", alert.freq_all)
+        cencel_sell := true , pending_sell := false
+    con_sell := false
+
+if B_long and barstate.isconfirmed and ( close < value_dem_lid or ( not con_time and con_time[1]) )
+    con_buy := false
+
+//Check gap between iFVG and FVG
+if not na(array.get(dfvg_bot,0)) and value_dem_lid < array.get(dfvg_bot,0) and up_trend
+    FVG_gap_buy := math.abs((array.get(dfvg_R2_bot,0) - array.get(dfvg_top,0)))
+    Con_gap_buy = FVG_gap_buy >= atr_check_FVG_min and FVG_gap_buy <= atr_check_FVG_max 
+    if con_buy[1] and Con_gap_buy
+        EQ_entry_buy =  Follow_trend and EQ_con ? array.get(dfvg_bot,0) <= Discount and array.get(dfvg_bot,0) >= Discount2 : true
+        Size_FVG_dem = math.abs((array.get(dfvg_top,0) - array.get(dfvg_bot,0)))
+        size_FVG_con_dem = not Filter_size_FVG or (Filter_size_FVG and Size_FVG_dem >= Check_min_FVG and Size_FVG_dem <= Check_max_FVG)
+        Size_iFVG_dem = math.abs((array.get(dfvg_R2_top,0) - array.get(dfvg_R2_bot,0)))
+        size_iFVG_con_dem = not Filter_size_iFVG or (Filter_size_iFVG and Size_iFVG_dem >= Check_min_iFVG and Size_iFVG_dem <= Check_max_iFVG)
+        con_mix_dem = ( Con_FVG_mix ? true : ( not iFVG_be_FVG ? array.get(dfvg_R2_bot,0) >= array.get(dfvg_top,0) : array.get(dfvg_R2_bot,0) < array.get(dfvg_top,0)))
+        if EQ_entry_buy and size_FVG_con_dem and size_iFVG_con_dem and con_mix_dem
+            Check_gap_buy := true 
+
+if con_buy and Check_gap_buy
+    buy_signal := true , con_buy := false
+    if B_long
+        value_unshift_noremove(his_dem_lid,pre_dem_lid,his_Dbar_left,pre2_bar_Dlid_left,his_Dbar_right,pre2_bar_Dlid_right)
+    if Turn_off
+        lbl_fvg = lbl_SnD ? "FVG" : "" 
+        lbl_ifvg = lbl_SnD ? "iFVG" : ""
+        dfvg_his = box.new(xloc = xloc.bar_time, left = array.get(dfvg_bar,0) , top = array.get(dfvg_top,0) , right = time+n_bar , bottom = array.get(dfvg_bot,0)  , border_color = Col_fvg_mit ,bgcolor = Col_fvg_mit , text = lbl_fvg ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center)
+        d_ifvg_his = box.new(xloc = xloc.bar_time, left = array.get(dfvg_bar_R2,0) , top = array.get(dfvg_R2_top,0) , right = time+n_bar , bottom = array.get(dfvg_R2_bot,0) , border_color = Col_ifvg_mit ,bgcolor = Col_ifvg_mit , text = lbl_ifvg ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center)
+
+        FVG_d_top = array.get(dfvg_top,0) , iFVG_d_bot = array.get(dfvg_R2_bot,0) , mid_d_both = (FVG_d_top + iFVG_d_bot) /2 , gap_value_min = atr_check_FVG_min/2 , gap_value_max = atr_check_FVG_max/2
+        if FVG_min_ATR > 0 
+            gap_min_his = box.new(xloc = xloc.bar_time, left = time-gap_bar , top = mid_d_both+gap_value_min , right = time + gap_bar , bottom = mid_d_both-gap_value_min  , border_color = gap_col_min ,bgcolor = gap_col_min )
+        gap_max_his = box.new(xloc = xloc.bar_time, left = time-gap_bar , top = mid_d_both+gap_value_max , right = time + gap_bar , bottom = mid_d_both-gap_value_max  , border_color = gap_col_max ,bgcolor = gap_col_max, text = 'Gap' ,text_size = size.tiny ,text_color = Col_SnD,text_halign = text.align_center,text_valign = text.align_center)
+
+//================ condition sell ================
+if break_sup and close < value_sup_lid and open < value_sup_lid and barstate.isconfirmed and strategy.position_size == 0
+    if S_short
+        con_sell := true
+        pre_sup_lid := value_sup_lid , pre2_bar_Slid_left := pre_bar_Slid_left , pre2_bar_Slid_right := pre_bar_Slid_right
+    if pending_buy and cancel_pending_A
+        strategy.cancel("Long "+str.tostring(c_order_buy))
+        alert("Cancel Pending Long", alert.freq_all)
+        cencel_buy := true , pending_buy := false
+    con_buy := false
+
+if S_short and barstate.isconfirmed and ( close > value_sup_lid or ( not con_time and con_time[1]) )
+    con_sell := false
+
+//Check gap between iFVG and FVG
+if not na(array.get(sfvg_top,0)) and value_sup_lid > array.get(sfvg_top,0) and down_trend
+    FVG_gap_sell := math.abs((array.get(sfvg_R2_top,0) - array.get(sfvg_bot,0)))
+    Con_gap_sell = FVG_gap_sell >= atr_check_FVG_min and FVG_gap_sell <= atr_check_FVG_max
+    if con_sell[1] and Con_gap_sell
+        EQ_entry_sell =  Follow_trend and EQ_con ? array.get(sfvg_top,0) >= Premium and array.get(sfvg_top,0) <= Premium2 : true
+        Size_FVG_sup = math.abs((array.get(sfvg_top,0) - array.get(sfvg_bot,0)))
+        size_FVG_con_sup = not Filter_size_FVG or (Filter_size_FVG and Size_FVG_sup >= Check_min_FVG and Size_FVG_sup <= Check_max_FVG)
+        Size_iFVG_sup = math.abs((array.get(sfvg_R2_top,0) - array.get(sfvg_R2_bot,0)))
+        size_iFVG_con_sup = not Filter_size_iFVG or (Filter_size_iFVG and Size_iFVG_sup >= Check_min_iFVG and Size_iFVG_sup <= Check_max_iFVG)
+        con_mix_sup = (Con_FVG_mix ? true : ( not iFVG_be_FVG ? array.get(sfvg_R2_top,0) <= array.get(sfvg_bot,0) : array.get(sfvg_R2_top,0) > array.get(sfvg_bot,0)))
+        if EQ_entry_sell and size_FVG_con_sup and size_iFVG_con_sup and con_mix_sup
+            Check_gap_sell := true 
+
+if con_sell and Check_gap_sell
+    sell_signal := true , con_sell := false
+    if S_short
+        value_unshift_noremove(his_sup_lid,pre_sup_lid,his_Sbar_left,pre2_bar_Slid_left,his_Sbar_right,pre2_bar_Slid_right)
+    if Turn_off
+        lbl_fvg = lbl_SnD ? "FVG" : "" 
+        lbl_ifvg = lbl_SnD ? "iFVG" : ""
+        sfvg_his = box.new(xloc = xloc.bar_time, left = array.get(sfvg_bar,0) , top = array.get(sfvg_top,0) , right = time+n_bar , bottom = array.get(sfvg_bot,0) , border_color = Col_fvg_mit2 ,bgcolor = Col_fvg_mit2 , text = lbl_fvg ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center)
+        s_ifvg_his = box.new(xloc = xloc.bar_time, left = array.get(sfvg_bar_R2,0) , top = array.get(sfvg_R2_top,0) , right = time+n_bar , bottom = array.get(sfvg_R2_bot,0) , border_color = Col_ifvg_mit2 ,bgcolor = Col_ifvg_mit2 , text = lbl_ifvg ,text_size = get_text_style(Size_SnD) ,text_color = Col_SnD,text_halign = text.align_right,text_valign = text.align_center)
+        
+        FVG_s_top = array.get(sfvg_bot,0) , iFVG_s_bot = array.get(sfvg_R2_top,0) , mid_s_both = (FVG_s_top + iFVG_s_bot) /2 , gap_value_min = atr_check_FVG_min/2 , gap_value_max = atr_check_FVG_max/2
+        if FVG_min_ATR > 0 
+            gap_min_his = box.new(xloc = xloc.bar_time, left = time-gap_bar , top = mid_s_both+gap_value_min , right = time + gap_bar , bottom = mid_s_both-gap_value_min  , border_color = gap_col_min ,bgcolor = gap_col_min )
+        gap_max_his = box.new(xloc = xloc.bar_time, left = time-gap_bar , top = mid_s_both+gap_value_max , right = time + gap_bar , bottom = mid_s_both-gap_value_max  , border_color = gap_col_max ,bgcolor = gap_col_max, text = 'Gap' ,text_size = size.tiny ,text_color = Col_SnD,text_halign = text.align_center,text_valign = text.align_center)
+
+//=================================================================================
+//Condition Buy
+if strategy.position_size > 0
+    pending_buy := false
+if strategy.closedtrades > strategy.closedtrades[1] and pending_buy and barstate.isconfirmed
+    im_buy_signal := true , pending_buy := false
+
+//Condition Sell
+if strategy.position_size < 0 
+    pending_sell := false
+if strategy.closedtrades > strategy.closedtrades[1] and pending_sell  and barstate.isconfirmed
+    im_sell_signal := true , pending_sell := false
+
+//Cancel pending Order
+if barstate.isconfirmed and (cancel_pending_B and (buy_signal or sell_signal)) or (cancel_pending_C and con_time[1] and not con_time)
+    if pending_buy
+        strategy.cancel("Long "+str.tostring(c_order_buy))
+        alert("Cancel Pending Long", alert.freq_all)
+        pending_buy := false , cencel_buy := true 
+    if pending_sell
+        strategy.cancel("Short "+str.tostring(c_order_sell))
+        alert("Cancel Pending Short", alert.freq_all)
+        pending_sell := false , cencel_sell := true
+//=================================================================================
+
+// === Position Size ===
+risk_pips = atr_sl * x_ATR
+value_remove2(va1 , va2 , size) =>
+    array.remove(va1,size) , array.remove(va2,size)
+var tp_buy = array.new_float(0,na) , var sl_buy = array.new_float(0,na)  
+var tp_sell = array.new_float(0,na) , var sl_sell = array.new_float(0,na)  
+
+var int Loss_Buy = 0 , var int Win_Buy = 0 , var float sl_trade_buy = na , var float tp_trade_buy = na
+var int Loss_Sell = 0 , var int Win_Sell = 0 , var float sl_trade_sell = na , var float tp_trade_sell = na
+
+if cencel_buy and array.size(tp_buy) > 0
+    tp_trade_buy := na , sl_trade_buy := na
+    for i = array.size(tp_buy)-1 to 0
+        value_remove2( tp_buy , sl_buy , i)
+if cencel_sell and array.size(tp_sell) > 0
+    tp_trade_sell := na , sl_trade_sell := na
+    for i = array.size(tp_sell)-1 to 0
+        value_remove2( tp_sell , sl_sell , i)
+
+// === Long Entry ===
+if buy_signal and up_trend and B_long and barstate.isconfirmed and con_time and con_date
+    sl_cal_long = array.get(dfvg_bot,0) , entry_b = array.get(dfvg_top,0)
+    open_long := entry_b -math.abs((fibo_entry / 100)*(entry_b-sl_cal_long))
+    stop_loss_long := sl_cal_long - risk_pips
+    take_profit_long := open_long + (open_long - stop_loss_long)*rr_ratio
+    c_order_buy += 1 
+    cs_buy = str.tostring(c_order_buy)
+    strategy.entry("Long "+cs_buy, strategy.long , na , limit = open_long )
+    strategy.exit("Long Exit "+cs_buy , "Long "+cs_buy , stop = stop_loss_long , limit = take_profit_long , comment_profit = "Long(Tp) "+cs_buy ,comment_loss = "Long(SL) "+cs_buy )
+    p_entry = "\n\nEntry price = "+str.tostring( open_long , format.mintick)
+    p_sl = "\n\nStop loss = "+str.tostring(stop_loss_long, format.mintick)
+    p_tp = "\n\nTarget profit = "+str.tostring(take_profit_long, format.mintick)
+    alert("Long_"+p_entry+p_sl+p_tp, alert.freq_all)
+    pending_buy := true  , time_buy := time
+    array.unshift(tp_buy, take_profit_long) , array.unshift(sl_buy,stop_loss_long)
+
+// === Short Entry ===
+if sell_signal and down_trend and S_short and barstate.isconfirmed and con_time and con_date
+    sl_cal_short = array.get(sfvg_top,0) , entry_s = array.get(sfvg_bot,0)
+    open_short := entry_s + math.abs((fibo_entry / 100) *(sl_cal_short-entry_s))
+    stop_loss_short := sl_cal_short + risk_pips
+    take_profit_short := open_short - (stop_loss_short - open_short)*rr_ratio
+    c_order_sell += 1
+    cs_sell = str.tostring(c_order_sell)
+    strategy.entry("Short "+cs_sell, strategy.short , na , limit = open_short  )
+    strategy.exit("Short Exit "+cs_sell ,"Short "+cs_sell , stop = stop_loss_short , limit = take_profit_short , comment_profit = "Short(Tp) "+cs_sell ,comment_loss = "Short(SL) "+cs_sell )
+    p_entry = "\n\nEntry price = "+str.tostring( open_short , format.mintick)
+    p_sl = "\n\nStop loss = "+str.tostring(stop_loss_short, format.mintick)
+    p_tp = "\n\nTarget profit = "+str.tostring(take_profit_short, format.mintick)
+    alert("Short_"+p_entry+p_sl+p_tp, alert.freq_all)
+    pending_sell := true  , time_sell := time
+    array.unshift(tp_sell, take_profit_short) , array.unshift(sl_sell,stop_loss_short)
+
+//===================== show pending ===================== 
+box box_entrybuy_1_his = na , box box_entrybuy_2_his = na
+box box_entrysell_1_his = na , box box_entrysell_2_his = na
+label lbl_entry_his = na , label lbl_tp_his = na , label lbl_sl_his = na
+
+var label lbl_entry_t = na , var label lbl_tp_t = na , var label lbl_sl_t = na
+var box box_entry_t1 = na , var box box_entry_t2 = na 
+
+In_Size_fibo = get_text_style(Size_SnD)
+//show Buy
+if Entry_box and (strategy.position_size > 0 or im_buy_signal) and barstate.isconfirmed and Turn_off
+    if (strategy.opentrades.entry_price(strategy.opentrades - 1) == open_long) or (cancel_pending_A or cancel_pending_B) or im_buy_signal
+        box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+        box.delete(box_entrybuy_1_his[1]) , box.delete(box_entrybuy_2_his[1]) , label.delete(lbl_entry_his[1]) , label.delete(lbl_tp_his[1]) , label.delete(lbl_sl_his[1])
+        box_entrybuy_1_his := box.new(xloc = xloc.bar_time ,left = time_buy , top = take_profit_long, right = time+n_bar , bottom = open_long , border_color = col_1 ,bgcolor = col_1)
+        box_entrybuy_2_his := box.new(xloc = xloc.bar_time ,left = time_buy , top = open_long, right = time+n_bar , bottom = stop_loss_long , border_color = col_2 ,bgcolor = col_2)
+        lbl_entry_his := label.new(bar_index+5, open_long , str.tostring(open_long,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+        lbl_tp_his := label.new(bar_index+5, take_profit_long , str.tostring(take_profit_long,format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+        lbl_sl_his := label.new(bar_index+5, stop_loss_long , str.tostring(stop_loss_long,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+if Entry_box and cencel_buy and barstate.isconfirmed and Turn_off
+    box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box.delete(box_entrybuy_1_his[1]) , box.delete(box_entrybuy_2_his[1]) , label.delete(lbl_entry_his[1]) , label.delete(lbl_tp_his[1]) , label.delete(lbl_sl_his[1])
+    box_entrybuy_1_his := box.new(xloc = xloc.bar_time ,left = time_buy[1] , top = take_profit_long[1] , right = time_buy[1]+n_bar , bottom = open_long[1] , border_color = col_1 ,bgcolor = col_1)
+    box_entrybuy_2_his := box.new(xloc = xloc.bar_time ,left = time_buy[1] , top = open_long[1] , right = time_buy[1]+n_bar , bottom = stop_loss_long[1] , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_his := label.new(time_buy[1]+n_bar, open_long[1] , str.tostring(open_long[1],format.mintick) ,xloc = xloc.bar_time, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_his := label.new(time_buy[1]+n_bar, take_profit_long[1] , str.tostring(take_profit_long[1],format.mintick),xloc = xloc.bar_time, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_his := label.new(time_buy[1]+n_bar, stop_loss_long[1] , str.tostring(stop_loss_long[1],format.mintick) ,xloc = xloc.bar_time, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+
+//show sell
+if Entry_box and (strategy.position_size < 0 or im_sell_signal) and barstate.isconfirmed and Turn_off
+    if (strategy.opentrades.entry_price(strategy.opentrades - 1) == open_short ) or (cancel_pending_A or cancel_pending_B) or im_sell_signal
+        box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+        box.delete(box_entrysell_1_his[1]) , box.delete(box_entrysell_2_his[1]) , label.delete(lbl_entry_his[1]) , label.delete(lbl_tp_his[1]) , label.delete(lbl_sl_his[1])
+        box_entrysell_1_his := box.new(xloc = xloc.bar_time , left = time_sell , top = take_profit_short, right = time+n_bar  , bottom = open_short , border_color = col_1 ,bgcolor = col_1)
+        box_entrysell_2_his := box.new(xloc = xloc.bar_time , left = time_sell , top = open_short, right = time+n_bar  , bottom = stop_loss_short , border_color = col_2 ,bgcolor = col_2)
+        lbl_entry_his := label.new(bar_index+5 , open_short , str.tostring(open_short,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+        lbl_tp_his := label.new(bar_index+5 , take_profit_short , str.tostring(take_profit_short,format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+        lbl_sl_his := label.new(bar_index+5 , stop_loss_short , str.tostring(stop_loss_short,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+if Entry_box and cencel_sell and barstate.isconfirmed and Turn_off
+    box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box.delete(box_entrysell_1_his[1]) , box.delete(box_entrysell_2_his[1]) , label.delete(lbl_entry_his[1]) , label.delete(lbl_tp_his[1]) , label.delete(lbl_sl_his[1])
+    box_entrysell_1_his := box.new(xloc = xloc.bar_time , left = time_sell[1] , top = take_profit_short[1], right = time_sell[1]+n_bar  , bottom = open_short[1] , border_color = col_1 ,bgcolor = col_1)
+    box_entrysell_2_his := box.new(xloc = xloc.bar_time , left = time_sell[1] , top = open_short[1], right = time_sell[1]+n_bar  , bottom = stop_loss_short[1] , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_his := label.new(time_sell[1]+n_bar , open_short[1] , str.tostring(open_short[1],format.mintick) ,xloc = xloc.bar_time, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_his := label.new(time_sell[1]+n_bar , take_profit_short[1] , str.tostring(take_profit_short[1],format.mintick),xloc = xloc.bar_time, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_his := label.new(time_sell[1]+n_bar , stop_loss_short[1] , str.tostring(stop_loss_short[1],format.mintick) ,xloc = xloc.bar_time, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+
+if Entry_box and buy_signal and barstate.isconfirmed and Turn_off
+    box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box_entry_t1 := box.new(xloc = xloc.bar_time ,left = time_buy , top = take_profit_long, right = time+n_bar , bottom = open_long , border_color = col_1 ,bgcolor = col_1)
+    box_entry_t2 := box.new(xloc = xloc.bar_time ,left = time_buy , top = open_long, right = time+n_bar , bottom = stop_loss_long , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_t := label.new(bar_index+5, open_long , str.tostring(open_long,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_t := label.new(bar_index+5, take_profit_long , str.tostring(take_profit_long,format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_t := label.new(bar_index+5, stop_loss_long , str.tostring(stop_loss_long,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+if Entry_box and sell_signal and barstate.isconfirmed and Turn_off
+    box.delete(box_entrysell_1_his[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box_entry_t1 := box.new(xloc = xloc.bar_time , left = time_sell , top = take_profit_short, right = time+n_bar  , bottom = open_short , border_color = col_1 ,bgcolor = col_1)
+    box_entry_t2 := box.new(xloc = xloc.bar_time , left = time_sell , top = open_short, right = time+n_bar  , bottom = stop_loss_short , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_t := label.new(bar_index+5 , open_short , str.tostring(open_short,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_t := label.new(bar_index+5 , take_profit_short , str.tostring(take_profit_short,format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_t := label.new(bar_index+5 , stop_loss_short , str.tostring(stop_loss_short,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = Col_SnD, style = label.style_label_center, size = In_Size_fibo)
+
+if Show_result and barstate.isconfirmed and Turn_off
+    //Check SL buy
+    if array.size(sl_buy) > 0 and not na(array.get(sl_buy,0))
+        sl_trade_buy := array.get(sl_buy,0)
+    if low <= sl_trade_buy and ( strategy.position_size[1] > 0 or im_buy_signal) and array.size(sl_buy) > 0
+        sl_trade_buy := na , tp_trade_buy := na
+        for i = array.size(sl_buy)-1 to 0
+            if low <= array.get(sl_buy,i) and not na(array.get(sl_buy,i))
+                Loss_Buy += 1
+                value_remove2( tp_buy , sl_buy , i)
+    //check TP buy
+    if array.size(tp_buy) > 0 and not na(array.get(tp_buy,0))
+        tp_trade_buy := array.get(tp_buy,0)
+    if high >= tp_trade_buy and ( strategy.position_size[1] > 0 or im_buy_signal) and array.size(tp_buy) > 0
+        tp_trade_buy := na , sl_trade_buy := na
+        for i = array.size(tp_buy)-1 to 0
+            if high >= array.get(tp_buy,i) and not na(array.get(tp_buy,i))
+                Win_Buy += 1 
+                value_remove2( tp_buy , sl_buy , i)
+
+    //Check SL Sell
+    if array.size(sl_sell) > 0 and not na(array.get(sl_sell,0))
+        sl_trade_sell := array.get(sl_sell,0)
+    if high >= sl_trade_sell and ( strategy.position_size[1] < 0 or im_sell_signal) and array.size(sl_sell) > 0
+        sl_trade_sell := na , tp_trade_sell := na
+        for i = array.size(sl_sell)-1 to 0
+            if high >= array.get(sl_sell,i) and not na(array.get(sl_sell,i))
+                Loss_Sell += 1
+                value_remove2( tp_sell , sl_sell , i)
+    //check TP Sell
+    if array.size(tp_sell) > 0 and not na(array.get(tp_sell,0))
+        tp_trade_sell := array.get(tp_sell,0)
+    if low <= tp_trade_sell and ( strategy.position_size[1] < 0 or im_sell_signal) and array.size(tp_sell) > 0
+        tp_trade_sell := na , sl_trade_sell := na
+        for i = array.size(tp_sell)-1 to 0
+            if low <= array.get(tp_sell,i) and not na(array.get(tp_sell,i))
+                Win_Sell += 1 
+                value_remove2( tp_sell , sl_sell , i)
+
+// === Plotting ===
+bgcolor(s_New_York and cf_ses1 ? color.rgb(255, 251, 0, 92) : na ,title = "New York")
+bgcolor(s_London and cf_ses2 ? color.rgb(255, 0, 255, 92) : na ,title = "London")
+bgcolor(s_Tokyo and cf_ses3? color.rgb(111, 255, 82, 92) : na ,title = "Tokyo")
+bgcolor(s_Sydney and cf_ses4? color.rgb(82, 122, 255, 92) : na ,title = "Sydney")
+
+Location_session = ((9*60*60) / timeframe.in_seconds(timeframe.period)) / 2 
+Lbl_New_York = not cf_ses1 and cf_ses1 != cf_ses1[1] and s_New_York and t_New == '1300-2200' and timeframe.in_seconds(timeframe.period) <= 32400
+plotshape( Lbl_New_York , "Session New York", shape.labeldown, location.bottom, na , offset = -Location_session  , text = "New York", textcolor = #fffb00, size = size.tiny, display = display.all - display.status_line, editable = false)
+Lbl_London = not cf_ses2 and cf_ses2 != cf_ses2[1] and s_London and t_Lon == '0700-1600' and timeframe.in_seconds(timeframe.period) <= 32400
+plotshape( Lbl_London , "Session London", shape.labeldown, location.bottom, na , offset = -Location_session  , text = "London", textcolor = #ff00ff , size = size.tiny, display = display.all - display.status_line, editable = false)
+Lbl_Tokyo = not cf_ses3 and cf_ses3 != cf_ses3[1] and s_Tokyo and t_Tokyo == '0000-0900' and timeframe.in_seconds(timeframe.period) <= 32400
+plotshape( Lbl_Tokyo , "Session Tokyo", shape.labeldown, location.bottom, na , offset = -Location_session  , text = "Tokyo", textcolor = #6fff52 , size = size.tiny, display = display.all - display.status_line, editable = false)
+Lbl_Sydney = not cf_ses4 and cf_ses4 != cf_ses4[1] and s_Sydney and t_Syd == '2100-0600' and timeframe.in_seconds(timeframe.period) <= 32400
+plotshape( Lbl_Sydney , "Session Sydney", shape.labeldown, location.bottom, na , offset = -Location_session  , text = "Sydney", textcolor = #527aff , size = size.tiny, display = display.all - display.status_line, editable = false)
+
+var table Balane_status = table.new( position(select_position) , 6 , 6 , border_width = 1)
+
+Total_all = Win_Buy + Loss_Buy + Win_Sell + Loss_Sell
+if Show_result and (Total_all > Total_all[1]) and barstate.isconfirmed and Turn_off
+    Long_all = Win_Buy + Loss_Buy , Short_all = Win_Sell + Loss_Sell
+    Total_win = Win_Buy + Win_Sell , Total_loss = Loss_Buy + Loss_Sell
+    Factor_all = (Total_win*rr_ratio)/Total_loss
+    Factor_buy = (Win_Buy*rr_ratio)/Loss_Buy
+    Factor_sell = (Win_Sell*rr_ratio)/Loss_Sell
+    txt1_1 = str.tostring(Total_all,format.volume)
+    txt1_2 = str.tostring(Long_all,format.volume)
+    txt1_3 = str.tostring(Short_all,format.volume)
+    txt2_1 = str.tostring(Total_win,format.volume)
+    txt3_1 = str.tostring(Total_loss,format.volume)
+    txt4_1 = str.tostring((Total_win/Total_all)*100,format.percent)
+    txt5_1 = str.format("{0,number,#.##}", Factor_all )
+
+    txt2_2 = str.tostring(Win_Buy,format.volume)
+    txt3_2 = str.tostring(Loss_Buy,format.volume)
+    txt4_2 = str.tostring((Win_Buy/Long_all)*100,format.percent)
+    txt5_2 = str.format("{0,number,#.##}", Factor_buy )
+
+    txt2_3 = str.tostring(Win_Sell,format.volume)
+    txt3_3 = str.tostring(Loss_Sell,format.volume)
+    txt4_3 = str.tostring((Win_Sell/Short_all)*100,format.percent)
+    txt5_3 = str.format("{0,number,#.##}", Factor_sell)
+
+    Factor_all_color = Factor_all > Factor_up ? Factor_up_color : Factor_all < Factor_donw ? Factor_donw_color : color.white 
+    Factor_buy_color = Factor_buy > Factor_up ? Factor_up_color : Factor_buy < Factor_donw ? Factor_donw_color : color.white 
+    Factor_sell_color = Factor_sell > Factor_up ? Factor_up_color : Factor_sell < Factor_donw ? Factor_donw_color : color.white 
+
+    table.cell(Balane_status , 1 , 1 , txt1_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 2 , 1 , txt2_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 3 , 1 , txt3_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 4 , 1 , txt4_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 5 , 1 , txt5_1 , bgcolor = color.black , text_color = Factor_all_color )
+
+    table.cell(Balane_status , 1 , 2 , txt1_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 2 , 2 , txt2_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 3 , 2 , txt3_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 4 , 2 , txt4_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 5 , 2 , txt5_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    
+    table.cell(Balane_status , 1 , 3 , txt1_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 2 , 3 , txt2_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 3 , 3 , txt3_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 4 , 3 , txt4_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 5 , 3 , txt5_3 , bgcolor = color.black , text_color = Factor_sell_color )
+
+    table.cell(Balane_status , 0 , 1 , "Total" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 0 , 2 , "Long" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 0 , 3 , "Short" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 1 , 0 , "All" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 2 , 0 , "Win" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 3 , 0 , "Loss" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 4 , 0 , "Winrate" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 5 , 0 , "Profit\n\Factor" , bgcolor = color.black , text_color = color.white )
+
+// Show Lidqudity History
+if Turn_off 
+    // Demand
+    if B_long and array.size(his_dem_lid) > 0
+        for i = 0 to array.size(his_dem_lid)-1
+            if array.size(line_his_lid_d)-1 < i or na(array.get(his_dem_lid,i))
+                break
+            line.delete(array.get(line_his_lid_d,i)) , label.delete(array.get(label_his_lid_d,i))
+            x_value = array.get(his_Dbar_left,i)  , y_value = array.get(his_dem_lid,i) , rigth_time = array.get(his_Dbar_right,i) , lbl_time = (x_value + rigth_time)/2
+            array.set(line_his_lid_d,i,line.new(x_value , y_value , rigth_time , y_value ,xloc = xloc.bar_time , color = Lid_color, style = get_line_style(Lid_style)))
+            array.set(label_his_lid_d,i,label.new(lbl_time, y_value ,xloc = xloc.bar_time, text= txt_lid,color = TRANSP ,textcolor = Lid_txt_color ,size = txt_size , style=label.style_label_center))
+    // Supply
+    if S_short and array.size(his_sup_lid) > 0
+        for i = 0 to array.size(his_sup_lid)-1
+            if array.size(line_his_lid_s)-1 < i or  na(array.get(his_sup_lid,i))
+                break
+            line.delete(array.get(line_his_lid_s,i)) , label.delete(array.get(label_his_lid_s,i))
+            x_value = array.get(his_Sbar_left,i)  , y_value = array.get(his_sup_lid,i) , rigth_time = array.get(his_Sbar_right,i) , lbl_time = (x_value + rigth_time)/2
+            array.set(line_his_lid_s,i,line.new(x_value , y_value , rigth_time , y_value ,xloc = xloc.bar_time , color = Lid_color, style = get_line_style(Lid_style)))
+            array.set(label_his_lid_s,i,label.new(lbl_time, y_value ,xloc = xloc.bar_time, text= txt_lid,color = TRANSP ,textcolor = Lid_txt_color ,size = txt_size , style=label.style_label_center))
+
+plot(In_Dir_Big , display =  display.status_line)
+plot(Filter_size_FVG ? Check_min_FVG : na , "Filter Size FVG Min" , color = color.rgb(0, 255, 98) , display = display.status_line)
+plot(Filter_size_FVG ? Check_max_FVG : na , "Filter Size FVG Max" , color = color.rgb(0, 255, 98) , display = display.status_line)
+plot(Filter_size_iFVG ? Check_min_iFVG : na , "Filter Size iFVG Min" , color = color.rgb(255, 0, 0) , display = display.status_line)
+plot(Filter_size_iFVG ? Check_max_iFVG : na , "Filter Size iFVG Max" , color = color.rgb(255, 0, 0) , display = display.status_line)
+
+View in Pine Editor・1282 lines
+Use on chart
+1.7 K
+3
+22 324
+Jan 2
+📌 Description – ICT Entry V1
+This trading system is based on price action, combined with FVG, iFVG, and liquidity, and it uses the mechanism from the indicator “Smallest Swing [Truth Indie]” to validate swings that become liquidity.
+
+⚙️ Core Logic & Working Mechanism
+I won’t explain FVG in detail, as most traders are already familiar with it.
+Let’s focus on the mechanism of iFVG instead.
+
+The concept of iFVG is based on a supply-to-demand flip and a demand-to-supply flip within an FVG zone.
+For an iFVG to be confirmed, the candle close must break through the FVG.
+A wick alone does not count as a valid iFVG confirmation.
+
+The confirmation of market structure swings uses a pivot length mechanism combined with price action.
+It validates a swing by detecting a structure break formed by candles making new highs or new lows.
+
+📈 Buy Setup
+
+
+1.Liquidity sweep on the demand side, with price closing above the liquidity level.
+2.A demand zone is formed as FVG and iFVG, where iFVG is located above FVG.
+3.The gap between the upper box of FVG and the lower box of iFVG must be within the defined Min and Max range.
+4.Market Structure must be in a Bullish trend.
+5.Place a Pending Order at the upper box of FVG and set Stop Loss at the lower box of FVG (Entry and Stop Loss can be adjusted using Entry Zone and ATR-based Stop Loss).
+
+📉 Sell Setup
+
+
+1.Liquidity sweep on the supply side, with price closing below the liquidity level.
+2.A supply zone is formed as FVG and iFVG, where iFVG is located below FVG.
+3.The gap between the lower box of FVG and the upper box of iFVG must be within the defined Min and Max range.
+4.Market Structure must be in a Bearish trend.
+5.Place a Pending Order at the lower box of FVG and set Stop Loss at the upper box of FVG (Entry and Stop Loss can be adjusted using Entry Zone and ATR-based Stop Loss).
+
+⚙️ Liquidity Sweep Conditions
+➯ When a liquidity sweep occurs on the demand side, the system will start looking for Buy Setup conditions.
+➯ When a liquidity sweep occurs on the supply side, the system will immediately switch to looking for Sell Setup conditions.
+➯ The system will always prioritize the most recent liquidity sweep and search for setups based on that direction.
+➯ The liquidity sweep condition will be invalidated when price closes back below (for demand sweep) or above (for supply sweep) the most recently swept liquidity level.
+
+⭐ Pending Order Cancellation Conditions
+A Pending Order will be canceled under the following conditions:
+1.A new Price Action signal appears on either the Buy or Sell side.
+2.When Time Session is enabled, the Pending Order is canceled once price exits the selected session.
+
+🕹 Order Management Rule
+When there is an active open position, the indicator restricts the creation of new Pending Orders to prevent overlapping positions.
+
+⚠️ Disclaimer
+This indicator is designed for educational and research purposes only. It does not guarantee profits and should not be considered financial advice. Trading in financial markets involves significant risk, including the potential loss of capital.
+
+🥂 Community Sharing
+If you find parameter settings that work well or produce strong statistical results, feel free to share them with the community so we can improve and develop this indicator together.
+Jan 11
+Release Notes
+Additional option details have been added as shown below.
+1.Added three cancel pending order options.
+Previously, cancel pending orders were enforced by default. Now, you can choose to enable or disable them.
+2.Added adjustable Min and Max values for activating the Premium and Discount Zone.
+3.Added an option to disable all display elements.
+

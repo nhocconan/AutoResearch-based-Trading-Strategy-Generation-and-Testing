@@ -1,0 +1,133 @@
+//@version=6
+strategy(
+    "VWAP Breakout – NY Open Only (2 Trades Max, Toward Multiday VWAP)",
+    overlay=true,
+    max_lines_count=100,
+    max_labels_count=100
+)
+
+// === INPUTS ===
+show_round_lvls    = input(true, "Show Round Number Levels")
+show_tp_sl_labels  = input(true, "Show TP / SL Labels")
+round_step         = input.int(500, "Round Number Level Step")
+stop_points        = input.float(10.0, "Stop Distance From VWAP (Points)")
+
+// === NY SESSION FILTER (9:30–11:30 ET) ===
+ny_session    = input.session("0930-1130", "NY Trade Window")
+in_ny_session = not na(time(timeframe.period, ny_session, "America/New_York"))
+
+// === VWAPS (LOGIC ONLY – NOT PLOTTED) ===
+vwap = ta.vwap
+multiday_vwap = ta.vwap(hlc3, timeframe.change("W"))
+
+// === DAILY TRADE COUNTER (FIXED) ===
+var int trades_today = 0
+new_day = ta.change(time("D")) != 0
+
+if new_day
+    trades_today := 0
+
+// Increment counter when a trade closes
+if strategy.closedtrades > strategy.closedtrades[1]
+    trades_today += 1
+
+// === DIRECTION FILTER (TOWARD MULTIDAY VWAP) ===
+long_allowed  = close < multiday_vwap
+short_allowed = close > multiday_vwap
+
+// === BREAKOUT LOGIC ===
+breakout_long  = in_ny_session and long_allowed  and ta.crossover(close, vwap)
+breakout_short = in_ny_session and short_allowed and ta.crossunder(close, vwap)
+
+// === STOP & TARGET (LOCKED ON ENTRY BAR) ===
+stop_loss_long  = breakout_long  ? vwap - stop_points : na
+stop_loss_short = breakout_short ? vwap + stop_points : na
+
+tp_long  = breakout_long  ? multiday_vwap : na
+tp_short = breakout_short ? multiday_vwap : na
+
+// === STRATEGY EXECUTION (MAX 2 TRADES PER DAY) ===
+if breakout_long and trades_today < 2
+    strategy.entry("Breakout Long", strategy.long)
+    strategy.exit(
+        "Exit Long",
+        from_entry="Breakout Long",
+        stop=stop_loss_long,
+        limit=tp_long
+    )
+
+if breakout_short and trades_today < 2
+    strategy.entry("Breakout Short", strategy.short)
+    strategy.exit(
+        "Exit Short",
+        from_entry="Breakout Short",
+        stop=stop_loss_short,
+        limit=tp_short
+    )
+
+// === ENTRY / STOP / TARGET LABELS ===
+if show_tp_sl_labels
+    if breakout_long and trades_today < 2
+        label.new(time, low, "BUY",
+            xloc=xloc.bar_time,
+            style=label.style_label_up,
+            color=color.green,
+            textcolor=color.white)
+
+        label.new(time, stop_loss_long, "STOP",
+            xloc=xloc.bar_time,
+            style=label.style_label_down,
+            color=color.red,
+            textcolor=color.white,
+            size=size.tiny)
+
+        label.new(time, tp_long, "TARGET",
+            xloc=xloc.bar_time,
+            style=label.style_label_up,
+            color=color.purple,
+            textcolor=color.white,
+            size=size.tiny)
+
+    if breakout_short and trades_today < 2
+        label.new(time, high, "SELL",
+            xloc=xloc.bar_time,
+            style=label.style_label_down,
+            color=color.red,
+            textcolor=color.white)
+
+        label.new(time, stop_loss_short, "STOP",
+            xloc=xloc.bar_time,
+            style=label.style_label_up,
+            color=color.green,
+            textcolor=color.white,
+            size=size.tiny)
+
+        label.new(time, tp_short, "TARGET",
+            xloc=xloc.bar_time,
+            style=label.style_label_down,
+            color=color.purple,
+            textcolor=color.white,
+            size=size.tiny)
+
+// === ROUND NUMBER LEVELS ===
+if show_round_lvls
+    round = math.round(close / round_step) * round_step
+    for offset = -2 to 2
+        level = round + offset * round_step
+        line.new(
+            bar_index - 50,
+            level,
+            bar_index + 1,
+            level,
+            color=color.gray,
+            style=line.style_dotted
+        )
+
+// === END ===
+
+View in Pine Editor・126 lines
+Use on chart
+1
+0
+713
+vwap breakout targeting multiday taking only 2 trades per day in the first 2 hours of ny session

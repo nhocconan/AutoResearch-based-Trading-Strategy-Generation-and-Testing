@@ -1,0 +1,102 @@
+//@version=6
+
+strategy('SMC  Liquidity Grab Pro', overlay = true, initial_capital = 10000)
+
+htfTF = input.timeframe('240', 'HTF (liquidity) Timeframe')
+swingLen = input.int(1, "Swing Lookback Length")
+riskRR   = input.float(2.0, "Fixed Risk:Reward Ratio", minval = 0.1)
+
+
+[htfHigh, htfLow] = request.security(
+     syminfo.tickerid, 
+     htfTF, 
+     [high[1], low[1]], 
+     lookahead = barmerge.lookahead_on
+ )
+
+
+sh = ta.pivothigh(high, swingLen, swingLen)
+sl = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastHigh = na
+var float lastLow  = na
+
+if not na(sh)
+    lastHigh := sh
+if not na(sl)
+    lastLow  := sl
+
+
+bullishGrab = low < htfLow and close > htfLow
+bearishGrab = high > htfHigh and close < htfHigh
+
+// long position entry
+if bullishGrab and strategy.position_size == 0
+    float stopLoss   = lastLow
+    float takeProfit = close + (close - stopLoss) * riskRR
+    strategy.entry("Long", strategy.long, comment="Bull Sweep")
+    strategy.exit("Exit Long", "Long", stop=stopLoss, limit=takeProfit)
+
+// Short position entry
+if bearishGrab and strategy.position_size == 0
+    float stopLoss   = lastHigh
+    float takeProfit = close - (stopLoss - close) * riskRR
+    strategy.entry("Short", strategy.short, comment="Bear Sweep")
+    strategy.exit("Exit Short", "Short", stop=stopLoss, limit=takeProfit)
+
+plot(htfHigh, "HTF Buy Side Liquidity", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+plot(htfLow, "HTF Sell Side Liquidity", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+
+plotshape(sh, "Swing High", shape.triangledown, location.abovebar, color.red, offset=-swingLen, size=size.tiny)
+plotshape(sl, "Swing Low", shape.triangleup, location.belowbar, color.green, offset=-swingLen, size=size.tiny)
+
+
+var table statusTable = table.new(position.top_right, 2, 4, color.black, border_width = 1)
+
+if barstate.islast
+    // Header
+    table.cell(statusTable, 0, 0, "SMC Dashboard", bgcolor=color.gray, text_color=color.white)
+    table.cell(statusTable, 1, 0, "Value", bgcolor=color.gray, text_color=color.white)
+    
+    // Status Row
+    string currentStatus = strategy.position_size != 0 ? "In Trade" : "Searching..."
+    color statusColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.yellow
+    table.cell(statusTable, 0, 1, "Status", bgcolor=color.gray, text_color=color.white)
+    table.cell(statusTable, 1, 1, currentStatus, bgcolor=statusColor, text_color=color.black)
+    
+    // Profit Row
+    float totalNet = strategy.netprofit
+    table.cell(statusTable, 0, 2, "Net Profit", bgcolor=color.gray, text_color=color.white)
+    table.cell(statusTable, 1, 2, str.format("${0,number,#.##}", totalNet), text_color = totalNet >= 0 ? color.green : color.red)
+    
+    // Win Rate Row
+    float winRate = (strategy.wintrades / math.max(1, strategy.closedtrades)) * 100
+    table.cell(statusTable, 0, 3, "Win Rate", bgcolor=color.gray, text_color=color.white)
+    table.cell(statusTable, 1, 3, str.format("{0,number,#.##}%", winRate), text_color=color.white)
+
+View in Pine Editor・78 lines
+Use on chart
+3
+9
+1 497
+SMC LIquidity GRab Pro is an high probability strategy for the Smart Money Concept (SMC).
+
+It looks for liquidity sweeps also known as stop hunts, where large financial institutions move the price beyond significant levels in order to trigger market orders and then reverse the price quickly.
+
+Features
+1. Liquidity Sweeps : It follows the previous 4 hour high/low liquidity in order to pinpoint stop runs.
+
+2. Liquidity grab confirmation: Trade setup where price momentarily breaks through the liquidity level but then ends up again inside the range suggests that there’s been a false breakout.
+
+3.Structure-Based Risk Management: Stop losses are placed beyond the latest swing high/low pivot, instead of basing it on a pip value.
+
+- Live Performance Dashboard - Allows you to display real-time data such as net profit, win rate, and active trade on your chart.
+
+
+-Customizable Risk-to-Reward- Traders can set risk/reward ratio as per their requirement. Default value is 2.0 RR. Graph Timeframe: This strategy is used on 5-minute or 15-minute charts.
+
+Chart Timeframe: Apply the strategy to 5-minute or 15-minute charts.
+
+HTF Configuration: Set the higher timeframe above your execution chart e.g., 240 minutes for 4-hours.
+
+Fine-Tuning: Adjust the swing lookback parameter to adapt stop-loss placement according to market volatility.

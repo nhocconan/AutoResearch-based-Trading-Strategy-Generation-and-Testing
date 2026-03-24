@@ -1,0 +1,230 @@
+//@version=5
+strategy("RENKO BACKTESTING", overlay=false, initial_capital=1000, commission_type=strategy.commission.percent, commission_value=0.18, slippage=3)
+
+
+//------------------------------TOOL TIPS--------------------------------//
+
+t1 = "Each gain or losse (relative to the previous reference) in an amount equal to this fixed ratio will change quantity of orders."
+t2 = "The amount of money to be added to or subtracted from orders once the fixed ratio has been reached."
+
+
+//------------------------------FUNCTIONS---------------------------------//
+
+//@function Displays text passed to `txt` when called.
+debugLabel(txt, color) =>
+    label.new(bar_index, high, text = txt, color=color, style = label.style_label_lower_right, textcolor = color.black, size = size.small)
+
+//@function which looks if the close date of the current bar falls inside the date range
+inBacktestPeriod(start, end) => (time >= start) and (time <= end)
+
+
+//----------------------------USER INPUTS---------------------------------//
+
+//User inputs to choose the source and the box size
+source = input.source(defval=close, title='Base price', group="Technical parameters")
+box_size = input.float(title='Box size', defval=10.0, minval=0.00001, group="Technical parameters")
+//User inputs to manage money : 
+//Every gains of fixedRatio we increase orders by increasingOrderAmount and every losses of fixedRatio we decrease the quantity to buy/sell by increasingOrderAmount
+fixedRatio = input.int(defval=400, minval=1, title="Fixed Ratio Value ($)", group="Money Management", tooltip=t1)
+increasingOrderAmount = input.int(defval=200, minval=1, title="Increasing Order Amount ($)", group="Money Management", tooltip=t2)
+//User inputs to choose the backtesting date
+startDate = input.time(title="Start Date", defval=timestamp("1 Jan 2013 00:00:00"), group="Backtesting Period")
+endDate = input.time(title="End Date", defval=timestamp("1 July 2024 00:00:00"), group="Backtesting Period")
+
+
+//----------------------------VARIABLES INITIALISATION-------------------------------//
+
+//The var variables are used to store data for the next script execution (next candle)
+renko_high = array.new_float(12, na)
+renko_low = array.new_float(12, na)
+renko_color = array.new_color(12, na)
+int array_lenght = na
+var float last_ref_high = close
+var float last_ref_low = close - box_size
+var color last_ref_color = color.lime
+bool inRange = na
+equity = math.abs(strategy.equity - strategy.openprofit)
+var float capital_ref = strategy.initial_capital
+var float cashOrder = strategy.initial_capital * 0.95
+
+
+//----------------------------CHECKING SOME CONDITIONS ON EACH SCRIPT EXECUTION---------------------//
+
+//Checking if the date belong to the range
+inRange := inBacktestPeriod(startDate, endDate)
+
+//Checking performances of the strategy to adjust order quantity
+if equity > capital_ref + fixedRatio
+    spread = (equity - capital_ref)/fixedRatio
+    nb_level = int(spread)
+    increasingOrder = nb_level * increasingOrderAmount
+    cashOrder := cashOrder + increasingOrder
+    capital_ref := capital_ref + nb_level*fixedRatio
+if equity < capital_ref - fixedRatio
+    spread = (capital_ref - equity)/fixedRatio
+    nb_level = int(spread)
+    decreasingOrder = nb_level * increasingOrderAmount
+    cashOrder := cashOrder - decreasingOrder
+    capital_ref := capital_ref - nb_level*fixedRatio
+
+// Checking if we close all trades in case where we exit the backtesting period
+if strategy.position_size!=0 and not inRange
+    debugLabel("END OF BACKTESTING PERIOD : we close the trade", color=color.rgb(116, 116, 116))
+    strategy.close_all()
+
+
+//--------------------------SCRIPT EXECUTION AND CALCULATION---------------------------//
+
+if (source - last_ref_high)/box_size >1
+    spread = (source - last_ref_high)/box_size
+    nb_box = int(spread)
+    for i=1 to nb_box
+        if i <= 12
+            array.set(renko_high, i-1, last_ref_high + (i * box_size))
+            array.set(renko_low, i-1, last_ref_low + (i * box_size))
+            array.set(renko_color, i-1, color.lime)
+        else
+            array.push(renko_high, last_ref_high + (i * box_size))
+            array.push(renko_low, last_ref_low + (i * box_size))
+            array.push(renko_color, color.lime)
+    array_lenght := array.size(renko_high)
+    //We check the direction of our position
+    if strategy.position_size<=0 and inRange
+        //If we were in a short position, we pass to a long position
+        debugLabel("Long entry order created at " + str.tostring(array.get(renko_high, 0)), color=color.rgb(78, 188, 135))
+        qty = cashOrder/close
+        strategy.entry("Long entry", strategy.long, qty)
+
+else if (last_ref_low - source)/box_size >1
+    spread = (last_ref_low - source)/box_size
+    nb_box = int(spread)
+    for i=1 to nb_box
+        if i <= 12
+            array.set(renko_high, i-1, last_ref_high - (i * box_size))
+            array.set(renko_low, i-1, last_ref_low - (i * box_size))
+            array.set(renko_color, i-1, color.red)
+        else
+            array.push(renko_high, last_ref_high - (i * box_size))
+            array.push(renko_low, last_ref_low - (i * box_size))
+            array.push(renko_color, color.red)
+    array_lenght := array.size(renko_high)
+    //We check the direction of our position
+    if strategy.position_size>=0 and inRange
+        debugLabel("Short entry order created at " + str.tostring(array.get(renko_low, 0)), color=color.rgb(252, 81, 81))
+        qty = cashOrder/close
+        strategy.entry("Short entry", strategy.short, qty)
+
+else
+    array.set(renko_high, 0, last_ref_high)
+    array.set(renko_low, 0, last_ref_low)
+    array.set(renko_color, 0, last_ref_color)
+    array_lenght := array.size(renko_high)
+
+for i = (array_lenght-1) to 0
+    if not na(array.get(renko_high, i))
+        last_ref_high := array.get(renko_high, i)
+        break
+for i = (array_lenght-1) to 0
+    if not na(array.get(renko_low, i))
+        last_ref_low := array.get(renko_low, i)
+        break
+for i = (array_lenght-1) to 0
+    if not na(array.get(renko_color, i))
+        last_ref_color := array.get(renko_color, i)
+        break
+
+
+//--------------------------PLOTTING BOX ELEMENT----------------------------//
+
+//We plot the first 9 candles and the last 3 candles. Tranding view limit us to plot 64 data by candles. Here we plot 5x12 = 60 data
+plotcandle(array.get(renko_high, 0), array.get(renko_high, 0), array.get(renko_low, 0), array.get(renko_low, 0), color=array.get(renko_color, 0))
+plotcandle(array.get(renko_high, 1), array.get(renko_high, 1), array.get(renko_low, 1), array.get(renko_low, 1), color=array.get(renko_color, 1))
+plotcandle(array.get(renko_high, 2), array.get(renko_high, 2), array.get(renko_low, 2), array.get(renko_low, 2), color=array.get(renko_color, 2))
+plotcandle(array.get(renko_high, 3), array.get(renko_high, 3), array.get(renko_low, 3), array.get(renko_low, 3), color=array.get(renko_color, 3))
+plotcandle(array.get(renko_high, 4), array.get(renko_high, 4), array.get(renko_low, 4), array.get(renko_low, 4), color=array.get(renko_color, 4))
+plotcandle(array.get(renko_high, 5), array.get(renko_high, 5), array.get(renko_low, 5), array.get(renko_low, 5), color=array.get(renko_color, 5))
+plotcandle(array.get(renko_high, 6), array.get(renko_high, 6), array.get(renko_low, 6), array.get(renko_low, 6), color=array.get(renko_color, 6))
+plotcandle(array.get(renko_high, 7), array.get(renko_high, 7), array.get(renko_low, 7), array.get(renko_low, 7), color=array.get(renko_color, 7))
+plotcandle(array.get(renko_high, 8), array.get(renko_high, 8), array.get(renko_low, 8), array.get(renko_low, 8), color=array.get(renko_color, 8))
+plotcandle(array.get(renko_high, array_lenght-3), array.get(renko_high, array_lenght-3), array.get(renko_low, array_lenght-3), array.get(renko_low, array_lenght-3), color=array.get(renko_color, array_lenght-3))
+plotcandle(array.get(renko_high, array_lenght-2), array.get(renko_high, array_lenght-2), array.get(renko_low, array_lenght-2), array.get(renko_low, array_lenght-2), color=array.get(renko_color, array_lenght-2))
+plotcandle(array.get(renko_high, array_lenght-1), array.get(renko_high, array_lenght-1), array.get(renko_low, array_lenght-1), array.get(renko_low, array_lenght-1), color=array.get(renko_color, array_lenght-1))
+
+View in Pine Editor・156 lines
+Use on chart
+3
+1
+8
+1
+7 440
+RENKO STRATEGY
+
+CAUTION : This strategy must be applied to a candlestick chart (not a Renko chart).
+
+
+INTRODUCTION :
+
+The Traditional Renko chart has been reproduced and is plotted according to the evolution of the price. It will enable us to receive buy or sell signals and follow major trends. This is a medium/long term strategy and depends a lot on the box size chosen in the parameters. There's also a money management method allowing us to reinvest part of the profits or reduce the size of orders in the event of substantial losses.
+
+
+RENKO CHART :
+
+Renko chart construction methodology :
+
+The user must first choose the box size. The minimum is 0.00001 and there is no maximum. The default is 10. The user must then choose the source that will define the data on which the calculations will be based (high, low, open, close). By default, close is selected. The first candle on the chart is used to draw the first box with its high and low.
+
+Each time the price changes by the amount of the box size relative to the high or low of the last box, a new box is added above or below the previous one. If price variations are less than the box size, the same box is added next to the previous one. If price variations are N (integer number) times greater than box size, N boxes are added above or below the previous one. Each box added above the previous one is a green box, while each box added below the previous one is a red box.
+
+Conditions for drawing a green box above the previous one :
+(source - high_of_the_last_box) / box_size > 1
+
+Condition for drawing a red box below the previous one :
+(low_of_the_last_box - source) / box_size > 1
+
+If neither condition is triggered, the same box is drawn next to the previous one.
+
+Example :
+
+The last candle has drawn a box with low 12 and high 14. The box size is therefore 2. The strategy will look at the value of the close each time a candle ends. The current candle closes with a close equal to 15.5. As the variation from the previous high is only 1.5 (which is less than the box size), the same box is added next to the previous one. The next candle closes at 16.2. The price variation is therefore 2.2 compared with the previous high. We can now add a new green box just above the previous one, with a low of 14 and a high of 16. The same process applies if the candle's close is at least one box size below the low of the last box. In this case, a new red box is placed below the previous one.
+
+
+PARAMETERS :
+
+
+Source : Allows you to specify which data will be taken into account by the strategy when performing calculations. The default is close.
+
+Box size : Size of Renko graph boxes. This is a very important parameter to choose carefully, as it has a strong impact on the strategy's performance. Defaults to 10.
+
+Fixed Ratio : This is the amount of gain or loss at which the order quantity is changed. The default is 400, meaning that for each $400 gain or loss, the order size is increased or decreased by a user-selected amount.
+
+Increasing Order Amount : This is the amount to be added to or subtracted from orders when the fixed ratio is reached. The default is $200, which means that for every $400 gain, $200 is reinvested in the strategy. On the other hand, for every $400 loss, the order size is reduced by $200.
+
+Initial capital : $1000
+
+Fees : Interactive Broker fees apply to this strategy. They are set at 0.18% of the trade value.
+
+Slippage : 3 ticks or $0.03 per trade. Corresponds to the latency time between the moment the signal is received and the moment the order is executed by the broker.
+
+Important : A bot has been used to test all possible box sizes to find out which one generates the highest return on 
+LTCUSD
+ while limiting the drawdown. This strategy is the most optimal with a box size equal to 5.08 in 8h timeframe.
+
+
+
+
+BUY AND SHORT SIGNALS :
+
+As the aim of this strategy is to follow major trends based on price movements, we need to be on the right side of price fluctuation. We trade every box reversal, i.e. we are LONG when the boxes are green indicating an uptrend and SHORT when they are red indicating a downtrend.
+
+
+RISK MANAGEMENT :
+
+This strategy can incur losses. The size of the box is decisive, as it is used to plot the RENKO chart and thus trigger buy or sell signals. It's also what allows us to manage risk. For every trade, we risk a maximum amount equal to 2 times the size of the box, i.e. :(5.08*2*nb_contract)/trade_value.
+
+
+MONEY MANAGEMENT :
+
+The fixed ratio method has been used to manage our gains and losses. For each gain of an amount equal to the value of the fixed ratio, we increase the order size by a value defined by the user in the "Increasing order amount" parameter. Similarly, each time we lose an amount equal to the value of the fixed ratio, we decrease the order size by the same user-defined value. This strategy not only increases our performance, but also our drawdown.
+
+
+Enjoy the strategy and don't forget to take the trade :)

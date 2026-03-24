@@ -1,0 +1,84 @@
+//@version=5
+strategy("WLD 4H Auto Entry Confirmed", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+a = input.float(2.0, title="UT Bot Key Value")
+c = input.int(1, title="UT Bot ATR Period")
+emaLength = input.int(50, title="EMA Length")
+maxBarsHold = input.int(4, title="Max Bars to Hold")
+
+// === BASE INDICATORS ===
+ema50 = ta.ema(close, emaLength)
+[macdLine, signalLine, _] = ta.macd(close, 12, 26, 9)
+
+// === UT BOT ALERTS (QuantNomad v4 konvertert til v5) ===
+xATR  = ta.atr(c)
+nLoss = a * xATR
+
+src = close
+var float xATRTrailingStop = na
+xATRTrailingStop := na(xATRTrailingStop[1]) ? src - nLoss : src > xATRTrailingStop[1] and src[1] > xATRTrailingStop[1] ? math.max(xATRTrailingStop[1], src - nLoss) : src < xATRTrailingStop[1] and src[1] < xATRTrailingStop[1] ? math.min(xATRTrailingStop[1], src + nLoss) : src > xATRTrailingStop[1] ? src - nLoss : src + nLoss
+var int pos = 0
+pos := na(pos[1]) ? 0 : src[1] < xATRTrailingStop[1] and src > xATRTrailingStop[1] ? 1 : src[1] > xATRTrailingStop[1] and src < xATRTrailingStop[1] ? -1 : pos[1]
+
+ema1 = ta.ema(src, 1)
+above = ta.crossover(ema1, xATRTrailingStop)
+below = ta.crossover(xATRTrailingStop, ema1)
+
+buySignal = src > xATRTrailingStop and above
+sellSignal = src < xATRTrailingStop and below
+
+plotshape(buySignal, title="Buy", text='Buy', style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.tiny)
+plotshape(sellSignal, title="Sell", text='Sell', style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.tiny)
+
+// === SIGNAL TRACKING ===
+var int signalBar = na
+var string signalType = "none"
+
+// Detect new UT signal and track det korrekt (bar 1 må starte over/under EMA)
+if (na(signalBar) or (bar_index > signalBar + maxBarsHold))
+    if (buySignal and macdLine > signalLine and close > ema50 and low > ema50)
+        signalBar := bar_index
+        signalType := "long"
+    else if (sellSignal and macdLine < signalLine and close < ema50 and high < ema50)
+        signalBar := bar_index
+        signalType := "short"
+
+// Confirm entry on bar 1
+enterLong = signalType == "long" and bar_index == signalBar and close > ema50 and macdLine > signalLine
+enterShort = signalType == "short" and bar_index == signalBar and close < ema50 and macdLine < signalLine
+
+if (enterLong)
+    strategy.entry("Long", strategy.long)
+if (enterShort)
+    strategy.entry("Short", strategy.short)
+
+// === EXIT CONDITIONS ===
+inPosition = strategy.opentrades > 0
+barsSinceEntry = bar_index - strategy.opentrades.entry_bar_index(0)
+exitTrade = false
+
+if (inPosition and barsSinceEntry >= maxBarsHold)
+    exitTrade := true
+
+// Opposite signal detected (on confirmed bar)
+oppositeConfirmed = false
+if (signalType == "long")
+    oppositeConfirmed := sellSignal and close < ema50 and macdLine < signalLine
+else if (signalType == "short")
+    oppositeConfirmed := buySignal and close > ema50 and macdLine > signalLine
+
+if (inPosition and oppositeConfirmed)
+    exitTrade := true
+
+if (exitTrade)
+    strategy.close_all()
+    signalBar := na
+    signalType := "none"
+
+View in Pine Editor・77 lines
+Use on chart
+1
+4
+454
+UT bot, MACD and EMA confirmation strategy. This a strategy for 4H timeframe, confimring when to go in a short/long and where to take TP/SL based on ATR levels

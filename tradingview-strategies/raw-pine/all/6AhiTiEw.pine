@@ -1,0 +1,140 @@
+//@version=4
+strategy("策略_RSI+移动揉搓线_", overlay=true)
+
+// 输入
+fastLength = input(title="均线 快线", defval = 11, minval=1)
+slowLength = input(title="均线 慢线", defval = 82,minval=1)
+length = input(title="RSI长度", type=input.integer, defval=14, minval=1, maxval=100)
+
+// 开仓区间
+open_long_rsi_threshold = input(title="开多区间上轨- RSI低于该阈值时才开多", type=input.integer, defval=75, minval=1, maxval=100)
+open_short_rsi_threshold = input(title="开空区间下轨- RSI高于该阈值时才开空", type=input.integer, defval=25, minval=1, maxval=100)
+// 止盈阈值
+win_hight_rsi = input(title="多仓止盈- RSI超过上轨平多获利", type=input.integer, defval=80, minval=50, maxval=100)
+win_low_rsi = input(title="空仓止盈- RSI低于下轨平空获利", type=input.integer, defval=20, minval=1, maxval=50)
+// 止盈后再开仓阈值
+again_hight_rsi = input(title="止盈后再次开多- RSI低于该阈值再次开多", type=input.integer, defval=60, minval=1, maxval=100)
+again_low_rsi = input(title="止盈后再次开空- RSI超过该阈值再次开空", type=input.integer, defval=40, minval=1, maxval=100)
+
+
+// 均线
+sma_fast = sma(close, fastLength)
+sma_slow = sma(close, slowLength)
+// RSI
+rsi = rsi(close, length)
+
+//**********变量*start*******//
+var long_f = false // 标记是否是均线交叉多头
+var short_f = false // 标记是否是均线交叉空头
+var long_open_pending = false // 标记开仓时rsi是否处于超买状态
+var short_open_pending = false // 标记开仓时rsi是否处于超卖
+var long_rsi_over_buy = false // 标记 多仓时 是否发生超买平多获利
+var short_rsi_over_sell = false // 标记 空仓时 是否发生超卖平空获利
+
+
+//**********开仓逻辑*start*******//
+
+// 买入
+longCondition = crossover(sma_fast, sma_slow)
+if (longCondition)
+    short_rsi_over_sell := false // 清空该标记，防止再次开空仓
+    long_f := true
+    short_f := false
+    if (rsi < open_long_rsi_threshold)
+        // 并且没有超买
+        strategy.entry("多", long=strategy.long)
+    if (rsi > open_long_rsi_threshold)
+        // 开仓时发生超买，等待rsi小于open_long_rsi_threshold
+        long_open_pending := true
+
+// 卖出
+shortCondition = crossunder(sma_fast, sma_slow)
+if (shortCondition)
+    long_rsi_over_buy := false //清空该标记，防止再次开多仓
+    long_f := false
+    short_f := true
+    if (rsi > open_short_rsi_threshold)
+        strategy.entry("空", long=strategy.short)
+    if (rsi < open_short_rsi_threshold)
+        // 开仓时发生超卖，等待rsi大于open_short_rsi_threshold
+        short_open_pending := true
+        
+
+// 等待RSI合理，买入开仓
+if (long_f and long_open_pending and strategy.position_size <= 0 and rsi < open_long_rsi_threshold)
+    strategy.close_all()//平空
+    strategy.entry("多", long=strategy.long)
+    long_open_pending := false
+// 等待RSI合理，卖出开仓
+if (short_f and short_open_pending and strategy.position_size >= 0 and rsi > open_short_rsi_threshold)
+    strategy.close_all()//平多
+    strategy.entry("空", long=strategy.short)
+    short_open_pending := false
+
+
+//**********止盈逻辑*start*******//
+    
+//RSI止盈(RSI超买平多)
+if (strategy.position_size > 0 and long_f and rsi > win_hight_rsi)
+    strategy.close_all()
+    long_rsi_over_buy := true
+//RSI止盈(RSI超卖平空)
+if (strategy.position_size < 0 and short_f and rsi < win_low_rsi)
+    strategy.close_all()
+    short_rsi_over_sell := true
+    
+
+//**********止盈后再次开仓逻辑*start*******//
+
+//RSI止盈之后，再次开多
+if (long_f and long_rsi_over_buy and strategy.position_size == 0 and rsi < again_hight_rsi)
+    long_rsi_over_buy := false
+    strategy.entry("再多", long=strategy.long)
+//RSI止盈之后，再次开空
+if (short_f and short_rsi_over_sell and strategy.position_size == 0 and rsi > again_low_rsi)
+    short_rsi_over_sell := false
+    strategy.entry("再空", long=strategy.short)
+
+
+//**********绘图*start*******//
+
+p1 = plot(sma_fast, linewidth=2, color=color.green)
+p2 = plot(sma_slow, linewidth=2, color=color.red)
+fill(p1, p2, color=color.green)
+plot(cross(sma_fast, sma_slow) ? sma_fast : na, style = plot.style_circles, linewidth = 4)
+
+// 绘制rsi线
+//plot(rsi, color=color.green, editable=true, style=plot.style_circles, linewidth=2)
+
+// 绘制上下轨
+//high_ = hline(80, title="上轨")
+//low_ = hline(20, title="下轨")
+//fill(high_, low_, transp=80, editable=true, title="背景")
+
+View in Pine Editor・120 lines
+Use on chart
+1
+3
+0
+4 282
+Nov 29, 2019
+1. long
+a. RSI does not open an order when it is overbought, until the RSI falls below a certain threshold, and then open a position
+b. There are already many positions. If the RSI is overbought, it will be profitable. When the RSI falls below a certain threshold, open a long position again until the moving average crossover signal turns short.
+
+2. Short
+a. RSI does not open an order when it is oversold, and then opens a position after RSI rises to a certain threshold
+b. There are already short positions. If the RSI is oversold, it will be profitable to close the short position. When the RSI rises above a certain threshold, open the short position again until there is a reversal of the moving average crossing signal.
+
+1. 做多
+a. RSI在超买区间时不开单，直到RSI回落到某个阈值之下，再开仓
+b. 已经有多仓，如果RSI超买，则平多获利，当RSI回落到某个阈值之下后，再次开多，直到有均线交叉信号反转做空
+
+2. 做空
+a. RSI在超卖区间时不开单，直到RSI上升到某个阈值之后，再开仓
+b. 已经有空仓，如果RSI超卖，则平空获利，当RSI上升到某个阈值之上后，再次开空，直到有均线交叉信号反转做多
+Dec 10, 2019
+Release Notes
+Separate thresholds and fix bugs
+
+将阈值参数分开，并修复bug

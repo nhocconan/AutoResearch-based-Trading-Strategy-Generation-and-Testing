@@ -1,0 +1,44 @@
+//@version=4
+
+strategy("Plot Break-even Price", overlay=true)
+
+/// Break-even calculation
+ep = 0.0
+ep := na(ep[1]) ? na : ep[1]
+
+p = 0.0
+p := na(p[1]) ? na : p[1]
+
+/// Fees Input
+fee_inp = input(0.25, title='Price Change in %', step=0.1)/100
+
+/// Your Strategy calculation
+longCondition = crossover(sma(close, 14), sma(close, 28))
+shortCondition = crossunder(sma(close, 14), sma(close, 28))
+
+/// Stategy Entry
+if (longCondition)
+    ep := close
+    p := close * (1 + fee_inp)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+if (shortCondition)
+    ep := close
+    p := close * (1 - fee_inp)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+/// Plot Break-even Price 
+p1 = plot(ep, color = color.red, transp = 85)
+p2 = plot(p, color = color.green)
+fill(p1, p2, color = color.red, transp = 85)
+
+View in Pine Editor・34 lines
+Use on chart
+1
+6
+3
+4
+9 254
+This indicator simply plots your entry price and the break-even point (green line). Area between the entry price and the break-even point will “eat” you profit by exchange fees. You can use the green line to lock your break-even point. I do not recommend using this strategy for trading, because the entry logic is based on SMA crosses. However, this script could be used within you own strategy to plot the break-even point.
+
+For example, there is 0.1% Maker fee and 0.1% Taker fee at Binance spot exchange. You need to sum up those two fees to calculate the break-even point. Every exit above/below the green line will guarantee a profit (in our case it means 0.2% above the entry price for long position and 0.2% below the entry price for short position).

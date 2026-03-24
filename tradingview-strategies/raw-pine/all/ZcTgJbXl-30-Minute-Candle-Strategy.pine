@@ -1,0 +1,64 @@
+//@version=5
+strategy("30-Minute Candle Strategy", overlay=true)
+
+// Define Global Variables
+var float PreviousCandleClose = na
+var float StopLoss = na
+
+// Get Previous Candle's Close (1 bar ago)
+if (bar_index > 1)
+    PreviousCandleClose := close[1]
+
+// Check for Buy Setup: If the current candle opens above the previous candle close
+if (open > PreviousCandleClose)
+    // Execute Buy Trade
+    strategy.entry("Buy", strategy.long)
+    // Set Stop Loss for Buy (StopLoss is stored for reference but not used directly)
+    StopLoss := PreviousCandleClose
+
+// Check for Sell Setup (if Buy Trade Stop-Loss is hit and market moves below previous close)
+if (strategy.position_size > 0 and open < PreviousCandleClose)
+    // Execute Sell Trade
+    strategy.entry("Sell", strategy.short)
+    // Set Stop Loss for Sell (StopLoss is stored for reference but not used directly)
+    StopLoss := PreviousCandleClose
+
+// Close Trades 1 Minute Before the Current Candle Closes (for 30-minute strategy)
+if (time_close - time >= 29 * 60 * 1000)  // 1 minute before candle close
+    // Close Buy Trade
+    strategy.close("Buy")
+    // Close Sell Trade
+    strategy.close("Sell")
+
+View in Pine Editor・31 lines
+Use on chart
+5
+1
+2 640
+30-Minute Candle Trading Strategy
+This strategy works on a 30-minute candle timeframe. When a new 30-minute candle opens, the following actions will take place based on the previous 30-minute candle's closing price:
+
+Buy Trade Setup:
+
+If the market opens above the previous 30-minute candle's closing price, a buy trade will be executed immediately at the market price.
+The stop-loss will be set at the previous 30-minute candle's closing price.
+There will be no fixed target.
+The trade will be closed 1 minute before the current 30-minute candle closes, regardless of profit or loss.
+Sell Trade Setup:
+
+If a buy trade hits the stop-loss and the market moves below the previous 30-minute candle's closing price, a sell trade will be executed immediately at the market price.
+The stop-loss for the sell trade will also be set at the previous 30-minute candle's closing price.
+There will be no fixed target.
+The trade will be closed 1 minute before the current 30-minute candle closes, regardless of profit or loss.
+Procedure:
+
+This process will repeat for every 30-minute candle.
+If the market crosses the previous 30-minute candle's closing price to the upside, a buy trade will be executed, and the stop-loss will be set at the previous candle's closing price.
+If the market crosses the previous 30-minute candle's closing price to the downside, a sell trade will be executed, and the stop-loss will also be set at the previous candle's closing price.
+Each trade will be closed 1 minute before the current candle closes.
+Key Points:
+
+This strategy applies to every new 30-minute candle.
+The stop-loss will always be based on the previous 30-minute candle's closing price.
+If a stop-loss is hit, the strategy will automatically switch to the opposite trade (buy to sell or sell to buy) based on market movement crossing the previous candle's closing price.
+This is a repetitive and systematic approach to trading, ensuring the rules are followed for every 30-minute candle.

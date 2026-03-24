@@ -1,0 +1,21 @@
+//@version=6
+strategy("RSI Strategy", overlay=true)
+length = input(14, "Length")
+overSold = input(25, "Oversold")
+overBought = input(75, "Overbought")
+price = close
+vrsi = ta.rsi(price, length)
+co = ta.crossover(vrsi, overSold)
+cu = ta.crossunder(vrsi, overBought)
+if (not na(vrsi))
+    if (co)
+        strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+    if (cu)
+        strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+View in Pine Editor・15 lines
+Use on chart
+5
+441
+will alert when RSI excees 85-overbought or 25-oversold

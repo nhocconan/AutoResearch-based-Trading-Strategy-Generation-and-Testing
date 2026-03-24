@@ -1,0 +1,215 @@
+//@version=4
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Designed per No Nonsense Forex VP rules
+//For testing your individual indicators before the full system
+//Originated from causecelebre
+//Tried to put in as much VP rules as possible
+
+///////////////////////////////////////////////////
+//Rules Implemented:
+///////////////////////////////////////////////////
+// - SL 1.5 x ATR
+// - TP 1 x ATR
+//
+// - Entry conditions
+//// - Entry from 1 x confirmation
+// - Exit conditions
+//// - Exit on confirmation flip 
+
+///////////////////////////////////////////////////
+//Trades entries
+///////////////////////////////////////////////////
+// - First entry L1 or S1 with standard SL and TP
+
+///////////////////////////////////////////////////
+//Included Indicators and settings
+///////////////////////////////////////////////////
+// - Confirmtion = SSL 10
+
+///////////////////////////////////////////////////
+//Credits
+// Strategy causecelebre https://www.tradingview.com/u/causecelebre/
+// SSL Channel ErwinBeckers https://www.tradingview.com/u/ErwinBeckers/
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Change log
+//First release. Testing of indicators
+//Corrected ATR
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+strategy(title="NNFX Strategy Indicator | jh", overlay = true, pyramiding=0, initial_capital=20000, currency=currency.USD, calc_on_order_fills=0,default_qty_type=strategy.fixed, default_qty_value=10000)
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//  **** Set the main stuff  ****
+///////////////////////////////////////////////////
+
+//Price
+price = close
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// ATR stuff
+///////////////////////////////////////////////////
+
+slMultiplier = input(1.5, "SL")
+tpMultiplier = input(1, "TP")
+
+atrlength = input(title="ATR Length", defval=14, minval=1)
+atrsmoothing = input(title="Smoothing", defval="SMA", options=["RMA", "SMA", "EMA", "WMA"])
+
+ma_function(source, atrlength) => 
+    if atrsmoothing == "RMA"
+        rma(source, atrlength)
+    else
+        if atrsmoothing == "SMA"
+            sma(source, atrlength)
+        else
+            if atrsmoothing == "EMA"
+                ema(source, atrlength)
+            else
+                wma(source, atrlength)
+
+//plot(ma_function(tr(true), atrlength), title = "ATR", color=#991515, transp=0)
+
+atr = ma_function(tr(true), atrlength)
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//  **** Confirmation ****
+///////////////////////////////////////////////////
+
+ssllen=input(title="SSL Length Period", defval=11)
+smaHigh=sma(high, ssllen)
+smaLow=sma(low, ssllen)
+Hlv = 0
+Hlv := close > smaHigh ? 1 : close < smaLow ? -1 : Hlv[1]
+sslDown = Hlv < 0 ? smaHigh: smaLow
+sslUp   = Hlv < 0 ? smaLow : smaHigh
+
+plot(sslDown, "SSL Down", linewidth=1, color=color.red)
+plot(sslUp, "SSL Up", linewidth=1, color=color.lime)
+
+///////////////////////////////////////////////////
+//Confirm Signals
+///////////////////////////////////////////////////
+
+c_Up = sslUp
+c_Down = sslDown
+
+//Signals based on crossover
+c_cross_Long = crossover(c_Up, c_Down)
+c_cross_Short = crossover(c_Down, c_Up)
+
+//Signals based on signal position
+c_trend_Long = c_Up > c_Down ? 1 : 0
+c_trend_Short = c_Down > c_Up ? 1 : 0
+
+confirm_Long = c_cross_Long
+confirm_Short = c_cross_Short
+
+plotshape(c_trend_Long, color = color.green, style=shape.triangleup, location=location.top)
+plotshape(c_trend_Short, color = color.red, style=shape.triangledown, location=location.top)
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Entries and Exits
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//Long entries with standard 1.5 ATR for SL, 1 ATR for TP
+//Corrected assignment of the ATR to TP and SL, credit to @baselinejunky
+long_sl = 0.0
+long_tp = 0.0
+long_sl := confirm_Long ? close - (atr * slMultiplier): long_sl[1]
+long_tp := confirm_Long ? close + (atr * tpMultiplier) : long_tp[1]
+
+//Short entries with standard 1.5 ATR for SL, 1 ATR for TP
+short_sl = 0.0
+short_tp = 0.0
+short_sl := confirm_Short ? close + (atr * slMultiplier) : short_sl[1]
+short_tp := confirm_Short ? close - (atr * tpMultiplier) : short_tp[1]
+
+if (year>2009)
+
+    strategy.close("L1", when = confirm_Short)
+    strategy.exit("L Limit Exit", "L1", stop = long_sl, limit = long_tp)
+
+    strategy.close("S1", when = confirm_Long)
+    strategy.exit("S Limit Exit", "S1", stop = short_sl, limit = short_tp)
+
+    strategy.order("L1", strategy.long, when = confirm_Long)
+    strategy.order("S1", strategy.short, when = confirm_Short)
+
+//Plotting of TP and SL lines credit to @baselinejunky
+plot(strategy.position_size <= 0 ? na : long_sl, color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size <= 0 ? na : long_tp, color=color.green, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size >= 0 ? na : short_sl, color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size >= 0 ? na : short_tp, color=color.green, style=plot.style_linebr, linewidth=2)
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//End
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+l = label.new(bar_index, na, 'Top shape: C1', 
+  color=color.gray, 
+  textcolor=color.white,
+  style=label.style_labelup, yloc=yloc.belowbar)
+label.delete(l[1])
+
+View in Pine Editor・153 lines
+Use on chart
+2
+8
+5
+1
+8 830
+Jul 11, 2019
+After putting the whole system together, sat down to benchmark the various confirmation indicators, shrink it down to backtest individual confirmation indicators.
+
+Results for 24 periods way better than 10, then again it's only one pair. :)
+
+More details below.
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Designed per No Nonsense Forex VP rules
+//For testing your individual indicators before the full system
+//Originated from causecelebre
+//Tried to put in as much VP rules as possible
+
+///////////////////////////////////////////////////
+//Rules Implemented:
+///////////////////////////////////////////////////
+// - SL 1.5 x ATR
+// - TP 1 x ATR
+//
+// - Entry conditions
+//// - Entry from 1 x confirmation
+// - Exit conditions
+//// - Exit on confirmation flip
+
+///////////////////////////////////////////////////
+//Trades entries
+///////////////////////////////////////////////////
+// - First entry L1 or S1 with standard SL and TP
+
+///////////////////////////////////////////////////
+//Included Indicators and settings
+///////////////////////////////////////////////////
+// - Confirmtion = SSL 10
+
+///////////////////////////////////////////////////
+//Credits
+// Strategy causecelebre tradingview.com/u/causecelebre/
+// SSL Channel ErwinBeckers tradingview.com/u/ErwinBeckers/
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Change log
+//First release. Testing of indicators
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Jul 13, 2019
+Release Notes
+Rename confirmation statements
+Re-order strategy block
+
+Aug 5, 2019
+Release Notes
+Updated to version 4.
+Most important change, ATR is correctly assigned upon confirmation signal.
+Aug 5, 2019
+Release Notes
+Uploaded the corrected script.

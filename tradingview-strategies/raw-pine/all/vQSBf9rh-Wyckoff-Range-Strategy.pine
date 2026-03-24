@@ -1,0 +1,85 @@
+//@version=5
+strategy("Wyckoff Range Strategy by deperp", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent)
+
+// Input Variables
+AccumulationLength = input(32, "Accumulation")
+DistributionLength = input(35, "Distribution")
+SpringLength = input(10, "Spring")
+UpthrustLength = input(20, "Upthrust")
+stopPercentage = input(10, "Stop Percentage")
+
+// Accumulation Phase
+isAccumulation = ta.crossover(close, ta.sma(close, AccumulationLength))
+
+// Distribution Phase
+isDistribution = ta.crossunder(close, ta.sma(close, DistributionLength))
+
+// Spring and Upthrust
+isSpring = ta.crossover(low, ta.sma(low, SpringLength))
+isUpthrust = ta.crossunder(high, ta.sma(high, UpthrustLength))
+
+// Strategy Conditions
+enterLong = isAccumulation and isSpring
+enterShort = isDistribution and isUpthrust
+
+// Entry and Exit Conditions
+if (enterLong)
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long, comment="Enter Long")
+    alert("Enter Long Position")
+
+if (enterShort)
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short,  comment="Enter Short")
+    alert("Enter Short Position")
+
+// Stop Loss
+stopLossLevelLong = close * (1 - stopPercentage / 100)
+stopLossLevelShort = close * (1 + stopPercentage / 100)
+strategy.exit("Stop Loss Long", "Long", stop=stopLossLevelLong)
+strategy.exit("Stop Loss Short", "Short", stop=stopLossLevelShort)
+
+// Plotting Wyckoff Schematics
+plotshape(isAccumulation, title="Accumulation Phase", location=location.belowbar, color=color.green, style=shape.labelup, text="Accumulation")
+plotshape(isDistribution, title="Distribution Phase", location=location.abovebar, color=color.red, style=shape.labeldown, text="Distribution")
+plotshape(isSpring, title="Spring", location=location.belowbar, color=color.blue, style=shape.triangleup)
+plotshape(isUpthrust, title="Upthrust", location=location.abovebar, color=color.orange, style=shape.triangledown)
+
+View in Pine Editor・49 lines
+Use on chart
+8
+1
+8
+9
+35 923
+May 25, 2023
+The Wyckoff Range Strategy is a trading strategy that aims to identify potential accumulation and distribution phases in the market using the principles of Wyckoff analysis. It also incorporates the detection of spring and upthrust patterns.
+
+Here's a step-by-step explanation of how to use this strategy:
+
+Understanding Accumulation and Distribution Phases:
+
+Accumulation Phase: This is a period where smart money (large institutional traders) accumulates a particular asset at lower prices. It is characterized by a sideways or consolidating price action.
+Distribution Phase: This is a period where smart money distributes or sells a particular asset at higher prices. It is also characterized by a sideways or consolidating price action.
+Input Variables:
+
+crossOverLength: This variable determines the length of the moving average crossover used to identify accumulation and distribution phases. You can adjust this value based on the market you are trading and the time frame you are analyzing.
+stopPercentage: This variable determines the percentage used to calculate the stop loss level. It helps you define a predefined level at which you would exit a trade if the price moves against your position.
+Strategy Conditions:
+
+Enter Long: The strategy looks for a crossover of the close price above the SMA of the close price with a length of crossOverLength and a crossover of the low price above the SMA of the low price with a length of 20. This combination suggests the start of an accumulation phase and a potential buying opportunity.
+Exit Long: The strategy looks for a crossunder of the close price below the SMA of the close price with a length of crossOverLength or a crossunder of the high price below the SMA of the high price with a length of 20. This combination suggests the end of an accumulation phase and a potential exit signal for long positions.
+Enter Short: The strategy looks for a crossunder of the close price below the SMA of the close price with a length of crossOverLength and a crossunder of the high price below the SMA of the high price with a length of 20. This combination suggests the start of a distribution phase and a potential selling opportunity.
+Exit Short: The strategy looks for a crossover of the close price above the SMA of the close price with a length of crossOverLength or a crossover of the low price above the SMA of the low price with a length of 20. This combination suggests the end of a distribution phase and a potential exit signal for short positions.
+Stop Loss:
+
+The strategy sets a stop loss level for both long and short positions. The stop loss level is calculated based on the stopPercentage variable, which represents the percentage of the current close price. If the price reaches the stop loss level, the strategy will automatically exit the position.
+Plotting Wyckoff Schematics:
+The strategy plots different shapes on the chart to indicate the identified phases and patterns. Green and red labels indicate the accumulation and distribution phases, respectively. Blue triangles indicate spring patterns, and orange triangles indicate upthrust patterns.
+To use this strategy, you can follow these steps:
+
+Jim Forte — Anatomy of a Trading Range
+robertbrain.com/Bull...+a+Trading+Range.pdf
+Jun 20, 2023
+Release Notes
+Fix Exit Alerts

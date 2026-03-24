@@ -1,0 +1,61 @@
+//@version=4
+// main codebody taken from Trader Noro - Noro's Crypto Pattern for H1
+// Intraday strategy - Exit at EOD at all cost, Best used on 30mins Time Frame
+// Returns and rewards using this strategy is solely users responsibility
+
+strategy(title = "Price Action + Bollinger Strategy ",overlay=true)
+bar = close > open ? 1 : close < open ? -1 : 0
+body = abs(close - open)
+avgbody = sma(body, 100)
+
+//calculate simple moving average bollinger bands
+b_sma = input(21,minval=1,title=" SMA candle")
+b_sma_no_of_deviations = 2.1
+b_sma_signal = sma(close, b_sma)
+b_sma_deviation = b_sma_no_of_deviations * stdev(close, b_sma)
+b_sma_upper= b_sma_signal + b_sma_deviation
+b_sma_lower= b_sma_signal - b_sma_deviation
+
+//Method 
+up1 = body < body[1] / 2 and body[1] > avgbody * 2 and bar[1]==1 and bar == -1 and close[1] > b_sma_upper  
+dn1 = body < body[1] / 2 and body[1] > avgbody * 2 and bar[1]==-1 and bar == 1 and close[1] < b_sma_lower
+
+up2 = false
+dn2 = false
+up2 := (up1[1] or up2[1]) and close < close[1]
+dn2 := (dn1[1] or dn2[1]) and close > close[1]
+
+
+longCondition = dn1
+if (longCondition)
+    strategy.entry("Long Entry", strategy.long)
+
+shortCondition = up1 
+if (shortCondition)
+    strategy.entry("Short Entry", strategy.short)
+
+View in Pine Editor・35 lines
+Use on chart
+8
+1
+9
+6
+35 507
+Jul 3, 2019
+Simple Price Action + Bollinger Band Strategy
+
+Buy Setup --------
+- Price closes below Bollinger Band
+- Last candle closes in green, confirming bulls have returned
+- Buy trade is taken
+
+Short Setup --------
+- Price closes above Bollinger Band
+- Last candle closes in red , confirming bears have returned
+- Short trade is taken
+
+
+Strategy open for suggestions and updation
+Jul 4, 2019
+Release Notes
+Minor updates

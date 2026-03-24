@@ -1,0 +1,868 @@
+//@version=6
+strategy("10>20,p>50 DEMA",
+     overlay=true,
+     initial_capital=10000,
+     pyramiding=0,
+     commission_type=strategy.commission.percent,
+     commission_value=0,
+     max_labels_count=500,    
+     process_orders_on_close=true) // modify this to see if any better result
+
+//─────────────────────────────────────────────
+// USER INPUTS
+//─────────────────────────────────────────────
+useLong  = input.bool(true,  "Enable Longs")
+useShort = input.bool(false,  "Enable Shorts")
+
+ema10_len = 10 // "10 Daily EMA Length"
+ema20_len = 20 // "20 Daily EMA Length"
+ema50_len = 50 // "50 Daily EMA Length"
+
+use_stop_loss = input.bool(false, "Use Stop Loss")
+sl_percent = input.float(1.5, "Stop Loss %", step=0.1)
+
+use_take_profit = input.bool(false, "Use Take Profit")
+tp_percent = input.float(5, "Take Profit %", step=0.1)
+
+// Trailing stops commented out - TradingView doesn't support them realistically
+// trailing_stop_activation_offset_type = input.string("Percent", "Trailing Stop Activation Offset Type", options=["Percent", "Dollar Amount"],
+//      tooltip="Choose whether the activation offset is a percentage of price or a fixed dollar amount")
+// trailing_stop_activation_offset = input.float(0.52, "Trailing Stop Activation Offset", minval=0.0, step=0.005,
+//      tooltip="Offset above current price to activate trailing stop (percentage or dollar amount based on type selected)")
+// use_trailing_stop_pct = input.bool(false, "Use Trailing Stop % on All Trades", 
+//      tooltip="Apply trailing stop to all trades from entry")
+// trailing_stop_pct = input.float(20.0, "Trailing Stop %", minval=0.1, maxval=50.0, step=0.1,
+//      tooltip="Trailing stop percentage for all trades (2% = trail 2% below highest price for longs, above lowest for shorts)")
+// use_trailing_stop_atr = input.bool(true, "Use Trailing Stop % of ATR (14 smoothed x5)", 
+//      tooltip="Apply trailing stop based on ATR 14 smoothed x5 to all trades from entry")
+// trailing_stop_atr_multiplier = input.float(300.0, "Trailing Stop % of ATR", minval=1.0, maxval=5000.0, step=1.0,
+//      tooltip="Trailing stop as percentage of ATR 14 smoothed x5 (100% = trail by 1x ATR, 200% = trail by 2x ATR)")
+
+alpha_boost_factor = input.float(1.4, "Alpha Boost Factor on EMA calculations", minval=0.9, maxval=2.0, step=0.05,
+     tooltip="Multiplier for alpha when a new daily bar forms. Higher values reduce lag but may cause overshooting. Leveraged ETF seem to do better with 1.0 while normal stocks with 1.4 or 1.45 Default: 1.2")
+
+entry_price_filter_type = input.string("Close", "Entry Price Filter (50 EMA)", options=["Open", "Close", "Average"],
+     tooltip="Which price to use for entry conditions: Open, Close, or Average (open+close)/2")
+exit_price_filter_type = input.string("Average", "Exit Price Filter (50 EMA)", options=["Open", "Close", "Average"],
+     tooltip="Which price to use for exit conditions: Open, Close, or Average (open+close)/2")
+
+label_offset_pct = 1.5 // 1.5, "Label Offset % of Price", minval=0.1, maxval=10.0, step=0.1,  tooltip="Vertical offset for entry labels as percentage of price (scales with price level for consistent appearance)")
+
+position_size_pct_long = input.float(100.0, "Long Position Size % of Equity", minval=1.0, maxval=100.0, step=1.0,
+     tooltip="Percentage of available equity to use for LONG trades (100% = use all available capital)")
+
+position_size_pct_short = input.float(50.0, "Short Position Size % of Equity", minval=1.0, maxval=100.0, step=1.0,
+     tooltip="Percentage of available equity to use for SHORT trades (100% = use all available capital)")
+
+// Re-entry prevention after exit
+prevent_same_day_reentry = input.bool(true, "Prevent Same-Day Re-entry", 
+     tooltip="Prevent opening a new position on the same trading day after a position was closed")
+prevent_same_bar_reentry = input.bool(true, "Prevent Same-Bar Re-entry", 
+     tooltip="Prevent opening a new position on the same bar where a position was closed (any exit type: trailing stop, stop loss, take profit, or manual close)")
+
+use_reentry_filter = input.bool(true, "Use Re-entry Price Filter", 
+     tooltip="Prevent immediate re-entry after exit. Requires price to move away from exit price before allowing re-entry.")
+reentry_price_move_atr_multiplier = input.float(1.0, "Re-entry Price Movement (ATR Multiplier)", minval=0.0, maxval=5.0, step=0.1,
+     tooltip="Minimum price movement in ATR units away from exit price before allowing re-entry (0 = disabled, 1.0 = price must move 1x ATR away)")
+
+//─────────────────────────────────────────────
+// DATE RANGE FILTER
+//─────────────────────────────────────────────
+// Enable/disable date filters
+use_start_date = input.bool(false, "Use Start Date Filter", 
+     tooltip="Enable to restrict backtest to start from a specific date")
+use_end_date = input.bool(false, "Use End Date Filter", 
+     tooltip="Enable to restrict backtest to end at a specific date")
+
+// default dates (timestamps in milliseconds)
+DEFAULT_START_DATE = 1104580800000  // January 1, 2005 12:00:00 UTC (shows as Jan 1 in all US timezones)
+DEFAULT_END_DATE = 4102444799000     // December 31, 2099 (effectively no end)
+
+// User-configurable date inputs
+start_date_input = input.time(defval=DEFAULT_START_DATE, title="Start Date", 
+     tooltip="Backtest start date (default: Jan 1, 2005)")
+end_date_input = input.time(defval=DEFAULT_END_DATE, title="End Date", 
+     tooltip="Backtest end date (default: Dec 31, 2099 - no end)")
+
+// Use input dates
+start_date = start_date_input
+end_date = end_date_input
+
+// Check if current bar is within the date range (only if filters are enabled)
+bar_time = time
+start_date_ok = not use_start_date or bar_time >= start_date
+end_date_ok = not use_end_date or bar_time <= end_date
+within_date_range = start_date_ok and end_date_ok
+
+//─────────────────────────────────────────────
+// DAILY EMA CALCULATIONS (adjusted length for intraday timeframe)
+//─────────────────────────────────────────────
+
+
+// The Alpha Formula
+// We calculate the alpha for the Daily timeframe, then convert it to the current timeframe's decay rate.
+// Formula: Alpha_LTF = 1 - (1 - Alpha_HTF)^(1/Ratio)
+get_adjusted_alpha(target_len, ratio) =>
+    alpha_daily = 2.0 / (target_len + 1)
+    alpha_corrected = 1.0 - math.pow(1.0 - alpha_daily, 1.0 / ratio)
+    alpha_corrected
+
+// Get the current chart timeframe in minutes (needed for detection)
+// Convert timeframe to minutes: seconds -> /60, minutes -> *1, hours -> *60, days -> *1440
+current_tf_seconds = timeframe.in_seconds()
+current_tf_minutes = current_tf_seconds / 60.0
+timeframe_in_hours = current_tf_minutes / 60.0
+
+// Auto-detect trading hours per day by counting actual bars per day
+// This is more accurate than estimating hours, especially for extended hours
+var int bars_in_current_day = 0
+var int last_day_counted = na
+var float detected_hours = 24.0
+
+// Get current day
+current_day = dayofmonth(time)
+current_year = year(time)
+current_day_key = current_year * 10000 + current_day
+
+// Count bars per day
+if na(last_day_counted) or current_day_key != last_day_counted
+    // New day detected, calculate hours from previous day's bar count
+    if not na(last_day_counted) and bars_in_current_day > 0
+        // Calculate hours based on actual bars counted
+        // bars_per_day * timeframe_in_hours = hours_per_day
+        detected_hours := bars_in_current_day * timeframe_in_hours
+        // Clamp to reasonable values
+        if detected_hours < 6.0
+            detected_hours := 6.5  // Regular hours minimum
+        else if detected_hours > 20.0
+            detected_hours := 24.0  // Crypto/Forex
+        else if detected_hours > 15.0
+            detected_hours := 14.5  // Extended hours maximum
+    
+    // Reset counter for new day
+    bars_in_current_day := 1
+    last_day_counted := current_day_key
+else
+    // Same day, increment counter
+    bars_in_current_day := bars_in_current_day + 1
+
+// Manual override option (set to 0 to use auto-detection)
+hours_per_day_manual = 0 // input.float(0.0, "Trading Hours per Day (0=Auto)", minval=0.0, maxval=24.0, step=0.5, 
+     // tooltip="Set to 0 for auto-detection, or manually set hours (6.5 for regular stock hours, 14.5 for extended, 24 for crypto/forex)")
+
+// Use manual override if set, otherwise use auto-detected value
+// Default to 6.5 if detection hasn't run yet
+hours_per_day = hours_per_day_manual > 0 ? hours_per_day_manual : (detected_hours > 0 ? detected_hours : 6.5)
+// Calculate the Ratio (How many current bars fit in one Day?)
+// We use 60 * hours_per_day to get total daily minutes for the asset
+daily_minutes = 60 * hours_per_day
+bars_per_day_ratio = daily_minutes / current_tf_minutes
+
+
+// Calculate how many bars equal one trading day
+// Standard trading day: 6.5 hours (9:30 AM - 4:00 PM ET)
+trading_hours_per_day = 6.5
+current_timeframe_seconds = timeframe.in_seconds()
+bars_per_hour = 3600 / current_timeframe_seconds
+bars_per_day = math.round(bars_per_hour * trading_hours_per_day)
+
+// Disable script for very low timeframes (< 5 minutes) to avoid "too many historical candles" error
+MIN_TIMEFRAME_SECONDS = 300  // 5 minutes - minimum allowed timeframe
+timeframe_too_low = current_timeframe_seconds < MIN_TIMEFRAME_SECONDS
+
+// Check if timeframe is daily (1D) or higher (weekly, monthly, etc.)
+ONE_DAY_SECONDS = 86400  // 1 day = 86400 seconds
+timeframe_daily_or_higher = current_timeframe_seconds >= ONE_DAY_SECONDS
+
+// Calculate equivalent EMA lengths for current timeframe
+// If on daily chart or higher (weekly, monthly), use standard lengths (10, 20, 50)
+// Otherwise (intraday), multiply by bars_per_day to get equivalent daily EMAs
+ema10_equivalent = timeframe_daily_or_higher ? ema10_len : ema10_len * bars_per_day
+ema20_equivalent = timeframe_daily_or_higher ? ema20_len : ema20_len * bars_per_day
+ema50_equivalent = timeframe_daily_or_higher ? ema50_len : ema50_len * bars_per_day
+
+// Calculate Alphas for our two EMAs
+alpha10 = get_adjusted_alpha(ema10_len, bars_per_day_ratio)
+alpha20 = get_adjusted_alpha(ema20_len, bars_per_day_ratio)
+alpha50 = get_adjusted_alpha(ema50_len, bars_per_day_ratio)
+
+// Calculate EMAs using equivalent lengths (smooth on intraday charts)
+ema10_rev2 = ta.ema(close, ema10_equivalent)
+ema20_rev2 = ta.ema(close, ema20_equivalent)
+ema50_rev2 = ta.ema(close, ema50_equivalent)
+
+// Get daily close price (non-repainting) - this is what daily EMAs are calculated from
+daily_close = request.security(syminfo.tickerid, "1D", close, lookahead=barmerge.lookahead_off)
+
+var float ema10 = na
+var float ema20 = na
+var float ema50 = na
+var float prev_daily_close = na
+
+// Detect when a new daily bar forms (daily close changes)
+is_new_daily_bar = not na(prev_daily_close) and daily_close != prev_daily_close
+
+// Initialize on first bar
+if bar_index == 0
+    ema10 := daily_close
+    ema20 := daily_close
+    ema50 := daily_close
+    prev_daily_close := daily_close
+else
+    // Update EMA on every bar using daily close with adjusted alpha for smooth continuous lines
+    // The adjusted alpha accounts for updating multiple times per day, ensuring accuracy
+    // When a new daily bar forms, apply a boost to reduce lag and match daily EMA timing
+    alpha10_boosted = is_new_daily_bar ? math.min(alpha10 * alpha_boost_factor, 0.5) : alpha10
+    alpha20_boosted = is_new_daily_bar ? math.min(alpha20 * alpha_boost_factor, 0.5) : alpha20
+    alpha50_boosted = is_new_daily_bar ? math.min(alpha50 * alpha_boost_factor, 0.5) : alpha50
+    
+    ema10 := (alpha10_boosted * daily_close) + ((1 - alpha10_boosted) * nz(ema10[1]))
+    ema20 := (alpha20_boosted * daily_close) + ((1 - alpha20_boosted) * nz(ema20[1]))
+    ema50 := (alpha50_boosted * daily_close) + ((1 - alpha50_boosted) * nz(ema50[1]))
+    
+    // Track daily close for next bar
+    prev_daily_close := daily_close
+
+//─────────────────────────────────────────────
+// TRUE DAILY EMAs (from 1D timeframe using request.security)
+//─────────────────────────────────────────────
+// Get true daily EMAs from the 1D timeframe (non-repainting)
+// These are the actual daily EMAs calculated on the daily chart
+ema10_daily = request.security(syminfo.tickerid, "1D", ta.ema(close, ema10_len), lookahead=barmerge.lookahead_off)
+ema20_daily = request.security(syminfo.tickerid, "1D", ta.ema(close, ema20_len), lookahead=barmerge.lookahead_off)
+ema50_daily = request.security(syminfo.tickerid, "1D", ta.ema(close, ema50_len), lookahead=barmerge.lookahead_off)
+
+
+//─────────────────────────────────────────────
+// PRICE FILTER VARIABLES
+//─────────────────────────────────────────────
+// Calculate average price (open + close) / 2
+avg_price = (open + close) / 2
+
+// Determine which price to use for 50 EMA filter (for entries)
+long_price_filter = entry_price_filter_type == "Close" ? close : entry_price_filter_type == "Open" ? open : avg_price
+short_price_filter = entry_price_filter_type == "Close" ? close : entry_price_filter_type == "Open" ? open : avg_price
+
+// Determine which price to use for 50 EMA filter (for exits)
+long_exit_price_filter = exit_price_filter_type == "Close" ? close : exit_price_filter_type == "Open" ? open : avg_price
+short_exit_price_filter = exit_price_filter_type == "Close" ? close : exit_price_filter_type == "Open" ? open : avg_price
+
+
+//─────────────────────────────────────────────
+// ENTRY CONDITIONS
+//─────────────────────────────────────────────
+// Long: (10 EMA crosses over 20 EMA OR 10 EMA > 20 EMA) AND price > 50 EMA
+// Also check if we're not already in a position to avoid re-entry
+longCondition_trend = (ema10 > ema20) and long_price_filter > ema50 and strategy.position_size == 0
+longCondition = longCondition_trend // here you can add more entry conditions with "and" 
+
+// Short: (10 EMA crosses under 20 EMA OR 10 EMA < 20 EMA) AND price < 50 EMA
+// Also check if we're not already in a position to avoid re-entry
+shortCondition_trend = (ema10 < ema20) and short_price_filter < ema50 and strategy.position_size == 0
+shortCondition = shortCondition_trend
+
+// Exit conditions (when setup is no longer valid) - checked separately to identify exact reason
+// Long exit conditions
+// Use daily EMAs for EMA-based exits, intraday price for price-based exits
+longExit_ema_crossunder = ema10 < ema20 // Daily 10 EMA < Daily 20 EMA
+longExit_price_below = long_exit_price_filter < ema50  // Intraday price < Daily 50 EMA
+longExitCondition = longExit_ema_crossunder or longExit_price_below
+
+// Short exit conditions
+shortExit_ema_crossover = ema10 > ema20 // Daily 10 EMA > Daily 20 EMA
+shortExit_price_above = short_exit_price_filter > ema50  // Intraday price > Daily 50 EMA
+shortExitCondition = shortExit_ema_crossover or shortExit_price_above
+
+// Apply user direction filters and date range check
+// Also disable if timeframe is too low
+longOK  = useLong  and longCondition and within_date_range and not timeframe_too_low
+shortOK = useShort and shortCondition and within_date_range and not timeframe_too_low
+
+//─────────────────────────────────────────────
+// ATR CALCULATION FOR TRAILING STOP
+//─────────────────────────────────────────────
+atr_length = 14
+atr_value = ta.atr(atr_length)
+atr_smoothed_x5 = ta.ema(atr_value, 5) * 5  // ATR 14 smoothed with EMA 5, then multiplied by 5
+
+//─────────────────────────────────────────────
+// TRAILING STOP TRACKING
+//─────────────────────────────────────────────
+// Track highest/lowest prices for trailing stops
+var float highest_price_long = na
+var float lowest_price_short = na
+var bool trailing_stop_set_long = false
+var bool trailing_stop_set_short = false
+
+// Trailing stop tracking (commented out - TradingView doesn't support trailing stops realistically)
+// if strategy.position_size > 0
+//     if na(highest_price_long) or high > highest_price_long
+//         highest_price_long := high
+// else
+//     highest_price_long := na
+//     trailing_stop_set_long := false
+// if strategy.position_size < 0
+//     if na(lowest_price_short) or low < lowest_price_short
+//         lowest_price_short := low
+// else
+//     lowest_price_short := na
+//     trailing_stop_set_short := false
+
+//─────────────────────────────────────────────
+// STOP LOSS / TAKE PROFIT
+//─────────────────────────────────────────────
+sl_long  = strategy.position_avg_price * (1 - sl_percent/100)
+tp_long  = strategy.position_avg_price * (1 + tp_percent/100)
+
+sl_short = strategy.position_avg_price * (1 + sl_percent/100)
+tp_short = strategy.position_avg_price * (1 - tp_percent/100)
+
+//─────────────────────────────────────────────
+// TRADE ID COUNTER (matches TradingView's trade numbering)
+//─────────────────────────────────────────────
+// Since pyramiding=0, each entry creates a new trade
+// This counter will match TradingView's sequential trade numbers
+var int trade_id_counter = 0
+
+//─────────────────────────────────────────────
+// SAME-BAR TRAILING STOP EXIT DETECTION
+//─────────────────────────────────────────────
+// Track position size and trailing stop state from PREVIOUS bar
+// Also track closed trades count to detect if a trade closed on current bar
+var float prev_bar_position_size = 0.0
+var bool prev_bar_trailing_stop_long = false
+var bool prev_bar_trailing_stop_short = false
+var int prev_bar_closed_trades_count = 0
+
+// Detect if we exited on the current bar (any exit type: trailing stop, stop loss, take profit, or manual close)
+// This happens if: 
+// 1. We had a position on previous bar
+// 2. A trade was closed on current bar (closed trades count increased)
+trade_closed_this_bar = strategy.closedtrades > prev_bar_closed_trades_count
+exited_with_trailing_stop_long_this_bar = false
+exited_with_trailing_stop_short_this_bar = false
+
+// Detect any exit for long positions (trailing stop, stop loss, take profit, or manual close)
+if trade_closed_this_bar and (prev_bar_position_size > 0)
+    exited_with_trailing_stop_long_this_bar := true
+
+// Detect any exit for short positions (trailing stop, stop loss, take profit, or manual close)
+if trade_closed_this_bar and (prev_bar_position_size < 0)
+    exited_with_trailing_stop_short_this_bar := true
+
+//─────────────────────────────────────────────
+// SAME-DAY RE-ENTRY PREVENTION + PRICE MOVEMENT FILTER
+//─────────────────────────────────────────────
+// Track the last trading day a position was closed
+// Prevent opening new positions on the same day after a close
+var int last_close_day = na
+var int last_close_year = na
+
+// Track exit prices for re-entry price movement filter
+var float last_exit_price_long = na
+var float last_exit_price_short = na
+
+// Get current trading day
+current_trading_day = dayofmonth(time)
+current_trading_year = year(time)
+
+// Check if we're on a new trading day (reset the flag)
+is_new_trading_day = not na(last_close_day) and (current_trading_day != last_close_day or current_trading_year != last_close_year)
+
+// Reset tracking when new day starts
+// Note: Do NOT reset exit prices on new day - they should persist for re-entry filter
+// Only reset the day tracking (for same-day re-entry prevention)
+if is_new_trading_day
+    last_close_day := na
+    last_close_year := na
+    // Keep last_exit_price_long and last_exit_price_short - they persist across days
+
+// Check if we can open a new position (not on the same day as a close, if same-day prevention is enabled)
+can_open_new_position_day = not prevent_same_day_reentry or na(last_close_day) or (current_trading_day != last_close_day or current_trading_year != last_close_year)
+
+// Check if price has moved enough from exit price (for re-entry filter)
+// For longs: require price to move DOWN by at least (ATR * multiplier) from exit price before re-entry
+// For shorts: require price to move UP by at least (ATR * multiplier) from exit price before re-entry
+reentry_atr_threshold = atr_value * reentry_price_move_atr_multiplier
+
+// Price movement check for longs
+// Use absolute value: allow re-entry if price moved away from exit price by at least ATR threshold (up OR down)
+price_moved_enough_long = true  // Default: allow re-entry
+if use_reentry_filter and reentry_price_move_atr_multiplier > 0.0
+    // Filter is enabled and multiplier is set - check price movement
+    if not na(last_exit_price_long) and not na(atr_value)
+        // Both exit price and ATR are available - check if price moved enough in either direction
+        price_diff = math.abs(close - last_exit_price_long)
+        price_moved_enough_long := price_diff >= reentry_atr_threshold
+    // If exit price or ATR is missing, allow re-entry (can't check)
+
+// Price movement check for shorts
+// Use absolute value: allow re-entry if price moved away from exit price by at least ATR threshold (up OR down)
+price_moved_enough_short = true  // Default: allow re-entry
+if use_reentry_filter and reentry_price_move_atr_multiplier > 0.0
+    // Filter is enabled and multiplier is set - check price movement
+    if not na(last_exit_price_short) and not na(atr_value)
+        // Both exit price and ATR are available - check if price moved enough in either direction
+        price_diff = math.abs(close - last_exit_price_short)
+        price_moved_enough_short := price_diff >= reentry_atr_threshold
+    // If exit price or ATR is missing, allow re-entry (can't check)
+
+// Combined check: must pass day filter AND price movement filter AND (if enabled) not exited on same bar
+// The re-entry filter only controls the price movement requirement
+// The same-bar prevention is controlled by the prevent_same_bar_reentry option
+can_open_new_position_long = can_open_new_position_day and price_moved_enough_long and (not prevent_same_bar_reentry or not exited_with_trailing_stop_long_this_bar)
+can_open_new_position_short = can_open_new_position_day and price_moved_enough_short and (not prevent_same_bar_reentry or not exited_with_trailing_stop_short_this_bar)
+
+//─────────────────────────────────────────────
+// ORDERS - Process exits FIRST, then entries
+//─────────────────────────────────────────────
+
+// Conditional exits (when setup is no longer valid) - with exact reason
+// Process exits BEFORE entries to avoid same-bar conflicts
+if (strategy.position_size > 0 and longExitCondition)
+    // Determine exact exit reason (check in priority order)
+    long_exit_reason = ""
+    if (longExit_ema_crossunder and longExit_price_below)
+        long_exit_reason := "10 EMA < 20 EMA & Price < 50 EMA"
+    else if (longExit_ema_crossunder)
+        long_exit_reason := "10 EMA < 20 EMA"
+    else if (longExit_price_below)
+        long_exit_reason := "Price < 50 EMA"
+    strategy.close("Long", comment=long_exit_reason)
+    // Track that a position was closed today and the exit price
+    // For strategy.close() with process_orders_on_close=true, exit happens at close of current bar
+    // Use current bar's close price as exit price (trade data not available until next bar)
+    exit_price_long = close
+    last_close_day := current_trading_day
+    last_close_year := current_trading_year
+    last_exit_price_long := exit_price_long
+    // Create label showing exit price - positioned higher for better readability
+    exit_price_to_show = exit_price_long
+    // Calculate total profit/loss (multiply by position size)
+    // Get entry price and position size from current position (before it closes)
+    entry_price = strategy.position_avg_price
+    position_size = strategy.position_size
+    profit_loss_per_share = na(entry_price) ? na : exit_price_to_show - entry_price
+    profit_loss_dollar = na(profit_loss_per_share) or na(position_size) or position_size == 0 ? na : profit_loss_per_share * math.abs(position_size)
+    profit_loss_pct = na(entry_price) or entry_price == 0 ? na : ((exit_price_to_show - entry_price) / entry_price) * 100
+    profit_loss_str = na(profit_loss_dollar) or na(profit_loss_pct) ? "" : str.tostring(profit_loss_dollar, "#.##") + "$ (" + str.tostring(profit_loss_pct, "#.##") + "%)"
+    // Convert UTC time to Eastern Time (EST/EDT)
+    // DST (EDT) is roughly March-October: UTC-4, otherwise EST: UTC-5
+    current_month = month(time)
+    is_dst = current_month >= 3 and current_month <= 10  // Approximate DST period
+    hours_offset = is_dst ? 4 : 5  // EDT = 4 hours, EST = 5 hours
+    eastern_time = time - hours_offset * 3600 * 1000  // Subtract hours in milliseconds
+    exit_time_str = str.format("{0,date,MM/dd HH:mm}", eastern_time)
+    exit_label_y = high * (1 + label_offset_pct / 100.0)
+    exit_label_text = "Exit\n@" + str.tostring(exit_price_to_show, "#.##") + "$\n" + exit_time_str + "\n" + long_exit_reason
+    if profit_loss_str != ""
+        exit_label_text := exit_label_text + "\n" + profit_loss_str
+    label.new(bar_index, exit_label_y, exit_label_text, 
+         color=color.new(color.orange, 0), textcolor=color.black, style=label.style_label_down, size=size.normal)
+    
+
+if (strategy.position_size < 0 and shortExitCondition)
+    // Determine exact exit reason (check in priority order)
+    short_exit_reason = ""
+    if (shortExit_ema_crossover and shortExit_price_above)
+        short_exit_reason := "10 EMA > 20 EMA & Price > 50 EMA"
+    else if (shortExit_ema_crossover)
+        short_exit_reason := "10 EMA > 20 EMA"
+    else if (shortExit_price_above)
+        short_exit_reason := "Price > 50 EMA"
+    strategy.close("Short", comment=short_exit_reason)
+    // Track that a position was closed today and the exit price
+    // For strategy.close() with process_orders_on_close=true, exit happens at close of current bar
+    // Use current bar's close price as exit price (trade data not available until next bar)
+    exit_price_short = close
+    last_close_day := current_trading_day
+    last_close_year := current_trading_year
+    last_exit_price_short := exit_price_short
+    // Create label showing exit price - positioned higher for better readability
+    exit_price_to_show = exit_price_short
+    // Calculate total profit/loss (for shorts: profit when exit < entry, multiply by position size)
+    // Get entry price and position size from current position (before it closes)
+    entry_price = strategy.position_avg_price
+    position_size = strategy.position_size
+    profit_loss_per_share = na(entry_price) ? na : entry_price - exit_price_to_show
+    profit_loss_dollar = na(profit_loss_per_share) or na(position_size) or position_size == 0 ? na : profit_loss_per_share * math.abs(position_size)
+    profit_loss_pct = na(entry_price) or entry_price == 0 ? na : ((entry_price - exit_price_to_show) / entry_price) * 100
+    profit_loss_str = na(profit_loss_dollar) or na(profit_loss_pct) ? "" : str.tostring(profit_loss_dollar, "#.##") + "$ (" + str.tostring(profit_loss_pct, "#.##") + "%)"
+    // Convert UTC time to Eastern Time (EST/EDT)
+    current_month = month(time)
+    is_dst = current_month >= 3 and current_month <= 10  // Approximate DST period
+    hours_offset = is_dst ? 4 : 5  // EDT = 4 hours, EST = 5 hours
+    eastern_time = time - hours_offset * 3600 * 1000  // Subtract hours in milliseconds
+    exit_time_str = str.format("{0,date,MM/dd HH:mm}", eastern_time)
+    exit_label_y = high * (1 + label_offset_pct / 100.0)
+    exit_label_text = "Exit\n@" + str.tostring(exit_price_to_show, "#.##") + "$\n" + exit_time_str + "\n" + short_exit_reason
+    if profit_loss_str != ""
+        exit_label_text := exit_label_text + "\n" + profit_loss_str
+    label.new(bar_index, exit_label_y, exit_label_text, 
+         color=color.new(color.orange, 0), textcolor=color.black, style=label.style_label_down, size=size.normal)
+
+// Stop Loss / Take Profit / Trailing Stop exits (only if enabled)
+// Note: strategy.exit() doesn't trigger on_close, so we track by checking if position_size changed
+// Use strategy.closedtrades.exit_price() to get the ACTUAL exit price (not just close price)
+var float prev_position_size = 0.0
+var bool position_closed_previous_bar = false
+var float position_size_when_closed = 0.0
+position_was_closed = (prev_position_size != 0.0) and (strategy.position_size == 0.0)
+
+// When position closes on CURRENT bar, get exit price immediately
+// Skip creating label if it was a conditional exit (already labeled in conditional exit section)
+if position_was_closed
+    last_close_day := current_trading_day
+    last_close_year := current_trading_year
+    position_size_when_closed := prev_position_size
+    // Try to get the actual exit price from the most recently closed trade
+    // This is accurate for trailing stops, stop loss, and take profit exits
+    actual_exit_price = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    exit_comment = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
+    // Check if this was an intraday exit (trailing stop, stop loss, take profit) vs conditional exit
+    // Intraday exits have specific comments: "Trail Stop %", "Trail Stop ATR", "Stop Loss", "Take Profit", "SL/TP"
+    // Conditional exits have comments like "Price < 50 EMA", "10 EMA < 20 EMA", etc.
+    is_intraday_exit = not na(exit_comment) and (str.contains(exit_comment, "Trail Stop") or str.contains(exit_comment, "Stop Loss") or str.contains(exit_comment, "Take Profit") or str.contains(exit_comment, "SL/TP"))
+    // Track exit price based on which position was closed
+    if prev_position_size > 0
+        last_exit_price_long := na(actual_exit_price) ? close : actual_exit_price
+        // Only create label if this was an intraday exit (trailing stop, stop loss, take profit)
+        // Conditional exits already have labels created when strategy.close() is called
+        if is_intraday_exit
+            // Create label showing exit price - positioned higher for better readability (on current bar)
+            exit_price_to_show = na(actual_exit_price) ? close : actual_exit_price
+            exit_reason_text = na(exit_comment) ? "Exit" : exit_comment
+            // Calculate total profit/loss (multiply by position size)
+            entry_price = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+            position_size = strategy.closedtrades.size(strategy.closedtrades - 1)
+            profit_loss_per_share = na(entry_price) ? na : exit_price_to_show - entry_price
+            profit_loss_dollar = na(profit_loss_per_share) or na(position_size) ? na : profit_loss_per_share * math.abs(position_size)
+            profit_loss_pct = na(entry_price) or entry_price == 0 ? na : ((exit_price_to_show - entry_price) / entry_price) * 100
+            profit_loss_str = na(profit_loss_dollar) or na(profit_loss_pct) ? "" : str.tostring(profit_loss_dollar, "#.##") + "$ (" + str.tostring(profit_loss_pct, "#.##") + "%)"
+            // Convert UTC time to Eastern Time (EST/EDT)
+            current_month = month(time)
+            is_dst = current_month >= 3 and current_month <= 10  // Approximate DST period
+            hours_offset = is_dst ? 4 : 5  // EDT = 4 hours, EST = 5 hours
+            eastern_time = time - hours_offset * 3600 * 1000  // Subtract hours in milliseconds
+            exit_time_str = str.format("{0,date,MM/dd HH:mm}", eastern_time)
+            exit_label_y = high * (1 + label_offset_pct / 100.0)
+            exit_label_text = "Exit\n@" + str.tostring(exit_price_to_show, "#.##") + "$\n" + exit_time_str + "\n" + exit_reason_text
+            if profit_loss_str != ""
+                exit_label_text := exit_label_text + "\n" + profit_loss_str
+            label.new(bar_index, exit_label_y, exit_label_text, 
+                 color=color.new(color.orange, 0), textcolor=color.black, style=label.style_label_down, size=size.normal)
+    else if prev_position_size < 0
+        last_exit_price_short := na(actual_exit_price) ? close : actual_exit_price
+        // Only create label if this was an intraday exit (trailing stop, stop loss, take profit)
+        // Conditional exits already have labels created when strategy.close() is called
+        if is_intraday_exit
+            // Create label showing exit price - positioned higher for better readability (on current bar)
+            exit_price_to_show = na(actual_exit_price) ? close : actual_exit_price
+            exit_reason_text = na(exit_comment) ? "Exit" : exit_comment
+            // Calculate total profit/loss (for shorts: profit when exit < entry, multiply by position size)
+            entry_price = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+            position_size = strategy.closedtrades.size(strategy.closedtrades - 1)
+            profit_loss_per_share = na(entry_price) ? na : entry_price - exit_price_to_show
+            profit_loss_dollar = na(profit_loss_per_share) or na(position_size) ? na : profit_loss_per_share * math.abs(position_size)
+            profit_loss_pct = na(entry_price) or entry_price == 0 ? na : ((entry_price - exit_price_to_show) / entry_price) * 100
+            profit_loss_str = na(profit_loss_dollar) or na(profit_loss_pct) ? "" : str.tostring(profit_loss_dollar, "#.##") + "$ (" + str.tostring(profit_loss_pct, "#.##") + "%)"
+            // Convert UTC time to Eastern Time (EST/EDT)
+            current_month = month(time)
+            is_dst = current_month >= 3 and current_month <= 10  // Approximate DST period
+            hours_offset = is_dst ? 4 : 5  // EDT = 4 hours, EST = 5 hours
+            eastern_time = time - hours_offset * 3600 * 1000  // Subtract hours in milliseconds
+            exit_time_str = str.format("{0,date,MM/dd HH:mm}", eastern_time)
+            exit_label_y = high * (1 + label_offset_pct / 100.0)
+            exit_label_text = "Exit\n@" + str.tostring(exit_price_to_show, "#.##") + "$\n" + exit_time_str + "\n" + exit_reason_text
+            if profit_loss_str != ""
+                exit_label_text := exit_label_text + "\n" + profit_loss_str
+            label.new(bar_index, exit_label_y, exit_label_text, 
+                 color=color.new(color.orange, 0), textcolor=color.black, style=label.style_label_down, size=size.normal)
+    position_closed_previous_bar := true
+else
+    position_closed_previous_bar := false
+prev_position_size := strategy.position_size
+
+// Update tracking variables for next bar (for same-bar exit detection)
+prev_bar_position_size := strategy.position_size
+// prev_bar_trailing_stop_long := trailing_stop_set_long
+// prev_bar_trailing_stop_short := trailing_stop_set_short
+prev_bar_closed_trades_count := strategy.closedtrades
+
+//─────────────────────────────────────────────
+// TRAILING STOPS (commented out - TradingView doesn't support them realistically)
+//─────────────────────────────────────────────
+// trailing_stop_activation_price = trailing_stop_activation_offset_type == "Percent" ? 
+//      close * (1 + trailing_stop_activation_offset / 100.0) : 
+//      close + trailing_stop_activation_offset
+// var bool prev_trailing_stop_set_long = false
+// var bool prev_trailing_stop_set_short = false
+var bool sl_tp_set_long = false
+var bool sl_tp_set_short = false
+
+// // Trailing Stop % on All Trades (Priority 1)
+// if use_trailing_stop_pct and not use_trailing_stop_atr and strategy.position_size > 0 and not na(highest_price_long)
+//     trail_offset_long = highest_price_long * (trailing_stop_pct / 100.0)
+//     trail_offset_long_cents = math.round(trail_offset_long * 100.0)
+//     if use_stop_loss or use_take_profit
+//         strategy.exit("Long Trailing", "Long", trail_price=trailing_stop_activation_price, trail_offset=trail_offset_long_cents, stop=use_stop_loss ? sl_long : na, limit=use_take_profit ? tp_long : na, comment="Trail Stop %", comment_loss=use_stop_loss ? "Stop Loss" : na, comment_profit=use_take_profit ? "Take Profit" : na)
+//     else
+//         strategy.exit("Long Trailing", "Long", trail_price=trailing_stop_activation_price, trail_offset=trail_offset_long_cents, comment="Trail Stop %")
+//     trailing_stop_set_long := true
+//     pip_size = 0.0001
+//     sl_distance_pips = use_stop_loss and not na(sl_long) ? math.floor((close - sl_long) / pip_size) : na
+//     sl_pips_str = na(sl_distance_pips) ? "" : " (" + str.tostring(sl_distance_pips, "#") + " pips)"
+//     trail_offset_ticks = math.round(trail_offset_long / syminfo.mintick)
+//     trail_offset_pips = math.floor(trail_offset_long / pip_size)
+//     trail_offset_display = " (" + str.tostring(trail_offset_ticks, "#") + " ticks, " + str.tostring(trail_offset_pips, "#") + " pips)"
+//     sl_info = use_stop_loss and not na(sl_long) ? "\nStop Loss: @" + str.tostring(sl_long, "#.##") + "$" + sl_pips_str : ""
+//     tp_info = use_take_profit and not na(tp_long) ? "\nTake Profit: @" + str.tostring(tp_long, "#.##") + "$" : ""
+//     exit_params = "\n\nstrategy.exit() params:\ntrail_price=" + str.tostring(trailing_stop_activation_price, "#.####") + "\ntrail_offset=" + str.tostring(trail_offset_long_cents, "#") + " cents ($" + str.tostring(trail_offset_long, "#.####") + ")"
+//     exit_params := exit_params + (use_stop_loss and not na(sl_long) ? "\nstop=" + str.tostring(sl_long, "#.####") : "\nstop=na")
+//     exit_params := exit_params + (use_take_profit and not na(tp_long) ? "\nlimit=" + str.tostring(tp_long, "#.####") : "\nlimit=na")
+//     label_text = "Setup Trail Stop\nCurrent Price: " + str.tostring(close, "#.##") + "$\nActivation Price: " + str.tostring(trailing_stop_activation_price, "#.##") + "$\nTrail Offset: " + str.tostring(trail_offset_long, "#.##") + "$" + trail_offset_display + sl_info + tp_info + exit_params + "\nATR: " + str.tostring(atr_value, "#.####")
+//     label_y = high * (1 + label_offset_pct / 200.0)
+//     label.new(bar_index, label_y, label_text, color=color.new(#FF69B4, 0), textcolor=color.black, style=label.style_label_down, size=size.normal)
+
+// if use_trailing_stop_pct and not use_trailing_stop_atr and strategy.position_size < 0 and not na(lowest_price_short)
+//     trail_offset_short = lowest_price_short * (trailing_stop_pct / 100.0)
+//     trail_offset_short_cents = math.round(trail_offset_short * 100.0)
+//     if use_stop_loss or use_take_profit
+//         strategy.exit("Short Trailing", "Short", trail_price=lowest_price_short, trail_offset=trail_offset_short_cents, stop=use_stop_loss ? sl_short : na, limit=use_take_profit ? tp_short : na, comment="Trail Stop %", comment_loss=use_stop_loss ? "Stop Loss" : na, comment_profit=use_take_profit ? "Take Profit" : na)
+//     else
+//         strategy.exit("Short Trailing", "Short", trail_price=lowest_price_short, trail_offset=trail_offset_short_cents, comment="Trail Stop %")
+//     trailing_stop_set_short := true
+//     if not prev_trailing_stop_set_short
+//         pip_size = 0.0001
+//         sl_distance_pips = use_stop_loss and not na(sl_short) ? math.floor((sl_short - close) / pip_size) : na
+//         sl_pips_str = na(sl_distance_pips) ? "" : " (" + str.tostring(sl_distance_pips, "#") + " pips)"
+//         trail_offset_ticks = math.round(trail_offset_short / syminfo.mintick)
+//         trail_offset_pips = math.floor(trail_offset_short / pip_size)
+//         trail_offset_display = " (" + str.tostring(trail_offset_ticks, "#") + " ticks, " + str.tostring(trail_offset_pips, "#") + " pips)"
+//         sl_info = use_stop_loss and not na(sl_short) ? "\nStop Loss: @" + str.tostring(sl_short, "#.##") + "$" + sl_pips_str : ""
+//         tp_info = use_take_profit and not na(tp_short) ? "\nTake Profit: @" + str.tostring(tp_short, "#.##") + "$" : ""
+//         exit_params = "\n\nstrategy.exit() params:\ntrail_price=" + str.tostring(lowest_price_short, "#.####") + "\ntrail_offset=" + str.tostring(trail_offset_short_cents, "#") + " cents ($" + str.tostring(trail_offset_short, "#.####") + ")"
+//         exit_params := exit_params + (use_stop_loss and not na(sl_short) ? "\nstop=" + str.tostring(sl_short, "#.####") : "\nstop=na")
+//         exit_params := exit_params + (use_take_profit and not na(tp_short) ? "\nlimit=" + str.tostring(tp_short, "#.####") : "\nlimit=na")
+//         label_text = "Setup Trail Stop\nCurrent Price: " + str.tostring(close, "#.##") + "$\nActivation Price: " + str.tostring(lowest_price_short, "#.##") + "$\nTrail Offset: " + str.tostring(trail_offset_short, "#.##") + "$" + trail_offset_display + sl_info + tp_info + exit_params + "\nATR: " + str.tostring(atr_value, "#.####")
+//         label_y = high * (1 + label_offset_pct / 200.0)
+//         label.new(bar_index, label_y, label_text, color=color.new(#FF69B4, 0), textcolor=color.black, style=label.style_label_down, size=size.normal)
+
+// Trailing Stop % of ATR (commented out)
+// if use_trailing_stop_atr and not use_trailing_stop_pct and strategy.position_size > 0 and not na(highest_price_long) and not na(atr_smoothed_x5)
+//     trail_offset_long_atr = atr_smoothed_x5 * (trailing_stop_atr_multiplier / 100.0)
+//     trail_offset_long_atr_cents = math.round(trail_offset_long_atr * 100.0)
+//     if use_stop_loss or use_take_profit
+//         strategy.exit("Long Trailing", "Long", trail_price=trailing_stop_activation_price, trail_offset=trail_offset_long_atr_cents, stop=use_stop_loss ? sl_long : na, limit=use_take_profit ? tp_long : na, comment_trailing="Trail Stop ATR", comment_loss=use_stop_loss ? "Stop Loss" : na, comment_profit=use_take_profit ? "Take Profit" : na)
+//     else
+//         strategy.exit("Long Trailing", "Long", trail_price=trailing_stop_activation_price, trail_offset=trail_offset_long_atr_cents, comment_trailing="Trail Stop ATR")
+//     trailing_stop_set_long := true
+//     if not prev_trailing_stop_set_long
+//         pip_size = 0.0001
+//         sl_distance_pips = use_stop_loss and not na(sl_long) ? math.floor((close - sl_long) / pip_size) : na
+//         sl_pips_str = na(sl_distance_pips) ? "" : " (" + str.tostring(sl_distance_pips, "#") + " pips)"
+//         trail_offset_ticks = math.round(trail_offset_long_atr / syminfo.mintick)
+//         trail_offset_pips = math.floor(trail_offset_long_atr / pip_size)
+//         trail_offset_display = " (" + str.tostring(trail_offset_ticks, "#") + " ticks, " + str.tostring(trail_offset_pips, "#") + " pips)"
+//         sl_info = use_stop_loss and not na(sl_long) ? "\nStop Loss: @" + str.tostring(sl_long, "#.##") + "$" + sl_pips_str : ""
+//         tp_info = use_take_profit and not na(tp_long) ? "\nTake Profit: @" + str.tostring(tp_long, "#.##") + "$" : ""
+//         exit_params = "\n\nstrategy.exit() params:\ntrail_price=" + str.tostring(trailing_stop_activation_price, "#.####") + "\ntrail_offset=" + str.tostring(trail_offset_long_atr_cents, "#") + " cents ($" + str.tostring(trail_offset_long_atr, "#.####") + ")"
+//         exit_params := exit_params + (use_stop_loss and not na(sl_long) ? "\nstop=" + str.tostring(sl_long, "#.####") : "\nstop=na")
+//         exit_params := exit_params + (use_take_profit and not na(tp_long) ? "\nlimit=" + str.tostring(tp_long, "#.####") : "\nlimit=na")
+//         label_text = "Setup Trail Stop\nCurrent Price: " + str.tostring(close, "#.##") + "$\nActivation Price: " + str.tostring(trailing_stop_activation_price, "#.##") + "$\nTrail Offset: " + str.tostring(trail_offset_long_atr, "#.##") + "$" + trail_offset_display + sl_info + tp_info + exit_params + "\nATR: " + str.tostring(trail_offset_long_atr, "#.####")
+//         label_y = high * (1 + label_offset_pct / 200.0)
+//         label.new(bar_index, label_y, label_text, color=color.new(#FF69B4, 0), textcolor=color.black, style=label.style_label_down, size=size.normal)
+
+// if use_trailing_stop_atr and not use_trailing_stop_pct and strategy.position_size < 0 and not na(lowest_price_short) and not na(atr_smoothed_x5)
+//     trail_offset_short_atr = atr_smoothed_x5 * (trailing_stop_atr_multiplier / 100.0)
+//     trail_offset_short_atr_cents = math.round(trail_offset_short_atr * 100.0)
+//     if use_stop_loss or use_take_profit
+//         strategy.exit("Short Trailing", "Short", trail_price=lowest_price_short, trail_offset=trail_offset_short_atr_cents, stop=use_stop_loss ? sl_short : na, limit=use_take_profit ? tp_short : na, comment_trailing="Trail Stop ATR", comment_loss=use_stop_loss ? "Stop Loss" : na, comment_profit=use_take_profit ? "Take Profit" : na)
+//     else
+//         strategy.exit("Short Trailing", "Short", trail_price=lowest_price_short, trail_offset=trail_offset_short_atr_cents, comment_trailing="Trail Stop ATR")
+//     trailing_stop_set_short := true
+//     if not prev_trailing_stop_set_short
+//         pip_size = 0.0001
+//         sl_distance_pips = use_stop_loss and not na(sl_short) ? math.floor((sl_short - close) / pip_size) : na
+//         sl_pips_str = na(sl_distance_pips) ? "" : " (" + str.tostring(sl_distance_pips, "#") + " pips)"
+//         trail_offset_ticks = math.round(trail_offset_short_atr / syminfo.mintick)
+//         trail_offset_pips = math.floor(trail_offset_short_atr / pip_size)
+//         trail_offset_display = " (" + str.tostring(trail_offset_ticks, "#") + " ticks, " + str.tostring(trail_offset_pips, "#") + " pips)"
+//         sl_info = use_stop_loss and not na(sl_short) ? "\nStop Loss: @" + str.tostring(sl_short, "#.##") + "$" + sl_pips_str : ""
+//         tp_info = use_take_profit and not na(tp_short) ? "\nTake Profit: @" + str.tostring(tp_short, "#.##") + "$" : ""
+//         exit_params = "\n\nstrategy.exit() params:\ntrail_price=" + str.tostring(lowest_price_short, "#.####") + "\ntrail_offset=" + str.tostring(trail_offset_short_atr_cents, "#") + " cents ($" + str.tostring(trail_offset_short_atr, "#.####") + ")"
+//         exit_params := exit_params + (use_stop_loss and not na(sl_short) ? "\nstop=" + str.tostring(sl_short, "#.####") : "\nstop=na")
+//         exit_params := exit_params + (use_take_profit and not na(tp_short) ? "\nlimit=" + str.tostring(tp_short, "#.####") : "\nlimit=na")
+//         label_text = "Setup Trail Stop\nCurrent Price: " + str.tostring(close, "#.##") + "$\nActivation Price: " + str.tostring(lowest_price_short, "#.##") + "$\nTrail Offset: " + str.tostring(trail_offset_short_atr, "#.##") + "$" + trail_offset_display + sl_info + tp_info + exit_params + "\nATR: " + str.tostring(atr_value, "#.####")
+//         label_y = high * (1 + label_offset_pct / 200.0)
+//         label.new(bar_index, label_y, label_text, color=color.new(#FF69B4, 0), textcolor=color.black, style=label.style_label_down, size=size.normal)
+
+// Update previous state for next bar (trailing stop state commented out)
+// prev_trailing_stop_set_long := trailing_stop_set_long
+// prev_trailing_stop_set_short := trailing_stop_set_short
+
+// Reset flags when position closes
+if strategy.position_size == 0
+    // prev_trailing_stop_set_long := false
+    // prev_trailing_stop_set_short := false
+    sl_tp_set_long := false
+    sl_tp_set_short := false
+
+// Regular Stop Loss / Take Profit (trailing stops commented out, so always use SL/TP when enabled)
+if (use_stop_loss or use_take_profit)
+    if (use_stop_loss and use_take_profit)
+        strategy.exit("Long Exit",  "Long",  stop=sl_long,  limit=tp_long, comment="SL/TP")
+        strategy.exit("Short Exit", "Short", stop=sl_short, limit=tp_short, comment="SL/TP")
+    else if (use_stop_loss)
+        strategy.exit("Long Exit",  "Long",  stop=sl_long, comment="Stop Loss")
+        strategy.exit("Short Exit", "Short", stop=sl_short, comment="Stop Loss")
+    else if (use_take_profit)
+        strategy.exit("Long Exit",  "Long",  limit=tp_long, comment="Take Profit")
+        strategy.exit("Short Exit", "Short", limit=tp_short, comment="Take Profit")
+    
+    // Create indicator labels for stop loss/take profit when first set
+    pip_size = 0.01
+    if strategy.position_size > 0 and not sl_tp_set_long
+        sl_info = use_stop_loss and not na(sl_long) ? "Stop Loss: @" + str.tostring(sl_long, "#.##") + "$ (" + str.tostring(math.floor((close - sl_long) / pip_size), "#") + " pips)" : ""
+        tp_info = use_take_profit and not na(tp_long) ? "Take Profit: @" + str.tostring(tp_long, "#.##") + "$" : ""
+        label_text = "Setup Stop Loss/Take Profit\nCurrent Price: " + str.tostring(close, "#.##") + "$"
+        if sl_info != ""
+            label_text := label_text + "\n" + sl_info
+        if tp_info != ""
+            label_text := label_text + "\n" + tp_info
+        label_y = high * (1 + label_offset_pct / 200.0)
+        label.new(bar_index, label_y, label_text, color=color.new(color.blue, 0), textcolor=color.white, style=label.style_label_down, size=size.normal)
+        sl_tp_set_long := true
+    
+    if strategy.position_size < 0 and not sl_tp_set_short
+        sl_info = use_stop_loss and not na(sl_short) ? "Stop Loss: @" + str.tostring(sl_short, "#.##") + "$ (" + str.tostring(math.floor((sl_short - close) / pip_size), "#") + " pips)" : ""
+        tp_info = use_take_profit and not na(tp_short) ? "Take Profit: @" + str.tostring(tp_short, "#.##") + "$" : ""
+        label_text = "Setup Stop Loss/Take Profit\nCurrent Price: " + str.tostring(close, "#.##") + "$"
+        if sl_info != ""
+            label_text := label_text + "\n" + sl_info
+        if tp_info != ""
+            label_text := label_text + "\n" + tp_info
+        label_y = high * (1 + label_offset_pct / 200.0)
+        label.new(bar_index, label_y, label_text, color=color.new(color.blue, 0), textcolor=color.white, style=label.style_label_down, size=size.normal)
+        sl_tp_set_short := true
+
+// Entries (processed after exits)
+// Only allow entries if no position was closed today AND price has moved enough from exit price
+// Double-check position size right before entry (strategy.position_size check in longCondition should be sufficient with process_orders_on_close=true)
+
+// Debug: Show why entry is blocked if basic condition is met but entry doesn't happen
+basic_long_condition_met = longCondition and useLong and within_date_range and not timeframe_too_low
+if basic_long_condition_met and strategy.position_size == 0 and not (longOK and can_open_new_position_long and strategy.position_size == 0)
+    debug_text = "Entry Blocked"
+    if not can_open_new_position_day
+        debug_text := debug_text + "\nSame day block"
+    if not price_moved_enough_long
+        debug_text := debug_text + "\nPrice not moved enough"
+    if prevent_same_bar_reentry and exited_with_trailing_stop_long_this_bar
+        debug_text := debug_text + "\nSame bar exit"
+    label.new(bar_index, low * 0.98, debug_text, color=color.yellow, textcolor=color.black, style=label.style_label_up, size=size.small)
+
+if (longOK and can_open_new_position_long and strategy.position_size == 0)
+    // Increment trade ID counter (matches TradingView's sequential trade numbering)
+    trade_id_counter += 1
+    trade_id_str = "#" + str.tostring(trade_id_counter)
+    // Calculate position size based on equity and long position size percentage
+    equity_to_use = strategy.equity * (position_size_pct_long / 100.0)
+    qty = math.floor(equity_to_use / close)
+    strategy.entry("Long", strategy.long, qty=qty, comment=" ") // comment empty string is to remove the dupplicate "Long" that we have in the signal indicator.
+    // Use percentage-based offset that scales with price (consistent across zoom levels)
+    label_y_long = low * (1 - label_offset_pct / 100.0)
+    // Add debug info: threshold and last exit price (always calculate, even if filter is disabled)
+    // Calculate threshold prices (always calculate if we have exit price and ATR, regardless of filter settings)
+    // Since we use absolute value, show both upper and lower thresholds
+    float threshold_lower = na
+    float threshold_upper = na
+    if not na(last_exit_price_long) and not na(atr_value)
+        // Calculate threshold offset using current multiplier value (even if 0 or filter disabled)
+        threshold_offset = atr_value * reentry_price_move_atr_multiplier
+        threshold_lower := last_exit_price_long - threshold_offset
+        threshold_upper := last_exit_price_long + threshold_offset
+    // Build label text - always show buy price, exit and threshold values
+    buy_price_str = str.tostring(close, "#.##")
+    exit_price_str = na(last_exit_price_long) ? "N/A" : str.tostring(last_exit_price_long, "#.##")
+    threshold_str = na(threshold_lower) or na(threshold_upper) ? "N/A" : str.tostring(threshold_lower, "#.##") + " / " + str.tostring(threshold_upper, "#.##")
+    label_text = "Long\n" + trade_id_str + "\nBuy @" + buy_price_str + "$\nLast Exit: " + exit_price_str
+    label.new(bar_index, label_y_long, label_text, color=color.green, style=label.style_label_up)
+    // Reset exit price tracking when entering new position
+    last_exit_price_long := na
+
+// Double-check position size right before entry (strategy.position_size check in shortCondition should be sufficient with process_orders_on_close=true)
+if (shortOK and can_open_new_position_short and strategy.position_size == 0)
+    // Increment trade ID counter (matches TradingView's sequential trade numbering)
+    trade_id_counter += 1
+    trade_id_str = "#" + str.tostring(trade_id_counter)
+    // Calculate position size based on equity and short position size percentage
+    equity_to_use = strategy.equity * (position_size_pct_short / 100.0)
+    qty = math.floor(equity_to_use / close)
+    strategy.entry("Short", strategy.short, qty=qty, comment=" ")
+    // Use percentage-based offset that scales with price (consistent across zoom levels)
+    label_y_short = high * (1 + label_offset_pct / 100.0)
+    label.new(bar_index, label_y_short, "Short\n" + trade_id_str, color=color.red, style=label.style_label_down)
+    // Reset exit price tracking when entering new position
+    last_exit_price_short := na
+
+//─────────────────────────────────────────────
+// ALERTS
+//─────────────────────────────────────────────
+alertcondition(longCondition,  "Long Signal",  "10 EMA crossed over 20 EMA and price > 50 EMA")
+alertcondition(shortCondition, "Short Signal", "10 EMA crossed under 20 EMA and price < 50 EMA")
+
+//─────────────────────────────────────────────
+// PLOTS
+//─────────────────────────────────────────────
+// Plot daily EMAs (blocky appearance is correct - they only update once per day)
+plot(ema10, "10 EMA (1D)", color=color.new(#CCCCCC, 0), linewidth=2)
+plot(ema20, "20 EMA (1D)", color=color.new(#666666, 0), linewidth=2)
+plot(ema50, "50 EMA (1D)", color=color.black, linewidth=3)
+
+// Those are the real daily EMA in staircases
+//plot(ema10_daily, "10 EMA (1D)", color=color.new(#00EE00, 0), linewidth=2)
+//plot(ema20_daily, "20 EMA (1D)", color=color.new(#66EE66, 0), linewidth=2)
+//plot(ema50_daily, "50 EMA (1D)", color=color.black, linewidth=4)
+
+
+
+//─────────────────────────────────────────────
+// BACKGROUND COLORS
+//─────────────────────────────────────────────
+// Green background when Daily 10 EMA > Daily 20 EMA AND intraday price > Daily 50 EMA
+green_condition = ema10 > ema20 and close > ema50
+bgcolor(green_condition ? color.new(color.green, 90) : na, title="Bullish Background")
+
+// Red background when Daily 10 EMA < Daily 20 EMA AND intraday price < Daily 50 EMA
+red_condition = ema10 < ema20 and close < ema50
+bgcolor(red_condition ? color.new(color.red, 90) : na, title="Bearish Background")
+
+//─────────────────────────────────────────────
+// DEBUG PLOTS (comment out after debugging)
+//─────────────────────────────────────────────
+// Uncomment these to debug re-entry filter
+//plot(last_exit_price_long, "Last Exit Price Long", color=color.yellow, linewidth=1)
+//plot(last_exit_price_long - reentry_atr_threshold, "Required Price for Re-entry Long", color=color.orange, linewidth=1, style=plot.style_line)
+//plotshape(not price_moved_enough_long and use_reentry_filter, "Price Not Moved Enough Long", location=location.belowbar, color=color.red, style=shape.triangleup, size=size.tiny)
+
+View in Pine Editor・868 lines
+Use on chart
+7
+1
+3
+1 277
+Dec 18, 2025
+Renders daily EMA, 10, 20 and 50 on any timeframe below 1D
+30m timeframe works well.
+Use trend of 10 > 20 + price > 50 for long and 10 < 20 + price < 50 for shorts or exits.
+Dec 20, 2025
+Release Notes
+Renders daily EMA, 10, 20 and 50 on any timeframe below 1D. Wont work below 5min.
+Best results are when used at 30m, 2H or 4H timeframe.
+Upward and downward trend are identified with:
+10 > 20 + price > 50 for long and
+10 < 20 + price < 50 for shorts or exits
+
+This strategy is open-source use and meant as a starting point to build a more complex strategy.
+It can be combined with other indicators to make a plan and backtest it.

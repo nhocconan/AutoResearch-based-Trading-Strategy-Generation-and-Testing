@@ -1,0 +1,21 @@
+//@version=5
+strategy("ES NIBBA", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+low_IBS = input.float(0.2, title="Low IBS Threshold", step=0.05)
+high_IBS = input.float(0.8, title="High IBS Threshold", step=0.05)
+capital = input.float(10000, title="Initial Capital")
+risk_money = input.float(500, title="Risk Money per Trade")
+ibs = (close - low) / (high - low)
+enter_long = ibs < low_IBS and strategy.position_size == 0
+exit_long = ibs > high_IBS or (strategy.opentrades.entry_bar_index(0) + 30 < bar_index)
+if enter_long
+    strategy.entry("Buy", strategy.long)
+if exit_long
+    strategy.close("Buy")
+
+View in Pine Editor・13 lines
+Use on chart
+3
+9
+1
+946
+this strategy uses laggard rsi to compute the best parameters to go long and tp at key levels. the overall trend strength within the rsi laggard indicator is what is used to automate the calculations within the script. enjoy and paramter optimize

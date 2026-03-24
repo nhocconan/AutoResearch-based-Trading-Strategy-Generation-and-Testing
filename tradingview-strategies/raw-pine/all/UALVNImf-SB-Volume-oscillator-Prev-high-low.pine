@@ -1,0 +1,81 @@
+//@version=3
+strategy("SB_Volume_oscillator_Prev_high_low", overlay=true,default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+shortlen = input(5, minval=1)
+longlen = input(10, minval=1)
+short = ema(volume, shortlen)
+long = ema(volume, longlen)
+osc = 100 * (short - long) / long
+//hline(0, title="Zero")
+//plot(osc)
+zero=input(0.0)
+
+low_val=input(0.0)
+high_val=input(0.0)
+prev_high_val=input(0.0)
+prev_low_val=input(0.0)
+where=input(0)
+where:=nz(where[1])
+low_val:=nz(low_val[1])
+high_val:=nz(high_val[1])
+prev_high_val:=nz(prev_high_val[1])
+prev_low_val:=nz(prev_low_val[1])
+if(crossover(osc,zero))
+    high_val:=osc
+    where:=1
+    prev_low_val:=low_val
+    low_val:=osc
+
+if(crossunder(osc,zero))
+    low_val:=osc
+    where:=-1
+    prev_high_val:=high_val
+    high_val:=osc
+
+if(where==1)
+    if(high_val<osc)
+        high_val:=osc
+        
+if(where==-1)
+    if(low_val>osc)
+        low_val:=osc
+
+
+if (crossover(osc,zero))
+    if(prev_high_val<=abs(prev_low_val))
+        strategy.entry("My Long Entry Id", strategy.long)
+    if(prev_high_val>abs(prev_low_val))
+        strategy.entry("My Short Entry Id", strategy.short)
+
+if (crossunder(osc,zero))
+    if(prev_high_val<=abs(prev_low_val))
+        strategy.entry("My Long Entry Id", strategy.long)
+    if(prev_high_val>abs(prev_low_val))
+        strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・54 lines
+Use on chart
+1
+1
+2
+2 843
+The strategy is a take on traditional volume oscillator.
+
+In Layman terms:
+The script places an order when the oscillator crosses the zero mark in the volume oscillator.
+
+If the previous high is greater than the absolute value of previous low then a long order is placed
+And if the absolute previous low is greater than the previous high then a shrt order is placed.
+
+
+
+Last script (bandwidth focus on other monetary works. If you have any opportunities ping me)
+
+
+Message if you think of any modifications/ enhancements/ any opportunities. :)
+
+Donations/Tips... :) -
+
+BTC: 1BjswGcRR6c23pka7qh5t5k56j46cuyyy2
+ETH: 0x64fed71c9d6c931639c7ba4671aeb6b05e6b3781
+LTC: LKT2ykQ8QSzzfTDB6Tnsf12xwYPjgq95h4

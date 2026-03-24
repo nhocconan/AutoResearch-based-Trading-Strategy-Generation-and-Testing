@@ -1,0 +1,8 @@
+//@version=5
+dow_yloc=##input(defval='Bottom',type='INPUT_STRING',##id='in_51')
+dow_top=(dow_yloc=='Top')
+##root(root_metainfo,rm_0,(dow_top?'Top':'Bottom'),input__string,plotchar,location)
+##root(root_metainfo,rm_1,(dow_top?'Top':'Bottom'),input__string,plotchar,location)
+##root(root_metainfo,rm_2,(dow_top?'Top':'Bottom'),input__string,plotchar,location)
+##root(root_metainfo,rm_3,(dow_top?'Top':'Bottom'),input__string,plotchar,location)
+##root(root_metainfo,rm_4,(dow_top?'Top':'Bottom'),input__string,plotchar,location)

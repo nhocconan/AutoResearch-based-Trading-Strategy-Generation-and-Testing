@@ -1,0 +1,205 @@
+//@version=5
+strategy(title = "DNSE VN301! ADX Momentum Strategy", shorttitle = "VN301! Signals_DNSE S2", overlay = false, slippage = 5, initial_capital = 100000000, default_qty_type = strategy.fixed, default_qty_value = 4, commission_type = strategy.commission.cash_per_order, commission_value = 5250,process_orders_on_close = true, fill_orders_on_standard_ohlc = true)
+
+// Back test set up: Chart 30m, trượt giá = 5, vốn ban đầu 100 triệu VND, mỗi lần mở 4 hợp đồng, phí 5,250/hợp đồng (Chưa bao gồm Thuế)
+// Back test set up: Chart 30m, slippage = 5, initial capital = 100m VNDm, open/clsoe 4 contracts each time, fee: 5,250/contract (Does not cover Tax)
+
+// *Khái niệm chiến chuật:
+// Áp dụng khái niệm về IQR (Interquartile Range) để tính toán ngưỡng giao động động lượng bình thường của giá
+// 1. Mở vị thế dựa trên động lượng: Sử dụng đạo hàm bậc hai (gia tốc thay đổi) của +DI và -DI từ chỉ báo ADX để phát hiện các thay đổi động lượng mạnh, xác nhận điểm phá vỡ khi vượt ngưỡng IQR lịch sử.  
+// 2. Thoát lệnh dựa trên biến động: So sánh khoảng cách giá giữa các nến liên tiếp với giá trị IQR lịch sử, thoát lệnh khi biến động giá vượt qua ngưỡng này.  
+// 3. Quản lý rủi ro: Áp dụng mức cắt lỗ động dựa trên IQR của khoảng cách giá đóng cửa, đảm bảo kiểm soát rủi ro linh hoạt.
+// *Strategy concept:
+// Applying the statistical method IQR (Interquartile Range) to calculate the threshold of "normal" prices momentum fluctuation
+// 1. Momentum-Based Entry: Uses the second derivative (acceleration change) of +DI and -DI from the ADX indicator to detect strong momentum shifts, confirming breakouts when exceeding historical IQR thresholds.  
+// 2. Volatility-Based Exit: Compares price gaps between consecutive bars against historical IQR values, exiting trades when price movements surpass this volatility benchmark.  
+// 3. Risk Management: Implements dynamic stop-loss levels based on the IQR of price gaps, ensuring adaptive risk control.   
+
+// ================================
+// Thiết lập giờ giao dịch 
+// Trading session setup
+// ================================
+// Chỉ giao dịch trong phiên: 9:00–11:30 và 13:00–14:30
+// Only trade during VN30 session hours
+t = time(timeframe.period, "0900-1130,1300-1430")  
+inSession = not na(t)
+
+// Đóng tất cả vị thế vào cuối phiên chiều (14:30), không giữ qua đêm
+// Force close all positions before market close (14:30), no overnight positions
+isMarketClose = (hour == 14 and minute == 30)
+
+// ================================
+// Thiết lập độ dài của các chỉ báo/dữ liệu quá khứ dùng cho các bước tính toán
+// Defining lengths/lookback periods for the calculation process 
+adxLength = input(14, title="ADX Length") // 
+diLength = input(14, title="DI Length") //
+rsiLength = input(14, title="RSI Length") //
+maLength = input(10, title="Moving Average Smoothing")
+DIiqrLength = input(1000, title="IQR Length")  // Lookback period for IQR Acceleration calculation
+bargapiqrLength = input(250, title="Bar Gap IQR Length")  // Lookback period for IQR BAr Gap calculation
+
+// Compute ADX, DI, and RSI (Using Close Prices Only)
+// Tính toán ADX, DI và RSI (sửu dụng giá đóng của nến)
+rsi = ta.rsi(close, rsiLength)
+tr = ta.tr(true)
+atr = ta.rma(tr, adxLength)
+plusDM = close > close[1] ? close - close[1] : 0
+minusDM = close < close[1] ? close[1] - close : 0
+plusDI = 100 * ta.rma(plusDM, diLength) / atr
+minusDI = 100 * ta.rma(minusDM, diLength) / atr
+dx = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx = ta.rma(dx, adxLength)
+
+// Tính toán đạo hàm bậc 2 của +Di và -DI
+// +Di and -Di 2nd derivative slope calculation
+plusDIslope = plusDI - ta.ema(plusDI, maLength)
+minusDIslope = minusDI - ta.ema(minusDI, maLength)
+plusDIaccel = plusDIslope - ta.ema(plusDIslope, maLength)
+minusDIaccel = minusDIslope - ta.ema(minusDIslope, maLength)
+
+// Tính toán Accleration change
+// Calculate Acceleration Change (Close Price-Based)
+plusDIaccelChange = plusDIaccel - nz(plusDIaccel[1])
+minusDIaccelChange = minusDIaccel - nz(minusDIaccel[1])
+
+// Tính toán IQR cho +Di và -Di
+// +Di and -Di Acceleration IQR Calculation (Using Close Prices)
+plusChangeQ1 = ta.percentile_linear_interpolation(plusDIaccelChange, DIiqrLength, 25)
+plusChangeQ3 = ta.percentile_linear_interpolation(plusDIaccelChange, DIiqrLength, 75)
+minusChangeQ1 = ta.percentile_linear_interpolation(minusDIaccelChange, DIiqrLength, 25)
+minusChangeQ3 = ta.percentile_linear_interpolation(minusDIaccelChange, DIiqrLength, 75)
+plusChangeIQR = plusChangeQ3 - plusChangeQ1
+minusChangeIQR = minusChangeQ3 - minusChangeQ1
+avgDIIQR = math.avg(plusChangeIQR, minusChangeIQR)
+
+// Tính toán khoảng cách giá giữa các nến liên tiếp với giá trị IQR lịch sử
+// Calculations of price gaps between consecutive bars against historical IQR values
+closeBarGap = close - close[1]
+closeGapQ1 = ta.percentile_linear_interpolation(closeBarGap, bargapiqrLength, 25)
+closeGapQ3 = ta.percentile_linear_interpolation(closeBarGap, bargapiqrLength, 75)
+closeGapIQR = closeGapQ3 - closeGapQ1
+
+// Điều kiện mở vị thế
+// Trade Execution Conditions 
+longCondition = inSession and (math.abs(plusDIaccelChange) >= avgDIIQR or math.abs(minusDIaccelChange) >= avgDIIQR) and close > close[1]  
+shortCondition = inSession and (math.abs(plusDIaccelChange) >= avgDIIQR or math.abs(minusDIaccelChange) >= avgDIIQR) and close < close[1] 
+
+// Điều kiện đóng vị thế
+// Trade Exit Conditions
+longExitCondition = inSession and (math.abs(plusDIaccelChange) >= avgDIIQR or math.abs(minusDIaccelChange) >= avgDIIQR) and rsi < rsi[1] and math.abs(closeBarGap) >= closeGapIQR and close < close[1]
+shortExitCondition = inSession and (math.abs(plusDIaccelChange) >= avgDIIQR or math.abs(minusDIaccelChange) >= avgDIIQR) and rsi > rsi[1] and math.abs(closeBarGap) >= closeGapIQR and close > close[1]
+
+// Điều kiện cắt lỗ sớm 
+// Early cutloss conditions
+longmaxloss = nz(strategy.position_avg_price, close) - closeGapIQR
+shortmaxloss = nz(strategy.position_avg_price, close) + closeGapIQR
+
+// Điều kiện vào & đóng lệnh
+// Entry & Exit execution conditions 
+if inSession
+    if strategy.position_size > 0 and shortCondition
+        strategy.close("Long")
+
+    if strategy.position_size < 0 and longCondition 
+        strategy.close("Short")
+
+    if longCondition and strategy.position_size == 0
+        strategy.entry("Long", strategy.long)
+
+    if shortCondition and strategy.position_size == 0
+        strategy.entry("Short", strategy.short)
+
+    if longExitCondition and strategy.position_size > 0
+        strategy.exit("Long Exit", from_entry="Long", loss = longmaxloss)
+
+    if shortExitCondition and strategy.position_size < 0
+        strategy.exit("Short Exit", from_entry="Short", loss = shortmaxloss)
+
+// Đóng tất cả vị thế cuối phiên (14:30)
+// Force close all open positions at end of day (14:30)
+if isMarketClose and strategy.position_size != 0
+    strategy.close_all(comment="End of Session Close")
+
+// Vẽ các chỉ báo 
+// Plot Indicators
+plot(adx, title="ADX", color=color.blue)
+plot(plusDI, title="+DI", color=color.green)
+plot(minusDI, title="-DI", color=color.red)
+plot(rsi, title="RSI", color=color.purple)
+
+plot(plusDIaccel, color=color.blue, title="+DI Acceleration")
+plot(minusDIaccel, color=color.red, title="-DI Acceleration")
+plot(plusDIaccelChange, color=color.yellow, title = '+DI Change')
+plot(minusDIaccelChange, color=color.orange, title = '-DI Change')
+plot(closeBarGap,color=color.white, title = 'Close Bar Gap')
+plot(avgDIIQR, color=color.purple, title = 'Average DI IQR')
+plot(closeGapIQR, color=color.green, title = 'Close Gap IQR')
+hline(0, "Zero Line", color=color.gray)
+
+// Tạo bảng để update dữ liệu tính IQR
+// Create Table to Display IQR Data
+var table iqrTable = table.new(position=position.top_right, columns=4, rows=3, border_width=1)//
+if bar_index == last_bar_index
+    // Header Row
+    table.cell(iqrTable, 0, 0, "Metric", text_color=color.white, bgcolor=color.blue)
+    table.cell(iqrTable, 1, 0, "+DI Acc Change", text_color=color.white, bgcolor=color.blue)
+    table.cell(iqrTable, 2, 0, "-DI Acc Change", text_color=color.white, bgcolor=color.blue)
+    table.cell(iqrTable, 3, 0, "Avg IQR", text_color=color.white, bgcolor=color.blue)
+
+    // Data Row for DI Acc Change
+    table.cell(iqrTable, 0, 1, "DI Acc Change (IQR)", text_color=color.white, bgcolor=color.green)
+    table.cell(iqrTable, 1, 1, str.tostring(plusChangeIQR, "#.##"), text_color=color.white, bgcolor=color.green)
+    table.cell(iqrTable, 2, 1, str.tostring(minusChangeIQR, "#.##"), text_color=color.white, bgcolor=color.green)
+    table.cell(iqrTable, 3, 1, str.tostring(avgDIIQR, "#.##"), text_color=color.white, bgcolor=color.green)
+
+    // Close Bar Gap (IQR) Row - Displays the same value in both columns
+    table.cell(iqrTable, 0, 2, "Close Gap (IQR)", text_color=color.white, bgcolor=color.red)
+    table.cell(iqrTable, 1, 2, str.tostring(closeGapIQR, "#.##"), text_color=color.white, bgcolor=color.red)
+    table.cell(iqrTable, 2, 2, str.tostring(closeGapIQR, "#.##"), text_color=color.white, bgcolor=color.red)
+    table.cell(iqrTable, 3, 2, str.tostring(closeGapIQR, "#.##"), text_color=color.white, bgcolor=color.red)
+
+View in Pine Editor・159 lines
+Use on chart
+3
+8
+1
+2 048
+Discover the tailored Pine Script for trading VN30F1M Futures Contracts intraday.
+This strategy applies the Statistical Method (IQR) to break down the components of the ADX, calculating the threshold of "normal" momentum fluctuations in price to identify potential breakouts for entry and exit signals. The script automatically closes all positions by 14:30 to avoid overnight holdings.
+tradingview.com/chart/651E79et/
+
+Settings & Backtest Results:
+- Chart: 30-minute timeframe
+- Initial capital: VND 100 million
+- Position size: 4 contracts per trade (includes trading fees, excludes tax)
+- Backtest period: Sep-2021 to Sep-2025
+- Return: over 270% (with 5 ticks slippage)
+- Trades executed: 1,000+
+- Win rate: ~40%
+- Profit factor: 1.2
+
+Default Script Settings:
+Calculates the acceleration of changes in the +DI and -DI components of the ADX, using IQR to define "normal" momentum fluctuations (adjustable via Lookback period).
+Calculates the difference between each bar’s Open and Close prices, using IQR to define "normal" gaps (adjustable via Lookback period).
+
+Entry & Exit Conditions:
+Entry Long: Change in +DI or -DI > Avg IQR Value AND Close Price > Previous Close
+Exit Long: (all 4 conditions must be met)
+- Change in +DI or -DI > Avg IQR Value
+- RSI < Previous RSI
+- Close–Open Gap > Avg IQR Gap
+- Close Price < Previous Close
+
+Entry Short: Change in +DI or -DI > Avg IQR Value AND Close Price < Previous Close
+Exit Short: (all 4 conditions must be met)
+- Change in +DI or -DI > Avg IQR Value
+- RSI > Previous RSI
+- Close–Open Gap > Avg IQR Gap
+- Close Price > Previous Close
+
+Disclaimers:
+Trading futures contracts carries a high degree of risk, and price movements can be highly volatile. This script is intended as a reference tool only. It should be used by individuals who fully understand futures trading, have assessed their own risk tolerance, and are knowledgeable about the strategy’s logic.
+All investment decisions are the sole responsibility of the user. DNSE bears no liability for any potential losses incurred from applying this strategy in real trading. Past performance does not guarantee future results. Please contact us directly if you have specific questions about this script.
+
+
+

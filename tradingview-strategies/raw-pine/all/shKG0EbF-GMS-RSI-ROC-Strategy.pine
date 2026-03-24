@@ -1,0 +1,235 @@
+//@version=4
+strategy("GMS: RSI & ROC Strategy", overlay=true)
+
+LongShort = input(title="Long Only or Short Only or Both?", type=input.string, defval="Both", options=["Both", "Long Only", "Short Only"])
+RSIroc = input(title="RSI Only, ROC Only, Both?", type=input.string, defval="Both", options=["Both", "RSI Only", "ROC Only"])
+RSILength = input(title="RSI Length", type = input.integer ,defval=14)
+RSIUpper = input(title="RSI Upper Threshold", type = input.float ,defval=70)
+RSILower = input(title="RSI Lower Threshold", type = input.float ,defval=30)
+ROCLength = input(title="ROC Length", type = input.integer ,defval=14)
+ROCUpper = input(title="ROC Upper Threshold", type = input.float ,defval=1)
+ROCLower = input(title="ROC Lower Threshold", type = input.float ,defval=-1)
+LongExit = input(title="Long Exit SMA Length", type = input.integer ,defval=5)
+ShortExit = input(title="Short Exit SMA Length", type = input.integer ,defval=5)
+AboveBelow = input(title="Trend SMA Filter?", type=input.string, defval="Above", options=["Above", "Below", "Don't Include"])
+TrendLength = input(title="Trend SMA Length", type = input.integer ,defval=200)
+PTbutton = input(title="Profit Target On/Off", type=input.bool, defval=true)
+ProfitTarget = input(title="Profit Target %", type=input.float, defval=1, step=0.01, minval=0)
+SLbutton = input(title="Stop Loss On/Off", type=input.bool, defval=true)
+StopLoss = input(title="Stop Loss %", type=input.float, defval=-1, step=0.01, maxval=0)
+
+//PROFIT TARGET & STOPLOSS
+
+if PTbutton == true and SLbutton == true
+    strategy.exit("EXIT", profit=((close*(ProfitTarget*0.01))/syminfo.mintick), loss=((close*(StopLoss*-0.01))/syminfo.mintick))
+else
+    if PTbutton == true and SLbutton == false
+        strategy.exit("PT EXIT", profit=((close*(ProfitTarget*0.01))/syminfo.mintick))
+    else
+        if PTbutton == false and SLbutton == true
+            strategy.exit("SL EXIT", loss=((close*(StopLoss*-0.01))/syminfo.mintick))
+        else    
+            strategy.cancel("PT EXIT")
+
+
+//RSI ONLY
+ //Long Side
+
+if LongShort =="Long Only" and AboveBelow == "Above" and RSIroc == "RSI Only"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and close< sma(close,LongExit) and close>sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Long Only" and AboveBelow == "Below" and RSIroc == "RSI Only"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and close< sma(close,LongExit) and close<sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Long Only" and AboveBelow == "Don't Include" and RSIroc == "RSI Only"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and close< sma(close,LongExit))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Both" and AboveBelow == "Above" and RSIroc == "RSI Only"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and close< sma(close,LongExit) and close>sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Both" and AboveBelow == "Below" and RSIroc == "RSI Only"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and close< sma(close,LongExit) and close<sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Both" and AboveBelow == "Don't Include" and RSIroc == "RSI Only"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and close< sma(close,LongExit))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+//RSI ONLY
+ //SHORT SIDE
+
+if LongShort =="Short Only" and AboveBelow == "Above" and RSIroc == "RSI Only"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and close> sma(close,ShortExit) and close>sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Short Only" and AboveBelow == "Below" and RSIroc == "RSI Only"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and close> sma(close,ShortExit) and close<sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Short Only" and AboveBelow == "Don't Include" and RSIroc == "RSI Only"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and close> sma(close,ShortExit))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Both" and AboveBelow == "Above" and RSIroc == "RSI Only"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and close> sma(close,ShortExit) and close>sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Both" and AboveBelow == "Below" and RSIroc == "RSI Only"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and close> sma(close,ShortExit) and close<sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Both" and AboveBelow == "Don't Include" and RSIroc == "RSI Only"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and close> sma(close,ShortExit))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+///////-----------------/////////////
+///////-----------------/////////////
+///////-----------------/////////////
+    
+    
+//ROC ONLY
+ //Long Side
+
+if LongShort =="Long Only" and AboveBelow == "Above" and RSIroc == "ROC Only"
+    strategy.entry("LONG", true, when = roc(close,ROCLength)<ROCLower and close< sma(close,LongExit) and close>sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Long Only" and AboveBelow == "Below" and RSIroc == "ROC Only"
+    strategy.entry("LONG", true, when = roc(close,ROCLength)<ROCLower and close< sma(close,LongExit) and close<sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Long Only" and AboveBelow == "Don't Include" and RSIroc == "ROC Only"
+    strategy.entry("LONG", true, when = roc(close,ROCLength)<ROCLower and close< sma(close,LongExit))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Both" and AboveBelow == "Above" and RSIroc == "ROC Only"
+    strategy.entry("LONG", true, when = roc(close,ROCLength)<ROCLower and close< sma(close,LongExit) and close>sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Both" and AboveBelow == "Below" and RSIroc == "ROC Only"
+    strategy.entry("LONG", true, when = roc(close,ROCLength)<ROCLower and close< sma(close,LongExit) and close<sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Both" and AboveBelow == "Don't Include" and RSIroc == "ROC Only"
+    strategy.entry("LONG", true, when = rsi(close,ROCLength)<ROCLower and close< sma(close,LongExit))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+//ROC ONLY
+ //SHORT SIDE
+
+if LongShort =="Short Only" and AboveBelow == "Above" and RSIroc == "ROC Only"
+    strategy.entry("SHORT", false, when = roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit) and close>sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Short Only" and AboveBelow == "Below" and RSIroc == "ROC Only"
+    strategy.entry("SHORT", false, when = roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit) and close<sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Short Only" and AboveBelow == "Don't Include" and RSIroc == "ROC Only"
+    strategy.entry("SHORT", false, when = roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Both" and AboveBelow == "Above" and RSIroc == "ROC Only"
+    strategy.entry("SHORT", false, when = roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit) and close>sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Both" and AboveBelow == "Below" and RSIroc == "ROC Only"
+    strategy.entry("SHORT", false, when = roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit) and close<sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Both" and AboveBelow == "Don't Include" and RSIroc == "ROC Only"
+    strategy.entry("SHORT", false, when = roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+   
+    
+///////-----------------/////////////
+///////-----------------/////////////
+///////-----------------/////////////   
+
+    
+//BOTH
+ //Long Side
+
+if LongShort =="Long Only" and AboveBelow == "Above" and RSIroc == "Both"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and roc(close,ROCLength)<ROCLower and close< sma(close,LongExit) and close>sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Long Only" and AboveBelow == "Below" and RSIroc == "Both"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and roc(close,ROCLength)<ROCLower and close< sma(close,LongExit) and close<sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Long Only" and AboveBelow == "Don't Include" and RSIroc == "Both"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and roc(close,ROCLength)<ROCLower  and close< sma(close,LongExit))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Both" and AboveBelow == "Above" and RSIroc == "Both"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and roc(close,ROCLength)<ROCLower  and close< sma(close,LongExit) and close>sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Both" and AboveBelow == "Below" and RSIroc == "Both"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and roc(close,ROCLength)<ROCLower  and close< sma(close,LongExit) and close<sma(close,TrendLength))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+if LongShort =="Both" and AboveBelow == "Don't Include" and RSIroc == "Both"
+    strategy.entry("LONG", true, when = rsi(close,RSILength)<RSILower and roc(close,ROCLength)<ROCLower  and close< sma(close,LongExit))
+    strategy.close("LONG", when = close>sma(close,LongExit))
+    
+//BOTH
+ //SHORT SIDE
+
+if LongShort =="Short Only" and AboveBelow == "Above" and RSIroc == "Both"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit) and close>sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Short Only" and AboveBelow == "Below" and RSIroc == "Both"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit) and close<sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Short Only" and AboveBelow == "Don't Include" and RSIroc == "Both"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Both" and AboveBelow == "Above" and RSIroc == "Both"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit) and close>sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Both" and AboveBelow == "Below" and RSIroc == "Both"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit) and close<sma(close,TrendLength))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+    
+if LongShort =="Both" and AboveBelow == "Don't Include" and RSIroc == "Both"
+    strategy.entry("SHORT", false, when = rsi(close,RSILength)>RSIUpper and roc(close,ROCLength)>ROCUpper and close> sma(close,ShortExit))
+    strategy.close("SHORT", when = close<sma(close,ShortExit))
+
+View in Pine Editor・209 lines
+Use on chart
+2
+4
+2
+6 747
+Feb 28, 2020
+This is a basic strategy like the RSI one I posted. This one adds in the Rate of Change indicator as well.
+
+You can separate the two for RSI only and ROC only. Everything else is the same as the RSI strategy.
+
+- Simple moving average trend filter.
+- Simple moving average trade exit.
+- Both long and short or each on it's own.
+
+The source code should be open if you want to see it or modify it for your own project. I hope it helps!
+
+Andre
+Global Market Signals
+Mar 6, 2020
+Release Notes
+I just added in a % profit target and % stop loss. Each has an on/off switch so you can test each other together or independently!
+
+Also changed the default values for the ROC Upper and Lower from 0.01 & -0.01 to 1 & -1
+
+I hope it helps,
+
+Andre

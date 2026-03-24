@@ -1,0 +1,121 @@
+//@version=5
+strategy("Opening Range Breakout (ORB) Heikin Ashi SPY 5min Correlation Strategy", overlay=true)
+
+
+///////// relative volume
+import TradingView/ta/7
+
+anchorTimeframeInput = input.timeframe("W", "Anchor Timeframe", tooltip = "When Chart Timeframe >= `Anchor Timeframe`, the indicator will use last `Length` bars in its calculations.", group="RVOL parameters")
+lengthInput          = input.int(3, "Length", minval = 1, group="RVOL parameters")
+
+[currentVolume, pastVolume, _] = ta.relativeVolume(lengthInput, anchorTimeframeInput, true)
+
+// Input parameters
+sessionTime = input.session("0930-1000", "Session Time Opening", group="Time Session")
+sessionTradingTime = input.session("1000-1200", "Session Time Trading", group="Time Session")
+sessionEndTime = input.session("1550-1555", "Session Time Ending", group="Time Session")
+useHeikinAshi = input(false, "Use Heikin Ashi?", group="Correlation Parameters")
+asset_correlation = input.symbol("SPY", group="Correlation Parameters", title="Symbol used for Correlation")
+
+// Session flags
+inSession = not na(time(timeframe.period, sessionTime + ":1234567"))
+inTradingSession = not na(time(timeframe.period, sessionTradingTime + ":1234567"))
+endSession = not na(time(timeframe.period, sessionEndTime + ":1234567"))
+
+// high/low correlation candle calculations
+high_ = useHeikinAshi ?  request.security(ticker.heikinashi(asset_correlation), timeframe.period, high) : request.security(asset_correlation, timeframe.period, high)
+low_ = useHeikinAshi ?  request.security(ticker.heikinashi(asset_correlation), timeframe.period, low) : request.security(asset_correlation, timeframe.period, low)
+
+
+// Initialize variables to store the previous session's high and low
+var float prevSessionHigh = na
+var float prevSessionLow = na
+
+// Update previous session's high and low if a new session begins
+if (inSession and not inSession[1])
+    prevSessionHigh := high_
+    prevSessionLow := low_
+    
+// Keep track of the current session's high and low
+currentSessionHigh = prevSessionHigh[1]
+currentSessionLow = prevSessionLow[1]
+
+// Update current session's high and low if necessary
+if (high_ > currentSessionHigh and inSession)
+    currentSessionHigh := high_
+
+if (low_ < currentSessionLow and inSession)
+    currentSessionLow := low_
+
+// Plotting
+plot( currentSessionHigh , color=color.green, title="ORB High", linewidth=2)
+plot( currentSessionLow  , color=color.red, title="ORB Low", linewidth=2)
+
+// Trading logic
+longCondition = close > currentSessionHigh and inTradingSession
+shortCondition = close < currentSessionLow and inTradingSession
+
+var bool longTrade = na
+var bool shortTrade = na
+
+
+rvol = currentVolume / pastVolume 
+
+if (longCondition and not shortTrade and rvol > 1 )
+    longTrade := true
+if (shortCondition and not longTrade and rvol > 1)
+    shortTrade := true
+
+if (endSession)
+    longTrade := na
+    shortTrade := na
+
+plotshape(longTrade[1] or shortTrade[1] ? endSession : na,style=shape.labeldown, location=location.abovebar, color=color.new(color.purple, 0), size=size.tiny, title='EXIT', text='END SESSION', textcolor=color.new(color.white, 0))
+
+
+strategy.entry("long", strategy.long, when=longTrade)
+strategy.entry("short", strategy.short, when=shortTrade)
+
+strategy.close_all(when=endSession)
+View in Pine Editor・82 lines
+Use on chart
+1.9 K
+7
+50 346
+Overview:
+
+The ORB (Opening Range Breakout) strategy combined with Heikin Ashi candles and Relative Volume (RVOL) indicator aims to capitalize on significant price movements that occur shortly after the market opens. This strategy identifies breakouts above or below the opening range, using Heikin Ashi candles for smoother price visualization and RVOL to gauge the strength of the breakout.
+
+Components:
+
+Opening Range Breakout (ORB): The strategy starts by defining the opening range, typically the first few minutes of the trading session. It then identifies breakouts above the high or below the low of this range as potential entry points.
+
+Heikin Ashi Candles: Heikin Ashi candles are used to provide a smoother representation of price movements compared to traditional candlesticks. By averaging open, close, high, and low prices of the previous candle, Heikin Ashi candles reduce noise and highlight trends more effectively.
+
+Relative Volume (RVOL): RVOL compares the current volume of a stock to its average volume over a specified period. It helps traders identify abnormal trading activity, which can signal potential price movements.
+
+Candle for correlation : In this case we are using SPY candles. It can also use different asset
+
+Strategy Execution:
+
+Initialization: The strategy initializes by setting up variables and parameters, including the ORB period, session timings, and Heikin Ashi candle settings.
+
+ORB Calculation: It calculates the opening range by identifying the high and low prices during the specified session time. These values serve as the initial reference points for potential breakouts. For this we are looking for the first 30 min of the US opening session.
+After that we are going to use the next 2 hours to check for breakout opportunities.
+
+Heikin Ashi Transformation: Optionally, the strategy transforms traditional candlestick data into Heikin Ashi format for smoother visualization and trend identification.
+
+Breakout Identification: It continuously monitors price movements within the session and checks if the current high breaches the ORB high or if the current low breaches the ORB low. These events trigger potential long or short entry signals, respectively.
+
+RVOL Analysis: Simultaneously, the strategy evaluates the relative volume of the asset to gauge the strength of the breakout. A surge in volume accompanying the breakout confirms the validity of the signal. In this case we are looking for at least a 1 value of the division between currentVolume and pastVolume
+
+Entry and Exit Conditions: When a breakout occurs and is confirmed by RVOL and is within our session time, the strategy enters a long or short position accordingly. It does not have a stop loss or a takie profit level, instead it will always exit at the end of the trading session, 5 minutes before
+
+Position Sizing and Commissions: For the purpose of this backtest, the strategy allocated 10% of the capital for each trade and assumes a trading commission of 0.01$ per share ( twice the IBKR broker values)
+
+Session End: At the end of the trading session, the strategy closes all open positions to avoid overnight exposure.
+
+Conclusion:
+
+The combination of ORB breakout strategy, Heikin Ashi candles, and RVOL provides traders with a robust framework for identifying and capitalizing on early trends in the market. By leveraging these technical indicators together, traders can make more informed decisions and improve the overall performance of their trading strategies. However, like any trading strategy, it's essential to backtest thoroughly and adapt the strategy to different market conditions to ensure its effectiveness over time.
+

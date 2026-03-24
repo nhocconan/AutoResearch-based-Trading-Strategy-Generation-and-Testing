@@ -1,0 +1,59 @@
+//@version=3
+strategy("Fixed Fractioning", overlay=true, initial_capital=100000.0)
+
+percent_invested=input(50.0,title="Percent Invested",maxval=100.0,minval=0.0)
+fraction_invested=percent_invested/100
+
+from_day=input(1,title="From Day",maxval=31,minval=1)
+from_month=input(1,title="From Month",maxval=12,minval=1)
+from_year=input(2017,title="From Year",maxval=2018,minval=1900)
+
+to_day=input(1,title="To Day",maxval=31,minval=1)
+to_month=input(1,title="To Month",maxval=12,minval=1)
+to_year=input(2018,title="To Year",maxval=2018,minval=1900)
+
+// === FUNCTION EXAMPLE === from: https://www.tradingview.com/script/62hUcP6O-How-To-Set-Backtest-Date-Range/
+start     = timestamp(from_year, from_month, from_day, 00, 00)  // backtest start window
+finish    = timestamp(to_year, to_month, to_day, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+if strategy.position_size==0 and window()
+    contracts_to_buy=(fraction_invested*strategy.initial_capital)/close
+    strategy.entry("long",long=true,qty=contracts_to_buy,limit=close,when=contracts_to_buy>1)
+
+invested=(strategy.position_size*close)/strategy.equity
+if invested<fraction_invested and window()
+    contracts_to_buy=((fraction_invested-invested)*strategy.equity)/close
+    strategy.order("long",long=true,qty=contracts_to_buy,limit=close,when=contracts_to_buy>1)
+
+else 
+    if invested>fraction_invested and window()
+        contracts_to_sell=((invested-fraction_invested)*strategy.equity)/close
+        strategy.order("sell",long=false,qty=contracts_to_sell,limit=close,when=contracts_to_sell>1)
+
+View in Pine Editor・32 lines
+Use on chart
+4
+5
+1
+2 671
+One of the most common trading strategy is to invest a certain percentage in an asset, and keep the percentage fixed. For example you invest 2% in a stock, and as the value goes up you sell. And as the value goes down you buy. Always trying to keep the value of how much you have invested in that asset at 2%.
+
+This works very well with assets that are stable. If you have something that fluctuates around a value, you will find yourself that each time it has gone back to the value in which you entered, you have actually gained something. With an asset that grows it also works. But in general you might find that more aggressive investments are more profitable. On the other side if there is a bubble, and you invest from the beginning using this strategy you will find yourself at the end of the bubble having gained something. Not as much as having bought all at the beginning and having sold all at the end, but still you will have sold going up, and bought going down. Plus you will have gained in the fluctuation.
+
+Where is instead very dangerous is in stock and assets that go to zero. This because you might invest just 2% in an investment. But then as the strategy works you keep investing more as you are trying to keep 2%. You basically can lose all your money in this way (like if you were invested 100% in an asset). Very dangerous. This is why you should only use this with assets that you are sure cannot go to zero (an ETF on S & P 500 could be a good example).
+
+So I coded this strategy on TradingView. basically it will ask you what percentage you want to invest. Then starts with entering with an order of that amount, and will then keep sitself at the same percentage. The system is discrete, as it can only buy a discrete number of contract.
+
+Note that if you use this for cryptocurrency (where you can buy a fraction of a coin, like 0.01 btc) then you should multiply the money that you have by 10, 100, 1000 ... depending on how many digits after the comma your exchange permit you to trade.
+
+If you are using this for forex or crypto it is quite easy that the number of order will explode. As such I added the date range taken from Allanster great script
+
+One way to use Fixed Fractioning is to calculate the Kelly Index
+ of an asset (which will give you a percentage), and then invest half or a quarter of the kelly in that coin, and then keep this fixed.
+
+Another way (which goes well beyond what this script can do alone) to use the Fixed Fractioning is, if you have two assets that are anticorrelated (has a negative correlation), then investing a certain percentage of your capital in one and another percentage in another. And then each time one goes up (and the other goes down) you sell the one that is going up, and buy the one that is going down to keep the percentages fixed.
+
+Something else, it is pretty common for people to invest around 80% of their money in an ETF that follows tha S&P500. This is why here we use 80%. Generally I have seen a more common investment strategy to be around 2%.
+
+As everybody says: I am not responsible for your money. Study before investing.

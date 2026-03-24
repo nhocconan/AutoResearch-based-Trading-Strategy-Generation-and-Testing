@@ -1,0 +1,183 @@
+//@version=6
+strategy("NQ1! Mean Reversion — BB + Z-Score + RSI + EMA200 (TP at Opposite Z)",
+     overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     calc_on_order_fills=true,
+     calc_on_every_tick=true)
+
+// === INPUTS ===
+bbLength      = input.int(25, "Bollinger Band Length")
+bbMult        = input.float(2.0, "BB Multiplier")
+zThreshold    = input.float(2.25, "Z-Score Threshold")
+rsiPeriod     = input.int(14, "RSI Period")
+rsiLongMax    = input.int(30, "RSI Oversold Threshold")
+rsiShortMin   = input.int(70, "RSI Overbought Threshold")
+emaLen        = input.int(200, "EMA Length (trend filter)")
+cooldownBars  = input.int(12, "Cooldown Bars After Exit")
+slBase        = input.float(75, "Base Stop Loss (points)")
+slMult        = input.float(2.25, "Stop Loss Multiplier (σ)")
+halfLifeBars  = input.int(35, "Max Bars to Hold")
+
+// === INDICATORS ===
+bbBasis = ta.sma(close, bbLength)
+bbStd   = ta.stdev(close, bbLength)
+bbUpper = bbBasis + bbMult * bbStd
+bbLower = bbBasis - bbMult * bbStd
+zScore  = (close - bbBasis) / bbStd
+
+// Volatility-based stop loss with base + volatility component
+sl_points = slBase + (slMult * bbStd)
+
+rsi = ta.rsi(close, rsiPeriod)
+emaFilter = ta.ema(close, emaLen)
+
+// === COOLDOWN LOGIC ===
+var int lastExitBar = na
+if (strategy.closedtrades > 0)
+    lastExitBar := strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1)
+cooldownActive = (bar_index - nz(lastExitBar, -cooldownBars) < cooldownBars)
+
+// === ENTRY CONDITIONS (Mean Reversion) ===
+// LONG: oversold, below lower BB, negative Z, below EMA
+longCondition = not cooldownActive and close <= bbLower and zScore <= -zThreshold and rsi <= rsiLongMax and close < emaFilter and strategy.position_size == 0
+
+// SHORT: overbought, above upper BB, positive Z, above EMA
+shortCondition = not cooldownActive and close >= bbUpper and zScore >= zThreshold and rsi >= rsiShortMin and close > emaFilter and strategy.position_size == 0
+
+// === TARGET PRICES FROM OPPOSITE Z-SCORE ===
+// Solve (price - bbBasis) / bbStd = targetZ  =>  price = bbBasis + targetZ * bbStd
+longTP  = bbBasis + zThreshold * bbStd   // opposite of -zThreshold
+shortTP = bbBasis - zThreshold * bbStd   // opposite of +zThreshold
+
+// === TRADE EXECUTION ===
+// Note: TP/SL are set using values from the signal bar (static like original).
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - sl_points, limit=longTP)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + sl_points, limit=shortTP)
+
+// === TIME-BASED EXIT (Half-Life) ===
+// Close position if it hasn't reverted after halfLifeBars
+if strategy.position_size != 0 and (bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1)) > halfLifeBars
+    strategy.close("Long")
+    strategy.close("Short")
+
+// === BB MIDDLE CROSS 5-BAR EXIT LOGIC ===
+// After entry, once price crosses the EXACT BB middle line (bbBasis), wait 5 bars, then exit exactly on mean failure
+var int crossAfterEntryBar = na
+var bool exitMonitorActive = false
+entryBarIdx = strategy.opentrades > 0 ? strategy.opentrades.entry_bar_index(strategy.opentrades - 1) : na
+
+// Directional cross of bbBasis (BB middle)
+longCrossNow = ta.crossover(close, bbBasis)   // Price crosses UP through middle
+shortCrossNow = ta.crossunder(close, bbBasis) // Price crosses DOWN through middle
+
+// Reset when flat
+if strategy.position_size == 0
+    crossAfterEntryBar := na
+    exitMonitorActive := false
+
+// Record first qualifying cross after entry
+if strategy.position_size > 0 and not na(entryBarIdx) and bar_index > entryBarIdx and na(crossAfterEntryBar) and longCrossNow
+    crossAfterEntryBar := bar_index
+if strategy.position_size < 0 and not na(entryBarIdx) and bar_index > entryBarIdx and na(crossAfterEntryBar) and shortCrossNow
+    crossAfterEntryBar := bar_index
+
+// Arm exactly on the 6th candle (i.e., 5 full bars after the cross bar)
+barsSinceCross = not na(crossAfterEntryBar) ? (bar_index - crossAfterEntryBar) : na
+armNow = not na(barsSinceCross) and barsSinceCross == 5
+if armNow
+    exitMonitorActive := true
+
+// Exact exits at the mean re-test (bar-close precision)
+if strategy.position_size > 0 and exitMonitorActive and ta.crossunder(close, bbBasis)
+    strategy.close("Long", comment="BB Middle crossunder exit (long)")
+if strategy.position_size < 0 and exitMonitorActive and ta.crossover(close, bbBasis)
+    strategy.close("Short", comment="BB Middle crossover exit (short)")
+
+// Intrabar-precise exits: place a dynamic stop at the mean once armed.
+// With calc_on_every_tick and Bar Magnifier enabled, this triggers exactly when price trades through the mean.
+if strategy.position_size > 0 and exitMonitorActive
+    strategy.exit("Long Mean Exit", "Long", stop=bbBasis)
+if strategy.position_size < 0 and exitMonitorActive
+    strategy.exit("Short Mean Exit", "Short", stop=bbBasis)
+
+// === PLOTS ===
+// Bollinger Bands
+plot(bbUpper, "BB Upper", color=color.new(color.red, 0), linewidth=2)
+plot(bbBasis, "BB Basis", color=color.new(color.gray, 0), linewidth=2)
+plot(bbLower, "BB Lower", color=color.new(color.green, 0), linewidth=2)
+
+// Entry Signals
+plotshape(longCondition, title="Long Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.labelup, text="BUY", size=size.normal)
+plotshape(shortCondition, title="Short Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.labeldown, text="SELL", size=size.normal)
+// === ALERTS ===
+alertcondition(longCondition, title="Mean Reversion Long", message="Mean Reversion Long setup")
+alertcondition(shortCondition, title="Mean Reversion Short", message="Mean Reversion Short setup")
+
+View in Pine Editor・121 lines
+Use on chart
+1
+4
+1 045
+This is a systematic mean-reversion framework for index futures and other liquid assets.
+This strategy combines Bollinger Bands, Z-Score dislocation, RSI extremes, and a trend-filtering EMA200 to capture short-term mean-reversion inefficiencies in NQ1!. It is designed for high-volatility conditions and uses a precise exit model based on opposite-side Z-Score targets and dynamic mid-band failure detection.
+🔍 Entry Logic (Mean Reversion) :
+The strategy enters trades only when multiple confluence signals align:
+Long Setup
+Price at or below the lower Bollinger Band
+Z-Score ≤ –Threshold (deep statistical deviation)
+RSI ≤ oversold level
+Price below the EMA-200 (countertrend mean-reversion only)
+Cooldown must be completed
+No open position
+Short Setup
+Price at or above the upper Bollinger Band
+Z-Score ≥ Threshold
+RSI ≥ overbought level
+Price above the EMA-200
+Cooldown complete
+No open position
+This multi-signal gate filters out weak reversions and focuses on mature dislocations.
+🎯 Take-Profit Model: Opposite-Side Z-Score Target :
+Once in a trade, take-profit is set by solving for the price where the Z-Score reaches the opposite side:
+Long TP = Z = +Threshold
+Short TP = Z = –Threshold
+This creates a symmetric statistical exit based on reverting to equilibrium plus overshoot.
+🛡️ Stop-Loss System (Volatility-Aware) :
+Stop losses combine:
+A fixed base stop (points)
+A standard-deviation volatility component
+This adapts the SL to regime changes and avoids being shaken out during rare volatility spikes.
+⏳ Half-Life Exit :
+If a trade has not reverted within a fixed number of bars, it automatically closes.
+This prevents “mean-reversion traps” during trending periods.
+📉 Advanced Mid-Band Exit Logic (BB Basis Failure) :
+This is the unique feature of the system.
+After entry:
+Wait for price to cross the Bollinger Basis (middle band) in the direction of the mean.
+Start a 5-bar delay timer.
+After 5 bars, the strategy becomes “armed.”
+Once armed:
+If price fails back through the mean, exit immediately.
+Intrabar exits trigger precisely (with tick-level precision if Bar Magnifier is enabled).
+This protects profits and exits trades at the first sign of mean-failure.
+⏱️ Cooldown System :
+After each closed trade, a cooldown period prevents immediate re-entry.
+This avoids clustering and improves statistical independence of trades.
+🖥️ What This Strategy Is Best For :
+High-volatility intraday NQ conditions
+Statistical mean reversion with structured confluence
+Traders who want clean, rule-based entries
+Avoiding trend-day traps using EMA and half-life logic
+📊 Included Visual Elements :
+Bollinger Bands (Upper, Basis, Lower)
+BUY/SELL markers at signal generation
+Optional alerts for automated monitoring
+🚀 Summary :
+This is a precision mean-reversion system built around volatility bands, statistical dislocation, and price-behavior confirmation. By combining Z-Score, RSI, EMA200 filtering, and a sophisticated mid-band failure exit, this model captures high-probability reversions while avoiding the common pitfalls of naive band-touch systems.

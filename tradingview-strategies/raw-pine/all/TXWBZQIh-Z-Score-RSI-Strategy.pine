@@ -1,0 +1,9 @@
+//@version=5
+midline=##input(defval=50.0,type='INPUT_FLOAT',##id='in_4')
+overboughtLevel=##input(defval=70.0,type='INPUT_FLOAT',##id='in_5')
+oversoldLevel=##input(defval=30.0,type='INPUT_FLOAT',##id='in_6')
+##root(root_metainfo,rm_0,1,input__integer,plot,linewidth)
+##root(root_metainfo,rm_1,2,input__integer,plot,linewidth)
+##root(root_metainfo,rm_2,overboughtLevel,input__float)
+##root(root_metainfo,rm_3,oversoldLevel,input__float)
+##root(root_metainfo,rm_4,midline,input__float)

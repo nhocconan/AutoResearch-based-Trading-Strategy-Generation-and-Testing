@@ -1,0 +1,57 @@
+//@version=3
+strategy (title = "EMAxMA", shorttitle="EMAxMA", overlay = false)
+
+length = input(9, minval=1)
+src = input(close, title="Source")
+
+lengthemaf= input(50, minval=1)
+emaf = ema(src,lengthemaf)
+
+lengthemas = input(9, minval=1)
+emas = ema(src, lengthemas)
+
+////source = hullma, lengthroc = input(5, minval=1)
+////roc = 100 * (source - source[lengthroc])/source[lengthroc]
+
+///emah = ema(hullma,lengthrema )
+//emah = ema(roc,lengthrema)
+
+
+//ATR
+Latr = input(title="Length", defval=14, minval=1)
+smoothing = input(title="Smoothing", defval="RMA", options=["RMA", "SMA", "EMA", "WMA"])
+
+ma_function(source, latr) => 
+    if smoothing == "RMA"
+        rma(source, latr)/2
+    else
+        if smoothing == "SMA"
+            sma(source, latr)/2
+        else
+            if smoothing == "EMA"
+                ema(source, latr)/2
+            else
+                wma(source, latr)/2
+
+
+
+x = abs(emas-emaf)
+
+//glong = crossover(x, ma_function)  gshort = crossunder (x, ma_function) 
+plot(ma_function(tr(true), length), title = "ATR", color=#991515, transp=0)
+//plot(hullma, color=black, title="HMA") 
+//plot(ma, color=white, title="MA") 
+///plot(emah, color = orange, title = "EMAhma")
+//plot (emah, color = orange, title ="ema roc")
+//plot (roc, color = red, title="roc hma")
+plot (x, color = black, title ="hma/ma")
+//plot (y, color = blue, title = "abshma/atr")
+///strategy.entry(id = "glong", long = true, when=glong ) 
+//strategy.entry(id = "gshort", long = false, when=gshort)
+
+View in Pine Editor・50 lines
+Use on chart
+1
+7
+1 106
+ema spread + average true range

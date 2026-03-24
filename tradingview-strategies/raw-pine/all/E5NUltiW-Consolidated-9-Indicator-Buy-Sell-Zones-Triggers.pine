@@ -1,0 +1,101 @@
+//@version=6
+strategy("9-Indicator Buy/Sell Zones & Triggers", overlay=true)
+
+// --- Primary Indicators ---
+
+// SMA/EMA
+sma200 = ta.sma(close, 200)
+sma50  = ta.sma(close, 50)
+ema20  = ta.ema(close, 20)
+ma_signal_buy  = close > sma200 and sma50 > sma200 and close > ema20
+ma_signal_sell = close < sma200 and sma50 < sma200 and close < ema20
+
+// RSI
+rsi = ta.rsi(close, 14)
+rsi_signal_buy  = rsi > 50
+rsi_signal_sell = rsi < 50
+
+// MACD
+macdLine    = ta.ema(close, 12) - ta.ema(close, 26)
+signalLine  = ta.ema(macdLine, 9)
+macd_signal_buy  = macdLine > signalLine and macdLine > 0
+macd_signal_sell = macdLine < signalLine and macdLine < 0
+
+// Bollinger Bands
+bbBasis = ta.sma(close, 20)
+bbUpper = bbBasis + ta.stdev(close, 20) * 2
+bbLower = bbBasis - ta.stdev(close, 20) * 2
+bb_signal_buy  = close > bbBasis and close > bbUpper[1]
+bb_signal_sell = close < bbBasis and close < bbLower[1]
+
+// OBV (manual)
+var float obv = na
+obv := na(obv[1]) ? 0 : obv[1] + (close > close[1] ? volume : close < close[1] ? -volume : 0)
+obvMA = ta.sma(obv, 20)
+obv_signal_buy  = obv > ta.highest(obv, 20)[1] and obv > obvMA
+obv_signal_sell = obv < ta.lowest(obv, 20)[1] and obv < obvMA
+
+// ADX
+[_, _, adx] = ta.dmi(14, 14)
+adx_signal_buy  = adx > 25
+adx_signal_sell = adx > 25
+
+// --- Secondary Indicators ---
+
+// VWAP (intraday only; for dailies use basis or ignore)
+vwap = ta.vwap
+vwap_signal_buy  = close > vwap
+vwap_signal_sell = close < vwap
+
+// Stochastic Oscillator
+stoch_k = ta.stoch(close, high, low, 14)
+stoch_signal_buy  = stoch_k > 50
+stoch_signal_sell = stoch_k < 50
+
+// Ichimoku Cloud base check
+conversion = (ta.highest(high, 9) + ta.lowest(low, 9)) / 2
+base      = (ta.highest(high, 26) + ta.lowest(low, 26)) / 2
+ichimoku_signal_buy  = close > base and close > conversion
+ichimoku_signal_sell = close < base and close < conversion
+
+// --- Composite Zones and Triggers ---
+
+buy_count  = (ma_signal_buy ? 1 : 0) + (rsi_signal_buy ? 1 : 0) + (macd_signal_buy ? 1 : 0) +
+             (bb_signal_buy ? 1 : 0) + (obv_signal_buy ? 1 : 0) + (adx_signal_buy ? 1 : 0) +
+             (vwap_signal_buy ? 1 : 0) + (stoch_signal_buy ? 1 : 0) + (ichimoku_signal_buy ? 1 : 0)
+
+sell_count = (ma_signal_sell ? 1 : 0) + (rsi_signal_sell ? 1 : 0) + (macd_signal_sell ? 1 : 0) +
+             (bb_signal_sell ? 1 : 0) + (obv_signal_sell ? 1 : 0) + (adx_signal_sell ? 1 : 0) +
+             (vwap_signal_sell ? 1 : 0) + (stoch_signal_sell ? 1 : 0) + (ichimoku_signal_sell ? 1 : 0)
+
+// Buy zone = at least 5 buy signals & fewer than 5 sell signals
+buy_zone  = buy_count >= 5 and sell_count < 5
+sell_zone = sell_count >= 5 and buy_count < 5
+
+// Buy trigger if more than 6 buy signals
+buy_trigger  = buy_count > 6 and sell_count < 5
+sell_trigger = sell_count > 6 and buy_count < 5
+
+bgcolor(buy_zone  ? color.new(color.green, 85) : na)
+bgcolor(sell_zone ? color.new(color.red,   85) : na)
+
+plotshape(buy_trigger,  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.large, title="Buy Trigger")
+plotshape(sell_trigger, style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.large, title="Sell Trigger")
+
+if buy_trigger
+    label.new(bar_index, low, "BUY (" + str.tostring(buy_count) + ")", style=label.style_label_up,   color=color.green, textcolor=color.white, size=size.large, yloc=yloc.belowbar)
+if sell_trigger
+    label.new(bar_index, high, "SELL (" + str.tostring(sell_count) + ")", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.large, yloc=yloc.abovebar)
+
+// Backtest entries
+if buy_trigger
+    strategy.entry("Long", strategy.long, comment="Buy Trigger " + str.tostring(buy_count))
+if sell_trigger
+    strategy.entry("Short", strategy.short, comment="Sell Trigger " + str.tostring(sell_count))
+
+View in Pine Editor・94 lines
+Use on chart
+3
+1
+1 210
+ALL important inductors combined for long term position holders and short term guys...use it to enter trade and exit ...backgroud colour will give you the indication of the market mood..

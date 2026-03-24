@@ -1,0 +1,70 @@
+//@version=4
+strategy("disparity and sdv", overlay=true) //1min FXbtcJPY 2020/1/30
+
+//backtest
+testStartYear = input(2018, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+testStopYear = input(2020, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(31, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+//input value
+input_length = input(8)
+input_sdv = input(1500,title="threshold_sdv_value")
+timeframe = input(title="Timeframe", type=input.integer, minval=1, defval=8)
+
+//calc
+disparity = (close - sma(close, input_length))/close
+disp = disparity*10000
+sdv = stdev(close, input_length)
+bars = barssince(strategy.opentrades == 0)
+
+//strategy
+eL = sdv > input_sdv and -13 <= disp and disp <= -8
+eS = sdv > input_sdv and 13 >= disp and disp >= 8
+
+if testPeriod()
+    if eL
+        strategy.entry("eL", strategy.long)
+    if eS
+        strategy.entry("eS", strategy.short)
+
+strategy.close_all(when=(bars>=timeframe))
+
+//exit - 8 candles after.(timeframe value)
+//I don't come up with good exit signal but seems like not a bad way.
+
+View in Pine Editor・40 lines
+Use on chart
+8
+1
+12
+4 277
+Jan 30, 2020
+FXBTCJPY 1min contrarian script (2020/1/30)
+1分足の逆張りです．
+
+If you want to use other timescale, need to change disparity rate and sdv.
+To display disparity(sma) and standard deviation, and to draw a hline(pine function) a certain valu. And lets think. I thought disparity rate 1~1.3 or -1~-1.3 are able to use constrarian trade (and sdv>600).
+
+In bottom, disparity index is auxiliary. It is different from the multiple in the script to make the value easier to understand.
+
+Sorry if the expiration date of the script has expired.
+Jan 31, 2020
+Release Notes
+disparity's multiple, length and sdv are changed.(is it Curve fitting ?)
+Feb 8, 2020
+Release Notes
+input_length and timeframe changed.
+Mar 26, 2020
+Release Notes
+・add comment
+・sdv value changed
+・made code easier to read
+
+in addition, sorry to make a mistake title "dipsparity"→"disparity :(

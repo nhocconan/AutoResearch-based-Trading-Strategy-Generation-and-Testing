@@ -1,0 +1,109 @@
+//@version=6
+strategy('EMA 10/55/200 - LONG ONLY MTF (4h with 1D & 1W confirmation)', overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,  // Use 10% of equity per trade
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,  // 0.1% commission
+     slippage=2)            // Simulate 2 ticks of slippage
+
+// === Higher Timeframes ===
+timeframe1d = 'D'
+timeframe1w = 'W'
+
+// === Current EMAs (4h chart) ===
+ema10 = ta.ema(close, 10)
+ema55 = ta.ema(close, 55)
+ema200 = ta.ema(close, 200)
+ema500 = ta.ema(close, 500)
+
+plot(ema10, color=color.blue, title='EMA 10')
+plot(ema55, color=color.orange, title='EMA 55')
+plot(ema200, color=color.red, title='EMA 200')
+plot(ema500, color=color.green, title='EMA 500')
+
+// === EMAs on Daily (1D) ===
+ema1d_55 = request.security(syminfo.tickerid, timeframe1d, ta.ema(close, 55))
+ema1d_200 = request.security(syminfo.tickerid, timeframe1d, ta.ema(close, 200))
+
+// === EMAs on Weekly (1W) ===
+ema1w_55 = request.security(syminfo.tickerid, timeframe1w, ta.ema(close, 55))
+ema1w_200 = request.security(syminfo.tickerid, timeframe1w, ta.ema(close, 200))
+
+// === Entry Conditions (on 4h chart) ===
+baseCondition = (ta.crossover(ema10, ema55) and high > ema55) or ta.crossover(ema55, ema200) or ta.crossover(ema10, ema500)
+
+// === Higher timeframe alignment confirmation ===
+htfConfirmation = ema1d_55 > ema1d_200 and ema1w_55 > ema1w_200
+
+longEntry = baseCondition and htfConfirmation
+
+// === Exit Conditions ===
+longExit = strategy.position_size > 0 and (ta.crossunder(ema10, ema200) or ta.crossunder(ema10, ema500))
+
+// === Stop Loss (5%) ===
+stopLossPerc = 0.05
+stopLossPrice = close * (1 - stopLossPerc)
+
+// === Strategy Execution ===
+if longEntry
+    strategy.entry('Long', strategy.long)
+    strategy.exit('Stop Loss', from_entry='Long', stop=stopLossPrice)
+
+if longExit
+    strategy.close('Long', comment='Crossover Exit')
+
+View in Pine Editor・53 lines
+Use on chart
+3
+7
+1 606
+Title: EMA 10/55/200 - Long Only Multi-Timeframe Strategy (4h with 1D & 1W confirmation)
+
+Description:
+
+This strategy is designed for trend-following long entries using a combination of exponential moving averages (EMAs) on the 4-hour chart, confirmed by higher timeframe trends from the daily (1D) and weekly (1W) charts.
+
+🔍 How It Works
+🔹 Entry Conditions (4h chart):
+EMA 10 crosses above EMA 55 and price is above EMA 55
+OR
+
+EMA 55 crosses above EMA 200
+OR
+
+EMA 10 crosses above EMA 500
+
+These entries indicate short-term momentum aligning with medium/long-term trend strength.
+
+🔹 Confirmation (multi-timeframe alignment):
+Daily (1D): EMA 55 is above EMA 200
+
+Weekly (1W): EMA 55 is above EMA 200
+
+This ensures that we only enter long trades when the higher timeframes support an uptrend, reducing false signals during sideways or bearish markets.
+
+🛑 Exit Conditions
+Bearish crossover of EMA 10 below EMA 200 or EMA 500
+
+Stop Loss: 5% below entry price
+
+⚙️ Backtest Settings
+Capital allocation per trade: 10% of equity
+
+Commission: 0.1%
+
+Slippage: 2 ticks
+
+These are realistic conditions for crypto, forex, and stocks.
+
+📈 Best Used On
+Timeframe: 4h
+
+Instruments: Trending markets like BTC/ETH, FX majors, or growth stocks
+
+Works best in volatile or trending environments
+
+⚠️ Disclaimer
+This is a backtest tool and educational resource. Always validate on demo accounts before applying to real capital. Do your own due diligence.
+
+

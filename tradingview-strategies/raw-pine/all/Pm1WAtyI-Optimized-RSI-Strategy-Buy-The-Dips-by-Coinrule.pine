@@ -1,0 +1,56 @@
+//@version=4
+strategy(shorttitle='Optimized RSI Strategy',title='Optimized RSI Strategy - Buy The Dips (by Coinrule)', overlay=true, initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_type = strategy.percent_of_equity, default_qty_value = 30, commission_type=strategy.commission.percent, commission_value=0.1)
+
+//Backtest dates
+fromMonth = input(defval = 1,    title = "From Month",      type = input.integer, minval = 1, maxval = 12)
+fromDay   = input(defval = 1,    title = "From Day",        type = input.integer, minval = 1, maxval = 31)
+fromYear  = input(defval = 2020, title = "From Year",       type = input.integer, minval = 1970)
+thruMonth = input(defval = 1,    title = "Thru Month",      type = input.integer, minval = 1, maxval = 12)
+thruDay   = input(defval = 1,    title = "Thru Day",        type = input.integer, minval = 1, maxval = 31)
+thruYear  = input(defval = 2112, title = "Thru Year",       type = input.integer, minval = 1970)
+
+showDate  = input(defval = true, title = "Show Date Range", type = input.bool)
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+
+
+
+// RSI inputs and calculations
+lengthRSI = (14)
+RSI = rsi(close, lengthRSI)
+
+RSI_entry = input(35, title = 'RSI Entry', minval=1)
+RSI_exit = input(65, title = 'RSI Close', minval=1)
+
+//Calculate Moving Averages
+movingaverage_signal = sma(close, input(100))
+
+//Entry 
+strategy.entry(id="long", long = true, when = RSI< RSI_entry and close < movingaverage_signal and window())
+
+//Exit
+//RSI
+strategy.close("long", when = RSI > RSI_exit and window())
+
+plot (movingaverage_signal)
+
+View in Pine Editor・40 lines
+Use on chart
+8
+9
+3
+1
+26 871
+Buy low and sell high is every trader's mantra. While this approach looks straightforward in theory, it's sometimes challenging to put into practice. That requires stress-management to buy when price drops and resolution in selling when the price is rising. RSI is a useful tool to implement long-term and effective trading strategies. The script presents an optimized RSI trading strategy that uses a Moving average to spot the best time to buy the dip.
+
+The strategy buys when the RSI is lower than 35, and at the same time, the price is below the MA100. In this way, the approach helps avoid catching early dips, increasing buying when the bottom approaches.
+
+The position closes when the RSI value is above 65. Depending on the volatility of the coins that the strategy will trade, it's possible to adjust the RSI exit value to chase larger profits.
+
+
+The setup is optimized on a 15-minutes time frame and trading cryptocurrencies versus USD or stable coins.
+The strategies was backtested over 150 times with multiple setups and coin to assess the best long-term system.
+
+The strategy assumes each order to trade 30% of the available capital. A trading fee of 0.1% is taken into account. The fee is aligned to the base fee applied on Binance, which is the largest cryptocurrency exchange.

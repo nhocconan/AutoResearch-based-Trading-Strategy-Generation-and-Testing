@@ -1,0 +1,80 @@
+//@version=6
+strategy("Any Strategy Backtest", "ASB", overlay=true, margin_long=100, margin_short=100, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// Входные параметры
+// Условия входа
+longCondition = input.source(title="Условие Long", defval=close)
+shortCondition = input.source(title="Условие Short", defval=close)
+
+// Параметры управления рисками
+stopLossPercent = input.float(title="Стоп-лосс (%)", minval=0.0, step=0.1, defval=2.0) / 100
+takeProfitPercent = input.float(title="Тейк-профит (%)", minval=0.0, step=0.1, defval=4.0) / 100
+riskPercent = input.float(title="Риск от капитала (%)", minval=0.1, step=0.1, defval=1.0) / 100
+
+// Расчет размера позиции
+calcPositionSize() =>
+    // Расчет на основе риска от капитала
+    equity = strategy.initial_capital + strategy.netprofit
+    riskAmount = equity * riskPercent
+    stopLossAmount = strategy.position_avg_price * stopLossPercent
+    riskAmount / stopLossAmount
+
+// Условия для входа (преобразуем source в boolean)
+longSignal = ta.change(longCondition) > 0
+shortSignal = ta.change(shortCondition) > 0
+
+// Расчет уровней стоп-лосса и тейк-профита
+calcLongStopPrice() => 
+    strategy.position_avg_price * (1 - stopLossPercent)
+
+calcLongTakeProfit() => 
+    strategy.position_avg_price * (1 + takeProfitPercent)
+
+calcShortStopPrice() => 
+    strategy.position_avg_price * (1 + stopLossPercent)
+
+calcShortTakeProfit() => 
+    strategy.position_avg_price * (1 - takeProfitPercent)
+
+// Логика выполнения ордеров
+if longSignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=calcPositionSize())
+    
+if shortSignal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=calcPositionSize())
+
+// Выход по стоп-лоссу и тейк-профиту для long
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", 
+         stop=calcLongStopPrice(), 
+         limit=calcLongTakeProfit())
+
+// Выход по стоп-лоссу и тейк-профиту для short
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", 
+         stop=calcShortStopPrice(), 
+         limit=calcShortTakeProfit())
+
+// Отображение уровней на графике
+plot(strategy.position_size > 0 ? calcLongStopPrice() : na, 
+     "Long Stop", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? calcLongTakeProfit() : na, 
+     "Long TP", color=color.green, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? calcShortStopPrice() : na, 
+     "Short Stop", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? calcShortTakeProfit() : na, 
+     "Short TP", color=color.green, style=plot.style_linebr)
+
+// Отображение точек входа
+plotshape(longSignal and strategy.position_size == 0 ? low : na, 
+          "Long Entry", shape.triangleup, location.belowbar, color=color.green, size=size.small)
+plotshape(shortSignal and strategy.position_size == 0 ? high : na, 
+          "Short Entry", shape.triangledown, location.abovebar, color=color.red, size=size.small)
+
+View in Pine Editor・75 lines
+Use on chart
+7
+4
+1 495
+A simple script for backtesting your strategies with TP and SL settings. For this to work, your indicators must have sources for long and short conditions.
+

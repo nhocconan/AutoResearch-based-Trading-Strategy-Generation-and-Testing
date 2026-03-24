@@ -1,0 +1,71 @@
+//@version=5
+strategy("Litecoin Trailing-Stop Strategy", overlay=true, pyramiding=1, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=50, calc_on_order_fills=false, slippage=0, commission_type=strategy.commission.percent, commission_value=0.03)
+
+// === PKAMA === by alexgrover
+length12 = input.int(50, title='PKAMA Length')
+factor = input.float(2.0, title='PKAMA Factor')
+sp = input.bool(true, title='Self Powered PKAMA')
+er = math.abs(ta.change(close, length12)) / math.sum(math.abs(ta.change(close)), length12)
+pow = sp ? 1 / er : factor
+per = math.pow(er, pow)
+a = 0.0
+a := per * close + (1 - per) * nz(a[1], close)
+a_f = a / a[1] > .999 and a / a[1] < 1.001
+bullish = a > a[1] and not a_f
+bearish = a < a[1] and not a_f
+
+var int lastTradeBar = na
+barsBetweenEntries = input.int(30, title="Bars Between Entries")
+canEnter = na(lastTradeBar) or (bar_index - lastTradeBar >= barsBetweenEntries)
+
+trailingStopPct = input.float(12.0, title="Trailing Stop %", minval=0.1)
+delayBars = input.int(50, title="Delay Trailing by N Bars", minval=1)
+inPosition = strategy.opentrades > 0
+barsInPosition = inPosition ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+trailReady = barsInPosition >= delayBars
+trail_offset = strategy.position_avg_price * trailingStopPct / 100
+
+longSignal = bullish and canEnter
+shortSignal = bearish and canEnter
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+    lastTradeBar := bar_index
+if shortSignal
+    strategy.entry("Short", strategy.short)
+    lastTradeBar := bar_index
+
+if inPosition and trailReady
+    if strategy.position_size > 0
+        strategy.exit("Trailing SL", from_entry="Long", trail_points=trail_offset, trail_offset=trail_offset)
+    if strategy.position_size < 0
+        strategy.exit("Trailing SL", from_entry="Short", trail_points=trail_offset, trail_offset=trail_offset)
+
+View in Pine Editor・42 lines
+Use on chart
+7
+8
+2 188
+Altcoins Trailing-Stop Strategy
+This strategy is based on a momentum breakout approach using PKAMA (Powered Kaufman Adaptive Moving Average) as a trend filter, and a delayed trailing stop mechanism to manage risk effectively.
+
+It has been designed and fine-tuned Altcoins, which historically shows consistent volatility patterns and clean trend structures, especially on intraday timeframes like 15m and 30m.
+
+Strategy Logic:
+Entry Conditions:
+Long when PKAMA indicates an upward move
+Short when PKAMA detects a downward trend
+Minimum spacing of 30 bars between trades to avoid overtrading
+
+Trailing Stop:
+Activated only after a customizable delay (delayBars)
+User can set trailing stop % and delay independently
+Helps avoid premature exits due to short-term volatility
+
+Customizable Parameters:
+This strategy uses a custom implementation of PKAMA (Powered Kaufman Adaptive Moving Average), inspired by the work of alexgrover https://www.tradingview.com/script/Jh0YGJr0-Powered-Kaufman-Adaptive-Moving-Average/
+PKAMA is a volatility-aware moving average that adjusts dynamically to market conditions, making it ideal for altcoins where trend strength and direction change frequently.
+
+This script is for educational and experimental purposes only. It is not financial advice. Please test thoroughly before using it in live conditions, and always adapt parameters to your specific asset and time frame.
+Feedback is welcome! Feel free to clone and adapt it for your own trading style.
+

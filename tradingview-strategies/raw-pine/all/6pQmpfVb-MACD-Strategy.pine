@@ -1,0 +1,118 @@
+//@version=6
+strategy('MACD Strategy', overlay = true, margin_long = 100, margin_short = 100)
+
+// --- Input Parameters ---
+account_balance = input.float(10000, 'Account Balance', minval = 1000, tooltip = 'Initial account balance for position sizing.')
+macd_fast = input.int(12, 'MACD Fast Length', minval = 1, tooltip = 'Fast length for MACD.')
+macd_slow = input.int(26, 'MACD Slow Length', minval = 1, tooltip = 'Slow length for MACD.')
+macd_signal = input.int(9, 'MACD Signal Length', minval = 1, tooltip = 'Signal smoothing for MACD.')
+risk_percent = input.float(3.0, 'Risk Per Trade (%)', minval = 0.1, step = 0.1, tooltip = 'Percentage of balance risked per trade.')
+rr_ratio = input.float(3.0, 'Risk:Reward Ratio', minval = 1.0, step = 0.1, tooltip = 'Ratio of potential reward to risk.')
+sl_multiplier = input.float(1.0, 'SL Multiplier', minval = 0.1, step = 0.1, tooltip = 'Multiplier for stop loss distance based on ATR.')
+tp_multiplier = input.float(3.0, 'TP Multiplier', minval = 0.1, step = 0.1, tooltip = 'Multiplier for take profit distance based on ATR.')
+line_length = input.int(25, 'Line Length (bars)', minval = 5, step = 5, tooltip = 'Duration for TP, SL, and entry lines.')
+label_position = input.string('left', 'Label Position', options = ['left', 'right'], tooltip = 'Position of labels.')
+atr_period = input.int(14, 'ATR Period', minval = 1, tooltip = 'ATR period for volatility measure.')
+
+// --- MACD Calculation ---
+[macdLine, signalLine, hist] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+macd_hist = macdLine - signalLine
+
+// --- Signals ---
+sellSignal = ta.crossunder(macdLine, signalLine) and macd_hist < 0
+buySignal = ta.crossover(macdLine, signalLine) and macd_hist > 0
+
+// --- Risk Management ---
+float risk_amount = account_balance * (risk_percent / 100)
+float stop_distance = ta.atr(atr_period)
+float position_size = math.floor(risk_amount / stop_distance)
+
+// --- Entry Logic ---
+var float sell_stop_price = na
+var float sell_take_profit = na
+var float buy_stop_price = na
+var float buy_take_profit = na
+
+if sellSignal
+    strategy.entry('Sell', strategy.short, qty = position_size)
+    sell_stop_price := close + stop_distance * sl_multiplier
+    sell_take_profit := close - stop_distance * tp_multiplier * rr_ratio
+    strategy.exit('Sell Exit', 'Sell', stop = sell_stop_price, limit = sell_take_profit)
+    line.new(bar_index, sell_stop_price, bar_index + line_length, sell_stop_price, color = color.red, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), sell_stop_price, text = 'SL: ' + str.tostring(sell_stop_price, '#.##'), color = color.red, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+    line.new(bar_index, sell_take_profit, bar_index + line_length, sell_take_profit, color = color.green, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), sell_take_profit, text = 'TP: ' + str.tostring(sell_take_profit, '#.##'), color = color.green, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+    line.new(bar_index, close, bar_index + line_length, close, color = color.red, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), close, text = 'Sell', color = color.red, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+
+if buySignal
+    strategy.entry('Buy', strategy.long, qty = position_size)
+    buy_stop_price := close - stop_distance * sl_multiplier
+    buy_take_profit := close + stop_distance * tp_multiplier * rr_ratio
+    strategy.exit('Buy Exit', 'Buy', stop = buy_stop_price, limit = buy_take_profit)
+    line.new(bar_index, buy_stop_price, bar_index + line_length, buy_stop_price, color = color.red, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), buy_stop_price, text = 'SL: ' + str.tostring(buy_stop_price, '#.##'), color = color.red, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+    line.new(bar_index, buy_take_profit, bar_index + line_length, buy_take_profit, color = color.green, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), buy_take_profit, text = 'TP: ' + str.tostring(buy_take_profit, '#.##'), color = color.green, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+    line.new(bar_index, close, bar_index + line_length, close, color = color.green, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), close, text = 'Buy', color = color.green, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+
+// --- Alert Conditions for Bitget Webhook ---
+alertcondition(sellSignal, title = 'Sell Signal', message = '{"action":"{{strategy.order.action}}","contracts":"{{strategy.order.contracts}}","marketPosition":"{{strategy.market_position}}","positionSize":"{{strategy.position_size}}","prevMarketPosition":"{{strategy.prev_market_position}}","price":"{{close}}","symbol":"{{ticker}}","time":"{{timenow}}"}')
+alertcondition(buySignal, title = 'Buy Signal', message = '{"action":"{{strategy.order.action}}","contracts":"{{strategy.order.contracts}}","marketPosition":"{{strategy.market_position}}","positionSize":"{{strategy.position_size}}","prevMarketPosition":"{{strategy.prev_market_position}}","price":"{{close}}","symbol":"{{ticker}}","time":"{{timenow}}"}')
+
+View in Pine Editor・62 lines
+Use on chart
+9
+9
+2 083
+Overview
+
+The "MACD Strategy" is a straightforward trading strategy tested for BTCUSDT Futures on the 1-minute timeframe, leveraging the Moving Average Convergence Divergence (MACD) indicator to identify momentum-based buy and sell opportunities. Developed with input from expert trading analyst insights, this strategy combines technical precision with risk management, making it suitable for traders of all levels on platforms like TradingView. It focuses on capturing trend reversals and momentum shifts, with clear visual cues and automated alerts for seamless integration with trading bots (e.g., Bitget webhooks).
+
+#### How It Works
+This strategy uses the MACD indicator to generate trading signals based on momentum and trend direction:
+- **Buy Signal**: Triggered when the MACD line crosses above the signal line, and the MACD histogram turns positive (above zero). This suggests increasing bullish momentum.
+- **Sell Signal**: Triggered when the MACD line crosses below the signal line, and the MACD histogram turns negative (below zero), indicating growing bearish momentum.
+
+Once a signal is detected, the strategy opens a position (long for buy, short for sell) with a position size calculated based on your risk tolerance. It includes a stop-loss to limit losses and a take-profit to lock in gains, both dynamically adjusted using the Average True Range (ATR) for adaptability to market volatility.
+
+#### Key Features
+- **MACD-Based Signals**: Relies solely on MACD for entry points, plotted in a separate pane for clear momentum analysis.
+- **Risk Management**: Automatically calculates position size based on a percentage of your account balance and sets stop-loss and take-profit levels using ATR multipliers and a risk:reward ratio.
+- **Visual Feedback**: Plots entry, stop-loss, and take-profit lines on the chart with labeled markers for easy tracking.
+- **Alerts**: Includes Bitget webhook-compatible alerts for automated trading, notifying you of buy and sell signals in real-time.
+
+#### Input Parameters
+- **Account Balance**: Default 10000 – Set your initial trading capital to determine position sizing.
+- **MACD Fast Length**: Default 12 – The short-term EMA period for MACD sensitivity.
+- **MACD Slow Length**: Default 26 – The long-term EMA period for MACD calculation.
+- **MACD Signal Length**: Default 9 – The smoothing period for the signal line.
+- **Risk Per Trade (%)**: Default 3.0 – The percentage of your account balance risked per trade (e.g., 3% of 10000 = 300).
+- **Risk:Reward Ratio**: Default 3.0 – The ratio of potential profit to risk (e.g., 3:1 means risking 1 to gain 3).
+- **SL Multiplier**: Default 1.0 – Multiplies ATR to set the stop-loss distance (e.g., 1.0 x ATR).
+- **TP Multiplier**: Default 3.0 – Multiplies ATR to set the take-profit distance, adjusted by the risk:reward ratio.
+- **Line Length (bars)**: Default 25 – Duration in bars for displaying trade lines on the chart.
+- **Label Position**: Default 'left' – Position of text labels (left or right) relative to trade lines.
+- **ATR Period**: Default 14 – The number of periods for calculating ATR to measure volatility.
+
+#### How to Use
+1. **Add to Chart**: Load the "MACD Strategy" as a strategy and the "MACD Indicator" as a separate indicator on your TradingView chart (recommended for BTCUSDT Futures on the 1-minute timeframe).
+2. **Customize Settings**: Adjust the input parameters based on your risk tolerance and market conditions. For BTCUSDT Futures, consider reducing `Risk Per Trade (%)` during high volatility (e.g., 1%) or increasing `SL Multiplier` for wider stops.
+3. **Visual Analysis**: Watch the main chart for trade entry lines (green for buy, red for sell), stop-loss (red), and take-profit (green) lines with labels. Use the MACD pane below to confirm momentum shifts.
+4. **Set Alerts**: Create alerts in TradingView for "Buy Signal" and "Sell Signal" to automate trades via Bitget webhooks.
+5. **Backtest and Optimize**: Test the strategy on historical BTCUSDT Futures 1-minute data to fine-tune parameters. The short timeframe requires quick execution, so monitor closely for slippage or latency.
+
+#### Tips for Success
+- **Market Conditions**: This strategy performs best in trending markets on the 1-minute timeframe. Avoid choppy conditions where MACD crossovers may produce false signals.
+- **Risk Management**: Start with the default 3% risk per trade and adjust downward (e.g., 1%) during volatile periods like BTCUSDT news events. The 3:1 risk:reward ratio targets consistent profitability.
+- **Timeframe**: Optimized for 1-minute charts; switch to 5-minute or 15-minute for less noise if needed.
+- **Confirmation**: Cross-check MACD signals with price action or support/resistance levels for higher accuracy on BTCUSDT Futures.
+
+#### Limitations
+- This strategy relies solely on MACD, so it may lag in fast-moving or sideways markets. Consider adding a secondary filter (e.g., RSI) if needed.
+- Stop-loss and take-profit are ATR-based and may need adjustment for BTCUSDT Futures’ high volatility, especially during leverage trading.
+
+#### Conclusion
+The "MACD Strategy" offers a simple yet effective way to trade momentum shifts using the MACD indicator, tested for BTCUSDT Futures on the 1-minute timeframe, with robust risk management and visual tools. Whether you’re scalping crypto futures or exploring short-term trends, this strategy provides a solid foundation for automated or manual trading. Share your feedback or customizations in the comments, and happy trading!
+

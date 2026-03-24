@@ -1,0 +1,32 @@
+//@version=3
+strategy("My Strategy", overlay=true, pyramiding=5)
+grid_width = input(2.0)
+ 
+start_date = timestamp(2017, 05, 1, 00, 00) // year, month, day, hour, minute
+is_trade_time = time > start_date
+ 
+upper = ((1 + floor(close/grid_width)) * grid_width)
+lower = ((floor(close/grid_width)) * grid_width)
+ 
+plot(series=upper, color=lime)
+plot(series=lower, color=red)
+ 
+if start_date
+    longCondition = crossover(close, upper[1])
+    if (longCondition)
+        strategy.entry("buy", strategy.long)
+        strategy.exit(id='exit buy', from_entry='buy', profit=500, loss=100)
+   
+    shortCondition = crossunder(close, lower[1])
+    if (shortCondition)
+        strategy.entry("sel", strategy.short)
+        strategy.exit(id='exit sel', from_entry='sel', profit=500, loss=100)
+
+View in Pine Editor・23 lines
+Use on chart
+2
+3
+4
+5
+5 783
+request for columbcille

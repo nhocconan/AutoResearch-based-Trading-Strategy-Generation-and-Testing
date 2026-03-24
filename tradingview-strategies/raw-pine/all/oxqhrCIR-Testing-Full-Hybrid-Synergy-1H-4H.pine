@@ -1,0 +1,141 @@
+//@version=5
+strategy("Grok × ARKROV Full Hybrid Synergy XRP [1H/4H]", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ────── INPUTS (tune for best backtest) ──────
+useGrokRules   = input.bool(true,  "Use Grok Core Rules (EMA/MACD/RSI)", group="Filter Settings")
+useReverseMACD = input.bool(true,  "Use CT Reverse MACD Thresholds",     group="Filter Settings")
+useSqueeze     = input.bool(true,  "Use LazyBear Squeeze Momentum",      group="Filter Settings")
+useAD          = input.bool(true,  "Use Accumulation/Distribution",      group="Filter Settings")
+use4HBias      = input.bool(true,  "Use 4H Trend Bias",                  group="Filter Settings")
+
+rrTarget       = input.float(2.0, "Target R:R", minval=1.5, group="Risk Management")
+riskPerTrade   = input.float(1.0, "Risk % per Trade (for info only)", group="Risk Management")
+
+// ────── YOUR 3 CUSTOM INDICATORS ──────
+// 1. CT Reverse MACD Cross
+source_price = close
+fast_length  = 12
+slow_length  = 26
+i_emaLen     = 9
+
+alpha(len) => 2 / (len + 1)
+macd_eq(p, f, s) =>
+    _X = (alpha(f) * ta.ema(p, f)[1] - alpha(s) * ta.ema(p, s)[1]) / (alpha(f) - alpha(s))
+    _X > 0 ? _X : 0
+macd_cross_ema(P, V, X, Y, Z) =>
+    a1 = ta.ema(P, X)[1] * alpha(X) * alpha(Z)
+    a2 = ta.ema(P, Y)[1] * alpha(Y) * alpha(Z)
+    a3 = ta.ema(P, X)[1] * alpha(X)
+    a4 = ta.ema(P, Y)[1] * alpha(Y)
+    a5 = ta.ema(P, Y)[1] * alpha(Z)
+    a6 = ta.ema(V, Z)[1] * alpha(Z)
+    a7 = ta.ema(P, X)[1] * alpha(Z)
+    a8 = ta.ema(P, Y)[1]
+    a9 = ta.ema(V, Z)[1]
+    numerator   = a1 - a2 - a3 + a4 + a5 + a6 - a7 - a8 - a9 + ta.ema(P, X)[1]
+    denominator = alpha(X) * alpha(Z) - alpha(Y) * alpha(Z) - alpha(X) + alpha(Y)
+    _X = numerator / denominator
+    _X > 0 ? _X : 0
+
+fast_ema       = ta.ema(source_price, fast_length)
+slow_ema       = ta.ema(source_price, slow_length)
+macd_line      = fast_ema - slow_ema
+ema_sig        = ta.ema(macd_line, i_emaLen)
+reverse_macd   = macd_eq(source_price, fast_length, slow_length)
+macd_ema_cross = macd_cross_ema(source_price, macd_line, fast_length, slow_length, i_emaLen)
+
+c_eq    = reverse_macd < source_price ? #26A69A : #EF5350
+c_cross = macd_ema_cross > source_price ? #005eff : #ff9d00
+
+// 2. LazyBear Squeeze Momentum
+sqz_len   = 20
+sqz_mult  = 2.0
+kc_len    = 20
+kc_mult   = 1.5
+useTR     = true
+basis   = ta.sma(close, sqz_len)
+dev     = sqz_mult * ta.stdev(close, sqz_len)
+upperBB = basis + dev
+lowerBB = basis - dev
+maKC    = ta.sma(close, kc_len)
+rng     = useTR ? ta.tr : (high - low)
+rngMA   = ta.sma(rng, kc_len)
+upperKC = maKC + rngMA * kc_mult
+lowerKC = maKC - rngMA * kc_mult
+sqzOn  = (lowerBB > lowerKC) and (upperBB < upperKC)
+sqzOff = (lowerBB < lowerKC) and (upperBB > upperKC)
+sqzVal = ta.linreg(close - math.avg(math.avg(ta.highest(high, kc_len), ta.lowest(low, kc_len)), ta.sma(close, kc_len)), kc_len, 0)
+
+// 3. Accumulation/Distribution
+ad = ta.cum(close == high and close == low or high == low ? 0 : ((2 * close - low - high) / (high - low)) * volume)
+
+// ────── GROK CORE RULES (original) ──────
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+[macdL, signalL, hist] = ta.macd(close, 12, 26, 9)
+rsi = ta.rsi(close, 14)
+
+// 4H Bias
+[close4, ema50_4h, ema200_4h] = request.security(syminfo.tickerid, "240", [close, ta.ema(close,50), ta.ema(close,200)])
+bullBias4h = close4 > ema200_4h and ema50_4h > ema200_4h
+
+// Grok conditions
+grokBullBias   = use4HBias ? bullBias4h : (close > ema200 and ema50 > ema200)
+grokMomentum   = hist > 0 and hist > hist[1]
+grokRSI        = rsi > 40 and rsi < 65
+grokTrend      = close > ema50
+
+// Your 3 synergy conditions
+revMACD_bull = not useReverseMACD or (close > reverse_macd and close > macd_ema_cross)
+sqz_bull     = not useSqueeze or (sqzOff and sqzVal > 0 and sqzVal > nz(sqzVal[1]))
+ad_bull      = not useAD or (ad > ad[1])
+
+// FINAL HYBRID BUY CONDITION
+longCondition = grokBullBias and grokMomentum and grokRSI and grokTrend and revMACD_bull and sqz_bull and ad_bull and strategy.position_size == 0
+
+// Exit when any filter breaks
+exitCondition = (ema50 < ema200) or (rsi > 75) or (hist < 0 and hist < hist[1]) or (close < macd_ema_cross) or (sqzVal < 0 and sqzVal < nz(sqzVal[1])) or (ad < ad[1])
+
+// ────── EXECUTION ──────
+if longCondition
+    strategy.entry("Grok LONG", strategy.long)
+
+if exitCondition and strategy.position_size > 0
+    strategy.close("Grok LONG", comment="Synergy Broken")
+
+if strategy.position_size > 0
+    strategy.exit("TP1", "Grok LONG", limit = strategy.position_avg_price * (1 + rrTarget * 0.01), qty_percent = 50)
+    strategy.exit("Trail", "Grok LONG", stop = close - ta.atr(14) * 2.0)
+
+// ────── DASHBOARD (all filters at a glance) ──────
+var table dash = table.new(position.top_right, 2, 9, bgcolor=color.new(#1e222d, 85), border_width=1)
+if barstate.islast
+    table.cell(dash, 0, 0, "4H Bias",      text_color = grokBullBias ? color.lime : color.red)
+    table.cell(dash, 1, 0, grokBullBias ? "BULL" : "BEAR")
+    table.cell(dash, 0, 1, "Grok RSI",     text_color = grokRSI ? color.lime : color.orange)
+    table.cell(dash, 1, 1, str.tostring(rsi, "#.##"))
+    table.cell(dash, 0, 2, "Squeeze",      text_color = sqz_bull ? color.lime : color.gray)
+    table.cell(dash, 1, 2, sqzOff ? "OFF + Rising" : "ON")
+    table.cell(dash, 0, 3, "Reverse MACD", text_color = revMACD_bull ? color.lime : color.red)
+    table.cell(dash, 1, 3, close > reverse_macd ? "Above Eq" : "Below")
+    table.cell(dash, 0, 4, "A/D",          text_color = ad_bull ? color.lime : color.red)
+    table.cell(dash, 1, 4, ad > ad[1] ? "Rising" : "Falling")
+    table.cell(dash, 0, 5, "SIGNAL",       text_color = longCondition ? color.lime : color.gray, text_size=size.large)
+    table.cell(dash, 1, 5, longCondition ? "🚀 BUY" : "—")
+
+// Plots
+plot(ema50,  "EMA50",  color.blue, 2)
+plot(ema200, "EMA200", color.red,  2)
+plot(reverse_macd,   "Reverse MACD Eq",   c_eq,    2)
+plot(macd_ema_cross, "MACD EMA Cross",   c_cross, 2)
+bgcolor(longCondition ? color.new(color.green, 80) : na)
+
+// Alerts
+alertcondition(longCondition,  title="🚀 Grok Hybrid BUY",  message="Grok × ARKROV Full Hybrid BUY on XRP — All rules + synergy aligned!")
+alertcondition(exitCondition,  title="🛑 Grok Hybrid EXIT", message="Grok Hybrid EXIT — One or more filters broken")
+
+View in Pine Editor・135 lines
+Use on chart
+1
+380
+Testing grok to better my personal taste disregard

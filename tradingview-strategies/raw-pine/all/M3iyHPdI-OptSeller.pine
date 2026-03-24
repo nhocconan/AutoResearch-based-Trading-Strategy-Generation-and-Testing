@@ -1,0 +1,252 @@
+//@version=6
+strategy(
+  "OptSeller Pro",
+  shorttitle="OS",
+  overlay=true,
+  default_qty_type=strategy.fixed,
+  default_qty_value=1,
+  initial_capital=200000,
+  margin_long=100,
+  margin_short=100,
+  commission_type=strategy.commission.cash_per_order,
+  commission_value=50,
+  slippage=2,
+  process_orders_on_close=true,
+  calc_on_every_tick=false,
+  max_bars_back=5000
+  )
+
+string grp1 = "Strangle"
+int atrLen = input.int(14, "ATR Len", minval=5, maxval=50, group=grp1)
+float atrMult = input.float(1.8, "ATR Mult", minval=0.5, maxval=5.0, step=0.1, group=grp1)
+int strikeRound = input.int(100, "Round To", options=[50, 100, 200, 500], group=grp1)
+bool useVWAP = input.bool(true, "Use VWAP", group=grp1)
+
+string grp2 = "Filters"
+bool useST = input.bool(true, "SuperTrend", group=grp2)
+int stLen = input.int(10, "ST Len", minval=5, maxval=30, group=grp2)
+float stMult = input.float(2.0, "ST Mult", minval=1.0, maxval=5.0, step=0.5, group=grp2)
+bool useRSI = input.bool(true, "RSI Filter", group=grp2)
+int rsiLen = input.int(14, "RSI Len", group=grp2)
+int rsiOB = input.int(72, "RSI OB", group=grp2)
+int rsiOS = input.int(28, "RSI OS", group=grp2)
+bool useSess = input.bool(true, "Session", group=grp2)
+
+string grp3 = "Risk"
+float slPct = input.float(0.8, "SL %", minval=0.2, maxval=3.0, step=0.1, group=grp3)
+float tgtPct = input.float(0.5, "Tgt %", minval=0.1, maxval=2.0, step=0.1, group=grp3)
+int maxTrd = input.int(2, "Max/Day", minval=1, maxval=5, group=grp3)
+
+string grp4 = "Display"
+bool showFill = input.bool(true, "Zone", group=grp4)
+bool showLbl = input.bool(true, "Signals", group=grp4)
+bool showTbl = input.bool(true, "Table", group=grp4)
+
+float atrVal = ta.atr(atrLen)
+float vwapVal = ta.vwap(hlc3)
+float center = useVWAP ? vwapVal : ta.ema(close, 20)
+
+float rawUp = center + (atrVal * atrMult)
+float rawDn = center - (atrVal * atrMult)
+
+float ceLevel = math.ceil(rawUp / strikeRound) * strikeRound
+float peLevel = math.floor(rawDn / strikeRound) * strikeRound
+
+[stLine, stDir] = ta.supertrend(stMult, stLen)
+bool bullTrend = stDir < 0
+bool bearTrend = stDir > 0
+
+float rsiVal = ta.rsi(close, rsiLen)
+bool rsiOkCE = useRSI == false or rsiVal > rsiOS
+bool rsiOkPE = useRSI == false or rsiVal < rsiOB
+
+bool sessOK = useSess == false or (not na(time(
+  timeframe.period, "0945-1515", "Asia/Kolkata"
+  )))
+
+var int dayTrd = 0
+bool newDay = ta.change(time("D")) != 0
+if newDay
+    dayTrd := 0
+bool trdOK = dayTrd < maxTrd
+
+bool touchUp = high >= ceLevel
+bool ceSig = touchUp and sessOK and trdOK and rsiOkCE
+bool ceFlt = useST == false or bullTrend == false or touchUp
+bool ceGo = ceSig and ceFlt
+
+bool touchDn = low <= peLevel
+bool peSig = touchDn and sessOK and trdOK and rsiOkPE
+bool peFlt = useST == false or bearTrend == false or touchDn
+bool peGo = peSig and peFlt
+
+float ceSL = ceLevel * (1 + slPct / 100)
+float ceTG = ceLevel * (1 - tgtPct / 100)
+float peSL = peLevel * (1 - slPct / 100)
+float peTG = peLevel * (1 + tgtPct / 100)
+
+var bool inCE = false
+var bool inPE = false
+
+if ceGo and inCE == false
+    strategy.entry("SellCE", strategy.short, comment="SELL CE")
+    inCE := true
+    dayTrd += 1
+
+if inCE
+    if high >= ceSL
+        strategy.close("SellCE", comment="CE SL")
+        inCE := false
+    else if low <= ceTG
+        strategy.close("SellCE", comment="CE TGT")
+        inCE := false
+
+if peGo and inPE == false
+    strategy.entry("SellPE", strategy.long, comment="SELL PE")
+    inPE := true
+    dayTrd += 1
+
+if inPE
+    if low <= peSL
+        strategy.close("SellPE", comment="PE SL")
+        inPE := false
+    else if high >= peTG
+        strategy.close("SellPE", comment="PE TGT")
+        inPE := false
+
+bool eod = not na(time(
+  timeframe.period, "1525-1530", "Asia/Kolkata"
+  ))
+if eod and inCE
+    strategy.close("SellCE", comment="EOD")
+    inCE := false
+if eod and inPE
+    strategy.close("SellPE", comment="EOD")
+    inPE := false
+
+pCE = plot(ceLevel, "CE Sell",
+  color=color.new(color.red, 0),
+  linewidth=2, style=plot.style_stepline)
+pPE = plot(peLevel, "PE Sell",
+  color=color.new(color.green, 0),
+  linewidth=2, style=plot.style_stepline)
+pMid = plot(center, "VWAP",
+  color=color.new(color.yellow, 40), linewidth=1)
+fill(pCE, pPE,
+  color=showFill ? color.new(color.yellow, 92) : na,
+  title="Zone")
+
+plot(useST ? stLine : na, "ST",
+  color=stDir < 0 ? color.green : color.red,
+  linewidth=1)
+
+plotshape(ceGo and showLbl, title="CE",
+  style=shape.triangledown,
+  location=location.abovebar,
+  color=color.red, size=size.small, text="Sell CE")
+plotshape(peGo and showLbl, title="PE",
+  style=shape.triangleup,
+  location=location.belowbar,
+  color=color.green, size=size.small, text="Sell PE")
+
+alertcondition(ceGo, title="CE",
+  message="SELL CE at {{close}}")
+alertcondition(peGo, title="PE",
+  message="SELL PE at {{close}}")
+
+bgcolor(
+  close > ceLevel ? color.new(color.red, 92) :
+  close < peLevel ? color.new(color.green, 92) : na,
+  title="Warn")
+
+if showTbl and barstate.islast
+    var table d = table.new(
+      position.top_right, 2, 11,
+      bgcolor=color.new(color.black, 15),
+      border_width=1,
+      border_color=color.gray
+      )
+    table.cell(d, 0, 0, "OPTSELLER v6",
+      text_color=color.yellow,
+      text_size=size.normal,
+      bgcolor=color.new(color.black, 0))
+    table.merge_cells(d, 0, 0, 1, 0)
+    table.cell(d, 0, 1, "Spot",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 1,
+      str.tostring(math.round(close)),
+      text_color=color.yellow,
+      text_size=size.small)
+    table.cell(d, 0, 2, "SELL CE",
+      text_color=color.red,
+      text_size=size.small)
+    table.cell(d, 1, 2,
+      str.tostring(math.round(ceLevel)),
+      text_color=color.red,
+      text_size=size.small)
+    table.cell(d, 0, 3, "SELL PE",
+      text_color=color.green,
+      text_size=size.small)
+    table.cell(d, 1, 3,
+      str.tostring(math.round(peLevel)),
+      text_color=color.green,
+      text_size=size.small)
+    table.cell(d, 0, 4, "Width",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 4,
+      str.tostring(math.round(ceLevel - peLevel)),
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 0, 5, "Width%",
+      text_color=color.white,
+      text_size=size.small)
+    float wp = (ceLevel - peLevel) / close * 100
+    table.cell(d, 1, 5,
+      str.tostring(math.round(wp, 1)) + "%",
+      text_color=color.aqua,
+      text_size=size.small)
+    table.cell(d, 0, 6, "ATR",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 6,
+      str.tostring(math.round(atrVal, 1)),
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 0, 7, "VWAP",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 7,
+      str.tostring(math.round(vwapVal)),
+      text_color=color.yellow,
+      text_size=size.small)
+    table.cell(d, 0, 8, "RSI",
+      text_color=color.white,
+      text_size=size.small)
+    color rc = rsiVal > rsiOB ? color.red :
+      rsiVal < rsiOS ? color.green : color.white
+    table.cell(d, 1, 8,
+      str.tostring(math.round(rsiVal, 1)),
+      text_color=rc,
+      text_size=size.small)
+    table.cell(d, 0, 9, "Trend",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 9,
+      stDir < 0 ? "BULL" : "BEAR",
+      text_color=stDir < 0 ? color.green : color.red,
+      text_size=size.small)
+    table.cell(d, 0, 10, "Trades",
+      text_color=color.white,
+      text_size=size.small)
+    table.cell(d, 1, 10,
+      str.tostring(dayTrd) + "/" + str.tostring(maxTrd),
+      text_color=dayTrd >= maxTrd ? color.red : color.green,
+      text_size=size.small)
+
+View in Pine Editor・246 lines
+Use on chart
+2
+311
+simple and easy logic for nifty option sellers. clearly marked the selling and buying levels

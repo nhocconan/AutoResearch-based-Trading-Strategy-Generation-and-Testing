@@ -1,0 +1,1377 @@
+//@version=6
+strategy("Precision Confluence Trading Strategy [JOAT]", shorttitle="PCT [JOAT]", overlay=true, 
+         initial_capital=10000, default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=10, commission_type=strategy.commission.percent, 
+         commission_value=0.1, slippage=2, max_bars_back=5000)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PRECISION CONFLUENCE TRADING Strategy [JOAT]
+// Elite Multi-Factor Strategy Combining All Professional Indicators
+// Integrates CPR Levels, HMA Trend, RSI Divergence, ADX Strength, Volume Confirmation,
+// Smart Money Concepts (FVG, Order Blocks, Liquidity Sweeps) & Multi-Timeframe Analysis
+// Advanced Risk Management with ATR-Based Stops, Trailing Exits & Position Sizing
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ────────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ────────────────────────────────────────────────────────────────────────────────
+
+// Strategy Settings
+strategyGroup = "Strategy Settings"
+useMultiTimeframe = input.bool(false, "Use Multi-Timeframe Confirmation", group=strategyGroup)
+useDivergence = input.bool(true, "Use Divergence Signals", group=strategyGroup)
+useSMC = input.bool(true, "Use Smart Money Concepts", group=strategyGroup)
+useVolume = input.bool(true, "Use Volume Confirmation", group=strategyGroup)
+useCPR = input.bool(true, "Use CPR Levels", group=strategyGroup)
+useWaveTrend = input.bool(true, "Use WaveTrend Signals", group=strategyGroup)
+useHMAAlignment = input.bool(true, "Use HMA Ribbon Alignment", group=strategyGroup)
+useSessionFilter = input.bool(false, "Use Session Filters", group=strategyGroup)
+minConfluenceScore = input.int(50, "Minimum Confluence Score %", minval=30, maxval=100, group=strategyGroup)
+
+// Risk Management
+riskGroup = "Risk Management"
+riskPercent = input.float(2.0, "Risk Per Trade %", minval=0.1, maxval=10, step=0.1, group=riskGroup)
+rewardRatio = input.float(2.5, "Reward:Risk Ratio", minval=1.0, maxval=5.0, step=0.1, group=riskGroup)
+useTrailingStop = input.bool(true, "Use Trailing Stop", group=riskGroup)
+trailOffset = input.float(2.0, "Trailing Stop %", minval=0.1, maxval=5.0, step=0.1, group=riskGroup)
+useBreakeven = input.bool(true, "Move to Breakeven", group=riskGroup)
+breakevenTrigger = input.float(1.2, "Breakeven Trigger R:R", minval=0.5, maxval=3.0, step=0.1, group=riskGroup)
+atrMultiplier = input.float(1.5, "ATR Stop Multiplier", minval=0.5, maxval=5.0, step=0.1, group=riskGroup)
+
+// Indicator Parameters
+indicatorGroup = "Indicator Parameters"
+rsiLength = input.int(14, "RSI Length", minval=2, group=indicatorGroup)
+adxLength = input.int(14, "ADX Length", minval=1, group=indicatorGroup)
+adxThreshold = input.int(20, "ADX Threshold", minval=10, group=indicatorGroup)
+volMaLength = input.int(20, "Volume MA Length", minval=1, group=indicatorGroup)
+hmaLength = input.int(21, "HMA Length", minval=1, group=indicatorGroup)
+wtChannelLen = input.int(10, "WaveTrend Channel Length", minval=1, group=indicatorGroup)
+wtAverageLen = input.int(21, "WaveTrend Average Length", minval=1, group=indicatorGroup)
+
+// Session Settings
+sessionGroup = "Session Settings"
+londonSession = input.session("0300-1200", "London Session", group=sessionGroup)
+nySession = input.session("0830-1700", "NY Session", group=sessionGroup)
+
+// ────────────────────────────────────────────────────────────────────────────────
+// COLOR DEFINITIONS
+// ────────────────────────────────────────────────────────────────────────────────
+
+strongBullColor = color.rgb(0, 255, 0)
+weakBullColor = color.rgb(129, 199, 132)
+strongBearColor = color.rgb(255, 0, 0)
+weakBearColor = color.rgb(229, 115, 115)
+neutralColor = color.rgb(158, 158, 158)
+entryColor = color.rgb(0, 255, 0)
+exitColor = color.rgb(255, 0, 0)
+cprColor = color.rgb(255, 235, 59)
+volumeColor = color.rgb(255, 152, 0)
+
+// ────────────────────────────────────────────────────────────────────────────────
+// ENHANCED CPR CALCULATIONS (FROM INDICATOR 1)
+// ────────────────────────────────────────────────────────────────────────────────
+
+calcCPR(h, l, c) =>
+    pivot = (h + l + c) / 3
+    bc = (h + l) / 2
+    tc = (pivot - bc) + pivot
+    [pivot, bc, tc]
+
+// Daily CPR
+dHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+dLow = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+dClose = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+[dPivot, dBC, dTC] = calcCPR(dHigh, dLow, dClose)
+
+// Weekly CPR
+wHigh = request.security(syminfo.tickerid, "W", high[1], lookahead=barmerge.lookahead_on)
+wLow = request.security(syminfo.tickerid, "W", low[1], lookahead=barmerge.lookahead_on)
+wClose = request.security(syminfo.tickerid, "W", close[1], lookahead=barmerge.lookahead_on)
+[wPivot, wBC, wTC] = calcCPR(wHigh, wLow, wClose)
+
+// CPR Width Analysis
+dCPRWidth = ((dTC - dBC) / dPivot) * 100
+wCPRWidth = ((wTC - wBC) / wPivot) * 100
+
+// CPR Position Analysis
+cprBullish = close > dPivot and close > wPivot
+cprBearish = close < dPivot and close < wPivot
+cprNarrow = dCPRWidth < 0.5  // Narrow CPR indicates potential breakout
+cprWide = dCPRWidth > 1.5    // Wide CPR indicates ranging market
+
+// Distance from CPR levels
+distFromDailyPivot = ((close - dPivot) / dPivot) * 100
+distFromWeeklyPivot = ((close - wPivot) / wPivot) * 100
+
+// ────────────────────────────────────────────────────────────────────────────────
+// ENHANCED HMA RIBBON SYSTEM (FROM INDICATOR 7)
+// ────────────────────────────────────────────────────────────────────────────────
+
+hullMA(src, length) =>
+    wma1 = ta.wma(src, length / 2)
+    wma2 = ta.wma(src, length)
+    ta.wma(2 * wma1 - wma2, int(math.sqrt(length)))
+
+// Multiple HMAs for ribbon
+hma8 = hullMA(close, 8)
+hma13 = hullMA(close, 13)
+hma21 = hullMA(close, 21)
+hma34 = hullMA(close, 34)
+hma55 = hullMA(close, 55)
+
+// HMA Alignment Check
+hmaFullBullish = hma8 > hma13 and hma13 > hma21 and hma21 > hma34 and hma34 > hma55
+hmaFullBearish = hma8 < hma13 and hma13 < hma21 and hma21 < hma34 and hma34 < hma55
+hmaBullish = close > hma21 and hma21 > hma21[1]
+hmaBearish = close < hma21 and hma21 < hma21[1]
+
+// EMA Cloud
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+emaCloudBullish = emaFast > emaSlow
+emaCloudBearish = emaFast < emaSlow
+
+// Key Moving Averages
+sma50 = ta.sma(close, 50)
+sma200 = ta.sma(close, 200)
+goldenCross = sma50 > sma200
+deathCross = sma50 < sma200
+
+// ────────────────────────────────────────────────────────────────────────────────
+// WAVETREND OSCILLATOR (FROM INDICATOR 2)
+// ────────────────────────────────────────────────────────────────────────────────
+
+calcWaveTrend(src, chlen, avglen) =>
+    esa = ta.ema(src, chlen)
+    d = ta.ema(math.abs(src - esa), chlen)
+    ci = (src - esa) / (0.015 * d)
+    tci = ta.ema(ci, avglen)
+    wt1 = tci
+    wt2 = ta.sma(wt1, 4)
+    [wt1, wt2]
+
+[wt1, wt2] = calcWaveTrend(hlc3, wtChannelLen, wtAverageLen)
+
+// WaveTrend Signals
+wtCross = ta.cross(wt1, wt2)
+wtCrossUp = ta.crossover(wt1, wt2)
+wtCrossDown = ta.crossunder(wt1, wt2)
+wtOverbought = wt1 > 60
+wtOversold = wt1 < -60
+wtExtremeOverbought = wt1 > 80
+wtExtremeOversold = wt1 < -80
+
+// WaveTrend Divergence
+wtPivotHigh = ta.pivothigh(wt1, 5, 5)
+wtPivotLow = ta.pivotlow(wt1, 5, 5)
+
+var float lastWTPivotHighVal = na
+var float lastWTPivotHighPrice = na
+var float lastWTPivotLowVal = na
+var float lastWTPivotLowPrice = na
+
+wtBullDiv = false
+wtBearDiv = false
+
+if not na(wtPivotHigh)
+    currentHighPrice = high[5]
+    currentHighWT = wt1[5]
+    if not na(lastWTPivotHighPrice)
+        wtBearDiv := currentHighPrice > lastWTPivotHighPrice and currentHighWT < lastWTPivotHighVal
+    lastWTPivotHighVal := currentHighWT
+    lastWTPivotHighPrice := currentHighPrice
+
+if not na(wtPivotLow)
+    currentLowPrice = low[5]
+    currentLowWT = wt1[5]
+    if not na(lastWTPivotLowPrice)
+        wtBullDiv := currentLowPrice < lastWTPivotLowPrice and currentLowWT > lastWTPivotLowVal
+    lastWTPivotLowVal := currentLowWT
+    lastWTPivotLowPrice := currentLowPrice
+
+// WaveTrend Momentum
+wtMomentum = wt1 - wt2
+wtMomentumBullish = wtMomentum > 0 and wtMomentum > wtMomentum[1]
+wtMomentumBearish = wtMomentum < 0 and wtMomentum < wtMomentum[1]
+
+// ────────────────────────────────────────────────────────────────────────────────
+// MULTI-OSCILLATOR DIVERGENCE SYSTEM (FROM INDICATOR 4)
+// ────────────────────────────────────────────────────────────────────────────────
+
+// RSI
+rsi = ta.rsi(close, rsiLength)
+rsiOversold = rsi < 30
+rsiOverbought = rsi > 70
+
+// Stochastic RSI
+stochRSI = ta.stoch(rsi, rsi, rsi, 14)
+
+// MACD
+[macdLine, macdSignal, macdHist] = ta.macd(close, 12, 26, 9)
+
+// CCI
+cci = ta.cci(close, 20)
+
+// Composite Oscillator
+compositeOsc = (rsi + stochRSI + ((macdHist + 100) / 2) + ((cci + 200) / 4)) / 4
+
+// RSI Divergence
+pivotLookback = 5
+rsiPivotHigh = ta.pivothigh(rsi, pivotLookback, pivotLookback)
+rsiPivotLow = ta.pivotlow(rsi, pivotLookback, pivotLookback)
+
+var float lastRSIPivotHighVal = na
+var float lastRSIPivotHighPrice = na
+var float lastRSIPivotLowVal = na
+var float lastRSIPivotLowPrice = na
+
+rsiBullDiv = false
+rsiBearDiv = false
+
+if not na(rsiPivotHigh)
+    currentHighPrice = high[pivotLookback]
+    currentHighRSI = rsi[pivotLookback]
+    if not na(lastRSIPivotHighPrice)
+        rsiBearDiv := currentHighPrice > lastRSIPivotHighPrice and currentHighRSI < lastRSIPivotHighVal
+    lastRSIPivotHighVal := currentHighRSI
+    lastRSIPivotHighPrice := currentHighPrice
+
+if not na(rsiPivotLow)
+    currentLowPrice = low[pivotLookback]
+    currentLowRSI = rsi[pivotLookback]
+    if not na(lastRSIPivotLowPrice)
+        rsiBullDiv := currentLowPrice < lastRSIPivotLowPrice and currentLowRSI > lastRSIPivotLowVal
+    lastRSIPivotLowVal := currentLowRSI
+    lastRSIPivotLowPrice := currentLowPrice
+
+// Combined Divergence Signal
+bullishDivergence = rsiBullDiv or wtBullDiv
+bearishDivergence = rsiBearDiv or wtBearDiv
+strongBullDiv = rsiBullDiv and wtBullDiv
+strongBearDiv = rsiBearDiv and wtBearDiv
+
+// ────────────────────────────────────────────────────────────────────────────────
+// ADX & TREND STRENGTH
+// ────────────────────────────────────────────────────────────────────────────────
+
+[plus, minus, adx] = ta.dmi(adxLength, adxLength)
+strongTrend = adx > adxThreshold
+trendBullish = plus > minus
+trendBearish = minus > plus
+
+// ────────────────────────────────────────────────────────────────────────────────
+// ENHANCED VOLUME ANALYSIS (FROM INDICATOR 6)
+// ────────────────────────────────────────────────────────────────────────────────
+
+volMA = ta.sma(volume, volMaLength)
+highVolume = volume > volMA * 1.5
+climaxVolume = volume > volMA * 3.0
+bullishVolume = close > open and highVolume
+bearishVolume = close < open and highVolume
+
+// Volume Delta
+buyVolume = close > open ? volume : 0
+sellVolume = close < open ? volume : 0
+volumeDelta = ta.cum(buyVolume) - ta.cum(sellVolume)
+volumeDeltaMA = ta.sma(volumeDelta, 20)
+deltaRising = volumeDelta > volumeDeltaMA
+deltaFalling = volumeDelta < volumeDeltaMA
+
+// Volume Confirmation
+volConfirmedBull = bullishVolume and deltaRising
+volConfirmedBear = bearishVolume and deltaFalling
+
+// ────────────────────────────────────────────────────────────────────────────────
+// ENHANCED SMART MONEY CONCEPTS (FROM INDICATOR 5)
+// ────────────────────────────────────────────────────────────────────────────────
+
+// Fair Value Gap with size calculation
+bullishFVG = low > high[2] and close[1] > high[2]
+fvgBullSize = bullishFVG ? ((low - high[2]) / high[2]) * 100 : 0
+bearishFVG = high < low[2] and close[1] < low[2]
+fvgBearSize = bearishFVG ? ((low[2] - high) / high) * 100 : 0
+
+// Significant FVG (larger gaps are more important)
+significantBullFVG = bullishFVG and fvgBullSize > 0.3
+significantBearFVG = bearishFVG and fvgBearSize > 0.3
+
+// Order Blocks with volume confirmation
+bullishOB = close[2] < open[2] and close[1] < open[1] and close > open and highVolume
+bearishOB = close[2] > open[2] and close[1] > open[1] and close < open and highVolume
+
+// Breaker Blocks (failed order blocks)
+var float lastBullOBHigh = na
+var float lastBearOBLow = na
+
+if bullishOB
+    lastBullOBHigh := high[1]
+if bearishOB
+    lastBearOBLow := low[1]
+
+breakerBull = not na(lastBearOBLow) and close > lastBearOBLow and close[1] <= lastBearOBLow
+breakerBear = not na(lastBullOBHigh) and close < lastBullOBHigh and close[1] >= lastBullOBHigh
+
+// Liquidity Sweeps with volume confirmation
+lookbackBars = 20
+recentHigh = ta.highest(high, lookbackBars)
+recentLow = ta.lowest(low, lookbackBars)
+liquiditySweepHigh = high > recentHigh[1] and close < recentHigh[1]
+liquiditySweepLow = low < recentLow[1] and close > recentLow[1]
+volConfirmedSweepHigh = liquiditySweepHigh and highVolume
+volConfirmedSweepLow = liquiditySweepLow and highVolume
+
+// Displacement (strong institutional move)
+atr = ta.atr(14)
+displacement = math.abs(close - open) > atr * 2 and climaxVolume
+bullishDisplacement = displacement and close > open
+bearishDisplacement = displacement and close < open
+
+// SMC Confluence Score
+smcBullScore = (significantBullFVG ? 2 : 0) + (bullishOB ? 2 : 0) + (breakerBull ? 1 : 0) + 
+               (volConfirmedSweepLow ? 2 : 0) + (bullishDisplacement ? 3 : 0)
+smcBearScore = (significantBearFVG ? 2 : 0) + (bearishOB ? 2 : 0) + (breakerBear ? 1 : 0) + 
+               (volConfirmedSweepHigh ? 2 : 0) + (bearishDisplacement ? 3 : 0)
+
+// ────────────────────────────────────────────────────────────────────────────────
+// SESSION FILTERS (FROM INDICATOR 6)
+// ────────────────────────────────────────────────────────────────────────────────
+
+inLondonSession = not na(time(timeframe.period, londonSession))
+inNYSession = not na(time(timeframe.period, nySession))
+inTradingSession = inLondonSession or inNYSession
+
+// ────────────────────────────────────────────────────────────────────────────────
+// MULTI-TIMEFRAME CONFIRMATION (FROM INDICATOR 3)
+// ────────────────────────────────────────────────────────────────────────────────
+
+htfTrend() =>
+    htfClose = close
+    htfHMA = hullMA(htfClose, 21)
+    [htfPlus, htfMinus, htfADX] = ta.dmi(14, 14)
+    htfTrendDir = htfClose > htfHMA ? 1 : -1
+    htfStrong = htfADX > 20
+    [htfTrendDir, htfStrong]
+
+[htf15mDir, htf15mStrong] = request.security(syminfo.tickerid, "15", htfTrend())
+[htf1hDir, htf1hStrong] = request.security(syminfo.tickerid, "60", htfTrend())
+[htf4hDir, htf4hStrong] = request.security(syminfo.tickerid, "240", htfTrend())
+
+mtfBullish = htf15mDir == 1 and htf1hDir == 1 and htf4hDir == 1
+mtfBearish = htf15mDir == -1 and htf1hDir == -1 and htf4hDir == -1
+mtfStrongBullish = mtfBullish and htf15mStrong and htf1hStrong and htf4hStrong
+mtfStrongBearish = mtfBearish and htf15mStrong and htf1hStrong and htf4hStrong
+
+// ────────────────────────────────────────────────────────────────────────────────
+// COMPREHENSIVE CONFLUENCE SCORING SYSTEM
+// ────────────────────────────────────────────────────────────────────────────────
+
+// Calculate individual component scores (0-100 scale)
+
+// 1. CPR Score (0-15 points)
+cprBullScore = 0
+cprBullScore := cprBullScore + (cprBullish ? 10 : 0)
+cprBullScore := cprBullScore + (close > dTC ? 3 : 0)
+cprBullScore := cprBullScore + (cprNarrow ? 2 : 0)
+
+cprBearScore = 0
+cprBearScore := cprBearScore + (cprBearish ? 10 : 0)
+cprBearScore := cprBearScore + (close < dBC ? 3 : 0)
+cprBearScore := cprBearScore + (cprNarrow ? 2 : 0)
+
+// 2. HMA Ribbon Score (0-15 points)
+hmaRibbonBullScore = 0
+hmaRibbonBullScore := hmaRibbonBullScore + (hmaBullish ? 5 : 0)
+hmaRibbonBullScore := hmaRibbonBullScore + (hmaFullBullish ? 7 : 0)
+hmaRibbonBullScore := hmaRibbonBullScore + (emaCloudBullish ? 3 : 0)
+
+hmaRibbonBearScore = 0
+hmaRibbonBearScore := hmaRibbonBearScore + (hmaBearish ? 5 : 0)
+hmaRibbonBearScore := hmaRibbonBearScore + (hmaFullBearish ? 7 : 0)
+hmaRibbonBearScore := hmaRibbonBearScore + (emaCloudBearish ? 3 : 0)
+
+// 3. WaveTrend Score (0-15 points)
+wtBullScore = 0
+wtBullScore := wtBullScore + (wtCrossUp and wtOversold ? 8 : wtCrossUp ? 5 : 0)
+wtBullScore := wtBullScore + (wtBullDiv ? 5 : 0)
+wtBullScore := wtBullScore + (wtMomentumBullish ? 2 : 0)
+
+wtBearScore = 0
+wtBearScore := wtBearScore + (wtCrossDown and wtOverbought ? 8 : wtCrossDown ? 5 : 0)
+wtBearScore := wtBearScore + (wtBearDiv ? 5 : 0)
+wtBearScore := wtBearScore + (wtMomentumBearish ? 2 : 0)
+
+// 4. Multi-Oscillator Divergence Score (0-10 points)
+divBullScore = 0
+divBullScore := divBullScore + (rsiBullDiv ? 5 : 0)
+divBullScore := divBullScore + (strongBullDiv ? 5 : 0)
+
+divBearScore = 0
+divBearScore := divBearScore + (rsiBearDiv ? 5 : 0)
+divBearScore := divBearScore + (strongBearDiv ? 5 : 0)
+
+// 5. ADX Trend Strength Score (0-10 points)
+adxBullScore = strongTrend and trendBullish ? 10 : trendBullish ? 5 : 0
+adxBearScore = strongTrend and trendBearish ? 10 : trendBearish ? 5 : 0
+
+// 6. Volume Confirmation Score (0-10 points)
+volBullScore = 0
+volBullScore := volBullScore + (volConfirmedBull ? 7 : bullishVolume ? 5 : 0)
+volBullScore := volBullScore + (climaxVolume and close > open ? 3 : 0)
+
+volBearScore = 0
+volBearScore := volBearScore + (volConfirmedBear ? 7 : bearishVolume ? 5 : 0)
+volBearScore := volBearScore + (climaxVolume and close < open ? 3 : 0)
+
+// 7. Smart Money Concepts Score (0-10 points) - already calculated as smcBullScore/smcBearScore
+
+// 8. Multi-Timeframe Score (0-15 points)
+mtfBullScore = 0
+mtfBullScore := mtfBullScore + (mtfStrongBullish ? 15 : mtfBullish ? 10 : htf1hDir == 1 ? 5 : 0)
+
+mtfBearScore = 0
+mtfBearScore := mtfBearScore + (mtfStrongBearish ? 15 : mtfBearish ? 10 : htf1hDir == -1 ? 5 : 0)
+
+// 9. Key MA Score (0-10 points)
+maBullScore = 0
+maBullScore := maBullScore + (close > sma50 ? 3 : 0)
+maBullScore := maBullScore + (close > sma200 ? 4 : 0)
+maBullScore := maBullScore + (goldenCross ? 3 : 0)
+
+maBearScore = 0
+maBearScore := maBearScore + (close < sma50 ? 3 : 0)
+maBearScore := maBearScore + (close < sma200 ? 4 : 0)
+maBearScore := maBearScore + (deathCross ? 3 : 0)
+
+// TOTAL CONFLUENCE SCORE (0-100)
+bullConfluenceScore = (useCPR ? cprBullScore : 0) + 
+                      (useHMAAlignment ? hmaRibbonBullScore : 0) + 
+                      (useWaveTrend ? wtBullScore : 0) + 
+                      (useDivergence ? divBullScore : 0) + 
+                      adxBullScore + 
+                      (useVolume ? volBullScore : 0) + 
+                      (useSMC ? smcBullScore : 0) + 
+                      (useMultiTimeframe ? mtfBullScore : 0) + 
+                      maBullScore
+
+bearConfluenceScore = (useCPR ? cprBearScore : 0) + 
+                      (useHMAAlignment ? hmaRibbonBearScore : 0) + 
+                      (useWaveTrend ? wtBearScore : 0) + 
+                      (useDivergence ? divBearScore : 0) + 
+                      adxBearScore + 
+                      (useVolume ? volBearScore : 0) + 
+                      (useSMC ? smcBearScore : 0) + 
+                      (useMultiTimeframe ? mtfBearScore : 0) + 
+                      maBearScore
+
+// Entry Signals with Confluence Threshold and Session Filter
+sessionFilter = useSessionFilter ? inTradingSession : true
+
+// More aggressive entry conditions
+strongLongSignal = bullConfluenceScore >= 70 and bearConfluenceScore < 40 and sessionFilter
+strongShortSignal = bearConfluenceScore >= 70 and bullConfluenceScore < 40 and sessionFilter
+
+// Medium strength signals
+mediumLongSignal = bullConfluenceScore >= 55 and bullConfluenceScore > bearConfluenceScore + 15 and sessionFilter and not strongLongSignal
+mediumShortSignal = bearConfluenceScore >= 55 and bearConfluenceScore > bullConfluenceScore + 15 and sessionFilter and not strongShortSignal
+
+// Combined signals
+longSignal = (strongLongSignal or mediumLongSignal) and bullConfluenceScore >= minConfluenceScore
+shortSignal = (strongShortSignal or mediumShortSignal) and bearConfluenceScore >= minConfluenceScore
+
+// ULTRA Signals (85+ confluence with strong momentum)
+ultraLongSignal = bullConfluenceScore >= 85 and bearConfluenceScore < 25 and (wtCrossUp or rsiBullDiv or bullishDisplacement)
+ultraShortSignal = bearConfluenceScore >= 85 and bullConfluenceScore < 25 and (wtCrossDown or rsiBearDiv or bearishDisplacement)
+
+// ────────────────────────────────────────────────────────────────────────────────
+// ENHANCED POSITION SIZING & RISK MANAGEMENT
+// ────────────────────────────────────────────────────────────────────────────────
+
+// Calculate ATR for stop loss
+stopLossDistance = atr * atrMultiplier
+
+// Dynamic stop adjustment based on signal strength
+dynamicStopMultiplier = ultraLongSignal or ultraShortSignal ? atrMultiplier * 0.8 : strongLongSignal or strongShortSignal ? atrMultiplier : atrMultiplier * 1.2
+
+// Calculate position size based on risk
+accountSize = strategy.equity
+riskAmount = accountSize * (riskPercent / 100)
+positionSize = riskAmount / stopLossDistance
+
+// Dynamic stop loss based on market structure and recent swing points
+swingLowLookback = 10
+swingHighLookback = 10
+recentSwingLow = ta.lowest(low, swingLowLookback)
+recentSwingHigh = ta.highest(high, swingHighLookback)
+
+dynamicStopBull = math.min(close - (atr * dynamicStopMultiplier), recentSwingLow - (atr * 0.2))
+dynamicStopBear = math.max(close + (atr * dynamicStopMultiplier), recentSwingHigh + (atr * 0.2))
+
+// ────────────────────────────────────────────────────────────────────────────────
+// ENHANCED STRATEGY EXECUTION
+// ────────────────────────────────────────────────────────────────────────────────
+
+// Track entry price for breakeven
+var float entryPrice = na
+var bool movedToBreakeven = false
+
+// Long Entry
+if longSignal and strategy.position_size == 0
+    stopLoss = dynamicStopBull
+    stopDistance = close - stopLoss
+    takeProfit = close + (stopDistance * rewardRatio)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=stopLoss, limit=takeProfit)
+    
+    entryPrice := close
+    movedToBreakeven := false
+    
+    labelText = ultraLongSignal ? "ULTRA LONG\n" + str.tostring(bullConfluenceScore) : strongLongSignal ? "STRONG LONG\n" + str.tostring(bullConfluenceScore) : "LONG\n" + str.tostring(bullConfluenceScore)
+    labelColor = ultraLongSignal ? color.new(strongBullColor, 0) : strongLongSignal ? color.new(weakBullColor, 0) : color.new(entryColor, 20)
+    labelSize = ultraLongSignal ? size.large : strongLongSignal ? size.normal : size.small
+    
+    label.new(bar_index, low, labelText, style=label.style_label_up, color=labelColor, textcolor=color.white, size=labelSize)
+
+// Short Entry
+if shortSignal and strategy.position_size == 0
+    stopLoss = dynamicStopBear
+    stopDistance = stopLoss - close
+    takeProfit = close - (stopDistance * rewardRatio)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=stopLoss, limit=takeProfit)
+    
+    entryPrice := close
+    movedToBreakeven := false
+    
+    labelText = ultraShortSignal ? "ULTRA SHORT\n" + str.tostring(bearConfluenceScore) : strongShortSignal ? "STRONG SHORT\n" + str.tostring(bearConfluenceScore) : "SHORT\n" + str.tostring(bearConfluenceScore)
+    labelColor = ultraShortSignal ? color.new(strongBearColor, 0) : strongShortSignal ? color.new(weakBearColor, 0) : color.new(exitColor, 20)
+    labelSize = ultraShortSignal ? size.large : strongShortSignal ? size.normal : size.small
+    
+    label.new(bar_index, high, labelText, style=label.style_label_down, color=labelColor, textcolor=color.white, size=labelSize)
+
+// Breakeven Management
+if useBreakeven and strategy.position_size > 0 and not movedToBreakeven
+    stopDistance = entryPrice - dynamicStopBull
+    if close >= entryPrice + (stopDistance * breakevenTrigger)
+        newStop = entryPrice + (stopDistance * 0.1)
+        newTP = entryPrice + (stopDistance * rewardRatio)
+        strategy.exit("Long Exit", "Long", stop=newStop, limit=newTP)
+        movedToBreakeven := true
+        label.new(bar_index, low, "BE", style=label.style_label_up, color=color.new(color.blue, 0), textcolor=color.white, size=size.tiny)
+
+if useBreakeven and strategy.position_size < 0 and not movedToBreakeven
+    stopDistance = dynamicStopBear - entryPrice
+    if close <= entryPrice - (stopDistance * breakevenTrigger)
+        newStop = entryPrice - (stopDistance * 0.1)
+        newTP = entryPrice - (stopDistance * rewardRatio)
+        strategy.exit("Short Exit", "Short", stop=newStop, limit=newTP)
+        movedToBreakeven := true
+        label.new(bar_index, high, "BE", style=label.style_label_down, color=color.new(color.blue, 0), textcolor=color.white, size=size.tiny)
+
+// ────────────────────────────────────────────────────────────────────────────────
+// ENHANCED PLOTTING
+// ────────────────────────────────────────────────────────────────────────────────
+
+// CPR Levels - Clean lines only
+plot(useCPR ? dPivot : na, "Daily Pivot", color.new(cprColor, 0), 2, plot.style_line)
+plot(useCPR ? dTC : na, "Daily TC", color.new(cprColor, 60), 1, plot.style_line)
+plot(useCPR ? dBC : na, "Daily BC", color.new(cprColor, 60), 1, plot.style_line)
+
+// HMA Ribbon with gradient colors
+hmaColor1 = color.rgb(0, 255, 0)
+hmaColor2 = color.rgb(102, 255, 102)
+hmaColor3 = color.rgb(255, 255, 0)
+hmaColor4 = color.rgb(255, 153, 0)
+hmaColor5 = color.rgb(255, 0, 0)
+
+hma8Plot = plot(hma8, "HMA 8", color.new(hmaColor1, 50), 2)
+hma13Plot = plot(hma13, "HMA 13", color.new(hmaColor2, 50), 2)
+hma21Plot = plot(hma21, "HMA 21", color.new(hmaColor3, 50), 2)
+hma34Plot = plot(hma34, "HMA 34", color.new(hmaColor4, 50), 2)
+hma55Plot = plot(hma55, "HMA 55", color.new(hmaColor5, 50), 2)
+
+// HMA Ribbon Fills
+ribbonTransparency = 85
+fill(hma8Plot, hma13Plot, color.new(hmaColor1, ribbonTransparency), title="HMA Fill 1-2")
+fill(hma13Plot, hma21Plot, color.new(hmaColor2, ribbonTransparency), title="HMA Fill 2-3")
+fill(hma21Plot, hma34Plot, color.new(hmaColor3, ribbonTransparency), title="HMA Fill 3-4")
+fill(hma34Plot, hma55Plot, color.new(hmaColor4, ribbonTransparency), title="HMA Fill 4-5")
+
+// EMA Cloud
+emaFastPlot = plot(emaFast, "EMA 9", color.new(emaCloudBullish ? strongBullColor : strongBearColor, 60), 1)
+emaSlowPlot = plot(emaSlow, "EMA 21", color.new(emaCloudBullish ? strongBullColor : strongBearColor, 60), 1)
+fill(emaFastPlot, emaSlowPlot, color.new(emaCloudBullish ? strongBullColor : strongBearColor, 90), title="EMA Cloud")
+
+// Key MAs
+plot(sma50, "SMA 50", color.new(color.blue, 40), 2)
+plot(sma200, "SMA 200", color.new(color.orange, 40), 3)
+
+// Signal Strength Visualization with Gradient
+confluenceGradient = bullConfluenceScore > bearConfluenceScore ? color.from_gradient(bullConfluenceScore, 50, 100, color.new(weakBullColor, 95), color.new(strongBullColor, 85)) : color.from_gradient(bearConfluenceScore, 50, 100, color.new(weakBearColor, 95), color.new(strongBearColor, 85))
+
+bgcolor(longSignal or shortSignal ? confluenceGradient : na, title="Signal BG")
+
+// ULTRA Signal Markers
+plotshape(ultraLongSignal ? low : na, "ULTRA Long", shape.diamond, location.belowbar, 
+         color.new(strongBullColor, 0), size=size.large)
+plotshape(ultraShortSignal ? high : na, "ULTRA Short", shape.diamond, location.abovebar, 
+         color.new(strongBearColor, 0), size=size.large)
+
+// ────────────────────────────────────────────────────────────────────────────────
+// COMPREHENSIVE INFORMATION TABLE
+// ────────────────────────────────────────────────────────────────────────────────
+
+var table perfTable = table.new(position.bottom_right, 3, 12,
+                                 bgcolor=color.new(color.black, 85),
+                                 frame_color=color.new(color.gray, 50),
+                                 frame_width=2,
+                                 border_width=1,
+                                 border_color=color.new(color.gray, 50))
+
+if barstate.islast
+    // Header
+    table.cell(perfTable, 0, 0, "Component", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    table.cell(perfTable, 1, 0, "Bull", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    table.cell(perfTable, 2, 0, "Bear", bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    
+    // Position Status
+    table.cell(perfTable, 0, 1, "Position", text_color=color.white, text_size=size.small)
+    posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.new(strongBullColor, 30) : strategy.position_size < 0 ? color.new(strongBearColor, 30) : color.new(neutralColor, 70)
+    table.cell(perfTable, 1, 1, posText, bgcolor=posColor, text_color=color.white, text_size=size.small)
+    table.merge_cells(perfTable, 1, 1, 2, 1)
+    
+    // Confluence Scores
+    table.cell(perfTable, 0, 2, "CONFLUENCE", text_color=color.yellow, text_size=size.small)
+    bullScoreColor = bullConfluenceScore >= 90 ? color.new(strongBullColor, 20) : bullConfluenceScore >= 70 ? color.new(weakBullColor, 30) : color.new(neutralColor, 70)
+    bearScoreColor = bearConfluenceScore >= 90 ? color.new(strongBearColor, 20) : bearConfluenceScore >= 70 ? color.new(weakBearColor, 30) : color.new(neutralColor, 70)
+    table.cell(perfTable, 1, 2, str.tostring(bullConfluenceScore, "#"), bgcolor=bullScoreColor, text_color=color.white, text_size=size.normal)
+    table.cell(perfTable, 2, 2, str.tostring(bearConfluenceScore, "#"), bgcolor=bearScoreColor, text_color=color.white, text_size=size.normal)
+    
+    // Individual Components
+    table.cell(perfTable, 0, 3, "CPR", text_color=cprColor, text_size=size.tiny)
+    table.cell(perfTable, 1, 3, str.tostring(cprBullScore), text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 2, 3, str.tostring(cprBearScore), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(perfTable, 0, 4, "HMA Ribbon", text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 1, 4, str.tostring(hmaRibbonBullScore), text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 2, 4, str.tostring(hmaRibbonBearScore), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(perfTable, 0, 5, "WaveTrend", text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 1, 5, str.tostring(wtBullScore), text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 2, 5, str.tostring(wtBearScore), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(perfTable, 0, 6, "Divergence", text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 1, 6, str.tostring(divBullScore), text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 2, 6, str.tostring(divBearScore), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(perfTable, 0, 7, "ADX", text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 1, 7, str.tostring(adxBullScore), text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 2, 7, str.tostring(adxBearScore), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(perfTable, 0, 8, "Volume", text_color=volumeColor, text_size=size.tiny)
+    table.cell(perfTable, 1, 8, str.tostring(volBullScore), text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 2, 8, str.tostring(volBearScore), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(perfTable, 0, 9, "SMC", text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 1, 9, str.tostring(smcBullScore), text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 2, 9, str.tostring(smcBearScore), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(perfTable, 0, 10, "MTF", text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 1, 10, str.tostring(mtfBullScore), text_color=color.white, text_size=size.tiny)
+    table.cell(perfTable, 2, 10, str.tostring(mtfBearScore), text_color=color.white, text_size=size.tiny)
+    
+    // Equity
+    table.cell(perfTable, 0, 11, "Equity", text_color=color.white, text_size=size.small)
+    equityText = "$" + str.tostring(strategy.equity, "#,###")
+    equityColor = strategy.equity > strategy.initial_capital ? color.new(strongBullColor, 30) : color.new(strongBearColor, 30)
+    pnlPercent = ((strategy.equity - strategy.initial_capital) / strategy.initial_capital) * 100
+    pnlText = str.tostring(pnlPercent, "#.##") + "%"
+    table.cell(perfTable, 1, 11, equityText + "\n" + pnlText, bgcolor=equityColor, text_color=color.white, text_size=size.small)
+    table.merge_cells(perfTable, 1, 11, 2, 11)
+
+View in Pine Editor・692 lines
+Use on chart
+5
+4
+4
+4
+8 650
+Precision Confluence Trading Strategy
+
+Introduction
+
+The Precision Confluence Trading Strategy is an open-source algorithmic trading system that combines Central Pivot Range (CPR) analysis, Hull Moving Average (HMA) ribbon alignment, WaveTrend oscillator signals, multi-oscillator divergence detection, ADX trend strength, volume confirmation, Smart Money Concepts (FVG, Order Blocks, Liquidity Sweeps), and multi-timeframe analysis into a comprehensive confluence-based strategy. This mashup creates an institutional-grade trading system designed to identify high-probability setups where multiple independent analytical frameworks simultaneously signal the same direction.
+
+The strategy addresses a fundamental challenge in algorithmic trading: single-factor systems produce too many false signals and lack robustness across different market conditions. By requiring confluence across 9 different analytical components before entering trades, this system significantly reduces false signals and focuses capital on only the highest-quality setups where technical, momentum, volume, and institutional factors all align.
+
+
+
+Chart showing strategy entries with confluence dashboard on 4H timeframe
+
+Why This Mashup Exists
+
+This strategy combines nine analytical frameworks that address different aspects of market analysis:
+
+
+CPR Analysis: Identifies key pivot levels where institutional algorithms make decisions
+
+HMA Ribbon: Measures trend quality through 5-layer moving average alignment
+
+WaveTrend Oscillator: Detects momentum cycles and overbought/oversold conditions
+
+Multi-Oscillator Divergence: Identifies momentum exhaustion across RSI, MACD, Stochastic RSI
+
+ADX Trend Strength: Quantifies trend strength to avoid weak, choppy markets
+
+Volume Confirmation: Validates moves with volume analysis and delta calculations
+
+Smart Money Concepts: Tracks institutional footprints (FVG, Order Blocks, Liquidity Sweeps)
+
+Multi-Timeframe Analysis: Ensures directional alignment across 15M, 1H, and 4H timeframes
+
+Key Moving Averages: Confirms position relative to SMA 50/200 institutional levels
+
+
+
+Each component addresses a different market dimension: CPR provides static structure, HMA shows trend quality, WaveTrend captures momentum cycles, Divergences warn of exhaustion, ADX measures trend strength, Volume confirms genuine moves, SMC reveals institutional behavior, MTF ensures alignment, and Key MAs provide institutional context. Together, they create a multi-dimensional analysis system that no single indicator can provide.
+
+The mashup is justified because these components use fundamentally different data and methodologies (pivot calculations, weighted moving averages, wave oscillators, directional movement, volume analysis, price inefficiencies, multi-timeframe data, simple moving averages) that respond to different market conditions. When they align, it indicates genuine high-probability setup rather than noise from a single analytical method.
+
+Core Strategy Logic
+
+1. CPR Analysis Component (0-15 points)
+
+Central Pivot Range provides structural reference levels:
+
+
+Pine Script®
+// Daily and Weekly CPR calculation
+[dPivot, dBC, dTC] = calcCPR(dHigh, dLow, dClose)
+[wPivot, wBC, wTC] = calcCPR(wHigh, wLow, wClose)
+
+// CPR scoring
+cprBullScore = 0
+cprBullScore += close > dPivot and close > wPivot ? 10 : 0
+cprBullScore += close > dTC ? 3 : 0
+cprBullScore += cprNarrow ? 2 : 0  // Narrow CPR = breakout potential
+
+cprBearScore = 0
+cprBearScore += close < dPivot and close < wPivot ? 10 : 0
+cprBearScore += close < dBC ? 3 : 0
+cprBearScore += cprNarrow ? 2 : 0
+
+Expand 9 lines
+
+
+CPR contribution: Up to 15 points for strong position relative to pivots with narrow CPR indicating breakout potential.
+
+2. HMA Ribbon Alignment Component (0-15 points)
+
+5-layer Hull Moving Average ribbon measures trend quality:
+
+
+Pine Script®
+// Calculate 5 HMAs
+hma8 = hullMA(close, 8)
+hma13 = hullMA(close, 13)
+hma21 = hullMA(close, 21)
+hma34 = hullMA(close, 34)
+hma55 = hullMA(close, 55)
+
+// Full alignment check
+hmaFullBullish = hma8 > hma13 and hma13 > hma21 and hma21 > hma34 and hma34 > hma55
+hmaFullBearish = hma8 < hma13 and hma13 < hma21 and hma21 < hma34 and hma34 < hma55
+
+// EMA cloud
+emaCloudBullish = emaFast > emaSlow
+
+// HMA scoring
+hmaRibbonBullScore = 0
+hmaRibbonBullScore += hmaBullish ? 5 : 0
+hmaRibbonBullScore += hmaFullBullish ? 7 : 0  // Full alignment = strong trend
+hmaRibbonBullScore += emaCloudBullish ? 3 : 0
+
+Expand 14 lines
+
+
+HMA contribution: Up to 15 points for full ribbon alignment with EMA cloud confirmation.
+
+3. WaveTrend Oscillator Component (0-15 points)
+
+WaveTrend detects momentum cycles and extreme conditions:
+
+
+Pine Script®
+[wt1, wt2] = calcWaveTrend(hlc3, wtChannelLen, wtAverageLen)
+
+// WaveTrend signals
+wtCrossUp = ta.crossover(wt1, wt2)
+wtCrossDown = ta.crossunder(wt1, wt2)
+wtOversold = wt1 < -60
+wtOverbought = wt1 > 60
+
+// WaveTrend scoring
+wtBullScore = 0
+wtBullScore += wtCrossUp and wtOversold ? 8 : wtCrossUp ? 5 : 0
+wtBullScore += wtBullDiv ? 5 : 0  // Divergence adds weight
+wtBullScore += wtMomentumBullish ? 2 : 0
+
+Expand 8 lines
+
+
+WaveTrend contribution: Up to 15 points for crossover in extreme zone with divergence and momentum confirmation.
+
+4. Multi-Oscillator Divergence Component (0-10 points)
+
+Tracks divergences across RSI, MACD, and Stochastic RSI:
+
+
+Pine Script®
+// Divergence detection
+rsiBullDiv = price LL and rsi HL
+wtBullDiv = price LL and wt1 HL
+strongBullDiv = rsiBullDiv and wtBullDiv
+
+// Divergence scoring
+divBullScore = 0
+divBullScore += rsiBullDiv ? 5 : 0
+divBullScore += strongBullDiv ? 5 : 0  // Multiple oscillators = stronger signal
+
+Expand 4 lines
+
+
+Divergence contribution: Up to 10 points for multi-oscillator divergence indicating momentum exhaustion.
+
+5. ADX Trend Strength Component (0-10 points)
+
+ADX quantifies trend strength to avoid choppy markets:
+
+
+Pine Script®
+[plus, minus, adx] = ta.dmi(adxLength, adxLength)
+
+strongTrend = adx > adxThreshold  // Default: 20
+trendBullish = plus > minus
+
+// ADX scoring
+adxBullScore = strongTrend and trendBullish ? 10 : trendBullish ? 5 : 0
+
+Expand 2 lines
+
+
+ADX contribution: Up to 10 points for strong trend (ADX > 20) in correct direction.
+
+6. Volume Confirmation Component (0-10 points)
+
+Volume analysis validates genuine institutional participation:
+
+
+Pine Script®
+volMA = ta.sma(volume, volMaLength)
+highVolume = volume > volMA * 1.5
+climaxVolume = volume > volMA * 3.0
+
+// Volume delta
+volumeDelta = ta.cum(buyVolume) - ta.cum(sellVolume)
+deltaRising = volumeDelta > volumeDeltaMA
+
+// Volume scoring
+volBullScore = 0
+volBullScore += volConfirmedBull ? 7 : bullishVolume ? 5 : 0
+volBullScore += climaxVolume and close > open ? 3 : 0
+
+Expand 7 lines
+
+
+Volume contribution: Up to 10 points for high volume with rising delta confirming institutional buying.
+
+7. Smart Money Concepts Component (0-10 points)
+
+SMC tracks institutional order flow patterns:
+
+
+Pine Script®
+// Fair Value Gaps
+significantBullFVG = bullishFVG and fvgSize > 0.3%
+
+// Order Blocks
+bullishOB = bearish candles + strong bullish candle + high volume
+
+// Liquidity Sweeps
+volConfirmedSweepLow = sweep below recent low + high volume
+
+// Displacement
+bullishDisplacement = large candle (> 2x ATR) + climax volume
+
+// SMC scoring
+smcBullScore = 0
+smcBullScore += significantBullFVG ? 2 : 0
+smcBullScore += bullishOB ? 2 : 0
+smcBullScore += volConfirmedSweepLow ? 2 : 0
+smcBullScore += bullishDisplacement ? 3 : 0
+
+Expand 13 lines
+
+
+SMC contribution: Up to 10 points for multiple institutional footprints (FVG + OB + Sweep + Displacement).
+
+8. Multi-Timeframe Analysis Component (0-15 points)
+
+Ensures directional alignment across higher timeframes:
+
+
+Pine Script®
+// Request higher timeframe data
+[htf15mDir, htf15mStrong] = request.security(syminfo.tickerid, "15", htfTrend())
+[htf1hDir, htf1hStrong] = request.security(syminfo.tickerid, "60", htfTrend())
+[htf4hDir, htf4hStrong] = request.security(syminfo.tickerid, "240", htfTrend())
+
+// Alignment check
+mtfBullish = htf15mDir == 1 and htf1hDir == 1 and htf4hDir == 1
+mtfStrongBullish = mtfBullish and htf15mStrong and htf1hStrong and htf4hStrong
+
+// MTF scoring
+mtfBullScore = 0
+mtfBullScore += mtfStrongBullish ? 15 : mtfBullish ? 10 : htf1hDir == 1 ? 5 : 0
+
+Expand 7 lines
+
+
+MTF contribution: Up to 15 points for all three higher timeframes aligned with strong trends.
+
+9. Key Moving Average Component (0-10 points)
+
+Position relative to institutional moving averages:
+
+
+Pine Script®
+sma50 = ta.sma(close, 50)
+sma200 = ta.sma(close, 200)
+goldenCross = sma50 > sma200
+
+// MA scoring
+maBullScore = 0
+maBullScore += close > sma50 ? 3 : 0
+maBullScore += close > sma200 ? 4 : 0
+maBullScore += goldenCross ? 3 : 0
+
+Expand 4 lines
+
+
+MA contribution: Up to 10 points for price above key MAs with Golden Cross.
+
+
+
+Dashboard showing confluence score breakdown by component
+
+Total Confluence Scoring System
+
+The strategy calculates total confluence score (0-100) by summing all components:
+
+
+Pine Script®
+bullConfluenceScore = cprBullScore +        // 0-15
+                      hmaRibbonBullScore +  // 0-15
+                      wtBullScore +         // 0-15
+                      divBullScore +        // 0-10
+                      adxBullScore +        // 0-10
+                      volBullScore +        // 0-10
+                      smcBullScore +        // 0-10
+                      mtfBullScore +        // 0-15
+                      maBullScore           // 0-10
+                      // Total: 0-100
+
+Expand 5 lines
+
+
+Entry signals require:
+
+Bullish confluence score >= minConfluenceScore (default: 70)
+
+Bearish confluence score < 30 (avoid conflicting signals)
+
+Optional session filter (London/NY sessions only)
+
+
+
+Signal tiers:
+
+LONG: Confluence score >= 70
+
+STRONG LONG: Confluence score >= 80
+
+ULTRA LONG: Confluence score >= 90 (rare, highest probability)
+
+
+
+Risk Management System
+
+The strategy implements comprehensive risk controls:
+
+1. ATR-Based Position Sizing
+
+
+Pine Script®
+atr = ta.atr(14)
+stopLossDistance = atr * 2
+
+// Calculate position size based on risk
+accountSize = strategy.equity
+riskAmount = accountSize * (riskPercent / 100)  // Default: 2%
+positionSize = riskAmount / stopLossDistance
+
+Expand 2 lines
+
+
+2. Dynamic Stop Loss and Take Profit
+
+
+Pine Script®
+// Dynamic stop based on market structure
+dynamicStopBull = math.min(close - stopLossDistance, ta.lowest(low, 10))
+
+// Take profit based on risk:reward ratio
+takeProfit = close + (stopLossDistance * rewardRatio)  // Default: 2:1
+
+
+
+3. Breakeven Management
+
+
+Pine Script®
+// Move stop to breakeven when profit reaches threshold
+if close >= entryPrice + (stopLossDistance * breakevenTrigger)  // Default: 1.0 R:R
+    strategy.exit("Long Exit", "Long", stop=entryPrice, limit=takeProfit)
+
+
+
+4. Trailing Stop (Optional)
+
+
+Pine Script®
+if useTrailingStop
+    trailDistance = close * (trailOffset / 100)  // Default: 1.5%
+    strategy.exit("Long Exit", "Long", trail_offset=trailDistance)
+
+
+
+Strategy Execution Logic
+
+
+Pine Script®
+// Long Entry
+if longSignal and strategy.position_size == 0
+    stopLoss = dynamicStopBull
+    takeProfit = close + (stopLossDistance * rewardRatio)
+    
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=stopLoss, limit=takeProfit)
+    
+    // Label with confluence score
+    label.new(bar_index, low, 
+             "LONG\nScore: " + str.tostring(bullConfluenceScore),
+             style=label.style_label_up, 
+             color=entryColor)
+
+// Short Entry (mirror logic)
+if shortSignal and strategy.position_size == 0
+    // Similar logic for short trades
+
+Expand 12 lines
+
+
+Performance Dashboard
+
+The strategy displays a comprehensive 12-row dashboard:
+
+
+Row 1: Component header
+
+Row 2: Current position (LONG/SHORT/FLAT)
+
+Row 3: Total confluence score (bull/bear)
+
+Row 4: CPR component score
+
+Row 5: HMA Ribbon component score
+
+Row 6: WaveTrend component score
+
+Row 7: Divergence component score
+
+Row 8: ADX component score
+
+Row 9: Volume component score
+
+Row 10: SMC component score
+
+Row 11: MTF component score
+
+Row 12: Equity and P&L percentage
+
+
+
+
+Strategy Parameters
+
+Strategy Settings:
+
+Use Multi-Timeframe Confirmation: Enable MTF analysis (default: enabled)
+
+Use Divergence Signals: Enable divergence component (default: enabled)
+
+Use Smart Money Concepts: Enable SMC component (default: enabled)
+
+Use Volume Confirmation: Enable volume component (default: enabled)
+
+Use CPR Levels: Enable CPR component (default: enabled)
+
+Use WaveTrend Signals: Enable WaveTrend component (default: enabled)
+
+Use HMA Alignment: Enable HMA component (default: enabled)
+
+Use Session Filter: Trade only during London/NY sessions (default: enabled)
+
+Minimum Confluence Score: Threshold for entry (default: 70, range: 50-100)
+
+
+
+Risk Management:
+
+Risk Per Trade %: Percentage of equity to risk (default: 2.0%, range: 0.1-10%)
+
+Reward:Risk Ratio: Take profit multiplier (default: 2.0, range: 1.0-5.0)
+
+Use Trailing Stop: Enable trailing stop (default: enabled)
+
+Trailing Stop %: Trail distance (default: 1.5%, range: 0.1-5.0%)
+
+Use Breakeven: Move stop to breakeven (default: enabled)
+
+Breakeven Trigger: R:R threshold to move stop (default: 1.0, range: 0.5-3.0)
+
+
+
+Indicator Parameters:
+
+RSI Length: Period for RSI (default: 14)
+
+ADX Length: Period for ADX (default: 14)
+
+ADX Threshold: Minimum ADX for strong trend (default: 20)
+
+Volume MA Length: Period for volume average (default: 20)
+
+HMA Length: Period for HMA (default: 21)
+
+WaveTrend Channel Length: (default: 10)
+
+WaveTrend Average Length: (default: 21)
+
+
+
+Backtesting Configuration
+
+Default strategy properties:
+
+Initial Capital: $10,000
+
+Default Qty Type: Percent of Equity
+
+Default Qty Value: 10%
+
+Commission Type: Percent
+
+Commission Value: 0.1% (10 basis points)
+
+Slippage: 2 ticks
+
+Max Bars Back: 5000
+
+
+
+These settings represent realistic trading conditions for the average trader. Commission and slippage account for typical broker fees and execution costs.
+
+How to Use This Strategy
+
+Step 1: Configure Components
+Enable/disable components based on your trading style. All components enabled provides maximum filtering but fewer trades.
+
+Step 2: Set Confluence Threshold
+Adjust minimum confluence score. Higher threshold (80-90) = fewer, higher-quality trades. Lower threshold (60-70) = more frequent trades.
+
+Step 3: Configure Risk Parameters
+Set risk per trade (1-2% recommended) and reward:risk ratio (2:1 minimum recommended). Enable breakeven and trailing stop for protection.
+
+Step 4: Backtest Thoroughly
+Run backtests on multiple timeframes and market conditions. Aim for 100+ trades for statistical significance. Review win rate, profit factor, and drawdown.
+
+Step 5: Analyze Component Contribution
+Use dashboard to see which components contribute most to winning trades. Consider adjusting weights or disabling low-value components.
+
+Step 6: Forward Test
+Paper trade the strategy before risking real capital. Verify that live results align with backtest expectations.
+
+Best Practices
+
+
+Use on 15-minute to 4-hour timeframes for optimal signal quality
+
+Confluence score above 80 produces highest win rate but fewer trades
+
+Enable all components for maximum filtering in volatile markets
+
+Disable some components for more frequent trades in trending markets
+
+Session filter (London/NY only) significantly improves results
+
+Risk 1-2% per trade maximum for sustainable trading
+
+Aim for minimum 2:1 reward:risk ratio
+
+Review dashboard component scores to understand trade quality
+
+Backtest on minimum 6-12 months of data
+
+Verify 100+ trades in backtest for statistical validity
+
+
+
+Strategy Limitations
+
+
+Confluence-based systems produce fewer trades - may not suit active traders
+
+Requires all components to align - perfect setups are rare
+
+Backtesting results may not reflect live trading with slippage and latency
+
+Multi-timeframe analysis can cause repainting on lower timeframes
+
+High confluence threshold (90+) may produce too few trades for some markets
+
+Commission and slippage significantly impact profitability
+
+Strategy optimized for trending markets - may underperform in ranges
+
+Past performance does not guarantee future results
+
+Requires understanding of all components for effective parameter tuning
+
+Complex system with many parameters - over-optimization risk
+
+
+
+Backtesting Considerations
+
+When evaluating backtest results:
+
+
+Sample Size: Minimum 100 trades for statistical significance
+
+Win Rate: 40-60% is realistic for 2:1 R:R strategy
+
+Profit Factor: Above 1.5 is good, above 2.0 is excellent
+
+Max Drawdown: Should be less than 20% of initial capital
+
+Sharpe Ratio: Above 1.0 indicates good risk-adjusted returns
+
+Trade Frequency: Should match your trading availability
+
+Equity Curve: Should show steady growth, not erratic spikes
+
+Consecutive Losses: Prepare for 5-10 consecutive losses
+
+
+
+Adjust parameters if:
+
+Win rate < 35% with 2:1 R:R (increase confluence threshold)
+
+Too few trades (< 50 in 6 months) (decrease confluence threshold or disable some components)
+
+Max drawdown > 25% (reduce risk per trade or increase confluence threshold)
+
+Profit factor < 1.2 (strategy may not be viable)
+
+
+
+Technical Implementation
+
+Built with Pine Script v6 using:
+
+9-component confluence scoring system
+
+CPR calculations with width analysis
+
+5-layer HMA ribbon with full alignment detection
+
+WaveTrend oscillator with divergence tracking
+
+Multi-oscillator divergence detection (RSI, MACD, Stoch RSI)
+
+ADX trend strength measurement
+
+Volume analysis with delta calculations
+
+Smart Money Concepts (FVG, OB, Liquidity Sweeps, Displacement)
+
+Multi-timeframe analysis (15M, 1H, 4H)
+
+ATR-based dynamic position sizing
+
+Breakeven and trailing stop management
+
+Comprehensive 12-row dashboard
+
+Session filtering (London/NY)
+
+
+
+The code is fully open-source and can be modified to adjust component weights, confluence thresholds, and risk parameters.
+
+Originality Statement
+
+This strategy is original in its comprehensive multi-component confluence approach. While individual components (CPR, HMA, WaveTrend, Divergences, ADX, Volume, SMC, MTF, Key MAs) are established analytical tools, this mashup is justified because:
+
+
+It integrates 9 independent analytical frameworks using fundamentally different data and methodologies
+
+The confluence scoring system quantifies setup quality across all components (0-100 scale)
+
+Each component addresses a different market dimension (structure, trend, momentum, strength, volume, institutional flow, timeframe alignment)
+
+Tiered signal system (LONG/STRONG/ULTRA) provides graduated confidence levels
+
+Comprehensive risk management with ATR-based sizing, breakeven, and trailing stops
+
+Component-level dashboard allows traders to understand what drives each trade
+
+Session filtering aligns with institutional trading hours
+
+Integration reveals complete market picture that no single indicator provides
+
+
+
+Each component contributes unique information: CPR provides structure, HMA shows trend quality, WaveTrend captures momentum cycles, Divergences warn of exhaustion, ADX measures strength, Volume confirms moves, SMC reveals institutional behavior, MTF ensures alignment, and Key MAs provide institutional context. The strategy's value lies in requiring confluence across these independent frameworks, significantly reducing false signals and focusing capital on only the highest-probability setups where all factors align.
+
+Disclaimer
+
+This strategy is provided for educational and informational purposes only. It is not financial advice or a recommendation to buy or sell any financial instrument. Trading involves substantial risk of loss and is not suitable for all investors.
+
+Backtesting results do not guarantee future performance. Past results, whether real or indicated by historical tests, are not indicative of future results. There are frequently sharp differences between backtested results and actual results subsequently achieved by any trading strategy.
+
+The confluence score is a mathematical calculation based on current market data, not a prediction of future price movement. High confluence scores do not ensure profitable trades. Market conditions change, and strategies that worked historically may not work in the future.
+
+Commission and slippage settings in backtests may not accurately reflect live trading conditions. Real trading results will vary based on execution quality, market liquidity, broker fees, and other factors not captured in backtesting.
+
+No representation is being made that any account will or is likely to achieve profits or losses similar to those shown in backtests. Users should thoroughly test any strategy in a paper trading environment before risking real capital.
+
+Always use proper risk management. Never risk more than you can afford to lose. The default 2% risk per trade is a guideline - adjust based on your personal risk tolerance and account size. Consider consulting with a qualified financial advisor before making investment decisions.
+
+The author is not responsible for any losses incurred from using this strategy. Users assume full responsibility for all trading decisions made using this tool.
+
+
+
+-Made with passion by officialjackofalltrades

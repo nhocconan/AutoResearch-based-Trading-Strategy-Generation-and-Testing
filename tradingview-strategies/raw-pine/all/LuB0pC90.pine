@@ -1,0 +1,4 @@
+//@version=5
+xfixtf=##input(defval=false,type='INPUT_BOOL',##id='in_7')
+##root(root_metainfo,rm_0,(xfixtf?plot.style_stepline:plot.style_line),cb__input__plot_style__integer,plot,style)
+##root(root_metainfo,rm_1,(xfixtf?plot.style_stepline:plot.style_line),cb__input__plot_style__integer,plot,style)

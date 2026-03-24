@@ -1,0 +1,4 @@
+//@version=3
+trade_dir=##input(defval='Long Only',type='INPUT_STRING',##id='in_6')
+dir=trade_dir=='Long Only'?'long':trade_dir=='Short Only'?'short':'all'
+##root(root_metainfo,rm_0,dir)

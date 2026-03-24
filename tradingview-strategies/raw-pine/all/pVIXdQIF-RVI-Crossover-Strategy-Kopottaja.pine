@@ -1,0 +1,87 @@
+//@version=5
+strategy("RVI Crossover Strategy", overlay=false)
+import TradingView/ta/8
+
+// Asetukset
+rviLength = input.int(10, title="RVI Length") 
+src = close
+
+
+
+
+len = input.int(10, title="Length", minval=1)
+rvi = math.sum(ta.swma(close-open), len)/math.sum(ta.swma(high-low),len)
+sig = ta.swma(rvi)
+offset = input.int(0, "Offset", minval = -500, maxval = 500, display = display.data_window)
+plot(rvi, color=#008000, title="RVGI", offset = offset)
+plot(sig, color=#FF0000, title="Signal", offset = offset)
+
+signalLine = ta.sma(rvi, rviLength)
+
+
+plot(rvi, color=color.green, title="RVI")
+plot(signalLine, color=color.red, title="Signal Line")
+
+pituusnopea = input(18, title="VWMANOPEA")
+pituusnopea2 = input(1, title="VWMAHIDAS")
+
+emapituus = input(31, title="EMAPITUUS")
+WVMA1= ta.vwma(close, pituusnopea)
+WVMA2 = ta.vwma(close, pituusnopea2) 
+WVMA3 = ta.vwma(close, 1)
+Bullish = ta.ema(close, emapituus) < WVMA2
+Bearish =  ta.ema(close, emapituus) > WVMA2
+
+longCondition = ta.crossover(rvi, sig) and (Bearish) 
+shortCondition = ta.crossunder(rvi, sig) and (Bullish)
+
+
+
+
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Sell", strategy.short)
+
+View in Pine Editor・45 lines
+Use on chart
+1
+0
+0
+3 532
+Overview of the RVI Crossover Strategy
+
+Strategy Name: RVI Crossover Strategy
+
+Purpose: The RVI Crossover Strategy is based on the crossover signals between the Relative Vigor Index (RVI) and its moving average signal line. This strategy aims to identify potential buy and sell signals by evaluating the market’s directional trend.
+
+Key Indicator Features
+Relative Vigor Index (RVI): This indicator measures the momentum of price changes over a specified period and helps identify the market’s current trend. The RVI is based on the idea that prices generally close higher than they open in an uptrend (and lower in a downtrend). The RVI helps provide an indication of the strength and direction of a trend.
+Signal Line: A moving average (e.g., SMA) is applied to the RVI values, creating a "signal line." When the RVI crosses above or below this line, it signals a potential trading opportunity.
+Calculations and Settings
+Calculating the RVI: The RVI is calculated by comparing the difference between the close and open prices to the difference between high and low prices. This provides information about the direction and momentum of price movement:
+
+RVI= Sum(SWMA(high−low))Sum(SWMA(close−open))
+​
+where SWMA is a smoothed weighted moving average over a specified period.
+
+Signal Line Calculation: The RVI value is smoothed by applying a simple moving average (SMA) to create the signal line. This signal line helps filter crossover signals for improved accuracy.
+
+Buy and Sell Conditions: Buy and sell conditions are identified based on crossovers between the RVI and its signal line.
+
+Buy Signal: A buy condition is triggered when the RVI crosses above the signal line, provided that the "Bearish" condition (trend confirmation) is met.
+Sell Signal: A sell condition occurs when the RVI crosses below the signal line, alongside the "Bullish" trend confirmation.
+Volume-Weighted Moving Averages (VWMA): VWMA indicators are used to assess price-volume relationships over different timeframes:
+
+Fast VWMA: A short-period volume-weighted moving average.
+Slow VWMA: A longer-period volume-weighted moving average. These values are used to strengthen the buy and sell conditions by confirming trend directions (Bullish or Bearish).
+
+
+
+
+
+
+
+
+Disclaimer: This is an educational and informational tool. Past performance is not indicative of future results. Always backtest before using in live markets

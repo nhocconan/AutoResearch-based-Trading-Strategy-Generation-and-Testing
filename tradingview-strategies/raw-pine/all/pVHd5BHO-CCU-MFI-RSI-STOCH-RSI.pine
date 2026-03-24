@@ -1,0 +1,6 @@
+//@version=4
+tradingOpportunity=##input(defval='Very good',type='INPUT_STRING',##id='in_6')
+longThreshhold=((tradingOpportunity=='Okay')?40:((tradingOpportunity=='Good')?30:((tradingOpportunity=='Very good')?20:0)))
+shortThreshhold=((tradingOpportunity=='Okay')?60:((tradingOpportunity=='Good')?70:((tradingOpportunity=='Very good')?80:0)))
+##root(root_metainfo,rm_0,longThreshhold,input__float)
+##root(root_metainfo,rm_1,shortThreshhold,input__float)

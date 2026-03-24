@@ -1,0 +1,389 @@
+//@version=6
+strategy("Bullish Engulfing at Daily Support (Pivot Low) - R Target (v6)",
+     overlay=true,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+useDailyOnly     = input.bool(true, "Only trade when chart timeframe is Daily?")
+pivotLeft        = input.int(3, "Pivot left bars (daily)", minval=1)
+pivotRight       = input.int(3, "Pivot right bars (daily)", minval=1)
+supportTolPct    = input.float(0.5, "Support tolerance (%)", minval=0.0, step=0.1)
+strictEngulf     = input.bool(false, "Strict engulfing (>, <) instead of (>=, <=)?")
+
+riskPct          = input.float(1.0, "Risk per trade (% of equity)", minval=0.1, step=0.1)
+rMultipleTP      = input.float(2.8, "Take profit (R multiple)", minval=0.2, step=0.1)
+stopBufferATR    = input.float(0.2, "Stop buffer (ATR multiple)", minval=0.0, step=0.1)
+atrLen           = input.int(14, "ATR length", minval=1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Daily series (works even if chart isn't daily)
+// ─────────────────────────────────────────────────────────────────────────────
+dOpen  = request.security(syminfo.tickerid, "D", open)
+dHigh  = request.security(syminfo.tickerid, "D", high)
+dLow   = request.security(syminfo.tickerid, "D", low)
+dClose = request.security(syminfo.tickerid, "D", close)
+
+dOpen1  = request.security(syminfo.tickerid, "D", open[1])
+dClose1 = request.security(syminfo.tickerid, "D", close[1])
+
+dATR = request.security(syminfo.tickerid, "D", ta.atr(atrLen))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Support = last confirmed daily pivot low
+// ─────────────────────────────────────────────────────────────────────────────
+dPivotLow = request.security(syminfo.tickerid, "D", ta.pivotlow(low, pivotLeft, pivotRight))
+
+var float lastSupport = na
+if not na(dPivotLow)
+    lastSupport := dPivotLow
+
+// Price "at support" if daily low is within tolerance zone
+tol = supportTolPct / 100.0
+atSupport = not na(lastSupport) and (math.abs(dLow - lastSupport) / lastSupport <= tol or dLow <= lastSupport * (1.0 + tol))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bullish engulfing (daily)
+// ─────────────────────────────────────────────────────────────────────────────
+bullishNow = dClose > dOpen
+
+bool engulfOK = false
+if strictEngulf
+    engulfOK := (dOpen < dClose1) and (dClose > dOpen1)
+else
+    engulfOK := (dOpen <= dClose1) and (dClose >= dOpen1)
+
+bullEngulf = bullishNow and engulfOK
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Filters
+// ─────────────────────────────────────────────────────────────────────────────
+tfOk = (not useDailyOnly) or timeframe.isdaily
+
+// Entry condition
+longSignal = tfOk and atSupport and bullEngulf
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Position sizing + exits (R-based target)
+// Stop: below min(support, engulfing low) minus ATR buffer
+// ─────────────────────────────────────────────────────────────────────────────
+stopRef = na(lastSupport) ? dLow : math.min(lastSupport, dLow)
+stopLevel = stopRef - (dATR * stopBufferATR)
+
+riskPerUnit = dClose - stopLevel
+validRisk = riskPerUnit > syminfo.mintick
+
+riskDollars = strategy.equity * (riskPct / 100.0)
+qty = validRisk ? (riskDollars / riskPerUnit) : na
+
+tpLevel = dClose + (riskPerUnit * rMultipleTP)
+
+// Orders
+if longSignal and validRisk
+    strategy.entry("L", strategy.long, qty=qty)
+    strategy.exit("L-exit", "L", stop=stopLevel, limit=tpLevel)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plotting
+// ─────────────────────────────────────────────────────────────────────────────
+plot(lastSupport, "Daily Pivot Support", linewidth=2, style=plot.style_linebr)
+plotshape(longSignal, title="Bull Engulf @ Support", style=shape.triangleup, location=location.belowbar, size=size.tiny)
+
+var label info = na
+if barstate.islast
+    if not na(info)
+        label.delete(info)
+    info := label.new(bar_index, high,
+         "Support=" + (na(lastSupport) ? "na" : str.tostring(lastSupport, format.mintick)) +
+         "\nTol=" + str.tostring(supportTolPct) + "%" +
+         "\nR TP=" + str.tostring(rMultipleTP),
+         style=label.style_label_left, textcolor=color.white, color=color.new(color.black, 60))
+
+View in Pine Editor・105 lines
+Use on chart
+2
+0
+1 580
+1. What this strategy really is (in human terms)
+
+This strategy is not about predicting the market.
+
+It’s about waiting for proof that buyers are stepping in at a price where they already should.
+
+Think of it like this:
+
+“I only buy when price falls into a known ‘floor’ and buyers visibly take control.”
+
+That’s it.
+
+Everything in the script enforces that idea.
+
+2. The two ingredients (nothing else)
+Ingredient #1: Daily Support (the location)
+
+Support is an area where price previously fell and then reversed upward.
+
+In the script:
+
+Support is defined as the most recent confirmed daily swing low
+
+A swing low means:
+
+Price went down
+
+Stopped
+
+Then went up enough to prove that buyers defended that level
+
+This matters because:
+
+You’re not guessing where support might be
+
+You’re using a level where buyers already proved themselves
+
+“At support” doesn’t mean exact
+
+Markets don’t bounce off perfect lines.
+
+So the script allows a small zone (the “support tolerance”):
+
+Example: 0.5% tolerance
+
+If support is at 100
+
+Anywhere between ~99.5–100.5 counts
+
+This prevents missing good trades just because price was off by a few ticks.
+
+Ingredient #2: Bullish Engulfing Candle (the trigger)
+
+This is the confirmation.
+
+A bullish engulfing candle means:
+
+Sellers were in control
+
+Buyers stepped in hard enough to fully overpower them
+
+The bullish candle’s body “swallows” the previous candle
+
+Psychologically, it says:
+
+“Sellers tried, failed, and buyers just took control.”
+
+That’s why this candle works only at support.
+
+A bullish engulfing in the middle of nowhere means nothing.
+
+3. Why daily timeframe matters
+
+The daily chart:
+
+Filters out noise
+
+Reflects decisions made by institutions, not random scalpers
+
+Produces fewer but higher-quality signals
+
+That’s why:
+
+The script uses daily data
+
+You typically get very few trades per month
+
+Most days: no trade
+
+That “boredom” is the edge.
+
+4. When a trade is taken (exact conditions)
+
+A trade happens only if ALL are true:
+
+Price drops into a recent daily support zone
+
+A bullish engulfing candle forms on the daily chart
+
+Risk is clearly defined (entry, stop, target)
+
+If any one is missing → no trade
+
+5. How risk is controlled (this is crucial)
+The stop loss (where you admit you’re wrong)
+
+The stop is placed:
+
+Below the support level
+
+Or below the low of the engulfing candle
+
+With a small ATR buffer so normal noise doesn’t stop you out
+
+Meaning:
+
+“If price breaks below this area, buyers were wrong. I’m out.”
+
+No hoping. No moving stops. No exceptions.
+
+Position sizing (why this strategy survives losing streaks)
+
+Each trade risks a fixed % of your account (default 1%).
+
+So:
+
+Big stop = smaller position
+
+Small stop = larger position
+
+This keeps every trade equal in risk, not equal in size.
+
+That’s professional behavior.
+
+6. The take-profit logic (why 2.8R matters)
+
+Instead of guessing targets:
+
+The strategy uses a multiple of risk (R)
+
+Example:
+
+Risk = $1
+
+Target = $2.80
+
+You can lose many times and still come out ahead.
+
+This is why:
+
+Win rate ≈ 60% is more than enough
+
+Even 40–45% could still work if discipline is perfect
+
+7. Why patience is the real edge (not the pattern)
+
+The bullish engulfing is common.
+
+Bullish engulfing at daily support is rare.
+
+Most people fail because they:
+
+Trade engulfings everywhere
+
+Ignore location
+
+Lower standards when bored
+
+Add “just one more indicator”
+
+Your edge is:
+
+Saying no 95% of the time
+
+Taking only trades that look obvious after they work
+
+8. How to use this strategy effectively (rules to follow)
+Rule 1: Only take “clean” setups
+
+Skip trades when:
+
+Support is messy or unclear
+
+Price is chopping sideways
+
+The engulfing candle is tiny
+
+The market is news-chaotic (earnings, FOMC, etc.)
+
+If you have to convince yourself, skip it.
+
+Rule 2: One trade at a time
+
+This strategy works best when:
+
+You’re not stacked in multiple correlated trades
+
+You treat each setup like it matters
+
+Quality > quantity.
+
+Rule 3: Journal screenshots, not just numbers
+
+After each trade, save:
+
+Daily chart screenshot
+
+Support level marked
+
+Entry / stop / target
+
+After 50–100 trades, patterns jump out:
+
+Best tolerance %
+
+Best stop buffer
+
+Markets that behave well vs poorly
+
+That’s how the original trader refined it.
+
+Rule 4: Expect boredom and drawdowns
+
+You will have:
+
+Weeks with zero trades
+
+Clusters of losses
+
+Long flat periods
+
+That’s normal.
+
+If you “fix” it by adding more trades:
+
+You destroy the edge.
+
+9. Who this strategy is perfect for
+
+This fits you if:
+
+You don’t want screen addiction
+
+You prefer process over excitement
+
+You’re okay being wrong often
+
+You want something you can execute for years
+
+It is not for:
+
+Scalpers
+
+Indicator collectors
+
+People who need action every day
+
+10. The mindset shift (the real lesson of that story)
+
+The money didn’t come from bullish engulfings.
+
+It came from:
+
+Defining one repeatable behavior
+
+Removing everything else
+
+Trusting math + patience
+
+Doing nothing most of the time
+
+If you want, next we can:
+
+Walk through real example trades bar-by-bar
+
+Optimize settings for a specific market you trade
+
+Add filters that increase quality without adding complexity

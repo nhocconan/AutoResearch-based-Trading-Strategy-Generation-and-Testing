@@ -1,0 +1,35 @@
+//@version=2
+strategy("MACDEEZNUTS", overlay=true)
+
+fastLength = input(20)
+slowlength = input(42)
+MACDLength = input(20)
+
+MACD = ema(close, fastLength) - ema(close, slowlength)
+aMACD = sma(MACD, MACDLength)
+delta = MACD - aMACD
+
+if (crossover(delta, 0)) and (year>2014)
+    strategy.entry("MacdLE", strategy.long, comment="MacdLlE")
+
+if (crossunder(delta, 0))and (year>2014)
+    strategy.entry("MacdSE", strategy.short, comment="MacdSE")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・18 lines
+Use on chart
+4
+0
+5
+5
+16 999
+This is only a slight modification to the existing "MACD Strategy" strategy plugin!
+found the default MACD strategy to be lacking, although impressive for its simplicity. I added "year>2014" to the IF buy/sell conditions so it will only backtest from 2015 and beyond**.
+I also had a problem with the standard MACD trading late, per se. To that end I modified the inputs for fast/slow/signal to double. Example: my defaults are 10, 21, 10 so I put 20, 42, 20 in. This has the effect of making a 30min interval the same as 1 hour at 10,21,10. So if you want to backtest at 4hr, you would set your time interval to 2hr on the main chart. This is a handy way to make shorter time periods more useful even regardless of strategy/testing, since you can view 15min with alot less noise but a better response.
+
+Used on BTCCNY OKcoin, with the chart set at 45 min (so really 90min in the strategy) this gave me a percent profitable of 42% and a profit factor of 1.998 on 189 trades.
+Personally, I like to set the length/signals to 30,63,30. Meaning you need to triple the time, it allows for much better use of shorter time periods and the backtests are remarkably profitable. (i.e. 15min chart view = 45min on script, 30min= 1.5hr on script)
+
+
+**If you want more specific time periods you need to try plugging in different bar values: replace "year" with "n" and "2014" with "5500". The bars are based on unix time I believe so you will need to play around with the number for n, with n being the numbers of bars.

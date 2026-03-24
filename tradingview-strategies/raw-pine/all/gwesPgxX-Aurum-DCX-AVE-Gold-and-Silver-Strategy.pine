@@ -1,0 +1,274 @@
+//@version=6
+strategy("Aurum DCX AVE Gold and Silver Strategy", shorttitle="Aurum DCX AVE",
+     overlay=true, pyramiding=0, 
+     initial_capital=20000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0.03,
+     slippage=5, calc_on_every_tick=false, calc_on_order_fills=false, process_orders_on_close=true, margin_long = 0 , margin_short = 0 )
+
+// =============== GROUPS
+group_setup = "Setup"
+group_dcx   = "Directional Convexity Index"
+group_ave   = "Adaptive Volatility Envelope"
+group_bias  = "Intermarket Bias"
+group_risk  = "Risk"
+group_ui    = "UI"
+
+// =============== INPUTS
+// Setup
+symbol         = input.symbol("TVC:GOLD", "Symbol")
+src            = input.source(hlc3, "Price source", group=group_setup, tooltip="Primary source for smoothing and envelopes")
+sig_tf         = input.timeframe("", "Signal timeframe empty uses chart", group=group_setup)
+confirm_tf     = input.timeframe("D", "Confirm timeframe", group=group_setup, tooltip="Used for bias and anchored metrics")
+
+// DCX
+dcx_len        = input.int(10, "DCX window", minval=5, group=group_dcx, tooltip="Lookback for DM and volatility normalizers")
+dcx_rise_len   = input.int(4, "DCX rise bars", minval=1, group=group_dcx, tooltip="Rising condition window")
+dcx_th         = input.float(20, "DCX entry threshold", minval=0, maxval=100, group=group_dcx, tooltip="Heat needed to allow breaks")
+eff_floor      = input.float(0.03, "Efficiency floor", minval=0.0, maxval=0.5, step=0.01, group=group_dcx, tooltip="Prevents zeroing in chop")
+conv_weight    = input.float(0.35, "Convexity weight 0..1", minval=0, maxval=1, step=0.05, group=group_dcx)
+
+// AVE
+ave_len        = input.int(30, "AVE window", minval=5, group=group_ave, tooltip="Midline and volatility window")
+ave_ma_type    = input.string("ALMA", "Midline type", options=["EMA","HMA","ALMA"], group=group_ave)
+q_tr           = input.int(80, "TR percentile 0..100", minval=50, maxval=100, step=1, group=group_ave, tooltip="Upper tail of TR to catch squeeze breaks")
+volv_ref       = input.float(0.05, "Vol of vol reference", minval=0.05, maxval=2.0, step=0.05, group=group_ave, tooltip="Controls blend of ATR and percentile TR")
+mult_base      = input.float(1.8, "Base envelope mult", minval=0.2, maxval=5, step=0.1, group=group_ave)
+mult_adapt     = input.float(0.85, "Regime adapt 0..1", minval=0, maxval=1, step=0.05, group=group_ave, tooltip="Widens bands with DCX heat")
+
+// Bias
+use_dxy_bias   = input.bool(true, "Use DXY bias", group=group_bias)
+dxy_symbol     = input.symbol("TVC:DXY", "DXY symbol", group=group_bias)
+dxy_tf         = input.timeframe("D", "DXY timeframe", group=group_bias)
+dxy_len        = input.int(10, "DXY trend window", minval=5, group=group_bias)
+
+// Risk
+risk_pct       = input.float(2.2, "Risk percent per trade", minval=0.1, maxval=5, step=0.1, group=group_risk)
+wk_atr_len     = input.int(14, "Weekly ATR", minval=7, group=group_risk)
+sl_atr_mult    = input.float(2.0, "Stop ATR weekly mult", minval=0.5, maxval=6, step=0.1, group=group_risk)
+tp_rr          = input.float(2.0, "Take profit R multiple", minval=0.5, maxval=6, step=0.1, group=group_risk)
+use_trail      = input.bool(false, "Trail with AVE band", group=group_risk)
+
+// // UI
+// show_bands     = input.bool(true, "Show AVE bands", group=group_ui)
+// show_mid       = input.bool(true, "Show midline", group=group_ui)
+// show_vwap      = input.bool(false, "Show daily VWAP", group=group_ui)
+// show_labels    = input.bool(true, "Show signals", group=group_ui)
+
+// =============== UTILS
+clamp(x, lo, hi) =>
+    math.min(math.max(x, lo), hi)
+
+clamp_from_zero(x, hi) =>
+    math.min(math.max(x, 0.0), hi)
+
+ma_sel(source, len) =>
+    switch ave_ma_type
+        "EMA"  => ta.ema(source, len)
+        "ALMA" => ta.alma(source, len, 0.85, 6)
+        => ta.hma(source, len)
+
+// Blend of ATR and percentile TR with regime widening from DCX
+ave_calc(len, q_pct, mult_b, adapt_01, dcx_0_100) =>
+    tr = ta.tr
+    atr = ta.atr(len)
+    qtr = ta.percentile_linear_interpolation(tr, len, q_pct)
+    vol_vol = ta.stdev(tr, len) / math.max(ta.ema(tr, len), 1e-10)
+    w = clamp(vol_vol / math.max(volv_ref, 1e-6), 0.0, 1.0)
+    v = w * qtr + (1 - w) * atr
+    basis = ma_sel(src, len)
+    heat = clamp_from_zero(dcx_0_100 / 100.0, 1.0)
+    mult = mult_b * (1 + adapt_01 * (heat - 0.5) * 2.0)
+    [basis, basis + mult * v, basis - mult * v, v, mult]
+
+// Directional Convexity Index 0..100  returns [dcx  di_plus  di_minus]
+dcx_calc(len) =>
+    dm_pos = math.max(high - high[1], 0)
+    dm_neg = math.max(low[1] - low, 0)
+    tr = ta.tr
+    tr_s = ta.rma(tr, len)
+    dmp = 100 * ta.rma(dm_pos, len) / math.max(tr_s, 1e-10)
+    dmn = 100 * ta.rma(dm_neg, len) / math.max(tr_s, 1e-10)
+    dx = 100 * math.abs(dmp - dmn) / math.max(dmp + dmn, 1e-10)
+    disp = math.abs(close - close[len])
+    path = math.sum(math.abs(ta.change(close)), len)
+    eff = clamp(disp / math.max(path, 1e-10), eff_floor, 1.0)
+    acc = ta.change(ta.change(close))
+    pacc = ta.rma(math.max(acc, 0), len)
+    nacc = ta.rma(math.max(-acc, 0), len)
+    conv = (pacc - nacc) / math.max(pacc + nacc, 1e-10)
+    conv01 = 0.5 * (conv + 1.0)
+    mix = (1.0 - conv_weight) * eff + conv_weight * conv01
+    dcx = 100.0 * math.sqrt((dx / 100.0) * mix)
+    [dcx, dmp, dmn]
+
+// =============== CORE CALC
+[dcx, di_p, di_m] = request.security(
+     symbol, sig_tf == "" ? timeframe.period : sig_tf, dcx_calc(dcx_len),
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+dcx_up   = ta.rising(dcx, dcx_rise_len)
+dcx_down = ta.falling(dcx, dcx_rise_len)
+dir_sign = di_p > di_m ? 1 : di_p < di_m ? -1 : 0
+
+[basis, upper, lower, ave_vol, ave_mult] =    request.security(        symbol, sig_tf == "" ? timeframe.period : sig_tf,        ave_calc(ave_len, q_tr, mult_base, mult_adapt, dcx),        gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+// Daily VWAP
+vwap_anchor_daily = request.security(symbol, "D", ta.vwap(open), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+// DXY bias
+dxy_close  = use_dxy_bias ? request.security(dxy_symbol, dxy_tf, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off) : na
+dxy_trend  = use_dxy_bias ? ta.ema(dxy_close, dxy_len) : na
+bias_long  = not use_dxy_bias or (dxy_close < dxy_trend)
+bias_short = not use_dxy_bias or (dxy_close > dxy_trend)
+
+// Weekly ATR
+wk_atr = request.security(symbol, "W", ta.atr(wk_atr_len), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+// =============== SIGNALS
+closex   = request.security(symbol, timeframe.period, close)
+break_up = closex > upper and dcx > dcx_th and dcx_up   and dir_sign > 0 and bias_long
+break_dn = closex < lower and dcx > dcx_th and dcx_down and dir_sign < 0 and bias_short
+
+// =============== ORDERS
+if break_up
+    strategy.close("L")
+    strategy.entry("L", strategy.long)
+
+if break_dn
+    strategy.close("L")
+    strategy.entry("S", strategy.short)
+
+// Brackets
+if ta.change(strategy.opentrades) > 0
+    ep = strategy.opentrades.entry_price(0)
+    longPos = strategy.position_size > 0
+    dist = sl_atr_mult * wk_atr
+    sl_price = longPos ? math.min(lower, ep - dist) : math.max(upper, ep + dist)
+    tp_price = longPos ? ep + tp_rr * math.abs(ep - sl_price) : ep - tp_rr * math.abs(ep - sl_price)
+    strategy.exit(longPos ? "XL" : "XS", from_entry=longPos ? "L" : "S", stop=sl_price, limit=tp_price)
+
+// Optional trailing
+if use_trail and strategy.position_size != 0
+    if strategy.position_size > 0
+        trailL = math.max(lower, strategy.position_avg_price - wk_atr)
+        strategy.exit("TL", from_entry="L", stop=trailL)
+    if strategy.position_size < 0
+        trailS = math.min(upper, strategy.position_avg_price + wk_atr)
+        strategy.exit("TS", from_entry="S", stop=trailS)
+
+// Alerts
+alertcondition(break_up, "Aurum Long", "Long {{ticker}}")
+alertcondition(break_dn, "Aurum Short", "Short {{ticker}}")
+
+View in Pine Editor・163 lines
+Use on chart
+9
+1
+2
+3 424
+Summary in one paragraph
+Aurum DCX AVE is a volatility break strategy for gold and silver on intraday and swing timeframes. It aligns a new Directional Convexity Index with an Adaptive Volatility Envelope and an optional USD/DXY bias so trades appear only when direction quality and expansion agree. It is original because it fuses three pieces rarely combined in one model for metals: a convexity aware trend strength score, a percentile based envelope that widens with regime heat, and an intermarket DXY filter.
+
+Scope and intent
+• Markets. Gold and silver futures or spot, other liquid commodities, major indices
+• Timeframes. Five minutes to one day. Defaults to 30min for swing pace
+• Default demo used in this publication. TVC:GOLD on 30m
+• Purpose. Enter confirmed volatility breaks while muting chop using regime heat and USD bias
+• Limits. This is a strategy. Orders are simulated on standard candles only
+
+Originality and usefulness
+• Unique fusion. DCX combines DI strength with path efficiency and curvature. AVE blends ATR with a high TR percentile and widens with DCX heat. DXY adds an intermarket bias
+• Failure mode addressed. False starts inside compression and unconfirmed breakouts during USD swings
+• Testability. Each component has a named input. Entry names L and S are visible in the list of trades
+• Portable yardstick. Weekly ATR for stops and R multiples for targets
+• Open source. Method and implementation are disclosed for community review
+
+Method overview in plain language
+You score direction quality with DCX, size an adaptive envelope with a blend of ATR and a high TR percentile, and only allow breaks that clear the band while DCX is above a heat threshold in the same direction. An optional DXY filter favors long when USD weakens and short when USD strengthens. Orders are bracketed with a Weekly ATR stop and an R multiple target, with optional trailing to the envelope.
+
+Base measures
+• Range basis. True Range and ATR over user windows. A high TR percentile captures expansion tails used by AVE
+• Return basis. Not required
+
+Components
+• Directional Convexity Index DCX. Measures directional strength with DX, multiplies by path efficiency, blends a curvature term from acceleration, scales to 0 to 100, and uses a rise window
+• Adaptive Volatility Envelope AVE. Midline ALMA or HMA or EMA plus bands sized by a blend of ATR and a high TR percentile. The blend weight follows volatility of volatility. Band width widens with DCX heat
+• DXY Bias optional. Daily EMA trend of DXY. Long bias when USD weakens. Short bias when USD strengthens
+• Risk block. Initial stop equals Weekly ATR times a multiplier. Target equals an R multiple of the initial risk. Optional trailing to AVE band
+
+Fusion rule
+• All gates must pass. DCX above threshold and rising. Directional lead agrees. Price breaks the AVE band in the same direction. DXY bias agrees when enabled
+
+Signal rule
+• Long. Close above AVE upper and DCX above threshold and DCX rising and plus DI leads and DXY bias is bearish
+• Short. Close below AVE lower and DCX above threshold and DCX falling and minus DI leads and DXY bias is bullish
+• Exit and flip. Bracket exit at stop or target. Optional trailing to AVE band
+
+
+Inputs with guidance
+
+Setup
+• Symbol. Default TVC:GOLD (Correlation Asset for internal logic)
+• Signal timeframe. Blank follows the chart
+• Confirm timeframe. Default 1 day used by the bias block
+
+Directional Convexity Index
+• DCX window. Typical 10 to 21. Higher filters more. Lower reacts earlier
+• DCX rise bars. Typical 3 to 6. Higher demands continuation
+• DCX entry threshold. Typical 15 to 35. Higher avoids soft moves
+• Efficiency floor. Typical 0.02 to 0.06. Stability in quiet tape
+• Convexity weight 0..1. Typical 0.25 to 0.50. Higher gives curvature more influence
+
+Adaptive Volatility Envelope
+• AVE window. Typical 24 to 48. Higher smooths more
+• Midline type. ALMA or HMA or EMA per preference
+• TR percentile 0..100. Typical 75 to 90. Higher favors only strong expansions
+• Vol of vol reference. Typical 0.05 to 0.30. Controls how much the percentile term weighs against ATR
+• Base envelope mult. Typical 1.4 to 2.2. Width of bands
+• Regime adapt 0..1. Typical 0.6 to 0.95. How much DCX heat widens or narrows the bands
+
+Intermarket Bias
+• Use DXY bias. Default ON
+• DXY timeframe. Default 1 day
+• DXY trend window. Typical 10 to 50
+
+Risk
+• Risk percent per trade. Reporting field. Keep live risk near one to two percent
+• Weekly ATR. Default 14. Basis for stops
+• Stop ATR weekly mult. Typical 1.5 to 3.0
+• Take profit R multiple. Typical 1.5 to 3.0
+• Trail with AVE band. Optional. OFF by default
+
+Properties visible in this publication
+• Initial capital. 20000
+• Base currency. USD
+• request.security lookahead off everywhere
+• Commission. 0.03 percent
+• Slippage. 5 ticks
+• Default order size method percent of equity with value 3% of the total capital available
+• Pyramiding 0
+• Process orders on close ON
+• Bar magnifier ON
+• Recalculate after order is filled OFF
+• Calc on every tick OFF
+
+Realism and responsible publication
+• No performance claims. Past results never guarantee future outcomes
+• Shapes can move while a bar forms and settle on close
+• Strategies use standard candles for signals and orders only
+
+Honest limitations and failure modes
+• Economic releases and thin liquidity can break assumptions behind the expansion logic
+• Gap heavy symbols may prefer a longer ATR window
+• Very quiet regimes can reduce signal contrast. Consider higher DCX thresholds or wider bands
+• Session time follows the exchange of the chart and can change symbol to symbol
+• Symbol sensitivity is expected. Use the gates and length inputs to find stable settings
+
+Open source reuse and credits
+• None
+
+Mode
+Public open source. Source is visible and free to reuse within TradingView House Rules
+
+Legal
+Education and research only. Not investment advice. You are responsible for your decisions. Test on historical data and in simulation before any live use. Use realistic costs.

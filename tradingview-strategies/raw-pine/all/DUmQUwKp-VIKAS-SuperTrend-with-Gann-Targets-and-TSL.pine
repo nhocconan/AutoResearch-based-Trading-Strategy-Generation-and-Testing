@@ -1,0 +1,417 @@
+//@version=5
+//@version=5
+strategy('VIKAS SuperTrend with Gann Targets and TSL', overlay=true, commission_type=strategy.commission.percent, commission_value=0.02, initial_capital=300000, default_qty_type=strategy.fixed, default_qty_value=3, pyramiding=1, process_orders_on_close=true, calc_on_every_tick=false)
+// ==============================
+// INPUT PARAMETERS
+// ==============================
+// SuperTrend Parameters
+Periods = input(title='ATR Period', defval=28)
+src = input(hl2, title='Source')
+Multiplier = input.float(title='ATR Multiplier', step=0.1, defval=5.0)
+changeATR = input(title='Change ATR Calculation Method?', defval=true)
+showsignals = input(title='Show Buy/Sell Signals?', defval=true)
+
+// Date Range Filter
+FromMonth = input.int(defval=1, title='From Month', minval=1, maxval=12)
+FromDay = input.int(defval=1, title='From Day', minval=1, maxval=31)
+FromYear = input.int(defval=2020, title='From Year')
+ToMonth = input.int(defval=1, title='To Month', minval=1, maxval=12)
+ToDay = input.int(defval=1, title='To Day', minval=1, maxval=31)
+ToYear = input.int(defval=9999, title='To Year')
+
+// ==============================
+// SUPER TREND CALCULATION
+// ==============================
+atr2 = ta.sma(ta.tr, Periods)
+atr = changeATR ? ta.atr(Periods) : atr2
+
+up = src - Multiplier * atr
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+
+dn = src + Multiplier * atr
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// Plot SuperTrend
+upPlot = plot(trend == 1 ? up : na, title='Up Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.green, 0))
+dnPlot = plot(trend == 1 ? na : dn, title='Down Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.red, 0))
+
+// Generate Signals
+buySignal = trend == 1 and trend[1] == -1
+sellSignal = trend == -1 and trend[1] == 1
+
+// ==============================
+// GANN SQUARE OF 9 CALCULATION
+// ==============================
+_normalise_squareRootCurrentClose = math.floor(math.sqrt(close))
+
+_upperGannLevel_1 = (_normalise_squareRootCurrentClose + 1) * (_normalise_squareRootCurrentClose + 1)
+_upperGannLevel_2 = (_normalise_squareRootCurrentClose + 2) * (_normalise_squareRootCurrentClose + 2)
+_zeroGannLevel = _normalise_squareRootCurrentClose * _normalise_squareRootCurrentClose
+_lowerGannLevel_1 = (_normalise_squareRootCurrentClose - 1) * (_normalise_squareRootCurrentClose - 1)
+_lowerGannLevel_2 = (_normalise_squareRootCurrentClose - 2) * (_normalise_squareRootCurrentClose - 2)
+
+// ==============================
+// ==============================
+// TSL LOGIC VARIABLES - UPDATED FOR TSL2
+// ==============================
+var bool target1Hit = false
+var bool target2Hit = false
+var bool target3Hit = false
+var float entryPrice = 0.0
+var float tsl1Level = 0.0
+var float tsl2Level = 0.0
+var string currentAction = "FLAT"
+var string exitReason = ""
+var int remainingQty = 0
+
+// ==============================
+// HIT TRACKING VARIABLES - ADD THIS SECTION
+// ==============================
+var bool slHitOccurred = false
+var bool tsl1HitOccurred = false
+var bool tsl2HitOccurred = false
+var bool target1HitOccurred = false
+var bool target2HitOccurred = false
+var bool target3HitOccurred = false
+
+// Date Range Window Function
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00) 
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+window() => time >= start and time <= finish
+
+// Target Hit Detection Function
+targetHit(targetPrice, trendDirection) =>
+    (trendDirection > 0 and high >= targetPrice) or (trendDirection < 0 and low <= targetPrice)
+
+// ==============================
+// TRADE EXECUTION LOGIC - UPDATED FOR TSL2
+// ==============================
+// Calculate targets and SL when signals occur
+var float TARGET1 = na
+var float TARGET2 = na
+var float TARGET3 = na
+var float SL = na
+
+if buySignal and window()
+    SL := math.round(up, 2)
+    range_val = math.abs(close - SL)
+    TARGET1 := close + range_val * 1.7
+    TARGET2 := close + range_val * 2.5
+    TARGET3 := close + range_val * 3.0
+    
+    // Gann adjustments for BUY
+    if close > _upperGannLevel_1 and close < _upperGannLevel_2
+        TARGET1 := _upperGannLevel_2
+    if close > _zeroGannLevel and close < _upperGannLevel_1
+        TARGET1 := _upperGannLevel_1
+        TARGET2 := (_upperGannLevel_1 + _upperGannLevel_2) / 2
+        TARGET3 := _upperGannLevel_2
+    if close > _lowerGannLevel_1 and close < _zeroGannLevel
+        TARGET1 := _zeroGannLevel
+        TARGET2 := (_zeroGannLevel + _upperGannLevel_1) / 2
+        TARGET3 := _upperGannLevel_1
+    
+    entryPrice := close
+    target1Hit := false
+    target2Hit := false
+    target3Hit := false
+    tsl1Level := na
+    tsl2Level := na
+    currentAction := "LONG"
+    exitReason := ""
+    remainingQty := 3
+    
+    // ENTRY ALERT - ADDED THIS
+    alert_message = "BUY " + syminfo.ticker + "! @ " + str.tostring(close) + 
+                   "\nTARGET1 @" + str.tostring(TARGET1) +
+                   "\nTARGET2 @" + str.tostring(TARGET2) + 
+                   "\nTARGET3 @" + str.tostring(TARGET3) +
+                   "\nSL @" + str.tostring(SL)
+    alert(alert_message, alert.freq_once_per_bar)
+
+if sellSignal and window()
+    SL := math.round(dn, 2)
+    range_val = math.abs(close - SL)
+    TARGET1 := close - range_val * 1.7
+    TARGET2 := close - range_val * 2.5
+    TARGET3 := close - range_val * 3.0
+    
+    // Gann adjustments for SELL
+    if close < _lowerGannLevel_1 and close > _lowerGannLevel_2
+        TARGET1 := _lowerGannLevel_2
+    if close < _zeroGannLevel and close > _lowerGannLevel_1
+        TARGET1 := _lowerGannLevel_1
+        TARGET2 := (_lowerGannLevel_1 + _lowerGannLevel_2) / 2
+        TARGET3 := _lowerGannLevel_2
+    if close < _upperGannLevel_1 and close > _zeroGannLevel
+        TARGET1 := _zeroGannLevel
+        TARGET2 := (_zeroGannLevel + _lowerGannLevel_1) / 2
+        TARGET3 := _lowerGannLevel_1
+    
+    entryPrice := close
+    target1Hit := false
+    target2Hit := false
+    target3Hit := false
+    tsl1Level := na
+    tsl2Level := na
+    currentAction := "SHORT"
+    exitReason := ""
+    remainingQty := 3
+    
+    // ENTRY ALERT - ADDED THIS
+    alert_message = "SELL " + syminfo.ticker + "! @ " + str.tostring(close) + 
+                   "\nTARGET1 @" + str.tostring(TARGET1) +
+                   "\nTARGET2 @" + str.tostring(TARGET2) + 
+                   "\nTARGET3 @" + str.tostring(TARGET3) +
+                   "\nSL @" + str.tostring(SL)
+    alert(alert_message, alert.freq_once_per_bar)
+// Check if targets are hit
+bool hitT1 = targetHit(TARGET1, trend)
+bool hitT2 = targetHit(TARGET2, trend)
+bool hitT3 = targetHit(TARGET3, trend)
+
+if (hitT1 and not target1Hit and strategy.position_size != 0)
+    target1Hit := true
+    tsl1Level := (entryPrice + TARGET1) / 2
+    exitReason := "TARGET1 Hit"
+    remainingQty := 2
+    // TARGET1 HIT ALERT
+    alert_message = currentAction + " " + syminfo.ticker + "! @ " + str.tostring(entryPrice) + ". TARGET1 hit/Book partial Profit"
+    alert(alert_message, alert.freq_once_per_bar)
+
+if (hitT2 and not target2Hit and strategy.position_size != 0)
+    target2Hit := true
+    tsl2Level := (tsl1Level + TARGET2) / 2
+    exitReason := "TARGET2 Hit"
+    remainingQty := 1
+    // TARGET2 HIT ALERT
+    alert_message = currentAction + " " + syminfo.ticker + "! @ " + str.tostring(entryPrice) + ". TARGET2 hit/Book partial Profit"
+    alert(alert_message, alert.freq_once_per_bar)
+
+if (hitT3 and not target3Hit and strategy.position_size != 0)
+    target3Hit := true
+    exitReason := "TARGET3 Hit"
+    remainingQty := 0
+    // TARGET3 HIT ALERT
+    alert_message = currentAction + " " + syminfo.ticker + "! @ " + str.tostring(entryPrice) + ". TARGET3 hit/Book full Profit"
+    alert(alert_message, alert.freq_once_per_bar)
+
+// Check for SL hit
+bool slHitLong = strategy.position_size > 0 and low <= SL
+bool slHitShort = strategy.position_size < 0 and high >= SL
+
+if (slHitLong or slHitShort) and exitReason == ""
+    exitReason := "SL Hit"
+    remainingQty := 0
+    strategy.close_all(comment="SL Hit - Exit All")
+    // SL HIT ALERT
+    alert_message = currentAction + " " + syminfo.ticker + "! @ " + str.tostring(entryPrice) + ". SL hit/Exit All"
+    alert(alert_message, alert.freq_once_per_bar)
+
+// Check for TSL1 hit after TARGET1
+bool tsl1HitLong = strategy.position_size > 0 and target1Hit and low <= tsl1Level
+bool tsl1HitShort = strategy.position_size < 0 and target1Hit and high >= tsl1Level
+
+if (tsl1HitLong or tsl1HitShort) and exitReason == ""
+    exitReason := "TSL1 Hit"
+    remainingQty := 0
+    strategy.close_all(comment="TSL1 Hit - Exit Remaining")
+    // TSL1 HIT ALERT
+    alert_message = currentAction + " " + syminfo.ticker + "! @ " + str.tostring(entryPrice) + ". TSL1 hit/Exit Remaining"
+    alert(alert_message, alert.freq_once_per_bar)
+
+// Check for TSL2 hit after TARGET2
+bool tsl2HitLong = strategy.position_size > 0 and target2Hit and low <= tsl2Level
+bool tsl2HitShort = strategy.position_size < 0 and target2Hit and high >= tsl2Level
+
+if (tsl2HitLong or tsl2HitShort) and exitReason == ""
+    exitReason := "TSL2 Hit"
+    remainingQty := 0
+    strategy.close_all(comment="TSL2 Hit - Exit Remaining")
+    // TSL2 HIT ALERT
+    alert_message = currentAction + " " + syminfo.ticker + "! @ " + str.tostring(entryPrice) + ". TSL2 hit/Exit Remaining"
+    alert(alert_message, alert.freq_once_per_bar)
+
+// ==============================
+// HIT TRACKING LOGIC - ADD THIS SECTION
+// ==============================
+// Reset hit trackers when new trade starts
+if buySignal or sellSignal
+    slHitOccurred := false
+    tsl1HitOccurred := false
+    tsl2HitOccurred := false
+    target1HitOccurred := false
+    target2HitOccurred := false
+    target3HitOccurred := false
+
+// Track when hits actually occur
+slHitOccurred := (slHitLong or slHitShort) and exitReason == "" and remainingQty > 0
+tsl1HitOccurred := (tsl1HitLong or tsl1HitShort) and exitReason == "" and remainingQty > 0
+tsl2HitOccurred := (tsl2HitLong or tsl2HitShort) and exitReason == "" and remainingQty > 0
+target1HitOccurred := hitT1 and not target1Hit and strategy.position_size != 0
+target2HitOccurred := hitT2 and not target2Hit and strategy.position_size != 0
+target3HitOccurred := hitT3 and not target3Hit and strategy.position_size != 0
+
+// Reset when flat
+if remainingQty == 0
+    currentAction := "FLAT"
+// ==============================
+// STRATEGY ORDERS - UPDATED FOR TSL2
+// ==============================
+// Entry Orders - Allow opposite direction entries
+if buySignal and window() and strategy.position_size == 0
+    strategy.entry('BUY', strategy.long, comment='Buy Entry')
+    
+if sellSignal and window() and strategy.position_size == 0
+    strategy.entry('SELL', strategy.short, comment='Sell Entry')
+
+// Exit Orders - Use strategy.exit for proper execution
+if strategy.position_size > 0  // Long position
+    // TARGET1 exit (1 quantity)
+    if not target1Hit
+        strategy.exit('BUY T1', 'BUY', qty=1, limit=TARGET1, comment='TARGET1 Hit')
+    
+    // TARGET2 exit (1 quantity) - only if TARGET1 hit
+    if target1Hit and not target2Hit
+        strategy.exit('BUY T2', 'BUY', qty=1, limit=TARGET2, comment='TARGET2 Hit')
+    
+    // TARGET3 exit (1 quantity) - only if TARGET2 hit
+    if target2Hit and not target3Hit
+        strategy.exit('BUY T3', 'BUY', qty=1, limit=TARGET3, comment='TARGET3 Hit')
+    
+    // TSL1 exit (remaining quantities) - only if TARGET1 hit but TARGET2 not hit
+    if target1Hit and not target2Hit and remainingQty > 0
+        strategy.exit('BUY TSL1', 'BUY', stop=tsl1Level, comment='TSL1 Hit')
+    
+    // TSL2 exit (remaining quantity) - only if TARGET2 hit
+    if target2Hit and remainingQty > 0
+        strategy.exit('BUY TSL2', 'BUY', stop=tsl2Level, comment='TSL2 Hit')
+    
+    // SL exit (all quantities) - only if no targets hit yet
+    if not target1Hit
+        strategy.exit('BUY SL', 'BUY', stop=SL, comment='SL Hit')
+    
+if strategy.position_size < 0  // Short position
+    // TARGET1 exit (1 quantity)
+    if not target1Hit
+        strategy.exit('SELL T1', 'SELL', qty=1, limit=TARGET1, comment='TARGET1 Hit')
+    
+    // TARGET2 exit (1 quantity) - only if TARGET1 hit
+    if target1Hit and not target2Hit
+        strategy.exit('SELL T2', 'SELL', qty=1, limit=TARGET2, comment='TARGET2 Hit')
+    
+    // TARGET3 exit (1 quantity) - only if TARGET2 hit
+    if target2Hit and not target3Hit
+        strategy.exit('SELL T3', 'SELL', qty=1, limit=TARGET3, comment='TARGET3 Hit')
+    
+    // TSL1 exit (remaining quantities) - only if TARGET1 hit but TARGET2 not hit
+    if target1Hit and not target2Hit and remainingQty > 0
+        strategy.exit('SELL TSL1', 'SELL', stop=tsl1Level, comment='TSL1 Hit')
+    
+    // TSL2 exit (remaining quantity) - only if TARGET2 hit
+    if target2Hit and remainingQty > 0
+        strategy.exit('SELL TSL2', 'SELL', stop=tsl2Level, comment='TSL2 Hit')
+    
+    // SL exit (all quantities) - only if no targets hit yet
+    if not target1Hit
+        strategy.exit('SELL SL', 'SELL', stop=SL, comment='SL Hit')
+
+// ==============================
+// INFORMATION TABLE - UPDATED FOR TSL2
+// ==============================
+var table infoTable = table.new(position.bottom_left, 10, 3, bgcolor=color.white, border_width=1, frame_color=color.black)
+
+// Table Headers
+if barstate.isfirst
+    table.cell(infoTable, 0, 0, 'Action', bgcolor=color.gray)
+    table.cell(infoTable, 1, 0, 'Entry', bgcolor=color.gray)
+    table.cell(infoTable, 2, 0, 'SL', bgcolor=color.gray)
+    table.cell(infoTable, 3, 0, 'T1', bgcolor=color.gray)
+    table.cell(infoTable, 4, 0, 'T2', bgcolor=color.gray)
+    table.cell(infoTable, 5, 0, 'T3', bgcolor=color.gray)
+    table.cell(infoTable, 6, 0, 'TSL1', bgcolor=color.gray)
+    table.cell(infoTable, 7, 0, 'TSL2', bgcolor=color.gray)
+    table.cell(infoTable, 8, 0, 'Status', bgcolor=color.gray)
+    table.cell(infoTable, 9, 0, 'Qty', bgcolor=color.gray)
+
+/// Update table values with better colors
+if barstate.isconfirmed or barstate.islast
+    // Determine background color for ALL cells
+    var color bgColor = color.gray
+    if currentAction == "LONG"
+        bgColor := exitReason != "" ? color.new(color.yellow, 10) : color.new(color.green, 10)
+    else if currentAction == "SHORT"
+        bgColor := exitReason != "" ? color.new(color.yellow, 10) : color.new(color.orange, 10)
+    
+    // Update all cells with the same background color
+    table.cell(infoTable, 0, 1, currentAction, bgcolor=bgColor)
+    table.cell(infoTable, 1, 1, str.tostring(entryPrice), bgcolor=bgColor)
+    table.cell(infoTable, 2, 1, str.tostring(SL), bgcolor=bgColor)
+    table.cell(infoTable, 3, 1, str.tostring(TARGET1), bgcolor=bgColor)
+    table.cell(infoTable, 4, 1, str.tostring(TARGET2), bgcolor=bgColor)
+    table.cell(infoTable, 5, 1, str.tostring(TARGET3), bgcolor=bgColor)
+    table.cell(infoTable, 6, 1, target1Hit ? str.tostring(tsl1Level) : '—', bgcolor=bgColor)
+    table.cell(infoTable, 7, 1, target2Hit ? str.tostring(tsl2Level) : '—', bgcolor=bgColor)
+    
+    // Status cell gets special color coding
+    var color statusColor = color.gray
+    if exitReason == "TARGET1 Hit"
+        statusColor := color.green
+    else if exitReason == "TARGET2 Hit"
+        statusColor := color.blue
+    else if exitReason == "TARGET3 Hit"
+        statusColor := color.purple
+    else if exitReason == "TSL1 Hit"
+        statusColor := color.orange
+    else if exitReason == "TSL2 Hit"
+        statusColor := color.orange
+    else if exitReason == "SL Hit"
+        statusColor := color.red
+    else
+        statusColor := color.gray
+    
+    table.cell(infoTable, 8, 1, exitReason != "" ? exitReason : "Active", bgcolor=statusColor)
+    table.cell(infoTable, 9, 1, str.tostring(remainingQty), bgcolor=bgColor)
+// ==============================
+// ==============================
+// PLOT CURRENT LEVELS ONLY - FIXED HIT MARKERS
+// ==============================
+// Entry signals
+plotshape(buySignal and showsignals ? low : na, title='Buy Signal', location=location.belowbar, style=shape.triangleup, size=size.small, color=color.green)
+plotshape(sellSignal and showsignals ? high : na, title='Sell Signal', location=location.abovebar, style=shape.triangledown, size=size.small, color=color.red)
+
+// Hit markers - ONLY PLOT ON THE ACTUAL HIT BAR
+plotshape(slHitOccurred and barstate.isconfirmed ? (currentAction == "LONG" ? low : high) : na, title='SL Hit', location=location.absolute, style=shape.xcross, size=size.normal, color=color.red)
+plotshape(tsl1HitOccurred and barstate.isconfirmed ? (currentAction == "LONG" ? low : high) : na, title='TSL1 Hit', location=location.absolute, style=shape.xcross, size=size.normal, color=color.orange)
+plotshape(tsl2HitOccurred and barstate.isconfirmed ? (currentAction == "LONG" ? low : high) : na, title='TSL2 Hit', location=location.absolute, style=shape.xcross, size=size.normal, color=color.orange)
+plotshape(target1HitOccurred and barstate.isconfirmed ? TARGET1 : na, title='TARGET1 Hit', location=location.absolute, style=shape.circle, size=size.normal, color=color.green)
+plotshape(target2HitOccurred and barstate.isconfirmed ? TARGET2 : na, title='TARGET2 Hit', location=location.absolute, style=shape.circle, size=size.normal, color=color.blue)
+plotshape(target3HitOccurred and barstate.isconfirmed ? TARGET3 : na, title='TARGET3 Hit', location=location.absolute, style=shape.circle, size=size.normal, color=color.purple)
+
+// Plot current trade levels
+plot(remainingQty > 0 ? entryPrice : na, color=color.blue, linewidth=2, style=plot.style_circles, title='Entry Price')
+plot(remainingQty > 0 ? TARGET1 : na, color=color.green, linewidth=2, style=plot.style_circles, title='TARGET1')
+plot(remainingQty > 0 ? TARGET2 : na, color=color.blue, linewidth=2, style=plot.style_circles, title='TARGET2')
+plot(remainingQty > 0 ? TARGET3 : na, color=color.purple, linewidth=2, style=plot.style_circles, title='TARGET3')
+plot(remainingQty > 0 and target1Hit ? tsl1Level : na, color=color.orange, linewidth=2, style=plot.style_cross, title='TSL1')
+plot(remainingQty > 0 and target2Hit ? tsl2Level : na, color=color.orange, linewidth=2, style=plot.style_cross, title='TSL2')
+plot(remainingQty > 0 ? SL : na, color=color.red, linewidth=2, style=plot.style_cross, title='Stop Loss')
+// ==============================
+// ALERT CONDITIONS
+// ==============================
+alertcondition(buySignal, title='Buy Signal', message='BUY signal generated')
+alertcondition(sellSignal, title='Sell Signal', message='SELL signal generated')
+
+View in Pine Editor・409 lines
+Use on chart
+1
+0
+0
+2 522
+this is a trial version of strategy to check alert msg

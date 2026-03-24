@@ -1,0 +1,79 @@
+//@version=3
+strategy("Build A Bot", overlay=true)
+_period = input(21, title="RSI Period")
+_length = input(20, title="CCI Period")
+pp = input(title="ProfitPips", type=integer, defval=500)
+sp = input(title="StopPips", type=integer, defval=100)
+size = input(title="PositionSize", type=integer, defval=10000)
+hullsrc = input(close, title="Hull Source")
+hulllength = input(16, title="Hull Length")
+
+_start = input(0.02, title="SAR Start")
+_inc = input(0.02, title="SAR Increment")
+_max = input(0.2, title="SAR Max")
+
+_macdfast = input(36, title="MACD Fast")
+_macdslow = input(78, title="MACD Slow")
+_macdsig = input(27, title="MACD Signal")
+
+_psar = sar(_start,_inc,_max)
+
+[macdLine, signalLine, histLine] = macd(close, _macdfast, _macdslow, _macdsig)
+
+adxlen = input(14, title="ADX Smoothing")
+dilen = input(14, title="DI Length")
+_adxAbove = input(30, title="ADX Above")
+
+dirmov(len) =>
+    up = change(high)
+    down = -change(low)
+    plusDM = na(up) ? na : (up > down and up > 0 ? up : 0)
+    minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+    truerange = rma(tr, len)
+    plus = fixnan(100 * rma(plusDM, len) / truerange)
+    minus = fixnan(100 * rma(minusDM, len) / truerange)
+    [plus, minus]
+
+adx(dilen, adxlen) =>
+    [plus, minus] = dirmov(dilen)
+    sum = plus + minus
+    adx = 100 * rma(abs(plus - minus) / (sum == 0 ? 1 : sum), adxlen)
+
+sig = adx(dilen, adxlen)
+
+f_hma(_hsrc, _hlength)=>
+    //HMA = WMA(2*WMA(n/2) − WMA(n)),sqrt(n))
+    _return = wma((2 * wma(_hsrc, _hlength / 2)) - wma(_hsrc, _hlength), round(sqrt(_hlength)))
+
+hullma = f_hma(hullsrc, hulllength)
+
+ccibuyabove=50
+ccisellbelow=-50
+rsibuyabove=52
+rsisellbelow=48
+
+thersi=rsi(close,_period)
+thecci=cci(close,_length)
+
+longcondition=crossover(thecci,ccibuyabove) and thersi>rsibuyabove and histLine>0 and _psar<low and sig>_adxAbove
+shortcondition=crossunder(thecci,ccisellbelow) and thersi<rsisellbelow and histLine<0  and _psar>high and sig>_adxAbove
+
+
+if (longcondition)
+    strategy.entry("My Long Entry Id", strategy.long, size)
+    strategy.exit("My Long Entry Id", profit = pp*10, loss = sp*10)
+    strategy.exit("My Long Entry Id", when=shortcondition)
+
+if (shortcondition)
+    strategy.entry("My Short Entry Id", strategy.short, size)
+    strategy.exit("My Short Entry Id", profit = pp*10, loss = sp*10)
+    strategy.exit("My Short Entry Id", when=longcondition)
+
+View in Pine Editor・70 lines
+Use on chart
+7
+7
+2 965
+This is the Robot we built during the 60 Minute Build-A-Bot webinar on September 12, 2018. We had a great time, and a lot of participation and the best part was that we finished up this robot and even ran a backtest in exactly 60 minutes! We built this robot based on recommendations and suggestions from those who were attending live. Lots of pieces in this robot, but you can always tinker with it, remove stuff, add things, whatever you want!
+
+This version uses the CCI as a trigger for trade entry. The other version uses the Hull Moving Average as a trigger for trade entry.

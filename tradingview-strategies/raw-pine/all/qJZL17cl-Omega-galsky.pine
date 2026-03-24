@@ -1,0 +1,127 @@
+//@version=5
+strategy("EMA Crossover with SL to BE", shorttitle="OmegaGalsky", overlay=true)
+
+// Входни параметри
+ema8_period = input.int(8, title="EMA 8 Period")
+ema21_period = input.int(21, title="EMA 21 Period")
+ema89_period = input.int(89, title="EMA 89 Period")
+fixed_risk_reward = input.float(1.0, title="Risk/Reward Ratio (R2R)")
+sl_percentage = input.float(0.001, title="Stop Loss Percentage", step=0.0001)
+tp_percentage = input.float(0.0025, title="Take Profit Percentage", step=0.0001)
+
+// Изчисляване на EMA
+ema8 = ta.ema(close, ema8_period)
+ema21 = ta.ema(close, ema21_period)
+ema89 = ta.ema(close, ema89_period)
+
+// Условия за BUY
+buy_condition = ta.crossover(ema8, ema21) and close > ema89 and close > open
+
+// Условия за SELL
+sell_condition = ta.crossunder(ema8, ema21) and close < ema89 and close < open
+
+// Вход в BUY позиция
+if (buy_condition)
+    stop_loss = close * (1 - sl_percentage)
+    take_profit = close * (1 + tp_percentage)
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("TP/SL", from_entry="BUY", stop=stop_loss, limit=take_profit)
+
+// Вход в SELL позиция
+if (sell_condition)
+    stop_loss = close * (1 + sl_percentage)
+    take_profit = close * (1 - tp_percentage)
+    strategy.entry("SELL", strategy.short)
+    strategy.exit("TP/SL", from_entry="SELL", stop=stop_loss, limit=take_profit)
+
+// Логика за преместване на стоп към BE
+if (strategy.position_size > 0)
+    entry_price = strategy.position_avg_price
+    // За LONG позиция
+    if (strategy.position_size > 0 and high  >= entry_price + (entry_price * sl_percentage * fixed_risk_reward))
+        strategy.exit("SL to BE", from_entry="BUY", stop=entry_price)
+        label.new(bar_index, high, "SL moved to BE", color=color.green)
+    // За SHORT позиция
+    if (strategy.position_size < 0 and low <= entry_price - (entry_price * sl_percentage * fixed_risk_reward))
+        strategy.exit("SL to BE", from_entry="SELL", stop=entry_price)
+        label.new(bar_index, low, "SL moved to BE", color=color.red)
+
+// Чертеж на EMA
+plot(ema8, color=color.orange, title="EMA 8")
+plot(ema21, color=color.blue, title="EMA 21")
+plot(ema89, color=color.purple, title="EMA 89")
+
+View in Pine Editor・52 lines
+Use on chart
+1
+0
+842
+Dec 29, 2024
+The strategy uses three Exponential Moving Averages (EMAs) — EMA8, EMA21, and EMA89 — to decide when to open buy or sell trades. It also includes a mechanism to move the Stop Loss (SL) to the Break-Even (BE) point, which is the entry price, once the price reaches a Risk-to-Reward (R2R) ratio of 1:1.
+
+Key Steps:
+Calculating EMAs: The script computes the EMA values for the specified periods. These help identify market trends and potential entry points.
+
+Buy Conditions:
+
+EMA8 crosses above EMA21.
+The candle that causes the crossover is green (closing price is higher than the opening price).
+The closing price is above EMA89.
+If all conditions are met, a buy order is executed.
+Sell Conditions:
+
+EMA8 crosses below EMA21.
+The candle that causes the crossover is red (closing price is lower than the opening price).
+The closing price is below EMA89.
+If all conditions are met, a sell order is executed.
+Stop Loss and Take Profit:
+
+Initial Stop Loss and Take Profit levels are calculated based on the entry price and a percentage defined by the user.
+These levels help protect against large losses and lock in profits.
+Break-Even Logic:
+
+When the price moves favorably to reach a 1:1 R2R ratio:
+For a buy trade, the Stop Loss is moved to the entry price if the price increases sufficiently.
+For a sell trade, the Stop Loss is moved to the entry price if the price decreases sufficiently.
+This ensures the trade is risk-free after the price reaches the predefined level.
+Visual Representation:
+
+The EMAs are plotted on the chart for easy visualization of trends and crossovers.
+Entry and exit points are also marked on the chart to track trades.
+Purpose:
+The strategy is designed to capitalize on EMA crossovers while minimizing risks using Break-Even logic and predefined Stop Loss/Take Profit levels. It automates decision-making for trend-following traders and ensures disciplined risk management.
+Dec 29, 2024
+Release Notes
+The strategy uses three Exponential Moving Averages (EMAs) — EMA8, EMA21, and EMA89 — to decide when to open buy or sell trades. It also includes a mechanism to move the Stop Loss (SL) to the Break-Even (BE) point, which is the entry price, once the price reaches a Risk-to-Reward (R2R) ratio of 1:1.
+
+Key Steps:
+Calculating EMAs: The script computes the EMA values for the specified periods. These help identify market trends and potential entry points.
+
+Buy Conditions:
+
+EMA8 crosses above EMA21.
+The candle that causes the crossover is green (closing price is higher than the opening price).
+The closing price is above EMA89.
+If all conditions are met, a buy order is executed.
+Sell Conditions:
+
+EMA8 crosses below EMA21.
+The candle that causes the crossover is red (closing price is lower than the opening price).
+The closing price is below EMA89.
+If all conditions are met, a sell order is executed.
+Stop Loss and Take Profit:
+
+Initial Stop Loss and Take Profit levels are calculated based on the entry price and a percentage defined by the user.
+These levels help protect against large losses and lock in profits.
+Break-Even Logic:
+
+When the price moves favorably to reach a 1:1 R2R ratio:
+For a buy trade, the Stop Loss is moved to the entry price if the price increases sufficiently.
+For a sell trade, the Stop Loss is moved to the entry price if the price decreases sufficiently.
+This ensures the trade is risk-free after the price reaches the predefined level.
+Visual Representation:
+
+The EMAs are plotted on the chart for easy visualization of trends and crossovers.
+Entry and exit points are also marked on the chart to track trades.
+Purpose:
+The strategy is designed to capitalize on EMA crossovers while minimizing risks using Break-Even logic and predefined Stop Loss/Take Profit levels. It automates decision-making for trend-following traders and ensures disciplined risk management.

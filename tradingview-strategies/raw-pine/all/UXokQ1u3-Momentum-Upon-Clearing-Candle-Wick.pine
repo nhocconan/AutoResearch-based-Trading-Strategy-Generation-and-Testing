@@ -1,0 +1,110 @@
+//@version=5
+strategy("Momentum Clear Candle Wick", 
+     overlay=true, 
+     initial_capital=1000000, 
+     default_qty_type=strategy.fixed, 
+     default_qty_value=1, 
+     margin_long=0, margin_short=0)
+
+// --- Inputs ---
+pctThreshold = input.float(0.1, "Candle Body % Threshold", step=0.1) / 100
+tickOffset   = input.int(8, "Entry Offset (Ticks)")
+validBars    = input.int(5, "How many bars is entry valid?", minval=1)
+
+// Exit Inputs
+useHardStop  = input.bool(true, "Use Initial Hard Stop?")
+hardStop     = input.int(40, "Initial Hard Stop (Ticks)")
+
+useTrailing  = input.bool(true, "Use Trailing Stop?")
+trailTicks   = input.int(20, "Trailing Stop (Ticks)")
+
+useTP        = input.bool(true, "Use Take Profit Target?")
+tpTicks      = input.int(40, "Take Profit (Ticks)")
+
+// Break Even Inputs
+useBreakEven = input.bool(true, "Use Break Even?")
+beTrigger    = input.int(15, "Break Even Trigger (Ticks in Profit)")
+beOffset     = input.int(1, "Break Even Offset (Ticks for Commission)")
+
+// Time Filter Inputs
+useTimeFilter = input.bool(true, "Use Time & Hard Close?")
+sessionTime   = input.session("0930-1400", "Trading Session (NY Time)")
+hardCloseTime = input.int(1400, "Hard Close Time (HHMM)", minval=0, maxval=2359)
+
+// --- Time Logic ---
+inSession = not useTimeFilter or not na(time(timeframe.period, sessionTime, "America/New_York"))
+isHardClose = useTimeFilter and (hour(time, "America/New_York") * 100 + minute(time, "America/New_York")) >= hardCloseTime
+
+// --- Calculations ---
+tickSize = syminfo.mintick
+candleMove = math.abs(close - open) / open
+isPowerCandle = candleMove >= pctThreshold and inSession and not isHardClose
+
+var float pendingLong = na
+var float pendingShort = na
+var int timer = 0
+var bool wasTradeTaken = false
+
+if isPowerCandle
+    timer := 0 
+    wasTradeTaken := false 
+    if close > open
+        pendingLong := high + (tickOffset * tickSize)
+        pendingShort := na
+    else
+        pendingShort := low - (tickOffset * tickSize)
+        pendingLong := na
+
+timer := timer + 1
+if timer > validBars or isHardClose
+    pendingLong := na
+    pendingShort := na
+
+// --- Entry Logic ---
+if inSession and not isHardClose and strategy.position_size == 0 and not wasTradeTaken
+    if not na(pendingLong) and high >= pendingLong
+        strategy.entry("Long", strategy.long, comment="Long Fill")
+        wasTradeTaken := true
+    if not na(pendingShort) and low <= pendingShort
+        strategy.entry("Short", strategy.short, comment="Short Fill")
+        wasTradeTaken := true
+
+// --- Exit & Hard Close Management ---
+if strategy.position_size != 0
+    if isHardClose
+        strategy.close_all(comment="Hard Close @ 2PM")
+    
+    // Determine Exit Parameters
+    float exitLimit = useTP ? (strategy.position_size > 0 ? strategy.position_avg_price + (tpTicks * tickSize) : strategy.position_avg_price - (tpTicks * tickSize)) : na
+    float tPoints   = useTrailing ? trailTicks : na
+    float tOffset   = useTrailing ? 0 : na
+
+    if strategy.position_size > 0
+        float beLevelLong = strategy.position_avg_price + (beOffset * tickSize)
+        float baseStopLong = useHardStop ? strategy.position_avg_price - (hardStop * tickSize) : na
+        float stopPriceLong = (useBreakEven and (high - strategy.position_avg_price) >= (beTrigger * tickSize)) ? beLevelLong : baseStopLong
+        
+        strategy.exit("X-Long", from_entry="Long", stop=stopPriceLong, limit=exitLimit, trail_points=tPoints, trail_offset=tOffset)
+
+    if strategy.position_size < 0
+        float beLevelShort = strategy.position_avg_price - (beOffset * tickSize)
+        float baseStopShort = useHardStop ? strategy.position_avg_price + (hardStop * tickSize) : na
+        float stopPriceShort = (useBreakEven and (strategy.position_avg_price - low) >= (beTrigger * tickSize)) ? beLevelShort : baseStopShort
+        
+        strategy.exit("X-Short", from_entry="Short", stop=stopPriceShort, limit=exitLimit, trail_points=tPoints, trail_offset=tOffset)
+
+// --- Visuals ---
+plot(pendingLong, "Pending Long", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+plot(pendingShort, "Pending Short", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+bgcolor(useTimeFilter and not inSession ? color.new(color.gray, 90) : na)
+plotshape(isPowerCandle, "Signal", shape.diamond, location.top, color.yellow, size=size.tiny)
+
+View in Pine Editor・100 lines
+Use on chart
+3
+0
+2
+1 007
+A Continuation Strategy. Select for candle size by percentage of price movement. Following candles will take a position when price clears the wick of the large candle. Select the number of candles a potential trade is valid. Robust selection of take profit and stop loss conditions. Select window in which trades are valid. You can leave it open to any candle or you could narrow it to news candles or another specific time of day. Can be customized into a scalping strategy or as an attempt to capture larger portions of a move. Remember, smaller timeframes generate smaller candles and larger timeframes will generate more trades. Adjusting candle sizes and timeframes will require very different profit and loss settings to maximize the strategies potential.
+
+No signals or information generated from this strategy is investment or trade advice. For entertainment purposes only. Code created with Gemini.

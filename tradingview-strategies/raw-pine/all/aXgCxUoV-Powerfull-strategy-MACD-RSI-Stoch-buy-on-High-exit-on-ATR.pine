@@ -1,0 +1,131 @@
+//@version=2
+strategy("Simple strat", shorttitle="Simple Strat", overlay=true)
+
+// X001TK MACD + Stochastic + RSI Strategy
+//
+// 
+// This strategy combines the special approach in stochastic and rsi
+// strategy to buy once stochastic and rsi closes above center line "50" level 
+// with a MACD strategy to buy when the MACD value goes above Signal line.
+//
+//
+// This strategy goes long if the MACD goes above Signal and stochastic 
+// goes above 50 level and rsi goes above 50 level.
+//
+// This pure strategy does not have any
+// stop loss or take profit money management logic.
+//
+// Exit rule is simple. We close the position once MACD goes below Signal line
+//
+// 
+// 
+//
+// Input
+fastMAlen = input(12, minval=1, title="MACD fast moving average")
+slowMAlen=input(26,minval=1, title="MACD slow moving average")
+signalMACDlen = input(9,minval=1, title="MACD signal line moving average")
+StochLength = input(14, minval=1, title="Stochastic Length")
+switch=input(true, title="Enable MACD Bar Color?")
+length = input(1, minval=1)
+atr = rma(tr(true), length)
+//tp = input(5)
+sl = input(1.5)
+
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2002, title = "From Year", minval = 2000)
+ToMonth   = input(defval = 3, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 2029, title = "To Year", minval = 2017)
+
+
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+// MACD Calculation
+MACD = ema(close, fastMAlen) - ema(close, slowMAlen)
+signalMACD = ema(MACD, signalMACDlen)
+delta = MACD - signalMACD
+fastMA = ema(close,fastMAlen)
+slowMA = ema(close,slowMAlen)
+
+// Stochastic Calculation
+smoothK = input(3, title="Smoothing of Stochastic %K ")
+smoothD = input(3, title="Moving Average of Stochastic %K")
+k = sma(stoch(close, high, low, StochLength), smoothK)
+d = sma(k, smoothD)
+MAL = sma(close,70)
+MAS = sma(close,140)
+
+//RSI Calculation
+xRSI = rsi(close, 14)
+
+// Colors
+bartrendcolor = MACD > signalMACD and k > 60 and xRSI > 60 and close>MAL? green : MACD < signalMACD and k < 50 and xRSI < 50 and close<MAS? red : MACD < signalMACD? yellow : gray   
+barcolor(switch?bartrendcolor:na)
+//plot(close-(atr*sl), color=red, style=line)
+//plot(close+(atr*tp), color=lime, style=line)
+
+
+
+
+// === STRATEGY ===
+// conditions
+longCond = MACD > signalMACD and k > 60 and xRSI > 60 and close>MAL
+XlongCond = MACD < signalMACD or k < 50 or xRSI < 50 or close<MAL  //or close<strategy.position_avg_price-(atr*sl) //or close>strategy.position_avg_price+(atr*tp) 
+ShortCond = MACD < signalMACD and k < 40 and xRSI < 50 and close<MAS
+XShortCond = MACD > signalMACD or k > 50 or xRSI > 50 or close>MAS //or close>strategy.position_avg_price+(atr*sl) //or close<strategy.position_avg_price-(atr*tp)
+
+
+strategy.entry("long", strategy.long, when=longCond==true and window()==true, stop=high )
+strategy.close("long", when=XlongCond==true and window()==true)
+strategy.entry("short", strategy.short,  when=ShortCond==true and window()==true, stop=low )
+strategy.close("short", when=XShortCond==true and window()==true)
+
+// === /STRATEGY ===
+
+View in Pine Editor・90 lines
+Use on chart
+4
+3
+6
+4
+29 585
+Jan 24, 2019
+My strategy uses a combination of three indicators MACD Stochastic RSI .
+
+The Idea is to buy when ( MACD > Signal and RSI > 50 and Stochastic > 50) occures at the same time the BUY STop we place on previous day HIGH
+
+We exit on Take profit or Stop loss which is calculated by ATR (10) or on the opposite signal "Volatility breakout"
+
+This strategy works well on stocks, commodities and cryptos especially during market breaking up after consolidation
+
+The best results are on Daily charts , so its NOT a scalping strategy. But it can work also on 1H charts.
+
+The strategy does not have any stops and profit targets, so we can take all the market can give us at the moment.
+
+The exit point only when MACD goes under Signal
+
+Its Preformance is significantly better with "buy stop on High.1" idea and exit on "volatility price breakout"
+
+So, use it, trade it.
+
+
+If it will help you to imprive your trading results, please donate me
+
+BTC: 12kd1F8buWisUBdq27BBwRkUvzW7Ey3og5
+Oct 30, 2019
+Release Notes
+I have improved my old Powerful strategy
+Added more filters for Long and Short trades
+Optimized some inputs and variables
+As a result - much better trading performance
+
+Fell free to use all my scripts
+
+Good luck and good trading!

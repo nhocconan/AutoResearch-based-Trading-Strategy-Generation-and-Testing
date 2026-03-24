@@ -1,0 +1,74 @@
+//@version=5
+strategy("AutoFib Breakout Strategy for Uptrend Assets", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === Trend Filter ===
+ema200 = ta.ema(close, 200)
+plot(ema200, "EMA 200", color=color.orange)
+
+// === ATR for Risk Management ===
+atr = ta.atr(14)
+
+// === Fib Extension Level to Use ===
+fibLevel = 1.618
+fibColor = color.green
+
+// === Fibonacci Anchor Logic (simple swing high/low detection) ===
+pivotHigh = ta.pivothigh(high, 10, 10)
+pivotLow = ta.pivotlow(low, 10, 10)
+
+var float fibBase = na
+var float fibTop = na
+var line fibLine = na
+
+if not na(pivotHigh)
+    fibTop := pivotHigh
+if not na(pivotLow)
+    fibBase := pivotLow
+
+fibDiff = fibTop - fibBase
+fibTarget = fibTop + fibDiff * (fibLevel - 1)
+
+if not na(fibTarget)
+    line.delete(fibLine)
+    fibLine := line.new(x1=bar_index - 1, y1=fibTarget, x2=bar_index, y2=fibTarget, color=fibColor, width=1, extend=extend.right)
+    label.new(bar_index, fibTarget, text="1.618 Target", style=label.style_label_up, textcolor=color.white, size=size.small, color=color.new(fibColor, 85))
+
+// === Entry & Exit Conditions ===
+longCondition = close > fibTarget and close > ema200
+if (longCondition)
+    strategy.entry("Long Breakout", strategy.long, comment="Breakout Entry")
+
+// Exits: TP and SL based on ATR
+strategy.exit("Exit", from_entry="Long Breakout", stop=close - atr, limit=close + atr * 3)
+
+View in Pine Editor・42 lines
+Use on chart
+9
+6
+2 794
+This trading strategy is designed to help you catch powerful upward moves on assets that are in a long-term uptrend, such as Gold (XAUUSD). It uses a popular technical tool called the Fibonacci Extension, combined with a trend filter and a risk-managed exit system.
+
+✅ When to Use This Strategy
+• Works best on higher timeframes: Daily (1D), 3-Day (3D), or Weekly (W).
+• Best used on uptrending assets like Gold.
+• Designed for swing trading – holding trades from a few days to weeks.
+
+📊 How It Works
+1. Find the Trend
+We only want to trade in the direction of the trend.
+• The strategy uses the 200-period EMA (Exponential Moving Average) to identify if the market is in an uptrend.
+• If the price is above the 200 EMA, we consider it an uptrend and allow long trades.
+2. Identify Breakout Levels
+• The strategy detects recent high and low pivot points to draw Fibonacci extension levels.
+• It focuses on the 1.618 Fibonacci level, which is often a target in strong trends.
+• When the price breaks above this level in an uptrend, it signals a potential momentum breakout – a good time to buy.
+3. Enter a Trade
+• The strategy enters a long (buy) position when the price closes above the 1.618 Fibonacci level and the market is in an uptrend (above the 200 EMA).
+4. Manage Risk Automatically
+• The trade includes a stop-loss set to 1x the ATR (Average True Range) below the entry price – this protects against sudden drops.
+• It sets a take-profit at 3x the ATR above the entry – aiming for higher rewards than risks.
+
+⚠️ Important Notes
+• 📈 Higher Timeframes Preferred: This strategy works best on Daily (D), 3-Day (3D), and Weekly (W) charts, especially on Gold (XAUUSD).
+• 🧪 Not for Deep Backtesting: Due to the nature of how pivot points and Fib levels are calculated, this strategy may not perform well in backtesting simulations (because the historical calculations can shift). It is better used for live analysis and forward testing.
+

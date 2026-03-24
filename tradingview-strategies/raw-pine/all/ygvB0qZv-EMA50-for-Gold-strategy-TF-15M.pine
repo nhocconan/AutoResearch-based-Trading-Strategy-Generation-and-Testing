@@ -1,0 +1,105 @@
+//@version=6
+strategy("HT EMA50 Bias + Entry: Price x EMA50(45m) + Exit: EMA50(15m) [Session+NewsSafe]",
+     overlay=true,
+     initial_capital=10000,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+emaLen      = input.int(50, "EMA Length", minval=1)
+
+// Timeframes
+htfBiasTF   = input.timeframe("60", "HTF for EMA50 Bias (e.g., 60=1H, 240=4H)")
+entryRefTF  = input.timeframe("45", "Entry reference TF (EMA50 on 45m)")
+exitTF      = input.timeframe("15", "Exit TF (EMA50 on 15m)")
+
+// Trade control
+onePosOnly  = input.bool(true, "One position at a time")
+
+// Session filter (exchange time of the symbol)
+useSession  = input.bool(true, "Use session filter")
+tradeSess   = input.session("0700-2200", "Trading session (exchange time)")
+
+// News-safe mode (manual lockout window)
+newsSafeOn  = input.bool(false, "🟡 News-safe mode (block entries)")
+newsSess    = input.session("0000-0000", "News lockout session (set your red-news window)")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers: session + news filters
+// ─────────────────────────────────────────────────────────────────────────────
+inSession = not useSession or not na(time(timeframe.period, tradeSess))
+inNews    = newsSafeOn and not na(time(timeframe.period, newsSess))
+
+allowEntries = inSession and not inNews
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HTF Bias: Close vs EMA50 on HTF
+// ─────────────────────────────────────────────────────────────────────────────
+htfClose = request.security(syminfo.tickerid, htfBiasTF, close, barmerge.gaps_off, barmerge.lookahead_off)
+htfEma50 = request.security(syminfo.tickerid, htfBiasTF, ta.ema(close, emaLen), barmerge.gaps_off, barmerge.lookahead_off)
+
+biasBull = htfClose > htfEma50
+biasBear = htfClose < htfEma50
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry Reference: EMA50 calculated on 45m (used on LTF chart)
+// ─────────────────────────────────────────────────────────────────────────────
+ema50_45 = request.security(syminfo.tickerid, entryRefTF, ta.ema(close, emaLen), barmerge.gaps_off, barmerge.lookahead_off)
+plot(ema50_45, "EMA50 (45m reference)", linewidth=2)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exit: EMA50 calculated on 15m
+// ─────────────────────────────────────────────────────────────────────────────
+ema50_15 = request.security(syminfo.tickerid, exitTF, ta.ema(close, emaLen), barmerge.gaps_off, barmerge.lookahead_off)
+plot(ema50_15, "EMA50 (15m exit)", linewidth=2)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entries (on your chart timeframe)
+// Long: HT bias bullish AND price crosses ABOVE 45m EMA50
+// Short: HT bias bearish AND price crosses BELOW 45m EMA50
+// ─────────────────────────────────────────────────────────────────────────────
+longEntry  = allowEntries and biasBull and ta.crossover(close, ema50_45)
+shortEntry = allowEntries and biasBear and ta.crossunder(close, ema50_45)
+
+canEnter = not onePosOnly or strategy.position_size == 0
+
+if canEnter and longEntry
+    strategy.entry("Long", strategy.long)
+
+if canEnter and shortEntry
+    strategy.entry("Short", strategy.short)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exits (based on 15m EMA50)
+// Long exits when close crosses BELOW 15m EMA50
+// Short exits when close crosses ABOVE 15m EMA50
+// ─────────────────────────────────────────────────────────────────────────────
+longExit  = ta.crossunder(close, ema50_15)
+shortExit = ta.crossover(close, ema50_15)
+
+if strategy.position_size > 0 and longExit
+    strategy.close("Long", comment="Exit: Close < EMA50(15m)")
+
+if strategy.position_size < 0 and shortExit
+    strategy.close("Short", comment="Exit: Close > EMA50(15m)")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+alertcondition(longEntry,  title="BUY: HT bias + Close x EMA50(45m)",
+     message="BUY: HT EMA50 bias bullish + price crossed ABOVE EMA50(45m).")
+alertcondition(shortEntry, title="SELL: HT bias + Close x EMA50(45m)",
+     message="SELL: HT EMA50 bias bearish + price crossed BELOW EMA50(45m).")
+alertcondition(longExit,   title="EXIT LONG: Close x EMA50(15m)",
+     message="EXIT LONG: price crossed BELOW EMA50(15m).")
+alertcondition(shortExit,  title="EXIT SHORT: Close x EMA50(15m)",
+     message="EXIT SHORT: price crossed ABOVE EMA50(15m).")
+
+View in Pine Editor・98 lines
+Use on chart
+1
+1
+637
+This is a strategy for Gold in TF 15M using EMA50 of HT

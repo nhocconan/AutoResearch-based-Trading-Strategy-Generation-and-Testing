@@ -1,0 +1,59 @@
+//@version=5
+strategy("Simple RSI Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Nastavení RSI
+rsiLength = input(14, title="RSI Length")
+overbought = input(70, title="Overbought Level")
+oversold = input(30, title="Oversold Level")
+
+// Výpočet RSI
+rsi = ta.rsi(close, rsiLength)
+
+// Stavy pro kontrolu dosažení extrémních zón
+var bool reachedOverbought = false
+var bool reachedOversold = false
+
+// Proměnná sledující poslední typ signálu (0 = žádný, 1 = buy, -1 = sell)
+var int lastSignal = 0
+
+// Detekce návratu RSI do normálního rozmezí
+rsiBelowOverbought = rsi[1] > overbought and rsi <= overbought
+rsiAboveOversold = rsi[1] < oversold and rsi >= oversold
+
+// Logika pro detekci dosažení zón
+if rsi >= overbought
+    reachedOverbought := true
+if rsi <= oversold
+    reachedOversold := true
+
+// Logika pro generování signálů
+buySignal = reachedOversold and rsiAboveOversold and lastSignal != 1
+sellSignal = reachedOverbought and rsiBelowOverbought and lastSignal != -1
+
+// Aktualizace posledního signálu a provedení obchodů
+if buySignal
+    strategy.entry("Buy", strategy.long)
+    lastSignal := 1
+    reachedOversold := false
+    reachedOverbought := false
+if sellSignal
+    strategy.entry("Sell", strategy.short)
+    lastSignal := -1
+    reachedOverbought := false
+    reachedOversold := false
+
+// Vykreslení signálů na graf
+plotshape(series=sellSignal, location=location.abovebar, color=color.red, style=shape.triangledown, title="Sell Signal", size=size.large)
+plotshape(series=buySignal, location=location.belowbar, color=color.green, style=shape.triangleup, title="Buy Signal", size=size.large)
+
+// Zobrazení RSI grafu
+plot(rsi, "RSI", color=color.blue)
+hline(overbought, "Overbought", color=color.red)
+hline(oversold, "Oversold", color=color.green)
+
+View in Pine Editor・52 lines
+Use on chart
+3
+6
+1 236
+Simple RSI Strategy Simple RSI StrategySimple RSI Strategy Simple RSI Strategy

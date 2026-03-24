@@ -1,0 +1,13 @@
+//@version=5
+maclr=##input(defval=#2962ff,type='INPUT_COLOR',##id='in_2')
+stbuyclr=##input(defval=#4CAF50,type='INPUT_COLOR',##id='in_8')
+stsellclr=##input(defval=#FF5252,type='INPUT_COLOR',##id='in_9')
+stbuyclr2=##input(defval=#4CAF50,type='INPUT_COLOR',##id='in_15')
+stsellclr2=##input(defval=#FF5252,type='INPUT_COLOR',##id='in_16')
+##root(root_metainfo,rm_0,2,input__integer,plot,linewidth)
+##root(root_metainfo,rm_1,2,input__integer,plot,linewidth)
+##root(root_metainfo,plot_0_0,stsellclr,input__color)
+##root(root_metainfo,plot_0_1,stbuyclr,input__color)
+##root(root_metainfo,plot_1_0,stsellclr2,input__color)
+##root(root_metainfo,plot_1_1,stbuyclr2,input__color)
+##root(root_metainfo,plot_2_0,maclr,input__color)

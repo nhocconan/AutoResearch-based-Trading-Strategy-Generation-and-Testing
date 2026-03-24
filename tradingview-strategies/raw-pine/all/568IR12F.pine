@@ -1,0 +1,172 @@
+//@version=5
+// strategy(title="Dow Theory Trend Strategy", shorttitle="Dow Trend Strat", overlay=true,
+//      initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+//      commission_type=strategy.commission.percent, commission_value=0.1) // Example strategy settings
+strategy(title="Dow Theory Trend Strategy", shorttitle="Dow Trend Strat", overlay=true) // Basic strategy settings
+
+// --- 設定 ---
+pivotLookback = input.int(10, title="Pivot Lookback Period", minval=1, tooltip="ピボットハイ/ローを検出するための左右のバーの数")
+showPivotPoints = input.bool(true, title="Show Pivot Points", tooltip="ピボットハイ/ローのポイントを表示します")
+showTrendChange = input.bool(true, title="Show Trend Change Signals", tooltip="トレンド転換のシグナル（エントリーポイント）を表示します")
+
+// --- ピボットハイ/ローの検出 ---
+// ta.pivothigh/low(source, leftbars, rightbars)
+// rightbars分だけ遅延して確定する点に注意
+pivotHighPrice = ta.pivothigh(high, pivotLookback, pivotLookback)
+pivotLowPrice = ta.pivotlow(low, pivotLookback, pivotLookback)
+
+// --- ピボットポイントの値を保持するための変数 ---
+var float lastPivotHigh = na
+var float prevPivotHigh = na
+var float lastPivotLow = na
+var float prevPivotLow = na
+
+var int lastPivotHighBar = na
+var int prevPivotHighBar = na
+var int lastPivotLowBar = na
+var int prevPivotLowBar = na
+
+// --- 新しいピボットが確定したかどうかの検出と値の更新 ---
+// 新しいピボットハイが確定
+if not na(pivotHighPrice)
+    if na(lastPivotHigh) or pivotHighPrice != lastPivotHigh // 初回または前回と違うピボット
+        prevPivotHigh := lastPivotHigh
+        prevPivotHighBar := lastPivotHighBar
+        lastPivotHigh := pivotHighPrice
+        lastPivotHighBar := bar_index - pivotLookback // ピボットが確定したバー
+
+// 新しいピボットローが確定
+if not na(pivotLowPrice)
+    if na(lastPivotLow) or pivotLowPrice != lastPivotLow // 初回または前回と違うピボット
+        prevPivotLow := lastPivotLow
+        prevPivotLowBar := lastPivotLowBar
+        lastPivotLow := pivotLowPrice
+        lastPivotLowBar := bar_index - pivotLookback // ピボットが確定したバー
+
+// --- ダウ理論に基づくトレンド判定 (改良版) ---
+var int trendDirection = 0 // 1: 上昇トレンド, -1: 下降トレンド, 0: レンジ/判定不能 (初期状態)
+
+// 有効なピボットが最低2つずつ存在するか確認
+bool hasEnoughPivots = not na(lastPivotHigh) and not na(prevPivotHigh) and not na(lastPivotLow) and not na(prevPivotLow)
+
+if hasEnoughPivots
+    // 上昇トレンドの条件: 高値切り上げ (HH) かつ 安値切り上げ (HL)
+    isHigherHigh = lastPivotHigh > prevPivotHigh
+    isHigherLow = lastPivotLow > prevPivotLow
+    isUptrendConfirmed = isHigherHigh and isHigherLow
+
+    // 下降トレンドの条件: 高値切り下げ (LH) かつ 安値切り下げ (LL)
+    isLowerHigh = lastPivotHigh < prevPivotHigh
+    isLowerLow = lastPivotLow < prevPivotLow
+    isDowntrendConfirmed = isLowerHigh and isLowerLow
+
+    // トレンド方向の決定ロジック (改良)
+    if isUptrendConfirmed
+        trendDirection := 1 // 明確な上昇トレンドを確認
+    else if isDowntrendConfirmed
+        trendDirection := -1 // 明確な下降トレンドを確認
+    else
+        // 明確な上昇・下降トレンドが確認できない場合、前のトレンドを維持する
+        // これにより、一時的なレンジや一方の条件のみ満たす状況でトレンド方向が頻繁に変わるのを防ぐ
+        trendDirection := trendDirection[1] // 前のバーのトレンド方向を引き継ぐ
+
+// --- トレンド転換の検出 ---
+// trendDirectionの値が変化したバーを検出 (0->1, 0->-1, 1->-1, -1->1)
+bool trendChanged = ta.change(trendDirection) != 0 and trendDirection != 0 // 0への変化は除外しない場合もあるが、ここでは明確な転換を重視
+bool changedToUp = trendChanged and trendDirection == 1
+bool changedToDown = trendChanged and trendDirection == -1
+
+// --- 描画処理 ---
+
+// 1. 背景色によるトレンド表示 (改良版のtrendDirectionを使用)
+bgcolor(trendDirection == 1 ? color.new(color.blue, 85) : trendDirection == -1 ? color.new(color.red, 85) : color.new(color.gray, 90), title="Trend Background") // レンジ/初期状態はグレーに
+
+// 2. ピボットポイントの描画 (オプション)
+plotshape(showPivotPoints and not na(pivotHighPrice), title="Pivot High", location=location.abovebar, color=color.new(color.maroon, 20), style=shape.triangledown, size=size.tiny, offset=-pivotLookback)
+plotshape(showPivotPoints and not na(pivotLowPrice), title="Pivot Low", location=location.belowbar, color=color.new(color.navy, 20), style=shape.triangleup, size=size.tiny, offset=-pivotLookback)
+
+// 3. トレンド転換シグナル（エントリーポイント）の描画 (オプション)
+plotshape(showTrendChange and changedToUp, title="Uptrend Start Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.labelup, text="▲ UP", textcolor=color.white, size=size.small)
+plotshape(showTrendChange and changedToDown, title="Downtrend Start Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.labeldown, text="▼ DOWN", textcolor=color.white, size=size.small)
+
+// --- ストラテジーロジック ---
+if (changedToUp)
+    // 上昇トレンドに転換したらロングエントリー (既存のショートがあればクローズ)
+    strategy.entry("L", strategy.long, comment="Go Long")
+
+if (changedToDown)
+    // 下降トレンドに転換したらショートエントリー (既存のロングがあればクローズ)
+    strategy.entry("S", strategy.short, comment="Go Short")
+
+// --- デバッグ用 (必要に応じてコメント解除) ---
+// plotchar(not na(pivotHighPrice), "PH", "H", location.abovebar, color.red, offset = -pivotLookback)
+// plotchar(not na(pivotLowPrice), "PL", "L", location.belowbar, color.blue, offset = -pivotLookback)
+// plot(lastPivotHigh, color=color.orange, title="Last PH")
+// plot(prevPivotHigh, color=color.purple, title="Prev PH")
+// plot(lastPivotLow, color=color.lime, title="Last PL")
+// plot(prevPivotLow, color=color.aqua, title="Prev PL")
+// plot(trendDirection, title="Trend Direction Value") // トレンド方向の値をプロットして確認
+
+View in Pine Editor・108 lines
+Use on chart
+1
+2
+0
+4 046
+Dow Theory Trend Strategy (Pine Script)
+
+Overview
+
+This Pine Script implements a trading strategy based on the core principles of Dow Theory. It visually identifies trends (uptrend, downtrend) by analyzing pivot highs and lows and executes trades when the trend direction changes. This script is an improved version that features refined trend determination logic and strategy implementation.
+
+Core Concept: Dow Theory
+
+The script uses a fundamental Dow Theory concept for trend identification:
+
+Uptrend: Characterized by a series of Higher Highs (HH) and Higher Lows (HL).
+Downtrend: Characterized by a series of Lower Highs (LH) and Lower Lows (LL).
+How it Works
+
+Pivot Point Detection:
+
+It uses the built-in ta.pivothigh() and ta.pivotlow() functions to identify significant swing points (potential highs and lows) in the price action.
+The pivotLookback input determines the number of bars to the left and right required to confirm a pivot. Note that this introduces a natural lag (equal to pivotLookback bars) before a pivot is confirmed.
+Improved Trend Determination:
+
+The script stores the last two confirmed pivot highs and the last two confirmed pivot lows.
+An Uptrend (trendDirection = 1) is confirmed only when the latest pivot high is higher than the previous one (HH) AND the latest pivot low is higher than the previous one (HL).
+A Downtrend (trendDirection = -1) is confirmed only when the latest pivot high is lower than the previous one (LH) AND the latest pivot low is lower than the previous one (LL).
+Key Improvement: If neither a clear uptrend nor a clear downtrend is confirmed based on the latest pivots, the script maintains the previous trend state (trendDirection := trendDirection[1]). This differs from simpler implementations that might switch to a neutral/range state (e.g., trendDirection = 0) more frequently. This approach aims for smoother trend following, acknowledging that trends often persist through periods without immediate new HH/HL or LH/LL confirmations.
+Trend Change Detection:
+
+The script monitors changes in the trendDirection variable.
+changedToUp becomes true when the trend shifts to an Uptrend (from Downtrend or initial state).
+changedToDown becomes true when the trend shifts to a Downtrend (from Uptrend or initial state).
+Visualizations
+
+Background Color: The chart background is colored to reflect the currently identified trend:
+Blue: Uptrend (trendDirection == 1)
+Red: Downtrend (trendDirection == -1)
+Gray: Initial state or undetermined (trendDirection == 0)
+Pivot Points (Optional): Small triangles (shape.triangledown/shape.triangleup) can be displayed above pivot highs and below pivot lows if showPivotPoints is enabled.
+Trend Change Signals (Optional): Labels ("▲ UP" / "▼ DOWN") can be displayed when a trend change is confirmed (changedToUp / changedToDown) if showTrendChange is enabled. These visually mark the potential entry points for the strategy.
+Strategy Logic
+
+Entry Conditions:
+Enters a long position (strategy.long) using strategy.entry("L", ...) when changedToUp becomes true.
+Enters a short position (strategy.short) using strategy.entry("S", ...) when changedToDown becomes true.
+Position Management: The script uses strategy.entry(), which automatically handles position reversal. If the strategy is long and a short signal occurs, strategy.entry() will close the long position and open a new short one (and vice-versa).
+Inputs
+
+pivotLookback: The number of bars on each side to confirm a pivot high/low. Higher values mean pivots are confirmed later but may be more significant.
+showPivotPoints: Toggle visibility of pivot point markers.
+showTrendChange: Toggle visibility of the trend change labels ("▲ UP" / "▼ DOWN").
+Key Improvements from Original
+
+Smoother Trend Logic: The trend state persists unless a confirmed reversal pattern (opposite HH/HL or LH/LL) occurs, reducing potential whipsaws in choppy markets compared to logic that frequently resets to neutral.
+Strategy Implementation: Converted from a pure indicator to a strategy capable of executing backtests and potentially live trades based on the Dow Theory trend changes.
+Disclaimer
+
+Dow Theory signals are inherently lagging due to the nature of pivot confirmation.
+The effectiveness of the strategy depends heavily on the market conditions and the chosen pivotLookback setting.
+This script serves as a basic template. Always perform thorough backtesting and implement proper risk management (e.g., stop-loss, take-profit, position sizing) before considering any live trading.

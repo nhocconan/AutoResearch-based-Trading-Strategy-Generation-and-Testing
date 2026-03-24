@@ -1,0 +1,11 @@
+//@version=5
+enableGlow=##input(defval=true,type='INPUT_BOOL',##id='in_2')
+##root(root_metainfo,rm_0,1,input__integer,plot,linewidth)
+##root(root_metainfo,rm_1,(enableGlow?4:na),input__integer,plot,linewidth)
+##root(root_metainfo,rm_2,(enableGlow?8:na),input__integer,plot,linewidth)
+##root(root_metainfo,rm_3,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_4,'Bottom',input__string,plotshape,location)
+##root(root_metainfo,rm_5,'tiny',const__string,plotshape,size)
+##root(root_metainfo,rm_6,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_7,'Top',input__string,plotshape,location)
+##root(root_metainfo,rm_8,'tiny',const__string,plotshape,size)

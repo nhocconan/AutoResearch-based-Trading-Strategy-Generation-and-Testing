@@ -1,0 +1,68 @@
+//@version=5
+strategy("[swapstrategy] Reversal Strategy", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// === Inputs ===
+length = input(14, 'Pivot Lookback')
+area = input.string('Wick Extremity', 'Swing Area', options = ['Wick Extremity', 'Full Range'])
+intraPrecision = input(false, 'Intrabar Precision', inline = 'intrabar')
+intrabarTf = input.timeframe('1', '', inline = 'intrabar')
+filterOptions = input.string('Count', 'Filter Areas By', options = ['Count', 'Volume'], inline = 'filter')
+filterValue = input.float(0, '', inline = 'filter')
+
+// === Style ===
+showTop = input(true, 'Swing High', inline = 'top', group = 'Style')
+topCss = input(color.red, '', inline = 'top', group = 'Style')
+topAreaCss = input(color.new(color.red, 50), 'Area', inline = 'top', group = 'Style')
+showBtm = input(true, 'Swing Low', inline = 'btm', group = 'Style')
+btmCss = input(color.teal, '', inline = 'btm', group = 'Style')
+btmAreaCss = input(color.new(color.teal, 50), 'Area', inline = 'btm', group = 'Style')
+labelSize = input.string('Tiny', 'Labels Size', options = ['Tiny', 'Small', 'Normal'], group = 'Style')
+
+// === SMA and Reversal Logic ===
+sma9 = ta.sma(close, 9)
+buySignal  = ta.crossover(close, sma9)
+sellSignal = ta.crossunder(close, sma9)
+
+// Exit current position when opposite signal appears
+buyExit  = sellSignal
+sellExit = buySignal
+
+// === Strategy Execution ===
+// Exit long when sell signal appears
+if (buyExit)
+    strategy.close("Long", comment="Exit Long")
+
+// Exit short when buy signal appears
+if (sellExit)
+    strategy.close("Short", comment="Exit Short")
+
+// Enter long on buy signal
+if (buySignal)
+    strategy.entry("Long", strategy.long, comment="Enter Long")
+
+// Enter short on sell signal
+if (sellSignal)
+    strategy.entry("Short", strategy.short, comment="Enter Short")
+
+// === Alerts ===
+alertcondition(buySignal, title="BUY Entry", message="BUY signal triggered")
+alertcondition(sellSignal, title="SELL Entry", message="SELL signal triggered")
+alertcondition(buyExit, title="BUY Exit", message="BUY exit triggered")
+alertcondition(sellExit, title="SELL Exit", message="SELL exit triggered")
+
+// === Plot Entry/Exit Markers ===
+plotshape(series=buySignal, location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(series=sellSignal, location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+plotshape(series=buyExit, location=location.abovebar, color=color.orange, style=shape.labeldown, text="EXIT")
+plotshape(series=sellExit, location=location.belowbar, color=color.orange, style=shape.labelup, text="EXIT")
+
+// --- Your existing pivot logic remains unchanged below this line ---
+// (You can keep your `get_counts`, `set_zone`, `set_level`, `set_label`, and pivot box logic as-is)
+
+View in Pine Editor・60 lines
+Use on chart
+2
+2
+1
+817
+Generate buy and sell signals and reverses position when chart turn buy or sell side

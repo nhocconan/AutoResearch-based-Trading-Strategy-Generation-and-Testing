@@ -1,0 +1,16 @@
+{
+  "updated_at": "2026-03-23T04:37:04.269726+00:00",
+  "status": "running",
+  "last_batch_status": "started",
+  "counts_before_batch": {
+    "total_items": 5403,
+    "cached_ok": 5036,
+    "pending": 0,
+    "errors": 367,
+    "retryable_errors": 367
+  },
+  "counts_after_batch": null,
+  "batch_started_at": "2026-03-23T04:37:04.269757+00:00",
+  "batch_completed_at": null,
+  "batch_exit_code": null
+}

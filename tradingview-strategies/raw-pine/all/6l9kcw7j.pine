@@ -1,0 +1,120 @@
+//@version=5
+strategy("Slight Swing Momentum Strategy.", overlay=true)
+
+// Position Status Definition
+var inPosition = false
+
+// Moving Average Definition
+ma60 = ta.sma(close, 60)
+
+// A1 Condition Definition
+A1 = high / close < 1.03 and open / low < 1.03 and high / close[1] > 1.06
+
+// A2 Condition Definition
+A2 = close / open > 1.05 or close / close[1] > 1.05
+
+// A3 Condition Definition
+highestVol = ta.highest(volume, 60)
+A3 = ta.crossover(volume, highestVol[1])
+
+// B1 Condition Definition
+ema5 = ta.ema(close, 5)
+B1 = close / ema5
+
+// XG Condition Definition
+A1andA2 = (A1 and A2) and (A1[1] and A2[1])
+XG = ta.crossover(B1, ta.sma(B1, 9))
+
+// Weekly Trend Factor Definition
+weeklyMa = ta.sma(close, 50)
+weeklySlope = (weeklyMa - weeklyMa[4]) / 4 > 0
+
+// Buy Signal using XG Condition
+buySignal = A1 and close > ma60 or A2 and A3 and XG and close > ma60 and weeklySlope 
+
+// Sell Signal Condition
+sellSignal = close < ta.ema(close, 10)
+
+// Buy and Sell Conditions
+buyCondition = buySignal and not inPosition
+sellCondition = sellSignal and inPosition
+
+// Execute Buy and Sell Operations
+if (buyCondition)
+    strategy.entry("Buy", strategy.long)
+    inPosition := true
+if (sellCondition)
+    strategy.close("Buy")
+    inPosition := false
+
+// Stop Loss and Take Profit Levels
+stopLoss = strategy.position_avg_price * 0.5
+takeProfit = strategy.position_avg_price * 1.30
+
+// Apply Stop Loss and Take Profit Levels
+if inPosition
+    strategy.exit("Long Stop Loss", "Buy", stop=stopLoss)
+    strategy.exit("Long Take Profit", "Buy", limit=takeProfit)
+
+// Plot Buy and Sell Signal Shapes
+plotshape(buyCondition, style=shape.arrowdown, location=location.belowbar, color=color.green, size=size.small)
+plotshape(sellCondition, style=shape.arrowup, location=location.abovebar, color=color.red, size=size.small)
+
+// EMA Variable Definition
+ema = ta.ema(close, 5)
+
+// Plot Indicator Line
+plot(ema, color=color.green, title="EMA")
+
+View in Pine Editor・69 lines
+Use on chart
+1
+6
+6
+1
+4 686
+Introduction:
+The Swing Momentum Strategy is a quantitative trading strategy designed to capture mid-term opportunities in the financial markets by combining swing trading principles with momentum indicators. It utilizes a combination of technical indicators, including moving averages, crossover signals, and volume analysis, to generate buy and sell signals. The strategy aims to identify market trends and capitalize on price momentum for profit generation.
+
+Highlights:
+The strategy offers several key highlights that make it unique and potentially attractive to traders:
+
+Swing Trading with Momentum: The strategy combines the principles of swing trading, which aim to capture short-to-medium-term price swings, with momentum indicators that help identify strong price trends and potential breakout opportunities.
+
+Technical Indicator Optimization: The strategy utilizes a selection of optimized technical indicators, including moving averages and crossover signals, to filter out the noise and focus on high-probability trading setups. This optimization enhances the strategy's ability to identify favourable entry and exit points.
+
+Risk Management: The strategy incorporates risk management techniques, such as position sizing based on equity and dynamic stop loss levels, to manage risk exposure and protect capital. This helps to minimize drawdowns and preserve profits.
+
+Buy Condition:
+The buy condition in the strategy is determined by a combination of factors, including A1, A2, A3, XG, and weeklySlope. Let's break it down:
+
+A1 Condition: The A1 condition checks for specific price relationships. It verifies that the ratio of the highest price to the closing price is less than 1.03, the ratio of the opening price to the lowest price is less than 1.03, and the ratio of the highest price to the previous day's closing price is greater than 1.06. This condition looks for a specific pattern indicating potential bullish momentum.
+
+A2 Condition: The A2 condition checks for price relationships related to the closing price. It verifies that the ratio of the closing price to the opening price is greater than 1.05 or that the ratio of the closing price to the previous day's closing price is greater than 1.05. This condition looks for signs of upward price movement and momentum.
+
+A3 Condition: The A3 condition focuses on volume. It checks if the current volume crosses above the highest volume over the last 60 periods. This condition aims to identify increased buying interest and potentially confirms the strength of the potential upward price movement.
+
+XG Condition: The XG condition combines the A1 and A2 conditions and checks if they are true for both the current and previous bars. It also verifies that the ratio of the closing price to the 5-period EMA crosses above the 9-period SMA of the same ratio. This condition helps identify potential buy signals when multiple factors align, indicating a strong bullish momentum and potential entry point.
+
+Weekly Trend Factor: The weekly slope condition calculates the slope of the 50-period SMA over a weekly timeframe. It checks if the slope is positive, indicating an overall upward trend on a weekly basis. This condition provides additional confirmation that the stock is in an upward trend.
+
+When all of these conditions align, the buy condition is triggered, indicating a favourable time to enter a long position.
+
+Sell Condition:
+The sell condition is relatively straightforward in the strategy:
+
+Sell Signal: The sell condition simply checks if the closing price crosses below the 10-period EMA. When this condition is met, it indicates a potential reversal or weakening of the upward price momentum, and a sell signal is generated.
+
+Backtest Outcome:
+The strategy was backtested over the period from January 22nd, 1999 to May 3rd, 2023, using daily candlestick charts for the NASDAQ: NVDA. The strategy used an initial capital of 1,000,000 USD, The order quantity is defined as 10% of the equity. The strategy allows for pyramiding with 1 order, and the transaction fee is set at 0.03% per trade. Here are the key outcomes of the backtest:
+
+Net Profit: 539,595.84 USD, representing a return of 53.96%.
+Percent Profitable: 48.82%
+Total Closed Trades: 127
+Profit Factor: 2.331
+Max Drawdown: 68,422.70 USD
+Average Trade: 4,248.79 USD
+Average Number of Bars in Trades: 11, indicating the average duration of the trades.
+
+Conclusion:
+In conclusion, the Swing Momentum Strategy is a quantitative trading approach that combines swing trading principles with momentum indicators to identify and capture mid term trading opportunities. The strategy has demonstrated promising results during backtesting, including a significant net profit and a favourable profit factor.

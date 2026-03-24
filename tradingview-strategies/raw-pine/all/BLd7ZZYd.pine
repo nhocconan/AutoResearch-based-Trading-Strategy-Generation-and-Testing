@@ -1,0 +1,145 @@
+//@version=5
+strategy("XAUUSD 1M SCALP", overlay=true, initial_capital=10000, default_qty_type=strategy.cash, currency=currency.USD)
+
+// ===== הגבלות קשיחות =====
+MAX_QTY        = 5          // לוט אחד בלבד
+MAX_LOSS_USDT  = 500.0        // הפסד מקסימלי לעסקה
+
+
+// --- פילטר מגמה ומחזוריות ---
+rsi = ta.rsi(close, 14)
+ema200 = ta.ema(close, 200)
+
+// --- זיהוי Phases A-C (נזילות) ---
+pivot_high = ta.pivothigh(high, 8, 2)
+pivot_low = ta.pivotlow(low, 5, 1)
+
+var float liquid_low = na
+var float liquid_high = na
+if not na(pivot_low)
+    liquid_low := pivot_low
+if not na(pivot_high)
+    liquid_high := pivot_high
+
+// Phase C: Liquidity Sweep (Spring)
+is_spring = low < liquid_low and close > liquid_low and rsi < 30
+is_upthrust = high > liquid_high and close < liquid_high and rsi > 70
+
+// --- Phase D: Sign of Strength (FVG + BOS) ---
+fvg_bull = low > high[2]
+fvg_bear = high < low[2]
+bos_bull = ta.crossover(close, ta.highest(high, 2)[1])
+bos_bear = ta.crossunder(close, ta.lowest(low, 2)[1])
+
+// --- Phase E: Entry (The Test) ---
+var bool showLongEntry = false
+var bool showShortEntry = false
+
+if is_spring
+    showLongEntry := true
+if is_upthrust
+    showShortEntry := true
+
+
+// ===== כניסה לונג =====
+if showLongEntry and fvg_bull and bos_bull and strategy.position_size == 0
+    entry_price = close
+    sl_price = entry_price - MAX_LOSS_USDT
+    strategy.entry("Long", strategy.long, qty=MAX_QTY)
+    showLongEntry := true
+    strategy.exit("XL", "Long", stop=sl_price)
+    showLongEntry := false
+
+// ===== כניסה שורט =====
+if showShortEntry and fvg_bear and bos_bear and strategy.position_size == 0
+    entry_price = close
+    sl_price = entry_price + MAX_LOSS_USDT
+    strategy.entry("Short", strategy.short, qty=MAX_QTY)
+    strategy.exit("XS", "Short", stop=sl_price)
+    showShortEntry := false
+// --- ניהול סיכונים ---
+atr = ta.atr(14)
+// הסטופ-לוס נשאר מבני (מתחת ל-Spring), אבל הכמות מבטיחה שזה יהיה בדיוק 1% הפסד
+strategy.exit("XL", "Long", stop=ta.lowest(low, 5), limit=close + (atr * 1))
+strategy.exit("XS", "Short", stop=ta.highest(high, 5), limit=close - (atr * 1))
+
+// ================= DESK STYLE TRADE VISUAL (FIXED) =================
+
+// זיהוי כניסה
+longEntry  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+shortEntry = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+// משתנים קבועים
+var line entryLine = na
+var line slLine    = na
+var line tpLine    = na
+var label tradeLbl = na
+var float entryPrice = na
+
+// ATR
+atrVis = ta.atr(14)
+
+
+
+// ===== LONG =====
+if longEntry
+    entryPrice := close
+
+    longSL = ta.lowest(low, 5)
+    longTP = entryPrice + atrVis * 3
+
+    entryLine := line.new(bar_index, entryPrice, bar_index + 20, entryPrice, width=2)
+    slLine    := line.new(bar_index, longSL,     bar_index + 20, longSL,     color=color.red,   width=2)
+    tpLine    := line.new(bar_index, longTP,     bar_index + 20, longTP,     color=color.green, width=2)
+
+    tradeLbl := label.new(bar_index, low, "BUY",
+         style=label.style_label_up,
+         color=color.green,
+         textcolor=color.white)
+
+// ===== SHORT =====
+if shortEntry
+    entryPrice := close
+
+    shortSL = ta.highest(high, 5)
+    shortTP = entryPrice - atrVis * 3
+
+    entryLine := line.new(bar_index, entryPrice, bar_index + 20, entryPrice, width=2)
+    slLine    := line.new(bar_index, shortSL,    bar_index + 20, shortSL,    color=color.red,   width=2)
+    tpLine    := line.new(bar_index, shortTP,    bar_index + 20, shortTP,    color=color.green, width=2)
+
+    tradeLbl := label.new(bar_index, high, "SELL",
+         style=label.style_label_down,
+         color=color.red,
+         textcolor=color.rgb(237, 240, 238))
+
+View in Pine Editor・114 lines
+Use on chart
+2
+7
+871
+Feb 2
+"The 1% Sniper" Strategy: Fast Forex Trading (1-Minute Chart) This is a strategy for disciplined traders looking for short, sharp market moves. The goal is to achieve a daily/weekly target of a single 1%, which will accumulate to the $1,000.1 pullback target. Technical SetupTimeframe: 1 minute chart ($1M$).Recommended assets: Major forex pairs with low spreads (like 
+E
+EUR/USD
+$ or 
+G
+GBP/USD
+$).Supporting indicators: Moving average (
+EMA
+\ 20/50$) to identify a short-term trend, and supply and demand areas ($Supply\ &\ Demand$).2. ExecutionEntry: Identify strong momentum on the minute chart. Enter only when there is a built-in confirmation (e.g.: a "hammer" candle on a support level or a breakout of a market structure).Risk management: 
+RISK
+\ Per\ Trade$ is fixed. Since the target is 1% per portfolio, we are looking for a risk-reward ratio ($R:R$) of at least $1:2$.The Goal: Once the portfolio has reached a 1% profit that day – close the screen. This discipline is what will get you to $1,000 faster without "Putting" money back into the market. 3. The financial roadmap In this strategy, we are not looking for a single "hit", but consistency: Base capital: $2,250. Daily target: 1% ($\approx $22.5). The path to withdrawal: After about 45 successful trading days (or less, if you increase the lot carefully), you reach the $1,000 withdrawal target. Why does it work for you? Short screen time: A 1-minute chart allows you to find opportunities quickly, take your percentage and go about your business. Clear goal: Instead of dreaming of millions, you are focused on the next 1%. This makes the path to the next portfolio much more tangible. Protection of the capital: Working on a few percentages protects your $2,250 from too sharp fluctuations. Important to remember: On a 1-minute chart, the "noise" in the market is high. Make sure you work with a broker who has low commissions so that they They won't eat your 1% profit.
+Feb 2
+Release Notes
+"The 1% Sniper" Strategy: Fast Forex Trading (1-Minute Chart) This is a strategy for disciplined traders looking for short, sharp market moves. The goal is to achieve a daily/weekly target of a single 1%, which will accumulate to the $1,000.1 pullback target. Technical SetupTimeframe: 1 minute chart ($1M$).Recommended assets: Major forex pairs with low spreads (like 
+E
+EUR/USD
+$ or 
+G
+GBP/USD
+$).Supporting indicators: Moving average (
+EMA
+\ 20/50$) to identify a short-term trend, and supply and demand areas ($Supply\ &\ Demand$).2. ExecutionEntry: Identify strong momentum on the minute chart. Enter only when there is a built-in confirmation (e.g.: a "hammer" candle on a support level or a breakout of a market structure).Risk management: 
+RISK
+\ Per\ Trade$ is fixed. Since the target is 1% per portfolio, we are looking for a risk-reward ratio ($R:R$) of at least $1:2$.The Goal: Once the portfolio has reached a 1% profit that day – close the screen. This discipline is what will get you to $1,000 faster without "Putting" money back into the market. 3. The financial roadmap In this strategy, we are not looking for a single "hit", but consistency: Base capital: $2,250. Daily target: 1% ($\approx $22.5). The path to withdrawal: After about 45 successful trading days (or less, if you increase the lot carefully), you reach the $1,000 withdrawal target. Why does it work for you? Short screen time: A 1-minute chart allows you to find opportunities quickly, take your percentage and go about your business. Clear goal: Instead of dreaming of millions, you are focused on the next 1%. This makes the path to the next portfolio much more tangible. Protection of the capital: Working on a few percentages protects your $2,250 from too sharp fluctuations. Important to remember: On a 1-minute chart, the "noise" in the market is high. Make sure you work with a broker who has low commissions so that they They won't eat your 1% profit.

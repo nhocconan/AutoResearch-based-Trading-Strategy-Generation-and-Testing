@@ -1,0 +1,10 @@
+//@version=4
+##root(root_metainfo,rm_0,7,input__integer,plot,style)
+##root(root_metainfo,rm_1,7,input__integer,plot,style)
+##root(root_metainfo,rm_2,7,input__integer,plot,style)
+##root(root_metainfo,rm_3,7,input__integer,plot,style)
+##root(root_metainfo,rm_4,7,input__integer,plot,style)
+##root(root_metainfo,rm_5,7,input__integer,plot,style)
+##root(root_metainfo,rm_6,7,input__integer,plot,style)
+##root(root_metainfo,rm_7,7,input__integer,plot,style)
+##root(root_metainfo,rm_8,7,input__integer,plot,style)

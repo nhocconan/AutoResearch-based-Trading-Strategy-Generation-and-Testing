@@ -1,0 +1,175 @@
+//@version=6
+strategy(
+    "Quality-Controlled Trend Strategy v2 (Expectancy Focused)",
+    overlay = true,
+    initial_capital = 10000,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.04
+)
+
+
+// ───────── Inputs
+fastEmaLen = input.int(50,  "Fast EMA")
+slowEmaLen = input.int(200, "Slow EMA")
+rsiLen     = input.int(14,  "RSI Length")
+atrLen     = input.int(14,  "ATR Length")
+rr         = input.float(2.5, "Risk : Reward", step = 0.1)
+cooldown   = input.int(10, "Bars Between Trades")
+
+
+// ───────── Indicators (computed once)
+emaFast = ta.ema(close, fastEmaLen)
+emaSlow = ta.ema(close, slowEmaLen)
+rsiVal  = ta.rsi(close, rsiLen)
+atrVal  = ta.atr(atrLen)
+
+
+// ───────── Trend Strength Filter
+emaSlope = emaFast - emaFast[5]
+
+
+bullTrend = emaFast > emaSlow and emaSlope > 0
+bearTrend = emaFast < emaSlow and emaSlope < 0
+
+
+// ───────── Volatility Filter (avoid dead markets)
+volOk = atrVal > ta.sma(atrVal, 20)
+
+
+// ───────── Pullback Logic
+longPullback  = bullTrend and low <= emaFast and close > emaFast
+shortPullback = bearTrend and high >= emaFast and close < emaFast
+
+
+// ───────── Momentum Filter
+longMomentum  = rsiVal > 50 and rsiVal < 65
+shortMomentum = rsiVal < 50 and rsiVal > 35
+
+
+// ───────── Trade Cooldown
+var int lastTradeBar = na
+canTrade = na(lastTradeBar) or bar_index - lastTradeBar > cooldown
+
+
+// ───────── Final Signals (non-repainting)
+longSignal  = barstate.isconfirmed and volOk and canTrade and longPullback and longMomentum
+shortSignal = barstate.isconfirmed and volOk and canTrade and shortPullback and shortMomentum
+
+
+// ───────── Entries
+if longSignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    lastTradeBar := bar_index
+
+
+if shortSignal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    lastTradeBar := bar_index
+
+
+// ───────── Risk Management (structure-aware)
+longStop  = emaFast - atrVal * 1.2
+longLimit = close + atrVal * rr
+
+
+shortStop  = emaFast + atrVal * 1.2
+shortLimit = close - atrVal * rr
+
+
+strategy.exit("Long Exit",  from_entry="Long",  stop=longStop,  limit=longLimit)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortLimit)
+
+
+// ───────── Visuals
+plot(emaFast, title="EMA 50", color=color.orange)
+plot(emaSlow, title="EMA 200", color=color.blue)
+
+View in Pine Editor・85 lines
+Use on chart
+3
+3
+1 475
+This script focuses on quality control rather than curve-fitting.
+No repainting, no intrabar tricks, no fake equity curves.
+It uses confirmed-bar entries, ATR-based risk, and clean trend logic so backtests reflect what could actually be traded live.
+If you publish scripts, this is the minimum structure worth sharing.
+
+Why this script exists
+
+TradingView’s public scripts are flooded with:
+
+repainting indicators
+
+no stop-loss logic
+
+curve-fit entries that collapse live
+
+strategies that look good only in hindsight
+
+
+This script is intentionally boring but honest.
+
+No repainting.
+
+No intrabar tricks.
+
+No fake equity curves
+
+
+The goal is quality control, not hype.
+
+What this strategy enforces
+
+✔ Confirmed bars only
+✔ Single source of truth for indicators
+✔ Fixed risk structure
+✔ No signal repainting
+✔ Clean exits with unique IDs
+✔ Works on any liquid market
+
+Trading Logic (simple & auditable)
+Trend filter
+
+EMA 50 vs EMA 200
+
+
+Entry
+
+Pullback to EMA 50
+
+RSI confirms momentum (not oversold/overbought)
+
+
+Risk
+
+ATR-based stop
+
+Fixed R:R
+
+One position at a time
+
+
+This is the minimum bar for a strategy to be considered publish-worthy.
+
+Why this helps TradingView quality
+Most low-value scripts fail because they:
+
+hide repainting logic
+
+skip exits entirely
+
+use inconsistent calculations
+
+rely on hindsight candles
+
+
+This strategy forces discipline:
+
+every signal is confirmed
+
+every trade has defined risk
+
+behavior is repeatable across symbols & timeframes
+
+
+If more scripts followed this baseline, TradingView’s public library would be far more usable.

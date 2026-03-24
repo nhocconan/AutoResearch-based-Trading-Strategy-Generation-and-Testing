@@ -1,0 +1,76 @@
+//@version=5
+strategy("RSI Filtreli Al-Sat Stratejisi", overlay=true, initial_capital=10000)
+
+// --- KULLANICI GİRİŞLERİ ---
+ma_length = input.int(50, "MA Uzunluğu", minval=1)
+rsi_length = input.int(14, "RSI Uzunluğu", minval=1)
+
+// --- GÖSTERGELERİN HESAPLANMASI ---
+ma50 = ta.sma(close, ma_length)
+rsi = ta.rsi(close, rsi_length)
+
+// --- SİNYAL KOŞULLARI ---
+// ALIM KOŞULU:
+// 1. RSI 50'yi yukarı keser VE RSI 70'in altındaysa
+// 2. Fiyat MA 50'nin üzerindeyse
+buy_condition = ta.crossover(rsi, 50) and (rsi < 70) and (close > ma50)
+
+// SATIM KOŞULU:
+// 1. RSI 40'ı aşağı keserse VEYA
+// 2. Fiyat MA 50'yi aşağı keserse
+sell_condition = ta.crossunder(rsi, 45) or ta.crossunder(close, ma50)
+
+// --- İŞLEM YÜRÜTME VE GÖRSELLEŞTİRME ---
+if buy_condition
+    strategy.entry("ALIM", strategy.long)
+
+if sell_condition
+    strategy.close("ALIM", comment="SATIM")
+
+plot(ma50, title="MA 50", color=color.blue, linewidth=2)
+
+plotshape(series=buy_condition ? close : na, title="AL", location=location.belowbar, color=color.rgb(65, 172, 100), style=shape.triangleup, size=size.small)
+plotshape(series=sell_condition ? close : na, title="SAT", location=location.abovebar, color=color.rgb(255, 69, 58), style=shape.triangledown, size=size.small)
+
+View in Pine Editor・33 lines
+Use on chart
+1
+9
+1 090
+This is a comprehensive trend-following and momentum-based strategy designed for the cryptocurrency market. It combines multiple leading indicators to filter out market noise and generate high-quality buy and sell signals.
+
+Key Indicators:
+
+Moving Average (MA): To determine the main trend direction.
+
+Relative Strength Index (RSI): To measure momentum and identify overbought/oversold conditions.
+
+Directional Movement Index (DMI): To confirm the strength of the trend.
+
+Volume & ATR: To validate market interest and filter out excessive volatility.
+
+Buy Conditions (All Must Be True):
+
+Price and Trend Alignment: The current price is above the MA50 (with a 5% buffer).
+
+Momentum Confirmation: The RSI is between 50 and 70.
+
+Trend Strength: The +DI is greater than the -DI.
+
+Market Interest: Volume is 1.5 times its moving average.
+
+Low Volatility: The ATR is below its average.
+
+Sell Conditions (Any One Is True):
+
+Trend Reversal: The price drops below the MA50 (with a 5% buffer).
+
+Momentum Loss: The RSI drops below 45.
+
+Trend Weakness: The -DI crosses above the +DI.
+
+Market Fatigue: Volume drops below 50% of its moving average.
+
+High Volatility: The ATR is above its average.
+
+Disclaimer: This is a backtesting tool and not financial advice. Past performance is not an indicator of future results. Always use proper risk management and conduct your own research before trading.

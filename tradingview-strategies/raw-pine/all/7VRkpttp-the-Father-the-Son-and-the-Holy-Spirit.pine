@@ -1,0 +1,299 @@
+//@version=5
+strategy("ICT Holy Trinity Strategy (EUR/USD)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=1, commission_value=0.00075, pyramiding=0)
+
+// =========================================================================================
+//                                     INPUTS & CONFIGURATION
+// =========================================================================================
+var string GROUP_EXECUTION = "Execution Settings"
+execution_mode = input.string("Paper Trading / Backtest", "Execution Mode", options=["Paper Trading / Backtest", "Live Alerts via Webhook"], group=GROUP_EXECUTION, tooltip="Select 'Paper Trading' to see trades directly on the chart and in the Strategy Tester. Select 'Live Alerts' to generate webhook messages for an external broker (disables on-chart trades).")
+
+var string GROUP_SESSIONS = "Time Session Settings"
+// --- Session Inputs ---
+asia_session_start = input.session("2000-0000", "Asia Session", group=GROUP_SESSIONS)
+london_session_start = input.session("0200-0500", "London Killzone", group=GROUP_SESSIONS)
+ny_session_start = input.session("0800-1100", "NY AM Killzone", group=GROUP_SESSIONS)
+
+var string GROUP_STRATEGY = "Strategy Parameters"
+// --- Lookback for Market Structure ---
+pivot_lookback = input.int(15, "Pivot Lookback", group=GROUP_STRATEGY, tooltip="How many bars to look back to find the swing high/low for the MSS level.")
+fvg_lookback = input.int(5, "FVG Lookback Window", group=GROUP_STRATEGY, tooltip="How many bars to look for an FVG after an MSS is confirmed.")
+
+
+var string GROUP_RISK = "Risk Management"
+// --- Take Profit Method ---
+tp_method = input.string("Risk/Reward Ratio", "Take Profit Method", options=["Risk/Reward Ratio", "ATR Multiplier"], group=GROUP_RISK)
+rr_ratio = input.float(2.0, "Risk/Reward Ratio", group=GROUP_RISK, tooltip="Used if Take Profit Method is 'Risk/Reward Ratio'.")
+atr_length = input.int(14, "ATR Length", group=GROUP_RISK, tooltip="Used if Take Profit Method is 'ATR Multiplier'.")
+atr_tp_multiplier = input.float(4.0, "ATR TP Multiplier", group=GROUP_RISK, tooltip="Used if Take Profit Method is 'ATR Multiplier'.")
+use_breakeven = input.bool(true, "Use Breakeven at 1R?", group=GROUP_RISK, tooltip="Moves Stop Loss to entry price after price reaches 1x the initial risk.")
+
+// =========================================================================================
+//                                     TIME & SESSION LOGIC
+// =========================================================================================
+// --- Timezone ---
+string TFC = "America/New_York"
+
+// --- Session Booleans ---
+is_asia_session = not na(time(timeframe.period, asia_session_start, TFC))
+is_london_session = not na(time(timeframe.period, london_session_start, TFC))
+is_ny_session = not na(time(timeframe.period, ny_session_start, TFC))
+
+// --- Session Start/End Detection for Drawing ---
+var int asia_start_time = na
+if is_asia_session and not is_asia_session[1]
+    asia_start_time := time
+is_asia_session_end = not is_asia_session and is_asia_session[1]
+
+var int london_start_time = na
+if is_london_session and not is_london_session[1]
+    london_start_time := time
+is_london_session_end = not is_london_session and is_london_session[1]
+
+is_ny_session_start_bar = is_ny_session and not is_ny_session[1]
+is_ny_session_end_bar = not is_ny_session and is_ny_session[1]
+
+// --- Function to get session high/low ---
+f_getSessionHighLow(session_time) =>
+    var float session_high = 0.0
+    var float session_low = 10.0 // Set ridiculously high to be overwritten
+    is_session = not na(time(timeframe.period, session_time, TFC))
+    is_new_session_bar = is_session and not is_session[1]
+
+    if is_new_session_bar
+        session_high := high
+        session_low := low
+    else if is_session
+        session_high := math.max(high, session_high)
+        session_low := math.min(low, session_low)
+    
+    [session_high, session_low]
+
+// --- Get Session Levels ---
+[asia_high, asia_low] = f_getSessionHighLow(asia_session_start)
+[london_high, london_low] = f_getSessionHighLow(london_session_start)
+
+// --- Get Previous Day High/Low ---
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]])
+
+// =========================================================================================
+//                                  STRATEGY STATE MACHINE
+// =========================================================================================
+var string trade_bias = na
+var float sweep_level = na
+var float mss_level = na
+var float fvg_high = na
+var float fvg_low = na
+var bool is_awaiting_entry = false
+var float trade_initial_risk = na 
+var box bull_fvg_box = na
+var box bear_fvg_box = na
+var int bars_since_mss = 0
+
+// --- Reset state machine daily ---
+if dayofmonth != dayofmonth[1]
+    trade_bias := na
+    sweep_level := na
+    mss_level := na
+    fvg_high := na
+    fvg_low := na
+    is_awaiting_entry := false
+    trade_initial_risk := na
+    bars_since_mss := 0
+    if not na(bull_fvg_box)
+        box.delete(bull_fvg_box)
+        bull_fvg_box := na
+    if not na(bear_fvg_box)
+        box.delete(bear_fvg_box)
+        bear_fvg_box := na
+
+// =========================================================================================
+//                                  DETECTION LAYER
+// =========================================================================================
+
+// --- Boolean flags for plotting ---
+var bool plot_bull_sweep = false
+var bool plot_bear_sweep = false
+var bool plot_bull_mss = false
+var bool plot_bear_mss = false
+
+// --- Pre-calculate potential MSS levels and ATR on every bar ---
+potential_bull_mss = ta.highest(high, pivot_lookback)[1]
+potential_bear_mss = ta.lowest(low, pivot_lookback)[1]
+atr_value = ta.atr(atr_length)
+
+
+// --- 1. Liquidity Sweep Detection ---
+sweep_target_high = is_london_session ? asia_high[1] : (is_ny_session ? london_high[1] : na)
+sweep_target_low = is_london_session ? asia_low[1] : (is_ny_session ? london_low[1] : na)
+
+bullish_sweep = low < sweep_target_low and close > sweep_target_low
+bearish_sweep = high > sweep_target_high and close < sweep_target_high
+
+if (is_london_session or is_ny_session) and not is_awaiting_entry
+    if bullish_sweep
+        trade_bias := "BULLISH_AWAITING_MSS"
+        sweep_level := low
+        mss_level := potential_bull_mss 
+        plot_bull_sweep := true
+    if bearish_sweep
+        trade_bias := "BEARISH_AWAITING_MSS"
+        sweep_level := high
+        mss_level := potential_bear_mss
+        plot_bear_sweep := true
+
+// --- 2. Market Structure Shift (CISD) Detection ---
+if trade_bias == "BULLISH_AWAITING_MSS" and high > mss_level
+    trade_bias := "BULLISH_AWAITING_FVG"
+    plot_bull_mss := true
+    bars_since_mss := 1
+
+if trade_bias == "BEARISH_AWAITING_MSS" and low < mss_level
+    trade_bias := "BEARISH_AWAITING_FVG"
+    plot_bear_mss := true
+    bars_since_mss := 1
+
+
+// --- 3. Fair Value Gap (FVG) Detection within Lookback Window ---
+if trade_bias == "BULLISH_AWAITING_FVG" or trade_bias == "BEARISH_AWAITING_FVG"
+    bars_since_mss += 1
+
+    // Correct FVG Logic based on video definition
+    // A Bullish FVG exists if the low of the current bar (Candle 3) is above the high of two bars ago (Candle 1).
+    bullish_fvg_here = low > high[2]
+    // A Bearish FVG exists if the high of the current bar (Candle 3) is below the low of two bars ago (Candle 1).
+    bearish_fvg_here = high < low[2]
+
+    if trade_bias == "BULLISH_AWAITING_FVG" and bullish_fvg_here
+        fvg_high := low     // Top of the FVG is the low of Candle 3
+        fvg_low := high[2]  // Bottom of the FVG is the high of Candle 1
+        is_awaiting_entry := true
+        trade_bias := "BULLISH_CONFIRMED"
+    
+    if trade_bias == "BEARISH_AWAITING_FVG" and bearish_fvg_here
+        fvg_high := low[2]  // Top of the FVG is the low of Candle 1
+        fvg_low := high     // Bottom of the FVG is the high of Candle 3
+        is_awaiting_entry := true
+        trade_bias := "BEARISH_CONFIRMED"
+
+    // If no FVG found within the window, reset
+    if bars_since_mss > fvg_lookback
+        trade_bias := na
+        
+// =========================================================================================
+//                                     PLOTTING LAYER
+// =========================================================================================
+// --- Draw Session Boxes (draws at the end of each session) ---
+if is_asia_session_end
+    box.new(asia_start_time, asia_high[1], time[1], asia_low[1], xloc=xloc.bar_time, bgcolor=color.new(color.blue, 90), border_color=color.new(color.blue, 80), text="Asia")
+
+if is_london_session_end
+    box.new(london_start_time, london_high[1], time[1], london_low[1], xloc=xloc.bar_time, bgcolor=color.new(color.orange, 90), border_color=color.new(color.orange, 80), text="London")
+
+// --- Draw NY Killzone Vertical Lines ---
+if is_ny_session_start_bar and dayofmonth == dayofmonth(timenow) and month == month(timenow) and year == year(timenow)
+    line.new(time, low - 50 * syminfo.mintick, time, high + 50 * syminfo.mintick, xloc=xloc.bar_time, extend=extend.both, color=color.new(color.black, 80), style=line.style_dotted)
+
+if is_ny_session_end_bar and dayofmonth == dayofmonth(timenow) and month == month(timenow) and year == year(timenow)
+    line.new(time[1], low[1] - 50 * syminfo.mintick, time[1], high[1] + 50 * syminfo.mintick, xloc=xloc.bar_time, extend=extend.both, color=color.new(color.black, 80), style=line.style_dotted)
+
+// --- Draw FVG Boxes with Correct xloc and Extend Logic ---
+if is_awaiting_entry and trade_bias == "BULLISH_CONFIRMED"
+    if not na(bull_fvg_box)
+        box.delete(bull_fvg_box)
+    bull_fvg_box := box.new(time[2], fvg_high, time, fvg_low, xloc=xloc.bar_time, bgcolor=color.new(color.green, 85), border_color=color.green, text="Bull FVG", extend=extend.right)
+
+if is_awaiting_entry and trade_bias == "BEARISH_CONFIRMED"
+    if not na(bear_fvg_box)
+        box.delete(bear_fvg_box)
+    bear_fvg_box := box.new(time[2], fvg_high, time, fvg_low, xloc=xloc.bar_time, bgcolor=color.new(color.red, 85), border_color=color.red, text="Bear FVG", extend=extend.right)
+
+// --- Draw Event Shapes ---
+plotshape(plot_bull_sweep, "Bull Sweep", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(plot_bear_sweep, "Bear Sweep", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(plot_bull_mss, "Bull MSS", shape.labelup, location.bottom, color.green, size=size.large)
+plotshape(plot_bear_mss, "Bear MSS", shape.labeldown, location.top, color.red, size=size.large)
+
+// --- Reset plot flags after use ---
+if plot_bull_sweep
+    plot_bull_sweep := false
+if plot_bear_sweep
+    plot_bear_sweep := false
+if plot_bull_mss
+    plot_bull_mss := false
+if plot_bear_mss
+    plot_bear_mss := false
+
+// =========================================================================================
+//                                   EXECUTION LAYER
+// =========================================================================================
+
+// --- Entry Logic ---
+if is_awaiting_entry and strategy.opentrades == 0
+    // --- Long Entry ---
+    if trade_bias == "BULLISH_CONFIRMED" and low <= fvg_high
+        entry_price = fvg_high
+        stop_loss = sweep_level - syminfo.mintick
+        
+        take_profit = if tp_method == "Risk/Reward Ratio"
+            entry_price + (entry_price - stop_loss) * rr_ratio
+        else // ATR Multiplier
+            entry_price + (atr_value * atr_tp_multiplier)
+        
+        trade_initial_risk := entry_price - stop_loss
+        
+        if execution_mode == "Paper Trading / Backtest"
+            strategy.entry("Long", strategy.long, limit=entry_price)
+            strategy.exit("Exit Long", "Long", stop=stop_loss, limit=take_profit)
+        
+        if execution_mode == "Live Alerts via Webhook"
+            alert_message = '{"action": "buy", "symbol": "' + syminfo.ticker + '", "entry": ' + str.tostring(entry_price) + ', "sl": ' + str.tostring(stop_loss) + ', "tp": ' + str.tostring(take_profit) + '}'
+            alert(alert_message, alert.freq_once_per_bar)
+        
+        if not na(bull_fvg_box) // Delete FVG box on entry
+            box.delete(bull_fvg_box)
+            bull_fvg_box := na
+        is_awaiting_entry := false 
+
+    // --- Short Entry ---
+    if trade_bias == "BEARISH_CONFIRMED" and high >= fvg_low
+        entry_price = fvg_low
+        stop_loss = sweep_level + syminfo.mintick
+
+        take_profit = if tp_method == "Risk/Reward Ratio"
+            entry_price - (stop_loss - entry_price) * rr_ratio
+        else // ATR Multiplier
+            entry_price - (atr_value * atr_tp_multiplier)
+
+        trade_initial_risk := stop_loss - entry_price
+
+        if execution_mode == "Paper Trading / Backtest"
+            strategy.entry("Short", strategy.short, limit=entry_price)
+            strategy.exit("Exit Short", "Short", stop=stop_loss, limit=take_profit)
+
+        if execution_mode == "Live Alerts via Webhook"
+            alert_message = '{"action": "sell", "symbol": "' + syminfo.ticker + '", "entry": ' + str.tostring(entry_price) + ', "sl": ' + str.tostring(stop_loss) + ', "tp": ' + str.tostring(take_profit) + '}'
+            alert(alert_message, alert.freq_once_per_bar)
+
+        if not na(bear_fvg_box) // Delete FVG box on entry
+            box.delete(bear_fvg_box)
+            bear_fvg_box := na
+        is_awaiting_entry := false
+
+// --- Breakeven Logic (Refined for accuracy) ---
+if strategy.opentrades > 0 and use_breakeven and not na(trade_initial_risk)
+    is_long = strategy.position_size > 0
+    
+    if is_long and high > strategy.opentrades.entry_price(0) + trade_initial_risk
+        strategy.exit("BE Long", from_entry="Long", stop=strategy.opentrades.entry_price(0))
+        trade_initial_risk := na // Reset risk after BE is triggered
+        
+    if not is_long and low < strategy.opentrades.entry_price(0) - trade_initial_risk
+        strategy.exit("BE Short", from_entry="Short", stop=strategy.opentrades.entry_price(0))
+        trade_initial_risk := na // Reset risk after BE is triggered
+
+View in Pine Editor・298 lines
+Use on chart
+4
+4
+1 689
+This is a tool used to find great trades! It's the Father, the Son, and the Holy Spirit.

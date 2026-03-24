@@ -1,0 +1,54 @@
+//@version=5
+strategy("Hybrid RSI Strategy [AYUB LAB]", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === User Settings ===
+enableBacktest = input.bool(true, "Enable Backtest Mode?")
+rsiLen = input.int(14, "RSI Length")
+overbought = input.int(70, "Overbought Level")
+oversold = input.int(30, "Oversold Level")
+
+// === Indicator Logic ===
+rsiVal = ta.rsi(close, rsiLen)
+plot(rsiVal, title="RSI", color=color.blue)
+hline(overbought, "Overbought", color=color.red)
+hline(oversold, "Oversold", color=color.green)
+
+// === Signal Logic ===
+longSignal = ta.crossover(rsiVal, oversold)
+exitSignal = ta.crossunder(rsiVal, overbought)
+
+// === Strategy Logic ===
+if enableBacktest
+    if longSignal
+        strategy.entry("RSI Long", strategy.long)
+    if exitSignal
+        strategy.close("RSI Long")
+
+// === Alert Visuals (works even if backtest disabled) ===
+plotshape(longSignal, title="BUY Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(exitSignal, title="SELL Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+bgcolor(longSignal ? color.new(color.green, 85) : na)
+bgcolor(exitSignal ? color.new(color.red, 85) : na)
+
+alertcondition(longSignal, title="RSI BUY Alert", message="RSI Crossover Oversold → BUY Signal!")
+alertcondition(exitSignal, title="RSI SELL Alert", message="RSI Crossunder Overbought → SELL Signal!")
+
+View in Pine Editor・35 lines
+Use on chart
+5
+8
+1 558
+This is a hybrid script that combines visual RSI indicator signals with an optional backtestable trading strategy.
+
+BUY Entry: When RSI crosses above the oversold level (default 30)
+
+SELL Exit: When RSI crosses below the overbought level (default 70)
+
+Timeframe: Works best on trending assets (crypto, forex, indices) in 5min to 1H
+
+Backtest Toggle: Turn ON/OFF live testing using the Enable Backtest Mode? setting
+
+Visual Cues: Buy/Sell labels, background coloring, and alerts ready for webhook automation
+
+Use this strategy to visually explore RSI dynamics, run performance backtests, or hook up to external bots via alerts.

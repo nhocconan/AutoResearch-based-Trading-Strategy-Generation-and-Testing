@@ -1,0 +1,163 @@
+//@version=3
+strategy("Linda Raschke's Holy Grail", shorttitle="RHG", default_qty_type = strategy.percent_of_equity, default_qty_value = 100, overlay = true)
+
+comm = input(0.07)
+f_highest(_src, _length)=>
+    _adjusted_length = _length < 1 ? 1 : _length
+    _value = _src
+    for _i = 0 to (_adjusted_length-1)
+        _value := _src[_i] >= _value ? _src[_i] : _value
+    _return = _value
+
+f_lowest(_src, _length)=>
+    _adjusted_length = _length < 1 ? 1 : _length
+    _value = _src
+    for _i = 0 to (_adjusted_length-1)
+        _value := _src[_i] <= _value ? _src[_i] : _value
+    _return = _value
+
+dirmov(len) =>
+    up = change(high)
+    down = -change(low)
+    plusDM = na(up) ? na : (up > down and up > 0 ? up : 0)
+    minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+    truerange = rma(tr, len)
+    plus = fixnan(100 * rma(plusDM, len) / truerange)
+    minus = fixnan(100 * rma(minusDM, len) / truerange)
+    [plus, minus]
+
+adx(dilen, adxlen) =>
+    [plus, minus] = dirmov(dilen)
+    sum = plus + minus
+    adx = 100 * rma(abs(plus - minus) / (sum == 0 ? 1 : sum), adxlen)
+
+adxlen = input(18, title="ADX period")
+adxMin = input(28)
+useAdx = input(true)
+dilen = adxlen
+
+maLength = input(11)
+s = input(title="Trend source", defval = "wma", options = ["ema", "sma", "rma", "wma"])
+curEma = s == "ema" ? ema(close, maLength) : s == "sma" ? sma(close, maLength) : s =="rma" ? rma(close, maLength) : wma(close, maLength)
+highPeriod = input(34)
+d = 0.1
+d := na
+d := nz(d[1])
+
+takeProfitLong = highest(high, highPeriod) 
+stopLossLong = f_lowest(low, barssince(low >= curEma))
+dir = 0
+dir := nz(dir[1])
+stopLoss = 0.2
+stopLoss := 0
+stopLoss := nz(stopLoss[1])
+takeProfit = 0.2
+takeProfit := 0
+takeProfit := nz(takeProfit[1])
+totalProfit = 0.2
+totalProfit := 0
+totalProfit := nz(totalProfit[1])
+
+
+p = 0.1
+p := 0
+p := nz(p[1])
+if dir != 0 and d >= low and d <= high
+    p := d
+    d := na
+    
+if dir != 0 and p != 0
+    if (stopLoss <= high and stopLoss >= low)
+        totalProfit := totalProfit + (1 / p / (1 + dir * comm / 100)  - 1 / stopLoss/ (1 - dir * comm / 100)) * dir * 2000
+        dir := 0
+        p := 0
+        takeProfit := 0
+        stopLoss := 0
+        d := 0
+    else
+        if (takeProfit <= high and takeProfit >= low)
+            totalProfit := totalProfit + (1 / p / (1 + dir * comm / 100) - 1 / takeProfit) * dir * 2000
+            dir := 0
+            p := 0
+            takeProfit := 0
+            stopLoss := 0
+            d := 0
+
+if strategy.position_size == 0
+    if (not useAdx or adx(dilen, adxlen) <= adxMin) or high < curEma 
+        strategy.cancel("Long")
+        if dir == 1
+            dir := 0
+            takeProfit := 0
+            stopLoss := 0
+            d := 0
+    if (not useAdx or adx(dilen, adxlen) > adxMin) and low < curEma and high > curEma and curEma > curEma[highPeriod / 2] and curEma > curEma[highPeriod] and takeProfitLong > high
+        strategy.cancel("Short")
+        strategy.order("Long", strategy.long, stop = high)
+        strategy.exit("Exit", "Long", limit = takeProfitLong, stop = stopLossLong)
+        d := high
+        dir := 1
+        stopLoss := stopLossLong
+        takeProfit := takeProfitLong
+
+takeProfitShort = lowest(low, highPeriod) 
+stopLossShort = f_highest(high, barssince(high <= curEma))
+if strategy.position_size == 0
+    if (not useAdx or adx(dilen, adxlen) <= adxMin) or low > curEma 
+        strategy.cancel("Short")
+        if dir == -1
+            dir := 0
+            takeProfit := 0
+            stopLoss := 0
+            d := 0
+    if (not useAdx or adx(dilen, adxlen) > adxMin) and high > curEma and low < curEma and curEma < curEma[highPeriod / 2] and curEma < curEma[highPeriod] and takeProfitShort < low
+        strategy.cancel("Long")
+        strategy.order("Short", strategy.short, stop = low)
+        strategy.exit("Exit", "Short", limit = takeProfitShort, stop = stopLossShort)
+        d := low
+        dir := -1
+        stopLoss := stopLossShort
+        takeProfit := takeProfitShort
+strategy.close("Exit")
+
+plot(d, style = circles, linewidth = 4, color = black)
+plot(p, style = circles, linewidth = 4, color = blue)
+plot(stopLoss, style = circles, linewidth = 4, color = red)
+plot(takeProfit, style = circles, linewidth = 4, color = green)
+plot(totalProfit, color = purple, transp = 100)   
+plot(curEma, color = black, linewidth = 2)  
+plot(dir, color = purple, transp = 100)
+
+// === Backtesting Dates ===
+testPeriodSwitch = input(false, "Custom Backtesting Dates")
+testStartYear = input(2018, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testStartHour = input(0, "Backtest Start Hour")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,testStartHour,0)
+testStopYear = input(2018, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(14, "Backtest Stop Day")
+testStopHour = input(14, "Backtest Stop Hour")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,testStopHour,0)
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+isPeriod = testPeriodSwitch == true ? testPeriod() : true
+// === /END
+
+if not isPeriod
+    strategy.cancel_all()
+    strategy.close_all()
+
+View in Pine Editor・150 lines
+Use on chart
+7
+4
+8
+9
+23 555
+May 25, 2018
+Another script based on Linda Raschke's strategy with the same name from her book about swing trading.
+Jul 24, 2018
+Release Notes
+More plots and custom backtesting period

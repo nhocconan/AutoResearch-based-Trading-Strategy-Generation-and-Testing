@@ -1,0 +1,171 @@
+//@version=6
+strategy('Long Only EMA Strategy (9/20 with 200 EMA Filter)', overlay = true, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+// EMA lengths
+shortEmaLen = 9
+longEmaLen = 20
+trendEmaLen = 200
+
+// Calculate EMAs
+emaShort = ta.ema(close, shortEmaLen) // 9 EMA
+emaLong = ta.ema(close, longEmaLen) // 20 EMA
+emaTrend = ta.ema(close, trendEmaLen) // 200 EMA
+
+// Plot EMAs
+plot(emaShort, color = color.blue, title = '9 EMA')
+plot(emaLong, color = color.orange, title = '20 EMA')
+plot(emaTrend, color = color.purple, title = '200 EMA')
+
+// Entry: 9 crosses above 20 AND close above 200 EMA
+longCondition = ta.crossover(emaShort, emaLong) and close > emaTrend
+
+// Exit: close crosses below 20 EMA
+exitCondition = ta.crossunder(close, emaLong)
+
+// Long only
+if longCondition
+    strategy.entry('Long', strategy.long)
+
+if exitCondition and strategy.position_size > 0
+    strategy.close('Long')
+
+// Debug label to see trade count
+var label tradesLabel = na
+if barstate.islast
+    label.delete(tradesLabel)
+    tradesLabel := label.new(bar_index, high, 'Closed trades: ' + str.tostring(strategy.closedtrades))
+    tradesLabel
+
+View in Pine Editor・37 lines
+Use on chart
+4
+7
+1
+1 563
+Details:
+
+This strategy is built around a very simple idea: follow the primary trend and enter only when momentum supports it.
+It uses three EMAs on a standard candlestick chart:
+
+1. 9‑period EMA – short‑term momentum
+2. 20‑period EMA – medium‑term structure
+3. 200‑period EMA – long‑term trend filter
+
+The strategy is **long‑only** and is mainly designed for swing trading and positional trading.
+It avoids counter‑trend trades by taking entries only when price is trading **above the 200 EMA**, which is commonly used as a long‑term trend reference.
+
+The rules are deliberately kept simple so that they are easy to understand, modify, and test on different markets and timeframes.
+
+---
+
+Key Features
+
+1. **Trend‑Filtered Entries**
+- Fresh long positions are considered only when:
+- The 9 EMA crosses above the 20 EMA
+- The closing price is **above** the 200 EMA
+- This attempts to combine short‑term momentum with a higher‑timeframe trend filter.
+
+2. **Clean Exit Logic**
+- The long position is exited when the closing price crosses **below** the 20 EMA.
+- This creates an objective, rule‑based way to trail the trade as long as the medium‑term structure remains intact.
+
+3. **Long‑Only, No Short Selling**
+- The script intentionally ignores short setups.
+- This makes it suitable for markets or accounts where short selling is restricted, or for traders who prefer to participate only on the long side of the market.
+
+4. **Simple Visuals**
+- All three EMAs are plotted directly on the chart:
+- 9 EMA (fast)
+- 20 EMA (medium)
+- 200 EMA (trend)
+- Trade entries and exits are handled by TradingView’s strategy engine, so users can see results in the Strategy Tester as well as directly on the chart.
+
+5. **Backtest‑Friendly Structure**
+- Uses TradingView’s built‑in `strategy()` framework.
+- Can be applied to different symbols, timeframes, and markets (equities, indices, crypto, etc.).
+- Works on standard candlestick charts, which are supported by TradingView’s backtesting engine.
+
+6. **Configurable in Code**
+- The EMA periods are defined in the code and can be easily adjusted.
+- Users can tailor the parameters to fit their own style (for example, faster EMAs for intraday trading, slower EMAs for positional trades).
+
+---
+
+How to Use
+
+1. **Add the Strategy to Your Chart**
+1. Open any symbol and select a **standard candlestick chart**.
+2. Apply the strategy from your “My Scripts” section.
+3. Make sure it is enabled so that the trades and results appear.
+
+2. **Select Timeframe**
+- The logic can be tested on various timeframes:
+- Higher timeframes (1H, 4H, 1D) for swing and positional setups.
+- Lower timeframes (5m, 15m) for more active trading, if desired.
+- Users should experiment and see where the strategy behaves more consistently for their chosen market.
+
+3. **Read the Signals**
+- **Entry:**
+- A long trade is opened when the 9 EMA crosses above the 20 EMA while the closing price is above the 200 EMA.
+- **Exit:**
+- The open long position is closed when the closing price crosses below the 20 EMA.
+- All orders are generated automatically once the strategy is attached to the chart.
+
+4. **Use the Strategy Tester**
+- Go to the **Strategy Tester** tab in TradingView.
+- Check:
+- Net profit / drawdown
+- Win rate and average trade
+- List of trades and the equity curve
+- Change the date range and timeframe to see how stable the results are over different periods.
+
+5. **Adjust Parameters if Needed**
+- Advanced users can open the code and experiment with:
+- EMA lengths (for example 8/21 with 200, or 10/30 with 200)
+- Risk sizing and capital settings within the `strategy()` call
+- Any changes should be thoroughly re‑tested before considering real‑world application.
+
+---
+
+Practical Applications
+
+1. **Swing Trading on Daily Charts**
+- Can be applied to stocks, indices, or ETFs on the daily timeframe.
+- The 200 EMA acts as a trend filter to stay aligned with the broad direction, while the 9/20 crossover helps catch medium‑term swings inside that trend.
+
+2. **Positional Trades on Higher Timeframes**
+- On 4H or 1D charts, this approach can help in holding trades for several days to weeks.
+- The exit rule based on the 20 EMA crossing helps avoid emotional decisions and provides a rules‑based way to trail the trend.
+
+3. **Trend‑Following Filter**
+- Even if used purely as a filter, the 200 EMA condition can help traders:
+- Avoid taking long trades when the market is in a clear downtrend.
+- Focus only on instruments that are trading above their long‑term average.
+
+4. **Educational Use**
+- The script is intentionally kept straightforward so that newer users can:
+- Learn how a moving average crossover strategy works.
+- See how to combine a short‑term signal with a long‑term filter.
+- Understand how TradingView’s strategy engine handles entries and exits.
+
+5. **Basis for Further Development**
+- This can serve as a starting point for more advanced systems.
+- Traders can extend it by adding:
+- Additional filters (RSI, volume, volatility filters, time‑of‑day filters, etc.)
+- Risk management rules (fixed stop loss, take profit, trailing stops).
+- The current version is kept minimal on purpose, so modifications are easy to implement and test.
+
+---
+
+Important Notes & Disclaimer
+
+1. This strategy is provided **for testing, research, and educational purposes only**.
+2. It is **not** a recommendation to buy or sell any financial instrument.
+3. Past performance on historical data does not guarantee similar results in live markets.
+4. Markets are risky and trading can lead to financial loss; users should always do their own research, manage risk appropriately, and consult a qualified financial professional if needed.
+5. Before using any strategy with real capital, it is strongly advised to:
+- Forward test it on a demo / paper trading account.
+- Check how it behaves during different market phases (trending, sideways, high‑volatility conditions).
+
+You are free to modify the parameters and logic to better align it with your own trading style and risk tolerance.

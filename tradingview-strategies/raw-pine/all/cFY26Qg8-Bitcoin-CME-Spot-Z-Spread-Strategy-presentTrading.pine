@@ -1,0 +1,209 @@
+//@version=5
+strategy("Bitcoin CME-Spot Bollinger Bands - Strategy [presentTrading]", overlay = false, precision=3, commission_value= 0.1, commission_type=strategy.commission.percent, slippage= 1, currency=currency.USD, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, initial_capital=10000)
+
+// User inputs for symbols
+cme_symbol = input.string("CME:BTC1!", title="CME Symbol")
+bitfinex_symbol = input.string("BITFINEX:BTCUSD", title="Bitfinex Symbol")
+
+// User inputs for Bollinger Bands settings
+bb_period = input.int(200, title="Bollinger Bands Period", minval=1)
+bb_std_dev = input.float(2.618, title="Standard Deviation", minval=0.1)
+
+// Fetch the close prices
+cme_price = request.security(cme_symbol, timeframe.period, close, lookahead=barmerge.lookahead_off)
+bitfinex_price = request.security(bitfinex_symbol, timeframe.period, close, lookahead=barmerge.lookahead_off)
+
+// Calculate the spread
+spread = cme_price - bitfinex_price
+
+// Calculate Bollinger Bands on the spread
+basis = ta.sma(spread, bb_period)
+dev = bb_std_dev * ta.stdev(spread, bb_period)
+upper_band = basis + dev
+lower_band = basis - dev
+
+// Long condition: Spread crosses below the lower Bollinger Band
+long_condition = ta.crossover(lower_band, spread)
+
+// Short condition: Spread crosses above the upper Bollinger Band
+short_condition = ta.crossover(spread, upper_band)
+
+// User inputs for risk management
+use_risk_management = input.bool(true, title="Enable Risk Management?")
+//stop_loss_pct = input.float(10.0, title="Stop Loss (%)", minval=0.1, step=0.1) / 100
+
+// User inputs for take profit levels
+take_profit_step1 = input.float(3.0, title="Take Profit Level 1 (%)", minval=0.1) / 100
+take_profit_step2 = input.float(8.0, title="Take Profit Level 2 (%)", minval=0.1) / 100
+take_profit_step3 = input.float(14.0, title="Take Profit Level 3 (%)", minval=0.1) / 100
+take_profit_step4 = input.float(21.0, title="Take Profit Level 4 (%)", minval=0.1) / 100
+
+// User inputs for position size to exit at each take profit level
+tp_pct1 = input.float(25.0, title="Take Profit % at Level 1", minval=0.1, maxval=100) / 100
+tp_pct2 = input.float(20.0, title="Take Profit % at Level 2", minval=0.1, maxval=100) / 100
+tp_pct3 = input.float(15.0, title="Take Profit % at Level 3", minval=0.1, maxval=100) / 100
+tp_pct4 = input.float(10.0, title="Take Profit % at Level 4", minval=0.1, maxval=100) / 100
+
+// User input for hold days (exit after certain bars)
+hold_days = input.int(20, title="Hold Days Exit (in bars)", minval=1)
+
+// Execute trades with take profit and stop loss, only if there is a position
+if long_condition
+    strategy.entry("Long", strategy.long)
+if short_condition
+    strategy.entry("Short", strategy.short)
+
+// Check for open long positions and execute take profits
+if (strategy.position_size > 0) and use_risk_management
+    // Four-step take profit exits, with user-defined percentage for each step
+    strategy.exit("TP 1", "Long", limit=strategy.position_avg_price * (1 + take_profit_step1), qty=strategy.position_size * tp_pct1)
+    strategy.exit("TP 2", "Long", limit=strategy.position_avg_price * (1 + take_profit_step2), qty=strategy.position_size * tp_pct2)
+    strategy.exit("TP 3", "Long", limit=strategy.position_avg_price * (1 + take_profit_step3), qty=strategy.position_size * tp_pct3)
+    strategy.exit("TP 4", "Long", limit=strategy.position_avg_price * (1 + take_profit_step4), qty=strategy.position_size * tp_pct4)
+
+// Check for open short positions and execute take profits
+if (strategy.position_size < 0) and use_risk_management
+    // Four-step take profit exits for shorts, with user-defined percentage for each step
+    strategy.exit("TP 1", "Short", limit=strategy.position_avg_price * (1 - take_profit_step1), qty=strategy.position_size * tp_pct1)
+    strategy.exit("TP 2", "Short", limit=strategy.position_avg_price * (1 - take_profit_step2), qty=strategy.position_size * tp_pct2)
+    strategy.exit("TP 3", "Short", limit=strategy.position_avg_price * (1 - take_profit_step3), qty=strategy.position_size * tp_pct3)
+    strategy.exit("TP 4", "Short", limit=strategy.position_avg_price * (1 - take_profit_step4), qty=strategy.position_size * tp_pct4)
+
+// Hold days exit logic, only if there is an open position
+if (strategy.opentrades > 0) and (bar_index - strategy.opentrades.entry_bar_index(0) >= hold_days)
+    strategy.close("Long", comment="Hold Days Exit")
+    strategy.close("Short", comment="Hold Days Exit")
+
+// Plotting
+plot(spread, title="Spread", color=color.blue)
+plot(upper_band, title="Upper Bollinger Band", color=color.red)
+plot(lower_band, title="Lower Bollinger Band", color=color.green)
+
+View in Pine Editor・88 lines
+Use on chart
+1
+9
+0
+2
+4 661
+Sep 25, 2024
+This time is a swing trading strategy! It measures the sentiment of the Bitcoin market through the spread of CME Bitcoin Futures and Bitfinex BTCUSD Spot prices. By applying Bollinger Bands to the spread, the strategy seeks to capture mean-reversion opportunities when prices deviate significantly from their historical norms
+
+█ Introduction and How it is Different
+
+The Bitcoin CME-Spot Bollinger Bands Strategy is designed to capture mean-reversion opportunities by exploiting the spread between CME Bitcoin Futures and Bitfinex BTCUSD Spot prices. The strategy uses Bollinger Bands to detect when the spread between these two correlated assets has deviated significantly from its historical norm, signaling potential overbought or oversold conditions.
+
+What sets this strategy apart is its focus on spread trading between futures and spot markets rather than price-based indicators. By applying Bollinger Bands to the spread rather than individual prices, the strategy identifies price inefficiencies across markets, allowing traders to take advantage of the natural reversion to the mean that often occurs in these correlated assets.
+
+BTCUSD 8hr Performance
+
+
+
+█ Strategy, How It Works: Detailed Explanation
+
+The strategy relies on Bollinger Bands to assess the volatility and relative deviation of the spread between CME Bitcoin Futures and Bitfinex BTCUSD Spot prices. Bollinger Bands consist of a moving average and two standard deviation bands, which help measure how much the spread deviates from its historical mean.
+
+🔶 Spread Calculation:
+The spread is calculated by subtracting the Bitfinex spot price from the CME Bitcoin futures price:
+
+Spread = CME Price - Bitfinex Price
+
+This spread represents the difference between the futures and spot markets, which may widen or narrow based on supply and demand dynamics in each market. By analyzing the spread, the strategy can detect when prices are too far apart (potentially overbought or oversold), indicating a trading opportunity.
+
+🔶 Bollinger Bands Calculation:
+The Bollinger Bands for the spread are calculated using a simple moving average (SMA) and the standard deviation of the spread over a defined period.
+
+1. Moving Average (SMA):
+The simple moving average of the spread (mu_S) over a specified period P is calculated as:
+
+mu_S = (1/P) * sum(S_i from i=1 to P)
+
+Where S_i represents the spread at time i, and P is the lookback period (default is 200 bars). The moving average provides a baseline for the normal spread behavior.
+
+2. Standard Deviation:
+The standard deviation (sigma_S) of the spread is calculated to measure the volatility of the spread:
+
+sigma_S = sqrt((1/P) * sum((S_i - mu_S)^2 from i=1 to P))
+
+3. Upper and Lower Bollinger Bands:
+The upper and lower Bollinger Bands are derived by adding and subtracting a multiple of the standard deviation from the moving average. The number of standard deviations is determined by a user-defined parameter k (default is 2.618).
+
+- Upper Band:
+
+Upper Band = mu_S + (k * sigma_S)
+
+- Lower Band:
+
+Lower Band = mu_S - (k * sigma_S)
+
+These bands provide a dynamic range within which the spread typically fluctuates. When the spread moves outside of these bands, it is considered overbought or oversold, potentially offering trading opportunities.
+
+Local view
+
+
+
+🔶 Entry Conditions:
+- Long Entry: A long position is triggered when the spread crosses below the lower Bollinger Band, indicating that the spread has become oversold and is likely to revert upward.
+
+Spread < Lower Band
+
+- Short Entry: A short position is triggered when the spread crosses above the upper Bollinger Band, indicating that the spread has become overbought and is likely to revert downward.
+
+Spread > Upper Band
+
+🔶 Risk Management and Profit-Taking:
+The strategy incorporates multi-step take profits to lock in gains as the trade moves in favor. The position is gradually reduced at predefined profit levels, reducing risk while allowing part of the trade to continue running if the price keeps moving favorably.
+
+Additionally, the strategy uses a hold period exit mechanism. If the trade does not hit any of the take-profit levels within a certain number of bars, the position is closed automatically to avoid excessive exposure to market risks.
+
+█ Trade Direction
+
+The trade direction is based on deviations of the spread from its historical norm:
+- Long Trade: The strategy enters a long position when the spread crosses below the lower Bollinger Band, signaling an oversold condition where the spread is expected to narrow.
+
+- Short Trade: The strategy enters a short position when the spread crosses above the upper Bollinger Band, signaling an overbought condition where the spread is expected to widen.
+
+These entries rely on the assumption of mean reversion, where extreme deviations from the average spread are likely to revert over time.
+
+█ Usage
+
+The Bitcoin CME-Spot Bollinger Bands Strategy is ideal for traders looking to capitalize on price inefficiencies between Bitcoin futures and spot markets. It’s especially useful in volatile markets where large deviations between futures and spot prices occur.
+
+- Market Conditions: This strategy is most effective in correlated markets, like CME futures and spot Bitcoin. Traders can adjust the Bollinger Bands period and standard deviation multiplier to suit different volatility regimes.
+
+- Backtesting: Before deployment, backtesting the strategy across different market conditions and timeframes is recommended to ensure robustness. Adjust the take-profit steps and hold periods to reflect the trader’s risk tolerance and market behavior.
+
+█ Default Settings
+
+The default settings provide a balanced approach to spread trading using Bollinger Bands but can be adjusted depending on market conditions or personal trading preferences.
+
+🔶 Bollinger Bands Period (200 bars):
+This defines the number of bars used to calculate the moving average and standard deviation for the Bollinger Bands. A longer period smooths out short-term fluctuations and focuses on larger, more significant trends. Adjusting the period affects the responsiveness of the strategy:
+- Shorter periods (e.g., 100 bars): Makes the strategy more reactive to short-term market fluctuations, potentially generating more signals but increasing the risk of false positives.
+- Longer periods (e.g., 300 bars): Focuses on longer-term trends, reducing the frequency of trades and focusing only on significant deviations.
+
+🔶 Standard Deviation Multiplier (2.618):
+The multiplier controls how wide the Bollinger Bands are around the moving average. By default, the bands are set at 2.618 standard deviations away from the average, ensuring that only significant deviations trigger trades.
+- Higher multipliers (e.g., 3.0): Require a more extreme deviation to trigger trades, reducing trade frequency but potentially increasing the accuracy of signals.
+- Lower multipliers (e.g., 2.0): Make the bands narrower, increasing the number of trade signals but potentially decreasing their reliability.
+
+🔶 Take-Profit Levels:
+The strategy has four take-profit levels to gradually lock in profits:
+- Level 1 (3%): 25% of the position is closed at a 3% profit.
+- Level 2 (8%): 20% of the position is closed at an 8% profit.
+- Level 3 (14%): 15% of the position is closed at a 14% profit.
+- Level 4 (21%): 10% of the position is closed at a 21% profit.
+
+Adjusting these take-profit levels affects how quickly profits are realized:
+- Lower take-profit levels: Capture gains more quickly, reducing risk but potentially cutting off larger profits.
+- Higher take-profit levels: Let trades run longer, aiming for bigger gains but increasing the risk of price reversals before profits are locked in.
+
+🔶 Hold Days (20 bars):
+The strategy automatically closes the position after 20 bars if none of the take-profit levels are hit. This feature prevents trades from being held indefinitely, especially if market conditions are stagnant. Adjusting this:
+- Shorter hold periods: Reduce the duration of exposure, minimizing risks from market changes but potentially closing trades too early.
+- Longer hold periods: Allow trades to stay open longer, increasing the chance for mean reversion but also increasing exposure to unfavorable market conditions.
+
+By understanding how these default settings affect the strategy’s performance, traders can optimize the Bitcoin CME-Spot Bollinger Bands Strategy to their preferences, adapting it to different market environments and risk tolerances.
+Sep 25, 2024
+Release Notes
+add the summary

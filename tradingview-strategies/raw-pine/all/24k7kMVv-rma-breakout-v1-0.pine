@@ -1,0 +1,32 @@
+//@version=3
+strategy("RMA Breakout v1.0", shorttitle = "RMABO str 1.0", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, pyramiding = 0)
+
+len = input(10, "Lehgth")
+coif = input(0.6, "Coifficient", minval = -10, maxval = 10, step = 0.1)
+fromyear = input(2018, defval = 1900, minval = 1900, maxval = 2100, title = "From Year")
+toyear = input(2100, defval = 2100, minval = 1900, maxval = 2100, title = "To Year")
+frommonth = input(01, defval = 01, minval = 01, maxval = 12, title = "From Month")
+tomonth = input(10, defval = 10, minval = 01, maxval = 12, title = "To Month")
+fromday = input(01, defval = 01, minval = 01, maxval = 31, title = "From day")
+today = input(31, defval = 31, minval = 01, maxval = 31, title = "To day")
+
+hsma = rma(high, len)
+lsma = rma(low, len)
+
+upex = hsma * (1 + coif/100)
+dnex = lsma * (1 - coif/100)
+
+plot(upex, "RMA", green)
+plot(dnex, "RMA2", red)
+
+strategy.entry("Long", strategy.long, stop = upex, when = (time > timestamp(fromyear, frommonth, fromday, 00, 00) and time < timestamp(toyear, tomonth, today, 23, 59)))
+strategy.entry("Short", strategy.short, stop = dnex, when = (time > timestamp(fromyear, frommonth, fromday, 00, 00) and time < timestamp(toyear, tomonth, today, 23, 59)))
+
+View in Pine Editor・23 lines
+Use on chart
+2
+0
+6
+1
+6 925
+Optimized for Bitmex XBT/USD. Timeframe 4H.

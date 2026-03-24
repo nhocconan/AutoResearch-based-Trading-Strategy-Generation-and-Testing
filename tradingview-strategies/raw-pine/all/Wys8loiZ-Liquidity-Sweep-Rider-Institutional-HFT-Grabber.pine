@@ -1,0 +1,164 @@
+//@version=6
+strategy("Liquidity Sweep Rider - Institutional HFT Grabber v6", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.04, pyramiding=0)
+
+// ──────────────────────────────────────────────────────────────
+// INPUTS - Focused on grabbing pending orders (stops/limits) + SL hunting with huge HFT volume
+// ──────────────────────────────────────────────────────────────
+leftBars          = input.int(5,  title="Swing Pivot Left Bars (for liquidity clusters)", minval=1, maxval=20)
+rightBars         = input.int(5,  title="Swing Pivot Right Bars (confirmed swings)", minval=1, maxval=20)
+volLen            = input.int(20, title="Volume SMA Length (for HFT detection)")
+volMult           = input.float(2.0, title="HFT Huge Volume Multiplier (Institutional Grabber Filter)", minval=1.0, step=0.1)
+
+// Options to "eat" specific liquidity types (as requested)
+eatSellStopsLongSL = input.bool(true,  title="Eat Sell Stops + Long SL (Bullish Sweep → Long Rider)")
+eatBuyStopsShortSL = input.bool(true,  title="Eat Buy Stops + Short SL (Bearish Sweep → Short Rider)")
+eatStopLossOnly    = input.bool(true,  title="Also Eat Pure Stop-Loss Clusters (included in above sweeps)")
+
+// Risk Management (ATR-based for realistic stops after grab)
+useATR            = input.bool(true,  title="Use ATR SL/TP")
+atrLen            = input.int(14,     title="ATR Length")
+slAtrMult         = input.float(1.2,  title="SL ATR Multiplier (tight after sweep)", minval=0.5, step=0.1)
+tpRR              = input.float(2.5,  title="Take-Profit Risk-Reward Ratio (ride the reversal)", minval=1.0, step=0.1)
+
+// ──────────────────────────────────────────────────────────────
+// CALCULATIONS
+// ──────────────────────────────────────────────────────────────
+// Confirmed swing highs/lows = liquidity pools (stops + pending buy/sell stops + limits cluster here)
+ph = ta.pivothigh(high, leftBars, rightBars)
+pl = ta.pivotlow(low, leftBars, rightBars)
+
+// Latest active liquidity levels (var holds until new swing forms)
+var float sellSideLiquidity = na   // Above this = Buy Stops + Short SL + Sell Limits
+var float buySideLiquidity  = na   // Below this = Sell Stops + Long SL + Buy Limits
+
+if not na(ph)
+    sellSideLiquidity := ph
+if not na(pl)
+    buySideLiquidity  := pl
+
+// HFT Volume filter (huge volume = institutional grabber candle)
+avgVol = ta.sma(volume, volLen)
+
+// Liquidity Sweep Detection (classic "grab then reverse" - wick through level + close back inside)
+// This captures pending stops/limits being triggered + SL hunting with reversal rider
+bullSweep = not na(buySideLiquidity) and low < buySideLiquidity and close > buySideLiquidity and volume >= avgVol * volMult
+bearSweep = not na(sellSideLiquidity) and high > sellSideLiquidity and close < sellSideLiquidity and volume >= avgVol * volMult
+
+// Cooldown to prevent duplicate entries on the same sweep (non-repainting)
+var int lastBullSweepBar = -999
+var int lastBearSweepBar = -999
+cooldown = math.max(leftBars + rightBars, 5) * 2
+
+bullEntry  = bullSweep and eatSellStopsLongSL and (bar_index - lastBullSweepBar > cooldown)
+bearEntry  = bearSweep and eatBuyStopsShortSL and (bar_index - lastBearSweepBar > cooldown)
+
+// ──────────────────────────────────────────────────────────────
+// EXECUTION
+// ──────────────────────────────────────────────────────────────
+if bullEntry
+    strategy.entry("Sweep Rider LONG", strategy.long)
+    lastBullSweepBar := bar_index
+
+if bearEntry
+    strategy.entry("Sweep Rider SHORT", strategy.short)
+    lastBearSweepBar := bar_index
+
+// ATR Risk Management (applied immediately on entry - tight SL after liquidity grab)
+if useATR and strategy.position_size != 0
+    atrVal = ta.atr(atrLen)
+    if strategy.position_size > 0
+        sl = strategy.position_avg_price - atrVal * slAtrMult
+        tp = strategy.position_avg_price + atrVal * slAtrMult * tpRR
+        strategy.exit("Exit LONG", from_entry="Sweep Rider LONG", stop=sl, limit=tp)
+    if strategy.position_size < 0
+        sl = strategy.position_avg_price + atrVal * slAtrMult
+        tp = strategy.position_avg_price - atrVal * slAtrMult * tpRR
+        strategy.exit("Exit SHORT", from_entry="Sweep Rider SHORT", stop=sl, limit=tp)
+
+// ──────────────────────────────────────────────────────────────
+// VISUALS
+// ──────────────────────────────────────────────────────────────
+plot(sellSideLiquidity,  title="Sell-Side Liquidity (Buy Stops / Short SL)",  color=color.new(color.red, 30), linewidth=2, style=plot.style_linebr)
+plot(buySideLiquidity,   title="Buy-Side Liquidity (Sell Stops / Long SL)",   color=color.new(color.green, 30), linewidth=2, style=plot.style_linebr)
+
+plotshape(bullEntry, title="LONG - Liquidity Sweep Rider",  location=location.belowbar, color=color.green, style=shape.labelup,   text="LONG\nRIDER", textcolor=color.white, size=size.normal)
+plotshape(bearEntry, title="SHORT - Liquidity Sweep Rider", location=location.abovebar, color=color.red,   style=shape.labeldown, text="SHORT\nRIDER", textcolor=color.white, size=size.normal)
+
+// Background tint on entry (easy to see HFT grab + reversal)
+bgcolor(bullEntry ? color.new(color.green, 85) : bearEntry ? color.new(color.red, 85) : na, title="Sweep Trigger Highlight")
+
+// Table with current settings (for quick reference)
+var table info = table.new(position.top_right, 1, 6, bgcolor=color.new(color.black, 80), border_width=1)
+if bar_index % 20 == 0
+    table.cell(info, 0, 0, "Liquidity Sweep Rider v6", text_color=color.white, text_size=size.small)
+    table.cell(info, 0, 1, "Vol Filter: " + str.tostring(volMult) + "x", text_color=color.yellow, text_size=size.small)
+    table.cell(info, 0, 2, "Eat Sell Stops/Long SL: " + (eatSellStopsLongSL ? "ON" : "OFF"), text_color=eatSellStopsLongSL ? color.green : color.gray)
+    table.cell(info, 0, 3, "Eat Buy Stops/Short SL: " + (eatBuyStopsShortSL ? "ON" : "OFF"), text_color=eatBuyStopsShortSL ? color.red : color.gray)
+    table.cell(info, 0, 4, "HFT Volume: " + str.tostring(avgVol * volMult, "#.##"), text_color=color.orange)
+    table.cell(info, 0, 5, "RR: " + str.tostring(tpRR) + " | SL ATR: " + str.tostring(slAtrMult), text_color=color.white)
+
+// Alerts
+alertcondition(bullEntry, title="LONG Liquidity Sweep Rider", message="Institutional HFT Liquidity Grab (Sell Stops + Long SL) - LONG RIDER Triggered!")
+alertcondition(bearEntry, title="SHORT Liquidity Sweep Rider", message="Institutional HFT Liquidity Grab (Buy Stops + Short SL) - SHORT RIDER Triggered!")
+
+View in Pine Editor・102 lines
+Use on chart
+4
+8
+1 215
+Liquidity Sweep Rider Strategy (Swing Pivot + Volume Filter)
+
+Publication Description:
+This is an open-source Pine Script v6 strategy that identifies potential liquidity sweep patterns around confirmed swing highs and lows.
+
+It uses:
+
+Pivot points (ta.pivothigh / ta.pivotlow) to mark historical swing levels where orders (such as stops or pending entries) often cluster.
+
+
+
+A volume filter requiring above-average volume (SMA-based with multiplier) on the sweep candle to highlight stronger moves.
+
+
+
+Classic sweep logic: price wicks beyond the level but closes back inside, suggesting a possible reversal after liquidity is taken.
+
+
+
+Entry rules:
+
+
+Long: after a downside sweep below a recent swing low (with volume condition).
+
+Short: after an upside sweep above a recent swing high (with volume condition).
+
+
+
+Features include:
+
+
+Optional toggles to enable/disable long/short directions.
+
+ATR-based stop-loss and take-profit (configurable multipliers and risk-reward ratio).
+
+Visual plots for liquidity levels, entry signals, background highlights, and an info table.
+
+Alert conditions for long/short triggers.
+
+
+
+Important notes:
+
+
+This is an educational/example script for backtesting and learning.
+
+Past performance does not indicate future results. Trading involves significant risk of loss — use proper risk management and never risk more than you can afford to lose.
+
+No guarantees of profitability are made. Always test thoroughly on demo accounts before live use.
+
+Customize parameters (pivot lengths, volume multiplier, ATR settings) based on the instrument and timeframe you trade. Works on various markets/timeframes but performs differently depending on liquidity and volatility.
+
+
+
+Feel free to fork/modify the code. Feedback and improvements are welcome!
+(≈ 3–4 paragraphs, clear, educational, includes risk disclaimer, explains logic + usage without hype.)

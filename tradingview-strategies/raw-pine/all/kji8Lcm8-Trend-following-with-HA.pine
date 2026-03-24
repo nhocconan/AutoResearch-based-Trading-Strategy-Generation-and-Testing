@@ -1,0 +1,30 @@
+//@version=3
+strategy("My Strategy", overlay=true)
+//inputs 
+StartYear = input(2017, title="Start")
+EndYear = input(2017, title="End")
+lmt = input(0.0020, title="Limit")
+// calculate HA closing price
+HA_cl = security(heikinashi("EURUSD"), "D", close)
+HA_op = security(heikinashi("EURUSD"), "D", open)
+// calculate WMA
+fastMA = wma(HA_cl,2)
+plot(fastMA,color=red)
+// calculate MA
+slowMA = sma(HA_cl,2)
+plot(slowMA,color=blue)
+// entry rules - if crossover/under, enter on open mkt order the next day
+longCondition1=crossover(fastMA,slowMA)
+if (longCondition1)
+    strategy.entry("My Long Entry", strategy.long, limit = HA_op + lmt, when =  year > (StartYear - 1) and year < (EndYear + 1))
+// if cannot get good price cancel trade    
+shortCondition1=crossunder(fastMA,slowMA)
+if (shortCondition1)
+    strategy.entry("My Short Entry", strategy.short, limit = HA_op - lmt, when =  year > (StartYear - 1) and year < (EndYear + 1))
+
+View in Pine Editor・23 lines
+Use on chart
+3
+8
+2 916
+This is my first script and it is basically a MA crossover/under strategy that uses heikin ashi closing prices. I've also used limit orders based on HA opening prices of the previous day for entry which improves the performance. However, this impose a restriction when prices are moving too fast and the algo is unable to enter the trade, resulting in a bad position for a long period, which I believe is preventing this strategy from performing better. Will appreciate any comments/ suggestions to improve this (such as enter market prices the next day when failed to enter on HA price - not sure if this is possible) as I'm still starting out and will be more than happy to learn from the community here. Cheers!

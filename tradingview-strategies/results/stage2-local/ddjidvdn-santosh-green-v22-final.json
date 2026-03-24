@@ -1,0 +1,44 @@
+{
+  "generated_at": "2026-03-23T08:50:08.257999+00:00",
+  "queue_rank": 1,
+  "page": 1,
+  "name": "santosh Green v22 - Final",
+  "slug": "ddjidvdn-santosh-green-v22-final",
+  "chart_url": "https://www.tradingview.com/script/DdjIDVdn-santosh-Green-v22-Final/",
+  "pine_file": "raw-pine/all/DdjIDVdn-santosh-Green-v22-Final.pine",
+  "symbol_name": "CME_MINI:NQ1!",
+  "repo_timeframe_hint": "1m",
+  "status": "converted",
+  "classification": "partial",
+  "timeframe": "1m",
+  "reason": "Uses request.security multi-timeframe alignment plus strategy.exit intrabar stop/target/trailing logic and syminfo point/tick sizing that require approximation in repo execution.",
+  "adaptations": [
+    "Approximate request.security(..., lookahead_off) via higher-timeframe resample plus forward-fill",
+    "Approximate intrabar strategy.exit stop/target/trailing behavior with OHLC-triggered position changes",
+    "Approximate syminfo pointvalue/mintick sizing using inferred market tick and pointvalue=1",
+    "Preserve NY session windows and 4:45pm close-all logic using open_time timezone conversion"
+  ],
+  "attempts_used": 3,
+  "attempt_log": [
+    "Initial conversion generated successfully but runtime failed in RSI fillna ndarray handling",
+    "Second run fixed RSI but failed in VWAP fillna(method=...) compatibility with current pandas",
+    "Third run fixed HTF/base index alignment to avoid boolean-mask misalignment and zeroed output"
+  ],
+  "conversion_notes": [
+    "Pine defaults were preserved, including London 02:00-03:00 NY entry window and EMA/RSI/HTF filters",
+    "i_exit_type input exists in Pine but is not used in source execution logic; conversion mirrors effective behavior",
+    "VWAP is session-anchored by America/New_York day for closer behavior to intraday Pine usage",
+    "Signals are target positions in {-1,0,1} with no lookahead and same length as input bars"
+  ],
+  "python_file": "python-strategies/stage2-local/ddjidvdn-santosh-green-v22-final.py",
+  "failed_python_files": [],
+  "validation": {
+    "module_name": "santosh Green v22 - Final",
+    "module_timeframe": "1m",
+    "symbol": "BTCUSDT",
+    "bars_checked": 217441,
+    "non_zero_signals": 737,
+    "finite_ratio": 1.0
+  },
+  "last_error": null
+}

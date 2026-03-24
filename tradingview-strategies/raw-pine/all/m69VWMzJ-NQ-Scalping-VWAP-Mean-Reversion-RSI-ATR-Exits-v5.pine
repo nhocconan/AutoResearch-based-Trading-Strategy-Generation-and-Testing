@@ -1,0 +1,114 @@
+//@version=5
+strategy("NQ Scalping VWAP Mean Reversion (RSI + ATR Exits) [v5]",
+     overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.0,
+     slippage=0,
+     calc_on_every_tick=true,
+     process_orders_on_close=true)
+
+//====================
+// Inputs
+//====================
+useSession   = input.bool(true, "Use Session Filter")
+sessionInput = input.session("0930-1600", "Session (Exchange Time)")
+
+rsiLen       = input.int(14, "RSI Length", minval=1)
+rsiOS        = input.int(30, "RSI Oversold", minval=1, maxval=50)
+rsiOB        = input.int(70, "RSI Overbought", minval=50, maxval=99)
+
+minVwapDist  = input.float(6.0, "Min Distance From VWAP (points)", step=0.25, minval=0.0)
+
+atrLen       = input.int(14, "ATR Length", minval=1)
+stopATR      = input.float(1.0, "Stop = ATR *", step=0.1, minval=0.1)
+targetATR    = input.float(1.1, "Target = ATR *", step=0.1, minval=0.1)
+
+useTimeExit  = input.bool(true, "Time Exit (bars)")
+timeBars     = input.int(20, "Exit After Bars", minval=1)
+
+useOneTradeAtATime = input.bool(true, "One Position at a Time")
+
+//====================
+// Filters / Calcs
+//====================
+inSession = not useSession or not na(time(timeframe.period, sessionInput))
+
+vwap = ta.vwap(hlc3)
+rsi  = ta.rsi(close, rsiLen)
+atr  = ta.atr(atrLen)
+
+dist = close - vwap
+
+// A small "reversal confirmation":
+// Long confirm = current candle closes up AND previous candle was down
+// Short confirm = current candle closes down AND previous candle was up
+bullReversal = close > open and close[1] < open[1]
+bearReversal = close < open and close[1] > open[1]
+
+//====================
+// Entry Logic (Mean Reversion)
+//====================
+canEnter = not useOneTradeAtATime or strategy.position_size == 0
+
+longSignal =
+     inSession and canEnter and
+     (dist <= -minVwapDist) and
+     (rsi <= rsiOS) and
+     bullReversal
+
+shortSignal =
+     inSession and canEnter and
+     (dist >= minVwapDist) and
+     (rsi >= rsiOB) and
+     bearReversal
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+
+//====================
+// Exits (ATR Brackets + Optional Time Exit)
+//====================
+longStop  = strategy.position_avg_price - atr * stopATR
+longLimit = strategy.position_avg_price + atr * targetATR
+
+shortStop  = strategy.position_avg_price + atr * stopATR
+shortLimit = strategy.position_avg_price - atr * targetATR
+
+if strategy.position_size > 0
+    strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longLimit)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortLimit)
+
+// Optional time-based exit (prevents holding too long in chop)
+var int barsInTrade = 0
+if strategy.position_size != 0
+    barsInTrade += 1
+else
+    barsInTrade := 0
+
+if useTimeExit and strategy.position_size > 0 and barsInTrade >= timeBars
+    strategy.close("Long", comment="Time Exit Long")
+
+if useTimeExit and strategy.position_size < 0 and barsInTrade >= timeBars
+    strategy.close("Short", comment="Time Exit Short")
+
+//====================
+// Visuals
+//====================
+plot(vwap, "VWAP", linewidth=2)
+plotshape(longSignal, title="Long Signal", style=shape.circle, location=location.belowbar, size=size.tiny, text="MR L")
+plotshape(shortSignal, title="Short Signal", style=shape.circle, location=location.abovebar, size=size.tiny, text="MR S")
+
+View in Pine Editor・105 lines
+Use on chart
+1
+0
+494
+This strategy is designed for NQ scalping using a VWAP mean reversion approach. It enters long positions when price extends below VWAP with oversold RSI conditions and confirms with a bullish reversal candle. It enters short positions when price stretches above VWAP with overbought RSI conditions and confirms with a bearish reversal candle.
+
+Risk management is handled using ATR-based stop losses and profit targets, with an optional time-based exit to prevent overexposure during consolidation. The strategy is optimized for lower timeframes such as 1–5 minute charts and is intended for intraday trading during regular session hours.

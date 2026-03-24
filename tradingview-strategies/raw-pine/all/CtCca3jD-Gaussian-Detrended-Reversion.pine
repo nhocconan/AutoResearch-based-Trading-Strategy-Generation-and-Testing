@@ -1,0 +1,82 @@
+//@version=5
+strategy(title="Gaussian Detrended Price Reversion Strategy", shorttitle = "GDR", overlay=false)
+
+// Detrended Price Oscillator base inputs and calculations
+period_ = input.int(52, title="Price Length", minval=1)
+
+barsback = period_/2 + 1
+ma = ta.ema(close, period_)
+dpo = close - ma[barsback]
+
+// ALMA smoothing and inputs on the DPO
+almaSource = dpo
+almaWindowSize = input(title="Smoothing Length", defval=52)
+lagLength = input(title="Lag Length", defval=26)
+almaDPO = ta.alma(almaSource, almaWindowSize, 0.85, 6)
+almaLag = almaDPO[lagLength]
+
+// Conditions
+entryL = ta.crossover(almaDPO, almaLag) and almaDPO < 0
+exitL = ta.crossunder(almaDPO, almaLag) or ta.crossunder(almaDPO, 0)
+entryS = ta.crossunder(almaDPO, almaLag) and almaDPO > 0
+exitS = ta.crossover(almaDPO, almaLag) or ta.crossover(almaDPO, 0)
+
+// Logic
+if entryL
+    strategy.entry("Long", strategy.long)
+
+if exitL
+    strategy.close("Long")
+
+if entryS
+    strategy.entry("Short", strategy.short)
+
+if exitS
+    strategy.close("Short")
+
+// Plotting
+plot(almaDPO, title="Price Line", color=color.green)
+plot(almaDPO, title="Lag Line", offset = lagLength, color=color.white)
+
+hline(0, title="Zero Rate Line", color=color.white)
+
+bgcolor(entryL ? color.new(color.green, 40) : na, title = "Long Entry Highlighter")
+bgcolor(entryS ? color.new(color.red, 40) : na, title = "Short Entry Highlighter")
+
+plotshape(series=exitL, style=shape.xcross, location=location.top, color=color.green, size=size.tiny, title = "Long Exit Symbol")
+plotshape(series=exitS, style=shape.xcross, location=location.bottom, color=color.red, size=size.tiny, title = "Short Exit Symbol")
+
+//______ _________ 
+//___  //_/__  __ \
+//__  ,<  __  /_/ /
+//_  /| | _  ____/ 
+///_/ |_| /_/
+
+View in Pine Editor・55 lines
+Use on chart
+4
+1
+8
+7
+13 958
+Aug 13, 2023
+This strategy, titled "Gaussian Detrended Reversion Strategy," aims to identify potential price reversals using the customized Gaussian Detrended Price Oscillator (GDPO) in combination with smoothed price cycles.
+
+Key Elements of the Strategy:
+
+GDPO Calculation: The strategy first calculates the Detrended Price Oscillator (DPO) by comparing the close price to an Exponential Moving Average (EMA) of a specified period. This calculation helps identify short-term price cycles by detrending the price data.
+
+Gaussian Smoothing: The DPO values are then smoothed using the Arnaud Legoux Moving Average (ALMA), applying a Gaussian smoothing technique. This smoothed version of the DPO is intended to filter out noise and provide a clearer picture of price trends.
+
+Entry and Exit Conditions: The strategy defines conditions for both long and short entry points as well as exit points. It looks for specific crossover events between the smoothed GDPO and its lagged version. The strategy enters a long position when the smoothed GDPO crosses above the lag and is negative, and exits the long position when the smoothed GDPO crosses below the lag or the zero line. Similarly, the strategy enters a short position when the smoothed GDPO crosses below the lag and is positive, and exits the short position when the smoothed GDPO crosses above the lag or the zero line.
+
+Visualization: The smoothed GDPO and its lag are plotted on the chart using distinct colors. The zero line is also displayed as a reference point. Additionally, the chart background changes color when the strategy enters a long or short position. Cross markers are also plotted at the crossover points as exit cues.
+
+Overall, this strategy aims to capture potential price reversals using the GDPO and Gaussian smoothing, with specific entry and exit conditions to guide trading decisions.
+Sep 3, 2023
+Release Notes
+*Updated Labels for clarity*
+Sep 24, 2023
+Release Notes
+Plotted an offset of the price line to create a leading indication on the oscillator
+

@@ -1,0 +1,25 @@
+//@version=2
+strategy("GetTrendStrategy Fast", overlay=true)
+tim=input('6')
+out1 = security(tickerid, tim, open)
+out2 = security(tickerid, tim, close)
+plot(out1,color=red)
+plot(out2,color=green)
+longCondition = crossover(security(tickerid, tim, close),security(tickerid, tim, open))
+if (longCondition)
+    strategy.entry("long", strategy.long)
+shortCondition = crossunder(security(tickerid, tim, close),security(tickerid, tim, open))
+if (shortCondition)
+    strategy.entry("short", strategy.short)
+//YaroslavG
+
+View in Pine Editor・14 lines
+Use on chart
+4
+3
+2
+6
+10 393
+GetTrendStrategy but much much much faster, and much more productive.
+Works perfect on 1m charts
+(YaroslavG)

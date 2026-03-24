@@ -1,0 +1,123 @@
+//@version=5
+strategy(     title="SPX Scalper: EMA Trend + Pullback + RSI/Volume + ATR Exits (v5)",     overlay=true,     calc_on_every_tick=true,     pyramiding=0,     commission_type=strategy.commission.percent,     commission_value=0.0,     initial_capital=100000,     default_qty_type=strategy.percent_of_equity,     default_qty_value=10)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────────────
+fastLen   = input.int(9,  "Fast EMA", minval=1)
+slowLen   = input.int(21, "Slow EMA", minval=1)
+trendLen  = input.int(200,"Trend Filter EMA (optional)", minval=1)
+
+useTrend200 = input.bool(true, "Require price above/below EMA(Trend)")
+
+rsiLen    = input.int(14, "RSI Length", minval=1)
+rsiLong   = input.int(50, "RSI long trigger (cross above)")
+rsiShort  = input.int(50, "RSI short trigger (cross below)")
+
+volLen    = input.int(20, "Volume MA Length", minval=1)
+volMult   = input.float(1.10, "Volume confirmation multiplier", step=0.05)
+
+atrLen    = input.int(14, "ATR Length", minval=1)
+stopATR   = input.float(1.0, "Stop = ATR *", step=0.1)
+targetATR = input.float(1.3, "Target = ATR *", step=0.1)
+trailATR  = input.float(0.8, "Trail = ATR * (0 disables)", step=0.1)
+
+maxBarsInTrade = input.int(18, "Time stop (bars). 0 disables", minval=0)
+
+sessionFilter = input.bool(true, "Trade only regular session (US equities hours)")
+tradeSession  = input.session("0930-1600", "Session (exchange time)")
+
+//──────────────────────────────────────────────────────────────────────────────
+// Indicators
+//──────────────────────────────────────────────────────────────────────────────
+fastEma  = ta.ema(close, fastLen)
+slowEma  = ta.ema(close, slowLen)
+trendEma = ta.ema(close, trendLen)
+
+rsi = ta.rsi(close, rsiLen)
+volMA = ta.sma(volume, volLen)
+atr = ta.atr(atrLen)
+
+// Session gate
+inSession = not sessionFilter or not na(time(timeframe.period, tradeSession))
+
+// Volume confirm
+volOK = volume > volMA * volMult
+
+// Trend definition
+trendUp   = fastEma > slowEma
+trendDown = fastEma < slowEma
+
+trend200UpOK   = not useTrend200 or close > trendEma
+trend200DownOK = not useTrend200 or close < trendEma
+
+// Pullback/reclaim logic:
+// For longs: we want price to dip near/under fast EMA then reclaim above it.
+// For shorts: price pops near/over fast EMA then reclaim below it.
+pullbackLong  = low <= fastEma and close > fastEma
+pullbackShort = high >= fastEma and close < fastEma
+
+// Momentum confirmation via RSI cross
+rsiLongCross  = ta.crossover(rsi, rsiLong)
+rsiShortCross = ta.crossunder(rsi, rsiShort)
+
+// Entries
+longSignal  = inSession and trendUp and trend200UpOK and pullbackLong and rsiLongCross and volOK
+shortSignal = inSession and trendDown and trend200DownOK and pullbackShort and rsiShortCross and volOK
+
+//──────────────────────────────────────────────────────────────────────────────
+// Entries
+//──────────────────────────────────────────────────────────────────────────────
+if longSignal
+    strategy.entry("L", strategy.long)
+
+if shortSignal
+    strategy.entry("S", strategy.short)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Exits (ATR stop/target + optional ATR trail) + Time stop
+//──────────────────────────────────────────────────────────────────────────────
+var int barsInTrade = 0
+inPos = strategy.position_size != 0
+
+barsInTrade := inPos ? (barsInTrade + 1) : 0
+
+longStop  = strategy.position_avg_price - (atr * stopATR)
+longLimit = strategy.position_avg_price + (atr * targetATR)
+
+shortStop  = strategy.position_avg_price + (atr * stopATR)
+shortLimit = strategy.position_avg_price - (atr * targetATR)
+
+// Trailing stop in price units (trail_points uses absolute price ticks)
+trailPoints = trailATR > 0 ? (atr * trailATR) : na
+
+strategy.exit("L-exit", from_entry="L", stop=longStop, limit=longLimit, trail_points=trailPoints)
+strategy.exit("S-exit", from_entry="S", stop=shortStop, limit=shortLimit, trail_points=trailPoints)
+
+// Time stop: flatten if trade lingers too long (scalping behavior)
+if maxBarsInTrade > 0 and inPos and barsInTrade >= maxBarsInTrade
+    strategy.close_all(comment="TimeStop")
+
+// Safety: flatten outside session (optional)
+if sessionFilter and not inSession and inPos
+    strategy.close_all(comment="SessionEnd")
+
+//──────────────────────────────────────────────────────────────────────────────
+// Plotting / Visuals
+//──────────────────────────────────────────────────────────────────────────────
+plot(fastEma, color=color.new(color.lime, 0), title="Fast EMA")
+plot(slowEma, color=color.new(color.red,  0), title="Slow EMA")
+plot(useTrend200 ? trendEma : na, color=color.new(color.blue, 0), title="Trend EMA")
+
+plotshape(longSignal,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.tiny, text="L")
+plotshape(shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),   size=size.tiny, text="S")
+
+// Optional: show volume confirmation status
+plotchar(volOK ? 1 : 0, title="VolOK (1=true)", char="•", location=location.bottom, color=volOK ? color.new(color.green, 0) : color.new(color.gray, 70))
+
+View in Pine Editor・116 lines
+Use on chart
+1
+3
+474
+This is a trend‑aligned SPX scalping strategy designed for fast day trades on 1–5 minute charts. It enters on pullbacks within a strong EMA trend, confirmed by RSI momentum and above‑average volume, and exits quickly using ATR‑based stops, targets, optional trailing stops, and a time‑based exit to avoid overstaying trades.

@@ -1,0 +1,29 @@
+//@version=2
+strategy("Poloniex 30 EMA & 50 SMA Strategy", overlay=true)
+
+expo = ema(close, 30)
+ma = sma(close, 50)
+
+s2 = cross(expo, ma) ? avg(expo, ma) : na
+plot(s2, style=circles, linewidth=5, color=red, transp=0)
+
+p1=plot(expo, color=#00FFFF, linewidth=2, transp=0)
+p2=plot(ma, color=orange, linewidth=2, transp=0)
+fill(p1,p2, color=white, transp=80)
+
+longCondition = crossover(expo, ma)
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = crossunder(expo, ma)
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・20 lines
+Use on chart
+2
+3
+0
+3
+6 410
+Working great on higher timeframes! Best is to check performance for certain timeframe and then trade on the signals, so far 4H-24H range works best. 9H had best performance on MAIDBTC, but seems lower Timeframes doing well too on BTCUSD. Just check under performance and try it out! :)

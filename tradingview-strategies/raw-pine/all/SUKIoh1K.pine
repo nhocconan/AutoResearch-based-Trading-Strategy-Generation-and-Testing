@@ -1,0 +1,1212 @@
+//@version=6
+///////////////////////////////////////////////////////////////////////////////
+// STRATEGY INITIALIZATION
+// stratejinin temel motor ayarları burada tanımlanır.
+// başlangıç sermayesi, pozisyon boyutlandırma ve execution modeli belirlenir.
+///////////////////////////////////////////////////////////////////////////////
+strategy("MTF Screener MA Cross System",  shorttitle = 'MTF Screener MA Cross System [yigdeli] 1.0.2',
+     overlay=true, initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10)
+
+///////////////////////////////////////////////////////////////////////////////
+// UI CONFIGURATION
+// ARAYÜZ AYARLARI
+// tablo konumu ve boyut kontrolü.
+///////////////////////////////////////////////////////////////////////////////
+
+uiGroup = "UI CONFIGURATION"
+
+tablePosInput = input.string(
+     "Middle Right",
+     "Table Position",
+     options=["Top Right","Middle Right","Bottom Right",
+              "Top Left","Middle Left","Bottom Left"],
+     group=uiGroup,
+     tooltip="EN: Defines where the table will appear on the chart.\nTR: Tablonun grafikte hangi konumda görüneceğini belirler.")
+
+tableSize = input.string(
+     "Normal",
+     "Table Size",
+     options=["Tiny","Small","Normal","Large","Huge"],
+     group=uiGroup,
+     tooltip="EN: Adjusts the table text size.\nTR: Tablodaki yazı boyutunu ayarlar.")
+
+txtSize =
+     tableSize=="Tiny"   ? size.tiny   :
+     tableSize=="Small"  ? size.small  :
+     tableSize=="Large"  ? size.large  :
+     tableSize=="Huge"   ? size.huge   :
+     size.normal
+
+tablePos =
+     tablePosInput=="Top Right"    ? position.top_right :
+     tablePosInput=="Middle Right" ? position.middle_right :
+     tablePosInput=="Bottom Right" ? position.bottom_right :
+     tablePosInput=="Top Left"     ? position.top_left :
+     tablePosInput=="Middle Left"  ? position.middle_left :
+     position.bottom_left
+
+///////////////////////////////////////////////////////////////////////////////
+// MOVING AVERAGE CONFIGURATION
+// HAREKETLİ ORTALAMA AYARLARI
+// fast, medium ve slow trend bileşenleri.
+///////////////////////////////////////////////////////////////////////////////
+
+maGroup = "MOVING AVERAGE SETTINGS"
+
+// --- FAST MA (9) -------------------------------------------------------------------------
+fastLen = input.int(
+     9,
+     "Fast MA Length     ",
+     group=maGroup,
+     inline="fast",
+     tooltip="EN: Short-term momentum moving average.\nTR: Kısa vadeli momentum ortalaması.")
+
+fastBullColorInput = input.color(
+     color.new(#005446, 70),
+     "",
+     group=maGroup,
+     inline="fast")
+
+fastBearColorInput = input.color(
+     color.new(#ff4d6d, 70),
+     "",
+     group=maGroup,
+     inline="fast")
+
+// --- MEDIUM MA (27) -------------------------------------------------------------------------
+mediumLen = input.int(
+     27,
+     "Medium MA Length",
+     group=maGroup,
+     inline="medium",
+     tooltip="EN: Medium-term trend filter.\nTR: Orta vadeli trend filtresi.")
+
+mediumBullColorInput = input.color(
+     color.new(#005446, 70),
+     "",
+     group=maGroup,
+     inline="medium")
+
+mediumBearColorInput = input.color(
+     color.new(#ff4d6d, 70),
+     "",
+     group=maGroup,
+     inline="medium")
+
+// --- SLOW MA (200) -------------------------------------------------------------------------
+slowLen = input.int(
+     200,
+     "Slow MA Length     ",
+     group=maGroup,
+     inline="slow",
+     tooltip="EN: Primary structural trend moving average.\nTR: Ana yapısal trend ortalaması.")
+
+slowBullColorInput = input.color(
+     color.new(#005446, 70),
+     "",
+     group=maGroup,
+     inline="slow")
+
+slowBearColorInput = input.color(
+     color.new(#ff4d6d, 70),
+     "",
+     group=maGroup,
+     inline="slow")
+
+///////////////////////////////////////////////////////////////////////////////
+// CROSS MODE CONFIGURATION
+// KESİŞİM MODU SEÇİMİ
+// hangi ortalamaların kesişeceğini belirler.
+///////////////////////////////////////////////////////////////////////////////
+
+crossGroup = "CROSS MODE SETTINGS"
+
+crossMode = input.string(
+     "Fast",
+     "Cross Mode",
+     options=["Fast","Medium","Slow"],
+     group=crossGroup,
+     tooltip="Fast: Fast vs Medium\nMedium: Fast vs Slow\nSlow: Medium vs Slow")
+
+bullBase = input.color(
+     color.new(#00ff88, 10),
+     "Bull Gradient ",
+     group=crossGroup,
+     inline="bullg")
+
+bearBase = input.color(
+     color.new(#ff3366, 10),
+     "Bear Gradient",
+     group=crossGroup,
+     inline="bearg")
+
+blueLight = input.color(
+     color.new(#0d47a1, 10),
+     "Neutral Gradient",
+     group=crossGroup,
+     inline="bullg")
+
+blueDark = input.color(
+     color.new(#0d47a1, 10),
+     "Neutral Gradient",
+     group=crossGroup,
+     inline="bearg")
+
+///////////////////////////////////////////////////////////////////////////////
+// HIGHER TIMEFRAME FILTER
+// ÜST ZAMAN DİLİMİ TREND FİLTRESİ
+///////////////////////////////////////////////////////////////////////////////
+
+htfGroup = "HIGHER TIMEFRAME FILTER"
+
+htfTF = input.timeframe(
+     "240",
+     "Higher Timeframe",
+     group=htfGroup,
+     tooltip="EN: Higher timeframe used for trend confirmation.\nTR: Trend doğrulaması için kullanılacak üst zaman dilimi.")
+
+htfLen = input.int(
+     200,
+     "HTF Slow Length",
+     group=htfGroup,
+     tooltip="EN: Period of the main trend moving average on the higher timeframe.\nTR: Üst zaman dilimindeki ana trend ortalaması periyodu.")
+
+///////////////////////////////////////////////////////////////////////////////
+// TRADE MANAGEMENT SETTINGS
+// İŞLEM YÖNETİM OTOMASYONU
+///////////////////////////////////////////////////////////////////////////////
+
+tmGroup = "TRADE MANAGEMENT"
+
+managementMode = input.string(
+     "Basic",
+     "Trade Management Mode",
+     options=["Basic","BreakEven","Partial + BE","Advanced"],
+     group=tmGroup,
+     tooltip="EN: Basic: Fixed SL/TP.\nBreakEven: Moves stop to entry when RR is reached.\nPartial + BE: Partial close with break-even.\nAdvanced: Partial + break-even + trailing stop.\nTR: Basic: Sabit SL/TP.\nBreakEven: RR ulaşıldığında stop girişe taşınır.\nPartial + BE: Kısmi kapama + BE.\nAdvanced: Kısmi + BE + trailing stop.")
+
+beRR = input.float(
+     1.0,
+     "BreakEven RR Trigger",
+     step=0.1,
+     group=tmGroup,
+     tooltip="EN: Risk/Reward level that triggers break-even adjustment.\nTR: BreakEven tetikleme risk/ödül oranı.")
+
+partialRR = input.float(
+     1.5,
+     "Partial Close RR Trigger",
+     step=0.1,
+     group=tmGroup,
+     tooltip="EN: Risk/Reward level that triggers partial position close.\nTR: Kısmi pozisyon kapama tetikleme RR değeri.")
+
+partialPercent = input.float(
+     50,
+     "Partial Close %",
+     step=1,
+     group=tmGroup,
+     tooltip="EN: Percentage of position size to close during partial exit.\nTR: Kısmi kapamada kapanacak pozisyon yüzdesi.")
+
+trailATRmult = input.float(
+     1.0,
+     "Trailing ATR Multiplier",
+     step=0.1,
+     group=tmGroup,
+     tooltip="EN: ATR multiplier used for trailing stop in Advanced mode.\nTR: Advanced modda trailing stop için ATR çarpanı.")
+
+///////////////////////////////////////////////////////////////////////////////
+// RISK MODE CONFIGURATION
+// RİSK MODELİ SEÇİMİ
+// ATR tabanlı veya yüzde tabanlı stop/kar modeli.
+///////////////////////////////////////////////////////////////////////////////
+
+riskGroup = "RISK SETTINGS"
+
+riskMode = input.string(
+     "Percent",
+     "Risk Mode",
+     options=["Percent", "ATR"],
+     group=riskGroup,
+     tooltip="EN: Method used to calculate Stop Loss and Take Profit levels.\nATR: Volatility-based calculation.\nPercent: Fixed percentage-based calculation.\nTR: Stop ve Take Profit hesaplama yöntemi.\nATR: Volatilite bazlı.\nPercent: Sabit yüzde bazlı."
+)
+
+userSLpct = input.float(
+     2.0,
+     "Stop %",
+     step=0.1,
+     group=riskGroup,
+     tooltip="EN: Stop percentage used when Percent mode is active.\nTR: Percent modu aktifken kullanılacak stop yüzdesi."
+)
+
+userTPpct = input.float(
+     4.0,
+     "Take Profit %",
+     step=0.1,
+     group=riskGroup,
+     tooltip="EN: Take profit percentage used when Percent mode is active.\nTR: Percent modu aktifken kullanılacak kar alma yüzdesi."
+)
+
+atrLen = input.int(
+     14,
+     "ATR Length",
+     group=riskGroup,
+     tooltip="EN: ATR period used for volatility calculation.\nTR: ATR periyodu. Volatilite hesaplamasında kullanılır."
+)
+
+riskRR = input.float(
+     2.0,
+     "Risk Reward",
+     group=riskGroup,
+     tooltip="EN: Risk/Reward ratio used in ATR mode.\nTR: ATR modunda risk/ödül oranı."
+)
+
+atrMult = input.float(
+     1.5,
+     "ATR Stop Multiplier",
+     group=riskGroup,
+     tooltip="EN: Multiplier that defines stop distance in ATR mode.\nTR: ATR modunda stop mesafesini belirleyen çarpan."
+)
+
+
+///////////////////////////////////////////////////////////////////////////////
+// MOVING AVERAGE CONFIGURATION
+///////////////////////////////////////////////////////////////////////////////
+
+fastMA   = ta.ema(close, fastLen)
+mediumMA = ta.ema(close, mediumLen)
+slowMA   = ta.hma(close, slowLen)
+
+///////////////////////////////////////////////////////////////////////////////
+// CROSS MODE CONFIGURATION
+///////////////////////////////////////////////////////////////////////////////
+
+shortMA = switch crossMode
+    "Fast"   => fastMA
+    "Medium" => fastMA
+    "Slow"   => mediumMA
+
+longMA = switch crossMode
+    "Fast"   => mediumMA
+    "Medium" => slowMA
+    "Slow"   => slowMA
+
+golden = ta.crossover(shortMA, longMA)
+death  = ta.crossunder(shortMA, longMA)
+
+///////////////////////////////////////////////////////////////////////////////
+// UNIFIED PROFESSIONAL MA COLOR SYSTEM
+// tüm MA'lar aynı renk ailesinde çalışır.
+// long → yeşil tonlar
+// short → kırmızı tonlar
+// pasif olanlar soft versiyon.
+///////////////////////////////////////////////////////////////////////////////
+
+bool fastActive   = crossMode=="Fast"   or crossMode=="Medium"
+bool mediumActive = crossMode=="Fast"   or crossMode=="Slow"
+bool slowActive   = crossMode=="Medium" or crossMode=="Slow"
+
+bool bull = shortMA > longMA
+
+// ---- LONG RENK AİLESİ ---------------------------------------------------------------------
+color bullStrong = fastBullColorInput
+color bullMid    = mediumBullColorInput
+color bullSoft   = slowBullColorInput
+
+// ---- SHORT RENK AİLESİ ---------------------------------------------------------------------
+color bearStrong = fastBearColorInput
+color bearMid    = mediumBearColorInput
+color bearSoft   = slowBearColorInput
+
+// --- FAST MA --------------------------------------------------------------------------------
+plot(fastMA,
+     color = fastActive
+             ? (bull ? bullStrong : bearStrong)
+             : (bull ? bullSoft : bearSoft),
+     linewidth = 1)
+
+// --- MEDIUM MA -------------------------------------------------------------------------------
+plot(mediumMA,
+     color = mediumActive
+             ? (bull ? bullMid : bearMid)
+             : (bull ? bullSoft : bearSoft),
+     linewidth = 1)
+
+// --- SLOW MA ---------------------------------------------------------------------------------
+
+plot(slowMA,
+     color = slowActive
+             ? (bull ? bullMid : bearMid)
+             : (bull ? bullSoft : bearSoft),
+     linewidth = 1)
+
+///////////////////////////////////////////////////////////////////////////////
+// HIGHER TIMEFRAME TREND FILTER
+///////////////////////////////////////////////////////////////////////////////
+
+htfSlowMA = request.security(
+     syminfo.tickerid,
+     htfTF,
+     ta.hma(close, htfLen),
+     lookahead=barmerge.lookahead_off)
+
+trendBull = close > htfSlowMA
+trendBear = close < htfSlowMA
+
+///////////////////////////////////////////////////////////////////////////////
+// ENTRY EXECUTION LOGIC
+///////////////////////////////////////////////////////////////////////////////
+longCondition  = golden and trendBull
+shortCondition = death  and trendBear
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+///////////////////////////////////////////////////////////////////////////////
+// RISK MANAGEMENT CORE
+///////////////////////////////////////////////////////////////////////////////
+
+atr = ta.atr(atrLen)
+
+longSL =
+     riskMode=="ATR" ?
+     strategy.position_avg_price - atr * atrMult :
+     strategy.position_avg_price * (1 - userSLpct/100)
+
+longTP =
+     riskMode=="ATR" ?
+     strategy.position_avg_price + atr * atrMult * riskRR :
+     strategy.position_avg_price * (1 + userTPpct/100)
+
+shortSL =
+     riskMode=="ATR" ?
+     strategy.position_avg_price + atr * atrMult :
+     strategy.position_avg_price * (1 + userSLpct/100)
+
+shortTP =
+     riskMode=="ATR" ?
+     strategy.position_avg_price - atr * atrMult * riskRR :
+     strategy.position_avg_price * (1 - userTPpct/100)
+
+///////////////////////////////////////////////////////////////////////////////
+// TRADE MANAGEMENT AUTOMATION ENGINE
+///////////////////////////////////////////////////////////////////////////////
+
+entryPrice = strategy.position_avg_price
+posSize    = strategy.position_size
+
+var bool breakEvenActivated = false
+var bool partialTaken = false
+
+// ───────── RR CALC (FINAL: na-safe + division-safe)
+longRisk  = nz(entryPrice - longSL, 0.0)
+shortRisk = nz(shortSL - entryPrice, 0.0)
+
+denLong   = math.max(longRisk,  syminfo.mintick)
+denShort  = math.max(shortRisk, syminfo.mintick)
+
+currentRR =
+     posSize > 0 ? (close - entryPrice) / denLong :
+     posSize < 0 ? (entryPrice - close) / denShort :
+     0
+
+if strategy.position_size == 0
+    breakEvenActivated := false
+    partialTaken := false
+
+if managementMode == "Basic"
+    if posSize > 0
+        strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP)
+    if posSize < 0
+        strategy.exit("Short Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+if managementMode == "BreakEven"
+    if not breakEvenActivated and currentRR >= beRR
+        breakEvenActivated := true
+
+    beStopLong  = breakEvenActivated ? entryPrice : longSL
+    beStopShort = breakEvenActivated ? entryPrice : shortSL
+
+    if posSize > 0
+        strategy.exit("Long Exit", from_entry="Long", stop=beStopLong, limit=longTP)
+    if posSize < 0
+        strategy.exit("Short Exit", from_entry="Short", stop=beStopShort, limit=shortTP)
+
+if managementMode == "Partial + BE"
+    if not partialTaken and currentRR >= partialRR
+        strategy.close("Long", qty_percent=partialPercent)
+        strategy.close("Short", qty_percent=partialPercent)
+        partialTaken := true
+        breakEvenActivated := true
+
+    beStopLong  = breakEvenActivated ? entryPrice : longSL
+    beStopShort = breakEvenActivated ? entryPrice : shortSL
+
+    if posSize > 0
+        strategy.exit("Long Exit", from_entry="Long", stop=beStopLong, limit=longTP)
+    if posSize < 0
+        strategy.exit("Short Exit", from_entry="Short", stop=beStopShort, limit=shortTP)
+
+if managementMode == "Advanced"
+    if not partialTaken and currentRR >= partialRR
+        strategy.close("Long", qty_percent=partialPercent)
+        strategy.close("Short", qty_percent=partialPercent)
+        partialTaken := true
+        breakEvenActivated := true
+
+    trailLong  = close - atr * trailATRmult
+    trailShort = close + atr * trailATRmult
+
+    finalStopLong  = breakEvenActivated ? math.max(entryPrice, trailLong) : longSL
+    finalStopShort = breakEvenActivated ? math.min(entryPrice, trailShort) : shortSL
+
+    if posSize > 0
+        strategy.exit("Long Exit", from_entry="Long", stop=finalStopLong, limit=longTP)
+
+    if posSize < 0
+        strategy.exit("Short Exit", from_entry="Short", stop=finalStopShort, limit=shortTP)
+
+///////////////////////////////////////////////////////////////////////////////
+// CROSS VISUALIZATION
+///////////////////////////////////////////////////////////////////////////////
+
+if golden
+    label.new(bar_index, shortMA, "▲",
+         style=label.style_label_up,
+         color=color.new(#089981, 40),
+         textcolor=#00ffd5)
+
+if death
+    label.new(bar_index, shortMA, "▼",
+         style=label.style_label_down,
+         color=color.new(#f23645, 40),
+         textcolor=#fd5f5f)
+         
+///////////////////////////////////////////////////////////////////////////////
+// MULTI-SYMBOL SCREENER CONFIGURATION
+// birden fazla sembol ve timeframe izlenmesini sağlar.
+///////////////////////////////////////////////////////////////////////////////
+
+gr_sy = "Multi Symbol Screener"
+
+sh01 = input.bool(true,"01",group=gr_sy,inline="01")
+sh02 = input.bool(true,"02",group=gr_sy,inline="02")
+sh03 = input.bool(true,"03",group=gr_sy,inline="03")
+sh04 = input.bool(true,"04",group=gr_sy,inline="04")
+sh05 = input.bool(true,"05",group=gr_sy,inline="05")
+sh06 = input.bool(true,"06",group=gr_sy,inline="06")
+sh07 = input.bool(true,"07",group=gr_sy,inline="07")
+sh08 = input.bool(true,"08",group=gr_sy,inline="08")
+sh09 = input.bool(true,"09",group=gr_sy,inline="09")
+sh10 = input.bool(true,"10",group=gr_sy,inline="10")
+
+tf01 = input.timeframe("60","",group=gr_sy,inline="01")
+tf02 = input.timeframe("60","",group=gr_sy,inline="02")
+tf03 = input.timeframe("60","",group=gr_sy,inline="03")
+tf04 = input.timeframe("60","",group=gr_sy,inline="04")
+tf05 = input.timeframe("60","",group=gr_sy,inline="05")
+tf06 = input.timeframe("60","",group=gr_sy,inline="06")
+tf07 = input.timeframe("60","",group=gr_sy,inline="07")
+tf08 = input.timeframe("60","",group=gr_sy,inline="08")
+tf09 = input.timeframe("60","",group=gr_sy,inline="09")
+tf10 = input.timeframe("60","",group=gr_sy,inline="10")
+
+s01 = input.symbol("BIST:ASELS","",group=gr_sy,inline="01")
+s02 = input.symbol("BIST:THYAO","",group=gr_sy,inline="02")
+s03 = input.symbol("BINANCE:BTCUSDT.P","",group=gr_sy,inline="03")
+s04 = input.symbol("BINANCE:ETHUSDT.P","",group=gr_sy,inline="04")
+s05 = input.symbol("BINANCE:XRPUSDT.P","",group=gr_sy,inline="05")
+s06 = input.symbol("BINANCE:DOGEUSDT.P","",group=gr_sy,inline="06")
+s07 = input.symbol("BINANCE:AVAXUSDT.P","",group=gr_sy,inline="07")
+s08 = input.symbol("NASDAQ:TSLA","",group=gr_sy,inline="08")
+s09 = input.symbol("BIST:PGSUS","",group=gr_sy,inline="09")
+s10 = input.symbol("BINANCE:USDTTRY","",group=gr_sy,inline="10")
+
+///////////////////////////////////////////////////////////////////////////////
+// SCREENER TREND CALCULATION ENGINE
+///////////////////////////////////////////////////////////////////////////////
+
+f_screener(_enabled)=>
+    if not _enabled
+        [na,na,na,na,color.gray]
+    else
+        fastMA_l   = ta.ema(close, fastLen)
+        mediumMA_l = ta.ema(close, mediumLen)
+        slowMA_l   = ta.hma(close, slowLen)
+
+        short_l = switch crossMode
+            "Fast"   => fastMA_l
+            "Medium" => fastMA_l
+            "Slow"   => mediumMA_l
+
+        long_l = switch crossMode
+            "Fast"   => mediumMA_l
+            "Medium" => slowMA_l
+            "Slow"   => slowMA_l
+
+        golden = ta.crossover(short_l,long_l)
+        death  = ta.crossunder(short_l,long_l)
+
+        lg = ta.barssince(golden)
+        ld = ta.barssince(death)
+
+        trend = lg < ld ? 1 : ld < lg ? -1 : 0
+        bars  = trend == 1 ? lg : trend == -1 ? ld : na
+
+        atr_l = ta.atr(14)
+        strength = math.abs(short_l-long_l)/atr_l
+        dailyPct = (close/close[1]-1)*100
+
+        col = trend==1?#00c3a3:trend==-1?#f23645:color.silver
+
+        [trend,bars,strength,dailyPct,col]
+
+///////////////////////////////////////////////////////////////////////////////
+// DATA REQUEST LAYER
+///////////////////////////////////////////////////////////////////////////////
+
+[a01,b01,s01p,d01,c01] = request.security(s01, tf01, f_screener(sh01))
+[a02,b02,s02p,d02,c02] = request.security(s02, tf02, f_screener(sh02))
+[a03,b03,s03p,d03,c03] = request.security(s03, tf03, f_screener(sh03))
+[a04,b04,s04p,d04,c04] = request.security(s04, tf04, f_screener(sh04))
+[a05,b05,s05p,d05,c05] = request.security(s05, tf05, f_screener(sh05))
+[a06,b06,s06p,d06,c06] = request.security(s06, tf06, f_screener(sh06))
+[a07,b07,s07p,d07,c07] = request.security(s07, tf07, f_screener(sh07))
+[a08,b08,s08p,d08,c08] = request.security(s08, tf08, f_screener(sh08))
+[a09,b09,s09p,d09,c09] = request.security(s09, tf09, f_screener(sh09))
+[a10,b10,s10p,d10,c10] = request.security(s10, tf10, f_screener(sh10))
+
+///////////////////////////////////////////////////////////////////////////////
+// TABLE RENDERING ENGINE
+///////////////////////////////////////////////////////////////////////////////
+
+var table screener = table.new(tablePos,6,30,border_width=3)
+
+// --- alignment hesaplama -----------------------------------------------------------------------------
+bullCount = 0
+totalCount = 0
+
+for i=0 to 9
+    sh = i==0?sh01:i==1?sh02:i==2?sh03:i==3?sh04:i==4?sh05:i==5?sh06:i==6?sh07:i==7?sh08:i==8?sh09:sh10
+    if sh
+        tr = i==0?a01:i==1?a02:i==2?a03:i==3?a04:i==4?a05:i==5?a06:i==6?a07:i==7?a08:i==8?a09:a10
+        if tr==1
+            bullCount += 1
+        totalCount += 1
+
+alignScore = totalCount>0 ? (bullCount/totalCount)*100 : 0
+filledBlocks = math.round(alignScore / 10)
+heatBar = ""
+for i = 0 to 9
+    heatBar += i < filledBlocks ? "█" : "░"
+
+activeText = str.tostring(bullCount) + " / " + str.tostring(totalCount)
+headerBlue = color.new(color.rgb(25, 55, 110), 40)
+
+// ===== HEADER ==========================================================================================
+table.cell(screener,0,1,"SYMBOL",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,1,1,"TF",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,2,1,"▲|▼",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,3,1,"BARS",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,4,1,"STRENGTH",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,5,1,"DAILY %",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+
+// ===== ROWS ===============================================================================================
+row_index = 2
+
+for i = 0 to 9
+    sh   = i==0?sh01:i==1?sh02:i==2?sh03:i==3?sh04:i==4?sh05:i==5?sh06:i==6?sh07:i==7?sh08:i==8?sh09:sh10
+    tfv  = i==0?tf01:i==1?tf02:i==2?tf03:i==3?tf04:i==4?tf05:i==5?tf06:i==6?tf07:i==7?tf08:i==8?tf09:tf10
+    sym  = i==0?s01:i==1?s02:i==2?s03:i==3?s04:i==4?s05:i==5?s06:i==6?s07:i==7?s08:i==8?s09:s10
+    val  = i==0?a01:i==1?a02:i==2?a03:i==3?a04:i==4?a05:i==5?a06:i==6?a07:i==7?a08:i==8?a09:a10
+    bars = i==0?b01:i==1?b02:i==2?b03:i==3?b04:i==4?b05:i==5?b06:i==6?b07:i==7?b08:i==8?b09:b10
+    strn = i==0?s01p:i==1?s02p:i==2?s03p:i==3?s04p:i==4?s05p:i==5?s06p:i==6?s07p:i==7?s08p:i==8?s09p:s10p
+    dly  = i==0?d01:i==1?d02:i==2?d03:i==3?d04:i==4?d05:i==5?d06:i==6?d07:i==7?d08:i==8?d09:d10
+
+    if sh
+        parts = str.split(sym, ":")
+        shortSym = array.get(parts, array.size(parts) - 1)
+        partsDot = str.split(shortSym, ".")
+        shortSym := array.get(partsDot, 0)
+
+        trendBg    = val==1?color.new(#089981,75):
+                     val==-1?color.new(#f23645,75):
+                     color.new(color.gray,85)
+
+        trendText  = val==1?#00c3a3:
+                     val==-1?#f23645:
+                     color.white
+
+        dailyBg    = dly>=0?color.new(#089981,70):
+                               color.new(#f23645,70)
+
+        dailyText  = dly>=0?#00c3a3:#f23645
+
+        table.cell(screener,0,row_index,shortSym,bgcolor=color.new(color.blue,80),text_color=color.blue,text_size=txtSize)
+        table.cell(screener,1,row_index,tfv,bgcolor=trendBg,text_color=trendText,text_size=txtSize)
+        table.cell(screener,2,row_index,val==1?"▲":val==-1?"▼":"NEUTRAL",bgcolor=trendBg,text_color=trendText,text_size=txtSize)
+        table.cell(screener,3,row_index,str.tostring(bars),bgcolor=trendBg,text_color=trendText,text_size=txtSize)
+        table.cell(screener,4,row_index,str.tostring(math.round(strn,2)),bgcolor=trendBg,text_color=trendText,text_size=txtSize)
+        table.cell(screener,5,row_index,str.tostring(math.round(dly,2))+"%", bgcolor=dailyBg, text_color=dailyText, text_size=txtSize)
+
+        row_index += 1
+
+// ===== BIAS ===============================================================================================
+biasTextColor =
+     bullCount > totalCount/2 ? #00c3a3 :
+     bullCount < totalCount/2 ? #f23645 :
+     color.yellow
+
+lastRow = row_index
+
+biasText = "Market Bias   " + heatBar
+alignText = "Score " + str.tostring(math.round(alignScore)) + " % | " + activeText
+
+table.cell(screener,0,lastRow,biasText,bgcolor=headerBlue,text_color=biasTextColor,text_size=txtSize)
+table.merge_cells(screener,0,lastRow,3,lastRow)
+
+table.cell(screener,4,lastRow,alignText,bgcolor=headerBlue,text_color=biasTextColor,text_size=txtSize)
+table.merge_cells(screener,4,lastRow,5,lastRow)
+
+///////////////////////////////////////////////////////////////////////////////
+// LIVE POSITION RISK ANALYSIS PANEL
+// aktif pozisyon için canlı performans, başlangıç riski,
+// stop mesafesi ve risk-reward ilerleme metriği hesaplanır.
+// tüm metrikler 0-100 arası normalize edilerek 10'luk scale
+// renk motoruna bağlanır ve yatay formatta gösterilir.
+///////////////////////////////////////////////////////////////////////////////
+
+openPct =
+     posSize > 0 ? (close - entryPrice) / entryPrice * 100 :
+     posSize < 0 ? (entryPrice - close) / entryPrice * 100 :
+     na
+
+riskPct =
+     posSize != 0 ?
+     math.abs(entryPrice - (posSize>0?longSL:shortSL)) / entryPrice * 100 :
+     na
+
+slDistPct =
+     posSize > 0 ? (close - longSL) / close * 100 :
+     posSize < 0 ? (shortSL - close) / close * 100 :
+     na
+
+tpPrice = posSize>0?longTP:shortTP
+
+rrProgress =
+     posSize > 0 ?
+     (close - entryPrice) / (tpPrice - entryPrice) * 100 :
+     posSize < 0 ?
+     (entryPrice - close) / (entryPrice - tpPrice) * 100 :
+     na
+
+riskHeaderRow = lastRow + 1
+riskValueRow  = lastRow + 2
+
+///////////////////////////////////////////////////////////////////////////////
+// SCALE COLOR ENGINE
+///////////////////////////////////////////////////////////////////////////////
+
+f_getScaleColor(_value) =>
+    _v = math.max(math.min(_value, 100), 0)
+    colorOut =
+         _v >= 90 ? #00ff88 :
+         _v >= 80 ? #00dd77 :
+         _v >= 70 ? #22cc66 :
+         _v >= 60 ? #55bb55 :
+         _v >= 50 ? #88aa44 :
+         _v >= 40 ? #cc9933 :
+         _v >= 30 ? #dd7722 :
+         _v >= 20 ? #ee5511 :
+         _v >= 10 ? #ff3300 :
+                     #990000
+    colorOut
+
+///////////////////////////////////////////////////////////////////////////////
+// NORMALIZATION ENGINE
+///////////////////////////////////////////////////////////////////////////////
+
+// RR normalize
+rrNorm     = posSize!=0 ? math.min(math.max(rrProgress,0),100) : 0
+rrScaled   = math.round(rrNorm/10)*10
+rrColor    = f_getScaleColor(rrScaled)
+
+// SL Distance normalize (risk'e oranla)
+slNorm     = posSize!=0 and riskPct>0 ? math.min(slDistPct/riskPct*100,100) : 0
+slScaled   = math.round(slNorm/10)*10
+slColor    = f_getScaleColor(slScaled)
+
+// Risk normalize (risk küçükse yüksek skor)
+riskNorm   = posSize!=0 ? math.max(100 - (riskPct*12),0) : 0
+riskScaled = math.round(riskNorm/10)*10
+riskColor  = f_getScaleColor(riskScaled)
+
+///////////////////////////////////////////////////////////////////////////////
+// EDGE SCORE ENGINE
+///////////////////////////////////////////////////////////////////////////////
+
+alignScorePart = math.min(alignScore,100) * 0.4
+
+strengthNorm = math.min(math.abs(shortMA - longMA) / atr, 2)
+strengthPart = math.min(strengthNorm / 2 * 25, 25)
+
+rrPart = posSize!=0 ? rrNorm * 0.25 : 0
+riskPenalty = posSize!=0 ? math.min(riskPct * 5,20) : 0
+
+edgeRaw    = alignScorePart + strengthPart + rrPart - riskPenalty
+edgeScore  = math.max(math.min(edgeRaw,100),0)
+edgeScaled = math.round(edgeScore/10)*10
+edgeColor  = f_getScaleColor(edgeScaled)
+
+///////////////////////////////////////////////////////////////////////////////
+// TABLE RENDERING - RISK PANEL
+///////////////////////////////////////////////////////////////////////////////
+
+// ---- HEADER ROW -------------------------------------------------------------------------------------
+table.cell(screener,0,riskHeaderRow,"POSITION",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,1,riskHeaderRow,"OPEN %",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,2,riskHeaderRow,"RISK %",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,3,riskHeaderRow,"SL DIST",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,4,riskHeaderRow,"RR %",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,5,riskHeaderRow,"EDGE",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+
+// ---- VALUE ROW --------------------------------------------------------------------------------------
+posText =
+     posSize > 0 ? "LONG" :
+     posSize < 0 ? "SHORT" :
+     "FLAT"
+
+posColor =
+     posSize > 0 ? #00c3a3 :
+     posSize < 0 ? #f23645 :
+     color.gray
+
+table.cell(screener,0,riskValueRow,posText,
+     bgcolor=color.new(posColor,80),
+     text_color=posColor,
+     text_size=txtSize)
+
+table.cell(screener,1,riskValueRow,
+     posSize!=0?str.tostring(math.round(openPct,2))+"%":"—",
+     bgcolor=posSize!=0?color.new(openPct>=0?#089981:#f23645,80):headerBlue,
+     text_color=posColor,
+     text_size=txtSize)
+
+table.cell(screener,2,riskValueRow,
+     posSize!=0?str.tostring(math.round(riskPct,2))+"%":"—",
+     bgcolor=color.new(riskColor,70),
+     text_color=posColor,
+     text_size=txtSize)
+
+table.cell(screener,3,riskValueRow,
+     posSize!=0?str.tostring(math.round(slDistPct,2))+"%":"—",
+     bgcolor=color.new(slColor,70),
+     text_color=posColor,
+     text_size=txtSize)
+
+table.cell(screener,4,riskValueRow,
+     posSize!=0?str.tostring(math.round(rrProgress,1))+"%":"—",
+     bgcolor=color.new(rrColor,70),
+     text_color=posColor,
+     text_size=txtSize)
+
+table.cell(screener,5,riskValueRow,
+     str.tostring(edgeScaled)+"%",
+     bgcolor=color.new(edgeColor,70),
+     text_color=posColor,
+     text_size=txtSize)
+
+///////////////////////////////////////////////////////////////////////////////
+// STRATEGY PERFORMANCE DASHBOARD
+// stratejinin genel performans metriklerini tablo altında gösterir.
+// renkler risk panel ile uyumludur.
+///////////////////////////////////////////////////////////////////////////////
+
+perfTitleRow  = riskValueRow + 2
+perfHeaderRow = riskValueRow + 3
+perfValueRow  = riskValueRow + 4
+
+// --- TITLE ROW ---
+table.cell(screener,0,perfTitleRow,"STRATEGY PERFORMANCE DASHBOARD",
+     bgcolor=headerBlue,
+     text_color=color.blue,
+     text_size=txtSize,
+     text_halign=text.align_center)
+
+table.merge_cells(screener,0,perfTitleRow,5,perfTitleRow)
+
+// --- METRIC CALCULATIONS -----------------------------------------------------------------------------
+netProfitPct = strategy.netprofit / strategy.initial_capital * 100
+winRate      = strategy.closedtrades > 0 ?
+               strategy.wintrades / strategy.closedtrades * 100 : 0
+totalTrades  = strategy.closedtrades
+profitFactor = strategy.grossloss != 0 ?
+               strategy.grossprofit / math.abs(strategy.grossloss) : 0
+maxDDpct     = strategy.max_drawdown / strategy.initial_capital * 100
+
+avgWin  = strategy.wintrades > 0 ?
+          strategy.grossprofit / strategy.wintrades : 0
+
+avgLoss = strategy.losstrades > 0 ?
+          math.abs(strategy.grossloss) / strategy.losstrades : 0
+
+lossRate = 100 - winRate
+
+expectancy =
+     (winRate/100 * avgWin) -
+     (lossRate/100 * avgLoss)
+
+expectancyPct = strategy.initial_capital != 0 ?
+                 expectancy / strategy.initial_capital * 100 : 0
+
+// --- HEADER -----------------------------------------------------------------------------------------
+table.cell(screener,0,perfHeaderRow,"NET %",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,1,perfHeaderRow,"WIN %",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,2,perfHeaderRow,"TRADES",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,3,perfHeaderRow,"PF",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,4,perfHeaderRow,"MAX DD %",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+table.cell(screener,5,perfHeaderRow,"EXP",bgcolor=headerBlue,text_color=color.blue,text_size=txtSize)
+
+// --- VALUE ------------------------------------------------------------------------------------------
+// NET %
+table.cell(screener,0,perfValueRow,str.tostring(math.round(netProfitPct,2))+"%",
+     bgcolor=color.new(netProfitPct>=0?#00c3a3:#f23645,80),
+     text_color=netProfitPct>=0?#00c3a3:#f23645,
+     text_size=txtSize)
+
+// WIN %
+table.cell(screener,1,perfValueRow,str.tostring(math.round(winRate,1))+"%",
+     bgcolor=color.new(winRate>=50?#00c3a3:#f23645,80),
+     text_color=winRate>=50?#00c3a3:#f23645,
+     text_size=txtSize)
+
+// TRADES
+table.cell(screener,2,perfValueRow,str.tostring(totalTrades),
+     bgcolor=color.new(#00c3a3,85),
+     text_color=#00c3a3,
+     text_size=txtSize)
+
+// PF
+table.cell(screener,3,perfValueRow,str.tostring(math.round(profitFactor,2)),
+     bgcolor=color.new(profitFactor>=1?#00c3a3:#f23645,80),
+     text_color=profitFactor>=1?#00c3a3:#f23645,
+     text_size=txtSize)
+
+// MAX DD %
+table.cell(screener,4,perfValueRow,str.tostring(math.round(maxDDpct,2))+"%",
+     bgcolor=color.new(#f23645,70),
+     text_color=#f23645,
+     text_size=txtSize)
+
+// EXPECTANCY
+table.cell(screener,5,perfValueRow,
+     str.tostring(math.round(expectancyPct,3))+"%",
+     bgcolor=color.new(expectancyPct>=0?#00c3a3:#f23645,80),
+     text_color=expectancyPct>=0?#00c3a3:#f23645,
+     text_size=txtSize)
+
+///////////////////////////////////////////////////////////////////////////////
+// CLEAN PROFESSIONAL GRADIENT FILL
+// aktif cross çifti gradient,
+// diğer alan mavi gradient.
+// pine-safe, fonksiyonsuz, tek blok.
+///////////////////////////////////////////////////////////////////////////////
+
+steps = 10
+
+// --- MA sıralama --------------------------------------------------------------------------------------
+float minMA = math.min(fastMA, math.min(mediumMA, slowMA))
+float maxMA = math.max(fastMA, math.max(mediumMA, slowMA))
+float midMA = fastMA + mediumMA + slowMA - minMA - maxMA
+
+// --- CrossMode aktif alan alt mı? ---------------------------------------------------------------------
+bool activeLower =
+     (crossMode=="Fast"   and ( (fastMA==minMA and mediumMA==midMA) or (mediumMA==minMA and fastMA==midMA) )) or
+     (crossMode=="Medium" and ( (fastMA==minMA and slowMA==midMA)   or (slowMA==minMA and fastMA==midMA) )) or
+     (crossMode=="Slow"   and ( (mediumMA==minMA and slowMA==midMA) or (slowMA==minMA and mediumMA==midMA) ))
+
+// --- LOWER interpolasyon çizgileri ---------------------------------------------------------------------
+l0 = plot(minMA, display=display.none)
+l1 = plot(minMA + (midMA-minMA)*0.1, display=display.none)
+l2 = plot(minMA + (midMA-minMA)*0.2, display=display.none)
+l3 = plot(minMA + (midMA-minMA)*0.3, display=display.none)
+l4 = plot(minMA + (midMA-minMA)*0.4, display=display.none)
+l5 = plot(minMA + (midMA-minMA)*0.5, display=display.none)
+l6 = plot(minMA + (midMA-minMA)*0.6, display=display.none)
+l7 = plot(minMA + (midMA-minMA)*0.7, display=display.none)
+l8 = plot(minMA + (midMA-minMA)*0.8, display=display.none)
+l9 = plot(minMA + (midMA-minMA)*0.9, display=display.none)
+l10 = plot(midMA, display=display.none)
+
+// --- UPPER interpolasyon çizgileri ------------------------------------------------------------------
+u0 = plot(midMA, display=display.none)
+u1 = plot(midMA + (maxMA-midMA)*0.1, display=display.none)
+u2 = plot(midMA + (maxMA-midMA)*0.2, display=display.none)
+u3 = plot(midMA + (maxMA-midMA)*0.3, display=display.none)
+u4 = plot(midMA + (maxMA-midMA)*0.4, display=display.none)
+u5 = plot(midMA + (maxMA-midMA)*0.5, display=display.none)
+u6 = plot(midMA + (maxMA-midMA)*0.6, display=display.none)
+u7 = plot(midMA + (maxMA-midMA)*0.7, display=display.none)
+u8 = plot(midMA + (maxMA-midMA)*0.8, display=display.none)
+u9 = plot(midMA + (maxMA-midMA)*0.9, display=display.none)
+u10 = plot(maxMA, display=display.none)
+
+// --- LOWER alan fill (Exponential Opacity) -----------------------------------------------------------
+fill(l0,l1,  activeLower ? color.new(bull?bullBase:bearBase,70) : color.new(bull?blueLight:blueDark,80))
+fill(l1,l2,  activeLower ? color.new(bull?bullBase:bearBase,73) : color.new(bull?blueLight:blueDark,83))
+fill(l2,l3,  activeLower ? color.new(bull?bullBase:bearBase,76) : color.new(bull?blueLight:blueDark,86))
+fill(l3,l4,  activeLower ? color.new(bull?bullBase:bearBase,79) : color.new(bull?blueLight:blueDark,89))
+fill(l4,l5,  activeLower ? color.new(bull?bullBase:bearBase,82) : color.new(bull?blueLight:blueDark,92))
+fill(l5,l6,  activeLower ? color.new(bull?bullBase:bearBase,85) : color.new(bull?blueLight:blueDark,95))
+fill(l6,l7,  activeLower ? color.new(bull?bullBase:bearBase,88) : color.new(bull?blueLight:blueDark,97))
+fill(l7,l8,  activeLower ? color.new(bull?bullBase:bearBase,91) : color.new(bull?blueLight:blueDark,98))
+fill(l8,l9,  activeLower ? color.new(bull?bullBase:bearBase,94) : color.new(bull?blueLight:blueDark,99))
+fill(l9,l10, activeLower ? color.new(bull?bullBase:bearBase,99) : color.new(bull?blueLight:blueDark,99))
+
+// --- UPPER alan fill (Linear & Balanced) -------------------------------------------------------------
+fill(u0,u1,  activeLower ? color.new(bull?blueLight:blueDark,80) : color.new(bull?bullBase:bearBase,70))
+fill(u1,u2,  activeLower ? color.new(bull?blueLight:blueDark,83) : color.new(bull?bullBase:bearBase,73))
+fill(u2,u3,  activeLower ? color.new(bull?blueLight:blueDark,86) : color.new(bull?bullBase:bearBase,76))
+fill(u3,u4,  activeLower ? color.new(bull?blueLight:blueDark,89) : color.new(bull?bullBase:bearBase,79))
+fill(u4,u5,  activeLower ? color.new(bull?blueLight:blueDark,92) : color.new(bull?bullBase:bearBase,82))
+fill(u5,u6,  activeLower ? color.new(bull?blueLight:blueDark,95) : color.new(bull?bullBase:bearBase,85))
+fill(u6,u7,  activeLower ? color.new(bull?blueLight:blueDark,97) : color.new(bull?bullBase:bearBase,88))
+fill(u7,u8,  activeLower ? color.new(bull?blueLight:blueDark,98) : color.new(bull?bullBase:bearBase,91))
+fill(u8,u9,  activeLower ? color.new(bull?blueLight:blueDark,99) : color.new(bull?bullBase:bearBase,94))
+fill(u9,u10, activeLower ? color.new(bull?blueLight:blueDark,99) : color.new(bull?bullBase:bearBase,99))
+
+///////////////////////////////////////////////////////////////////////////////
+// FINISH
+///////////////////////////////////////////////////////////////////////////////
+
+View in Pine Editor・986 lines
+Use on chart
+9
+1
+3
+14
+10 952
+Feb 17
+MTF Screener MA Cross System
+Overview
+
+Multi-Timeframe Structural Analysis with Integrated Risk and Dashboard Modules
+
+MTF Screener MA Cross System is a multi-timeframe analytical framework that integrates moving average cross logic, higher timeframe context, risk modeling and multi-symbol monitoring within a unified interface.
+
+The script visualizes relationships between moving averages, structural alignment across symbols and internally calculated strategy metrics.
+
+It does not predict future price direction.
+It does not provide discretionary trade calls.
+It does not issue standalone buy or sell recommendations.
+
+All calculations are rule-based and derived from internal strategy logic.
+It is designed for research, observation and structured testing.
+
+📷 Image – Complete System Layout
+
+
+Complete system view including screener, gradient structure, risk panel and performance dashboard.
+System Architecture
+
+The system is built around three moving averages:
+
+• Fast EMA
+• Medium EMA
+• Slow HMA
+
+Users can select between different structural cross relationships:
+
+• Fast vs Medium
+• Fast vs Slow
+• Medium vs Slow
+
+A higher timeframe filter is included to display broader structural context relative to the selected cross configuration.
+
+The script visualizes how these components interact under different parameter settings.
+
+📷 Image – Cross Mode Comparison
+Fast Mode
+
+
+Medium Mode
+
+
+Slow Mode
+
+
+📷 Image – Higher Timeframe Filter Example
+
+
+Higher timeframe filter provides structural context for rule-based entry conditions.
+
+Risk Modeling & Trade Management
+Two configurable risk models are available:
+
+• Percentage-based stop and target
+• ATR-based volatility-adjusted stop model
+
+Trade management modes include:
+
+• Fixed stop/target
+• Break-even adjustment
+• Partial position handling
+• ATR-based trailing logic
+
+These configurations allow comparative backtesting of different rule-based management approaches within the strategy framework.
+No configuration implies future performance or profitability.
+
+📷 Image – Risk Model Comparison
+
+
+Comparison of stop placement under percentage-based risk mode.
+(Stop level reflects percent-based configuration.)
+
+
+Comparison of stop placement under ATR-based risk mode.
+(Stop level reflects ATR-based configuration.)
+
+📷 Image – Management Mode Comparison
+Advanced (Break-even + Trailing)
+
+
+Example of break-even activation followed by ATR-based trailing stop adjustment under Advanced management mode.
+Basic
+
+
+Example of fixed stop and target under Basic management mode.
+
+Multi-Symbol Screener & Market Alignment
+
+The integrated screener supports monitoring up to 10 symbols with independent timeframe selection.
+
+Displayed metrics include:
+
+• Directional state based on selected cross configuration
+• Bars since last cross
+• Relative distance between moving averages
+• Daily percentage change
+
+An alignment score summarizes the distribution of directional states across enabled symbols.
+This score is descriptive and does not indicate or forecast market direction.
+
+📷 Image – Screener, Alignment & Dashboard Overview
+
+
+
+Live Risk Monitoring Panel
+When a position is active, the system displays:
+
+• Open position change (%)
+• Initial risk exposure (%)
+• Distance to stop level
+• Risk/reward progression (%)
+• Composite normalized metric (normalized scale)
+
+Values are calculated from internal strategy data and visualized using a structured scale.
+These metrics reflect current strategy state and are informational.
+Strategy Performance Dashboard
+The dashboard summarizes historical backtest metrics, including:
+
+• Net result percentage
+• Win rate
+• Total trades
+• Profit factor
+• Maximum drawdown
+• Expectancy
+
+All values are derived from historical strategy calculations.
+Historical performance does not represent future performance.
+
+Gradient Wave Visualization
+A layered gradient engine visually represents the positional relationship between the three moving averages.
+Active cross zones and neutral structural regions are differentiated through a multi-step interpolation system.
+The visualization reflects internal calculations and does not forecast or anticipate price movement.
+
+📷 Image – Gradient Wave Structure
+
+
+Layered gradient structure representing the relative positioning of the three moving averages.
+Customization
+
+📷 Image – Gradient Color Layering Example
+
+
+Layered gradient fill between moving averages showing active and neutral structural color zones.
+The script allows configuration of:
+
+• Moving average lengths
+• Cross mode selection
+• Risk parameters
+• Trade management mode
+• Screener symbols and timeframes
+• Table position and size
+• Color settings
+
+All components are adjustable without modifying the core structure.
+
+How To Use
+
+Select a cross mode according to the structural relationship you wish to observe.
+Configure the higher timeframe filter if broader structural context is required.
+
+Adjust risk model and management settings for comparative testing.
+Enable screener symbols to monitor multi-instrument structural alignment.
+
+Observe displayed metrics and historical calculations during testing.
+The script operates strictly on predefined rules and does not replace independent analysis.
+Notes
+This script is provided for analytical and educational purposes.
+It does not predict market direction.
+It does not provide investment advice.
+It does not guarantee performance or profitability.
+
+Users are responsible for their own analysis, testing and risk management decisions.
+
+Disclaimer
+
+This script is a rule-based analytical tool.
+It is not a financial advisory service and does not provide personalized investment guidance.
+All strategy calculations are based on historical data and predefined logic.
+Market conditions may vary, and users should perform independent analysis before making trading decisions.
+Mar 4
+Release Notes
+v1.0.1 — Stability & Runtime Safety Update
+
+This update focuses on improving runtime stability and drawing-object management while keeping the strategy logic, entries/exits, and trade management behavior unchanged.
+
+Changes
+
+• Added a division-safe Risk/Reward (RR) calculation to prevent rare edge-case runtime errors.
+• Improved cross visualization object handling to avoid label accumulation over time (cleaner chart & better performance).
+
+Result
+
+More stable execution on long histories and lower timeframes, with reduced drawing-object overhead.
+
+No changes were made to the strategy rules, signals, or trade management logic.
+Mar 5
+Release Notes
+v1.0.2 — Runtime Safety & Signal Marker Restoration
+
+This update improves runtime safety and restores the historical cross signal markers on the chart.
+
+Changes
+
+• Improved Risk/Reward (RR) calculation with division-safe and na-safe handling to prevent rare edge-case runtime errors.
+• Restored historical MA cross signal markers (▲ / ▼) that were unintentionally limited in the previous update.
+
+Result
+
+The strategy now maintains full historical signal visibility for visual backtesting while ensuring safer internal calculations.
+
+No changes were made to:
+• Strategy entry or exit rules
+• Trade management logic
+• Screener calculations
+• Core strategy behavior
+
+The strategy logic and results remain unchanged under normal conditions.

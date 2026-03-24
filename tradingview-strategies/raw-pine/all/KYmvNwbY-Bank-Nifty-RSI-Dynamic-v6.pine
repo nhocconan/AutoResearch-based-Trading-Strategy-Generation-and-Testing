@@ -1,0 +1,91 @@
+//@version=6
+strategy("Bank Nifty RSI Dynamic v6", 
+     overlay=true, 
+     initial_capital=500000, 
+     pyramiding=0, 
+     margin_long=0, 
+     margin_short=0)
+
+// --- Inputs ---
+int rsiLength      = input.int(14, "RSI Length")
+int rsiUpperEntry  = input.int(68, "RSI Put Entry (>68)")
+int rsiLowerEntry  = input.int(30, "RSI Call Entry (<30)")
+int rsiPutExit     = input.int(56, "RSI Put Exit (<56)")
+int rsiCallExit    = input.int(45, "RSI Call Exit (>45)")
+
+// --- Math for 3 Lots (90 Units) ---
+int totalUnits     = 90 
+
+// --- Indicators ---
+float rsiValue = ta.rsi(close, rsiLength)
+
+// --- Strategy Logic ---
+// 1. ENTRY CONDITIONS (On Candle Close)
+bool buyCall = ta.crossunder(rsiValue, rsiLowerEntry) 
+bool buyPut  = ta.crossover(rsiValue, rsiUpperEntry)
+
+// 2. EXIT CONDITIONS (On Candle Close)
+// If we hold a Call, exit when RSI rises above 45
+bool exitCall = strategy.position_size > 0 and rsiValue > rsiCallExit
+// If we hold a Put, exit when RSI drops below 56
+bool exitPut  = strategy.position_size < 0 and rsiValue < rsiPutExit
+
+// --- Execution ---
+
+// Enter Trades
+if buyCall
+    strategy.entry("Call", strategy.long, qty=totalUnits, comment="RSI < 30")
+
+if buyPut
+    strategy.entry("Put", strategy.short, qty=totalUnits, comment="RSI > 68")
+
+// Exit Trades based on your RSI levels
+if exitCall
+    strategy.close("Call", comment="RSI > 45 Exit")
+
+if exitPut
+    strategy.close("Put", comment="RSI < 56 Exit")
+
+// --- Visuals ---
+plot(rsiValue, "RSI", color=color.purple, display=display.none)
+hline(rsiUpperEntry, "Put Entry", color=color.red)
+hline(rsiPutExit, "Put Exit", color=color.orange, linestyle=hline.style_dotted)
+hline(rsiCallExit, "Call Exit", color=color.blue, linestyle=hline.style_dotted)
+hline(rsiLowerEntry, "Call Entry", color=color.green)
+
+// Mark entries/exits on chart
+plotshape(buyCall, "Call Buy", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(buyPut, "Put Buy", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+View in Pine Editor・58 lines
+Use on chart
+2
+518
+This is a specialized mean-reversion strategy designed for Bank Nifty (NSE:NIFTYBANK) on the 5-minute timeframe. It focuses on capturing rapid reversals when the market reaches extreme overbought or oversold conditions based on the Relative Strength Index (RSI).
+
+Unlike standard RSI strategies that wait for a cross back into the neutral zone, this script uses asymmetric dynamic exits to lock in profits early as momentum shifts.
+
+How it Works
+Timeframe: Optimized for 5m (Intraday).
+
+Bullish Entry (Call): Triggers when the RSI closes below 30. This identifies a potential "exhaustion" in selling pressure.
+
+Bearish Entry (Put): Triggers when the RSI closes above 68. This identifies a potential "overextension" in buying pressure.
+
+Dynamic Exits:
+
+Calls are closed when RSI recovers to 45.
+
+Puts are closed when RSI cools down to 56.
+
+Position Sizing: Fixed at 3 Lots (90 units), calibrated for the 2026 Bank Nifty lot size.
+
+Key Features
+Pine Script v6: Built using the latest TradingView standards for faster execution and better backtesting accuracy.
+
+Capital Efficiency: Includes a zero-margin override to ensure the backtester reflects the full 3-lot position regardless of account leverage settings.
+
+Visual Signals: Uses clear plotshape triangles (Green for Call, Red for Put) directly on the price chart for easy manual execution or alert monitoring.
+
+Risk Disclaimer
+Bank Nifty is highly volatile. This strategy does not include a fixed stop loss by default (exits are momentum-based), so users should be prepared for drawdowns during strong trending phases where RSI remains in extreme zones for extended periods. Always backtest on your preferred broker's data before going live.

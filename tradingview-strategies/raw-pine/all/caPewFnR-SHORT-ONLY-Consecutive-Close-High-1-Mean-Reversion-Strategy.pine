@@ -1,0 +1,132 @@
+//@version=6
+strategy("[SHORT ONLY] Consecutive Close>High[1] Mean Reversion Strategy", overlay = false, precision = 4, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true)
+
+//#region INPUTS SECTION
+// ============================================
+// Time Settings
+// ============================================
+startTimeInput = input.time(timestamp("1 Jan 2014"), "Start Time", group = "Time Settings")
+endTimeInput = input.time(timestamp("1 Jan 2099"), "End Time", group = "Time Settings")
+isWithinTradingWindow = time >= startTimeInput and time <= endTimeInput
+
+// ============================================
+// Strategy Settings
+// ============================================
+lookback = input.int(defval = 3, minval = 1, title = 'Threshold', group = "Strategy Signal")
+
+// ============================================
+// EMA Filter Settings
+// ============================================
+useEmaFilter = input.bool(true, "Use EMA Filter", group = "Trend Filter")
+emaPeriodInput = input.int(200, "EMA Period", minval = 1, group = "Trend Filter")
+//#endregion
+
+//#region INDICATOR CALCULATIONS
+// ============================================
+// Consecutive Close>High[1] Counter
+// ============================================
+var int bullCount = 0
+if close > high[1]
+    bullCount += 1
+if close < low[1]
+    bullCount := 0
+
+plot(bullCount, title="Bullish Count", color=color.green, style=plot.style_columns)
+hline(lookback, title="Signal Threshold")
+
+// ============================================
+// Trend Filter
+// ============================================
+ma200 = ta.ema(close, emaPeriodInput)
+plot(ma200, color=color.red, force_overlay=true)
+
+//#region TRADING CONDITIONS
+// ============================================
+// Entry/Exit Logic
+// ============================================
+shortCondition = bullCount >= lookback and isWithinTradingWindow
+exitCondition = close<low[1]
+
+// Apply EMA Filter if enabled
+if useEmaFilter
+    shortCondition := shortCondition and close < ma200
+//#endregion
+
+//#region STRATEGY EXECUTION
+// ============================================
+// Order Management
+// ============================================
+if shortCondition
+    strategy.entry('short', strategy.short)
+if exitCondition
+    strategy.close_all()
+//#endregion
+
+View in Pine Editor・63 lines
+Use on chart
+6
+1
+1 819
+█ STRATEGY DESCRIPTION
+The "Consecutive Close > High[1]" Mean Reversion Strategy is a contrarian daily trading system for stocks and ETFs. It identifies potential shorting opportunities by counting consecutive days where the closing price exceeds the previous day's high. When this consecutive day count reaches a predetermined threshold, and if the close is below a 200-period EMA (if enabled), a short entry is triggered, anticipating a corrective pullback.
+
+█ HOW ARE THE CONSECUTIVE BULLISH COUNTS CALCULATED?
+The strategy uses a counter variable called `bullCount` to track how many consecutive bars meet a bullish condition. Here’s a breakdown of the process:
+
+Initialize the Counter
+
+Pine Script®
+var int bullCount = 0
+
+Bullish Bar Detection
+Every time the close exceeds the previous bar's high, increment the counter:
+
+Pine Script®
+if close > high[1]
+    bullCount += 1
+
+Reset on Bearish Bar
+When there is a clear bearish reversal, the counter is reset to zero:
+
+Pine Script®
+if close < low[1]
+    bullCount := 0
+
+
+
+█ SIGNAL GENERATION
+1. SHORT ENTRY
+A Short Signal is triggered when:
+
+The count of consecutive bullish closes (where close > high[1]) reaches or exceeds the defined threshold (default: 3).
+
+The signal occurs within the specified trading window (between Start Time and End Time).
+
+
+
+2. EXIT CONDITION
+
+An exit Signal is generated when the current close falls below the previous bar’s low (close < low[1]), prompting the strategy to exit the position.
+
+
+
+█ ADDITIONAL SETTINGS
+
+Threshold: The number of consecutive bullish closes required to trigger a short entry (default is 3).
+
+Start Time and End Time: The time window during which the strategy is allowed to execute trades.
+
+EMA Filter (Optional): When enabled, short entries are only triggered if the current close is below the 200-period EMA.
+
+
+
+█ PERFORMANCE OVERVIEW
+
+This strategy is designed for Stocks and ETFs on the Daily timeframe and targets overextended bullish moves.
+
+It aims to capture mean reversion by entering short after a series of consecutive bullish closes.
+
+Further optimization is possible with additional filters (e.g., EMA, volume, or volatility).
+
+Backtesting should be used to fine-tune the threshold and filter settings for specific market conditions.
+

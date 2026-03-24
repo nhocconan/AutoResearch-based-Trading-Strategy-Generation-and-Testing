@@ -1,0 +1,117 @@
+//@version=3
+strategy(title="Adaptive Zero Lag EMA", shorttitle="AZLEMA", overlay = true, initial_capital=1000, currency="USD", commission_type=strategy.commission.cash_per_contract, commission_value=0.000005, slippage = 5, pyramiding=1, calc_on_every_tick=true)
+
+src = input(title="Source", type=source, defval=close)
+Period = input(title="Period", type=integer, defval = 20)
+adaptive = input(title="Adaptive?", type=bool, defval=true)
+GainLimit = input(title="Gain Limit", type=integer, defval = 15)
+Threshold = input(title="Threshold", type = float, defval=0.03, step=0.01)
+fixedSL = input(title="SL Points", defval=50)
+fixedTP = input(title="TP Points", defval=10)
+risk = input(title='Risk', defval=0.01, step=0.01)
+
+PI = 3.14159265359
+s2 = 0.0
+s3 = 0.0
+delta = 0.0
+inst = 0.0
+len = 0.0
+v1 = 0.0
+v2 = 0.0
+v4 = 0.0
+
+//IF adaptive is true, use the Cosine IFM strategy for determining the dominant
+//cycle period
+if(adaptive)
+    v1 := src - src[7]
+    s2 := 0.2*(v1[1] + v1)*(v1[1] + v1) + 0.8*nz(s2[1])
+    s3 := 0.2*(v1[1] - v1)*(v1[1] - v1) + 0.8*nz(s3[1])
+    if (s2 != 0)
+        v2 := sqrt(s3/s2)
+    if (s3 != 0)
+        delta := 2*atan(v2)
+    for i = 0 to 100
+        v4 := v4 + delta[i]
+        if (v4 > 2*PI and inst == 0.0)
+            inst := i - 1
+    if (inst == 0.0)
+        inst := inst[1]
+    len := 0.25*inst + 0.75*nz(len[1])
+    Period := round(len)
+
+LeastError = 1000000.0
+EC = 0.0
+Gain = 0.0
+EMA = 0.0
+Error = 0.0
+BestGain = 0.0
+
+alpha =2/(Period + 1)
+EMA := alpha*src + (1-alpha)*nz(EMA[1])
+
+for i = -GainLimit to GainLimit
+    Gain := i/10
+    EC := alpha*(EMA + Gain*(src - nz(EC[1]))) + (1 - alpha)*nz(EC[1])
+    Error := src - EC
+    if(abs(Error)<LeastError)
+        LeastError := abs(Error)
+        BestGain := Gain
+
+EC := alpha*(EMA + BestGain*(src - nz(EC[1]))) + (1-alpha)*nz(EC[1])
+
+plot(EC, title="EC", color=orange, linewidth=2)
+plot(EMA, title="EMA", color=red, linewidth=2)
+
+buy = crossover(EC,EMA) and 100*LeastError/src > Threshold
+sell = crossunder(EC,EMA) and 100*LeastError/src > Threshold
+
+if (time>timestamp(2016, 1, 1 , 0, 0))
+    //LONG
+    balance = strategy.initial_capital + strategy.netprofit
+    lots = ((risk * balance)/fixedSL)*100000
+    strategy.entry("BUY", strategy.long, qty=lots, oca_name="BUY", oca_type=strategy.oca.cancel, when=buy)
+    strategy.exit("B.Exit", "BUY", qty_percent = 100, loss=fixedSL, trail_offset=20, trail_points=fixedTP)
+    //SHORT
+    strategy.entry("SELL", strategy.short, qty=lots, oca_name="SELL", oca_type=strategy.oca.cancel, when=sell)
+    strategy.exit("S.Exit", "SELL", qty_percent = 100, loss=fixedSL, trail_offset=20, trail_points=fixedTP)
+
+View in Pine Editor・76 lines
+Use on chart
+3
+1
+8
+5
+10 104
+Behold! A strategy that makes use of Ehlers research into the field of signal processing and wins so consistently, on multiple time frames AND on multiple currency pairs.
+The Adaptive Zero Lag EMA (AZLEMA) is based on an informative report by Ehlers and Ric [1].
+I've modified it by using Cosine IFM, a method by Ehlers on determining the dominant cycle period without using fast-Fourier transforms [2] [3]
+Instead, we use some basic differential equations that are simplified to approximate the cycle period over a 100 bar sample size.
+
+The settings for this strategy allow you to scalp or swing trade! High versatility!
+Since this strategy is frequency based, you can run it on any timeframe (M1 is untested) and even have the option of using adaptive settings for a best-fit.
+
+>Settings
+
+Source : Choose the value for calculations (close, open, high + low / 2, etc...)
+
+Period : Choose the dominant cycle for the ZLEMA (typically under 100)
+
+Adaptive? : Allow the strategy to continuously update the Period for you (disables Period setting)
+
+Gain Limit : Higher = faster response. Lower = smoother response. See [2] for more information.
+
+Threshold : Provides a bit more control over entering a trade. Lower = less selective. Higher = More selective. (range from 0 to 1)
+
+SL Points : Stop Poss level in points (10 points = 1 pip)
+
+TP Points : Take Profit level in points
+
+Risk : Percent of current balance to risk on each trade (0.01 = 1%)
+
+
+
+[1] mesasoftware.com/papers/ZeroLag.pdf
+
+[2] jamesgoulding.com/Research_II/Ehlers/Ehlers (Measuring Cycles).doc
+
+[3]

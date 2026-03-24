@@ -1,0 +1,72 @@
+//@version=5
+strategy("Multi-MA + RSI Pullback Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// === INPUTS ===
+ema50 = ta.ema(close, 50)
+ema100 = ta.ema(close, 100)
+ema200 = ta.ema(close, 200)
+ema600 = ta.ema(close, 600)
+rsiPeriod = input.int(6, "RSI Period")
+rsiOB = input.int(80, "RSI Overbought")
+rsiOS = input.int(20, "RSI Oversold")
+rsi = ta.rsi(close, rsiPeriod)
+
+// === TREND DIRECTION ===
+isBull = ema50 > ema100 and ema100 > ema200 and ema200 > ema600
+isBear = ema50 < ema100 and ema100 < ema200 and ema200 < ema600
+
+// === ENTRY CONDITIONS ===
+longCond = isBull and ta.crossunder(rsi, rsiOS)
+shortCond = isBear and ta.crossover(rsi, rsiOB)
+
+// === STRATEGY EXECUTION ===
+if (longCond)
+    strategy.entry("Long", strategy.long)
+
+if (shortCond)
+    strategy.entry("Short", strategy.short)
+
+// === EXIT CONDITIONS ===
+rr = input.float(2.0, "Risk/Reward Ratio", step=0.1)
+stopATR = ta.atr(14)
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=close - stopATR, limit=close + stopATR * rr)
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=close + stopATR, limit=close - stopATR * rr)
+
+// === PLOTTING ===
+plot(ema50, color=color.red)
+plot(ema100, color=color.yellow)
+plot(ema200, color=color.green)
+plot(ema600, color=color.blue)
+plot(rsi, title="RSI", color=color.new(color.white, 0), display=display.none)
+
+View in Pine Editor・42 lines
+Use on chart
+1
+5
+778
+1️⃣ Strategy logic I’ll code
+
+From your screenshots:
+
+Indicators
+• EMAs: 600 / 200 / 100 / 50
+• RSI: length 6, levels 80 / 20
+
+Rules (simplified so a script can handle them):
+• Use a higher-timeframe trend filter (15m or 1h) using the EMAs.
+• Take entries on the chart timeframe (you can use 1m or 5m).
+• Long:
+• Higher-TF trend is up.
+• Price is pulling back into a zone (between 50 EMA and 100 EMA on the entry timeframe – this approximates your 50–61% retrace).
+• RSI crosses below 20 (oversold).
+• Short:
+• Higher-TF trend is down.
+• Price pulls back between 50 & 100 EMAs.
+• RSI crosses above 80 (overbought).
+• Exits: ATR-based stop + take-profit with adjustable R:R (2:1 or 3:1).
+• Max 4 trades per day.
+
+News filter & “only trade gold” you handle manually (run it on XAUUSD and avoid news times yourself – TradingView can’t read the economic calendar from code).
+

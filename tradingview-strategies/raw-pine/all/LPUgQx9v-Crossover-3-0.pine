@@ -1,0 +1,70 @@
+//@version=5
+strategy("Crossover 3.0", overlay=true)
+
+// Define input parameters for the EMA and SMAs
+ema9Length  = input.int(9, title="9 EMA")
+sma9Length  = input.int(9, title="9 SMA")
+ema20Length = input.int(20, title="20 EMA")
+ema40Length = input.int(40, title="40 EMA")
+sma50Length = input.int(50, title="50 SMA")
+
+// Calculate the EMA and SMAs
+ema9Value  = ta.ema(close, ema9Length)
+sma9Value  = ta.sma(close, sma9Length)
+ema20Value = ta.ema(close, ema20Length)
+ema40Value = ta.ema(close, ema40Length)
+sma50Value = ta.sma(close, sma50Length)
+
+// Plot the EMA and SMAs on the chart
+plot(ema9Value,  title="9-day EMA",  color=color.yellow, linewidth=2)
+plot(sma9Value,  title="9-day SMA",  color=color.orange, linewidth=2)
+plot(ema20Value, title="20-day EMA", color=color.purple)
+plot(ema40Value, title="40-day EMA", color=color.black)
+plot(sma50Value, title="50-day SMA", color=color.red)
+
+// Plot the 50 SMA as an area chart with brown color and 21% opacity
+plot(sma50Value, title="50-day SMA", color=color.new(#a74f10, 90), style=plot.style_area)
+plot(ema20Value, title="20-day EMA", color=color.new(#1ba73a, 90), style=plot.style_area)
+
+// Define the crossover conditions
+buySignal  = ta.crossover(ema9Value, sma9Value)
+sellSignalEma = ta.crossunder(ema9Value, sma9Value) or ta.crossunder(ema9Value, sma50Value)
+
+// Define entry price
+entryPrice = strategy.position_avg_price
+
+// Add new sell conditions
+sellSignalProfit = strategy.position_size > 0 and close >= entryPrice * 1.10   // 10% above buy
+sellSignalLoss   = strategy.position_size > 0 and close <= entryPrice * 0.95   // 5% below buy
+
+// Combine all sell signals
+sellSignal = sellSignalEma or sellSignalProfit or sellSignalLoss
+
+// Plot buy and sell signals on the chart
+plotshape(buySignal,  location=location.belowbar, color=color.green, style=shape.triangleup,   text="Buy")
+plotshape(sellSignal, location=location.abovebar, color=color.red,   style=shape.triangledown, text="Sell")
+
+// Implement the strategy
+if (buySignal)
+    strategy.entry("Buy", strategy.long)
+
+if (sellSignal)
+    strategy.close("Buy")
+
+// Optional: Add alert conditions
+alertcondition(buySignal,  title="Buy Alert",  message="Buy signal: EMA crossed above 9 SMA")
+alertcondition(sellSignal, title="Sell Alert", message="Sell signal: EMA crossed below SMA OR profit/loss threshold")
+
+View in Pine Editor・59 lines
+Use on chart
+2
+8
+639
+ben dover
+land rover
+rhyme it
+say it
+suck it
+loose ball sack
+primply susu
+lets do it

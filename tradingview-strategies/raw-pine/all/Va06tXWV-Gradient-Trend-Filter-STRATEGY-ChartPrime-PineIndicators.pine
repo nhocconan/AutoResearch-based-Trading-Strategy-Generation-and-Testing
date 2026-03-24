@@ -1,0 +1,363 @@
+//@version=6
+strategy("Gradient Trend Filter STRATEGY [ChartPrime/PineIndicators]", overlay = true, initial_capital = 10000, commission_value = 0.01, slippage = 2, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 𝙐𝙎𝙀𝙍 𝙄𝙉𝙋𝙐𝙏𝙎
+// --------------------------------------------------------------------------------------------------------------------{
+
+string tradeDirection = input.string("Long Only", "Trade Direction", options=["Long Only", "Short Only", "Long & Short"],  group="For help go to PineIndicators.com")
+
+float src     = input.source(close, "Source")
+int   length  = input.int(25, "Length")
+int   width   = input.int(2, "Line Width")
+
+color color1  = input.color(#22c878, "", inline = "1", group = "color")
+color color2  = input.color(#c8224e, "", inline = "1", group = "color")
+int   transp  = input.int(80, "", inline = "1", group = "color")
+
+showTable = input(true, "Show Performance Table")
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 𝙄𝙉𝘿𝙄𝘾𝘼𝙏𝙊𝙍 𝘾𝘼𝙇𝘾𝙐𝙇𝘼𝙏𝙄𝙊𝙉𝙎
+// --------------------------------------------------------------------------------------------------------------------{
+// Noise filter function
+noise_filter(src, length) =>
+    alpha = 2 / (length + 1)
+    nf_1 = 0.0
+    nf_2 = 0.0
+    nf_3 = 0.0
+
+    nf_1 := (alpha * src) + ((1 - alpha) * nz(nf_1[1]))
+    nf_2 := (alpha * nf_1) + ((1 - alpha) * nz(nf_2[1]))
+    nf_3 := (alpha * nf_2) + ((1 - alpha) * nz(nf_3[1]))
+    
+    nf_3 // Final output with three-stage smoothing
+
+// Bands function
+bands(src)=>
+    val = noise_filter(high-low, length)
+    upper3 = src + val * 0.618*2.5
+    upper2 = src + val * 0.382*2
+    upper1 = src + val * 0.236*1.5
+    lower1 = src - val * 0.236*1.5
+    lower2 = src - val * 0.382*2
+    lower3 = src - val * 0.618*2.5
+    [upper3, upper2, upper1, lower1, lower2, lower3]
+
+float base = noise_filter(src, length)
+[upper3, upper2, upper1, lower1, lower2, lower3] = bands(base)
+float diff = base - base[2]
+
+// Signals
+bool signal_up = ta.crossover(diff, 0) and barstate.isconfirmed
+bool signal_dn = ta.crossunder(diff, 0) and barstate.isconfirmed
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 𝙑𝙄𝙎𝙐𝘼𝙇𝙄𝙕𝘼𝙏𝙄𝙊𝙉
+// --------------------------------------------------------------------------------------------------------------------{
+color gradient_col = color.from_gradient(diff, ta.lowest(diff, 100), ta.highest(diff, 100), color2, color1)
+color trend_color  = color.new(gradient_col, transp)
+
+plot(base, "Filter", linewidth = width, color = diff >= 0 ? color1 : color2)
+
+up3 = plot(upper3, display = display.none, editable = false)
+up2 = plot(upper2, display = display.none, editable = false)
+up1 = plot(upper1, display = display.none, editable = false)
+lw1 = plot(lower1, display = display.none, editable = false)
+lw2 = plot(lower2, display = display.none, editable = false)
+lw3 = plot(lower3, display = display.none, editable = false)
+
+fill(up3, lw3, trend_color)
+fill(up2, lw2, trend_color)
+fill(up1, lw1, trend_color)
+
+plotshape(signal_up ? base[1] : na, "", shape.diamond, location.absolute, offset = -1, size = size.tiny, color = color.orange)
+plotshape(signal_dn ? base[1] : na, "", shape.diamond, location.absolute, offset = -1, size = size.tiny, color = color.orange)
+// --------------------------------------------------------------------------------------------------------------------}
+// ENTRY & CLOSE CONDITIONS
+// --------------------------------------------------------------------------------------------------------------------{
+if (tradeDirection == "Long & Short" or tradeDirection == "Long Only") and signal_up
+    strategy.entry("L", strategy.long)
+
+if (tradeDirection == "Long & Short" or tradeDirection == "Short Only") and signal_dn
+    strategy.entry("S", strategy.short)
+
+if signal_dn and (tradeDirection == "Long & Short" or tradeDirection == "Long Only")
+    strategy.close("L")
+
+if signal_up and (tradeDirection == "Long & Short" or tradeDirection == "Short Only")
+    strategy.close("S")
+// --------------------------------------------------------------------------------------------------------------------}
+// PERFORMANCE TABLE
+// --------------------------------------------------------------------------------------------------------------------{
+font_color  = color.white
+prec        = 2
+
+var float prev_equity = strategy.equity
+float eq              = strategy.equity
+float eq_prev         = nz(prev_equity, eq)
+var float bar_pnl     = 0.0
+
+bar_pnl := eq_prev == 0.0 ? 0.0 : eq / eq_prev - 1
+prev_equity := eq  // für nächste Bar sichern
+
+bool month_changed = month(time) != month(time[1])
+bool year_changed  = year(time)  != year(time[1])
+
+var float cur_month_pnl = 0.0
+var float cur_year_pnl  = 0.0
+
+if barstate.isfirst
+    cur_month_pnl := bar_pnl
+    cur_year_pnl  := bar_pnl
+else
+    if month_changed
+        cur_month_pnl := bar_pnl
+    else
+        cur_month_pnl := (1 + cur_month_pnl) * (1 + bar_pnl) - 1
+
+    if year_changed
+        cur_year_pnl := bar_pnl
+    else
+        cur_year_pnl := (1 + cur_year_pnl) * (1 + bar_pnl) - 1
+
+var month_pnl  = array.new_float()
+var month_time = array.new_int()
+
+var year_pnl  = array.new_float()
+var year_time = array.new_int()
+
+if month_changed and not barstate.isfirst
+    float lastMonthFinal = cur_month_pnl[1]
+    array.push(month_pnl,  lastMonthFinal)
+    array.push(month_time, time[1])         
+
+if year_changed and not barstate.isfirst
+    float lastYearFinal = cur_year_pnl[1]
+    array.push(year_pnl,  lastYearFinal)
+    array.push(year_time, time[1])
+
+var table monthly_table = na
+
+if showTable
+    int final_years_count_raw = array.size(year_pnl)
+    int final_year_time_count = array.size(year_time)
+    int final_years_count = math.min(final_years_count_raw, final_year_time_count)
+
+    int final_months_count_raw = array.size(month_pnl)
+    int final_month_time_count = array.size(month_time)
+    int final_months_count     = math.min(final_months_count_raw, final_month_time_count)
+
+    int row_count = final_years_count + 1 + 1
+
+    monthly_table := table.new(position.bottom_right, 14, row_count, border_width = 1)
+    table.clear(monthly_table, 0, 0)
+
+    table.cell(monthly_table, 0, 0, "in %",       bgcolor = color.new(#252630, 0), text_color = font_color)
+    table.cell(monthly_table, 1, 0, "Jan",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 2, 0, "Feb",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 3, 0, "Mar",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 4, 0, "Apr",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 5, 0, "May",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 6, 0, "Jun",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 7, 0, "Jul",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 8, 0, "Aug",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 9, 0, "Sep",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 10,0, "Oct",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 11,0, "Nov",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 12,0, "Dec",        bgcolor = #252630,               text_color = font_color)
+    table.cell(monthly_table, 13,0, "Year",       bgcolor = #3c3d49,               text_color = font_color)
+
+    if final_years_count > 0
+        for i = 0 to final_years_count - 1
+            int savedTime = array.get(year_time, i)  
+            int yearVal   = year(savedTime)
+
+            table.cell(monthly_table, 0, i+1, str.tostring(yearVal), bgcolor = #252630, text_color = font_color)
+
+            float yPnl = array.get(year_pnl, i)
+            color yColor = yPnl >= 0 ? color.new(#0097a7, 50) : color.new(#ff195f, 50)
+            table.cell(monthly_table, 13, i+1, str.tostring(math.round(yPnl * 100, prec)), bgcolor = yColor, text_color = font_color)
+
+    int row_current_year = final_years_count + 1
+
+    if final_months_count > 0
+        for m = 0 to final_months_count - 1
+            int   mTime  = array.get(month_time, m)
+            float mPnL   = array.get(month_pnl,  m)
+            int   mYear  = year(mTime)
+            int   mMonth = month(mTime)
+
+            int rowIdx = na
+            if final_years_count > 0
+                for y_i = 0 to final_years_count - 1
+                    int yTime = array.get(year_time, y_i)
+                    if year(yTime) == mYear
+                        rowIdx := y_i + 1  
+                        break
+
+            if na(rowIdx) and (mYear == year(time))
+                rowIdx := row_current_year
+
+            if not na(rowIdx)
+                color mColor = mPnL >= 0 ? color.new(#0097a7, 70) : color.new(#ff195f, 70)
+                table.cell(monthly_table, mMonth, rowIdx, str.tostring(math.round(mPnL * 100, prec)), bgcolor = mColor, text_color = font_color)
+
+    table.cell(monthly_table, 0, row_current_year, str.tostring(year(time)), bgcolor = color.new(#3c3d49, 0), text_color = font_color)
+
+    int curMonth = month(time)
+    color moColor = cur_month_pnl >= 0 ? color.new(#0097a7, 70) : color.new(#ff195f, 70)
+    table.cell(monthly_table, curMonth, row_current_year, str.tostring(math.round(cur_month_pnl * 100, prec)), bgcolor = moColor, text_color = font_color)
+
+    color yrColor = cur_year_pnl >= 0 ? color.new(#0097a7, 50) : color.new(#ff195f, 50)
+    table.cell(monthly_table, 13, row_current_year, str.tostring(math.round(cur_year_pnl * 100, prec)), bgcolor = yrColor, text_color = font_color)
+
+if not showTable and not na(monthly_table)
+    table.clear(monthly_table, 0, 0)
+// --------------------------------------------------------------------------------------------------------------------}
+
+View in Pine Editor・220 lines
+Use on chart
+6
+8
+8
+1
+13 199
+This strategy is based on the Gradient Trend Filter indicator developed by ChartPrime. Full credit for the concept and indicator goes to ChartPrime.
+
+The Gradient Trend Filter Strategy is designed to execute trades based on the trend analysis and filtering system provided by the Gradient Trend Filter indicator. It integrates a noise-filtered trend detection system with a color-gradient visualization, helping traders identify trend strength, momentum shifts, and potential reversals.
+
+How the Gradient Trend Filter Strategy Works
+1. Noise Filtering for Smoother Trends
+To reduce false signals caused by market noise, the strategy applies a three-stage smoothing function to the source price. This function ensures that trend shifts are detected more accurately, minimizing unnecessary trade entries and exits.
+
+
+The filter is based on an Exponential Moving Average (EMA)-style smoothing technique.
+
+It processes price data in three successive passes, refining the trend signal before generating trade entries.
+
+This filtering technique helps eliminate minor fluctuations and highlights the true underlying trend.
+
+
+
+2. Multi-Layered Trend Bands & Color-Based Trend Visualization
+The Gradient Trend Filter constructs multiple trend bands around the filtered trend line, acting as dynamic support and resistance zones.
+
+
+The mid-line changes color based on the trend direction:
+
+Green for uptrends
+Red for downtrends
+
+A gradient cloud is formed around the trend line, dynamically shifting colors to provide early warning signals of trend reversals.
+
+The outer bands function as potential support and resistance, helping traders determine stop-loss and take-profit zones.
+
+
+Visualization elements used in this strategy:
+
+Trend Filter Line → Changes color between green (bullish) and red (bearish).
+
+Trend Cloud → Dynamically adjusts color based on trend strength.
+
+Orange Markers → Appear when a trend shift is confirmed.
+
+
+
+Trade Entry & Exit Conditions
+This strategy automatically enters trades based on confirmed trend shifts detected by the Gradient Trend Filter.
+
+1. Trade Entry Rules
+
+Long Entry:
+
+A bullish trend shift is detected (trend direction changes to green).
+The filtered trend value crosses above zero, confirming upward momentum.
+The strategy enters a long position.
+
+Short Entry:
+
+A bearish trend shift is detected (trend direction changes to red).
+The filtered trend value crosses below zero, confirming downward momentum.
+The strategy enters a short position.
+
+
+2. Trade Exit Rules
+
+Closing a Long Position:
+
+If a bearish trend shift occurs, the strategy closes the long position.
+
+Closing a Short Position:
+
+If a bullish trend shift occurs, the strategy closes the short position.
+
+
+The trend shift markers (orange diamonds) act as a confirmation signal, reinforcing the validity of trade entries and exits.
+
+Customization Options
+This strategy allows traders to adjust key parameters for flexibility in different market conditions:
+
+
+Trade Direction: Choose between Long Only, Short Only, or Long & Short.
+
+Trend Length: Modify the length of the smoothing function to adapt to different timeframes.
+
+Line Width & Colors: Customize the visual appearance of trend lines and cloud colors.
+
+Performance Table: Enable or disable the equity performance table that tracks historical trade results.
+
+
+
+Performance Tracking & Reporting
+A built-in performance table is included to monitor monthly and yearly trading performance.
+
+
+The table calculates monthly percentage returns, displaying them in a structured format.
+
+Color-coded values highlight profitable months (blue) and losing months (red).
+
+Tracks yearly cumulative performance to assess long-term strategy effectiveness.
+
+
+
+Traders can use this feature to evaluate historical performance trends and optimize their strategy settings accordingly.
+
+How to Use This Strategy
+
+Identify Trend Strength & Reversals:
+
+Use the trend line and cloud color changes to assess trend strength and detect potential reversals.
+
+Monitor Momentum Shifts:
+
+Pay attention to gradient cloud color shifts, as they often appear before the trend line changes color.
+This can indicate early momentum weakening or strengthening.
+
+Act on Trend Shift Markers:
+
+Use orange diamonds as confirmation signals for trend shifts and trade entry/exit points.
+
+Utilize Cloud Bands as Support/Resistance:
+
+The outer bands of the cloud serve as dynamic support and resistance, helping with stop-loss and take-profit placement.
+
+
+Considerations & Limitations
+
+Trend Lag: Since the strategy applies a smoothing function, entries may be slightly delayed compared to raw price action.
+
+Volatile Market Conditions: In high-volatility markets, trend shifts may occur more frequently, leading to higher trade frequency.
+
+Optimized for Trend Trading: This strategy is best suited for trending markets and may produce false signals in sideways (ranging) conditions.
+
+
+
+Conclusion
+The Gradient Trend Filter Strategy is a trend-following system based on the Gradient Trend Filter indicator by ChartPrime. It integrates noise filtering, trend visualization, and gradient-based color shifts to help traders identify strong market trends and potential reversals.
+
+By combining trend filtering with a multi-layered cloud system, the strategy provides clear trade signals while minimizing noise. Traders can use this strategy for long-term trend trading, momentum shifts, and support/resistance-based decision-making.
+
+This strategy is a fully automated system that allows traders to execute long, short, or both directions, with customizable settings to adapt to different market conditions.
+
+Credit for the original concept and indicator goes to ChartPrime.

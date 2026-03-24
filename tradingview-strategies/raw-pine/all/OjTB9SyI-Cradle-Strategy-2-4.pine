@@ -1,0 +1,158 @@
+//@version=5
+strategy("Cradle Strategy [Strict]", overlay=true, process_orders_on_close=true, calc_on_order_fills=false)
+
+// -------------------------------------------------------------------------
+// INPUTS
+// -------------------------------------------------------------------------
+grp_ma      = "Moving Averages"
+len_short   = input.int(10, "Short Term EMA", group=grp_ma)
+len_med     = input.int(20, "Medium Term EMA", group=grp_ma)
+
+grp_htf     = "Multi-Timeframe"
+htf_res     = input.timeframe("240", "Higher Timeframe", group=grp_htf, tooltip="Select the next higher timeframe (e.g., if trading 1H, select 4H)")
+
+grp_macd    = "MACD Convergence"
+macd_fast   = input.int(12, "Fast Length", group=grp_macd)
+macd_slow   = input.int(26, "Slow Length", group=grp_macd)
+macd_sig    = input.int(9, "Signal Smoothing", group=grp_macd)
+
+grp_candle  = "Candle Analysis"
+max_body_pct = input.float(50.0, "Max Body % for 'Small Candle'", group=grp_candle, tooltip="Body size as a percentage of the total candle range (High-Low) to be considered 'indecision/small'")
+
+grp_risk    = "Risk Management"
+rr_ratio    = input.float(2.0, "Risk/Reward Ratio", group=grp_risk)
+
+// -------------------------------------------------------------------------
+// INDICATOR CALCULATIONS (Current Timeframe)
+// -------------------------------------------------------------------------
+ema_s = ta.ema(close, len_short)
+ema_m = ta.ema(close, len_med)
+
+[macdLine, signalLine, histLine] = ta.macd(close, macd_fast, macd_slow, macd_sig)
+
+// -------------------------------------------------------------------------
+// INDICATOR CALCULATIONS (Higher Timeframe)
+// -------------------------------------------------------------------------
+// We use request.security to get HTF data. 
+// gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off to prevent repainting.
+htf_ema_s = request.security(syminfo.tickerid, htf_res, ta.ema(close, len_short))
+htf_ema_m = request.security(syminfo.tickerid, htf_res, ta.ema(close, len_med))
+
+// -------------------------------------------------------------------------
+// STRATEGY LOGIC - ESSENTIAL FACTORS
+// -------------------------------------------------------------------------
+
+// 1. Trend Identification (Current & HTF)
+// MAs must be in correct order.
+// Long: 10 > 20. Short: 10 < 20.
+trend_bull_curr = ema_s > ema_m
+trend_bull_htf  = htf_ema_s > htf_ema_m
+
+trend_bear_curr = ema_s < ema_m
+trend_bear_htf  = htf_ema_s < htf_ema_m
+
+// 2. Cradle Zone Identification
+// Price must touch or be inside the area between the 10 and 20 EMA.
+// We check if the Low dips into the zone (Long) or High pokes into the zone (Short).
+// Note: We do not want a full cross of the 20 (trend violation).
+in_cradle_long = low <= ema_s and low >= ema_m // Simple check: Low is between lines (assuming 10>20)
+in_cradle_short = high >= ema_s and high <= ema_m // Simple check: High is between lines (assuming 10<20)
+
+// More lenient cradle check: Simply touching the zone without closing on the wrong side of the 20
+cradle_long_valid = trend_bull_curr and low <= ema_s and close > ema_m
+cradle_short_valid = trend_bear_curr and high >= ema_s and close < ema_m
+
+// 3. Small Candle (Indecision)
+// Calculate body size vs total range
+candle_range = high - low
+body_size = math.abs(close - open)
+is_small_candle = (body_size <= (candle_range * (max_body_pct / 100))) or (candle_range == 0)
+
+// 4. Convergence (MACD)
+// "Trigger chart is converging". 
+// For Long: MACD should not be diverging down significantly. Ideally MACD > Signal or Histogram > 0.
+// Per instructions: "When price and MACD are both agreeing".
+// Simplification: We ensure Momentum is in direction of trade.
+macd_bullish = macdLine > signalLine
+macd_bearish = macdLine < signalLine
+
+// -------------------------------------------------------------------------
+// TRIGGER CONDITIONS
+// -------------------------------------------------------------------------
+
+// Factor Combination
+long_setup = trend_bull_curr and trend_bull_htf and cradle_long_valid and is_small_candle and macd_bullish
+short_setup = trend_bear_curr and trend_bear_htf and cradle_short_valid and is_small_candle and macd_bearish
+
+// -------------------------------------------------------------------------
+// EXECUTION & JSON ALERTS
+// -------------------------------------------------------------------------
+
+// Helper to generate JSON string
+get_json(side) =>
+    str = '{"ticker": "' + syminfo.ticker + '", "side": "' + side + '", "timestamp": "' + str.tostring(timenow) + '"}'
+    str
+
+// Variables to store entry levels for stop orders
+var float long_entry_price = na
+var float long_sl_price = na
+var float short_entry_price = na
+var float short_sl_price = na
+
+// Strategy Execution
+// Rule: "To enter the trade price must break the high (for long) or low (for short) of the entry candle"
+
+if (long_setup)
+    long_entry_price := high
+    long_sl_price := low < ema_m ? low : ema_m // Stop below candle low or EMA 20
+    
+    // Calculate Target
+    risk = long_entry_price - long_sl_price
+    target = long_entry_price + (risk * rr_ratio)
+    
+    // Submit Stop Order
+    strategy.entry("Long Cradle", strategy.long, stop=long_entry_price, alert_message=get_json("buy"))
+    strategy.exit("Exit Long", "Long Cradle", stop=long_sl_price, limit=target, alert_message=get_json("sell"))
+
+if (short_setup)
+    short_entry_price := low
+    short_sl_price := high > ema_m ? high : ema_m // Stop above candle high or EMA 20
+    
+    // Calculate Target
+    risk = short_sl_price - short_entry_price
+    target = short_entry_price - (risk * rr_ratio)
+    
+    // Submit Stop Order
+    strategy.entry("Short Cradle", strategy.short, stop=short_entry_price, alert_message=get_json("sell"))
+    strategy.exit("Exit Short", "Short Cradle", stop=short_sl_price, limit=target, alert_message=get_json("buy"))
+
+// Cancel pending orders if trend breaks
+// If price closes below 20EMA (Long) or above 20EMA (Short), the Cradle is invalidated
+if (close < ema_m)
+    strategy.cancel("Long Cradle")
+
+if (close > ema_m)
+    strategy.cancel("Short Cradle")
+
+// -------------------------------------------------------------------------
+// VISUALIZATION
+// -------------------------------------------------------------------------
+plot(ema_s, color=color.blue, title="EMA 10 (Short)")
+plot(ema_m, color=color.red, linewidth=2, title="EMA 20 (Med)")
+
+// Highlight Cradle Zone
+fill(plot(ema_s, display=display.none), plot(ema_m, display=display.none), color=color.new(color.yellow, 90), title="Cradle Zone")
+
+// Mark Setup Candles
+plotshape(long_setup, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Long Setup")
+plotshape(short_setup, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Short Setup")
+
+View in Pine Editor・151 lines
+Use on chart
+1
+338
+Feb 10
+Cradle strategy to be used with MACD, Moving Averages on any chart.
+Feb 11
+Release Notes
+Updated Cradle strategy permissions

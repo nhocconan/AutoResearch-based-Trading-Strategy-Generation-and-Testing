@@ -1,0 +1,109 @@
+//@version=6
+strategy("ATRTSS v6 (4H Entry / 1H Exit / Daily Filter, Long Only, Multi-TF Lines)",
+     shorttitle="ATRTSS v6", overlay=true,
+     initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.0, pyramiding=2)
+
+// ===================
+// Inputs
+// ===================
+atrPeriod     = input.int(10, "ATR Period")
+atrMult       = input.float(4.0, "ATR Multiplier")
+htfATRPeriod  = input.int(10, "Daily ATR Period")
+htfATRMult    = input.float(4.0, "Daily ATR Multiplier")
+maxPyramids   = input.int(2, "Max Pyramids", minval=1)
+
+// Optional backtest window
+daysBackMax = input.int(360, "Max Days Back to Test", minval=0)
+daysBackMin = input.int(0,   "Min Days Back to Test", minval=0)
+msBackMax   = daysBackMax * 86400000
+msBackMin   = daysBackMin * 86400000
+isInTimeBounds = (msBackMax == 0 or (time > (timenow - msBackMax))) and
+                 (msBackMin == 0 or (time < (timenow - msBackMin)))
+
+// Helper for non-repainting security pulls
+gaps  = barmerge.gaps_off
+ahead = barmerge.lookahead_off
+
+// ===================
+// 4H ENTRY ATR STOP
+// ===================
+entryClose = request.security(syminfo.tickerid, "240", close, gaps, ahead)
+entryATR   = request.security(syminfo.tickerid, "240", ta.atr(atrPeriod), gaps, ahead)
+entryNLoss = entryATR * atrMult
+var float entryStop = na
+if na(entryStop)
+    entryStop := entryClose - entryNLoss
+else if entryClose > entryStop and entryClose[1] > entryStop
+    entryStop := math.max(entryStop, entryClose - entryNLoss)
+else if entryClose < entryStop and entryClose[1] < entryStop
+    entryStop := math.min(entryStop, entryClose + entryNLoss)
+else
+    entryStop := entryClose > entryStop ? entryClose - entryNLoss : entryClose + entryNLoss
+
+plot(entryStop, title="4H ATR Stop (Entry)", color=color.new(color.green, 0), linewidth=2)
+
+// ===================
+// 1H EXIT ATR STOP
+// ===================
+exitClose = request.security(syminfo.tickerid, "60", close, gaps, ahead)
+exitATR   = request.security(syminfo.tickerid, "60", ta.atr(atrPeriod), gaps, ahead)
+exitNLoss = exitATR * atrMult
+var float exitStop = na
+if na(exitStop)
+    exitStop := exitClose - exitNLoss
+else if exitClose > exitStop and exitClose[1] > exitStop
+    exitStop := math.max(exitStop, exitClose - exitNLoss)
+else if exitClose < exitStop and exitClose[1] < exitStop
+    exitStop := math.min(exitStop, exitClose + exitNLoss)
+else
+    exitStop := exitClose > exitStop ? exitClose - exitNLoss : exitClose + exitNLoss
+
+plot(exitStop, title="1H ATR Stop (Exit)", color=color.new(color.orange, 0), linewidth=2)
+
+// ===================
+// DAILY ATR FILTER (locked to D)
+// ===================
+dClose = request.security(syminfo.tickerid, "D", close, gaps, ahead)
+dATR   = request.security(syminfo.tickerid, "D", ta.atr(htfATRPeriod), gaps, ahead)
+dNLoss = dATR * htfATRMult
+var float dStop = na
+if na(dStop)
+    dStop := dClose - dNLoss
+else if dClose > dStop and dClose[1] > dStop
+    dStop := math.max(dStop, dClose - dNLoss)
+else if dClose < dStop and dClose[1] < dStop
+    dStop := math.min(dStop, dClose + dNLoss)
+else
+    dStop := dClose > dStop ? dClose - dNLoss : dClose + dNLoss
+
+plot(dStop, title="Daily ATR Stop (Filter)", color=color.new(color.blue, 0), linewidth=2)
+
+htfPassLong = dClose > dStop
+
+// ===================
+// Signals (LONG-only)
+// ===================
+longEntry = ta.crossover(entryClose, entryStop)
+longExit  = ta.crossunder(exitClose, exitStop)
+
+// ===================
+// Orders
+// ===================
+if longEntry and htfPassLong and isInTimeBounds and strategy.opentrades < maxPyramids
+    strategy.entry("LONG", strategy.long)
+
+if longExit and isInTimeBounds
+    strategy.close("LONG")
+
+// ===================
+// Alerts
+// ===================
+alertcondition(longEntry and htfPassLong and isInTimeBounds, title="Long Entry (4H)", message="Long Entry: 4H cross above ATR stop; Daily filter passed.")
+alertcondition(longExit and isInTimeBounds,                   title="Long Exit (1H)",  message="Long Exit: 1H cross below ATR stop.")
+
+View in Pine Editor・103 lines
+Use on chart
+9
+982
+this strategy is trend trading strategy for mabby and asher

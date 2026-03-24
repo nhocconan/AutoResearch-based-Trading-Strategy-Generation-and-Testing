@@ -1,0 +1,91 @@
+//@version=6
+strategy("Futures Trading Hours RSI Strategy", overlay=true)
+
+// ——— INPUTS ——————————————————————————————
+length     = input(14, "RSI Length")
+overSold   = input(30, "RSI Oversold Level")
+overBought = input(70, "RSI Overbought Level")
+
+price = close
+vrsi  = ta.rsi(price, length)
+
+// ——— TIME FILTER (CENTRAL TIME) ——————————————————
+startHour   = 8
+startMinute = 30
+endHour     = 15
+endMinute   = 0
+
+// Offset in hours from UTC to CST (not accounting for DST)
+var timezoneOffset = 0
+adjustedTime   = time + (timezoneOffset * 60 * 60 * 1000)
+adjustedHour   = hour(adjustedTime)
+adjustedMinute = minute(adjustedTime)
+
+// Only trade Monday (1) through Friday (5) in the chart’s default time zone.
+weekdayFilter = dayofweek >= dayofweek.monday and dayofweek <= dayofweek.friday
+
+// Determine if the current bar is within the session (08:30–15:00 CT)
+inSession = (adjustedHour > startHour or (adjustedHour == startHour and adjustedMinute >= startMinute)) and            (adjustedHour < endHour   or (adjustedHour == endHour   and adjustedMinute <  endMinute))
+
+// ——— SIGNALS ————————————————————————————————
+co = ta.crossover(vrsi, overSold)
+cu = ta.crossunder(vrsi, overBought)
+
+// ——— ENTRY LOGIC ————————————————————————————
+if not na(vrsi) and inSession and weekdayFilter
+    if co
+        strategy.entry("RsiLE", strategy.long,  comment="RsiLE")
+    if cu
+        strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+
+// ——— EXIT ALL ORDERS AT/AFTER 15:00 CT ——————————————————
+// Closes any open positions once the clock hits 15:00 CT or later on weekdays
+if weekdayFilter and (adjustedHour > endHour or (adjustedHour == endHour and adjustedMinute >= endMinute))
+    strategy.close_all(comment="Close All by 15:00 CT")
+
+// ——— (Optional) Plot ————————————————————————————
+//plot(strategy.equity, title="Equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+// ——— BACKGROUND SHADING WHEN POSITION IS OPEN ——————————————————
+longOpen  = strategy.position_size > 0
+shortOpen = strategy.position_size < 0
+
+bgcolor(longOpen  ? color.new(color.green, 90) : na, title="Long Position Shading")
+bgcolor(shortOpen ? color.new(color.red,   90) : na, title="Short Position Shading")
+
+View in Pine Editor・54 lines
+Use on chart
+2
+7
+5
+5 465
+Futures Trading Hours RSI Strategy
+
+A lightweight, session-filtered RSI strategy designed for equity-index futures (e.g. NQ, ES, YM) on a 30-minute chart. It dynamically enters long when RSI crosses above your oversold threshold and short when RSI crosses below your overbought threshold—but only during regular U.S. trading hours (08:30–15:00 CT, Monday–Friday). All positions are set to close at 15:00 CT to avoid overnight risk, and optional background shading highlights your open longs (green) and shorts (red).
+
+⸻
+
+Key Features
+• RSI-based entries: configurable length, oversold, and overbought levels
+• Session filter: trades only between 08:30–15:00 CT, Monday through Friday
+• Automatic exit: closes all positions at or after 15:00 CT each day
+• Visual cues: optional background shading for open long/short positions
+• Easy customization: adjust length, overSold, overBought, and time offsets
+
+Backtest Performance (NQ Jun 2025, 30 min)
+• Total P&L: +$10,230 (+1.02%)
+• Profit Factor: 4.61
+• Win Rate: 57.1% (4 wins / 7 trades)
+• Max Drawdown: $2,215 (0.22%)
+
+(Results shown are for illustrative purposes only; past performance does not guarantee future returns.)
+
+How to Use
+1. Add this script to your 30-minute futures chart.
+2. Tweak the RSI parameters and time-zone offset to suit your instrument.
+3. Enable “background shading” if you’d like a visual reminder of open positions.
+4. Run in paper-trade mode to validate performance before going live.
+
+⸻
+
+⚠️ Disclaimer: Trading carries risk. Always backtest and paper-trade before using real capital. Adjust position sizing and risk controls to your own tolerance.

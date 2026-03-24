@@ -1,0 +1,488 @@
+//@version=5
+strategy("MNQ | Trigger Happy | 5Min", overlay=true, initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=4, calc_on_every_tick=false, process_orders_on_close=true, commission_type=strategy.commission.cash_per_contract, commission_value=1.2, slippage=6, max_labels_count=500, max_boxes_count=300, max_lines_count=300)
+
+// ================================================================
+//  POSITION SIZING
+// ================================================================
+grp_pos = "POSITION SIZING"
+contract_qty        = input.int(4,        "Contracts",        minval=1, group=grp_pos)
+daily_profit_target = input.float(2000.0, "Daily Profit Cap", group=grp_pos)
+daily_loss_limit    = input.float(350.0,  "Daily Loss Cap",   group=grp_pos)
+
+// ================================================================
+//  SESSION
+// ================================================================
+grp_ses = "SESSION"
+use_session = input.bool(true,           "Session Filter",  group=grp_ses)
+session_str = input.session("0930-1545", "Session Window",  group=grp_ses)
+tz          = "America/New_York"
+
+// ================================================================
+//  TARGETS & STOPS
+// ================================================================
+grp_tp = "TARGETS & STOPS"
+tp_ticks  = input.int(250, "Take Profit (ticks)", group=grp_tp)
+sl_ticks  = input.int(125,  "Stop Loss (ticks)",   group=grp_tp)
+trail_pts = input.int(20,  "Trail Trigger (ticks)", group=grp_tp)
+
+// ================================================================
+//  ENTRY GATES
+// ================================================================
+grp_gate = "ENTRY GATES"
+
+use_atr_gate = input.bool(true,  "ATR Volatility Gate",    group=grp_gate)
+atr_min      = input.float(2.2,  "  Min ATR",              group=grp_gate)
+
+use_rsi_gate = input.bool(true,  "RSI Gate",               group=grp_gate)
+rsi_buy      = input.int(45,     "  Max RSI for Longs",    group=grp_gate)
+rsi_sell     = input.int(55,     "  Min RSI for Shorts",   group=grp_gate)
+
+use_ema_gate = input.bool(false, "EMA Trend Gate",         group=grp_gate, tooltip="Longs only above EMA, shorts only below. Pull from any timeframe.")
+ema_len      = input.int(9,      "  EMA Length",           group=grp_gate, minval=1)
+ema_tf       = input.timeframe("", "  EMA Timeframe",      group=grp_gate, tooltip="Blank = chart timeframe. Examples: 1, 5, 15, 60, D")
+
+use_vix_gate = input.bool(false, "VIX Regime Gate",        group=grp_gate, tooltip="Block trades when VIX is outside range")
+vix_max      = input.float(30.0, "  Max VIX",              group=grp_gate)
+vix_min      = input.float(12.0, "  Min VIX",              group=grp_gate)
+
+// ================================================================
+//  VISUALS
+// ================================================================
+grp_viz = "VISUALS"
+show_dash      = input.bool(true,  "Dashboard",         group=grp_viz)
+show_zones     = input.bool(true,  "TP / SL Zones",     group=grp_viz)
+show_ema_line  = input.bool(true,  "EMA Line",          group=grp_viz)
+show_exits     = input.bool(true,  "Exit P&L Tags",     group=grp_viz)
+
+// ================================================================
+//  NEON PALETTE
+// ================================================================
+CYAN    = #00FFFF
+GREEN   = #39FF14
+MAGENTA = #FF00FF
+RED     = #FF003C
+AMBER   = #FFB300
+BLUE    = #4488FF
+PURPLE  = #BF5FFF
+BG      = #0A0A14
+DIM     = color.new(color.white, 60)
+DIMMER  = color.new(color.white, 78)
+
+CYAN_HOT    = #00FFEE
+MAGENTA_HOT = #FF20FF
+
+HEADER_BG = #0C0C1E
+ROW_A     = #0A0A18
+ROW_B     = #0E0E22
+GLOW      = #00CCDD
+
+// ================================================================
+//  DAILY P&L ENGINE
+// ================================================================
+var float day_eq = 0.0
+if ta.change(time("D", tz)) != 0
+    day_eq := strategy.netprofit
+
+daily_pnl  = strategy.netprofit - day_eq
+gate_daily = daily_pnl < daily_profit_target and daily_pnl > -daily_loss_limit
+
+// ================================================================
+//  SESSION GATE
+// ================================================================
+gate_session = not use_session or not na(time(timeframe.period, session_str, tz))
+
+// ================================================================
+//  CORE INDICATORS
+// ================================================================
+length = 1
+ph     = ta.pivothigh(length, length)
+pl     = ta.pivotlow(length, length)
+rsi    = ta.rsi(close, 14)
+atr    = ta.atr(14)
+
+// ================================================================
+//  MULTI-TIMEFRAME EMA
+// ================================================================
+raw_ema = ta.ema(close, ema_len)
+ema_val = ema_tf == "" ? raw_ema : request.security(syminfo.tickerid, ema_tf, ta.ema(close, ema_len), barmerge.gaps_off, barmerge.lookahead_off)
+
+gate_ema_long  = not use_ema_gate or close > ema_val
+gate_ema_short = not use_ema_gate or close < ema_val
+
+// ================================================================
+//  VIX GATE
+// ================================================================
+vix_close = request.security("CBOE:VIX", "D", close)
+gate_vix  = not use_vix_gate or (vix_close <= vix_max and vix_close >= vix_min)
+
+// ================================================================
+//  ATR & RSI GATES
+// ================================================================
+gate_atr       = not use_atr_gate or atr > atr_min
+gate_rsi_long  = not use_rsi_gate or rsi < rsi_buy
+gate_rsi_short = not use_rsi_gate or rsi > rsi_sell
+
+// ================================================================
+//  TRADE SIGNALS
+// ================================================================
+is_flat = strategy.position_size == 0
+
+go_long  = gate_session and gate_daily and is_flat and gate_vix and pl and gate_atr and gate_rsi_long and gate_ema_long
+
+go_short = gate_session and gate_daily and is_flat and gate_vix and ph and gate_atr and gate_rsi_short and gate_ema_short
+
+// ================================================================
+//  ALERT MESSAGES (TradersPost format)
+// ================================================================
+buy_msg  = '{"ticker":"' + syminfo.ticker + '","action":"buy","price":' + str.tostring(close) + '}'
+sell_msg = '{"ticker":"' + syminfo.ticker + '","action":"sell","price":' + str.tostring(close) + '}'
+exit_msg = '{"ticker":"' + syminfo.ticker + '","action":"close"}'
+
+// ================================================================
+//  EXECUTION
+// ================================================================
+if go_long
+    strategy.entry("Long", strategy.long, qty=contract_qty, comment="BUY", alert_message=buy_msg)
+
+if go_short
+    strategy.entry("Short", strategy.short, qty=contract_qty, comment="SELL", alert_message=sell_msg)
+
+strategy.exit("Exit", loss=sl_ticks, profit=tp_ticks, trail_points=trail_pts, trail_offset=10, comment="EXIT", alert_message=exit_msg)
+
+// ================================================================
+//  VISUAL: NEON CANDLES
+// ================================================================
+in_long  = strategy.position_size > 0
+in_short = strategy.position_size < 0
+
+barcolor(in_long ? color.new(CYAN, 0) : in_short ? color.new(MAGENTA, 0) : color.new(#444455, 25))
+
+// ================================================================
+//  VISUAL: EMA LINE (glow effect)
+// ================================================================
+_ema_col = close > ema_val ? color.new(CYAN, 30) : color.new(MAGENTA, 30)
+_ema_glow = close > ema_val ? color.new(CYAN, 70) : color.new(MAGENTA, 70)
+plot(show_ema_line ? ema_val : na, "EMA Glow", color=_ema_glow, linewidth=5)
+plot(show_ema_line ? ema_val : na, "EMA", color=_ema_col, linewidth=2)
+
+// ================================================================
+//  VISUAL: ENTRY ARROWS
+// ================================================================
+plotshape(go_long,  "LONG",  shape.triangleup,   location.belowbar, color.new(CYAN_HOT,    0), size=size.normal)
+plotshape(go_short, "SHORT", shape.triangledown, location.abovebar, color.new(MAGENTA_HOT, 0), size=size.normal)
+
+// ================================================================
+//  VISUAL: EXIT P&L TAGS
+// ================================================================
+var float prev_pos = 0.0
+var float prev_avg = na
+
+just_closed_long  = prev_pos > 0 and is_flat
+just_closed_short = prev_pos < 0 and is_flat
+just_closed       = just_closed_long or just_closed_short
+
+var float exit_pnl = 0.0
+if just_closed_long and not na(prev_avg)
+    exit_pnl := (close - prev_avg) * prev_pos * syminfo.pointvalue
+if just_closed_short and not na(prev_avg)
+    exit_pnl := (prev_avg - close) * math.abs(prev_pos) * syminfo.pointvalue
+
+if show_exits and just_closed
+    _col  = exit_pnl > 0 ? GREEN : RED
+    _sign = exit_pnl > 0 ? "+" : ""
+    _y    = just_closed_long ? low - atr * 0.4 : high + atr * 0.4
+    _sty  = just_closed_long ? label.style_label_up : label.style_label_down
+    label.new(bar_index, _y, text=_sign + "$" + str.tostring(exit_pnl, "#.00"), style=_sty, color=color.new(_col, 78), textcolor=color.new(_col, 0), size=size.tiny)
+
+prev_pos := strategy.position_size
+prev_avg := strategy.position_avg_price
+
+// ================================================================
+//  VISUAL: TP / SL / TRAIL ZONE (glow lines)
+// ================================================================
+var line  ln_tp = na
+var line  ln_sl = na
+var line  ln_tr = na
+var line  ln_tp_glow = na
+var line  ln_sl_glow = na
+var box   bx_zone = na
+var label lb_tp = na
+var label lb_sl = na
+
+tick      = syminfo.mintick
+avg_price = strategy.position_avg_price
+
+if show_zones
+    if is_flat and not na(ln_tp)
+        line.delete(ln_tp)
+        line.delete(ln_sl)
+        line.delete(ln_tr)
+        line.delete(ln_tp_glow)
+        line.delete(ln_sl_glow)
+        box.delete(bx_zone)
+        label.delete(lb_tp)
+        label.delete(lb_sl)
+        ln_tp := na
+        ln_sl := na
+        ln_tr := na
+        ln_tp_glow := na
+        ln_sl_glow := na
+        bx_zone := na
+        lb_tp := na
+        lb_sl := na
+
+    if (in_long or in_short) and na(ln_tp) and not na(avg_price)
+        _tp = in_long ? avg_price + tp_ticks * tick : avg_price - tp_ticks * tick
+        _sl = in_long ? avg_price - sl_ticks * tick : avg_price + sl_ticks * tick
+        _tr = in_long ? avg_price + trail_pts * tick : avg_price - trail_pts * tick
+        _zc = in_long ? CYAN : MAGENTA
+
+        ln_tp_glow := line.new(bar_index, _tp, bar_index, _tp, color=color.new(GREEN, 70), width=4, style=line.style_solid, extend=extend.right)
+        ln_sl_glow := line.new(bar_index, _sl, bar_index, _sl, color=color.new(RED, 70), width=4, style=line.style_solid, extend=extend.right)
+        ln_tp   := line.new(bar_index, _tp, bar_index, _tp, color=color.new(GREEN, 0), width=1, style=line.style_dashed, extend=extend.right)
+        ln_sl   := line.new(bar_index, _sl, bar_index, _sl, color=color.new(RED, 0), width=1, style=line.style_dashed, extend=extend.right)
+        ln_tr   := line.new(bar_index, _tr, bar_index, _tr, color=color.new(AMBER, 15), width=1, style=line.style_dotted, extend=extend.right)
+        bx_zone := box.new(bar_index, _tp, bar_index + 60, _sl, border_color=color.new(_zc, 92), bgcolor=color.new(_zc, 96), extend=extend.right)
+        lb_tp   := label.new(bar_index, _tp, text="  TP " + str.tostring(_tp, "#.00"), style=label.style_label_left, color=color.new(GREEN, 85), textcolor=color.new(GREEN, 0), size=size.tiny)
+        lb_sl   := label.new(bar_index, _sl, text="  SL " + str.tostring(_sl, "#.00"), style=label.style_label_left, color=color.new(RED, 85), textcolor=color.new(RED, 0), size=size.tiny)
+
+// ================================================================
+//  DASHBOARD: NEON COCKPIT
+//
+//  Dynamic rows - only active gates show
+//  Col 0 = ON/OFF
+//  Col 1 = Gate name
+//  Col 2 = Live value
+//  Col 3 = Percentage / meter
+// ================================================================
+
+// Count active rows to size the table
+_active_gates = 2 + (use_session ? 1 : 0) + (use_atr_gate ? 1 : 0) + (use_rsi_gate ? 1 : 0) + (use_ema_gate ? 1 : 0) + (use_vix_gate ? 1 : 0) + 2
+
+_gcol(ok) => ok ? color.new(GREEN, 0) : color.new(RED, 20)
+
+var table hud = table.new(position.top_right, 4, 12, bgcolor=color.new(HEADER_BG, 0), border_color=color.new(GLOW, 80), border_width=1, frame_color=color.new(GLOW, 45), frame_width=2)
+
+if show_dash and barstate.islast
+    any_gate_long  = gate_daily and gate_session and gate_atr and gate_rsi_long and gate_ema_long and gate_vix
+    any_gate_short = gate_daily and gate_session and gate_atr and gate_rsi_short and gate_ema_short and gate_vix
+    any_ready      = any_gate_long or any_gate_short
+
+    // Track which row we're on
+    int r = 0
+
+    // === HEADER ROW ===
+    _mode = in_long ? "LONG" : in_short ? "SHORT" : any_ready ? "LOCKED IN" : not gate_session ? "CLOSED" : not gate_daily ? "LIMIT HIT" : "SCANNING"
+    _mcol = in_long ? CYAN : in_short ? MAGENTA : any_ready ? GREEN : AMBER
+    table.cell(hud, 0, r, "TRIGGER HAPPY", text_color=color.new(CYAN, 0), bgcolor=color.new(HEADER_BG, 0), text_size=size.normal, text_halign=text.align_left)
+    table.cell(hud, 1, r, "", bgcolor=color.new(HEADER_BG, 0), text_size=size.tiny)
+    table.cell(hud, 2, r, "", bgcolor=color.new(HEADER_BG, 0), text_size=size.tiny)
+    table.cell(hud, 3, r, _mode, text_color=color.new(_mcol, 0), bgcolor=color.new(HEADER_BG, 0), text_size=size.normal, text_halign=text.align_right)
+    r += 1
+
+    // === COLUMN HEADERS ===
+    table.cell(hud, 0, r, "STATE", text_color=color.new(#88AACC, 0), bgcolor=color.new(GLOW, 82), text_size=size.tiny, text_halign=text.align_center)
+    table.cell(hud, 1, r, "GATE", text_color=color.new(#88AACC, 0), bgcolor=color.new(GLOW, 82), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 2, r, "VALUE", text_color=color.new(#88AACC, 0), bgcolor=color.new(GLOW, 82), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(hud, 3, r, "%", text_color=color.new(#88AACC, 0), bgcolor=color.new(GLOW, 82), text_size=size.tiny, text_halign=text.align_right)
+    r += 1
+
+    // === DAILY P&L (always visible) ===
+    _pnl_col = daily_pnl >= 0 ? GREEN : RED
+    _pnl_str = (daily_pnl >= 0 ? "+" : "") + "$" + str.tostring(daily_pnl, "#.00")
+    _pnl_pct = str.tostring(math.min(math.abs(daily_pnl) / daily_profit_target * 100, 100), "#.0") + "%"
+    table.cell(hud, 0, r, "ON", text_color=_gcol(gate_daily), bgcolor=color.new(ROW_A, 0), text_size=size.tiny, text_halign=text.align_center)
+    table.cell(hud, 1, r, "Daily P&L", text_color=DIM, bgcolor=color.new(ROW_A, 0), text_size=size.tiny)
+    table.cell(hud, 2, r, _pnl_str, text_color=color.new(_pnl_col, 0), bgcolor=color.new(ROW_A, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(hud, 3, r, _pnl_pct, text_color=color.new(_pnl_col, 20), bgcolor=color.new(ROW_A, 0), text_size=size.tiny, text_halign=text.align_right)
+    r += 1
+
+    // === SESSION (only if enabled) ===
+    if use_session
+        _ses_txt = gate_session ? "IN WINDOW" : "CLOSED"
+        _rbg = r % 2 == 0 ? ROW_A : ROW_B
+        table.cell(hud, 0, r, gate_session ? "ON" : "OFF", text_color=_gcol(gate_session), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_center)
+        table.cell(hud, 1, r, "Session", text_color=DIM, bgcolor=color.new(_rbg, 0), text_size=size.tiny)
+        table.cell(hud, 2, r, _ses_txt, text_color=_gcol(gate_session), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(hud, 3, r, "", bgcolor=color.new(_rbg, 0), text_size=size.tiny)
+        r += 1
+
+    // === ATR (only if enabled) ===
+    if use_atr_gate
+        _atr_pct = str.tostring(math.min(atr / atr_min * 100, 999), "#") + "%"
+        _rbg = r % 2 == 0 ? ROW_A : ROW_B
+        table.cell(hud, 0, r, gate_atr ? "ON" : "OFF", text_color=_gcol(gate_atr), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_center)
+        table.cell(hud, 1, r, "Volatility", text_color=DIM, bgcolor=color.new(_rbg, 0), text_size=size.tiny)
+        table.cell(hud, 2, r, str.tostring(atr, "#.00") + " / " + str.tostring(atr_min, "#.0"), text_color=_gcol(gate_atr), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(hud, 3, r, _atr_pct, text_color=_gcol(gate_atr), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_right)
+        r += 1
+
+    // === RSI (only if enabled) ===
+    if use_rsi_gate
+        _rsi_ok = rsi < rsi_buy or rsi > rsi_sell
+        _rsi_dir = rsi < rsi_buy ? "BUY ZONE" : rsi > rsi_sell ? "SELL ZONE" : "NEUTRAL"
+        _rsi_pct = str.tostring(rsi, "#.0")
+        _rbg = r % 2 == 0 ? ROW_A : ROW_B
+        table.cell(hud, 0, r, _rsi_ok ? "ON" : "OFF", text_color=_gcol(_rsi_ok), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_center)
+        table.cell(hud, 1, r, "RSI", text_color=DIM, bgcolor=color.new(_rbg, 0), text_size=size.tiny)
+        table.cell(hud, 2, r, _rsi_dir, text_color=_gcol(_rsi_ok), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(hud, 3, r, _rsi_pct, text_color=_gcol(_rsi_ok), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_right)
+        r += 1
+
+    // === EMA (only if enabled) ===
+    if use_ema_gate
+        _ema_bull = close > ema_val
+        _ema_tf_label = ema_tf == "" ? "" : ema_tf + " "
+        _ema_name = _ema_tf_label + str.tostring(ema_len) + " EMA"
+        _ema_str = (_ema_bull ? "ABOVE " : "BELOW ") + str.tostring(ema_val, "#.0")
+        _ema_dist = math.abs(close - ema_val) / close * 100
+        _ema_pct = str.tostring(_ema_dist, "#.1") + "%"
+        _rbg = r % 2 == 0 ? ROW_A : ROW_B
+        table.cell(hud, 0, r, _ema_bull ? "ON" : "OFF", text_color=_gcol(_ema_bull), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_center)
+        table.cell(hud, 1, r, _ema_name, text_color=DIM, bgcolor=color.new(_rbg, 0), text_size=size.tiny)
+        table.cell(hud, 2, r, _ema_str, text_color=_gcol(_ema_bull), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(hud, 3, r, _ema_pct, text_color=_gcol(_ema_bull), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_right)
+        r += 1
+
+    // === VIX (only if enabled) ===
+    if use_vix_gate
+        _vix_ok = gate_vix
+        _vix_str = str.tostring(vix_close, "#.0")
+        _vix_range = "[" + str.tostring(vix_min, "#") + "-" + str.tostring(vix_max, "#") + "]"
+        _rbg = r % 2 == 0 ? ROW_A : ROW_B
+        table.cell(hud, 0, r, _vix_ok ? "ON" : "OFF", text_color=_gcol(_vix_ok), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_center)
+        table.cell(hud, 1, r, "VIX", text_color=DIM, bgcolor=color.new(_rbg, 0), text_size=size.tiny)
+        table.cell(hud, 2, r, _vix_str + " " + _vix_range, text_color=_gcol(_vix_ok), bgcolor=color.new(_rbg, 0), text_size=size.tiny, text_halign=text.align_right)
+        table.cell(hud, 3, r, "", bgcolor=color.new(_rbg, 0), text_size=size.tiny)
+        r += 1
+
+    // === POSITION DIVIDER ===
+    table.cell(hud, 0, r, "", bgcolor=color.new(GLOW, 82), text_size=size.tiny)
+    table.cell(hud, 1, r, "", bgcolor=color.new(GLOW, 82), text_size=size.tiny)
+    table.cell(hud, 2, r, "POSITION", text_color=color.new(#88AACC, 0), bgcolor=color.new(GLOW, 82), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(hud, 3, r, "", bgcolor=color.new(GLOW, 82), text_size=size.tiny)
+    r += 1
+
+    // === POSITION ROW ===
+    _open_pnl = in_long ? (close - avg_price) * math.abs(strategy.position_size) * syminfo.pointvalue : in_short ? (avg_price - close) * math.abs(strategy.position_size) * syminfo.pointvalue : 0.0
+    _open_sign = _open_pnl >= 0 ? "+" : ""
+    _pos_dir = in_long ? "LONG " + str.tostring(contract_qty) : in_short ? "SHORT " + str.tostring(contract_qty) : "FLAT"
+    _pos_entry = in_long or in_short ? "@ " + str.tostring(avg_price, "#.00") : ""
+    _pos_pnl = in_long or in_short ? _open_sign + "$" + str.tostring(_open_pnl, "#.00") : ""
+    _pos_col = in_long ? CYAN : in_short ? MAGENTA : DIM
+    _pnl_c = _open_pnl >= 0 ? GREEN : RED
+    table.cell(hud, 0, r, in_long ? ">>>" : in_short ? "<<<" : "---", text_color=color.new(_pos_col, 10), bgcolor=color.new(HEADER_BG, 0), text_size=size.tiny, text_halign=text.align_center, text_font_family=font.family_monospace)
+    table.cell(hud, 1, r, _pos_dir, text_color=color.new(_pos_col, 0), bgcolor=color.new(HEADER_BG, 0), text_size=size.small)
+    table.cell(hud, 2, r, _pos_entry, text_color=DIM, bgcolor=color.new(HEADER_BG, 0), text_size=size.tiny, text_halign=text.align_right)
+    table.cell(hud, 3, r, _pos_pnl, text_color=is_flat ? DIMMER : color.new(_pnl_c, 0), bgcolor=color.new(HEADER_BG, 0), text_size=size.small, text_halign=text.align_right)
+
+
+// ================================================================
+//  ALERT CONDITIONS
+// ================================================================
+alertcondition(go_long,  "Trigger Happy BUY",  "BUY signal fired")
+alertcondition(go_short, "Trigger Happy SELL", "SELL signal fired")
+
+View in Pine Editor・384 lines
+Use on chart
+1
+2
+2
+1 369
+Feb 19
+# Trigger Happy Elite v0.5 NEON
+
+---
+
+## What It Does
+
+Trigger Happy Elite detects pivot reversals on the 5-minute chart and enters trades when multiple confluence gates align. Every signal on the chart is a real trade — no repainting, no phantom signals. What you see is what fired.
+
+The strategy is designed for high-frequency scalping during the NY session, capturing quick reversals with tight risk management and a trailing stop mechanism.
+
+---
+
+## How It Works
+
+**Core Logic:** The engine identifies pivot highs and pivot lows, then filters entries through a layered gate system. All gates must pass before a trade is taken. No signal, no trade, no exceptions.
+
+**Gate System (all toggleable):**
+- **Daily P&L Cap** — Stops trading after hitting your profit target or loss limit for the day. Protects capital and prevents revenge trading.
+- **Session Filter** — Restricts trading to your chosen session window. Default is NY open to close (09:30–15:45 EST).
+- **ATR Volatility Gate** — Only trades when volatility is above a minimum threshold. Keeps you out of dead, choppy markets.
+- **RSI Gate** — Longs only when RSI is below a threshold (oversold zone), shorts only when RSI is above (overbought zone). Filters out low-probability entries.
+- **Multi-Timeframe EMA Gate** — Optional trend filter. Choose any EMA length and pull it from any timeframe. Run a 1-minute 9 EMA over your 5-minute chart, or a 15-minute 21 EMA — your call. Longs only above, shorts only below.
+- **VIX Regime Gate** — Optional volatility regime filter using the CBOE VIX index. Block trades when VIX is too high (panic mode) or too low (dead market).
+
+**Risk Management:**
+- Configurable take profit and stop loss in ticks
+- Trailing stop with activation threshold
+- Daily profit cap prevents overtrading winners
+- Daily loss cap prevents spiraling losers
+
+---
+
+## The Dashboard
+
+The neon cockpit HUD displays everything you need at a glance:
+
+- **Live gate status** — Each active gate shows ON (green) or OFF (red) with its current reading and percentage
+- **Disabled gates disappear** — No clutter. Only what's active shows on screen
+- **Real-time position tracking** — Direction, size, entry price, and open P&L
+- **Daily P&L progress** — See how close you are to your daily cap
+
+The dashboard is designed to be readable on both desktop and mobile.
+
+---
+
+## Visuals
+
+- **Neon candles** — Cyan glow when long, magenta glow when short, dim gray when flat
+- **Entry arrows** — Bright cyan triangles for longs, hot magenta for shorts. Every arrow is a real trade.
+- **Exit P&L tags** — Green or red labels showing exact dollar P&L on every closed trade
+- **TP/SL glow lines** — Neon glow effect on take profit and stop loss levels while in a position
+- **EMA with glow** — Dual-layer EMA line with a soft outer glow and bright inner core, color-coded by trend direction
+
+---
+
+## Designed For
+
+- **Instrument:** MNQ (Micro E-mini Nasdaq-100 Futures) — works on other NQ products
+- **Timeframe:** 5-minute (primary), adaptable to 1m–15m
+- **Session:** NY Session recommended (09:30–15:45 EST)
+- **Style:** High-frequency scalping with tight risk controls
+
+---
+
+## Settings Guide
+
+**Start with defaults.** The default configuration has been tested extensively. Once you're comfortable, experiment with individual gates:
+
+- Turn the **EMA Gate** on to add trend filtering (reduces trades but may improve quality)
+- Turn the **VIX Gate** on to avoid extreme market conditions
+- Adjust the **Session Window** if you want to trade London or Asia sessions
+- Lower **Contracts** to 1–2 for smaller accounts or tighter drawdown limits
+
+**Important:** This is a strategy, not an indicator. Add it from the strategy tab to see full backtest results. Backtest settings use conservative assumptions (6-tick slippage, commissions included).
+
+---
+
+## Alerts
+
+Fully compatible with webhook automation platforms. Alert messages fire in JSON format on every entry and exit:
+
+```
+{"ticker":"MNQ1!","action":"buy","price":24750.00}
+{"ticker":"MNQ1!","action":"sell","price":24750.00}
+{"ticker":"MNQ1!","action":"close"}
+```
+
+---
+
+## Disclaimer
+
+Past performance does not guarantee future results. This strategy is provided for educational and informational purposes. Always backtest thoroughly and paper trade before risking real capital. Futures trading involves substantial risk of loss. Trade responsibly.
+
+Feb 19
+Release Notes
+Wider SL in defaults... lets see... looks promising.

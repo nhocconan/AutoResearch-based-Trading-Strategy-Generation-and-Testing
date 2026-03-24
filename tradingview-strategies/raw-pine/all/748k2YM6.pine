@@ -1,0 +1,206 @@
+//@version=5
+strategy("A股ETF综合择时策略 [左侧激活+衰竭离场]", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=50, pyramiding=2)
+
+//Params
+grp_left  = "左侧策略 (Left-Side)"
+grp_right = "右侧策略 (Right-Side)"
+grp_risk  = "风控 (Risk Management)"
+
+// --- 1. 指标计算 (Indicators) ---
+
+// A. 趋势与波动
+ma_fast = ta.sma(close, 20)
+ma_slow = ta.sma(close, 60) // 生命线
+
+// 乖离率 (Bias) - 用于判断是否跌过头了
+bias_pct = (close - ma_slow) / ma_slow * 100
+
+// 布林带
+bb_len = input.int(20, "BB Length", group=grp_left)
+bb_mult = input.float(2.0, "BB Mult", group=grp_left)
+[bb_mid, bb_upper, bb_lower] = ta.bb(close, bb_len, bb_mult)
+
+// B. 动量
+rsi_len = input.int(14, "RSI Length", group=grp_left)
+// 优化：放宽至30，更容易触发
+rsi_limit = input.int(30, "RSI Oversold Limit", minval=10, maxval=40, group=grp_left)
+rsi = ta.rsi(close, rsi_len)
+
+// CCI
+cci_len = input.int(14, "CCI Length", group=grp_right)
+cci = ta.cci(close, cci_len)
+
+// C. 量能
+v_fast = 12, v_slow = 26, v_sig = 9
+v_macd_line = ta.ema(volume, v_fast) - ta.ema(volume, v_slow)
+v_signal_line = ta.ema(v_macd_line, v_sig)
+
+// D. MACD与底背离 (逻辑简化，提高灵敏度)
+[macd_line, signal_line, macd_hist] = ta.macd(close, 12, 26, 9)
+
+// 寻找Pivot低点 (回溯5根确认1根)
+pl = ta.pivotlow(low, 5, 1)
+
+// 变量：记录背离
+var bool is_div_signal = false
+is_div_signal := false // 重置
+
+if not na(pl)
+    // 简单的单次背离检测
+    // 价格新低 + MACD没新低 + MACD在水下
+    // 移除之前的复杂多重背离，改为单次有效背离
+    // 这里的 macd_hist[1] 对应 pivotlow 确认的那根K线
+    if low[1] < low[5] and macd_hist[1] > macd_hist[5] and macd_hist[1] < 0
+        is_div_signal := true
+
+// E. ATR
+atr_len = input.int(14, "ATR Length", group=grp_risk)
+atr_hard_mult = input.float(2.0, "Left Side Hard Stop", group=grp_risk)
+atr_trail_mult = input.float(3.0, "Global Trailing Stop", group=grp_risk)
+atr = ta.atr(atr_len)
+
+// --- 2. 交易逻辑 (Trading Logic) ---
+
+// === 左侧仓位逻辑 (激活版) ===
+
+// 场景A: 极度恐慌 (RSI低位 + 破布林 + 止跌动作)
+// 止跌动作: 收阳线 或 长下影线
+// 修复：min -> math.min
+is_hammer = (close > open) or ((math.min(close, open) - low) > (high - low) * 0.4) // 下影线超过实体
+cond_panic = rsi < rsi_limit and close < bb_lower and is_hammer
+
+// 场景B: 乖离率超跌 (新增)
+// 如果价格偏离60日线超过 15% (负乖离)，往往有技术性修复
+cond_bias = bias_pct < -15 and is_hammer
+
+// 场景C: 底背离 (动能修复)
+// 要求: 检测到背离信号 + 当前MACD柱子比上一根长 (动能正在加强)
+cond_div = is_div_signal and macd_hist > macd_hist[1]
+
+left_entry_signal = (cond_panic or cond_bias or cond_div) and strategy.position_size == 0 
+
+// === 右侧仓位逻辑 (保持不变) ===
+is_trend_up = macd_line > signal_line and cci > 100 and close > ma_fast
+is_vol_support = v_macd_line > v_signal_line 
+right_entry_signal = is_trend_up and is_vol_support 
+
+// --- 3. 执行策略 ---
+
+if left_entry_signal
+    string entry_msg = cond_div ? "底背离" : (cond_bias ? "超跌乖离" : "恐慌超卖")
+    // 左侧保持默认 50% 仓位
+    strategy.entry("Left_Buy", strategy.long, comment=entry_msg)
+
+if right_entry_signal
+    // 逻辑修改：右侧信号触发时，直接打满仓位
+    // 1. 计算当前账户权益 99% 可以购买的总股数 (预留1%作为缓冲防止资金不足拒单)
+    float target_qty = (strategy.equity * 0.99) / close
+    // 2. 计算需要买入的数量 = 目标数量 - 当前持仓数量
+    float qty_to_buy = target_qty - strategy.position_size
+    
+    // 只有当还需要加仓时才执行
+    if qty_to_buy > 0
+        strategy.entry("Right_Buy", strategy.long, qty=qty_to_buy, comment="右侧满仓")
+
+// --- 4. 离场与风控 (智能衰竭离场) ---
+
+// A. 熊市反弹衰竭 (Smart Exit)
+// 定义空头趋势: MA20 < MA60
+is_bear_trend = ma_fast < ma_slow
+
+if strategy.opentrades > 0 and is_bear_trend
+    if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Left_Buy"
+        // 衰竭信号1: 跌破 MA20 (反弹连短期均线都站不稳)
+        fail_ma20 = close < ma_fast
+        // 衰竭信号2: 触及 MA60 (天花板压力，原逻辑)
+        hit_ma60 = close >= ma_slow
+        // 衰竭信号3: RSI 冲高回落 (例如反弹到50附近掉头)
+        // 逻辑: RSI前值>45 (有过反弹) 且 当前RSI死叉均线(掉头)
+        fail_rsi = rsi[1] > 45 and ta.crossunder(rsi, ta.sma(rsi, 5))
+        
+        if fail_ma20 or hit_ma60 or fail_rsi
+            strategy.close("Left_Buy", comment="熊市衰竭离场")
+
+// B. 左侧硬止损
+if strategy.opentrades > 0
+    if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Left_Buy"
+        stop_level = strategy.opentrades.entry_price(strategy.opentrades - 1) - (atr_hard_mult * atr)
+        if close < stop_level
+            strategy.close("Left_Buy", comment="硬止损")
+
+// C. 全局ATR止盈
+var float highest_price = 0.0
+if strategy.position_size > 0
+    highest_price := math.max(highest_price, high)
+else
+    highest_price := 0.0
+
+trailing_stop = highest_price - (atr_trail_mult * atr)
+trend_break = ta.crossunder(close, ma_fast) and macd_line < signal_line
+
+if strategy.position_size > 0
+    if close < trailing_stop
+        strategy.close_all(comment="ATR止盈")
+    else if trend_break
+        strategy.close_all(comment="趋势破坏")
+
+// --- 5. 绘图 ---
+plot(ma_fast, "MA20", color=color.yellow)
+plot(ma_slow, "MA60", color=color.fuchsia, linewidth=2, title="MA60") 
+plot(strategy.position_size > 0 ? trailing_stop : na, "Stop", color=color.red, style=plot.style_circles)
+
+plotshape(left_entry_signal, title="左侧", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, text="左")
+plotshape(right_entry_signal, title="右侧", style=shape.labelup, location=location.belowbar, color=color.orange, size=size.small, text="右")
+
+View in Pine Editor・153 lines
+Use on chart
+1
+7
+908
+1. Strategy Overview
+
+The "A-Share Broad-Based ETF Dual-Core Timing System" is a quantitative trading strategy tailored for the Chinese A-share market (specifically for broad-based ETFs like CSI 300, CSI 500, STAR 50). Recognizing the market's characteristic of "short bulls, long bears, and sharp bottoms," this strategy employs a "Left-Side Latency + Right-Side Full Position" dual-core driver. It aims to safely bottom-fish during the late stages of a bear market and maximize profits during the main ascending waves of a bull market.
+
+2. Core Logic
+
+A. Left-Side Latency (Rebound/Bottom Fishing)
+
+Capital Allocation: Defaults to 50% position.
+
+Philosophy: "Buy when others fear." Seeks opportunities in extreme panic or momentum divergence.
+
+Entry Signals (Triggered by any of the following):
+
+Extreme Panic: RSI Oversold (<30) + Price below Bollinger Lower Band + Bullish Candle Close (Avoid catching falling knives).
+
+Oversold Bias: Price deviates more than 15% from the 60-day MA (Life Line), betting on mean reversion.
+
+MACD Bullish Divergence: Price makes a new low while MACD histogram does not, accompanied by strengthening momentum.
+
+B. Right-Side Full Position (Trend Following)
+
+Capital Allocation: Aggressively scales up to Full Position (~99%) upon signal trigger.
+
+Philosophy: "Follow the trend." Strike heavily once the trend is confirmed.
+
+Entry Signals (All must be met):
+
+Upward Trend: MACD Golden Cross + Price above 20-day MA.
+
+Breakout Confirmation: CCI indicator breaks above 100, confirming a main ascending wave.
+
+Volume Support: Volume MACD Golden Cross, ensuring price increase is backed by volume.
+
+C. Smart Risk Control
+
+Bear Market Exhaustion Exit: In a bearish trend (MA20 < MA60), the strategy does not "hold and hope." It immediately liquidates left-side positions upon signs of rebound exhaustion (breaking below MA20, touching MA60 resistance, or RSI failure).
+
+ATR Trailing Stop: Uses Average True Range (ATR) to calculate a dynamic stop-profit line that rises with the price to lock in profits.
+
+Hard Stop Loss: Forces a stop-loss if the left-side bottom fishing fails and losses exceed a set ATR multiple, preventing deep drawdowns.
+
+3. Recommendations
+
+Target Assets: High liquidity broad-based ETFs such as CSI 300 ETF (510300), CSI 500 ETF (510500), ChiNext ETF (159915), STAR 50 ETF (588000).
+
+Timeframe: Daily Chart.

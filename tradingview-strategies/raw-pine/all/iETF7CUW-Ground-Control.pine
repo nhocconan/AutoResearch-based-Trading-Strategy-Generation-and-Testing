@@ -1,0 +1,689 @@
+//@version=5
+strategy("Ground Control", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_every_tick=true)
+
+// ============================================
+// POSITION SIZING
+// ============================================
+tradeDirection = input.string("Long", "Trade Direction", options=["Long", "Short", "Both"], group="Position Sizing")
+invertForShorts = input.bool(true, "Invert Indicators for Shorts", tooltip="When enabled, short entries trigger on opposite conditions (e.g., RSI > 90 instead of < 10)", group="Position Sizing")
+positionMode = input.string("Percent", "Position Size Mode", options=["Percent", "Fixed Units", "Fixed Cash"], group="Position Sizing")
+positionPercent = input.float(100, "Position Size (%)", minval=1, maxval=100, group="Position Sizing")
+positionUnits = input.float(100, "Position Units (Shares)", minval=1, group="Position Sizing")
+positionCash = input.float(10000, "Position Cash ($)", minval=1, group="Position Sizing")
+
+// ============================================
+// COOL OFF PERIOD (NEW!)
+// ============================================
+useCoolOff = input.bool(false, "Use Cool Off After Loss", group="Cool Off Period", tooltip="Wait before re-entering after a losing trade")
+coolOffPeriod = input.string("1 Day", "Cool Off Period", options=["1 Day", "1 Week", "1 Month"], group="Cool Off Period")
+
+// Convert cool off period to bars (assuming 1-hour timeframe)
+int coolOffBars = switch coolOffPeriod
+    "1 Day" => 24      // 24 hours
+    "1 Week" => 168    // 7 * 24 hours  
+    "1 Month" => 720   // ~30 * 24 hours
+    => 24
+
+// Track last trade result and bar index
+var int lastExitBar = 0
+var bool lastTradeWasLoss = false
+
+// Detect when a position closes
+positionClosed = strategy.position_size[1] != 0 and strategy.position_size == 0
+
+// Update tracking when position closes
+if positionClosed
+    lastExitBar := bar_index
+    lastTradeWasLoss := (strategy.netprofit - strategy.netprofit[1]) < 0
+
+// Check if we're in cool off period
+barsSinceExit = bar_index - lastExitBar
+inCoolOffPeriod = useCoolOff and lastTradeWasLoss and barsSinceExit < coolOffBars and lastExitBar > 0
+
+// ============================================
+// ENTRY PARAMETERS
+// ============================================
+// RSI Entry
+useRsiEntry = input.bool(true, "Use RSI for Entry", group="Entry Parameters", tooltip="Long: RSI condition | Short (inverted): Opposite RSI condition")
+rsiEntryMode = input.string("Below", "RSI Entry Mode", options=["Below", "Above"], group="Entry Parameters", tooltip="Below: RSI < level | Above: RSI > level | Short inverts these")
+rsiEntry = input.float(10, "RSI Entry Level", group="Entry Parameters", tooltip="Long: Triggers at this level | Short (inverted): Triggers at (100 - this)")
+useRsiMaEntry = input.bool(false, "Use RSI MA for Entry", group="Entry Parameters", tooltip="Long: RSI MA below level | Short (inverted): RSI MA above (100-level)")
+rsiMaEntryMode = input.string("Below", "RSI MA Entry Mode", options=["Below", "Above"], group="Entry Parameters", tooltip="Below: RSI MA < level | Above: RSI MA > level | Short inverts these")
+rsiMaEntry = input.float(30, "RSI MA Entry Level", group="Entry Parameters", tooltip="Long: Triggers at this level | Short (inverted): Triggers at (100 - this)")
+
+// MFI Entry
+useMfiEntry = input.bool(false, "Use MFI for Entry", group="Entry Parameters", tooltip="Long: MFI condition | Short (inverted): Opposite MFI condition")
+mfiEntryMode = input.string("Below", "MFI Entry Mode", options=["Below", "Above"], group="Entry Parameters", tooltip="Below: MFI < level | Above: MFI > level | Short inverts these")
+mfiEntry = input.float(20, "MFI Entry Level", group="Entry Parameters", tooltip="Long: Triggers at this level | Short (inverted): Triggers at (100 - this)")
+
+// MACD Entry
+useMacdEntry = input.bool(false, "Use MACD for Entry", group="Entry Parameters", tooltip="Long: MACD condition | Short (inverted): Opposite MACD condition")
+macdEntryMode = input.string("Crossover", "MACD Entry Mode", options=["Crossover", "Histogram Below", "Line Below"], group="Entry Parameters", tooltip="Crossover: MACD crosses above signal | Short inverts to Crossunder")
+macdEntryLevel = input.float(0, "MACD Entry Level", group="Entry Parameters", tooltip="For Histogram/Line modes | Short (inverted): Uses negative of this")
+
+// MA Filter Entry
+useMaFilterEntry = input.bool(false, "Require Price Below MA", group="Entry Parameters", tooltip="Long: Price < MA | Short (inverted): Price > MA")
+useMaPctEntry = input.bool(false, "Require Price % Below MA", group="Entry Parameters", tooltip="Long: Price X% below MA | Short (inverted): Price X% above MA")
+maPctEntryLevel = input.float(2.0, "Entry % From MA", minval=0.1, step=0.1, group="Entry Parameters", tooltip="Percentage distance from MA required")
+useMaAboveEntry = input.bool(false, "Require Price Above MA", group="Entry Parameters", tooltip="Long: Price > MA | Short (inverted): Price < MA")
+useMaPctAboveEntry = input.bool(false, "Require Price % Above MA", group="Entry Parameters", tooltip="Long: Price X% above MA | Short (inverted): Price X% below MA")
+maPctAboveEntryLevel = input.float(2.0, "Entry % Above MA", minval=0.1, step=0.1, group="Entry Parameters", tooltip="Percentage distance above MA required")
+
+// MA Crossover Entry
+useMaCrossEntry = input.bool(false, "Use MA Crossover for Entry", group="Entry Parameters", tooltip="Long: Selected direction | Short (inverted): Opposite direction")
+maCrossDirection = input.string("Crossover (Up)", "MA Cross Direction", options=["Crossover (Up)", "Crossunder (Down)"], group="Entry Parameters", tooltip="Crossover: Fast crosses above Slow | Crossunder: Fast crosses below Slow | Short inverts")
+fastMaLength = input.int(50, "Fast MA Length", minval=1, group="Entry Parameters")
+fastMaType = input.string("EMA", "Fast MA Type", options=["SMA", "EMA", "WMA", "HMA"], group="Entry Parameters")
+
+// Supertrend Entry
+useSupertrendEntry = input.bool(false, "Use Supertrend for Entry", group="Entry Parameters", tooltip="Long: Uptrend/Buy signal | Short (inverted): Downtrend/Sell signal")
+supertrendEntryMode = input.string("Trend Direction", "Supertrend Entry Mode", options=["Trend Direction", "Signal (Crossover)"], group="Entry Parameters", tooltip="Trend Direction: Price above/below ST | Signal: Trend change crossover")
+supertrendEntryDir = input.string("Uptrend", "Supertrend Entry Direction", options=["Uptrend", "Downtrend"], group="Entry Parameters", tooltip="Uptrend: Price above ST | Downtrend: Price below ST | Short inverts")
+supertrendAtrPeriod = input.int(10, "Supertrend ATR Period", minval=1, group="Entry Parameters")
+supertrendAtrMult = input.float(2.0, "Supertrend ATR Multiplier", minval=0.1, step=0.1, group="Entry Parameters")
+
+// Entry Logic
+requireBothEntry = input.bool(true, "Require ALL enabled for Entry", group="Entry Parameters")
+
+// ============================================
+// EXIT PARAMETERS
+// ============================================
+// RSI Exit
+useRsiExit = input.bool(true, "Use RSI for Exit", group="Exit Parameters", tooltip="Long: RSI condition | Short (inverted): Opposite RSI condition")
+rsiExitMode = input.string("Above", "RSI Exit Mode", options=["Below", "Above"], group="Exit Parameters", tooltip="Above: RSI > level | Below: RSI < level | Short inverts these")
+rsiExit = input.float(70, "RSI Exit Level", group="Exit Parameters", tooltip="Long: Triggers at this level | Short (inverted): Triggers at (100 - this)")
+useRsiMaExit = input.bool(false, "Use RSI MA for Exit", group="Exit Parameters", tooltip="Long: RSI MA condition | Short (inverted): Opposite RSI MA condition")
+rsiMaExitMode = input.string("Above", "RSI MA Exit Mode", options=["Below", "Above"], group="Exit Parameters", tooltip="Above: RSI MA > level | Below: RSI MA < level | Short inverts these")
+rsiMaExit = input.float(50, "RSI MA Exit Level", group="Exit Parameters", tooltip="Long: Triggers at this level | Short (inverted): Triggers at (100 - this)")
+
+// MFI Exit
+useMfiExit = input.bool(false, "Use MFI for Exit", group="Exit Parameters", tooltip="Long: MFI condition | Short (inverted): Opposite MFI condition")
+mfiExitMode = input.string("Above", "MFI Exit Mode", options=["Below", "Above"], group="Exit Parameters", tooltip="Above: MFI > level | Below: MFI < level | Short inverts these")
+mfiExit = input.float(80, "MFI Exit Level", group="Exit Parameters", tooltip="Long: Triggers at this level | Short (inverted): Triggers at (100 - this)")
+
+// MACD Exit
+useMacdExit = input.bool(false, "Use MACD for Exit", group="Exit Parameters", tooltip="Long: MACD condition | Short (inverted): Opposite MACD condition")
+macdExitMode = input.string("Crossunder", "MACD Exit Mode", options=["Crossunder", "Histogram Above", "Line Above"], group="Exit Parameters", tooltip="Crossunder: MACD crosses below signal | Short inverts to Crossover")
+macdExitLevel = input.float(0, "MACD Exit Level", group="Exit Parameters", tooltip="For Histogram/Line modes | Short (inverted): Uses negative of this")
+
+// MA Filter Exit
+useMaFilterExit = input.bool(false, "Require Price Below MA", group="Exit Parameters", tooltip="Long: Price < MA to exit | Short (inverted): Price > MA to exit")
+useMaPctExit = input.bool(false, "Require Price % Below MA", group="Exit Parameters", tooltip="Long: Price X% below MA | Short (inverted): Price X% above MA")
+maPctExitLevel = input.float(2.0, "Exit % From MA", minval=0.1, step=0.1, group="Exit Parameters", tooltip="Percentage distance from MA required")
+useMaAboveExit = input.bool(false, "Require Price Above MA", group="Exit Parameters", tooltip="Long: Price > MA to exit | Short (inverted): Price < MA to exit")
+useMaPctAboveExit = input.bool(false, "Require Price % Above MA", group="Exit Parameters", tooltip="Long: Price X% above MA | Short (inverted): Price X% below MA")
+maPctAboveExitLevel = input.float(2.0, "Exit % Above MA", minval=0.1, step=0.1, group="Exit Parameters", tooltip="Percentage distance above MA required")
+
+// MA Crossover Exit
+useMaCrossExit = input.bool(false, "Use MA Crossover for Exit", group="Exit Parameters", tooltip="Long: Selected direction | Short (inverted): Opposite direction")
+maCrossExitDirection = input.string("Crossunder (Down)", "MA Cross Exit Direction", options=["Crossover (Up)", "Crossunder (Down)"], group="Exit Parameters", tooltip="Crossunder: Fast crosses below Slow | Crossover: Fast crosses above Slow | Short inverts")
+
+// Supertrend Exit
+useSupertrendExit = input.bool(false, "Use Supertrend for Exit", group="Exit Parameters", tooltip="Long: Downtrend/Sell signal | Short (inverted): Uptrend/Buy signal")
+supertrendExitMode = input.string("Signal (Crossover)", "Supertrend Exit Mode", options=["Trend Direction", "Signal (Crossover)"], group="Exit Parameters", tooltip="Trend Direction: Price below/above ST | Signal: Trend change crossover")
+supertrendExitDir = input.string("Downtrend", "Supertrend Exit Direction", options=["Uptrend", "Downtrend"], group="Exit Parameters", tooltip="Downtrend: Price below ST | Uptrend: Price above ST | Short inverts")
+
+// Exit Logic
+requireBothExit = input.bool(false, "Require ALL enabled for Exit", group="Exit Parameters")
+
+// Stop Loss
+useStopLoss = input.bool(false, "Use Stop Loss", group="Exit Parameters")
+stopLossMode = input.string("Dollar", "Stop Loss Mode", options=["Dollar", "Percent"], group="Exit Parameters")
+stopLossAmount = input.float(5.0, "Stop Loss Amount ($)", minval=0.1, step=0.5, group="Exit Parameters")
+stopLossPercent = input.float(2.0, "Stop Loss Percent (%)", minval=0.1, step=0.1, group="Exit Parameters")
+
+// Take Profit
+useTakeProfit = input.bool(false, "Use Take Profit", group="Exit Parameters")
+tpOverrideIndicators = input.bool(false, "Take Profit Overrides Indicators", group="Exit Parameters")
+takeProfitMode = input.string("Dollar", "Take Profit Mode", options=["Dollar", "Percent"], group="Exit Parameters")
+takeProfitAmount = input.float(10.0, "Take Profit Amount ($)", minval=0.1, step=0.5, group="Exit Parameters")
+takeProfitPercent = input.float(2.0, "Take Profit Percent (%)", minval=0.1, step=0.1, group="Exit Parameters")
+
+// ============================================
+// INDICATOR SETTINGS
+// ============================================
+rsiLength = input.int(2, "RSI Length", group="Indicator Settings")
+rsiMaLength = input.int(14, "RSI MA Length", group="Indicator Settings")
+mfiLength = input.int(14, "MFI Length", group="Indicator Settings")
+macdFast = input.int(12, "MACD Fast Length", group="Indicator Settings")
+macdSlow = input.int(26, "MACD Slow Length", group="Indicator Settings")
+macdSignal = input.int(9, "MACD Signal Length", group="Indicator Settings")
+maLength = input.int(200, "MA Length", group="Indicator Settings")
+maType = input.string("EMA", "MA Type", options=["SMA", "EMA", "WMA", "HMA"], group="Indicator Settings")
+
+// CALCULATIONS
+rsiValue = ta.rsi(close, rsiLength)
+rsiMaValue = ta.sma(rsiValue, rsiMaLength)
+mfiValue = ta.mfi(hlc3, mfiLength)
+
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+float ma = switch maType
+    "SMA" => ta.sma(close, maLength)
+    "EMA" => ta.ema(close, maLength)
+    "WMA" => ta.wma(close, maLength)
+    "HMA" => ta.hma(close, maLength)
+    => ta.ema(close, maLength)
+
+// Fast MA for crossover
+float fastMa = switch fastMaType
+    "SMA" => ta.sma(close, fastMaLength)
+    "EMA" => ta.ema(close, fastMaLength)
+    "WMA" => ta.wma(close, fastMaLength)
+    "HMA" => ta.hma(close, fastMaLength)
+    => ta.ema(close, fastMaLength)
+
+// Supertrend calculation
+[supertrendLine, supertrendDir] = ta.supertrend(supertrendAtrMult, supertrendAtrPeriod)
+supertrendUptrend = supertrendDir < 0
+supertrendDowntrend = supertrendDir > 0
+supertrendBuySignal = supertrendDir < 0 and supertrendDir[1] > 0
+supertrendSellSignal = supertrendDir > 0 and supertrendDir[1] < 0
+
+// CONDITIONS
+belowMa = close < ma
+aboveMa = close > ma
+pctBelowMa = (ma - close) / ma * 100
+belowMaPct = pctBelowMa >= maPctEntryLevel
+pctAboveMa = (close - ma) / ma * 100
+aboveMaPct = pctAboveMa >= maPctAboveEntryLevel
+
+// Exit MA conditions
+belowMaPctExit = pctBelowMa >= maPctExitLevel
+aboveMaPctExit = pctAboveMa >= maPctAboveExitLevel
+
+// MA conditions inverted for shorts (entry)
+belowMaShort = aboveMa
+aboveMaShort = belowMa
+belowMaPctShort = aboveMaPct
+aboveMaPctShort = belowMaPct
+
+// MA conditions inverted for shorts (exit)
+belowMaPctExitShort = aboveMaPctExit
+aboveMaPctExitShort = belowMaPctExit
+
+// RSI conditions
+rsiEntryOk = rsiEntryMode == "Below" ? rsiValue < rsiEntry : rsiValue > rsiEntry
+rsiExitOk = rsiExitMode == "Above" ? rsiValue > rsiExit : rsiValue < rsiExit
+
+// RSI conditions inverted for shorts
+rsiEntryOkShort = rsiEntryMode == "Below" ? rsiValue > (100 - rsiEntry) : rsiValue < (100 - rsiEntry)
+rsiExitOkShort = rsiExitMode == "Above" ? rsiValue < (100 - rsiExit) : rsiValue > (100 - rsiExit)
+
+// RSI MA conditions
+rsiMaEntryOk = rsiMaEntryMode == "Below" ? rsiMaValue < rsiMaEntry : rsiMaValue > rsiMaEntry
+rsiMaExitOk = rsiMaExitMode == "Above" ? rsiMaValue > rsiMaExit : rsiMaValue < rsiMaExit
+
+// RSI MA conditions inverted for shorts
+rsiMaEntryOkShort = rsiMaEntryMode == "Below" ? rsiMaValue > (100 - rsiMaEntry) : rsiMaValue < (100 - rsiMaEntry)
+rsiMaExitOkShort = rsiMaExitMode == "Above" ? rsiMaValue < (100 - rsiMaExit) : rsiMaValue > (100 - rsiMaExit)
+
+// MFI conditions
+mfiEntryOk = mfiEntryMode == "Below" ? mfiValue < mfiEntry : mfiValue > mfiEntry
+mfiExitOk = mfiExitMode == "Above" ? mfiValue > mfiExit : mfiValue < mfiExit
+
+// MFI conditions inverted for shorts
+mfiEntryOkShort = mfiEntryMode == "Below" ? mfiValue > (100 - mfiEntry) : mfiValue < (100 - mfiEntry)
+mfiExitOkShort = mfiExitMode == "Above" ? mfiValue < (100 - mfiExit) : mfiValue > (100 - mfiExit)
+
+// MACD conditions
+macdEntryOk = switch macdEntryMode
+    "Crossover" => ta.crossover(macdLine, signalLine)
+    "Histogram Below" => histLine < macdEntryLevel
+    "Line Below" => macdLine < macdEntryLevel
+    => ta.crossover(macdLine, signalLine)
+
+macdExitOk = switch macdExitMode
+    "Crossunder" => ta.crossunder(macdLine, signalLine)
+    "Histogram Above" => histLine > macdExitLevel
+    "Line Above" => macdLine > macdExitLevel
+    => ta.crossunder(macdLine, signalLine)
+
+// MACD conditions inverted for shorts
+macdEntryOkShort = switch macdEntryMode
+    "Crossover" => ta.crossunder(macdLine, signalLine)
+    "Histogram Below" => histLine > -macdEntryLevel
+    "Line Below" => macdLine > -macdEntryLevel
+    => ta.crossunder(macdLine, signalLine)
+
+macdExitOkShort = switch macdExitMode
+    "Crossunder" => ta.crossover(macdLine, signalLine)
+    "Histogram Above" => histLine < -macdExitLevel
+    "Line Above" => macdLine < -macdExitLevel
+    => ta.crossover(macdLine, signalLine)
+
+// MA Crossover conditions
+maCrossoverOk = ta.crossover(fastMa, ma)
+maCrossunderOk = ta.crossunder(fastMa, ma)
+maCrossEntryOk = maCrossDirection == "Crossover (Up)" ? maCrossoverOk : maCrossunderOk
+maCrossEntryOkShort = maCrossDirection == "Crossover (Up)" ? maCrossunderOk : maCrossoverOk
+
+// MA Crossover exit conditions
+maCrossExitOk = maCrossExitDirection == "Crossunder (Down)" ? maCrossunderOk : maCrossoverOk
+maCrossExitOkShort = maCrossExitDirection == "Crossunder (Down)" ? maCrossoverOk : maCrossunderOk
+
+// Supertrend conditions based on selected direction
+supertrendEntryTrendOk = supertrendEntryDir == "Uptrend" ? supertrendUptrend : supertrendDowntrend
+supertrendEntrySignalOk = supertrendEntryDir == "Uptrend" ? supertrendBuySignal : supertrendSellSignal
+supertrendEntryOk = supertrendEntryMode == "Trend Direction" ? supertrendEntryTrendOk : supertrendEntrySignalOk
+
+supertrendExitTrendOk = supertrendExitDir == "Downtrend" ? supertrendDowntrend : supertrendUptrend
+supertrendExitSignalOk = supertrendExitDir == "Downtrend" ? supertrendSellSignal : supertrendBuySignal
+supertrendExitOk = supertrendExitMode == "Trend Direction" ? supertrendExitTrendOk : supertrendExitSignalOk
+
+// Supertrend conditions inverted for shorts
+supertrendEntryTrendOkShort = supertrendEntryDir == "Uptrend" ? supertrendDowntrend : supertrendUptrend
+supertrendEntrySignalOkShort = supertrendEntryDir == "Uptrend" ? supertrendSellSignal : supertrendBuySignal
+supertrendEntryOkShort = supertrendEntryMode == "Trend Direction" ? supertrendEntryTrendOkShort : supertrendEntrySignalOkShort
+
+supertrendExitTrendOkShort = supertrendExitDir == "Downtrend" ? supertrendUptrend : supertrendDowntrend
+supertrendExitSignalOkShort = supertrendExitDir == "Downtrend" ? supertrendBuySignal : supertrendSellSignal
+supertrendExitOkShort = supertrendExitMode == "Trend Direction" ? supertrendExitTrendOkShort : supertrendExitSignalOkShort
+
+// Combined LONG entry logic
+var bool longEntrySignal = false
+if requireBothEntry
+    longEntrySignal := true
+    if useRsiEntry
+        longEntrySignal := longEntrySignal and rsiEntryOk
+    if useRsiMaEntry
+        longEntrySignal := longEntrySignal and rsiMaEntryOk
+    if useMfiEntry
+        longEntrySignal := longEntrySignal and mfiEntryOk
+    if useMacdEntry
+        longEntrySignal := longEntrySignal and macdEntryOk
+    if useMaPctEntry
+        longEntrySignal := longEntrySignal and belowMaPct
+    if useMaFilterEntry
+        longEntrySignal := longEntrySignal and belowMa
+    if useMaPctAboveEntry
+        longEntrySignal := longEntrySignal and aboveMaPct
+    if useMaAboveEntry
+        longEntrySignal := longEntrySignal and aboveMa
+    if useMaCrossEntry
+        longEntrySignal := longEntrySignal and maCrossEntryOk
+    if useSupertrendEntry
+        longEntrySignal := longEntrySignal and supertrendEntryOk
+    if not useRsiEntry and not useRsiMaEntry and not useMfiEntry and not useMacdEntry and not useMaPctEntry and not useMaFilterEntry and not useMaPctAboveEntry and not useMaAboveEntry and not useMaCrossEntry and not useSupertrendEntry
+        longEntrySignal := false
+else
+    longEntrySignal := false
+    if useRsiEntry
+        longEntrySignal := longEntrySignal or rsiEntryOk
+    if useRsiMaEntry
+        longEntrySignal := longEntrySignal or rsiMaEntryOk
+    if useMfiEntry
+        longEntrySignal := longEntrySignal or mfiEntryOk
+    if useMacdEntry
+        longEntrySignal := longEntrySignal or macdEntryOk
+    if useMaPctEntry
+        longEntrySignal := longEntrySignal or belowMaPct
+    if useMaFilterEntry
+        longEntrySignal := longEntrySignal or belowMa
+    if useMaPctAboveEntry
+        longEntrySignal := longEntrySignal or aboveMaPct
+    if useMaAboveEntry
+        longEntrySignal := longEntrySignal or aboveMa
+    if useMaCrossEntry
+        longEntrySignal := longEntrySignal or maCrossEntryOk
+    if useSupertrendEntry
+        longEntrySignal := longEntrySignal or supertrendEntryOk
+
+// Combined SHORT entry logic (inverted if enabled)
+var bool shortEntrySignal = false
+if requireBothEntry
+    shortEntrySignal := true
+    if useRsiEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? rsiEntryOkShort : rsiEntryOk)
+    if useRsiMaEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? rsiMaEntryOkShort : rsiMaEntryOk)
+    if useMfiEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? mfiEntryOkShort : mfiEntryOk)
+    if useMacdEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? macdEntryOkShort : macdEntryOk)
+    if useMaPctEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? belowMaPctShort : belowMaPct)
+    if useMaFilterEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? belowMaShort : belowMa)
+    if useMaPctAboveEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? aboveMaPctShort : aboveMaPct)
+    if useMaAboveEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? aboveMaShort : aboveMa)
+    if useMaCrossEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? maCrossEntryOkShort : maCrossEntryOk)
+    if useSupertrendEntry
+        shortEntrySignal := shortEntrySignal and (invertForShorts ? supertrendEntryOkShort : supertrendEntryOk)
+    if not useRsiEntry and not useRsiMaEntry and not useMfiEntry and not useMacdEntry and not useMaPctEntry and not useMaFilterEntry and not useMaPctAboveEntry and not useMaAboveEntry and not useMaCrossEntry and not useSupertrendEntry
+        shortEntrySignal := false
+else
+    shortEntrySignal := false
+    if useRsiEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? rsiEntryOkShort : rsiEntryOk)
+    if useRsiMaEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? rsiMaEntryOkShort : rsiMaEntryOk)
+    if useMfiEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? mfiEntryOkShort : mfiEntryOk)
+    if useMacdEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? macdEntryOkShort : macdEntryOk)
+    if useMaPctEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? belowMaPctShort : belowMaPct)
+    if useMaFilterEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? belowMaShort : belowMa)
+    if useMaPctAboveEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? aboveMaPctShort : aboveMaPct)
+    if useMaAboveEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? aboveMaShort : aboveMa)
+    if useMaCrossEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? maCrossEntryOkShort : maCrossEntryOk)
+    if useSupertrendEntry
+        shortEntrySignal := shortEntrySignal or (invertForShorts ? supertrendEntryOkShort : supertrendEntryOk)
+
+// Combined LONG exit logic
+var bool longExitSignal = false
+if requireBothExit
+    longExitSignal := true
+    if useRsiExit
+        longExitSignal := longExitSignal and rsiExitOk
+    if useRsiMaExit
+        longExitSignal := longExitSignal and rsiMaExitOk
+    if useMfiExit
+        longExitSignal := longExitSignal and mfiExitOk
+    if useMacdExit
+        longExitSignal := longExitSignal and macdExitOk
+    if useMaCrossExit
+        longExitSignal := longExitSignal and maCrossExitOk
+    if useSupertrendExit
+        longExitSignal := longExitSignal and supertrendExitOk
+    if useMaFilterExit
+        longExitSignal := longExitSignal and belowMa
+    if useMaPctExit
+        longExitSignal := longExitSignal and belowMaPctExit
+    if useMaAboveExit
+        longExitSignal := longExitSignal and aboveMa
+    if useMaPctAboveExit
+        longExitSignal := longExitSignal and aboveMaPctExit
+    if not useRsiExit and not useRsiMaExit and not useMfiExit and not useMacdExit and not useMaCrossExit and not useSupertrendExit and not useMaFilterExit and not useMaPctExit and not useMaAboveExit and not useMaPctAboveExit
+        longExitSignal := false
+else
+    longExitSignal := false
+    if useRsiExit
+        longExitSignal := longExitSignal or rsiExitOk
+    if useRsiMaExit
+        longExitSignal := longExitSignal or rsiMaExitOk
+    if useMfiExit
+        longExitSignal := longExitSignal or mfiExitOk
+    if useMacdExit
+        longExitSignal := longExitSignal or macdExitOk
+    if useMaCrossExit
+        longExitSignal := longExitSignal or maCrossExitOk
+    if useSupertrendExit
+        longExitSignal := longExitSignal or supertrendExitOk
+    if useMaFilterExit
+        longExitSignal := longExitSignal or belowMa
+    if useMaPctExit
+        longExitSignal := longExitSignal or belowMaPctExit
+    if useMaAboveExit
+        longExitSignal := longExitSignal or aboveMa
+    if useMaPctAboveExit
+        longExitSignal := longExitSignal or aboveMaPctExit
+
+// Combined SHORT exit logic (inverted if enabled)
+var bool shortExitSignal = false
+if requireBothExit
+    shortExitSignal := true
+    if useRsiExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? rsiExitOkShort : rsiExitOk)
+    if useRsiMaExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? rsiMaExitOkShort : rsiMaExitOk)
+    if useMfiExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? mfiExitOkShort : mfiExitOk)
+    if useMacdExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? macdExitOkShort : macdExitOk)
+    if useMaCrossExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? maCrossExitOkShort : maCrossExitOk)
+    if useSupertrendExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? supertrendExitOkShort : supertrendExitOk)
+    if useMaFilterExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? aboveMa : belowMa)
+    if useMaPctExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? belowMaPctExitShort : belowMaPctExit)
+    if useMaAboveExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? belowMa : aboveMa)
+    if useMaPctAboveExit
+        shortExitSignal := shortExitSignal and (invertForShorts ? aboveMaPctExitShort : aboveMaPctExit)
+    if not useRsiExit and not useRsiMaExit and not useMfiExit and not useMacdExit and not useMaCrossExit and not useSupertrendExit and not useMaFilterExit and not useMaPctExit and not useMaAboveExit and not useMaPctAboveExit
+        shortExitSignal := false
+else
+    shortExitSignal := false
+    if useRsiExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? rsiExitOkShort : rsiExitOk)
+    if useRsiMaExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? rsiMaExitOkShort : rsiMaExitOk)
+    if useMfiExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? mfiExitOkShort : mfiExitOk)
+    if useMacdExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? macdExitOkShort : macdExitOk)
+    if useMaCrossExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? maCrossExitOkShort : maCrossExitOk)
+    if useSupertrendExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? supertrendExitOkShort : supertrendExitOk)
+    if useMaFilterExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? aboveMa : belowMa)
+    if useMaPctExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? belowMaPctExitShort : belowMaPctExit)
+    if useMaAboveExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? belowMa : aboveMa)
+    if useMaPctAboveExit
+        shortExitSignal := shortExitSignal or (invertForShorts ? aboveMaPctExitShort : aboveMaPctExit)
+
+// Take Profit overrides indicator exits (if enabled)
+if useTakeProfit and tpOverrideIndicators
+    longExitSignal := false
+    shortExitSignal := false
+
+// ENTRY/EXIT
+float qty = na
+if positionMode == "Percent"
+    qty := math.max(1, math.abs(strategy.equity * positionPercent / 100 / close))
+else if positionMode == "Fixed Units"
+    qty := positionUnits
+else if positionMode == "Fixed Cash"
+    qty := math.max(1, positionCash / close)
+
+bool canLong = tradeDirection == "Long" or tradeDirection == "Both"
+bool canShort = tradeDirection == "Short" or tradeDirection == "Both"
+
+// ENTRIES WITH COOL OFF CHECK (MODIFIED!)
+if longEntrySignal and canLong and not inCoolOffPeriod
+    strategy.entry("Long", strategy.long, qty=qty)
+
+if shortEntrySignal and canShort and not inCoolOffPeriod
+    strategy.entry("Short", strategy.short, qty=qty)
+
+// STOP LOSS & TAKE PROFIT
+bool isLong = strategy.position_size > 0
+bool isShort = strategy.position_size < 0
+
+float stopPrice = na
+if useStopLoss
+    if stopLossMode == "Dollar"
+        stopPrice := isLong ? strategy.position_avg_price - stopLossAmount : strategy.position_avg_price + stopLossAmount
+    else if stopLossMode == "Percent"
+        stopPrice := isLong ? strategy.position_avg_price * (1 - stopLossPercent / 100) : strategy.position_avg_price * (1 + stopLossPercent / 100)
+
+float tpPrice = na
+if useTakeProfit
+    if takeProfitMode == "Dollar"
+        tpPrice := isLong ? strategy.position_avg_price + takeProfitAmount : strategy.position_avg_price - takeProfitAmount
+    else if takeProfitMode == "Percent"
+        tpPrice := isLong ? strategy.position_avg_price * (1 + takeProfitPercent / 100) : strategy.position_avg_price * (1 - takeProfitPercent / 100)
+
+if isLong
+    if useStopLoss and useTakeProfit
+        strategy.exit("SL/TP", "Long", stop=stopPrice, limit=tpPrice)
+    else if useStopLoss
+        strategy.exit("Stop Loss", "Long", stop=stopPrice)
+    else if useTakeProfit
+        strategy.exit("Take Profit", "Long", limit=tpPrice)
+
+if isShort
+    if useStopLoss and useTakeProfit
+        strategy.exit("SL/TP", "Short", stop=stopPrice, limit=tpPrice)
+    else if useStopLoss
+        strategy.exit("Stop Loss", "Short", stop=stopPrice)
+    else if useTakeProfit
+        strategy.exit("Take Profit", "Short", limit=tpPrice)
+
+if longExitSignal
+    if isLong
+        strategy.close("Long")
+if shortExitSignal
+    if isShort
+        strategy.close("Short")
+
+// PLOTTING
+plot(ma, "MA", color.purple, 2)
+plot(useMaCrossEntry or useMaCrossExit ? fastMa : na, "Fast MA", color.orange, 2)
+
+supertrendColor = supertrendUptrend ? color.lime : color.red
+plot(useSupertrendEntry or useSupertrendExit ? supertrendLine : na, "Supertrend", supertrendColor, 2, plot.style_linebr)
+
+float entryLine = strategy.position_size != 0 ? strategy.position_avg_price : na
+plot(entryLine, "Entry Price", color.blue, 1, plot.style_linebr)
+
+float stopLossLine = na
+if useStopLoss and strategy.position_size != 0
+    if stopLossMode == "Dollar"
+        stopLossLine := isLong ? strategy.position_avg_price - stopLossAmount : strategy.position_avg_price + stopLossAmount
+    else if stopLossMode == "Percent"
+        stopLossLine := isLong ? strategy.position_avg_price * (1 - stopLossPercent / 100) : strategy.position_avg_price * (1 + stopLossPercent / 100)
+plot(stopLossLine, "Stop Loss", color.red, 2, plot.style_linebr)
+
+float tpLine = na
+if useTakeProfit and strategy.position_size != 0
+    if takeProfitMode == "Dollar"
+        tpLine := isLong ? strategy.position_avg_price + takeProfitAmount : strategy.position_avg_price - takeProfitAmount
+    else if takeProfitMode == "Percent"
+        tpLine := isLong ? strategy.position_avg_price * (1 + takeProfitPercent / 100) : strategy.position_avg_price * (1 - takeProfitPercent / 100)
+plot(tpLine, "Take Profit", color.green, 2, plot.style_linebr)
+
+plotshape(longEntrySignal and canLong and not inCoolOffPeriod, "Long Entry", shape.triangleup, location.belowbar, color.lime)
+plotshape(shortEntrySignal and canShort and not inCoolOffPeriod, "Short Entry", shape.triangledown, location.abovebar, color.fuchsia)
+plotshape(longExitSignal and isLong, "Long Exit", shape.xcross, location.abovebar, color.red)
+plotshape(shortExitSignal and isShort, "Short Exit", shape.xcross, location.belowbar, color.green)
+
+// Cool off indicator on chart
+plotshape(inCoolOffPeriod and longEntrySignal and canLong, "Blocked Entry (Cool Off)", shape.xcross, location.belowbar, color.orange, size=size.small)
+
+// INFO TABLE
+var table infoTable = table.new(position.top_right, 2, 16, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Indicator", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, tradeDirection == "Short" and invertForShorts ? "SHORT (Inverted)" : tradeDirection == "Both" and invertForShorts ? "LONG / SHORT (Inv)" : tradeDirection, text_color=color.yellow, text_size=size.small)
+    
+    rsiEntryTextLong = rsiEntryMode == "Below" ? "RSI < " + str.tostring(rsiEntry) : "RSI > " + str.tostring(rsiEntry)
+    rsiEntryTextShort = rsiEntryMode == "Below" ? "RSI > " + str.tostring(100 - rsiEntry) : "RSI < " + str.tostring(100 - rsiEntry)
+    rsiEntryText = useRsiEntry ? (tradeDirection == "Short" and invertForShorts ? rsiEntryTextShort : rsiEntryTextLong) : "OFF"
+    table.cell(infoTable, 0, 1, "RSI Entry", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 1, rsiEntryText, text_color=useRsiEntry ? color.lime : color.gray, text_size=size.tiny)
+    
+    rsiExitTextLong = rsiExitMode == "Above" ? "RSI > " + str.tostring(rsiExit) : "RSI < " + str.tostring(rsiExit)
+    rsiExitTextShort = rsiExitMode == "Above" ? "RSI < " + str.tostring(100 - rsiExit) : "RSI > " + str.tostring(100 - rsiExit)
+    rsiExitText = useRsiExit ? (tradeDirection == "Short" and invertForShorts ? rsiExitTextShort : rsiExitTextLong) : "OFF"
+    table.cell(infoTable, 0, 2, "RSI Exit", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, rsiExitText, text_color=useRsiExit ? color.orange : color.gray, text_size=size.tiny)
+    
+    mfiEntryTextLong = mfiEntryMode == "Below" ? "MFI < " + str.tostring(mfiEntry) : "MFI > " + str.tostring(mfiEntry)
+    mfiEntryTextShort = mfiEntryMode == "Below" ? "MFI > " + str.tostring(100 - mfiEntry) : "MFI < " + str.tostring(100 - mfiEntry)
+    mfiEntryText = useMfiEntry ? (tradeDirection == "Short" and invertForShorts ? mfiEntryTextShort : mfiEntryTextLong) : "OFF"
+    table.cell(infoTable, 0, 3, "MFI Entry", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, mfiEntryText, text_color=useMfiEntry ? color.lime : color.gray, text_size=size.tiny)
+    
+    macdEntryTextLong = macdEntryMode == "Crossover" ? "MACD Cross Up" : macdEntryMode == "Histogram Below" ? "Hist < " + str.tostring(macdEntryLevel) : "Line < " + str.tostring(macdEntryLevel)
+    macdEntryTextShort = macdEntryMode == "Crossover" ? "MACD Cross Down" : macdEntryMode == "Histogram Below" ? "Hist > " + str.tostring(-macdEntryLevel) : "Line > " + str.tostring(-macdEntryLevel)
+    macdEntryText = useMacdEntry ? (tradeDirection == "Short" and invertForShorts ? macdEntryTextShort : macdEntryTextLong) : "OFF"
+    table.cell(infoTable, 0, 4, "MACD Entry", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, macdEntryText, text_color=useMacdEntry ? color.lime : color.gray, text_size=size.tiny)
+    
+    maCrossEntryTextLong = maCrossDirection == "Crossover (Up)" ? "Fast > Slow" : "Fast < Slow"
+    maCrossEntryTextShort = maCrossDirection == "Crossover (Up)" ? "Fast < Slow" : "Fast > Slow"
+    maCrossEntryText = useMaCrossEntry ? (tradeDirection == "Short" and invertForShorts ? maCrossEntryTextShort : maCrossEntryTextLong) : "OFF"
+    table.cell(infoTable, 0, 5, "MA Cross Entry", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 5, maCrossEntryText, text_color=useMaCrossEntry ? color.lime : color.gray, text_size=size.tiny)
+    
+    maFilterText = useMaFilterEntry ? (tradeDirection == "Short" and invertForShorts ? "Price > MA" : "Price < MA") : useMaPctEntry ? (tradeDirection == "Short" and invertForShorts ? str.tostring(maPctEntryLevel) + "% Above MA" : str.tostring(maPctEntryLevel) + "% Below MA") : "OFF"
+    table.cell(infoTable, 0, 6, "MA Filter", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, maFilterText, text_color=useMaFilterEntry or useMaPctEntry ? color.lime : color.gray, text_size=size.tiny)
+    
+    stEntryTextLong = supertrendEntryMode == "Trend Direction" ? supertrendEntryDir : (supertrendEntryDir == "Uptrend" ? "Buy Signal" : "Sell Signal")
+    stEntryTextShort = supertrendEntryMode == "Trend Direction" ? (supertrendEntryDir == "Uptrend" ? "Downtrend" : "Uptrend") : (supertrendEntryDir == "Uptrend" ? "Sell Signal" : "Buy Signal")
+    stEntryText = useSupertrendEntry ? (tradeDirection == "Short" and invertForShorts ? stEntryTextShort : stEntryTextLong) : "OFF"
+    table.cell(infoTable, 0, 7, "Supertrend", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, stEntryText, text_color=useSupertrendEntry ? color.lime : color.gray, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 8, "─────────", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 8, "─────────", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 0, 9, "RSI", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 9, str.tostring(rsiValue, "#.##"), text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 10, "MFI", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 10, str.tostring(mfiValue, "#.##"), text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 11, "MACD", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 11, str.tostring(macdLine, "#.####"), text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 12, "Supertrend", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 12, supertrendUptrend ? "UP" : "DOWN", text_color=supertrendUptrend ? color.lime : color.red, text_size=size.tiny)
+    table.cell(infoTable, 0, 13, "Position", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 13, isLong ? "LONG" : isShort ? "SHORT" : "FLAT", text_color=isLong ? color.lime : isShort ? color.fuchsia : color.gray, text_size=size.tiny)
+    
+    // Cool Off Status (NEW!)
+    table.cell(infoTable, 0, 14, "─────────", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 14, "─────────", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 0, 15, "Cool Off", text_color=color.gray, text_size=size.tiny)
+    coolOffText = inCoolOffPeriod ? "WAIT " + str.tostring(coolOffBars - barsSinceExit) + "h" : useCoolOff ? "Ready" : "OFF"
+    table.cell(infoTable, 1, 15, coolOffText, text_color=inCoolOffPeriod ? color.orange : useCoolOff ? color.lime : color.gray, text_size=size.tiny)
+
+// === GAME SCORE (points) ===
+pointPerWin   = input.float(1.0,   "Game: Points per winning trade", group="Game Score")
+penaltyPerWk  = input.float(0.025, "Game: Penalty per trade-week held", group="Game Score")
+
+var float winPoints   = 0.0
+var float holdPenalty = 0.0
+var int   prevClosed  = 0
+
+// 1) Add holding-time penalty each bar (calendar time between bar closes).
+// Use opentrades[1] because those trades were held during the interval (time_close[1] -> time_close).
+if not na(time_close[1])
+    deltaWeeks  = (time_close - time_close[1]) / 1000.0 / 60.0 / 60.0 / 24.0 / 7.0
+    holdPenalty += penaltyPerWk * deltaWeeks * nz(strategy.opentrades[1], 0)
+
+// 2) Add +points for each newly closed winning trade.
+if strategy.closedtrades > prevClosed
+    for i = prevClosed to strategy.closedtrades - 1
+        winPoints += strategy.closedtrades.profit(i) > 0 ? pointPerWin : 0
+    prevClosed := strategy.closedtrades
+
+gameScore = winPoints - holdPenalty
+
+// Display
+var table scoreTable = table.new(position.bottom_right, 2, 4, bgcolor=color.new(color.black, 80))
+if barstate.islast
+    table.cell(scoreTable, 0, 0, "Game score")
+    table.cell(scoreTable, 1, 0, str.tostring(gameScore, "#.##"), text_color=color.yellow)
+    table.cell(scoreTable, 0, 1, "Win points")
+    table.cell(scoreTable, 1, 1, str.tostring(winPoints, "#.##"))
+    table.cell(scoreTable, 0, 2, "Hold penalty")
+    table.cell(scoreTable, 1, 2, str.tostring(holdPenalty, "#.##"))
+    table.cell(scoreTable, 0, 3, "Closed trades")
+    table.cell(scoreTable, 1, 3, str.tostring(strategy.closedtrades))
+
+View in Pine Editor・677 lines
+Use on chart
+1
+0
+525
+Jan 11
+a bunch of indicators to play with for stock trading strategy development
+Jan 12
+Release Notes
+a bunch of indicators to play with for stock trading strategy development
+

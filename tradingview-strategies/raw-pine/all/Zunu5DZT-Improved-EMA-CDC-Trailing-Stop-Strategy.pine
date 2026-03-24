@@ -1,0 +1,110 @@
+//@version=5
+strategy("Improved EMA & CDC Trailing Stop Strategy", overlay=true)
+
+// Define the inputs
+ema60Period = input(60, title="EMA 60 Period")
+ema90Period = input(90, title="EMA 90 Period")
+atrPeriod = input(24, title="CDC ATR Period")
+multiplier = input(4.0, title="CDC Multiplier")
+profitTargetMultiplier = input(2.0, title="Profit Target Multiplier (ATR)")
+
+// Calculate EMAs
+ema60 = ta.ema(close, ema60Period)
+ema90 = ta.ema(close, ema90Period)
+
+// Calculate ATR 
+atr = ta.atr(atrPeriod)
+
+// MACD calculation
+[macdLine, signalLine, _] = ta.macd(close, 12, 26, 9)
+
+// Define the trailing stop and profit target
+longStop = close - multiplier * atr
+shortStop = close + multiplier * atr
+longProfitTarget = close + profitTargetMultiplier * atr
+shortProfitTarget = close - profitTargetMultiplier * atr
+
+// Entry conditions
+longCondition = close > ema60 and ema60 > ema90 and macdLine > signalLine and close > longStop
+shortCondition = close < ema60 and ema60 < ema90 and macdLine < signalLine and close < shortStop
+
+// Exit conditions based on profit target
+longProfitCondition = close >= longProfitTarget
+shortProfitCondition = close <= shortProfitTarget
+
+// Plot the EMAs, Stops, and MACD for visualization
+plot(ema60, color=color.blue, title="60 EMA")
+plot(ema90, color=color.red, title="90 EMA")
+plot(longStop, color=color.green, title="Long Stop", style=plot.style_linebr)
+plot(shortStop, color=color.red, title="Short Stop", style=plot.style_linebr)
+hline(0, "Zero Line", color=color.gray)
+plot(macdLine - signalLine, color=color.blue, title="MACD Histogram")
+
+// Strategy execution using conditional blocks
+if longCondition
+    strategy.entry("Long", strategy.long)
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+// Exit based on profit target and trailing stop
+if longProfitCondition or close < longStop
+    strategy.close("Long")
+if shortProfitCondition or close > shortStop
+    strategy.close("Short")
+
+View in Pine Editor・53 lines
+Use on chart
+9
+8
+3 361
+Improved EMA & CDC Trailing Stop Strategy
+
+Objective: This strategy seeks to exploit potential trend reversals or continuations using Exponential Moving Averages (EMAs) and a trailing stop based on the Chande Dynamic Convergence Divergence (CDC) ATR method.
+
+Components:
+
+Exponential Moving Averages (EMAs):
+
+60-period EMA (Blue Line): Faster-moving average that reacts more quickly to price changes.
+90-period EMA (Red Line): Slower-moving average that provides a smoother indication of long-term price direction.
+MACD Indicator:
+
+Utilized to confirm the trend direction. When the MACD line is above its signal line, it may indicate a bullish trend. Conversely, when the MACD line is below its signal line, it may indicate a bearish trend.
+CDC Trailing Stop ATR:
+
+Used to set dynamic stop-loss levels that adjust with market volatility. This stop is based on the Average True Range (ATR) with a user-defined multiplier, providing the strategy with a flexible way to protect against adverse price movements.
+Profit Targets:
+
+Based on a multiple of the ATR, this sets an objective level at which to take profits, ensuring gains are captured while potentially still leaving room for further profitable movement.
+Trading Rules:
+
+Entry:
+
+Long (Buy) Entry Conditions:
+
+Price is above the 60-period EMA.
+The 60-period EMA is above the 90-period EMA.
+The MACD line is above its signal line.
+Price is above the calculated CDC Trailing Stop ATR level.
+Short (Sell) Entry Conditions:
+
+Price is below the 60-period EMA.
+The 60-period EMA is below the 90-period EMA.
+The MACD line is below its signal line.
+Price is below the calculated CDC Trailing Stop ATR level.
+Exit:
+
+Long (Buy) Exit Conditions:
+
+Price reaches the predetermined profit target based on the ATR.
+Price drops below the CDC Trailing Stop ATR level.
+Short (Sell) Exit Conditions:
+
+Price reaches the predetermined profit target based on the ATR.
+Price rises above the CDC Trailing Stop ATR level.
+Visualization:
+
+The strategy displays the 60-period and 90-period EMAs on the chart.
+The CDC Trailing Stop ATR levels for both long and short trades are also plotted for clarity.
+The MACD Histogram is shown to visualize the difference between the MACD line and its signal line.
+Recommendations: Before deploying this strategy, traders should backtest it across various historical data sets and market conditions. Regularly reviewing and potentially adjusting the strategy is recommended as market dynamics evolve.

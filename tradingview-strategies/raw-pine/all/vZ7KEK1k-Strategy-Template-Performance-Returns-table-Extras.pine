@@ -1,0 +1,3 @@
+//@version=5
+ma_color=##input(defval=#ff9800,type='INPUT_COLOR',##id='in_13')
+##root(root_metainfo,plot_2_0,ma_color,input__color)

@@ -1,0 +1,95 @@
+//@version=5
+strategy("Larry Williams - Smash Day (SL/TP in %)",
+     overlay=true,
+     initial_capital=100000,
+     pyramiding=0,
+     calc_on_every_tick=false,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0)
+
+// ====== Inputs ======
+enableLongs  = input.bool(true,  "Activar largos")
+enableShorts = input.bool(true,  "Activar cortos")
+tpPerc       = input.float(2.0,  "Take Profit (%)", step=0.1, minval=0.0)
+slPerc       = input.float(2.0,  "Stop Loss (%)",   step=0.1, minval=0.0)
+orderQtyPct  = input.float(100,  "Tamaño posición (% del capital)", step=1, minval=1, maxval=100)
+
+longSetupToday  = barstate.isconfirmed and close < low[1]
+shortSetupToday = barstate.isconfirmed and close > high[1]
+
+var float plannedLongStop  = na
+var int   plannedLongBar   = na
+var float plannedShortStop = na
+var int   plannedShortBar  = na
+
+flat = strategy.position_size == 0
+
+if longSetupToday and enableLongs and flat
+    plannedLongStop := high
+    plannedLongBar  := bar_index
+
+if shortSetupToday and enableShorts and flat
+    plannedShortStop := low
+    plannedShortBar  := bar_index
+
+isNextBarOfLong  = not na(plannedLongBar)  and bar_index == plannedLongBar  + 1
+isNextBarOfShort = not na(plannedShortBar) and bar_index == plannedShortBar + 1
+
+
+longOrderId  = "LongNext"
+shortOrderId = "ShortNext"
+
+if isNextBarOfLong and flat and enableLongs and not na(plannedLongStop)
+    strategy.entry(id=longOrderId, direction=strategy.long,  stop=plannedLongStop)
+
+if isNextBarOfShort and flat and enableShorts and not na(plannedShortStop)
+    strategy.entry(id=shortOrderId, direction=strategy.short, stop=plannedShortStop)
+
+if not na(plannedLongBar) and bar_index >= plannedLongBar + 2 and strategy.position_size == 0
+    strategy.cancel(longOrderId)
+    plannedLongStop := na
+    plannedLongBar  := na
+
+if not na(plannedShortBar) and bar_index >= plannedShortBar + 2 and strategy.position_size == 0
+    strategy.cancel(shortOrderId)
+    plannedShortStop := na
+    plannedShortBar  := na
+
+
+if strategy.position_size != 0
+    plannedLongStop  := na
+    plannedLongBar   := na
+    plannedShortStop := na
+    plannedShortBar  := na
+
+
+longPos  = strategy.position_size > 0
+shortPos = strategy.position_size < 0
+entry    = strategy.position_avg_price
+
+
+longSL  = entry * (1 - slPerc/100.0)
+longTP  = entry * (1 + tpPerc/100.0)
+shortSL = entry * (1 + slPerc/100.0)
+shortTP = entry * (1 - tpPerc/100.0)
+
+
+if longPos
+    strategy.exit(id="LongExit",  from_entry=longOrderId,  stop=longSL,  limit=longTP)
+
+if shortPos
+    strategy.exit(id="ShortExit", from_entry=shortOrderId, stop=shortSL, limit=shortTP)
+
+
+plotshape(longSetupToday,   title="Setup LARGO (mañana stop en High de hoy)",  style=shape.triangleup,   color=color.new(color.green, 0), location=location.belowbar, size=size.tiny, text="L setup")
+plotshape(shortSetupToday, title="Setup CORTO (mañana stop en Low de hoy)",    style=shape.triangledown, color=color.new(color.red,   0), location=location.abovebar, size=size.tiny, text="S setup")
+
+plot(plannedLongStop,  title="Stop compra programado (siguiente día)", color=color.new(color.green, 50), style=plot.style_linebr, linewidth=2)
+plot(plannedShortStop, title="Stop venta programado (siguiente día)",  color=color.new(color.red,   50), style=plot.style_linebr, linewidth=2)
+
+View in Pine Editor・88 lines
+Use on chart
+4
+0
+1 401
+This strategy implements Larry Williams’ “Smash Day” reversal concept on any symbol and timeframe (daily is the classic). A Smash Day is a bar that closes beyond a recent extreme and then potentially reverses on the next session.

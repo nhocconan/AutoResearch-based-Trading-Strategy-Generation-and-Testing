@@ -1,0 +1,162 @@
+//@version=2
+strategy(title="Ichimoku/SAR Strategy - Bitcoin",overlay=true, pyramiding=1, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.2)
+
+
+
+
+// Parabolic SAR
+
+start = input(0.02)
+increment = input(0.02)
+maximum = input(0.2)
+
+psar = security(tickerid, "D", sar(start, increment, maximum))
+
+plot(psar, title="Par SAR", color=white, linewidth=2, style=cross)
+
+
+// Ichimoku
+
+conversionPeriods = input(10, minval=1, title="Conversion Line Periods"),
+basePeriods = input(30, minval=1, title="Base Line Periods")
+laggingSpan2Periods = input(60, minval=1, title="Lagging Span 2 Periods"),
+displacement = input(30, minval=1, title="Displacement")
+
+donchian(len) => avg(lowest(len), highest(len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+
+p1 = plot(leadLine1, offset = displacement, color=green,
+ title="Lead 1")
+p2 = plot(leadLine2, offset = displacement, color=red, 
+ title="Lead 2")
+fill(p1, p2, color = leadLine1 > leadLine2 ? color(green,50) : color(red,50))
+
+bottomcloud=leadLine2[displacement-1]
+uppercloud=leadLine1[displacement-1]
+
+
+
+
+// RSI
+
+rsilength = input(14, title="RSI Length")
+overSold = input(20, title="RSI Overbought")
+overBought = input(80, title="RSI Oversold")
+rsiprice = close
+
+vrsi = rsi(rsiprice, rsilength)
+
+
+
+
+// Bollinger Bands
+
+length = input(20, minval=1, title="BB Length")
+mult = 2
+
+basis = sma(close, length)
+dev = mult * stdev(close, length)
+
+upperbb = security(tickerid, "D", basis + dev)
+lowerbb = security(tickerid, "D", basis - dev)
+
+
+
+plot(lowerbb, title="Lower BB")
+plot(upperbb, title="Upper BB")
+plot(basis, title="BB Basis", color=red)
+
+// SMA Indicator - Are we in a Bull or Bear market according to 200 SMA?
+SMA200 = sma(close, input(200))
+EMA = ema(close,input(21))
+
+plot(SMA200,color=green, linewidth=2)
+plot(EMA,color=yellow, linewidth=2)
+
+
+
+
+//MACD Indicator - Is the MACD bullish or bearish?
+
+fastLength = input(12)
+slowlength = input(26)
+MACDLength = input(9)
+
+MACD = ema(close, fastLength) - ema(close, slowlength)
+aMACD = ema(MACD, MACDLength)
+delta = MACD - aMACD
+[main,signal,histo]=macd(close,fastLength,slowlength,MACDLength)
+
+stop_price=close
+
+// Set Buy/Sell conditions
+
+buy_1 = if low>psar and vrsi<overBought and close<upperbb and close>EMA and (histo>histo[1] or delta>0)
+    true
+buy_2 = if uppercloud>=bottomcloud and close>min(uppercloud,bottomcloud)
+    true
+buy_3 = if uppercloud<bottomcloud and close>max(uppercloud,bottomcloud)
+    true
+buy_4 = if close>max(uppercloud,bottomcloud)
+    true
+
+sell_1 = if vrsi>overSold and close>lowerbb and close<EMA and (histo<histo[1] or delta<0)
+    true
+sell_2 = if uppercloud<bottomcloud and close<max(uppercloud,bottomcloud)
+    true
+sell_3 = if uppercloud>=bottomcloud and close<min(uppercloud,bottomcloud)
+    true
+sell_4 = if close<min(uppercloud,bottomcloud)
+    true
+
+
+buy_entry = if (buy_1 and ((close>SMA200 and (buy_2 or buy_3)) or (close<SMA200 and buy_4)))
+    true
+
+sell_entry = if (sell_1 and ((close<SMA200 and (sell_2 or sell_3)) or (close>SMA200 and sell_4)))
+    true
+
+
+strategy.entry("Buy", strategy.long, comment="Buy", when = buy_entry and not sell_entry)
+
+strategy.close("Buy", when = (sell_entry))
+
+View in Pine Editor・127 lines
+Use on chart
+5
+9
+4
+3
+22 332
+Jun 28, 2019
+This strategy uses a number of chart indicators to provide a Bullish/Bearish signal. Using a combination of the 200 SMA, the 20 EMA, the MACD and the Ichimoku cloud, the strategy logic will adjust the amount of confluence required between the indicators depending on how bullish or bearish the chart is looking. The logic looks for the following:
+
+- Are we above or below the 200 SMA?
+- Are we above or below the 20 EMA?
+- Have we had a bullish MACD cross?
+- Where are we in relation to the Ichimoku cloud?
+
+If the coin is below the 200 SMA, then the strategy will only give a buy signal if the coin closes a candle above the 20 EMA AND the MACD is bullish and either the Ichimoku cloud is green, or the coin is above the Ichimoku cloud (regardless of colour).
+
+If the coin is above the 200 SMA, Then the strategy will give a buy signal if the coin closes a candle above the 20 EMA AND the MACD is bullish and the coin is either IN the cloud (not necessarily above it) or the cloud is green.
+
+The reverse is true for a sell signal, i.e. when the coin is above the 200 SMA it must close a candle below the Ichimoku cloud and be bearish in relation to the 20 EMA and MACD. If it is below the 200 SMA, then the strategy will give a sell signal if the the EMA/MACD conditions are true and the coin enters the cloud.
+
+This strategy gives a fairly conservative signal for entry and exit points, but is fairly successful across a number of time frames, both short term and long term. As with all my strategies, I only include LONG entries and closes, not SHORT entries (as I find they make for inaccurate backtesting).
+
+Please feel free to like, share, critique and suggest any improvements to this strategy. All feedback, positive and negative, is appreciated.
+Jul 12, 2019
+Release Notes
+Update: Noticed the logic was overly conservative, basically an AND present instead of an OR. Logic updated
+Dec 1, 2019
+Release Notes
+Update: Strategy has been updated to include the Daily Bollinger Bands and Parabolic SAR.
+
+In the event of a buy or sell condition being met outside the boundaries of the Bollinger Bands, the signal will be supressed until a candle closes back within the bands.
+
+For the Parabolic SAR, the buy condition will only fire if the chart is bullish (i.e. the Parabolic SAR dots are below the candle closes). This was implemented as an additional filter to prevent spurious trades occurring in a sideways market.

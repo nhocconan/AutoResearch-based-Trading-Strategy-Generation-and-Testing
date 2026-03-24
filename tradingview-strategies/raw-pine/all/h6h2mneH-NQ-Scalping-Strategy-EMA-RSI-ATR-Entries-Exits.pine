@@ -1,0 +1,108 @@
+//@version=5
+strategy("NQ Scalping Strategy (EMA + RSI + ATR) [Entries/Exits]",
+     overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.0,
+     slippage=0,
+     calc_on_every_tick=true,
+     process_orders_on_close=true,
+     pyramiding=0)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+emaLen      = input.int(100, "EMA Length", minval=1)
+rsiLen      = input.int(14, "RSI Length", minval=1)
+rsiBull     = input.float(55, "RSI Bull Threshold", step=0.5)
+rsiBear     = input.float(45, "RSI Bear Threshold", step=0.5)
+
+atrLen      = input.int(14, "ATR Length", minval=1)
+stopATR     = input.float(1.0, "Stop = ATR x", step=0.1)
+targetATR   = input.float(1.2, "Target = ATR x", step=0.1)
+
+pullbackPct = input.float(0.10, "Pullback Band (%) around EMA", step=0.01)  // 0.10% default
+
+useSession  = input.bool(true, "Use Session Filter")
+sessionStr  = input.session("0930-1600", "Session (Exchange Time)")
+
+useTimeExit = input.bool(true, "Time Exit")
+maxBarsInTrade = input.int(20, "Max Bars in Trade (time exit)", minval=1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core calculations
+// ─────────────────────────────────────────────────────────────────────────────
+ema  = ta.ema(close, emaLen)
+rsi  = ta.rsi(close, rsiLen)
+atr  = ta.atr(atrLen)
+
+// Session filter
+inSession = not useSession or not na(time(timeframe.period, sessionStr))
+
+// Pullback zone around EMA (percent band)
+band = ema * (pullbackPct / 100.0)
+nearEMA = math.abs(close - ema) <= band
+
+// Trend direction
+bullTrend = close > ema
+bearTrend = close < ema
+
+// Momentum confirmation
+bullMom = rsi >= rsiBull
+bearMom = rsi <= rsiBear
+
+// Simple “pullback then go” logic:
+// Long: in uptrend, price pulls near EMA, and momentum confirms.
+// Short: in downtrend, price pulls near EMA, and momentum confirms.
+longSignal  = inSession and bullTrend and nearEMA and bullMom
+shortSignal = inSession and bearTrend and nearEMA and bearMom
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entries
+// ─────────────────────────────────────────────────────────────────────────────
+if (longSignal and strategy.position_size <= 0)
+    strategy.entry("Long", strategy.long)
+
+if (shortSignal and strategy.position_size >= 0)
+    strategy.entry("Short", strategy.short)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATR-based exits (these drive Strategy Tester trades)
+// ─────────────────────────────────────────────────────────────────────────────
+longStop  = strategy.position_avg_price - (atr * stopATR)
+longLimit = strategy.position_avg_price + (atr * targetATR)
+
+shortStop  = strategy.position_avg_price + (atr * stopATR)
+shortLimit = strategy.position_avg_price - (atr * targetATR)
+
+// Attach exits (always on, only active when in a position)
+strategy.exit("Long Exit",  from_entry="Long",  stop=longStop,  limit=longLimit)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortLimit)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Time-based exit (common for scalping)
+// ─────────────────────────────────────────────────────────────────────────────
+var int barsInTrade = 0
+inTrade = strategy.position_size != 0
+
+if inTrade
+    barsInTrade += 1
+else
+    barsInTrade := 0
+
+if useTimeExit and inTrade and barsInTrade >= maxBarsInTrade
+    strategy.close(id=strategy.position_size > 0 ? "Long" : "Short", comment="Time Exit")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plotting
+// ─────────────────────────────────────────────────────────────────────────────
+plot(ema, "EMA", linewidth=2)
+
+plotshape(longSignal,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, text="L")
+plotshape(shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar, size=size.tiny, text="S")
+
+View in Pine Editor・102 lines
+Use on chart
+9
+590
+This scalping strategy is designed for trading the Nasdaq futures (NQ) using a trend-pullback approach. The system combines a 100-period EMA trend filter with RSI momentum confirmation to identify high-probability entries during pullbacks toward the moving average. Trades are executed when price aligns with the trend and momentum conditions are met. Risk management is handled automatically using ATR-based stop losses and profit targets, with optional session filtering and time-based exits to better suit intraday scalping conditions. The strategy includes fully defined entries and exits so results can be analyzed directly in TradingView’s Strategy Tester.

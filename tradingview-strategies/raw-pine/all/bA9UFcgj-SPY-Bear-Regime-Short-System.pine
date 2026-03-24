@@ -1,0 +1,142 @@
+//@version=5
+strategy("SPY Bear Regime Short System",
+     overlay    = true,
+     shorttitle = "BRSM",
+     initial_capital      = 10000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 100,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.05,
+     slippage             = 1,
+     process_orders_on_close = false,
+     calc_on_every_tick   = false)
+
+// ── Inputs ───────────────────────────────────────────────────
+ma_long_len  = input.int(250,   "Long MA length",      minval = 1)
+ma_short_len = input.int(5,     "Short MA length",     minval = 1)
+rsi_len      = input.int(3,     "RSI length",          minval = 1)
+rsi_thresh   = input.float(70.0, "RSI overbought",     minval = 50, maxval = 100)
+gap_pct      = input.float(2.0,  "Min % below long MA", minval = 0, step = 0.1)
+
+// ── Indicators ───────────────────────────────────────────────
+ma_long  = ta.sma(close, ma_long_len)
+ma_short = ta.sma(close, ma_short_len)
+rsi      = ta.rsi(close, rsi_len)
+
+// ── Conditions ───────────────────────────────────────────────
+below_long_ma  = close < ma_long
+above_short_ma = close > ma_short
+rsi_cross_ob   = ta.crossover(rsi, rsi_thresh)
+gap_ok         = close <= ma_long * (1 - gap_pct / 100)
+
+entry_signal = below_long_ma and above_short_ma and rsi_cross_ob and gap_ok
+
+exit_below_short = close < ma_short
+exit_above_long  = close > ma_long
+exit_signal      = exit_below_short or exit_above_long
+
+// ── Strategy orders (execute at next bar open) ────────────────
+if entry_signal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, comment = "SHORT")
+
+if exit_signal and strategy.position_size < 0
+    strategy.close("Short", comment = "EXIT")
+
+// ── Plot MAs on price pane ────────────────────────────────────
+plot(ma_long,  "250 MA", color = color.yellow, linewidth = 2)
+plot(ma_short, "5 MA",   color = color.white,  linewidth = 2)
+
+// ── RSI in separate pane ──────────────────────────────────────
+rsiPlot = plot(rsi, "3-period RSI",
+     color     = color.white,
+     linewidth = 3,
+     display   = display.pane)
+
+hline(70, "Overbought 70",
+     color     = color.new(#ff4444, 30),
+     linestyle = hline.style_dashed,
+     linewidth = 1)
+
+hline(50, "Midline",
+     color     = color.new(color.gray, 60),
+     linestyle = hline.style_dotted,
+     linewidth = 1)
+
+hline(30, "Oversold 30",
+     color     = color.new(#00e676, 50),
+     linestyle = hline.style_dashed,
+     linewidth = 1)
+
+// ── Entry arrow ──────────────────────────────────────────────
+plotshape(
+     entry_signal and strategy.position_size == 0,
+     title     = "Short entry",
+     style     = shape.triangledown,
+     location  = location.abovebar,
+     color     = color.new(#ff4444, 0),
+     size      = size.small,
+     text      = "SHORT",
+     textcolor = color.new(#ff4444, 0))
+
+// ── Exit arrow ───────────────────────────────────────────────
+plotshape(
+     exit_signal and strategy.position_size < 0,
+     title     = "Exit short",
+     style     = shape.triangleup,
+     location  = location.belowbar,
+     color     = color.new(#00e676, 0),
+     size      = size.small,
+     text      = "EXIT",
+     textcolor = color.new(#00e676, 0))
+
+View in Pine Editor・90 lines
+Use on chart
+5
+222
+SPY Bear Regime Short System
+
+A rules-based short-selling strategy designed to profit during bear market regimes. Backtested on SPY daily data from 1994 to 2025 using Wealth-Lab 8.
+
+The system identifies weak counter-trend bounces within established downtrends and shorts them with mechanical entry and exit rules. No discretion, no optimization — just objective conditions applied consistently over 30 years.
+
+ENTRY CONDITIONS (all four must be true):
+1. Close is below the 250-period simple moving average (bear regime confirmed)
+2. Close is above the 5-period simple moving average (short-term bounce in progress)
+3. 3-period RSI crosses above 70 (bounce is becoming overbought)
+4. Close is at least 2% below the 250-period MA (keeps you away from the MA where direction is ambiguous)
+
+EXIT CONDITIONS (first one triggered):
+1. Close drops back below the 5-period MA (bounce has failed — trade worked)
+2. Close rises above the 250-period MA (bear regime may be ending — get out)
+
+All entries and exits are executed at the next bar open.
+
+BACKTEST RESULTS (SPY daily, 1994–2025):
+Win rate: 70.16%
+Average winner: +1.77% — average hold 3.1 bars
+Average loser: -2.12% — average hold 5.0 bars
+
+BEAR MARKET PERFORMANCE vs SPY:
+2000: System +8.31% | SPY -10.53%
+2001: System +21.10% | SPY -12.86%
+2002: System +1.55% | SPY -22.78%
+2008: System +35.29% | SPY -36.71%
+2022: System +20.29% | SPY -18.11%
+
+HOW TO USE:
+Apply to SPY on the daily timeframe. The 250 MA (yellow) and 5 MA (white) plot on the price chart. The companion RSI indicator plots in a separate pane below. Short entry signals appear as red triangles above the bar. Exit signals appear as green triangles below the bar.
+
+Because SPY correlation with large-cap stocks runs high during bear markets, signals can also serve as a regime filter for shorting individual names or sector ETFs.
+
+INPUTS (adjustable in settings):
+- Long MA length (default 250)
+- Short MA length (default 5)
+- RSI length (default 3)
+- RSI overbought threshold (default 70)
+- Minimum % gap below long MA (default 2%)
+
+Find more systems at:TradingTimeMachine.com/systems
+
+
+DISCLAIMER:
+Past performance is not indicative of future results. This script is for educational purposes only and does not constitute financial advice. Always do your own research before trading.

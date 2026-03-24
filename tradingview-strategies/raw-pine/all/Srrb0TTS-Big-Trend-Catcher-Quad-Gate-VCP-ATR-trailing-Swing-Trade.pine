@@ -1,0 +1,162 @@
+//@version=5
+strategy("Big Trend Catcher: Quad-Gate & VCP & ATR trailing & Phoenix swing trade", 
+     overlay=true, 
+     initial_capital=100000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=50,
+     pyramiding=2,         
+     process_orders_on_close=true)
+
+// =============================
+// INDICATORS & VOLATILITY (VCP)
+// =============================
+ema20  = ta.ema(close, 20)
+ema100 = ta.ema(close, 100)
+atrVal = ta.atr(20)
+volGate = volume > ta.sma(volume, 20) * 1.3
+
+[bbUpper, bbMid, bbLower] = ta.bb(close, 20, 2)
+bbWidth = (bbUpper - bbLower) / bbMid
+isQuietZone = bbWidth < ta.sma(bbWidth, 50)
+
+// === NEW: 3 Std Dev Bands from 100 EMA ===
+// We calculate standard deviation based on price over 100 periods
+dev100 = ta.stdev(close, 100)
+ema100Upper = ema100 + (dev100 * 3)
+ema100Lower = ema100 - (dev100 * 3)
+
+// =============================
+// REGIME FILTERS (100 EMA SLOPE)
+// =============================
+ema100Slope = ema100 - ema100[3]
+regimeIsUp  = ema100Slope >= 0
+
+// =============================
+// ROC MOMENTUM FILTER
+// =============================
+rocLen    = 15
+smoothLen = 10
+rocRaw    = 100.0 * (close / nz(close[rocLen]) - 1.0)
+roc       = ta.ema(rocRaw, smoothLen) 
+rocIsPositive = roc >= 0
+
+// =============================
+// FIXED EXIT LOGIC (Matches Standalone Indicator)
+// =============================
+atrPeriod = 20
+hhvPeriod = 20
+atrMult   = 3.0
+
+highest_val = ta.highest(high - atrMult * ta.atr(atrPeriod), hhvPeriod)
+
+var float TS = na
+
+if na(TS)
+    TS := highest_val
+else
+    TS := (close > TS[1] and close > close[1]) ? highest_val : TS[1]
+
+if close < TS
+    TS := highest_val
+
+aboveATR   = close > TS
+trendDeath = close < TS or ta.crossunder(close, ema100)
+
+// =============================
+// THE PHOENIX WINDOW
+// =============================
+barsSinceExit = ta.barssince(trendDeath)
+isPhoenixWindow = barsSinceExit < 10
+
+// =============================
+// SIGNAL LOGIC
+// =============================
+initialSignal = (ta.crossover(close, ema20) or (close > high[1] and close > ema20)) and volGate and isQuietZone
+phoenixSignal = (ta.crossover(close, ema20) or (close > high[1] and close > ema20)) and volGate and isPhoenixWindow
+
+var bool signalPending = false
+if initialSignal or phoenixSignal
+    signalPending := true
+
+if ta.crossunder(close, ema20) or ta.barssince(initialSignal or phoenixSignal) > 10
+    signalPending := false
+
+// =============================
+// ENTRY EXECUTION
+// =============================
+confirmedEntry = signalPending and close > ema100 and close > ema20 and rocIsPositive and regimeIsUp and aboveATR and strategy.position_size == 0
+
+if confirmedEntry
+    strategy.entry("Wizard", strategy.long, comment=isPhoenixWindow ? "Phoenix" : "Initial")
+    signalPending := false 
+
+// =============================
+// PROGRESSIVE PYRAMIDING
+// =============================
+avgPrice = strategy.position_avg_price
+distFromEntry = (close - avgPrice) / avgPrice * 100
+
+runawayScale  = strategy.position_size > 0 and distFromEntry > 10 and close > ema100 and close > ema20 and regimeIsUp and aboveATR and strategy.opentrades < 3
+pullbackScale = ta.crossunder(low, ema20) and close > ema20 and close > ema100 and regimeIsUp and aboveATR and strategy.position_size > 0
+
+if (runawayScale or pullbackScale)
+    strategy.entry("Wizard", strategy.long, comment=runawayScale ? "Velocity" : "Pullback")
+
+if trendDeath
+    strategy.close_all(comment="Trend Death")
+
+// =============================
+// VISUALS
+// =============================
+plot(ema20, "20 EMA", color=color.yellow)
+plot(ema100, "100 EMA", color=regimeIsUp ? color.blue : color.gray, linewidth=2)
+
+// Plotting the 3 Std Dev Bands
+plot(ema100Upper, "EMA 100 Upper Band (3SD)", color=color.new(color.gray, 50), linewidth=1)
+plot(ema100Lower, "EMA 100 Lower Band (3SD)", color=color.new(color.gray, 50), linewidth=1)
+
+tsColor = close > TS ? color.green : color.red
+plot(TS, "ATR Stop", color=tsColor, style=plot.style_stepline, linewidth=1)
+
+bgcolor(isQuietZone ? color.new(color.blue, 95) : na)
+
+plotshape(signalPending and (not rocIsPositive or not regimeIsUp or not aboveATR), "Gate Wait", shape.cross, location.abovebar, color=color.orange, size=size.tiny)
+plotshape(confirmedEntry, "Entry", shape.triangleup, location.belowbar, color=isPhoenixWindow ? color.orange : color.lime, size=size.tiny)
+
+View in Pine Editor・127 lines
+Use on chart
+4
+1
+1
+1 506
+The Strategy Philosophy
+
+This is designed for Daily Charts to capture the large chunks if not all of a primary trend. It focuses on the "VCP" (Volatility Contraction Pattern), combined with high-grade momentum filtering.
+
+1. How VCP (The Quiet Zone) is Calculated
+The script identifies "Volatility Contraction" by measuring the Bollinger Band Width (BBW).
+* The Math: It calculates the standard BBW: $(Upper Band - Lower Band) / Mid Band$.
+* The "Quiet" Threshold: It compares the current width to its own 50-period Simple Moving Average.
+* The Signal: When the current width is narrower than the 50-period average, the stock is in a "Quiet Zone" (represented by the blue background). This indicates energy is coiling for a potential breakout.
+
+2. How Rate of Change (ROC) is Calculated
+Unlike a standard ROC, this "Wizard" version uses a smoothed momentum filter to reduce whipsaws:
+* Raw ROC: First, it calculates the raw percentage change over 15 bars: $100 x (Close / Close(15) - 1).
+* Smoothing: This raw value is then smoothed using a 10-period EMA.
+* The Gate: The ROC Gate only turns green when this smoothed value is greater or equal to 0, ensuring the stock has genuine upward velocity before you enter.
+
+3. What the Indicators on the Chart Show
+* Yellow Line (20 EMA): Your "Tactical Line." It tracks short-term momentum and acts as a trigger for Phoenix re-entries.
+* Blue/Gray Line (100 EMA): Your "Regime Filter." It turns Blue when the trend slope is positive and Gray when negative.
+* Thin Gray Outer Bands: These are Bollinger Bands set at 3 Standard Deviations from the 100 EMA. They mark extreme "Climax Zones" where price is statistically overextended.
+* Stepped Red/Green Line (ATR Stop): The "Iron Floor." It uses a 20-period ATR with a 3.0 multiplier and an HHV (Highest High Value) lookback to ensure the stop only moves up, never down.
+* Yellow Crosses (Gate Wait): These small icons appear above the bars when a signal has been detected but one or more "Wizard Gates" (such as the ROC or 100 EMA Slope) are not yet satisfied, signifying the strategy is waiting for full confirmation.
+
+4. How to Trade This Strategy
+* Step 1: The Setup: Look for the Blue Background on the daily chart, signifying a Volatility Contraction.
+* Step 2: The Entry: An Initial Entry (Lime Triangle) fires when the price breaks out of the Quiet Zone with a volume spike. This volume must be greater than 1.3 times the 20-period Simple Moving Average of volume to confirm significant buying interest. An entry only occurs when all Quad-Gates (ROC, EMA Slope, Price > ATR) are satisfied.
+* Step 3: Pyramiding: If the trend gains "Velocity" (price > 10% from entry), the script will signal a second unit to maximize gains during runaway moves.
+* Step 4: The Exit: Sell the entire position if the price closes below the ATR Trailing Stop (Trend Death) or if the 100 EMA trend turns down.
+
+5. The Phoenix Re-entry
+If you are stopped out but the stock immediately recovers above the 20 EMA within 10 bars, a Phoenix Entry (Orange Triangle) will fire. This allows you to catch "Power Resumptions" where the initial shakeout was a bear trap.

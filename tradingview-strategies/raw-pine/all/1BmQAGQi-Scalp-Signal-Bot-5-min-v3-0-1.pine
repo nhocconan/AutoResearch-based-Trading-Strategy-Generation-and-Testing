@@ -1,0 +1,1009 @@
+//@version=5
+strategy("Scalp Signal Bot - 5 min v3.0.1", overlay=true,
+     margin_long=100, margin_short=100, calc_on_every_tick=true, process_orders_on_close=true)
+
+//====================
+// Inputs (with tooltips)
+//====================
+grpStruct = "Structure"
+pivotLen = input.int(3, "Pivot length", minval=1, group=grpStruct,
+     tooltip="Bars left/right that define a swing point.\nLower = more swings/noise. Higher = fewer swings/stability.\nTypical 5m: 2–8. Default: 3.")
+useBodies = input.bool(false, "Structure from bodies (close/open) vs wicks", group=grpStruct,
+     tooltip="ON = bodies (open/close). OFF = wicks (high/low).\nBodies = fewer false sweeps. Wicks = more sensitivity.\nDefault: OFF.")
+
+swingSrcLow  = useBodies ? math.min(open, close) : low
+swingSrcHigh = useBodies ? math.max(open, close) : high
+
+grpSweep = "Sweep filter (lowest-low sweep)"
+useSweepFilter = input.bool(true, "Require liquidity sweep before long", group=grpSweep,
+     tooltip="ON: longs require a prior lowest-low sweep + reclaim.\nDefault: ON.")
+sweepLookback = input.int(60, "Lowest-low lookback (bars)", minval=5, group=grpSweep,
+     tooltip="Window for prior lowest low.\n5m: 60 bars = 5 hours.\nTypical: 30–200. Default: 60.")
+sweepMaxAgeBars = input.int(12, "Sweep max age (bars)", minval=1, group=grpSweep,
+     tooltip="How long a sweep stays valid context.\n5m: 12 bars = 1 hour.\nTypical: 6–24. Default: 12.")
+sweepConfirmMode = input.string("Close back above", "Confirmation",
+     options=["Close back above","Reclaim on same bar"], group=grpSweep,
+     tooltip="Close back above = safer.\nSame bar reclaim = faster/more signals.\nDefault: Close back above.")
+
+//====================
+// Sweep Risk Filters (A/B toggles)
+//====================
+grpSweepRisk = "Sweep Risk Filters (A/B)"
+useSweepClustering = input.bool(false, "Use SWP clustering (liquidity exhaustion filter)", group=grpSweepRisk,
+     tooltip="Blocks new entries when multiple SWP prints cluster in the same direction within a lookback window.\nDefault: OFF (A/B).")
+clusterLookbackBars = input.int(20, "SWP cluster lookback (bars)", minval=5, group=grpSweepRisk,
+     tooltip="Rolling window for counting SWPs. Default: 20.")
+minSweepCluster = input.int(2, "Min SWP cluster count", minval=1, group=grpSweepRisk,
+     tooltip="Cluster threshold. Default: 2.")
+
+useReclaimLogic = input.bool(true, "Use reclaim (OK) context awareness", group=grpSweepRisk,
+     tooltip="When multiple SWPs cluster and an OK reclaim prints, temporarily suppress trades in the original sweep direction.\nDefault: ON.")
+useSweepEntryDelay = input.bool(true, "Use sweep-candle entry delay (anti-fakeout)", group=grpSweepRisk,
+     tooltip="Blocks entries on the sweep candle and waits N bars after any SWP.\nDefault: ON.")
+sweepDelayBars = input.int(1, "Sweep entry delay (bars)", minval=0, maxval=10, group=grpSweepRisk,
+     tooltip="How many full bars AFTER a SWP to block new entries.\n1 = block sweep bar + next bar; allow starting 2 bars after.\nDefault: 1.")
+
+//====================
+// NEW (v2.9.9) — Drift exits toggle (A/B)
+//====================
+grpDrift = "Exit Behavior (A/B)"
+useDriftExitOrders = input.bool(false, "Use drift TP/SL for active exits (A/B)", group=grpDrift,
+     tooltip="OFF (default): Active trade exits use locked TP/SL (lockTP/lockSL).\nON: Active exits drift each bar using live TP/SL calculations.\nHUD/lines remain locked unless you later choose to change that.")
+
+//====================
+// Stops
+//====================
+grpRisk = "Stops"
+useAtrBuffer = input.bool(false, "Use ATR-based sweep buffer (else ticks)", group=grpRisk,
+     tooltip="ON: buffer = ATR * mult.\nOFF: buffer = fixed ticks.\nDefault: OFF.")
+atrLen = input.int(14, "ATR length", minval=1, group=grpRisk,
+     tooltip="ATR period if ATR buffer enabled.\nTypical: 10–20. Default: 14.")
+atrMult = input.float(0.15, "ATR buffer multiplier", step=0.01, group=grpRisk,
+     tooltip="Buffer = ATR * multiplier.\nTypical: 0.05–0.30. Default: 0.15.")
+tickBuffer = input.int(10, "Sweep buffer (ticks)", minval=0, group=grpRisk,
+     tooltip="Fixed buffer in ticks when ATR buffer OFF.\nTypical: 2–20. Default: 10.")
+
+//====================
+// Trade logic
+//====================
+grpTrade = "Trade logic"
+useLong = input.bool(true, "Enable longs", group=grpTrade)
+useShort = input.bool(true, "Enable shorts", group=grpTrade)
+
+//====================
+// Trend filter
+//====================
+grpTrend = "Trend filter"
+trendMode = input.string("CHOP", "Trend mode", options=["CHOP","TREND"], group=grpTrend,
+     tooltip="CHOP: allow both directions.\nTREND: only allow trades aligned with EMA filter.\nDefault: CHOP.")
+emaLen = input.int(200, "EMA length", minval=1, group=grpTrend,
+     tooltip="EMA length for TREND mode. Default: 200.")
+allowLongTrend = input.bool(true, "Allow longs in TREND if above EMA", group=grpTrend)
+allowShortTrend = input.bool(true, "Allow shorts in TREND if below EMA", group=grpTrend)
+
+//====================
+// Execution
+//====================
+grpExec = "Execution"
+signalMode = input.string("On Close (confirmed)", "Mode", options=["On Close (confirmed)","Intrabar (faster)"], group=grpExec,
+     tooltip="On Close: uses confirmed bar close (no repaint).\nIntrabar: reacts within current candle.\nDefault: On Close.")
+riskR = input.float(1.0, "R-multiple target", minval=0.25, step=0.25, group=grpExec,
+     tooltip="TP = Entry ± (SL distance * R).\nDefault: 1.0R.")
+useRR = input.bool(true, "Use R-based TP (else fixed %)", group=grpExec)
+fixedTpPct = input.float(0.20, "Fixed TP % (if not R-based)", step=0.05, group=grpExec)
+
+//====================
+// Manual Controls
+//====================
+grpManual = "Manual Controls"
+killSeq = input.int(0, "KillSeq (increment to close trade once)", minval=0, group=grpManual,
+     tooltip="Increment this number to close the current open position ONE time.\nRuns on bar close (process_orders_on_close).\nDoes NOT block new entries.")
+cooldownBars = input.int(0, "Cooldown after close (bars)", minval=0, group=grpManual,
+     tooltip="After a trade closes, wait N bars before allowing new entries.\nDefault: 0.")
+
+//====================
+// Backtest window
+//====================
+grpWindow = "Backtest window"
+useWindow = input.bool(true, "Trade only last N hours", group=grpWindow,
+     tooltip="Limits trading to the most recent N hours using timenow.\nDefault ON.")
+backtestHours = input.int(168, "Hours", minval=1, group=grpWindow,
+     tooltip="How many recent hours to allow trading.\nDefault: 168 (7d).")
+
+//====================
+// HUD
+//====================
+grpHUD = "HUD"
+showHUD = input.bool(true, "Show HUD", group=grpHUD)
+hudCorner = input.string("Top Right", "HUD corner", options=["Top Left","Top Right","Bottom Left","Bottom Right"], group=grpHUD)
+hudPadRows = input.int(1, "HUD top padding rows", minval=0, maxval=4, group=grpHUD,
+     tooltip="Extra blank rows above HUD. 0 = tight. Default: 1.")
+
+//====================
+// Markers
+//====================
+grpMarkers = "Markers"
+showSweepMarkers = input.bool(true, "Show SWP/OK markers", group=grpMarkers)
+showEntrySLTP = input.bool(true, "Show Entry/TP/SL markers", group=grpMarkers)
+lineWidth = input.int(3, "TP/SL/EN dotted line width", minval=1, maxval=6, group=grpMarkers)
+
+//====================
+// Historical trade markers (v2.9.9)
+//====================
+grpHist = "Historical Trade Markers"
+showHistoricalTradeMarkers = input.bool(true, "Show historical trade markers", group=grpHist,
+     tooltip="Adds labels for CLOSED trades only (not active).\nEntry=black, TP=purple, SL=yellow.\nNo horizontal lines.")
+maxHistoricalMarkers = input.int(200, "Max historical labels (cap)", minval=20, maxval=2000, group=grpHist,
+     tooltip="Hard cap to avoid unbounded label growth. Oldest labels are deleted first.")
+
+//====================
+// Visual Aids
+//====================
+grpVisual = "Visual Aids"
+showLookbackLine = input.bool(true, "Show sweep lookback window line", group=grpVisual,
+     tooltip="Draws a vertical line showing the sweepLookback boundary (white). Default: ON.")
+
+//====================
+// Probability display
+//====================
+grpProb = "Probability"
+probDisplay = input.string("Real", "Prob Display", options=["Real","Pred"], group=grpProb,
+     tooltip="Real = distance-based % to TP/SL from current price.\nPred = predictive probability using a model.")
+predModel = input.string("Empirical", "Pred Model", options=["Empirical","DriftVol"], group=grpProb,
+     tooltip="Empirical = learns TP/SL hit-rate from closed trades (lightweight).\nDriftVol = drift/vol barrier-hit model (assumption-heavy).")
+dvLen = input.int(96, "Drift/Vol length (bars)", minval=20, group=grpProb)
+priorK = input.float(1.0, "Empirical smoothing prior", minval=0.0, step=0.5, group=grpProb)
+
+//====================
+// Volume Filter (A/B) — NEW v2.9.10
+// Default volMode = "Off" to preserve identical v2.9.9 behavior unless enabled.
+//====================
+grpVol = "Volume Filter (A/B)"
+volMode = input.string("Off", "Volume mode", options=["Off","RelVol Gate","SweepVol Confirm","Both"], group=grpVol,
+     tooltip="Off: no volume gating (v2.9.9 behavior).\nRelVol Gate: require current volume > SMA*mult.\nSweepVol Confirm: require last SWP bar volume ratio >= mult.\nBoth: require A AND B.")
+volLen = input.int(20, "Volume SMA length", minval=1, group=grpVol)
+relVolMult = input.float(1.2, "RelVol multiplier (A)", minval=0.1, step=0.05, group=grpVol)
+sweepVolMult = input.float(1.5, "SweepVol multiplier (B)", minval=0.1, step=0.05, group=grpVol)
+
+//====================
+// Helpers
+//====================
+tNow = timenow
+windowOK = (not useWindow) or (time >= (tNow - backtestHours * 3600000))
+
+atr = ta.atr(atrLen)
+buf = useAtrBuffer ? atr * atrMult : syminfo.mintick * tickBuffer
+
+ema = ta.ema(close, emaLen)
+ema200 = ta.ema(close, 200)
+
+// EMA 200 Plot (Style tab)
+plot(ema200, "EMA 200", linewidth=2)
+
+trendOKLong  = (trendMode == "CHOP") or (allowLongTrend and close > ema)
+trendOKShort = (trendMode == "CHOP") or (allowShortTrend and close < ema)
+
+//====================
+// Pivots
+//====================
+pL = ta.pivotlow(swingSrcLow, pivotLen, pivotLen)
+pH = ta.pivothigh(swingSrcHigh, pivotLen, pivotLen)
+
+var float lastSwingLow = na
+var float lastSwingHigh = na
+if not na(pL)
+    lastSwingLow := pL
+if not na(pH)
+    lastSwingHigh := pH
+
+//====================
+// Sweep logic (lowest-low sweep + reclaim)
+//====================
+priorLowest = ta.lowest(swingSrcLow, sweepLookback)
+isNewLowest = swingSrcLow < priorLowest[1]
+sweepLow = isNewLowest ? swingSrcLow : na
+var float sweepPrice = na
+var int sweepBar = na
+if not na(sweepLow)
+    sweepPrice := sweepLow
+    sweepBar := bar_index
+
+sweepAge = na(sweepBar) ? 999999 : (bar_index - sweepBar)
+bool sweepRecent = sweepAge <= sweepMaxAgeBars
+
+bool reclaimOK = false
+if not na(sweepPrice)
+    if sweepConfirmMode == "Reclaim on same bar"
+        reclaimOK := close > sweepPrice + buf
+    else
+        reclaimOK := (close[1] <= sweepPrice + buf) and (close > sweepPrice + buf)
+
+bool sweepConfirmed = sweepRecent and reclaimOK
+
+// High sweep for shorts
+priorHighest = ta.highest(swingSrcHigh, sweepLookback)
+isNewHighest = swingSrcHigh > priorHighest[1]
+hsweepHigh = isNewHighest ? swingSrcHigh : na
+var float highSweepPrice = na
+var int highSweepBar = na
+if not na(hsweepHigh)
+    highSweepPrice := hsweepHigh
+    highSweepBar := bar_index
+
+highAge = na(highSweepBar) ? 999999 : (bar_index - highSweepBar)
+bool highSweepRecent = highAge <= sweepMaxAgeBars
+
+bool highReclaimOK = false
+if not na(highSweepPrice)
+    if sweepConfirmMode == "Reclaim on same bar"
+        highReclaimOK := close < highSweepPrice - buf
+    else
+        highReclaimOK := (close[1] >= highSweepPrice - buf) and (close < highSweepPrice - buf)
+
+bool highSweepConfirmed = highSweepRecent and highReclaimOK
+
+sweepGate = useSweepFilter ? sweepConfirmed : true
+
+//====================
+// === SWEEP CLUSTER LOGIC ===
+// Fixed-size circular buffer (O(1)/bar; bounded; no heavy loops)
+//====================
+var int[] _downRing = array.new_int(0)
+var int[] _upRing   = array.new_int(0)
+var int   _ringIdx  = 0
+var int   _downSum  = 0
+var int   _upSum    = 0
+var int   _ringSize = na
+
+needInit = barstate.isfirst or na(_ringSize) or (_ringSize != clusterLookbackBars)
+if needInit
+    _ringSize := clusterLookbackBars
+    _ringIdx := 0
+    _downSum := 0
+    _upSum := 0
+    array.clear(_downRing)
+    array.clear(_upRing)
+    for _i = 0 to _ringSize - 1
+        array.push(_downRing, 0)
+        array.push(_upRing, 0)
+
+_downNow = isNewLowest ? 1 : 0
+_upNow   = isNewHighest ? 1 : 0
+
+_downOld = array.get(_downRing, _ringIdx)
+_upOld   = array.get(_upRing, _ringIdx)
+
+array.set(_downRing, _ringIdx, _downNow)
+array.set(_upRing, _ringIdx, _upNow)
+
+_downSum += (_downNow - _downOld)
+_upSum   += (_upNow - _upOld)
+
+_ringIdx += 1
+if _ringIdx >= _ringSize
+    _ringIdx := 0
+
+downSweepCount = _downSum
+upSweepCount   = _upSum
+
+bool clusterDown = downSweepCount >= minSweepCluster
+bool clusterUp   = upSweepCount >= minSweepCluster
+
+bool clusterBlockShort = useSweepClustering and clusterDown
+bool clusterBlockLong  = useSweepClustering and clusterUp
+
+//====================
+// === RECLAIM LOGIC FILTER ===
+//====================
+var int lastReclaimFlipDownBar = na
+var int lastReclaimFlipUpBar   = na
+
+if useReclaimLogic and clusterDown and reclaimOK
+    lastReclaimFlipDownBar := bar_index
+if useReclaimLogic and clusterUp and highReclaimOK
+    lastReclaimFlipUpBar := bar_index
+
+bool reclaimSuppressShort = useReclaimLogic and (not na(lastReclaimFlipDownBar)) and ((bar_index - lastReclaimFlipDownBar) <= sweepMaxAgeBars)
+bool reclaimSuppressLong  = useReclaimLogic and (not na(lastReclaimFlipUpBar)) and ((bar_index - lastReclaimFlipUpBar) <= sweepMaxAgeBars)
+
+//====================
+// === SWEEP ENTRY DELAY FILTER ===
+//====================
+var int lastAnySweepBar = na
+if isNewLowest or isNewHighest
+    lastAnySweepBar := bar_index
+
+barsSinceAnySweep = na(lastAnySweepBar) ? 999999 : (bar_index - lastAnySweepBar)
+bool sweepDelayOK = (not useSweepEntryDelay) or (barsSinceAnySweep > sweepDelayBars)
+
+//====================
+// Volume logic (A/B) — computed once per bar; applied as FINAL entry filter only
+//====================
+float volSma = ta.sma(volume, volLen)
+bool relVolOK = (not na(volSma)) ? (volume > (volSma * relVolMult)) : true
+
+float volRatio = (not na(volSma) and volSma > 0.0) ? (volume / volSma) : na
+var float lastSweepVolRatio = na
+if isNewLowest or isNewHighest
+    lastSweepVolRatio := volRatio
+
+bool sweepVolOK = na(lastSweepVolRatio) ? true : (lastSweepVolRatio >= sweepVolMult)
+
+bool useVolA = (volMode == "RelVol Gate") or (volMode == "Both")
+bool useVolB = (volMode == "SweepVol Confirm") or (volMode == "Both")
+
+bool volGate = true
+volGate := volGate and (useVolA ? relVolOK : true)
+volGate := volGate and (useVolB ? sweepVolOK : true)
+
+//====================
+// Entry conditions (structure breaks)
+//====================
+bool enterLongRaw  = (useLong and (not na(lastSwingHigh)) and (close > lastSwingHigh) and sweepGate and trendOKLong)
+bool enterShortRaw = (useShort and (not na(lastSwingLow))  and (close < lastSwingLow)  and trendOKShort)
+
+bool enterLongRaw_F  = enterLongRaw  and sweepDelayOK and (not clusterBlockLong)  and (not reclaimSuppressLong)
+bool enterShortRaw_F = enterShortRaw and sweepDelayOK and (not clusterBlockShort) and (not reclaimSuppressShort)
+
+// FINAL volume gate (does not touch base logic; last step only)
+bool enterLongRaw_FV  = enterLongRaw_F and (volMode == "Off" ? true : volGate)
+bool enterShortRaw_FV = enterShortRaw_F and (volMode == "Off" ? true : volGate)
+
+// Confirmed mode gating (non-repaint; does not kill signals)
+bool confirmedMode = signalMode == "On Close (confirmed)"
+bool enterLong_confirmed  = barstate.isconfirmed and enterLongRaw_FV
+bool enterShort_confirmed = barstate.isconfirmed and enterShortRaw_FV
+
+bool enterLong  = enterLongRaw_FV
+bool enterShort = enterShortRaw_FV
+if confirmedMode
+    enterLong := enterLong_confirmed
+    enterShort := enterShort_confirmed
+
+//====================
+// Stops & Targets (LIVE, used for setup + (optional) drift exits)
+//====================
+longSL_live  = (na(sweepPrice) ? (lastSwingLow - buf) : (sweepPrice - buf))
+shortSL_live = (na(highSweepPrice) ? (lastSwingHigh + buf) : (highSweepPrice + buf))
+
+rrTakeLong  = close + (close - longSL_live) * riskR
+rrTakeShort = close - (shortSL_live - close) * riskR
+
+pctTakeLong  = close * (1 + fixedTpPct/100.0)
+pctTakeShort = close * (1 - fixedTpPct/100.0)
+
+longTP_live  = useRR ? rrTakeLong  : pctTakeLong
+shortTP_live = useRR ? rrTakeShort : pctTakeShort
+
+//====================
+// Cooldown tracking
+//====================
+var int lastFlatBar = na
+inPos = strategy.position_size != 0
+justWentFlat = (not inPos) and (strategy.position_size[1] != 0)
+if justWentFlat
+    lastFlatBar := bar_index
+
+cooldownOK = cooldownBars <= 0 ? true : (na(lastFlatBar) ? true : (bar_index - lastFlatBar >= cooldownBars))
+
+//====================
+// KillSeq (increment pulse) — closes once, does not block new entries
+//====================
+var int killPrev = na
+killPulse = (killPrev != killSeq)
+killPrev := killSeq
+
+if killPulse and strategy.position_size != 0
+    strategy.close_all(comment="KILL")
+    lastFlatBar := bar_index
+
+//====================
+// Entries (single position)
+//====================
+if cooldownOK and windowOK
+    if enterLong and strategy.position_size == 0
+        strategy.entry("L", strategy.long)
+    if enterShort and strategy.position_size == 0
+        strategy.entry("S", strategy.short)
+
+//====================
+// Lock Entry/TP/SL when position opens (no drifting visuals/active values)
+//====================
+var float lockEntry = na
+var float lockTP = na
+var float lockSL = na
+var int lockDir = 0
+
+newEntry = strategy.position_size != 0 and strategy.position_size[1] == 0
+newExit  = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if newEntry
+    lockEntry := strategy.position_avg_price
+    lockDir := strategy.position_size > 0 ? 1 : -1
+    lockSL := lockDir == 1 ? longSL_live : shortSL_live
+    lockTP := lockDir == 1 ? longTP_live : shortTP_live
+
+if newExit
+    lockEntry := na
+    lockTP := na
+    lockSL := na
+    lockDir := 0
+
+//====================
+// v2.9.9 Task #3 — Exit orders:
+// When in position, submit exits using lockTP/lockSL (default).
+// Optional drift mode uses LIVE TP/SL while in-position.
+//====================
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+float exitSL = na
+float exitTP = na
+
+if strategy.position_size == 0
+    // flat: use live setup values
+    exitSL := na
+    exitTP := na
+else
+    if useDriftExitOrders
+        // drift: use live TP/SL while in position
+        exitSL := inLong ? longSL_live : shortSL_live
+        exitTP := inLong ? longTP_live : shortTP_live
+    else
+        // locked: use locked TP/SL while in position
+        exitSL := lockSL
+        exitTP := lockTP
+
+// Submit exits (same IDs; behavior controlled by exitSL/exitTP above)
+strategy.exit("Lx", "L", stop=(inLong ? exitSL : na),  limit=(inLong ? exitTP : na))
+strategy.exit("Sx", "S", stop=(inShort ? exitSL : na), limit=(inShort ? exitTP : na))
+
+//====================
+// Visual: SWP / OK markers pegged to sweep source
+//====================
+if showSweepMarkers
+    swpBelow = isNewLowest
+    okBelow  = sweepConfirmed
+    swpAbove = isNewHighest
+    okAbove  = highSweepConfirmed
+
+    if confirmedMode
+        if swpBelow[1]
+            label.new(bar_index-1, swingSrcLow[1], "SWP", style=label.style_label_up, textcolor=color.white,
+                 color=color.new(color.green, 0), size=size.tiny, yloc=yloc.price)
+        if okBelow[1]
+            label.new(bar_index-1, swingSrcLow[1], "OK", style=label.style_label_up, textcolor=color.white,
+                 color=color.new(color.lime, 0), size=size.tiny, yloc=yloc.price)
+        if swpAbove[1]
+            label.new(bar_index-1, swingSrcHigh[1], "SWP", style=label.style_label_down, textcolor=color.white,
+                 color=color.new(color.red, 0), size=size.tiny, yloc=yloc.price)
+        if okAbove[1]
+            label.new(bar_index-1, swingSrcHigh[1], "OK", style=label.style_label_down, textcolor=color.white,
+                 color=color.new(color.maroon, 0), size=size.tiny, yloc=yloc.price)
+    else
+        if swpBelow
+            label.new(bar_index, swingSrcLow, "SWP", style=label.style_label_up, textcolor=color.white,
+                 color=color.new(color.green, 0), size=size.tiny, yloc=yloc.price)
+        if okBelow
+            label.new(bar_index, swingSrcLow, "OK", style=label.style_label_up, textcolor=color.white,
+                 color=color.new(color.lime, 0), size=size.tiny, yloc=yloc.price)
+        if swpAbove
+            label.new(bar_index, swingSrcHigh, "SWP", style=label.style_label_down, textcolor=color.white,
+                 color=color.new(color.red, 0), size=size.tiny, yloc=yloc.price)
+        if okAbove
+            label.new(bar_index, swingSrcHigh, "OK", style=label.style_label_down, textcolor=color.white,
+                 color=color.new(color.maroon, 0), size=size.tiny, yloc=yloc.price)
+
+//====================
+// Entry/TP/SL markers + dotted lines (locked)
+//====================
+var line tpLine = na
+var line slLine = na
+var line enLine = na
+var label entLbl = na
+var label tpLbl = na
+var label slLbl = na
+
+f_fmtMoney(_v) =>
+    "$" + str.tostring(_v, "#.##")
+
+f_fmtPct(_v) =>
+    str.tostring(_v, "#.##") + "%"
+
+f_fmtPrice(_p) =>
+    na(_p) ? "—" : ("$" + str.tostring(_p, "#.###"))
+
+if showEntrySLTP
+    if newEntry
+        if not na(tpLine)
+            line.delete(tpLine)
+        if not na(slLine)
+            line.delete(slLine)
+        if not na(enLine)
+            line.delete(enLine)
+        if not na(entLbl)
+            label.delete(entLbl)
+        if not na(tpLbl)
+            label.delete(tpLbl)
+        if not na(slLbl)
+            label.delete(slLbl)
+
+        tpLine := line.new(bar_index, lockTP, bar_index+1, lockTP, extend=extend.right, color=color.new(color.green, 0), style=line.style_dotted, width=lineWidth)
+        slLine := line.new(bar_index, lockSL, bar_index+1, lockSL, extend=extend.right, color=color.new(color.red, 0), style=line.style_dotted, width=lineWidth)
+        enLine := line.new(bar_index, lockEntry, bar_index+1, lockEntry, extend=extend.right, color=color.new(color.white, 0), style=line.style_dotted, width=lineWidth)
+
+        notional = math.abs(strategy.position_size) * lockEntry
+
+        // Entry label: EN $entry_price | $notional_value
+        entLbl := label.new(bar_index, lockEntry, "EN " + f_fmtPrice(lockEntry) + " | " + f_fmtMoney(notional),
+             style=label.style_label_left, color=color.new(color.black, 0), textcolor=color.white, yloc=yloc.price, size=size.small)
+
+        tpMove = lockDir == 1 ? (lockTP - lockEntry) : (lockEntry - lockTP)
+        slMove = lockDir == 1 ? (lockEntry - lockSL) : (lockSL - lockEntry)
+        tpPct = lockEntry != 0 ? (tpMove / lockEntry * 100.0) : na
+        slPct = lockEntry != 0 ? (slMove / lockEntry * 100.0) : na
+
+        // TP/SL label: TP/SL $price | $gain/loss (pct)
+        tpLbl := label.new(bar_index, lockTP, "TP " + f_fmtPrice(lockTP) + " | " + f_fmtMoney(tpMove) + " (" + f_fmtPct(tpPct) + ")",
+             style=label.style_label_left, color=color.new(color.green, 0), textcolor=color.white, yloc=yloc.price, size=size.small)
+        slLbl := label.new(bar_index, lockSL, "SL " + f_fmtPrice(lockSL) + " | " + f_fmtMoney(slMove) + " (" + f_fmtPct(slPct) + ")",
+             style=label.style_label_left, color=color.new(color.red, 0), textcolor=color.white, yloc=yloc.price, size=size.small)
+
+    if newExit
+        if not na(tpLine)
+            line.delete(tpLine)
+        if not na(slLine)
+            line.delete(slLine)
+        if not na(enLine)
+            line.delete(enLine)
+        if not na(entLbl)
+            label.delete(entLbl)
+        if not na(tpLbl)
+            label.delete(tpLbl)
+        if not na(slLbl)
+            label.delete(slLbl)
+        tpLine := na
+        slLine := na
+        enLine := na
+        entLbl := na
+        tpLbl := na
+        slLbl := na
+
+//====================
+// Lookback window vertical line (white) for sweepLookback
+//====================
+var line lookbackVLine = na
+if showLookbackLine
+    x0 = bar_index - sweepLookback
+    yTop = ta.highest(high, math.min(sweepLookback, 500))
+    yBot = ta.lowest(low,  math.min(sweepLookback, 500))
+    if na(lookbackVLine)
+        lookbackVLine := line.new(x0, yBot, x0, yTop, xloc=xloc.bar_index, extend=extend.none, color=color.new(color.white, 0), style=line.style_dotted, width=2)
+    else
+        line.set_xy1(lookbackVLine, x0, yBot)
+        line.set_xy2(lookbackVLine, x0, yTop)
+else
+    if not na(lookbackVLine)
+        line.delete(lookbackVLine)
+        lookbackVLine := na
+
+//====================
+// Last trade info / recent OK
+//====================
+ct = strategy.closedtrades
+lastPnl = ct > 0 ? strategy.closedtrades.profit(ct-1) : na
+
+var int lastOkBar = na
+if sweepConfirmed
+    lastOkBar := bar_index
+recentOK = not na(lastOkBar) and ((bar_index - lastOkBar) <= sweepMaxAgeBars)
+
+//====================
+// Probability (Real vs Predictive)
+//====================
+f_probReal(_tp, _sl, _px) =>
+    tpDist = math.abs(_tp - _px)
+    slDist = math.abs(_px - _sl)
+    den = tpDist + slDist
+    den <= 0 ? na : (slDist / den)
+
+// Precompute drift/vol on every bar
+dv_r  = math.log(close / close[1])
+dv_mu = ta.sma(dv_r, dvLen)
+dv_sig = ta.stdev(dv_r, dvLen)
+
+f_probDV(_tp, _sl, _px) =>
+    float _p = na
+    if _tp > 0 and _sl > 0 and _px > 0
+        loP = math.min(_tp, _sl)
+        hiP = math.max(_tp, _sl)
+        if hiP == loP
+            _p := 0.5
+        else
+            x  = math.log(_px)
+            lo = math.log(loP)
+            hi = math.log(hiP)
+            if na(dv_mu) or na(dv_sig) or dv_sig <= 1e-10
+                _pUp = (x - lo) / (hi - lo)
+                _p := (_tp == hiP) ? _pUp : (1.0 - _pUp)
+            else
+                a = (2.0 * dv_mu) / (dv_sig * dv_sig)
+                if math.abs(a) <= 1e-10
+                    _pUp = (x - lo) / (hi - lo)
+                    _p := (_tp == hiP) ? _pUp : (1.0 - _pUp)
+                else
+                    num = 1.0 - math.exp(-a * (x - lo))
+                    den2 = 1.0 - math.exp(-a * (hi - lo))
+                    _pUp = den2 == 0 ? na : (num / den2)
+                    _p := (_tp == hiP) ? _pUp : (1.0 - _pUp)
+    _p
+
+f_riskBin(_atrPct) =>
+    _atrPct < 0.5 ? 0 :
+     _atrPct < 1.0 ? 1 :
+     _atrPct < 1.5 ? 2 : 3
+
+f_empKey(_dir, _sweep, _trend, _riskBin) =>
+    ((_dir * 16) + (_sweep * 8) + (_trend * 4) + _riskBin)
+
+var int[] empTP = array.new_int(32, 0)
+var int[] empSL = array.new_int(32, 0)
+var int   empKeyActive = na
+var bool  empKeyValid  = false
+var int   ctPrev2 = 0
+
+atrPctNow = close != 0 ? (atr / close * 100.0) : na
+
+if newEntry
+    dirBit   = lockDir == 1 ? 1 : 0
+    sweepBit = 0
+    if lockDir == 1
+        sweepBit := (useSweepFilter and sweepRecent and sweepConfirmed) ? 1 : 0
+    else
+        sweepBit := (highSweepRecent and highSweepConfirmed) ? 1 : 0
+    trendBit = (trendMode == "TREND") ? 1 : 0
+    rb = f_riskBin(atrPctNow)
+    empKeyActive := f_empKey(dirBit, sweepBit, trendBit, rb)
+    empKeyValid := not na(empKeyActive)
+
+ct2 = strategy.closedtrades
+if ct2 > ctPrev2
+    for i = ctPrev2 to ct2 - 1
+        p = strategy.closedtrades.profit(i)
+        if empKeyValid and not na(empKeyActive)
+            if p > 0
+                array.set(empTP, empKeyActive, array.get(empTP, empKeyActive) + 1)
+            else
+                array.set(empSL, empKeyActive, array.get(empSL, empKeyActive) + 1)
+    ctPrev2 := ct2
+    if newExit
+        empKeyValid := false
+        empKeyActive := na
+
+f_probEmp(_key) =>
+    if na(_key)
+        na
+    else
+        t = array.get(empTP, _key)
+        s = array.get(empSL, _key)
+        den = (t + s) + (2.0 * priorK)
+        den <= 0 ? na : ((t + priorK) / den)
+
+int setupDir = enterLongRaw ? 1 : (enterShortRaw ? -1 : 0)
+setupSL  = setupDir == 1 ? longSL_live  : (setupDir == -1 ? shortSL_live : na)
+setupTP  = setupDir == 1 ? longTP_live  : (setupDir == -1 ? shortTP_live : na)
+
+int setupKey = na
+if setupDir != 0
+    dirBit2   = setupDir == 1 ? 1 : 0
+    sweepBit2 = 0
+    if setupDir == 1
+        sweepBit2 := (useSweepFilter and sweepRecent and sweepConfirmed) ? 1 : 0
+    else
+        sweepBit2 := (highSweepRecent and highSweepConfirmed) ? 1 : 0
+    trendBit2 = (trendMode == "TREND") ? 1 : 0
+    rb2 = f_riskBin(atrPctNow)
+    setupKey := f_empKey(dirBit2, sweepBit2, trendBit2, rb2)
+
+f_probSelect(_tp, _sl, _px, _dir, _empKey) =>
+    float _p = na
+    if probDisplay == "Real"
+        _p := f_probReal(_tp, _sl, _px)
+    else
+        if predModel == "Empirical"
+            _p := f_probEmp(_empKey)
+        else
+            _p := f_probDV(_tp, _sl, _px)
+    _p := na(_p) ? na : math.max(0.0, math.min(1.0, _p))
+    _p
+
+pTP_active = (strategy.position_size != 0 and not na(lockTP) and not na(lockSL) and lockDir != 0) ? f_probSelect(lockTP, lockSL, close, lockDir, empKeyActive) : na
+pTP_live   = (setupDir != 0 and not na(setupTP) and not na(setupSL)) ? f_probSelect(setupTP, setupSL, close, setupDir, setupKey) : na
+pSL_active = not na(pTP_active) ? (1.0 - pTP_active) : na
+pSL_live   = not na(pTP_live) ? (1.0 - pTP_live) : na
+
+//====================
+// v2.9.9 Task #2 — Correct "Order ID" in HUD
+// Use Trade # semantics: current ID = closedtrades + 1 when active.
+//====================
+int activeOrderId = strategy.position_size != 0 ? (strategy.closedtrades + 1) : na
+orderIdTxt = strategy.position_size != 0 ? str.tostring(activeOrderId) : "—"
+
+//====================
+// HUD (7 columns with internal divider columns)
+//====================
+var table hud = na
+f_corner(_c) =>
+    _c == "Top Left" ? position.top_left :
+     _c == "Top Right" ? position.top_right :
+     _c == "Bottom Left" ? position.bottom_left : position.bottom_right
+
+HUD_BASE_ROWS = 15
+HUD_ROWS = HUD_BASE_ROWS + hudPadRows
+
+if na(hud)
+    hud := table.new(f_corner(hudCorner), 7, HUD_ROWS, frame_color=color.new(color.black, 18), border_color=color.new(color.black, 18))
+
+bgHud = color.new(#000000, 18)
+sepBg = color.new(color.white, 94)
+sepTxt = " "
+
+cTP  = color.lime
+cSL  = color.red
+cPct = color.rgb(170, 210, 255)
+
+f_cell4(_row, _k1, _v1, _k2, _v2) =>
+    r = _row + hudPadRows
+    table.cell(hud, 1, r, sepTxt, bgcolor=sepBg, text_color=color.new(color.white, 100), text_size=size.tiny)
+    table.cell(hud, 3, r, sepTxt, bgcolor=sepBg, text_color=color.new(color.white, 100), text_size=size.tiny)
+    table.cell(hud, 5, r, sepTxt, bgcolor=sepBg, text_color=color.new(color.white, 100), text_size=size.tiny)
+
+    table.cell(hud, 0, r, _k1, text_color=color.white, bgcolor=bgHud, text_halign=text.align_right)
+    table.cell(hud, 2, r, _v1, text_color=color.white, bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 4, r, _k2, text_color=color.white, bgcolor=bgHud, text_halign=text.align_right)
+    table.cell(hud, 6, r, _v2, text_color=color.white, bgcolor=bgHud, text_halign=text.align_left)
+
+f_cell4_col(_row, _k1, _v1, _k2, _v2, _bg, _tc) =>
+    r = _row + hudPadRows
+    table.cell(hud, 1, r, sepTxt, bgcolor=sepBg, text_color=color.new(color.white, 100), text_size=size.tiny)
+    table.cell(hud, 3, r, sepTxt, bgcolor=sepBg, text_color=color.new(color.white, 100), text_size=size.tiny)
+    table.cell(hud, 5, r, sepTxt, bgcolor=sepBg, text_color=color.new(color.white, 100), text_size=size.tiny)
+
+    table.cell(hud, 0, r, _k1, text_color=_tc, bgcolor=_bg, text_halign=text.align_right)
+    table.cell(hud, 2, r, _v1, text_color=_tc, bgcolor=_bg, text_halign=text.align_left)
+    table.cell(hud, 4, r, _k2, text_color=_tc, bgcolor=_bg, text_halign=text.align_right)
+    table.cell(hud, 6, r, _v2, text_color=_tc, bgcolor=_bg, text_halign=text.align_left)
+
+f_price(_p) => na(_p) ? "—" : str.tostring(_p, "#.###")
+f_money(_m) => na(_m) ? "—" : ("$" + str.tostring(_m, "#.##"))
+f_posNegColor(_x) => na(_x) ? color.white : (_x > 0 ? color.lime : (_x < 0 ? color.red : color.white))
+
+posDir = strategy.position_size > 0 ? 1 : (strategy.position_size < 0 ? -1 : 0)
+activeHeader = posDir == 1 ? "ACTIVE LONG" : (posDir == -1 ? "ACTIVE SHORT" : "NO ACTIVE")
+activeBG = posDir == 1 ? color.new(color.green, 0) : (posDir == -1 ? color.new(color.red, 0) : bgHud)
+
+inPos2 = strategy.position_size != 0
+activeEntryTxt = inPos2 ? f_price(lockEntry) : "—"
+activeTpTxt    = inPos2 ? f_price(lockTP)    : "—"
+activeSlTxt    = inPos2 ? f_price(lockSL)    : "—"
+
+probTag = probDisplay == "Real" ? "R" : (predModel == "Empirical" ? "E" : "D")
+probTPKey = "TP" + probTag + "%"
+probSLKey = "SL" + probTag + "%"
+
+pTPaTxt = not na(pTP_active) ? (str.tostring(pTP_active * 100.0, "#.##") + "%") : "—"
+pSLaTxt = not na(pSL_active) ? (str.tostring(pSL_active * 100.0, "#.##") + "%") : "—"
+
+setupHeader = "LIVE SETUP"
+dirTxt = setupDir == 1 ? "LONG" : (setupDir == -1 ? "SHORT" : "NONE")
+liveEntryTxt = f_price(close)
+liveTpTxt = setupDir != 0 ? f_price(setupTP) : "—"
+liveSlTxt = setupDir != 0 ? f_price(setupSL) : "—"
+pTPlTxt = not na(pTP_live) ? (str.tostring(pTP_live * 100.0, "#.##") + "%") : "—"
+pSLlTxt = not na(pSL_live) ? (str.tostring(pSL_live * 100.0, "#.##") + "%") : "—"
+
+atrPct = close != 0 ? (atr / close * 100.0) : na
+atrPctTxt = na(atrPct) ? "—" : (str.tostring(atrPct, "#.##") + "%")
+
+sigTxt = (enterLongRaw ? "LONG" : (enterShortRaw ? "SHORT" : "NONE"))
+modeTxt = confirmedMode ? "On Close (confirmed)" : "Intrabar"
+sweepTxt = sweepGate ? "true" : "false"
+coolTxt = cooldownOK ? "true" : "false"
+openPnl = strategy.openprofit
+sizeTxt = inPos2 ? str.tostring(math.abs(strategy.position_size), "#") : "—"
+
+// Render HUD
+if showHUD
+    table.clear(hud, 0, 0, 6, HUD_ROWS - 1)
+
+    if hudPadRows > 0
+        for pr = 0 to hudPadRows - 1
+            for c = 0 to 6
+                table.cell(hud, c, pr, "", bgcolor=bgHud)
+
+    // Top context box (Entry/TP/SL stacked; ATR% moved into right slot)
+    f_cell4_col(0, "Signal", sigTxt, "Mode", modeTxt, bgHud, color.white)
+    f_cell4(1, "TrendMode", trendMode, "EMA", str.tostring(emaLen))
+    f_cell4(2, "SweepGate", sweepTxt, "CooldownOK", coolTxt)
+    f_cell4(3, "Pos", posDir == 1 ? "LONG" : (posDir == -1 ? "SHORT" : "FLAT"), "Open PnL", f_money(openPnl))
+    f_cell4(4, "Entry", f_price(lockEntry), "ATR%", atrPctTxt)
+    f_cell4(5, "TP", f_price(lockTP), "RecentOK", str.tostring(recentOK))
+    f_cell4(6, "SL", f_price(lockSL), "Last PnL", f_money(lastPnl))
+
+    table.cell(hud, 2, 5 + hudPadRows, f_price(lockTP), text_color=cTP, bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 2, 6 + hudPadRows, f_price(lockSL), text_color=cSL, bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 6, 6 + hudPadRows, f_money(lastPnl), text_color=f_posNegColor(lastPnl), bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 6, 3 + hudPadRows, f_money(openPnl), text_color=f_posNegColor(openPnl), bgcolor=bgHud, text_halign=text.align_left)
+
+    // Active header row with Order ID (corrected)
+    rAct = 7 + hudPadRows
+    table.cell(hud, 1, rAct, sepTxt, bgcolor=sepBg, text_color=color.new(color.white, 100), text_size=size.tiny)
+    table.cell(hud, 3, rAct, sepTxt, bgcolor=sepBg, text_color=color.new(color.white, 100), text_size=size.tiny)
+    table.cell(hud, 5, rAct, sepTxt, bgcolor=sepBg, text_color=color.new(color.white, 100), text_size=size.tiny)
+
+    table.cell(hud, 0, rAct, activeHeader, text_color=color.white, bgcolor=activeBG, text_halign=text.align_right)
+    table.cell(hud, 2, rAct, "", text_color=color.white, bgcolor=activeBG, text_halign=text.align_left)
+    table.cell(hud, 4, rAct, "Order ID", text_color=color.white, bgcolor=activeBG, text_halign=text.align_right)
+    table.cell(hud, 6, rAct, orderIdTxt, text_color=color.white, bgcolor=activeBG, text_halign=text.align_left)
+
+    f_cell4(8,  "Entry", activeEntryTxt, probTPKey, pTPaTxt)
+    f_cell4(9,  "TP",    activeTpTxt,    probSLKey, pSLaTxt)
+    // Active SL row: add Size on right pair
+    f_cell4(10, "SL",    activeSlTxt,    "Size", sizeTxt)
+
+    table.cell(hud, 2, 9 + hudPadRows, activeTpTxt, text_color=cTP, bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 2, 10 + hudPadRows, activeSlTxt, text_color=cSL, bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 6, 8 + hudPadRows, pTPaTxt, text_color=cPct, bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 6, 9 + hudPadRows, pSLaTxt, text_color=cPct, bgcolor=bgHud, text_halign=text.align_left)
+
+    // LIVE SETUP
+    dirBg = setupDir == 1 ? color.new(color.green, 0) : (setupDir == -1 ? color.new(color.red, 0) : bgHud)
+    f_cell4_col(11, setupHeader, "", "Dir", dirTxt, color.new(color.yellow, 0), color.black)
+    table.cell(hud, 6, 11 + hudPadRows, dirTxt, text_color=color.white, bgcolor=dirBg, text_halign=text.align_left)
+
+    f_cell4(12, "Entry", liveEntryTxt, "", "")
+    f_cell4(13, "TP",    liveTpTxt,    probTPKey, pTPlTxt)
+    f_cell4(14, "SL",    liveSlTxt,    probSLKey, pSLlTxt)
+
+    table.cell(hud, 2, 13 + hudPadRows, liveTpTxt, text_color=cTP, bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 2, 14 + hudPadRows, liveSlTxt, text_color=cSL, bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 6, 13 + hudPadRows, pTPlTxt, text_color=cPct, bgcolor=bgHud, text_halign=text.align_left)
+    table.cell(hud, 6, 14 + hudPadRows, pSLlTxt, text_color=cPct, bgcolor=bgHud, text_halign=text.align_left)
+
+//====================
+// v2.9.9 Task #4 — Historical markers for CLOSED trades only
+// Entry = black, TP = purple, SL = yellow
+// No horizontal lines, label-only. Format per your spec.
+//====================
+var label[] histLabels = array.new_label(0)
+f_pushHistLabel(_lb) =>
+    array.push(histLabels, _lb)
+    if array.size(histLabels) > maxHistoricalMarkers
+        old = array.shift(histLabels)
+        if not na(old)
+            label.delete(old)
+
+var int ctPrevHist = 0
+ctNow = strategy.closedtrades
+
+if showHistoricalTradeMarkers and (ctNow > ctPrevHist)
+    for i = ctPrevHist to ctNow - 1
+        // "Order ID" here = trade number (1-indexed)
+        tradeId = i + 1
+
+        eBar = strategy.closedtrades.entry_bar_index(i)
+        xBar = strategy.closedtrades.exit_bar_index(i)
+        ePx  = strategy.closedtrades.entry_price(i)
+        xPx  = strategy.closedtrades.exit_price(i)
+        tSz = strategy.closedtrades.size(i)  // signed; >0 long, <0 short
+
+        isLongT = tSz > 0
+        // Infer TP vs SL by direction + exit relative to entry (robust enough for labeling)
+        isTP = isLongT ? (xPx >= ePx) : (xPx <= ePx)
+
+        // Entry label (at entry bar/price)
+        enTxt = "EN | Order ID " + str.tostring(tradeId) + " | " + str.tostring(ePx, "#.###")
+        enStyle = isLongT ? label.style_label_up : label.style_label_down
+        enCol = color.new(color.black, 0)
+        enLb = label.new(eBar, ePx, enTxt, xloc=xloc.bar_index, yloc=yloc.price, style=enStyle, color=enCol, textcolor=color.white, size=size.small)
+        f_pushHistLabel(enLb)
+
+        // Exit label (TP purple / SL yellow)
+        exTxt = (isTP ? "TP" : "SL") + " | Order ID " + str.tostring(tradeId)
+        exStyle = isLongT ? label.style_label_down : label.style_label_up
+        exCol = isTP ? color.new(color.purple, 0) : color.new(color.yellow, 0)
+        exTextCol = isTP ? color.white : color.black
+        exLb = label.new(xBar, xPx, exTxt, xloc=xloc.bar_index, yloc=yloc.price, style=exStyle, color=exCol, textcolor=exTextCol, size=size.small)
+        f_pushHistLabel(exLb)
+
+    ctPrevHist := ctNow
+else
+    // keep ctPrevHist in sync even if markers are off
+    ctPrevHist := ctNow
+
+View in Pine Editor・922 lines
+Use on chart
+2
+1
+3
+1
+2 195
+A precision-built intraday trading system designed for fast-moving markets like crypto and metals, optimized for 5-minute charts. This strategy focuses on capturing high-probability liquidity-driven moves while minimizing exposure to noise and false breakouts.
+
+Core Concept
+Scalp Signal Bot combines market structure, liquidity sweeps, and confirmation logic to identify actionable trade setups. It is engineered to enter after key levels are reclaimed and structure is confirmed, helping avoid common traps during volatile conditions.
+
+Key Features
+
+Market Structure Engine
+Detects swing highs/lows and triggers entries on confirmed structure breaks.
+
+Liquidity Sweep Detection
+Identifies stop-hunt behavior and uses it as context for higher-probability reversals or continuations.
+
+Reclaim Confirmation Logic
+Ensures price reclaims key levels before entering, filtering out weak or premature signals.
+
+Anti-Fakeout Entry Delay
+Optional candle delay reduces entries during impulsive spikes and false breakouts.
+
+Volume Filtering (Optional)
+Uses relative volume conditions to validate participation and reduce low-liquidity signals.
+
+Trend & Chop Modes
+Flexible regime detection allows the bot to adapt between trending and ranging environments.
+
+Configurable Risk Model
+Supports R-based take profit and dynamic stop logic aligned with structure and volatility.
+
+Live Trade HUD
+Displays real-time signal state, entry, TP/SL levels, and system context directly on chart.
+
+Designed For
+
+5-minute scalping strategies
+
+High-volatility assets (e.g., BTC, ETH, XAU, XAG)
+
+Traders seeking structured, rule-based entries without emotional bias
+
+Strengths
+
+Avoids chasing moves with confirmation-based entries
+
+Filters noise in choppy markets
+
+Adapts to multiple market conditions with configurable logic
+
+Important Notes
+
+Performance varies by market regime (trend vs range)
+
+Works best when tuned to the current volatility environment
+
+Not intended for passive buy-and-hold strategies
+
+Best Use
+Run on 5-minute charts with proper parameter tuning. Ideal for traders who want consistent, rule-driven setups and are comfortable optimizing settings for current market conditions.
+
+Disclaimer
+
+This script is for educational and informational purposes only and does not constitute financial advice. The creator is not a registered financial advisor.
+
+Trading financial markets involves significant risk. Past performance is not indicative of future results. This strategy does not guarantee profits and may result in losses, including the loss of principal.
+
+Users are solely responsible for their own trading decisions. Always conduct your own research and risk management before using this script in live markets.
+
+This script is a tool designed to assist in decision-making and should not be used as a standalone system without proper understanding and testing.
+
+No representation is being made that any account will or is likely to achieve profits or losses similar to those shown.
+
+If you want stricter (sometimes helps approval faster), use this slightly heavier version:
+
+Risk Disclosure
+
+This script is provided “as is” without any guarantees or warranties. The developer assumes no responsibility for any trading losses incurred.
+
+All trading involves risk, and you should only trade with capital you can afford to lose. Hypothetical or backtested results have inherent limitations and do not reflect actual trading performance.
+
+By using this script, you acknowledge that you are fully responsible for your trading decisions and outcomes.

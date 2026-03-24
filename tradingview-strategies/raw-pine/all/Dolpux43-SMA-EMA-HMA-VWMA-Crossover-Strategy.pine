@@ -1,0 +1,58 @@
+//@version=3
+//study(title="MA Crossover Strategy", overlay = true)
+strategy("MA Crossover Strategy", overlay=true)
+src = input(close, title="Source")
+
+price = security(tickerid, period, src)
+ma1 = input(25, title="1st MA Length")
+type1 = input("HMA", "1st MA Type", options=["SMA", "EMA", "HMA", "VWMA"])
+
+ma2 = input(7, title="2nd MA Length")
+type2 = input("HMA", "2nd MA Type", options=["SMA", "EMA", "HMA", "VWMA"])
+
+f_hma(_src, _length)=>
+    _return = wma((2*wma(_src, _length/2))-wma(_src, _length), round(sqrt(_length)))
+
+price1 = if (type1 == "SMA")
+    sma(price, ma1)
+else
+    if (type1 == "EMA")
+        ema(price, ma1)
+    else
+        if (type1 == "VWMA")
+            vwma(price, ma1)
+        else
+            f_hma(price, ma1)
+    
+price2 = if (type2 == "SMA")
+    sma(price, ma2)
+else
+    if (type2 == "EMA")
+        ema(price, ma2)
+    else
+        if (type2 == "VWMA")
+            vwma(price, ma2)
+        else
+            f_hma(price, ma2)
+
+
+//plot(series=price, style=line,  title="Price", color=black, linewidth=1, transp=0)
+plot(series=price1, style=line,  title="1st MA", color=blue, linewidth=2, transp=0)
+plot(series=price2, style=line, title="2nd MA", color=green, linewidth=2, transp=0)
+
+
+longCondition = crossover(price1, price2)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = crossunder(price1, price2)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・50 lines
+Use on chart
+2
+3
+0
+6 657
+This latest version allows you to backtest crossovers of any SMA EMA HMA or VWMA. Due to the number of orders limit, it will only work on higher timeframes, sometimes using it on a newer exchange with less history can overcome this.

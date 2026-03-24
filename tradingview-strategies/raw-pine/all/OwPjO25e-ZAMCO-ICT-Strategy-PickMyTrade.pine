@@ -1,0 +1,424 @@
+//@version=6
+strategy("ZAMCO ICT Strategy [PickMyTrade]",
+         shorttitle        = "ZAMCO ICT [PMT]",
+         overlay           = true,
+         default_qty_type  = strategy.percent_of_equity,
+         default_qty_value = 1,
+         initial_capital   = 10000,
+         commission_type   = strategy.commission.percent,
+         commission_value  = 0.01,
+         max_boxes_count   = 200,
+         max_lines_count   = 500,
+         max_labels_count  = 200)
+ 
+// ─────────────────────────────────────────────
+//  INPUTS
+// ─────────────────────────────────────────────
+grp1 = "── Structure ──"
+swingLen      = input.int(10, "Pivot Len", minval=3, maxval=50, group=grp1)
+ 
+grp2 = "── Liquidity ──"
+sweepWick     = input.float(0.3, "Min Sweep Wick %", minval=0.1, maxval=1.0, step=0.05, group=grp2)
+showSweepDot  = input.bool(true, "Show Sweep Dots", group=grp2)
+ 
+grp3 = "── FVG ──"
+showFVG       = input.bool(true,  "Show FVG Zones",      group=grp3)
+fvgMitigated  = input.bool(true,  "Hide Mitigated FVGs", group=grp3)
+showFVGMid    = input.bool(true,  "Show CE Midline",      group=grp3)
+ 
+grp4 = "── HTF Bias ──"
+htfTF         = input.timeframe("60", "HTF Timeframe", group=grp4)
+ 
+grp5 = "── Risk ──"
+rrTarget      = input.float(3.0, "R:R Target", minval=1.0, maxval=20.0, step=0.5, group=grp5)
+challengeMode = input.bool(false, "Challenge Mode", group=grp5)
+ 
+// ─────────────────────────────────────────────
+//  THEME PALETTE  (dark-optimised, Zeiierman style)
+// ─────────────────────────────────────────────
+c_bull        = #00e5ff   // cyan  — bullish structure
+c_bear        = #ff1744   // red   — bearish structure
+c_sweep_bull  = #ffea00   // yellow — bull sweep dot
+c_sweep_bear  = #ff6d00   // orange — bear sweep dot
+c_mss_bull    = #00e676   // green  — bull MSS line
+c_mss_bear    = #ff1744   // red    — bear MSS line
+c_fvg_bull    = color.new(#00e676, 88)
+c_fvg_bear    = color.new(#ff1744, 88)
+c_fvg_bull_b  = color.new(#00e676, 70)
+c_fvg_bear_b  = color.new(#ff1744, 70)
+c_sl          = color.new(#ff1744, 30)
+c_tp          = color.new(#00e676, 30)
+c_entry       = color.new(#ffffff, 60)
+c_london      = color.new(#1565c0, 93)
+c_ny          = color.new(#4a148c, 93)
+ 
+// ─────────────────────────────────────────────
+//  1. SWING STRUCTURE — dots only (no triangles)
+// ─────────────────────────────────────────────
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow  = ta.pivotlow(low,  swingLen, swingLen)
+ 
+var float lastSH = na
+var float lastSL = na
+ 
+if not na(swingHigh)
+    lastSH := swingHigh
+if not na(swingLow)
+    lastSL := swingLow
+ 
+// Tiny dots for swing H/L — clean Zeiierman look
+plotshape(swingHigh, style=shape.circle, location=location.abovebar,
+          color=color.new(c_bear, 30), size=size.tiny, offset=-swingLen, title="SH")
+plotshape(swingLow,  style=shape.circle, location=location.belowbar,
+          color=color.new(c_bull, 30), size=size.tiny, offset=-swingLen, title="SL")
+ 
+// ─────────────────────────────────────────────
+//  2. LIQUIDITY SWEEP — small diamond + thin dashed level line
+// ─────────────────────────────────────────────
+bullSweep = not na(lastSL) and low < lastSL and close > lastSL and (lastSL - low) / (high - low + 0.00001) >= sweepWick
+ 
+bearSweep = not na(lastSH) and high > lastSH and close < lastSH and (high - lastSH) / (high - low + 0.00001) >= sweepWick
+ 
+plotshape(showSweepDot and bullSweep, style=shape.diamond, location=location.belowbar,
+          color=c_sweep_bull, size=size.small, title="Bull Sweep")
+plotshape(showSweepDot and bearSweep, style=shape.diamond, location=location.abovebar,
+          color=c_sweep_bear, size=size.small, title="Bear Sweep")
+ 
+// Thin dashed line at swept level
+if bullSweep
+    line.new(bar_index - 1, lastSL, bar_index + 15, lastSL,
+             color=color.new(c_sweep_bull, 50), style=line.style_dashed, width=1)
+ 
+if bearSweep
+    line.new(bar_index - 1, lastSH, bar_index + 15, lastSH,
+             color=color.new(c_sweep_bear, 50), style=line.style_dashed, width=1)
+ 
+// ─────────────────────────────────────────────
+//  3. MARKET STRUCTURE SHIFT — thin solid line + small arrow
+// ─────────────────────────────────────────────
+var bool  waitBull   = false
+var bool  waitBear   = false
+var float mssLvlBull = na
+var float mssLvlBear = na
+ 
+if bullSweep
+    waitBull   := true
+    mssLvlBull := lastSH
+ 
+if bearSweep
+    waitBear   := true
+    mssLvlBear := lastSL
+ 
+bullMSS = waitBull and not na(mssLvlBull) and close > mssLvlBull
+bearMSS = waitBear and not na(mssLvlBear) and close < mssLvlBear
+ 
+if bullMSS
+    waitBull := false
+    // Thin solid MSS line
+    line.new(bar_index - 5, mssLvlBull, bar_index + 20, mssLvlBull,
+             color=color.new(c_mss_bull, 20), style=line.style_solid, width=1)
+    // Small label — Zeiierman uses tiny text tags, not large boxes
+    label.new(bar_index, mssLvlBull, " MSS",
+              color=color.new(c_mss_bull, 85), textcolor=c_mss_bull,
+              style=label.style_label_right, size=size.tiny)
+ 
+if bearMSS
+    waitBear := false
+    line.new(bar_index - 5, mssLvlBear, bar_index + 20, mssLvlBear,
+             color=color.new(c_mss_bear, 20), style=line.style_solid, width=1)
+    label.new(bar_index, mssLvlBear, " MSS",
+              color=color.new(c_mss_bear, 85), textcolor=c_mss_bear,
+              style=label.style_label_right, size=size.tiny)
+ 
+// ─────────────────────────────────────────────
+//  4. FAIR VALUE GAP — semi-transparent zone + CE midline
+// ─────────────────────────────────────────────
+bullFVG = low  > high[2]
+bearFVG = high < low[2]
+ 
+var box[]  fvgBoxes   = array.new_box()
+var line[] fvgMidlines= array.new_line()
+var bool[] fvgIsBull  = array.new_bool()
+ 
+if showFVG and bullFVG
+    fTop = low
+    fBot = high[2]
+    fMid = math.avg(fTop, fBot)
+    b = box.new(left=bar_index - 2, top=fTop, right=bar_index + 40, bottom=fBot,
+                bgcolor=c_fvg_bull, border_color=c_fvg_bull_b, border_width=1)
+    ml = showFVGMid ? line.new(bar_index - 2, fMid, bar_index + 40, fMid,
+                               color=color.new(#00e676, 55), style=line.style_dotted, width=1) :
+                      line.new(0, 0, 0, 0, color=color.new(color.white,100))
+    array.push(fvgBoxes,    b)
+    array.push(fvgMidlines, ml)
+    array.push(fvgIsBull,   true)
+ 
+if showFVG and bearFVG
+    fTop = low[2]
+    fBot = high
+    fMid = math.avg(fTop, fBot)
+    b = box.new(left=bar_index - 2, top=fTop, right=bar_index + 40, bottom=fBot,
+                bgcolor=c_fvg_bear, border_color=c_fvg_bear_b, border_width=1)
+    ml = showFVGMid ? line.new(bar_index - 2, fMid, bar_index + 40, fMid,
+                               color=color.new(#ff1744, 55), style=line.style_dotted, width=1) :
+                      line.new(0, 0, 0, 0, color=color.new(color.white,100))
+    array.push(fvgBoxes,    b)
+    array.push(fvgMidlines, ml)
+    array.push(fvgIsBull,   false)
+ 
+// Mitigate FVGs
+if fvgMitigated and array.size(fvgBoxes) > 0
+    for i = array.size(fvgBoxes) - 1 to 0
+        b      = array.get(fvgBoxes,    i)
+        ml     = array.get(fvgMidlines, i)
+        isBull = array.get(fvgIsBull,   i)
+        bTop   = box.get_top(b)
+        bBot   = box.get_bottom(b)
+        if isBull and low <= bTop
+            box.delete(b)
+            line.delete(ml)
+            array.remove(fvgBoxes,    i)
+            array.remove(fvgMidlines, i)
+            array.remove(fvgIsBull,   i)
+        else if not isBull and high >= bBot
+            box.delete(b)
+            line.delete(ml)
+            array.remove(fvgBoxes,    i)
+            array.remove(fvgMidlines, i)
+            array.remove(fvgIsBull,   i)
+ 
+// ─────────────────────────────────────────────
+//  5. HTF BIAS — coloured candles + slim EMA ribbon
+// ─────────────────────────────────────────────
+htfEMA50  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 50),  lookahead=barmerge.lookahead_off)
+htfEMA200 = request.security(syminfo.tickerid, htfTF, ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+htfBull   = htfEMA50 > htfEMA200
+htfLabelY = ta.highest(high, 50)
+ 
+// Slim EMA lines on chart
+plot(htfEMA50,  "HTF EMA50",  color=color.new(c_bull, 40), linewidth=1, style=plot.style_line)
+plot(htfEMA200, "HTF EMA200", color=color.new(c_bear, 40), linewidth=1, style=plot.style_line)
+ 
+// Bias tag — right side, tiny
+if barstate.islast
+    label.new(bar_index + 2, htfLabelY,
+              htfBull ? "▲ BULL" : "▼ BEAR",
+              color=color.new(htfBull ? c_mss_bull : c_mss_bear, 80),
+              textcolor=htfBull ? c_mss_bull : c_mss_bear,
+              style=label.style_label_left, size=size.small)
+ 
+// ─────────────────────────────────────────────
+//  6. ENTRY SIGNALS
+// ─────────────────────────────────────────────
+longSig  = htfBull      and bullMSS
+shortSig = not htfBull  and bearMSS
+ 
+// Small triangle signals (not plotshape large boxes)
+plotshape(longSig,  style=shape.triangleup,   location=location.belowbar,
+          color=c_mss_bull, size=size.small, title="Long Signal")
+plotshape(shortSig, style=shape.triangledown, location=location.abovebar,
+          color=c_mss_bear, size=size.small, title="Short Signal")
+ 
+// ─────────────────────────────────────────────
+//  7. ENTRIES + CLEAN SL/TP ZONES
+// ─────────────────────────────────────────────
+if longSig and strategy.position_size == 0
+    stopD  = close - lastSL * 0.9998
+    slL    = close - stopD
+    tpL    = close + stopD * rrTarget
+    strategy.entry("Long",  strategy.long,  comment="L")
+    strategy.exit("LX", "Long",  stop=slL, limit=tpL)
+ 
+    // SL zone — thin red shaded box
+    box.new(left=bar_index, top=close, right=bar_index + 50, bottom=slL,
+            bgcolor=color.new(c_bear, 88), border_color=color.new(c_bear, 60), border_width=1)
+    // TP zone — thin green shaded box
+    box.new(left=bar_index, top=tpL, right=bar_index + 50, bottom=close,
+            bgcolor=color.new(c_mss_bull, 88), border_color=color.new(c_mss_bull, 60), border_width=1)
+    // Entry line
+    line.new(bar_index, close, bar_index + 50, close,
+             color=color.new(c_entry, 20), style=line.style_dotted, width=1)
+    // SL / TP price tags — tiny right-side labels
+    label.new(bar_index + 50, slL, " SL " + str.tostring(slL, "#.##"),
+              color=color.new(c_bear, 80), textcolor=c_bear,
+              style=label.style_label_left, size=size.tiny)
+    label.new(bar_index + 50, tpL, " TP " + str.tostring(tpL, "#.##"),
+              color=color.new(c_mss_bull, 80), textcolor=c_mss_bull,
+              style=label.style_label_left, size=size.tiny)
+    label.new(bar_index + 50, close, " E " + str.tostring(close, "#.##"),
+              color=color.new(color.white, 85), textcolor=color.white,
+              style=label.style_label_left, size=size.tiny)
+ 
+if shortSig and strategy.position_size == 0
+    stopD  = lastSH * 1.0002 - close
+    slS    = close + stopD
+    tpS    = close - stopD * rrTarget
+    strategy.entry("Short", strategy.short, comment="S")
+    strategy.exit("SX", "Short", stop=slS, limit=tpS)
+ 
+    box.new(left=bar_index, top=slS,   right=bar_index + 50, bottom=close,
+            bgcolor=color.new(c_bear, 88), border_color=color.new(c_bear, 60), border_width=1)
+    box.new(left=bar_index, top=close, right=bar_index + 50, bottom=tpS,
+            bgcolor=color.new(c_mss_bull, 88), border_color=color.new(c_mss_bull, 60), border_width=1)
+    line.new(bar_index, close, bar_index + 50, close,
+             color=color.new(c_entry, 20), style=line.style_dotted, width=1)
+    label.new(bar_index + 50, slS, " SL " + str.tostring(slS, "#.##"),
+              color=color.new(c_bear, 80), textcolor=c_bear,
+              style=label.style_label_left, size=size.tiny)
+    label.new(bar_index + 50, tpS, " TP " + str.tostring(tpS, "#.##"),
+              color=color.new(c_mss_bull, 80), textcolor=c_mss_bull,
+              style=label.style_label_left, size=size.tiny)
+    label.new(bar_index + 50, close, " E " + str.tostring(close, "#.##"),
+              color=color.new(color.white, 85), textcolor=color.white,
+              style=label.style_label_left, size=size.tiny)
+ 
+// ─────────────────────────────────────────────
+//  8. SESSION SHADING — very subtle
+// ─────────────────────────────────────────────
+londonSess = time(timeframe.period, "0800-1200", "Europe/London")
+nySess     = time(timeframe.period, "1330-1700", "America/New_York")
+bgcolor(not na(londonSess) ? c_london : na, title="London")
+bgcolor(not na(nySess)     ? c_ny     : na, title="NY")
+ 
+// ─────────────────────────────────────────────
+//  9. ALERTS
+// ─────────────────────────────────────────────
+if longSig
+    alert("ZAMCO ICT LONG — " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar)
+if shortSig
+    alert("ZAMCO ICT SHORT — " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar)
+if bullSweep or bearSweep
+    alert("ZAMCO ICT Sweep — " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar)
+ 
+// ─────────────────────────────────────────────
+//  10. MINIMAL DASHBOARD — Zeiierman style (small, top-right)
+// ─────────────────────────────────────────────
+if barstate.islast
+    var table t = table.new(position.top_right, 2, 5,
+                            bgcolor=color.new(#0d0d0d, 20),
+                            border_color=color.new(color.gray, 70),
+                            border_width=1,
+                            frame_color=color.new(color.gray, 60),
+                            frame_width=1)
+ 
+    table.cell(t, 0, 0, "ZAMCO ICT", text_color=color.new(color.white, 20), text_size=size.small,
+               bgcolor=color.new(#0d0d0d, 10), text_halign=text.align_center)
+    table.cell(t, 1, 0, "[PickMyTrade]", text_color=#00e5ff, text_size=size.tiny,
+               bgcolor=color.new(#0d0d0d, 10), text_halign=text.align_center)
+ 
+    table.cell(t, 0, 1, "Bias",   text_color=color.new(color.gray, 30), text_size=size.tiny)
+    table.cell(t, 1, 1, htfBull ? "BULL" : "BEAR",
+               text_color=htfBull ? c_mss_bull : c_mss_bear,            text_size=size.tiny)
+ 
+    table.cell(t, 0, 2, "EMA50",  text_color=color.new(color.gray, 30), text_size=size.tiny)
+    table.cell(t, 1, 2, str.tostring(htfEMA50,  "#.##"), text_color=color.white, text_size=size.tiny)
+ 
+    table.cell(t, 0, 3, "EMA200", text_color=color.new(color.gray, 30), text_size=size.tiny)
+    table.cell(t, 1, 3, str.tostring(htfEMA200, "#.##"), text_color=color.white, text_size=size.tiny)
+ 
+    table.cell(t, 0, 4, "Mode",   text_color=color.new(color.gray, 30), text_size=size.tiny)
+    table.cell(t, 1, 4, challengeMode ? "CHAL" : "FUND",
+               text_color=challengeMode ? #ff6d00 : c_mss_bull,         text_size=size.tiny)
+
+View in Pine Editor・330 lines
+Use on chart
+2
+3
+5
+3 061
+This strategy is inspired by publicly discussed prop firm methodologies and ICT (Inner Circle Trader) concepts focused on liquidity, market structure shifts, and price imbalances.
+
+It is not affiliated with, endorsed by, or connected to Zamco Capital Ltd, ICT, or Michael Huddleston.
+This script is provided strictly for educational and research purposes.
+
+OVERVIEW
+This rule-based strategy implements core ICT concepts using standard OHLC data available on TradingView.
+
+The model focuses on:
+Liquidity sweeps of recent swing highs/lows
+Market Structure Shift (MSS) confirmation
+Fair Value Gap (FVG) imbalance zones
+Higher Timeframe (HTF) EMA 50/200 directional bias
+
+The objective is to participate in directional moves after liquidity has been taken and short-term structure confirms displacement.
+
+This is not predictive trading. It is reactive to confirmed structural shifts.
+
+CORE LOGIC
+1. HTF Bias Filter
+EMA 50 and EMA 200 on a configurable higher timeframe define macro direction.
+Only trades aligned with HTF direction are considered.
+
+2. Liquidity Sweep Detection
+Price must first take a prior swing high or low before any setup becomes valid.
+
+3. Market Structure Shift (MSS)
+After the sweep, a break of opposing structure confirms potential shift in order flow.
+
+4. Execution Rules
+Entry: Market order on MSS confirmation bar
+Stop Loss: Beyond swept liquidity level
+Take Profit: Fixed risk-to-reward (default 3R)
+One position at a time (no pyramiding)
+
+FEATURES
+Liquidity sweep markers with level visualization
+Market structure shift lines with price labels
+Fair Value Gap zones with optional equilibrium midline
+Higher timeframe EMA ribbon
+Session background shading (London & New York)
+Compact dashboard (bias, session, structure state, R:R)
+Alert() support for automation
+
+BACKTEST INFORMATION
+Backtests depend heavily on:
+Instrument
+Timeframe
+Spread and commission
+Slippage
+Market regime
+Risk settings
+
+Results will vary significantly across symbols and periods.
+Users should configure realistic trading costs in Strategy Properties before evaluating performance.
+
+The sample backtest shown in the chart is for demonstration purposes only and represents a limited historical window.
+
+RECOMMENDED SETTINGS
+
+Entry Timeframes:
+5-minute
+15-minute
+
+Suggested HTF Bias:
+Use 4H HTF when trading 5m or 15m charts
+Use Daily HTF when trading 1H charts
+
+Common Instruments:
+XAUUSD
+NAS100
+GER40
+BTCUSD
+ETHUSD
+
+Default Risk-to-Reward: 3.0
+
+IMPORTANT CLARIFICATIONS
+This script approximates ICT concepts using candle data only.
+It does not use real bid/ask order flow or institutional execution data.
+
+Performance is highly sensitive to configuration and market conditions.
+Past performance does not guarantee future results.
+
+AUTOMATION
+TradingView alerts can be connected to supported brokers using third-party automation services.
+Automation configuration is optional and not required to use this script.
+
+EDUCATIONAL DISCLAIMER
+This strategy is provided for educational and research purposes only.
+It is not financial advice.
+
+Users are responsible for their own risk management, testing, and trading decisions.
+Forward-testing on a demo or simulated account is strongly recommended before considering live execution.
+
+

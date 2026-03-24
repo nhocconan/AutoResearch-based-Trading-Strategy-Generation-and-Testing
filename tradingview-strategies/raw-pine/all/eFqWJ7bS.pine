@@ -1,0 +1,113 @@
+//@version=5
+strategy("Dynamic Volatility Differential Model (DVDM)", overlay=false)
+
+// Inputs
+length = input.int(5, title="Periods for Historical Volatility", minval=1)
+vix_symbol = input.string("TVC:VIX", title="Volatility Index Symbol", options=["TVC:VIX", "CBOE:VXN", "CBOE:VXD", "CBOEFTSE:RVX", "CBOE:GVZ", "INDEX:DV1X"])
+stdev_multiplier = input.float(7.1, title="Standard Deviation Multiplier", minval=0.1, step=0.1) // Multiplier for dynamic threshold
+
+// Historical Volatility (Realized Volatility)
+log_return = math.log(close / close[1])
+historical_volatility = ta.stdev(log_return, length) * math.sqrt(252) * 100
+
+// Implied Volatility (selected volatility index)
+volatility_index_close = request.security(vix_symbol, "D", close, lookahead=barmerge.lookahead_off)
+
+// Spread between Implied and Historical Volatility
+volatility_spread = volatility_index_close - historical_volatility
+
+// Dynamic thresholds based on standard deviation
+spread_stdev = ta.stdev(volatility_spread, length)
+upper_threshold = spread_stdev * stdev_multiplier
+lower_threshold = -spread_stdev * stdev_multiplier
+
+// Highlight background for extreme conditions
+bgcolor(volatility_spread > upper_threshold ? color.new(color.green, 40) : 
+       volatility_spread < lower_threshold ? color.new(color.red, 40) : na)
+
+// Plot the Volatility Spread and Thresholds
+plot(volatility_spread, title="Volatility Spread", color=color.blue, linewidth=2)
+hline(0, "Zero Line", color=color.gray, linestyle=hline.style_dotted)
+plot(upper_threshold, title="Upper Threshold", color=color.green, linewidth=1)
+plot(lower_threshold, title="Lower Threshold", color=color.red, linewidth=1)
+
+// Trading Conditions
+long_condition = volatility_spread > upper_threshold
+short_condition = volatility_spread < lower_threshold
+
+if (long_condition)
+    strategy.entry("Long", strategy.long)
+
+if (short_condition)
+    strategy.entry("Short", strategy.short)
+
+// Exit Conditions
+exit_long_condition = ta.crossover(volatility_spread, 0)
+exit_short_condition = ta.crossunder(volatility_spread, 0)
+
+if (exit_long_condition)
+    strategy.close("Long")
+
+if (exit_short_condition)
+    strategy.close("Short")
+
+View in Pine Editor・52 lines
+Use on chart
+8
+8
+2 353
+The Dynamic Volatility Differential Model (DVDM) is a quantitative trading strategy designed to exploit the spread between implied volatility (IV) and historical (realized) volatility (HV). This strategy identifies trading opportunities by dynamically adjusting thresholds based on the standard deviation of the volatility spread. The DVDM is versatile and applicable across various markets, including equity indices, commodities, and derivatives such as the FDAX (DAX Futures).
+
+Key Components of the DVDM:
+
+1. Implied Volatility (IV):
+The IV is derived from options markets and reflects the market’s expectation of future price volatility. For instance, the strategy uses volatility indices such as the VIX (S&P 500), VXN (Nasdaq 100), or RVX (Russell 2000), depending on the target market. These indices serve as proxies for market sentiment and risk perception (Whaley, 2000).
+
+2. Historical Volatility (HV):
+The HV is computed from the log returns of the underlying asset’s price. It represents the actual volatility observed in the market over a defined lookback period, adjusted to annualized levels using a multiplier of \sqrt{252} for daily data (Hull, 2012).
+
+3. Volatility Spread:
+The difference between IV and HV forms the volatility spread, which is a measure of divergence between market expectations and actual market behavior.
+
+4. Dynamic Thresholds:
+Unlike static thresholds, the DVDM employs dynamic thresholds derived from the standard deviation of the volatility spread. The thresholds are scaled by a user-defined multiplier, ensuring adaptability to market conditions and volatility regimes (Christoffersen & Jacobs, 2004).
+
+Trading Logic:
+
+1. Long Entry:
+A long position is initiated when the volatility spread exceeds the upper dynamic threshold, signaling that implied volatility is significantly higher than realized volatility. This condition suggests potential mean reversion, as markets may correct inflated risk premiums.
+
+2. Short Entry:
+A short position is initiated when the volatility spread falls below the lower dynamic threshold, indicating that implied volatility is significantly undervalued relative to realized volatility. This signals the possibility of increased market uncertainty.
+
+3. Exit Conditions:
+Positions are closed when the volatility spread crosses the zero line, signifying a normalization of the divergence.
+
+Advantages of the DVDM:
+
+1. Adaptability:
+Dynamic thresholds allow the strategy to adjust to changing market conditions, making it suitable for both low-volatility and high-volatility environments.
+
+2. Quantitative Precision:
+The use of standard deviation-based thresholds enhances statistical reliability and reduces subjectivity in decision-making.
+
+3. Market Versatility:
+The strategy’s reliance on volatility metrics makes it universally applicable across asset classes and markets, ensuring robust performance.
+
+Scientific Relevance:
+
+The strategy builds on empirical research into the predictive power of implied volatility over realized volatility (Poon & Granger, 2003). By leveraging the divergence between these measures, the DVDM aligns with findings that IV often overestimates future volatility, creating opportunities for mean-reversion trades. Furthermore, the inclusion of dynamic thresholds aligns with risk management best practices by adapting to volatility clustering, a well-documented phenomenon in financial markets (Engle, 1982).
+
+References:
+
+1. Christoffersen, P., & Jacobs, K. (2004). The importance of the volatility risk premium for volatility forecasting. Journal of Financial and Quantitative Analysis, 39(2), 375-397.
+
+2. Engle, R. F. (1982). Autoregressive conditional heteroskedasticity with estimates of the variance of United Kingdom inflation. Econometrica, 50(4), 987-1007.
+
+3. Hull, J. C. (2012). Options, Futures, and Other Derivatives. Pearson Education.
+
+4. Poon, S. H., & Granger, C. W. J. (2003). Forecasting volatility in financial markets: A review. Journal of Economic Literature, 41(2), 478-539.
+
+5. Whaley, R. E. (2000). The investor fear gauge. Journal of Portfolio Management, 26(3), 12-17.
+
+This strategy leverages quantitative techniques and statistical rigor to provide a systematic approach to volatility trading, making it a valuable tool for professional traders and quantitative analysts.

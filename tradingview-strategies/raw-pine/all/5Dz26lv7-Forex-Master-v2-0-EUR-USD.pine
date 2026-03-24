@@ -1,0 +1,51 @@
+//@version=2
+strategy("FX Master v2.0", overlay=true)
+
+price = close
+
+basis = rsi(price, input(20))
+rsiema = ema(basis, input(5))
+
+trigger = input(50)
+
+long_profit = input(500)
+long_loss = input(500)
+
+short_profit = input(500)
+short_loss = input(500)
+
+strategy.entry("enter long", true, when = crossover(rsiema, trigger))
+strategy.exit("exit long", "enter long", profit = long_profit, loss = long_loss)
+
+strategy.entry("enter short", false, when = crossunder(rsiema, trigger))
+strategy.exit("exit short", "enter short", profit = short_profit, loss = short_loss)
+
+View in Pine Editor・21 lines
+Use on chart
+2
+5
+6
+1
+12 248
+This is version 2 of my Forex Master algorithm originally posted here:
+
+
+
+BACKTEST CONDITIONS:
+Initial equity = $100,000 (no leverage)
+Order size = 100% of equity
+Pyramiding = disabled
+
+TRADING RULES:
+Long entry = EMA5(RSI20) cross> 50
+Profit limit = 50 pips
+Stop loss = 50 pips
+
+Short entry = EMA5(RSI20) cross< 50
+Profit limit = 50 pips
+Stop loss = 50 pips
+
+Long entry = Short exit
+Short entry = long exit
+
+DISCLAIMER: None of my ideas and posts are investment advice. Past performance is not an indication of future results. This strategy was constructed with the benefit of hindsight and its future performance cannot be guaranteed.

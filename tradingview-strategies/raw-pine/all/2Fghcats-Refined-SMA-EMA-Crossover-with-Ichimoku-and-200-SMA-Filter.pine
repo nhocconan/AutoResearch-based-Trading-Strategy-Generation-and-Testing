@@ -1,0 +1,145 @@
+//@version=5
+strategy("Refined SMA/EMA Crossover with Ichimoku and 200 SMA Filter", overlay=true)
+
+// Ichimoku Cloud settings
+conversionPeriods = input.int(9, minval=1, title="Conversion Line Periods")
+basePeriods = input.int(26, minval=1, title="Base Line Periods")
+laggingSpan2Periods = input.int(52, minval=1, title="Lagging Span 2 Periods")
+displacement = input.int(26, minval=1, title="Displacement")
+
+donchian(len) => math.avg(ta.lowest(low, len), ta.highest(high, len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = math.avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+// Plot Ichimoku Cloud
+plot(conversionLine, color=color.blue, title="Conversion Line")
+plot(baseLine, color=color.red, title="Base Line")
+plot(close[displacement], offset= displacement + 1, color=color.green, title="Lagging Span")
+p1 = plot(leadLine1[displacement], color=color.green, title="Lead 1")
+p2 = plot(leadLine2[displacement], color=color.red, title="Lead 2")
+fill(p1, p2, color=leadLine1 > leadLine2 ? color.new(color.green, 90) : color.new(color.red, 90))
+
+// Define moving averages
+smaLength = 28
+sma50Length = 50
+emaLength = 14
+sma200Length = 200
+
+sma = ta.sma(close, smaLength)
+sma50 = ta.sma(close, sma50Length)
+ema = ta.ema(close, emaLength)
+sma200 = ta.sma(close, sma200Length)
+
+// Define price conditions relative to the Ichimoku Cloud and 200 SMA
+priceAboveLead1 = close > leadLine1
+priceAboveLead2 = close > leadLine2
+priceBelowLead1 = close < leadLine1
+priceBelowLead2 = close < leadLine2
+priceAboveSMA200 = close > sma200
+priceBelowSMA200 = close < sma200
+
+// Initialize variables to track if the buy or sell signal has been issued
+var bool buySignalIssued = false
+var bool sellSignalIssued = false
+
+// Define crossover conditions
+smaEmaCrossOutsideCloud = (ta.crossover(sma, ema) or ta.crossunder(sma, ema)) and (close > leadLine1 or close < leadLine2)
+
+// Generate buy and sell signals immediately based on closing prices and SMA
+buySignalCondition = priceAboveSMA200 and (priceAboveLead1 or priceAboveLead2)
+sellSignalCondition = priceBelowSMA200 and (priceBelowLead1 or priceBelowLead2)
+
+// Generate buy and sell signals immediately
+if (buySignalCondition and not buySignalIssued)
+    strategy.entry("Buy", strategy.long)
+    buySignalIssued := true
+
+if (sellSignalCondition and not sellSignalIssued)
+    strategy.entry("Sell", strategy.short)
+    sellSignalIssued := true
+
+// Reset signal flags when a trade is closed
+if (strategy.opentrades == 0)
+    buySignalIssued := false
+    sellSignalIssued := false
+
+// Plot moving averages
+plot(sma, color=color.blue, title="28 SMA")
+plot(sma50, color=color.black, title="50 SMA")
+plot(ema, color=color.orange, title="14 EMA")
+plot(sma200, color=color.purple, title="200 SMA")
+
+// Plot buy and sell signals
+plotshape(series=buySignalCondition and not buySignalIssued, location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(series=sellSignalCondition and not sellSignalIssued, location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+View in Pine Editor・77 lines
+Use on chart
+2
+7
+1 922
+Dec 17, 2024
+Your **Refined SMA/EMA Crossover with Ichimoku and 200 SMA Filter** strategy is a multi-faceted technical trading strategy that combines several key technical indicators to refine entry and exit points for trades. Here's a breakdown of the components and how they work together:
+
+### 1. **SMA/EMA Crossover**
+- **Simple Moving Average (SMA) & Exponential Moving Average (EMA) Crossover**:
+- The core idea behind the crossover strategy is to use the relationship between two moving averages to generate buy or sell signals.
+- **SMA** (Simple Moving Average) gives an average of past prices over a set period.
+- **EMA** (Exponential Moving Average) places more weight on recent prices, making it more responsive to price movements.
+- A **bullish crossover** occurs when a shorter period moving average (such as a 50-period EMA) crosses above a longer period moving average (such as a 200-period SMA), signaling a potential buy.
+- A **bearish crossover** occurs when a shorter period moving average crosses below the longer period moving average, signaling a potential sell.
+
+### 2. **Ichimoku Cloud**
+- The **Ichimoku Cloud** is a versatile indicator that provides insight into trend direction, support and resistance levels, and momentum.
+- **Cloud (Kumo)**: The space between the Senkou Span A and Senkou Span B lines. It helps identify whether the market is in an uptrend, downtrend, or consolidation.
+- **Tenkan-sen** (Conversion Line) and **Kijun-sen** (Base Line): These lines are used for additional confirmation of trend direction.
+- **Chikou Span**: A lagging line that is used to confirm the trend.
+- The general trading rules based on the Ichimoku Cloud are:
+- **Bullish Signal**: When the price is above the cloud and the Tenkan-sen crosses above the Kijun-sen.
+- **Bearish Signal**: When the price is below the cloud and the Tenkan-sen crosses below the Kijun-sen.
+
+### 3. **200 SMA Filter**
+- The **200 SMA Filter** serves as a long-term trend filter.
+- When the price is **above the 200 SMA**, it signals a long-term bullish trend, and you only look for buying opportunities.
+- When the price is **below the 200 SMA**, it signals a long-term bearish trend, and you only look for selling opportunities.
+- This filter helps to avoid counter-trend trades, aligning your positions with the broader market trend.
+
+### **How the Strategy Works Together**
+- **Trade Setup (Long Position)**
+1. The **200 SMA Filter** must confirm an **uptrend** by ensuring that the price is above the 200 SMA.
+2. A **bullish crossover** (e.g., the 50 EMA crossing above the 200 SMA) occurs.
+3. **Ichimoku Cloud** confirms a bullish trend, with the price above the cloud and the Tenkan-sen crossing above the Kijun-sen.
+4. You enter a **long trade** with this confluence of signals.
+
+- **Trade Setup (Short Position)**
+1. The **200 SMA Filter** must confirm a **downtrend** by ensuring the price is below the 200 SMA.
+2. A **bearish crossover** (e.g., the 50 EMA crossing below the 200 SMA) occurs.
+3. **Ichimoku Cloud** confirms a bearish trend, with the price below the cloud and the Tenkan-sen crossing below the Kijun-sen.
+4. You enter a **short trade** with this confluence of signals.
+
+### **Exit Strategy**
+- Exits can be determined based on any of the following:
+- **SMA/EMA crossover reversal**: Exit when the shorter-term moving average crosses back below the longer-term moving average for a long position or crosses above for a short position.
+- **Ichimoku Cloud reversal**: If the price breaks through the cloud or the Tenkan-sen and Kijun-sen lines cross in the opposite direction.
+- **Profit target or stop loss**: Setting predefined profit targets or using a trailing stop to lock in profits as the trade moves in your favor.
+
+Summary of the Strategy
+
+This strategy is designed to identify strong trends and avoid false signals by combining:
+
+
+SMA/EMA crossovers for immediate market direction signals.
+
+Ichimoku Cloud for confirming the strength and trend direction.
+
+A 200
+
+SMA filter to ensure trades align with the long-term trend.
+
+By using these multiple indicators together, the strategy aims to refine entry and exit points, minimize risk, and increase the likelihood of successful trades.
+Mar 11, 2025
+Release Notes
+Refined the indicator with SMA 50

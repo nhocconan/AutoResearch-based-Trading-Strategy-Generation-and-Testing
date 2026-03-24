@@ -1,0 +1,176 @@
+//@version=6
+strategy("LANZ Strategy 6.0 [Backtest]", overlay=true, default_qty_type=strategy.cash, default_qty_value=100)
+if timeframe.period != "60"
+    runtime.error("🚫 LANZ Strategy 6.0 is only available on the 1-hour timeframe.")
+
+// === 📏 RISK SETTINGS ===
+groupRisk = "📏 RISK SETTINGS"
+slPct = input.float(0.05, title="SL as % of Candle Range High–Low (0 = Wick Extreme)", minval=0.0, step=0.01, group=groupRisk)
+rr     = input.float(5.0, title="Risk Reward Ratio = 1:__", minval=0.1, step=0.1, group=groupRisk)
+
+// === 💰 ACCOUNT MANAGEMENT ===
+groupAccount = "💰 ACCOUNT MANAGEMENT"
+accountSizeUSD = input.float(10000, title="Account Capital ($)", minval=1, group=groupAccount)
+riskPercent    = input.float(1.0, title="Risk (%)", minval=0.1, maxval=100, group=groupAccount)
+
+// === ⚙️ NON-FOREX SETTINGS ===
+usarValorManual  = input.bool(true, "Use manual pip value if not Forex?", group=groupAccount,
+     tooltip="Enable this option to manually define the pip value for assets that are not Forex pairs (e.g., indices, gold, oil).")
+valorPipManual   = input.float(1.0, "Manual Pip Value ($)", minval=0.001, step=0.01, group=groupAccount,
+     tooltip="Set the pip value manually for non-Forex assets. Refer to your broker's data.")
+
+// === ✅ ENABLED ENTRIES ===
+groupEnabled = "✅ ENABLED ENTRIES"
+enableBuy  = input.bool(true, "Enable BUY entries", group=groupEnabled)
+enableSell = input.bool(false, "Enable SELL entries", group=groupEnabled)
+
+// === 📊 INTERNAL CALCULATIONS ===
+pipSize = syminfo.mintick * 10
+conversionRate = request.security("USDJPY", timeframe.period, close)
+isForex = syminfo.type == "forex"
+pipValue = isForex ? (str.endswith(syminfo.ticker, "USD") ? 10.0 : str.startswith(syminfo.ticker, "USD") ? (100000 * pipSize / close) : not na(conversionRate) ? (100000 * pipSize / conversionRate) : na) : usarValorManual ? valorPipManual : na
+
+// === 📅 CANDLE VALIDATION 09:00 NY ===
+is0900Candle   = time(timeframe.period, "0900-1000", "America/New_York")
+isBullish0900  = not na(is0900Candle) and close > open
+isBearish0900  = not na(is0900Candle) and close < open
+
+// === INPUT VARIABLES ===
+var float entryPrice = na
+var float slPrice = na
+var float tpPrice = na
+var float slPips = na
+var float qty = na
+
+if (isBullish0900 and enableBuy) or (isBearish0900 and enableSell)
+    entryPrice := close
+    hi = high
+    lo = low
+    candleRange = hi - lo
+
+    slPrice := slPct == 0.0 ? (isBullish0900 ? lo : hi) : (isBullish0900 ? lo - (candleRange * slPct) : hi + (candleRange * slPct))
+
+    risk = math.abs(entryPrice - slPrice)
+    tpPrice := isBullish0900 ? entryPrice + risk * rr : entryPrice - risk * rr
+    slPips := risk / pipSize
+
+    riskUSD = accountSizeUSD * (riskPercent / 100)
+    qty := slPips > 0 and not na(pipValue) ? (riskUSD / (slPips * pipValue)) : na
+
+    if isBullish0900 and enableBuy
+        strategy.entry("BUY", strategy.long, qty=qty, limit=entryPrice)
+        strategy.exit("TP/SL BUY", from_entry="BUY", stop=slPrice, limit=tpPrice)
+
+    if isBearish0900 and enableSell
+        strategy.entry("SELL", strategy.short, qty=qty, limit=entryPrice)
+        strategy.exit("TP/SL SELL", from_entry="SELL", stop=slPrice, limit=tpPrice)
+
+// === 🕒 MANUAL CLOSING AT 3:00 PM NY ===
+nyHour = hour(time, "America/New_York")
+nyMinute = minute(time, "America/New_York")
+isManualClose = (nyHour == 15 and nyMinute == 0)
+if isManualClose
+    strategy.close("BUY")
+    strategy.close("SELL")
+
+View in Pine Editor・74 lines
+Use on chart
+1
+3
+3
+2 903
+Jul 22, 2025
+🔷 LANZ Strategy 6.0 [Backtest] — Precision Backtesting Based on 09:00 NY Candle, Dynamic SL/TP, and Lot Size per Trade
+
+LANZ Strategy 6.0 [Backtest] is the simulation version of the original LANZ 6.0 indicator. It executes a single LIMIT BUY order per day based on the 09:00 a.m. New York candle, using dynamic Stop Loss and Take Profit levels derived from the candle range. Position sizing is calculated automatically using capital, risk percentage, and pip value — allowing accurate trade simulation and performance tracking.
+
+📌 This is a strategy script — It simulates real trades using strategy.entry() and strategy.exit() with full money management for risk-based backtesting.
+
+🧠 Core Logic & Trade Conditions
+
+🔹 BUY Signal Trigger:
+
+
+At 09:00 a.m. NY (New York time), if:
+
+The current candle is bullish (close > open)
+
+→ A BUY order is placed at the candle’s close price (EP)
+
+Only one signal is evaluated per day.
+
+
+
+⚙️ Stop Loss / Take Profit Logic
+
+SL can be:
+
+Wick low (0%)
+Or dynamically calculated using a % of the full candle range
+TP is calculated using the user-defined Risk/Reward ratio (e.g., 1:4)
+The TP and SL levels are passed to strategy.exit() for each trade simulation.
+
+💰 Risk Management & Lot Size Calculation
+
+Before placing the trade:
+
+
+The system calculates pip distance from EP to SL
+
+Computes the lot size based on:
+
+Account capital
+
+Risk % per trade
+
+Pip value (auto or manual)
+
+This ensures every trade uses consistent, scalable risk regardless of instrument.
+
+
+
+🕒 Manual Close at 3:00 p.m. NY
+
+
+If the trade is still open by 15:00 NY time, it will be closed using strategy.close().
+
+The final result is the actual % gain/loss based on how far price moved relative to SL.
+
+
+
+📊 Backtest Accuracy
+
+
+One trade per day
+
+LIMIT order at the candle close
+
+SL and TP pre-defined at execution
+
+No repainting
+
+Session-restricted (only runs on 1H timeframe)
+
+
+
+✅ Ideal For:
+
+
+Traders who want to backtest a clean and simple daily entry system
+
+Strategy developers seeking reproducible, high-conviction trades
+
+Users who prefer non-repainting, session-based simulations
+
+
+
+👨‍💻 Credits:
+💡 Developed by: LANZ
+🧠 Logic & Money Management Engine: LANZ
+📈 Designed for: 1H charts
+🧪 Purpose: Accurate simulation of LANZ 6.0's NY Candle Entry system
+Aug 4, 2025
+Release Notes
+🎁 - Update
+
+In the latest LANZ Strategy 6.0 [Backtest] update, default parameters have been adjusted for better calibration, and SELL entries are now available as an optional feature. This allows full backtesting of both directions, giving you greater flexibility in evaluating performance.

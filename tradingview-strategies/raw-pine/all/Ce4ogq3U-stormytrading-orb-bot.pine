@@ -1,0 +1,340 @@
+//@version=5
+strategy("MNQ Multi-Session ORB Break & Retest", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, max_bars_back=5000)
+
+// Input parameters
+useAsia = input.bool(true, "Use Asia Session (5:00-5:15 PM EST)")
+useLondon = input.bool(true, "Use London Session (2:30-2:45 AM EST)")
+useNYC = input.bool(true, "Use NYC Session (6:00-6:15 AM EST)")
+useOverlap = input.bool(true, "Use NYC Overlap (8:30-8:45 AM EST)")
+retestBuffer = input.float(0.5, "Retest Buffer (%)", minval=0, maxval=5) / 100
+slPoints = input.float(20, "Stop Loss (Points)", minval=1)
+tpMultiplier = input.float(2.0, "TP Multiplier (x SL)", minval=0.5, step=0.5)
+tpPoints = slPoints * tpMultiplier
+
+// Momentum settings
+emaFast = input.int(9, "Fast EMA", minval=1)
+emaSlow = input.int(21, "Slow EMA", minval=1)
+momentumLookback = input.int(50, "Momentum Lookback Bars", minval=10)
+
+// Session definitions (NYC/EST timezone)
+asiaSession = "1700-1715:23456"
+londonSession = "0230-0245:23456"
+nycSession = "0600-0615:23456"
+overlapSession = "0830-0845:23456"
+
+// === MOMENTUM CALCULATION ===
+emaF = ta.ema(close, emaFast)
+emaS = ta.ema(close, emaSlow)
+rsi = ta.rsi(close, 14)
+
+// Price position relative to day open
+var float dayOpen = na
+if ta.change(time("D"))
+    dayOpen := open
+
+// Momentum scoring (-3 to +3, positive = bullish, negative = bearish)
+var int momentumScore = 0
+
+emaBullish = emaF > emaS ? 1 : -1
+rsiBullish = rsi > 50 ? 1 : -1
+priceVsDayOpen = close > dayOpen ? 1 : -1
+
+momentumScore := emaBullish + rsiBullish + priceVsDayOpen
+
+// Determine bias
+bool bullishBias = momentumScore > 0
+bool bearishBias = momentumScore < 0
+
+// Variables for each session - ORB levels
+var float asiaHigh = na
+var float asiaLow = na
+var bool asiaSet = false
+var float ldnHigh = na
+var float ldnLow = na
+var bool ldnSet = false
+var float nycHigh = na
+var float nycLow = na
+var bool nycSet = false
+var float ovlHigh = na
+var float ovlLow = na
+var bool ovlSet = false
+
+// Break tracking
+var bool asiaBrokeHigh = false
+var bool asiaBrokeLow = false
+var bool ldnBrokeHigh = false
+var bool ldnBrokeLow = false
+var bool nycBrokeHigh = false
+var bool nycBrokeLow = false
+var bool ovlBrokeHigh = false
+var bool ovlBrokeLow = false
+
+// Retest tracking
+var bool asiaRetestHigh = false
+var bool asiaRetestLow = false
+var bool ldnRetestHigh = false
+var bool ldnRetestLow = false
+var bool nycRetestHigh = false
+var bool nycRetestLow = false
+var bool ovlRetestHigh = false
+var bool ovlRetestLow = false
+
+// Trade taken flags
+var bool asiaTradeTaken = false
+var bool ldnTradeTaken = false
+var bool nycTradeTaken = false
+var bool ovlTradeTaken = false
+
+// Variables for TP/SL lines
+var line tpLine = na
+var line slLine = na
+var float currentTP = na
+var float currentSL = na
+
+// Detect new day
+isNewDay = ta.change(time("D"))
+
+// Reset all sessions at start of new day
+if isNewDay
+    asiaHigh := na
+    asiaLow := na
+    asiaSet := false
+    asiaBrokeHigh := false
+    asiaBrokeLow := false
+    asiaRetestHigh := false
+    asiaRetestLow := false
+    asiaTradeTaken := false
+    ldnHigh := na
+    ldnLow := na
+    ldnSet := false
+    ldnBrokeHigh := false
+    ldnBrokeLow := false
+    ldnRetestHigh := false
+    ldnRetestLow := false
+    ldnTradeTaken := false
+    nycHigh := na
+    nycLow := na
+    nycSet := false
+    nycBrokeHigh := false
+    nycBrokeLow := false
+    nycRetestHigh := false
+    nycRetestLow := false
+    nycTradeTaken := false
+    ovlHigh := na
+    ovlLow := na
+    ovlSet := false
+    ovlBrokeHigh := false
+    ovlBrokeLow := false
+    ovlRetestHigh := false
+    ovlRetestLow := false
+    ovlTradeTaken := false
+
+// Check if we're in each session
+inAsia = not na(time(timeframe.period, asiaSession))
+inLondon = not na(time(timeframe.period, londonSession))
+inNYC = not na(time(timeframe.period, nycSession))
+inOverlap = not na(time(timeframe.period, overlapSession))
+
+// === ASIA SESSION ===
+if useAsia
+    if inAsia
+        if na(asiaHigh) or high > asiaHigh
+            asiaHigh := high
+        if na(asiaLow) or low < asiaLow
+            asiaLow := low
+        asiaSet := true
+    if asiaSet and not inAsia
+        asiaBufferHigh = asiaHigh * (1 + retestBuffer)
+        asiaBufferLow = asiaLow * (1 - retestBuffer)
+        if not asiaBrokeHigh and close > asiaHigh
+            asiaBrokeHigh := true
+        if not asiaBrokeLow and close < asiaLow
+            asiaBrokeLow := true
+        if asiaBrokeHigh and not asiaRetestHigh
+            if low <= asiaBufferHigh and low >= asiaLow
+                asiaRetestHigh := true
+        if asiaBrokeLow and not asiaRetestLow
+            if high >= asiaBufferLow and high <= asiaHigh
+                asiaRetestLow := true
+
+// === LONDON SESSION ===
+if useLondon
+    if inLondon
+        if na(ldnHigh) or high > ldnHigh
+            ldnHigh := high
+        if na(ldnLow) or low < ldnLow
+            ldnLow := low
+        ldnSet := true
+    if ldnSet and not inLondon
+        ldnBufferHigh = ldnHigh * (1 + retestBuffer)
+        ldnBufferLow = ldnLow * (1 - retestBuffer)
+        if not ldnBrokeHigh and close > ldnHigh
+            ldnBrokeHigh := true
+        if not ldnBrokeLow and close < ldnLow
+            ldnBrokeLow := true
+        if ldnBrokeHigh and not ldnRetestHigh
+            if low <= ldnBufferHigh and low >= ldnLow
+                ldnRetestHigh := true
+        if ldnBrokeLow and not ldnRetestLow
+            if high >= ldnBufferLow and high <= ldnHigh
+                ldnRetestLow := true
+
+// === NYC SESSION ===
+if useNYC
+    if inNYC
+        if na(nycHigh) or high > nycHigh
+            nycHigh := high
+        if na(nycLow) or low < nycLow
+            nycLow := low
+        nycSet := true
+    if nycSet and not inNYC
+        nycBufferHigh = nycHigh * (1 + retestBuffer)
+        nycBufferLow = nycLow * (1 - retestBuffer)
+        if not nycBrokeHigh and close > nycHigh
+            nycBrokeHigh := true
+        if not nycBrokeLow and close < nycLow
+            nycBrokeLow := true
+        if nycBrokeHigh and not nycRetestHigh
+            if low <= nycBufferHigh and low >= nycLow
+                nycRetestHigh := true
+        if nycBrokeLow and not nycRetestLow
+            if high >= nycBufferLow and high <= nycHigh
+                nycRetestLow := true
+
+// === OVERLAP SESSION ===
+if useOverlap
+    if inOverlap
+        if na(ovlHigh) or high > ovlHigh
+            ovlHigh := high
+        if na(ovlLow) or low < ovlLow
+            ovlLow := low
+        ovlSet := true
+    if ovlSet and not inOverlap
+        ovlBufferHigh = ovlHigh * (1 + retestBuffer)
+        ovlBufferLow = ovlLow * (1 - retestBuffer)
+        if not ovlBrokeHigh and close > ovlHigh
+            ovlBrokeHigh := true
+        if not ovlBrokeLow and close < ovlLow
+            ovlBrokeLow := true
+        if ovlBrokeHigh and not ovlRetestHigh
+            if low <= ovlBufferHigh and low >= ovlLow
+                ovlRetestHigh := true
+        if ovlBrokeLow and not ovlRetestLow
+            if high >= ovlBufferLow and high <= ovlHigh
+                ovlRetestLow := true
+
+// === GET PERFECT ENTRY PRICE ===
+float longEntryPrice = na
+float shortEntryPrice = na
+
+if asiaRetestHigh and close > asiaHigh and not asiaTradeTaken
+    longEntryPrice := asiaHigh
+if ldnRetestHigh and close > ldnHigh and not ldnTradeTaken
+    longEntryPrice := ldnHigh
+if nycRetestHigh and close > nycHigh and not nycTradeTaken
+    longEntryPrice := nycHigh
+if ovlRetestHigh and close > ovlHigh and not ovlTradeTaken
+    longEntryPrice := ovlHigh
+
+if asiaRetestLow and close < asiaLow and not asiaTradeTaken
+    shortEntryPrice := asiaLow
+if ldnRetestLow and close < ldnLow and not ldnTradeTaken
+    shortEntryPrice := ldnLow
+if nycRetestLow and close < nycLow and not nycTradeTaken
+    shortEntryPrice := nycLow
+if ovlRetestLow and close < ovlLow and not ovlTradeTaken
+    shortEntryPrice := ovlLow
+
+// === ENTRY CONDITIONS WITH MOMENTUM FILTER ===
+// Only take longs if bullish bias, only take shorts if bearish bias
+asiaLong = asiaRetestHigh and close > asiaHigh and not asiaTradeTaken and bullishBias
+asiaShort = asiaRetestLow and close < asiaLow and not asiaTradeTaken and bearishBias
+ldnLong = ldnRetestHigh and close > ldnHigh and not ldnTradeTaken and bullishBias
+ldnShort = ldnRetestLow and close < ldnLow and not ldnTradeTaken and bearishBias
+nycLong = nycRetestHigh and close > nycHigh and not nycTradeTaken and bullishBias
+nycShort = nycRetestLow and close < nycLow and not nycTradeTaken and bearishBias
+ovlLong = ovlRetestHigh and close > ovlHigh and not ovlTradeTaken and bullishBias
+ovlShort = ovlRetestLow and close < ovlLow and not ovlTradeTaken and bearishBias
+
+longCondition = (asiaLong or ldnLong or nycLong or ovlLong) and strategy.position_size == 0
+shortCondition = (asiaShort or ldnShort or nycShort or ovlShort) and strategy.position_size == 0
+
+// Execute trades
+if longCondition
+    strategy.entry("Long", strategy.long)
+    if asiaLong
+        asiaTradeTaken := true
+    if ldnLong
+        ldnTradeTaken := true
+    if nycLong
+        nycTradeTaken := true
+    if ovlLong
+        ovlTradeTaken := true
+    if not na(tpLine)
+        line.delete(tpLine)
+    if not na(slLine)
+        line.delete(slLine)
+    currentTP := close + tpPoints
+    currentSL := close - slPoints
+    tpLine := line.new(bar_index, currentTP, bar_index + 1, currentTP, color=color.green, width=2, extend=extend.right)
+    slLine := line.new(bar_index, currentSL, bar_index + 1, currentSL, color=color.red, width=2, extend=extend.right)
+    label.new(bar_index, low, "BUY\n" + str.tostring(longEntryPrice, "#.##"), style=label.style_label_up, color=color.green, textcolor=color.white, size=size.normal)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    if asiaShort
+        asiaTradeTaken := true
+    if ldnShort
+        ldnTradeTaken := true
+    if nycShort
+        nycTradeTaken := true
+    if ovlShort
+        ovlTradeTaken := true
+    if not na(tpLine)
+        line.delete(tpLine)
+    if not na(slLine)
+        line.delete(slLine)
+    currentTP := close - tpPoints
+    currentSL := close + slPoints
+    tpLine := line.new(bar_index, currentTP, bar_index + 1, currentTP, color=color.green, width=2, extend=extend.right)
+    slLine := line.new(bar_index, currentSL, bar_index + 1, currentSL, color=color.red, width=2, extend=extend.right)
+    label.new(bar_index, high, "SELL\n" + str.tostring(shortEntryPrice, "#.##"), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.normal)
+
+// Update line positions
+if strategy.position_size != 0 and not na(tpLine) and not na(slLine)
+    line.set_x2(tpLine, bar_index + 1)
+    line.set_x2(slLine, bar_index + 1)
+
+// Delete lines when position closes
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    if not na(tpLine)
+        line.delete(tpLine)
+        tpLine := na
+    if not na(slLine)
+        line.delete(slLine)
+        slLine := na
+    currentTP := na
+    currentSL := na
+
+// Exit with TP/SL
+if strategy.position_size > 0
+    strategy.exit("TP/SL", "Long", limit=strategy.position_avg_price + tpPoints, stop=strategy.position_avg_price - slPoints)
+
+if strategy.position_size < 0
+    strategy.exit("TP/SL", "Short", limit=strategy.position_avg_price - tpPoints, stop=strategy.position_avg_price + slPoints)
+
+// === BIAS INDICATOR TABLE ===
+var table biasTable = table.new(position.top_right, 1, 2, bgcolor=color.new(color.black, 70))
+biasText = momentumScore > 0 ? "BULLISH" : momentumScore < 0 ? "BEARISH" : "NEUTRAL"
+biasColor = momentumScore > 0 ? color.green : momentumScore < 0 ? color.red : color.gray
+table.cell(biasTable, 0, 0, "BIAS: " + biasText, text_color=biasColor, text_size=size.normal)
+table.cell(biasTable, 0, 1, "Score: " + str.tostring(momentumScore), text_color=color.white, text_size=size.small)
+
+View in Pine Editor・331 lines
+Use on chart
+7
+1
+1 568
+shows entries for 15m orb based on 5m break and retest made solely for mnq or nq, works good with smt
+
+shows trades for ldn, nyc, nyc overlap and Asia session, pls follow stormy trading on insta for more

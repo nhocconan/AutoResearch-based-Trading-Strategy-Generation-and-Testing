@@ -1,0 +1,105 @@
+//@version=6
+strategy(
+    "Pro-Momentum-Strategy-Main-Table – Daily 55 EMA + RSI + Volume + NIFTY Filter + Table",
+    overlay = true,
+    initial_capital = 200000,
+    pyramiding = 0
+)
+
+// ================= INPUTS =================
+riskPercent = input.float(1.0, "Risk per Trade (%)", step = 0.1)
+rsiLevel    = input.int(51, "RSI Threshold")
+emaLength   = input.int(55, "EMA Length")
+useNifty    = input.bool(true, "Use NIFTY Trend Filter")
+
+// ================= NIFTY FILTER =================
+niftyClose = request.security("NSE:NIFTY", timeframe.period, close)
+niftyEMA50 = request.security("NSE:NIFTY", timeframe.period, ta.ema(close, 50))
+
+marketOk = useNifty ? niftyClose > niftyEMA50 : true
+
+// ================= INDICATORS =================
+ema55     = ta.ema(close, emaLength)
+rsi14     = ta.rsi(close, 14)
+volAvg20  = ta.sma(volume, 20)
+
+// ================= PARAMETER CHECKS =================
+priceCrossUp = ta.crossover(close, ema55)
+rsiOk        = rsi14 > rsiLevel
+volOk        = volume > volAvg20
+
+// ================= ENTRY CONDITION =================
+entryCondition = marketOk and priceCrossUp and rsiOk and volOk
+
+// ================= POSITION SIZING =================
+stopRef      = ema55
+riskCapital  = strategy.equity * (riskPercent / 100)
+riskPerShare = close - stopRef
+qty          = riskPerShare > 0 ? math.floor(riskCapital / riskPerShare) : 0
+
+if entryCondition and qty > 0 and strategy.position_size == 0
+    strategy.entry("BUY", strategy.long, qty = qty)
+
+// ================= EXIT CONDITION =================
+exitCondition = ta.crossunder(close, ema55)
+
+if exitCondition and strategy.position_size > 0
+    strategy.close_all()
+
+// ================= SIGNALS =================
+plotshape(entryCondition,
+     title = "BUY",
+     style = shape.labelup,
+     location = location.belowbar,
+     color = color.green,
+     text = "BUY")
+
+plotshape(exitCondition,
+     title = "SELL",
+     style = shape.labeldown,
+     location = location.abovebar,
+     color = color.red,
+     text = "SELL")
+
+// ================= VISUALS =================
+plot(ema55, "EMA 55", color = color.blue, linewidth = 2)
+
+// ================= ALERTS =================
+alertcondition(entryCondition,
+     title = "BUY ALERT",
+     message = "BUY signal on {{ticker}}")
+
+alertcondition(exitCondition,
+     title = "SELL ALERT",
+     message = "SELL signal on {{ticker}}")
+
+// ================= STATUS TABLE =================
+// Create table (2 columns x 5 rows)
+var table statusTable = table.new(position.top_right, 2, 5, frame_color=color.gray, border_width=1)
+
+// Header
+table.cell(statusTable, 0, 0, "Parameter", bgcolor=color.silver)
+table.cell(statusTable, 1, 0, "Status", bgcolor=color.silver)
+
+// Row 1: Price > EMA55
+table.cell(statusTable, 0, 1, "Price Cross EMA55")
+table.cell(statusTable, 1, 1, priceCrossUp ? "✅" : "❌", bgcolor=priceCrossUp ? color.new(color.green, 0) : color.new(color.red, 0))
+
+// Row 2: RSI > Threshold
+table.cell(statusTable, 0, 2, "RSI > Threshold")
+table.cell(statusTable, 1, 2, rsiOk ? "✅" : "❌", bgcolor=rsiOk ? color.new(color.green, 0) : color.new(color.red, 0))
+
+// Row 3: Volume > Avg20
+table.cell(statusTable, 0, 3, "Volume > Avg20")
+table.cell(statusTable, 1, 3, volOk ? "✅" : "❌", bgcolor=volOk ? color.new(color.green, 0) : color.new(color.red, 0))
+
+// Row 4: Market Trend OK
+table.cell(statusTable, 0, 4, "Market Trend OK")
+table.cell(statusTable, 1, 4, marketOk ? "✅" : "❌", bgcolor=marketOk ? color.new(color.green, 0) : color.new(color.red, 0))
+
+View in Pine Editor・98 lines
+Use on chart
+1
+2
+607
+Hi this is a good script. This Indicator can give ou more. This include what ou want. Lone run this will be beneicial.

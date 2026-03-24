@@ -1,0 +1,204 @@
+//@version=5
+strategy("Final Scalping Strategy (v5) - RELAXED ENTRY", overlay=true, 
+     default_qty_type=strategy.percent_of_equity, default_qty_value=2, 
+     initial_capital=10000, 
+     commission_type=strategy.commission.percent, commission_value=0.01)
+
+// --- 1. Inputs ---
+htf_tf = input.string("60", "Higher Timeframe (Trend/HTF)", group="Timeframes") 
+ltf_tf = input.string("15", "Lower Timeframe (Signal/LTF)", group="Timeframes") 
+london_session = input.session("0800-1700:12345", "London Session (GMT)", group="Session Filter")
+ny_session = input.session("1300-2200:12345", "New York Session (GMT)", group="Session Filter")
+
+atr_multiplier = input.float(2.0, "ATR Stop Multiplier (SL distance)", step=0.1, group="Risk Management")
+rr_ratio = input.float(1.5, "Risk-Reward Ratio (TP distance)", step=0.1, group="Risk Management")
+
+ema_length_htf = input.int(50, "HTF EMA Length", group="Indicators") 
+ema_length_ltf = input.int(20, "LTF EMA Length", group="Indicators") 
+
+f_pips(price_diff) =>
+    math.round(price_diff / syminfo.mintick / 10 * 100) / 100 
+
+// --- 2. Indicators & Calculations ---
+htf_ema = request.security(syminfo.tickerid, htf_tf, ta.ema(close, ema_length_htf))
+trend_bullish = close > htf_ema[1]
+trend_bearish = close < htf_ema[1]
+
+ltf_ema = ta.ema(close, ema_length_ltf)
+
+atr_value = ta.atr(14) 
+atr_stop_dist = atr_value * atr_multiplier 
+
+in_london = time(timeframe.period, london_session) != 0
+in_ny = time(timeframe.period, ny_session) != 0
+in_session = in_london or in_ny
+
+// --- 3. Entry Conditions (RELAXED - NO CANDLE CONFIRMATION) ---
+long_signal = ta.crossover(close, ltf_ema)
+// Entry only requires EMA cross + HTF trend alignment + session
+longCondition = long_signal and trend_bullish and in_session 
+
+short_signal = ta.crossunder(close, ltf_ema)
+// Entry only requires EMA cross + HTF trend alignment + session
+shortCondition = short_signal and trend_bearish and in_session 
+
+// --- 4. Trade Execution and Label Data Storage ---
+var float last_sl_price = na
+var float last_tp_price = na
+var float last_risk_pips = na
+var float last_reward_pips = na
+var float last_rr_ratio = na
+var string last_action = ""
+
+if longCondition and strategy.position_size == 0 
+    long_sl_price = low - atr_stop_dist 
+    long_risk_dist = close - long_sl_price
+    long_tp_price = close + (long_risk_dist * rr_ratio) 
+    
+    last_sl_price := long_sl_price
+    last_tp_price := long_tp_price
+    last_risk_pips := f_pips(long_risk_dist)
+    last_reward_pips := f_pips(long_tp_price - close)
+    last_rr_ratio := last_reward_pips / last_risk_pips
+    last_action := "BUY"
+
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=long_sl_price, limit=long_tp_price)
+
+if shortCondition and strategy.position_size == 0 
+    short_sl_price = high + atr_stop_dist 
+    short_risk_dist = short_sl_price - close
+    short_tp_price = close - (short_risk_dist * rr_ratio) 
+    
+    last_sl_price := short_sl_price
+    last_tp_price := short_tp_price
+    last_risk_pips := f_pips(short_risk_dist)
+    last_reward_pips := f_pips(close - short_tp_price)
+    last_rr_ratio := last_reward_pips / last_risk_pips
+    last_action := "SHORT"
+    
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=short_sl_price, limit=short_tp_price)
+
+
+// --- 5. On-Chart Visuals ---
+
+// Plot 1: SL and TP Price Lines 
+plot(strategy.position_size > 0 ? last_sl_price : na, title="Long SL", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? last_tp_price : na, title="Long TP", color=color.lime, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? last_sl_price : na, title="Short SL", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? last_tp_price : na, title="Short TP", color=color.lime, linewidth=2, style=plot.style_linebr)
+
+// Plot 2: Entry/Exit Shapes (Triangles)
+plotshape(longCondition, title="Long Entry", location=location.belowbar, style=shape.triangleup, color=color.green, size=size.small)
+plotshape(shortCondition, title="Short Entry", location=location.abovebar, style=shape.triangledown, color=color.red, size=size.small)
+
+// Plot 3: Detailed Trade Label 
+if (longCondition or shortCondition) and strategy.position_size != strategy.position_size[1]
+    
+    y_position = last_action == "BUY" ? low - atr_stop_dist : high + atr_stop_dist
+    y_location = last_action == "BUY" ? yloc.belowbar : yloc.abovebar
+    label_style = last_action == "BUY" ? label.style_label_up : label.style_label_down
+
+    label_text = last_action + 
+                 "\nSL: " + str.tostring(last_sl_price, format.mintick) + 
+                 "\nTP: " + str.tostring(last_tp_price, format.mintick) + 
+                 "\nRisk: " + str.tostring(last_risk_pips, "#.##") + " pips" + 
+                 "\nReward: " + str.tostring(last_reward_pips, "#.##") + " pips" +
+                 "\nR:R = 1:" + str.tostring(last_rr_ratio, "#.##")
+
+    label.new(x=bar_index, y=y_position, 
+              text=label_text, 
+              xloc=xloc.bar_index, 
+              yloc=y_location, 
+              color=last_action == "BUY" ? color.green : color.red, 
+              textcolor=color.white,
+              style=label_style,
+              size=size.small)
+
+// Plot 4: EMAs and Backgrounds
+plot(htf_ema, color=color.blue, title="HTF EMA 50", linewidth=2)
+plot(ltf_ema, color=color.orange, title="LTF EMA 20")
+
+bgcolor(in_london ? color.new(#FFC300, 85) : na, title="London Session Background")
+bgcolor(in_ny ? color.new(#4A235A, 85) : na, title="NY Session Background")
+
+View in Pine Editor・124 lines
+Use on chart
+3
+5
+1 405
+EMA Scalping System (MTF) Guide (1HR direction, 15 min entry)
+
+Objective
+
+To capture small, consistent profits by entering trades when 15-minute momentum aligns with the 1-hour trend.
+
+Trades are executed only during high-liquidity London and New York sessions to increase the probability of execution and success.
+
+Strategy Setup
+
+
+Chart Timeframe (Execution): 15-Minute (M15).
+
+Trend Filter (HTF): 1-Hour (H1) chart data is used for the long-term EMA.
+
+Long-Term Trend Filter: 50-Period EMA (based on H1 data).
+
+Short-Term Momentum Signal: 20-Period EMA (based on M15 data).
+
+Risk
+
+Metric: 14-period ATR for dynamic Stop Loss calculation.
+
+✅ Trading Rules🟢
+
+Long (Buy) Entry Conditions
+
+
+Session: Must be within the London (0800-1700 GMT) or New York (1300-2200 GMT) sessions.
+
+HTF Trend: Current price must be above the 1-Hour EMA 50.
+
+Momentum Signal: Price crosses above the 15-Minute EMA 20.
+
+Confirmation: The bar immediately following the crossover must close above the 15-Minute EMA 20.
+
+Ent
+
+ry: A market order is executed on the close of the confirmation candle.
+
+🔴 Short (Sell) Entry Conditions
+
+
+Session: Must be within the London (0800-1700 GMT) or New York (1300-2200 GMT) sessions.
+
+HTF Trend: Current price must be below the 1-Hour EMA 50.
+
+Momentum Signal: Price crosses below the 15-Minute EMA 20.
+
+Confirmation: The bar immediately following the crossover must close below the 15-Minute EMA 20.
+
+Entry: A market order is executed on the close of the confirmation candle.
+
+
+
+🛑 Trade Management & Exits
+
+
+Stop Loss (SL): Placed dynamically at 2.0 times the 14-period ATR distance from the entry candle's low (for Buys) or high (for Sells).
+
+Take Profit (TP): Placed dynamically to achieve a 1.5 Risk-Reward Ratio (RR) (TP distance = 1.5 x SL d
+
+istance).
+
+📊 On-Chart Visuals
+
+
+Detailed Labels: A box appears on the entry bar showing the action, SL/TP prices, Risk/Reward in Pips, and the exact R:R ratio.
+
+Horizontal Lines: Dashed lines display the calculated SL (Red) and TP (Green) levels while the trade is active.
+
+Background: The chart background is shaded to highlight the active London and New York tradi
+
+ng sessions.

@@ -1,0 +1,48 @@
+//@version=5
+strategy(title='[SMT] Buy & Sell Renko Based - Strategy', shorttitle='[SMT] B&S Renko', overlay=true)
+
+//INPUTS
+renkoATRLength = input.int(10, minval=1, title='ATR Length')
+
+//CALCULATION
+param = ticker.renko(syminfo.tickerid, 'ATR', renkoATRLength)
+
+renkoClose = request.security(param, timeframe.period, close)
+renkoOpen = request.security(param, timeframe.period, open)
+
+buySignal = ta.crossunder(renkoOpen, renkoClose)
+sellSignal = ta.crossover(renkoOpen, renkoClose)
+
+col = renkoClose < renkoOpen ? #F23645 : #089981
+
+//PLOTS
+plot(renkoOpen, title="Renko Open", style=plot.style_line, linewidth=2, color=col)
+plotshape(buySignal, "Buy", shape.labelup, location.belowbar, #089981, 0, "Buy", color.white)
+plotshape(sellSignal, "Sell", shape.labeldown, location.abovebar, #F23645, 0, "Sell", color.white)
+
+// STRATEGY
+if (buySignal)
+    strategy.entry("Long", strategy.long)
+if (sellSignal)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・27 lines
+Use on chart
+1.8 K
+14
+47 732
+This is a custom indicator that implements a trading strategy based on Renko charts, but they can be used on regular candlestick charts and on any time frame. Renko charts are known for filtering market noise and displaying price movements in a clearer way. However, it is important to note that this indicator is provided for educational and informational purposes only and is not a guarantee of profitable returns.
+
+Features:
+- The indicator uses Renko charts to generate buy and sell signals.
+- Renko bricks are built based on a predefined price variation, rather than time.
+- The length of the Average True Range (ATR) used to calculate Renko bricks can be customized.
+- Buy signals are generated when the price crosses below the current Renko brick.
+- Sell signals are generated when the price crosses above the current Renko brick.
+- Entry points are marked with "Buy" and "Sell" arrows on the chart.
+
+It is essential to emphasize that no indicator or trading strategy guarantees profitable results. The financial market is complex and subject to unpredictable changes. It is recommended to perform additional tests and analysis before using this indicator on a real trading account.
+
+Always remember to manage your risks properly and consider other factors such as fundamental analysis and market conditions when making trading decisions. The use of this indicator is entirely the user's responsibility.
+
+DISCLAIMER: This indicator is not financial advice and should not be interpreted as such. Always consult with a qualified financial professional before making any investment decisions.

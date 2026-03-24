@@ -1,0 +1,33 @@
+//@version=2
+strategy("4H CCI Strategy 1.5", overlay=true)
+length = input( 11 )
+overSold = input( -100 )
+overBought = input( +100 )
+price1 = high
+price2 = low
+ucci = cci(price1, length)
+dcci = cci(price2, length)
+tp = (atr(66))*600000
+sl = (atr(66))*300000
+trade_size = (1000/sl)*100000
+strategy.entry("CCILE", strategy.long, comment="CCILE",qty=trade_size, when=crossover(dcci, overSold))
+strategy.exit(id="CCILE", profit = tp, loss = sl)
+strategy.entry("CCISE", strategy.short, comment="CCISE",qty=trade_size,when=crossunder(ucci, overBought))
+strategy.exit(id="CCISE", profit = tp, loss = sl)
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・17 lines
+Use on chart
+5
+6
+0
+7
+20 050
+Included adaptive lot size based on ATR, and also ATR based stop and take profit levels.
+Risk/reward increased to 1:2 and should work in all ranging FX pairs as long as they are not trending.
+Once the market starts trending it'll eat this bot alive.
+
+Cheers,
+
+Ivan Labrie
+Time at Mode FX

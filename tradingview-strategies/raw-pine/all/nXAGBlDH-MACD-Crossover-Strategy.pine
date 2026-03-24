@@ -1,0 +1,77 @@
+//@version=5
+strategy("MACD Crossover Strategy", overlay=false)
+
+// MACD parameters
+fastLength = input(12, "Fast Length")
+slowLength = input(26, "Slow Length")
+signalLength = input(9, "Signal Length")
+
+// Important zone parameters
+lowerThreshold = input.float(-0.5, "Lower Threshold", step=0.1)
+upperThreshold = input.float(0.5, "Upper Threshold", step=0.1)
+
+// Calculate MACD
+[macdLine, signalLine, _] = ta.macd(close, fastLength, slowLength, signalLength)
+
+// Plot MACD lines
+plot(macdLine, color=color.blue, title="MACD Line")
+plot(signalLine, color=color.orange, title="Signal Line")
+plot(0, color=color.white, title="Zero Line")
+plot(upperThreshold, color=color.gray, style=plot.style_linebr, title="Upper Threshold")
+plot(lowerThreshold, color=color.gray, style=plot.style_linebr, title="Lower Threshold")
+
+// Define crossover conditions
+crossOverUp = ta.crossover(macdLine, signalLine)
+crossOverDown = ta.crossunder(macdLine, signalLine)
+
+// Define important crossover zone
+isImportantZone = macdLine >= lowerThreshold and macdLine <= upperThreshold
+
+// Strategy entries
+if (crossOverUp and isImportantZone)
+    strategy.entry("Long", strategy.long)
+
+if (crossOverDown and isImportantZone)
+    strategy.entry("Short", strategy.short)
+
+// Optional: Add exits based on opposite signals
+if (crossOverDown)
+    strategy.close("Long")
+
+if (crossOverUp)
+    strategy.close("Short")
+
+// Plot buy/sell signals
+plotshape(series=crossOverUp and isImportantZone, title="Buy Signal", location=location.bottom, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(series=crossOverDown and isImportantZone, title="Sell Signal", location=location.top, color=color.red, style=shape.triangledown, size=size.small)
+
+View in Pine Editor・46 lines
+Use on chart
+3
+7
+1 666
+MACD Crossover Strategy:
+
+This strategy is based on the Moving Average Convergence Divergence (MACD) indicator, a popular tool used in technical analysis to identify potential trend changes and momentum in price movements. The strategy focuses on MACD crossovers within a specific "important zone" to generate trading signals.
+
+Key Components:
+
+1. MACD Calculation: The strategy uses customizable parameters for fast length (default 12), slow length (default 26), and signal length (default 9) to calculate the MACD line and signal line.
+
+2. Important Zone: Defined by upper and lower thresholds (default 0.5 and -0.5), this zone helps filter out potentially less significant crossovers.
+
+3. Entry Conditions:
+- Long (Buy) Entry: When the MACD line crosses above the signal line within the important zone.
+- Short (Sell) Entry: When the MACD line crosses below the signal line within the important zone.
+
+4. Exit Conditions: The strategy closes positions on opposite crossover signals. Long positions are closed on bearish crossovers, and short positions on bullish crossovers.
+
+5. Visualization:
+- MACD line (blue) and signal line (orange) are plotted.
+- The zero line, upper threshold, and lower threshold are displayed for reference.
+- Buy signals are represented by green triangles at the bottom of the chart.
+- Sell signals are shown as red triangles at the top of the chart.
+
+This strategy aims to capture trend changes while filtering out potentially false signals that occur when the MACD is at extreme values. By focusing on crossovers within the important zone, the strategy attempts to identify more reliable trading opportunities.
+
+Traders can adjust the MACD parameters and the important zone thresholds to fine-tune the strategy for different assets or timeframes. As with any trading strategy, it's crucial to thoroughly backtest and consider risk management before using it in live trading.

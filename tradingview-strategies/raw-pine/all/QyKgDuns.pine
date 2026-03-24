@@ -1,0 +1,314 @@
+//@version=5
+strategy("🔥 HYBRID SCALPING Bot - เข้าง่าย ออกแม่น", overlay=true, max_labels_count=50, calc_on_order_fills=false, process_orders_on_close=true, pyramiding=0)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 📋 การตั้งค่าแบบ Hybrid - รวมจุดเด่นทั้งสอง
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// การตั้งค่าเทรด - Scalping Style
+group_trading = "⚡ การตั้งค่า Scalping"
+daily_trade_limit = input.int(15, "ลิมิตเทรดต่อวัน", minval=5, maxval=50, tooltip="Scalping = เทรดบ่อย", group=group_trading)
+tp_percent = input.float(0.8, "Take Profit %", minval=0.3, maxval=3.0, tooltip="เล็กแต่ชัวร์", group=group_trading)
+sl_percent = input.float(0.6, "Stop Loss %", minval=0.3, maxval=2.0, tooltip="ตัดขาดทุนเร็ว", group=group_trading)
+
+// การตั้งค่าการออกเทรด - จาก Scalping Bot
+use_quick_exit = input.bool(true, "ออกเทรดเร็ว", tooltip="ออกเมื่อ RSI กลับตัว", group=group_trading)
+use_trailing_stop = input.bool(true, "ใช้ Trailing Stop", tooltip="ล็อคกำไรเมื่อขึ้น", group=group_trading)
+trailing_percent = input.float(0.4, "Trailing Stop %", minval=0.2, maxval=1.0, group=group_trading)
+
+// ความยากง่ายในการเข้าเทรด - จาก Debug Bot
+group_sensitivity = "🎯 ความยากง่ายการเข้าเทรด"
+signal_sensitivity = input.string("อ่อน", "ระดับความรุนแรง", options=["ง่ายมาก", "อ่อน", "กลาง", "แรง"], 
+                                  tooltip="ง่ายมาก=เข้าเทรดบ่อยสุด, แรง=แม่นยำสุด", group=group_sensitivity)
+
+// ฟิลเตอร์เสริม - ปรับได้ตามระดับ
+use_trend_filter = input.bool(true, "ใช้ฟิลเตอร์เทรนด์", tooltip="เทรดตามเทรนด์เท่านั้น", group=group_sensitivity)
+use_volume_filter = input.bool(false, "ใช้ฟิลเตอร์ Volume", tooltip="ต้องมี Volume สูง", group=group_sensitivity)
+
+// การแสดงผล
+group_display = "🎨 การแสดงผล"
+show_signals = input.bool(true, "แสดงสัญญาณ", group=group_display)
+show_exit_signals = input.bool(true, "แสดงสัญญาณออก", group=group_display)
+show_dashboard = input.bool(true, "แสดง Dashboard", group=group_display)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 📱 การตั้งค่า Telegram - แบบง่าย (จาก Debug Bot)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+group_telegram = "📱 Telegram"
+enable_telegram = input.bool(false, "เปิด Telegram", group=group_telegram)
+telegram_bot_token = input.string("", "Bot Token", group=group_telegram)
+telegram_chat_id = input.string("", "Chat ID", group=group_telegram)
+send_test_message = input.bool(false, "ส่งข้อความทดสอบ", group=group_telegram)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🧮 ตัวชี้วัดเทคนิค - Hybrid
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// RSI
+rsi = ta.rsi(close, 14)
+rsi_oversold = 30
+rsi_overbought = 70
+
+// Moving Averages
+ema9 = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+ema50 = ta.ema(close, 50)
+
+// Trend
+uptrend = ema21 > ema50
+downtrend = ema21 < ema50
+strong_uptrend = ema9 > ema21 and ema21 > ema50
+strong_downtrend = ema9 < ema21 and ema21 < ema50
+
+// Volume
+avg_volume = ta.sma(volume, 10)
+high_volume = volume > avg_volume * 1.2
+volume_ok = use_volume_filter ? high_volume : true
+
+// Price Action
+bullish_candle = close > open
+bearish_candle = close < open
+strong_bullish_candle = close > open and (close - open) / (high - low) > 0.6
+strong_bearish_candle = close < open and (open - close) / (high - low) > 0.6
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎯 ระบบสัญญาณแบบ Hybrid
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ระดับ "ง่ายมาก" - เข้าเทรดง่ายสุด
+very_easy_buy = rsi < 60 and bullish_candle
+very_easy_sell = rsi > 40 and bearish_candle
+
+// ระดับ "อ่อน" - ใช้ RSI หลัก
+easy_buy = rsi < rsi_oversold and bullish_candle
+easy_sell = rsi > rsi_overbought and bearish_candle
+
+// ระดับ "กลาง" - เพิ่มเงื่อนไข Trend
+medium_buy = rsi < rsi_oversold and bullish_candle and (use_trend_filter ? uptrend : true)
+medium_sell = rsi > rsi_overbought and bearish_candle and (use_trend_filter ? downtrend : true)
+
+// ระดับ "แรง" - เงื่อนไขครบ (เหมือน Scalping Bot เดิม)
+strong_buy = rsi < rsi_oversold and 
+             strong_bullish_candle and 
+             (use_trend_filter ? strong_uptrend : true) and 
+             volume_ok and 
+             close > ema21
+
+strong_sell = rsi > rsi_overbought and 
+              strong_bearish_candle and 
+              (use_trend_filter ? strong_downtrend : true) and 
+              volume_ok and 
+              close < ema21
+
+// เลือกสัญญาณตามระดับที่ตั้งค่า
+buy_signal = signal_sensitivity == "ง่ายมาก" ? very_easy_buy :
+             signal_sensitivity == "อ่อน" ? easy_buy :
+             signal_sensitivity == "กลาง" ? medium_buy :
+             strong_buy
+
+sell_signal = signal_sensitivity == "ง่ายมาก" ? very_easy_sell :
+              signal_sensitivity == "อ่อน" ? easy_sell :
+              signal_sensitivity == "กลาง" ? medium_sell :
+              strong_sell
+
+// Exit Signals - ใช้จาก Scalping Bot
+rsi_exit_long = rsi > 70 or rsi < 25
+rsi_exit_short = rsi < 30 or rsi > 75
+
+quick_exit_long = use_quick_exit and (rsi_exit_long or close < ema21)
+quick_exit_short = use_quick_exit and (rsi_exit_short or close > ema21)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 📊 การจัดการเทรด
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+var int trades_today = 0
+var bool test_sent = false
+
+// รีเซ็ตทุกวัน
+if dayofweek != dayofweek[1]
+    trades_today := 0
+
+can_trade = trades_today < daily_trade_limit and strategy.position_size == 0
+
+// ส่งข้อความทดสอบ Telegram - ใช้ format จาก Debug Bot
+if enable_telegram and send_test_message and not test_sent and barstate.islast
+    test_message = "🧪 ทดสอบ HYBRID SCALPING Bot\n\n" +
+                   "✅ การเชื่อมต่อสำเร็จ!\n" +
+                   "📊 Symbol: " + syminfo.ticker + "\n" +
+                   "💲 ราคาปัจจุบัน: $" + str.tostring(close, "#.####") + "\n" +
+                   "⚡ ระดับ: " + signal_sensitivity + "\n" +
+                   "⏰ เวลา: " + str.tostring(hour, "00") + ":" + str.tostring(minute, "00") + "\n\n" +
+                   "🎯 Bot พร้อมทำงาน!"
+    
+    alert(test_message, alert.freq_once_per_bar)
+    test_sent := true
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 💰 การดำเนินการเทรด - Scalping Logic
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Variables for Scalping
+var float entry_price = 0
+var float highest_profit = 0
+var float trailing_stop_price = 0
+
+// Entry Long
+if buy_signal and can_trade
+    strategy.entry("LONG", strategy.long)
+    trades_today := trades_today + 1
+    entry_price := close
+    highest_profit := 0
+    trailing_stop_price := close * (1 - sl_percent / 100)
+    
+    // Set exits
+    strategy.exit("SL/TP", "LONG", 
+                  stop=close * (1 - sl_percent / 100), 
+                  limit=close * (1 + tp_percent / 100))
+    
+    // Telegram Alert - ใช้ format ง่าย
+    if enable_telegram
+        entry_message = "🚀 HYBRID LONG!\n" +
+                       "📊 " + syminfo.ticker + "\n" +
+                       "💰 Entry: $" + str.tostring(close, "#.####") + "\n" +
+                       "🛑 SL: $" + str.tostring(close * (1 - sl_percent / 100), "#.####") + "\n" +
+                       "🎯 TP: $" + str.tostring(close * (1 + tp_percent / 100), "#.####") + "\n" +
+                       "📈 RSI: " + str.tostring(rsi, "#.#") + "\n" +
+                       "⚡ Level: " + signal_sensitivity + "\n" +
+                       "📊 เทรดที่: " + str.tostring(trades_today)
+        
+        alert(entry_message, alert.freq_once_per_bar)
+
+// Entry Short
+if sell_signal and can_trade
+    strategy.entry("SHORT", strategy.short)
+    trades_today := trades_today + 1
+    entry_price := close
+    highest_profit := 0
+    trailing_stop_price := close * (1 + sl_percent / 100)
+    
+    // Set exits
+    strategy.exit("SL/TP", "SHORT", 
+                  stop=close * (1 + sl_percent / 100), 
+                  limit=close * (1 - tp_percent / 100))
+    
+    // Telegram Alert
+    if enable_telegram
+        entry_message = "📉 HYBRID SHORT!\n" +
+                       "📊 " + syminfo.ticker + "\n" +
+                       "💰 Entry: $" + str.tostring(close, "#.####") + "\n" +
+                       "🛑 SL: $" + str.tostring(close * (1 + sl_percent / 100), "#.####") + "\n" +
+                       "🎯 TP: $" + str.tostring(close * (1 - tp_percent / 100), "#.####") + "\n" +
+                       "📈 RSI: " + str.tostring(rsi, "#.#") + "\n" +
+                       "⚡ Level: " + signal_sensitivity + "\n" +
+                       "📊 เทรดที่: " + str.tostring(trades_today)
+        
+        alert(entry_message, alert.freq_once_per_bar)
+
+// Trailing Stop Logic - จาก Scalping Bot
+if strategy.position_size > 0 and use_trailing_stop  // Long position
+    current_profit = (close - entry_price) / entry_price * 100
+    if current_profit > highest_profit
+        highest_profit := current_profit
+        trailing_stop_price := close * (1 - trailing_percent / 100)
+    
+    if close <= trailing_stop_price
+        strategy.close("LONG", comment="Trailing Stop")
+        if enable_telegram
+            exit_message = "🔒 TRAILING STOP LONG!\n" +
+                          "📊 " + syminfo.ticker + "\n" +
+                          "💰 Exit: $" + str.tostring(close, "#.####") + "\n" +
+                          "📈 Profit: +" + str.tostring(current_profit, "#.##") + "%"
+            alert(exit_message, alert.freq_once_per_bar)
+
+if strategy.position_size < 0 and use_trailing_stop  // Short position
+    current_profit = (entry_price - close) / entry_price * 100
+    if current_profit > highest_profit
+        highest_profit := current_profit
+        trailing_stop_price := close * (1 + trailing_percent / 100)
+    
+    if close >= trailing_stop_price
+        strategy.close("SHORT", comment="Trailing Stop")
+        if enable_telegram
+            exit_message = "🔒 TRAILING STOP SHORT!\n" +
+                          "📊 " + syminfo.ticker + "\n" +
+                          "💰 Exit: $" + str.tostring(close, "#.####") + "\n" +
+                          "📈 Profit: +" + str.tostring(current_profit, "#.##") + "%"
+            alert(exit_message, alert.freq_once_per_bar)
+
+// Quick Exit Logic - จาก Scalping Bot
+if strategy.position_size > 0 and quick_exit_long
+    strategy.close("LONG", comment="Quick Exit")
+    if enable_telegram
+        current_pnl = (close - entry_price) / entry_price * 100
+        exit_message = "⚡ QUICK EXIT LONG!\n" +
+                      "📊 " + syminfo.ticker + "\n" +
+                      "💰 Exit: $" + str.tostring(close, "#.####") + "\n" +
+                      "📈 P&L: " + str.tostring(current_pnl, "#.##") + "%"
+        alert(exit_message, alert.freq_once_per_bar)
+
+if strategy.position_size < 0 and quick_exit_short
+    strategy.close("SHORT", comment="Quick Exit")
+    if enable_telegram
+        current_pnl = (entry_price - close) / entry_price * 100
+        exit_message = "⚡ QUICK EXIT SHORT!\n" +
+                      "📊 " + syminfo.ticker + "\n" +
+                      "💰 Exit: $" + str.tostring(close, "#.####") + "\n" +
+                      "📈 P&L: " + str.tostring(current_pnl, "#.##") + "%"
+        alert(exit_message, alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎨 การแสดงผลบนชาร์ต
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Plot signals
+plotshape(buy_signal and show_signals, "Buy", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(sell_signal and show_signals, "Sell", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Plot exit signals
+plotshape(quick_exit_long and show_exit_signals, "Quick Exit Long", shape.xcross, location.abovebar, color.orange, size=size.tiny)
+plotshape(quick_exit_short and show_exit_signals, "Quick Exit Short", shape.xcross, location.belowbar, color.orange, size=size.tiny)
+
+// Plot EMAs
+plot(ema21, "EMA21", color.blue, linewidth=1)
+plot(ema50, "EMA50", color.purple, linewidth=1)
+
+// Dashboard - ปรับปรุงให้ปลอดภัย
+if show_dashboard and barstate.islast
+    var table dashboard = table.new(position.top_right, 2, 7, bgcolor=color.white, border_width=1)
+    
+    table.cell(dashboard, 0, 0, "🔥 HYBRID", text_color=color.white, bgcolor=color.orange, text_size=size.small)
+    table.cell(dashboard, 1, 0, syminfo.ticker, text_color=color.white, bgcolor=color.orange, text_size=size.small)
+    
+    table.cell(dashboard, 0, 1, "💰 P&L", text_color=color.black, text_size=size.small)
+    pnl_value = strategy.netprofit
+    pnl_color = pnl_value >= 0 ? color.green : color.red
+    table.cell(dashboard, 1, 1, "$" + str.tostring(pnl_value, "#.##"), text_color=pnl_color, text_size=size.small)
+    
+    table.cell(dashboard, 0, 2, "⚡ Level", text_color=color.black, text_size=size.small)
+    table.cell(dashboard, 1, 2, signal_sensitivity, text_color=color.purple, text_size=size.small)
+    
+    table.cell(dashboard, 0, 3, "📈 RSI", text_color=color.black, text_size=size.small)
+    rsi_color = rsi < 30 ? color.green : rsi > 70 ? color.red : color.gray
+    table.cell(dashboard, 1, 3, str.tostring(rsi, "#.#"), text_color=rsi_color, text_size=size.small)
+    
+    table.cell(dashboard, 0, 4, "📊 เทรด", text_color=color.black, text_size=size.small)
+    table.cell(dashboard, 1, 4, str.tostring(trades_today) + "/" + str.tostring(daily_trade_limit), text_color=color.navy, text_size=size.small)
+    
+    table.cell(dashboard, 0, 5, "📍 สถานะ", text_color=color.black, text_size=size.small)
+    position_text = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "ว่าง"
+    position_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(dashboard, 1, 5, position_text, text_color=position_color, text_size=size.small)
+    
+    table.cell(dashboard, 0, 6, "🎯 Trend", text_color=color.black, text_size=size.small)
+    trend_text = uptrend ? "UP" : downtrend ? "DOWN" : "SIDE"
+    trend_color = uptrend ? color.green : downtrend ? color.red : color.gray
+    table.cell(dashboard, 1, 6, trend_text, text_color=trend_color, text_size=size.small)
+
+View in Pine Editor・307 lines
+Use on chart
+4
+7
+1 430
+A tool bot that helps analyze charts accurately, focusing on profits.

@@ -1,0 +1,101 @@
+//@version=5
+strategy("EMA 5/9 Angle + Candle Strength (SL=Open, TP=RR)",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0)
+
+// ====== Inputs ======
+fastLen        = input.int(5,  "EMA Fast Length", minval=1)
+slowLen        = input.int(9,  "EMA Slow Length", minval=1)
+
+angleLookback  = input.int(3,  "Angle lookback (bars)", minval=1)
+minAngleDeg    = input.float(30.0, "Min angle (deg)", step=0.1)
+
+bodyLookback   = input.int(200, "Candle-body lookback", minval=50)
+
+strengthType   = input.string("Normal", "Required candle strength",
+     options=["Normal", "2nd Most", "Most"])
+
+rr             = input.float(2.0, "RR (TP = RR * Risk)", minval=0.5, step=0.1)
+
+// ====== Indicators ======
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+plot(emaFast, "EMA Fast", color=color.new(color.yellow, 0))
+plot(emaSlow, "EMA Slow", color=color.new(color.blue, 0))
+
+// ====== Cross ======
+crossUp = ta.crossover(emaFast, emaSlow)
+crossDn = ta.crossunder(emaFast, emaSlow)
+
+// ====== Angle condition (approx) ======
+// Use slope of EMA spread over lookback, then atan(|slope|) converted to degrees.
+spread      = emaFast - emaSlow
+spreadSlope = (spread - spread[angleLookback]) / angleLookback
+
+angleRad = math.atan(math.abs(spreadSlope))
+angleDeg = angleRad * 180.0 / math.pi
+
+angleOK  = angleDeg >= minAngleDeg
+
+// ====== Candle strength condition ======
+// "Normal / 2nd Most / Most" via body-size percentile over rolling window
+body = math.abs(close - open)
+
+pct = strengthType == "Normal" ? 50.0 : strengthType == "2nd Most" ? 80.0 : 95.0
+bodyThreshold = ta.percentile_linear_interpolation(body, bodyLookback, pct)
+
+isBull = close > open
+isBear = close < open
+
+bullCandleOK = isBull and (body >= bodyThreshold)
+bearCandleOK = isBear and (body >= bodyThreshold)
+
+// ====== Signals (your rules) ======
+longSignal  = crossUp and angleOK and bullCandleOK
+shortSignal = crossDn and angleOK and bearCandleOK
+
+// ====== SL/TP rules (SL = signal candle open, TP = 1:RR) ======
+longSL   = open
+longRisk = close - longSL
+longTP   = close + rr * longRisk
+
+shortSL   = open
+shortRisk = shortSL - close
+shortTP   = close - rr * shortRisk
+
+validLong  = longRisk  > syminfo.mintick
+validShort = shortRisk > syminfo.mintick
+
+// ====== Orders ======
+if (longSignal and validLong and strategy.position_size == 0)
+    strategy.entry("LONG", strategy.long)
+    strategy.exit("LONG-EXIT", "LONG", stop=longSL, limit=longTP)
+
+if (shortSignal and validShort and strategy.position_size == 0)
+    strategy.entry("SHORT", strategy.short)
+    strategy.exit("SHORT-EXIT", "SHORT", stop=shortSL, limit=shortTP)
+
+// ====== Visual markers ======
+plotshape(longSignal and validLong,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, color=color.new(color.lime, 0), text="L")
+plotshape(shortSignal and validShort, title="Short Signal", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0),  text="S")
+
+View in Pine Editor・84 lines
+Use on chart
+1
+7
+731
+EMA 5 / EMA 9 cross
+
+Cross must have ~30° angle (approximated using slope → atan)
+
+Entry candle must be bullish/bearish and also be Normal / 2nd Most / Most based on body-size percentile
+
+Entry = close of signal candle
+
+SL = open of signal candle
+
+TP = 1:2 RR (editable input)

@@ -1,0 +1,242 @@
+//@version=6
+strategy(
+     "TriAnchor Elastic Reversion US Market", shorttitle="TAER", overlay=true, pyramiding=0,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100, margin_short=0, margin_long=0,
+     commission_type=strategy.commission.percent, commission_value=0.03,
+     slippage=5, process_orders_on_close=false, calc_on_every_tick=false, calc_on_order_fills=false)
+
+// ========== GROUPS
+group_setup   = "Setup"
+group_regime  = "Regime and Breadth"
+group_risk    = "Risk — Short only"
+
+// ========== INPUTS (only those used by want_long / want_short)
+base_len         = input.int(52,  "Base length",               minval=20, group=group_setup, tooltip="Window for percentranks and medians.")
+atr_len          = input.int(14,  "ATR length",                minval=5,  group=group_setup)
+sd_mult          = input.float(3.0,"VWAP band stdev",          minval=0.1, step=0.1, group=group_setup)
+z_len            = input.int(62,  "Robust Z window",           minval=20, group=group_setup)
+z_trig           = input.float(1.7,"Robust Z entry magnitude", minval=0.5, step=0.05, group=group_setup, tooltip="Enter when |Z| exceeds this.")
+energy_trig_prc  = input.float(95.0,"Energy percentile trigger", minval=60, maxval=99.9, step=0.1, group=group_setup)
+shape_gate       = input.float(0.10,"Bar close in range gate long", minval=0, maxval=1, step=0.01, group=group_setup, tooltip="Require close near low for longs. Shorts use 1 minus this.")
+
+// Breadth needed by want_long / want_short
+use_breadth      = input.bool(true, "Use breadth gate", group=group_regime)
+sym_spy          = input.symbol("BATS:SPY", "Breadth 1", group=group_regime)
+sym_qqq          = input.symbol("BATS:QQQ", "Breadth 2", group=group_regime)
+sym_iwm          = input.symbol("BATS:IWM", "Breadth 3", group=group_regime)
+breadth_z_ok     = input.float(1.2,"Breadth Z confirm magnitude", minval=0, step=0.05, group=group_regime, tooltip="Average of SPY QQQ IWM robust Z must be below -X for longs and above +X for shorts.")
+
+// Gap shock filter needed by want_long / want_short
+gap_limit_prc    = input.float(3.0, "Gap shock percent", minval=0.2, step=0.1, group=group_regime, tooltip="Skip fades on larger than this gap in percent.")
+
+// Short only risk
+use_short_brackets = input.bool(true, "Enable short SL TP", group=group_risk)
+short_sl_atr_mult  = input.float(2.0, "Short ATR stop mult", minval=0.1, step=0.05, group=group_risk)
+short_tp_atr_mult  = input.float(100.0, "Short ATR take profit mult", minval=0.1, step=0.05, group=group_risk)
+
+// long_sl_atr_mult  = input.float(2.0, "Long ATR stop mult", minval=0.1, step=0.05, group=group_risk)
+// long_tp_atr_mult  = input.float(100.0, "Long ATR take profit mult", minval=0.1, step=0.05, group=group_risk)
+
+
+symbol = input.symbol("SPY")
+closex = request.security(symbol, timeframe.period, close)
+
+// ==================== LOGIC NEEDED BY THE TRIGGERS
+// Robust Z using MAD
+robust_z(src, len) =>
+    m  = ta.median(src, len)
+    d  = math.abs(src - m)
+    md = ta.median(d, len)
+    denom = md * 1.4826
+    denom != 0 ? (src - m) / denom : 0.0
+
+// Percent rank helper
+prank(x, len) => request.security(symbol, timeframe.period, ta.percentrank(x, len))
+
+// ========== TRI ANCHOR VWAP CLUSTER (required for energy)
+anchor_d = timeframe.change("1D")
+anchor_w = timeframe.change("1W")
+anchor_m = timeframe.change("1M")
+// Use hlc3 for stability
+[vwap_d, _, _] = request.security(symbol, timeframe.period, ta.vwap(hlc3, anchor_d, sd_mult))
+[vwap_w, _, _] = request.security(symbol, timeframe.period, ta.vwap(hlc3, anchor_w, sd_mult))
+[vwap_m, _, _] = request.security(symbol, timeframe.period, ta.vwap(hlc3, anchor_m, sd_mult))
+
+// Elastic energy of stretch normalized by ATR (needed)
+atrv = request.security(symbol, timeframe.period, ta.atr(atr_len))
+norm = atrv != 0 ? atrv : request.security(symbol, timeframe.period, ta.tr)
+de_d = (closex - vwap_d) / norm
+de_w = (closex - vwap_w) / norm
+de_m = (closex - vwap_m) / norm
+elastic_energy = de_d*de_d + de_w*de_w + de_m*de_m
+energy_pct = request.security(symbol, timeframe.period, prank(elastic_energy, base_len))
+
+// ========== ROBUST Z AND SHAPE (needed)
+zrob = request.security(symbol, timeframe.period, robust_z(close, z_len))
+pos_in_range = request.security(symbol, timeframe.period, (close - low) / math.max(high - low, syminfo.mintick))
+
+// ========== BREADTH GATE (needed)
+get_z_for(sym) =>
+    request.security(sym, timeframe.period, robust_z(close, z_len), lookahead=barmerge.lookahead_off)
+breadth_z = use_breadth ? (get_z_for(sym_spy) + get_z_for(sym_qqq) + get_z_for(sym_iwm)) / 3.0 : 0.0
+breadth_ok_long  = not use_breadth or breadth_z <= -breadth_z_ok
+breadth_ok_short = not use_breadth or breadth_z >=  breadth_z_ok
+
+// ========== GAP SHOCK FILTER (needed)
+is_first_bar = timeframe.isintraday ? session.isfirstbar_regular : true
+gap_prc = is_first_bar and not na(close[1]) ? 100 * (open - close[1]) / close[1] : 0
+gap_shock = request.security(symbol, timeframe.period, math.abs(gap_prc) >= gap_limit_prc)
+
+// ========== SIGNALS USED BY FINAL ENTRY/EXIT
+want_long  = not gap_shock and energy_pct >= energy_trig_prc and zrob <= -z_trig and pos_in_range <= shape_gate and breadth_ok_long
+want_short = not gap_shock and energy_pct >= energy_trig_prc and zrob >=  z_trig and pos_in_range >= (1.0 - shape_gate) and breadth_ok_short
+
+// ===== SHORT REENTRY LOCK STATE
+var bool short_lock = false                // true blocks new short entries
+var bool long_seen  = false                // becomes true when a long is open after a short
+
+// ==================== ENTRIES AND EXITS
+// Long logic unchanged
+if want_long
+    strategy.close("long")
+    strategy.close("short")
+if want_long[10]
+    strategy.entry("long", strategy.long)
+
+// Unlock shorts only after a long was opened and later closed
+was_long = strategy.position_size[1] > 0
+is_long  = strategy.position_size > 0
+if is_long
+    long_seen := true
+long_closed = was_long and not is_long
+if long_closed and long_seen
+    short_lock := false
+    long_seen  := false
+
+// Enter short only if lock is off
+if want_short 
+    strategy.close("long")
+    strategy.entry("short", strategy.short)
+    short_lock := true
+    long_seen  := false
+
+// Short-only brackets
+if use_short_brackets and strategy.position_size < 0
+    ep = strategy.position_avg_price
+    stop_px  = ep + short_sl_atr_mult * atrv
+    limit_px = ep - short_tp_atr_mult * atrv
+    strategy.exit("SX", from_entry="short", stop=stop_px, limit=limit_px)
+
+// if use_short_brackets and strategy.position_size > 0
+//     ep = strategy.position_avg_price
+//     stop_px_l  = ep - long_sl_atr_mult * atrv
+//     limit_px_l = ep + long_tp_atr_mult * atrv
+//     strategy.exit("LX", from_entry="long", stop=stop_px_l, limit=limit_px_l)
+
+View in Pine Editor・137 lines
+Use on chart
+6
+4
+2
+2 064
+Summary in one paragraph
+Mean-reversion strategy for liquid ETFs, index futures, large-cap equities, and major crypto on intraday to daily timeframes. It waits for three anchored VWAP stretches to become statistically extreme, aligns with bar-shape and breadth, and fades the move. Originality comes from fusing daily, weekly, and monthly AVWAP distances into a single ATR-normalized energy percentile, then gating with a robust Z-score and a session-safe gap filter.
+
+Scope and intent
+• Markets: SPY QQQ IWM NDX large caps liquid futures liquid crypto
+• Timeframes: 5 min to 1 day
+• Default demo: SPY on 60 min
+• Purpose: fade stretched moves only when multi-anchor context and breadth agree
+• Limits: strategy uses standard candles for signals and orders only
+
+Originality and usefulness
+• Unique fusion: tri-anchor AVWAP energy percentile plus robust Z of close plus shape-in-range gate plus breadth Z of SPY QQQ IWM
+• Failure mode addressed: chasing extended moves and fading during index-wide thrusts
+• Testability: each component is an input and visible in orders list via L and S tags
+• Portable yardstick: distances are ATR-normalized so thresholds transfer across symbols
+• Open source: method and implementation are disclosed for community review
+
+Method overview in plain language
+Base measures
+• Range basis: ATR(length = atr_len) as the normalization unit
+• Return basis: not used directly; we use rank statistics for stability
+
+Components
+• Tri-Anchor Energy: squared distances of price from daily, weekly, monthly AVWAPs, each divided by ATR, then summed and ranked to a percentile over base_len
+• Robust Z of Close: median and MAD based Z to avoid outliers
+• Shape Gate: position of close inside bar range to require capitulation for longs and exhaustion for shorts
+• Breadth Gate: average robust Z of SPY QQQ IWM to avoid fading when the tape is one-sided
+• Gap Shock: skip signals after large session gaps
+
+Fusion rule
+• All required gates must be true: Energy ≥ energy_trig_prc, |Robust Z| ≥ z_trig, Shape satisfied, Breadth confirmed, Gap filter clear
+
+Signal rule
+• Long: energy extreme, Z negative beyond threshold, close near bar low, breadth Z ≤ −breadth_z_ok
+• Short: energy extreme, Z positive beyond threshold, close near bar high, breadth Z ≥ +breadth_z_ok
+
+What you will see on the chart
+• Standard strategy arrows for entries and exits
+• Optional short-side brackets: ATR stop and ATR take profit if enabled
+
+
+Inputs with guidance
+Setup
+• Base length: window for percentile ranks and medians. Typical 40 to 80. Longer smooths, shorter reacts.
+• ATR length: normalization unit. Typical 10 to 20. Higher reduces noise.
+• VWAP band stdev: volatility bands for anchors. Typical 2.0 to 4.0.
+• Robust Z window: 40 to 100. Larger for stability.
+• Robust Z entry magnitude: 1.2 to 2.2. Higher means stronger extremes only.
+• Energy percentile trigger: 90 to 99.5. Higher limits signals to rare stretches.
+• Bar close in range gate long: 0.05 to 0.25. Larger requires deeper capitulation for longs.
+
+Regime and Breadth
+• Use breadth gate: on when trading indices or broad ETFs.
+• Breadth Z confirm magnitude: 0.8 to 1.8. Higher avoids fighting thrusts.
+• Gap shock percent: 1.0 to 5.0. Larger allows more gaps to trade.
+
+Risk — Short only
+• Enable short SL TP: on to bracket shorts.
+• Short ATR stop mult: 1.0 to 3.0.
+• Short ATR take profit mult: 1.0 to 6.0.
+
+
+Properties visible in this publication
+• Initial capital: 25000USD
+• Default order size: Percent of total equity 3%
+• Pyramiding: 0
+• Commission: 0.03 percent
+• Slippage: 5 ticks
+• Process orders on close: OFF
+• Bar magnifier: OFF
+• Recalculate after order is filled: OFF
+• Calc on every tick: OFF
+• request.security lookahead off where used
+
+
+Realism and responsible publication
+• No performance claims. Past results never guarantee future outcomes
+• Fills and slippage vary by venue
+• Shapes can move during bar formation and settle on close
+• Standard candles only for strategies
+
+Honest limitations and failure modes
+• Economic releases or very thin liquidity can overwhelm mean-reversion logic
+• Heavy gap regimes may require larger gap filter or TR-based tuning
+• Very quiet regimes reduce signal contrast; extend windows or raise thresholds
+
+Open source reuse and credits
+• None
+
+Strategy notice
+Orders are simulated by TradingView on standard candles. request.security uses lookahead off where applicable. Non-standard charts are not supported for execution.
+
+Entries and exits
+• Entry logic: as in Signal rule above
+• Exit logic: short side optional ATR stop and ATR take profit via brackets; long side closes on opposite setup
+• Risk model: ATR-based brackets on shorts when enabled
+• Tie handling: stop first when both could be touched inside one bar
+
+Dataset and sample size
+• Test across your visible history. For robust inference prefer 100 plus trades.

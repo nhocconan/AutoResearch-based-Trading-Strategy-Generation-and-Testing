@@ -1,0 +1,97 @@
+//@version=5
+strategy("Pairs strategy", overlay=true, margin_long=100, margin_short=100)
+
+downbar = close < open
+upbar   = close > open
+
+SymbolClose = request.security("SMH", timeframe.period, close)
+SymbolOpen  = request.security("SMH", timeframe.period, open)
+
+//Symbol2Close = request.security("BTCUSDT", timeframe.period, close)
+//Symbol2Open = request.security("BTCUSDT", timeframe.period, close)
+
+Filter3 = SymbolClose > SymbolOpen
+//Filter2 = Symbol2Close > Symbol2Open
+Filter4 = SymbolClose < SymbolOpen
+
+Buy = Filter3 and downbar //and Filter2
+Sell = close > high[1]
+
+
+if Buy and strategy.position_size == 0
+    strategy.entry("Buy", strategy.long)
+
+if Sell and strategy.position_size > 0
+    strategy.close("Buy")
+
+View in Pine Editor・28 lines
+Use on chart
+9
+9
+3
+2 989
+Hello, Tradingview community,
+
+I am been playing with this idea that nowadays trading instruments are interconnected and when one goes too far "out of order" it should return to the mean.
+
+So, here's a relatively simple idea.
+
+This is a LONG-ONLY strategy.
+
+
+Buy when your traded instrument's last bar closes down, and the comparing instrument closes up.
+
+
+
+
+Sell when close is higher than the previous bar's high.
+
+
+
+Best results I found with medium timeframes: 45min, 120min, 180min.
+
+Also, feel free to test non-typical timeframes such as 59min, 119min, 179min, etc.
+
+My reasoning for medium timeframes would be, that they are big enough to avoid "market noise"
+of smaller timeframes + commissions & slippage is less negligible, and small enough to avoid exposure of higher timeframes, although, I haven't tested D timeframe and above.
+
+The best results, I found were with instruments that aren't directly correlated. I mostly tested equities and equity futures, so for equity indexes, equity index futures, or large-cap stocks, 
+SMH
+, 
+NVDA
+, EURUSD, and Crude Oil would be a good candidate for comparing symbols.
+
+When testing either futures or stocks, please adjust the commission for each asset, for stocks I use % equity, so it compounds over time, whereas, for futures, I use 1 contract all the time.
+
+Here's 
+MSFT
+ on 119min chart
+
+
+
+
+Here's 
+SPY
+ on 59min chart using 
+NVDA
+ as comparison
+
+
+
+
+Here's 
+ES1!
+ on 179min chart using 
+CL1!
+ as comparison
+
+To change comparison symbol just insert your symbol between the brackets on both fields down here.
+
+SymbolClose = request.security("YOUR SYMBOL HERE", timeframe.period, close)
+SymbolOpen = request.security("YOUR SYMBOL HERE", timeframe.period, open)
+
+Since I am still relatively new to testing, hence, I am publishing this idea, so you can point out some crucial things I may have missed.
+
+Thanks,
+
+Enjoy the strategy!

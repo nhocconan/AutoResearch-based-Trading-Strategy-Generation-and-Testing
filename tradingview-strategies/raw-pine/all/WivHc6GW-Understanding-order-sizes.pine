@@ -1,0 +1,53 @@
+//@version=2
+strategy("BarUpDn time limited", overlay=true, default_qty_type = strategy.fixed, default_qty_value = 1)
+
+//input boxes for the limit date
+yearLimit = input(2016,title="year") 
+monthLimit = input(1, title="month")
+dayLimit = input(1, title="day")
+
+//function that checks if the current date is more recent than the limit
+dateOk(yl,ml,dl) =>
+//    ok = (year < yl) ? false : (yl == year and month < ml ) ? false : (yl == year and ml == month and dayofmonth < dl) ? false : true
+    ok = time > timestamp(yl,ml,dl,0,1)
+    
+    
+//applies dumb prebuilt strat limited to the date
+if (dateOk(yearLimit,monthLimit,dayLimit) and (close > open and open > close[1]) )
+    strategy.entry("BarDn", strategy.short)
+if (dateOk(yearLimit,monthLimit,dayLimit) and (close < open and open < close[1]) )
+    strategy.entry("BarUp", strategy.long)
+
+View in Pine Editor・19 lines
+Use on chart
+1
+9
+6
+7
+25 351
+type: properties manipulation, no programming needed
+time required: 15minutes, at least
+level: medium (need to know contracts, trading pairs)
+
+A strategy can "appear" to work or be broken depending on the pile of cash that is working on. This amount is defined in the strat properties, under "order size".
+
+For noobs (like me) this is very confusing at first :)
+
+A strat opens/closes positions using units, a generic measure for the chart being operated on. Thes "units" can be a fixed amount of cash, a fixed amount of contracts, or a floating amount based on the last profits made. I recommend checking my previous strat to figure the case of contracts .
+
+So, any trading price is the amount of "things" you get for some "cash". The things are the first unit, the "cash" is the second. Some examples:
+XAU/USD - 1 xau oz is worth x dollars
+BTC/USD - 1 bitcoin is worth x dollars
+GBP/EUR - 1 pound is worth x euros
+
+To add to confusion, a lot of markets the "unit size" is different from what the strat thinks it is. An options contract is 100 shares(the unit), 1 xau contract is 10 oz(units), 1 eur/usd contract is 100k euros and so on... so, after figuring out how the sizes work in a strat, then the sizes must be adapted for the specific market in question.
+
+The choice os using the ETHUSD pair is because:
+1 - you can buy 1eth, unlike a gold contract for example, so 1 "unit" = 1 eth, easier to get
+2 - ETH is around 12 bucks, wich gives round numbers on the math, easier to wrap the brains around :)
+3- is an unusual pair, so the regular contract sizes don't apply, and the brain is not conditioned to work inside the box ;)
+
+You will have to access the script properties, to change the values. As these values are changed you will see exactly the differences in the values of the strat.
+
+Text is too long, check the comments for all the cases
+

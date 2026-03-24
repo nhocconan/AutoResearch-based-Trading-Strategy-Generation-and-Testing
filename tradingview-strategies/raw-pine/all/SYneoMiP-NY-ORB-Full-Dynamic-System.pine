@@ -1,0 +1,419 @@
+//@version=6
+strategy('NY ORB - Full Dynamic System', overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === INPUTS ===
+start_hour = input.int(8, 'ORB Start Hour', group='Session Settings')
+start_minute = input.int(30, 'ORB Start Minute')
+end_hour = input.int(8, 'ORB End Hour')
+end_minute = input.int(45, 'ORB End Minute')
+entry_start_hour = input.int(8, 'Entry Start Hour')
+entry_start_minute = input.int(50, 'Entry Start Minute')
+entry_end_hour = input.int(12, 'Entry End Hour')
+entry_end_minute = input.int(0, 'Entry End Minute')
+exit_hour = input.int(13, 'Exit Hour')
+exit_minute = input.int(25, 'Exit Minute')
+
+use_second_break = input.bool(false, "Second Break of ORB?", group='Second Break')
+
+trade_direction = input.string("Both", "Trade Direction", options=["Both", "Long Only", "Short Only"], group='Trade Direction')
+
+stop_method = input.string("Fixed", title="Stop Method", options=["Fixed", "ATR", "Capped ATR", "OR-Based"], group='Stop & Target Settings')
+fixed_stop_ticks = input.int(30, "Fixed Stop Loss (Ticks)", minval=1)
+atr_length = input.int(7, "ATR Length")
+atr_multiplier = input.float(3.0, "ATR Multiplier")
+max_atr_stop_ticks = input.int(50, "Max ATR Stop (Ticks)", minval=5)
+or_stop_multiplier = input.float(1.0, "OR Range Multiplier")
+
+fixed_trail_ticks = input.int(50, "Fixed Trailing Stop (Ticks)", minval=5)
+atr_trail_multiplier = input.float(2.0, "ATR Trailing Multiplier")
+atr_tight_trail_multiplier = input.float(1.0, "ATR Tightened Trail Multiplier After Breakeven")
+
+use_custom_trail = input.bool(true, "Optimize Trailing Per Stop Method")
+use_auto_tighten = input.bool(true, "Auto Tighten Trailing After Breakeven")
+
+use_adaptive_breakeven = input.bool(true, "Enable Adaptive Breakeven?")
+adaptive_breakeven_pct = input.float(0.25, "Breakeven Activation at % of ATR Target", minval=0.01)
+
+enable_breakeven = input.bool(true, "Enable Breakeven Stop")
+breakeven_trigger_ticks = input.int(65, "Breakeven Trigger Distance (Ticks)", minval=1)
+
+use_profit_target = input.bool(true, "Enable Dynamic Profit Target?")
+profit_target_type = input.string("ATR", title="Profit Target Type", options=["ATR", "OR-Based"])
+profit_target_multiplier = input.float(1.5, "Profit Target Multiplier", minval=0.5)
+
+exit_on_ma_cross = input.bool(true, "Enable MA Cross Exit?")
+ma_exit_type = input.string("SMMA", "MA Cross Exit Type", options=["SMMA", "VWAP"])
+
+confirmation_candle_count = input.int(0, 'ORB Confirmation Candle Count (0 = No Confirmation)', minval=0)
+
+use_rsi = input.bool(true, "Use RSI Filter?", group='Filters')
+rsi_length = input.int(14, "RSI Length")
+rsi_overbought = input.int(70, "RSI Overbought Level")
+rsi_oversold = input.int(30, "RSI Oversold Level")
+
+use_macd = input.bool(true, "Use MACD Filter?")
+macd_fast = input.int(12, "MACD Fast Length")
+macd_slow = input.int(26, "MACD Slow Length")
+macd_signal = input.int(9, "MACD Signal Smoothing")
+
+use_vwap = input.bool(true, "Use VWAP Filter?")
+use_trend_filter = input.bool(true, "Use Trend Filter?")
+smma_length = input.int(50, "SMMA Length")
+
+// === TRADING DAYS SELECTION ===
+trade_sunday    = input.bool(true,  'Trade Sunday')
+trade_monday    = input.bool(true,  'Trade Monday')
+trade_tuesday   = input.bool(true,  'Trade Tuesday')
+trade_wednesday = input.bool(true,  'Trade Wednesday')
+trade_thursday  = input.bool(true,  'Trade Thursday')
+trade_friday    = input.bool(true,  'Trade Friday')
+
+// === FILTER INDICATORS ===
+rsi = ta.rsi(close, rsi_length)
+[macd_line, signal_line, _] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+vwap = ta.vwap(close)
+smma = ta.sma(close, smma_length)
+
+// === SECOND BREAK TRACKING ===
+var bool first_breakout_up = false
+var bool first_breakout_down = false
+var bool returned_inside_or_up = false
+var bool returned_inside_or_down = false
+
+// === DAILY LIMIT INPUTS ===
+enable_daily_profit_limit = input.bool(true, "Enable Daily Profit Limit?", group='Daily Limits')
+enable_daily_loss_limit = input.bool(true, "Enable Daily Loss Limit?")
+daily_max_profit_ticks = input.int(200, "Max Daily Profit (Ticks)")
+daily_max_loss_ticks = input.int(-100, "Max Daily Loss (Ticks)")
+
+// === FUNCTIONS ===
+in_time_range(t, sh, sm, eh, em) =>
+    start = timestamp(year(t), month(t), dayofmonth(t), sh, sm)
+    end_ = timestamp(year(t), month(t), dayofmonth(t), eh, em)
+    t >= start and t <= end_
+
+// === INITIALIZE VARIABLES ===
+
+// Example reset logic
+var float or_high = na
+var float or_low = na
+var string auto_selected_method = na
+var int last_reset_day_id = na
+var bool profit_limit_hit = false
+var bool loss_limit_hit = false
+var bool entry_blocked = false
+
+session_start_hour = 17
+t = time
+
+// Shift timestamp by 7 hours back, so the "day" starts at 17:00 instead of 00:00
+adjusted_time = t - (session_start_hour * 60 * 60 * 1000)
+
+// Create custom day ID from adjusted time
+current_day = dayofmonth(adjusted_time)
+current_month = month(adjusted_time)
+current_year = year(adjusted_time)
+current_day_id = current_year * 10000 + current_month * 100 + current_day
+
+// Detect new day (at 17:00)
+new_day = na(current_day_id[1]) or current_day_id != current_day_id[1]
+if new_day
+    or_high := na
+    or_low := na
+    first_breakout_up := false
+    first_breakout_down := false
+    returned_inside_or_up := false
+    returned_inside_or_down := false
+    entry_blocked := false
+
+if in_time_range(time, start_hour, start_minute, end_hour, end_minute)
+    or_high := na(or_high[1]) ? high : math.max(or_high[1], high)
+    or_low := na(or_low[1]) ? low : math.min(or_low[1], low)
+
+// === TRADING DAY FILTER ===
+is_trading_day = (dayofweek == dayofweek.sunday    and trade_sunday) or
+                 (dayofweek == dayofweek.monday    and trade_monday) or
+                 (dayofweek == dayofweek.tuesday   and trade_tuesday) or
+                 (dayofweek == dayofweek.wednesday and trade_wednesday) or
+                 (dayofweek == dayofweek.thursday  and trade_thursday) or
+                 (dayofweek == dayofweek.friday    and trade_friday)
+
+atr = ta.atr(atr_length)
+
+crossunder_smma = ta.crossunder(close, smma)
+crossover_smma = ta.crossover(close, smma)
+crossunder_vwap = ta.crossunder(close, vwap)
+crossover_vwap = ta.crossover(close, vwap)
+
+confirm_long = confirmation_candle_count == 0 or close[confirmation_candle_count] <= or_high
+confirm_short = confirmation_candle_count == 0 or close[confirmation_candle_count] >= or_low
+
+breakout_long = na(or_high) ? false : close > or_high and confirm_long
+breakout_short = na(or_low) ? false : close < or_low and confirm_short
+
+// Track second break logic
+if not na(or_high)
+    if not first_breakout_up and close > or_high
+        first_breakout_up := true
+    if first_breakout_up and not returned_inside_or_up and close <= or_high
+        returned_inside_or_up := true
+
+if not na(or_low)
+    if not first_breakout_down and close < or_low
+        first_breakout_down := true
+    if first_breakout_down and not returned_inside_or_down and close >= or_low
+        returned_inside_or_down := true
+
+var int orb_break_long_count = 0
+var int orb_break_short_count = 0
+
+// Reset daily
+if new_day
+    orb_break_long_count := 0
+    orb_break_short_count := 0
+
+// Count each breakout
+if breakout_long
+    orb_break_long_count += 1
+if breakout_short
+    orb_break_short_count += 1
+
+rsi_ok_long = rsi < rsi_overbought
+rsi_ok_short = rsi > rsi_oversold
+macd_ok_long = macd_line > signal_line
+macd_ok_short = macd_line < signal_line
+vwap_ok_long = close > vwap
+vwap_ok_short = close < vwap
+trend_ok_long = close > smma
+trend_ok_short = close < smma
+
+second_break_valid_long = close > or_high and first_breakout_up and returned_inside_or_up
+second_break_valid_short = close < or_low and first_breakout_down and returned_inside_or_down
+
+entry_long = breakout_long and (not use_second_break or second_break_valid_long) and (not use_rsi or rsi_ok_long) and (not use_macd or macd_ok_long) and (not use_vwap or vwap_ok_long) and (not use_trend_filter or trend_ok_long) and (trade_direction == "Both" or trade_direction == "Long Only")
+entry_short = breakout_short and (not use_second_break or second_break_valid_short) and (not use_rsi or rsi_ok_short) and (not use_macd or macd_ok_short) and (not use_vwap or vwap_ok_short) and (not use_trend_filter or trend_ok_short) and (trade_direction == "Both" or trade_direction == "Short Only")
+
+bgcolor(entry_blocked ? color.new(color.gray, 85) : entry_long ? color.new(color.green, 80) : entry_short ? color.new(color.red, 80) : na)
+
+// === ENTRY LOCKOUT IF DAILY LIMITS HIT ===
+if new_day
+    entry_blocked := false
+
+entry_blocked := profit_limit_hit or loss_limit_hit
+
+lockout_bgcolor = entry_blocked ? color.new(color.gray, 85) : na
+bgcolor(lockout_bgcolor)
+
+// === ENTRY EXECUTION ===
+if not entry_blocked and is_trading_day and in_time_range(time, entry_start_hour, entry_start_minute, entry_end_hour, entry_end_minute)
+    if entry_long
+        strategy.entry('Long', strategy.long)
+        alert('{"strategy":"NY ORB","action":"enter","position":"long","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+    if entry_short
+        strategy.entry('Short', strategy.short)
+        alert('{"strategy":"NY ORB","action":"enter","position":"short","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+
+// === TRAIL AMOUNT CALCULATION ===
+var float trail_amt = na
+if use_custom_trail
+    if stop_method == "Fixed"
+        trail_amt := fixed_trail_ticks * syminfo.mintick
+    else
+        trail_amt := atr * atr_trail_multiplier
+else
+    trail_amt := atr * atr_multiplier
+
+// === DAILY PNL TRACKING ===
+var float daily_realized_ticks = 0.0
+var float daily_unrealized_ticks = 0.0
+
+if na(time('D')[1]) or time('D') != time('D')[1]
+    daily_realized_ticks := 0.0
+    daily_unrealized_ticks := 0.0
+    profit_limit_hit := false
+    loss_limit_hit := false
+
+if strategy.opentrades > 0
+    avg_price = strategy.position_avg_price
+    pos_dir = strategy.position_size > 0 ? 1 : -1
+    daily_unrealized_ticks := pos_dir * (close - avg_price) / syminfo.mintick
+else
+    daily_unrealized_ticks := 0.0
+
+closed_trades = strategy.closedtrades
+last_closed = closed_trades - closed_trades[1] > 0
+if last_closed
+    last_entry = strategy.closedtrades.entry_price(closed_trades - 1)
+    last_exit = strategy.closedtrades.exit_price(closed_trades - 1)
+    last_size = strategy.closedtrades.size(closed_trades - 1)
+    direction = last_size > 0 ? 1 : -1
+    tick_gain = direction * (last_exit - last_entry) / syminfo.mintick
+    daily_realized_ticks += tick_gain
+
+total_ticks = daily_realized_ticks + daily_unrealized_ticks
+
+if enable_daily_profit_limit and not profit_limit_hit and total_ticks >= daily_max_profit_ticks
+    profit_limit_hit := true
+    strategy.close_all(comment='Daily Profit Limit Hit')
+    label.new(bar_index, high, "Profit Limit Hit", style=label.style_label_down, color=color.green, textcolor=color.white)
+
+if enable_daily_loss_limit and not loss_limit_hit and total_ticks <= daily_max_loss_ticks
+    loss_limit_hit := true
+    strategy.close_all(comment='Daily Loss Limit Hit')
+    label.new(bar_index, low, "Loss Limit Hit", style=label.style_label_up, color=color.red, textcolor=color.white)
+
+// === EXIT LOGIC ===
+breakeven_price = strategy.position_avg_price
+var float dynamic_breakeven_trigger = breakeven_trigger_ticks * syminfo.mintick
+if use_adaptive_breakeven
+    dynamic_breakeven_trigger := atr * adaptive_breakeven_pct
+
+trigger_long = close >= strategy.position_avg_price + dynamic_breakeven_trigger
+trigger_short = close <= strategy.position_avg_price - dynamic_breakeven_trigger
+
+if use_auto_tighten
+    if (strategy.position_size > 0 and trigger_long) or (strategy.position_size < 0 and trigger_short)
+        trail_amt := atr * atr_tight_trail_multiplier
+
+var float stop_loss_amt = na
+atr_stop = atr * atr_multiplier
+atr_stop_capped = math.min(atr_stop, max_atr_stop_ticks * syminfo.mintick)
+or_range = or_high - or_low
+or_stop = or_range * or_stop_multiplier
+
+if stop_method == "Fixed"
+    stop_loss_amt := fixed_stop_ticks * syminfo.mintick
+else if stop_method == "ATR"
+    stop_loss_amt := atr_stop
+else if stop_method == "Capped ATR"
+    stop_loss_amt := atr_stop_capped
+else if stop_method == "OR-Based"
+    stop_loss_amt := or_stop
+
+var float target_price = na
+if use_profit_target
+    if strategy.position_size > 0
+        target_price := enable_breakeven and trigger_long ? breakeven_price : strategy.position_avg_price + (profit_target_type == "ATR" ? atr : or_range) * profit_target_multiplier
+        strategy.exit("Long TP", from_entry="Long", limit=target_price)
+        alert('{"strategy":"NY ORB","action":"exit","position":"long","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+    if strategy.position_size < 0
+        target_price := enable_breakeven and trigger_short ? breakeven_price : strategy.position_avg_price - (profit_target_type == "ATR" ? atr : or_range) * profit_target_multiplier
+        strategy.exit("Short TP", from_entry="Short", limit=target_price)
+        alert('{"strategy":"NY ORB","action":"exit","position":"short","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+
+if strategy.position_size > 0
+    stop_price = enable_breakeven and trigger_long ? breakeven_price : strategy.position_avg_price - stop_loss_amt
+    strategy.exit('Exit Long', from_entry='Long', trail_points=trail_amt / syminfo.mintick, stop=stop_price)
+    if strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
+        alert('{"strategy":"NY ORB","action":"exit","position":"long","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+if strategy.position_size < 0
+    stop_price = enable_breakeven and trigger_short ? breakeven_price : strategy.position_avg_price + stop_loss_amt
+    strategy.exit('Exit Short', from_entry='Short', trail_points=trail_amt / syminfo.mintick, stop=stop_price)
+    if strategy.closedtrades > 0 and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
+        alert('{"strategy":"NY ORB","action":"exit","position":"short","price":' + str.tostring(close) + '}', alert.freq_once_per_bar)
+
+// MA Cross Exit Logic (SMA or VWAP based)
+if exit_on_ma_cross
+    is_sma_selected = ma_exit_type == "SMMA"
+    is_vwap_selected = ma_exit_type == "VWAP"
+
+    // Long exit logic
+    long_cross_exit = (is_sma_selected and crossunder_smma) or (is_vwap_selected and crossunder_vwap)
+    if strategy.position_size > 0 and long_cross_exit and (na(target_price) or close < target_price)
+        strategy.close("Long", comment="MA Cross Exit")
+        alert('{"strategy":"NY ORB","action":"exit","position":"long","reason":"MA cross"}', alert.freq_once_per_bar)
+
+    // Short exit logic
+    short_cross_exit = (is_sma_selected and crossover_smma) or (is_vwap_selected and crossover_vwap)
+    if strategy.position_size < 0 and short_cross_exit and (na(target_price) or close > target_price)
+        strategy.close("Short", comment="MA Cross Exit")
+        alert('{"strategy":"NY ORB","action":"exit","position":"short","reason":"MA cross"}', alert.freq_once_per_bar)
+
+exit_time = timestamp(year, month, dayofmonth, exit_hour, exit_minute)
+if time >= exit_time
+    strategy.close_all(comment='Fixed Time Exit')
+
+// === PLOTS ===
+
+// Plot trailing stop level
+var float trailing_stop_level = na
+var color trailing_color = na
+if strategy.position_size > 0
+    trailing_stop_level := close - trail_amt
+    trailing_color := close > strategy.position_avg_price ? color.green : color.red
+else if strategy.position_size < 0
+    trailing_stop_level := close + trail_amt
+    trailing_color := close < strategy.position_avg_price ? color.green : color.red
+plot(strategy.position_size != 0 ? trailing_stop_level : na, title="Trailing Stop Level", color=trailing_color, style=plot.style_circles, linewidth=2)
+
+// Plot ORB High and Low
+plot(or_high, title="ORB High", color=color.green, linewidth=2)
+plot(use_vwap ? vwap : na, title="VWAP", color=color.orange, linewidth=2)
+plot(use_trend_filter ? smma : na, title="SMA", color=color.blue, linewidth=2)
+plot(or_low, title="ORB Low", color=color.red, linewidth=2)
+
+View in Pine Editor・353 lines
+Use on chart
+1
+0
+2
+5
+2 114
+NY ORB - Full Dynamic Strategy Summary
+1. Opening Range and Session Timing
+Opening Range (ORB) Calculation: The strategy identifies the ORB High and ORB Low by tracking the highest high and lowest low during the specified New York pre-market window, which is set by default from 8:30 to 8:45 (New York time).
+
+Entry Window: Trading activity is restricted to a specific entry period, typically starting shortly after the ORB is established (default: 8:50 to 12:00).
+
+Hard Exit Time: Any remaining open positions are automatically closed at a fixed exit time (default: 13:25).
+
+2. Trade Entry Logic and Filters
+An entry (Long or Short) is generated when the price breaks out of the established ORB, provided it passes a series of optional filters:
+
+Direction Control: The user can restrict the strategy to trade Long Only, Short Only, or Both.
+
+Second Breakout Logic: An optional filter that requires the price to break out, reverse back into the range, and then break out again, confirming momentum after a consolidation.
+
+Confirmation Candle Count: An optional filter that checks the close of a previous candle (e.g., 1 or 2 candles ago) to ensure the price was still inside the range, preventing premature entry.
+
+Technical Filters (Optional): The entry is only executed if it aligns with selected indicators:
+
+RSI: Filters for non-overbought (Long) or non-oversold (Short) conditions.
+
+MACD: Requires the MACD line to be above/below the Signal line for alignment.
+
+VWAP: Requires the price to be above/below the Volume-Weighted Average Price.
+
+Trend Filter (SMMA): Requires the price to be above/below a 50-period Simple Moving Average.
+
+3. Dynamic Risk and Exit Management
+This strategy features highly configurable stop-loss and profit-taking mechanics:
+
+Primary Stop Loss Methods: The Stop Loss distance can be dynamically chosen from four types:
+
+Fixed: A fixed number of ticks.
+
+ATR: Based on a multiple of the Average True Range (ATR).
+
+Capped ATR: ATR-based, but with a hard maximum tick limit.
+
+OR-Based: Based on a multiple of the actual ORB High-to-Low range.
+
+Dynamic Profit Target: The Take Profit level is calculated dynamically based on a multiplier of either the ATR or the ORB Range.
+
+Breakeven Stop:
+
+If enabled, the Stop Loss automatically moves to the entry price (Breakeven) once the price moves a predetermined distance in the profitable direction.
+
+An Adaptive Breakeven option allows the trigger distance to be calculated as a percentage of the overall ATR Profit Target.
+
+Trailing Stop: The strategy uses a trailing stop, which can be custom-set (fixed ticks) or dynamically tied to the ATR. An optional feature Auto Tighten Trailing reduces the trailing multiplier once the breakeven level is hit.
+
+MA Cross Exit: An alternative, counter-trend exit mechanism that closes the trade if the price crosses back over the chosen Moving Average (either SMMA or VWAP), overriding the pending profit target.
+
+4. Daily Account Management
+The strategy includes crucial daily risk controls to protect capital and lock in profits:
+
+Daily Profit Limit: If the total daily PnL (realized and unrealized) hits a predefined maximum profit threshold (in ticks), all trades are closed, and new entries are blocked for the remainder of the trading day.
+
+Daily Loss Limit: Conversely, if the total daily PnL hits a predefined maximum loss threshold, all trades are closed, and new entries are blocked for the remainder of the day.

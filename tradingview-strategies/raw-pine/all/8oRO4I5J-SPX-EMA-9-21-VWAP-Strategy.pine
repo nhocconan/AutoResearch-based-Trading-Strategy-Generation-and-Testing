@@ -1,0 +1,67 @@
+//@version=5
+strategy("SPX EMA 9/21 + VWAP Strategy", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Parámetros
+emaFastLen = input.int(9, "EMA Rápida")
+emaSlowLen = input.int(21, "EMA Lenta")
+tpPts      = input.int(15, "Take Profit (pts)")
+slPts      = input.int(10, "Stop Loss (pts)")
+
+// Cálculo de EMAs y VWAP
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+vwap    = ta.vwap(close)
+
+// Condiciones de entrada
+longCond  = ta.crossover(emaFast, emaSlow) and close > vwap
+shortCond = ta.crossunder(emaFast, emaSlow) and close < vwap
+
+// Estrategia long
+if (longCond)
+    strategy.entry("Long", strategy.long)
+
+// Estrategia short
+if (shortCond)
+    strategy.entry("Short", strategy.short)
+
+// Gestión de riesgo (TP y SL en puntos de SPX)
+if (strategy.position_size > 0)
+    strategy.exit("Long Exit", "Long", stop=strategy.position_avg_price - slPts, limit=strategy.position_avg_price + tpPts)
+
+if (strategy.position_size < 0)
+    strategy.exit("Short Exit", "Short", stop=strategy.position_avg_price + slPts, limit=strategy.position_avg_price - tpPts)
+
+// Dibujar
+plot(emaFast, color=color.blue, title="EMA 9")
+plot(emaSlow, color=color.orange, title="EMA 21")
+plot(vwap, color=color.purple, title="VWAP")
+
+View in Pine Editor・37 lines
+Use on chart
+4
+0
+1 654
+1. Temporality: 2 minutes.
+
+2. EMA 9 and EMA 21:
+
+• Purchase Call: when EMA 9 crosses up EMA 21 and the price is > VWAP.
+
+• Put : when EMA 9 crosses down EMA 21 and the price is < VWAP.
+
+3. Stop and Take Profit:
+
+• Stop: candle closure on the other side of the VWAP.
+
+• TP: configurable in points (e.g. +10 pts, +20 pts) or up to the opposite crossing of EMAs.
+
+
+
+
+• Long enters when EMA 9 crosses up 21 and the price is above VWAP.
+
+• Short enters when the EMA 9 crosses down the 21 and the price is below VWAP.
+
+• TP and SL in SPX points (configurable in inputs).
+
+• You can run in 2 minutes on SPX.

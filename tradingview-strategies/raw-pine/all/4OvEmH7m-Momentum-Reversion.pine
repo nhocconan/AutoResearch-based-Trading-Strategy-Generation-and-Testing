@@ -1,0 +1,119 @@
+//@version=5
+strategy("Momentum Reversion", 
+     overlay=true, 
+     initial_capital=1000000, 
+     default_qty_type=strategy.fixed, 
+     default_qty_value=1, 
+     margin_long=0, margin_short=0)
+
+// --- Inputs ---
+pctThreshold = input.float(0.1, "Candle Body % Threshold", step=0.1) / 100
+tickOffset   = input.int(8, "Entry Offset (Ticks)")
+validBars    = input.int(5, "How many bars is entry valid?", minval=1)
+
+// Exit Inputs
+useHardStop  = input.bool(true, "Use Initial Hard Stop?")
+hardStop     = input.int(40, "Initial Hard Stop (Ticks)")
+
+useTrailing  = input.bool(true, "Use Trailing Stop?")
+trailTicks   = input.int(20, "Trailing Stop (Ticks)")
+
+useTP        = input.bool(true, "Use Take Profit Target?")
+tpTicks      = input.int(40, "Take Profit (Ticks)")
+
+// Break Even Inputs
+useBreakEven = input.bool(true, "Use Break Even?")
+beTrigger    = input.int(15, "Break Even Trigger (Ticks in Profit)")
+beOffset     = input.int(1, "Break Even Offset (Ticks for Commission)")
+
+// Time Filter Inputs
+useTimeFilter = input.bool(true, "Use Time & Hard Close?")
+sessionTime   = input.session("0930-1400", "Trading Session (NY Time)")
+hardCloseTime = input.int(1400, "Hard Close Time (HHMM)", minval=0, maxval=2359)
+
+// --- Time Logic ---
+inSession = not useTimeFilter or not na(time(timeframe.period, sessionTime, "America/New_York"))
+isHardClose = useTimeFilter and (hour(time, "America/New_York") * 100 + minute(time, "America/New_York")) >= hardCloseTime
+
+// --- Calculations ---
+tickSize = syminfo.mintick
+candleMove = math.abs(close - open) / open
+isPowerCandle = candleMove >= pctThreshold and inSession and not isHardClose
+
+var float pendingLong = na
+var float pendingShort = na
+var int timer = 0
+var bool wasTradeTaken = false
+
+if isPowerCandle
+    timer := 0 
+    wasTradeTaken := false 
+    // REVERSED: If bearish candle, look for a Long breakout above
+    if close < open
+        pendingLong := open + (tickOffset * tickSize)
+        pendingShort := na
+    // REVERSED: If bullish candle, look for a Short breakout below
+    else
+        pendingShort := open - (tickOffset * tickSize)
+        pendingLong := na
+
+timer := timer + 1
+if timer > validBars or isHardClose
+    pendingLong := na
+    pendingShort := na
+
+// --- Entry Logic (Flipped) ---
+if inSession and not isHardClose and strategy.position_size == 0 and not wasTradeTaken
+    if not na(pendingLong) and high >= pendingLong
+        strategy.entry("Long", strategy.long, comment="Rev Long Fill")
+        wasTradeTaken := true
+    if not na(pendingShort) and low <= pendingShort
+        strategy.entry("Short", strategy.short, comment="Rev Short Fill")
+        wasTradeTaken := true
+
+// --- Exit & Hard Close Management ---
+if strategy.position_size != 0
+    if isHardClose
+        strategy.close_all(comment="Hard Close @ 2PM")
+    
+    float exitLimit = useTP ? (strategy.position_size > 0 ? strategy.position_avg_price + (tpTicks * tickSize) : strategy.position_avg_price - (tpTicks * tickSize)) : na
+    float exitStop  = na
+    
+    if strategy.position_size > 0
+        float beLevelLong = strategy.position_avg_price + (beOffset * tickSize)
+        float baseStop = useHardStop ? strategy.position_avg_price - (hardStop * tickSize) : na
+        exitStop := (useBreakEven and (high - strategy.position_avg_price) >= (beTrigger * tickSize)) ? beLevelLong : baseStop
+        
+        strategy.exit("X-Long", "Long", 
+             stop         = exitStop, 
+             limit        = exitLimit, 
+             trail_points = useTrailing ? trailTicks : na, 
+             trail_offset = 0)
+
+    if strategy.position_size < 0
+        float beLevelShort = strategy.position_avg_price - (beOffset * tickSize)
+        float baseStop = useHardStop ? strategy.position_avg_price + (hardStop * tickSize) : na
+        exitStop := (useBreakEven and (strategy.position_avg_price - low) >= (beTrigger * tickSize)) ? beLevelShort : baseStop
+        
+        strategy.exit("X-Short", "Short", 
+             stop         = exitStop, 
+             limit        = exitLimit, 
+             trail_points = useTrailing ? trailTicks : na, 
+             trail_offset = 0)
+
+// --- Visuals ---
+plot(pendingLong, "Pending Long", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+plot(pendingShort, "Pending Short", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+bgcolor(useTimeFilter and not inSession ? color.new(color.gray, 90) : na)
+plotshape(isPowerCandle, "Signal", shape.diamond, location.top, color.yellow, size=size.tiny)
+
+View in Pine Editor・108 lines
+Use on chart
+2
+1
+705
+A mean reversion strategy that takes a position when price reenters a large candle body. Filter for candle size by percentage of price movement. Adjustable entry position based on number of ticks price moves back into the large candles body. Robust take profit and stop loss conditions. Filter valid time window for potential trades.
+
+Note: The default conditions were just place holders. They are not the settings on the chart displayed. This is a very finicky strategy. You really need to dial in the parameters for each asset. I recommend playing with different timeframes and treating it as a scalping strategy. Adjust the valid candle size with one profit/loss condition enabled then adjust the other parameters to maximize potential profits. This is not for everyone.
+
+I wanted to see what doing the opposite of my momentum/continuation strategies could achieve as the successful settings in those have a very low win rate without strict time filters. Created with Gemini. No information generated with this script is investment or trading advice. For entertainment/frustration purposes only.

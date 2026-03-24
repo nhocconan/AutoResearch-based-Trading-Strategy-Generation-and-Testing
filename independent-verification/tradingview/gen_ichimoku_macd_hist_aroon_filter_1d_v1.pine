@@ -1,0 +1,124 @@
+//@version=6
+strategy(
+    "gen_ichimoku_macd_hist_aroon_filter_1d_v1 [Independent Conversion]",
+    overlay = true,
+    initial_capital = 10000,
+    pyramiding = 0,
+    calc_on_every_tick = false,
+    process_orders_on_close = false,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.05,
+    default_qty_type = strategy.fixed,
+    default_qty_value = 0,
+    margin_long = 100,
+    margin_short = 100
+)
+
+float sizeFraction = input.float(0.25, "Position Size Fraction", minval = 0.0, maxval = 1.0, step = 0.01)
+int atrLength = input.int(14, "ATR Stop Length", minval = 1)
+float atrStopMultiplier = input.float(2.5, "ATR Stop Multiplier", minval = 0.1, step = 0.1)
+int warmupBars = input.int(100, "Warmup Bars", minval = 1)
+int tenkanLength = input.int(20, "Tenkan Length", minval = 1)
+int kijunLength = input.int(60, "Kijun Length", minval = 1)
+int macdFastLength = input.int(12, "MACD Fast Length", minval = 1)
+int macdSlowLength = input.int(26, "MACD Slow Length", minval = 1)
+int macdSignalLength = input.int(9, "MACD Signal Length", minval = 1)
+int aroonLength = input.int(25, "Aroon Length", minval = 2)
+float aroonSpreadThreshold = input.float(30.0, "Aroon Spread Threshold", minval = 0.0, step = 1.0)
+
+if barstate.isfirst and (not timeframe.isdaily or timeframe.multiplier != 1)
+    runtime.error("Use this script on a 1D chart. It is a direct conversion of gen_ichimoku_macd_hist_aroon_filter_1d_v1.")
+
+f_round_qty(_qty) =>
+    float step = syminfo.mincontract > 0 ? syminfo.mincontract : 0.000001
+    float rounded = math.floor(_qty / step) * step
+    rounded >= step ? rounded : step
+
+float tr = bar_index == 0 ? 0.0 : math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+float atrStopRaw = ta.sma(tr, atrLength)
+float atrStop = bar_index >= atrLength - 1 ? atrStopRaw : na
+
+float tenkanRaw = (ta.highest(high, tenkanLength) + ta.lowest(low, tenkanLength)) / 2.0
+float kijunRaw = (ta.highest(high, kijunLength) + ta.lowest(low, kijunLength)) / 2.0
+float tenkan = bar_index >= tenkanLength - 1 ? tenkanRaw : na
+float kijun = bar_index >= kijunLength - 1 ? kijunRaw : na
+float trend = 0.0
+if not na(tenkan) and not na(kijun)
+    if tenkan > kijun and close > kijun
+        trend := 1.0
+    else if tenkan < kijun and close < kijun
+        trend := -1.0
+
+float macdFastRaw = ta.ema(close, macdFastLength)
+float macdSlowRaw = ta.ema(close, macdSlowLength)
+float macdFast = bar_index >= macdFastLength - 1 ? macdFastRaw : na
+float macdSlow = bar_index >= macdSlowLength - 1 ? macdSlowRaw : na
+float macdLine = not na(macdFast) and not na(macdSlow) ? macdFast - macdSlow : na
+float macdSignalRaw = ta.ema(macdLine, macdSignalLength)
+float macdSignal = bar_index >= macdSlowLength + macdSignalLength - 2 ? macdSignalRaw : na
+float macdHist = not na(macdLine) and not na(macdSignal) ? macdLine - macdSignal : na
+bool entryOkLong = not na(macdHist) and macdHist > 0
+bool entryOkShort = not na(macdHist) and macdHist < 0
+
+int highestOffset = bar_index >= aroonLength ? ta.highestbars(high[1], aroonLength) : na
+int lowestOffset = bar_index >= aroonLength ? ta.lowestbars(low[1], aroonLength) : na
+float aroonUp = not na(highestOffset) ? (aroonLength - (highestOffset + 1)) / aroonLength * 100.0 : 0.0
+float aroonDown = not na(lowestOffset) ? (aroonLength - (lowestOffset + 1)) / aroonLength * 100.0 : 0.0
+bool regimeOk = math.abs(aroonUp - aroonDown) > aroonSpreadThreshold
+
+// Keep an internal entry reference at the signal bar close to mirror the Python state machine.
+var int modelState = 0
+var float modelEntryPrice = na
+
+float activeSignal = sizeFraction * modelState
+float stopLineLong = modelState == 1 and not na(modelEntryPrice) and not na(atrStop) ? modelEntryPrice - atrStopMultiplier * atrStop : na
+float stopLineShort = modelState == -1 and not na(modelEntryPrice) and not na(atrStop) ? modelEntryPrice + atrStopMultiplier * atrStop : na
+
+if barstate.isconfirmed
+    int prevState = modelState
+    float nextEntryPrice = modelEntryPrice
+    int nextState = prevState
+
+    if bar_index < warmupBars or na(atrStop) or atrStop == 0
+        nextState := 0
+        nextEntryPrice := na
+    else if prevState != 0
+        bool longStopHit = prevState == 1 and close < modelEntryPrice - atrStopMultiplier * atrStop
+        bool shortStopHit = prevState == -1 and close > modelEntryPrice + atrStopMultiplier * atrStop
+        bool longTrendExit = prevState == 1 and trend < 0
+        bool shortTrendExit = prevState == -1 and trend > 0
+        if longStopHit or shortStopHit or longTrendExit or shortTrendExit
+            nextState := 0
+            nextEntryPrice := na
+    else
+        if regimeOk and trend > 0 and entryOkLong
+            nextState := 1
+            nextEntryPrice := close
+        else if regimeOk and trend < 0 and entryOkShort
+            nextState := -1
+            nextEntryPrice := close
+
+    bool signalChanged = nextState != prevState
+    float rawQty = close > 0 ? (strategy.equity * sizeFraction) / close : 0.0
+    float entryQty = rawQty > 0 ? f_round_qty(rawQty) : 0.0
+
+    if signalChanged
+        if prevState == 1
+            strategy.close("Long", comment = "Long Exit")
+        if prevState == -1
+            strategy.close("Short", comment = "Short Exit")
+        if nextState == 1 and entryQty > 0
+            strategy.entry("Long", strategy.long, qty = entryQty, comment = "Long Entry")
+        if nextState == -1 and entryQty > 0
+            strategy.entry("Short", strategy.short, qty = entryQty, comment = "Short Entry")
+
+    modelState := nextState
+    modelEntryPrice := nextEntryPrice
+    activeSignal := sizeFraction * modelState
+    stopLineLong := modelState == 1 and not na(modelEntryPrice) and not na(atrStop) ? modelEntryPrice - atrStopMultiplier * atrStop : na
+    stopLineShort := modelState == -1 and not na(modelEntryPrice) and not na(atrStop) ? modelEntryPrice + atrStopMultiplier * atrStop : na
+
+plot(stopLineLong, "Long Stop", color = color.new(color.red, 0), style = plot.style_linebr)
+plot(stopLineShort, "Short Stop", color = color.new(color.green, 0), style = plot.style_linebr)
+plotchar(activeSignal > 0, "Long Bias", "L", location.top, color = color.lime)
+plotchar(activeSignal < 0, "Short Bias", "S", location.bottom, color = color.red)

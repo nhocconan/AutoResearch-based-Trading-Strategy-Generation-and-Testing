@@ -1,0 +1,57 @@
+//@version=2
+strategy(title = "MA + EMA Crossover Strategy ",shorttitle="eMA", overlay = true,default_qty_type = strategy.percent_of_equity, default_qty_value = 100,commission_type=strategy.commission.percent,commission_value=0.1,initial_capital=100000)
+
+
+emaLength =input(34)
+
+maLength = input(89)
+
+ema=ema(close,emaLength)
+ma=sma(close,maLength)
+
+plot(ema,linewidth=3,color=green)
+plot(ma,linewidth=3,color=red)
+longCond= crossover(ema,ma)
+shortCond=crossover(ma,ema)
+
+
+
+
+
+monthfrom =input(8)
+monthuntil =input(12)
+dayfrom=input(1)
+dayuntil=input(31)
+
+
+
+if (  longCond    and  month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth < dayuntil) 
+    strategy.entry("LONG", strategy.long, stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="LONG")
+    
+else
+    strategy.cancel(id="LONG")
+    
+
+
+
+if ( shortCond   and month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth < dayuntil ) 
+
+    strategy.entry("SHORT", strategy.short,stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="SHORT")
+else
+    strategy.cancel(id="SHORT")
+
+View in Pine Editor・41 lines
+Use on chart
+9
+2
+2 815
+EMA and MA crossovers are good signals fo trend reversal
+
+
+
+You can look at my other scripts.
+
+
+tradingview.com/u/ridvansoze...
+
+If you want to ask something, you can message me.

@@ -1,0 +1,81 @@
+//@version=5
+strategy("Multi-Supertrend Moving Average", shorttitle = "MSMA" ,overlay=true, initial_capital = 10000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, commission_value = 0.025)
+
+// Moving Averages
+fastVWMA = ta.vwma(close, 35)
+fastALMA = ta.alma(close, 140, 0.6, 6)
+atrPeriod = input.int(14, "ATR Period")
+factor = input.float(3.0, "Factor")
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+// Long and Exit conditions
+goLongCondition = (direction < 0) and ta.crossover(fastVWMA, fastALMA)
+exitCondition = (direction > 0) and ta.crossunder(fastVWMA, fastALMA)
+
+// Bullish Bearish MA's
+maBullish = fastVWMA > fastALMA
+maBearish = fastVWMA < fastALMA
+
+// Trend color
+trendColor = (direction < 0 and maBullish) ? color.green :
+     (direction < 0) ? color.new(color.green, 70) :
+     (direction > 0 and maBearish) ? color.red :
+     (direction > 0) ? color.new(color.red, 70) : color.gray
+
+// InTrade Not InTrade
+inTrade = strategy.position_size > 0
+NotInTrade = strategy.position_size <= 0
+
+// If Conditions 
+var float stoploss = na
+
+if (goLongCondition and NotInTrade)
+    strategy.entry("Long", strategy.long)
+
+strategy.exit("SL", "Long", stop = stoploss)
+
+if (inTrade and exitCondition)
+    strategy.close("Long", comment = "Exit Signal")
+
+// Visuals
+plot(supertrend, "Muilti-Conditional Supertrend", color = trendColor, linewidth = 3)
+bgcolor(inTrade ? color.new(color.green, 85) : color.new(color.red, 85))
+
+View in Pine Editor・45 lines
+Use on chart
+1
+7
+628
+This strategy enhances the traditional Supertrend by combining ATR-based volatility bands with dual moving average confirmation to improve trade selection and reduce false entries.
+
+Core Components:
+
+• ATR Period & Factor – Generates dynamic Supertrend bands based on market volatility.
+• ALMA (Arnaud Legoux Moving Average) – Provides low-lag trend smoothing for directional bias.
+• WVMA (Weighted Volume Moving Average) – Incorporates volume-weighted confirmation to filter weak or low-conviction moves.
+
+Strategy Logic
+
+Long positions are taken when:
+
+Price aligns with bullish Supertrend direction
+
+ALMA confirms upward trend structure
+
+WVMA supports momentum through volume-weighted bias
+
+This is a long only strategy
+
+Objective
+
+The strategy aims to:
+
+Reduce whipsaws during consolidation
+
+Improve trend confirmation in volatile markets
+
+Increase trade quality through multi-factor validation
+
+Fully customizable parameters (Parameters changed inside PineScript not input, only ATR and Factors can be changed within settings, the rest inside the PineScript tab.
+
+This is a systematic, rule-based approach intended for traders who want structured trend participation rather than discretionary entries.

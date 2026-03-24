@@ -1,0 +1,370 @@
+//@version=6
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// This strategy has been created for illustration purposes only and should not be relied upon as a basis for buying, selling, or holding any asset or security.
+// © kirilov (enhanced by Grok) — Xiznit EMA Cross Strategy
+
+strategy(
+     "Xiznit EMA Cross Strategy",
+     overlay=true,
+     calc_on_every_tick=true,
+     currency=currency.USD
+     )
+
+// INPUTS:
+
+// EMA Inputs
+emaFast = input.int(title="Fast EMA", defval=10, minval=1, maxval=9999)
+emaSlow = input.int(title="Slow EMA", defval=20, minval=1, maxval=9999)
+
+// Trade Direction
+tradeDirection = input.string(title="Trade Direction", options=["Long", "Short", "Both"], defval="Both")
+
+// ADX/DMI Inputs
+adxLen = input.int(title="ADX/DMI Length", defval=14, minval=1)
+adxThresh = input.float(title="ADX Threshold", defval=25.0, minval=0.0, step=0.1)
+
+// Volume Surge Inputs
+volLen = input.int(title="Volume SMA Length", defval=20, minval=1)
+volMult = input.float(title="Volume Multiplier", defval=1.5, minval=1.0, step=0.1)
+
+// Trailing Stop and Risk Management Inputs
+atrLen = input.int(title="ATR Length", defval=14, minval=1)
+trailMult = input.float(title="Trailing ATR Multiplier (Chandelier)", defval=3.0, minval=0.1, step=0.1)
+slMult = input.float(title="Initial SL ATR Multiplier", defval=1.5, minval=0.1, step=0.1)
+rr = input.float(title="RR for BE Move", defval=1.0, minval=0.1, step=0.1)
+
+// CALCULATIONS:
+
+// EMAs
+fastEMA = ta.ema(close, emaFast)
+slowEMA = ta.ema(close, emaSlow)
+
+// ADX and DMI (same length for DI and ADX smoothing)
+[diplus, diminus, adxVal] = ta.dmi(adxLen, adxLen)
+
+// Volume SMA
+volSMA = ta.sma(volume, volLen)
+
+// ATR
+atrVal = ta.atr(atrLen)
+
+// CONDITIONS:
+
+// Trade Direction Permissions
+longOK  = (tradeDirection == "Long") or (tradeDirection == "Both")
+shortOK = (tradeDirection == "Short") or (tradeDirection == "Both")
+
+// Raw EMA Cross Conditions
+longCross = ta.crossover(fastEMA, slowEMA)
+shortCross = ta.crossunder(fastEMA, slowEMA)
+
+// Enhanced Filters
+longFilter = (adxVal > adxThresh) and (diplus > diminus) and (volume > volSMA * volMult)
+shortFilter = (adxVal > adxThresh) and (diminus > diplus) and (volume > volSMA * volMult)
+
+// Full entry conditions
+longEntry = longCross and longFilter and longOK
+shortEntry = shortCross and shortFilter and shortOK
+
+// POSITION TRACKING VARIABLES
+var float entryPrice = na
+var float initialSL = na
+var float trailStop = na
+var bool beTriggered = false
+var line trailLine = na
+var line initialSLLine = na
+var int slLineBars = 10  // Display initial SL for 10 bars
+var int slLineCounter = 0
+
+// ENTRY LOGIC
+
+if (longEntry)
+    strategy.entry(id="long", direction=strategy.long)
+    entryPrice := close
+    initialSL := close - atrVal * slMult
+    trailStop := high - atrVal * trailMult  // Initial Chandelier for long
+    beTriggered := false
+    
+    // Reset Trail Line
+    if not na(trailLine)
+        line.delete(trailLine)
+    trailLine := line.new(bar_index - 1, trailStop, bar_index, trailStop, color=color.new(color.green, 50), width=2, style=line.style_dashed)
+    
+    // Initial SL Line
+    if not na(initialSLLine)
+        line.delete(initialSLLine)
+    initialSLLine := line.new(bar_index, initialSL, bar_index + slLineBars, initialSL, color=color.red, width=1, style=line.style_dashed)
+    slLineCounter := slLineBars
+
+if (shortEntry)
+    strategy.entry(id="short", direction=strategy.short)
+    entryPrice := close
+    initialSL := close + atrVal * slMult
+    trailStop := low + atrVal * trailMult  // Initial Chandelier for short
+    beTriggered := false
+    
+    // Reset Trail Line
+    if not na(trailLine)
+        line.delete(trailLine)
+    trailLine := line.new(bar_index - 1, trailStop, bar_index, trailStop, color=color.new(color.red, 50), width=2, style=line.style_dashed)
+    
+    // Initial SL Line
+    if not na(initialSLLine)
+        line.delete(initialSLLine)
+    initialSLLine := line.new(bar_index, initialSL, bar_index + slLineBars, initialSL, color=color.red, width=1, style=line.style_dashed)
+    slLineCounter := slLineBars
+
+// POSITION MANAGEMENT (Trailing Stop, BE Move, Exit)
+
+if (strategy.position_size > 0)  // In Long Position
+    // Update Chandelier Trail (move up only)
+    trailStop := math.max(trailStop, high - atrVal * trailMult)
+    
+    // Check for BE Move (to exact entry price)
+    float risk = entryPrice - initialSL
+    float profit = close - entryPrice
+    if (not beTriggered and profit >= risk * rr)
+        initialSL := entryPrice
+        trailStop := math.max(trailStop, initialSL)
+        beTriggered := true
+        // No label here anymore
+        line.set_color(trailLine, color.new(color.lime, 30))  // Brighter post-BE
+        line.set_width(trailLine, 3)  // Thicker post-BE
+        line.set_style(trailLine, line.style_solid)  // Solid post-BE
+    
+    // Update Trail Line
+    line.set_xy2(trailLine, bar_index, trailStop)
+    line.set_xy1(trailLine, bar_index - 1, line.get_y2(trailLine[1]))
+    
+    // Exit if Breached
+    if (close < trailStop)
+        strategy.close(id="long")
+        line.delete(trailLine)
+        trailLine := na
+        if not na(initialSLLine)
+            line.delete(initialSLLine)
+            initialSLLine := na
+    
+    // Manage Initial SL Line Duration
+    if (slLineCounter > 0)
+        slLineCounter -= 1
+        line.set_x2(initialSLLine, bar_index + slLineCounter)
+    else if not na(initialSLLine)
+        line.delete(initialSLLine)
+        initialSLLine := na
+
+if (strategy.position_size < 0)  // In Short Position
+    // Update Chandelier Trail (move down only)
+    trailStop := math.min(trailStop, low + atrVal * trailMult)
+    
+    // Check for BE Move (to exact entry price)
+    float risk = initialSL - entryPrice
+    float profit = entryPrice - close
+    if (not beTriggered and profit >= risk * rr)
+        initialSL := entryPrice
+        trailStop := math.min(trailStop, initialSL)
+        beTriggered := true
+        // No label here anymore
+        line.set_color(trailLine, color.new(color.fuchsia, 30))  // Brighter post-BE
+        line.set_width(trailLine, 3)  // Thicker post-BE
+        line.set_style(trailLine, line.style_solid)  // Solid post-BE
+    
+    // Update Trail Line
+    line.set_xy2(trailLine, bar_index, trailStop)
+    line.set_xy1(trailLine, bar_index - 1, line.get_y2(trailLine[1]))
+    
+    // Exit if Breached
+    if (close > trailStop)
+        strategy.close(id="short")
+        line.delete(trailLine)
+        trailLine := na
+        if not na(initialSLLine)
+            line.delete(initialSLLine)
+            initialSLLine := na
+    
+    // Manage Initial SL Line Duration
+    if (slLineCounter > 0)
+        slLineCounter -= 1
+        line.set_x2(initialSLLine, bar_index + slLineCounter)
+    else if not na(initialSLLine)
+        line.delete(initialSLLine)
+        initialSLLine := na
+
+// PLOTS & VISUALS
+
+// EMAs on Chart
+plot(fastEMA, title="Fast EMA", color=color.orange, linewidth=2)
+plot(slowEMA, title="Slow EMA", color=color.blue, linewidth=2)
+
+// ADX/DMI Overlaid
+plot(adxVal, title="ADX", color=color.purple, linewidth=1)
+plot(diplus, title="+DI", color=color.green, linewidth=1)
+plot(diminus, title="-DI", color=color.red, linewidth=1)
+hline(adxThresh, title="ADX Threshold", color=color.red, linestyle=hline.style_dashed)
+
+// DI Cross Markers
+plotshape(ta.crossover(diplus, diminus), title="+DI > -DI Cross", style=shape.diamond, location=location.absolute, color=color.green, size=size.tiny)
+plotshape(ta.crossunder(diplus, diminus), title="-DI > +DI Cross", style=shape.diamond, location=location.absolute, color=color.red, size=size.tiny)
+
+// Entry Shapes
+plotshape(longEntry, title="Long Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(shortEntry, title="Short Entry", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+// Background Fill for ADX Condition
+bgcolor(adxVal > adxThresh ? color.new(color.green, 90) : color.new(color.gray, 90), title="ADX Trend Background")
+
+View in Pine Editor・214 lines
+Use on chart
+2
+6
+2
+717
+Feb 17
+Xiznit EMA Cross Strategy is a robust, filtered trend-following trading system built in Pine Script v6 for TradingView. It improves upon classic EMA crossover signals by incorporating multiple confirmations to reduce whipsaws and fakeouts, while using dynamic risk management to protect capital and let winners run in strong trends.
+
+Core Concept
+
+The strategy enters trades on Exponential Moving Average (EMA) crossovers (fast EMA crossing above/below slow EMA), but only when the market shows sufficient trend strength and momentum confirmation. This helps focus on higher-probability setups and avoids choppy, range-bound conditions where simple EMA crosses often fail.
+
+Key Features & Logic
+Entry Signals (Filtered for Quality)
+
+Long Entry: Fast EMA crosses above Slow EMA AND all filters pass:
+ADX > user-defined threshold (default 25) — confirms a strong trend.
++DI > -DI — confirms bullish directional momentum.
+Current volume > SMA(volume, length) × multiplier (default 1.5) — ensures volume surge backing the move (reduces low-conviction fakeouts).
+
+Short Entry: Fast EMA crosses below Slow EMA AND:
+ADX > threshold.
+-DI > +DI (bearish momentum).
+Volume surge condition.
+
+Trades respect the selected direction mode: Long only, Short only, or Both (reversals allowed).
+
+Position Management & Exits
+
+Initial Stop-Loss: Placed at entry price ± ATR × multiplier (default 1.5× ATR(14)). Visualized as a short red dashed horizontal line for the first 10 bars after entry.
+Trailing Stop (Chandelier Exit style): Dynamic ATR-based trail:
+Longs: Trails below price at highest high since entry minus ATR × multiplier (default 3.0).
+Shorts: Trails above price at lowest low since entry plus ATR × multiplier.
+Updates every bar to move only in the trade's favor.
+Visualized as a stepped line on the chart (green/teal for longs, red/maroon for shorts) — only shown while position is open.
+
+Breakeven (BE) Move: When unrealized profit reaches RR × initial risk (default RR = 1.0), the stop-loss automatically moves to the exact entry price (breakeven).
+Triggers a label ("SL → BE") near the current price.
+Changes trailing line appearance: brighter color (lime for longs, fuchsia for shorts), thicker width, and solid style instead of dashed — clear visual cue that the trade is now risk-free.
+
+Exit: Position closes only when price hits the trailing stop (market order at close). No opposite EMA cross exits — allows trades to capture larger moves in trending markets.
+
+Visuals on the Chart (Clean & Informative)
+
+Fast EMA (orange, thick) and Slow EMA (blue, thick).
+Entry markers:
+Green upward triangle below bar + "Long" label for valid longs.
+Red downward triangle above bar + "Short" label for valid shorts.
+
+Trailing stop line (dynamic, position-based).
+Temporary initial SL dashed red line (fades after 10 bars).
+Breakeven trigger label and trailing line style/color change.
+ADX/DMI pane elements (overlaid but visually distinct):
+ADX line (purple).
++DI (green) and -DI (red) lines.
+Dashed red horizontal at ADX threshold.
+Small diamond markers on +DI/-DI crossovers.
+Background fill: light green when ADX > threshold (trending allowed), light gray when below (range-bound, signals blocked).
+
+Overall chart background tint: subtle green/gray based on ADX condition for quick trend context.
+
+Inputs (Fully Customizable)
+
+Fast EMA & Slow EMA lengths (defaults 10 / 20).
+Trade Direction: Long, Short, or Both.
+ADX/DMI Length (default 14) and ADX Threshold (default 25.0).
+Volume SMA Length (default 20) and Volume Multiplier (default 1.5).
+ATR Length (default 14).
+Trailing ATR Multiplier (default 3.0 — Chandelier distance).
+Initial SL ATR Multiplier (default 1.5 — starting risk distance).
+RR for BE Move (default 1.0 — reward:risk ratio to trigger breakeven).
+
+Important Notes & Disclaimers
+
+This is a trend-following strategy — performs best in trending markets (e.g., stocks, forex, crypto on higher timeframes like 1H, 4H, Daily). It may underperform or generate few signals in sideways/choppy conditions due to strict ADX + DMI + volume filters.
+No guarantees of profitability — past backtest results do not predict future performance. Always forward-test, paper trade, and use proper risk management.
+
+Designed for illustration and educational purposes only. Not financial advice. Trading involves substantial risk of loss.
+
+Uses calc_on_every_tick=true for real-time responsiveness.
+
+No pyramiding, fixed quantity sizing (uses strategy defaults — adjust in Settings/Properties tab).
+Commission, slippage, and realistic fill assumptions should be set in the Strategy Tester for more accurate results.
+Feb 17
+Release Notes
+
+Xiznit EMA Cross Strategy is a robust, filtered trend-following trading system built in Pine Script v6 for TradingView. It improves upon classic EMA crossover signals by incorporating multiple confirmations to reduce whipsaws and fakeouts, while using dynamic risk management to protect capital and let winners run in strong trends.
+
+Core Concept
+The strategy enters trades on Exponential Moving Average (EMA) crossovers (fast EMA crossing above/below slow EMA), but only when the market shows sufficient trend strength and momentum confirmation. This helps focus on higher-probability setups and avoids choppy, range-bound conditions where simple EMA crosses often fail.
+
+Key Features & Logic
+Entry Signals (Filtered for Quality)
+
+Long Entry: Fast EMA crosses above Slow EMA AND all filters pass:
+ADX > user-defined threshold (default 25) — confirms a strong trend.
++DI > -DI — confirms bullish directional momentum.
+Current volume > SMA(volume, length) × multiplier (default 1.5) — ensures volume surge backing the move (reduces low-conviction fakeouts).
+
+Short Entry: Fast EMA crosses below Slow EMA AND:
+ADX > threshold.
+-DI > +DI (bearish momentum).
+Volume surge condition.
+Trades respect the selected direction mode: Long only, Short only, or Both (reversals allowed).
+
+Position Management & Exits
+
+Initial Stop-Loss: Placed at entry price ± ATR × multiplier (default 1.5× ATR(14)). Visualized as a short red dashed horizontal line for the first 10 bars after entry.
+Trailing Stop (Chandelier Exit style): Dynamic ATR-based trail:
+Longs: Trails below price at highest high since entry minus ATR × multiplier (default 3.0).
+Shorts: Trails above price at lowest low since entry plus ATR × multiplier.
+Updates every bar to move only in the trade's favor.
+Visualized as a stepped line on the chart (green/teal for longs, red/maroon for shorts) — only shown while position is open.
+Breakeven (BE) Move: When unrealized profit reaches RR × initial risk (default RR = 1.0), the stop-loss automatically moves to the exact entry price (breakeven).
+Triggers a label ("SL → BE") near the current price.
+Changes trailing line appearance: brighter color (lime for longs, fuchsia for shorts), thicker width, and solid style instead of dashed — clear visual cue that the trade is now risk-free.
+Exit: Position closes only when price hits the trailing stop (market order at close). No opposite EMA cross exits — allows trades to capture larger moves in trending markets.
+
+Visuals on the Chart (Clean & Informative)
+
+Fast EMA (orange, thick) and Slow EMA (blue, thick).
+Entry markers:
+Green upward triangle below bar
+Red downward triangle above bar
+Trailing stop line (dynamic, position-based).
+Temporary initial SL dashed red line (fades after 10 bars).
+Breakeven trigger label and trailing line style/color change.
+ADX/DMI pane elements (overlaid but visually distinct):
+ADX line (purple).
++DI (green) and -DI (red) lines.
+Dashed red horizontal at ADX threshold.
+Small diamond markers on +DI/-DI crossovers.
+Background fill: light green when ADX > threshold (trending allowed), light gray when below (range-bound, signals blocked).
+Overall chart background tint: subtle green/gray based on ADX condition for quick trend context.
+
+Inputs (Fully Customizable)
+
+Fast EMA & Slow EMA lengths (defaults 10 / 20).
+Trade Direction: Long, Short, or Both.
+ADX/DMI Length (default 14) and ADX Threshold (default 25.0).
+Volume SMA Length (default 20) and Volume Multiplier (default 1.5).
+ATR Length (default 14).
+Trailing ATR Multiplier (default 3.0 — Chandelier distance).
+Initial SL ATR Multiplier (default 1.5 — starting risk distance).
+RR for BE Move (default 1.0 — reward:risk ratio to trigger breakeven).
+
+Important Notes & Disclaimers
+
+This is a trend-following strategy — performs best in trending markets (e.g., stocks, forex, crypto on higher timeframes like 1H, 4H, Daily). It may underperform or generate few signals in sideways/choppy conditions due to strict ADX + DMI + volume filters.
+No guarantees of profitability — past backtest results do not predict future performance. Always forward-test, paper trade, and use proper risk management.
+Designed for illustration and educational purposes only. Not financial advice. Trading involves substantial risk of loss.
+Uses calc_on_every_tick=true for real-time responsiveness.
+No pyramiding, fixed quantity sizing (uses strategy defaults — adjust in Settings/Properties tab).
+Commission, slippage, and realistic fill assumptions should be set in the Strategy Tester for more accurate results.

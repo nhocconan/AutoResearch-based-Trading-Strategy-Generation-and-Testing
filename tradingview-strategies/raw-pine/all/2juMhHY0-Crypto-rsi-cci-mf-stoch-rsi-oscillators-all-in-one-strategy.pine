@@ -1,0 +1,69 @@
+//@version=4
+
+strategy(title="something", initial_capital = 1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.03, pyramiding=1  )
+
+length = input(title="Length", type=input.integer, defval=100, minval=1, maxval=2000)
+src = hlc3
+upper = sum(volume * (change(src) <= 0 ? 0 : src), length)
+lower = sum(volume * (change(src) >= 0 ? 0 : src), length)
+_rsi(upper, lower) =>
+    if lower == 0
+        100
+    if upper == 0
+        0
+    100.0 - (100.0 / (1.0 + upper / lower))
+mf = _rsi(upper, lower)
+
+up = rma(max(change(src), 0), length)
+down = rma(-min(change(src), 0), length)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+plot(rsi, "RSI", color=#8E1599)
+
+plot(mf, "MF", color=#459915)
+hline(50, title="zap", color=#c0c0c0)
+
+
+
+ma = sma(src, length)
+cci = (src - ma) / (0.015 * dev(src, length))
+//plot(cci, "CCI", color=#996A15)
+
+
+smoothK = input(1, "K", minval=1)
+smoothD = input(1, "D", minval=1)
+
+rsi1 = rsi(src, length)
+k = sma(stoch(rsi1, rsi1, rsi1, length), smoothK)
+d = sma(k, smoothD)
+plot(k, "K", color=#0094FF)
+plot(d, "D", color=#FF6A00)
+
+avg = (rsi + mf + cci + k + d)/5
+
+long = rsi > 50 and mf > 50 and cci >50 and (k > 50 or d>50)
+short= rsi<49 and mf<49 and cci<0 and (k<50 or d<50)
+
+// long= avg > 100
+// short=avg<0
+
+plot(avg)
+
+strategy.entry('long',1,when=long)
+strategy.close("long",when=short)
+//strategy.entry('short',0,when=short)
+//strategy.close("short",when=exitshort)
+
+View in Pine Editor・57 lines
+Use on chart
+3
+6
+2
+5
+13 732
+This is a strategy based on the popular oscillator like RSI, CCI, MF and Stochastic RSI oscillators.
+
+In this situation I use a very high length , 100 candles, and the middle point between overbought and oversold levels at 50.
+
+The entry for long is when all oscilators are above 50, and the exit is when they are below 50 + plus some minor modifications
+
+If you have any questions, please message me a private message !

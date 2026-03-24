@@ -1,0 +1,5 @@
+//@version=4
+##root(root_metainfo,rm_0,'BelowBar',input__string,plotchar,location)
+##root(root_metainfo,rm_1,'tiny',const__string,plotchar,size)
+##root(root_metainfo,rm_2,'AboveBar',input__string,plotchar,location)
+##root(root_metainfo,rm_3,'tiny',const__string,plotchar,size)

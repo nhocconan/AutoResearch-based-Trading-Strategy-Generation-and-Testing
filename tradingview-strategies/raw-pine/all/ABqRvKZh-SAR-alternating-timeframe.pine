@@ -1,0 +1,45 @@
+//@version=2
+strategy ("SAR alternating timeframe", overlay=true)
+
+//resolution
+res1=input("15", type=resolution, title="Resolution")
+res2=input("D", type=resolution, title="Resolution")
+res3=input("W", type=resolution, title="Resolution")
+res4=input("M", type=resolution, title="Resolution")
+
+//output functions
+out = sar(0.02,0.02,0.2)
+
+// Security
+SAR1 = security(tickerid, res1, out)
+SAR2 = security(tickerid, res2, out)
+SAR3 = security(tickerid, res3, out)
+SAR4 = security(tickerid, res4, out)
+
+//Plots
+//plot(SAR1 , title="SAR 15", color = red, linewidth = 2)
+//plot(SAR2 , title="SAR D", color = green, linewidth = 3)
+plot(SAR3 , title="SAR W", color =blue, linewidth = 4)
+//plot(SAR4 , title="SAR W", color =purple, linewidth = 5))
+
+
+/////////////////////////////////////////////////////////////////////
+//trade
+if (SAR3 >= high)
+    strategy.entry("ParLE", strategy.long, stop=SAR3, comment="ParLE")
+else
+    strategy.cancel("ParLE")
+
+if (SAR3 <= low)
+    strategy.entry("ParSE", strategy.short, stop=SAR3, comment="ParSE")
+else
+    strategy.cancel("ParSE")
+
+View in Pine Editor・36 lines
+Use on chart
+1
+2
+4
+1
+3 622
+Not following the signal.

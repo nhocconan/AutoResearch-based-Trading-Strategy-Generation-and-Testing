@@ -1,0 +1,173 @@
+//@version=6
+strategy("Dips Oleg", overlay = true, initial_capital = 3000, pyramiding = 15)
+
+// === Lot precision & UI ===
+group_precision     = "⚙️ Lot & UI Settings"
+lot_precision       = input.int(3, "Lot precision (decimal places)", minval = 0, maxval = 8, group = group_precision)
+show_base_labels    = input.bool(true, "Show base order label", group = group_precision)
+show_small_table    = input.bool(true, "Show mini table", group = group_precision)
+
+roundQty(q) =>
+    factor = math.pow(10.0, lot_precision)
+    raw    = math.ceil(q * factor) / factor
+    math.max(1.0 / factor, raw)
+
+// === Date Ranges ===
+from_month = input.int(defval = 1, title = "From Month", minval = 1, maxval = 12)
+from_day   = input.int(defval = 1, title = "From Day", minval = 1, maxval = 31)
+from_year  = input(defval = 2021, title = "From Year")
+to_month   = input.int(defval = 1, title = "To Month", minval = 1, maxval = 12)
+to_day     = input.int(defval = 1, title = "To Day", minval = 1, maxval = 31)
+to_year    = input(defval = 9999, title = "To Year")
+
+start  = timestamp(from_year, from_month, from_day, 00, 00)
+finish = timestamp(to_year, to_month, to_day, 23, 59)
+window = time >= start and time <= finish
+
+// === Strategy Inputs ===
+price_drop  = input.float(3.1, "Price drop to open safety orders (%)", step = 0.1, minval = 0.0) / 100
+take_profit = input.float(2.5, "Target Take Profit (%)", step = 0.01, minval = 0.0) / 100
+
+base_order_cash = input.float(1000.0, "Start order ($)")
+safe_order_cash = input.float(500.0,  "Safe order ($)")
+
+base_order = roundQty(base_order_cash / close)
+safe_order = roundQty(safe_order_cash / close)
+
+safe_order_volume_scale = input.float(1.49, step = 0.01, title = "Safety order volume scale")
+safe_order_step_scale   = input.float(1.37, step = 0.01, title = "Safety order step scale")
+max_safe_order          = input.int(4, "Max safe orders")
+
+var float initial_order = 0.0
+
+// === Threshold for first trade ===
+lengthp = input.int(15, "Length of SMA - threshold")
+trh     = input.float(3.1, step = 0.1, title = "Threshold (%) first trade") * -1
+trhL    = input.float(2.5, step = 0.1, title = "Threshold (%) first trade bull market") * -1
+
+avg_price  = ta.sma(close, lengthp)
+price_diff = (close - avg_price) / avg_price * 100
+
+NB   = input.int(3, "Number of bars avg_price rising to switch to bull threshold")
+bull = ta.rising(avg_price, NB)
+
+buy_pricediff = not bull ? price_diff <= trh : price_diff <= trhL
+
+// === First Position (Base Order) ===
+if strategy.opentrades == 0 and window and buy_pricediff
+    strategy.entry("Long", strategy.long, qty = base_order)
+    initial_order := close
+
+    if show_base_labels
+        label.new(bar_index, low, "Base: " + str.tostring(base_order),
+            style = label.style_label_up, color = color.green, textcolor = color.white)
+
+// === Safety Order Price Calculation ===
+saveorder = 0.0
+
+if safe_order_step_scale == 1.0
+    saveorder := initial_order - initial_order * price_drop * safe_order_step_scale * strategy.opentrades
+else
+    saveorder := initial_order - initial_order *
+         ((price_drop * math.pow(safe_order_step_scale, strategy.opentrades) - price_drop) /
+         (safe_order_step_scale - 1))
+
+// === Average Down (Safety Orders) ===
+if strategy.opentrades > 0 and strategy.opentrades < max_safe_order
+    so_qty = roundQty(safe_order * math.pow(safe_order_volume_scale, strategy.opentrades - 1))
+    strategy.entry("safe_order", strategy.long, qty = so_qty, limit = saveorder)
+
+// === Take Profit ===
+take_profit_level = strategy.position_avg_price * (1 + take_profit)
+
+if strategy.position_size > 0
+    strategy.exit("ALL", limit = take_profit_level)
+
+// === Plots ===
+plot(take_profit_level, style = plot.style_linebr, linewidth = 2, color = color.green)
+plot(saveorder, color = strategy.position_size <= 0 ? na : color.red)
+plot(avg_price, "Short MA", color = color.new(color.red, 0), style = plot.style_line)
+
+// === Breakeven ===
+fee = input.float(0.1, "Exchange fee (%)") / 100
+be  = strategy.position_avg_price * (1 + fee)
+plot(be, style = plot.style_linebr, linewidth = 2, color = color.black)
+
+// === Cleaning ===
+if ta.crossunder(strategy.opentrades, 0.5)
+    strategy.close_all()
+    strategy.cancel_all()
+
+// === Mini Table ===
+group_table = "📊 Mini Table Settings"
+show_small_table := show_small_table  // already defined above, just grouped logically
+
+if show_small_table
+    sum_qty     = strategy.position_size
+    sum_usd     = sum_qty * close
+    open_trades = strategy.opentrades
+    open_pnl    = strategy.openprofit
+    eq          = strategy.equity
+
+    var table mini = table.new(position.top_right, 5, 1, bgcolor = na)
+
+    table.cell(mini, 0, 0, "Qty: "    + str.tostring(sum_qty),                  text_color = color.white, bgcolor = na, text_size = size.small)
+    table.cell(mini, 1, 0, "USD: "    + str.tostring(sum_usd,  format.mintick), text_color = color.white, bgcolor = na, text_size = size.small)
+    table.cell(mini, 2, 0, "Trades: " + str.tostring(open_trades),              text_color = color.white, bgcolor = na, text_size = size.small)
+    table.cell(mini, 3, 0, "PnL: "    + str.tostring(open_pnl, format.mintick), text_color = open_pnl >= 0 ? color.green : color.red, bgcolor = na, text_size = size.small)
+    table.cell(mini, 4, 0, "Eq: "     + str.tostring(eq,       format.mintick), text_color = eq >= 0 ? color.green : color.red,      bgcolor = na, text_size = size.small)
+
+View in Pine Editor・118 lines
+Use on chart
+4
+5
+1 054
+Adaptive Dip‑Buying Strategy with Lot Precision & Smart Averaging
+
+📘 Description
+This strategy is a personalized adaptation of an idea originally developed by the respected author fullmax.
+I reworked the concept to suit my own trading approach, adding lot‑precision rounding to avoid exchange quantity errors when using webhooks, and enhancing the visual and analytical components of the script.
+
+🔧 What’s New in This Version
+Configurable lot precision to ensure clean, exchange‑safe order sizes
+
+Improved UI elements: base‑order labels, compact mini‑table, grouped settings
+
+Dynamic safety‑order pricing based on price drops and scaling factors
+
+Flexible date‑range filtering for controlled backtesting
+
+Clear visualization of SMA threshold, safety levels, breakeven, and take‑profit
+
+Adaptive threshold logic that adjusts depending on trend conditions
+
+🎯 Core Logic
+The strategy monitors how far price deviates from a short‑term SMA.
+When the deviation crosses a user‑defined threshold, the script opens a base position.
+If price continues to dip, the system deploys safety orders with:
+
+scalable volume
+
+scalable distance
+
+precise rounding for compatibility with webhook automation
+
+Once the position is built, the strategy manages exits using a fixed take‑profit target.
+A breakeven reference line and auto‑cleanup logic help maintain clarity and prevent stale orders.
+
+⚙️ Feature Overview
+Dip‑based entry logic with bull/bear threshold switching
+
+Safety orders with volume and step scaling
+
+Take‑profit management
+
+Breakeven visualization
+
+Mini‑table showing real‑time position metrics
+
+Clean chart overlays for easier interpretation
+
+📝 Disclaimer
+This script is intended for educational and analytical use.
+It does not guarantee profits and should be tested thoroughly before being used in live trading.

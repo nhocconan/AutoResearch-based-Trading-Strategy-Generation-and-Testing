@@ -1,0 +1,107 @@
+//@version=5
+strategy("Market Mastery Blueprint Strategy",
+     overlay=true,
+     margin_long=100,
+     margin_short=100,
+     initial_capital=10000,
+     pyramiding=0,
+     commission_type=strategy.commission.percent,
+     commission_value=0.01)
+
+// ── Inputs ──
+maLenFast   = input.int(20,  "Fast MA Length")
+maLenSlow   = input.int(200, "Slow MA Length")
+maSpreadThr = input.float(0.5, "Narrow State MA Spread (%)", step=0.1)
+wideFactor  = input.float(2.0, "Wide State Spread Multiplier", step=0.1)
+eleFactor   = input.float(1.5, "Elephant Body vs Avg Body",   step=0.1)
+tailFactor  = input.float(0.6, "Tail Wick % of Range",        step=0.05)
+riskR       = input.float(3.0, "R Multiple Target",           step=0.5)
+riskPct     = input.float(1.0, "Risk % of Equity per Trade",  step=0.25)
+
+// ── MAs & ATR ──
+maFast = ta.sma(close, maLenFast)
+maSlow = ta.sma(close, maLenSlow)
+atr    = ta.atr(14)
+
+plot(maFast, color=color.blue, title="20MA")
+plot(maSlow, color=color.red,  title="200MA")
+
+// ── State detection ──
+spreadPct   = math.abs(maFast - maSlow) / maSlow * 100
+narrowState = spreadPct <= maSpreadThr
+wideState   = spreadPct >= maSpreadThr * wideFactor
+
+// ── Position zones ──
+pos1        = math.abs(close - maSlow) <= 1.0 * atr
+aboveBoth   = close > maFast and close > maSlow
+threeFinger = (close - maFast) > 1.5 * atr and (maFast - maSlow) > 1.5 * atr
+pos3        = aboveBoth and threeFinger
+
+// ── Events ──
+bodySize    = math.abs(close - open)
+avgBody     = ta.sma(bodySize, 20)
+elephant    = close > open and bodySize >= eleFactor * avgBody
+longSignal  = narrowState and pos1 and elephant
+
+candleRange = high - low
+upperWick   = high - math.max(open, close)
+toppingTail = upperWick >= tailFactor * candleRange
+shortSignal = wideState and pos3 and toppingTail
+
+// ── Position sizing ──
+var float entryPrice = na
+var float stopPrice  = na
+var float tpPrice    = na
+
+// Long setup
+if longSignal and strategy.position_size <= 0
+    entryPrice   := close
+    stopPrice    := low
+    float riskPerShare = entryPrice - stopPrice
+    if riskPerShare > 0
+        float capitalRisk = strategy.equity * (riskPct / 100.0)
+        float qty         = capitalRisk / riskPerShare
+        tpPrice := entryPrice + riskR * riskPerShare
+        strategy.entry("Long", strategy.long, qty=qty)
+        strategy.exit("Long TP/SL", "Long", stop=stopPrice, limit=tpPrice)
+
+// Short setup
+if shortSignal and strategy.position_size >= 0
+    entryPrice   := close
+    stopPrice    := high
+    float riskPerShare = stopPrice - entryPrice
+    if riskPerShare > 0
+        float capitalRisk = strategy.equity * (riskPct / 100.0)
+        float qty         = capitalRisk / riskPerShare
+        tpPrice := entryPrice - riskR * riskPerShare
+        strategy.entry("Short", strategy.short, qty=qty)
+        strategy.exit("Short TP/SL", "Short", stop=stopPrice, limit=tpPrice)
+
+View in Pine Editor・78 lines
+Use on chart
+4
+312
+The Market Mastery Blueprint Strategy is a trend-following and mean-reversion hybrid built on the 3-part framework of State, Position, and Event.
+
+STATE
+The strategy classifies market conditions using the percentage spread between the 20MA and 200MA:
+- Narrow State: MAs are close together (spread <= 0.5%) — signals compression and potential breakout.
+- Wide State: MAs are far apart (spread >= 1.0%) — signals extended trend and potential reversal.
+
+POSITION
+Two high-probability trade zones are defined:
+- Position 1 (Gold Mine): Price is within 1 ATR of the 200MA — a high-value pullback zone for long entries.
+- Position 3 (Pluto Land): Price is extended above both MAs with both gaps (price to 20MA and 20MA to 200MA) exceeding 1.5 ATR — a high-risk overextension zone used for short entries.
+
+EVENT
+Two candlestick signals confirm trade entries:
+- Elephant Bar (Long): A strong bullish candle whose body is at least 1.5x the 20-bar average body size, confirming institutional buying in Position 1.
+- Topping Tail (Short): A candle where the upper wick makes up 60% or more of the total range, confirming rejection in Position 3.
+
+RISK MANAGEMENT
+- Dynamic position sizing: risk is calculated as a fixed percentage of equity divided by the stop distance.
+- 3R profit target: take profit is set at 3x the initial risk.
+- Hard stop: long stop = low of signal bar, short stop = high of signal bar.
+
+IDEAL USE CASE
+Best used on SPY or SPX on the 2-minute to daily timeframe. Signals can be used to time entries for options spreads (call spreads, put spreads, bear call spreads) with 0-2 DTE and defined max risk of $300 per trade.

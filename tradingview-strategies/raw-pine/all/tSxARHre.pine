@@ -1,0 +1,158 @@
+//@version=6
+
+//By DrMesquita, 01/11/2025
+//versão do script: 7
+
+strategy("WIN1! • EMAs Cruzadas • Stop/Alvo + Filtro EMA Longa (v7)",
+     overlay=true,
+     calc_on_every_tick=true,
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     pyramiding=0,
+     process_orders_on_close=false)
+
+// =====================
+// ⚙️ Janela de Backtest
+// =====================
+anoIni  = input.int(2024, "Início - Ano", minval=1970, maxval=2100)
+mesIni  = input.int(1,    "Início - Mês", minval=1,    maxval=12)
+diaIni  = input.int(1,    "Início - Dia", minval=1,    maxval=31)
+horaIni = input.int(0,    "Início - Hora", minval=0,   maxval=23)
+minIni  = input.int(0,    "Início - Min",  minval=0,   maxval=59)
+
+anoFim  = input.int(2025, "Fim - Ano", minval=1970, maxval=2100)
+mesFim  = input.int(12,   "Fim - Mês", minval=1,    maxval=12)
+diaFim  = input.int(31,   "Fim - Dia", minval=1,    maxval=31)
+horaFim = input.int(23,   "Fim - Hora", minval=0,   maxval=23)
+minFim  = input.int(59,   "Fim - Min",  minval=0,   maxval=59)
+
+fecharPosNoFimBT = input.bool(true, "Encerrar posições na data final (janela)")
+
+inicioBT = timestamp("America/Sao_Paulo", anoIni, mesIni, diaIni, horaIni, minIni)
+fimBT    = timestamp("America/Sao_Paulo", anoFim, mesFim, diaFim, horaFim, minFim)
+
+// ⏰ Sessão (parametrizável) + bool
+sessao = input.session("0900-1755", "Sessão B3 (WIN)")
+inSession = not na(time(timeframe.period, sessao))
+
+// ✅ Dentro da janela de backtest?
+inDateRange = (time >= inicioBT) and (time <= fimBT)
+
+// =====================
+// 📈 Médias
+// =====================
+fastLen = input.int(10,  "EMA Rápida", minval=1)
+slowLen = input.int(30,  "EMA Lenta",  minval=1)
+longLen = input.int(200, "EMA Longa (filtro de tendência)", minval=2)
+
+fastMA = ta.ema(close, fastLen)
+slowMA = ta.ema(close, slowLen)
+longMA = ta.ema(close, longLen)
+
+// =====================
+// ⚙️ Execução
+// =====================
+contratos    = input.int(1, "Contratos (fixo)", minval=1)
+longOnly     = input.bool(false, "Somente Comprado")
+shortOnly    = input.bool(false, "Somente Vendido")
+useTrendFilt = input.bool(true,  "Usar filtro pela EMA Longa (tendência)")
+trendMode    = input.string("Ambos", "Modo do filtro",
+     options=["Ambos", "Apenas Long acima", "Apenas Short abaixo"],
+     tooltip="Ambos: Long só acima da EMA longa e Short só abaixo.\nApenas Long acima: filtra apenas os Longs.\nApenas Short abaixo: filtra apenas os Shorts.")
+tradeOnClose = input.bool(false, "Executar no fechamento da barra (ao invés de intrabar)")
+
+// Stops/Alvos (em PONTOS do índice)
+useStops   = input.bool(true,  "Usar Stop Loss / Take Profit")
+stopPts    = input.float(400,  "Stop (pts)",  minval=0.0)
+targetPts  = input.float(800,  "Alvo (pts)",  minval=0.0)
+
+// =====================
+// 📊 Sinais base (cruzamentos)
+// =====================
+baseLong  = ta.crossover(fastMA, slowMA)
+baseShort = ta.crossunder(fastMA, slowMA)
+
+// =====================
+// 🧭 Filtro de tendência (EMA longa)
+// =====================
+longAllowed  = not useTrendFilt or
+     (trendMode == "Ambos"             and close > longMA) or
+     (trendMode == "Apenas Long acima" and close > longMA) or
+     (trendMode == "Apenas Short abaixo")  // não restringe Long
+shortAllowed = not useTrendFilt or
+     (trendMode == "Ambos"                and close < longMA) or
+     (trendMode == "Apenas Short abaixo"  and close < longMA) or
+     (trendMode == "Apenas Long acima")   // não restringe Short
+
+// Sinais finais
+longSignal  = baseLong  and inSession and inDateRange and not shortOnly and longAllowed
+shortSignal = baseShort and inSession and inDateRange and not longOnly  and shortAllowed
+
+// Execução no fechamento (se desejar)
+longExec  = tradeOnClose ? (longSignal  and barstate.isconfirmed) : longSignal
+shortExec = tradeOnClose ? (shortSignal and barstate.isconfirmed) : shortSignal
+
+// =====================
+// 🛒 Entradas / reversões
+// =====================
+if longExec and strategy.position_size <= 0
+    strategy.entry("Compra", strategy.long, qty=contratos)
+
+if shortExec and strategy.position_size >= 0
+    strategy.entry("Venda", strategy.short, qty=contratos)
+
+// =====================
+// 🛡️ Stops/Alvos dinâmicos (por preço)
+// =====================
+if useStops
+    // Para posição comprada
+    longStop  = strategy.position_size > 0 ? strategy.position_avg_price - stopPts   : na
+    longLimit = strategy.position_size > 0 ? strategy.position_avg_price + targetPts : na
+    strategy.exit("SL/TP Long",  from_entry="Compra", stop=longStop, limit=longLimit)
+
+    // Para posição vendida
+    shortStop  = strategy.position_size < 0 ? strategy.position_avg_price + stopPts   : na
+    shortLimit = strategy.position_size < 0 ? strategy.position_avg_price - targetPts : na
+    strategy.exit("SL/TP Short", from_entry="Venda",  stop=shortStop, limit=shortLimit)
+
+// =====================
+// 🏁 Fechamento diário (zerar posição ao fim do pregão)
+// =====================
+sessionEnded = (not inSession) and inSession[1]
+if sessionEnded and strategy.position_size != 0
+    strategy.close_all(comment="Zera no fim do pregão")
+
+// Encerrar no fim da janela (opcional)
+if fecharPosNoFimBT and time >= fimBT and strategy.position_size != 0
+    strategy.close_all(comment="Fim da janela")
+
+// =====================
+// 👀 Marcas visuais
+// =====================
+// Sinais
+plotshape(longSignal,  title="Sinal Compra", style=shape.triangleup,   location=location.belowbar, size=size.tiny, text="Buy",  textcolor=color.white, color=color.new(color.teal, 0))
+plotshape(shortSignal, title="Sinal Venda",  style=shape.triangledown, location=location.abovebar, size=size.tiny, text="Sell", textcolor=color.white, color=color.new(color.orange, 0))
+
+// Entradas efetivas (posição cruzando zero)
+entrouLong  = ta.crossover(strategy.position_size, 0)
+entrouShort = ta.crossunder(strategy.position_size, 0)
+plotshape(entrouLong,  title="Entrou Long",  style=shape.circle, location=location.belowbar, size=size.tiny, color=color.new(color.green, 0))
+plotshape(entrouShort, title="Entrou Short", style=shape.circle, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0))
+
+// Médias
+plot(fastMA, color=color.new(color.teal, 0),   title="EMA Rápida")
+plot(slowMA, color=color.new(color.orange, 0), title="EMA Lenta")
+plot(longMA, color=color.new(#b821f3, 30),  title="EMA Longa (Filtro)", linewidth=2)
+
+// Fundo
+bgcolor(inSession and inDateRange ? color.new(color.green, 92) : color.new(color.red, 95))
+
+View in Pine Editor・151 lines
+Use on chart
+1
+5
+982
+Moving average crossover strategy for intraday movements, especially in the continuous index (WIN1!) on the Brazilian stock exchange B³. The strategy is customizable for time windows, has a filter for trades only above the long-term average, whether only long, only short, or both, with or without stop loss.

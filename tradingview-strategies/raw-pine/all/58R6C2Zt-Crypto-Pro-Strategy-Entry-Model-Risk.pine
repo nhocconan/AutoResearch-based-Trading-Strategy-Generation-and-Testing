@@ -1,0 +1,82 @@
+//@version=6
+strategy("Crypto Pro Strategy (Entry Model + Risk)", overlay=true, default_qty_type=strategy.percent_of_equity)
+
+// === INPUTS ===
+riskPercent     = input.float(1.0, "Risk % per Trade", step=0.1)
+targetRR        = input.float(2.0, "Target R-Multiple", step=0.1)
+ema_fast_len    = input.int(21, "Fast EMA")
+ema_slow_len    = input.int(50, "Slow EMA")
+rsi_len         = input.int(14, "RSI Length")
+macd_fast       = input.int(12, "MACD Fast")
+macd_slow       = input.int(26, "MACD Slow")
+macd_signal     = input.int(9, "MACD Signal")
+atr_len         = input.int(14, "ATR Length")
+volatility_mult = input.float(1.5, "ATR Stop Multiplier", step=0.1)
+volume_mult     = input.float(1.5, "Volume Spike Multiplier", step=0.1)
+accountBalance  = input.float(100000, "Account Balance")
+
+// === TREND FILTER ===
+ema_fast = ta.ema(close, ema_fast_len)
+ema_slow = ta.ema(close, ema_slow_len)
+trend_up = ema_fast > ema_slow
+trend_down = ema_fast < ema_slow
+
+// === MOMENTUM CONFIRMATION ===
+rsi = ta.rsi(close, rsi_len)
+macd_line = ta.ema(close, macd_fast) - ta.ema(close, macd_slow)
+macd_signal_line = ta.ema(macd_line, macd_signal)
+macd_hist = macd_line - macd_signal_line
+
+momentum_up = rsi > 55 and macd_hist > 0
+momentum_down = rsi < 45 and macd_hist < 0
+
+// === VOLUME SPIKE ===
+avg_volume = ta.sma(volume, 20)
+volume_spike = volume > avg_volume * volume_mult
+
+// === BREAKOUT CANDLE ===
+atr = ta.atr(atr_len)
+breakout_up = close - open > atr
+breakout_down = open - close > atr
+
+// === ENTRY CONDITIONS ===
+longEntry = trend_up and momentum_up and volume_spike and breakout_up
+shortEntry = trend_down and momentum_down and volume_spike and breakout_down
+
+// === STOP LOSS & TARGET ===
+stopLossLong = close - (atr * volatility_mult)
+stopLossShort = close + (atr * volatility_mult)
+
+riskLong = close - stopLossLong
+riskShort = stopLossShort - close
+
+takeProfitLong = close + (riskLong * targetRR)
+takeProfitShort = close - (riskShort * targetRR)
+
+// === POSITION SIZING ===
+riskAmount = accountBalance * (riskPercent / 100)
+longSize = riskLong > 0 ? riskAmount / riskLong : na
+shortSize = riskShort > 0 ? riskAmount / riskShort : na
+
+validLong = longEntry and not na(longSize) and longSize > 0
+validShort = shortEntry and not na(shortSize) and shortSize > 0
+
+// === EXECUTION ===
+if validLong
+    strategy.entry("Long", strategy.long, qty=longSize)
+    strategy.exit("TP/SL Long", from_entry="Long", stop=stopLossLong, limit=takeProfitLong)
+
+if validShort
+    strategy.entry("Short", strategy.short, qty=shortSize)
+    strategy.exit("TP/SL Short", from_entry="Short", stop=stopLossShort, limit=takeProfitShort)
+
+// === VISUALS ===
+plotshape(validLong, title="Long Entry", location=location.belowbar, color=color.green, style=shape.labelup, size=size.normal, text="Long")
+plotshape(validShort, title="Short Entry", location=location.abovebar, color=color.red, style=shape.labeldown, size=size.normal, text="Short")
+
+View in Pine Editor・75 lines
+Use on chart
+3
+9
+1 231
+Imma try to use this on a prop firm but if you want to use it itss free or im going to try to make it free

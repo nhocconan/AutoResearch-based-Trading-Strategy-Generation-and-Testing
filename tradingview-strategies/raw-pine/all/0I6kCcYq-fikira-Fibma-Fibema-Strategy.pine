@@ -1,0 +1,8 @@
+//@version=4
+vStyle=##input(defval='Line',type='INPUT_STRING',##id='in_4')
+vThickness=##input(defval=2,type='INPUT_INTEGER',##id='in_5')
+var vShowDiamonds=(vStyle=='Diamonds')
+##root(root_metainfo,rm_0,(vShowDiamonds?'shape_diamond':'shape_circle'),input__string)
+##root(root_metainfo,rm_1,vThickness,input__integer)
+##root(root_metainfo,rm_2,(max(vThickness,1)+2),input__integer)
+##root(root_metainfo,rm_3,max(vThickness,1),input__integer)

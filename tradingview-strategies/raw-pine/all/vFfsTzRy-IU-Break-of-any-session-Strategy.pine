@@ -1,0 +1,166 @@
+//@version=6
+strategy("IU Break of any session Strategy", overlay = true)
+
+// ______________________________________ User Inputs _____________________________________________ \\
+session         = input.session("0915-1000", "Choose the time session = ")
+exit_session    = input.session("1500-1530", "Exit Time = ")
+RTR             = input.float(2, 'Risk To Reward = ')
+
+
+// ______________________________________ Time Conditions _____________________________________________ \\
+time_in_session = not na(time("", session)) // time() // true 
+exit_time       = not na(time("", exit_session))
+
+
+// ______________________________________ Storing values  _____________________________________________ \\
+var prices      = array.new<float>()
+if time_in_session
+    prices.push(high)
+    prices.push(low)
+// ------------- extracting highest and lowest ------------- \\
+highest         = prices.max()
+lowest          = prices.min()
+
+
+// ______________________________________ Long and Short ______________________________________________ \\
+long            = ta.crossover(close, highest)
+short           = ta.crossunder(close, lowest)
+// --------------- long entry -------------------- \\
+if long and strategy.position_size == 0 
+    strategy.entry("long", strategy.long, comment = "Long Entry")
+// --------------- short entry ------------------- \\
+if short and strategy.position_size == 0 
+    strategy.entry("short", strategy.short, comment = "Short Entry")
+
+
+// ______________________________________ Time Based Exit ______________________________________________ \\
+if exit_time
+    strategy.close_all("Time Based Exit")
+    prices.clear()
+
+
+if session.islastbar 
+    strategy.close_all("Time based exit")
+    prices.clear()
+    
+//_____________________________ Stop Loss and Take Profit ____________________________\\
+// ---- long and short SL ------ \\
+long_SL = ta.valuewhen(strategy.position_size > 0 and strategy.position_size[1] == 0 , low[1], 0)
+short_SL = ta.valuewhen(strategy.position_size < 0 and strategy.position_size[1] == 0, high[1], 0)
+// ----- long and short TP ------ \\
+long_TP = (strategy.position_avg_price - long_SL) * RTR + strategy.position_avg_price
+short_TP = strategy.position_avg_price - (short_SL - strategy.position_avg_price) * RTR
+
+
+// ____________________________ Stting long and short SL / TP ___________________________\\
+if strategy.position_size > 0 
+    strategy.exit("long", "long", stop = long_SL, limit = long_TP, comment = "Long Exit")
+
+if strategy.position_size < 0 
+    strategy.exit("short", "short", stop = short_SL, limit = short_TP, comment = "Short Exit")
+
+
+//______________________________ Plotting long and short SL , TP ___________________________________\\
+// ---- for long positions ------ \\
+long_SL_plot = plot(strategy.position_size[1] > 0 ? long_SL : na   , 'Long SL', color.red  , style = plot.style_linebr)
+long_TP_plot = plot(strategy.position_size[1] > 0 ? long_TP[1] : na, 'Long TP', color.green, style = plot.style_linebr)
+// ---- for short positions ----- \\
+short_SL_plot = plot(strategy.position_size[1] < 0 ? short_SL : na   , 'Short SL', color.red  , style = plot.style_linebr)
+short_TP_plot = plot(strategy.position_size[1] < 0 ? short_TP[1] : na, 'Short SL', color.green, style = plot.style_linebr)
+//______________________________ Filling stop loss and take profits ______________//
+entry_plot = plot(strategy.position_size[1] != 0 ? strategy.position_avg_price[1] : na, 
+             color = color.new(color.silver, 20), style = plot.style_linebr)
+// ------------- for long ----------- \\
+fill(entry_plot, long_SL_plot , color =color.new(color.red, 85)   , title = 'Long SL plot')
+fill(entry_plot, long_TP_plot , color = color.new(color.green, 85), title = 'Long TP plot')
+// ------------- for short ---------- \\ 
+fill(entry_plot, short_SL_plot, color.new(color.red, 85)  , 'Short SL plot')
+fill(entry_plot, short_TP_plot, color.new(color.green, 85), 'Short TP plot')
+
+
+// ______________________________ Plotting highest and lowest values ______________ \\
+plot(not time_in_session ? highest : na, "Highest", color = color.green, style = plot.style_linebr)
+plot(not time_in_session ? lowest  : na, "lowest",  color = color.red  , style = plot.style_linebr)
+
+
+// ______________________________ Bg color based on time ___________________________ \\
+bgcolor(time_in_session ? color.new(color.aqua, 90) : na)
+bgcolor(exit_time ?        color.new(color.red, 90) : na)
+
+View in Pine Editor・91 lines
+Use on chart
+3
+7
+2
+2
+11 125
+Oct 2, 2023
+How this script works:
+
+1. This script is an intraday trading strategy script which buy and sell on the bases of user-defined intraday session range breakout and gives alert(if the alert is set) message too when the new position is open.
+
+2. It calculate the session as per the user inputs or user defined custom session.
+
+3. The script stores the highest and lowest value of the whole session.
+
+4. It take a long position on the first break and close above the highest value.
+
+5. It take a short position on the break and close below the lowest value.
+
+6. The script takes one position in one day.
+
+7. The stop loss for this script is the previous low(if long) or high(if short).
+
+8. Take profit is 1:2 and it's adjustable.
+
+9. This script work on every kind of market.
+
+
+How The Useful For The User :
+
+1. User can backtest any session range breakout he wants to trade.
+
+2. User can get alert when the new position is open.
+
+3. User can change the Risk to Reward in order to find the best Risk to Reward.
+
+4. User can see the highest and lowest value of the session with respect to analyzing his trading objective.
+
+5. This strategy script highlights which session range breakout performs best and which performs worst.
+Dec 25, 2023
+Release Notes
+How this script works:
+
+1. This script is an intraday trading strategy script which buy and sell on the bases of user-defined intraday session range breakout and gives alert(if the alert is set) message too when the new position is open.
+
+2. It calculate the session as per the user inputs or user defined custom session.
+
+3. The script stores the highest and lowest value of the whole session.
+
+4. It take a long position on the first break and close above the highest value.
+
+5. It take a short position on the break and close below the lowest value.
+
+6. The script takes one position in one day.
+
+7. The stop loss for this script is the previous low(if long) or high(if short).
+
+8. Take profit is 1:2 and it's adjustable.
+
+9. This script work on every kind of market.
+
+
+How The Useful For The User :
+
+1. User can backtest any session range breakout he wants to trade.
+
+2. User can get alert when the new position is open.
+
+3. User can change the Risk to Reward in order to find the best Risk to Reward.
+
+4. User can see the highest and lowest value of the session with respect to analyzing his trading objective.
+
+5. This strategy script highlights which session range breakout performs best and which performs worst.
+Jan 24
+Release Notes
+This Update consist better code and updated visuals

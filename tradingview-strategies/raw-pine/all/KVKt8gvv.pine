@@ -1,0 +1,1105 @@
+//@version=6
+strategy("SmartDCA", overlay=true, fill_orders_on_standard_ohlc = true, initial_capital= 100000, default_qty_type=strategy.percent_of_equity, default_qty_value=0.1, commission_type=strategy.commission.percent, commission_value=0.02, pyramiding = 1000, slippage = 5, backtest_fill_limits_assumption = 5, margin_long = 0, margin_short = 0)
+ 
+// User Settings
+sideInput = input.string("Long", title="Trade Direction", options=["Long", "Short"], group="Entry", tooltip="Defines the trading direction of the strategy.")
+entryModelInput = input.string("Structure Break",title="Entry Model",options=["Structure Break","RSI Extremity","RSI Reversal","Trend Flip","None"],group="Entry",tooltip="Defines the core entry logic of the strategy.\n\n" +"Break Default: Enters on structural high/low breaks.\n" +"RSI Reversal: Enters on RSI extreme reversals (oversold/overbought).\n" +"Trend Flip: Enters when the detected main trend changes direction.\n" +"None: Disables new entries.\n\n" +"Entry Filters can be applied separately to refine signal quality.")
+entryPeriodInput = input.int(100, title="Entry Period", minval=5, maxval=1000, group="Entry", tooltip="Lookback period used to determine local highs/lows for Break_* entry models. Lower values generate earlier and more aggressive entries. Not used in MA_Based mode.")
+entryFilterInput = input.string("None",title="Entry Filter",options=["None", "Reward Space", "Entry Quality", "RSI Extremity", "Fair Value", "Trend Direction"],group="Entry",tooltip="Defines how positions are closed. All exits are executed using market orders for faster execution and simplified management.\n\nFixed: Closes at predefined take-profit level using market execution. No limit orders are placed.\n\nMicro Trend exits: Short-term momentum-based exit models designed for lower timeframes; Micro Trend is more flexible, while Micro Trend Alt is stricter and reacts faster to momentum breakdown.\n\nStructure Break: Closes when price breaks the active structural boundary.\n\nAdaptive Fast: Exits on short-term exhaustion signals for quicker profit capture.\n\nAdaptive Slow: Uses a wider structural reference for extended trend participation.\n\nProtect Profit: Locks in profits based on peak PNL and closes on meaningful giveback.\n\nTrend Reversal: Closes when the active trend direction changes. Recommended only when using Trend Flip entry mode.\n\nNone: Disables automated exits.")
+trendPeriodInput = input.int(200, title="Trend Period", minval=5, maxval=1000, group="Entry", tooltip="Lookback period used to determine local highs/lows for Break_* entry models. Lower values generate earlier and more aggressive entries. Not used in MA_Based mode.")
+
+exitModelInput = input.string("Fixed",title = "Exit Model",options = ["Fixed", "Close Break", "Range Break", "None"],group = "Exit / DCA / TP",tooltip = "Defines how profitable positions are closed.\n\nFixed: Closes immediately once the take-profit level is reached.\n\nClose Break: Exits when price closes beyond the structural boundary defined by the selected Exit Period. Provides smoother, trend-following exits with more tolerance to intrabar volatility.\n\nRange Break: Exits when intrabar high/low breaks the structural boundary. Reacts faster and reduces giveback but may exit earlier.\n\nNone: Disables structural exits and relies only on TP or other protection layers.")
+exitPeriodInput = input.int(20, title="Exit Period (Break Models)", minval=1, maxval=1000, group="Exit / DCA / TP")
+exitTpModeInput = input.string("Flexible",title = "Exit Behavior Mode",options = ["Flexible", "Strict"],group = "Exit / DCA / TP",tooltip ="Defines how strictly the take-profit level is enforced.\n\n" +"Hard TP: Position can only close while price remains beyond the TP threshold.\n\n" +"Soft TP: Once TP is reached, exit models may close the position at any profitable level, even if price falls back below TP.")
+takeProfitPercentInput = input.float(4, title="TP (%)", step=0.01, minval=0, group="Exit / DCA / TP", tooltip="Defines the base take-profit percentage. When trend-following exit is enabled, this value represents the activation threshold.")
+dcaPercentInput = input.float(4, title="DCA (%)", step=0.01, minval=0, group="Exit / DCA / TP", tooltip="Percentage deviation from average price required to trigger an additional DCA order.")
+tpDcaIncrementModeInput = input.string("Percent", title="TP/DCA Increment Scaling Mode", options=["Percent", "Fixed"], group="Exit / DCA / TP", tooltip="Percent: TP and DCA thresholds scale multiplicatively (aggressive).\nFixed: Linear increase for deeper and more resilient DCA structures.")
+tpIncrementValueInput = input.float(5, title="TP Increment Value", step=0.1, group="Exit / DCA / TP", tooltip="Determines how the take-profit level increases after each DCA step, depending on the selected scaling mode.")
+dcaIncrementValueInput = input.float(5, title="DCA Increment Value", step=0.1, group="Exit / DCA / TP", tooltip="Controls how the DCA distance expands after each additional DCA step.")
+
+maxDcaStepsInput = input.int(20,title="Maximum DCA Steps",step=1,minval=1,group="Position Risk",tooltip="Maximum number of position layers including the initial entry. Higher values increase recovery flexibility but also increase capital exposure and structural risk.")
+orderSizeModeInput = input.string("Balanced",title="Order Size Model",options=["Default", "Balanced", "Progressive", "Aggressive","Pro"],group="Position Risk",tooltip="Defines how DCA order sizes grow.\n\nDefault: Equal-sized orders.\nBalanced: Gradual laddered growth.\nProgressive: Linear step-based scaling.\nAggressive: Front-loaded aggressive scaling.")
+orderSizeFirstEqualInput = input.int(2, title="Initial Equal Steps [PRO]", group="Position Risk", tooltip="Number of initial DCA steps executed with equal order size.")
+orderSizePairEveryInput = input.int(2, title="Increase Frequency [PRO]", group="Position Risk", tooltip="Determines how often order size increases after the initial equal steps.")
+orderSizePairIncrementInput = input.float(1, title="Step Increment Ratio [PRO]", step=0.001, group="Position Risk", tooltip="Increment applied to order size at each growth tier.")
+orderSizePairMultiplierInput = input.float(1, title="Tier Multiplier [PRO]", step=0.001, group="Position Risk", tooltip="Controls whether order size growth accelerates across successive tiers.")
+
+autoManagementInput = input.bool(true,title="Auto Management",group="Risk Management",tooltip="Dynamically adjusts position behavior based on internal risk conditions. May activate profit protection, tighten exit logic, or reduce structural tolerance when risk increases. Designed to improve survivability and reduce large drawdowns rather than maximize peak returns.")
+defensiveProfitExitInput = input.bool(false,title="Defensive Profit Exit",group="Risk Management",tooltip="Enables early profit protection logic that closes the position before full target extension when short-term reversal risk increases. Designed to reduce giveback during unstable conditions.")
+dcaCompressionModeInput = input.bool(true,title="DCA Compression Mode",group="Risk Management",tooltip="Reduces position size after recovery to release capital and lower structural exposure.\n\n" +"Off: No reduction is applied.\n" +"On: Automatically trims position size once recovery conditions are met.")
+
+profitProtectionInput = input.bool(true,title="Profit Protection Layer",group="Profit Protection",tooltip="Enables a peak-based giveback protection layer that locks a portion of unrealized profit once a defined profit threshold is reached.")
+profitProtectTriggerInput = input.float(5.0,title="Activation Threshold (x Estimated PNL)",step=0.1,group="Profit Protection",tooltip="Profit protection activates only after unrealized PNL exceeds this multiple of the estimated PNL. Example: 2.0 means protection starts after profit reaches 2x the base target.")
+profitProtectLockInput = input.float(0.6,title="Locked Profit Ratio",step=0.05,minval=0.1,maxval=0.95,group="Profit Protection",tooltip="Defines how much of the maximum seen profit is locked once protection activates. Example: 0.6 means exit if profit falls below 60% of peak PNL.")
+
+trendSoftStopInput = input.bool(false,title="Trend Soft Stop",group="Stop Loss",tooltip="Activates breakeven protection when the detected main trend reverses against the active position. The position is not closed immediately. Exit occurs only if effective PNL (realized + unrealized) turns positive. In fast or volatile conditions, breakeven execution may not always be achieved.")
+trendHardStopInput = input.bool(false,title="Trend Hard Stop",group="Stop Loss",tooltip="When the trend changes, the position is closed directly, regardless of the active profit or loss status.")
+pnlStopInput = input.bool(false,title="PNL Based Stop",group="Stop Loss",tooltip="Enables breakeven protection based on a predefined PNL threshold instead of trend direction. Once activated, the position is closed when effective PNL returns to zero or above.")
+pnlStopValueInput = input.float(100,title="PNL Based Stop Value",group="Stop Loss",minval=0,tooltip="Defines the PNL level required to activate breakeven protection when PNL Based Stop is enabled. Value is measured in strategy currency.")
+cooldownMinutesInput = input.int(120, title="Cooldown After Stop (Minutes)", minval=0, group="Stop Loss",tooltip="Defines the waiting time after a position is closed before allowing a new entry. Set to 0 to disable cooldown.")
+
+useCustomRangeInput = input.bool(false, title="Use Custom Backtest Range", group="Backtest", tooltip="Limits strategy execution to the specified date range for backtesting purposes.")
+startDateInput = input.time(timestamp("2025-01-01 00:00"), title="Backtest Start Date", group="Backtest",confirm=false)
+endDateInput = input.time(timestamp("2030-01-01 00:00"), title="Backtest End Date", group="Backtest",confirm=false)
+
+activePositionTableInput = input.bool(true, title="Show Active Position Table", group="Table", tooltip="Displays detailed information about the currently active position.")
+tableAltInput = input.string("Off",title = "Left Panel Table",options = ["Off","Strategy Summary","DCA History","DCA & Order Summary"],group = "Table",tooltip = "Select which table to display on the left panel.\n\n" +"Off: No table displayed.\n" +"Strategy Summary: Shows current strategy configuration and key parameters.\n" +"DCA History: Displays historical DCA step statistics and close performance.\n" +"DCA & Order Summary: Shows order size progression and position scaling structure.")
+
+showHighLowLevelsInput = input.bool(true, title="Show Structure High/Low Levels", group="Visual", tooltip="Visualizes the high/low structure used by Break_* entry models.")
+showTrendInput = input.bool(false,title = "Show Trend Structure",group = "Visual",tooltip = "Highlights the detected main market trend on the chart using background coloring. The trend is based on confirmed structural breakouts to avoid false flips during pullbacks.")
+showRsiInput = input.bool(false, title="Show RSI Overbought/Oversold Zones", group="Visual", tooltip="Highlights RSI <30 and RSI >70 zones using background shading.")
+show4hRsiInput = input.bool(false, title="Show 4H RSI Zones", group="Visual", tooltip="Highlights overbought and oversold zones based on 4-hour RSI.")
+showRsiDivergencesInput = input.bool(false, title="Show RSI Divergence Zones", group="Visual", tooltip="Displays visual markers for RSI divergence areas.")
+
+inDateRange = not useCustomRangeInput or (time >= startDateInput and time <= endDateInput)
+
+// Runtime Settings
+exitModel                             = exitModelInput
+side                                  = sideInput
+takeProfitPercentEffective            = takeProfitPercentInput
+tpIncrementValueEffective             = tpIncrementValueInput
+dcaPercentEffective                   = dcaPercentInput
+dcaIncrementValueEffective            = dcaIncrementValueInput
+dcaCompressionEffective               = dcaCompressionModeInput
+defensiveProfitExitEffective          = defensiveProfitExitInput
+defensiveProfitExitLimitEffective     = 4
+defensiveProfitExitProximityEffective = 40
+
+// Static Vars
+var tpActivated = bool(false)
+var mainPeriod = entryPeriodInput
+var baseOrderSize = float(na)
+var adaptiveTakeProfitPrice = float(na)
+var adaptiveDcaPrice = float(na)
+var currentDcaStep = int(na)
+var lastDcaPrice = float(na)
+var lastDcaBar = int(na)
+var lastExitBar = int(na)
+var lastExitTime = int(na)
+var entryBlocked = bool(false)
+var dcaBlocked = bool(false)
+var orderSize = float(na)
+var orderQty = float(na)
+var estimatedPnl = float(na)
+var currentPnl = float(na)
+var maxPnlSeen = float(na)
+var minPnlSeen = float(na)
+var maxClosePnlSeen = float(na)
+var minClosePnlSeen = float(na)
+var maxClosePnlSeenAt = float(na)
+var minClosePnlSeenAt = float(na)
+var profitProtectFloor = float(na)
+var profitProtectActive = bool(na)
+var compressionLock = bool(false)
+var compressCount = int(0)
+var waitBeforeReCompress = int(0)
+var trendStopModeEnabled = bool(false)
+var breakevenStopEnabled = bool(false)
+var inefficiencyExitEnabled = bool(false)
+var totalPositionCount = 0
+var totalDcaStepCount = 0
+var allTimeMaxDca = int(na)
+var allTimeMaxPnl = float(na)
+var allTimeMinPnl = float(na)
+var allTimeMaxNotional = float(na)
+var crossTp = int(na)
+var int[] dcaCloseCounts = array.new_int(maxDcaStepsInput + 1, 0)
+var float[] dcaClosePnl = array.new_float(maxDcaStepsInput + 1, 0.0)
+
+// Strategy
+lowest = ta.lowest(low,mainPeriod)
+highest = ta.highest(high,mainPeriod)
+
+lowestTrend = ta.lowest(low,trendPeriodInput)
+highestTrend = ta.highest(high,trendPeriodInput)
+
+lowestLowExit    = ta.lowest(low, exitPeriodInput)
+highestHighExit  = ta.highest(high, exitPeriodInput)
+lowestCloseExit  = ta.lowest(close, exitPeriodInput)
+highestCloseExit = ta.highest(close, exitPeriodInput)
+
+rsi=ta.rsi(close,14)
+rsi_4h=request.security(syminfo.tickerid, "240", ta.rsi(close, 14),gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+rsiLowest = ta.lowest(rsi,mainPeriod)
+rsiHighest = ta.highest(rsi,mainPeriod)
+
+rsi_divergence_short=close>highest[1] and rsi<rsiHighest[1]
+rsi_divergence_long=close<lowest[1] and rsi>rsiLowest[1]
+
+no_recent_short = not (rsi_divergence_short[1] or rsi_divergence_short[2] or rsi_divergence_short[3] or rsi_divergence_short[4] or rsi_divergence_short[5])
+no_recent_long  = not (rsi_divergence_long[1]  or rsi_divergence_long[2]  or rsi_divergence_long[3]  or rsi_divergence_long[4]  or rsi_divergence_long[5])
+
+fairValue = ta.wma(close, 200)
+
+plot(lowestLowExit[1],color = color.new(color.yellow, 50),title = "Lowest Low Exit",display = exitModelInput == "Range Break" and sideInput == "Long" ? display.pane : display.none)
+plot(highestHighExit[1],color = color.new(color.yellow, 50),title = "Highest High Exit",display = exitModelInput == "Range Break" and sideInput == "Short" ? display.pane : display.none)
+
+plot(lowestCloseExit[1],color = color.new(color.yellow, 50),title = "Lowest Close Exit",display = exitModelInput == "Close Break" and sideInput == "Long" ? display.pane : display.none)
+plot(highestCloseExit[1],color = color.new(color.yellow, 50),title = "Highest Close Exit",display = exitModelInput == "Close Break" and sideInput == "Short" ? display.pane : display.none)
+
+// Trend tespiti
+
+var float baseHigh = na
+var float baseLow  = na
+var int   watchDir = 0   //  1 = up watch, -1 = down watch
+var int   trend    = 0   //  1 = up, -1 = down, 0 = neutral
+
+if watchDir == 0
+    // yukarı aday
+    if highestTrend > highestTrend[2]
+        watchDir := 1
+        baseHigh := highestTrend
+
+    // aşağı aday
+    else if lowestTrend < lowestTrend[2]
+        watchDir := -1
+        baseLow := lowestTrend
+
+
+if watchDir == 1
+    // ikinci, daha güçlü kırılım
+    if highestTrend > baseHigh
+        trend := 1
+        watchDir := 0
+        baseHigh := na
+
+    // izleme iptali (yapı bozuldu)
+    else if lowestTrend < lowestTrend[2]
+        watchDir := 0
+        baseHigh := na
+
+if watchDir == -1
+    // ikinci kırılım
+    if lowestTrend < baseLow
+        trend := -1
+        watchDir := 0
+        baseLow := na
+
+    // izleme iptali
+    else if highestTrend > highestTrend[2]
+        watchDir := 0
+        baseLow := na
+
+// === TREND STRENGTH ===
+
+var int trendBreakCount = 0
+var float lastBreakLevel = na
+
+// Trend yeni başladığında reset
+if trend != trend[1]
+    trendBreakCount := 0
+    lastBreakLevel := na
+
+// UP trend continuation
+if trend == 1
+    if na(lastBreakLevel)
+        lastBreakLevel := highestTrend
+
+    if highestTrend > lastBreakLevel
+        trendBreakCount += 1
+        lastBreakLevel := highestTrend
+
+// DOWN trend continuation
+if trend == -1
+    if na(lastBreakLevel)
+        lastBreakLevel := lowestTrend
+
+    if lowestTrend < lastBreakLevel
+        trendBreakCount += 1
+        lastBreakLevel := lowestTrend
+
+// Trend bgcolor
+maxStrength = 10
+strengthRatio = math.min(trendBreakCount / maxStrength, 1.0)
+
+clampedRatio = math.min(strengthRatio, 1.0)
+// yumuşatma (1.0 = linear, 1.5–2.0 güzel akıyor)
+smoothRatio = math.pow(clampedRatio, 1.6)
+// opacity hesap
+opacityRaw = 100 - int(smoothRatio * 50)
+
+// minimum 50'ye sabitle
+trendOpacity = math.max(70, math.min(90, opacityRaw))
+
+// Cooldown
+cooldownMs = cooldownMinutesInput * 60 * 1000
+cooldownOk = cooldownMinutesInput == 0 or na(lastExitTime) or (time - lastExitTime > cooldownMs)
+
+// Functions
+// Calculate open profit or loss for the open positions.
+tradeOpenPnl() =>
+    sumProfit = 0.0
+    for tradeNo = 0 to strategy.opentrades - 1
+        sumProfit += strategy.opentrades.profit(tradeNo)
+    result = sumProfit
+f_openRealizedPnl() =>
+    var float openRealized = 0.0
+    var float lastNetProfit = na
+
+    // ilk çağrı
+    if na(lastNetProfit)
+        lastNetProfit := strategy.netprofit
+
+    // pozisyon kapandıysa reset
+    if strategy.position_size == 0
+        openRealized := 0.0
+        lastNetProfit := strategy.netprofit
+
+    // pozisyon açıkken netprofit düşüşünü yakala (realized)
+    if strategy.position_size != 0
+        delta = strategy.netprofit - lastNetProfit
+
+        // sadece realized kayıplar/kârlar (reduce, partial close)
+        if delta != 0
+            openRealized += delta
+
+        lastNetProfit := strategy.netprofit
+
+    openRealized
+f_getOrderSize(baseSize, step, mode, firstEqual, pairEvery, pairIncrement, pairMultiplier) =>
+    size = baseSize
+    tmpStep = na(step) ? 0 : step
+    pair = math.ceil((tmpStep + 1) / 2)
+
+    if mode == "Default"  // Flat
+        size := baseSize
+
+    else if mode == "Balanced"  // Ladder
+        m = 1.0 + (pair - 1) * 0.5
+        size := baseSize * m
+
+    else if mode == "Progressive"  // eski Smart (istersen kaldırabilirsin)
+        size := baseSize * pair
+
+    else if mode == "Aggressive"  // Hammer
+        m = 1.0 + (pair - 1) * 1.5
+        size := baseSize * m
+
+    else if mode == "Pro"
+        if (step + 1) <= firstEqual
+            size := baseSize
+        else
+            after    = (step + 1) - firstEqual
+            newTier  = math.ceil(after / pairEvery)
+
+            totalInc = 0.0
+            for t = 1 to newTier
+                totalInc += pairIncrement + (t - 1) * pairMultiplier
+
+            size := baseSize * (1 + totalInc)
+
+    else
+        size := baseSize
+
+    size
+
+f_getMaxPositionSize(baseSize,maxSteps,mode,firstEqual,pairEvery,pairIncrement,pairMultiplier) =>
+    total = 0.0
+
+    for step = 0 to maxSteps - 1
+        stepSize = f_getOrderSize(baseSize,step,mode,firstEqual,pairEvery,pairIncrement,pairMultiplier)
+        total += stepSize
+
+    total
+f_calcTpDca(baseTp, baseDca, step, mode, tpInc, dcaInc) =>
+    tp  = baseTp
+    dca = baseDca
+
+    if step <= 1
+        [tp, dca]
+    else
+        for i = 2 to step
+            if mode == "Percent"
+                tp  := tp  * (1 + tpInc  / 100)
+                dca := dca * (1 + dcaInc / 100)
+            else
+                tp  := tp  + tpInc
+                dca := dca + dcaInc
+
+        [tp, dca]
+f_norm(val, minVal, maxVal)=>
+    math.min(math.max((val - minVal) / (maxVal - minVal), 0), 1)
+trendColor(ma,opacity=50) =>
+    if (ma>ma[1])
+        color.new(color.green, opacity)
+    else
+        color.new(color.red, opacity)
+
+// Position
+positionSize = strategy.position_size
+hasPosition = positionSize != 0
+avgPrice = strategy.position_avg_price
+openTrades = strategy.opentrades
+changeClosedTrades = ta.change(strategy.closedtrades)
+positionSide = positionSize>0 ? "Long" : (positionSize<0 ? "Short" : side)
+baseOrderSize := na(baseOrderSize) ? math.abs(strategy.opentrades.size(0) * strategy.opentrades.entry_price(0)) : baseOrderSize
+positionOpenPrice = strategy.opentrades.entry_price(0)
+lastEntryPrice = strategy.opentrades.entry_price(strategy.opentrades - 1)
+lastOrderSize = strategy.opentrades.size(openTrades-1) * strategy.opentrades.entry_price(openTrades-1)
+totalNotional = math.abs(positionSize*avgPrice)
+dcaFillRatio = currentDcaStep / maxDcaStepsInput
+avgDcaStep = math.round(totalDcaStepCount / totalPositionCount,2)
+avgPnl = math.round(strategy.netprofit / totalPositionCount,2)
+
+currentPnl := tradeOpenPnl()
+firstOrderPnl = strategy.opentrades.profit(0)
+lastOrderPnl = strategy.opentrades.profit(strategy.opentrades - 1)
+openRealizedPnl = f_openRealizedPnl()
+effectivePnl = openRealizedPnl + currentPnl
+
+orderSize := f_getOrderSize(baseOrderSize,currentDcaStep,orderSizeModeInput,orderSizeFirstEqualInput,orderSizePairEveryInput,orderSizePairIncrementInput,orderSizePairMultiplierInput)
+orderQty  := math.abs(orderSize / close)
+maxPositionSize = f_getMaxPositionSize(baseOrderSize,maxDcaStepsInput,orderSizeModeInput,orderSizeFirstEqualInput,orderSizePairEveryInput,orderSizePairIncrementInput,orderSizePairMultiplierInput)
+
+// Auto side
+if sideInput == "Auto"
+    if trend == 1
+        side := "Long"
+    else if trend == -1
+        side := "Short"
+
+    if hasPosition
+        side := positionSide
+
+trendOk = (side == "Long" and trend == 1) or (side == "Short" and trend == -1)
+isLong  = side == "Long" and side != "Short"
+isShort = side == "Short" and side != "Long"
+
+// TP DCA calculations
+
+[adaptiveTakeProfitPercent, adaptiveDcaPercent] = f_calcTpDca(takeProfitPercentEffective,dcaPercentEffective,currentDcaStep,tpDcaIncrementModeInput,tpIncrementValueEffective,dcaIncrementValueEffective)
+
+if na(adaptiveTakeProfitPrice)
+    adaptiveTakeProfitPrice := positionSide == "Long" ? avgPrice * (1 + (adaptiveTakeProfitPercent / 100)) : avgPrice * (1 - (adaptiveTakeProfitPercent / 100))
+
+tpExtension = (close - adaptiveTakeProfitPrice) / (adaptiveTakeProfitPrice - avgPrice)
+
+tmpAdaptiveDcaPriceLast = positionSide == "Long" ? lastDcaPrice * (1 - adaptiveDcaPercent / 100) : lastDcaPrice * (1 + adaptiveDcaPercent / 100)
+tmpAdaptiveDcaPriceAvg  = positionSide == "Long" ? avgPrice   * (1 - adaptiveDcaPercent / 100) : avgPrice   * (1 + adaptiveDcaPercent / 100)
+
+if na(adaptiveDcaPrice)
+    adaptiveDcaPrice := positionSide == "Long" ? math.min(tmpAdaptiveDcaPriceLast,tmpAdaptiveDcaPriceAvg) : math.max(tmpAdaptiveDcaPriceLast,tmpAdaptiveDcaPriceAvg)
+
+// position calculations
+if hasPosition
+    estimatedPnl:=math.abs(strategy.position_size*strategy.position_avg_price * (1 + adaptiveTakeProfitPercent / 100) - strategy.position_size*strategy.position_avg_price)
+
+    maxPnl = side=="Long" ? (high - avgPrice) * math.abs(strategy.position_size) : (avgPrice - low) * math.abs(strategy.position_size)
+    minPnl = side=="Long" ? (low - avgPrice) * math.abs(strategy.position_size) : (avgPrice - high) * math.abs(strategy.position_size)
+
+    maxPnlSeen := na(maxPnlSeen) ? maxPnl : math.max(maxPnlSeen, maxPnl)
+    minPnlSeen := na(minPnlSeen) ? minPnl : math.min(minPnlSeen, minPnl)
+    maxClosePnlSeen := na(maxClosePnlSeen) ? currentPnl : math.max(maxClosePnlSeen, currentPnl)
+    minClosePnlSeen := na(minClosePnlSeen) ? currentPnl : math.min(minClosePnlSeen, currentPnl)
+    maxClosePnlSeenAt := na(maxClosePnlSeenAt) ? close : math.max(maxClosePnlSeenAt, close)
+    minClosePnlSeenAt := na(minClosePnlSeenAt) ? close : math.min(minClosePnlSeenAt, close)
+
+    profitProtectFloor := maxClosePnlSeen * profitProtectLockInput
+
+    if minPnlSeen<allTimeMinPnl or na(allTimeMinPnl)
+        allTimeMinPnl:=minPnlSeen
+
+    if maxPnlSeen<allTimeMaxPnl or na(allTimeMaxPnl)
+        allTimeMaxPnl:=maxPnlSeen
+
+    if currentDcaStep>allTimeMaxDca or na(allTimeMaxDca)
+        allTimeMaxDca:=currentDcaStep
+
+    if totalNotional>allTimeMaxNotional or na(allTimeMaxNotional)
+        allTimeMaxNotional:=totalNotional
+
+    // Cross TP
+    if close<adaptiveTakeProfitPrice and (high>adaptiveTakeProfitPrice or high[1]>adaptiveTakeProfitPrice)
+        if na(crossTp)
+            crossTp := 1
+        else
+            crossTp += 1
+
+// Auto Management
+
+if autoManagementInput
+
+    if dcaFillRatio >= 0.7 and maxDcaStepsInput>=8 and exitModel != "Fixed"
+        exitModel := "Fixed"
+
+// Exit Models
+if inDateRange and hasPosition
+
+    exitSignal = false
+
+    if not tpActivated
+        if side == "Long" and close >= adaptiveTakeProfitPrice
+            tpActivated := true
+        if side == "Short" and close <= adaptiveTakeProfitPrice
+            tpActivated := true
+
+    // === Exit Permission Filter ===
+    exitAllowed = false
+
+    if side == "Long"
+        exitAllowed := close > avgPrice and (close >= adaptiveTakeProfitPrice or (exitTpModeInput == "Flexible" and tpActivated))
+
+    if side == "Short"
+        exitAllowed := close < avgPrice and (close <= adaptiveTakeProfitPrice or (exitTpModeInput == "Flexible" and tpActivated))
+
+    // ================= EXIT MODELS =================
+
+    if exitAllowed and effectivePnl > 0
+
+        if exitModel == "Fixed"
+            exitSignal := true
+        else if exitModel == "Close Break"
+            exitSignal := (side == "Long"  and close <= lowestCloseExit[1]) or (side == "Short" and close >= highestCloseExit[1])
+        else if exitModel == "Range Break"
+            exitSignal := (side == "Long" and low <= lowestLowExit[1]) or (side == "Short" and high >= highestHighExit[1])
+
+
+    // Profit Protect Layer
+    if profitProtectionInput
+        if maxClosePnlSeen >= estimatedPnl * profitProtectTriggerInput
+            profitProtectActive := true
+
+    if profitProtectActive
+        
+        if effectivePnl <= profitProtectFloor and effectivePnl > 0 and ((side == "Long"  and close < open) or (side == "Short" and close > open))
+            exitSignal := true
+            exitModel := "Profit Protect"
+
+    // === Execute Close ===
+    if exitSignal
+        strategy.close(side == "Long" ? "Long" : "Short", comment=exitModel + " Exit")
+        entryBlocked := true
+        lastExitBar := bar_index
+
+// Stop
+if inDateRange and hasPosition
+
+    if pnlStopInput and effectivePnl < -math.abs(pnlStopValueInput)
+        strategy.close(isLong ? "Long" : "Short", comment="PNL Based Stop")
+
+        entryBlocked := true
+        lastExitBar := bar_index
+        lastExitTime := time
+
+    if trendSoftStopInput and ((isLong and trend == -1 and (trend[1] == 1 or trend[1]==0)) or (isShort and trend == 1 and (trend[1] == -1 or trend[1] == 0))) and currentPnl < 0
+        breakevenStopEnabled := true
+
+    if trendHardStopInput and ((isLong and trend == -1 and (trend[1] == 1 or trend[1]==0)) or (isShort and trend == 1 and (trend[1] == -1 or trend[1] == 0)))
+        strategy.close(side == "Long" ? "Long" : "Short", comment="Trend Hard Stop")
+
+        entryBlocked := true
+        lastExitBar := bar_index
+        lastExitTime := time
+
+    if breakevenStopEnabled and effectivePnl > 0
+        if side == "Long"
+            strategy.close("Long", comment="Breakeven Stop")
+
+        else if side=="Short"
+            strategy.close("Short", comment="Breakeven Stop")
+
+        entryBlocked := true
+        lastExitBar := bar_index
+        lastExitTime := time
+
+    if inefficiencyExitEnabled and math.abs(openRealizedPnl)>estimatedPnl and effectivePnl>math.abs(openRealizedPnl) * 0.1
+        strategy.close(isLong ? "Long" : "Short", comment="Inefficiency Exit")
+        entryBlocked := true
+        lastExitBar := bar_index
+        lastExitTime := time
+
+// Defensive Profit Exit
+if inDateRange and hasPosition and defensiveProfitExitEffective and currentDcaStep >= defensiveProfitExitLimitEffective and effectivePnl > 0
+    defensiveProfitExitProximity = defensiveProfitExitProximityEffective / 100.0
+
+    if side == "Long" and (close - avgPrice) / (adaptiveTakeProfitPrice - avgPrice) >= defensiveProfitExitProximity and close < adaptiveTakeProfitPrice
+        strategy.close("Long", comment="Defensive Profit Exit")
+
+        entryBlocked := true
+        lastExitBar := bar_index
+        lastExitTime := time
+
+    else if side=="Short" and (avgPrice - close) / (avgPrice - adaptiveTakeProfitPrice) >= defensiveProfitExitProximity and close > adaptiveTakeProfitPrice
+        strategy.close("Short", comment="Defensive Profit Exit")
+
+        entryBlocked := true
+        lastExitBar := bar_index
+        lastExitTime := time
+
+// Range dışına çıkış anı
+exitedDateRange = useCustomRangeInput and not inDateRange and inDateRange[1]
+
+if exitedDateRange and strategy.position_size != 0
+    strategy.close_all(comment="Backtest Range End")
+
+rewardSpaceOk = isLong ? highest[1] > close * (1 + adaptiveTakeProfitPercent / 100) : lowest[1]  < close * (1 - adaptiveTakeProfitPercent / 100)
+entryQualityOk = isLong ? highest[1] > close * (1 + adaptiveTakeProfitPercent / 100) and (close - low) / (high - low) < 0.4 : lowest[1]  < close * (1 - adaptiveTakeProfitPercent / 100) and (high - close) / (high - low) < 0.4
+
+// Open Position
+if inDateRange and not hasPosition and cooldownOk and not entryBlocked and (side == "Long" or side == "Short")
+    
+    entrySignal = false
+    entryFilter = true
+    openPosition = false
+
+    // ENTRY SIGNALS
+    if entryModelInput == "Structure Break"
+        entrySignal := isLong ? ((low < lowest[1] and close < high[1]) or close < lowest[1]) : ((high > highest[1] and close > low[1]) or close > highest[1])
+    else if entryModelInput=="RSI Extremity"
+        entrySignal := isLong ? rsi <= 30 : rsi >= 70
+    else if entryModelInput=="RSI Reversal"
+        entrySignal := isLong ? rsi>30 and rsi[1] <= 30 : rsi < 70 and rsi[1] >= 70
+    else if entryModelInput=="Trend Flip"
+        entrySignal := isLong ? trend == 1 and trend[1] != 1 : trend == -1 and trend[1] != -1
+
+    // ENTRY FILTERS
+    if entryFilterInput == "Reward Space"
+        entryFilter := rewardSpaceOk
+    else if entryFilterInput == "Entry Quality"
+        entryFilter := entryQualityOk
+    else if entryFilterInput == "RSI Extremity"
+        entryFilter := isLong ? rsi <= 30 : rsi >= 70
+    else if entryFilterInput == "Fair Value"
+        entryFilter := isLong ? close <= fairValue : close >= fairValue
+    else if entryFilterInput == "Trend Direction"
+        entryFilter := isLong ? trend == 1 : trend == -1
+   
+    openPosition := entrySignal and entryFilter
+    if openPosition
+        strategy.entry(isLong ? "Long" : "Short", isLong ? strategy.long : strategy.short, comment = isLong ? "Long" : "Short", qty = orderQty)
+
+        lastDcaPrice := close
+        currentDcaStep := 1
+        totalPositionCount += 1
+        adaptiveTakeProfitPrice := na
+        adaptiveDcaPrice := na
+
+// Add Position
+if inDateRange and hasPosition and not entryBlocked and not dcaBlocked
+    canDca = false
+
+    if side=="Long"
+        canDca:=(close<lastDcaPrice * (1 - (adaptiveDcaPercent / 100)) and close<avgPrice * (1 - (adaptiveDcaPercent / 100)))
+    else
+        canDca:=(close>lastDcaPrice * (1 + (adaptiveDcaPercent / 100)) and close>avgPrice * (1 + (adaptiveDcaPercent / 100)))
+
+    if canDca and currentDcaStep<maxDcaStepsInput
+        strategy.entry(side == "Long" ? "Long" : "Short", side=="Long" ? strategy.long : strategy.short, qty=orderQty, comment = side == "Long" ? "Long DCA" : "Short DCA")
+
+        lastDcaPrice:=close
+        lastDcaBar := bar_index
+        currentDcaStep += 1
+        adaptiveTakeProfitPrice := na
+        adaptiveDcaPrice := na
+        tpActivated := false
+        
+        waitBeforeReCompress -= 1
+        if waitBeforeReCompress == 0
+            compressionLock := false
+
+// Dca Compression
+if hasPosition and dcaCompressionEffective
+
+    //canCompress = (currentDcaStep >= 3 and dcaFillRatio<1 and not compressionLock and
+    //    ((side == "Long" and ((dcaFillRatio>0.80 and currentPnl>minClosePnlSeen * 0.10) or (high>avgPrice and close>high[1]))) or 
+    //    (side == "Short" and ((dcaFillRatio>0.80 and currentPnl>minClosePnlSeen * 0.10) or (low<avgPrice and close<low[1]))))
+    //)
+
+    canCompress = currentDcaStep >= 3 and dcaFillRatio<1 and not compressionLock and ((side == "Long" and close>avgPrice) or (side == "Short" and close<avgPrice))
+
+    if canCompress
+
+        progressRatio = currentDcaStep / maxDcaStepsInput
+
+        ratio = dcaFillRatio < 0.40 ? 0.10 : dcaFillRatio < 0.60 ? 0.20 : dcaFillRatio < 0.90 ? 0.30 : 0.40
+
+        // Reduction artık max yerine current üzerinden
+        stepReduction = math.round(currentDcaStep * ratio)
+
+        // Minimum 1
+        stepReduction := math.max(1, stepReduction)
+
+        // Mevcut adımdan fazla düşmesin
+        stepReduction := math.min(stepReduction, currentDcaStep - 1)
+
+        compressStep = currentDcaStep - stepReduction
+        compressionComment = "Dca Compression (-" + str.tostring(stepReduction) + " DCA)"
+
+        reduceNotional = 0.0
+        for i = 0 to stepReduction - 1
+            stepIndex = currentDcaStep - 1 - i
+            reduceNotional += f_getOrderSize(baseOrderSize, stepIndex, orderSizeModeInput,orderSizeFirstEqualInput,orderSizePairEveryInput,orderSizePairIncrementInput,orderSizePairMultiplierInput)
+
+        currentNotional = math.abs(strategy.position_size) * close
+        targetNotional = math.max(currentNotional - reduceNotional, 0)
+        targetQty = targetNotional / close
+        reduceQty = math.abs(strategy.position_size) - targetQty
+    
+        if reduceQty > 0
+            if side == "Long"
+                strategy.close("Long", qty = reduceQty, comment = compressionComment)
+            else
+                strategy.close("Short", qty = reduceQty, comment = compressionComment)
+
+        currentDcaStep := compressStep
+        lastDcaPrice := close
+        adaptiveDcaPrice := na
+        compressionLock := true
+        compressCount += 1
+        waitBeforeReCompress := stepReduction
+
+// Reset
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    tpActivated := false
+    dcaIndex = math.min(currentDcaStep, maxDcaStepsInput)
+    array.set(dcaCloseCounts,dcaIndex,array.get(dcaCloseCounts, dcaIndex) + 1)
+    array.set(dcaClosePnl,dcaIndex,array.get(dcaClosePnl, dcaIndex) + strategy.netprofit - strategy.netprofit[1])
+    totalDcaStepCount := totalDcaStepCount + currentDcaStep
+    takeProfitPercentEffective := takeProfitPercentInput
+    dcaPercentEffective := dcaPercentInput
+    dcaBlocked := false
+    currentDcaStep := na
+    positionSize := na
+    lastDcaPrice := na
+    lastDcaBar := na
+    compressionLock := false
+    compressCount := 0
+    waitBeforeReCompress := 0
+    trendStopModeEnabled := false
+    breakevenStopEnabled := false
+    inefficiencyExitEnabled := false
+    profitProtectActive := false
+    maxPnlSeen := na
+    minPnlSeen := na
+    maxClosePnlSeen := na
+    minClosePnlSeen := na
+    maxClosePnlSeenAt := na
+    minClosePnlSeenAt := na
+    crossTp := na
+
+newPositionOpened = barstate.isconfirmed and strategy.position_size != 0 and strategy.position_size[1] == 0
+
+if newPositionOpened
+    tpActivated := false
+    lastDcaPrice := na(lastDcaPrice) ? close : lastDcaPrice
+    currentDcaStep := 1
+
+if entryBlocked and bar_index > lastExitBar
+    entryBlocked := false
+
+// Shape
+trendStopActivated = hasPosition and trendStopModeEnabled and not trendStopModeEnabled[1]
+
+plotchar(trendStopActivated,char="S",location=location.abovebar,color=color.orange,size = size.tiny,display = display.pane)
+
+// Bg color
+bgcolor(useCustomRangeInput ? (inDateRange ? na : color.new(color.gray, 90)) : na, title="Outside Backtest Range")
+bgcolor(inDateRange and (showTrendInput or entryModelInput == "Trend Flip" or entryFilterInput == "Trend Direction" or trendSoftStopInput or trendHardStopInput or sideInput == "Auto") ? trend == 1 ? color.new(color.green, trendOpacity) : trend == -1 ? color.new(color.red, trendOpacity) : na : na)
+bgcolor(inDateRange and rsi<=30 ? color.new(color.green, (showRsiInput or entryFilterInput=="RSI Extremity") ? 90 : 100) : na)
+bgcolor(inDateRange and rsi>=70 ? color.new(color.red, (showRsiInput or entryFilterInput=="RSI Extremity") ? 90 : 100) : na)
+bgcolor(inDateRange and rsi_4h<=30 ? color.new(color.green, show4hRsiInput ? 90 : 100) : na)
+bgcolor(inDateRange and rsi_4h>=70 ? color.new(color.red, show4hRsiInput ? 90 : 100) : na)
+bgcolor(inDateRange and rsi_4h<=30 and rsi<=30 ? color.new(color.green, show4hRsiInput ? 80 : 100) : na)
+bgcolor(inDateRange and rsi_4h>=70 and rsi>=70 ? color.new(color.red, show4hRsiInput ? 80 : 100) : na)
+bgcolor(inDateRange and rsi_divergence_short and no_recent_short ? color.new(color.orange, showRsiDivergencesInput ? 90 : 100) : na)
+bgcolor(inDateRange and rsi_divergence_long and no_recent_long  ? color.new(color.lime, showRsiDivergencesInput ? 90 : 100) : na)
+
+lowestPlot = plot(lowest[1],color = color.new(color.green, 0),title = "Lowest",display = showHighLowLevelsInput ? display.pane : display.none)
+highestPlot = plot(highest[1],color = color.new(color.red, 0),title = "Highest",display = showHighLowLevelsInput ? display.pane : display.none)
+
+plot(hasPosition ? lastDcaPrice : na,title="Last Entry Price",display = display.status_line)
+plot(strategy.position_avg_price,title="Position AVG Price (Strategy)",color=positionSide == "Long" ? color.green : color.red,linewidth = 1,style=plot.style_circles)
+plot(hasPosition ? adaptiveTakeProfitPrice : na,title="TP Price",color=color.blue,linewidth = 1,style=plot.style_circles)
+plot(hasPosition ? adaptiveDcaPrice : na,title="DCA Price",color=color.gray,linewidth = 1,style=plot.style_circles, display = display.pane)
+plot(hasPosition ? adaptiveTakeProfitPercent : na,title="TP %", color=color.green, linewidth=1, display=display.status_line)
+plot(hasPosition ? adaptiveDcaPercent : na,title="DCA %", color=color.orange, linewidth=1, display=display.status_line)
+plot(hasPosition ? currentDcaStep : na,title="Current DCA Step",color=color.white,linewidth = 1,display=display.status_line)
+plot(hasPosition ? lastOrderSize : na,title="Step Order Size",color=color.orange,linewidth = 1,display=display.status_line)
+plot(hasPosition ? totalNotional : na,title="Position Notional Size",color=color.fuchsia,linewidth = 1,display=display.status_line)
+plot(hasPosition ? currentPnl : na,title="Active PNL",color=currentPnl>0 ? color.green : color.red,linewidth = 1,display=display.status_line)
+plot(hasPosition ? openRealizedPnl : na,title="Realized PNL",color=openRealizedPnl>0 ? color.green : color.red,linewidth = 1,display=display.status_line)
+plot(hasPosition ? estimatedPnl : na,title="Target PNL",color=color.blue,linewidth = 1,display=display.status_line)
+plot(profitProtectFloor,title="Protect Floor PNL",color=color.green,display=display.status_line)
+plot(trend, title="Trend", color=trend == 1 ? color.green : color.red, display = display.status_line)
+plot(strengthRatio, title="Trend Strength", color= trend == 1 ? color.green : color.red, display = display.status_line)
+plot(fairValue,title="Fair Value WMA 200",color=color.yellow,display= entryFilterInput == "Fair Value" ? display.all : display.none)
+plot(strategy.netprofit,title="Total Strategy PNL",color=strategy.netprofit>0 ? color.green : color.red,linewidth = 1,display=display.status_line)
+
+// Visual Tables
+clrHeaderBg   = color.rgb(45, 45, 45)
+clrLabelBg    = color.rgb(60, 60, 60)
+clrValueBg    = color.rgb(20, 20, 20)
+
+clrHeaderTxt  = color.white
+clrLabelTxt   = color.silver
+clrValueTxt   = color.white
+
+clrPos        = color.rgb(46, 204, 113)   // yeşil
+clrNeg        = color.rgb(231, 76, 60)    // kırmızı
+clrWarn       = color.rgb(241, 196, 15)   // sarı
+
+clrCountBase = color.green
+clrRatioBase = color.green
+
+f_header(_table, _text, _row) =>
+    table.cell(_table,0,_row,_text,text_color=clrHeaderTxt,bgcolor=clrHeaderBg,text_halign=text.align_center,text_size = size.small)
+    table.merge_cells(_table,0,_row,1,_row)
+
+f_row(_table,_row,_label,_value,_bgLabel,_bgValue,_txtValue) =>
+    table.cell(_table,0,_row," " + _label,text_color=clrLabelTxt,bgcolor=_bgLabel,text_halign=text.align_left,text_size = size.small)
+    table.cell(_table,1,_row,str.tostring(_value) + " ",text_color=_txtValue,bgcolor=_bgValue,text_halign=text.align_right,text_size = size.small)
+
+f_header3(_table, _text, _row) =>
+    table.cell(_table,0,_row,_text,text_color=clrHeaderTxt,bgcolor=clrHeaderBg,text_halign=text.align_center,text_size = size.small)
+    table.merge_cells(_table,0,_row,2,_row)
+
+f_row3(_table, _row, _label, _value1, _value2, _bgLabel, _bgValue1, _bgValue2, _txtValue) =>
+    table.cell(_table,0,_row," " + _label,text_color = clrLabelTxt,bgcolor    = _bgLabel,text_halign = text.align_left,text_size = size.small)
+    table.cell(_table,1,_row,str.tostring(_value1) + " ",text_color = _txtValue,bgcolor    = _bgValue1,text_halign = text.align_right,text_size = size.small)
+    table.cell(_table,2,_row,str.tostring(_value2) + " ",text_color = _txtValue,bgcolor    = _bgValue2,text_halign = text.align_right,text_size = size.small)
+
+f_header4(_table, _text, _row) =>
+    table.cell(_table,0,_row,_text,text_color=clrHeaderTxt,bgcolor=clrHeaderBg,text_halign=text.align_center,text_size = size.small)
+    table.merge_cells(_table,0,_row,3,_row)
+
+f_row4(_table, _row, _label, _v1, _v2, _v3, _bgLabel, _bgV1, _bgV2, _bgV3, _txtValue) =>
+    table.cell(_table, 0, _row, " " + _label, text_color=clrLabelTxt, bgcolor=_bgLabel, text_halign=text.align_left,text_size = size.small)
+    table.cell(_table, 1, _row, str.tostring(_v1) + " ", text_color=_txtValue, bgcolor=_bgV1, text_halign=text.align_right,text_size = size.small)
+    table.cell(_table, 2, _row, str.tostring(_v2) + " ", text_color=_txtValue, bgcolor=_bgV2, text_halign=text.align_right,text_size = size.small)
+    table.cell(_table, 3, _row, str.tostring(_v3) + " ", text_color=_txtValue, bgcolor=_bgV3, text_halign=text.align_right,text_size = size.small)
+
+f_dimColor(_clr, _isDim) =>
+    _isDim ? color.new(_clr, 80) : _clr
+
+f_gradient(_value, _max, _baseClr) =>
+    _max > 0 ? color.new(_baseClr, 80 - int(60 * math.min(math.abs(_value) / _max, 1))) : color.new(_baseClr, 80)
+
+if tableAltInput == "Strategy Summary"
+    
+    var table planTable = table.new(position = position.bottom_right,columns=2,rows=50,border_width = 1,border_color = color.gray)
+
+    f_header(planTable, "🔎 Strategy Overview", 0)
+    f_row(planTable,1,  "Direction",                    side,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,2,  "Entry Model",                  entryModelInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,3,  "Entry Filter",                 entryFilterInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,4,  "Entry Lookback Period",        entryPeriodInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,5,  "Exit Model",                   exitModelInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,6,  "Order Size Model",             orderSizeModeInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,7,  "Max DCA Steps",                maxDcaStepsInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,8,  "Base Order Size",              baseOrderSize,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,9,  "Estimated Max Notional ~",     math.ceil(maxPositionSize),clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,10,  "Take Profit (%)",             takeProfitPercentInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,11, "DCA Distance (%)",             dcaPercentInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,12, "TP / DCA Scaling Mode",        tpDcaIncrementModeInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,13, "TP Increment (%)",              tpIncrementValueInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,14, "DCA Increment (%)",             dcaIncrementValueInput,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,15, "Total Position Count",         totalPositionCount,color.blue, color.blue, clrValueTxt)
+    f_row(planTable,16, "Total DCA Step Count",         totalDcaStepCount,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,17, "Average DCA Steps",            avgDcaStep,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,18, "All-Time Max DCA Steps",       allTimeMaxDca,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,19, "All-Time Max Notional",        math.round(allTimeMaxNotional),clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,20, "All-Time Realized PNL",        math.round(strategy.netprofit,2),clrLabelBg, strategy.netprofit>0 ? clrPos : clrNeg, clrValueTxt)
+    f_row(planTable,21, "All-Time Avg Pnl",             avgPnl,clrLabelBg, clrValueBg, clrValueTxt)
+    f_row(planTable,22, "All-Time Max Drawdown",        math.round(allTimeMinPnl,2),clrLabelBg, clrValueBg, clrNeg)
+ 
+
+else if tableAltInput == "DCA History"
+
+    maxCount = array.max(dcaCloseCounts)
+    maxPnl   = math.max(math.abs(array.max(dcaClosePnl)),math.abs(array.min(dcaClosePnl)))
+
+    var table dcaSummaryTable = table.new(position = position.bottom_right,columns  = 4,rows     = maxDcaStepsInput + 2,border_width = 1,border_color = color.gray)
+
+    f_header4(dcaSummaryTable, "📜 DCA History", 0)
+
+    for i = 1 to maxDcaStepsInput
+        count = array.get(dcaCloseCounts, i)
+        pnl   = array.get(dcaClosePnl, i)
+        ratio = totalPositionCount > 0? (count / totalPositionCount) * 100: 0.0
+
+        isEmpty = count == 0
+
+        countBg = f_dimColor(f_gradient(count, maxCount, clrCountBase),isEmpty)
+        ratioBg = f_dimColor(f_gradient(ratio, 100, clrRatioBase),isEmpty)
+        pnlBaseClr = pnl > 0 ? clrPos : pnl < 0 ? clrNeg : clrValueBg
+
+        pnlBg = f_dimColor(f_gradient(pnl, maxPnl, pnlBaseClr),isEmpty)
+
+        f_row4(dcaSummaryTable,i,str.tostring(i) + " DCA",count,str.tostring(math.round(ratio, 2)) + "%",math.round(pnl, 2),f_dimColor(clrLabelBg, isEmpty),countBg,ratioBg,pnlBg,clrValueTxt)
+
+else if tableAltInput == "DCA & Order Summary"
+
+    // --- maksimum teorik pozisyon
+    maxPositionSizeTable = f_getMaxPositionSize(baseOrderSize,maxDcaStepsInput,orderSizeModeInput,orderSizeFirstEqualInput,orderSizePairEveryInput,orderSizePairIncrementInput,orderSizePairMultiplierInput)
+
+    // --- max değerler (renk skalası için)
+    var float maxOrderSize = 0.0
+    var float maxTotalSize = 0.0
+    var float totalPosSize = 0.0
+
+    totalPosSize := 0
+    for i = 0 to maxDcaStepsInput - 1
+        orderSizeStep = f_getOrderSize(baseOrderSize, i, orderSizeModeInput,orderSizeFirstEqualInput,orderSizePairEveryInput,orderSizePairIncrementInput,orderSizePairMultiplierInput)
+        totalPosSize += orderSizeStep
+        maxOrderSize := math.max(maxOrderSize, orderSizeStep)
+        maxTotalSize := math.max(maxTotalSize, totalPosSize)
+
+    // --- tablo
+    var table dcaOrderTable = table.new(position = position.bottom_right,columns = 4,rows = maxDcaStepsInput + 2,border_width = 1,border_color = color.gray)
+
+    f_header4(dcaOrderTable, "📦 DCA Order & Notional Summary", 0)
+
+    // --- satırlar
+    totalPosSize := 0
+
+    for i = 0 to maxDcaStepsInput - 1
+        step = i + 1
+
+        orderSizeStep = f_getOrderSize(baseOrderSize, i, orderSizeModeInput,orderSizeFirstEqualInput,orderSizePairEveryInput,orderSizePairIncrementInput,orderSizePairMultiplierInput)
+        totalPosSize += orderSizeStep
+
+        shareRatio = maxPositionSizeTable > 0 ? (orderSizeStep / maxPositionSizeTable) * 100 : 0.0
+
+        orderBg = f_gradient(orderSizeStep, maxOrderSize, clrCountBase)
+        totalBg = f_gradient(totalPosSize, maxTotalSize, clrRatioBase)
+
+        f_row4(dcaOrderTable,step,"DCA " + str.tostring(step),math.round(orderSizeStep, 2),math.round(totalPosSize, 2),str.tostring(math.round(shareRatio, 2)) + "%",clrLabelBg,orderBg,totalBg,clrValueBg,clrValueTxt)
+
+if activePositionTableInput
+
+    var table posTable = na
+
+    if not hasPosition and not na(posTable)
+        table.delete(posTable)
+        posTable := na
+
+    if hasPosition and na(posTable)
+        posTable := table.new(position = position.top_right,columns = 2,rows = 15,border_width = 1,border_color = color.gray)
+
+    if hasPosition and not na(posTable)
+        f_header(posTable, "🟢 Active Position", 0)
+        f_row(posTable, 2, "DCA Step",                    str.format("{0}/{1}", currentDcaStep, maxDcaStepsInput),clrLabelBg, clrValueBg, currentDcaStep >= maxDcaStepsInput * 0.7 ? clrNeg : currentDcaStep >= maxDcaStepsInput * 0.5 ? clrWarn : clrPos)
+        f_row(posTable, 3, "Max Notional ~",              math.round(maxPositionSize),clrLabelBg, clrValueBg, clrValueTxt)
+        f_row(posTable, 4, "Take Profit (%)",             math.round(adaptiveTakeProfitPercent,2),clrLabelBg, clrValueBg, clrValueTxt)
+        f_row(posTable, 5, "DCA (%)",                     math.round(adaptiveDcaPercent,2),clrLabelBg, clrValueBg, clrValueTxt)
+        f_row(posTable, 6, "Current Notional",            math.round(totalNotional),clrLabelBg, clrValueBg, clrValueTxt)
+        f_row(posTable, 7, "Next Order Size ➡",           math.round(orderSize),clrLabelBg, color.gray, clrValueTxt)
+        f_row(posTable, 8, "Target PNL ~",                math.round(estimatedPnl, 2),clrLabelBg, clrValueBg, color.blue)
+        f_row(posTable, 9, "Unrealized PNL",              math.round(currentPnl, 2),clrLabelBg, currentPnl > 0 ? clrPos : clrNeg, clrValueTxt)
+        f_row(posTable, 10, "Realized PNL",               math.round(openRealizedPnl, 2),clrLabelBg, clrValueBg, openRealizedPnl > 0 ? color.green : color.red)
+        f_row(posTable, 11, "Max PNL",                    math.round(maxClosePnlSeen, 2),clrLabelBg, clrValueBg, maxClosePnlSeen > 0 ? color.green : color.red)
+        f_row(posTable, 12, "Min PNL",                    math.round(minClosePnlSeen, 2),clrLabelBg, clrValueBg, minClosePnlSeen > 0 ? color.green : color.red)
+
+    if not hasPosition and na(posTable)
+
+        nextPosTable = table.new(position = position.top_right,columns = 2,rows = 15,border_width = 1,border_color = color.gray)
+
+        f_header(nextPosTable, "⌛ Next Position", 0)
+        f_row(nextPosTable, 2, "Direction",               side,clrLabelBg, clrValueBg, clrValueTxt)
+        f_row(nextPosTable, 3, "Entry Model",             entryModelInput,clrLabelBg, clrValueBg, clrValueTxt)
+        f_row(nextPosTable, 4, "Max DCA Steps",           maxDcaStepsInput,clrLabelBg, clrValueBg, clrValueTxt)
+        f_row(nextPosTable, 5, "Max Notional ~",          math.round(maxPositionSize),clrLabelBg, clrValueBg, clrValueTxt)
+        f_row(nextPosTable, 6, "Initial Order Size",      math.round(baseOrderSize),clrLabelBg, color.blue, clrValueTxt)
+
+View in Pine Editor・905 lines
+Use on chart
+4
+9
+1 146
+Feb 13
+SmartDCA is a single-direction (Long or Short) step-based DCA strategy with adaptive take-profit and structured risk management.
+
+All core parameters are fully user-configurable. The strategy logic does not enforce a fixed trading style; behavior depends entirely on user-selected settings.
+
+General Structure
+
+The strategy operates in one direction at a time (Long or Short).
+All position management logic is applied relative to the selected direction.
+
+
+The following components are fully controlled by the user:
+
+Trade direction (Long / Short)
+
+Entry model
+
+Entry filters
+
+Take-profit percentage
+
+DCA distance percentage
+
+TP/DCA increment scaling mode
+
+Order size model
+
+Maximum DCA steps
+
+Risk management options
+
+Exit model selection
+
+
+
+The strategy plan is visualized either across the entire chart history or within a user-defined custom backtest date range.
+
+Entry Configuration
+
+Users can select the entry model:
+
+
+Structural breakout
+
+RSI reversal
+
+Trend flip
+
+None (manual disable)
+
+
+
+Optional entry filters refine signal selection based on:
+
+
+Reward space
+
+Entry quality
+
+RSI extremity
+
+Fair value (VWMA)
+
+Trend alignment
+
+
+
+DCA & Position Scaling
+
+After initial entry:
+
+
+Additional DCA orders are triggered when price deviates from the average position price by the defined DCA percentage.
+
+DCA distance and take-profit levels expand step-by-step according to the selected scaling mode.
+
+Order size progression depends on the selected order size model.
+
+Maximum DCA steps define the upper exposure limit.
+
+
+
+This ensures the full theoretical risk is bounded and visible.
+
+Exit Models
+
+Users can choose the exit behavior:
+
+
+Fixed take-profit
+
+Structure-based exit
+
+Adaptive Fast
+
+Adaptive Slow
+
+Protect Profit
+
+Trend Ended
+
+None
+
+
+
+All exits are executed using market orders.
+
+Additional Risk Controls
+
+Optional risk features include:
+
+
+DCA Compression (partial size reduction after recovery)
+
+Defensive Profit Exit
+
+Trend Soft Stop (breakeven protection after trend reversal)
+
+
+
+These mechanisms are configurable and do not override the predefined maximum DCA limit.
+
+Visualization & Reporting
+
+The strategy provides:
+
+
+Active position tracking
+
+DCA step monitoring
+
+Position notional transparency
+
+Trend strength visualization
+
+Historical DCA performance summary
+
+
+
+Users may restrict execution to a custom backtest range or allow the strategy to operate across the full visible chart history.
+
+Risk Disclosure
+
+
+The maximum DCA step defines the full predefined risk envelope.
+
+Strong and sustained one-directional trends may lead to full DCA utilization.
+
+The strategy does not attempt unlimited recovery.
+
+Users are responsible for configuring position sizing and DCA parameters relative to their capital.
+
+
+
+This script is for educational and analytical purposes only and does not constitute investment advice.
+Feb 13
+Release Notes
+The visual error in Protect Profit mode has been fixed.
+Feb 13
+Release Notes
+Added Micro Trend Exit model for low timeframes.
+Feb 14
+Release Notes
+PNL based stop option added.
+Added cooldown option after stop.
+Visual improvements have been made.
+Feb 14
+Release Notes
+Minor interface and naming convention adjustments have been made.
+The trend reversal exit model has been updated to trend hard stop. This allows two different exit rules to be applied simultaneously.
+Feb 18
+Release Notes
+Exit Behavior Mode option added.
+Feb 20
+Release Notes
+Minor updates have been made.
+Feb 20
+Release Notes
+Visual improvements have been made.
+Feb 21
+Release Notes
+Exit models have been simplified.
+Feb 22
+Release Notes
+Minor improvements have been made.
+Feb 22
+Release Notes
+Minor bug fixed
+Feb 22
+Release Notes
+Profit Protection bug fixes
+Feb 23
+Release Notes
+Minor bug fixed for Profit Protection Layer
+Feb 23
+Release Notes
+Minor bug fixes.

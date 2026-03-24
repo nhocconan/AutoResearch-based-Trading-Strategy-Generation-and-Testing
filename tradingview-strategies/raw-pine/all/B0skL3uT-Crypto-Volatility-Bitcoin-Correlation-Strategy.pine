@@ -1,0 +1,79 @@
+//@version=5
+strategy("Crypto Volatility Bitcoin Correlation Strategy", overlay=true)
+
+// User Inputs for Flexibility
+symbol = input.symbol("COINBASE:BTCUSD", title="Bitcoin Symbol")  // User can change the asset symbol here
+symbol_volatility_index = input.symbol("BITMEX:BVOL7D", title="Bitcoin Volatility Index (7D)")  // The BVOL7D volatility index from BitMEX
+VIXFixLength = input.int(22, title="VIX Fix Length")  // Customizable length for VIX Fix calculation
+emaLength = input.int(50, title="EMA Length")  // Customizable length for EMA
+
+// Requesting Security Data
+close_ = request.security(symbol, timeframe.period, close)  // Fetch close price for selected asset
+low_ = request.security(symbol, timeframe.period, low)  // Fetch low price for selected asset
+bvol7d = request.security(symbol_volatility_index, timeframe.period, close)  // Fetch Bitcoin 7-day volatility
+
+// VIXFix Calculation (Volatility Index for Crypto)
+VIXFix = (ta.highest(close_, VIXFixLength) - low_) / (ta.highest(close_, VIXFixLength)) * 100
+
+// ATR (Average True Range) Calculation
+// atr = ta.atr(14)  // Default ATR period of 14
+
+// EMA Calculation (Exponential Moving Average)
+ema_out = ta.ema(close_, emaLength)  // Calculate the EMA of the close price
+
+// Entry and Exit Conditions
+longCondition = (VIXFix > VIXFix[1] and bvol7d > bvol7d[1]) and close_ > ema_out  // Go long when VIXFix and BVOL7D are rising, and price is above EMA
+exitCondition = close_ < ema_out  // Exit long when the price drops below the EMA
+
+// Strategy Execution
+strategy.entry('Long Position', strategy.long, when=longCondition)  // Enter a long position when conditions are met
+strategy.close("Long Position", when=exitCondition)  // Close the position when the exit condition is triggered
+
+// Plotting for Visualization
+// plot(close_, color=color.blue, linewidth=1, title="Price")  // Plot the close price for reference
+// plot(ema_out, color=color.red, linewidth=2, title="EMA")  // Plot the EMA for visual guidance
+// plot(VIXFix, color=color.orange, linewidth=2, title="VIX Fix")  // Plot the VIXFix for reference
+// plot(bvol7d, color=color.green, linewidth=2, title="BVOL7D")  // Plot BVOL7D volatility index for reference
+// hline(0, "Zero Line", color=color.gray)  // Add a zero line for better visibility
+
+// Alerts for Traders
+// alertcondition(longCondition, title="Long Entry Alert", message="Bitcoin Volatility Master Strategy: Long entry signal triggered!")
+// alertcondition(exitCondition, title="Exit Long Position Alert", message="Bitcoin Volatility Master Strategy: Exit signal triggered!")
+
+View in Pine Editor・45 lines
+Use on chart
+2
+0
+9
+4
+5 967
+Description:
+
+The Crypto Volatility Bitcoin Correlation Strategy is designed to leverage market volatility specifically in Bitcoin (BTC) using a combination of volatility indicators and trend-following techniques. This strategy utilizes the VIXFix (a volatility indicator adapted for crypto markets) and the BVOL7D (Bitcoin 7-Day Volatility Index from BitMEX) to identify periods of high volatility, while confirming trends with the Exponential Moving Average (EMA). These components work together to offer a comprehensive system that traders can use to enter positions when volatility and trends are aligned in their favor.
+
+Key Features:
+VIXFix (Volatility Index for Crypto Markets): This indicator measures the highest price of Bitcoin over a set period and compares it with the current low price to gauge market volatility. A rise in VIXFix indicates increasing market volatility, signaling that large price movements could occur.
+BVOL7D (Bitcoin 7-Day Volatility Index): This volatility index, provided by BitMEX, measures the volatility of Bitcoin over the past 7 days. It helps traders monitor the recent volatility trend in the market, particularly useful when making short-term trading decisions.
+Exponential Moving Average (EMA): The 50-period EMA acts as a trend indicator. When the price is above the EMA, it suggests the market is in an uptrend, and when the price is below the EMA, it suggests a downtrend.
+How It Works:
+Long Entry: A long position is triggered when both the VIXFix and BVOL7D indicators are rising, signaling increased volatility, and the price is above the 50-period EMA, confirming that the market is trending upward.
+Exit: The strategy exits the position when the price crosses below the 50-period EMA, which signals a potential weakening of the uptrend and a decrease in volatility.
+This strategy ensures that traders only enter positions when the volatility aligns with a clear trend, minimizing the risk of entering trades during periods of market uncertainty.
+
+Testing and Timeframe:
+This strategy has been tested on Bitcoin using the daily timeframe, which provides a longer-term perspective on market trends and volatility. However, users can adjust the timeframe according to their trading preferences. It is crucial to note that this strategy does not include comprehensive risk management, aside from the exit condition when the price crosses below the EMA. Users are strongly advised to implement their own risk management techniques, such as setting appropriate stop-loss levels, to safeguard their positions during high volatility periods.
+
+Utility:
+The Crypto Volatility Bitcoin Correlation Strategy is particularly well-suited for traders who aim to capitalize on the high volatility often seen in the Bitcoin market. By combining volatility measurements (VIXFix and BVOL7D) with a trend-following mechanism (EMA), this strategy helps identify optimal moments for entering and exiting trades. This approach ensures that traders participate in potentially profitable market moves while minimizing exposure during times of uncertainty.
+
+Use Cases:
+Volatility-Based Entries: Traders looking to take advantage of market volatility spikes will find this strategy useful for timing entry points during market swings.
+Trend Confirmation: By using the EMA as a confirmation tool, traders can avoid entering trades that go against the trend, which can result in significant losses during volatile market conditions.
+Risk Management: While the strategy exits when price falls below the EMA, it is important to recognize that this is not a full risk management system. Traders should use caution and integrate additional risk measures, such as stop-losses and position sizing, to better manage potential losses.
+How to Use:
+Step 1: Monitor the VIXFix and BVOL7D indicators. When both are rising and the Bitcoin price is above the EMA, the strategy will trigger a long entry, indicating that the market is experiencing increased volatility with a confirmed uptrend.
+Step 2: Exit the position when the price drops below the 50-period EMA, signaling that the trend may be reversing or weakening, reducing the likelihood of continued upward price movement.
+This strategy is open-source and is intended to help traders navigate volatile market conditions, particularly in Bitcoin, using proven indicators for volatility and trend confirmation.
+
+Risk Disclaimer:
+This strategy has been tested on the daily timeframe of Bitcoin, but users should be aware that it does not include built-in risk management except for the below-EMA exit condition. Users should be extremely cautious when using this strategy and are encouraged to implement their own risk management, such as using stop-losses, position sizing, and setting appropriate limits. Trading involves significant risk, and this strategy does not guarantee profits or prevent losses. Past performance is not indicative of future results. Always test any strategy in a demo environment before applying it to live markets.

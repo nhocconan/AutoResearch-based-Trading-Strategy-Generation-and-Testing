@@ -1,0 +1,573 @@
+//@version=6
+strategy("Range Break v1 - Session Bias + Scale Outs",
+     overlay = true,
+     initial_capital = 10000,
+     pyramiding = 0,
+     calc_on_every_tick = true,
+     process_orders_on_close = false,
+     default_qty_type = strategy.fixed,
+     default_qty_value = 1)
+
+//────────────────────────────────────
+// INPUTS
+//────────────────────────────────────
+groupRange = "Range Source"
+rangeSource = input.string("NY ORB", "Range Source", options=["NY ORB", "Asia Range", "London Range"], group=groupRange)
+orbSession   = input.session("0830-0900", "NY ORB Session", group=groupRange)
+asiaSession  = input.session("1800-0000", "Asia Session", group=groupRange)
+londonSession = input.session("0000-0830", "London Session", group=groupRange)
+tradeSession = input.session("0900-1500", "Trade Session", group=groupRange)
+
+groupBias = "Session Bias Filter"
+useSessionBias = input.bool(true, "Use Session Confirmation Bias", group=groupBias)
+dominanceThreshold = input.float(1.0, "Min London Move / Asia Range", minval=0.1, step=0.1, group=groupBias)
+requireLondonCloseOutsideAsia = input.bool(true, "Require London Close Outside Asia Range", group=groupBias)
+
+groupVol = "Volatility Model"
+useVolatilityModel = input.bool(true, "Use Volatility Model", group=groupVol)
+asiaCompressionLookback = input.int(20, "Asia Compression Lookback", minval=5, group=groupVol)
+maxAsiaCompressionRatio = input.float(0.9, "Max Asia Range / Avg Asia Range", minval=0.1, step=0.05, group=groupVol)
+maxLondonRangeToAsiaRange = input.float(2.0, "Max London Range / Asia Range", minval=0.1, step=0.1, group=groupVol)
+minLondonMoveToAsiaRange = input.float(1.0, "Min |London Move| / Asia Range", minval=0.1, step=0.1, group=groupVol)
+minRegimeScore = input.int(2, "Minimum Regime Score (0-3)", minval=0, maxval=3, group=groupVol)
+
+groupEntry = "Entry Logic"
+entryMode = input.string("Direct Break", "Entry Mode", options=["Direct Break", "Retest Break", "Sweep Then Break"], group=groupEntry)
+breakoutBuffer = input.float(0.0, "Breakout Buffer (points)", minval=0.0, step=0.25, group=groupEntry)
+retestTolerance = input.float(2.0, "Retest Tolerance (points)", minval=0.0, step=0.25, group=groupEntry)
+useVWAPFilter = input.bool(false, "Use VWAP Filter", group=groupEntry)
+oneTradePerDay = input.bool(true, "One Trade Per Day", group=groupEntry)
+allowLongsWithoutBias = input.bool(false, "Allow Longs If No Bias", group=groupEntry)
+allowShortsWithoutBias = input.bool(false, "Allow Shorts If No Bias", group=groupEntry)
+
+groupRangeFilter = "Range Size Filter"
+useRangeSizeFilter = input.bool(false, "Use Range Size Filter", group=groupRangeFilter)
+minRangePoints = input.float(5.0, "Min Range (points)", minval=0.25, step=0.25, group=groupRangeFilter)
+maxRangePoints = input.float(80.0, "Max Range (points)", minval=0.25, step=0.25, group=groupRangeFilter)
+
+groupRisk = "Stops / Targets"
+useStopLoss = input.bool(true, "Use Stop Loss", group=groupRisk)
+useTarget = input.bool(true, "Use Profit Target", group=groupRisk)
+stopReference = input.string("Range Opposite Side", "Stop Reference",
+     options=["Range Opposite Side", "Range Midpoint", "London Opposite Extreme", "Asia Opposite Extreme", "Fixed Points"], group=groupRisk)
+fixedStopPoints = input.float(10.0, "Fixed Stop Points", minval=0.25, step=0.25, group=groupRisk)
+
+useScaleOuts = input.bool(true, "Use TP1 / TP2 / TP3 Scale Outs", group=groupRisk)
+moveStopToBEAfterTP1 = input.bool(true, "Move Stop To Entry After TP1", group=groupRisk)
+
+targetMode = input.string("R-Multiple", "Target Mode",
+     options=["R-Multiple", "Fixed Points"], group=groupRisk)
+
+tp1R = input.float(1.0, "TP1 R", minval=0.1, step=0.1, group=groupRisk)
+tp2R = input.float(2.0, "TP2 R", minval=0.1, step=0.1, group=groupRisk)
+tp3R = input.float(3.0, "TP3 R", minval=0.1, step=0.1, group=groupRisk)
+
+tp1Pts = input.float(10.0, "TP1 Points", minval=0.25, step=0.25, group=groupRisk)
+tp2Pts = input.float(20.0, "TP2 Points", minval=0.25, step=0.25, group=groupRisk)
+tp3Pts = input.float(40.0, "TP3 Points", minval=0.25, step=0.25, group=groupRisk)
+
+tp1QtyPct = input.float(33, "TP1 Qty %", minval=1, maxval=100, step=1, group=groupRisk)
+tp2QtyPct = input.float(33, "TP2 Qty %", minval=1, maxval=100, step=1, group=groupRisk)
+tp3QtyPct = input.float(34, "TP3 Qty %", minval=1, maxval=100, step=1, group=groupRisk)
+
+groupExit = "Forced Exit"
+useForceFlat = input.bool(true, "Force Flat By Time", group=groupExit)
+flatHour = input.int(15, "Flat Hour", minval=0, maxval=23, group=groupExit)
+flatMinute = input.int(0, "Flat Minute", minval=0, maxval=59, group=groupExit)
+
+groupVis = "Visuals"
+showLevels = input.bool(true, "Show Active Range Levels", group=groupVis)
+showSignals = input.bool(true, "Show Entry Markers", group=groupVis)
+showDebug = input.bool(true, "Show Debug Label", group=groupVis)
+
+//────────────────────────────────────
+// SESSION FLAGS
+//────────────────────────────────────
+inAsia   = not na(time(timeframe.period, asiaSession))
+inLondon = not na(time(timeframe.period, londonSession))
+inTrade  = not na(time(timeframe.period, tradeSession))
+inORB    = not na(time(timeframe.period, orbSession))
+
+asiaStart = inAsia and not inAsia[1]
+asiaEnd   = not inAsia and inAsia[1]
+
+londonStart = inLondon and not inLondon[1]
+londonEnd   = not inLondon and inLondon[1]
+
+orbStart = inORB and not inORB[1]
+orbEnd   = not inORB and inORB[1]
+
+curHour = hour(time)
+curMinute = minute(time)
+isFlatTime = curHour == flatHour and curMinute == flatMinute
+
+//────────────────────────────────────
+// VWAP
+//────────────────────────────────────
+vwapValue = ta.vwap(hlc3)
+
+//────────────────────────────────────
+// STORAGE
+//────────────────────────────────────
+var float asiaOpen = na
+var float asiaHigh = na
+var float asiaLow = na
+var float asiaClose = na
+
+var float londonOpen = na
+var float londonHigh = na
+var float londonLow = na
+var float londonClose = na
+var float londonMove = na
+var float londonRange = na
+
+var float orbHigh = na
+var float orbLow = na
+var bool orbReady = false
+
+var bool tradedToday = false
+var float asiaRangeCompleted = na
+
+// active chosen range
+var float activeRangeHigh = na
+var float activeRangeLow = na
+var bool activeRangeReady = false
+
+// entry state
+var bool longBroken = false
+var bool shortBroken = false
+var bool longRetested = false
+var bool shortRetested = false
+var bool sweptBelowRange = false
+var bool sweptAboveRange = false
+
+// tp state
+var bool tp1HitLong = false
+var bool tp1HitShort = false
+
+//────────────────────────────────────
+// DAILY RESET
+//────────────────────────────────────
+if asiaStart
+    asiaOpen := open
+    asiaHigh := high
+    asiaLow := low
+    asiaClose := na
+
+    londonOpen := na
+    londonHigh := na
+    londonLow := na
+    londonClose := na
+    londonMove := na
+    londonRange := na
+
+    orbHigh := na
+    orbLow := na
+    orbReady := false
+
+    activeRangeHigh := na
+    activeRangeLow := na
+    activeRangeReady := false
+
+    tradedToday := false
+
+    longBroken := false
+    shortBroken := false
+    longRetested := false
+    shortRetested := false
+    sweptBelowRange := false
+    sweptAboveRange := false
+
+if strategy.position_size == 0
+    tp1HitLong := false
+    tp1HitShort := false
+
+//────────────────────────────────────
+// BUILD ASIA
+//────────────────────────────────────
+if inAsia
+    asiaHigh := na(asiaHigh) ? high : math.max(asiaHigh, high)
+    asiaLow  := na(asiaLow)  ? low  : math.min(asiaLow, low)
+
+if asiaEnd
+    asiaClose := close
+    asiaRangeCompleted := asiaHigh - asiaLow
+
+//────────────────────────────────────
+// BUILD LONDON
+//────────────────────────────────────
+if londonStart
+    londonOpen := open
+    londonHigh := high
+    londonLow := low
+    londonClose := na
+
+if inLondon
+    londonHigh := na(londonHigh) ? high : math.max(londonHigh, high)
+    londonLow  := na(londonLow)  ? low  : math.min(londonLow, low)
+
+if londonEnd
+    londonClose := close
+    londonMove := not na(londonOpen) ? londonClose - londonOpen : na
+    londonRange := not na(londonHigh) and not na(londonLow) ? londonHigh - londonLow : na
+
+//────────────────────────────────────
+// BUILD ORB
+//────────────────────────────────────
+if orbStart
+    orbHigh := high
+    orbLow := low
+    orbReady := false
+
+if inORB
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow)  ? low  : math.min(orbLow, low)
+
+if orbEnd
+    orbReady := true
+
+//────────────────────────────────────
+// SELECT ACTIVE RANGE SOURCE
+//────────────────────────────────────
+if rangeSource == "Asia Range"
+    activeRangeHigh := asiaHigh
+    activeRangeLow := asiaLow
+    activeRangeReady := not na(asiaHigh) and not na(asiaLow) and not inAsia
+else if rangeSource == "London Range"
+    activeRangeHigh := londonHigh
+    activeRangeLow := londonLow
+    activeRangeReady := not na(londonHigh) and not na(londonLow) and not inLondon
+else
+    activeRangeHigh := orbHigh
+    activeRangeLow := orbLow
+    activeRangeReady := orbReady
+
+activeRange = activeRangeReady ? activeRangeHigh - activeRangeLow : na
+activeMid = activeRangeReady ? (activeRangeHigh + activeRangeLow) / 2.0 : na
+
+rangeSizePass = useRangeSizeFilter ? (activeRangeReady and activeRange >= minRangePoints and activeRange <= maxRangePoints) : activeRangeReady
+
+//────────────────────────────────────
+// SESSION BIAS MODEL
+//────────────────────────────────────
+haveAsia = not na(asiaHigh) and not na(asiaLow) and not na(asiaClose)
+haveLondon = not na(londonOpen) and not na(londonHigh) and not na(londonLow) and not na(londonClose) and not na(londonMove) and not na(londonRange)
+
+asiaRange = haveAsia ? asiaHigh - asiaLow : na
+avgAsiaRange = ta.sma(asiaRangeCompleted, asiaCompressionLookback)
+
+londonDominance = haveAsia and haveLondon and asiaRange != 0 ? math.abs(londonMove) / asiaRange : na
+londonRangeRatio = haveAsia and haveLondon and asiaRange != 0 ? londonRange / asiaRange : na
+asiaCompressionRatio = haveAsia and not na(avgAsiaRange) and avgAsiaRange != 0 ? asiaRange / avgAsiaRange : na
+
+londonCloseAboveAsia = haveAsia and haveLondon ? londonClose > asiaHigh : false
+londonCloseBelowAsia = haveAsia and haveLondon ? londonClose < asiaLow  : false
+
+strongBullLondon = haveAsia and haveLondon and londonMove > 0 and londonMove > asiaRange * dominanceThreshold
+strongBearLondon = haveAsia and haveLondon and londonMove < 0 and math.abs(londonMove) > asiaRange * dominanceThreshold
+
+bullClosePass = requireLondonCloseOutsideAsia ? londonCloseAboveAsia : true
+bearClosePass = requireLondonCloseOutsideAsia ? londonCloseBelowAsia : true
+
+asiaCompressionPass = not na(asiaCompressionRatio) and asiaCompressionRatio <= maxAsiaCompressionRatio
+londonMovePass = not na(londonDominance) and londonDominance >= minLondonMoveToAsiaRange
+londonExhaustionPass = not na(londonRangeRatio) and londonRangeRatio <= maxLondonRangeToAsiaRange
+
+regimeScore = (asiaCompressionPass ? 1 : 0) + (londonMovePass ? 1 : 0) + (londonExhaustionPass ? 1 : 0)
+regimePass = useVolatilityModel ? regimeScore >= minRegimeScore : true
+
+bullBias = useSessionBias ? (haveAsia and haveLondon and regimePass and strongBullLondon and bullClosePass) : true
+bearBias = useSessionBias ? (haveAsia and haveLondon and regimePass and strongBearLondon and bearClosePass) : true
+
+allowLongs = bullBias or (not useSessionBias and true) or (useSessionBias and not bullBias and not bearBias and allowLongsWithoutBias)
+allowShorts = bearBias or (not useSessionBias and true) or (useSessionBias and not bullBias and not bearBias and allowShortsWithoutBias)
+
+//────────────────────────────────────
+// ENTRY WINDOW + STATE TRACKING
+//────────────────────────────────────
+entryWindowOpen = inTrade and activeRangeReady and rangeSizePass
+
+longBreakLevel = activeRangeReady ? activeRangeHigh + breakoutBuffer : na
+shortBreakLevel = activeRangeReady ? activeRangeLow - breakoutBuffer : na
+
+bullVWAPPass = useVWAPFilter ? close > vwapValue : true
+bearVWAPPass = useVWAPFilter ? close < vwapValue : true
+
+if entryWindowOpen and activeRangeReady
+    if high > longBreakLevel
+        longBroken := true
+    if low < shortBreakLevel
+        shortBroken := true
+
+    if low < activeRangeLow
+        sweptBelowRange := true
+    if high > activeRangeHigh
+        sweptAboveRange := true
+
+    if longBroken and low <= (activeRangeHigh + retestTolerance)
+        longRetested := true
+    if shortBroken and high >= (activeRangeLow - retestTolerance)
+        shortRetested := true
+
+//────────────────────────────────────
+// ENTRY MODES
+//────────────────────────────────────
+longDirect = entryWindowOpen and allowLongs and high > longBreakLevel and bullVWAPPass
+shortDirect = entryWindowOpen and allowShorts and low < shortBreakLevel and bearVWAPPass
+
+longRetestBreak = entryWindowOpen and allowLongs and longBroken and longRetested and high > longBreakLevel and bullVWAPPass
+shortRetestBreak = entryWindowOpen and allowShorts and shortBroken and shortRetested and low < shortBreakLevel and bearVWAPPass
+
+longSweepBreak = entryWindowOpen and allowLongs and sweptBelowRange and high > longBreakLevel and bullVWAPPass
+shortSweepBreak = entryWindowOpen and allowShorts and sweptAboveRange and low < shortBreakLevel and bearVWAPPass
+
+longTriggered =
+     entryMode == "Direct Break" ? longDirect :
+     entryMode == "Retest Break" ? longRetestBreak :
+     longSweepBreak
+
+shortTriggered =
+     entryMode == "Direct Break" ? shortDirect :
+     entryMode == "Retest Break" ? shortRetestBreak :
+     shortSweepBreak
+
+longSignal =
+     longTriggered and
+     strategy.position_size == 0 and
+     (oneTradePerDay ? not tradedToday : true)
+
+shortSignal =
+     shortTriggered and
+     strategy.position_size == 0 and
+     (oneTradePerDay ? not tradedToday : true)
+
+//────────────────────────────────────
+// ENTRIES
+//────────────────────────────────────
+if longSignal
+    strategy.entry("Long", strategy.long)
+    tradedToday := true
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+    tradedToday := true
+
+//────────────────────────────────────
+// STOPS
+//────────────────────────────────────
+isLong = strategy.position_size > 0
+isShort = strategy.position_size < 0
+avgEntry = strategy.position_avg_price
+
+longStopBase =
+     stopReference == "Range Opposite Side" ? activeRangeLow :
+     stopReference == "Range Midpoint" ? activeMid :
+     stopReference == "London Opposite Extreme" ? londonLow :
+     stopReference == "Asia Opposite Extreme" ? asiaLow :
+     avgEntry - fixedStopPoints
+
+shortStopBase =
+     stopReference == "Range Opposite Side" ? activeRangeHigh :
+     stopReference == "Range Midpoint" ? activeMid :
+     stopReference == "London Opposite Extreme" ? londonHigh :
+     stopReference == "Asia Opposite Extreme" ? asiaHigh :
+     avgEntry + fixedStopPoints
+
+longRiskValid = isLong and not na(longStopBase) and longStopBase < avgEntry
+shortRiskValid = isShort and not na(shortStopBase) and shortStopBase > avgEntry
+
+longRisk = longRiskValid ? avgEntry - longStopBase : na
+shortRisk = shortRiskValid ? shortStopBase - avgEntry : na
+
+//────────────────────────────────────
+// TARGETS
+//────────────────────────────────────
+longTP1 = targetMode == "R-Multiple" ? avgEntry + longRisk * tp1R : avgEntry + tp1Pts
+longTP2 = targetMode == "R-Multiple" ? avgEntry + longRisk * tp2R : avgEntry + tp2Pts
+longTP3 = targetMode == "R-Multiple" ? avgEntry + longRisk * tp3R : avgEntry + tp3Pts
+
+shortTP1 = targetMode == "R-Multiple" ? avgEntry - shortRisk * tp1R : avgEntry - tp1Pts
+shortTP2 = targetMode == "R-Multiple" ? avgEntry - shortRisk * tp2R : avgEntry - tp2Pts
+shortTP3 = targetMode == "R-Multiple" ? avgEntry - shortRisk * tp3R : avgEntry - tp3Pts
+
+if isLong and not tp1HitLong and not na(longTP1) and high >= longTP1
+    tp1HitLong := true
+
+if isShort and not tp1HitShort and not na(shortTP1) and low <= shortTP1
+    tp1HitShort := true
+
+longStopActive = moveStopToBEAfterTP1 and tp1HitLong ? avgEntry : longStopBase
+shortStopActive = moveStopToBEAfterTP1 and tp1HitShort ? avgEntry : shortStopBase
+
+//────────────────────────────────────
+// EXITS
+//────────────────────────────────────
+if isLong and useScaleOuts
+    strategy.exit("Long TP1", "Long",
+         stop = useStopLoss and longRiskValid ? longStopActive : na,
+         limit = longRiskValid ? longTP1 : na,
+         qty_percent = tp1QtyPct)
+
+    strategy.exit("Long TP2", "Long",
+         stop = useStopLoss and longRiskValid ? longStopActive : na,
+         limit = longRiskValid ? longTP2 : na,
+         qty_percent = tp2QtyPct)
+
+    strategy.exit("Long TP3", "Long",
+         stop = useStopLoss and longRiskValid ? longStopActive : na,
+         limit = longRiskValid ? longTP3 : na,
+         qty_percent = tp3QtyPct)
+
+if isShort and useScaleOuts
+    strategy.exit("Short TP1", "Short",
+         stop = useStopLoss and shortRiskValid ? shortStopActive : na,
+         limit = shortRiskValid ? shortTP1 : na,
+         qty_percent = tp1QtyPct)
+
+    strategy.exit("Short TP2", "Short",
+         stop = useStopLoss and shortRiskValid ? shortStopActive : na,
+         limit = shortRiskValid ? shortTP2 : na,
+         qty_percent = tp2QtyPct)
+
+    strategy.exit("Short TP3", "Short",
+         stop = useStopLoss and shortRiskValid ? shortStopActive : na,
+         limit = shortRiskValid ? shortTP3 : na,
+         qty_percent = tp3QtyPct)
+
+//────────────────────────────────────
+// FORCE FLAT
+//────────────────────────────────────
+if useForceFlat and isFlatTime and strategy.position_size != 0
+    strategy.close_all(comment="Force Flat")
+
+//────────────────────────────────────
+// VISUALS
+//────────────────────────────────────
+plot(showLevels and activeRangeReady ? activeRangeHigh : na, "Active Range High", color=color.new(color.lime, 0), style=plot.style_linebr)
+plot(showLevels and activeRangeReady ? activeRangeLow  : na, "Active Range Low", color=color.new(color.red, 0), style=plot.style_linebr)
+plot(showLevels and activeRangeReady ? activeMid       : na, "Active Range Mid", color=color.new(color.yellow, 0), style=plot.style_linebr)
+
+plotshape(showSignals and longSignal, title="Long Signal", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, text="L")
+plotshape(showSignals and shortSignal, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="S")
+
+var label dbg = na
+if barstate.islast and showDebug
+    label.delete(dbg)
+    txt = "Range Source: " + rangeSource +
+          "\nActive Range: " + str.tostring(activeRange, format.mintick) +
+          "\nBull Bias: " + str.tostring(bullBias) +
+          "\nBear Bias: " + str.tostring(bearBias) +
+          "\nRegime Score: " + str.tostring(regimeScore) +
+          "\nLong Broken: " + str.tostring(longBroken) +
+          "\nShort Broken: " + str.tostring(shortBroken) +
+          "\nLong Retested: " + str.tostring(longRetested) +
+          "\nShort Retested: " + str.tostring(shortRetested) +
+          "\nSwept Below: " + str.tostring(sweptBelowRange) +
+          "\nSwept Above: " + str.tostring(sweptAboveRange)
+    dbg := label.new(bar_index, high, txt, style=label.style_label_left, color=color.new(color.black, 65), textcolor=color.white)
+
+View in Pine Editor・467 lines
+Use on chart
+3
+4
+508
+Range Break Strategy – Session-Biased Breakout Model
+Overview
+This strategy is a session-aware range breakout system designed to capture expansion moves when global market activity aligns across major trading sessions.
+Instead of trading every breakout, the system uses inter-session price behavior to determine whether the market is more likely to trend or remain range-bound.
+
+The model evaluates three key sessions:
+
+Asia session – establishes early structure
+London session – reveals directional intent
+New York session – provides liquidity for expansion
+When conditions align, the strategy trades a breakout of a defined price range in the direction of the dominant session bias.
+Core Concept
+Most breakout systems fail because they treat every breakout equally.
+This strategy attempts to solve that problem by asking two questions:
+
+Is the market showing directional intent across sessions?
+Is price breaking an important structural range in that same direction?
+Trades are only taken when both conditions are satisfied.
+Session Confirmation Logic
+The strategy analyzes how the London session behaves relative to the Asia session.
+The goal is to determine whether London has established a dominant directional move or whether the market remains balanced.
+
+The model evaluates:
+
+London directional strength relative to the Asia range
+Whether London closed outside the Asia range
+Volatility regime conditions between sessions
+These rules create a bullish or bearish session bias.
+Bullish Bias
+Conditions suggest buyers are in control.
+The strategy will only consider long breakouts.
+
+Bearish Bias
+Conditions suggest sellers are in control.
+The strategy will only consider short breakouts.
+
+Neutral
+If session behavior is unclear, the system can optionally avoid trading.
+Range Break Engine
+Once the directional bias is established, the strategy waits for price to break a key range.
+The range can be selected by the user:
+
+New York Opening Range
+Asia session range
+London session range
+A breakout of this range signals a potential volatility expansion move.
+Entry Models
+Three breakout entry models are included:
+Direct Break
+Trade immediately when price breaks the range boundary.
+This is the classic breakout approach.
+
+Retest Break
+Wait for price to break the range, pull back toward the breakout level, then break again.
+This helps filter false breakouts.
+
+Sweep Then Break
+Require a liquidity sweep of the opposite side of the range before the breakout occurs.
+This model attempts to capture stop-run reversals that lead to strong directional moves.
+
+Risk Management
+The strategy includes several configurable risk controls.
+Stop Placement Options
+Stops can be placed relative to:
+Opposite side of the breakout range
+Midpoint of the range
+Opposite session extreme
+Fixed distance
+Scaling Out
+Positions can be scaled out using up to three targets:
+TP1
+TP2
+TP3
+Targets can be defined using:
+R-multiple risk units
+Fixed price distances
+Break-Even Logic
+After TP1 is reached, the stop can automatically move to the entry price to protect remaining position size.
+Trade Management
+Additional controls include:
+One trade per day option
+Optional VWAP confirmation
+Range size filters
+Forced position closure at a specific time
+These features allow the system to adapt to different markets and volatility environments.
+Intended Use
+This script is designed primarily for research and systematic strategy development.
+It can be used to study:
+
+Session-based market structure
+Breakout continuation behavior
+Liquidity sweep patterns
+Volatility expansion across global trading sessions
+The framework is intentionally modular so that traders can test different combinations of:
+session bias filters
+range definitions
+breakout models
+risk management approaches
+Important Note
+This script is provided for educational and research purposes only. It is not financial advice and should not be used for live trading without proper testing and risk management.

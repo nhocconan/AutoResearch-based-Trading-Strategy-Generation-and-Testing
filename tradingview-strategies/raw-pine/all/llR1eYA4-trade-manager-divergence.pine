@@ -1,0 +1,475 @@
+//@version=6
+strategy("Trade Manager + Divergence", overlay = true, initial_capital = 10000, pyramiding = 9)
+
+// ======================================================================
+// GENERAL
+// ======================================================================
+lot_precision = input.int(1, "Lot precision", minval = 0, maxval = 8,
+    tooltip = "Number of decimal places used when calculating order quantity.",
+    group = "General")
+
+show_base_labels = input.bool(true, "Show base order labels",
+    tooltip = "Display labels on the chart when a base order is opened.",
+    group = "General")
+
+show_small_table = input.bool(true, "Show mini-table",
+    tooltip = "Display a compact table with position size, PnL, and equity.",
+    group = "General")
+
+roundQty(q) =>
+    factor = math.pow(10.0, lot_precision)
+    raw    = math.ceil(q * factor) / factor
+    math.max(1.0 / factor, raw)
+
+
+// ======================================================================
+// ENTRY MODE
+// ======================================================================
+entry_mode = input.string("Combined", "Entry mode",
+    options = ["Divergence only", "Manual levels only", "Combined"],
+    tooltip = "Choose the source of entry signals: divergence, manual levels, or both.",
+    group = "Entry Mode")
+
+allow_div_entries   = entry_mode != "Manual levels only"
+allow_level_entries = entry_mode != "Divergence only"
+
+use_divergence = input.bool(true, "Enable divergence entries",
+    tooltip = "Allow entries based on RSI divergence signals.",
+    group = "Entry Mode")
+
+use_manual_long = input.bool(false, "Enable manual LONG entries",
+    tooltip = "Allow manual LONG entries at a specified price level.",
+    group = "Entry Mode")
+
+use_manual_short = input.bool(false, "Enable manual SHORT entries",
+    tooltip = "Allow manual SHORT entries at a specified price level.",
+    group = "Entry Mode")
+
+
+// ======================================================================
+// DIVERGENCE SETTINGS
+// ======================================================================
+sentiment_src = input.source(close, "Oscillator source",
+    tooltip = "Data source used for RSI calculation.",
+    group = "Divergence Settings")
+
+lbL = input.int(5, "Left bars", minval = 1,
+    tooltip = "Number of bars to the left used to detect a pivot.",
+    group = "Divergence Settings")
+
+lbR = input.int(5, "Right bars", minval = 1,
+    tooltip = "Number of bars to the right required to confirm a pivot.",
+    group = "Divergence Settings")
+
+show_div_mark = input.bool(true, "Show divergence markers",
+    tooltip = "Display divergence arrows on the chart.",
+    group = "Divergence Settings")
+
+min_strength_long = input.float(0.0, "Min LONG strength", step = 0.1,
+    tooltip = "Minimum bullish divergence strength required for a LONG entry.",
+    group = "Divergence Settings")
+
+min_strength_short = input.float(0.0, "Min SHORT strength", step = 0.1,
+    tooltip = "Minimum bearish divergence strength required for a SHORT entry.",
+    group = "Divergence Settings")
+
+use_ma_filter_for_div = input.bool(false, "Use MA trend filter",
+    tooltip = "Enable trend filter: LONG only above MA200, SHORT only below MA200.",
+    group = "Divergence Settings")
+
+// MA(200)
+ma = ta.sma(close, 200)
+uptrend   = ma > ma[1]
+downtrend = ma < ma[1]
+
+// RSI
+osc = ta.rsi(sentiment_src, 14)
+
+
+// ======================================================================
+// CUSTOM PIVOTS
+// ======================================================================
+osc_pivot_low  = ta.lowest(osc,  lbL + lbR + 1) == osc[lbR]  ? osc[lbR]  : na
+osc_pivot_high = ta.highest(osc, lbL + lbR + 1) == osc[lbR]  ? osc[lbR]  : na
+
+price_pivot_low  = ta.lowest(low,  lbL + lbR + 1) == low[lbR]  ? low[lbR]  : na
+price_pivot_high = ta.highest(high, lbL + lbR + 1) == high[lbR] ? high[lbR] : na
+
+prev_osc_low   = ta.valuewhen(not na(osc_pivot_low),  osc_pivot_low,  1)
+prev_osc_high  = ta.valuewhen(not na(osc_pivot_high), osc_pivot_high, 1)
+
+prev_price_low  = ta.valuewhen(not na(price_pivot_low),  price_pivot_low,  1)
+prev_price_high = ta.valuewhen(not na(price_pivot_high), price_pivot_high, 1)
+
+
+// ======================================================================
+// DIVERGENCE CONDITIONS
+// ======================================================================
+bullDiv_raw = not na(price_pivot_low) and not na(prev_price_low) and
+              not na(osc_pivot_low)  and not na(prev_osc_low) and
+              price_pivot_low <  prev_price_low and
+              osc_pivot_low   >  prev_osc_low
+
+bearDiv_raw = not na(price_pivot_high) and not na(prev_price_high) and
+              not na(osc_pivot_high)  and not na(prev_osc_high) and
+              price_pivot_high > prev_price_high and
+              osc_pivot_high   < prev_osc_high
+
+
+// ======================================================================
+// DIVERGENCE STRENGTH
+// ======================================================================
+bull_strength = bullDiv_raw ? (osc_pivot_low - prev_osc_low) - (price_pivot_low - prev_price_low) : na
+bear_strength = bearDiv_raw ? (prev_osc_high - osc_pivot_high) - (prev_price_high - price_pivot_high) : na
+
+bullDiv = bullDiv_raw and bull_strength >= min_strength_long and (not use_ma_filter_for_div or uptrend)
+bearDiv = bearDiv_raw and bear_strength >= min_strength_short and (not use_ma_filter_for_div or downtrend)
+
+
+// ======================================================================
+// VISUALIZATION: DIVERGENCES
+// ======================================================================
+plotshape(show_div_mark and bullDiv,
+     title     = "Bullish Divergence",
+     style     = shape.triangleup,
+     location  = location.belowbar,
+     color     = color.new(color.lime, 0),
+     size      = size.small)
+
+if show_div_mark and bullDiv
+    label.new(bar_index - lbR, low[lbR],
+              "Bull\n" + str.tostring(bull_strength, "#.##"),
+              style     = label.style_label_up,
+              color     = color.new(color.lime, 80),
+              textcolor = color.white)
+
+plotshape(show_div_mark and bearDiv,
+     title     = "Bearish Divergence",
+     style     = shape.triangledown,
+     location  = location.abovebar,
+     color     = color.new(color.red, 0),
+     size      = size.small)
+
+if show_div_mark and bearDiv
+    label.new(bar_index - lbR, high[lbR],
+              "Bear\n" + str.tostring(bear_strength, "#.##"),
+              style     = label.style_label_down,
+              color     = color.new(color.red, 80),
+              textcolor = color.white)
+
+
+// ======================================================================
+// MANUAL LEVEL ENTRY SYSTEM
+// ======================================================================
+manual_long_price_in = input.float(0.0, "Manual LONG price", step = 0.1,
+    tooltip = "Price level at which a LONG position will be opened.",
+    group = "Manual Levels")
+
+manual_short_price_in = input.float(0.0, "Manual SHORT price", step = 0.1,
+    tooltip = "Price level at which a SHORT position will be opened.",
+    group = "Manual Levels")
+
+reset_manual_levels = input.bool(false, "Reset manual levels",
+    tooltip = "Remove all manual levels and lines from the chart.",
+    group = "Manual Levels")
+
+var float manual_long_price  = na
+var float manual_short_price = na
+var line  long_line  = na
+var line  short_line = na
+var bool  reset_done = false
+
+if reset_manual_levels and not reset_done
+    if not na(long_line)
+        line.delete(long_line)
+        long_line := na
+    if not na(short_line)
+        line.delete(short_line)
+        short_line := na
+    manual_long_price := na
+    manual_short_price := na
+    reset_done := true
+
+if not reset_manual_levels
+    reset_done := false
+
+if use_manual_long and manual_long_price_in > 0 and not reset_manual_levels
+    if na(manual_long_price) or manual_long_price != manual_long_price_in
+        if not na(long_line)
+            line.delete(long_line)
+        manual_long_price := manual_long_price_in
+        x1 = bar_index > 5000 ? bar_index - 5000 : 0
+        long_line := line.new(x1, manual_long_price, bar_index, manual_long_price,
+                              extend = extend.right, color = color.new(color.green, 0), width = 1)
+else
+    if not na(long_line)
+        line.delete(long_line)
+        long_line := na
+    manual_long_price := na
+
+if use_manual_short and manual_short_price_in > 0 and not reset_manual_levels
+    if na(manual_short_price) or manual_short_price != manual_short_price_in
+        if not na(short_line)
+            line.delete(short_line)
+        manual_short_price := manual_short_price_in
+        x1s = bar_index > 5000 ? bar_index - 5000 : 0
+        short_line := line.new(x1s, manual_short_price, bar_index, manual_short_price,
+                               extend = extend.right, color = color.new(color.red, 0), width = 1)
+else
+    if not na(short_line)
+        line.delete(short_line)
+        short_line := na
+    manual_short_price := na
+
+if not na(long_line)
+    line.set_x2(long_line, bar_index)
+if not na(short_line)
+    line.set_x2(short_line, bar_index)
+
+
+// ======================================================================
+// RISK MANAGEMENT
+// ======================================================================
+enable_long_trades = input.bool(true, "Enable LONG trades",
+    tooltip = "Allow opening LONG positions.",
+    group = "Risk Management")
+
+enable_short_trades = input.bool(true, "Enable SHORT trades",
+    tooltip = "Allow opening SHORT positions.",
+    group = "Risk Management")
+
+enable_breakeven = input.bool(false, "Enable breakeven",
+    tooltip = "Automatically close the position at breakeven after N safety orders.",
+    group = "Risk Management")
+
+breakeven_trades = input.int(1, "Breakeven after N SO",
+    tooltip = "Number of safety orders required before breakeven activates.",
+    group = "Risk Management")
+
+price_deviation_short = input.float(3.1, "SHORT deviation (%)", step = 0.1,
+    tooltip = "Price deviation percentage used to place SHORT safety orders.",
+    group = "Risk Management") / -100
+
+price_deviation_long = input.float(3.1, "LONG deviation (%)", step = 0.1,
+    tooltip = "Price deviation percentage used to place LONG safety orders.",
+    group = "Risk Management") / 100
+
+take_profit_short = input.float(3.0, "SHORT take profit (%)", step = 0.01,
+    tooltip = "Take profit percentage for SHORT positions.",
+    group = "Risk Management") / 100
+
+take_profit_long = input.float(6.0, "LONG take profit (%)", step = 0.01,
+    tooltip = "Take profit percentage for LONG positions.",
+    group = "Risk Management") / 100
+
+first_order = roundQty(input.float(100.0, "Initial order ($)",
+    tooltip = "Size of the base order in USD.",
+    group = "Risk Management") / close)
+
+safe_order = roundQty(input.float(200.0, "Safety order ($)",
+    tooltip = "Size of the first safety order in USD.",
+    group = "Risk Management") / close)
+
+safe_order_volume_scale = input.float(1.49, "SO volume scale", step = 0.01,
+    tooltip = "Multiplier applied to each subsequent safety order volume.",
+    group = "Risk Management")
+
+safe_order_step_scale = input.float(1.37, "SO step scale", step = 0.01,
+    tooltip = "Multiplier applied to the distance between safety orders.",
+    group = "Risk Management")
+
+max_safe_order = input.int(8, "Max safety orders",
+    tooltip = "Maximum number of safety orders allowed.",
+    group = "Risk Management")
+
+fee = input.float(0.1, "Exchange fee (%)", step = 0.1,
+    tooltip = "Exchange fee used in breakeven calculations.",
+    group = "Risk Management") / 100
+
+            // === ENTRY LOGIC ===
+price_deviation = strategy.position_size <= 0 ? price_deviation_short : price_deviation_long
+
+existing_position = strategy.position_size != 0
+can_new_entry     = strategy.opentrades == 0 and not existing_position
+
+long_level_entry  = allow_level_entries and use_manual_long  and enable_long_trades  and not na(manual_long_price)  and close <= manual_long_price
+short_level_entry = allow_level_entries and use_manual_short and enable_short_trades and not na(manual_short_price) and close >= manual_short_price
+
+long_div_entry  = allow_div_entries and use_divergence and enable_long_trades  and bullDiv
+short_div_entry = allow_div_entries and use_divergence and enable_short_trades and bearDiv
+
+var float initial_order = 0.0
+
+if can_new_entry
+    if short_level_entry
+        strategy.entry("Short", strategy.short, qty = first_order)
+        initial_order := close
+        manual_short_price := na
+        if not na(short_line)
+            line.delete(short_line)
+            short_line := na
+    else if long_level_entry
+        strategy.entry("Long", strategy.long, qty = first_order)
+        initial_order := close
+        manual_long_price := na
+        if not na(long_line)
+            line.delete(long_line)
+            long_line := na
+    else if short_div_entry
+        strategy.entry("Short", strategy.short, qty = first_order)
+        initial_order := close
+    else if long_div_entry
+        strategy.entry("Long", strategy.long, qty = first_order)
+        initial_order := close
+
+
+// === SAFETY ORDERS ===
+saveorder = 0.0
+if safe_order_step_scale == 1.0
+    saveorder := initial_order - initial_order * price_deviation * safe_order_step_scale * strategy.opentrades
+else
+    saveorder := initial_order - initial_order * (
+        (price_deviation * math.pow(safe_order_step_scale, strategy.opentrades) - price_deviation)
+        / (safe_order_step_scale - 1)
+    )
+
+ns = str.tostring(strategy.opentrades)
+
+if strategy.opentrades > 0 and strategy.opentrades < max_safe_order and strategy.position_size < 0
+    so_qty = roundQty(safe_order * math.pow(safe_order_volume_scale, strategy.opentrades - 1))
+    strategy.entry("Safety " + ns, strategy.short, qty = so_qty, limit = saveorder)
+
+if strategy.opentrades > 0 and strategy.opentrades < max_safe_order and strategy.position_size > 0
+    so_qty = roundQty(safe_order * math.pow(safe_order_volume_scale, strategy.opentrades - 1))
+    strategy.entry("Safety " + ns, strategy.long, qty = so_qty, limit = saveorder)
+
+
+// === EXITS ===
+take_profit_level_short = strategy.position_avg_price * (1 - take_profit_short)
+take_profit_level_long  = strategy.position_avg_price * (1 + take_profit_long)
+
+if strategy.position_size < 0
+    strategy.exit("Exit", limit = take_profit_level_short)
+
+if strategy.position_size > 0
+    strategy.exit("Exit", limit = take_profit_level_long)
+
+plot(strategy.position_size < 0 ? take_profit_level_short : na,
+     style = plot.style_linebr, linewidth = 2, color = color.green)
+
+plot(strategy.position_size > 0 ? take_profit_level_long : na,
+     style = plot.style_linebr, linewidth = 2, color = color.green)
+
+plot(saveorder, color = strategy.position_size != 0 ? color.red : na)
+
+
+// === BREAKEVEN ===
+short_order_fee = strategy.position_avg_price * (1 - fee)
+long_order_fee  = strategy.position_avg_price * (1 + fee)
+
+plot(short_order_fee,
+     style = plot.style_linebr, linewidth = 2,
+     color = strategy.position_size < 0 ? color.rgb(63, 54, 69, 84) : na)
+
+plot(long_order_fee,
+     style = plot.style_linebr, linewidth = 2,
+     color = strategy.position_size > 0 ? color.rgb(63, 54, 69, 84) : na)
+
+if strategy.position_size < 0 and strategy.opentrades > breakeven_trades and close < short_order_fee and enable_breakeven
+    strategy.close_all("Breakeven Short")
+
+if strategy.position_size > 0 and strategy.opentrades > breakeven_trades and close > long_order_fee and enable_breakeven
+    strategy.close_all("Breakeven Long")
+
+if ta.crossunder(strategy.opentrades, 0.5)
+    strategy.close_all()
+    strategy.cancel_all()
+
+
+// === MINI TABLE ===
+if show_small_table
+    sum_qty     = strategy.position_size
+    sum_usd     = sum_qty * close
+    open_trades = strategy.opentrades
+    open_pnl    = strategy.openprofit
+    eq          = strategy.equity
+
+    var table mini = table.new(position.top_right, 5, 1, bgcolor = na)
+
+    table.cell(mini, 0, 0, "Position size: " + str.tostring(sum_qty),                   text_color = color.white)
+    table.cell(mini, 1, 0, "Position value: " + str.tostring(sum_usd,  format.mintick), text_color = color.white)
+    table.cell(mini, 2, 0, "Open trades: "   + str.tostring(open_trades),               text_color = color.white)
+    table.cell(mini, 3, 0, "PnL: "           + str.tostring(open_pnl, format.mintick),  text_color = open_pnl >= 0 ? color.green : color.red)
+    table.cell(mini, 4, 0, "Equity: "        + str.tostring(eq,       format.mintick),  text_color = color.white)
+
+View in Pine Editor・403 lines
+Use on chart
+4
+6
+871
+Trade Manager + Divergence — Smart Entry & Automated Risk Control
+
+Trade Manager + Divergence is a versatile trading strategy that combines automated RSI divergence detection, manual level entries, and a multi‑layered safety‑order system with advanced risk management.
+It is designed for traders who want precise technical entries supported by fully automated position handling.
+
+🔍 Key Features
+1. RSI Divergence Entry Module
+The strategy automatically detects:
+Bullish divergence (Higher Low on RSI + Lower Low on price)
+Bearish divergence (Lower High on RSI + Higher High on price)
+Additional options include:
+Divergence strength filtering
+MA200 trend filter
+Visual divergence markers on the chart
+
+2. Manual Entry Levels
+You can define:
+A manual LONG entry price
+A manual SHORT entry price
+Automatic removal of the level after entry
+Perfect for traders who prefer to work from key zones they identify themselves.
+
+3. Multi‑Level Safety Order System
+The strategy supports:
+Initial base order
+Up to 8 safety orders
+Volume scaling
+Step scaling
+All parameters are fully customizable:
+Order size
+Distance between orders
+Scaling coefficients
+Maximum number of safety orders
+
+4. Automated Take Profit
+Take profit is calculated from the average position price:
+Separate TP settings for LONG and SHORT
+TP levels displayed directly on the chart
+
+5. Breakeven Mechanism
+After a specified number of safety orders, the strategy can:
+Automatically close the position at breakeven
+Include exchange fees in the calculation
+
+6. Mini Status Panel
+A compact table in the top‑right corner shows:
+Position size
+Position value
+Number of open trades
+Current PnL
+Equity
+This makes monitoring your position simple and intuitive.
+
+⚙️ Clean and Organized Settings
+All inputs are grouped into clear sections:
+General
+Entry Mode
+Divergence Settings
+Manual Levels
+Risk Management
+
+Each parameter includes a tooltip explaining its purpose.
+
+📌 Disclaimer
+This script does not guarantee profits and is not financial advice.
+Always test strategies on historical data and use proper risk management.

@@ -1,0 +1,609 @@
+//@version=6
+strategy(title='Bitcoin Halving Cycle Profit - Backtesting', shorttitle='BTC Halv', overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// CONFIGURATION & INPUTS
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Backtesting Settings
+enableBacktesting = input.bool(true, "Enable Backtesting", group="Backtesting Settings")
+enableShortTrades = input.bool(true, "Enable Short Trades", group="Backtesting Settings")
+positionSize = input.float(100, "Position Size (%)", minval=10, maxval=100, group="Backtesting Settings")
+slippage = input.float(0.05, "Slippage (%)", minval=0, maxval=1, group="Backtesting Settings")
+
+// Main Settings
+showHalvingLines = input.bool(true, "Show Halving Lines", group="Display Options")
+showProfitZones = input.bool(true, "Show Profit Zones", group="Display Options")
+showBackgroundGradient = input.bool(true, "Show Background Gradient", group="Display Options")
+showLabels = input.bool(true, "Show Labels", group="Display Options")
+showDCAZone = input.bool(true, "Show DCA Zone", group="Display Options")
+showInfoTable = input.bool(true, "Show Info Table", group="Display Options")
+showTradeSignals = input.bool(true, "Show Trade Signals", group="Display Options")
+
+// Table Settings
+tablePosition = input.string("Top Right", "Table Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Table Settings")
+tableSize = input.string("Normal", "Table Size", options=["Small", "Normal", "Large"], group="Table Settings")
+tableTransparency = input.int(10, "Table Transparency", minval=0, maxval=50, group="Table Settings")
+
+// Professional Dark Theme Color Scheme
+colorHalving = input.color(color.new(#ff6b35, 0), "Halving Line Color", group="Colors")
+colorProfitStart = input.color(color.new(#4ecdc4, 0), "Profit Start Color", group="Colors")
+colorProfitEnd = input.color(color.new(#ff6b6b, 0), "Profit End Color", group="Colors")
+colorDCA = input.color(color.new(#ffd93d, 0), "DCA Color", group="Colors")
+colorBackground = input.color(color.new(#4ecdc4, 92), "Background Color", group="Colors")
+
+// Timing Settings
+profitStartWeeks = input.int(40, "Profit Start (Weeks)", minval=1, group="Timing")
+profitEndWeeks = input.int(80, "Profit End (Weeks)", minval=1, group="Timing")
+dcaStartWeeks = input.int(135, "DCA Start (Weeks)", minval=1, group="Timing")
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Get table position
+getTablePosition() =>
+    switch tablePosition
+        "Top Left" => position.top_left
+        "Top Right" => position.top_right
+        "Bottom Left" => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        => position.top_right
+
+// Get table text size
+getTableTextSize() =>
+    switch tableSize
+        "Small" => size.tiny
+        "Normal" => size.small
+        "Large" => size.normal
+        => size.small
+
+// Get table header text size
+getTableHeaderSize() =>
+    switch tableSize
+        "Small" => size.small
+        "Normal" => size.normal
+        "Large" => size.large
+        => size.normal
+
+// Calculate weeks from halving date
+weeksFromHalving(halvingTimestamp) =>
+    (time - halvingTimestamp) / (7 * 24 * 60 * 60 * 1000)
+
+// Check if current time is within profit zone
+inProfitZone(halvingTimestamp) =>
+    weeks = weeksFromHalving(halvingTimestamp)
+    weeks >= profitStartWeeks and weeks <= profitEndWeeks
+
+// Check if current time is within DCA zone  
+inDCAZone(halvingTimestamp) =>
+    weeks = weeksFromHalving(halvingTimestamp)
+    weeks >= dcaStartWeeks
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// HALVING DATES & DATA
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Historical halving dates
+halving1 = timestamp(2012, 11, 28)
+halving2 = timestamp(2016, 7, 9)
+halving3 = timestamp(2020, 5, 11)
+halving4 = timestamp(2024, 4, 19)
+
+// Store halving data
+type HalvingData
+    float timestamp
+    string label
+    string emoji
+    color lineColor
+
+halvings = array.new<HalvingData>()
+array.push(halvings, HalvingData.new(halving1, "1st Halving\n2012", "⛏️", colorHalving))
+array.push(halvings, HalvingData.new(halving2, "2nd Halving\n2016", "⛏️⛏️", colorHalving))
+array.push(halvings, HalvingData.new(halving3, "3rd Halving\n2020", "⛏️⛏️⛏️", colorHalving))
+array.push(halvings, HalvingData.new(halving4, "4th Halving\n2024", "⛏️⛏️⛏️⛏️", colorHalving))
+
+// Get current cycle status
+getCurrentCycleStatus() =>
+    var string result = "⏳ Pre-Halving Phase"
+    for i = array.size(halvings) - 1 to 0 by 1
+        halvingData = array.get(halvings, i)
+        if time >= halvingData.timestamp
+            weeks = weeksFromHalving(halvingData.timestamp)
+            if weeks <= profitStartWeeks
+                result := "🔶 Accumulation Phase"
+                break
+            else if weeks <= profitEndWeeks
+                result := "🟢 Profit Taking Phase"
+                break
+            else if weeks <= dcaStartWeeks
+                result := "⚠️ Bear Market Phase"
+                break
+            else
+                result := "🟡 DCA Phase"
+                break
+    result
+
+// Get weeks until next phase
+getWeeksUntilNextPhase() =>
+    var float result = na
+    for i = array.size(halvings) - 1 to 0 by 1
+        halvingData = array.get(halvings, i)
+        if time >= halvingData.timestamp
+            weeks = weeksFromHalving(halvingData.timestamp)
+            if weeks <= profitStartWeeks
+                result := profitStartWeeks - weeks
+                break
+            else if weeks <= profitEndWeeks
+                result := profitEndWeeks - weeks
+                break
+            else if weeks <= dcaStartWeeks
+                result := dcaStartWeeks - weeks
+                break
+            else
+                result := na
+                break
+    result
+
+// Get next phase date
+getNextPhaseDate() =>
+    var float result = na
+    for i = array.size(halvings) - 1 to 0 by 1
+        halvingData = array.get(halvings, i)
+        if time >= halvingData.timestamp
+            weeks = weeksFromHalving(halvingData.timestamp)
+            if weeks <= profitStartWeeks
+                result := halvingData.timestamp + (profitStartWeeks * 7 * 24 * 60 * 60 * 1000)
+                break
+            else if weeks <= profitEndWeeks
+                result := halvingData.timestamp + (profitEndWeeks * 7 * 24 * 60 * 60 * 1000)
+                break
+            else if weeks <= dcaStartWeeks
+                result := halvingData.timestamp + (dcaStartWeeks * 7 * 24 * 60 * 60 * 1000)
+                break
+            else
+                result := na
+                break
+    result
+
+// Get current phase name
+getCurrentPhaseName() =>
+    var string result = "Pre-Halving"
+    for i = array.size(halvings) - 1 to 0 by 1
+        halvingData = array.get(halvings, i)
+        if time >= halvingData.timestamp
+            weeks = weeksFromHalving(halvingData.timestamp)
+            if weeks <= profitStartWeeks
+                result := "Accumulation"
+                break
+            else if weeks <= profitEndWeeks
+                result := "Profit Taking"
+                break
+            else if weeks <= dcaStartWeeks
+                result := "Bear Market"
+                break
+            else
+                result := "DCA"
+                break
+    result
+
+// Get next phase name
+getNextPhaseName() =>
+    var string result = "Accumulation"
+    for i = array.size(halvings) - 1 to 0 by 1
+        halvingData = array.get(halvings, i)
+        if time >= halvingData.timestamp
+            weeks = weeksFromHalving(halvingData.timestamp)
+            if weeks <= profitStartWeeks
+                result := "Profit Taking"
+                break
+            else if weeks <= profitEndWeeks
+                result := "Bear Market"
+                break
+            else if weeks <= dcaStartWeeks
+                result := "DCA"
+                break
+            else
+                result := "Next Halving"
+                break
+    result
+
+// Get phase countdown variables
+getPhaseCountdown() =>
+    var float currentHalvingTimestamp = na
+    var float profitStartWeeksLeft = na
+    var float profitEndWeeksLeft = na
+    var float dcaStartWeeksLeft = na
+    var string profitStartDateText = "N/A"
+    var string profitEndDateText = "N/A"
+    var string dcaStartDateText = "N/A"
+    var string nextPhaseName = "N/A"
+    var string nextPhaseDateText = "N/A"
+    
+    for i = array.size(halvings) - 1 to 0 by 1
+        halvingData = array.get(halvings, i)
+        if time >= halvingData.timestamp
+            currentHalvingTimestamp := halvingData.timestamp
+            weeks = weeksFromHalving(halvingData.timestamp)
+            
+            // Calculate countdowns
+            profitStartWeeksLeft := profitStartWeeks - weeks
+            profitEndWeeksLeft := profitEndWeeks - weeks
+            dcaStartWeeksLeft := dcaStartWeeks - weeks
+            
+            // Calculate dates
+            profitStartDate = halvingData.timestamp + (profitStartWeeks * 7 * 24 * 60 * 60 * 1000)
+            profitEndDate = halvingData.timestamp + (profitEndWeeks * 7 * 24 * 60 * 60 * 1000)
+            dcaStartDate = halvingData.timestamp + (dcaStartWeeks * 7 * 24 * 60 * 60 * 1000)
+            
+            profitStartDateText := str.format("{0,date,yyyy-MM-dd}", profitStartDate)
+            profitEndDateText := str.format("{0,date,yyyy-MM-dd}", profitEndDate)
+            dcaStartDateText := str.format("{0,date,yyyy-MM-dd}", dcaStartDate)
+            
+            // Get next phase
+            if weeks <= profitStartWeeks
+                nextPhaseName := "Profit Taking"
+                nextPhaseDateText := profitStartDateText
+                break
+            else if weeks <= profitEndWeeks
+                nextPhaseName := "Bear Market"
+                nextPhaseDateText := profitEndDateText
+                break
+            else if weeks <= dcaStartWeeks
+                nextPhaseName := "DCA"
+                nextPhaseDateText := dcaStartDateText
+                break
+            else
+                nextPhaseName := "Next Halving"
+                nextPhaseDateText := "N/A"
+                break
+    
+    [profitStartWeeksLeft, profitEndWeeksLeft, dcaStartWeeksLeft, profitStartDateText, profitEndDateText, dcaStartDateText, nextPhaseName, nextPhaseDateText]
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// BACKTESTING LOGIC
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Variables for tracking signals
+var bool longSignal = false
+var bool shortSignal = false
+var bool buyAtHalving = false
+var bool buyAtDCA = false
+var bool sellAtProfitEnd = false
+var bool shortAtProfitEnd = false
+var bool coverAtDCA = false
+
+// Reset signals
+longSignal := false
+shortSignal := false
+buyAtHalving := false
+buyAtDCA := false
+sellAtProfitEnd := false
+shortAtProfitEnd := false
+coverAtDCA := false
+
+// Check for buy signals (Halving and DCA zones)
+for i = 0 to array.size(halvings) - 1
+    halvingData = array.get(halvings, i)
+    weeks = weeksFromHalving(halvingData.timestamp)
+    
+    // Buy at halving (within 1 week of halving)
+    if math.abs(weeks) < 1 and weeks >= 0
+        buyAtHalving := true
+        longSignal := true
+    
+    // Buy at DCA start
+    if math.abs(weeks - dcaStartWeeks) < 0.5
+        buyAtDCA := true
+        longSignal := true
+    
+    // Sell at profit end
+    if math.abs(weeks - profitEndWeeks) < 0.5
+        sellAtProfitEnd := true
+        if enableShortTrades
+            shortAtProfitEnd := true
+            shortSignal := true
+    
+    // Cover short at DCA (same time as long entry)
+    if math.abs(weeks - dcaStartWeeks) < 0.5 and enableShortTrades
+        coverAtDCA := true
+
+// Execute trades
+if enableBacktesting
+    // Long entries
+    if longSignal and (buyAtHalving or buyAtDCA)
+        strategy.close("SHORT", comment="Cover Short")
+        strategy.entry("LONG", strategy.long, qty=positionSize/100 * strategy.equity/close, comment=buyAtHalving ? "Buy at Halving" : "Buy at DCA")
+    
+    // Long exit and short entry
+    if sellAtProfitEnd and strategy.position_size > 0
+        strategy.close("LONG", comment="Sell at Profit End")
+        if enableShortTrades and shortAtProfitEnd
+            strategy.entry("SHORT", strategy.short, qty=positionSize/100 * strategy.equity/close, comment="Short at Profit End")
+    
+    // Short cover (already handled above with long entry)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// VISUAL ELEMENTS
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Trade signals visualization
+if showTradeSignals
+    if longSignal and buyAtHalving
+        label.new(bar_index, low, "🟢 BUY\nHALVING", style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.normal)
+    
+    if longSignal and buyAtDCA
+        label.new(bar_index, low, "🟢 BUY\nDCA", style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.normal)
+    
+    if sellAtProfitEnd
+        label.new(bar_index, high, "🔴 SELL\nPROFIT END", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.normal)
+    
+    if shortAtProfitEnd and enableShortTrades
+        label.new(bar_index, high, "🔴 SHORT\nPROFIT END", style=label.style_label_down, color=color.new(color.orange, 0), textcolor=color.white, size=size.normal)
+
+// Background gradient for profit zones
+var bool showBgGradient = false
+if showBackgroundGradient
+    for i = 0 to array.size(halvings) - 1
+        halvingData = array.get(halvings, i)
+        if inProfitZone(halvingData.timestamp)
+            showBgGradient := true
+            break
+        else
+            showBgGradient := false
+
+bgcolor(showBackgroundGradient and showBgGradient ? colorBackground : na)
+
+// Draw halving lines and labels
+var line halvingLine = na
+var label halvingLabel = na
+
+if showHalvingLines
+    for i = 0 to array.size(halvings) - 1
+        halvingData = array.get(halvings, i)
+        if time >= halvingData.timestamp and time[1] < halvingData.timestamp
+            // Elegant halving line
+            halvingLine := line.new(bar_index, low * 0.95, bar_index, high * 1.05, 
+                     xloc.bar_index, extend.both, 
+                     color=halvingData.lineColor, 
+                     style=line.style_solid, 
+                     width=2)
+            
+            // Elegant halving label
+            if showLabels
+                halvingLabel := label.new(bar_index, high, 
+                         text=halvingData.emoji + "\n" + halvingData.label, 
+                         style=label.style_label_down, 
+                         textcolor=color.white, 
+                         color=color.new(halvingData.lineColor, 10), 
+                         textalign=text.align_center, 
+                         yloc=yloc.abovebar, 
+                         size=size.normal)
+
+// Draw profit zones
+var line profitStartLine = na
+var line profitEndLine = na
+var label profitStartLabel = na  
+var label profitEndLabel = na
+
+if showProfitZones
+    for i = 0 to array.size(halvings) - 1
+        halvingData = array.get(halvings, i)
+        weeks = weeksFromHalving(halvingData.timestamp)
+        
+        // Profit start line
+        if math.abs(weeks - profitStartWeeks) < 0.5
+            profitStartLine := line.new(bar_index, low, bar_index, high, 
+                     xloc.bar_index, extend.both, 
+                     color=colorProfitStart, 
+                     style=line.style_dashed, 
+                     width=2)
+            
+            if showLabels
+                profitStartLabel := label.new(bar_index, high, 
+                         text="🟢 PROFIT START\n" + str.tostring(profitStartWeeks) + " weeks", 
+                         style=label.style_label_left, 
+                         textcolor=color.white, 
+                         color=color.new(colorProfitStart, 10), 
+                         textalign=text.align_left, 
+                         yloc=yloc.abovebar, 
+                         size=size.small)
+        
+        // Profit end line
+        if math.abs(weeks - profitEndWeeks) < 0.5
+            profitEndLine := line.new(bar_index, low, bar_index, high, 
+                     xloc.bar_index, extend.both, 
+                     color=colorProfitEnd, 
+                     style=line.style_dashed, 
+                     width=2)
+            
+            if showLabels
+                profitEndLabel := label.new(bar_index, high, 
+                         text="🔴 PROFIT END\n" + str.tostring(profitEndWeeks) + " weeks", 
+                         style=label.style_label_right, 
+                         textcolor=color.white, 
+                         color=color.new(colorProfitEnd, 10), 
+                         textalign=text.align_right, 
+                         yloc=yloc.abovebar, 
+                         size=size.small)
+
+// Draw DCA zone
+var line dcaLine = na
+var label dcaLabel = na
+
+if showDCAZone
+    for i = 0 to array.size(halvings) - 1
+        halvingData = array.get(halvings, i)
+        weeks = weeksFromHalving(halvingData.timestamp)
+        
+        // DCA start line
+        if math.abs(weeks - dcaStartWeeks) < 0.5
+            dcaLine := line.new(bar_index, low, bar_index, high, 
+                     xloc.bar_index, extend.both, 
+                     color=colorDCA, 
+                     style=line.style_dotted, 
+                     width=2)
+            
+            if showLabels
+                dcaLabel := label.new(bar_index, low, 
+                         text="🟡 DCA START\n" + str.tostring(dcaStartWeeks) + " weeks", 
+                         style=label.style_label_up, 
+                         textcolor=color.black, 
+                         color=color.new(colorDCA, 10), 
+                         textalign=text.align_center, 
+                         yloc=yloc.belowbar, 
+                         size=size.small)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// PROFESSIONAL DARK THEME TABLE - ALWAYS VISIBLE
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Get position variables
+var string currentPosition = "FLAT"
+var color positionColor = color.new(#cccccc, 0)
+var string positionEmoji = "⚪"
+
+// Update position variables
+currentPosition := strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+positionColor := strategy.position_size > 0 ? color.new(#00ff88, 0) : strategy.position_size < 0 ? color.new(#ff4444, 0) : color.new(#cccccc, 0)
+positionEmoji := strategy.position_size > 0 ? "🟢" : strategy.position_size < 0 ? "🔴" : "⚪"
+
+// Get phase countdown data
+[profitStartWeeksLeft, profitEndWeeksLeft, dcaStartWeeksLeft, profitStartDateText, profitEndDateText, dcaStartDateText, nextPhaseName, nextPhaseDateText] = getPhaseCountdown()
+
+if showInfoTable and (barstate.islast or barstate.isconfirmed)
+    // Professional Dark Theme Colors
+    darkBg = color.new(#1a1a1a, tableTransparency)
+    headerBg = color.new(#2d2d30, tableTransparency)
+    accentBg = color.new(#3c3c3c, tableTransparency)
+    borderColor = color.new(#555555, 30)
+    
+    // Create compact professional table
+    var table infoTable = na
+    infoTable := table.new(getTablePosition(), 3, 12, bgcolor=darkBg, border_width=1, border_color=borderColor, frame_width=2, frame_color=color.new(#4a9eff, 40))
+
+    // Header
+    table.cell(infoTable, 0, 0, "₿ BTC HALVING CYCLE", text_color=color.new(#4a9eff, 0), text_size=getTableHeaderSize(), bgcolor=headerBg)
+    table.cell(infoTable, 1, 0, "STRATEGY DASHBOARD", text_color=color.new(#ffd700, 0), text_size=getTableHeaderSize(), bgcolor=headerBg)
+    table.cell(infoTable, 2, 0, "", text_color=color.white, text_size=getTableHeaderSize(), bgcolor=headerBg)
+
+    // Current Phase
+    currentPhaseName = getCurrentPhaseName()
+    table.cell(infoTable, 0, 1, "CURRENT PHASE", text_color=color.new(#cccccc, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 1, 1, currentPhaseName, text_color=color.new(#ffd700, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 2, 1, nextPhaseDateText, text_color=color.new(#ffffff, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+
+    // Net Profit, Win Rate, Total Trades
+    table.cell(infoTable, 0, 2, "NET PROFIT", text_color=color.new(#cccccc, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+    table.cell(infoTable, 1, 2, str.tostring(strategy.netprofit, "#,###.##"), text_color=strategy.netprofit >= 0 ? color.new(#00ff88, 0) : color.new(#ff4444, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+    table.cell(infoTable, 2, 2, "TOTAL: " + str.tostring(strategy.closedtrades) + " trades", text_color=color.new(#ffffff, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+
+    // Win Rate, Sharpe Ratio, Average Trade
+    table.cell(infoTable, 0, 3, "WIN RATE", text_color=color.new(#cccccc, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 1, 3, str.tostring(strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0, "#.##") + "%", text_color=color.new(#00ff88, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    avgTrade = strategy.closedtrades > 0 ? strategy.netprofit / strategy.closedtrades : 0
+    table.cell(infoTable, 2, 3, "AVG: " + str.tostring(avgTrade, "#.##"), text_color=avgTrade >= 0 ? color.new(#00ff88, 0) : color.new(#ff4444, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+
+    // Maximum Drawdown
+    table.cell(infoTable, 0, 4, "MAX DRAWDOWN", text_color=color.new(#cccccc, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+    maxDD = strategy.max_drawdown > 0 ? strategy.max_drawdown / strategy.initial_capital * 100 : 0
+    table.cell(infoTable, 1, 4, str.tostring(maxDD, "#.##") + "%", text_color=color.new(#ff6b6b, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+    table.cell(infoTable, 2, 4, "EQUITY: " + str.tostring(strategy.equity, "#,###"), text_color=color.new(#ffffff, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+
+    // Phase Countdown
+    table.cell(infoTable, 0, 5, "PHASE", text_color=color.new(#4a9eff, 0), text_size=getTableHeaderSize(), bgcolor=headerBg)
+    table.cell(infoTable, 1, 5, "COUNTDOWN", text_color=color.new(#4a9eff, 0), text_size=getTableHeaderSize(), bgcolor=headerBg)
+    table.cell(infoTable, 2, 5, "DATE", text_color=color.new(#4a9eff, 0), text_size=getTableHeaderSize(), bgcolor=headerBg)
+
+    // Profit Start
+    table.cell(infoTable, 0, 6, "🟢 PROFIT START", text_color=color.new(colorProfitStart, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 1, 6, profitStartWeeksLeft > 0 ? str.tostring(math.round(profitStartWeeksLeft, 1)) + "w" : "ACTIVE", text_color=profitStartWeeksLeft > 0 ? color.new(#ffffff, 0) : color.new(#00ff88, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 2, 6, profitStartDateText, text_color=color.new(#ffffff, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+
+    // Profit End
+    table.cell(infoTable, 0, 7, "🔴 PROFIT END", text_color=color.new(colorProfitEnd, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+    table.cell(infoTable, 1, 7, profitEndWeeksLeft > 0 ? str.tostring(math.round(profitEndWeeksLeft, 1)) + "w" : "EXPIRED", text_color=profitEndWeeksLeft > 0 ? color.new(#ffffff, 0) : color.new(#ff4444, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+    table.cell(infoTable, 2, 7, profitEndDateText, text_color=color.new(#ffffff, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+
+    // DCA Start
+    table.cell(infoTable, 0, 8, "🟡 DCA START", text_color=color.new(colorDCA, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 1, 8, dcaStartWeeksLeft > 0 ? str.tostring(math.round(dcaStartWeeksLeft, 1)) + "w" : "ACTIVE", text_color=dcaStartWeeksLeft > 0 ? color.new(#ffffff, 0) : color.new(#ffd700, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 2, 8, dcaStartDateText, text_color=color.new(#ffffff, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+
+    // Strategy Rules Header
+    table.cell(infoTable, 0, 9, "PHASE", text_color=color.new(#4a9eff, 0), text_size=getTableHeaderSize(), bgcolor=headerBg)
+    table.cell(infoTable, 1, 9, "TIMING", text_color=color.new(#4a9eff, 0), text_size=getTableHeaderSize(), bgcolor=headerBg)
+    table.cell(infoTable, 2, 9, "ACTION", text_color=color.new(#4a9eff, 0), text_size=getTableHeaderSize(), bgcolor=headerBg)
+
+    // Strategy Rules
+    table.cell(infoTable, 0, 10, "⛏️ HALVING", text_color=color.new(colorHalving, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 1, 10, "At Event", text_color=color.new(#ffffff, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 2, 10, "🟢 BUY", text_color=color.new(#00ff88, 0), text_size=getTableTextSize(), bgcolor=accentBg)
+    table.cell(infoTable, 0, 11, "POSITION", text_color=color.new(#cccccc, 0), text_size=getTableTextSize(), bgcolor=headerBg)
+    table.cell(infoTable, 1, 11, currentPosition, text_color=positionColor, text_size=getTableTextSize(), bgcolor=headerBg)
+    table.cell(infoTable, 2, 11, positionEmoji, text_color=positionColor, text_size=getTableTextSize(), bgcolor=headerBg)
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Enhanced alerts with trade signals
+for i = 0 to array.size(halvings) - 1
+    halvingData = array.get(halvings, i)
+    weeks = weeksFromHalving(halvingData.timestamp)
+    
+    if math.abs(weeks) < 0.1 and weeks >= 0
+        alert("🟢 Bitcoin Halving Cycle: BUY SIGNAL at halving event!", alert.freq_once_per_bar)
+    
+    if math.abs(weeks - profitEndWeeks) < 0.1
+        alert("🔴 Bitcoin Halving Cycle: SELL SIGNAL - Last call for profit taking! (" + str.tostring(profitEndWeeks) + " weeks post-halving)", alert.freq_once_per_bar)
+    
+    if math.abs(weeks - dcaStartWeeks) < 0.1
+        alert("🟡 Bitcoin Halving Cycle: BUY SIGNAL - DCA accumulation phase has begun! (" + str.tostring(dcaStartWeeks) + " weeks post-halving)", alert.freq_once_per_bar)
+
+View in Pine Editor・562 lines
+Use on chart
+5
+6
+1 604
+
+A systematic, data-driven trading strategy based on Bitcoin's 4-year halving cycles. This strategy capitalizes on historical price patterns that emerge around halving events, providing clear entry and exit signals for both accumulation and profit-taking phases.
+
+🎯 Strategy Overview
+This automated trading system identifies optimal buy and sell zones based on the predictable Bitcoin halving cycle that occurs approximately every 4 years. By analyzing historical data from all previous halvings (2012, 2016, 2020, 2024), the strategy pinpoints high-probability trading opportunities.
+
+📊 Key Features
+Automated Signal Generation: Buy signals at halving events and DCA zones, sell signals at profit-taking peaks
+Multi-Phase Analysis: Tracks Accumulation, Profit Taking, Bear Market, and DCA phases
+Visual Dashboard: Real-time performance metrics, phase countdown, and position tracking
+Backtesting Enabled: Comprehensive historical performance analysis with configurable parameters
+Risk Management: Built-in position sizing, slippage control, and optional short trading
+
+⚙️ Strategy Logic
+Buy Signals:
+At halving event (Week 0)
+DCA zone entry (Week 135 post-halving)
+Sell Signals:
+Profit-taking zone (Week 80 post-halving)
+Optional short position entry for advanced traders
+
+📈 Performance Highlights
+Captures major bull run profits while avoiding prolonged bear markets
+Clear visual indicators for all phases and transitions
+Customizable timing parameters for personalized risk tolerance
+Professional dashboard with live P&L, win rate, and drawdown metrics
+
+🛠️ Customization Options
+Adjustable phase timing (profit start/end, DCA timing)
+Position sizing control
+Enable/disable short trading
+Visual customization (colors, labels, zones)
+Table positioning and transparency
+
+⚠️ Risk Disclosure
+Past performance does not guarantee future results. This strategy is based on historical halving cycle patterns and should be used as part of a comprehensive trading plan. Always conduct your own research and consider your risk tolerance before trading.
+
+💡 Ideal For
+Long-term Bitcoin investors seeking systematic entry/exit points
+Swing traders capitalizing on multi-month trends
+Portfolio managers implementing cycle-based allocation strategies

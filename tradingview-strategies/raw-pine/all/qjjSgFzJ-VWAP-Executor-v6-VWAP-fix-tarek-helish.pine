@@ -1,0 +1,139 @@
+//@version=6
+strategy("XAUUSD VWAP Executor — v6 (VWAP fix)",
+     overlay=true,
+     process_orders_on_close=true,
+     calc_on_every_tick=false)
+
+// ===== الإعدادات =====
+enableTrading = input.bool(true, "تنفيذ أوامر (تشغيل/إيقاف)")
+showSignals   = input.bool(true, "إظهار أسهم الإشارات")
+showHint      = input.bool(true, "إظهار تنبيه عند غياب الـ Volume")
+
+tfTrend       = input.timeframe("5", "إطار فلتر الاتجاه (EMA/ADX)")
+emaLen        = input.int(50,  "طول EMA على إطار الاتجاه", minval=1)
+
+atrLen        = input.int(14, "ATR Length", minval=1)
+atrStopMult   = input.float(0.60, "وقف: ×ATR", step=0.05)
+atrTPMult     = input.float(0.50, "هدف: ×ATR", step=0.05)
+bandATRmult   = input.float(0.20, "أقصى بُعد عن VWAP: ×ATR", step=0.05)
+
+useRSI        = input.bool(true, "فلتر RSI(2)")
+rsiLen        = input.int(2, "RSI Length", minval=1)
+rsiBuyMax     = input.int(5,  "RSI(2) ≤ (للشراء)", minval=1, maxval=50)
+rsiSellMin    = input.int(95, "RSI(2) ≥ (للبيع)",  minval=50, maxval=100)
+
+useADX        = input.bool(true, "فلتر ADX (على إطار الاتجاه)")
+adxLen        = input.int(14, "DI Length", minval=1)
+adxSmoothLen  = input.int(14, "ADX Smoothing", minval=1)
+adxMin        = input.float(18, "ADX ≥", step=0.5)
+
+session1      = input.session("1000-1200", "جلسة 1 (بتوقيت بورصة الرمز)")
+session2      = input.session("1630-1800", "جلسة 2 (بتوقيت بورصة الرمز)")
+
+// ===== المؤشرات =====
+atr   = ta.atr(atrLen)
+rsi2  = ta.rsi(close, rsiLen)
+emaTrend  = request.security(syminfo.tickerid, tfTrend, ta.ema(close, emaLen))
+
+// فحص وجود Volume (بعض رموز الذهب/الفوركس لا تُعيد حجماً)
+hasVol = not na(volume) and volume > 0
+vwapVal = hasVol ? ta.vwap(hlc3) : na
+
+// ADX عبر DMI على إطار الاتجاه
+f_adx(_diLen, _smoothLen) =>
+    [_, _, _adx] = ta.dmi(_diLen, _smoothLen)
+    _adx
+adxTF = request.security(syminfo.tickerid, tfTrend, f_adx(adxLen, adxSmoothLen))
+
+// ===== فلاتر وإشارات =====
+inSess    = not na(time(timeframe.period, session1)) or not na(time(timeframe.period, session2))
+adxOK     = not useADX or adxTF >= adxMin
+nearVWAP  = math.abs(close - vwapVal) <= atr * bandATRmult
+longTrend  = close >  emaTrend
+shortTrend = close <  emaTrend
+longRSIok  = (not useRSI) or (rsi2 <= rsiBuyMax)
+shortRSIok = (not useRSI) or (rsi2 >= rsiSellMin)
+
+longSigRaw  = hasVol and inSess and adxOK and longTrend  and nearVWAP and close > vwapVal and longRSIok
+shortSigRaw = hasVol and inSess and adxOK and shortTrend and nearVWAP and close < vwapVal and shortRSIok
+longSig  = longSigRaw  and barstate.isconfirmed
+shortSig = shortSigRaw and barstate.isconfirmed
+
+// ===== تنفيذ الأوامر =====
+flat = strategy.position_size == 0
+if enableTrading and flat and longSig and not shortSig
+    strategy.entry("L", strategy.long)
+if enableTrading and flat and shortSig and not longSig
+    strategy.entry("S", strategy.short)
+
+if strategy.position_size > 0
+    longStop = strategy.position_avg_price - atr * atrStopMult
+    longTP   = strategy.position_avg_price + atr * atrTPMult
+    strategy.exit("L-Exit", from_entry="L", stop=longStop, limit=longTP)
+if strategy.position_size < 0
+    shortStop = strategy.position_avg_price + atr * atrStopMult
+    shortTP   = strategy.position_avg_price - atr * atrTPMult
+    strategy.exit("S-Exit", from_entry="S", stop=shortStop, limit=shortTP)
+
+// ===== رسومات/تنبيهات =====
+plot(emaTrend, "EMA(Trend TF)", color=color.orange, linewidth=2)
+plot(vwapVal,  "VWAP",          color=color.new(color.blue, 0), linewidth=2)
+
+plotshape(series=showSignals and longSig,  title="VWAP Long",
+     style=shape.triangleup,   location=location.belowbar, size=size.tiny,
+     text="BUY",  color=color.new(color.green,0))
+plotshape(series=showSignals and shortSig, title="VWAP Short",
+     style=shape.triangledown, location=location.abovebar, size=size.tiny,
+     text="SELL", color=color.new(color.red,0))
+
+// تلميح في حال عدم توفر الـ Volume (بدون if محلّي)
+plotshape(series=showHint and not hasVol and barstate.islast, title="VWAP Hint",
+     style=shape.labeldown, location=location.abovebar, size=size.small,
+     text="VWAP يحتاج Volume\nجرّب OANDA/FOREXCOM\nواستخدم فريم داخل اليوم",
+     color=color.new(color.orange, 0), textcolor=color.black)
+
+alertcondition(longSig,  title="VWAP Long",  message="VWAP Long on {{ticker}} {{interval}}")
+alertcondition(shortSig, title="VWAP Short", message="VWAP Short on {{ticker}} {{interval}}")
+
+View in Pine Editor・96 lines
+Use on chart
+2
+2
+1 292
+Practical scalping plan with high-rate (sometimes reaching 70–85% in a quiet market)
+
+Concept: “VWAP bounce with a clear trend.”
+
+Tools: 1–3-minute chart for entry, 5-minute trend filter, VWAP, EMA(50) on 5M, ATR(14) on 1M, volume.
+
+When to trade: London session or early New York session; avoid 10–15 minutes before/after high-impact news.
+
+Entry rules (buy for example):
+
+Trend: Price is above the EMA(50) on 5M and has an upward trend.
+
+Entry zone: First bounce to VWAP (or a ±1 standard deviation channel around it).
+
+Signal: Bullish rejection/engulfing candle on 1M with increasing volume, and RSI(2) has exited oversold territory (optional).
+
+Order: Entry after the confirmation candle closes or a limit close to VWAP.
+
+Trade Management:
+
+Stop: Below the bounce low or 0.6xATR(1M) (strongest).
+
+Target: 0.4–0.7xATR(1M) or the previous micro-high (small return to increase success rate).
+
+Trigger: Move the stop to breakeven after +0.25R; close manually if the 1M candle closes strongly against you.
+
+Filter: Do not trade if the spread widens, or the price "saws" around VWAP without a trend.
+
+Sell against the rules in a downtrend.
+
+Why this plan raises the heat-rate? You buy a "small discount" within an existing trend and near the institutional average price (VWAP), with a small target price.
+
+مواقعي شركة الماسة للخدمات المنزلية
+
+شركة تنظيف بالرياض 
+
+نقل عفش بالرياض

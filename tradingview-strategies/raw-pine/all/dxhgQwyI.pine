@@ -1,0 +1,252 @@
+//@version=5
+strategy("Golden Vector Trend Orchestrator (GVTO))", shorttitle="GVTO_Full", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=2, currency=currency.USD)
+
+// ==========================================
+// ─── 1. ส่วนตั้งค่าพารามิเตอร์ (INPUTS) ───
+// ==========================================
+
+// กลุ่มตั้งค่า Supertrend
+grp_st      = "Supertrend Settings (Trigger)"
+st_atr_len  = input.int(14, minval=1, title="ATR Length", group=grp_st)
+st_factor   = input.float(3.5, minval=0.1, step=0.1, title="ATR Multiplier", group=grp_st)
+
+// กลุ่มตั้งค่า EMA
+grp_ema     = "EMA Filter (Structure)"
+ema_len     = input.int(200, minval=1, title="EMA Length", group=grp_ema)
+use_ema     = input.bool(true, title="เปิดใช้ EMA Filter?", group=grp_ema)
+
+// กลุ่มตั้งค่า ADX
+grp_adx     = "ADX Filter (Strength)"
+adx_len     = input.int(14, minval=1, title="ADX Length", group=grp_adx)
+adx_thresh  = input.int(25, minval=1, title="ADX Threshold", group=grp_adx)
+adx_smooth  = input.int(14, minval=1, title="ADX Smoothing", group=grp_adx)
+
+// กลุ่มแสดงผล
+grp_disp    = "Visuals"
+show_table  = input.bool(true, title="แสดงตารางข้อมูล", group=grp_disp)
+
+// ==========================================
+// ─── 2. การคำนวณ (CALCULATIONS) ───
+// ==========================================
+
+// --- A. คำนวณ EMA ---
+ema_macro = ta.ema(close, ema_len)
+
+// --- B. คำนวณ Supertrend ---
+[st_value, st_direction] = ta.supertrend(st_factor, st_atr_len)
+
+// --- C. คำนวณ ADX และ DMI ---
+[di_plus, di_minus, adx_value] = ta.dmi(adx_len, adx_smooth)
+
+// ==========================================
+// ─── 3. ตรรกะกลยุทธ์ (STRATEGY LOGIC) ───
+// ==========================================
+
+is_st_bullish = st_direction == -1
+is_st_bearish = st_direction == 1
+
+filter_long = use_ema? (close > ema_macro) : true
+filter_short = use_ema? (close < ema_macro) : true
+
+filter_adx = adx_value >= adx_thresh
+
+momentum_long = di_plus > di_minus
+momentum_short = di_minus > di_plus
+
+// --- เงื่อนไขการเข้าออเดอร์ (Master Entry) ---
+long_condition = is_st_bullish and filter_long and filter_adx and momentum_long
+short_condition = is_st_bearish and filter_short and filter_adx and momentum_short
+
+// --- ตัวกระตุ้นสัญญาณ (Trigger) ---
+// [แก้ไข] เติม [1] เพื่อเช็ค Crossover และป้องกันสัญญาณหลอก
+long_trigger = long_condition and not long_condition[1]
+short_trigger = short_condition and not short_condition[1]
+
+// ==========================================
+// ─── 4. การส่งคำสั่งซื้อขาย (EXECUTION) ───
+// ==========================================
+
+if (long_trigger)
+    strategy.entry("Long Run", strategy.long, comment="GOLD BUY")
+
+if (short_trigger)
+    strategy.entry("Short Run", strategy.short, comment="GOLD SELL")
+
+// --- การออกออเดอร์ (Exit Strategy) ---
+if (is_st_bearish and strategy.position_size > 0)
+    strategy.close("Long Run", comment="Exit Long")
+
+if (is_st_bullish and strategy.position_size < 0)
+    strategy.close("Short Run", comment="Exit Short")
+
+// ==========================================
+// ─── 5. การคำนวณกำไร/ขาดทุน (P/L Logic) ───
+// ==========================================
+
+// ตัวแปรสำหรับเก็บค่า P/L %
+float pnl_pct = 0.0
+string pnl_text = "Waiting..."
+color pnl_bg = color.gray
+
+// เช็คว่ามีสถานะอยู่ไหม
+if strategy.position_size != 0
+    // ราคาทุนเฉลี่ย
+    float entry_price = strategy.position_avg_price
+    
+    // คำนวณ % ตามหน้าเทรด (Long หรือ Short)
+    if strategy.position_size > 0 // ถือ Long
+        pnl_pct := ((close - entry_price) / entry_price) * 100
+        pnl_text := "L: " + str.tostring(pnl_pct, "#.00") + "%"
+    else // ถือ Short
+        pnl_pct := ((entry_price - close) / entry_price) * 100
+        pnl_text := "S: " + str.tostring(pnl_pct, "#.00") + "%"
+        
+    // เลือกสีพื้นหลัง (กำไร=เขียว, ขาดทุน=แดง)
+    pnl_bg := pnl_pct > 0 ? color.green : color.red
+else
+    pnl_text := "Waiting..."
+    pnl_bg := color.gray
+
+// ==========================================
+// ─── 6. การแสดงผล (VISUALIZATION) ───
+// ==========================================
+
+// วาดเส้น
+plot(use_ema? ema_macro : na, color=color.new(color.orange, 0), title="200 EMA", linewidth=2)
+plot(st_value, color = st_direction == -1? color.green : color.red, linewidth=2, title="Supertrend")
+
+// --- ป้ายบอกสัญญาณ (Labels) แบบไม่ซ้ำ ---
+// จะโชว์ป้ายก็ต่อเมื่อเกิดสัญญาณ AND เรายังไม่ได้ถือสถานะฝั่งนั้น
+plotshape(long_trigger and strategy.position_size <= 0, title="Buy Label", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, text="BUY", size=size.small)
+plotshape(short_trigger and strategy.position_size >= 0, title="Sell Label", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, text="SELL", size=size.small)
+
+// ระบายสีพื้นหลัง
+p1 = plot(st_value, display=display.none)
+p2 = plot(close, display=display.none)
+fill(p1, p2, color = st_direction == -1? color.new(color.green, 90) : color.new(color.red, 90), title="Trend Background")
+
+// เปลี่ยนสีแท่งเทียน
+barcolor(is_st_bullish? color.green : is_st_bearish? color.red : na)
+
+// --- Dashboard (เพิ่มแถว P/L) ---
+if show_table
+    // สร้างตาราง 2 คอลัมน์ 5 แถว (เพิ่มมา 1 แถว)
+    var tbl = table.new(position.top_right, 2, 5, frame_color=color.gray, frame_width=1, border_width=1, border_color=color.gray)
+    if barstate.islast
+        // Header
+        table.cell(tbl, 0, 0, "GVTO Monitor", text_color=color.white, bgcolor=color.black)
+        table.cell(tbl, 1, 0, "Status", text_color=color.white, bgcolor=color.black)
+        
+        // Row 1: Trend
+        table.cell(tbl, 0, 1, "Trend", bgcolor=color.gray)
+        table.cell(tbl, 1, 1, is_st_bullish? "BULLISH" : "BEARISH", bgcolor=is_st_bullish? color.green : color.red)
+        
+        // Row 2: Strength
+        table.cell(tbl, 0, 2, "ADX Power", bgcolor=color.gray)
+        table.cell(tbl, 1, 2, str.tostring(adx_value, "#.##"), bgcolor=filter_adx? color.green : color.orange)
+        
+        // Row 3: EMA Zone
+        table.cell(tbl, 0, 3, "Zone", bgcolor=color.gray)
+        table.cell(tbl, 1, 3, close > ema_macro? "BUY ZONE" : "SELL ZONE", bgcolor=close > ema_macro? color.green : color.red)
+
+        // Row 4: P/L (New!)
+        table.cell(tbl, 0, 4, "Current P/L", bgcolor=color.gray, text_color=color.white)
+        table.cell(tbl, 1, 4, pnl_text, bgcolor=pnl_bg, text_color=color.white)
+
+View in Pine Editor・154 lines
+Use on chart
+6
+2
+8
+2
+10 411
+Golden Vector Trend Orchestrator (GVTO) is a composite trend-following strategy specifically engineered for XAUUSD (Gold) and volatile assets on H4 (4-Hour) and Daily timeframes.
+
+This script aims to solve a common problem in trend trading: "Whipsaws in Sideways Markets." Instead of relying on a single indicator, GVTO employs a Multi-Factor Confluence System that filters out low-probability trades by requiring alignment across Trend Structure, Momentum, and Volatility.
+
+🛠 Methodology & Logic
+The strategy executes trades only when four distinct technical conditions overlap (Confluence). If any single condition is not met, the trade is filtered out to preserve capital.
+
+1. Market Structure Filter (200 EMA)
+
+Indicator: Exponential Moving Average (Length 200).
+
+Logic: The 200 EMA acts as the baseline for the long-term trend regime.
+
+Bullish Regime: Price must close above the 200 EMA.
+
+Bearish Regime: Price must close below the 200 EMA.
+
+Purpose: Prevents counter-trend trading against the macro direction.
+
+2. Signal Trigger & Trailing Stop (Supertrend)
+
+Indicator: Supertrend (ATR Length 14, Factor 3.5).
+
+Logic: Uses Average True Range (ATR) to detect trend reversals while accounting for volatility.
+
+Purpose: Provides the specific entry signal and acts as a dynamic trailing stop-loss to let profits run while cutting losses when the trend invalidates.
+
+3. Volatility Gatekeeper (ADX Filter)
+
+Indicator: Average Directional Index (Length 14).
+
+Threshold: > 25.
+
+Logic: A high ADX value indicates a strong trend presence, regardless of direction.
+
+Purpose: This is the most critical filter. It prevents the strategy from entering trades during "choppy" or ranging markets (consolidation zones) where trend-following systems typically fail.
+
+4. Momentum Confirmation (DMI)
+
+Indicator: Directional Movement Index (DI+ and DI-).
+
+Logic: Checks if the buying pressure (DI+) is physically stronger than selling pressure (DI-), or vice versa.
+
+Purpose: Ensures that the price movement is backed by genuine momentum, not just a momentary price spike.
+
+📋 How to Use This Strategy
+🟢 LONG (BUY) Setup
+A Buy signal is generated only when ALL of the following occur simultaneously:
+
+Price Action: Price closes ABOVE the 200 EMA (Orange Line).
+
+Trigger: Supertrend flips to GREEN (Bullish).
+
+Strength: ADX is greater than 25 (Strong Trend).
+
+Momentum: DI+ (Plus Directional Indicator) is greater than DI- (Minus).
+
+🔴 SHORT (SELL) Setup
+A Sell signal is generated only when ALL of the following occur simultaneously:
+
+Price Action: Price closes BELOW the 200 EMA (Orange Line).
+
+Trigger: Supertrend flips to RED (Bearish).
+
+Strength: ADX is greater than 25 (Strong Trend).
+
+Momentum: DI- (Minus Directional Indicator) is greater than DI+ (Plus).
+
+🛡 Exit Strategy
+Stop Loss / Take Profit: The strategy utilizes the Supertrend Line as a dynamic Trailing Stop.
+
+Exit Long: When Supertrend turns Red.
+
+Exit Short: When Supertrend turns Green.
+
+Note: Traders can also use the real-time P/L Dashboard included in the script to manually secure profits based on their personal Risk:Reward ratio.
+
+📊 Included Features
+Real-Time P/L Dashboard: A table in the top-right corner displays the current trend status, ADX strength, and the Unrealized Profit/Loss % of the current active position.
+
+Smart Labeling: Buy/Sell labels are coded to appear only on the initial entry trigger. They do not repaint and do not spam the chart if the trend continues (no pyramiding visualization).
+
+Visual Aids: Background color changes (Green/Red) to visually represent the active trend based on the Supertrend status.
+
+⚠️ Risk Warning & Best Practices
+Asset Class: Optimized for XAUUSD (Gold) due to its high volatility nature. It also works well on Crypto (BTC, ETH) and Major Forex Pairs.
+
+Timeframe: Highly recommended for H4 (4 Hours) or D1 (Daily). Using this on lower timeframes (M5, M15) may result in false signals due to market noise.
+
+News Events: Automated strategies cannot predict economic news (CPI, NFP). Exercise caution or pause trading during high-impact economic releases.

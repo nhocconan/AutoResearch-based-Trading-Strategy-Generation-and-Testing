@@ -1,0 +1,84 @@
+//@version=5
+strategy("Pivot Point Breakout", "PPB", true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, process_orders_on_close=true)
+
+// Constants
+
+var L_PIVOT_HIGH = "Pivot high"
+var L_PIVOT_LOW = "Pivot low"
+
+var LEFT = "Left"
+var RIGHT = "Right"
+
+var BOTH = "Both"
+var LONG = "Long"
+var SHORT = "Short"
+
+var DATES = "Date selection"
+var DATES_TOOLTIP = "Change it to limit the trades for the given time interval.\n\nLeave it to disable this behaviour."
+
+// Inputs
+
+var orderDirection = input.string(LONG, "Order direction", options=[BOTH, LONG, SHORT])
+
+var leftHigh = input.int(3, LEFT, minval=0, inline=L_PIVOT_HIGH, group=L_PIVOT_HIGH)
+var rightHigh = input.int(3, RIGHT, minval=0, inline=L_PIVOT_HIGH, group=L_PIVOT_HIGH)
+
+var leftLow = input.int(3, LEFT, minval=0, inline=L_PIVOT_LOW, group=L_PIVOT_LOW)
+var rightLow = input.int(3, RIGHT, minval=0, inline=L_PIVOT_LOW, group=L_PIVOT_LOW)
+
+var startDate = input.time(0, "Starting date", group=DATES)
+var endDate = input.time(0, "Final date", group=DATES)
+
+//
+
+var float lastHigh = na
+var float lastLow = na
+
+lowPivot = ta.pivotlow(leftLow, rightLow)
+highPivot = ta.pivothigh(leftHigh, rightHigh)
+
+f_updateLevels(pivot_) => 
+    var float pastLevel = na
+    
+    if not na(pivot_)
+        pastLevel := pivot_
+    
+    pastLevel
+    
+lastLow := f_updateLevels(lowPivot)
+lastHigh := f_updateLevels(highPivot)
+
+// Validates the time interval
+
+validTrade = (startDate == 0 ? true : time >= startDate) and
+ (endDate == 0 ? true : time <= endDate)
+
+// Orders
+
+if high > lastHigh
+    strategy.entry("Long", strategy.long, when=orderDirection != SHORT and validTrade)
+    strategy.close("Short", when=orderDirection == SHORT)
+if low < lastLow
+    strategy.entry("Short", strategy.short, when=orderDirection != LONG and validTrade)
+    strategy.close("Long", when=orderDirection == LONG)
+    
+// Plots
+
+plot(lastLow, "Last pivot low", color.red, offset=1)
+plot(lastHigh, "Last pivot high", color.teal, offset=1)
+
+plotshape(lowPivot, "Pivot low", location=location.belowbar, color=color.red, offset=-rightLow)
+plotshape(highPivot, "Pivot high", color=color.teal, offset=-rightHigh)
+
+View in Pine Editor・74 lines
+Use on chart
+2
+2
+0
+1
+7 793
+This is a strategy taken from Perry Kaufman's book, Trading Systems and Methods.
+
+Just like the title says, it's a breakout strategy. It works by buying when the current high is higher than the last pivot high, and selling when the low is lower than the last pivot low.
+
+It does not have a good success probability, and relies on the good reward to risk ratio. Definitely not recommended for someone with weak hands.

@@ -1,0 +1,279 @@
+//@version=5
+strategy("REVELATIONS (VoVix - PoC)", default_qty_type=strategy.fixed, initial_capital=10000, overlay=true, pyramiding=1)
+
+// === 📈 Main Signal Parameters ===
+group_signal = "📈 Main Signal Params"
+atr_fast = input.int(14, title="⚡ ATR Fast Length", group=group_signal, tooltip="ATR Fast: Short-term period for measuring fast volatility. Lower = more sensitive, higher = smoother.")
+atr_slow = input.int(21, title="⚡ ATR Slow Length", group=group_signal, tooltip="ATR Slow: Used as baseline for regime shift via fast-vs-slow relationship.")
+atr_stdev = input.int(12, title="⚡ ATR StdDev Window", group=group_signal, tooltip="Standard deviation window for ATR, used to normalize VoVix spikes.")
+vrt = input.float(0.5, title="⚡ Base Spike Threshold", group=group_signal, tooltip="Sets minimum normalized spike for event. Higher = stricter, fewer triggers; lower = more signals.")
+super_mult = input.float(1.5, title="⚡ Super Spike Multiplier", group=group_signal, tooltip="Only enter at spikes that are this multiple over local average. Raise for more selectivity.")
+
+// === ⚙️ Regime & MultiTF ===
+group_regime = "⚙️ Regime & MultiTF"
+regime_len = input.int(8, title="⚙️ Regime Window (Bars)", group=group_regime, tooltip="Count of bars for regime summing. Controls smoothing of regime index.")
+regime_thresh = input.int(3, title="⚙️ Regime Event Count", group=group_regime, tooltip="Spike count threshold in regime window to allow trades. Higher = only high-stress clusters trade.")
+local_n = input.int(3, title="⚙️ Local Window for Extremes", group=group_regime, tooltip="Bars to confirm local spike maxima. Higher = more filtered, lower = faster reacting.")
+higher_tf = input.timeframe("45", title="⚙️ HTF Confirm (e.g. '45')", group=group_regime, tooltip="Require regime confirmation from this higher timeframe for confirmation.")
+
+// === 🎛️ Adaptive Sizing ===
+group_size = "🎛️ Adaptive Sizing"
+max_qty = input.float(2, title="📈 Max Contracts (Adaptive)", minval=1, group=group_size, tooltip="Max allowed position size, contracts/shares/units. Adaptive sizing caps at this.")
+min_qty = input.float(1, title="📉 Min Contracts (Adaptive)", minval=0.1, group=group_size, tooltip="Minimum allowed size. Ensures some size even on smallest signals.")
+
+// === 💰 Trade Management ===
+group_trade = "💰 Trade Management"
+stop_perc = input.float(0.9, title="💰 Stop %", group=group_trade, tooltip="Stop loss as % away from entry. Lower = tighter stops.")
+tp_perc = input.float(1.8, title="💰 Take Profit %", group=group_trade, tooltip="Take profit % from entry. Lower = faster profit, higher = runner trades.")
+decay_buffer = input.int(0, title="💰 Decay Exit Sensitivity Buffer", group=group_trade, tooltip="Regime index must fall this far below threshold before a decay exit. Higher/slower.")
+decay_confirm_bars = input.int(4, title="💰 Bars Decay Must Persist to Exit", group=group_trade, tooltip="Decay must last this many bars before exit (anti-whipsaw).")
+
+// ========= QUANT CORE =========
+atr_f = ta.atr(atr_fast)
+atr_s = ta.atr(atr_slow)
+atr_vol = ta.stdev(atr_f, atr_stdev)
+vo_spike = (atr_f - atr_s) / (atr_vol + 1e-6)
+base_spike = math.abs(vo_spike[1]) > vrt
+is_long_spike = vo_spike[1] > 0
+is_short_spike = vo_spike[1] < 0
+regime_index = math.sum(base_spike ? 1 : 0, regime_len)
+vovix_avg = ta.sma(math.abs(vo_spike), local_n * 4)
+vovix_local_max = math.abs(vo_spike[1]) == ta.highest(math.abs(vo_spike), local_n)[1]
+super_spike = math.abs(vo_spike[1]) > (vovix_avg[1] * super_mult)
+at_local_low = close[1] == ta.lowest(close, local_n)[1]
+at_local_high = close[1] == ta.highest(close, local_n)[1]
+vovix_htf = request.security(syminfo.tickerid, higher_tf, (ta.atr(atr_fast) - ta.atr(atr_slow)) / (ta.stdev(ta.atr(atr_fast), atr_stdev) + 1e-6))
+htf_trigger_long = vovix_htf[1] > vrt
+htf_trigger_short = vovix_htf[1] < -vrt
+delta_spike = math.abs(vo_spike[1] - vovix_avg[1])
+sizing_factor = delta_spike / (vrt * super_mult + 1e-8)
+tanh(x) => (math.exp(x) - math.exp(-x)) / (math.exp(x) + math.exp(-x))
+trade_qty_fine = min_qty + ((max_qty - min_qty) * tanh(sizing_factor))
+trade_qty = math.round(trade_qty_fine)
+
+// ========= ENTRY LOGIC (NON-REPAINTING) =========
+can_trade_long = base_spike and vovix_local_max and super_spike and regime_index[1] >= regime_thresh and is_long_spike and at_local_low and htf_trigger_long
+can_trade_short = base_spike and vovix_local_max and super_spike and regime_index[1] >= regime_thresh and is_short_spike and at_local_high and htf_trigger_short
+if (not barstate.islast) and strategy.position_size == 0
+    if can_trade_long
+        strategy.entry("EventLong", strategy.long, qty=trade_qty[1])
+    else if can_trade_short
+        strategy.entry("EventShort", strategy.short, qty=trade_qty[1])
+
+// ========= DECAY EXIT LOGIC =========
+regime_decay_condition = regime_index[2] >= regime_thresh and regime_index[1] <= (regime_thresh - decay_buffer)
+decay_bars = ta.barssince(regime_index[1] > (regime_thresh - decay_buffer))
+bool decay_confirmed = na
+decay_confirmed := decay_confirm_bars <= 1 ? regime_decay_condition : (regime_index[1] < (regime_thresh - decay_buffer) and decay_bars >= decay_confirm_bars)
+
+// ========= EXIT LOGIC =========
+tp_level_long = strategy.position_avg_price * (1 + tp_perc / 100)
+sl_level_long = strategy.position_avg_price * (1 - stop_perc / 100)
+tp_level_short = strategy.position_avg_price * (1 - tp_perc / 100)
+sl_level_short = strategy.position_avg_price * (1 + stop_perc / 100)
+exited_tp_long = strategy.position_size[1] > 0 and high >= tp_level_long and strategy.closedtrades > nz(strategy.closedtrades[1], 0)
+exited_sl_long = strategy.position_size[1] > 0 and low <= sl_level_long and strategy.closedtrades > nz(strategy.closedtrades[1], 0)
+exited_decay_long = strategy.position_size[1] > 0 and decay_confirmed and strategy.closedtrades > nz(strategy.closedtrades[1], 0)
+exited_tp_short = strategy.position_size[1] < 0 and low <= tp_level_short and strategy.closedtrades > nz(strategy.closedtrades[1], 0)
+exited_sl_short = strategy.position_size[1] < 0 and high >= sl_level_short and strategy.closedtrades > nz(strategy.closedtrades[1], 0)
+exited_decay_short = strategy.position_size[1] < 0 and decay_confirmed and strategy.closedtrades > nz(strategy.closedtrades[1], 0)
+if strategy.position_size > 0
+    if high >= tp_level_long
+        strategy.close("EventLong", comment="ExitLong_TP")
+    else if low <= sl_level_long
+        strategy.close("EventLong", comment="ExitLong_SL")
+    else if decay_confirmed
+        strategy.close("EventLong", comment="ExitLong_Decay")
+if strategy.position_size < 0
+    if low <= tp_level_short
+        strategy.close("EventShort", comment="ExitShort_TP")
+    else if high >= sl_level_short
+        strategy.close("EventShort", comment="ExitShort_SL")
+    else if decay_confirmed
+        strategy.close("EventShort", comment="ExitShort_Decay")
+if barstate.islast
+    strategy.close_all(comment="FinalFlush")
+
+// ========= ENTRY/EXIT VISUALS =========
+plotshape(can_trade_long and strategy.position_size == 0, style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.normal, title="Long Entry")
+plotshape(can_trade_short and strategy.position_size == 0, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.normal, title="Short Entry")
+plotshape(exited_tp_long or exited_tp_short, style=shape.diamond, location=location.abovebar, offset=-1, color=color.lime, text="TP", title="TP Exit", size=size.tiny)
+plotshape(exited_sl_long or exited_sl_short, style=shape.diamond, location=location.abovebar, offset=-1, color=color.red, text="SL", title="SL Exit", size=size.tiny)
+plotshape(exited_decay_long or exited_decay_short, style=shape.diamond, location=location.bottom, offset=-1, color=color.rgb(49, 27, 146, 32), text="D", title="Decay Exit", size=size.tiny)
+
+// ========= REGIME DECAY ZONE AREA =========
+var float decay_zone_start = na
+bool show_decay_area = na
+if regime_decay_condition and na(decay_zone_start)
+    decay_zone_start := bar_index
+if decay_confirmed
+    decay_zone_start := na
+show_decay_area := not na(decay_zone_start)
+bgcolor(show_decay_area ? color.new(color.aqua, 92) : na)
+
+// --- REAL-TIME SHARPE / SORTINO CALCULATION ---
+var float[] returns = array.new_float()
+if strategy.closedtrades > nz(strategy.closedtrades[1])
+    profit = strategy.closedtrades > 0 ? (strategy.netprofit - nz(strategy.netprofit[1])) : na
+    if not na(profit)
+        array.unshift(returns, profit)
+    if array.size(returns) > 100
+        array.pop(returns)
+
+float sharpe = na
+float sortino = na
+if array.size(returns) > 1
+    avg = array.avg(returns)
+    stdev = array.stdev(returns)
+    float[] downside_list = array.new_float()
+    for i = 0 to array.size(returns) - 1
+        val = array.get(returns, i)
+        if val < 0
+            array.push(downside_list, val)
+    downside_stdev = array.size(downside_list) > 0 ? array.stdev(downside_list) : na
+    sharpe := stdev != 0 ? avg / stdev : na
+    sortino := downside_stdev != 0 ? avg / downside_stdev : na
+
+//// ========== PRO DASHBOARD ==========
+get_progress(pct) =>
+    nBars = 10
+    on = math.round(pct * 0.10)
+    off = nBars - on
+    str.repeat('█', on) + str.repeat('░', off)
+
+var table dashboard = na
+if na(dashboard)
+    dashboard := table.new(position.top_right, 2, 3, bgcolor=color.new(color.black, 95), border_color=color.purple)
+table.clear(dashboard, 0, 0)
+table.cell(dashboard, 0, 0, '   ⚡ Dskyz (DAFE) REVELATIONS   ', bgcolor=color.purple, text_color=color.black, text_size=size.large)
+table.merge_cells(dashboard, 0, 0, 1, 0)
+
+table.cell(
+  dashboard, 0, 1,
+  'Regime Strength: ' + str.tostring(regime_index) +
+  ' | Size: ' + str.tostring(trade_qty) +
+  '\nStatus: ' + (strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "NEUTRAL"),
+  text_color=(strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.silver),
+  text_size=size.normal)
+table.merge_cells(dashboard, 0, 1, 1, 1)
+
+win_pct = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades : na
+win_pct_display = na(win_pct) ? 0 : win_pct * 100
+win_color = win_pct_display > 50 ? color.lime : color.red
+table.cell(dashboard, 0, 2, 'Trades: ' + str.tostring(strategy.closedtrades) + ' | Net: ' + str.tostring(strategy.netprofit, '0.##') + '\nWin %: ' + (na(win_pct) ? 'N/A' : str.tostring(win_pct_display, '#.##') + '% ' + get_progress(win_pct_display)) + ' | # Wins: ' + str.tostring(strategy.wintrades) + '\nSharpe: ' + str.tostring(sharpe, "#.##") + ' | Sortino: ' + str.tostring(sortino, "#.##"), text_color=win_color, text_size=size.normal)
+table.merge_cells(dashboard, 0, 2, 1, 2)
+
+// === Bottom-right WATERMARK/VoVix PROGRESSION BAR ===
+var table infoTable = na
+if na(infoTable)
+    infoTable := table.new(position.bottom_right, 1, 2, bgcolor=color.new(color.black, 90), border_color=color.new(color.purple, 80), border_width=1)
+table.clear(infoTable, 0, 0)
+table.cell(infoTable, 0, 0, '⚡ Dskyz (DAFE) Trading Systems', text_color=color.rgb(200, 200, 255), text_size=size.normal)
+super_val = na(vovix_avg) ? 1.0 : vovix_avg * super_mult
+progress_pct = math.min(1.0, math.abs(vo_spike) / (super_val + 1e-5))
+int bar_length = 20
+int full_bars = math.round(progress_pct * bar_length)
+int empty_bars = bar_length - full_bars
+string vovix_bar_str = str.repeat('█', full_bars) + str.repeat('░', empty_bars)
+color vovix_color = progress_pct > 0.8 ? color.lime : progress_pct > 0.6 ? color.green : progress_pct > 0.3 ? color.yellow : progress_pct > 0.1 ? color.orange : color.red
+table.cell(infoTable, 0, 1, "VoVix [" + vovix_bar_str + "] " + str.tostring(progress_pct, "#.##"), text_color=vovix_color, text_size=size.normal)
+
+View in Pine Editor・179 lines
+Use on chart
+2
+1
+3
+8
+4 000
+REVELATIONS (VoVix - POC): True Regime Detection Before the Move
+
+Let’s not sugarcoat it: Most strategies on TradingView are recycled—RSI, MACD, OBV, CCI, Stochastics. They all lag. No matter how many overlays you stack, every one of these “standard” indicators fires after the move is underway. The retail crowd almost always gets in late. That’s never been enough for my team, for DAFE, or for anyone who’s traded enough to know the real edge vanishes by the time the masses react.
+
+How is this different?
+
+REVELATIONS (VoVix - POC) was engineered from raw principle, structured to detect pre-move regime change—before standard technicals even light up. We built, tested, and refined VoVix to answer one hard question:
+
+What if you could see the spike before the trend?
+
+Here’s what sets this system apart, line-by-line:
+o True volatility-of-volatility mathematics: It’s not just "ATR of ATR" or noise smoothing. VoVix uses normalized, multi-timeframe v-vol spikes, instantly detecting orderbook stress and "outlier" market events—before the chart shows them as trends.
+o Purist regime clustering: Every trade is enabled only during coordinated, multi-filter regime stress. No more signals in meaningless chop.
+o Nonlinear entry logic: No trade is ever sent just for a “good enough” condition. Every entry fires only if every requirement is aligned—local extremes, super-spike threshold, regime index, higher timeframe, all must trigger in sync.
+o Adaptive position size: Your contracts scale up with event strength. Tiny size during nominal moves, max leverage during true regime breaks—never guesswork, never static exposure.
+o All exits governed by regime decay logic: Trades are closed not just on price targets but at the precise moment the market regime exhausts—the hardest part of systemic trading, now solved.
+
+How this destroys the lag:
+
+Standard indicators (RSI, MACD, OBV, CCI, and even most “momentum” overlays) simply tell you what already happened. VoVix triggers as price structure transitions—anyone running these generic scripts will trade behind the move while VoVix gets in as stress emerges. Real alpha comes from anticipation, not confirmation.
+
+The visuals only show what matters:
+Top right, you get a live, live quant dashboard—regime index, current position size, real-time performance (Sharpe, Sortino, win rate, and wins). Bottom right: a VoVix "engine bar" that adapts live with regime stress. Everything you see is a direct function of logic driving this edge—no cosmetics, no fake momentum.
+
+Inputs/Signals—explained carefully for clarity:
+
+o ATR Fast Length & ATR Slow Length:
+These are the heart of VoVix’s regime sensing. Fast ATR reacts to sharp volatility; Slow ATR is stability baseline. Lower Fast = reacts to every twitch; higher Slow = requires more persistent, “real” regime shifts.
+Tip: If you want more signals or faster markets, lower ATR Fast. To eliminate noise, raise ATR Slow.
+o ATR StdDev Window: Smoothing for volatility-of-volatility normalization. Lower = more jumpy, higher = only the cleanest spikes trigger.
+Tip: Shorten for “jumpy” assets, raise for indices/futures.
+o Base Spike Threshold: Think of this as your “minimum event strength.” If the current move isn’t volatile enough (normalized), no signal.
+Tip: Higher = only biggest moves matter. Lower for more signals but more potential noise.
+o Super Spike Multiplier: The “are you sure?” test—entry only when the current spike is this multiple above local average.
+Tip: Raise for ultra-selective/swing-trading; lower for more active style.
+
+Regime & MultiTF:
+o Regime Window (Bars):
+How many bars to scan for regime cluster “events.” Short for turbo markets, long for big swings/trends only.
+o Regime Event Count:Only trade when this many spikes occur within the Regime Window—filters for real stress, not isolated ticks.
+Tip: Raise to only ever trade during true breakouts/crashes.
+o Local Window for Extremes:
+How many bars to check that a spike is a local max.
+Tip: Raise to demand only true, “clearest” local regime events; lower for early triggers.
+o HTF Confirm:
+Higher timeframe regime confirmation (like 45m on an intraday chart). Ensures any event you act on is visible in the broader context.
+Tip: Use higher timeframes for only major moves; lower for scalping or fast regimes.
+
+Adaptive Sizing:
+o Max Contracts (Adaptive): The largest size your system will ever scale to, even on extreme event.
+Tip: Lower for small accounts/conservative risk; raise on big accounts or when you're willing to go big only on outlier events.
+o Min Contracts (Adaptive): The “toe-in-the-water.” Smallest possible trade.
+
+Tip: Set as low as your broker/exchange allows for safety, or higher if you want to always have meaningful skin in the game.
+
+Trade Management:
+o Stop %: Tightness of your stop-loss relative to entry. Lower for tighter/safer, higher for more breathing room at cost of greater drawdown.
+o Take Profit %: How much you'll hold out for on a win. Lower = more scalps. Higher = only run with the best.
+o Decay Exit Sensitivity Buffer: Regime index must dip this far below the trading threshold before you exit for “regime decay.”
+Tip: 0 = exit as soon as stress fails, higher = exits only on stronger confirmation regime is over.
+o Bars Decay Must Persist to Exit: How long must decay be present before system closes—set higher to avoid quick fades and whipsaws.
+
+Backtest Settings
+Initial capital: $10,000
+Commission: Conservative, realistic roundtrip cost:
+15–20 per contract (including slippage per side) I set this to $25
+Slippage: 3 ticks per trade
+Symbol: CME_MINI:NQ1!
+Timeframe: 1 min (but works on all timeframes)
+Order size: Adaptive, 1–3 contracts
+No pyramiding, no hidden DCA
+
+
+Why these settings?
+These settings are intentionally strict and realistic, reflecting the true costs and risks of live trading. The 10,000 account size is accessible for most retail traders. 25/contract including 3 ticks of slippage are on the high side for NQ, ensuring the strategy is not curve-fit to perfect fills. If it works here, it will work in real conditions.
+
+Tip: Set to 1 for instant regime exit; raise for extra confirmation (less whipsaw risk, exits held longer).
+________________________________________
+
+Bottom line: Tune the sensitivity, selectivity, and risk of REVELATIONS by these inputs. Raise thresholds and windows for only the best, most powerful signals (institutional style); lower for activity (scalpers, fast cryptos, signals in constant motion). Sizing is always adaptive—never static or martingale. Exits are always based on both price and regime health. Every input is there for your control, not to sell “complexity.” Use with discipline, and make it your own.
+This strategy is not just a technical achievement: It’s a statement about trading smarter, not just more.
+
+* I went back through the code to make sure no the strategy would not suffer from repainting, forward looking, or any frowned upon loopholes.
+
+Disclaimer:
+Trading is risky and carries the risk of substantial loss. Do not use funds you aren’t prepared to lose. This is for research and informational purposes only, not financial advice. Backtest, paper trade, and know your risk before going live. Past performance is not a guarantee of future results.
+
+Expect more: We’ll keep pushing the standard, keep evolving the bar until “quant” actually means something in the public code space.
+
+Use with clarity, use with discipline, and always trade your edge.
+
+— Dskyz, for DAFE Trading Systems

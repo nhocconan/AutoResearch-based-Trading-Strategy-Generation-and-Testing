@@ -1,0 +1,88 @@
+//@version=4
+strategy("Ichimoku Strategy [CDI]", shorttitle="Ichimoku Strategy", overlay=true, pyramiding=3, calc_on_order_fills=false )
+
+conversionPeriods = input(9, minval=1, title="Conversion Line Periods")
+basePeriods = input(26, minval=1, title="Base Line Periods")
+laggingSpan2Periods = input(52, minval=1, title="Lagging Span 2 Periods")
+displacement = input(26, minval=1, title="Displacement")
+limmit = input(6, minval=1, title="Profit %") * 0.01
+stop = input(3, minval=1, title="Loss %") * 0.01
+PreBars = input(6, minval=2, title="Crossing Candles:")
+donchian(len) => avg(lowest(len), highest(len))
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = offset(avg(conversionLine, baseLine),displacement - 1)
+leadLine2 = offset(donchian(laggingSpan2Periods),displacement - 1)
+
+leadLine1ax = avg(conversionLine, baseLine)
+leadLine2ax = donchian(laggingSpan2Periods)
+
+plot(conversionLine, color=#0496ff, title="Conversion Line", display=display.none)
+plot(baseLine, color=#991515, title="Base Line", display=display.none)
+plot(close, offset = -displacement + 1, color=#459915, title="Lagging Span", display=display.none)
+p1 = plot(leadLine1ax, offset = displacement - 1, color=color.green,
+     title="Lead 1",display=display.none)
+p2 = plot(leadLine2ax, offset = displacement - 1, color=color.red,
+     title="Lead 2",display=display.none)
+fill(p1, p2, color = leadLine1ax > leadLine2ax ? color.green : color.red)
+
+// Orders config
+higherLine = leadLine1 > leadLine2 ? leadLine1 : leadLine2
+downLine = leadLine1 < leadLine2 ? leadLine1 : leadLine2
+
+crossConfim = false
+
+var float auxlead = na
+for i = 1 to PreBars
+    auxlead := leadLine1[i] < leadLine2 [i] ? leadLine1[i] : leadLine2[i]
+    crossConfim:= crossConfim or (auxlead >= open[i]) or auxlead >= close[i]
+    
+conditionEntry = (open > higherLine or close > higherLine) and crossConfim and (open[1] < higherLine[1] and close[1] < higherLine[1])
+
+barColour = if (conditionEntry)
+    alert("Price (" + tostring(close) + ") crossed over Ichimoku Strategy.", alert.freq_all)
+    color.yellow
+else
+    na
+
+barcolor(color=barColour)
+bgcolor(color=barColour)
+
+takeProfitPrice = 0.0
+longStopPrice = 0.0
+takeProfitPrice := conditionEntry and strategy.position_size == 0 ?  close  + (close * limmit) : takeProfitPrice[1]
+longStopPrice := conditionEntry  ? close - (close * stop) : longStopPrice[1]
+
+if (conditionEntry)
+    strategy.entry("Entry", strategy.long)
+
+strategy.exit("Exit", limit=takeProfitPrice, stop=longStopPrice)
+
+//alertcondition(condition=conditionEntry,title="Crossover Ichimoku",message="Price (" + tostring(close) + ") crossed over Ichimoku Strategy.")
+
+View in Pine Editor・64 lines
+Use on chart
+2
+7
+8
+3
+7 196
+Strategy used in the CDI community that consists of having as a signal to enter long when it crosses the entire Ichimoku cloud .
+
+It is recommended to use the strategy in one hour candles and the profit / loss ratio is 2 to 1 for swing trading, however it can be used at any time frame.
+
+The purpose is to perform a bakctesting quickly by setting the limit and stop in the study settings (Proffit and Loss). It is also possible to deactivate the trades on chart changing the configuration in the settings pannel to visualize more clearly the yellow candles that are marked on the chart to identify the signal of the strategy.
+
+
+Strategy settings:
+- Profit %: approximate profit on each entry
+- Loss %: approximate loss limit in each entry
+- Crossing Candles: number of candles that establishes the crossing of the Ichimoku clouds
+
+Alerts can be configured.
+
+For more information about the strategy, you can search on YouTube for Hyenuk Chu's video "Cómo construir una buena tasa Riesgo Beneficio"
+
+WARNING:
+- For purpose educate only
+- The entries are used under your responsibility

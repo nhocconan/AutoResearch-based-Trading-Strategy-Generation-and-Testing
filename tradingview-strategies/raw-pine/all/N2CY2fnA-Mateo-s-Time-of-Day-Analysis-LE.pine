@@ -1,0 +1,57 @@
+//@version=5
+//This is a simple script to determine if entering a long position at a specific time has a higher probability of being up if exited at a different specific time.
+//Use the TradingView "Percent Profitable" to help determine this.  The inverse is true for short trades, just reverse the percentage.
+strategy("Mateo's Time of Day Analysis LE-SE", shorttitle = "Time of Day LE", overlay=true, pyramiding=1, initial_capital=3000,
+          process_orders_on_close = true, default_qty_value = 1, max_labels_count = 500)
+
+
+
+tFrame = timeframe.multiplier
+
+StartTime = input.int(defval = 0930, title = "Start time")
+EndTime = input.int(defval = 1600, title = "End time")
+StartTimeString = StartTime < 1000 ? "0"+str.tostring(StartTime,"#") : str.tostring(StartTime,"#")
+EndTimeString = EndTime < 1000 ? "0"+str.tostring(EndTime,"#") : str.tostring(EndTime,"#")
+
+EntryWindowString = StartTimeString + "-" + EndTimeString
+ExitWindowString = EndTimeString + "-2000"
+
+if barstate.islastconfirmedhistory
+    label.new(bar_index, high, text=EntryWindowString)
+    // label.new(bar_index, high, text="End")
+
+
+// FOR ONE DAY TRADING 
+
+// === INPUT BACKTEST RANGE ===
+i_from = input.time(defval = timestamp("21 April 2017 00:00 +0000"), title = "From")
+i_thru = input.time(defval = timestamp("01 Dec 2099 00:00 +0000"), title = "Thru")
+date() => time >= i_from and time <= i_thru  // create date function "within window of time"
+
+
+// Check if we can take trades
+EntryWindow = not na(time(timeframe.period, EntryWindowString)) 
+ExitWindow = not na(time(timeframe.period, ExitWindowString)) 
+canTakeTrades = date() and EntryWindow
+ 
+if canTakeTrades
+    strategy.entry("Time-LE", strategy.long)
+    // label.new(bar_index, high, text="Entry")
+
+
+if ExitWindow
+    // label.new(bar_index, high, text="Close")
+    strategy.close_all()
+
+Strategy.closeAllAtEndOfSession(comment = "End Of Day")
+
+View in Pine Editor・47 lines
+Use on chart
+3
+5
+2 038
+This strategy takes a trade every day at a specified time and then closes it at a specified time.
+
+The purpose of this strategy is to help determine if there are better times to day to buy or sell.
+
+I was originally inspired to write this when a YouTuber stated that SPX had been up during the last 30 minutes of the day over 80% of the time the past year. No matter who says it, test it, and in my opinion, TradingView is one of the easiest placed to do that! Unfortunately, that particular claim did not turn out to be accurate, but this tool remains for those who want to optimize timing their entries and exits at specific times of day.

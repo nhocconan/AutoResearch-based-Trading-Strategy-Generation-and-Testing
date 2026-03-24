@@ -1,0 +1,171 @@
+//@version=6
+strategy(
+    "Market Input – Modular Returns (Equity Percent)", 
+    overlay=true,
+    shorttitle="MarketInputMod",
+    initial_capital=100000,
+    default_qty_type=strategy.percent_of_equity,  // THIS makes qty in percent of equity
+    default_qty_value=25
+                        // 10% of equity per trade (fallback)
+)
+            // fallback
+
+// =======================
+// === USER INPUTS ====
+// =======================
+
+symbolInput      = input.symbol("AAPL", "Ticker")
+primaryTF        = input.timeframe("240", "Primary Timeframe (4H)")
+longTermTF       = input.timeframe("D", "Long-Term Context TF")
+priceSource      = input.source(close, "Price Source")
+
+lookbackShort    = input.int(14, "Short MA Lookback")
+lookbackLong     = input.int(60, "Long MA Lookback")
+
+volLookback      = input.int(20, "Volatility Lookback")
+volThresholdLow  = input.float(0.01, "Low Vol Threshold")
+volThresholdHigh = input.float(0.05, "High Vol Threshold")
+volSmoothing     = input.int(5, "Volatility Smoothing")
+
+bbPeriod         = input.int(20, "Bollinger Band Period")
+bbMult           = input.float(2.0, "Bollinger Band Multiplier")
+
+skipHighVol      = input.bool(true, "Skip High Volatility Trades")
+skipLowVol       = input.bool(true, "Skip Low Volatility Trades")
+skipBBExtreme    = input.bool(true, "Skip Trades Outside BB")
+
+maxHoldBars      = input.int(10, "Max Bars to Hold Trade")
+atrMult          = input.float(2.0, "ATR Trailing Stop Multiplier")
+
+// Adjustable percent of equity per trade
+tradePercent     = input.float(100.0, "Percent of Equity per Trade", minval=0.1, maxval=100)
+
+// =======================
+// === DATA ====
+// =======================
+
+pricePrimary   = request.security(symbolInput, primaryTF, priceSource)
+priceLongTerm  = request.security(symbolInput, longTermTF, priceSource)
+
+// =======================
+// === INDICATORS ====
+// =======================
+
+// Moving averages
+shortMA   = ta.sma(pricePrimary, lookbackShort)
+longMA    = ta.sma(pricePrimary, lookbackLong)
+longTFMA  = ta.sma(priceLongTerm, lookbackLong) // Higher timeframe trend filter
+
+// Historical volatility
+returnsPrimary = ta.roc(pricePrimary, 1) / 100
+histVol        = ta.sma(ta.stdev(returnsPrimary, volLookback), volSmoothing)
+
+// Bollinger Bands
+maBB    = ta.sma(pricePrimary, bbPeriod)
+bbUpper = maBB + bbMult * ta.stdev(pricePrimary, bbPeriod)
+bbLower = maBB - bbMult * ta.stdev(pricePrimary, bbPeriod)
+
+// Z-score for mean-reversion
+zScore = (pricePrimary - maBB) / ta.stdev(pricePrimary, bbPeriod)
+
+// ATR for trailing stops
+atr = ta.atr(14)
+trailStopLong  = pricePrimary - atrMult * atr
+trailStopShort = pricePrimary + atrMult * atr
+
+// =======================
+// === FILTERS ====
+// =======================
+
+skipTrade =
+     (skipHighVol and histVol > volThresholdHigh) or
+     (skipLowVol  and histVol < volThresholdLow) or
+     (skipBBExtreme and (pricePrimary > bbUpper or pricePrimary < bbLower))
+
+// =======================
+// === REGIMES ====
+
+// Trend regime: volatility + shortMA > longMA + long-term confirmation
+trendRegime      = histVol >= volThresholdLow and shortMA > longMA and shortMA > longTFMA
+
+// Mean-reversion regime: low volatility
+meanRevertRegime = histVol < volThresholdLow
+
+// =======================
+// === POSITION STATE ====
+
+// Only allow one active position at a time
+flat = strategy.position_size == 0
+barsHeld = strategy.opentrades > 0 ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+
+// =======================
+// === CALCULATE QTY ====
+
+// Position size based on percent of equity
+tradeQty = strategy.equity * (tradePercent / 100) / pricePrimary
+
+// =======================
+// === ENTRIES ====
+
+// ---------- Trend Entry ----------
+if flat and not skipTrade and trendRegime
+    strategy.entry("Trend Long", strategy.long, qty=tradeQty)
+
+// ---------- Mean-Reversion Entries ----------
+if flat and not skipTrade and meanRevertRegime
+    if zScore < -1
+        strategy.entry("MR Long", strategy.long, qty=tradeQty)
+    if zScore > 1
+        strategy.entry("MR Short", strategy.short, qty=tradeQty)
+
+// =======================
+// === EXITS ====
+
+// Trend Long Exit
+if strategy.position_size > 0
+    if pricePrimary >= bbUpper or pricePrimary < trailStopLong or barsHeld >= maxHoldBars
+        strategy.close("Trend Long")
+
+// Trend Short Exit
+if strategy.position_size < 0
+    if pricePrimary <= bbLower or pricePrimary > trailStopShort or barsHeld >= maxHoldBars
+        strategy.close("Trend Short")
+
+// MR Long Exit
+if strategy.position_size > 0
+    if pricePrimary >= maBB or barsHeld >= maxHoldBars
+        strategy.close("MR Long")
+
+// MR Short Exit
+if strategy.position_size < 0
+    if pricePrimary <= maBB or barsHeld >= maxHoldBars
+        strategy.close("MR Short")
+
+// =======================
+// === PLOTS ==== 
+
+plot(pricePrimary, color=color.blue, title="Primary Price")
+plot(maBB, color=color.gray, title="BB Mean")
+plot(bbUpper, color=color.red, title="BB Upper")
+plot(bbLower, color=color.green, title="BB Lower")
+plot(histVol, color=color.orange, title="Historical Volatility")
+plot(zScore, color=color.purple, title="Z-score MR")
+
+View in Pine Editor・152 lines
+Use on chart
+1
+6
+714
+Jan 7
+w model
+
+skibidi skibidi
+
+they told me to add more to the description
+Jan 7
+Release Notes
+w model
+this is the updated version
+Jan 8
+Release Notes
+new stuff

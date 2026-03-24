@@ -1,0 +1,9 @@
+//@version=5
+smaColorInput=##input(defval=#FF9800,type='INPUT_COLOR',##id='in_7')
+bbColorInput=##input(defval=#2962ff,type='INPUT_COLOR',##id='in_10')
+##root(root_metainfo,rm_0,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_1,'AboveBar',input__string,plotshape,location)
+##root(root_metainfo,rm_2,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,plot_0_0,smaColorInput,input__color)
+##root(root_metainfo,plot_1_0,bbColorInput,input__color)

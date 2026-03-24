@@ -1,0 +1,372 @@
+//@version=5
+strategy("Dskyz (DAFE) GENESIS", default_qty_type=strategy.fixed, initial_capital=10000, overlay=true, pyramiding=1, commission_type=strategy.commission.cash_per_contract, commission_value=12.5, slippage=3)
+
+// === 📈 Main Signal Parameters ===
+scoreMax        = input.int(2, title="📊 Maximum Raw Score", minval=1, maxval=10, tooltip="Number of raw signal criteria that make up your trade confidence/regime score. Leave at 4 unless you expand system factors.")
+rsiLen          = input.int(9, title="🔢 RSI Length", minval=2, maxval=30, tooltip="Lookback window (in bars) for RSI calculation. Lower = more sensitive & choppy; higher = smoother, slower signals.")
+rsiShortFloor   = input.int(67, title="📉 Min RSI for Shorts", minval=0, maxval=100, tooltip="Minimum RSI needed for SHORT entries. Raise to only short when market is more overbought.")
+rsiLongCeil     = input.int(39, title="📈 Max RSI for Longs", minval=0, maxval=100, tooltip="Maximum RSI allowed for LONG entries. Lower = only go long on deeper oversold conditions.")
+momentumGate    = input.float(0, title="⚡ Min Normed Momentum", minval=0, maxval=1, tooltip="Minimum normalized momentum (0-1) for new trades. Raise for more conviction (less 'chop'), lower for more trades.")
+confGate        = input.float(0.3, title="🎯 Min Normed Score (Conf)", minval=0, maxval=1, tooltip="Minimum normalized regime confidence, 0-1. Higher means only strongest multi-factor confluence trades allowed.")
+volLookback     = input.int(44, title="🔍 ATR Lookback Period", minval=5, maxval=1000, tooltip="How many bars to average for ATR (volatility). 120 best for 15m or 1hr bar. Increase for smoother volatility gating.")
+lowVolPct       = input.int(60, title="🧊 ATR Low Vol Percentile", minval=1, maxval=99, tooltip="Below this ATR percentile, trading is suppressed as market is too dead/choppy. Increase if you want less trading in quiet.")
+hiVolPct        = input.int(85, title="🔥 ATR High Vol Percentile", minval=10, maxval=100, tooltip="Above this ATR percentile, system enters HiVol mode: position sizing and regime logic adjust. Lower to trigger HiVol more often.")
+sessionHours    = input.session("0830-1500", title="🕰️ Trading Session", tooltip="Hours during which the system can enter trades. Markets outside this period will NOT trigger entries. Use for US market hours, etc.")
+maxDollarRisk   = input.int(750, title="💰 Max Dollar Risk Per Trade", tooltip="Maximum risk allowed per trade (across all contracts, not per contract). Lower for tighter, smaller trades/accounts. ATR will effect the total loss during volatility")
+baseSize        = input.float(1, title="🛠️ Base Contracts", minval=1, tooltip="Minimum contract size used for any new trade. Raise for more aggression, lower for hands-off exposure.")
+maxSize         = input.float(3, title="🚀 Max Contracts", minval=1, tooltip="Maximum total contracts held by the strategy (including scaling up). This caps your maximum position size at all times.")
+stopATRmult     = input.float(1.7, title="🛑 Stop ATR Multiplier", minval=0.2, step=0.01, tooltip="Multiplies ATR for your stop level. Raise for wider stops (fewer whipsaws, bigger risk), lower for tighter stops.")
+trailATRmult    = input.float(0.5, title="🏹 Trail Stop ATR Mult", minval=0.2, step=0.01, tooltip="Multiplier for trailing stop distance. Small = tight trailing, large = more breathing room.")
+scaleOutATR     = input.float(0.85, title="📏 Scale Out at N x ATR", minval=0.4, step=0.01, tooltip="Price distance from entry (in ATR units) to take partial profits (scale out). Raise to target larger wins before scaling out.")
+
+// ========== CORE LOGIC (SAME AS BEFORE; NO DCA) ==========
+
+rolling_sum(src, len) =>
+    s = 0.0
+    for i = 0 to len - 1
+        s += nz(src[i])
+    s
+
+percentile(arr, perc) =>
+    len = array.size(arr)
+    if len == 0
+        na
+    else
+        sorted = array.copy(arr)
+        array.sort(sorted, order.ascending)
+        idx = math.round((perc / 100) * (len - 1))
+        array.get(sorted, idx)
+
+price_x_vol = close * volume
+poc_sum   = rolling_sum(price_x_vol, 20)
+poc_vol   = rolling_sum(volume, 20)
+poc_price = poc_vol > 0 ? poc_sum / poc_vol : na
+buy_vol   = rolling_sum(volume * (close > poc_price ? 1 : 0), 12)
+sell_vol  = rolling_sum(volume * (close < poc_price ? 1 : 0), 12)
+imbalance = (buy_vol - sell_vol) / (buy_vol + sell_vol + 1e-8)
+trendUp   = ta.sma(close, 9) > ta.sma(close, 30)
+trendDn   = ta.sma(close, 9) < ta.sma(close, 30)
+strongImbLong  = imbalance > 0.22
+strongImbShort = imbalance < -0.22
+rsiVal    = ta.rsi(close, rsiLen)
+rsiLong   = rsiVal > 55
+rsiShort  = rsiVal < 45
+atr       = ta.atr(14)
+hiVol     = atr > ta.sma(atr, 60) * 0.8
+
+rawScoreLong   = (trendUp ? 1 : 0) + (strongImbLong ? 1 : 0) + (rsiLong ? 1 : 0) + (hiVol ? 1 : 0)
+rawScoreShort  = (trendDn ? 1 : 0) + (strongImbShort ? 1 : 0) + (rsiShort ? 1 : 0) + (hiVol ? 1 : 0)
+confNormLong   = rawScoreLong / scoreMax
+confNormShort  = rawScoreShort / scoreMax
+
+emaFast = ta.ema(close, 8)
+emaSlow = ta.ema(close, 21)
+momentumLong  = emaFast - emaSlow
+momentumShort = emaSlow - emaFast
+
+var float[] momArrLong = na
+if bar_index == 0
+    momArrLong := array.new_float()
+array.unshift(momArrLong, math.abs(momentumLong))
+if array.size(momArrLong) > 100
+    array.pop(momArrLong)
+momPercLong = percentile(momArrLong, 90)
+momNormLong = not na(momPercLong) and momPercLong != 0 ? math.abs(momentumLong) / momPercLong : 0
+momNormLong := math.min(momNormLong, 1)
+
+var float[] momArrShort = na
+if bar_index == 0
+    momArrShort := array.new_float()
+array.unshift(momArrShort, math.abs(momentumShort))
+if array.size(momArrShort) > 100
+    array.pop(momArrShort)
+momPercShort = percentile(momArrShort, 90)
+momNormShort = not na(momPercShort) and momPercShort != 0 ? math.abs(momentumShort) / momPercShort : 0
+momNormShort := math.min(momNormShort, 1)
+
+var float[] atrArr = na
+if bar_index == 0
+    atrArr := array.new_float()
+array.unshift(atrArr, atr)
+if array.size(atrArr) > volLookback
+    array.pop(atrArr)
+lowVolThresh = percentile(atrArr, lowVolPct)
+hiVolThresh  = percentile(atrArr, hiVolPct)
+isLowVol = not na(lowVolThresh) and atr < lowVolThresh
+isHiVol  = not na(hiVolThresh) and atr > hiVolThresh
+volNorm = (not na(lowVolThresh) and not na(hiVolThresh)) ? math.max(math.min((atr - lowVolThresh) / (hiVolThresh - lowVolThresh), 1), 0) : 0.5
+
+inSession = not na(time(timeframe.period, sessionHours))
+
+momRevLong  = ta.crossunder(emaFast, emaSlow)
+momRevShort = ta.crossover(emaFast, emaSlow)
+
+riskPoints    = atr * stopATRmult
+pointValue    = syminfo.pointvalue
+maxContractsLong = math.max(1, math.floor(maxDollarRisk / (riskPoints * pointValue)))
+maxContractsShort = math.max(1, math.floor(maxDollarRisk / (riskPoints * pointValue)))
+
+canTradeLong  = inSession and not isLowVol and (confNormLong >= confGate) and (momNormLong > momentumGate) and not momRevLong and (rsiVal <= rsiLongCeil)
+canTradeShort = inSession and not isLowVol and (confNormShort >= confGate) and (momNormShort > momentumGate) and not momRevShort and (rsiVal >= rsiShortFloor)
+
+float sizeLong = na
+float sizeShort = na
+if canTradeLong
+    regimeWeightLong = confNormLong * momNormLong * volNorm
+    newSizeLong = baseSize + (maxSize - baseSize) * regimeWeightLong
+    sizeLong := isHiVol ? math.max(1, math.floor(newSizeLong * 0.5)) : math.min(newSizeLong, maxContractsLong)
+else
+    sizeLong := na
+if canTradeShort
+    regimeWeightShort = confNormShort * momNormShort * volNorm
+    newSizeShort = baseSize + (maxSize - baseSize) * regimeWeightShort
+    sizeShort := isHiVol ? math.max(1, math.floor(newSizeShort * 0.5)) : math.min(newSizeShort, maxContractsShort)
+else
+    sizeShort := na
+
+meanATR = ta.sma(atr, 200)
+stdATR  = ta.stdev(atr, 200)
+circuitBreaker = atr > (meanATR + 3 * stdATR)
+if circuitBreaker
+    strategy.close_all(comment="ATR Circuit Breaker")
+
+if canTradeLong and not na(sizeLong) and sizeLong > 0 and strategy.position_size == 0 and not circuitBreaker
+    strategy.entry("MMVI Long", strategy.long, qty=math.floor(sizeLong))
+    strategy.exit("Long Stop", from_entry="MMVI Long", stop=close - riskPoints)
+    strategy.exit("Long Trail", from_entry="MMVI Long", trail_offset=atr * trailATRmult, trail_price=close)
+    strategy.exit("Long Scale", from_entry="MMVI Long", qty_percent=50, limit=strategy.position_avg_price + scaleOutATR * atr)
+
+if canTradeShort and not na(sizeShort) and sizeShort > 0 and strategy.position_size == 0 and not circuitBreaker
+    strategy.entry("MMVI Short", strategy.short, qty=math.floor(sizeShort))
+    strategy.exit("Short Stop", from_entry="MMVI Short", stop=close + riskPoints)
+    strategy.exit("Short Trail", from_entry="MMVI Short", trail_offset=atr * trailATRmult, trail_price=close)
+    strategy.exit("Short Scale", from_entry="MMVI Short", qty_percent=50, limit=strategy.position_avg_price - scaleOutATR * atr)
+
+if strategy.position_size > 0 and momRevLong
+    strategy.close("MMVI Long", qty_percent=50, comment="ReduceLongReversal")
+if strategy.position_size < 0 and momRevShort
+    strategy.close("MMVI Short", qty_percent=50, comment="ReduceShortReversal")
+
+closeOutTime = (hour == 15 and minute >= 50) or (hour == 16)
+if (strategy.position_size != 0 and closeOutTime)
+    strategy.close_all(comment="FlatBeforeClose")
+
+// ========== DASHBOARD: Top Right ==========
+var table dashboard = na
+if na(dashboard)
+    dashboard := table.new(position.top_right, 2, 3, bgcolor=color.new(color.black, 95), border_color=color.purple)
+table.clear(dashboard, 0, 0)
+table.cell(dashboard, 0, 0, '      ⚡Dskyz (DAFE) GENESIS      ', bgcolor=color.purple, text_color=color.black, text_size=size.large)
+table.merge_cells(dashboard, 0, 0, 1, 0)
+
+table.cell(dashboard, 0, 1,
+     'Score L/S: ' + str.tostring(rawScoreLong) + '/' + str.tostring(rawScoreShort) +
+     '\nStatus: ' + (strategy.position_size > 0 ? 'LONG' : strategy.position_size < 0 ? 'SHORT' : 'NEUTRAL') +
+     ' | Size: ' + str.tostring(math.abs(strategy.position_size)),
+     text_color=(strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.silver), text_size=size.normal)
+table.merge_cells(dashboard, 0, 1, 1, 1)
+
+var float avgWin = 0.0
+var float avgLoss = 0.0
+var float winLossRatio = 0.0
+var float profitFactor = 0.0
+if strategy.wintrades > 0
+    avgWin := strategy.grossprofit / strategy.wintrades
+if strategy.losstrades > 0
+    avgLoss := math.abs(strategy.grossloss / strategy.losstrades)
+if avgLoss > 0
+    winLossRatio := avgWin / avgLoss
+if math.abs(strategy.grossloss) > 0
+    profitFactor := strategy.grossprofit / math.abs(strategy.grossloss)
+
+var int streak = 0
+if bar_index == 0
+    streak := 0
+won_last = strategy.closedtrades > nz(strategy.closedtrades[1]) and strategy.wintrades > nz(strategy.wintrades[1])
+lost_last = strategy.closedtrades > nz(strategy.closedtrades[1]) and strategy.wintrades < nz(strategy.wintrades[1])
+streak := won_last ? nz(streak[1]) + 1 : lost_last ? nz(streak[1]) - 1 : nz(streak[1])
+string streak_emoji = streak >= 3 ? '🔥' : streak <= -3 ? '❄️' : '●'
+win_pct = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades : na
+win_pct_display = na(win_pct) ? 0 : win_pct * 100
+win_color = win_pct_display > 50 ? color.lime : color.red
+
+get_progress(pct) =>
+    nBars = 10
+    full = math.round(pct * 0.10)
+    empty = nBars - full
+    str.repeat('█', full) + str.repeat('░', empty)
+
+table.cell(dashboard, 0, 2,
+     'Total Trades: ' + str.tostring(strategy.closedtrades) +
+     ' | Net P/L: ' + str.tostring(strategy.netprofit, '0.##') +
+     '\nWin %: ' + (na(win_pct) ? 'N/A' : str.tostring(win_pct_display, '#.##') + '% ' + get_progress(win_pct_display)) +
+     ' | # of Wins: ' + str.tostring(strategy.wintrades) +
+     '\nStreak: ' + streak_emoji + str.tostring(streak),
+     text_color=win_color, text_size=size.normal)
+table.merge_cells(dashboard, 0, 2, 1, 2)
+
+
+// ========== WATERMARK: Bottom Right ==========
+var table infoTable = na
+if na(infoTable)
+    infoTable := table.new(position.bottom_right, 1, 2, bgcolor=color.new(color.black, 90), border_color=color.new(color.purple, 80), border_width=1)
+table.clear(infoTable, 0, 0)
+table.cell(infoTable, 0, 0, '⚡ Dskyz (DAFE) Trading Systems', text_color=color.rgb(200, 200, 255), text_size=size.normal)
+
+float mLong = na(momNormLong) ? 0 : momNormLong
+float mShort = na(momNormShort) ? 0 : momNormShort
+regime = strategy.position_size > 0 ? 1 : strategy.position_size < 0 ? -1 : 0
+float bar_momentum =
+     regime == 1     ? mLong
+   : regime == -1    ? mShort
+   : math.max(mLong, mShort)
+bar_momentum := math.max(0, math.min(1, bar_momentum))
+int bar_length = 20
+int full_bars = math.round(bar_momentum * bar_length)
+int empty_bars = bar_length - full_bars
+string momentum_bar_str = str.repeat('█', full_bars) + str.repeat('░', empty_bars)
+
+color momentum_color = bar_momentum > 0.8 ? color.lime : bar_momentum > 0.6 ? color.green : bar_momentum > 0.3 ? color.yellow : bar_momentum > 0.1 ? color.orange : color.red
+table.cell(infoTable, 0, 1, "Momentum [" + momentum_bar_str + "] " + str.tostring(bar_momentum, "#.##"), text_color=momentum_color, text_size=size.normal)
+
+View in Pine Editor・230 lines
+Use on chart
+1
+0
+6
+6
+3 478
+May 15, 2025
+Dskyz (DAFE) GENESIS: Adaptive Quant, Real Regime Power
+
+Let’s be honest: Most published strategies on TradingView look nearly identical—copy-paste “open-source quant,” generic “adaptive” buzzwords, the same shallow explanations. I’ve even fallen into this trap with my own previously posted strategies. Not this time.
+
+What Makes This Unique
+GENESIS is not a black-box mashup or a pre-built template. It’s the culmination of DAFE’s own adaptive, multi-factor, regime-aware quant engine—built to outperform, survive, and visualize live edge in anything from NQ/MNQ to stocks and crypto.
+
+True multi-factor core: Volume/price imbalances, trend shifts, volatility compression/expansion, and RSI all interlock for signal creation.
+Adaptive regime logic: Trades only in healthy, actionable conditions—no “one-size-fits-all” signals.
+Momentum normalization: Uses rolling, percentile-based fast/slow EMA differentials, ALWAYS normalized, ALWAYS relevant—no “is it working?” ambiguity.
+Position sizing that adapts: Not fixed-lot, not naive—not a loophole for revenge trading.
+No hidden DCA or pyramiding—what you see is what you trade.
+Dashboard and visual system: Directly connected to internal logic. If it’s shown, it’s used—and nothing cosmetic is presented on your chart that isn’t quantifiable.
+
+📊 Inputs and What They Mean (Read Carefully)
+
+Maximum Raw Score: How many distinct factors can contribute to regime/trade confidence (default 4). If you extend the quant logic, increase this.
+RSI Length / Min RSI for Shorts / Max RSI for Longs: Fine-tunes how “overbought/oversold” matters; increase the length for smoother swings, tighten floors/ceilings for more extreme signals.
+
+⚡ Regime & Momentum Gates
+
+Min Normed Momentum/Score (Conf): Raise to demand only the strongest trends—your filter to avoid algorithmic chop.
+
+🕒 Volatility & Session
+
+ATR Lookback, ATR Low/High Percentile: These control your system’s awareness of when the market is dead or ultra-volatile. All sizing and filter logic adapts in real time.
+Trading Session (hours): Easy filter for when entries are allowed; default is regular trading hours—no surprise overnight fills.
+
+📊 Sizing & Risk
+
+Max Dollar Risk / Base-Max Contracts: All sizing is adaptive, based on live regime and volatility state—never static or “just 1 contract.” Control your max exposures and real $ risk. ATR will effect losses in high volatility times.
+
+🔄 Exits & Scaling
+
+Stop/Trail/Scale multipliers: You choose how dynamic/flexible risk controls and profit-taking need to be. ATR-based, so everything auto-adjusts to the current market mode.
+Visuals That Actually Matter
+Dashboard (Top Right): Shows only live, relevant stats: scoring, status, position size, win %, win streak, total wins—all from actual trade engine state (not “simulated”).
+Watermark (Bottom Right): Momentum bar visual is always-on, regime-aware, reflecting live regime confidence and momentum normalization. If the bar is empty, you’re truly in no-momentum. If it glows lime, you’re riding the strongest possible edge.
+*No cosmetics, no hidden code distractions.
+
+Backtest Settings
+Initial capital: $10,000
+Commission: Conservative, realistic roundtrip cost:
+15–20 per contract (including slippage per side) I set this to $25
+Slippage: 3 ticks per trade
+Symbol: CME_MINI:NQ1!
+Timeframe: 1 min (but works on all timeframes)
+Order size: Adaptive, 1–3 contracts
+No pyramiding, no hidden DCA
+
+Why these settings?
+These settings are intentionally strict and realistic, reflecting the true costs and risks of live trading. The 10,000 account size is accessible for most retail traders. 25/contract including 3 ticks of slippage are on the high side for NQ, ensuring the strategy is not curve-fit to perfect fills. If it works here, it will work in real conditions.
+
+Why It Wins
+
+While others put out “AI-powered” strategies with little logic or soul, GENESIS is ruthlessly practical. It is built around what keeps traders alive:
+
+- Context-aware signals, not just patterns
+- Tight, transparent risk
+- Inputs that adapt, not confuse
+- Visuals that clarify, not distract
+- Code that runs clean, efficient, and with minimal overfitting risk (try it on QQQ, AMD, SOL, etc. out of the box)
+
+Disclaimer (for TradingView compliance):
+
+Trading is risky. Futures, stocks, and crypto can result in significant losses. Do not trade with funds you cannot afford to lose. This is for educational and informational purposes only. Use in simulation/backtest mode before live trading. No past performance is indicative of future results. Always understand your risk and ownership of your trades.
+
+This will not be my last—my goal is to keep raising the bar until DAFE is a brand or I’m forced to take this private.
+
+Use with discipline, use with clarity, and always trade smarter.
+— Dskyz, powered by DAFE Trading Systems.
+May 20, 2025
+Release Notes
+Dskyz (DAFE) GENESIS: Adaptive Quant, Real Regime Power
+
+GENESIS is not a template or a black-box mashup. It’s DAFE’s own adaptive, multi-factor, regime-aware quant engine—built to outperform, survive, and visualize live edge in anything from NQ/MNQ to stocks and crypto.
+
+What Makes This Strategy Unique
+True multi-factor core: Volume/price imbalances, trend shifts, volatility compression/expansion, and RSI all interlock for signal creation.
+Adaptive regime logic: Trades only in healthy, actionable conditions—no “one-size-fits-all” signals.
+Momentum normalization: Uses rolling, percentile-based fast/slow EMA differentials, always normalized and relevant.
+Adaptive position sizing: Not fixed-lot, not naive—position size adapts to regime and volatility.
+No hidden DCA or pyramiding: What you see is what you trade.
+Dashboard and visuals: All stats and visuals are directly connected to the internal logic—no cosmetic overlays.
+
+Backtest Settings:
+Initial capital: $10,000
+Commission: 12.50 perside
+12.50perside,25 round-trip per contract (covers exchange, broker, and slippage)
+Slippage: 3 ticks per trade (NQ = $15 per contract per trade)
+Order size: Adaptive, 1–3 contracts
+Max risk per trade: $750 (7.5% of capital)
+Symbol: CME_MINI:NQ1!
+Timeframe: 1 min (works on all timeframes)
+No pyramiding, no hidden DCA
+Sample size: Designed to generate >100 trades for robust statistics (if your filters are strict and you get fewer, explain why in your notes).
+
+Why these settings?
+These settings are intentionally strict and realistic, reflecting the true costs and risks of live trading. If it works here, it will work in real conditions.
+
+Inputs (Explained)
+Maximum Raw Score: Number of factors contributing to regime/trade confidence (default 4).
+RSI Length / Min RSI for Shorts / Max RSI for Longs: Fine-tune overbought/oversold logic.
+Min Normed Momentum/Score (Conf): Filter for only the strongest trends.
+ATR Lookback, ATR Low/High Percentile: Controls system’s awareness of volatility regime.
+Trading Session: Filter for when entries are allowed (default: regular trading hours).
+Max Dollar Risk / Base-Max Contracts: Adaptive sizing based on live regime and volatility.
+Stop/Trail/Scale multipliers: ATR-based, so all risk controls and profit-taking auto-adjust to market mode.
+
+How the Strategy Works
+Signals: Combines trend, volume imbalance, RSI, and volatility regime for entries.
+Adaptive Sizing: Position size adapts to regime confidence, momentum, and volatility.
+Risk Management: ATR-based stops, trailing stops, and scale-outs.
+No hidden pyramiding or DCA.
+Visuals: Dashboard (top right) shows live stats; momentum bar (bottom right) reflects regime and momentum in real time.
+
+How to Use
+- Apply to NQ, MNQ, or any liquid stock/crypto on 1m or higher timeframe.
+- Adjust risk and sizing inputs to match your account and risk tolerance.
+- Use dashboard and momentum bar for live feedback on regime and trade quality.
+- Backtest and paper trade before going live.
+
+Disclaimer
+Trading is risky. Futures, stocks, and crypto can result in significant losses. Do not trade with funds you cannot afford to lose. This is for educational and informational purposes only. Use in simulation/backtest mode before live trading. No past performance is indicative of future results. Always understand your risk and ownership of your trades.
+
+Release Notes
+- Commission and slippage set to realistic, strict values for compliance.
+- All user inputs and logic fully explained.
+- Dashboard and visuals reflect only real, quantifiable logic—no cosmetic overlays.
+- No pyramiding, no hidden DCA, no lookahead bias.
+
+Use with discipline, use with clarity, and always trade smarter.
+— Dskyz, powered by DAFE Trading Systems

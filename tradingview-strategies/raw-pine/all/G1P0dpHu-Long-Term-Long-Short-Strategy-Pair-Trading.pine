@@ -1,0 +1,43 @@
+//@version=4
+strategy("Long Term L/S", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+base = input("BMFBOVESPA:IBOV")
+period = input(5, 'SMA Period', input.integer)
+resolution = input(title="SMA Resolution", type=input.resolution, defval='M')
+strat = input(title="Strategy", defval="Long/Short", options=["Long Only", "Long/Short", "Short Only"])
+strat_val = strat == "Long Only" ? 1 : strat == "Long/Short" ? 0 : -1
+
+base_cl = security((base), resolution, close)
+base_ma = sma(base_cl, period)
+
+longCondition = crossover(base_cl, base_ma)
+if (longCondition)
+    if strat_val > -1
+        strategy.entry("LONG", strategy.long)
+    if strat_val < 1
+        strategy.close("SHORT")
+
+shortCondition = crossunder(base_cl, base_ma)
+if (shortCondition)
+    if strat_val > -1
+        strategy.close("LONG")
+    if strat_val < 1
+        strategy.entry("SHORT", strategy.short)
+
+//plot(longCondition?1:0, 'L', color.blue)
+//plot(shortCondition?-1:0, 'S', color.red)
+
+View in Pine Editor・31 lines
+Use on chart
+1
+7
+1
+9 760
+Longing or shorting an asset ratio depending on long term trend.
+
+Long term trend is defined by crossing of an asset or index and its SMA.
+
+Input values:
+* trend asset
+* SMA configuration (periods, resolution)
+* strategy: long only, long/short, short only

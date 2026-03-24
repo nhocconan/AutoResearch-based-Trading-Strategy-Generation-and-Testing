@@ -1,0 +1,227 @@
+//@version=5
+strategy("Profitable Swing Trading Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ============================================
+// USER INPUTS
+// ============================================
+
+// Trend Detection (EMAs)
+ema_fast = input.int(9, "Fast EMA", minval=5, maxval=50)
+ema_slow = input.int(21, "Slow EMA", minval=10, maxval=100)
+ema_trend = input.int(50, "Trend EMA", minval=20, maxval=200)
+
+// RSI Settings
+rsi_length = input.int(14, "RSI Length")
+rsi_buy_level = input.int(45, "RSI Buy Level (below = oversold)")
+rsi_sell_level = input.int(55, "RSI Sell Level (above = overbought)")
+
+// MACD Settings
+macd_fast = input.int(12, "MACD Fast")
+macd_slow = input.int(26, "MACD Slow")
+macd_signal = input.int(9, "MACD Signal")
+
+// Volume Confirmation
+use_volume = input.bool(true, "Require Volume Confirmation")
+volume_ma_length = input.int(20, "Volume MA Length")
+
+// Risk Management
+use_atr_stops = input.bool(true, "Use ATR-Based Stops")
+atr_length = input.int(14, "ATR Length")
+atr_multiplier = input.float(2.0, "ATR Stop Multiplier", minval=1.0, maxval=5.0, step=0.5)
+risk_reward_ratio = input.float(2.0, "Risk:Reward Ratio", minval=1.0, maxval=5.0, step=0.5)
+
+// ============================================
+// INDICATORS
+// ============================================
+
+// EMAs
+ema9 = ta.ema(close, ema_fast)
+ema21 = ta.ema(close, ema_slow)
+ema50 = ta.ema(close, ema_trend)
+
+// RSI
+rsi = ta.rsi(close, rsi_length)
+
+// MACD
+[macd_line, signal_line, macd_hist] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+
+// Volume
+vol_ma = ta.sma(volume, volume_ma_length)
+volume_increasing = volume > vol_ma
+
+// ATR for stops
+atr = ta.atr(atr_length)
+
+// ============================================
+// TREND DETECTION
+// ============================================
+
+// Strong uptrend: Fast EMA > Slow EMA > Trend EMA
+strong_uptrend = ema9 > ema21 and ema21 > ema50 and close > ema50
+
+// Strong downtrend: Fast EMA < Slow EMA < Trend EMA
+strong_downtrend = ema9 < ema21 and ema21 < ema50 and close < ema50
+
+// Trend strength (distance between EMAs)
+trend_strength = math.abs(ema9 - ema50) / close * 100
+
+// ============================================
+// ENTRY SIGNALS
+// ============================================
+
+// BULLISH CONDITIONS
+// 1. EMA alignment (9 > 21 > 50)
+// 2. Price pullback to 21 EMA or bouncing off it
+// 3. RSI not overbought (below 70) but showing momentum
+// 4. MACD bullish (line above signal or about to cross)
+// 5. Volume confirmation
+
+ema_cross_bull = ta.crossover(ema9, ema21)
+price_near_ema21_bull = close > ema21 and close < ema21 * 1.02
+macd_bullish = macd_line > signal_line or ta.crossover(macd_line, signal_line)
+rsi_momentum_bull = rsi > 40 and rsi < 70
+
+buy_condition_1 = ema_cross_bull and close > ema50
+buy_condition_2 = strong_uptrend and price_near_ema21_bull and macd_bullish and rsi_momentum_bull
+volume_ok_bull = not use_volume or volume_increasing
+
+buy_signal = (buy_condition_1 or buy_condition_2) and volume_ok_bull
+
+// BEARISH CONDITIONS
+// 1. EMA alignment (9 < 21 < 50)
+// 2. Price rejection from 21 EMA
+// 3. RSI not oversold but showing weakness
+// 4. MACD bearish
+// 5. Volume confirmation
+
+ema_cross_bear = ta.crossunder(ema9, ema21)
+price_near_ema21_bear = close < ema21 and close > ema21 * 0.98
+macd_bearish = macd_line < signal_line or ta.crossunder(macd_line, signal_line)
+rsi_momentum_bear = rsi < 60 and rsi > 30
+
+sell_condition_1 = ema_cross_bear and close < ema50
+sell_condition_2 = strong_downtrend and price_near_ema21_bear and macd_bearish and rsi_momentum_bear
+volume_ok_bear = not use_volume or volume_increasing
+
+sell_signal = (sell_condition_1 or sell_condition_2) and volume_ok_bear
+
+// ============================================
+// EXIT SIGNALS
+// ============================================
+
+// Exit long when trend weakens
+exit_long = ta.crossunder(ema9, ema21) or close < ema50 or rsi > 75
+
+// Exit short when trend weakens
+exit_short = ta.crossover(ema9, ema21) or close > ema50 or rsi < 25
+
+// ============================================
+// STRATEGY EXECUTION
+// ============================================
+
+// Calculate stops and targets
+long_stop = use_atr_stops ? close - (atr * atr_multiplier) : close * 0.98
+long_target = close + (close - long_stop) * risk_reward_ratio
+
+short_stop = use_atr_stops ? close + (atr * atr_multiplier) : close * 1.02
+short_target = close - (short_stop - close) * risk_reward_ratio
+
+// LONG ENTRY
+if buy_signal and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long)
+    strategy.exit("Exit Long", "LONG", stop=long_stop, limit=long_target)
+
+// LONG EXIT
+if exit_long and strategy.position_size > 0
+    strategy.close("LONG")
+
+// SHORT ENTRY
+if sell_signal and strategy.position_size == 0
+    strategy.entry("SHORT", strategy.short)
+    strategy.exit("Exit Short", "SHORT", stop=short_stop, limit=short_target)
+
+// SHORT EXIT
+if exit_short and strategy.position_size < 0
+    strategy.close("SHORT")
+
+// ============================================
+// VISUAL ELEMENTS
+// ============================================
+
+// Plot EMAs
+plot(ema9, "EMA 9", color=color.new(color.aqua, 0), linewidth=2)
+plot(ema21, "EMA 21", color=color.new(color.orange, 0), linewidth=2)
+plot(ema50, "EMA 50", color=color.new(color.white, 0), linewidth=2)
+
+// Buy/Sell Signals
+plotshape(buy_signal, "BUY", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.normal, text="BUY")
+plotshape(sell_signal, "SELL", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.normal, text="SELL")
+
+// Background for trend
+bgcolor(strong_uptrend ? color.new(color.green, 95) : strong_downtrend ? color.new(color.red, 95) : na)
+
+// ============================================
+// DASHBOARD
+// ============================================
+
+var table dashboard = table.new(position.top_right, 2, 8, border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(dashboard, 0, 0, "Indicator", bgcolor=color.gray, text_color=color.white)
+    table.cell(dashboard, 1, 0, "Value", bgcolor=color.gray, text_color=color.white)
+    
+    // Trend
+    trend_text = strong_uptrend ? "STRONG UP ↑" : strong_downtrend ? "STRONG DOWN ↓" : "NEUTRAL"
+    trend_color = strong_uptrend ? color.new(color.green, 50) : strong_downtrend ? color.new(color.red, 50) : color.new(color.gray, 50)
+    table.cell(dashboard, 0, 1, "Trend", text_color=color.white)
+    table.cell(dashboard, 1, 1, trend_text, bgcolor=trend_color, text_color=color.white)
+    
+    // RSI
+    rsi_color = rsi > 70 ? color.new(color.red, 50) : rsi < 30 ? color.new(color.green, 50) : color.new(color.gray, 50)
+    table.cell(dashboard, 0, 2, "RSI", text_color=color.white)
+    table.cell(dashboard, 1, 2, str.tostring(math.round(rsi, 1)), bgcolor=rsi_color, text_color=color.white)
+    
+    // MACD
+    macd_text = macd_bullish ? "BULLISH ↑" : "BEARISH ↓"
+    macd_color = macd_bullish ? color.new(color.green, 50) : color.new(color.red, 50)
+    table.cell(dashboard, 0, 3, "MACD", text_color=color.white)
+    table.cell(dashboard, 1, 3, macd_text, bgcolor=macd_color, text_color=color.white)
+    
+    // Volume
+    vol_text = volume_increasing ? "ABOVE AVG ✓" : "Below Avg"
+    vol_color = volume_increasing ? color.new(color.green, 50) : color.new(color.gray, 50)
+    table.cell(dashboard, 0, 4, "Volume", text_color=color.white)
+    table.cell(dashboard, 1, 4, vol_text, bgcolor=vol_color, text_color=color.white)
+    
+    // Signal
+    signal_text = buy_signal ? "BUY 🟢" : sell_signal ? "SELL 🔴" : "---"
+    signal_color = buy_signal ? color.new(color.green, 30) : sell_signal ? color.new(color.red, 30) : color.new(color.gray, 70)
+    table.cell(dashboard, 0, 5, "SIGNAL", text_color=color.white)
+    table.cell(dashboard, 1, 5, signal_text, bgcolor=signal_color, text_color=color.white, text_size=size.large)
+    
+    // EMA Alignment
+    ema_align = ema9 > ema21 and ema21 > ema50 ? "UP ✓" : ema9 < ema21 and ema21 < ema50 ? "DOWN ✓" : "Mixed"
+    ema_color = ema9 > ema21 and ema21 > ema50 ? color.new(color.green, 50) : ema9 < ema21 and ema21 < ema50 ? color.new(color.red, 50) : color.new(color.gray, 50)
+    table.cell(dashboard, 0, 6, "EMA Align", text_color=color.white)
+    table.cell(dashboard, 1, 6, ema_align, bgcolor=ema_color, text_color=color.white)
+    
+    // Position
+    pos_text = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    pos_color = strategy.position_size > 0 ? color.new(color.green, 50) : strategy.position_size < 0 ? color.new(color.red, 50) : color.gray
+    table.cell(dashboard, 0, 7, "Position", text_color=color.white)
+    table.cell(dashboard, 1, 7, pos_text, bgcolor=pos_color, text_color=color.white)
+
+// ============================================
+// ALERTS
+// ============================================
+
+alertcondition(buy_signal, "BUY Alert", "🟢 PROFITABLE BUY SIGNAL")
+alertcondition(sell_signal, "SELL Alert", "🔴 PROFITABLE SELL SIGNAL")
+
+View in Pine Editor・220 lines
+Use on chart
+1
+3
+602
+Profitable Swing Trading Strategy mainly uses the 4hr

@@ -1,0 +1,140 @@
+//@version=4
+
+// Strategy
+strategy("Momentum Strategy", overlay=true, initial_capital = 10000, default_qty_value = 10000, default_qty_type = strategy.cash)
+
+// Strategy Backtesting
+startDate  = input(timestamp("2021-10-01T00:00:00"), type = input.time, title='Backtesting Start Date')
+finishDate = input(timestamp("9999-12-31T00:00:00"), type = input.time, title='Backtesting End Date')
+
+time_cond  = time >= startDate and time <= finishDate
+
+//Time Restriction Settings
+startendtime = input("", title='Time Frame To Enter Trades')
+enableclose = input(false, title='Enable Close Trade At End Of Time Frame')
+timetobuy = (time(timeframe.period, startendtime))
+timetoclose = na(time(timeframe.period, startendtime))
+
+// Momentum Code
+
+i_len           =       input(defval = 12,      title = "Momentum Length",       minval = 1)
+i_src           =       input(defval = close,   title = "Momentum Source")
+i_percent       =       input(defval = true,    title = "Percent?")
+i_mom           =       input(defval = "MOM2",  title = "MOM Choice",   options = ["MOM1", "MOM2"])
+
+momentum(seria, length, percent) =>
+    _mom        =       percent ? ( (seria / seria[length]) - 1) * 100 : seria - seria[length]
+    _mom
+
+mom0        =       momentum(i_src, i_len, i_percent)
+mom1        =       momentum(mom0, 1, i_percent)
+mom2        =       momentum(i_src, 1, i_percent)
+
+momX        =       mom1
+
+if i_mom == "MOM2"
+    momX    :=     mom2
+    
+doublemom = input(true, title="Use Double Momentum Entries")
+singlemom = input(false, title="Use Single Momentum Entries")
+
+// EMA Filter
+noemafilter = input(true, title="No EMA Filter")
+useemafilter = input(false, title="Use EMA Filter")
+ema_length = input(defval=15, minval=1, title="EMA Length")
+emasrc = input(close, title="EMA Source")
+ema = ema(emasrc, ema_length)
+plot(ema, "EMA", style=plot.style_linebr, color=#cad850, linewidth=2)
+
+// Stop Loss & Take Profit % Based
+enablesl = input(false, title='Enable Stop Loss')
+enabletp = input(false, title='Enable Take Profit')
+stopTick = input(5.0, title='Stop Loss %', type=input.float, step=0.1) / 100
+takeTick = input(10.0, title='Take Profit %', type=input.float, step=0.1) / 100
+
+longStop = strategy.position_avg_price * (1 - stopTick)
+shortStop = strategy.position_avg_price * (1 + stopTick)
+shortTake = strategy.position_avg_price * (1 - takeTick)
+longTake = strategy.position_avg_price * (1 + takeTick)
+
+plot(strategy.position_size > 0 and enablesl ? longStop : na, style=plot.style_linebr, color=color.red, linewidth=1, title="Long Fixed SL")
+plot(strategy.position_size < 0 and enablesl ? shortStop : na, style=plot.style_linebr, color=color.red, linewidth=1, title="Short Fixed SL")
+plot(strategy.position_size > 0 and enabletp ? longTake : na, style=plot.style_linebr, color=color.green, linewidth=1, title="Long Take Profit")
+plot(strategy.position_size < 0 and enabletp ? shortTake : na, style=plot.style_linebr, color=color.green, linewidth=1, title="Short Take Profit")
+
+// Alert messages
+message_enterlong  = input("", title="Long Entry message")
+message_entershort = input("", title="Short Entry message")
+message_closelong = input("", title="Close Long message")
+message_closeshort = input("", title="Close Short message")
+
+// Strategy Execution
+
+// Entry No EMA
+if (mom0 > 0 and momX > 0 and time_cond and timetobuy and doublemom and noemafilter)
+    strategy.entry("Long", strategy.long, alert_message = message_enterlong)
+    
+if (mom0 < 0 and momX < 0 and time_cond and timetobuy and doublemom and noemafilter)
+    strategy.entry("Short", strategy.short, alert_message = message_entershort)
+    
+if (mom0 > 0 and time_cond and timetobuy and singlemom and noemafilter)
+    strategy.entry("Long", strategy.long, alert_message = message_enterlong)
+    
+if (mom0 < 0 and time_cond and timetobuy and singlemom and noemafilter)
+    strategy.entry("Short", strategy.short, alert_message = message_entershort)
+
+// Entry Use EMA    
+if (mom0 > 0 and momX > 0  and close > ema and time_cond and timetobuy and doublemom and useemafilter)
+    strategy.entry("Long", strategy.long, alert_message = message_enterlong)
+    
+if (mom0 < 0 and momX < 0  and close < ema and time_cond and timetobuy and doublemom and useemafilter)
+    strategy.entry("Short", strategy.short, alert_message = message_entershort)
+    
+if (mom0 > 0 and time_cond  and close > ema and timetobuy and singlemom and useemafilter)
+    strategy.entry("Long", strategy.long, alert_message = message_enterlong)
+    
+if (mom0 < 0 and time_cond  and close < ema and timetobuy and singlemom and useemafilter)
+    strategy.entry("Short", strategy.short, alert_message = message_entershort)
+
+// Exit at close    
+if strategy.position_size > 0 and timetoclose and enableclose
+    strategy.close_all(alert_message = message_closelong)
+if strategy.position_size < 0 and timetoclose and enableclose
+    strategy.close_all(alert_message = message_closeshort)
+    
+// Exit SL and TP    
+if strategy.position_size > 0 and enablesl and time_cond
+    strategy.exit(id="Close Long", stop=longStop, limit=longTake, alert_message = message_closelong)
+if strategy.position_size < 0 and enablesl and time_cond
+    strategy.exit(id="Close Short", stop=shortStop, limit=shortTake, alert_message = message_closeshort)
+    
+if strategy.position_size > 0 and enabletp and time_cond
+    strategy.exit(id="Close Long", stop=longStop, limit=longTake, alert_message = message_closelong)
+if strategy.position_size < 0 and enabletp and time_cond
+    strategy.exit(id="Close Short", stop=shortStop, limit=shortTake, alert_message = message_closeshort)
+
+View in Pine Editor・117 lines
+Use on chart
+1
+8
+7
+5 918
+Sep 17, 2021
+This is a momentum indicator strategy that plots 2 lines on the momentum indicator and if both cross above zero a long entry is generated and if both cross below zero a short entry is generated. It also has code to check and make sure the condition is still true when launching the official alert, which helps back testing and live results line up, however be sure to enter commission and slippage into the properties to accurately reflect profits. There's also an optional "percent" option and selecting the MOM1 option in the "MOM Choice" field as it uses a slightly different calculation and may provide better results than the standard momentum calculation. Also I'd like to thank felipecms14 for his open source momentum code. I added back testing date ranges to this so you can easily pull up and see back tested results for a certain date range.
+Sep 18, 2021
+Release Notes
+Update 9-17-21:
+- Added a zero line plotted on the indicator so you can clearly see when lines are crossing above or below zero.
+- Added a buy and sell message field in the properties so you can launch alerts that will work with automated trading services. Simply enter your buy message and sell message into those fields in the properties and then when you create an alert enter {{strategy.order.alert_message}} into the alert body and it will dynamically pull in your buy and sell messages when it fires alerts.
+Jan 19, 2022
+Release Notes
+In this version I updated momentum entries to have 2 options. By default it uses 2 momentum lines that must cross zero to generate an entry. However you can uncheck "Use Double Momentum Entries" and check off "Use Single Momentum" entries and it will use only 1 momentum line to generate an entry. Usually using the double will be best but I'm providing the option in case it works better for the asset you're trading.
+
+I also added in the ability trade between certain hours which is useful for day traders. You can check off "Enable Close Trade At End Of Time Frame" to have the open trade closed when it reaches the end of the trading hours.
+
+The take profit and stop loss has been changed to % based and you can check off a box to enable stop loss or take profit individually.
+
+Finally I've also added more alert boxes so you can set separate entry and exit alert messages. Just use {{strategy.order.alert_message}} in your alert body and it will use the alert boxes for all entries and exits.
+Jan 23, 2022
+Release Notes
+Added EMA filter. Default "No EMA Filter" is checked. You can uncheck this and check "Use EMA Filter" and then set an ema length and ema source. Then it will not enter a long unless close price is above the ema and will not enter a short until close price is below the ema.

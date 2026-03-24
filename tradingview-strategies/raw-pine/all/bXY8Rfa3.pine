@@ -1,0 +1,160 @@
+//@version=5
+strategy("Tailwind.(BTC)", overlay=true, initial_capital=20000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// --- CONFIGURATION ---
+grp_grid = "Grid Configuration"
+step_size = input.float(3000, title="Step Size (Grid)", group=grp_grid)
+
+grp_risk = "Risk Management"
+tp_mult = input.float(1.4, title="TP Multiplier (x Grid)", step=0.1, group=grp_risk)
+sl_mult = input.float(1.0, title="SL Multiplier (x Grid)", step=0.1, group=grp_risk)
+
+grp_filt = "Entry Filters"
+max_dist_pct = input.float(60.0, title="Max % Travel Allowed", minval=1.0, maxval=99.0, group=grp_filt)
+use_ema   = input.bool(false, title="Use EMA Filter?", group=grp_filt)
+ema_len   = input.int(200, title="EMA Length", minval=1, group=grp_filt)
+
+// --- CALCULATIONS ---
+level_base = math.floor(close / step_size) * step_size
+limit_price_entry = level_base + (step_size * (max_dist_pct / 100.0))
+ema_trend = ta.ema(close, ema_len)
+
+// --- ENTRY LOGIC ---
+// Strict cross: Open below base, Close above base
+strict_cross = (open < level_base) and (close > level_base)
+price_is_valid = close <= limit_price_entry
+trend_ok = use_ema ? (close > ema_trend) : true
+
+// --- VISUAL MANAGEMENT (Persistent Variables) ---
+var line line_tp = na
+var line line_sl = na
+
+// --- EXECUTION ---
+if (strict_cross and price_is_valid and trend_ok and strategy.position_size == 0)
+    
+    // 1. Define Prices (Direct and fixed calculation)
+    
+    // TP: Base Level + (Step * Multiplier)
+    take_profit = level_base + (step_size * tp_mult)
+    
+    // SL: Base Level - (Step * Multiplier)
+    // We do not add the entry 'offset'. The SL is rigid relative to the level.
+    stop_loss = level_base - (step_size * sl_mult)
+    
+    // 2. Execute
+    id = "Long " + str.tostring(level_base)
+    strategy.entry(id, strategy.long)
+    strategy.exit("Exit " + id, id, limit=take_profit, stop=stop_loss)
+
+    // 3. Draw initial lines
+    line_tp := line.new(bar_index, take_profit, bar_index + 1, take_profit, color=color.green, style=line.style_dashed, width=2)
+    line_sl := line.new(bar_index, stop_loss, bar_index + 1, stop_loss, color=color.red, style=line.style_dashed, width=2)
+
+// --- VISUAL MAINTENANCE ---
+if strategy.position_size > 0
+    line.set_x2(line_tp, bar_index + 5)
+    line.set_x2(line_sl, bar_index + 5)
+
+// --- PLOTTING ---
+plot(level_base, color=color.new(color.gray, 60), style=plot.style_circles, title="Grid Level")
+plot(use_ema ? ema_trend : na, color=color.orange, title="Trend EMA", linewidth=2)
+
+View in Pine Editor・64 lines
+Use on chart
+2
+0
+1
+944
+Imagine the price of Bitcoin is like a person climbing a staircase.
+
+The Steps (Grid): Instead of watching every single price movement, the strategy divides the market into fixed steps. In your configuration, each step measures **3,000 points**. (Examples: 60,000, 63,000, 66,000...).
+
+The Signal: We buy only when the price climbs a full step decisively.
+
+The "Expensive Price" Filter: If the price jumps the step but lands too far away (the candle closes too high), we do not buy. It is like trying to board a train that has already started moving too fast; the risk is too high.
+
+Rigid Exits: The Take Profit (TP) and Stop Loss (SL) are calculated from the edge of the step, not from the specific price where you managed to buy. This preserves the geometric structure of the market.
+
+The Code Logic (Step-by-Step)
+
+A. The Math of the Grid (`math.floor`)
+
+pinescript
+level_base = math.floor(close / step_size) * step_size
+
+
+This is the most important line.
+
+What does it do? It rounds the price down to the nearest multiple of 3,000.
+
+Example: If BTC is at 64,500 and the step size is 3,000:
+
+1. Divide: $64,500 / 3,000 = 21.5$
+
+2. `math.floor` (Floor): Removes the decimals $\rightarrow$ remains $21$.
+
+3. Multiply: $21 * 3,000 = 63,000$.
+
+Result: The code knows that the current "floor" is **63,000**, regardless of whether the price is at 63,001 or 65,999.
+
+B. The Strict Breakout (`strict_cross`)
+
+pinescript
+strict_cross = (open < level_base) and (close > level_base)
+
+Most strategies only check if `close > level`. We do things slightly differently:
+
+`open < level_base`: Requires the candle to have "born" *below* the line (e.g., opened at 62,900).
+
+`close > level_base`: Requires the candle to have *finished* above the line (e.g., closed at 63,200).
+
+Why? This avoids entering on gaps (price jumps where the market opens already very high) and confirms that there was real buying power crossing the line.
+
+C. The "Expensive Price" Filter (`max_dist_pct`)
+
+pinescript
+limit_price_entry = level_base + (step_size * (max_dist_pct / 100.0))
+price_is_valid = close <= limit_price_entry
+
+
+Here you apply the percentage rule:
+
+-If the level is 63,000 and the next is 66,000 (a difference of 3,000).
+
+-If `max_dist_pct` is **60%**, the limit is $63,000 + (60\% \text{ of } 3,000) = 64,800$.
+
+-If the breakout candle closes at **65,000**, the variable `price_is_valid` will be **false** and it will not enter the trade. This avoids buying at the ceiling.
+
+
+D. TP and SL Calculation (Anchored to the Level)
+
+pinescript
+take_profit = level_base + (step_size * tp_mult)
+stop_loss = level_base - (step_size * sl_mult)
+
+Note that we use `level_base` and not `close`.
+
+-If you entered because the price broke 63,000, your SL is calculated starting from 63,000.
+
+-If your SL is 1.0x, your stop will be exactly at 60,000.
+
+This is crucial: If you bought "expensive" (e.g., at 63,500), your real stop is wider (3,500 points) than if you bought cheap (63,100). Because you filter out expensive entries, you protect your Risk/Reward ratio.
+
+E. Visual Management (`var line`)
+
+The code uses `var` variables to remember the TP and SL lines and the `line.set_x2` function to stretch them to the right while the operation remains open, providing that visual reference on the chart until the trade ends.
+
+
+Workflow Summary
+
+Strategy Parameters:
+
+Total Capital: $20,000
+We will use 10% of total capital per trade.
+Commissions: 0.1% per trade.
+TP: 1.4
+SL: 1
+Step Size (Grid): 3,000
+We use the 200 EMA as a trend filter.
+
+Feel free to experiment with the parameters to your liking. Cheers.

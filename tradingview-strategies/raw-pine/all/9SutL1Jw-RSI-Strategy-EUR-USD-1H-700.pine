@@ -1,0 +1,24 @@
+//@version=2
+strategy("RSI Strategy", overlay=true)
+length = input( 14 )
+overSold = input( 27 )
+overBought = input( 73 )
+price = close
+
+vrsi = rsi(price, length)
+
+if (not na(vrsi))
+    if (crossover(vrsi, overSold))
+        strategy.entry("RsiLE", strategy.long, qty=10000, comment="RsiLE")
+      
+    if (crossunder(vrsi, overBought))
+        strategy.entry("RsiSE", strategy.short, qty=10000, comment="RsiSE")
+
+View in Pine Editor・15 lines
+Use on chart
+2
+4
+7
+1
+6 727
+A rsi strategy that has potential to do over 700% annually on the EURUSD 1h

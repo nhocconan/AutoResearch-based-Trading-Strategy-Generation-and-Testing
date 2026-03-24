@@ -1,0 +1,255 @@
+//@version=6
+strategy('Strategy EMA trend & MACD 5m-15m', overlay = true)
+
+// Parameters
+lookback_period = input.int(14, title = 'Lookback Period', minval = 5, maxval = 50, tooltip = 'Period for RSI and MA calculations')
+rsi_length = input.int(14, title = 'RSI Length', minval = 5, maxval = 50, tooltip = 'RSI calculation period')
+volume_threshold = input.float(2.0, title = 'Volume Spike Factor', minval = 1.0, tooltip = 'Factor for significant volume spikes')
+divergence_threshold = input.float(0.05, title = 'Divergence Threshold', minval = 0.01, maxval = 0.2, tooltip = 'Threshold for divergence detection')
+
+var onUptrend = false
+var onDowntrend = false
+var hasBottom = false
+var hasPeak = false
+var ableToLong = false
+var sidewayTop = -1.0
+var sidewayBottom = -1.0
+
+var entry = 0.0
+var tp1 = 0.0
+var tp2 = 0.0
+
+// emaValue = input.int(defval = 21, title = 'EMA Value')
+ema20 = ta.ema(close, 20)
+ema25 = ta.ema(close, 25)
+ema30 = ta.ema(close, 30)
+ema35 = ta.ema(close, 35)
+ema40 = ta.ema(close, 40)
+ema45 = ta.ema(close, 45)
+ema50 = ta.ema(close, 50)
+ema55 = ta.ema(close, 55)
+ema100 = ta.ema(close, 100)
+ema200 = ta.ema(close, 200)
+
+// var cumVol = 0.
+// cumVol += nz(volume)
+// if barstate.islast and cumVol == 0
+//     runtime.error("No volume is provided by the data vendor.")
+// src = close
+obv = ta.obv
+obv_ema20 = ta.ema(obv, 20)
+obv_ema30 = ta.ema(obv, 30)
+obv_ema40 = ta.ema(obv, 40)
+obv_ema50 = ta.ema(obv, 50)
+obv_ema100 = ta.ema(obv, 100)
+obv_ema200 = ta.ema(obv, 200)
+
+obv_emaUptrend = obv_ema20 > obv_ema30 and obv_ema30 > obv_ema40 and obv_ema40 > obv_ema50 and (not na(obv_ema100) ? obv_ema50 > obv_ema100 : true) and (not na(obv_ema200) ? obv_ema100 > obv_ema200 : true)
+obv_emaDowntrend = obv_ema20 < obv_ema30 and obv_ema30 < obv_ema40 and obv_ema40 < obv_ema50 and (not na(obv_ema100) ? obv_ema50 < obv_ema100 : true) and (not na(obv_ema200) ? obv_ema100 < obv_ema200 : true)
+obv_emaDownTrendWithNoise = obv_ema20 < obv_ema100 and obv_ema30 < obv_ema100 and obv_ema40 < obv_ema100 and obv_ema50 < obv_ema100 and obv_ema100 < obv_ema200 and not (obv_ema20 < obv_ema30 and obv_ema30 < obv_ema40 and obv_ema40 < obv_ema50)
+obv_emaUpTrendWithNoise = obv_ema20 > obv_ema100 and obv_ema30 > obv_ema100 and obv_ema40 > obv_ema100 and obv_ema50 > obv_ema100 and obv_ema100 > obv_ema200 and not (obv_ema20 > obv_ema30 and obv_ema30 > obv_ema40 and obv_ema40 > obv_ema50)
+
+// plot(ema20, 'ema20', color = color.blue, linewidth = 1)
+// plot(ema25, 'ema25', color = color.lime, linewidth = 1)
+// plot(ema30, 'ema30', color = color.yellow, linewidth = 1)
+// plot(ema35, 'ema35', color = color.purple, linewidth = 1)
+// plot(ema40, 'ema40', color = color.black, linewidth = 1)
+// plot(ema45, 'ema45', color = color.gray, linewidth = 1)
+// plot(ema50, 'ema50', color = color.navy, linewidth = 1)
+// plot(ema55, 'ema55', color = color.green, linewidth = 1)
+// plot(ema100, 'ema100', color = color.red, linewidth = 1)
+// plot(ema200, 'ema200', color = color.red, linewidth = 3)
+
+// onUptrend := ema20 > ema25 and ema25 > ema30 and ema30 > ema35 and ema35 > ema40 and ema40 > ema45 and ema45 > ema50 and ema50 > ema55
+onUptrend := ema20 > ema30 and ema30 > ema40 and ema40 > ema50
+onBigUptrend = onUptrend and ema50 >= ema100 and ema100 >= ema200
+// onBigDownTrend = ema20 < ema25 and ema25 < ema30 and ema30 < ema35 and ema35 < ema40 and ema40 < ema45 and ema45 < ema50 and ema50 < ema55 and ema55 < ema100 and ema100 < ema200
+onBigDownTrend = ema20 < ema30 and ema30 < ema40 and ema40 < ema50 and ema50 < ema100 and ema100 < ema200
+emaCrossingUp = ta.crossover(ema20, ema200)
+emaCrossingDown = ta.crossunder(ema20, ema200)
+emaCrossingDownClose = ta.crossunder(ema20, ema50)
+emaDownTrendWithNoise = ema20 < ema100 and ema30 < ema100 and ema40 < ema100 and ema50 < ema100 and ema100 < ema200 and not (ema20 < ema30 and ema30 < ema40 and ema40 < ema50)
+emaUpTrendWithNoise = ema20 > ema100 and ema30 > ema100 and ema40 > ema100 and ema50 > ema100 and ema100 > ema200 and not (ema20 > ema30 and ema30 > ema40 and ema40 > ema50)
+
+rsiObv = ta.rsi(ta.obv, 14)
+rsi_obv_ema20 = ta.ema(rsiObv, 20)
+rsi_obv_ema30 = ta.ema(rsiObv, 30)
+rsi_obv_ema40 = ta.ema(rsiObv, 40)
+rsi_obv_ema50 = ta.ema(rsiObv, 50)
+rsi_obv_ema100 = ta.ema(rsiObv, 100)
+rsi_obv_ema200 = ta.ema(rsiObv, 200)
+rsi_obv_emaUptrend = rsi_obv_ema20 > rsi_obv_ema30 and rsi_obv_ema30 > rsi_obv_ema40 and rsi_obv_ema40 > rsi_obv_ema50 and (not na(rsi_obv_ema100) ? rsi_obv_ema50 > rsi_obv_ema100 : true) and (not na(rsi_obv_ema200) ? rsi_obv_ema100 > rsi_obv_ema200 : true)
+rsi_obv_emaDowntrend = rsi_obv_ema20 < rsi_obv_ema30 and rsi_obv_ema30 < rsi_obv_ema40 and rsi_obv_ema40 < rsi_obv_ema50 and (not na(rsi_obv_ema100) ? rsi_obv_ema50 < rsi_obv_ema100 : true) and (not na(rsi_obv_ema200) ? rsi_obv_ema100 < rsi_obv_ema200 : true)
+
+// plot(emaCrossingUp ? 1 : 0, 'emaCrossingUp', color = color.blue, linewidth = 1)
+// plot(emaCrossingDown ? 1 : 0, 'emaCrossingDown', color = color.blue, linewidth = 1)
+// plot(strategy.position_size, 'strategy.position_size', color = color.blue, linewidth = 1)
+// plot(strategy.position_size > 0 and emaCrossingDown ? 1 : 0, 'strategy.position_size > 0 and emaCrossingDown', color = color.blue, linewidth = 1)
+
+//-####################################-//
+//indicator('Sideways Scalper Peak and Bottom', overlay = true)
+
+// RSI for momentum
+rsi = ta.rsi(close, rsi_length)
+
+// Moving Averages for trend
+fast_ma = ta.sma(close, lookback_period / 2)
+slow_ma = ta.sma(close, lookback_period)
+
+// Volume Analysis
+avg_volume = ta.sma(volume, lookback_period)
+is_volume_spike = volume > avg_volume * volume_threshold
+
+// Function to check for RSI divergence
+rsi_divergence(long_term, short_term) =>
+    divergence = (long_term - short_term) / long_term
+    math.abs(divergence) > divergence_threshold
+
+// Divergence
+lookbackRight = 5
+lookbackLeft = 5
+rangeUpper = 60
+rangeLower = 5
+bearColor = color.red
+bullColor = color.green
+textColor = color.white
+noneColor = color.new(color.white, 100)
+
+plFound = na(ta.pivotlow(rsi, lookbackLeft, lookbackRight)) ? false : true
+phFound = na(ta.pivothigh(rsi, lookbackLeft, lookbackRight)) ? false : true
+_inRange(cond) =>
+    bars = ta.barssince(cond == true)
+    rangeLower <= bars and bars <= rangeUpper
+
+//------------------------------------------------------------------------------
+// Regular Bullish
+// rsi: Higher Low
+inRange = _inRange(plFound[1])
+rsiHL = rsi[lookbackRight] > ta.valuewhen(plFound, rsi[lookbackRight], 1) and inRange
+
+// Price: Lower Low
+
+priceLL = low[lookbackRight] < ta.valuewhen(plFound, low[lookbackRight], 1)
+bullCondAlert = priceLL and rsiHL and plFound
+// bullCond = showDivergence and bullCondAlert
+
+// Conditions for potential reversal signals
+// Sell Signal: Look for overbought RSI, bearish divergence, volume spike, and price above both MAs
+peak_condition = rsi > 70 and rsi_divergence(rsi[lookback_period], rsi) and is_volume_spike and close > fast_ma and close > slow_ma
+
+// Buy Signal: Look for oversold RSI, bullish divergence, volume spike, and price below both MAs
+bottom_condition = rsi < 30 and rsi_divergence(rsi[lookback_period], rsi) and is_volume_spike and close < fast_ma and close < slow_ma
+
+// Plotting MAs for visual reference
+// plot(fast_ma, title = 'Fast MA', color = color.blue, linewidth = 1)
+// plot(slow_ma, title = 'Slow MA', color = color.red, linewidth = 1)
+
+// Plotting Buy/Sell Signals
+// plotshape(peak_condition, title = 'Peak Signal', location = location.abovebar, color = color.red, style = shape.labeldown, text = 'Peak', size = size.small, textcolor = color.white)
+// plotshape(bottom_condition, title = 'Bottom Signal', location = location.belowbar, color = color.green, style = shape.labelup, text = 'Bottom', size = size.small, textcolor = color.white)
+
+// Alerts
+alertcondition(peak_condition, title = 'Peak Signal Alert', message = 'Potential Peak Detected')
+alertcondition(bottom_condition, title = 'Bottom Signal Alert', message = 'Potential Bottom Detected')
+
+// length = input(50)
+// //----
+// a = ta.ema(close,length)
+// b = ta.stdev(a > a[1] ? a : 0,length)
+// c = ta.stdev(a < a[1] ? a : 0,length)
+// up = a/(a+b)
+// dn = a/(a+c)
+// //----
+// os = up[1] == 1 and up != 1 ? 1 : dn[1] == 1 and dn != 1 ? -1 : na
+// plotarrow(os,colorup=#2196f3,colordown =color.red)
+
+if bottom_condition and onBigDownTrend
+// if bottom_condition and close < ema200 and not onBigUptrend
+    hasBottom := true
+if hasBottom and onBigDownTrend
+    ableToLong := true
+// if hasBottom
+//     sidewayBottom := low
+// if hasBottom and peak_condition and close < ema200 and not onUptrend
+//     hasPeak := true
+//     sidewayTop := high
+//     hasBottom := false
+// if peak_condition
+//     hasBottom := false
+
+
+// if hasBottom and onBigDownTrend[1] and not onBigDownTrend
+// if bottom_condition //ableToLong and (onBigUptrend)
+// if hasBottom and not obv_emaDownTrendWithNoise and not emaDownTrendWithNoise
+//      and ((onBigDownTrend[1] and not onBigDownTrend) or (obv_emaIsDown[1] and not obv_emaIsDown)
+//      or (emaDownTrendWithNoise[1] and not emaDownTrendWithNoise)
+//      or (obv_emaDownTrendWithNoise[1] and not obv_emaDownTrendWithNoise))
+// if ((not obv_emaUpTrendWithNoise[1] and obv_emaUpTrendWithNoise and emaUpTrendWithNoise)
+//      or (not emaUpTrendWithNoise[1] and emaUpTrendWithNoise and obv_emaUpTrendWithNoise))
+
+// Long From existing script "Strategy EMA trend"
+// if ((not obv_emaUptrend[1] and obv_emaUptrend and onBigUptrend)
+//      or (not onBigUptrend[1] and onBigUptrend and obv_emaUptrend))
+//      and not na(ema200[5]) and not na(ema200[10])
+// // if obv_emaDownTrend and rsi_obv_emaDowntrend[1] and not rsi_obv_emaDowntrend and not rsi_obv_emaUptrend
+// // if obv_emaDowntrend and not rsi_obv_emaDowntrend and not rsi_obv_emaUptrend and close > open
+//     if strategy.position_size == 0
+//         strategy.entry('longEntry', strategy.long)
+//         entry := close
+//         hasBottom := false
+//         ableToLong := false
+// // if (not obv_emaDownTrendWithNoise and not obv_emaDowntrend and not obv_emaUptrend and obv < obv_ema200)
+// if (rsi_obv_emaDowntrend and not rsi_obv_emaDowntrend[1]) // gray to red
+//      or (rsi_obv_emaUptrend[1] and not rsi_obv_emaUptrend) // green to gray
+//     if strategy.position_size > 0    
+//         // strategy.entry('short', strategy.short)
+//         strategy.close('longEntry', 'TP/SL Long')
+//         // if strategy.position_size > 0 and ta.crossunder(close, ema)
+//         //     strategy.close("longEntry", "Start Down")
+
+// Short: new strategy combine with MACD 02/01/2026
+//Strategy
+[macd, signalLine, histLine] = ta.macd(close, 12, 26, 9)
+close_15m =  request.security(syminfo.tickerid, "15", close)
+ema200_15m =  request.security(syminfo.tickerid, "15", ema200)
+macd_15m =  request.security(syminfo.tickerid, "15", macd)
+macd_30m =  request.security(syminfo.tickerid, "30", macd)
+macd_1h =  request.security(syminfo.tickerid, "60", macd)
+macd_4h =  request.security(syminfo.tickerid, "240", macd)
+signalLine_15m =  request.security(syminfo.tickerid, "15", signalLine)
+signalLine_30m =  request.security(syminfo.tickerid, "30", signalLine)
+signalLine_1h =  request.security(syminfo.tickerid, "60", signalLine)
+signalLine_4h =  request.security(syminfo.tickerid, "240", signalLine)
+
+macd_crossover_signal = ta.crossover(macd, signalLine)
+if timeframe.period == "5"
+    macd_crossunder_signal = ta.crossunder(macd, signalLine)
+    macd_crossover_signal := ta.crossover(macd, signalLine)
+    sellCondition = onBigUptrend and macd_15m < signalLine_15m and macd_crossunder_signal //and macd_30m < signalLine_30m //and macd_1h < signalLine_1h //and macd_4h < signalLine_4h
+    // Execute trade if condition is True
+
+    if sellCondition
+        strategy.order("short", strategy.short)
+
+    if strategy.position_size != 0 and close < ema200 and (macd_crossover_signal)
+        strategy.exit(id='short', stop=close)
+// plot(strategy.position_size, 'strategy.position_size', color = color.blue, linewidth = 1)
+// plot(macd_crossover_signal ? 1 : 0, 'macd_crossover_signal', color = color.blue, linewidth = 1)
+// plot(close < ema200 ? 1 : 0, 'close < ema200', color = color.blue, linewidth = 1)
+// if close > open and close > Trailingsl and Trend == 1 and ta.crossover(outEma, macdSignalNormalized) and outEma < 1 and isMACDAbove and volume > outVolumeEma and strategy.position_size <= 0
+//     slPrice = math.min(low,low[1],low[2],low[3],low[4],low[5],low[6],low[7],low[8]) * 0.9999
+//     tpPrice = close + math.abs(close - slPrice)*rr
+//     strategy.entry("longEntry", strategy.long, qty = lossIfSL / math.abs(close - slPrice))
+//     strategy.exit("SL/TP Long", from_entry = "longEntry", stop = slPrice)
+// if close < open and close < Trailingsl and Trend == -1 and ta.crossunder(outEma, macdSignalNormalized) and not isMACDAbove and volume > outVolumeEma and strategy.position_size >= 0
+//     slPrice =  math.max(high,high[1],high[2],high[3],high[4],high[5],high[6],high[7],high[8]) * 1.0001
+//     tpPrice = close - math.abs(close - slPrice)*rr
+//     strategy.entry("shortEntry", strategy.short, qty = lossIfSL / math.abs(close - slPrice))
+//     strategy.exit("SL/TP Short", from_entry = "shortEntry", stop = slPrice)
+
+View in Pine Editor・251 lines
+Use on chart
+2
+2
+654
+Strategy using multiple EMAs as a trend & MACD as a signal, using 5m and 15m timeframe, 5m is a main timeframe.

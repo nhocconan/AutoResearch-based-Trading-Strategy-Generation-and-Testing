@@ -1,0 +1,179 @@
+//@version=6
+strategy("MTF FVG Confluence v6 — JSON Alerts via alert()",
+     overlay=true, pyramiding=0, calc_on_every_tick=false,
+     initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06)
+
+//──────────────── Inputs
+tfD    = input.timeframe("D","Daily TF")
+tf4H   = input.timeframe("240","4H TF")
+tf1H   = input.timeframe("60","1H TF")
+
+riskPct  = input.float(1.5,"Risk % per trade",minval=0.1,maxval=5)
+acctSize = input.float(10000,"Account Size")
+rr       = input.float(3.0,"Reward:Risk",step=0.5)
+atrLen   = input.int(14,"ATR Len",minval=5)
+atrMult  = input.float(1.5,"ATR Mult",step=0.1)
+
+useSession = input.bool(false,"Use Session Filter")
+sess       = input.session("0930-1600","Session (exchange)")
+allowWknd  = input.bool(true,"Trade Weekends")
+
+beEnable = input.bool(true,"Break-Even Enable")
+beR      = input.float(1.0,"Move BE at R:",step=0.25,minval=0.5)
+
+//──────────────── Helpers
+nzmax(x) =>
+    math.max(x, syminfo.mintick)
+
+//──────────────── Session / weekend gate
+inSess  = (not useSession) or (not na(time(timeframe.period, sess)))
+isWknd  = (dayofweek == dayofweek.saturday) or (dayofweek == dayofweek.sunday)
+barOK   = inSess and (allowWknd or not isWknd)
+
+//──────────────── Higher-TF filters (non-repainting)
+dClose  = request.security(syminfo.tickerid, tfD,  close, barmerge.gaps_off, barmerge.lookahead_off)
+dEMA200 = request.security(syminfo.tickerid, tfD,  ta.ema(close,200), barmerge.gaps_off, barmerge.lookahead_off)
+dUp     = dClose > dEMA200
+dDown   = dClose < dEMA200
+
+h4EMA50  = request.security(syminfo.tickerid, tf4H, ta.ema(close, 50), barmerge.gaps_off, barmerge.lookahead_off)
+h4EMA200 = request.security(syminfo.tickerid, tf4H, ta.ema(close,200), barmerge.gaps_off, barmerge.lookahead_off)
+h4Up     = h4EMA50 > h4EMA200
+h4Down   = h4EMA50 < h4EMA200
+
+[_,_,hist1h] = request.security(syminfo.tickerid, tf1H, ta.macd(close,12,26,9), barmerge.gaps_off, barmerge.lookahead_off)
+macdUp   = hist1h > 0
+macdDown = hist1h < 0
+
+//──────────────── FVG + engulfing trigger on chart TF
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+// store most recent zones (typed vars)
+var float bTop  = na
+var float bBot  = na
+var float sTop  = na
+var float sBot  = na
+if bullFVG
+    bTop := low
+    bBot := high[2]
+if bearFVG
+    sTop := low[2]
+    sBot := high
+
+inBull = not na(bTop) and not na(bBot) and (close <= bTop) and (close >= bBot)
+inBear = not na(sTop) and not na(sBot) and (close >= sBot) and (close <= sTop)
+
+bullEng = (close > open) and (close >= open[1]) and (open <= close[1])
+bearEng = (close < open) and (close <= open[1]) and (open >= close[1])
+
+//──────────────── Confluence
+longCond  = barOK and dUp   and h4Up   and macdUp   and inBull and bullEng
+shortCond = barOK and dDown and h4Down and macdDown and inBear and bearEng
+
+//──────────────── Risk, stops, targets
+atr   = ta.atr(atrLen)
+stopL = close - atrMult * atr
+stopS = close + atrMult * atr
+
+riskCash = acctSize * (riskPct / 100.0)
+qtyL = riskCash / nzmax(close - stopL)
+qtyS = riskCash / nzmax(stopS - close)
+
+//──────────────── Entries
+if longCond and strategy.position_size <= 0
+    strategy.entry("LONG", strategy.long, qty=qtyL)
+if shortCond and strategy.position_size >= 0
+    strategy.entry("SHORT", strategy.short, qty=qtyS)
+
+//──────────────── Exits (3R + optional BE). Typed vars.
+var float dynStopL = na
+var float dynStopS = na
+var float lastRiskL = na
+var float lastRiskS = na
+
+// reset on position change (bool-safe)
+if ta.change(strategy.position_size) != 0
+    dynStopL  := na
+    dynStopS  := na
+    lastRiskL := na
+    lastRiskS := na
+
+if strategy.position_size > 0
+    avg  = strategy.position_avg_price
+    lastRiskL := nz(lastRiskL, nzmax(avg - stopL))
+    tpL = avg + rr * lastRiskL
+    beHit = beEnable and ((high - avg) >= beR * lastRiskL)
+    dynStopL := beHit ? math.max(nz(dynStopL, stopL), avg + syminfo.mintick) : nz(dynStopL, stopL)
+    strategy.exit("L-TP/SL", from_entry="LONG", stop=dynStopL, limit=tpL)
+
+if strategy.position_size < 0
+    avg  = strategy.position_avg_price
+    lastRiskS := nz(lastRiskS, nzmax(stopS - avg))
+    tpS = avg - rr * lastRiskS
+    beHit = beEnable and ((avg - low) >= beR * lastRiskS)
+    dynStopS := beHit ? math.min(nz(dynStopS, stopS), avg - syminfo.mintick) : nz(dynStopS, stopS)
+    strategy.exit("S-TP/SL", from_entry="SHORT", stop=dynStopS, limit=tpS)
+
+//──────────────── JSON messages (concat, no str.format)
+estRiskL = nzmax(close - stopL)
+estRiskS = nzmax(stopS - close)
+
+qtyL_s = str.tostring(qtyL, "#.########")
+qtyS_s = str.tostring(qtyS, "#.########")
+slL_s  = str.tostring(stopL, "#.######")
+slS_s  = str.tostring(stopS, "#.######")
+tpL_s  = str.tostring(close + rr * estRiskL, "#.######")
+tpS_s  = str.tostring(close - rr * estRiskS, "#.######")
+rr_s   = str.tostring(rr, "#.##")
+ts_s   = str.tostring(time, "yyyy-MM-dd HH:mm:ss")
+
+msgL = "{\"symbol\":\"" + syminfo.ticker + "\",\"side\":\"BUY\",\"qty\":" + qtyL_s +
+       ",\"stop\":" + slL_s + ",\"tp\":" + tpL_s + ",\"rr\":" + rr_s + ",\"t\":\"" + ts_s + "\"}"
+
+msgS = "{\"symbol\":\"" + syminfo.ticker + "\",\"side\":\"SELL\",\"qty\":" + qtyS_s +
+       ",\"stop\":" + slS_s + ",\"tp\":" + tpS_s + ",\"rr\":" + rr_s + ",\"t\":\"" + ts_s + "\"}"
+
+// Static alertconditions (optional)
+alertcondition(longCond,  title="LONG Setup",  message="Long setup triggered")
+alertcondition(shortCond, title="SHORT Setup", message="Short setup triggered")
+
+// Dynamic alerts for webhooks
+if longCond
+    alert(msgL, alert.freq_once_per_bar_close)
+if shortCond
+    alert(msgS, alert.freq_once_per_bar_close)
+
+//──────────────── Visuals
+plot(dEMA200,  "D EMA200",  color=color.new(color.blue, 0), linewidth=2)
+plot(h4EMA50,  "4H EMA50",  color=color.new(color.teal, 40))
+plot(h4EMA200, "4H EMA200", color=color.new(color.orange,40))
+plotshape(bullFVG, title="Bull FVG", style=shape.triangleup,   location=location.belowbar, size=size.tiny, color=color.new(color.green,0))
+plotshape(bearFVG, title="Bear FVG", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red,  0))
+
+//──────────────── Stats
+var table t = table.new(position.top_right, 1, 4, border_width=1)
+win  = strategy.wintrades
+loss = strategy.losstrades
+wr   = (win + loss) > 0 ? (win / (win + loss)) * 100.0 : na
+pf   = strategy.grossloss != 0 ? (strategy.grossprofit / math.abs(strategy.grossloss)) : na
+if barstate.islast
+    table.cell(t, 0, 0, "Win Rate: " + (na(wr) ? "—" : str.tostring(wr, "#.00") + "%"))
+    table.cell(t, 0, 1, "Profit Factor: " + (na(pf) ? "—" : str.tostring(pf, "#.00")))
+    table.cell(t, 0, 2, "Trades: " + str.tostring(win + loss))
+    table.cell(t, 0, 3, "Risk/Trade: " + str.tostring(riskPct, "#.##") + "%")
+
+View in Pine Editor・164 lines
+Use on chart
+1
+0
+1 367
+This strategy combines multi-timeframe confluence with candlestick analysis and fair value gaps (FVGs) to generate structured long/short entries. It aligns Daily and 4H EMA trends with 1H MACD momentum, then confirms with engulfing candles and FVG zones for precision entries. Risk management is built-in, featuring stop-loss, 3R take-profit targets, and optional break-even logic, with dynamic JSON alerts for webhook automation.
+
+Categories:
+
+Candlestick analysis
+
+Chart patterns
+
+Cycles

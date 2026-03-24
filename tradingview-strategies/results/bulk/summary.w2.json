@@ -1,0 +1,10 @@
+[
+  {
+    "slug": "rsi-spx-btc-correlation",
+    "classification": "partial",
+    "chart_url": "https://www.tradingview.com/script/LLnfx90C/",
+    "python_file": "python-strategies/bulk/rsi-spx-btc-correlation.py",
+    "import_ok": true,
+    "backtested": true
+  }
+]

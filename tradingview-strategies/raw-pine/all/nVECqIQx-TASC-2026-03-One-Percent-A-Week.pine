@@ -1,0 +1,192 @@
+//@version=6
+strategy(
+    "TASC 2026.03 One Percent A Week", "1%/W", overlay = true, 
+    initial_capital = 1000, 
+    default_qty_type = strategy.percent_of_equity, 
+    default_qty_value = 10
+)
+
+
+//#region 1. Observe the weekly open price on Monday.
+
+var float wOpen = na
+var float pt    = na
+bool newSession = dayofweek == dayofweek.monday and session.isfirstbar_regular
+
+if newSession
+    wOpen := open
+//#endregion
+
+
+//#region 2. Set limit buy at a 1% dip from Monday open.
+
+float down1 = wOpen * 0.99
+
+if newSession
+    strategy.entry("Buy", strategy.long, limit = down1)
+    pt := na
+//#endregion
+
+
+//#region 3. Once filled, set a 1% target on the next day.
+
+bool newFill = ta.change(strategy.position_size) != 0
+var bool sendPT = false
+var bool beSent = false
+
+if strategy.position_size > 0 and newFill
+    sendPT := true
+    beSent := false
+
+if sendPT == true and session.isfirstbar_regular and not beSent
+    pt := strategy.position_avg_price * 1.01
+    strategy.exit(
+        "profit", "Buy", limit = pt, 
+        oca_name = "Order", comment = "Profit"
+    )
+    sendPT := false
+//#endregion
+
+//#region 4. Risk management: Exit at break-even level after a -0.5% change.
+
+float bet = strategy.position_avg_price * 0.995
+
+if low < bet and not beSent
+    pt := strategy.position_avg_price
+    strategy.exit(
+        "profit", "Buy", limit = pt, 
+        oca_name = "Order", comment = "Break-even"
+    )
+    beSent := true
+//#endregion
+
+
+//#region 5. Hard exit at Friday close.
+
+if (
+    dayofweek == dayofweek.friday and 
+    strategy.position_size > 0 and 
+    session.islastbar_regular and barstate.isconfirmed
+)    
+    strategy.close_all("End of week", immediately = true)
+//#endregion
+
+
+//#region Plots
+
+plot(
+    newSession or not na(pt) ? na : wOpen, 
+    "Weekly Open", color.yellow, 
+    style = plot.style_linebr
+)
+
+plot(
+    newSession or not na(pt) ? na : down1,
+    "Weekly 1% Dip", color.blue, 
+    style = plot.style_linebr, 
+    linestyle = plot.linestyle_dashed
+)
+
+plot(
+    strategy.position_size > 0? bet : na,
+    "0.5% Drawdown", color.rgb(255,0,0),
+    style = plot.style_linebr, 
+    linestyle = plot.linestyle_dashed
+)
+
+plot(
+    strategy.position_size > 0 ? pt : na, 
+    "Profit Target", color.rgb(0,255,0), 
+    style = plot.style_linebr, 
+    linestyle = plot.linestyle_solid
+)
+//#endregion
+
+View in Pine Editor・111 lines
+Use on chart
+3
+2
+8
+1
+14 989
+█ OVERVIEW
+
+This script implements "A High-Probability Weekly Trading Strategy For TQQQ" as dictated in the March 2026 edition of the TASC Traders' Tips
+, "Trading Snapbacks In A Leveraged ETF”. In this article the author creates a mean reversion strategy intended for systematic and discretionary traders with the goal of having a minimal number of rules, low time commitment, and a consistent weekly profit target.
+
+
+█ INSTRUMENT SELECTION
+
+TQQQ is a 3x leveraged fund based on the Nasdaq-100 index. The article focuses specifically on this instrument because of its key characteristics that are suitable for this type of strategy:
+
+Strong trend behavior during bullish periods
+
+Frequent and sometimes steep intraday pullbacks
+
+High volatility, even on otherwise quiet market days
+
+Long-term compounding when the underlying index rises
+
+
+
+█ THE STRATEGY
+
+Simply put, the goal of this strategy is to trade TQQQ using an objective system with simple rules and no weekend holds, targeting 1% weekly returns while controlling drawdowns and preventing overtrading.
+
+This strategy was created to exploit short-term pullbacks during strong uptrends on TQQQ. With this in mind, the strategy is naturally long-only. Additionally, the strategy executes only one trade per week, which naturally limits trade activity and makes for a more robust system.
+
+While this strategy may not outperform buy-and-hold returns, it can offer more consistent behavior with relatively modest drawdowns and gains over time. The resulting equity curve is typically smoother overall than that of a typical buy-and-hold position, and therefore potentially more favorable from a long-term performance perspective.
+
+▌ Properties
+
+
+Position Sizing: Sizing is 10% of equity, the same as in the article.
+
+
+Commissions: Commission value is set to $0. Most major US brokers charge $0 commission on stocks and ETF trades, including leveraged ETFs such as TQQQ.
+
+
+Slippage: Slippage is set to 0. This strategy uses only limit orders, with the exception of a market-on-close order for the end of the week as a hard exit. For this reason slippage is not a consideration for this script.
+
+
+
+█ THE RULES
+
+Track Monday's Opening Price: Each week, Monday's open is noted.
+
+
+Enter on a 1% dip from the Open: On the open, a limit buy order is set at -1% from the open.
+
+
+Set a 1% profit target: If the buy order is filled, a limit sell (take-profit) order is set at the start of the following day for +1% from the fill price. By waiting until the start of the following day, this allows for occasional profits greater than 1% each week.
+
+
+Breakeven if 0.5% drawdown occurs: While in a position, if a drawdown of 0.5% or greater is observed, we immediately set a limit sell order at the entry price (breakeven).
+
+
+Hard stop at Friday close: A market-on-close order is set for EOD Friday to exit us from any position which has not met the target or breakeven limits.
+
+
+
+
+█ DISPLAY
+
+
+
+
+In addition to the strategy script's order executions, the display consists of four lines for visualizing the levels that the strategy uses for execution.
+
+
+Weekly Open: This yellow line plots at the start of the week. Once the profit target order is placed, this line stops plotting.
+
+Weekly 1% Dip: This blue dashed line also plots at the start of the week. Similar to the Weekly Open line, this line also stops plotting once the profit target order is placed.
+
+0.5% Drawdown: This red dashed line starts plotting once the strategy is in an active position.
+
+Profit Target: This solid green line begins plotting once the profit target order has been placed at the start of the day after the buy order was filled.
+
+
+
+The strategy aims to educate users about the specific trading approach outlined in the article. Therefore, it does not include customizable inputs to adjust calculations or levels. However, users can still adjust strategy parameters such as trade sizes, commissions, margin, etc. in the "Properties" tab.
+
+Note: Certain lines may not be visible if the conditions for display only last one bar. This is simply caused by the strategy executions and price action.

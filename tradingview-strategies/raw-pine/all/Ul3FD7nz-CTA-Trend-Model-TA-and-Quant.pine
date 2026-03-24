@@ -1,0 +1,82 @@
+//@version=5
+strategy("Static Ensemble CTA + AQR Time-Series Momentum", overlay=true, pyramiding=0)
+
+// === INPUTS ===
+maFastLen = input.int(50, title="Fast SMA Length")
+maSlowLen = input.int(200, title="Slow SMA Length")
+
+donchLen = input.int(40, title="Donchian Length")
+
+
+
+// AQR Time-Series Momentum
+tsmLen = input.int(252, title="TSM Lookback (days)")
+
+// === INDICATORS ===
+
+// 1️⃣ Moving Average Trend
+fastMA = ta.sma(close, maFastLen)
+slowMA = ta.sma(close, maSlowLen)
+int maVote = fastMA > slowMA ? 1 : -1
+
+// 2️⃣ Donchian Breakout
+donchHigh = ta.highest(high, donchLen)
+donchLow  = ta.lowest(low, donchLen)
+
+int donchVote = 0
+if close > donchHigh[1]
+    donchVote := 1
+else if close < donchLow[1]
+    donchVote := -1
+else
+    donchVote := 0
+
+
+// 4️⃣ AQR Time-Series Momentum
+tsmReturn = close - close[tsmLen]
+int tsmVote = tsmReturn > 0 ? 1 : -1
+
+// === ENSEMBLE SCORE ===
+trendScore = maVote + donchVote + tsmVote
+
+// === POSITION STATE ===
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// === ENTRY CONDITIONS ===
+enterLong  = trendScore >= 3 and not inLong
+enterShort = trendScore <= -3 and not inShort
+
+// === EXIT CONDITIONS ===
+exitLong  = inLong and (trendScore < 1)
+exitShort = inShort and (trendScore > -1)
+
+// === EXECUTION ===
+if enterLong
+    strategy.entry("Long", strategy.long)
+
+if enterShort
+    strategy.entry("Short", strategy.short)
+
+if exitLong
+    strategy.close("Long")
+
+if exitShort
+    strategy.close("Short")
+
+// === PLOTS ===
+plot(fastMA, "Fast SMA", color=color.blue)
+plot(slowMA, "Slow SMA", color=color.orange)
+
+plot(donchHigh, "Donchian High", color=color.green)
+plot(donchLow, "Donchian Low", color=color.red)
+
+plot(tsmReturn, "Time series momentum", color=color.purple)
+
+View in Pine Editor・74 lines
+Use on chart
+2
+7
+967
+Simple CTA Long-Term model using a mix of Quant and old school Technical Indicators.
+Use on Daily or Weekly Charts for trending macro futures/spot markets

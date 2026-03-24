@@ -1,0 +1,183 @@
+//@version=5
+strategy("New Paradigm: Omni-Command STRATEGY (Ultimate)", overlay=true, initial_capital=1000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=0.50)
+
+// ==========================================
+// 1. CONTROL PANEL
+// ==========================================
+asset_class = input.string("NQ", "Asset Class", options=["NQ", "ES", "Gold", "Stocks"], group="Volatility Engine")
+
+ma_choice   = input.string("50 SMA", "Trend Filter", options=["20 SMA", "50 SMA", "20 EMA", "50 EMA"], group="Filters")
+vol_mult    = input.float(2.1, "Volume Spike Multiplier", step=0.1, group="Filters")
+show_ma     = input.bool(true, "Show Trend Line?", group="Filters")
+show_vwap   = input.bool(true, "Show VWAP Line? (Orange)", group="Filters")
+
+// --- STRATEGY LIMITS ---
+tp_ticks    = input.int(300, "Take Profit (Ticks)", group="Strategy Limits", tooltip="300 ticks = 75 points (1.5 R/R on $100 risk)")
+sl_ticks    = input.int(200, "Legacy Stop Loss (Ticks)", group="Strategy Limits", tooltip="200 ticks = 50 points ($100 max risk per MNQ)")
+
+// --- TIME SETTINGS (Lunch Chopper Blocker) ---
+use_time    = input.bool(true, "Use Time Filter?", group="Time Settings")
+trade_time  = input.string("0930-1200,1300-1545", "Trading Hours (EST)", group="Time Settings")
+
+// --- QUANT FILTERS (Invisible on Chart) ---
+use_adx     = input.bool(true, "Use ADX Trend Filter?", group="New Quant Filters")
+adx_len     = input.int(14, "ADX Length", group="New Quant Filters")
+adx_thresh  = input.int(25, "ADX Minimum Threshold", group="New Quant Filters")
+
+use_atr     = input.bool(true, "Use Dynamic ATR Stop?", group="New Quant Filters")
+atr_len     = input.int(14, "ATR Length", group="New Quant Filters")
+atr_mult    = input.float(2.0, "ATR Multiplier", group="New Quant Filters")
+
+// ==========================================
+// 2. DYNAMIC VOLATILITY ENGINE
+// ==========================================
+var string vix_ticker = "TVC:VIX"
+if (asset_class == "NQ")
+    vix_ticker := "CBOE:VXN"     
+else if (asset_class == "ES" or asset_class == "Stocks")
+    vix_ticker := "TVC:VIX"      
+else if (asset_class == "Gold")
+    vix_ticker := "CBOE:GVZ"     
+
+dynamic_iv = request.security(vix_ticker, "D", close)
+
+/// ==========================================
+// 3. MATH ENGINE (Volatility Walls)
+// ==========================================
+// NQ, ES, Gold, and Stocks all trade ~252 days a year. 
+// We default to 252, and only use 365 if you ever add Crypto.
+days_year = (asset_class == "Crypto") ? 365.0 : 252.0
+
+d_open    = request.security(syminfo.tickerid, "D", open)
+move      = d_open * (dynamic_iv / 100) * math.sqrt(1.0 / days_year)
+
+npl_1 = d_open - move           
+npl_2 = d_open - (move * 0.5)   
+npl_3 = d_open                  
+npl_4 = d_open + (move * 0.5)   
+npl_5 = d_open + move           
+
+plot(npl_1, color=color.new(color.green, 20), style=plot.style_line, title="NPL Bottom Wall", linewidth=2)
+plot(npl_2, color=color.new(color.green, 50), style=plot.style_line, title="NPL Lower Mid", linewidth=1)
+plot(npl_3, color=color.new(color.white, 30), style=plot.style_cross, title="Daily Open", linewidth=2)
+plot(npl_4, color=color.new(color.red, 50), style=plot.style_line, title="NPL Upper Mid", linewidth=1)
+plot(npl_5, color=color.new(color.red, 20), style=plot.style_line, title="NPL Top Wall", linewidth=2)
+
+// ==========================================
+// 4. FILTER ENGINE (SMA vs EMA, VWAP, ADX, ATR)
+// ==========================================
+sma_20 = ta.sma(close, 20)
+sma_50 = ta.sma(close, 50)
+ema_20 = ta.ema(close, 20)
+ema_50 = ta.ema(close, 50)
+
+var float selected_ma = na
+if (ma_choice == "20 SMA")
+    selected_ma := sma_20
+else if (ma_choice == "50 SMA")
+    selected_ma := sma_50
+else if (ma_choice == "20 EMA")
+    selected_ma := ema_20
+else if (ma_choice == "50 EMA")
+    selected_ma := ema_50
+
+bool is_bullish = close > selected_ma
+color trend_col = is_bullish ? color.green : color.red
+
+plot(show_ma ? selected_ma : na, color=trend_col, linewidth=2, title="Trend Filter")
+
+vwap_val = ta.vwap(close)
+plot(show_vwap ? vwap_val : na, color=color.new(color.orange, 0), linewidth=2, title="VWAP")
+
+// ADX Trend Strength Calculation
+[diPlus, diMinus, adx] = ta.dmi(adx_len, adx_len)
+is_trend_strong = use_adx ? (adx > adx_thresh) : true
+
+// ATR Stop Loss Calculation (Converted to Ticks)
+atr = ta.atr(atr_len)
+atr_stop_ticks = (atr * atr_mult) / syminfo.mintick
+
+// ==========================================
+// 5. NEW CONFLUENCE ENGINE 
+// ==========================================
+// A. Higher Timeframe Alignment (1-Hour Chart 50 EMA)
+htf_ema = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+is_htf_bullish = close > htf_ema
+is_htf_bearish = close < htf_ema
+
+// B. RSI Exhaustion Filter (14-period)
+rsi = ta.rsi(close, 14)
+has_room_long = rsi < 65
+has_room_short = rsi > 35
+
+// C. Volatility Wall Clearance (Options Data Confluence)
+// Prevents buying right into the Daily Top Wall or shorting the Bottom Wall
+clear_top_wall = (npl_5 - close) > 10
+clear_bottom_wall = (close - npl_1) > 10
+
+// D. Volume Spike Math
+avg_vol = ta.sma(volume, 20)
+is_vol_spike = volume > (avg_vol * vol_mult)
+
+// ==========================================
+// 6. STRATEGY EXECUTION ENGINE
+// ==========================================
+is_time_valid = not na(time(timeframe.period, trade_time, "America/New_York"))
+in_session = use_time ? is_time_valid : true
+
+bull_cross  = ta.crossover(close, selected_ma)
+bear_cross  = ta.crossunder(close, selected_ma)
+
+// STRICT ENTRY CONDITIONS (All Confluence Layers combined)
+strict_long = bull_cross and is_vol_spike and in_session and is_trend_strong and is_htf_bullish and has_room_long and clear_top_wall
+strict_short = bear_cross and is_vol_spike and in_session and is_trend_strong and is_htf_bearish and has_room_short and clear_bottom_wall
+
+if (strict_long)
+    strategy.entry("Long", strategy.long)
+
+if (strict_short)
+    strategy.entry("Short", strategy.short)
+
+// Dynamic exit routing with a $100 (200 tick) Hard Cap for MNQ
+max_mnq_risk_ticks = 200
+atr_capped_ticks = math.min(atr_stop_ticks, max_mnq_risk_ticks)
+active_sl_ticks = use_atr ? atr_capped_ticks : max_mnq_risk_ticks
+
+strategy.exit("Exit Long", "Long", profit=tp_ticks, loss=active_sl_ticks)
+strategy.exit("Exit Short", "Short", profit=tp_ticks, loss=active_sl_ticks)
+
+// Forced EOD Flatten
+if (use_time and not is_time_valid)
+    strategy.close_all(comment="EOD Flatten")
+// ==========================================
+// 7. DASHBOARD
+// ==========================================
+var table dash = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 70), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "Omni-Command", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 50))
+    table.cell(dash, 1, 0, "Status", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 50))
+
+    table.cell(dash, 0, 1, "Trend Bias", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, is_bullish ? "BULLISH" : "BEARISH", text_color=trend_col, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Top Wall (NPL 5)", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(npl_5, "#.##"), text_color=color.red, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Bottom Wall (NPL 1)", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(npl_1, "#.##"), text_color=color.green, text_size=size.small)
+    
+    table.cell(dash, 0, 4, "Inst. VWAP", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(vwap_val, "#.##"), text_color=color.orange, text_size=size.small)
+
+    table.cell(dash, 0, 5, "Trading Window", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, in_session ? "ACTIVE" : "WAITING", text_color=in_session ? color.green : color.red, text_size=size.small)
+    
+    table.cell(dash, 0, 6, "Live Daily IV", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(dynamic_iv, "#.##") + "%", text_color=color.yellow, text_size=size.small)
+
+View in Pine Editor・177 lines
+Use on chart
+5
+263
+This script uses daily expected move and daily open to give buy or sell information

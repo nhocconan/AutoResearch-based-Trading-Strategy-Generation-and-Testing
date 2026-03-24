@@ -1,0 +1,166 @@
+//@version=5
+strategy("New Bollinger Bands Strategy with Alerts V2.5(By Rolwin))", overlay=true)
+
+// Input settings
+length = input(20, title="Bollinger Bands Length")
+src = close
+
+// Bollinger Bands (Standard Deviation Levels)
+bb1_mult = 2.0
+bb2_mult = 3.0
+basis = ta.sma(src, length)
+dev1 = bb1_mult * ta.stdev(src, length)
+dev2 = bb2_mult * ta.stdev(src, length)
+
+// Band Levels
+upper1 = basis + dev1
+lower1 = basis - dev1
+upper2 = basis + dev2
+lower2 = basis - dev2
+
+// **Trading Conditions**
+longCondition = ta.crossover(src, lower2)  // Price crosses above lower 3SD band
+shortCondition = ta.crossunder(src, upper2)  // Price crosses below upper 3SD band
+
+// **Exit Conditions**
+exitLong = ta.crossover(src, upper1)  // Exit long at upper 2SD band
+exitShort = ta.crossunder(src, lower1)  // Exit short at lower 2SD band
+
+// **Execute trades**
+strategy.entry("Long", strategy.long, when=longCondition)
+strategy.entry("Short", strategy.short, when=shortCondition)
+
+strategy.close("Long", when=exitLong)
+strategy.close("Short", when=exitShort)
+
+// **Plot Bollinger Bands**
+plot(upper1, color=color.blue, title="Upper Band (2 SD)")
+plot(lower1, color=color.blue, title="Lower Band (2 SD)")
+plot(upper2, color=color.red, title="Upper Band (3 SD)")
+plot(lower2, color=color.red, title="Lower Band (3 SD)")
+plot(basis, color=color.gray, title="Middle Band (SMA)")
+
+// **Plot Buy & Sell Signals**
+plotshape(longCondition, location=location.belowbar, color=color.green, style=shape.labelup, size=size.small, title="BUY Signal")
+plotshape(shortCondition, location=location.abovebar, color=color.red, style=shape.labeldown, size=size.small, title="SELL Signal")
+
+// **Candle Coloring for 3SD Touch**
+touches3SD = (src >= upper2) or (src <= lower2)
+barcolor(touches3SD ? color.white : na)  // Change to white if touching 3SD band  
+
+// **🔔 Alerts for Trading Signals**
+alertcondition(longCondition, title="BUY Signal", message="🚀 BUY: Price crossed above Lower 3SD Band!")
+alertcondition(shortCondition, title="SELL Signal", message="🔻 SELL: Price crossed below Upper 3SD Band!")
+alertcondition(exitLong, title="Exit Long", message="⚠️ EXIT LONG: Price reached Upper 2SD Band!")
+alertcondition(exitShort, title="Exit Short", message="⚠️ EXIT SHORT: Price reached Lower 2SD Band!")
+
+View in Pine Editor・55 lines
+Use on chart
+1
+0
+6
+3
+3 036
+Mar 4, 2025
+Double Bollinger Bands Strategy with Signals 1.0 (By Rolwin)
+📌 Overview
+The Double Bollinger Bands Strategy is a trend-following system that utilizes two sets of Bollinger Bands (2 standard deviations and 3 standard deviations) to identify high-probability entry and exit points. This strategy helps traders capitalize on strong price movements and potential reversals by detecting overbought and oversold conditions more effectively.
+📊 How It Works
+• Bollinger Bands Setup:
+o Middle Band: 20-period Simple Moving Average (SMA)
+o Upper & Lower Bands (2 SD): Standard Bollinger Bands (±2 standard deviations)
+o Extreme Bands (3 SD): Additional Bollinger Bands (±3 standard deviations) for extreme price moves
+• Entry Signals:
+✅ Buy (Long Entry): When the price crosses above the lower 3SD band (oversold zone)
+❌ Sell (Short Entry): When the price crosses below the upper 3SD band (overbought zone)
+• Exit Signals:
+🔼 Exit Long: When the price reaches the upper 2SD band
+🔽 Exit Short: When the price reaches the lower 2SD band
+• Additional Features:
+✅ Buy & Sell Signals plotted directly on the chart
+🎨 Candles turn white when price touches the extreme 3SD band
+🔥 Why Use This Strategy?
+✔️ Clear Entry & Exit Points: Based on strong statistical levels
+✔️ Effective in Trending & Reversal Markets: Captures both momentum & mean reversion setups
+✔️ Easy-to-Use Visualization: Signals & bands make it beginner-friendly
+✔️ Customizable: Adjust Bollinger Band length and multipliers to fit different assets & timeframes
+⚠️ Risk Management Tip
+While this strategy provides high-probability trade signals, it is essential to use stop-loss orders (e.g., ATR-based) and proper position sizing to manage risk effectively.
+📈 Try it out and optimize the settings for your favorite markets! 🚀
+
+Mar 5, 2025
+Release Notes
+New Update:
+🔔 How to Set Up Alerts in TradingView
+1. Click "Alerts" in TradingView.
+2. Click "+ Create Alert".
+3. In the "Condition" dropdown, select this script.
+4. Choose "Any alert function call".
+5. Set Alert Actions (popup, email, notification, etc.).
+6. Click "Create" to activate the alerts.
+________________________________________
+🔹 What This Update Adds
+✅ Alerts when Buy & Sell signals appear.
+✅ User-friendly alert messages with clear trade signals.
+✅ No repainting alerts (alerts trigger only when bar closes).
+Would you like alert conditions for exits as well? 🚀 Let me know!
+
+Double Bollinger Bands Strategy with Alert Signals ver. 2.2 (By Rolwin)
+📌 Overview
+The Double Bollinger Bands Strategy is a trend-following system that utilizes two sets of Bollinger Bands (2 standard deviations and 3 standard deviations) to identify high-probability entry and exit points. This strategy helps traders capitalize on strong price movements and potential reversals by detecting overbought and oversold conditions more effectively.
+📊 How It Works
+• Bollinger Bands Setup:
+o Middle Band: 20-period Simple Moving Average (SMA)
+o Upper & Lower Bands (2 SD): Standard Bollinger Bands (±2 standard deviations)
+o Extreme Bands (3 SD): Additional Bollinger Bands (±3 standard deviations) for extreme price moves
+• Entry Signals:
+✅ Buy (Long Entry): When the price crosses above the lower 3SD band (oversold zone)
+❌ Sell (Short Entry): When the price crosses below the upper 3SD band (overbought zone)
+• Exit Signals:
+🔼 Exit Long: When the price reaches the upper 2SD band
+🔽 Exit Short: When the price reaches the lower 2SD band
+• Additional Features:
+✅ Buy & Sell Signals plotted directly on the chart
+🎨 Candles turn white when price touches the extreme 3SD band
+🔥 Why Use This Strategy?
+✔️ Clear Entry & Exit Points: Based on strong statistical levels
+✔️ Effective in Trending & Reversal Markets: Captures both momentum & mean reversion setups
+✔️ Easy-to-Use Visualization: Signals & bands make it beginner-friendly
+✔️ Customizable: Adjust Bollinger Band length and multipliers to fit different assets & timeframes
+⚠️ Risk Management Tip
+While this strategy provides high-probability trade signals, it is essential to use stop-loss orders (e.g., ATR-based) and proper position sizing to manage risk effectively.
+📈 Try it out and optimize the settings for your favorite markets! 🚀
+--- Great 15 mins Time frame for XAUUSD (63% Profitable)
+
+
+
+Mar 6, 2025
+Release Notes
+New Dbl Bollinger Bands Strategy with Alert Signals ver. 2.5 (By Rolwin)
+📌 Overview
+The Double Bollinger Bands Strategy is a trend-following system that utilizes two sets of Bollinger Bands (2 standard deviations and 3 standard deviations) to identify high-probability entry and exit points. This strategy helps traders capitalize on strong price movements and potential reversals by detecting overbought and oversold conditions more effectively.
+📊 How It Works
+• Bollinger Bands Setup:
+o Middle Band: 20-period Simple Moving Average (SMA)
+o Upper & Lower Bands (2 SD): Standard Bollinger Bands (±2 standard deviations)
+o Extreme Bands (3 SD): Additional Bollinger Bands (±3 standard deviations) for extreme price moves
+• Entry Signals:
+✅ Buy (Long Entry): When the price crosses above the lower 3SD band (oversold zone)
+❌ Sell (Short Entry): When the price crosses below the upper 3SD band (overbought zone)
+• Exit Signals:
+🔼 Exit Long: When the price reaches the upper 2SD band
+🔽 Exit Short: When the price reaches the lower 2SD band
+• Additional Features:
+✅ Buy & Sell Signals plotted directly on the chart
+🎨 Candles turn white when price touches the extreme 3SD band
+🔥 Why Use This Strategy?
+✔️ Clear Entry & Exit Points: Based on strong statistical levels
+✔️ Effective in Trending & Reversal Markets: Captures both momentum & mean reversion setups
+✔️ Easy-to-Use Visualization: Signals & bands make it beginner-friendly
+✔️ Customizable: Adjust Bollinger Band length and multipliers to fit different assets & timeframes
+⚠️ Risk Management Tip
+While this strategy provides high-probability trade signals, it is essential to use stop-loss orders (e.g., ATR-based) and proper position sizing to manage risk effectively.
+📈 Try it out and optimize the settings for your favorite markets! 🚀
+--- Great 15 mins Time frame for XAUUSD (63% Profitable)
+
+

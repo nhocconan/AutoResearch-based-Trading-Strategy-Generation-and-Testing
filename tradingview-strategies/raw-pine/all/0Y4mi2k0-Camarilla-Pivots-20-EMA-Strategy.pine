@@ -1,0 +1,175 @@
+//@version=5
+strategy("Camarilla Pivots + 20 EMA Strategy", overlay=true, shorttitle="CAM_EMA", default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Input parameters
+ema_length = input.int(20, title="EMA Length", minval=1)
+risk_reward = input.float(2.0, title="Risk:Reward Ratio", minval=1.0, step=0.1)
+show_pivots = input.bool(true, title="Show Pivot Lines")
+show_ema = input.bool(true, title="Show EMA")
+show_signals = input.bool(true, title="Show Entry Signals")
+
+// Get previous day's data
+prev_day_high = request.security(syminfo.tickerid, "1D", high[1], lookahead=barmerge.lookahead_off)
+prev_day_low = request.security(syminfo.tickerid, "1D", low[1], lookahead=barmerge.lookahead_off)
+prev_day_close = request.security(syminfo.tickerid, "1D", close[1], lookahead=barmerge.lookahead_off)
+
+// Calculate Camarilla Pivot Points
+pp = (prev_day_high + prev_day_low + prev_day_close) / 3
+range_val = prev_day_high - prev_day_low
+
+// Camarilla Levels
+h4 = prev_day_close + (range_val * 1.1) / 2
+h3 = prev_day_close + (range_val * 1.1) / 4
+l3 = prev_day_close - (range_val * 1.1) / 4
+l4 = prev_day_close - (range_val * 1.1) / 2
+
+// 20 EMA
+ema20 = ta.ema(close, ema_length)
+
+// Plot EMA
+plot(show_ema ? ema20 : na, title="20 EMA", color=color.blue, linewidth=2)
+
+// Plot Camarilla levels
+h4_line = plot(show_pivots ? h4 : na, title="H4", color=color.red, linewidth=2, style=plot.style_line)
+h3_line = plot(show_pivots ? h3 : na, title="H3", color=color.orange, linewidth=1, style=plot.style_line)
+l3_line = plot(show_pivots ? l3 : na, title="L3", color=color.orange, linewidth=1, style=plot.style_line)
+l4_line = plot(show_pivots ? l4 : na, title="L4", color=color.red, linewidth=2, style=plot.style_line)
+
+// Entry conditions
+long_condition = close > h4 and close > ema20 and close[1] <= h4
+short_condition = close < l4 and close < ema20 and close[1] >= l4
+
+// Position tracking
+var float long_entry_price = na
+var float short_entry_price = na
+var float long_stop_loss = na
+var float short_stop_loss = na
+var float long_target = na
+var float short_target = na
+
+// Long trade logic
+if long_condition and strategy.position_size == 0
+    long_entry_price := close
+    long_stop_loss := h3
+    risk_distance = long_entry_price - long_stop_loss
+    long_target := long_entry_price + (risk_distance * risk_reward)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=long_stop_loss, limit=long_target)
+
+// Short trade logic
+if short_condition and strategy.position_size == 0
+    short_entry_price := close
+    short_stop_loss := l3
+    risk_distance = short_stop_loss - short_entry_price
+    short_target := short_entry_price - (risk_distance * risk_reward)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=short_stop_loss, limit=short_target)
+
+// Plot entry signals
+plotshape(show_signals and long_condition, title="Long Signal", location=location.belowbar, style=shape.triangleup, color=color.green, size=size.normal, text="LONG")
+plotshape(show_signals and short_condition, title="Short Signal", location=location.abovebar, style=shape.triangledown, color=color.red, size=size.normal, text="SHORT")
+
+// Plot stop loss and target lines for active positions
+plot(strategy.position_size > 0 ? long_stop_loss : na, title="Long Stop Loss", color=color.red, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? long_target : na, title="Long Target", color=color.green, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? short_stop_loss : na, title="Short Stop Loss", color=color.red, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size < 0 ? short_target : na, title="Short Target", color=color.green, linewidth=1, style=plot.style_linebr)
+
+// Labels for pivot levels
+if show_pivots and barstate.islast
+    label.new(bar_index, h4, "H4", color=color.red, style=label.style_label_left, size=size.small, textcolor=color.white)
+    label.new(bar_index, h3, "H3", color=color.orange, style=label.style_label_left, size=size.small, textcolor=color.white)
+    label.new(bar_index, l3, "L3", color=color.orange, style=label.style_label_left, size=size.small, textcolor=color.white)
+    label.new(bar_index, l4, "L4", color=color.red, style=label.style_label_left, size=size.small, textcolor=color.white)
+
+// Alert conditions
+alertcondition(long_condition, title="Long Entry Signal", message="Camarilla Long: Price broke above H4 with EMA support")
+alertcondition(short_condition, title="Short Entry Signal", message="Camarilla Short: Price broke below L4 with EMA resistance")
+
+// Table for displaying current pivot levels
+if barstate.islast and show_pivots
+    var table pivot_table = table.new(position.top_right, 2, 5, bgcolor=color.white, border_width=1)
+    table.cell(pivot_table, 0, 0, "Level", text_color=color.black, text_size=size.small)
+    table.cell(pivot_table, 1, 0, "Price", text_color=color.black, text_size=size.small)
+    table.cell(pivot_table, 0, 1, "H4", text_color=color.red, text_size=size.small)
+    table.cell(pivot_table, 1, 1, str.tostring(h4, "#.####"), text_color=color.black, text_size=size.small)
+    table.cell(pivot_table, 0, 2, "H3", text_color=color.orange, text_size=size.small)
+    table.cell(pivot_table, 1, 2, str.tostring(h3, "#.####"), text_color=color.black, text_size=size.small)
+    table.cell(pivot_table, 0, 3, "L3", text_color=color.orange, text_size=size.small)
+    table.cell(pivot_table, 1, 3, str.tostring(l3, "#.####"), text_color=color.black, text_size=size.small)
+    table.cell(pivot_table, 0, 4, "L4", text_color=color.red, text_size=size.small)
+    table.cell(pivot_table, 1, 4, str.tostring(l4, "#.####"), text_color=color.black, text_size=size.small)
+
+View in Pine Editor・101 lines
+Use on chart
+4
+7
+1 555
+This is an intraday volatility and trend-following system for commodities like Natural Gas, combining dynamic pivot levels (Camarilla) with a trend filter (20-period EMA) to improve risk-reward and reduce false breakouts.
+
+Core Components
+1. Camarilla Pivots:
+
+These are special support and resistance levels (H3, H4, L3, L4) calculated each day based on the previous day's high, low, and close.
+
+The pivots adapt to daily volatility, giving more relevant breakout and bounce zones than static lines.
+
+H4: Aggressive resistance (used for breakout LONG entry)
+
+H3: Moderate resistance/support (used for bounce or stoploss)
+
+L4: Aggressive support (used for breakout SHORT entry)
+
+L3: Moderate support/resistance (used for bounce or stoploss)
+
+2. 20 EMA (Exponential Moving Average):
+
+Plotted on the 30-minute chart, this acts as a trend filter.
+
+If the price is above 20 EMA: Only look for long trades (bullish bias).
+
+If below 20 EMA: Only look for short trades (bearish bias).
+
+How the Strategy Works
+Setup (30-Min Chart):
+
+Camarilla pivots for the day are drawn on the chart.
+
+20 EMA is also plotted.
+
+Trade Filter:
+
+Bullish: Trade ONLY if price is above 20 EMA.
+
+Bearish: Trade ONLY if price is below 20 EMA.
+
+Entry:
+
+LONG: Enter when price breaks and closes above the H4 pivot AND is above 20 EMA.
+
+SHORT: Enter when price breaks and closes below the L4 pivot AND is below 20 EMA.
+
+Stop Loss:
+
+LONG: Place stoploss at H3 (the next lower Camarilla resistance).
+
+SHORT: Place stoploss at L3 (the next higher Camarilla support).
+
+Target:
+
+Always set a profit target at 2x the distance (risk) between entry and stoploss (strict R:R 2).
+
+For example, if your entry is at H4 and stoploss at H3, your target is entry + 2*(entry - stoploss).
+
+Alerts & Visuals:
+
+The strategy plots entry arrows, stoploss and target lines for immediate visual reference.
+
+Alerts trigger on breakout signals so you never miss a trade.
+
+Why This Works Well for Natural Gas
+Adapts to volatility: The pivots change daily, handling wide-ranging and choppy price moves better than fixed breakouts.
+
+Trend filter: EMA prevents counter-trend whipsaws, only trades with market momentum.
+
+Risk control: Every trade must meet strict risk-reward criteria, so losses are contained and winners can outweigh losers.

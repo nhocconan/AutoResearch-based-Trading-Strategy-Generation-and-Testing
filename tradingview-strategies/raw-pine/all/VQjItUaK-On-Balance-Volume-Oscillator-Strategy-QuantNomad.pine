@@ -1,0 +1,38 @@
+//@version=4
+strategy(title="On Balance Volume Oscillator Strategy [QuantNomad]", shorttitle="OBV Str [QN]")
+  
+// Inputs
+obv_length       = input(20,    title = "OBV Length")
+obv_source       = input(close, title = "OBV Source")
+obv_show_ema     = input(true,  title = "Show OBV EMA")
+obv_ema1_length  = input(12,     title = "EMA1 Length")
+obv_ema2_length  = input(26,     title = "EMA2 Length")
+
+// Calculatios
+obv      = sum(volume * sign(change(obv_source)), obv_length)
+obv_osc  = obv / sum(volume, obv_length)
+obv_ema1 = ema(obv_osc, obv_ema1_length)
+obv_ema2 = ema(obv_osc, obv_ema2_length)
+
+plot(0,                            color = color.gray,   title = "0 line")
+plot(obv_osc,                      color = color.blue,   title = "OBV Osc", linewidth = 2)
+plot(obv_show_ema ? obv_ema1 : na, color = color.orange, title = "OBV EMA1", linewidth = 2)
+plot(obv_show_ema ? obv_ema2 : na, color = color.green , title = "OBV EMA2", linewidth = 2)
+
+
+strategy.entry('long',  true,  when = crossover( obv_ema1, obv_ema2))
+strategy.entry('short', false, when = crossunder(obv_ema1, obv_ema2))
+
+View in Pine Editor・24 lines
+Use on chart
+8
+1
+1
+2
+28 776
+Looking for the way to use OBV Oscillator in a strategy.
+Here is my first try. I just enter to position of a cross of 2 emas based on OBV.
+
+Here is my original oscillator indicator:
+
+

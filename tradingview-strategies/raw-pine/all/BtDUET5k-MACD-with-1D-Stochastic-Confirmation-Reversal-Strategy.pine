@@ -1,0 +1,235 @@
+//@version=5
+
+//_______ <declaration_statement>
+strategy(title = "MACD with 1D Stochastic Confirmation Reversal Strategy", 
+         shorttitle = "MACD Strategy", 
+         overlay = true, 
+         format = format.inherit, 
+         pyramiding = 1, 
+         calc_on_order_fills = false, 
+         calc_on_every_tick = false, 
+         default_qty_type = strategy.percent_of_equity, 
+         default_qty_value = 30, 
+         initial_capital = 10000, 
+         currency = currency.NONE,  
+         commission_type = strategy.commission.percent, 
+         commission_value = 0.1,
+         slippage = 5,
+         use_bar_magnifier = true)
+
+
+//_______ <constant_declarations>
+var const color skyrexGreen       = color.new(#2ECD99, 0)
+var const color skyrexGray        = color.new(#F2F2F2, 0)
+var const color skyrexWhite       = color.new(#FFFFFF, 0)
+
+
+//________<variables declarations>
+var float stopLossLevel                = na
+var float takeProfitLevel              = na 
+var float tralingProfitActivationLevel = na
+
+
+//_______ <inputs>
+// Trading bot settings
+sourceUuid               = input.string(title = "sourceUuid:", defval = "yourBotSourceUuid", group = "🤖Trading Bot Settings🤖")
+secretToken              = input.string(title = "secretToken:", defval = "yourBotSecretToken", group = "🤖Trading Bot Settings🤖")
+
+
+// Trading period settings
+lookBackPeriodStart      = input.time(title = "Trade Start Date/Time", defval = timestamp('2023-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+lookBackPeriodStop       = input.time(title = "Trade Stop Date/Time", defval = timestamp('2025-01-01T00:00:00'), group = "🕐Trading Period Settings🕐")
+
+
+// Strategy settings
+stopLossAtrNum                 = input.float(defval = 3.25, title = "ATR Stop Loss", step = 0.25, group = "📈Strategy settings📈")
+tralingProfitActivationNum     = input.float(defval = 4.25, title = "ATR Traling Profit Activation Level", step = 0.25, group = "📈Strategy settings📈")
+trailingEmaLength              = input.int(20, minval = 10, title = "Trailing EMA Length", group = "📈Strategy settings📈")
+//_______ <function_declarations>
+
+
+//_______ <calculations>
+//Average true range (ATR) calculations
+ATR = ta.atr(14)
+
+
+//Calculating MACD
+macdFastMa = ta.ema(close, 12)
+macdSlowMA = ta.ema(close, 26)
+macd = macdFastMa - macdSlowMA
+macdSignal = ta.ema(macd, 9)
+hist = macd - macdSignal
+
+
+//Calculating EMA
+trailingEma = ta.ema(close, trailingEmaLength)
+
+
+//Calculating daily candle data
+[dailyClose, dailyHigh, dailyLow] = request.security(syminfo.tickerid, "D", [close, high, low])
+
+
+//Calculating stop loss level
+stopLossLevel := strategy.position_avg_price - stopLossAtrNum * ATR
+
+
+//Calculating traling profit activation level
+tralingProfitActivationLevel := strategy.position_avg_price + tralingProfitActivationNum * ATR
+
+
+//Calculating dynamic traling take profit level
+if strategy.opentrades == 0 or ta.barssince(strategy.opentrades == 1 and strategy.opentrades[1] == 0) < ta.barssince(ta.crossover(high, tralingProfitActivationLevel))
+    takeProfitLevel := na
+else
+    takeProfitLevel := trailingEma
+
+
+//Calcultating Stochastic 1D
+k = ta.sma(ta.stoch(dailyClose, dailyHigh, dailyLow, 14), 1)
+d = ta.sma(k, 3)
+dailyK = request.security(syminfo.tickerid, "D", k)
+dailyD = request.security(syminfo.tickerid, "D", d)
+
+
+//_______ <strategy_calls>
+//Defining long condition
+longCondition =   ta.crossover(macd, macdSignal) and dailyK > dailyD and dailyK < 80 
+
+
+//Defining trade close condition
+closeCondition =  close < takeProfitLevel or low <= stopLossLevel 
+
+
+//Strategy entry
+//Scrip places the stop order at the upFractalActivationLevel if longCondition is true
+if (longCondition and time >= lookBackPeriodStart and time <= lookBackPeriodStop) 
+    strategy.entry(id = "entry1", direction = strategy.long,  alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "entry1",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+//Strategy exit 
+if (closeCondition)
+    strategy.close(id = "entry1",immediately = true , alert_message = '{\n"base": "' + syminfo.basecurrency + '",\n"quote": "' + syminfo.currency + '",\n"position": "close",\n"price": "' + str.tostring(close) + '",\n"sourceUuid": "' + sourceUuid + '",\n"secretToken": "' + secretToken + '",\n"timestamp": "' + str.tostring(timenow) + '"\n}')
+
+
+//_______ <visuals>
+pricePlot = plot(close, title="Price", color=color.new(color.blue, 100))
+emaPlot = plot(takeProfitLevel, title="EMA", color=skyrexGreen, style=plot.style_linebr, linewidth = 3)
+plot(not na(takeProfitLevel) and na(takeProfitLevel[1]) ? takeProfitLevel : na, title="EMA", color=skyrexGreen, join = false, style=plot.style_circles, linewidth = 6)
+fill(pricePlot, emaPlot, color=color.new(skyrexGreen, 70))
+plotshape(not na(takeProfitLevel) and na(takeProfitLevel[1]) ? true: na,text="Trailing Activated",size=size.small,offset=0,color=color.new(skyrexGreen, 0),textcolor=skyrexWhite,style=shape.triangleup,location=location.belowbar)
+
+
+//_______ <alerts>
+
+View in Pine Editor・126 lines
+Use on chart
+2
+7
+9
+2
+6 426
+Overview
+The MACD with 1D Stochastic Confirmation Reversal Strategy utilizes MACD indicator in conjunction with 1 day timeframe Stochastic indicators to obtain the high probability short-term trend reversal signals. The main idea is to wait until MACD line crosses up it’s signal line, at the same time Stochastic indicator on 1D time frame shall show the uptrend (will be discussed in methodology) and not to be in the oversold territory. Strategy works on time frames from 30 min to 4 hours and opens only long trades.
+
+Unique Features
+
+Dynamic stop-loss system: Instead of fixed stop-loss level strategy utilizes average true range (ATR) multiplied by user given number subtracted from the position entry price as a dynamic stop loss level.
+
+Configurable Trading Periods: Users can tailor the strategy to specific market windows, adapting to different market conditions.
+
+Higher time frame confirmation: Strategy utilizes 1D Stochastic to establish the major trend and confirm the local reversals with the higher probability.
+
+Trailing take profit level: After reaching the trailing profit activation level scrip activate the trailing of long trade using EMA. More information in methodology.
+
+
+
+Methodology
+The strategy opens long trade when the following price met the conditions:
+
+MACD line of MACD indicator shall cross over the signal line of MACD indicator.
+
+1D time frame Stochastic’s K line shall be above the D line.
+
+1D time frame Stochastic’s K line value shall be below 80 (not overbought)
+
+
+
+When long trade is executed, strategy set the stop-loss level at the price ATR multiplied by user-given value below the entry price. This level is recalculated on every next candle close, adjusting to the current market volatility.
+At the same time strategy set up the trailing stop validation level. When the price crosses the level equals entry price plus ATR multiplied by user-given value script starts to trail the price with EMA. If price closes below EMA long trade is closed. When the trailing starts, script prints the label “Trailing Activated”.
+
+Strategy settings
+In the inputs window user can setup the following strategy settings:
+
+ATR Stop Loss (by default = 3.25, value multiplied by ATR to be subtracted from position entry price to setup stop loss)
+
+ATR Trailing Profit Activation Level (by default = 4.25, value multiplied by ATR to be added to position entry price to setup trailing profit activation level)
+
+Trailing EMA Length (by default = 20, period for EMA, when price reached trailing profit activation level EMA will stop out of position if price closes below it)
+
+
+
+User can choose the optimal parameters during backtesting on certain price chart, in our example we use default settings.
+
+Justification of Methodology
+This strategy leverages 2 time frames analysis to have the high probability reversal setups on lower time frame in the direction of the 1D time frame trend. That’s why it’s recommended to use this strategy on 30 min – 4 hours time frames.
+
+To have an approximation of 1D time frame trend strategy utilizes classical Stochastic indicator. The Stochastic Indicator is a momentum oscillator that compares a security's closing price to its price range over a specific period. It's used to identify overbought and oversold conditions. The indicator ranges from 0 to 100, with readings above 80 indicating overbought conditions and readings below 20 indicating oversold conditions.
+It consists of two lines:
+
+%K: The main line, calculated using the formula (CurrentClose−LowestLow)/(HighestHigh−LowestLow)×100. Highest and lowest price taken for 14 periods.
+
+%D: A smoothed moving average of %K, often used as a signal line.
+
+
+Strategy logic assumes that on 1D time frame it’s uptrend in %K line is above the %D line. Moreover, we can consider long trade only in %K line is below 80. It means that in overbought state the long trade will not be opened due to higher probability of pullback or even major trend reversal. If these conditions are met we are going to our working (lower) time frame.
+On the chosen time frame, we remind you that for correct work of this strategy you shall use 30min – 4h time frames, MACD line shall cross over it’s signal line. The MACD (Moving Average Convergence Divergence) is a popular momentum and trend-following indicator used in technical analysis. It helps traders identify changes in the strength, direction, momentum, and duration of a trend in a stock's price.
+The MACD consists of three components:
+
+MACD Line: This is the difference between a short-term Exponential Moving Average (EMA) and a long-term EMA, typically calculated as: MACD Line=12-period EMA−26-period
+
+Signal Line: This is a 9-period EMA of the MACD Line, which helps to identify buy or sell signals. When the MACD Line crosses above the Signal Line, it can be a bullish signal (suggesting a buy); when it crosses below, it can be a bearish signal (suggesting a sell).
+
+Histogram: The histogram shows the difference between the MACD Line and the Signal Line, visually representing the momentum of the trend. Positive histogram values indicate increasing bullish momentum, while negative values indicate increasing bearish momentum.
+
+
+In our script we are interested in only MACD and signal lines. When MACD line crosses signal line there is a high chance that short-term trend reversed to the upside. We use this strategy on 45 min time frame.
+
+ATR is used to adjust the strategy risk management to the current market volatility. If volatility is low, we don’t need the large stop loss to understand the there is a high probability that we made a mistake opening the trade. User can setup the settings ATR Stop Loss and ATR Trailing Profit Activation Level to realize his own risk to reward preferences, but the unique feature of a strategy is that after reaching trailing profit activation level strategy is trying to follow the trend until it is likely to be finished instead of using fixed risk management settings. It allows sometimes to be involved in the large movements.
+
+Backtest Results
+
+Operating window: Date range of backtests is 2023.01.01 - 2024.08.01. It is chosen to let the strategy to close all opened positions.
+
+Commission and Slippage: Includes a standard Binance commission of 0.1% and accounts for possible slippage over 5 ticks.
+
+Initial capital: 10000 USDT
+
+Percent of capital used in every trade: 30%
+
+Maximum Single Position Loss: -4.79%
+
+Maximum Single Profit: +20.14%
+
+Net Profit: +2361.33 USDT (+44.72%)
+
+Total Trades: 123 (44.72% win rate)
+
+Profit Factor: 1.623
+
+Maximum Accumulated Loss: 695.80 USDT (-5.48%)
+
+Average Profit per Trade: 19.20 USDT (+0.59%)
+
+Average Trade Duration: 30 hours
+
+
+These results are obtained with realistic parameters representing trading conditions observed at major exchanges such as Binance and with realistic trading portfolio usage parameters.
+
+How to Use
+Add the script to favorites for easy access.
+Apply to the desired timeframe between 30 min and 4 hours and chart (optimal performance observed on 45 min BTC/USDT).
+Configure settings using the dropdown choice list in the built-in menu.
+Set up alerts to automate strategy positions through web hook with the text: {{strategy.order.alert_message}}
+
+Disclaimer:
+Educational and informational tool reflecting Skyrex commitment to informed trading. Past performance does not guarantee future results. Test strategies in a simulated environment before live implementation
+

@@ -1,0 +1,29 @@
+# Momentum Strategy (BTC/USDT; 1h) - MACD (with source code)
+
+- Source URL: https://www.tradingview.com/script/b7zn25L6-Momentum-Strategy-BTC-USDT-1h-MACD-with-source-code/
+- Pine file: `raw-pine/bulk/b7zn25L6-Momentum-Strategy-BTC-USDT-1h-MACD-with-source-code.pine`
+- Classification: `direct`
+- Timeframe: `1h`
+- Attempts used: `1`
+- Result: `converted`
+- Reason: Uses deterministic OHLCV indicators (MACD, RSI, LinReg) and logic-based entries/exits without lookahead or broker-managed stops.
+
+## Adaptations
+
+- Hardcode Pine input parameters to default values
+- Implement custom MA and stress functions using numpy/pandas
+- Convert strategy.position_size checks to target-position state logic
+- Normalize position sizing to repo testing contract
+
+## Conversion Notes
+
+- Converted MACD+RSI Pine strategy to Python with deterministic indicators
+- Implemented custom MA functions (EMA, SMA, WMA, RMA, HMA, DEMA, TEMA, THMA)
+- Preserved min/max MACD change detection logic for entries (ON_MINMAX default)
+- RSI filter and take-profit conditions implemented as signal filters
+- All calculations use only historical data - no lookahead
+- Position state tracked across bars for proper entry/exit logic
+- Signals represent target position fractions (1=long, -1=short, 0=flat)
+- Hardcoded default Pine parameters for reproducibility
+- Stress, MA smoothing, and linreg features preserved but disabled by default where complex
+- Compatible with repo OHLCV columns: open_time, open, high, low, close, volume

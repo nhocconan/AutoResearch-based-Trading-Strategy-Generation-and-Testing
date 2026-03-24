@@ -1,0 +1,106 @@
+//@version=4
+strategy("Estrategia Booz", "", true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, margin_long=0, margin_short=0)
+
+// ----------------------------- Inputs ------------------------------------- //
+source_ma_type = input("EMA", "Tipo de MA Fuente", options=["SMA", "EMA"])
+source_ma_length = input(50, "Longitud de la MA Fuente")
+fast_ma_length = input(50, "Longitud de la MA Rápida")
+slow_ma_length = input(100, "Longitud de la MA Lenta")        
+use_trend_filter = input(true, "Filtro de Tendencia")
+trend_filter_ma_type = input("EMA", "Tipo de MA Filtro de Tendencia", options=["SMA", "EMA"])
+trend_filter_ma_length = input(200, "Período de la MA Filtro de Tendencia")
+show_mas = input(true, "Mostrar MAs")
+swing_trading_mode = input(false, "Modo de Trading Swing")
+
+// -------------------------- Calculations ---------------------------------- //
+fast_ma = ema(close, fast_ma_length)
+slow_ma = ema(close, slow_ma_length)
+source_ma = source_ma_type == "EMA"? ema(close, source_ma_length): 
+                                     sma(close, source_ma_length)
+trend_filter_ma = trend_filter_ma_type == "EMA"? ema(close, trend_filter_ma_length): 
+                                                 sma(close, trend_filter_ma_length)
+
+// --------------------------- Conditions ----------------------------------- //
+uptrend = not use_trend_filter or close > trend_filter_ma
+buy_cond = crossover(fast_ma, slow_ma) and uptrend
+
+downtrend = not use_trend_filter or close < trend_filter_ma
+sell_cond = crossunder(fast_ma, slow_ma) and downtrend
+
+// ---------------------------- Plotting ------------------------------------ //
+bgcolor(use_trend_filter and downtrend? color.red: use_trend_filter? color.green: na)
+plot(show_mas? fast_ma: na, "MA Rápida", color.green)
+plot(show_mas? slow_ma: na, "MA Lenta", color.red)
+plot(show_mas? source_ma: na, "MA Fuente", color.purple)
+plot(show_mas? trend_filter_ma: na, "MA Filtro de Tendencia", color.blue)
+
+
+// ---------------------------- Trading  ------------------------------------ //
+// Inputs
+sl_perc = input(1.0, "Stop Loss (en %)", group="Control de Backtest")/100
+tp_perc = input(1.0, "Take Profit (en %)", group="Control de Backtest")/100
+leverage = input(1, "Apalancamiento", maxval=100, group="Control de Backtest")
+bt_start_time = input(timestamp("2021 01 01"), "Hora de inicio de Backtest", input.time, group="Control de Backtest")
+bt_end_time = input(timestamp("2029 12 31"), "Hora de finalización de Backtest", input.time, group="Control de Backtest")
+
+// Trading Window
+in_trading_window = time >= bt_start_time and time <= bt_end_time
+trade_qty = (strategy.equity * leverage) / close 
+
+// Long Side
+strategy.entry("Compra", strategy.long, trade_qty, when=buy_cond and in_trading_window)
+long_tp = strategy.position_avg_price * (1 + tp_perc)
+long_sl = strategy.position_avg_price * (1 - sl_perc)
+if not swing_trading_mode
+    strategy.exit("Cierre Compra", "Compra", limit=long_tp, stop=long_sl)
+
+// Short Side
+strategy.entry("Venta", strategy.short, trade_qty, when=sell_cond and in_trading_window)
+short_tp = strategy.position_avg_price * (1 - tp_perc)
+short_sl = strategy.position_avg_price * (1 + sl_perc)
+if not swing_trading_mode
+    strategy.exit("Cierre Venta", "Venta", limit=short_tp, stop=short_sl)
+
+View in Pine Editor・76 lines
+Use on chart
+6
+7
+2 713
+Jun 12, 2022
+Booz Backtesting : Booz Backtesting is a method for analyzing the performance of your current trading strategy . Booz Backtesting aims to help you generate results and evaluate risk and return without risking real capital.
+
+The Booz Backtesting is the Booz Super Swing Indicator equivalent but gives you the ability to backtest data on different charts.
+
+This is an Indicator created for the purpose of identifying trends in Multiple Markets, it is based on Moving Average Crossover and extra features.
+
+Swing Trading: This function allows you to navigate the entire trend until it is not strong enough, so you can compare it with fixed parameters such as Take Profit and Stop Loss.
+
+Take Profit and Stop Loss function: With this function you will be able to choose the most optimal parameters and see in real time the results in order to choose the best combination of parameters.
+
+Leverage : We have this function for the futures markets where you can check which is the most appropriate leverage for your operation.
+
+Trend Filter: allows you to take multiple entries in the same direction of the market.
+
+If the market crosses below the 200 moving average, it will take only short entries.
+
+If the market crosses above the 200 moving average, it will take only long entries.
+
+
+Timeframes
+Charting from 1 Hour, 4 Hour, Daily, Weekly, Weekly
+
+Markets :Booz Backtesting can be tested in Cryptocurrency, Stocks and Futures markets.
+
+
+Background Color : at a glance, you can see what cycle the market is in.
+
+Green background : Shows that the market is in a bullish cycle.
+Red background: Shows that the market is in a bearish cycle.
+
+Jun 22, 2023
+Release Notes
+"¡Hola a todos! He actualizado la Estrategia Booz para mejorar su rendimiento y hacerla más efectiva en la toma de decisiones de trading. En esta actualización, he agregado mejoras para proporcionar una mayor confirmación de la tendencia y mejorar la precisión de las señales de entrada. También he mejorado las etiquetas y las partes gráficas para que sea más fácil de entender y utilizar.
+
+Además, he optimizado el backtesting de la estrategia para asegurarme de que esté funcionando de manera óptima en diferentes condiciones del mercado. Espero que estas mejoras hagan que la estrategia sea más efectiva y rentable para todos los usuarios.
+
+Como siempre, si tienen alguna pregunta o sugerencia, no duden en hacérmelo saber. ¡Gracias por usar ArnoldTrader!"

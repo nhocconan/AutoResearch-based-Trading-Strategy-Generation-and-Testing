@@ -1,0 +1,87 @@
+//@version=5
+strategy('EMA and MACD with Trailing Stop Loss',
+         overlay=true,
+         initial_capital=1000,
+         process_orders_on_close=true,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=30,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1)
+
+showDate = input(defval=true, title='Show Date Range')
+timePeriod = time >= timestamp(syminfo.timezone, 2022, 1, 1, 0, 0)
+notInTrade = strategy.position_size <= 0
+
+// EMAs 
+fastEMA = ta.ema(close, 7)
+slowEMA = ta.ema(close, 14)
+plot(fastEMA, color = color.blue)
+plot(slowEMA, color = color.green)
+//buyCondition1 = ta.crossover(fastEMA, slowEMA)
+buyCondition1 = fastEMA > slowEMA
+
+
+// DMI and MACD inputs and calculations
+[macd, macd_signal, macd_histogram] = ta.macd(close, 12, 26, 9)
+buyCondition2 = ta.crossover(macd_signal, macd)
+
+
+// Configure trail stop level with input options
+longTrailPerc = input.float(title='Trail Long Loss (%)', minval=0.0, step=0.1, defval=3) * 0.01
+shortTrailPerc = input.float(title='Trail Short Loss (%)', minval=0.0, step=0.1, defval=1) * 0.01
+
+// Determine trail stop loss prices
+longStopPrice = 0.0
+shortStopPrice = 0.0
+
+longStopPrice := if strategy.position_size > 0
+    stopValue = close * (1 - longTrailPerc)
+    math.max(stopValue, longStopPrice[1])
+else
+    0
+
+shortStopPrice := if strategy.position_size < 0
+    stopValue = close * (1 + shortTrailPerc)
+    math.min(stopValue, shortStopPrice[1])
+else
+    999999
+    
+
+if (buyCondition1 and buyCondition2 and notInTrade and timePeriod)
+    strategy.entry(id="Long", direction = strategy.long)
+
+strategy.exit(id="Exit", stop = longStopPrice, limit = shortStopPrice)
+
+
+//if (sellCondition1 and sellCondition2 and notInTrade and timePeriod)
+//strategy.close(id="Close", when = sellCondition1 or sellCondition2)
+
+View in Pine Editor・60 lines
+Use on chart
+2
+1
+3
+6 988
+An exponential moving average ( EMA ) is a type of moving average (MA) that places a greater weight and significance on the most recent data points. The exponential moving average is also referred to as the exponentially weighted moving average. An exponentially weighted moving average reacts more significantly to recent price changes than a simple moving average simple moving average ( SMA ), which applies an equal weight to all observations in the period.
+
+Moving average convergence divergence ( MACD ) is a trend-following momentum indicator that shows the relationship between two moving averages of a security’s price. The MACD is calculated by subtracting the 26-period exponential moving average ( EMA ) from the 12-period EMA.
+
+The result of that calculation is the MACD line. A nine-day EMA of the MACD called the "signal line," is then plotted on top of the MACD line, which can function as a trigger for buy and sell signals. Traders may buy the security when the MACD crosses above its signal line and sell—or short—the security when the MACD crosses below the signal line. Moving average convergence divergence ( MACD ) indicators can be interpreted in several ways, but the more common methods are crossovers, divergences, and rapid rises/falls.
+
+The Strategy enters and closes the trade when the following conditions are met:
+
+LONG
+The MACD histogram turns bearish
+EMA7 is greater than EMA14
+
+EXIT
+Price increases 3% trailing
+Price decreases 1% trailing
+
+This strategy is back-tested from 1 January 2022 to simulate how the strategy would work in a bear market and provides good returns.
+
+Pairs that produce very strong results include XRPUSDT on the 1-minute timeframe. This short timeframe means that this strategy opens and closes trades regularly
+
+In order to further improve the strategy, the EMA can be changed from 7 and 14 to, say, EMA20 and EMA50. Furthermore, the trailing stop loss can also be changed to ideally suit the user to match their needs.
+
+The strategy assumes each order is using 30% of the available coins to make the results more realistic and to simulate you only ran this strategy on 30% of your holdings. A trading fee of 0.1% is also taken into account and is aligned to the base fee applied on Binance.

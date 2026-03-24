@@ -1,0 +1,55 @@
+//@version=3
+// Zero Lag EMA combined with Hull moving average for smoothing purposes.
+// author: email: sbginter@gmail.com
+
+strategy("Ujanja", overlay=true)
+
+
+
+Period = input(title="Period", type=integer, defval=30, minval=1)
+S_period=input(title="Smoother Period",type=integer,defval=176)
+EMA1= ema(close,Period)
+EMA2= ema(EMA1,Period)
+Difference= EMA1 - EMA2
+ZeroLagEMA= EMA1 + Difference
+
+n2ma=2*wma(ZeroLagEMA,round(S_period/2))
+nma=wma(ZeroLagEMA,S_period)
+diff=n2ma-nma
+sqn=round(sqrt(S_period))
+
+
+n2ma1=2*wma(ZeroLagEMA[1],round(S_period/2))
+nma1=wma(ZeroLagEMA[1],S_period)
+diff1=n2ma1-nma1
+sqn1=round(sqrt(S_period))
+
+
+n1=wma(diff,sqn)
+n2=wma(diff1,sqn)
+
+c=n1>n2?green:red
+ma=plot(n1,color=c)
+
+
+longCondition = n1>n2
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = longCondition != true
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・41 lines
+Use on chart
+6
+6
+2 034
+Ujanja uses Zero Lag EMA combined with Hull Moving Average for smoothing purposes. It is a less aggressive. It is only to be used with huge volume , huge momentum and high volatility to get trend analysis... It doesn't repaint at all.
+
+Advised use :
+
+Trades highly volatile Crypto currencies, stocks as well as Gold .
+
+It is only to be used with huge momentum and high volatility to get trend analysis... It doesn't repaint at all.
+

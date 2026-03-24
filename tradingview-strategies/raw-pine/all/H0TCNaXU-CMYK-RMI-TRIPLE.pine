@@ -1,0 +1,1039 @@
+//@version=3
+//
+//▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                ██████    ██      ██   ██      ██   ██    ██                 ██                  ██████       ██      ██   ██████   ██████
+//              ██          ████  ████    ██    ██    ██   ██                ██████                ██    ██     ████  ████     ██           ██ 
+//              ██          ██  ██  ██      █  █      █████                 ████████               ██████       ██  ██  ██     ██     ██████
+//              ██          ██      ██       ██       ██   ██                ██████                ██    ██     ██      ██     ██           ██
+//                ██████    ██      ██       ██       ██    ██                 ██                  ██      ██   ██      ██   ██████   ██████
+//                                             Experimantal Triple RMI Indicator, prepared for automation
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+//                  To use This with AUTOTVIEW ::
+//                  At the top of the script:
+//                  Switch from
+//  Strategy() 
+//  //study()
+//                  To
+//  //Strategy() 
+//  study()
+//                  Then delete or // The complete "BACKTESTING" section in the script ,by selecting it an pressing 'ctrl + :' or  'ctrl + /' or 'del'
+//                                                  starting at line 510+
+//
+//                   At line 660+ you can find the "AUTOTVIEW ALERTS" section to select your preferred approach
+//
+//                   Using either specific alerts per order with seperate Stoploss/Takeprofit
+//                   Customize the script to your use case BEFORE using it.
+//                   I am not responsible for misuse of this script, It is not finished, use at own risk.
+//
+//                   Pyramiding is Set at 9 max , For less put conditions in //
+//
+//                   Look at the script to interpret how to use it.
+//
+//
+//
+//                                                                              STRATEGY SETTINGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+strategy(title='░▒▓█ CMYK ◊ RMI ◊ TRIPLE █▓▒░',shorttitle='░▒▓█ CMYK ◊ RMI ◊ TRIPLE █▓▒░', overlay=false,pyramiding=5,  default_qty_type=strategy.percent_of_equity, default_qty_value=20, initial_capital=9000000, currency='EUR', slippage=1, commission_type=strategy.commission.percent , commission_value=0.25, precision=0)
+//study           ( title='░▒▓█ CMYK ◊ RMI ◊ TRIPLE █▓▒░', shorttitle='░▒▓█ CMYK ◊ RMI ◊ TRIPLE █▓▒░', overlay=false , precision=0 )
+//                                                                              COLORSPACE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+oker        = #FF9900   , reds          = #FF6600   , dreds         = #5d2b0a   ,
+cyan        = #00CCCC   , blues         = #0099CC   , dblues        = #0a3f51   , 
+magenta     = #FF00FF   , purples       = #6633CC   , KBBB          = #BBBBBB   , 
+K111        = #111111   , K555          = #555555   , K999          = #999999   , 
+
+//                                                                              FUNCTIONS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              RMI
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ 
+rmi(SOURCE,LENGHT,MOMENTUM)=>
+    INC                 = ema   (max(SOURCE              - SOURCE[MOMENTUM]   , 0)    , LENGHT)
+    DEC                 = ema   (max(SOURCE[MOMENTUM]    - SOURCE             , 0)    , LENGHT)
+    RMI                 = DEC   == 0    ? 0     : 50 - 100 / (1     + INC / DEC)
+    
+//                                                                              INPUTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RESOLUTION              = input ( defval=1      , minval=1                  , type=integer                          , title="Resolution (Minutes)"                  )
+SLOWCORRECTION          = input ( defval=10     , minval=9                  , type=integer                          , title="Slowcorrection 10's"                   )
+//                                                              SOURCE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+RMI_SOURCE              = input ( defval=close                              , type=source                           , title="Source"                                )
+
+//                                                              RMI
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+RMI_FAST_LENGHT         = input ( defval=29     , minval=1                  , type=integer                          , title="Fast   RMI Length"                     ) / RESOLUTION
+RMI_FAST_MOMENTUM       = input ( defval=7      , minval=1                                                          , title="Fast   RMI Momentum"                   ) / RESOLUTION
+RMI_FAST_ON             = input ( defval=true                               , type=bool                             , title="Fast   RMI On"                         ) 
+
+RMI_MEDI_LENGHT         = input ( defval=239    , minval=1                  , type=integer                          , title="Medium RMI Length"                     ) / RESOLUTION
+RMI_MEDI_MOMENTUM       = input ( defval=23     , minval=1                                                          , title="Medium RMI Momentum"                   ) / RESOLUTION
+RMI_MEDI_ON             = input ( defval=true                               , type=bool                             , title="Medium RMI On"                         )
+
+RMI_SLOW_LENGHT         = input ( defval=2467   , minval=1                  , type=integer                          , title="Slow   RMI Length"                     ) / RESOLUTION * (SLOWCORRECTION/10)
+RMI_SLOW_MOMENTUM       = input ( defval=239    , minval=1                                                          , title="Slow   RMI Momentum"                   ) / RESOLUTION * (SLOWCORRECTION/10)
+RMI_SLOW_ON             = input ( defval=true                               , type=bool                             , title="Slow   RMI On"                         )
+
+//                    RMI boundaries
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_FAST_HIGH_BNDR      = input ( defval=31     , minval=00  , maxval=50    , type=integer                          , title="Fast   HIGH Boundary"                  )
+RMI_MEDI_HIGH_BNDR      = input ( defval=23     , minval=00  , maxval=50    , type=integer                          , title="Medium HIGH Boundary"                  )
+RMI_SLOW_HIGH_BNDR      = input ( defval=19     , minval=00  , maxval=50    , type=integer                          , title="Slow   HIGH Boundary"                  )
+
+RMI_FAST_LOW_BNDR       = input ( defval=-31    , minval=-50 , maxval=00    , type=integer                          , title="Fast   LOW Boundary"                   )
+RMI_MEDI_LOW_BNDR       = input ( defval=-23    , minval=-50 , maxval=00    , type=integer                          , title="Medium LOW Boundary"                   )
+RMI_SLOW_LOW_BNDR       = input ( defval=-19    , minval=-50 , maxval=00    , type=integer                          , title="Slow   LOW Boundary"                   )
+
+//                    RMI boundary correction
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_TREND_CORRECTION    = input ( defval=true                               , type=bool                             , title="Trend Boundary correction on Slow RMI" )
+RMI_TREND_LENGHT        = input ( defval=2467   , minval=00  , maxval=2500  , type=integer                          , title="Trend Lenght"                          ) / RESOLUTION
+RMI_TREND_FACTOR        = input ( defval=3      , minval=00  , maxval=2500  , type=integer                          , title="Trend Factor 10's"                     ) 
+
+//                                                              AUTOMATION
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+DELAY_BETWEEN_ENTRIES   = input ( defval=199     , minval=0                                                         , title="Delay Between Entries"                 ) / RESOLUTION
+ENTRY_ONCE_PER_DIP      = input ( defval=false                              , type=bool                             , title="Or Entry Once Per Dip/Top"             )
+//                    RISK MANAGEMENT
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+PYRAMIDING              = input ( defval=9      , minval=9  , maxval=9      , type=integer                          , title="Pyramiding"                            ) // NOT ADJUSTABLE YET
+
+TAKEPROFIT              = input ( defval=20000  , minval=0                                                          , title="Take Profit Pips %/1000"               )
+STOPLOSS                = input ( defval=15000  , minval=0                                                          , title="Stop Loss   Pips %/1000"               )
+COMISSION_VALUE         = input ( defval=0.25   , minval=0  , maxval=1      , type=float        , step=0.01         , title="Comission value for offsetting Takeprofit/stoploss")
+
+
+VIEWPOSITIONS           = input ( defval=false                              , type=bool                             , title="View Positions"                        )
+
+//                    Additional Entries
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+ENTRY_EXTRAS            = input ( defval=true                               , type=bool                             , title="Extra Entries on Opportune Moments"    )
+
+//                                                                              CALCULATION
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              RMI
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+RMI_FAST                = rmi   ( RMI_SOURCE    , RMI_FAST_LENGHT   , RMI_FAST_MOMENTUM )
+
+RMI_MEDI                = rmi   ( RMI_SOURCE    , RMI_MEDI_LENGHT   , RMI_MEDI_MOMENTUM )
+
+RMI_SLOW                = rmi   ( RMI_SOURCE    , RMI_SLOW_LENGHT   , RMI_SLOW_MOMENTUM )
+
+//                                                              TREND CORRECTION
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+RMI_TREND               = sma   ( RMI_FAST + RMI_MEDI + RMI_SLOW    , RMI_TREND_LENGHT  )   /   ( 1     /   ( RMI_TREND_FACTOR  / 10    ))
+RMI_CORRECTION          = iff   ( RMI_TREND_CORRECTION  , RMI_TREND        , 0)
+
+RMI_FAST_HIGH           = RMI_FAST_HIGH_BNDR
+RMI_MEDI_HIGH           = RMI_MEDI_HIGH_BNDR
+RMI_SLOW_HIGH           = RMI_SLOW_HIGH_BNDR    + iff   ( RMI_CORRECTION < 0    , RMI_CORRECTION    , 0)
+
+RMI_FAST_LOW            = RMI_FAST_LOW_BNDR
+RMI_MEDI_LOW            = RMI_MEDI_LOW_BNDR
+RMI_SLOW_LOW            = RMI_SLOW_LOW_BNDR     + iff   ( RMI_CORRECTION > 0    , RMI_CORRECTION    , 0)
+
+//                                                                              CONDITIONS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              OVER AND UNDER
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      TOPS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_FAST_TOP            = RMI_FAST              >=  RMI_FAST_HIGH   ? 1 : not RMI_FAST_ON   ? 1 : 0
+RMI_MEDI_TOP            = RMI_MEDI              >=  RMI_MEDI_HIGH   ? 1 : not RMI_MEDI_ON   ? 1 : 0
+RMI_SLOW_TOP            = RMI_SLOW              >=  RMI_SLOW_HIGH   ? 1 : not RMI_SLOW_ON   ? 1 : 0
+
+//                      DIPS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_FAST_DIP            = RMI_FAST              <=  RMI_FAST_LOW    ? 1 : not RMI_FAST_ON   ? 1 : 0
+RMI_MEDI_DIP            = RMI_MEDI              <=  RMI_MEDI_LOW    ? 1 : not RMI_MEDI_ON   ? 1 : 0
+RMI_SLOW_DIP            = RMI_SLOW              <=  RMI_SLOW_LOW    ? 1 : not RMI_SLOW_ON   ? 1 : 0
+
+//                      3 RMI FMS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_TOP_3               = RMI_FAST_TOP          and RMI_MEDI_TOP        and RMI_SLOW_TOP    ? 1 : 0
+RMI_DIP_3               = RMI_FAST_DIP          and RMI_MEDI_DIP        and RMI_SLOW_DIP    ? 1 : 0
+
+//                      2 RMI FM
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_TOP_2               = RMI_FAST_TOP          and RMI_MEDI_TOP        and not iff(RMI_SLOW >=  RMI_SLOW_HIGH,1,0)  ? 1 : 0
+RMI_DIP_2               = RMI_FAST_DIP          and RMI_MEDI_DIP        and not iff(RMI_SLOW <=  RMI_SLOW_LOW,1,0)   ? 1 : 0
+
+//                      1 RMI F
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+//                                                              CROSSINGS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      TOPS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_FAST_TOP_IN         = crossover ( RMI_FAST          , RMI_FAST_HIGH )
+RMI_FAST_TOP_OUT        = crossunder( RMI_FAST          , RMI_FAST_HIGH )
+
+RMI_MEDI_TOP_IN         = crossover ( RMI_MEDI          , RMI_MEDI_HIGH )
+RMI_MEDI_TOP_OUT        = crossunder( RMI_MEDI          , RMI_MEDI_HIGH )
+
+RMI_SLOW_TOP_IN         = crossover ( RMI_SLOW          , RMI_SLOW_HIGH )
+RMI_SLOW_TOP_OUT        = crossunder( RMI_SLOW          , RMI_SLOW_HIGH )
+
+//                      DIPS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+RMI_FAST_DIP_IN         = crossunder( RMI_FAST          , RMI_FAST_LOW  )
+RMI_FAST_DIP_OUT        = crossover ( RMI_FAST          , RMI_FAST_LOW  )
+
+RMI_MEDI_DIP_IN         = crossunder( RMI_MEDI          , RMI_MEDI_LOW  )
+RMI_MEDI_DIP_OUT        = crossover ( RMI_MEDI          , RMI_MEDI_LOW  )
+
+RMI_SLOW_DIP_IN         = crossunder( RMI_SLOW          , RMI_SLOW_LOW  )
+RMI_SLOW_DIP_OUT        = crossover ( RMI_SLOW          , RMI_SLOW_LOW  )
+
+//                                                                              AUTOMATION
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              SHORT
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+SHORT_PULSE             = RMI_TOP_3                     and not offset   ( RMI_TOP_3                        ? 1         : 0 , 1 )                                                       ? 1     : 0 
+//                      DELAY BETWEEN ENTRIES
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+SHORT_SWEEP             = sma       ( SHORT_PULSE       , DELAY_BETWEEN_ENTRIES )   > 0                     ? 1         : 0
+SHORT_DBE_OUT           = fixnan    ( RMI_TOP_3                                                             ? 1         : SHORT_PULSE   or RMI_MEDI_TOP_OUT or SHORT_SWEEP              ? 0     : na    )
+SHORT_DBE               = offset    ( SHORT_SWEEP       , 1 )   < SHORT_PULSE                               ? 1         : 0 
+//                      ONCE PER DIP/TOP ENTRY
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+SHORT_OPD_OUT           = fixnan    ( RMI_TOP_3                                                             ? 1         : SHORT_PULSE   or RMI_MEDI_TOP_OUT                             ? 0     : na    )
+SHORT_OPD               = iff       ( ENTRY_ONCE_PER_DIP, offset( SHORT_OPD_OUT,1)  > SHORT_OPD_OUT         ? 1         : 0             , offset    ( SHORT_SWEEP , 1) < SHORT_PULSE    ? 1     : 0     )
+
+SHORT                   = ENTRY_ONCE_PER_DIP                                                                ? SHORT_OPD : SHORT_DBE
+
+//                                                              LONG
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+LONG_PULSE              = RMI_DIP_3                     and not offset  ( RMI_DIP_3                         ? 1         : 0 , 1 )                                                       ? 1     : 0 
+//                      DELAY BETWEEN ENTRIES
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+LONG_SWEEP              = sma       ( LONG_PULSE        , DELAY_BETWEEN_ENTRIES )   > 0                     ? 1         : 0
+LONG_DBE_OUT            = fixnan    ( RMI_DIP_3                                                             ? 1         : LONG_PULSE    or  RMI_MEDI_DIP_OUT or LONG_SWEEP              ? 0     : na    )
+LONG_DBE                = offset    ( LONG_SWEEP        , 1)    < LONG_PULSE                                ? 1         : 0 
+//                      ONCE PER DIP/TOP ENTRY
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+LONG_OPD_OUT            = fixnan    ( RMI_DIP_3                                                             ? 1         : LONG_PULSE    or RMI_MEDI_DIP_OUT                             ? 0     : na    )
+LONG_OPD                = iff       ( ENTRY_ONCE_PER_DIP, offset( LONG_OPD_OUT,1)   > LONG_OPD_OUT          ? 1         : 0             , offset    ( LONG_SWEEP  , 1) < LONG_PULSE     ? 1     : 0     )
+
+LONG                    = ENTRY_ONCE_PER_DIP                                                                ? LONG_OPD  : LONG_DBE
+
+//                                                                              ANALYTHICAL
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              PHASE
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+PHASE_SWITCH            = fixnan    ( SHORT             ? 1             : LONG                              ? 0         : na    )
+PHASE_COLOR             = PHASE_SWITCH    ? cyan  : oker
+
+PHASE_LONG              = offset    ( PHASE_SWITCH      , 1) > PHASE_SWITCH
+PHASE_SHORT             = offset    ( PHASE_SWITCH      , 1) < PHASE_SWITCH
+
+PHASE_LONG_IV           = fixnan    ( PHASE_LONG        ? close         : na )
+PHASE_SHORT_IV          = fixnan    ( PHASE_SHORT       ? close         : na )
+
+//                                                      HIGHEST/LOWEST ENTRY
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                    ON ENTRY IF LARGER
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+PHASE_LONG_LV           = fixnan    ( LONG              and close < PHASE_LONG_IV                           ? close     : PHASE_LONG    ?   PHASE_LONG_IV       : na )
+PHASE_SHORT_LV          = fixnan    ( SHORT             and close > PHASE_SHORT_IV                          ? close     : PHASE_SHORT   ?   PHASE_SHORT_IV      : na )
+
+//                                                                              ADDITIONAL ENRTRIES
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+
+//                                                              SHORT
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+X_SHORT_PULSE           = RMI_TOP_2                     and not offset  ( RMI_TOP_2                         ? 1         : 0 , 1 )                                                       ? 1     : 0 
+//                      DELAY BETWEEN ENTRIES
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+X_SHORT_SWEEP           = sma       ( X_SHORT_PULSE     , DELAY_BETWEEN_ENTRIES )   >   0                   ? 1         : 0
+X_SHORT_DBE_OUT         = fixnan    ( RMI_TOP_2         ? 1     : X_SHORT_PULSE     or RMI_MEDI_TOP_OUT or X_SHORT_SWEEP                                                                ? 0     : na    )
+X_SHORT_DBE             = offset    ( X_SHORT_SWEEP     , 1)    < X_SHORT_PULSE                             ? 1         : 0 
+//                      ONCE PER DIP/TOP ENTRY
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+X_SHORT_OPD_OUT         = fixnan    ( RMI_TOP_2         ? 1     : X_SHORT_PULSE     or RMI_MEDI_TOP_OUT     ? 0         : na    )
+X_SHORT_OPD             = iff       ( ENTRY_ONCE_PER_DIP, offset( X_SHORT_OPD_OUT,1)> X_SHORT_OPD_OUT       ? 1         : 0         , offset    ( X_SHORT_SWEEP  ,1) < X_SHORT_PULSE    ? 1     : 0     )
+
+SHORT_EXTRA_INPUT       = ENTRY_ONCE_PER_DIP            ? X_SHORT_OPD               : X_SHORT_DBE
+SHORT_EXTRA             = ENTRY_EXTRAS                  and SHORT_EXTRA_INPUT       and iff ( close > PHASE_SHORT_LV    , 1 , 0 )
+
+
+//                                                              LONG
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+X_LONG_PULSE            = RMI_DIP_2                     and not offset  ( RMI_DIP_2                         ? 1         : 0 , 1 )                                                       ? 1     : 0 
+//                      DELAY BETWEEN ENTRIES
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+X_LONG_SWEEP            = sma       ( X_LONG_PULSE      , DELAY_BETWEEN_ENTRIES )   >   0                   ? 1         : 0
+X_LONG_DBE_OUT          = fixnan    ( RMI_DIP_3         ? 1     : X_LONG_PULSE      or RMI_MEDI_DIP_OUT or X_LONG_SWEEP                                                                 ? 0     : na    )
+X_LONG_DBE              = offset    ( X_LONG_SWEEP      , 1)    <  X_LONG_PULSE                             ? 1         : 0 
+//                      ONCE PER DIP/TOP ENTRY
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+X_LONG_OPD_OUT          = fixnan    ( RMI_DIP_2         ? 1     : X_LONG_PULSE      or RMI_MEDI_DIP_OUT     ? 0         : na    )
+X_LONG_OPD              = iff       ( ENTRY_ONCE_PER_DIP, offset( X_LONG_OPD_OUT,1) > X_LONG_OPD_OUT        ? 1         : 0         , offset    ( X_LONG_SWEEP  ,1) < X_LONG_PULSE      ? 1     : 0     )
+
+LONG_EXTRA_INPUT        = ENTRY_ONCE_PER_DIP            ? X_LONG_OPD    : X_LONG_DBE
+LONG_EXTRA              = ENTRY_EXTRAS                  and LONG_EXTRA_INPUT        and iff( close < PHASE_LONG_LV      , 1 , 0 )
+
+//                    ADJUSTED VALUE AFTER ADDITIONAL ENTRY
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// REQUIRES REBUILD  :: ORDER OF LOGIC INCAPABLE OR POST ADJUSTMENT
+
+//plot                    (PHASE_LONG_IV , color=cyan)
+//plot                    (PHASE_LONG_LV , color=blues)
+
+//plot                    (PHASE_SHORT_IV , color=oker)
+//plot                    (PHASE_SHORT_LV , color=reds)
+
+//                                                                              ASSET MANAGEMENT 
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                  STOPLOSS VARIABLES
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      SHORTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+STOPLOSS_SHORT_A    = na , STOPLOSS_SHORT_B     = na , STOPLOSS_SHORT_C     = na , STOPLOSS_SHORT_D     = na , STOPLOSS_SHORT_E     = na , STOPLOSS_SHORT_F     = na , STOPLOSS_SHORT_G     = na , STOPLOSS_SHORT_H     = na , STOPLOSS_SHORT_I     = na 
+STOPLOSS_SHORT          = STOPLOSS_SHORT_A      or STOPLOSS_SHORT_B     or STOPLOSS_SHORT_C     or STOPLOSS_SHORT_D     or STOPLOSS_SHORT_E     or STOPLOSS_SHORT_F     or STOPLOSS_SHORT_G     or STOPLOSS_SHORT_H     or STOPLOSS_SHORT_I     ? 1 : 0
+
+//                      LONGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+STOPLOSS_LONG_A     = na , STOPLOSS_LONG_B      = na , STOPLOSS_LONG_C      = na , STOPLOSS_LONG_D      = na , STOPLOSS_LONG_E      = na , STOPLOSS_LONG_F      = na , STOPLOSS_LONG_G      = na , STOPLOSS_LONG_H      = na , STOPLOSS_LONG_I      = na
+STOPLOSS_LONG           = STOPLOSS_LONG_A       or STOPLOSS_LONG_B      or STOPLOSS_LONG_C      or STOPLOSS_LONG_D      or STOPLOSS_LONG_E      or STOPLOSS_LONG_F      or STOPLOSS_LONG_G      or STOPLOSS_LONG_H      or STOPLOSS_LONG_I      ? 1 : 0
+
+//                                                  TAKEPROFIT VARIABLES
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      SHORTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+TAKEPROFIT_SHORT_A  = na , TAKEPROFIT_SHORT_B   = na , TAKEPROFIT_SHORT_C   = na , TAKEPROFIT_SHORT_D   = na , TAKEPROFIT_SHORT_E   = na , TAKEPROFIT_SHORT_F   = na , TAKEPROFIT_SHORT_G   = na , TAKEPROFIT_SHORT_H   = na , TAKEPROFIT_SHORT_I   = na
+TAKEPROFIT_SHORT        = TAKEPROFIT_SHORT_A    or TAKEPROFIT_SHORT_B   or TAKEPROFIT_SHORT_C   or TAKEPROFIT_SHORT_D   or TAKEPROFIT_SHORT_E   or TAKEPROFIT_SHORT_F   or TAKEPROFIT_SHORT_G   or TAKEPROFIT_SHORT_H   or TAKEPROFIT_SHORT_I   ? 1 : 0
+
+//                      LONGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+TAKEPROFIT_LONG_A   = na , TAKEPROFIT_LONG_B    = na , TAKEPROFIT_LONG_C    = na , TAKEPROFIT_LONG_D    = na , TAKEPROFIT_LONG_E    = na , TAKEPROFIT_LONG_F    = na , TAKEPROFIT_LONG_G    = na , TAKEPROFIT_LONG_H    = na , TAKEPROFIT_LONG_I    = na
+TAKEPROFIT_LONG         = TAKEPROFIT_LONG_A     or TAKEPROFIT_LONG_B    or TAKEPROFIT_LONG_C    or TAKEPROFIT_LONG_D    or TAKEPROFIT_LONG_E    or TAKEPROFIT_LONG_F    or TAKEPROFIT_LONG_G    or TAKEPROFIT_LONG_H    or TAKEPROFIT_LONG_I    ? 1 : 0
+
+
+
+//                                                              PYRAMIDING
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      COUNTER OPEN SHORTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+PYR_SHORTS_OPEN             = 0
+PYR_SHORTS_OPEN             := nz(PYR_SHORTS_OPEN[1])
+
+PYR_SHORTS_CLOSED           = 0
+PYR_SHORTS_CLOSED           := nz(PYR_SHORTS_CLOSED[1])
+
+if (SHORT or SHORT_EXTRA)
+    PYR_SHORTS_OPEN         := PYR_SHORTS_OPEN + 1
+    PYR_SHORTS_CLOSED       := 0
+    
+if ((LONG or LONG_EXTRA) or (TAKEPROFIT_SHORT or STOPLOSS_SHORT))
+    PYR_SHORTS_CLOSED       := PYR_SHORTS_CLOSED + PYR_SHORTS_OPEN
+    PYR_SHORTS_OPEN         := 0
+    
+//                      LAST POSITION VALUE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+PYR_SHORTS_LAST             = na
+PYR_SHORTS_LAST             := (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_LAST[1])
+
+
+//                      COUNTER OPEN LONGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+PYR_LONGS_OPEN              = 0
+PYR_LONGS_OPEN              := nz(PYR_LONGS_OPEN[1])
+
+PYR_LONGS_CLOSED            = 0
+PYR_LONGS_CLOSED            := nz(PYR_LONGS_CLOSED[1])
+
+if (LONG or LONG_EXTRA)
+    PYR_LONGS_OPEN          := PYR_LONGS_OPEN + 1
+    PYR_LONGS_CLOSED        := 0
+    
+if ((SHORT or SHORT_EXTRA) or (TAKEPROFIT_LONG or STOPLOSS_LONG))
+    PYR_LONGS_CLOSED        := PYR_LONGS_CLOSED + PYR_LONGS_OPEN
+    PYR_LONGS_OPEN          := 0
+    
+//                      LAST POSITION VALUE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+PYR_LONGS_LAST              = na
+PYR_LONGS_LAST              := LONG or LONG_EXTRA ? close : nz(PYR_LONGS_LAST[1])
+
+//                                                              POSITIONS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      SHORTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+PYR_SHORTS_A                = na
+PYR_SHORTS_A                := PYR_SHORTS_OPEN == 1 and (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_A[1])
+PYR_SHORTS_A                := (TAKEPROFIT_SHORT_A[1] or STOPLOSS_SHORT_A[1]) or (LONG or LONG_EXTRA) ? 0 : PYR_SHORTS_A
+OPEN_SHORT_A                = PYR_SHORTS_OPEN == 1 and (SHORT or SHORT_EXTRA) ? 1 : 0
+
+PYR_SHORTS_B                = na
+PYR_SHORTS_B                := PYR_SHORTS_OPEN == 2 and (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_B[1])
+PYR_SHORTS_B                := (TAKEPROFIT_SHORT_B[1] or STOPLOSS_SHORT_B[1]) or (LONG or LONG_EXTRA) ? 0 : PYR_SHORTS_B
+OPEN_SHORT_B                = PYR_SHORTS_OPEN == 2 and (SHORT or SHORT_EXTRA) ? 1 : 0
+
+PYR_SHORTS_C                = na
+PYR_SHORTS_C                := PYR_SHORTS_OPEN == 3 and (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_C[1])
+PYR_SHORTS_C                := (TAKEPROFIT_SHORT_C[1] or STOPLOSS_SHORT_C[1]) or (LONG or LONG_EXTRA) ? 0 : PYR_SHORTS_C
+OPEN_SHORT_C                = PYR_SHORTS_OPEN == 3 and (SHORT or SHORT_EXTRA) ? 1 : 0
+
+PYR_SHORTS_D                = na
+PYR_SHORTS_D                := PYR_SHORTS_OPEN == 4 and (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_D[1])
+PYR_SHORTS_D                := (TAKEPROFIT_SHORT_D[1] or STOPLOSS_SHORT_D[1]) or (LONG or LONG_EXTRA) ? 0 : PYR_SHORTS_D
+OPEN_SHORT_D                = PYR_SHORTS_OPEN == 4 and (SHORT or SHORT_EXTRA) ? 1 : 0
+
+PYR_SHORTS_E                = na
+PYR_SHORTS_E                := PYR_SHORTS_OPEN == 5 and (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_E[1])
+PYR_SHORTS_E                := (TAKEPROFIT_SHORT_E[1] or STOPLOSS_SHORT_E[1]) or (LONG or LONG_EXTRA) ? 0 : PYR_SHORTS_E
+OPEN_SHORT_E                = PYR_SHORTS_OPEN == 5 and (SHORT or SHORT_EXTRA) ? 1 : 0
+
+PYR_SHORTS_F                = na
+PYR_SHORTS_F                := PYR_SHORTS_OPEN == 6 and (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_F[1])
+PYR_SHORTS_F                := (TAKEPROFIT_SHORT_F[1] or STOPLOSS_SHORT_F[1]) or (LONG or LONG_EXTRA) ? 0 : PYR_SHORTS_F
+OPEN_SHORT_F                = PYR_SHORTS_OPEN == 6 and (SHORT or SHORT_EXTRA) ? 1 : 0
+
+PYR_SHORTS_G                = na
+PYR_SHORTS_G                := PYR_SHORTS_OPEN == 7 and (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_G[1])
+PYR_SHORTS_G                := (TAKEPROFIT_SHORT_G[1] or STOPLOSS_SHORT_G[1]) or (LONG or LONG_EXTRA) ? 0 : PYR_SHORTS_G
+OPEN_SHORT_G                = PYR_SHORTS_OPEN == 7 and (SHORT or SHORT_EXTRA) ? 1 : 0
+
+PYR_SHORTS_H                = na
+PYR_SHORTS_H                := PYR_SHORTS_OPEN == 8 and (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_H[1])
+PYR_SHORTS_H                := (TAKEPROFIT_SHORT_H[1] or STOPLOSS_SHORT_H[1]) or (LONG or LONG_EXTRA) ? 0 : PYR_SHORTS_H
+OPEN_SHORT_H                = PYR_SHORTS_OPEN == 8 and (SHORT or SHORT_EXTRA) ? 1 : 0
+
+PYR_SHORTS_I                = na
+PYR_SHORTS_I                := PYR_SHORTS_OPEN == 9 and (SHORT or SHORT_EXTRA) ? close : nz(PYR_SHORTS_I[1])
+PYR_SHORTS_I                := (TAKEPROFIT_SHORT_I[1] or STOPLOSS_SHORT_I[1]) or (LONG or LONG_EXTRA) ? 0 : PYR_SHORTS_I
+OPEN_SHORT_I                = PYR_SHORTS_OPEN == 9 and (SHORT or SHORT_EXTRA) ? 1 : 0
+
+//                      LONGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+PYR_LONGS_A                 = na
+PYR_LONGS_A                 := PYR_LONGS_OPEN == 1 and (LONG or LONG_EXTRA) ? close : nz(PYR_LONGS_A[1])
+PYR_LONGS_A                 := (TAKEPROFIT_LONG_A[1] or STOPLOSS_LONG_A[1]) or (SHORT or SHORT_EXTRA) ? 0 : PYR_LONGS_A
+OPEN_LONG_A                 = PYR_LONGS_OPEN == 1 and (LONG or LONG_EXTRA) ? 1 : 0
+
+PYR_LONGS_B                 = na
+PYR_LONGS_B                 := PYR_LONGS_OPEN == 2 and (LONG or LONG_EXTRA) ? close : nz(PYR_LONGS_B[1])
+PYR_LONGS_B                 := (TAKEPROFIT_LONG_B[1] or STOPLOSS_LONG_B[1]) or (SHORT or SHORT_EXTRA) ? 0 : PYR_LONGS_B
+OPEN_LONG_B                 = PYR_LONGS_OPEN == 2 and (LONG or LONG_EXTRA) ? 1 : 0
+
+PYR_LONGS_C                 = na
+PYR_LONGS_C                 := PYR_LONGS_OPEN == 3 and (LONG or LONG_EXTRA) ? close : nz(PYR_LONGS_C[1])
+PYR_LONGS_C                 := (TAKEPROFIT_LONG_C[1] or STOPLOSS_LONG_C[1]) or (SHORT or SHORT_EXTRA) ? 0 : PYR_LONGS_C
+OPEN_LONG_C                 = PYR_LONGS_OPEN == 3 and (LONG or LONG_EXTRA) ? 1 : 0
+
+PYR_LONGS_D                 = na
+PYR_LONGS_D                 := PYR_LONGS_OPEN == 4 and (LONG or LONG_EXTRA) ? close : nz(PYR_LONGS_D[1])
+PYR_LONGS_D                 := (TAKEPROFIT_LONG_D[1] or STOPLOSS_LONG_D[1]) or (SHORT or SHORT_EXTRA) ? 0 : PYR_LONGS_D
+OPEN_LONG_D                 = PYR_LONGS_OPEN == 4 and (LONG or LONG_EXTRA) ? 1 : 0
+
+PYR_LONGS_E                 = na
+PYR_LONGS_E                 := PYR_LONGS_OPEN == 5 and (LONG or LONG_EXTRA) ? close : nz(PYR_LONGS_E[1])
+PYR_LONGS_E                 := (TAKEPROFIT_LONG_E[1] or STOPLOSS_LONG_E[1]) or (SHORT or SHORT_EXTRA) ? 0 : PYR_LONGS_E
+OPEN_LONG_E                 = PYR_LONGS_OPEN == 5 and (LONG or LONG_EXTRA) ? 1 : 0
+
+PYR_LONGS_F                 = na
+PYR_LONGS_F                 := PYR_LONGS_OPEN == 6 and (LONG or LONG_EXTRA) ? close : nz(PYR_LONGS_F[1])
+PYR_LONGS_F                 := (TAKEPROFIT_LONG_F[1] or STOPLOSS_LONG_F[1]) or (SHORT or SHORT_EXTRA) ? 0 : PYR_LONGS_F
+OPEN_LONG_F                 = PYR_LONGS_OPEN == 6 and (LONG or LONG_EXTRA) ? 1 : 0
+
+PYR_LONGS_G                 = na
+PYR_LONGS_G                 := PYR_LONGS_OPEN == 7 and (LONG or LONG_EXTRA) ? close : nz(PYR_LONGS_G[1])
+PYR_LONGS_G                 := (TAKEPROFIT_LONG_G[1] or STOPLOSS_LONG_G[1]) or (SHORT or SHORT_EXTRA) ? 0 : PYR_LONGS_G
+OPEN_LONG_G                 = PYR_LONGS_OPEN == 7 and (LONG or LONG_EXTRA) ? 1 : 0
+
+PYR_LONGS_H                 = na
+PYR_LONGS_H                 := PYR_LONGS_OPEN == 8 and (LONG or LONG_EXTRA) ? close : nz(PYR_LONGS_H[1])
+PYR_LONGS_H                 := (TAKEPROFIT_LONG_H[1] or STOPLOSS_LONG_H[1]) or (SHORT or SHORT_EXTRA) ? 0 : PYR_LONGS_H
+OPEN_LONG_H                 = PYR_LONGS_OPEN == 8 and (LONG or LONG_EXTRA) ? 1 : 0
+
+PYR_LONGS_I                 = na
+PYR_LONGS_I                 := PYR_LONGS_OPEN == 9 and (LONG or LONG_EXTRA) ? close : nz(PYR_LONGS_I[1])
+PYR_LONGS_I                 := (TAKEPROFIT_LONG_I[1] or STOPLOSS_LONG_I[1]) or (SHORT or SHORT_EXTRA) ? 0 : PYR_LONGS_I
+OPEN_LONG_I                 = PYR_LONGS_OPEN == 9 and (LONG or LONG_EXTRA) ? 1 : 0
+
+//                                                              STOP LOSS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      FACTOR
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+STOPLOSS_LONG_FACTOR        = (( 100000 - STOPLOSS   ) / 100000     ) - (   COMISSION_VALUE /   100 )
+STOPLOSS_SHORT_FACTOR       = (( 100000 + STOPLOSS   ) / 100000     ) + (   COMISSION_VALUE /   100 )
+
+//                      SHORTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+STOPLOSS_SHORT_A            := PYR_SHORTS_A     * STOPLOSS_SHORT_FACTOR     < close     and PYR_SHORTS_A > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(STOPLOSS_SHORT_A[1])  
+STOPLOSS_SHORT_B            := PYR_SHORTS_B     * STOPLOSS_SHORT_FACTOR     < close     and PYR_SHORTS_B > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(STOPLOSS_SHORT_B[1]) 
+STOPLOSS_SHORT_C            := PYR_SHORTS_C     * STOPLOSS_SHORT_FACTOR     < close     and PYR_SHORTS_C > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(STOPLOSS_SHORT_C[1]) 
+STOPLOSS_SHORT_D            := PYR_SHORTS_D     * STOPLOSS_SHORT_FACTOR     < close     and PYR_SHORTS_D > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(STOPLOSS_SHORT_D[1]) 
+STOPLOSS_SHORT_E            := PYR_SHORTS_E     * STOPLOSS_SHORT_FACTOR     < close     and PYR_SHORTS_E > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(STOPLOSS_SHORT_E[1]) 
+STOPLOSS_SHORT_F            := PYR_SHORTS_F     * STOPLOSS_SHORT_FACTOR     < close     and PYR_SHORTS_F > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(STOPLOSS_SHORT_F[1]) 
+STOPLOSS_SHORT_G            := PYR_SHORTS_G     * STOPLOSS_SHORT_FACTOR     < close     and PYR_SHORTS_G > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(STOPLOSS_SHORT_G[1]) 
+STOPLOSS_SHORT_H            := PYR_SHORTS_H     * STOPLOSS_SHORT_FACTOR     < close     and PYR_SHORTS_H > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(STOPLOSS_SHORT_H[1]) 
+STOPLOSS_SHORT_I            := PYR_SHORTS_I     * STOPLOSS_SHORT_FACTOR     < close     and PYR_SHORTS_I > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(STOPLOSS_SHORT_I[1])
+
+//                      LONGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+STOPLOSS_LONG_A             := PYR_LONGS_A      * STOPLOSS_LONG_FACTOR      > close     and PYR_LONGS_A > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(STOPLOSS_LONG_A[1])
+STOPLOSS_LONG_B             := PYR_LONGS_B      * STOPLOSS_LONG_FACTOR      > close     and PYR_LONGS_B > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(STOPLOSS_LONG_B[1])    
+STOPLOSS_LONG_C             := PYR_LONGS_C      * STOPLOSS_LONG_FACTOR      > close     and PYR_LONGS_C > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(STOPLOSS_LONG_C[1])  
+STOPLOSS_LONG_D             := PYR_LONGS_D      * STOPLOSS_LONG_FACTOR      > close     and PYR_LONGS_D > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(STOPLOSS_LONG_D[1])  
+STOPLOSS_LONG_E             := PYR_LONGS_E      * STOPLOSS_LONG_FACTOR      > close     and PYR_LONGS_E > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(STOPLOSS_LONG_E[1])  
+STOPLOSS_LONG_F             := PYR_LONGS_F      * STOPLOSS_LONG_FACTOR      > close     and PYR_LONGS_F > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(STOPLOSS_LONG_F[1])  
+STOPLOSS_LONG_G             := PYR_LONGS_G      * STOPLOSS_LONG_FACTOR      > close     and PYR_LONGS_G > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(STOPLOSS_LONG_G[1])  
+STOPLOSS_LONG_H             := PYR_LONGS_H      * STOPLOSS_LONG_FACTOR      > close     and PYR_LONGS_H > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(STOPLOSS_LONG_H[1])  
+STOPLOSS_LONG_I             := PYR_LONGS_I      * STOPLOSS_LONG_FACTOR      > close     and PYR_LONGS_I > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(STOPLOSS_LONG_I[1]) 
+
+//                                                              TAKE PROFIT
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      FACTOR
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+TAKEPROFIT_LONG_FACTOR      = (( 100000 + TAKEPROFIT   ) / 100000   ) + (   COMISSION_VALUE /   100 )
+TAKEPROFIT_SHORT_FACTOR     = (( 100000 - TAKEPROFIT   ) / 100000   ) - (   COMISSION_VALUE /   100 )
+
+//                      SHORTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+TAKEPROFIT_SHORT_A          := PYR_SHORTS_A     * TAKEPROFIT_SHORT_FACTOR   > close     and PYR_SHORTS_A > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(TAKEPROFIT_SHORT_A[1])  
+TAKEPROFIT_SHORT_B          := PYR_SHORTS_B     * TAKEPROFIT_SHORT_FACTOR   > close     and PYR_SHORTS_B > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(TAKEPROFIT_SHORT_B[1]) 
+TAKEPROFIT_SHORT_C          := PYR_SHORTS_C     * TAKEPROFIT_SHORT_FACTOR   > close     and PYR_SHORTS_C > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(TAKEPROFIT_SHORT_C[1]) 
+TAKEPROFIT_SHORT_D          := PYR_SHORTS_D     * TAKEPROFIT_SHORT_FACTOR   > close     and PYR_SHORTS_D > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(TAKEPROFIT_SHORT_D[1]) 
+TAKEPROFIT_SHORT_E          := PYR_SHORTS_E     * TAKEPROFIT_SHORT_FACTOR   > close     and PYR_SHORTS_E > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(TAKEPROFIT_SHORT_E[1]) 
+TAKEPROFIT_SHORT_F          := PYR_SHORTS_F     * TAKEPROFIT_SHORT_FACTOR   > close     and PYR_SHORTS_F > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(TAKEPROFIT_SHORT_F[1]) 
+TAKEPROFIT_SHORT_G          := PYR_SHORTS_G     * TAKEPROFIT_SHORT_FACTOR   > close     and PYR_SHORTS_G > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(TAKEPROFIT_SHORT_G[1]) 
+TAKEPROFIT_SHORT_H          := PYR_SHORTS_H     * TAKEPROFIT_SHORT_FACTOR   > close     and PYR_SHORTS_H > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(TAKEPROFIT_SHORT_H[1]) 
+TAKEPROFIT_SHORT_I          := PYR_SHORTS_I     * TAKEPROFIT_SHORT_FACTOR   > close     and PYR_SHORTS_I > 0 ? 1    : LONG or LONG_EXTRA    ? 0     :   nz(TAKEPROFIT_SHORT_I[1])
+
+//                      LONGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+TAKEPROFIT_LONG_A           := PYR_LONGS_A      * TAKEPROFIT_LONG_FACTOR    < close     and PYR_LONGS_A > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(TAKEPROFIT_LONG_A[1])
+TAKEPROFIT_LONG_B           := PYR_LONGS_B      * TAKEPROFIT_LONG_FACTOR    < close     and PYR_LONGS_B > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(TAKEPROFIT_LONG_B[1])    
+TAKEPROFIT_LONG_C           := PYR_LONGS_C      * TAKEPROFIT_LONG_FACTOR    < close     and PYR_LONGS_C > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(TAKEPROFIT_LONG_C[1])  
+TAKEPROFIT_LONG_D           := PYR_LONGS_D      * TAKEPROFIT_LONG_FACTOR    < close     and PYR_LONGS_D > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(TAKEPROFIT_LONG_D[1])  
+TAKEPROFIT_LONG_E           := PYR_LONGS_E      * TAKEPROFIT_LONG_FACTOR    < close     and PYR_LONGS_E > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(TAKEPROFIT_LONG_E[1])  
+TAKEPROFIT_LONG_F           := PYR_LONGS_F      * TAKEPROFIT_LONG_FACTOR    < close     and PYR_LONGS_F > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(TAKEPROFIT_LONG_F[1])  
+TAKEPROFIT_LONG_G           := PYR_LONGS_G      * TAKEPROFIT_LONG_FACTOR    < close     and PYR_LONGS_G > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(TAKEPROFIT_LONG_G[1])  
+TAKEPROFIT_LONG_H           := PYR_LONGS_H      * TAKEPROFIT_LONG_FACTOR    < close     and PYR_LONGS_H > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(TAKEPROFIT_LONG_H[1])  
+TAKEPROFIT_LONG_I           := PYR_LONGS_I      * TAKEPROFIT_LONG_FACTOR    < close     and PYR_LONGS_I > 0 ? 1     : SHORT or SHORT_EXTRA  ? 0     :   nz(TAKEPROFIT_LONG_I[1])  
+
+
+//                                                                              BACKTESTING
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              SHORTS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      SHORT A
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (SHORT or SHORT_EXTRA)       and     PYR_SHORTS_OPEN == 1 )
+    strategy.entry  ( "SHORT ENTRY :: A"    , strategy.short)
+
+if ( (LONG or LONG_EXTRA)     or      (STOPLOSS_SHORT_A or TAKEPROFIT_SHORT_A) )
+    strategy.close  ( "SHORT ENTRY :: A"    , strategy.short)     
+    
+//                      SHORT B
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (SHORT or SHORT_EXTRA)       and     PYR_SHORTS_OPEN == 2 )
+    strategy.entry  ( "SHORT ENTRY :: B"    , strategy.short)
+
+if ( (LONG or LONG_EXTRA)     or      (STOPLOSS_SHORT_B or TAKEPROFIT_SHORT_B) )
+    strategy.close  ( "SHORT ENTRY :: B"    , strategy.short)     
+    
+//                      SHORT C
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (SHORT or SHORT_EXTRA)       and     PYR_SHORTS_OPEN == 3 )
+    strategy.entry  ( "SHORT ENTRY :: C"    , strategy.short)
+
+if ( (LONG or LONG_EXTRA)     or      (STOPLOSS_SHORT_C or TAKEPROFIT_SHORT_C) )
+    strategy.close  ( "SHORT ENTRY :: C"    , strategy.short)     
+    
+//                      SHORT D
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (SHORT or SHORT_EXTRA)       and     PYR_SHORTS_OPEN == 4 )
+    strategy.entry  ( "SHORT ENTRY :: D"    , strategy.short)
+if ( (LONG or LONG_EXTRA)     or      (STOPLOSS_SHORT_D or TAKEPROFIT_SHORT_D) )
+    strategy.close  ( "SHORT ENTRY :: D"    , strategy.short)     
+
+    
+//                      SHORT E
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (SHORT or SHORT_EXTRA)       and     PYR_SHORTS_OPEN == 5 )
+    strategy.entry  ( "SHORT ENTRY :: E"    , strategy.short)
+
+if ( (LONG or LONG_EXTRA)     or      (STOPLOSS_SHORT_E or TAKEPROFIT_SHORT_E) )
+    strategy.close  ( "SHORT ENTRY :: E"    , strategy.short)     
+
+//                      SHORT F
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (SHORT or SHORT_EXTRA)       and     PYR_SHORTS_OPEN == 6 )
+    strategy.entry  ( "SHORT ENTRY :: F"    , strategy.short)
+
+if ( (LONG or LONG_EXTRA)     or      (STOPLOSS_SHORT_F or TAKEPROFIT_SHORT_F) )
+    strategy.close  ( "SHORT ENTRY :: F"    , strategy.short)     
+    
+//                      SHORT G
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (SHORT or SHORT_EXTRA)       and     PYR_SHORTS_OPEN == 7 )
+    strategy.entry  ( "SHORT ENTRY :: G"    , strategy.short)
+
+if ( (LONG or LONG_EXTRA)     or      (STOPLOSS_SHORT_G or TAKEPROFIT_SHORT_G) )
+    strategy.close  ( "SHORT ENTRY :: G"    , strategy.short)     
+
+//                      SHORT H
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (SHORT or SHORT_EXTRA)       and     PYR_SHORTS_OPEN == 8 )
+    strategy.entry  ( "SHORT ENTRY :: H"    , strategy.short)
+
+if ( (LONG or LONG_EXTRA)     or      (STOPLOSS_SHORT_H or TAKEPROFIT_SHORT_H) )
+    strategy.close  ( "SHORT ENTRY :: H"    , strategy.short)     
+    
+//                      SHORT I
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (SHORT or SHORT_EXTRA)       and     PYR_SHORTS_OPEN == 9 )
+    strategy.entry  ( "SHORT ENTRY :: I"    , strategy.short)
+
+if ( (LONG or LONG_EXTRA)     or      (STOPLOSS_SHORT_I or TAKEPROFIT_SHORT_I) )
+    strategy.close  ( "SHORT ENTRY :: I"    , strategy.short)      
+
+//                                                              LONGS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      LONG A
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (LONG[1] or LONG_EXTRA[1])       and     PYR_LONGS_OPEN == 1 )
+    strategy.entry  ( "LONG ENTRY :: A"    , strategy.long)
+
+if ( (SHORT or SHORT_EXTRA)     or      (STOPLOSS_LONG_A or TAKEPROFIT_LONG_A) )
+    strategy.close  ( "LONG ENTRY :: A"    , strategy.long)     
+    
+//                      LONG B
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (LONG or LONG_EXTRA)       and     PYR_LONGS_OPEN == 2 )
+    strategy.entry  ( "LONG ENTRY :: B"    , strategy.long)
+
+if ( (SHORT or SHORT_EXTRA)     or      (STOPLOSS_LONG_B or TAKEPROFIT_LONG_B) )
+    strategy.close  ( "LONG ENTRY :: B"    , strategy.long)     
+    
+//                      LONG C
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (LONG or LONG_EXTRA)       and     PYR_LONGS_OPEN == 3 )
+    strategy.entry  ( "LONG ENTRY :: C"    , strategy.long)
+
+if ( (SHORT or SHORT_EXTRA)     or      (STOPLOSS_LONG_C or TAKEPROFIT_LONG_C) )
+    strategy.close  ( "LONG ENTRY :: C"    , strategy.long)     
+    
+//                      LONG D
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (LONG or LONG_EXTRA)       and     PYR_LONGS_OPEN == 4 )
+    strategy.entry  ( "LONG ENTRY :: D"    , strategy.long)
+if ( (SHORT or SHORT_EXTRA)     or      (STOPLOSS_LONG_D or TAKEPROFIT_LONG_D) )
+    strategy.close  ( "LONG ENTRY :: D"    , strategy.long)     
+
+    
+//                      LONG E
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (LONG or LONG_EXTRA)       and     PYR_LONGS_OPEN == 5 )
+    strategy.entry  ( "LONG ENTRY :: E"    , strategy.long)
+
+if ( (SHORT or SHORT_EXTRA)     or      (STOPLOSS_LONG_E or TAKEPROFIT_LONG_E) )
+    strategy.close  ( "LONG ENTRY :: E"    , strategy.long)     
+
+//                      LONG F
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (LONG or LONG_EXTRA)       and     PYR_LONGS_OPEN == 6 )
+    strategy.entry  ( "LONG ENTRY :: F"    , strategy.long)
+
+if ( (SHORT or SHORT_EXTRA)     or      (STOPLOSS_LONG_F or TAKEPROFIT_LONG_F) )
+    strategy.close  ( "LONG ENTRY :: F"    , strategy.long)     
+    
+//                      LONG G
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (LONG or LONG_EXTRA)       and     PYR_LONGS_OPEN == 7 )
+    strategy.entry  ( "LONG ENTRY :: G"    , strategy.long)
+
+if ( (SHORT or SHORT_EXTRA)     or      (STOPLOSS_LONG_G or TAKEPROFIT_LONG_G) )
+    strategy.close  ( "LONG ENTRY :: G"    , strategy.long)     
+
+//                      LONG H
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (LONG or LONG_EXTRA)       and     PYR_LONGS_OPEN == 8 )
+    strategy.entry  ( "LONG ENTRY :: H"    , strategy.long)
+
+if ( (SHORT or SHORT_EXTRA)     or      (STOPLOSS_LONG_H or TAKEPROFIT_LONG_H) )
+    strategy.close  ( "LONG ENTRY :: H"    , strategy.long)     
+    
+//                      LONG I
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+if ( (LONG or LONG_EXTRA)       and     PYR_LONGS_OPEN == 9 )
+    strategy.entry  ( "LONG ENTRY :: I"    , strategy.long)
+
+if ( (SHORT or SHORT_EXTRA)     or      (STOPLOSS_LONG_I or TAKEPROFIT_LONG_I) )
+    strategy.close  ( "LONG ENTRY :: I"    , strategy.long)     
+
+//                                                                              AUTOTVIEW ALERTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              GENERAL
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      WITHOUT SPECIFIC ORDER TAGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+plot    (LONG       or LONG_EXTRA                   ? 1 : 0     , color=cyan        , title="OPEN LONG & CLOSE ALL SHORTS"  )
+
+plot    (SHORT      or SHORT_EXTRA                  ? 1 : 0     , color=oker        , title="OPEN SHORT & CLOSE ALL LONGS" )
+
+plot    (TAKEPROFIT_LONG or STOPLOSS_LONG           ? 1 : 0     , color=magenta     ,title="CLOSE 1 LONG" )
+
+plot    (TAKEPROFIT_SHORT or STOPLOSS_SHORT         ? 1 : 0     , color=white       ,title="CLOSE 1 SHORT" )
+
+//                      WITHOUT PYRAMIDING
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    (OPEN_LONG_A                                                        ? 1 : 0     , color=cyan        , title="OPEN LONG"  )
+
+// plot    (OPEN_SHORT_A                                                       ? 1 : 0     , color=oker        , title="OPEN SHORT" )
+
+// plot    ((TAKEPROFIT_LONG_A or STOPLOSS_LONG_A)     or (OPEN_SHORT_A)       ? 1 : 0     , color=magenta     , title="CLOSE LONG" )
+
+// plot    ((TAKEPROFIT_SHORT_A or STOPLOSS_SHORT_A)   or (OPEN_LONG_A)        ? 1 : 0     , color=white       , title="CLOSE SHORT")
+
+//                      WITH MINIMAL ALERTS ON A
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    (OPEN_LONG_A                                                        ? 1 : 0     , color=cyan        , title="OPEN LONG A"  )
+
+// plot    (OPEN_SHORT_A                                                       ? 1 : 0     , color=oker        , title="OPEN SHORT A" )
+
+// plot    ((TAKEPROFIT_LONG_A or STOPLOSS_LONG_A) or (TAKEPROFIT_SHORT_A or STOPLOSS_SHORT_A)       ? 1 : 0     , color=magenta     , title="CLOSE ALL A" )
+
+//                      WITH MINIMAL ALERTS ON B
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    (OPEN_LONG_B                                                        ? 1 : 0     , color=cyan        , title="OPEN LONG B"  )
+
+// plot    (OPEN_SHORT_B                                                       ? 1 : 0     , color=oker        , title="OPEN SHORT B" )
+
+// plot    ((TAKEPROFIT_LONG_B or STOPLOSS_LONG_B) or (TAKEPROFIT_SHORT_B or STOPLOSS_SHORT_B)       ? 1 : 0     , color=magenta     , title="CLOSE ALL B" )
+
+
+//                                                              SHORT SPECIFIC
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      SHORT SPECIFIC OPEN
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    (OPEN_SHORT_A                               ? 1 : 0     , color=oker        , title="OPEN SHORT A"  )
+// plot    (OPEN_SHORT_B                               ? 1 : 0     , color=oker        , title="OPEN SHORT B"  )
+// plot    (OPEN_SHORT_C                               ? 1 : 0     , color=oker        , title="OPEN SHORT C"  )
+// plot    (OPEN_SHORT_D                               ? 1 : 0     , color=oker        , title="OPEN SHORT D"  )
+// plot    (OPEN_SHORT_E                               ? 1 : 0     , color=oker        , title="OPEN SHORT E"  )
+// plot    (OPEN_SHORT_F                               ? 1 : 0     , color=oker        , title="OPEN SHORT F"  )
+// plot    (OPEN_SHORT_G                               ? 1 : 0     , color=oker        , title="OPEN SHORT G"  )
+// plot    (OPEN_SHORT_H                               ? 1 : 0     , color=oker        , title="OPEN SHORT H"  )
+// plot    (OPEN_SHORT_I                               ? 1 : 0     , color=oker        , title="OPEN SHORT I"  )
+
+//                      SHORT SPECIFIC TAKEPROFIT
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    (TAKEPROFIT_SHORT_A                         ? 1 : 0     , color=reds        , title="TP SHORT A"    )
+// plot    (TAKEPROFIT_SHORT_B                         ? 1 : 0     , color=reds        , title="TP SHORT B"    )
+// plot    (TAKEPROFIT_SHORT_C                         ? 1 : 0     , color=reds        , title="TP SHORT C"    )
+// plot    (TAKEPROFIT_SHORT_D                         ? 1 : 0     , color=reds        , title="TP SHORT D"    )
+// plot    (TAKEPROFIT_SHORT_E                         ? 1 : 0     , color=reds        , title="TP SHORT E"    )
+// plot    (TAKEPROFIT_SHORT_F                         ? 1 : 0     , color=reds        , title="TP SHORT F"    )
+// plot    (TAKEPROFIT_SHORT_G                         ? 1 : 0     , color=reds        , title="TP SHORT G"    )
+// plot    (TAKEPROFIT_SHORT_H                         ? 1 : 0     , color=reds        , title="TP SHORT H"    )
+// plot    (TAKEPROFIT_SHORT_I                         ? 1 : 0     , color=reds        , title="TP SHORT I"    )
+
+//                      SHORT SPECIFIC STOPLOSS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    (STOPLOSS_SHORT_A                           ? 1 : 0     , color=white       , title="SL SHORT A"    )
+// plot    (STOPLOSS_SHORT_B                           ? 1 : 0     , color=white       , title="SL SHORT B"    )
+// plot    (STOPLOSS_SHORT_C                           ? 1 : 0     , color=white       , title="SL SHORT C"    )
+// plot    (STOPLOSS_SHORT_D                           ? 1 : 0     , color=white       , title="SL SHORT D"    )
+// plot    (STOPLOSS_SHORT_E                           ? 1 : 0     , color=white       , title="SL SHORT E"    )
+// plot    (STOPLOSS_SHORT_F                           ? 1 : 0     , color=white       , title="SL SHORT F"    )
+// plot    (STOPLOSS_SHORT_G                           ? 1 : 0     , color=white       , title="SL SHORT G"    )
+// plot    (STOPLOSS_SHORT_H                           ? 1 : 0     , color=white       , title="SL SHORT H"    )
+// plot    (STOPLOSS_SHORT_I                           ? 1 : 0     , color=white       , title="SL SHORT I"    )
+
+//                      SHORT SPECIFIC CLOSE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    ( (STOPLOSS_SHORT_A or TAKEPROFIT_SHORT_A)   ? 1 : 0     , color=K555        , title="CLOSE SHORT A"     )
+// plot    ( (STOPLOSS_SHORT_B or TAKEPROFIT_SHORT_B)   ? 1 : 0     , color=K555        , title="CLOSE SHORT B"     )
+// plot    ( (STOPLOSS_SHORT_C or TAKEPROFIT_SHORT_C)   ? 1 : 0     , color=K555        , title="CLOSE SHORT C"     )
+// plot    ( (STOPLOSS_SHORT_D or TAKEPROFIT_SHORT_D)   ? 1 : 0     , color=K555        , title="CLOSE SHORT D"     )
+// plot    ( (STOPLOSS_SHORT_E or TAKEPROFIT_SHORT_E)   ? 1 : 0     , color=K555        , title="CLOSE SHORT E"     )
+// plot    ( (STOPLOSS_SHORT_F or TAKEPROFIT_SHORT_F)   ? 1 : 0     , color=K555        , title="CLOSE SHORT F"     )
+// plot    ( (STOPLOSS_SHORT_G or TAKEPROFIT_SHORT_G)   ? 1 : 0     , color=K555        , title="CLOSE SHORT G"     )
+// plot    ( (STOPLOSS_SHORT_H or TAKEPROFIT_SHORT_H)   ? 1 : 0     , color=K555        , title="CLOSE SHORT H"     )
+// plot    ( (STOPLOSS_SHORT_I or TAKEPROFIT_SHORT_I)   ? 1 : 0     , color=K555        , title="CLOSE SHORT I"     )
+
+//                                                              LONG SPECIFIC
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      LONG SPECIFIC OPEN
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    (OPEN_LONG_A                                ? 1 : 0     , color=cyan        , title="OPEN LONG A"   )
+// plot    (OPEN_LONG_B                                ? 1 : 0     , color=cyan        , title="OPEN LONG B"   )
+// plot    (OPEN_LONG_C                                ? 1 : 0     , color=cyan        , title="OPEN LONG C"   )
+// plot    (OPEN_LONG_D                                ? 1 : 0     , color=cyan        , title="OPEN LONG D"   )
+// plot    (OPEN_LONG_E                                ? 1 : 0     , color=cyan        , title="OPEN LONG E"   )
+// plot    (OPEN_LONG_F                                ? 1 : 0     , color=cyan        , title="OPEN LONG F"   )
+// plot    (OPEN_LONG_G                                ? 1 : 0     , color=cyan        , title="OPEN LONG G"   )
+// plot    (OPEN_LONG_H                                ? 1 : 0     , color=cyan        , title="OPEN LONG H"   )
+// plot    (OPEN_LONG_I                                ? 1 : 0     , color=cyan        , title="OPEN LONG I"   )
+
+//                      LONG SPECIFIC TAKEPROFIT
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    (TAKEPROFIT_LONG_A                          ? 1 : 0     , color=blues       , title="TP LONG A"     )
+// plot    (TAKEPROFIT_LONG_B                          ? 1 : 0     , color=blues       , title="TP LONG B"     )
+// plot    (TAKEPROFIT_LONG_C                          ? 1 : 0     , color=blues       , title="TP LONG C"     )
+// plot    (TAKEPROFIT_LONG_D                          ? 1 : 0     , color=blues       , title="TP LONG D"     )
+// plot    (TAKEPROFIT_LONG_E                          ? 1 : 0     , color=blues       , title="TP LONG E"     )
+// plot    (TAKEPROFIT_LONG_F                          ? 1 : 0     , color=blues       , title="TP LONG F"     )
+// plot    (TAKEPROFIT_LONG_G                          ? 1 : 0     , color=blues       , title="TP LONG G"     )
+// plot    (TAKEPROFIT_LONG_H                          ? 1 : 0     , color=blues       , title="TP LONG H"     )
+// plot    (TAKEPROFIT_LONG_I                          ? 1 : 0     , color=blues       , title="TP LONG I"     )
+
+//                      LONG SPECIFIC STOPLOSS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    (STOPLOSS_LONG_A                            ? 1 : 0     , color=magenta     , title="SL LONG A"     )
+// plot    (STOPLOSS_LONG_B                            ? 1 : 0     , color=magenta     , title="SL LONG B"     )
+// plot    (STOPLOSS_LONG_C                            ? 1 : 0     , color=magenta     , title="SL LONG C"     )
+// plot    (STOPLOSS_LONG_D                            ? 1 : 0     , color=magenta     , title="SL LONG D"     )
+// plot    (STOPLOSS_LONG_E                            ? 1 : 0     , color=magenta     , title="SL LONG E"     )
+// plot    (STOPLOSS_LONG_F                            ? 1 : 0     , color=magenta     , title="SL LONG F"     )
+// plot    (STOPLOSS_LONG_G                            ? 1 : 0     , color=magenta     , title="SL LONG G"     )
+// plot    (STOPLOSS_LONG_H                            ? 1 : 0     , color=magenta     , title="SL LONG H"     )
+// plot    (STOPLOSS_LONG_I                            ? 1 : 0     , color=magenta     , title="SL LONG I"     )
+
+//                      LONG SPECIFIC CLOSE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot    ( (STOPLOSS_LONG_A or TAKEPROFIT_LONG_A)    ? 1 : 0     , color=K555        , title="CLOSE LONG A"     )
+// plot    ( (STOPLOSS_LONG_B or TAKEPROFIT_LONG_B)    ? 1 : 0     , color=K555        , title="CLOSE LONG B"     )
+// plot    ( (STOPLOSS_LONG_C or TAKEPROFIT_LONG_C)    ? 1 : 0     , color=K555        , title="CLOSE LONG C"     )
+// plot    ( (STOPLOSS_LONG_D or TAKEPROFIT_LONG_D)    ? 1 : 0     , color=K555        , title="CLOSE LONG D"     )
+// plot    ( (STOPLOSS_LONG_E or TAKEPROFIT_LONG_E)    ? 1 : 0     , color=K555        , title="CLOSE LONG E"     )
+// plot    ( (STOPLOSS_LONG_F or TAKEPROFIT_LONG_F)    ? 1 : 0     , color=K555        , title="CLOSE LONG F"     )
+// plot    ( (STOPLOSS_LONG_G or TAKEPROFIT_LONG_G)    ? 1 : 0     , color=K555        , title="CLOSE LONG G"     )
+// plot    ( (STOPLOSS_LONG_H or TAKEPROFIT_LONG_H)    ? 1 : 0     , color=K555        , title="CLOSE LONG H"     )
+// plot    ( (STOPLOSS_LONG_I or TAKEPROFIT_LONG_I)    ? 1 : 0     , color=K555        , title="CLOSE LONG I"     )
+
+
+//                                                                              GRAPHICAL
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                              RMI
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+RMI_FAST_PLOT           = plot  ( RMI_FAST_ON   ? RMI_FAST          : na    , transp=30     , color=magenta                                             , title='RMI Fast'          , editable=true     )
+
+RMI_MEDI_PLOT           = plot  ( RMI_MEDI_ON   ? RMI_MEDI          : na    , transp=20     , color=cyan                                                , title='RMI Medium'        , editable=true     )
+
+RMI_SLOW_PLOT           = plot  ( RMI_SLOW_ON   ? RMI_SLOW          : na    , transp=10     , color=oker                                                , title='RMI Slow'          , editable=true     )
+
+//                                                              LINES
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+plot                    ( RMI_FAST_ON   ? RMI_FAST_HIGH : na                , transp=20     , color=purple                                              , title='Fast   High'       , editable=false    )
+plot                    ( RMI_MEDI_ON   ? RMI_MEDI_HIGH : na                , transp=20     , color=blues                                               , title='Medium High'       , editable=false    )
+plot                    ( RMI_SLOW_ON   ? RMI_SLOW_HIGH : na                , transp=20     , color=reds                                                , title='Slow   High'       , editable=false    )
+
+hline                   ( 00                    , linestyle=dotted                          , color=white                                               , title='Midline'           , editable=false    )
+
+plot                    ( RMI_FAST_ON   ? RMI_FAST_LOW  : na                , transp=20     , color=purple                                              , title='Fast   Low'        , editable=false    )
+plot                    ( RMI_MEDI_ON   ? RMI_MEDI_LOW  : na                , transp=20     , color=blues                                               , title='Medium Low'        , editable=false    )
+plot                    ( RMI_SLOW_ON   ? RMI_SLOW_LOW  : na                , transp=20     , color=reds                                                , title='Slow   Low'        , editable=false    )
+
+//                                                              RMI FILL LINES
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+RMI_FAST_PLOT_HIGH      = plot   ( RMI_FAST     >= RMI_FAST_HIGH and RMI_FAST_ON ? RMI_FAST_HIGH : RMI_FAST_ON ? RMI_FAST : na , color=magenta          , title='Fast   Over  High' , editable=false    , transp=100 )
+RMI_MEDI_PLOT_HIGH      = plot   ( RMI_MEDI     >= RMI_MEDI_HIGH and RMI_MEDI_ON ? RMI_MEDI_HIGH : RMI_MEDI_ON ? RMI_MEDI : na , color=cyan             , title='Medium Over  High' , editable=false    , transp=100 )
+RMI_SLOW_PLOT_HIGH      = plot   ( RMI_SLOW     >= RMI_SLOW_HIGH and RMI_SLOW_ON ? RMI_SLOW_HIGH : RMI_SLOW_ON ? RMI_SLOW : na , color=oker             , title='Slow   Over  High' , editable=false    , transp=100 )
+
+RMI_FAST_PLOT_LOW       = plot   ( RMI_FAST     <= RMI_FAST_LOW  and RMI_FAST_ON ? RMI_FAST_LOW  : RMI_FAST_ON ? RMI_FAST : na , color=magenta          , title='Fast   Under Low'  , editable=false    , transp=100 )
+RMI_MEDI_PLOT_LOW       = plot   ( RMI_MEDI     <= RMI_MEDI_LOW  and RMI_MEDI_ON ? RMI_MEDI_LOW  : RMI_MEDI_ON ? RMI_MEDI : na , color=cyan             , title='Medium Under Low'  , editable=false    , transp=100 )
+RMI_SLOW_PLOT_LOW       = plot   ( RMI_SLOW     <= RMI_SLOW_LOW  and RMI_SLOW_ON ? RMI_SLOW_LOW  : RMI_SLOW_ON ? RMI_SLOW : na , color=oker             , title='SLow   Under Low'  , editable=false    , transp=100 )
+
+//                                                              RMI FILL
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+fill                    ( RMI_FAST_PLOT         , RMI_FAST_PLOT_HIGH        , transp=80     , color=magenta                                             , title='Fast   High Fill'  , editable=false    )
+fill                    ( RMI_FAST_PLOT         , RMI_FAST_PLOT_LOW         , transp=80     , color=magenta                                             , title='Fast   Low  Fill'  , editable=false    )
+
+fill                    ( RMI_MEDI_PLOT         , RMI_MEDI_PLOT_HIGH        , transp=80     , color=cyan                                                , title='Medium High Fill'  , editable=false    )
+fill                    ( RMI_MEDI_PLOT         , RMI_MEDI_PLOT_LOW         , transp=80     , color=cyan                                                , title='Medium Low  Fill'  , editable=false    )
+
+fill                    ( RMI_SLOW_PLOT         , RMI_SLOW_PLOT_HIGH        , transp=80     , color=oker                                                , title='Slow   High Fill'  , editable=false    )
+fill                    ( RMI_SLOW_PLOT         , RMI_SLOW_PLOT_LOW         , transp=80     , color=oker                                                , title='Slow   Low  Fill'  , editable=false    )
+
+//                                                              ARROWS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+plotshape               ( RMI_TOP_3      , transp=50    , color=oker    , size=size.small    , style=shape.triangledown  , location=location.top        , title="RMI Top"           , editable=true     )
+plotshape               ( RMI_DIP_3      , transp=50    , color=cyan    , size=size.small    , style=shape.triangleup    , location=location.bottom     , title="RMI Dip"           , editable=true     )
+
+//                                                              ENTRY ARROWS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+plotshape               ( SHORT             , transp=50     , color=oker    , size=size.normal  , style=shape.triangledown  , location=location.top     , title="RMI Top"           , editable=true     )
+plotshape               ( LONG              , transp=50     , color=cyan    , size=size.normal  , style=shape.triangleup    , location=location.bottom  , title="RMI Dip"           , editable=true     )
+
+plotshape               ( SHORT_EXTRA       , transp=50     , color=reds    , size=size.large   , style=shape.triangledown  , location=location.top     , title="RMI Top Extra"     , editable=true     )
+plotshape               ( LONG_EXTRA        , transp=50     , color=blues   , size=size.large   , style=shape.triangleup    , location=location.bottom  , title="RMI Dip Extra"     , editable=true     )
+
+//                                                              PLOT POSITIONS
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+//                      PYRAMIDING COUNTER
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot                       ( PYR_LONGS_OPEN*                                 , color=cyan    )
+// plot                       ( PYR_LONGS_CLOSED                                , color=blues   )
+
+// plot                       ( PYR_SHORTS_OPEN                                 , color=oker    )
+// plot                       ( PYR_SHORTS_CLOSED                               , color=reds    )
+
+//                      LAST CLOSED VALUE
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+// plot                       ( PYR_SHORTS_LAST                                                 )
+// plot                       ( PYR_LONGS_LAST                                                  )
+
+//                      SHORTS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+plot                       ( VIEWPOSITIONS ? PYR_SHORTS_A   : na             , color=oker    )
+plot                       ( VIEWPOSITIONS ? PYR_SHORTS_B   : na             , color=oker    )
+plot                       ( VIEWPOSITIONS ? PYR_SHORTS_C   : na             , color=oker    )
+plot                       ( VIEWPOSITIONS ? PYR_SHORTS_D   : na             , color=oker    )
+plot                       ( VIEWPOSITIONS ? PYR_SHORTS_E   : na             , color=oker    )
+// plot                       ( VIEWPOSITIONS ? PYR_SHORTS_F   : na             , color=oker    )
+// plot                       ( VIEWPOSITIONS ? PYR_SHORTS_G   : na             , color=oker    )
+// plot                       ( VIEWPOSITIONS ? PYR_SHORTS_H   : na             , color=oker    )
+// plot                       ( VIEWPOSITIONS ? PYR_SHORTS_I   : na             , color=oker    )
+    
+//                      LONGS
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+plot                       ( VIEWPOSITIONS ? PYR_LONGS_A    : na             , color=cyan    )
+plot                       ( VIEWPOSITIONS ? PYR_LONGS_B    : na             , color=cyan    )
+plot                       ( VIEWPOSITIONS ? PYR_LONGS_C    : na             , color=cyan    )
+plot                       ( VIEWPOSITIONS ? PYR_LONGS_D    : na             , color=cyan    )
+plot                       ( VIEWPOSITIONS ? PYR_LONGS_E    : na             , color=cyan    )
+// plot                       ( VIEWPOSITIONS ? PYR_LONGS_F    : na             , color=cyan    )
+// plot                       ( VIEWPOSITIONS ? PYR_LONGS_G    : na             , color=cyan    )
+// plot                       ( VIEWPOSITIONS ? PYR_LONGS_H    : na             , color=cyan    )
+// plot                       ( VIEWPOSITIONS ? PYR_LONGS_I    : na             , color=cyan    )
+
+//                                                              BLACKGROUND
+//▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+bgcolor                 ( K111                                              , transp=20                                                                 , title='Blackground'       , editable=false    )
+
+//                                                                                                                                                              
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+//                                                      _________   ____________  _____  _________                                                              
+//                                                     /     \   \ /  \______   \/     \ \_   ___ \                                                             
+//                                                    /  \ /  \   Y   /|     ___/  \ /  \/    \  \/                                                             
+//                                                   /    Y    \     / |    |  /    Y    \     \____                                                            
+//                                                   \____|__  /\___/  |____|  \____|__  /\______  /                                                            
+//                                                           \/                        \/        \/                                                             
+//                                                                                                                                                              
+//░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+View in Pine Editor・923 lines
+Use on chart
+3
+0
+2
+11
+8 265
+Mar 24, 2018
+◊ Introduction
+This script makes use of three RMI's, to indicate Overbought/Oversold.
+Adjustments can easily be made, through its settings or script.
+
+◊ Origin
+The Relative Momentum Index was developed by Roger Altman and was introduced in his article in the February, 1993 issue of Technical Analysis of Stocks & Commodities magazine.
+While RSI counts up and down days from close to close, the Relative Momentum Index counts up and down days from the close relative to a close x number of days ago.
+This results in an RSI that is smoother.
+
+This is a part of Project XIAM.
+◊ Theoretical Approach
+Philosophy γ :: consequential
+
+◊ Usage
+You can use this as an indicator for manual trading, or apply AUTOTVIEW to automate your trading.
+My advice is to combine this with another indicator before you do this.
+The script is written in an organized and flexible manner to do this.
+
+◊ Features
+
+3 RMI's with seperately adjustable HIGH / LOW levels.
+
+Trend adjustment on the SLOW RMI.
+
+Adjustable Interval between entries / Once per dip-top entry.
+
+Take Profit & Stop loss
+
+
+
+◊ Community
+Wanna share your findings ? or need help resolving a problem ?
+
+CMYK :: discord.gg/AnkZuA
+
+AUTOVIEW :: discordapp.com/invite/BFz8VPn
+
+TRADINGVIEW UNOFFICIAL :: discord.gg/fZFcJBy
+Mar 24, 2018
+Release Notes
+
+◊ Adjustments
+
+Correction in the AUTOMATION > SHORT/LONG section.
+
+Mar 24, 2018
+Release Notes
+◊ Adjustments
+
+Added Ovveride condition for RMI SLOW in case and entry moment with RMI FAST & RMI MEDI is better than any previous moment with 3 RMI's.
+
+This setting is called 'ENTRY_EXTRAS' and large triangles are displayed to visualize these entries.
+* Because of the current clutter of conditions, their functions will be put in the header in the future, and the Order of sections should be rewritten to allow for the PHASE_SHORT_LV & PHASE_SHORT_LV (largest values) to adapt to SHORT_EXTRA & LONG_EXTRA entries. So that extra entries will only be applied when they are Better placed than any previous in the PHASE. Currently they are applied when they are better than any non-EXTRA entry.
+Mar 24, 2018
+Release Notes
+◊ Adjustments
+
+Added capability for larger resolutions.
+
+Slow Trend adjustment for larger resolutions.
+
+This shows, without correction it would perform poorly during large events/trends, Better implementation of trend adjustment is needed.
+
+
+Use resolution 7 on 10min , 5 on 5min , 1 on 1min.
+
+Use Slow correction 49 on 10min , 33 on 5min , 10 on 1min.
+
+^^^ Looks like a logarythm is needed behind these settings...
+
+Mar 26, 2018
+Release Notes
+◊ Adjustments
+
+Added STOPLOSS / TAKEPROFIT / PYRAMIDING counter / Entry position values
+
+Beware for bug in STOPLOSS for shorts, will be fixed soon.
+
+Mar 26, 2018
+Release Notes
+◊ Adjustments
+
+Cleaned Up Script / changed placement of PLOT section
+
+Currently Debugging Stoploss & Takeprofit for SHORTS
+
+Mar 26, 2018
+Release Notes
+◊ Debugging
+
+Fixed TAKEPROFIT_SHORT_X and STOPLOSS_SHORT_X conditions
+
+Backtesting does not respond to TAKEPROFIT_SHORT_X and STOPLOSS_SHORT_X
+
+Line 500 to 573
+
+Mar 27, 2018
+Release Notes
+◊ Adjustments
+
+Added Several Alert approaches in the "AUTOVIEW ALERTS" section
+
+
+◊ Debugging
+
+Backtesting problem persists, Beware or this. ( STOPLOSS & TAKEPROFIT for SHORTS do not show in backtesting)
+

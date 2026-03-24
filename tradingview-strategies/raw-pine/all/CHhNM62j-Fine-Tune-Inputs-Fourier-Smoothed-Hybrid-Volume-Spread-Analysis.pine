@@ -1,0 +1,147 @@
+//@version=5
+
+strategy("Fourier Smoothed Hybrid Volume Spread Analysis","FSHVSA Strategy [Algo Alert]", default_qty_type = "percent_of_equity",  default_qty_value=100)
+import Celje_2300/aprox/1
+
+aproximation = input.bool(title = 'Double Fourier', tooltip="Improved Fourier Transform of Open&Close" ,defval = true, group = "Source")
+smoothed_volume = input.bool(title = 'Smoothed Volume', tooltip="Vomume is dynamically EMA smoothed over last X days." ,defval = true, group = "Source")
+
+maxEmaLength=input.int(12,title = 'Smoothed Volume Length', tooltip="Smooth Volume over last X days." , group = "Source")
+v= smoothed_volume ? volume/aprox.smooth(aprox.FFT(volume),src = volume[1], maxEmaLength = maxEmaLength) : volume/ volume[1]
+
+lenth=input.int(10,title = 'Volume*Source Smoothing', tooltip="Ema of Source*Volume of last X days." , group = "Calculations")
+malenth=input.int(20,title = 'Smoothed Volume Length', tooltip="Ema of Close*Volume - Open*Volume of last X days." , group = "Calculations")
+
+
+
+src = aproximation ? (aprox.DTF32(close)) : close
+mac = ta.ema(src,lenth) //mac = aprox.smooth(volume,src = src,minEmaLength = lenth, maxEmaLength2 = 12) //maxEmaLength2 = input(12)
+vmac=mac*v
+
+
+src_0 =  aproximation ? (aprox.DTF32(open)) : open
+mao = ta.ema(src_0,lenth) //mao = aprox.smooth(volume,src = src_0,minEmaLength = lenth, maxEmaLength2 = 12)//maxEmaLength2 = input(12)
+vmao=mao*v
+
+
+vd=vmac-vmao
+plot(vd, color = vd<0?color.red:color.green, style = plot.style_columns)
+
+
+vdma= ta.ema(vd,malenth)
+plot(vdma, color=color.rgb(0, 0, 0, 52), linewidth=2, style = plot.style_area)
+plot(vdma, color=vdma>0?color.rgb(23, 235, 4, 81):color.rgb(133, 4, 4, 75), linewidth=2, style = plot.style_area)
+hline(0)
+
+
+close_all = input.bool(false,"Enable Close all", tooltip=" Position is always 1 or -1 if false, and 1, 0 or -1 if true. 0 Is falling above 0 or rising bellow 0")
+longCondition= vdma > 0  and vd > 0
+shortCondition = vdma < 0  and vd <0
+
+var pos = 0
+var long = 0
+
+if longCondition 
+    pos := 1
+    long := 1
+    strategy.entry("enter long", strategy.long)
+
+if shortCondition 
+    pos := -1
+    long := -1
+    strategy.entry("enter short", strategy.short)
+
+
+if not longCondition and not shortCondition and close_all
+    pos := 0
+    strategy.close_all()
+
+plotchar(longCondition and long[1]==-1 ? -math.max(vd[1],vd[2],vd[3],vd[4],vd[5],vd[6],vd[7],vd[8],vd[9],vd[10],vd[11],vd[12],vd[13],vd[14],vd[15],vd[16],vd[17],vd[18],vd[19],mac/100) : na, char = "▲", color = color.rgb(0, 255, 187,40), location = location.absolute, size = size.tiny, display=display.pane)
+plotchar(shortCondition  and long[1]==1 ? -math.min(vd[1],vd[2],vd[3],vd[4],vd[5],vd[6],vd[7],vd[8],vd[9],vd[10],vd[11],vd[12],vd[13],vd[14],vd[15],vd[16],vd[17],vd[18],vd[19],-mac/100)  : na, char = "▼", color = color.rgb(255, 17, 0, 40), location = location.absolute, size = size.tiny, display=display.pane)
+
+plot(close, title="ClosePrice", display=display.status_line)
+plot(open, title="OpenPrice", display=display.status_line)
+plot(pos, color = longCondition ? color.rgb(9, 232, 173, 50) : shortCondition ? color.rgb(255, 17, 0, 50) : color.rgb(100, 100, 100), title="position", display=display.status_line)
+
+View in Pine Editor・64 lines
+Use on chart
+4
+1
+6
+1
+11 543
+Use this Strategy to Fine-tune inputs for the HSHVSA Indicator.
+
+Strategy allows you to fine-tune the indicator for 1 TimeFrame at a time; cross Timeframe Input fine-tuning is done manually after exporting the chart data.
+
+I suggest using "Close all" input False when fine-tuning Inputs for 1 TimeFrame. When you export data to Excel/Numbers/GSheets I suggest using "Close all" input as True, except for the lowest TimeFrame.
+
+
+MEANINGFUL DESCRIPTION:
+The Fourier Smoothed Hybrid Volume Spread Analysis (FSHVSA) Strategy/Indicator is an innovative trading tool designed to fuse volume analysis with trend detection capabilities, offering traders a comprehensive view of market dynamics.
+
+This Strategy/Indicator stands apart by integrating the principles of the Discrete Fourier Transform (DFT) and volume spread analysis, enhanced with a layer of Fourier smoothing to distill market noise and highlight trend directions with unprecedented clarity.
+
+This smoothing process allows traders to discern the true underlying patterns in volume and price action, stripped of the distractions of short-term fluctuations and noise.
+
+The core functionality of the FSHVSA revolves around the innovative combination of volume change analysis, spread determination (calculated from the open and close price difference), and the strategic use of the EMA (default 10) to fine-tune the analysis of spread by incorporating volume changes.
+
+Trend direction is validated through a moving average (MA) of the histogram, which acts analogously to the Volume MA found in traditional volume indicators. This MA serves as a pivotal reference point, enabling traders to confidently engage with the market when the histogram's movement concurs with the trend direction, particularly when it crosses the Trend MA line, signalling optimal entry points.
+
+It returns 0 when MA of the histogram and EMA of the Price Spread are not align.
+
+WHAT IS FSHVSA INDICATOR:
+
+The FSHVSA plots a positive trend when a positive Volume smoothed Spread and EMA of Volume smoothed price is above 0, and a negative when negative Volume smoothed Spread and EMA of Volume smoothed price is below 0. When this conditions are not met it plots 0.
+
+
+HOW TO USE THE STRATEGY:
+
+Here you fine-tune the inputs until you find a combination that works well on all Timeframes you will use when creating your Automated Trade Algorithmic Strategy. I suggest 4h, 12h, 1D, 2D, 3D, 4D, 5D, 6D, W and M.
+
+ORIGINALITY & USEFULNESS:
+
+The FSHVSA Strategy is unique because it applies DFT for data smoothing, effectively filtering out the minor fluctuations and leaving traders with a clear picture of the market's true movements. The DFT's ability to break down market signals into constituent frequencies offers a granular view of market dynamics, highlighting the amplitude and phase of each frequency component. This, combined with the strategic application of Ehler's Universal Oscillator principles via a histogram, furnishes traders with a nuanced understanding of market volatility and noise levels, thereby facilitating more informed trading decisions.
+
+DETAILED DESCRIPTION:
+
+My detailed description of the indicator and use cases which I find very valuable.
+
+
+What is the meaning of price spread?
+
+In finance, a spread refers to the difference between two prices, rates, or yields. One of the most common types is the bid-ask spread, which refers to the gap between the bid (from buyers) and the ask (from sellers) prices of a security or asset.
+
+We are going to use Open-Close spread.
+
+
+What is Volume spread analysis?
+
+Volume spread analysis (VSA) is a method of technical analysis that compares the volume per candle, range spread, and closing price to determine price direction.
+
+
+
+
+
+
+What does this mean?
+
+We need to have a positive Volume Price Spread and a positive Moving average of Volume price spread for a positive trend. OR via versa a negative Volume Price Spread and a negative Moving average of Volume price spread for a negative trend.
+
+What if we have a positive Volume Price Spread and a negative Moving average of Volume Price Spread?
+It results in a neutral, not trending price action.
+
+Thus the Indicator/Strategy returns 0 and Closes all long and short positions.
+
+In the next Image you can see that trend is negative on 4h, we just move Negative on 12h and Positive on 1D. That means trend/Strategy flipped negative.
+
+I am sorry, the chart is a bit messy. The idea is to use the indicator/strategy over more than 1 Timeframe.
+
+
+
+
+Use this Strategy to fine-tune inputs for the HSHVSA Indicator.
+https://www.tradingview.com/script/pgAdT9Kk-Fourier-Smoothed-Hybrid-Volume-Spread-Analysis/
+(Strategy allows you to fine-tune the indicator for 1 TimeFrame at a time; cross Timeframe Input fine-tuning is done manually after exporting the chart data)
+
+I suggest using "Close all" input False when fine-tuning Inputs for 1 TimeFrame. When you export data to Excel/Numbers/GSheets I suggest using "Close all" input as True, except for the lowest TimeFrame. I suggest using 100% equity as your default quantity for fine-tune purposes. I have to mention that 100% equity may lead to unrealistic backtesting results. Be avare. When backtesting for trading purposes use Contracts or USDT.

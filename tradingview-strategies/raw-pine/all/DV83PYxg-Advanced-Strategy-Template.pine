@@ -1,0 +1,713 @@
+//@version=6
+
+// https://www.tradingview.com/blog/en/use-an-input-from-another-indicator-with-your-strategy-19584/
+
+strategyName = "Advanced Strategy Template v6"
+traderId = "DAVE"
+
+// Strategy configuration values
+initialCapital = 1000000
+positionSize = 10.0
+commissionRate = 0.075
+maxPyramiding = 3
+calcOnFills = true
+
+strategy(title=strategyName, shorttitle=strategyName, 
+ overlay=true, pyramiding=maxPyramiding, initial_capital=initialCapital, default_qty_type=strategy.percent_of_equity, 
+ default_qty_value=positionSize, commission_type=strategy.commission.percent, commission_value=commissionRate, calc_on_order_fills=calcOnFills, 
+ precision=6, max_lines_count=500, max_labels_count=500)
+
+// ————— Indicator Connection
+signalSource = input.source(close, title="Data source")
+
+// Custom exit signal
+enableCustomExit = input.bool(false, title="Use Custom Close?")
+
+// ————— Visual Settings
+colorBars = input.bool(true, title="Colour Candles to Trade Order state")
+
+enableSessionClose = input.bool(false, title="Close positions at market at the end of each session ?")
+tradingSession = input.session("0000-2345", title="Trading Session")
+
+entryDirection  = input.string(defval="ALL", title="Open  Trading Direction", options=["ALL", "LONG", "SHORT"])
+exitDirection = input.string(defval="ALL", title="Close Trading Direction", options=["ALL", "LONG", "SHORT"])
+
+closeOnReversal = input.bool(true, title="Close on Opposite Signal")
+
+// ————— Date range filtering
+enableDateFilter = input.bool(false, title="═════════════ Date Range Filtering")
+
+startDate = input.time(defval = timestamp("01 Jan 2019 13:30 +0000"), title = "Start Time")
+endDate = input.time(defval = timestamp("30 Dec 2021 23:30 +0000"), title = "End Time")
+
+isDateAllowed() => enableDateFilter ? time >= startDate and time <= endDate : true
+
+// ————— Consecutive loss/win limits
+enableLossStreakLimit = input.bool(title="═════════════ Set Max number of consecutive loss trades", defval=false)
+maxLossStreak = input.int(title="Max of consecutive loss trades", defval=15, minval=1)
+
+enableWinStreakLimit = input.bool(title="═════════════ Set Max number of consecutive won trades", defval=false)
+maxWinStreak = input.int(title="Max Winning Streak Length", defval=15, minval=1)
+
+// ————— Consecutive losing days
+enableLosingDaysLimit = input.bool(title="═════════════ Set MAX consecutive days with a loss in a row", defval=false)
+maxLosingDays = input.int(title="Max of consecutive days with a loss in a row", defval=3, minval=1)
+
+enableMaxDD = input.bool(title="═════════════ Set Max Total DrawDown", defval=false)
+maxDrawdownPercent = input.int(title="Max Drawdown (%)", defval=10, minval=1, maxval=100)
+
+enableIntradayLossLimit = input.bool(title="═════════════ Set Max Intraday Loss", defval=false)
+maxIntradayLossPercent = input.int(title="Max Intraday Loss (%)", defval=3, minval=1, maxval=100)
+
+enableDailyTradeLimit = input.bool(title="═════════════ Limit the number of trades per day", defval=false)
+maxTradesPerDay = input.int(title="Number MAX of daily trades", defval=10, minval=1, maxval=100)
+
+enableWeeklyTradeLimit = input.bool(title="═════════════ Limit the number of trades per week", defval=false)
+maxTradesPerWeek = input.int(title="Number MAX of weekly trades", defval=50, minval=1, maxval=100)
+
+// ————— Stop loss management
+stopLossType = input.string(title="═════════════ Stop Type Selection", defval="None", options=["None", "Percent", "Trailing", "ATR", "Structure"])
+
+// Percent-based stops
+stopLossPercent = input.float(title="Stop Loss (%)", minval=0.0, step=0.5, defval=1) * 0.01
+trailingStopPercent = input.float(title="Trail Stop Loss (%)", minval=0.0, step=0.5, defval=3) * 0.01
+
+// ATR stops
+atrStopPeriod = input.int(title="═════════════ ATR Stop Length", defval=14)
+atrStopMultiplier = input.float(defval=1, title="[ATR ONLY] Risk Ratio", step=0.10)
+
+// Structure-based stops
+swingLookback = input.int(title="═════════════ Structure Lookback Period", defval=5, minval=1)
+swingStopBuffer = input.float(title="[STRUCTURE] Stop Offset (pips/points)", defval=0, step=0.1)
+
+// ————— Take Profit
+takeProfitType = input.string(title="════ Take Profit Type Selection", defval="None", options=["None", "Percent", "ATR", "RiskReward", "Tiered", "Fibonacci"])
+
+// Percent TP
+takeProfitPercent = input.float(title="Take Profit (%)", minval=0.0, step=0.5, defval=3) * 0.01
+
+// ATR TP
+atrTpPeriod = input.int(title="══════ ATR Take Profit Length", defval=14)
+atrTpMultiplier = input.float(defval=2, title="[ATR ONLY] Reward Ratio", step=0.10)
+
+// Risk:Reward Ratio
+rrRatio = input.float(title="══════ [R:R] Risk:Reward Ratio", defval=2.0, minval=0.5, step=0.5)
+
+// Tiered Targets
+enableTieredTP = input.bool(title="══════ Enable Tiered Targets", defval=false)
+tier1Percent = input.float(title="[TIERED] TP1 (%)", defval=1.0, step=0.5) * 0.01
+tier1ClosePercent = input.int(title="[TIERED] TP1 Close % of Position", defval=33, minval=1, maxval=100)
+tier2Percent = input.float(title="[TIERED] TP2 (%)", defval=2.0, step=0.5) * 0.01
+tier2ClosePercent = input.int(title="[TIERED] TP2 Close % of Position", defval=33, minval=1, maxval=100)
+tier3Percent = input.float(title="[TIERED] TP3 (%)", defval=3.0, step=0.5) * 0.01
+tier3ClosePercent = input.int(title="[TIERED] TP3 Close % of Position", defval=34, minval=1, maxval=100)
+
+// Fibonacci Targets
+fibLookbackPeriod = input.int(title="══════ [FIBONACCI] Lookback Period", defval=20, minval=5)
+enableFib382 = input.bool(title="[FIBONACCI] Use 0.382 Level", defval=false)
+enableFib618 = input.bool(title="[FIBONACCI] Use 0.618 Level", defval=true)
+enableFib100 = input.bool(title="[FIBONACCI] Use 1.0 Level", defval=true)
+enableFib162 = input.bool(title="[FIBONACCI] Use 1.618 Level", defval=true)
+enableFib262 = input.bool(title="[FIBONACCI] Use 2.618 Level", defval=false)
+fib382ClosePercent = input.int(title="[FIBONACCI] 0.382 Close %", defval=25, minval=1, maxval=100)
+fib618ClosePercent = input.int(title="[FIBONACCI] 0.618 Close %", defval=25, minval=1, maxval=100)
+fib100ClosePercent = input.int(title="[FIBONACCI] 1.0 Close %", defval=25, minval=1, maxval=100)
+fib162ClosePercent = input.int(title="[FIBONACCI] 1.618 Close %", defval=25, minval=1, maxval=100)
+
+// Breakeven
+enableBreakeven = input.bool(title="══════ Move to Breakeven after TP1", defval=false)
+breakevenOffsetPercent = input.float(title="[BREAKEVEN] Offset (%)", defval=0.1, step=0.1) * 0.01
+
+// ————— Colors
+colorGreenRaw = color.new(color.lime,0)
+colorGreenMedium = color.new(#00b300,0)
+colorGreenSemiDark = color.new(#009900,0)
+colorGreenDark = color.new(#006600,0)
+colorGreenDarkDark = color.new(#003300,0)
+
+colorRedRaw = color.new(color.red,0)
+colorRedMedium = color.new(#cc0000,0)
+colorRedSemiDark = color.new(#990000,0)
+colorRedDark = color.new(#330000,0)
+colorRedDarkDark = color.new(#330000,0)
+
+colorFuchsiaRaw = color.new(color.fuchsia,0)
+colorFuchsiaMedium = color.new(#c000c0,0)
+colorFuchsiaDark = color.new(#800080,0)
+colorFuchsiaDarkDark = color.new(#400040,0)
+
+colorYellowRaw = color.new(color.yellow,0)
+colorYellowMedium = color.new(#c0c000,0)
+colorYellowDark = color.new(#808000,0)
+colorYellowDarkDark = color.new(#404000,0)
+
+colorOrangeRaw = color.new(#ffa500,0)
+colorOrangeMedium = color.new(#cc8400,0)
+colorOrangeDark = color.new(#996300,0)
+
+colorBlueRaw = color.new(#4985E7,0)
+colorBlueMedium = color.new(#4985E7,0)
+
+colorGreenBg = color.new(#00FF00,93)
+colorRedBg = color.new(#FF0000,90)
+
+LARGE_NUMBER = 1000
+
+// Signal interpretation
+signalValue = nz(signalSource)
+
+// 1 = bullish signal
+isBullSignal = (signalValue == 1)
+// -1 = bearish signal
+isBearSignal = (signalValue == -1)
+
+// 2 = custom exit long
+customExitLong = enableCustomExit and (signalValue == 2)
+// -2 = custom exit short
+customExitShort = enableCustomExit and (signalValue == -2)
+
+// Entry Price tracking
+entryPriceLevel = ta.valuewhen(condition=isBearSignal or isBullSignal, source=close, occurrence=0)
+
+// ————— RISK MANAGEMENT
+
+intradayLossValue = (enableIntradayLossLimit) ? maxIntradayLossPercent : 100
+strategy.risk.max_intraday_loss(value=intradayLossValue, type=strategy.percent_of_equity)
+
+drawdownValue = (enableMaxDD) ? maxDrawdownPercent : 100
+strategy.risk.max_drawdown(value=drawdownValue, type=strategy.percent_of_equity)
+
+// Daily trades
+dailyTradeCount = (enableDailyTradeLimit) ? maxTradesPerDay : LARGE_NUMBER
+strategy.risk.max_intraday_filled_orders(count=dailyTradeCount)
+
+// Weekly trades calculation
+var int tradesAtWeekStart = 0
+
+tradesAtWeekStart := if (dayofweek == dayofweek.monday) and (dayofweek != dayofweek[1])
+    strategy.closedtrades[1] + strategy.opentrades[1]
+else
+    tradesAtWeekStart[1]
+
+weeklyTradeCount = (strategy.closedtrades + strategy.opentrades) - tradesAtWeekStart
+isWeeklyTradeAllowed = (enableWeeklyTradeLimit) ? (weeklyTradeCount < maxTradesPerWeek) : true
+
+// Consecutive losing days
+losingDaysCount = (enableLosingDaysLimit) ? maxLosingDays : LARGE_NUMBER
+strategy.risk.max_cons_loss_days(losingDaysCount)
+
+// Calculate losing streaks
+hasNewLoss = (strategy.losstrades > strategy.losstrades[1]) and
+     (strategy.wintrades == strategy.wintrades[1]) and
+     (strategy.eventrades == strategy.eventrades[1])
+
+var int currentLossStreak = 0
+
+currentLossStreak := if (hasNewLoss)
+    nz(currentLossStreak[1]) + 1
+else
+    if (strategy.wintrades > strategy.wintrades[1]) or (strategy.eventrades > strategy.eventrades[1])
+        0
+    else
+        nz(currentLossStreak[1])
+
+isLossStreakOk = (enableLossStreakLimit) ? currentLossStreak < maxLossStreak : true
+
+// Calculate winning streaks
+hasNewWin = (strategy.wintrades > strategy.wintrades[1]) and
+     (strategy.losstrades == strategy.losstrades[1]) and
+     (strategy.eventrades == strategy.eventrades[1])
+
+var int currentWinStreak = 0
+
+currentWinStreak := if (hasNewWin)
+    nz(currentWinStreak[1]) + 1
+else
+    if (strategy.losstrades > strategy.losstrades[1]) or (strategy.eventrades > strategy.eventrades[1])
+        0
+    else
+        nz(currentWinStreak[1])
+
+isWinStreakOk = (enableWinStreakLimit) ? currentWinStreak < maxWinStreak : true
+
+// Stop loss calculations
+longStopPercent = strategy.position_avg_price * (1 - stopLossPercent)
+shortStopPercent = strategy.position_avg_price * (1 + stopLossPercent)
+
+// Trailing stops
+var float longTrailingStop = 0.0
+var float shortTrailingStop = 0.0
+
+longTrailingStop := if (strategy.position_size > 0)
+    stopValue = close * (1 - trailingStopPercent)
+    math.max(stopValue, longTrailingStop[1])
+else
+    0
+
+shortTrailingStop := if (strategy.position_size < 0)
+    stopValue = close * (1 + trailingStopPercent)
+    math.min(stopValue, shortTrailingStop[1])
+else
+    999999
+
+useStopLoss = stopLossType != "None"
+usePercentStop = stopLossType == "Percent"
+useTrailingStop = stopLossType == "Trailing"
+useAtrStop = stopLossType == "ATR"
+useStructureStop = stopLossType == "Structure"
+
+// ATR calculations
+atrStopValue = ta.atr(atrStopPeriod)
+atrTpValue = ta.atr(atrTpPeriod)
+
+var float atrStopAtEntry = 0.0
+var float atrTpAtEntry = 0.0
+
+if isBullSignal or isBearSignal
+    atrStopAtEntry := atrStopValue
+    atrTpAtEntry := atrTpValue
+
+// Structure-based stops
+var float longSwingStop = 0.0
+var float shortSwingStop = 0.0
+
+if useStructureStop
+    swingLowPrice = ta.pivotlow(low, swingLookback, swingLookback)
+    if not na(swingLowPrice)
+        longSwingStop := swingLowPrice - swingStopBuffer
+    else
+        longSwingStop := nz(longSwingStop[1])
+    
+    swingHighPrice = ta.pivothigh(high, swingLookback, swingLookback)
+    if not na(swingHighPrice)
+        shortSwingStop := swingHighPrice + swingStopBuffer
+    else
+        shortSwingStop := nz(shortSwingStop[1])
+
+// Final stop loss levels
+finalStopLong = usePercentStop ? longStopPercent :
+ useTrailingStop ? longTrailingStop :
+ useAtrStop ? entryPriceLevel - (atrStopAtEntry * atrStopMultiplier) :
+ useStructureStop ? longSwingStop : na
+
+finalStopShort = usePercentStop ? shortStopPercent :
+ useTrailingStop ? shortTrailingStop :
+ useAtrStop ? entryPriceLevel + (atrStopAtEntry * atrStopMultiplier) :
+ useStructureStop ? shortSwingStop : na
+
+// Plot stop loss
+plot(series=(strategy.position_size > 0 and useStopLoss) ? finalStopLong : na,
+     color=color.red, style=plot.style_cross,
+     linewidth=2, title="Long Stop Loss")
+
+plot(series=(strategy.position_size < 0 and useStopLoss) ? finalStopShort : na,
+     color=color.red, style=plot.style_cross,
+     linewidth=2, title="Short Stop Loss")
+
+// ————— Take Profit Management
+
+useTakeProfit = takeProfitType != "None"
+usePercentTp = takeProfitType == "Percent"
+useAtrTp = takeProfitType == "ATR"
+useRiskRewardTp = takeProfitType == "RiskReward"
+useTieredTp = takeProfitType == "Tiered"
+useFibonacciTp = takeProfitType == "Fibonacci"
+
+// Calculate stop distance for R:R
+stopDistanceValue = strategy.position_size > 0 ? math.abs(strategy.position_avg_price - finalStopLong) :
+ strategy.position_size < 0 ? math.abs(finalStopShort - strategy.position_avg_price) : 0.0
+
+// Fibonacci calculations
+var float fibSwingRange = 0.0
+var float fibBasePrice = 0.0
+
+if useFibonacciTp
+    highestPrice = ta.highest(high, fibLookbackPeriod)
+    lowestPrice = ta.lowest(low, fibLookbackPeriod)
+    fibSwingRange := highestPrice - lowestPrice
+    fibBasePrice := entryPriceLevel
+
+// Standard TP prices
+tpLongPrice = usePercentTp ? strategy.position_avg_price * (1 + takeProfitPercent) :
+ useAtrTp ? strategy.position_avg_price + (atrTpAtEntry * atrTpMultiplier) :
+ useRiskRewardTp ? strategy.position_avg_price + (stopDistanceValue * rrRatio) :
+ strategy.position_avg_price + (atrTpAtEntry * atrTpMultiplier)
+
+tpShortPrice = usePercentTp ? strategy.position_avg_price * (1 - takeProfitPercent) :
+ useAtrTp ? strategy.position_avg_price - (atrTpAtEntry * atrTpMultiplier) :
+ useRiskRewardTp ? strategy.position_avg_price - (stopDistanceValue * rrRatio) :
+ strategy.position_avg_price - (atrTpAtEntry * atrTpMultiplier)
+
+// Tiered target prices
+tier1Long = strategy.position_avg_price * (1 + tier1Percent)
+tier2Long = strategy.position_avg_price * (1 + tier2Percent)
+tier3Long = strategy.position_avg_price * (1 + tier3Percent)
+
+tier1Short = strategy.position_avg_price * (1 - tier1Percent)
+tier2Short = strategy.position_avg_price * (1 - tier2Percent)
+tier3Short = strategy.position_avg_price * (1 - tier3Percent)
+
+// Fibonacci target prices
+fib382Long = fibBasePrice + (fibSwingRange * 0.382)
+fib618Long = fibBasePrice + (fibSwingRange * 0.618)
+fib100Long = fibBasePrice + (fibSwingRange * 1.0)
+fib162Long = fibBasePrice + (fibSwingRange * 1.618)
+fib262Long = fibBasePrice + (fibSwingRange * 2.618)
+
+fib382Short = fibBasePrice - (fibSwingRange * 0.382)
+fib618Short = fibBasePrice - (fibSwingRange * 0.618)
+fib100Short = fibBasePrice - (fibSwingRange * 1.0)
+fib162Short = fibBasePrice - (fibSwingRange * 1.618)
+fib262Short = fibBasePrice - (fibSwingRange * 2.618)
+
+// Breakeven tracking
+var bool beActivated = false
+
+// Breakeven stop prices
+beStopLong = strategy.position_size > 0 ? strategy.position_avg_price * (1 + breakevenOffsetPercent) : 0.0
+beStopShort = strategy.position_size < 0 ? strategy.position_avg_price * (1 - breakevenOffsetPercent) : 0.0
+
+if strategy.position_size == 0
+    beActivated := false
+
+// Plot TP levels
+plot(series=(strategy.position_size > 0 and useTakeProfit and not useTieredTp and not useFibonacciTp) ? tpLongPrice : na,
+     color=color.green, style=plot.style_circles,
+     linewidth=3, title="Long Take Profit")
+
+plot(series=(strategy.position_size < 0 and useTakeProfit and not useTieredTp and not useFibonacciTp) ? tpShortPrice : na,
+     color=color.red, style=plot.style_circles,
+     linewidth=3, title="Short Take Profit")
+
+// Plot tiered targets
+plot(series=(strategy.position_size > 0 and useTieredTp) ? tier1Long : na,
+     color=colorGreenMedium, style=plot.style_circles, linewidth=2, title="TP1 Long")
+plot(series=(strategy.position_size > 0 and useTieredTp) ? tier2Long : na,
+     color=colorGreenSemiDark, style=plot.style_circles, linewidth=2, title="TP2 Long")
+plot(series=(strategy.position_size > 0 and useTieredTp) ? tier3Long : na,
+     color=colorGreenDark, style=plot.style_circles, linewidth=2, title="TP3 Long")
+
+plot(series=(strategy.position_size < 0 and useTieredTp) ? tier1Short : na,
+     color=colorRedMedium, style=plot.style_circles, linewidth=2, title="TP1 Short")
+plot(series=(strategy.position_size < 0 and useTieredTp) ? tier2Short : na,
+     color=colorRedSemiDark, style=plot.style_circles, linewidth=2, title="TP2 Short")
+plot(series=(strategy.position_size < 0 and useTieredTp) ? tier3Short : na,
+     color=colorRedDark, style=plot.style_circles, linewidth=2, title="TP3 Short")
+
+// Plot Fibonacci targets
+plot(series=(strategy.position_size > 0 and useFibonacciTp and enableFib382) ? fib382Long : na,
+     color=colorYellowRaw, style=plot.style_cross, linewidth=2, title="Fib 0.382 Long")
+plot(series=(strategy.position_size > 0 and useFibonacciTp and enableFib618) ? fib618Long : na,
+     color=colorYellowMedium, style=plot.style_cross, linewidth=2, title="Fib 0.618 Long")
+plot(series=(strategy.position_size > 0 and useFibonacciTp and enableFib100) ? fib100Long : na,
+     color=colorYellowDark, style=plot.style_cross, linewidth=2, title="Fib 1.0 Long")
+plot(series=(strategy.position_size > 0 and useFibonacciTp and enableFib162) ? fib162Long : na,
+     color=colorOrangeMedium, style=plot.style_cross, linewidth=2, title="Fib 1.618 Long")
+plot(series=(strategy.position_size > 0 and useFibonacciTp and enableFib262) ? fib262Long : na,
+     color=colorOrangeDark, style=plot.style_cross, linewidth=2, title="Fib 2.618 Long")
+
+plot(series=(strategy.position_size < 0 and useFibonacciTp and enableFib382) ? fib382Short : na,
+     color=colorYellowRaw, style=plot.style_cross, linewidth=2, title="Fib 0.382 Short")
+plot(series=(strategy.position_size < 0 and useFibonacciTp and enableFib618) ? fib618Short : na,
+     color=colorYellowMedium, style=plot.style_cross, linewidth=2, title="Fib 0.618 Short")
+plot(series=(strategy.position_size < 0 and useFibonacciTp and enableFib100) ? fib100Short : na,
+     color=colorYellowDark, style=plot.style_cross, linewidth=2, title="Fib 1.0 Short")
+plot(series=(strategy.position_size < 0 and useFibonacciTp and enableFib162) ? fib162Short : na,
+     color=colorOrangeMedium, style=plot.style_cross, linewidth=2, title="Fib 1.618 Short")
+plot(series=(strategy.position_size < 0 and useFibonacciTp and enableFib262) ? fib262Short : na,
+     color=colorOrangeDark, style=plot.style_cross, linewidth=2, title="Fib 2.618 Short")
+
+// Plot breakeven stop
+plot(series=(strategy.position_size > 0 and beActivated) ? beStopLong : na,
+     color=colorBlueMedium, style=plot.style_line,
+     linewidth=3, title="Breakeven Stop Long")
+
+plot(series=(strategy.position_size < 0 and beActivated) ? beStopShort : na,
+     color=colorBlueMedium, style=plot.style_line,
+     linewidth=3, title="Breakeven Stop Short")
+
+// ————— Session Management
+isInSession(sess) => not na(time(timeframe.period, sess))
+inTradingSession = isInSession(tradingSession)
+canTradeInSession = enableSessionClose ? inTradingSession : true
+sessionJustStarted = inTradingSession and not inTradingSession[1]
+
+bgcolor(color=(enableSessionClose and isInSession(tradingSession)[1]) ? color.new(color.green, 85) : na,
+ title="Trading Session")
+
+// Consolidate trading conditions
+canTrade = isWeeklyTradeAllowed and isLossStreakOk and isWinStreakOk and isDateAllowed() and canTradeInSession
+
+// Position tracking
+hasLongPosition = strategy.position_size > 0
+hasShortPosition = strategy.position_size < 0
+hasAnyPosition = strategy.position_size != 0
+
+canOpenLongs = entryDirection != "SHORT"
+canOpenShorts = entryDirection != "LONG"
+
+// ————— ENTRY LOGIC
+
+if (isBullSignal and canTrade and canTradeInSession and canOpenLongs)
+    strategy.entry("Long", strategy.long, alert_message="{{ticker}} Long Signal - Entry Price: " + str.tostring(close) + " Timeframe: {{interval}}")
+    alert(syminfo.tickerid + " Long Signal - Entry Price: " + str.tostring(close) + " Timeframe: " + timeframe.period, alert.freq_once_per_bar_close)
+
+if (isBearSignal and canTrade and canTradeInSession and canOpenShorts)
+    strategy.entry("Short", strategy.short, alert_message="{{ticker}} Short Signal - Entry Price: " + str.tostring(close) + " Timeframe: {{interval}}")
+    alert(syminfo.tickerid + " Short Signal - Entry Price: " + str.tostring(close) + " Timeframe: " + timeframe.period, alert.freq_once_per_bar_close)
+
+// ————— CLOSE ON OPPOSITE SIGNAL
+
+if closeOnReversal and strategy.position_size > 0 and isBearSignal
+    strategy.close(id="Long", alert_message="{{ticker}} Short Signal - Close Long Signal - Timeframe: {{interval}}", comment="Short Signal\nClose Long")
+
+if closeOnReversal and strategy.position_size < 0 and isBullSignal
+    strategy.close(id="Short", alert_message="{{ticker}} Long Signal - Close Short Signal - Timeframe: {{interval}}", comment="Long Signal\nClose Short")
+
+// ————— CUSTOM CLOSE
+
+if (strategy.position_size > 0 and customExitLong)
+    strategy.close(id="Long", alert_message="{{ticker}} Custom Close Long Signal - Timeframe: {{interval}}", comment="Custom Close Signal\nClose Long")
+    alert(syminfo.tickerid + " Custom Close Long Signal - Entry Price: " + str.tostring(close) + " Timeframe: " + timeframe.period, alert.freq_once_per_bar_close)
+
+if (strategy.position_size < 0 and customExitShort)
+    strategy.close(id="Short", alert_message="{{ticker}} Custom Close Short Signal - Timeframe: {{interval}}", comment="Custom Close Signal\nClose Short")
+    alert(syminfo.tickerid + " Custom Close Short Signal  - Entry Price: " + str.tostring(close) + " Timeframe: " + timeframe.period, alert.freq_once_per_bar_close)
+
+canCloseLongs = exitDirection != "SHORT"
+canCloseShorts = exitDirection != "LONG"
+
+// ————— BREAKEVEN LOGIC
+
+if enableBreakeven and not beActivated
+    if strategy.position_size > 0 and useTieredTp
+        if high >= tier1Long
+            beActivated := true
+    if strategy.position_size < 0 and useTieredTp
+        if low <= tier1Short
+            beActivated := true
+
+// Adjusted stops with breakeven
+adjustedStopLong = beActivated ? beStopLong : finalStopLong
+adjustedStopShort = beActivated ? beStopShort : finalStopShort
+
+// ————— EXIT LOGIC - TIERED TARGETS
+
+if (strategy.position_size > 0 and canCloseLongs and useTieredTp)
+    strategy.exit(id="TP1 Long", from_entry="Long", qty_percent=tier1ClosePercent, 
+     stop=useStopLoss ? adjustedStopLong : na, limit=tier1Long, 
+     alert_message="{{ticker}} TP1 Long Hit - Timeframe: {{interval}}")
+    
+    strategy.exit(id="TP2 Long", from_entry="Long", qty_percent=tier2ClosePercent, 
+     stop=useStopLoss ? adjustedStopLong : na, limit=tier2Long, 
+     alert_message="{{ticker}} TP2 Long Hit - Timeframe: {{interval}}")
+    
+    strategy.exit(id="TP3 Long", from_entry="Long", qty_percent=tier3ClosePercent, 
+     stop=useStopLoss ? adjustedStopLong : na, limit=tier3Long, 
+     alert_message="{{ticker}} TP3 Long Hit - Timeframe: {{interval}}")
+
+if (strategy.position_size < 0 and canCloseShorts and useTieredTp)
+    strategy.exit(id="TP1 Short", from_entry="Short", qty_percent=tier1ClosePercent, 
+     stop=useStopLoss ? adjustedStopShort : na, limit=tier1Short, 
+     alert_message="{{ticker}} TP1 Short Hit - Timeframe: {{interval}}")
+    
+    strategy.exit(id="TP2 Short", from_entry="Short", qty_percent=tier2ClosePercent, 
+     stop=useStopLoss ? adjustedStopShort : na, limit=tier2Short, 
+     alert_message="{{ticker}} TP2 Short Hit - Timeframe: {{interval}}")
+    
+    strategy.exit(id="TP3 Short", from_entry="Short", qty_percent=tier3ClosePercent, 
+     stop=useStopLoss ? adjustedStopShort : na, limit=tier3Short, 
+     alert_message="{{ticker}} TP3 Short Hit - Timeframe: {{interval}}")
+
+// ————— EXIT LOGIC - FIBONACCI TARGETS
+
+if (strategy.position_size > 0 and canCloseLongs and useFibonacciTp)
+    if enableFib382
+        strategy.exit(id="Fib 0.382 Long", from_entry="Long", qty_percent=fib382ClosePercent, 
+         stop=useStopLoss ? adjustedStopLong : na, limit=fib382Long, 
+         alert_message="{{ticker}} Fib 0.382 Long Hit - Timeframe: {{interval}}")
+    
+    if enableFib618
+        strategy.exit(id="Fib 0.618 Long", from_entry="Long", qty_percent=fib618ClosePercent, 
+         stop=useStopLoss ? adjustedStopLong : na, limit=fib618Long, 
+         alert_message="{{ticker}} Fib 0.618 Long Hit - Timeframe: {{interval}}")
+    
+    if enableFib100
+        strategy.exit(id="Fib 1.0 Long", from_entry="Long", qty_percent=fib100ClosePercent, 
+         stop=useStopLoss ? adjustedStopLong : na, limit=fib100Long, 
+         alert_message="{{ticker}} Fib 1.0 Long Hit - Timeframe: {{interval}}")
+    
+    if enableFib162
+        strategy.exit(id="Fib 1.618 Long", from_entry="Long", qty_percent=fib162ClosePercent, 
+         stop=useStopLoss ? adjustedStopLong : na, limit=fib162Long, 
+         alert_message="{{ticker}} Fib 1.618 Long Hit - Timeframe: {{interval}}")
+    
+    if enableFib262
+        strategy.exit(id="Fib 2.618 Long", from_entry="Long", 
+         stop=useStopLoss ? adjustedStopLong : na, limit=fib262Long, 
+         alert_message="{{ticker}} Fib 2.618 Long Hit - Timeframe: {{interval}}")
+
+if (strategy.position_size < 0 and canCloseShorts and useFibonacciTp)
+    if enableFib382
+        strategy.exit(id="Fib 0.382 Short", from_entry="Short", qty_percent=fib382ClosePercent, 
+         stop=useStopLoss ? adjustedStopShort : na, limit=fib382Short, 
+         alert_message="{{ticker}} Fib 0.382 Short Hit - Timeframe: {{interval}}")
+    
+    if enableFib618
+        strategy.exit(id="Fib 0.618 Short", from_entry="Short", qty_percent=fib618ClosePercent, 
+         stop=useStopLoss ? adjustedStopShort : na, limit=fib618Short, 
+         alert_message="{{ticker}} Fib 0.618 Short Hit - Timeframe: {{interval}}")
+    
+    if enableFib100
+        strategy.exit(id="Fib 1.0 Short", from_entry="Short", qty_percent=fib100ClosePercent, 
+         stop=useStopLoss ? adjustedStopShort : na, limit=fib100Short, 
+         alert_message="{{ticker}} Fib 1.0 Short Hit - Timeframe: {{interval}}")
+    
+    if enableFib162
+        strategy.exit(id="Fib 1.618 Short", from_entry="Short", qty_percent=fib162ClosePercent, 
+         stop=useStopLoss ? adjustedStopShort : na, limit=fib162Short, 
+         alert_message="{{ticker}} Fib 1.618 Short Hit - Timeframe: {{interval}}")
+    
+    if enableFib262
+        strategy.exit(id="Fib 2.618 Short", from_entry="Short", 
+         stop=useStopLoss ? adjustedStopShort : na, limit=fib262Short, 
+         alert_message="{{ticker}} Fib 2.618 Short Hit - Timeframe: {{interval}}")
+
+// ————— EXIT LOGIC - STANDARD (Single TP)
+
+if (strategy.position_size > 0 and canCloseLongs and not useTieredTp and not useFibonacciTp)
+    strategy.exit(id="Exit Long", from_entry="Long", stop=useStopLoss ? adjustedStopLong : na, limit=useTakeProfit ? tpLongPrice : na, alert_message="{{ticker}} Close Long Signal - Timeframe: {{interval}}")
+    alert(syminfo.tickerid + " Exit Long Signal - Exit Price: " + str.tostring(close) + " Timeframe: " + timeframe.period, alert.freq_once_per_bar_close)
+
+if (strategy.position_size < 0 and canCloseShorts and not useTieredTp and not useFibonacciTp)
+    strategy.exit(id="Exit Short", from_entry="Short", stop=useStopLoss ? adjustedStopShort : na, limit=useTakeProfit ? tpShortPrice : na, alert_message="{{ticker}} Close Short Signal - Timeframe: {{interval}}")
+    alert(syminfo.tickerid + " Exit Short Signal - Exit Price: " + str.tostring(close) + "Timeframe: " + timeframe.period, alert.freq_once_per_bar_close)
+
+// ————— SESSION END CLOSE
+
+if not canTradeInSession and hasAnyPosition
+    strategy.close_all()
+
+// ————— EMERGENCY FLATTEN
+
+shouldFlatten = not isWeeklyTradeAllowed or not isLossStreakOk or not isWinStreakOk or not isDateAllowed()
+
+if (shouldFlatten)
+    strategy.close_all()
+
+// ————— BAR COLORING
+
+barColor = not colorBars ? na : strategy.position_size == 0 ? color.gray : 
+ hasLongPosition ? color.lime :
+ hasShortPosition ? color.red : color.gray
+
+barcolor(barColor, title="Trade State Bar Colouring")
+
+View in Pine Editor・607 lines
+Use on chart
+3
+6
+897
+This script is a strategy execution and risk-management template designed to test external indicators under consistent and repeatable conditions.
+
+The script does not generate buy or sell signals internally. All trade entries and exits are driven by a user-supplied indicator through a numeric connector. This design intentionally separates signal generation from trade execution, allowing users to evaluate indicators without rewriting strategy logic.
+
+Purpose and Originality
+The purpose of this template is to provide a standardized execution framework rather than a trading methodology.
+
+Instead of embedding a specific signal logic, the script focuses on how trades are managed after a signal occurs. This allows users to:
+
+Benchmark different indicators under identical execution rules
+
+Compare stop-loss and take-profit models objectively
+
+Study the impact of risk constraints on performance
+
+Reduce bias caused by inconsistent trade management
+
+
+This makes the script suitable for educational testing and experimentation, not for presenting a profitable strategy.
+
+How the Signal Connector Works
+The strategy listens to a single numeric data source supplied by an external indicator.
+The indicator must output values using the following convention:
+1 → open long position
+-1 → open short position
+0 → no action
+Optional:
+2 → custom close for long
+-2 → custom close for short
+The strategy reacts only to these values and ignores all other indicator logic.
+
+Example Connector Code (Indicator Side)
+Users must add the following logic to their indicator to make it compatible with this template:
+
+// Strategy Connector
+// 1 = Buy
+// -1 = Sell
+// 0 = No Signal
+signal = buySignal ? 1 : sellSignal ? -1 : 0
+plot(signal, title="Connector", display=display.none)
+
+buySignal and sellSignal represent the indicator’s own conditions
+The connector plot is hidden and used only as a data source
+
+How to Connect the Indicator to the Strategy
+
+Add the indicator (with connector output) to the chart
+
+Add this strategy template to the same chart
+
+Open the strategy’s settings
+
+Set Data source to the indicator’s Connector plot
+
+Configure risk, stop-loss, and take-profit settings as required
+
+
+The strategy will not execute trades unless a valid connector signal is received.
+
+Execution and Risk-Management Features
+This template provides configurable execution modules including:
+
+Position sizing and pyramiding control
+
+Maximum drawdown and intraday loss limits
+
+Consecutive win, loss, and losing-day limits
+
+Stop-loss methods (percent, trailing, ATR, structure-based)
+
+Take-profit models (single target, tiered targets, risk-reward, Fibonacci levels)
+
+Optional breakeven logic
+
+Session-based trading control
+
+
+All execution logic operates independently of the signal source.
+
+Strategy Properties and Results
+Default strategy properties are intentionally conservative and provided only as a demonstration baseline.
+Backtest results depend entirely on:
+
+The connected indicator
+
+Market and timeframe selection
+
+User-defined execution parameters
+
+
+Results shown by this template do not represent a trading edge and should not be interpreted as investment advice.
+
+Intended Use
+This script is intended for:
+
+Educational study of trade execution and risk control
+
+Indicator benchmarking under identical execution rules
+
+Exploring how exits and risk constraints influence outcomes
+
+
+It is not intended to promote or present a standalone trading strategy.

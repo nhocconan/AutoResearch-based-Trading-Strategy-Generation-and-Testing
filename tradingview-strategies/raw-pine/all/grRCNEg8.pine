@@ -1,0 +1,177 @@
+//@version=6
+strategy("Candle Pattern Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ============================================
+// 参数配置
+// ============================================
+lookback_period = input.int(5, title="K线统计数量", minval=3, maxval=20)
+crossover_threshold = input.float(0.1, title="十字星阈值 (0-1)", minval=0.0, maxval=1.0, step=0.05)
+cross_count_limit = input.int(3, title="十字星数量限制", minval=1, maxval=10)
+close_at_high_threshold = input.float(0.9, title="收最高接近度 (0-1)", minval=0.5, maxval=1.0, step=0.05)
+close_at_low_threshold = input.float(0.9, title="收最低接近度 (0-1)", minval=0.5, maxval=1.0, step=0.05)
+tp_sl_ratio = input.float(2.0, title="止盈/止损比例", minval=1.0, maxval=5.0, step=0.5)
+bars_after_open = input.int(5, title="开盘后禁止交易K线数", minval=0, maxval=50)
+cooldown_bars = input.int(2, title="交易后冷却K线数", minval=0, maxval=20)
+
+// 声明历史缓冲区大小，确保足够的历史数据
+// 根据Pine Script执行模型，需要提前声明来避免运行时错误
+max_bars_back(close, 20)
+max_bars_back(open, 20)
+max_bars_back(high, 20)
+max_bars_back(low, 20)
+
+// ============================================
+// 主要逻辑：分析最近N根K线
+// 注意：直接在全局范围访问历史数据 [i]，避免函数范围内的历史引用问题
+// 按照Pine Script官方执行模型文档的要求
+// ============================================
+
+// 记录最后一次交易的K线位置
+var int last_trade_bar = -999
+
+// 记录会话开始的K线位置
+var int session_start_bar = -999
+if session.isfirstbar
+    session_start_bar := bar_index
+
+// 计算当前K线距离上次交易的bar数
+bars_since_trade = bar_index - last_trade_bar
+
+// 计算当前K线距离会话开始的bar数
+bars_since_session_start = bar_index - session_start_bar
+
+// 检查是否在禁止交易期：开盘后N根K线或交易后冷却期
+is_within_cooldown = bars_since_trade <= cooldown_bars
+is_after_session_start = bars_since_session_start < bars_after_open
+trading_allowed = (not is_within_cooldown) and (not is_after_session_start)
+
+// 统计过去N根K线的形态
+close_at_high_count = 0
+close_at_low_count = 0
+doji_count = 0
+
+// 循环统计最近N根K线的形态
+for i = 0 to lookback_period - 1
+    // 判断第i根K线是否接近收在最高
+    high_range = high[i] - low[i]
+    close_to_high_ratio = high_range > 0 ? (high[i] - close[i]) / high_range : 0
+    if close_to_high_ratio <= (1 - close_at_high_threshold)
+        close_at_high_count += 1
+    
+    // 判断第i根K线是否接近收在最低
+    close_to_low_ratio = high_range > 0 ? (close[i] - low[i]) / high_range : 0
+    if close_to_low_ratio <= (1 - close_at_low_threshold)
+        close_at_low_count += 1
+    
+    // 判断第i根K线是否是十字星
+    body_size = math.abs(close[i] - open[i])
+    total_range = high[i] - low[i]
+    
+    if total_range > 0
+        body_ratio = body_size / total_range
+        if body_ratio <= crossover_threshold
+            doji_count += 1
+
+// 检查最后一根K线（当前K线）的形态
+high_range_last = high - low
+close_to_high_ratio_last = high_range_last > 0 ? (high - close) / high_range_last : 0
+last_close_at_high = close_to_high_ratio_last <= (1 - close_at_high_threshold)
+
+close_to_low_ratio_last = high_range_last > 0 ? (close - low) / high_range_last : 0
+last_close_at_low = close_to_low_ratio_last <= (1 - close_at_low_threshold)
+
+// ============================================
+// 生成交易信号
+// ============================================
+
+// 信号1: 如果有3个或以上十字星，不操作
+skip_signal = doji_count >= cross_count_limit
+
+// 信号2: 如果5根K线中有2个收在最高，且最后一根收在最高，做多
+long_signal = (not skip_signal) and (close_at_high_count >= 2) and last_close_at_high and trading_allowed
+
+// 信号3: 如果5根K线中有2个收在最低，且最后一根收在最低，做空
+short_signal = (not skip_signal) and (close_at_low_count >= 2) and last_close_at_low and trading_allowed
+
+// ============================================
+// 执行交易
+// ============================================
+
+if long_signal
+    strategy.entry("Long", strategy.long)
+    last_trade_bar := bar_index
+    
+if short_signal
+    strategy.entry("Short", strategy.short)
+    last_trade_bar := bar_index
+
+// 基于最后一根K线的高低点设置止损止盈
+// 做多：止损在最后一根K线的最低点，止盈为风险的倍数
+// 做空：止损在最后一根K线的最高点，止盈为风险的倍数
+last_bar_low = low
+last_bar_high = high
+
+// 做多的止损止盈
+if long_signal
+    sl_long = last_bar_low
+    risk_long = close - sl_long
+    tp_long = close + (risk_long * tp_sl_ratio)
+    strategy.exit("Exit Long", from_entry="Long", stop=sl_long, limit=tp_long)
+
+// 做空的止损止盈
+if short_signal
+    sl_short = last_bar_high
+    risk_short = sl_short - close
+    tp_short = close - (risk_short * tp_sl_ratio)
+    strategy.exit("Exit Short", from_entry="Short", stop=sl_short, limit=tp_short)
+
+// ============================================
+// 可视化
+// ============================================
+
+
+// 显示统计信息
+var table display_table = na
+if na(display_table)
+    display_table := table.new(position.top_right, 3, 4, bgcolor=color.new(color.white, 80), border_color=color.gray)
+    
+table.cell(display_table, 0, 0, "形态统计", text_color=color.black, bgcolor=color.new(color.gray, 50))
+table.cell(display_table, 0, 1, "收最高: " + str.tostring(close_at_high_count), text_color=color.black)
+table.cell(display_table, 0, 2, "收最低: " + str.tostring(close_at_low_count), text_color=color.black)
+table.cell(display_table, 0, 3, "十字星: " + str.tostring(doji_count), text_color=color.black)
+
+// 信息标签
+if long_signal
+    label.new(bar_index, low, "✓ 做多条件满足", yloc=yloc.belowbar, color=color.green, textcolor=color.white, style=label.style_label_up)
+if short_signal
+    label.new(bar_index, high, "✓ 做空条件满足", yloc=yloc.abovebar, color=color.red, textcolor=color.white, style=label.style_label_down)
+if is_within_cooldown
+    label.new(bar_index, high, "⏸ 冷却中", yloc=yloc.abovebar, color=color.orange, textcolor=color.white, size=size.small)
+if is_after_session_start
+    label.new(bar_index, high, "🔒 开盘禁止", yloc=yloc.abovebar, color=color.gray, textcolor=color.white, size=size.small)
+
+View in Pine Editor・151 lines
+Use on chart
+1
+8
+752
+# Candle Pattern Trading Strategy
+
+## Core Logic
+Analyzes the last 5 candlesticks to identify "close at high" and "close at low" patterns, generating long/short signals.
+
+## Trading Conditions
+- **Long**: ≥2 bars closed at high in past 5 bars + current bar closes at high → Open long
+- **Short**: ≥2 bars closed at low in past 5 bars + current bar closes at low → Open short
+- **Filter**: If ≥3 doji patterns detected, skip trading
+
+## Risk Management
+- Stop Loss: Based on entry bar's high/low
+- Take Profit: Risk × 2x multiplier
+- Cooldown: No trading for 2 bars after entry
+- Session Filter: No trading for first 5 bars after market open
+
+## Configurable Parameters
+- Lookback period, doji threshold, close proximity ratio, TP/SL ratio, cooldown bars, etc.
+
+**Use Cases**: 1-minute and higher timeframes on stocks/futures

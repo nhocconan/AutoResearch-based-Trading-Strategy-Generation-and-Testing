@@ -1,0 +1,402 @@
+//@version=6
+strategy("FluxGate SPY Daily",
+     shorttitle="FluxGate",
+     overlay=true, pyramiding=0,
+     calc_on_every_tick=false, calc_on_order_fills=false, process_orders_on_close=false,
+     initial_capital=25000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=3,
+     commission_type=strategy.commission.percent, commission_value=0.03, // 0.03%
+     slippage=5, // ticks
+     margin_long=0, margin_short=0)
+
+// ========================= GROUPS
+group_setupL   = "Setup — Long"
+group_setupS   = "Setup — Short"
+group_entries  = "Entries & UI"
+
+// ========================= INPUTS
+// Long side setup
+base_len_L = input.int(40, "Base length", minval=16, group=group_setupL, tooltip="Master window for LONG engine.")
+aggr_L     = input.float(0.40, "Aggression 0..1", minval=0.0, maxval=1.0, step=0.05, group=group_setupL, tooltip="Controls speed, gate curvature, thresholds, smoothing for LONG.")
+
+// Short side setup
+base_len_S = input.int(48, "Base length", minval=16, group=group_setupS, tooltip="Master window for SHORT engine.")
+aggr_S     = input.float(0.20, "Aggression 0..1", minval=0.0, maxval=1.0, step=0.05, group=group_setupS, tooltip="Controls speed, gate curvature, thresholds, smoothing for SHORT.")
+
+// Entry mode and visuals
+entry_mode  = input.string("Long only", options=["Both","Long only","Short only"], group=group_entries, tooltip="Choose which entries are allowed.")
+// show_trig   = input.bool(true,  "Plot thresholds",   group=group_entries)
+// show_ribbon = input.bool(true,  "Ribbon to zero",    group=group_entries)
+// show_sign   = input.bool(true,  "Show signal shapes",group=group_entries)
+// show_aux    = input.bool(false, "Show aux lines",    group=group_entries)
+
+// ========================= HELPERS
+eps = 1e-10
+lerp(a, b, t) => a + (b - a) * t
+clamp(x, lo, hi) => math.max(lo, math.min(hi, x))
+softsign(x) => x / (1.0 + math.abs(x))
+softclip(x, a) => softsign(x / math.max(a, eps)) * a
+safe_div(n, d) => d == 0.0 ? 0.0 : n / d
+safe_stdev(s, ln) => math.max(ta.stdev(s, ln), eps)
+mad_norm(s, ln) =>
+    m  = ta.sma(s, ln)
+    ta.sma(math.abs(s - m), ln)
+entropy_binary(up_ser, ln) =>
+    p = ta.sma(up_ser, ln)
+    H = -(p * math.log(math.max(p, eps)) + (1 - p) * math.log(math.max(1 - p, eps))) / math.log(2.0)
+    clamp(H, 0.0, 1.0)
+eff_ratio(src, ln) =>
+    dm = math.abs(src - src[ln])
+    vm = math.sum(math.abs(src - src[1]), ln)
+    vm == 0.0 ? 0.0 : dm / vm
+curvature(src, ln) =>
+    lr = ta.linreg(src, ln, 0)
+    num = lr - 2.0 * lr[1] + lr[2]
+    den = math.max(ta.stdev(src, ln), eps)
+    num / den
+phase_in_channel(ln) =>
+    lo = ta.lowest(low, ln)
+    hi = ta.highest(high, ln)
+    rg = math.max(hi - lo, eps)
+    ph = (close - lo) / rg
+    clamp(ph, 0.0, 1.0)
+covar(u, v, ln) =>
+    mu = ta.sma(u, ln)
+    mv = ta.sma(v, ln)
+    ta.sma(u * v, ln) - mu * mv
+varn(u, ln) =>
+    m = ta.sma(u, ln)
+    ta.sma(u * u, ln) - m * m
+proj_coeff(u, v, ln) =>
+    cuv = covar(u, v, ln)
+    vu  = varn(u, ln)
+    safe_div(cuv, math.max(vu, eps))
+orthonorm3(a, b, c, ln) =>
+    u1 = a
+    b_ = b - proj_coeff(u1, b, ln) * u1
+    u2 = b_
+    c_ = c - proj_coeff(u1, c, ln) * u1 - proj_coeff(u2, c, ln) * u2
+    u3 = c_
+    s1 = safe_stdev(u1, ln), s2 = safe_stdev(u2, ln), s3 = safe_stdev(u3, ln)
+    [u1 / s1, u2 / s2, u3 / s3]
+palette(v) =>
+    v_cl = clamp(v, -1.0, 1.0)
+    tr   = int(100 - 100 * math.abs(v_cl))
+    v_cl >= 0 ? color.new(color.teal, tr) : color.new(color.red, tr)
+
+// ========================= ENGINE FUNCTION  per side
+engine(N, a) =>
+    // Derived windows
+    L_trend  = int(math.round(lerp(N * 1.10, N * 0.55, a)))
+    L_gate   = int(math.round(lerp(N * 0.90, N * 0.60, a)))
+    L_norm   = int(math.round(lerp(N * 1.80, N * 1.10, a)))
+    L_adapt  = int(math.round(lerp(N * 1.40, N * 0.80, a)))
+    L_phase  = int(math.round(lerp(N * 1.20, N * 0.90, a)))
+    L_fd     = int(math.round(lerp(N * 1.60, N * 1.00, a)))
+
+    // Drivers
+    ret      = math.log(close / close[1])
+    ema_t    = ta.ema(ohlc4, L_trend)
+    slope_p  = ema_t - ema_t[1]
+    ret_sd   = safe_stdev(ret, L_norm)
+    dir      = softclip(safe_div(slope_p, ret_sd), 3.0)
+    sgn      = close > close[1] ? 1.0 : -1.0
+    prs      = nz(ta.correlation(sgn, sgn[1], L_gate), 0.0)
+    cvx      = softclip(curvature(close, L_trend), 3.0)
+    [o1, o2, o3] = orthonorm3(dir, prs, cvx, L_norm)
+    w_dir = 0.52 + 0.28 * a
+    w_prs = 0.30 - 0.10 * a
+    w_cvx = 0.18 + 0.10 * (1.0 - a)
+    ws    = w_dir + w_prs + w_cvx
+    w_dir /= ws, w_prs /= ws, w_cvx /= ws
+    tri_raw = w_dir * o1 + w_prs * o2 + w_cvx * o3
+
+    // Regime gate
+    er     = eff_ratio(close, L_gate)
+    up_bin = close > close[1] ? 1.0 : 0.0
+    H      = entropy_binary(up_bin, L_gate)
+    inten  = 1.0 - H
+    sum_len = 0.0
+    for i = 1 to L_fd
+        sum_len += math.abs(close[i] - close[i - 1])
+    R    = ta.highest(close, L_fd) - ta.lowest(close, L_fd)
+    fd_0 = R > 0.0 and L_fd > 1 ? math.log(math.max(sum_len / math.max(R, eps), eps)) / math.log(L_fd) : 1.0
+    fd    = clamp(1.0 + fd_0, 1.0, 2.0)
+    coh   = math.max(0.0, 2.0 - fd)
+    gamma = lerp(1.7, 1.10, a)
+    gate  = math.pow(math.max(er * inten * coh, 0.0), gamma)
+
+    // Phase assist and vol ratio gate
+    ph01         = phase_in_channel(L_phase)
+    phase_signed = (ph01 - 0.5) * 2.0
+    phase_conf   = math.abs(phase_signed)
+    phase_w      = lerp(0.12, 0.25, a)
+    assist       = phase_signed * phase_w * phase_conf
+    sig_short = safe_stdev(ret, int(math.round(lerp(N * 0.60, N * 0.40, a))))
+    sig_long  = safe_stdev(ret, int(math.round(lerp(N * 2.00, N * 1.20, a))))
+    vol_ratio = safe_div(sig_short, sig_long)
+    shock_gate = 1.0 / (1.0 + math.max(0.0, vol_ratio - 1.0))
+
+    // Score
+    mad     = mad_norm(tri_raw, L_norm)
+    gain    = lerp(1.00, 1.80, a)
+    score0  = (tri_raw + assist) * gate * shock_gate / math.max(mad, eps) * gain
+    smoothN = int(math.round(lerp(9, 3, a)))
+    score   = ta.ema(softclip(score0, 4.0), smoothN)
+
+    // Adaptive thresholds
+    sig_vol    = safe_stdev(score, L_adapt)
+    k_base     = lerp(0.85, 0.45, a)
+    mu_score   = ta.sma(score, L_adapt)
+    z_score    = (score - mu_score) / math.max(sig_vol, eps)
+    sk         = ta.sma(z_score * z_score * z_score, L_adapt)
+    tilt_long  = clamp(1.0 - 0.20 * math.max(sk,   0.0), 0.7, 1.1)
+    tilt_short = clamp(1.0 - 0.20 * math.max(-sk,  0.0), 0.7, 1.1)
+    th_long    =  k_base * sig_vol * tilt_long
+    th_short   = -k_base * sig_vol * tilt_short
+    [score, th_long, th_short, gate, shock_gate]
+
+// ========================= RUN TWO ENGINES
+[scoreL, thL_L, thS_L, gateL, shockL] = engine(base_len_L, aggr_L)
+[scoreS, thL_S, thS_S, gateS, shockS] = engine(base_len_S, aggr_S)
+
+// ========================= SIGNALS AND ORDERS
+allow_long  = entry_mode != "Short only"
+allow_short = entry_mode != "Long only"
+long_sig  = ta.crossover(scoreL,  thL_L)
+short_sig =  ta.crossunder(scoreS, thS_S)
+
+if long_sig
+    strategy.close("short")
+if short_sig
+    strategy.close("long")
+
+if (long_sig or long_sig[1]) and allow_long
+    strategy.entry("long", strategy.long)
+if short_sig and allow_short
+    strategy.entry("short", strategy.short)
+
+if(long_sig)
+    strategy.close("long")
+
+// // ========================= PLOTS
+// p0 = plot(0, "Zero", color=color.new(color.gray, 80))
+// pL = plot(scoreL, "Score LongEngine", color=color.new(color.teal, 0))
+// pS = plot(scoreS, "Score ShortEngine", color=color.new(color.red, 0))
+// fill(pL, p0, color=show_ribbon ? palette(scoreL) : na)
+
+// plot(show_trig ? thL_L : na, "TH Long from L",  color=color.new(color.teal,  40))
+// plot(show_trig ? thS_S : na, "TH Short from S", color=color.new(color.red,   40))
+
+// plot(show_aux ? gateL      : na, "Gate L",      color=color.new(color.yellow, 70))
+// plot(show_aux ? shockL     : na, "Shock L",     color=color.new(color.orange, 70))
+// plot(show_aux ? gateS      : na, "Gate S",      color=color.new(color.yellow, 80))
+// plot(show_aux ? shockS     : na, "Shock S",     color=color.new(color.orange, 80))
+
+// plotshape(show_sign and long_sig,  "Long",  shape.triangleup,   location.bottom, color=color.new(color.teal,0), size=size.tiny, text="L")
+// plotshape(show_sign and short_sig, "Short", shape.triangledown, location.top,    color=color.new(color.red,0),  size=size.tiny, text="S")
+ 
+// ========================= GROUP
+group_risk = "Complementary Risk Engine"
+
+// ========================= RISK INPUTS
+risk_enabled     = input.bool(false,  "Enable risk engine", group=group_risk, tooltip="Adds TP/SL, breakeven, trailing. Works alongside your existing closes.")
+atr_anchor_tf    = input.string("W", "ATR anchor TF", options=["D","W","M"], group=group_risk, tooltip="Base timeframe for ATR distances (D/W/M).")
+atr_len_r        = input.int(14,     "ATR length (anchor)", minval=2, group=group_risk)
+sl_mult          = input.float(1.50, "Stop × ATR", minval=0.1, step=0.05, group=group_risk)
+use_tp           = input.bool(true,  "Use take-profit", group=group_risk)
+tp_r_mult        = input.float(2.00, "TP in R (×SL)", minval=0.25, step=0.25, group=group_risk)
+use_breakeven    = input.bool(true,  "Move to breakeven at R ≥", group=group_risk)
+be_trigger_r     = input.float(1.00, "Breakeven trigger (R)", minval=0.25, step=0.25, group=group_risk)
+
+
+
+// ========================= HELPERS (NO LOOK-AHEAD)
+anchor_tf_to_tv(tf) => tf == "D" ? "1D" : tf == "W" ? "1W" : "1M"
+atr_anchor = request.security(syminfo.tickerid, anchor_tf_to_tv(atr_anchor_tf), ta.atr(atr_len_r),
+                              gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off) // MTF ATR anchor :contentReference[oaicite:5]{index=5}
+atr_curr   = ta.atr(atr_len_r)  // chart-TF ATR for trailing
+
+// ========================= LIVE STATE
+var float stop_long  = na
+var float stop_short = na
+var float tp_long    = na
+var float tp_short   = na
+
+in_long   = strategy.position_size > 0
+in_short  = strategy.position_size < 0
+entered_l = in_long  and strategy.position_size[1] <= 0
+entered_s = in_short and strategy.position_size[1] >= 0
+flat_now  = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+if flat_now
+    stop_long := na, tp_long := na, stop_short := na, tp_short := na
+
+// Init on fills
+if entered_l
+    dist     = atr_anchor * sl_mult
+    entry    = strategy.position_avg_price
+    stop_long := entry - dist
+    tp_long   := use_tp ? entry + dist * tp_r_mult : na
+
+if entered_s
+    dist      = atr_anchor * sl_mult
+    entry     = strategy.position_avg_price
+    stop_short := entry + dist
+    tp_short   := use_tp ? entry - dist * tp_r_mult : na
+
+// Dynamic updates per bar
+if in_long and risk_enabled
+    entry   = strategy.position_avg_price
+    dist    = atr_anchor * sl_mult
+    rr_up   = (close - entry) / math.max(dist, eps)
+    // Breakeven
+    if use_breakeven and rr_up >= be_trigger_r
+        stop_long := math.max(stop_long, entry)
+
+    // Apply exits tied to ID "long"
+    strategy.exit("RISK-L", from_entry="long", stop=stop_long, limit=tp_long)            // bracket exits     :contentReference[oaicite:6]{index=6}
+
+if in_short and risk_enabled
+    entry   = strategy.position_avg_price
+    dist    = atr_anchor * sl_mult
+    rr_dn   = (entry - close) / math.max(dist, eps)
+    // Breakeven
+    if use_breakeven and rr_dn >= be_trigger_r
+        stop_short := math.min(stop_short, entry)
+
+    // Apply exits tied to ID "short"
+    strategy.exit("RISK-S", from_entry="short", stop=stop_short, limit=tp_short)         // bracket exits     :contentReference[oaicite:7]{index=7}
+
+View in Pine Editor・271 lines
+Use on chart
+5
+2
+1 689
+Summary in one paragraph
+FluxGate treats long and short as different ecosystems. It runs two independent engines so the long side can be bold when the tape rewards upside persistence while the short side can stay selective when downside is messy. The core reads three directional drivers from price geometry then removes overlap before gating with clean path checks. The complementary risk module anchors stop distance to a higher timeframe ATR so a unit means the same thing on SPY and BTC. It can add take profit breakeven and an ATR trail that only activates after the trade earns it. If a stop is hit the strategy can re enter in the same direction on the next bar with a daily retry cap that you control. Add it to a clean chart. Use defaults to see the intended behavior. For conservative workflows evaluate on bar close.
+
+Scope and intent
+• Markets. Large cap equities and liquid ETFs major FX pairs US index futures and liquid crypto pairs
+• Timeframes. From one minute to daily
+• Default demo in this publication. SPY on one day timeframe
+• Purpose. Reduce false starts without missing sustained trends by fusing independent drivers and suppressing activity when the path is noisy
+• Limits. This is a strategy. Orders are simulated on standard candles. Non standard chart types are not supported for execution
+
+Originality and usefulness
+• Unique fusion. FluxGate extracts three drivers that look at price from different angles. Direction measures slope of a smoothed guide and scales by realized volatility so a point of slope does not mean a different thing on different symbols. Persistence looks at short sign agreement to reward series of closes that keep direction. Curvature measures the second difference of a local fit to wake up during convex pushes. These three are then orthonormalized so a strong reading in one does not double count through another.
+• Gates that matter. Efficiency ratio prefers direct paths over treadmills. Entropy turns up versus down frequency into an information read. Light fractal cohesion punishes wrinkly paths. Together they slow the system in chop and allow it to open up when the path is clean.
+• Separate long and short engines. Threshold tilts adapt to the skew of score excursions. That lets long engage earlier when upside distribution supports it and keeps short cautious where downside surprise and venue frictions are common.
+• Practical risk behavior. Stops are ATR anchored on a higher timeframe so the unit is portable. Take profit is expressed in R so two R means the same concept across symbols. Breakeven and trailing only activate after a chosen R so early noise does not squeeze a good entry. Re entry after stop lets the system try again without you babysitting the chart.
+• Testability. Every major window and the aggression controls live in Inputs. There is no hidden magic number.
+
+
+Method overview in plain language
+Base measures
+• Return basis. Natural log of close over prior close for stability and easy aggregation through time. Realized volatility is the standard deviation of returns over a moving window.
+• Range basis for risk. ATR computed on a higher timeframe anchor such as day week or month. That anchor is steady across venues and avoids chasing chart specific quirks.
+
+Components
+• Directional intensity. Use an EMA of typical price as a guide. Take the day to day slope as raw direction. Divide by realized volatility to get a unit free measure. Soft clip to keep outliers from dominating.
+• Persistence. Encode whether each bar closed up or down. Measure short sign agreement so a string of higher closes scores better than a jittery sequence. This favors push continuity without guessing tops or bottoms.
+• Curvature. Fit a short linear regression and compute the second difference of the fitted series. Strong curvature flags acceleration that slope alone may miss.
+• Efficiency gate. Compare net move to path length over a gate window. Values near one indicate direct paths. Values near zero indicate treadmill behavior.
+• Entropy gate. Convert up versus down frequency into a probability of direction. High entropy means coin toss. The gate narrows there.
+• Fractal cohesion. A light read of path wrinkliness relative to span. Lower cohesion reduces the urge to act.
+• Phase assist. Map price inside a recent channel to a small signed bias that grows with confidence. This helps entries lean toward the right half of the channel without becoming a breakout rule.
+• Shock control. Compare short volatility to long volatility. When short term volatility spikes the shock gate temporarily damps activity so the system waits for pressure to normalize.
+
+Fusion rule
+• Normalize the three drivers after removing overlap
+• Blend with weights that adapt to your aggression input
+• Multiply by the gates to respect path quality
+• Smooth just enough to avoid jitter while keeping timing responsive
+• Compute an adaptive mean and deviation of the score and set separate long and short thresholds with a small tilt informed by skew sign
+• The result is one long score and one short score that can cross their thresholds at different times for the same tape which is a feature not a bug
+
+Signal rule
+• A long suggestion appears when the long score crosses above its long threshold while all gates are active
+• A short suggestion appears when the short score crosses below its short threshold while all gates are active
+• If any required gate is missing the state is wait
+• When a position is open the status is in long or in short until the complementary risk engine exits or your entry mode closes and flips
+
+
+Inputs with guidance
+
+Setup Long
+• Base length Long. Master window for the long engine. Typical range twenty four to eighty. Raising it improves selectivity and reduces trade count. Lowering it reacts faster but can increase noise
+• Aggression Long. Zero to one. Higher values make thresholds more permissive and shorten smoothing
+
+Setup Short
+• Base length Short. Master window for the short engine. Typical range twenty eight to ninety six
+• Aggression Short. Zero to one. Lower values keep shorts conservative which is often useful on upward drifting symbols
+
+Entries and UI
+• Entry mode. Both or Long only or Short only
+
+Complementary risk engine
+• Enable risk engine. Turns on bracket exits while keeping your signal logic untouched
+• ATR anchor timeframe. Day Week or Month. This sets the structural unit of stop distance
+• ATR length. Default fourteen
+• Stop multiple. Default one point five times the anchor ATR
+• Use take profit. On by default
+• Take profit in R. Default two R
+• Breakeven trigger in R. Default one R
+
+
+Usage recipes
+
+Intraday trend focus
+• Entry mode Both
+• ATR anchor Week
+• Aggression Long zero point five Aggression Short zero point three
+• Stop multiple one point five Take profit two R
+• Expect fewer trades that stick to directional pushes and skip treadmill noise
+
+Intraday mean reversion focus
+• Session windows optional if you add them in your copy
+• ATR anchor Day
+• Lower aggression both sides
+• Breakeven later and trailing later so the first bounce has room
+• This favors fade entries that still convert into trends when the path stays clean
+
+Swing continuation
+• Signal timeframe four hours or one day
+• Confirm timeframe one day if you choose to include bias
+• ATR anchor Week or Month
+• Larger base windows and a steady two R target
+• This accepts fewer entries and aims for larger holds
+
+
+Properties visible in this publication
+• Initial capital 25.000
+• Base currency USD
+• Default order size percent of equity value three - 3% of the total capital
+• Pyramiding zero
+• Commission zero point zero three percent - 0.03% of total capital
+• Slippage five ticks
+• Process orders on close off
+• Recalculate after order is filled off
+• Calc on every tick off
+• Bar magnifier off
+• Any request security calls use lookahead off everywhere
+
+Realism and responsible publication
+• No performance promises. Past results never guarantee future outcomes
+• Fills and slippage vary by venue and feed
+• Strategies run on standard candles only
+• Shapes can update while a bar is forming and settle on close
+• Keep risk per trade sensible. Around one percent is typical for study. Above five to ten percent is rarely sustainable
+
+Honest limitations and failure modes
+• Sudden news and thin liquidity can break assumptions behind entropy and cohesion reads
+• Gap heavy symbols often behave better with a True Range basis for risk than a simple range
+• Very quiet regimes can reduce score contrast. Consider longer windows or higher thresholds when markets sleep
+• Session windows follow the exchange time of the chart if you add them
+• If stop and target can both be inside a single bar this strategy prefers stop first to keep accounting conservative
+
+Open source reuse and credits
+• No reused open source beyond public domain building blocks such as ATR EMA and linear regression concepts
+
+Legal
+Education and research only. Not investment advice. You are responsible for your decisions. Test on history and in simulation with realistic costs

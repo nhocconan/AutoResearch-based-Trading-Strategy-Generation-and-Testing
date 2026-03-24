@@ -1,0 +1,109 @@
+//@version=5
+strategy("Volatility Trend Follower", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ═══════════════════════════════════════════════════════════════
+// PARAMÈTRES UTILISATEUR
+// ═══════════════════════════════════════════════════════════════
+multiplier      = input.float(2.0,   "Multiplicateur Volatilité", minval=0.5, maxval=5, step=0.1)
+volatilityLen   = input.int(14,      "Période Volatilité", minval=1)
+trendFilterLen  = input.int(100,     "Période Filtre Tendance", minval=10)
+useHeikinAshi   = input.bool(false,  "Utiliser Heikin Ashi")
+useTrendFilter  = input.bool(true,   "Activer Filtre Tendance")
+
+// ═══════════════════════════════════════════════════════════════
+// CALCUL DE LA SOURCE DE PRIX
+// ═══════════════════════════════════════════════════════════════
+haClose = request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close)
+priceSource = useHeikinAshi ? haClose : close
+
+// ═══════════════════════════════════════════════════════════════
+// INDICATEUR DE VOLATILITÉ (bande dynamique)
+// ═══════════════════════════════════════════════════════════════
+volatility = ta.atr(volatilityLen)
+bandDistance = multiplier * volatility
+
+// ═══════════════════════════════════════════════════════════════
+// BANDE ADAPTATIVE (trailing)
+// ═══════════════════════════════════════════════════════════════
+var float adaptiveBand = na
+var int currentDirection = 0
+
+upperBand = priceSource + bandDistance
+lowerBand = priceSource - bandDistance
+
+if na(adaptiveBand)
+    adaptiveBand := lowerBand
+    currentDirection := 1
+else
+    if currentDirection == 1
+        adaptiveBand := math.max(adaptiveBand, lowerBand)
+        if priceSource < adaptiveBand
+            adaptiveBand := upperBand
+            currentDirection := -1
+    else
+        adaptiveBand := math.min(adaptiveBand, upperBand)
+        if priceSource > adaptiveBand
+            adaptiveBand := lowerBand
+            currentDirection := 1
+
+// ═══════════════════════════════════════════════════════════════
+// FILTRE DE TENDANCE GLOBAL
+// ═══════════════════════════════════════════════════════════════
+trendLine = ta.ema(priceSource, trendFilterLen)
+bullishTrend = priceSource > trendLine
+bearishTrend = priceSource < trendLine
+
+// ═══════════════════════════════════════════════════════════════
+// DÉTECTION DES SIGNAUX
+// ═══════════════════════════════════════════════════════════════
+directionChanged = currentDirection != currentDirection[1]
+longSignal  = directionChanged and currentDirection == 1
+shortSignal = directionChanged and currentDirection == -1
+
+// Application du filtre de tendance
+validLong  = longSignal and (useTrendFilter ? bullishTrend : true)
+validShort = shortSignal and (useTrendFilter ? bearishTrend : true)
+
+// ═══════════════════════════════════════════════════════════════
+// AFFICHAGE
+// ═══════════════════════════════════════════════════════════════
+bandColor = currentDirection == 1 ? color.new(color.teal, 0) : color.new(color.maroon, 0)
+plot(adaptiveBand, "Bande Adaptative", color=bandColor, linewidth=2)
+plot(useTrendFilter ? trendLine : na, "Tendance", color=color.gray, linewidth=1)
+
+plotshape(validLong,  "Achat",  shape.triangleup,   location.belowbar, color.teal,   size=size.small)
+plotshape(validShort, "Vente",  shape.triangledown, location.abovebar, color.maroon, size=size.small)
+
+barcolor(currentDirection == 1 ? color.new(color.teal, 70) : color.new(color.maroon, 70))
+
+// ═══════════════════════════════════════════════════════════════
+// EXÉCUTION STRATÉGIE
+// ═══════════════════════════════════════════════════════════════
+if validLong
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+
+if validShort
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTES
+// ═══════════════════════════════════════════════════════════════
+alertcondition(validLong,  "Signal Achat",  "ACHAT_SIGNAL")
+alertcondition(validShort, "Signal Vente",  "VENTE_SIGNAL")
+
+View in Pine Editor・94 lines
+Use on chart
+2
+8
+929
+The script combines several classic technical analysis techniques:
+
+SuperTrend / Adaptive Band - The main idea comes from the SuperTrend indicator, which uses ATR (Average True Range) to create a trailing band that adapts to volatility
+
+ATR (Average True Range) - A volatility measure developed by J. Welles Wilder Jr.
+
+EMA (Exponential Moving Average) - Used as a global trend filter
+
+Heikin Ashi - An option to smooth prices and reduce noise

@@ -1,0 +1,290 @@
+//@version=6
+
+strategy(title = '1hr ichi v6', shorttitle = '1hr ichi', overlay = true)
+
+//  Periods
+conversionPeriods = input.int(32, minval = 1, title = 'Conversion Line Length')
+basePeriods = input.int(104, minval = 1, title = 'Base Line Length')
+laggingSpan2Periods = input.int(208, minval = 1, title = 'Lagging Span 2 Length')
+displacement = input.int(116, minval = 1, title = 'Displacement')
+stoplossperiod = input.int(240, minval = 1, title = 'stoplossperiod')
+
+donchian(len) =>
+    math.avg(ta.lowest(len), ta.highest(len))
+
+length3 = input.int(44, minval = 1)
+ci = 100 * math.log10(math.sum(ta.atr(1), length3) / (ta.highest(length3) - ta.lowest(length3))) / math.log10(length3)
+threshold = input.int(46, 'Chop Threshold', minval = 1, maxval = 90, step = 1)
+
+useStiffness = input(title = 'Use Stiffness?', defval = true)
+useBearish = input(title = 'Use Bearish', defval = false)
+useBullish = input(title = 'Use Bullish', defval = false)
+useChoppiness = input(true, 'Use Choppiness')
+
+maLengthStiffness = input.int(title = 'Moving Average Length - Stiffness', minval = 1, defval = 100)
+stiffLength = input.int(title = 'Stiffness Length', minval = 1, defval = 60)
+stiffSmooth = input.int(title = 'Stiffness Smoothing Length', minval = 1, defval = 20)
+thresholdStiffness = input.int(title = 'threshold - Stiffness', minval = 1, defval = 3)
+highlightThresholdCrossoversStiffness = input(title = 'Highlight threshold Stiffness Crossovers ?', defval = false)
+
+boundStiffness = ta.sma(close, maLengthStiffness) - 0.2 * ta.stdev(close, maLengthStiffness)
+sumAboveStiffness = math.sum(close > boundStiffness ? 1 : 0, stiffLength)
+stiffness = ta.ema(sumAboveStiffness * 100 / stiffLength, stiffSmooth)
+
+transparentStiffness = color.new(color.white, 100)
+
+bgColorStiffness = highlightThresholdCrossoversStiffness ? stiffness > thresholdStiffness ? color.new(#0ebb23, 70) : color.new(color.red, 70) : transparentStiffness
+
+
+signalStiffness = useStiffness ? stiffness > thresholdStiffness ? true : false : true
+
+// Build MA and Ichimoku
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = math.avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+stoploss = donchian(stoplossperiod)
+cloudGreen = leadLine1 > leadLine2
+cloudRed = leadLine2 > leadLine1
+closeAbvCloud = close > leadLine1[displacement] and close > leadLine2[displacement]
+closeBelowCloud = close < leadLine1[displacement] and close < leadLine2[displacement]
+LaggingSpan = close[laggingSpan2Periods]
+
+
+showDash = input.bool(true, title = 'Show Dashboard', group = 'Dashboard Options')
+colorDash = input.color(color.new(#696969, 80), title = 'Background Color', inline = 'Dash Colors', group = 'Dashboard Options')
+colorTextDash = input.color(color.new(#FFFFFF, 0), title = 'Text Color', inline = 'Dash Colors', group = 'Dashboard Options')
+distance = input.int(30, title = 'Bars Distance (to rigth)', minval = -1000, group = 'Dashboard Options')
+
+showSignals = input.bool(true, title = 'Show Signals (long/short)', group = 'Extra Options')
+showTargets = input.bool(true, title = 'Show Targets (Profit/Loss)', group = 'Extra Options')
+
+var long = false
+var short = false
+var signalLong = false
+var signalShort = false
+
+//LONG 
+conAbvBase = conversionLine > baseLine
+lagSpanAbvCloud = close > leadLine1[displacement * 2] and close > leadLine2[displacement * 2]
+conditionLong = not long and conAbvBase and cloudGreen and closeAbvCloud and lagSpanAbvCloud
+
+//SHORT
+conBlwBase = conversionLine < baseLine
+closeBlwCloud = close < leadLine1[displacement] and close < leadLine2[displacement]
+lagSpanBlwCloud = close < leadLine1[displacement * 2] and close < leadLine2[displacement * 2]
+conditionShort = not short and conBlwBase and cloudRed and closeBlwCloud and lagSpanBlwCloud
+
+if ta.cross(conversionLine, baseLine)
+    alert('Tenkan crossing Kijun', alert.freq_once_per_bar_close)
+
+var drawing = false
+var waitingLong = false
+var waitingShort = false
+var profit = 0.0
+var current = 0.1
+var loss = 0.0
+var pullPrice = 0.0
+var longStopPrice = 0.0
+var crossover = false
+var crossunder = false
+
+if conditionLong
+    long := true
+    short := false
+    signalLong := true
+    signalShort := false
+    drawing := true
+    drawing
+
+if conditionShort
+    short := true
+    long := false
+    signalShort := true
+    signalLong := false
+    drawing := true
+    drawing
+
+decision(condition) =>
+    var text_1 = ''
+    if condition
+        text_1 := '🟢'
+        text_1
+    else
+        text_1 := '🔴'
+        text_1
+
+position = time + (time - time[1]) * distance
+PandL = signalLong ? (open - current) / current * 100 : signalShort ? (open - current) / current * 100 * -1 : 0.0
+
+if showDash
+    label dashBoard = label.new(position, open, text = '-----------Long conditions-----------' + '\n\n' + decision(conAbvBase) + ' Conversion line above base line' + '\n\n' + decision(cloudGreen) + ' Cloud is green' + '\n\n' + decision(closeAbvCloud) + ' Price closed above cloud' + '\n\n' + decision(lagSpanAbvCloud) + ' Lagging span above cloud' + '\n\n-----------Short conditions-----------' + '\n\n' + decision(conBlwBase) + ' Conversion line below base line' + '\n\n' + decision(cloudRed) + ' Cloud is red' + '\n\n' + decision(closeBlwCloud) + ' Price closed below cloud' + '\n\n' + decision(lagSpanBlwCloud) + ' Lagging span below cloud' + str.tostring(PandL), xloc = xloc.bar_time, textalign = text.align_left, style = label.style_label_left, color = colorDash, textcolor = colorTextDash)
+    label.delete(dashBoard[1])
+
+
+
+
+// Plot CROSS at MA Cross Over 
+plot(ta.crossover(conversionLine, baseLine) ? conversionLine : na, style = plot.style_cross, color = #fafafa, linewidth = 6, title = 'Long')
+
+// Plot CROSS at MA Cross Under 
+plot(ta.crossover(baseLine, conversionLine) ? baseLine : na, style = plot.style_cross, color = color.rgb(255, 255, 0), linewidth = 6, title = 'Short')
+
+
+// Plot MA
+plot(conversionLine, color = color.rgb(91, 189, 255), title = 'Tenkan', linewidth = 2)
+plot(baseLine, color = #293fff, title = 'Kijun', linewidth = 2)
+plot(close, offset = -displacement, color = color.rgb(156, 128, 21, 20), title = 'Lagging Span')
+
+// Plot Cloud
+p1 = plot(leadLine1, offset = displacement - 1, color = color.rgb(1, 140, 17, 0), title = 'Lead 1')
+p2 = plot(leadLine2, offset = displacement - 1, color = color.rgb(201, 0, 0, 0), title = 'Lead 2')
+
+// Color Fill Cloud
+fill(p1, p2, color = leadLine1 > leadLine2 ? color.rgb(1, 250, 17, 85) : color.rgb(68, 0, 0, 55))
+
+len1 = input.int(60, minval = 1, title = 'SMA #1')
+src1 = input(close, title = 'SMA Source #1')
+out1 = ta.sma(src1, len1)
+plot(out1, title = 'SMA #1', color = color.orange)
+
+len2 = input.int(120, minval = 1, title = 'SMA #2')
+src2 = input(close, title = 'SMA Source #2')
+out2 = ta.sma(src2, len2)
+plot(out2, title = 'SMA #2', color = #0084ff)
+
+len3 = input.int(700, minval = 1, title = 'SMA #3')
+src3 = input(close, title = 'SMA Source #3')
+out3 = ta.sma(src3, len3)
+roc3 = ta.roc(out3, 1)
+plot(out3, title = 'SMA #3', color = color.rgb(255, 0, 157))
+//plot(stoploss, title="stoploss", color=color.white)
+
+lookback1 = input(1, 'Lookback 1')
+malen1 = input(60, 'MA Length')
+type1 = input.string('EMA', '1st MA Type', options = ['SMA', 'EMA', 'HMA', 'VWMA', 'LSMA'])
+f_hma(_src, _length) =>
+    _return = ta.wma(2 * ta.wma(_src, _length / 2) - ta.wma(_src, _length), math.round(math.sqrt(_length)))
+    _return
+price = close
+price1 = if type1 == 'SMA'
+    ta.sma(price, malen1)
+else
+    if type1 == 'EMA'
+        ta.ema(price, malen1)
+    else
+        if type1 == 'VWMA'
+            ta.vwma(price, malen1)
+        else
+            if type1 == 'LSMA'
+                ta.linreg(price, malen1, 0)
+            else
+                f_hma(price, malen1)
+
+
+roc1 = ta.roc(price1, lookback1) * 100
+//plot(roc1, "slope", color.maroon)
+
+// STEP 1:
+// Configure trail stop level with input options (optional)
+TrailType = input.string('Percent', title = 'Trigger', options = ['Percent', 'ATR'])
+CurrentATR = ta.atr(10)
+longTrailPerc = input.float(1.6, title = 'Trail Long Loss (%)', minval = 0.0, step = 0.1) * 0.01
+
+shortTrailPerc = input.float(1.6, title = 'Trail Short Loss (%)', minval = 0.0, step = 0.1) * 0.01
+
+
+LongTrailATR = input.float(1, title = 'Trail Long Loss (ATR)', minval = 0.1, step = 0.1)
+ShortTRailATR = input.float(1, title = 'trail Short Loss (ATR)', minval = 0.1, step = 0.1)
+
+
+// STEP 2:
+// Determine trail stop loss prices
+shortStopPrice = 0.0
+
+longStopPrice := if strategy.position_size > 0
+    if TrailType == 'Percent'
+        stopValue = close * (1 - longTrailPerc)
+        math.max(stopValue, longStopPrice[1])
+    else
+        stopValue = close - LongTrailATR * CurrentATR
+        math.max(stopValue, longStopPrice[1])
+else
+    0
+
+shortStopPrice := if strategy.position_size < 0
+    if TrailType == 'Percent'
+        stopValue = close * (1 + shortTrailPerc)
+        math.min(stopValue, shortStopPrice[1])
+    else
+        stopValue = close + ShortTRailATR * CurrentATR
+        math.min(stopValue, shortStopPrice[1])
+else
+    999999
+
+var bullish = false
+var bearish = false
+var Choppiness = false
+
+if ta.crossover(conversionLine, baseLine)
+    crossover := true
+    crossover
+
+else
+    crossover := false
+    crossover
+
+if ta.crossunder(conversionLine, baseLine)
+    crossunder := true
+    crossunder
+
+else
+    crossunder := false
+    crossunder
+if useBullish
+    bullish := ta.crossover(conversionLine, out1)
+    bullish
+
+if useChoppiness
+    Choppiness := true
+    Choppiness
+
+if useBearish
+    bearish := ta.crossunder(conversionLine, leadLine2[displacement]) and closeBlwCloud // and roc1 < -4
+    bearish
+
+else
+    bearish := false
+    bearish
+
+
+// Plot stop loss values for confirmation
+plot(strategy.position_size > 0 ? longStopPrice : na, color = color.fuchsia, style = plot.style_steplinebr, linewidth = 1, title = 'Long Trail Stop')
+
+plot(strategy.position_size < 0 ? shortStopPrice : na, color = color.fuchsia, style = plot.style_steplinebr, linewidth = 1, title = 'Short Trail Stop')
+//buy_signal = ((crossover and cloudGreen and roc1 > 0 and closeAbvCloud and signalStiffness) or (bullish and closeAbvCloud)) and ci > threshold// or (crossover and closeAbvCloud)//and LaggingSpan > leadLine1
+buy_signal = conAbvBase and cloudGreen and closeAbvCloud and lagSpanAbvCloud // and signalStiffness)// or (bullish and closeAbvCloud)) and ci > threshold// or (crossover and closeAbvCloud)//and LaggingSpan > leadLine1
+sell_signal = crossunder and cloudRed and closeBelowCloud and roc3 < 0 //and signalStiffness and roc1 < -3)
+//sell_signal = (conBlwBase and cloudRed and closeBelowCloud and lagSpanBlwCloud)
+
+if buy_signal
+    strategy.entry('Buy', strategy.long)
+
+if sell_signal
+    strategy.entry('Sell', strategy.short)
+    // STEP 3:
+    // Submit exit orders for trail stop loss price
+if strategy.position_size > 0 and crossunder
+    strategy.exit('XL TRL STP', stop = longStopPrice)
+    //strategy.exit("long close", stop = close)
+if strategy.position_size < 0 //and crossover
+    strategy.exit('XS TRL STP', stop = shortStopPrice)
+
+View in Pine Editor・285 lines
+Use on chart
+3
+2
+1 123
+Ichimoku adapted to a 1hr chart
+Set margin for positions to "0"
+Adjust the number of contracts to the maximum drawdown you will accept. I use 11-13%

@@ -1,0 +1,129 @@
+//@version=5
+strategy("Sniper V4: Liquidity & Fast Exhaustion", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// --- 1. INPUTS ---
+rsiLen     = input.int(14, "RSI Period")
+volMult    = input.float(1.2, "Volume Sensitivity")
+expireBar  = input.int(12, "Entry Window (12 Candles)")
+liqLookback = input.int(20, "Liquidity Pool Lookback") // Bars to find swing high/low
+
+// --- 2. INDICATORS ---
+rsi    = ta.rsi(close, rsiLen)
+volAvg = ta.sma(volume, 20)
+
+// --- 3. LIQUIDITY POOL DETECTION ---
+// Identify recent major Swing Highs and Lows (Liquidity Pools)
+poolHigh = ta.highest(high, liqLookback)[1]
+poolLow  = ta.lowest(low, liqLookback)[1]
+
+// A "Liquidity Grab" happens when price sweeps the pool and returns
+isBullGrab = low < poolLow and close > poolLow
+isBearGrab = high > poolHigh and close < poolHigh
+
+// --- 4. EXHAUSTION & READY STATE ---
+// Bullish: RSI low + Vol Spike + Liquidity Grab (The Bottom)
+bullExhaustion = (rsi < 35) and (volume > volAvg * volMult) and (low < low[1] or isBullGrab)
+// Bearish: RSI high + Vol Spike + Liquidity Grab (The Top)
+bearExhaustion = (rsi > 65) and (volume > volAvg * volMult) and (high > high[1] or isBearGrab)
+
+var int lastBullBar = 0
+var int lastBearBar = 0
+if bullExhaustion
+    lastBullBar := bar_index
+if bearExhaustion
+    lastBearBar := bar_index
+
+bullActive = (bar_index - lastBullBar <= expireBar) and lastBullBar != 0
+bearActive = (bar_index - lastBearBar <= expireBar) and lastBearBar != 0
+
+// --- 5. ENTRY LOGIC (Confirmation) ---
+longSignal  = bullActive and ta.crossover(close, high[1]) and rsi > rsi[1] and strategy.position_size == 0
+shortSignal = bearActive and ta.crossunder(close, low[1]) and rsi < rsi[1] and strategy.position_size == 0
+
+// --- 6. INSTANT EXHAUSTION EXITS ---
+// Reverted to exit IMMEDIATELY upon seeing the next exhaustion diamond
+closeLongSignal  = bearExhaustion and strategy.position_size > 0
+closeShortSignal = bullExhaustion and strategy.position_size < 0
+
+// --- 7. EXECUTION ---
+if longSignal
+    strategy.entry("Long", strategy.long, comment="L-ENTRY")
+    lastBullBar := 0 
+
+if shortSignal
+    strategy.entry("Short", strategy.short, comment="S-ENTRY")
+    lastBearBar := 0
+
+if closeLongSignal
+    strategy.close("Long", comment="EXIT AT TOP")
+
+if closeShortSignal
+    strategy.close("Short", comment="EXIT AT BOTTOM")
+
+// --- 8. VISUALS ---
+// Plot Liquidity Pools
+plot(poolHigh, "Liquidity Top", color=color.new(color.red, 60), style=plot.style_linebr)
+plot(poolLow, "Liquidity Bottom", color=color.new(color.green, 60), style=plot.style_linebr)
+
+// Background Ready State
+bgcolor(bullActive and strategy.position_size == 0 ? color.new(color.green, 92) : na)
+bgcolor(bearActive and strategy.position_size == 0 ? color.new(color.red, 92) : na)
+
+// Exhaustion Diamonds & Signals
+plotshape(bullExhaustion, "Bull Exhaustion", shape.diamond, location.belowbar, color.yellow, size=size.tiny)
+plotshape(bearExhaustion, "Bear Exhaustion", shape.diamond, location.abovebar, color.orange, size=size.tiny)
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.green, size=size.small, text="LONG")
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.small, text="SHORT")
+plotshape(closeLongSignal, "Close L", shape.labeldown, location.abovebar, color.fuchsia, size=size.small, text="EXIT L")
+plotshape(closeShortSignal, "Close S", shape.labelup, location.belowbar, color.aqua, size=size.small, text="EXIT S")
+
+View in Pine Editor・78 lines
+Use on chart
+4
+4
+1 117
+Mar 2
+1. The "Exhaustion" Phase (The Warning)
+The strategy first looks for a Yellow or Orange Diamond. This isn't a signal to buy yet; it’s a warning that the current trend is dying.
+
+The Logic: It looks for a massive spike in volume combined with an "over-extended" RSI.
+
+The Visual: Imagine a car slamming on its brakes at high speed. The tires smoke (Volume Spike), and the car skids (RSI Oversold).
+
+The Filter: This prevents you from entering a trade when the market is "boring" or slowly drifting. You only care about the moments of peak panic or peak euphoria.
+
+2. The "Locked & Loaded" Window (The 12-Candle Rule)
+Once that "Exhaustion" diamond appears, the chart background changes color. The strategy is now hunting for a trade.
+
+The Logic: It gives the market exactly 12 candles to prove it can reverse.
+
+Why 12? If the market doesn't reverse within 12 candles, the "exhaustion" was just a pause, and the old trend is likely to continue. This rule keeps you out of "dead zones" where the price just goes sideways.
+
+3. The "Trigger" (The Fast Entry)
+This is where the strategy beats traditional indicators. It doesn't wait for a fancy moving average crossover.
+
+The Logic: As soon as a candle closes above the high of the previous candle (for a Long) or below the low (for a Short), it enters.
+
+The Goal: It gets you in at the absolute "bend" of the trend. By the time most traders see a trend change, this strategy is already in profit.
+
+4. The "Ride" (The Exit)
+This strategy is not about "scalping" small profits. It is designed to stay in the trade as long as the trend is healthy.
+
+The Exit Rule: It only closes the trade if:
+
+Opposite Exhaustion: It sees the same "panic" signal happening on the other side (The Target).
+
+Trend Break: The price closes on the wrong side of the 50 EMA (The Safety Net).
+
+The Result: This allows you to "Ride the Wave" during massive moon-shots or market crashes, often staying in a single trade for days on the 4H chart.
+
+Why It’s "Adaptive"
+Because it uses standard deviations for volume and previous candle breaks for entry, it behaves correctly whether you are looking at a 15-minute chart (fast day trading) or a Daily chart (long-term investing). It scales its "expectations" based on the timeframe you choose.
+
+Summary in one sentence: "We wait for the sellers to get exhausted, wait for the buyers to step in and break one high, and then we hold until the buyers get tired too."
+Mar 2
+Release Notes
+Updated with faster close and entry
+Mar 2
+Release Notes
+Update V3

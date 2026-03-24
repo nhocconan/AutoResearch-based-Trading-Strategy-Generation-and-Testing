@@ -1,0 +1,74 @@
+//@version=3
+strategy("Moving Average Strategy of BiznesFilosof", shorttitle="MAS of BiznesFilosof", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=20, commission_type=strategy.commission.percent, commission_value=0.15, pyramiding=0)
+
+//Period
+startY = input(title="Start Year", defval = 2011, type=integer)
+startM = input(title="Start Month", defval = 1, type=integer, minval = 1, maxval = 12)
+startD = input(title="Start Day", defval = 1, type=integer, minval = 1, maxval = 31)
+finishY = input(title="Finish Year", defval = 2050, type=integer)
+finishM = input(title="Finish Month", defval = 12, type=integer, minval = 1, maxval = 12)
+finishD = input(title="Finish Day", defval = 31, type=integer, minval = 1, maxval = 31)
+//finish = input(2019, 02, 28, 00, 00)
+timestart = timestamp(startY, startM, startD, 00, 00)
+timefinish = timestamp(finishY, finishM, finishD, 23, 59)
+window = time >= timestart and time <= timefinish ? true : false // Lenghth strategy
+
+lma1 = input(title="Length MA1", defval = 21, type=integer, minval=1)
+exponential1 = input(false, title="exponential")
+lma2 = input(title="Length MA2", defval = 1, type=integer, minval=1)
+exponential2 = input(false, title="exponential")
+lbars = input(title="Length bars close", defval = 0, type=integer, minval=0)
+short = input(false, title="Short off")
+long = input(false, title="Long off")
+
+ma1 = exponential1 ? ema(close, lma1) : sma(close, lma1)
+ma2 = exponential2 ? ema(close, lma2) : sma(close, lma2)
+
+//source = close
+source = ma2
+
+//open
+strategy.entry("LongEntryID", strategy.long, comment="LONG", when = crossover(ma2, ma1) and window and long == false)
+strategy.entry("ShortEntryID", strategy.short, comment="SHORT", when = crossunder(ma2, ma1) and window and short == false)
+strategy.close_all(when = crossover(ma2, ma1) and window and long == true)
+strategy.close_all(when = crossunder(ma2, ma1) and window and short == true)
+
+if crossunder(source, ma1) and strategy.position_size > 0
+    strategy.close_all()
+if crossunder(ma2[lbars], ma1[lbars]) and strategy.position_size > 0 and lbars != 0
+    strategy.close_all()    
+if crossover(source, ma1) and strategy.position_size < 0
+    strategy.close_all()
+if crossover(ma2[lbars], ma1[lbars]) and strategy.position_size < 0 and lbars != 0
+    strategy.close_all()      
+
+src = close
+src1 = high
+src2 = low
+maH = exponential1 ? ema(src1, lma1) : sma(src1, lma1)
+maL = exponential1 ? ema(src2, lma1) : sma(src2, lma1)
+maColor = src>maH ? green : src<maL ? red : blue
+
+plot(ma1, title="MA1", color=maColor, linewidth=2, style=line)
+plot(ma2, title="MA2", color=gray, linewidth=1, style=line)
+
+View in Pine Editor・53 lines
+Use on chart
+8
+1
+6
+7
+10 921
+May 20, 2019
+What is brilliant is simple! Therefore, this strategy works very well. It is configured on bitcoin. But you can use it for other tools. Only need to change the settings.
+Remember that this is not a panacea, but only an assistant! You yourself have to choose which entry and exit points to choose.
+In more detail about strategy on my channel in YouTube.
+===
+Что гениально, то просто! Потому, эта стратегия очень хорошо работает. Настроена она на биткоин. Но можно использовать и для других инструментов. Только нужно поменять настройки.
+Помните, что это не панацея, а только помощник! Вы сами должны панимать, какие выбирать точки входа и выхода.
+Более подробно про стратегию на моём канале в Ютуб.
+Jun 1, 2019
+Release Notes
+Added the ability to disable short and long positions. Subscribers requested to do this.
+===
+Добавил возможность отключать короткие и длинные позиции. Подписчики просили это сделать.

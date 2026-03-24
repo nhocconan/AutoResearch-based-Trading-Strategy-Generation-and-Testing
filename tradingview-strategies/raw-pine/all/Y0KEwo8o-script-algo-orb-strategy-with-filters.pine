@@ -1,0 +1,195 @@
+//@version=5
+strategy("Script_Algo - ORB Strategy with Filters", overlay=true, default_qty_type=strategy.fixed, default_qty_value=10, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// Author: Script_Algo
+// License: MIT
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+
+// SuperTrend parameters
+atrPeriod = input.int(11, "ATR Period", minval=1)
+factor = input.float(2.0, "Factor", step=0.1)
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+// SuperTrend visualization
+plot(supertrend, color=direction < 0 ? color.red : color.green, linewidth=2)
+
+// Time parameters for session opening
+h = input.int(9, "Hour", minval=0, maxval=23)
+m = input.int(30, "Minute", minval=0, maxval=59) // Default to US session open (9:30 EST)
+gmt = input.string("America/New_York", "GMT", options=["America/New_York", "Asia/Kolkata", "Europe/London"])
+orbLength = input.int(5, "ORB Candle Count", minval=1)
+
+// Volume filter
+volumeFilterEnabled = input.bool(true, "Enable Volume Filter")
+volumeLength = input.int(50, "Volume MA Period", minval=1)
+volumeMA = ta.sma(volume, volumeLength)
+volumeFilter = volume > volumeMA
+
+// ORB range calculation
+var float s_high = na
+var float s_low = na
+
+// Arrays to store high/low of ORB candles
+var highs = array.new_float(orbLength)
+var lows = array.new_float(orbLength)
+
+// Reset arrays at the start of new session
+if (hour(time, gmt) == h and minute(time, gmt) == m)
+    array.clear(highs)
+    array.clear(lows)
+    
+// Fill arrays with high/low values during ORB formation period
+if hour(time, gmt) >= h and minute(time, gmt) >= m and array.size(highs) < orbLength
+    array.push(highs, high)
+    array.push(lows, low)
+    
+// Calculate ORB range after collecting all required candles
+if array.size(highs) == orbLength
+    s_high := array.max(highs)
+    s_low := array.min(lows)
+
+plot(s_high, color=color.green, style=plot.style_cross)
+plot(s_low, color=color.red, style=plot.style_cross)
+
+// Entry conditions
+long_condition = close > s_high and close[1] <= s_high and close > open and direction < 0
+short_condition = close < s_low and close[1] >= s_low and close < open and direction > 0
+
+// Apply volume filter
+filtered_long_condition = volumeFilterEnabled ? (long_condition and volumeFilter) : long_condition
+filtered_short_condition = volumeFilterEnabled ? (short_condition and volumeFilter) : short_condition
+
+// Position management - FIXED: Added logic to close positions on opposite breakout
+in_long_position = strategy.position_size > 0
+in_short_position = strategy.position_size < 0
+
+// Exit conditions for opposite breakouts
+exit_long_condition = close < s_low
+exit_short_condition = close > s_high
+
+// Stop loss and take profit calculation
+stop_loss_long = s_low
+stop_loss_short = s_high
+risk_reward_ratio = input.float(3.0, "Risk/Reward Ratio")
+take_profit_long = close + (close - stop_loss_long) * risk_reward_ratio
+take_profit_short = close - (stop_loss_short - close) * risk_reward_ratio
+
+// Long entry (only if SuperTrend is bearish)
+if (filtered_long_condition and strategy.position_size == 0 and direction < 0)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Take Profit/Stop Loss Long", from_entry="Long", stop=stop_loss_long, limit=take_profit_long)
+
+// Short entry (only if SuperTrend is bullish)
+if (filtered_short_condition and strategy.position_size == 0 and direction > 0)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Take Profit/Stop Loss Short", from_entry="Short", stop=stop_loss_short, limit=take_profit_short)
+
+// Close positions on opposite breakout - NEW: Added explicit exit logic
+if (in_long_position and exit_long_condition)
+    strategy.close("Long", comment="Exit Long on Opposite Breakout")
+    
+if (in_short_position and exit_short_condition)
+    strategy.close("Short", comment="Exit Short on Opposite Breakout")
+
+View in Pine Editor・98 lines
+Use on chart
+3
+6
+5
+4
+7 062
+🔍 Core Concept: This strategy combines three powerful technical analysis tools: Range Breakout, the SuperTrend indicator, and a volume filter. Additionally, it features precise customization of the number of candles used to construct the breakout range, enabling optimized performance for specific assets.
+
+🎯 How It Works:
+
+The strategy defines a trading range at the beginning of the trading session based on a selected number of candles.
+
+It waits for a breakout above the upper or below the lower boundary of this range, requiring a candle close.
+
+It filters signals using the SuperTrend indicator for trend confirmation.
+
+It utilizes trading volume to filter out false breakouts.
+
+⚡ Strategy Features
+
+📈 Entry Points:
+Long: Candle close above the upper range boundary + SuperTrend confirmation
+
+Short: Candle close below the lower range boundary + SuperTrend confirmation
+
+🛡️ Risk Management:
+Stop-Loss: Set at the opposite range boundary.
+
+Take-Profit: Calculated based on a risk/reward ratio (3:1 by default).
+
+Position Size: 10 contracts (configurable).
+
+⚠️ IMPORTANT SETTINGS
+
+🕐 Time Parameters:
+
+Set the correct time and time zone!
+❕ATTENTION: The strategy works ONLY with correct time settings! Set the time corresponding to your location and trading session.
+
+📊 This strategy is optimized for trading TESLA stock!
+
+Parameters are tailored to TESLA's volatility, and trading volumes are adequate for signal filtering. Trading time corresponds to the American session.
+
+📈 If you look at the backtesting results, you can see that the strategy could potentially have generated about 70 percent profit on Tesla stock over six months on 5m timeframe. However, this does not guarantee that results will be repeated in the future; remain vigilant.
+
+⚠️ For other assets, the following is required:
+
+Testing and parameter optimization
+
+Adjustment of time intervals and the number of candles forming the range
+
+Calibration of stop-loss and take-profit levels
+
+⚠️ Limitations and Drawbacks
+🔗 Automation Constraints:
+❌ Cannot be directly connected via Webhook to CFD brokers!
+
+Additional IT solutions are required for automation, thus only manual trading based on signals is possible.
+
+📉 Risk Management:
+Do not risk more than 2-3% of your account per trade.
+
+Test on historical data before live use.
+
+Start with a demo account.
+
+💪 Strategy Advantages
+✅ Combined approach – multiple signal filters
+✅ Clear entry and exit rules
+✅ Visual signals on the chart
+✅ Volume-based false breakout filtering
+✅ Automatic position management
+
+🎯 Usage Recommendations
+
+Always test the strategy on historical data.
+
+Start with small trading volumes.
+
+Ensure time settings are correct.
+
+Adapt parameters to current market volatility.
+
+Use only for stocks – futures and Forex require adaptation.
+
+
+
+📚 Suitable Timeframes - M1-M15
+
+Only highly liquid stocks
+
+🍀 I wish all subscribers good luck in trading and steady profits!
+📈 May your charts move in the right direction!
+
+⚠️ Remember: Trading involves risk. Do not invest money you cannot afford to lose!

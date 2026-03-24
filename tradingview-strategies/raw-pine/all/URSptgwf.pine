@@ -1,0 +1,465 @@
+//@version=5
+strategy("SOFT Speed×Linearity Strategy (MTF) - LIVE + BACKTEST", shorttitle="SOFT SPEED×LIN STRAT", overlay=false,
+     calc_on_every_tick=true, process_orders_on_close=true, dynamic_requests=true,
+     initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.0)
+
+// =====================================================
+// MODE / MODE
+// =====================================================
+grp_mode = "Mode / Mode"
+modeRun = input.string("LIVE", "Execution mode / Mode d'exécution", options=["LIVE","BACKTEST"], group=grp_mode)
+bool isBacktestMode = (modeRun == "BACKTEST")
+
+// =====================================================
+// TIMEFRAME / UNITE DE TEMPS
+// =====================================================
+grp_tf = "Timeframe / Unité de temps"
+lockToChartTF = input.bool(false, "Lock analysis TF to chart TF / Verrouiller l'analyse sur le TF du graphique", group=grp_tf)
+tfInput = input.timeframe("15", "Analysis timeframe (MTF) / TF d'analyse (MTF)", group=grp_tf)
+
+// SAFE public rule: if chart TF < 15m, keep analysis TF = 15 even when locked
+int chartSec = timeframe.in_seconds(timeframe.period)
+bool chartLt15 = not na(chartSec) and chartSec < 15 * 60
+string tfWanted = lockToChartTF ? timeframe.period : tfInput
+string tfUse = (lockToChartTF and chartLt15) ? "15" : tfWanted
+bool analysisEqualsChart = (tfUse == timeframe.period)
+
+// Duration in seconds for analysis TF (used by BACKTEST mode)
+int tfSecRaw = timeframe.in_seconds(tfUse)
+int tfSec = na(tfSecRaw) ? 900 : tfSecRaw
+tfSec := math.max(tfSec, 1)
+
+// =====================================================
+// CORE / COEUR
+// =====================================================
+grp_core = "Core / Coeur"
+atrLen = input.int(14, "ATR length / Longueur ATR", minval=1, group=grp_core)
+minProgAtr = input.float(0.10, "Min progress (|C-O|) in ATR / Progression min (|C-O|) en ATR", minval=0.0, step=0.01, group=grp_core)
+
+grp_score = "Linearity thresholds / Seuils de linéarité (% ATR adverse)"
+thr5 = input.float(0.10, "Score 5 if adverse <= x ATR / Score 5 si adverse <= x ATR", minval=0.0, step=0.01, group=grp_score)
+thr4 = input.float(0.20, "Score 4 if adverse <= x ATR / Score 4 si adverse <= x ATR", minval=0.0, step=0.01, group=grp_score)
+thr3 = input.float(0.35, "Score 3 if adverse <= x ATR / Score 3 si adverse <= x ATR", minval=0.0, step=0.01, group=grp_score)
+thr2 = input.float(0.50, "Score 2 if adverse <= x ATR / Score 2 si adverse <= x ATR", minval=0.0, step=0.01, group=grp_score)
+
+// =====================================================
+// DISPLAY / AFFICHAGE
+// =====================================================
+grp_disp = "Display / Affichage"
+speedSmooth = input.int(1, "Speed smoothing EMA / Lissage EMA vitesse", minval=1, group=grp_disp)
+speedMult = input.float(100.0, "Panel multiplier / Multiplicateur panneau", minval=0.1, step=0.1, group=grp_disp)
+paintBg = input.bool(true, "Background by linearity / Fond selon linéarité", group=grp_disp)
+showInfoLabel = input.bool(true, "Show info label / Afficher label info", group=grp_disp)
+labelAtBottom = input.bool(true, "Info label at panel bottom / Label info en bas du panneau", group=grp_disp)
+
+// =====================================================
+// ENTRIES / ENTREES
+// =====================================================
+grp_ent = "Entries / Entrées"
+tradeMode = input.string("Both", "Direction / Sens", options=["Long","Short","Both"], group=grp_ent)
+minScoreEntry = input.int(4, "Min score entry (1-5) / Score min entrée (1-5)", minval=1, maxval=5, group=grp_ent)
+minSpeedLive = input.float(1.0, "Min speed LIVE ($/s) / Vitesse min LIVE ($/s)", minval=0.0, step=0.01, group=grp_ent)
+minSpeedBT = input.float(0.001, "Min speed BACKTEST ($/s) / Vitesse min BACKTEST ($/s)", minval=0.0, step=0.0001, group=grp_ent)
+useWeightedForEntry = input.bool(false, "Use weighted speed for entry / Utiliser vitesse pondérée pour entrée", group=grp_ent)
+minBarsBetweenSignals = input.int(0, "Cooldown bars (0=off) / Pause barres (0=off)", minval=0, group=grp_ent)
+
+// =====================================================
+// EXIT MODES / MODES DE SORTIE
+// =====================================================
+grp_exit = "Exits / Sorties"
+exitMode = input.string("B - Hysteresis / Hystérésis", "Exit mode / Mode de sortie",
+     options=["A - Symmetric / Symétrique","B - Hysteresis / Hystérésis","C - Momentum / Momentum"], group=grp_exit)
+
+exitOnOpposite = input.bool(true, "Exit on opposite signal / Sortir sur signal opposé", group=grp_exit)
+
+// Mode B thresholds
+exitMinScore = input.int(2, "B: Exit if score <= / B: Sortie si score <=", minval=1, maxval=5, group=grp_exit)
+exitMinSpeed = input.float(0.20, "B: Exit if |speed| <= ($/s) / B: Sortie si |vitesse| <= ($/s)", minval=0.0, step=0.01, group=grp_exit)
+
+// =====================================================
+// SPEED CHANNEL / CANAL DE VITESSE
+// =====================================================
+grp_ch = "Speed Channel / Canal vitesse"
+useChannel = input.bool(true, "Enable channel / Activer canal", group=grp_ch)
+chUpper = input.float(1.0, "Upper channel ($/s) / Canal haut ($/s)", minval=0.0, step=0.01, group=grp_ch)
+chLower = input.float(1.0, "Lower channel ($/s) / Canal bas ($/s)", minval=0.0, step=0.01, group=grp_ch)
+exitOnChannelReentry = input.bool(false, "Exit when re-entering channel / Sortir lors du retour dans le canal", group=grp_ch)
+
+// =====================================================
+// PANEL SIGNALS / SIGNAUX PANNEAU
+// =====================================================
+grp_sig = "Panel Signals / Signaux panneau"
+showSignals = input.bool(true, "Show BUY/SELL labels / Afficher labels BUY/SELL", group=grp_sig)
+maxSigLabels = input.int(150, "Max labels kept / Max labels conservés", minval=10, maxval=500, group=grp_sig)
+
+// =====================================================
+// ALERTS / ALERTES
+// =====================================================
+grp_al = "Alerts / Alertes"
+alertBuy = input.bool(true, "Alert BUY / Alerte BUY", group=grp_al)
+alertSell = input.bool(true, "Alert SELL / Alerte SELL", group=grp_al)
+alertExit = input.bool(true, "Alert EXIT / Alerte EXIT", group=grp_al)
+alertChannel = input.bool(true, "Alert channel breakout / Alerte sortie canal", group=grp_al)
+alertAll = input.bool(false, "Alert ALL events / Alerte TOUS événements", group=grp_al)
+
+// =====================================================
+// DATA (typed; may start as na)  ✅ FIX
+// =====================================================
+float oTF = na
+float hTF = na
+float lTF = na
+float cTF = na
+float atrTF = na
+int tTF = na
+int tcTF = na
+
+if analysisEqualsChart
+    oTF := open
+    hTF := high
+    lTF := low
+    cTF := close
+    tTF := time
+    tcTF := time_close
+    atrTF := ta.atr(atrLen)
+else
+    oTF := request.security(syminfo.tickerid, tfUse, open, barmerge.gaps_off, barmerge.lookahead_off)
+    hTF := request.security(syminfo.tickerid, tfUse, high, barmerge.gaps_off, barmerge.lookahead_off)
+    lTF := request.security(syminfo.tickerid, tfUse, low, barmerge.gaps_off, barmerge.lookahead_off)
+    cTF := request.security(syminfo.tickerid, tfUse, close, barmerge.gaps_off, barmerge.lookahead_off)
+    tTF := request.security(syminfo.tickerid, tfUse, time, barmerge.gaps_off, barmerge.lookahead_off)
+    tcTF := request.security(syminfo.tickerid, tfUse, time_close, barmerge.gaps_off, barmerge.lookahead_off)
+    atrTF := request.security(syminfo.tickerid, tfUse, ta.atr(atrLen), barmerge.gaps_off, barmerge.lookahead_off)
+
+// =====================================================
+// SPEED ($/s): LIVE vs BACKTEST
+// =====================================================
+bool isCurrTF = (timenow >= tTF) and (timenow < tcTF)
+float elapsedSecLive = isCurrTF ? ((timenow - tTF) / 1000.0) : float(tfSec)
+elapsedSecLive := math.max(elapsedSecLive, 1.0)
+
+float net = cTF - oTF
+float speedLive = net / elapsedSecLive
+float speedBacktest = net / float(tfSec)
+float speedExec = isBacktestMode ? speedBacktest : speedLive
+
+float speedSm = ta.ema(speedExec, speedSmooth)
+
+// BACKTEST decisions only on confirmed bars (reproducible)
+bool gateBT = isBacktestMode ? barstate.isconfirmed : true
+
+// =====================================================
+// LINEARITY SCORE (1..5)
+// =====================================================
+float atrSafe = math.max(atrTF, syminfo.mintick)
+float adverseLong = math.max(0.0, oTF - lTF)
+float adverseShort = math.max(0.0, hTF - oTF)
+float adverse = net >= 0 ? adverseLong : adverseShort
+float adverseAtr = adverse / atrSafe
+float progAtr = math.abs(net) / atrSafe
+
+int score = 1
+score := progAtr < minProgAtr ? 1 : score
+score := progAtr >= minProgAtr and adverseAtr <= thr2 ? 2 : score
+score := progAtr >= minProgAtr and adverseAtr <= thr3 ? 3 : score
+score := progAtr >= minProgAtr and adverseAtr <= thr4 ? 4 : score
+score := progAtr >= minProgAtr and adverseAtr <= thr5 ? 5 : score
+
+// Weighted speed (for display and optional entry metric)
+float speedWeighted = speedSm * (score / 5.0)
+float speedPanel = speedWeighted * speedMult
+
+// =====================================================
+// COLORS
+// =====================================================
+color col = score == 5 ? color.lime : score == 4 ? color.green : score == 3 ? color.yellow : score == 2 ? color.orange : color.red
+color txtCol = score >= 3 ? color.black : color.white
+bgcolor(paintBg ? color.new(col, 88) : na)
+
+// =====================================================
+// ENTRY LOGIC (separate LIVE/BACKTEST speed threshold) ✅
+// =====================================================
+float minSpeedUse = isBacktestMode ? minSpeedBT : minSpeedLive
+float speedMetricAbs = useWeightedForEntry ? math.abs(speedWeighted) : math.abs(speedSm)
+
+bool dirLongOK = net > 0
+bool dirShortOK = net < 0
+bool allowLong = tradeMode == "Long" or tradeMode == "Both"
+bool allowShort = tradeMode == "Short" or tradeMode == "Both"
+
+var int lastSigBar = na
+bool cooldownOK = minBarsBetweenSignals <= 0 ? true : (na(lastSigBar) ? true : (bar_index - lastSigBar >= minBarsBetweenSignals))
+
+bool longSignal = gateBT and cooldownOK and allowLong and dirLongOK and (score >= minScoreEntry) and (speedMetricAbs >= minSpeedUse)
+bool shortSignal = gateBT and cooldownOK and allowShort and dirShortOK and (score >= minScoreEntry) and (speedMetricAbs >= minSpeedUse)
+
+if longSignal
+    strategy.entry("LONG", strategy.long)
+if shortSignal
+    strategy.entry("SHORT", strategy.short)
+if longSignal or shortSignal
+    lastSigBar := bar_index
+
+// =====================================================
+// EXIT LOGIC (3 MODES)
+// =====================================================
+bool inLong = strategy.position_size > 0
+bool inShort = strategy.position_size < 0
+
+bool oppForLong = shortSignal
+bool oppForShort = longSignal
+
+// Channel add-on
+bool channelBreakUp = useChannel and (speedSm > chUpper)
+bool channelBreakDn = useChannel and (speedSm < -chLower)
+bool channelBreakAny = channelBreakUp or channelBreakDn
+
+bool channelInside = useChannel and (speedSm <= chUpper) and (speedSm >= -chLower)
+bool exitChannelLong = exitOnChannelReentry and inLong and channelInside
+bool exitChannelShort = exitOnChannelReentry and inShort and channelInside
+
+bool exitBaseLong = false
+bool exitBaseShort = false
+
+// A - Symmetric
+if exitMode == "A - Symmetric / Symétrique"
+    exitBaseLong := inLong and ((score < minScoreEntry) or (speedMetricAbs < minSpeedUse))
+    exitBaseShort := inShort and ((score < minScoreEntry) or (speedMetricAbs < minSpeedUse))
+
+// B - Hysteresis
+if exitMode == "B - Hysteresis / Hystérésis"
+    bool exitByScore = (score <= exitMinScore)
+    bool exitBySpeed = (math.abs(speedSm) <= exitMinSpeed)
+    exitBaseLong := inLong and (exitByScore or exitBySpeed)
+    exitBaseShort := inShort and (exitByScore or exitBySpeed)
+
+// C - Momentum (C1)
+if exitMode == "C - Momentum / Momentum"
+    exitBaseLong := inLong and (speedSm <= 0)
+    exitBaseShort := inShort and (speedSm >= 0)
+
+bool exitOppLong = exitOnOpposite and inLong and oppForLong
+bool exitOppShort = exitOnOpposite and inShort and oppForShort
+
+bool exitLong = gateBT and (exitBaseLong or exitChannelLong or exitOppLong)
+bool exitShort = gateBT and (exitBaseShort or exitChannelShort or exitOppShort)
+
+if exitLong
+    strategy.close("LONG")
+if exitShort
+    strategy.close("SHORT")
+
+// =====================================================
+// PLOTS (PANEL)
+// =====================================================
+plot(speedPanel, title="Speed (weighted) / Vitesse (pondérée)", style=plot.style_columns, linewidth=3, color=col)
+hline(0.0, "Zero / Zéro", linestyle=hline.style_dotted)
+plot(float(score), title="Linearity score / Score linéarité", display=display.data_window)
+plot(speedExec, title="Speed exec ($/s) / Vitesse exec ($/s)", display=display.data_window)
+plot(speedSm, title="Speed smoothed ($/s) / Vitesse lissée ($/s)", display=display.data_window)
+plot(speedWeighted, title="Weighted speed ($/s) / Vitesse pondérée ($/s)", display=display.data_window)
+
+// =====================================================
+// PANEL SIGNAL LABELS (BUY/SELL) - NOT ON CANDLES
+// =====================================================
+var label[] sigLbls = array.new_label()
+
+float yBuy = speedPanel > 0 ? speedPanel : 0.0
+float ySell = speedPanel < 0 ? speedPanel : 0.0
+
+if showSignals and longSignal
+    label lbBuy = label.new(bar_index, yBuy, "BUY", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 0))
+    array.push(sigLbls, lbBuy)
+
+if showSignals and shortSignal
+    label lbSell = label.new(bar_index, ySell, "SELL", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0))
+    array.push(sigLbls, lbSell)
+
+while array.size(sigLbls) > maxSigLabels
+    label lbOld = array.shift(sigLbls)
+    label.delete(lbOld)
+
+// =====================================================
+// INFO LABEL
+// =====================================================
+float yLbl = labelAtBottom ? 0.0 : speedPanel
+var label infoLb = na
+
+if showInfoLabel and barstate.islast
+    string tfTxt = lockToChartTF ? (chartLt15 ? "TF 15 (SAFE)" : "Chart TF") : "TF " + tfUse
+    string modeTxt = isBacktestMode ? "BACKTEST" : "LIVE"
+    string dirTxt = net > 0 ? "LONG" : net < 0 ? "SHORT" : "FLAT"
+    string txt = modeTxt + "  •  " + tfTxt + "\nLIN " + str.tostring(score) + "/5  •  " + dirTxt + "\nSpeed: " + str.tostring(speedExec, format.mintick) + " $/s  •  W: " + str.tostring(speedWeighted, format.mintick) + " $/s" + "\nEXIT: " + exitMode
+    if na(infoLb)
+        infoLb := label.new(bar_index, yLbl, txt, style=label.style_label_left, textcolor=txtCol, color=col)
+    label.set_x(infoLb, bar_index)
+    label.set_y(infoLb, yLbl)
+    label.set_text(infoLb, txt)
+    label.set_color(infoLb, col)
+    label.set_textcolor(infoLb, txtCol)
+
+// =====================================================
+// ALERTS
+// =====================================================
+alertcondition(alertBuy and longSignal, title="SOFT BUY", message="SOFT BUY: Speed/Linearity entry signal.")
+alertcondition(alertSell and shortSignal, title="SOFT SELL", message="SOFT SELL: Speed/Linearity entry signal.")
+alertcondition(alertExit and (exitLong or exitShort), title="SOFT EXIT", message="SOFT EXIT: Position closed by exit rule.")
+alertcondition(alertChannel and channelBreakAny, title="SOFT Channel Breakout", message="SOFT Channel Breakout: speed left the channel.")
+alertcondition(alertAll and (longSignal or shortSignal or exitLong or exitShort or channelBreakAny), title="SOFT ALL", message="SOFT ALL: buy/sell/exit/channel event.")
+
+View in Pine Editor・307 lines
+Use on chart
+1
+3
+633
+SOFT Speed × Linearity Strategy (MTF – LIVE & BACKTEST)
+
+This strategy detects clean impulsive moves by combining real-time price speed with directional quality (linearity).
+
+It is designed for intraday markets such as Gold (XAUUSD), Nasdaq, and Crypto (ETH, BTC), where acceleration quality matters more than raw indicators.
+
+🔹 Core Concepts
+1️⃣ Speed ($ per second)
+
+Measures how fast price is moving
+
+Expressed in $/second, not points or ticks
+
+Two execution modes:
+
+LIVE → real-time intra-candle speed using elapsed seconds
+
+BACKTEST → historical approximation using (Close − Open) / candle duration
+
+2️⃣ Linearity Score (1 → 5)
+
+Evaluates movement quality inside the candle:
+
+Net progress vs adverse excursion
+
+Identifies one-way impulses vs noisy back-and-forth moves
+
+Interpretation
+
+1–2 → choppy / rotational
+
+3 → acceptable
+
+4–5 → clean impulse (higher continuation probability)
+
+🔹 Visual Panel
+
+Histogram bars = Speed × Linearity
+
+Color reflects directional quality
+
+Optional info label displays:
+
+Execution mode (LIVE / BACKTEST)
+
+Analysis timeframe
+
+Linearity score
+
+Direction
+
+Speed ($/s)
+
+No drawings are placed on candles.
+
+🔹 Entry Logic
+
+Configurable conditions:
+
+Minimum linearity score
+
+Minimum speed
+
+Direction aligned with candle movement
+
+Long / Short / Both modes
+
+Optional cooldown between signals
+
+⚠️ Speed thresholds are separated for LIVE and BACKTEST to reflect their different nature.
+
+🔹 Exit Modes (Selectable)
+A — Symmetric
+
+Exit when entry conditions are no longer valid.
+
+B — Hysteresis (default)
+
+Exit only after controlled degradation:
+
+Linearity falls below a lower threshold
+
+Or speed drops below a lower threshold
+
+C — Momentum
+
+Exit when speed no longer supports the trade direction (speed ≤ 0).
+
+Optional add-ons:
+
+Exit on opposite signal
+
+Exit on speed channel re-entry
+
+🔹 Multi-Timeframe (MTF)
+
+Default analysis timeframe: 15 minutes
+
+Optional lock to chart timeframe
+
+Safety rule for public use:
+
+If chart timeframe < 15m, analysis remains on 15m
+
+Prevents misleading ultra-fast recalculations
+
+🔹 LIVE vs BACKTEST (Important)
+
+LIVE mode uses true intra-candle acceleration
+
+BACKTEST mode uses an approximation to allow reproducible historical testing
+
+Results between LIVE and BACKTEST are not identical by design
+
+This is intentional and clearly separated.
+
+🔹 Alerts
+
+Available alerts:
+
+BUY
+
+SELL
+
+EXIT
+
+Speed channel breakout
+
+ALL events
+
+Compatible with TradingView webhooks.
+
+🔹 Intended Use
+
+This is not a trend indicator.
+This is not a prediction tool.
+
+It is a momentum quality detector, useful to:
+
+Validate breakouts
+
+Filter false accelerations
+
+Trade continuation, not anticipation
+
+⚠️ Disclaimer
+
+This script is for educational and research purposes only.
+It does not constitute financial advice.
+Always test, adapt parameters to your market, and manage risk.
+
+

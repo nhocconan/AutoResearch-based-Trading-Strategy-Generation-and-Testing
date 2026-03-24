@@ -1,0 +1,112 @@
+//@version=5
+strategy("SNIPER EMA 9/21 + MACD + Angle", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ===== INPUTS =====
+angleLen = input.int(5, "Angle Calculation Candles")
+angle9Limit  = input.int(30, "Strong Angle 9 EMA")
+angle21Limit = input.int(15, "Strong Angle 21 EMA")
+maxBarsAfterCross = input.int(6, "Max Bars After Crossover")
+noTradeAngle = input.int(8, "No-Trade Angle Zone")
+riskReward = input.float(2.0, "Risk Reward Ratio")
+slLookback = input.int(5, "Stop Loss Lookback Bars")
+scalpMode = input.bool(true, "Scalping Mode (3-min)")
+
+// Adjust angles for scalp mode
+angle9Req  = scalpMode ? angle9Limit * 0.7 : angle9Limit
+angle21Req = scalpMode ? angle21Limit * 0.7 : angle21Limit
+
+// ===== EMA CALCULATION =====
+ema9  = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+
+plot(ema9, color=color.lime, linewidth=2)
+plot(ema21, color=color.red, linewidth=2)
+
+// ===== MACD CALCULATION =====
+[macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+
+// ===== EMA ANGLE CALCULATION =====
+slope9  = (ema9 - ema9[angleLen]) / angleLen
+slope21 = (ema21 - ema21[angleLen]) / angleLen
+
+angle9  = math.atan(slope9) * 180 / math.pi
+angle21 = math.atan(slope21) * 180 / math.pi
+
+// ===== CROSSOVER TRACKING =====
+var int crossBar = na
+var int crossDir = 0   // 1 = bullish, -1 = bearish
+
+if ta.crossover(ema9, ema21)
+    crossBar := bar_index
+    crossDir := 1
+
+if ta.crossunder(ema9, ema21)
+    crossBar := bar_index
+    crossDir := -1
+
+barsAfterCross = bar_index - crossBar
+
+// ===== ANGLE CONDITIONS =====
+bullAngle = angle9 > angle9Req and angle21 > angle21Req
+bearAngle = angle9 < -angle9Req and angle21 < -angle21Req
+
+// ===== NO-TRADE ZONE =====
+noTradeZone = math.abs(angle9) < noTradeAngle and math.abs(angle21) < noTradeAngle
+bgcolor(noTradeZone ? color.new(color.gray, 85) : na)
+
+// ===== FINAL SIGNALS =====
+callSignal = crossDir == 1 and barsAfterCross <= maxBarsAfterCross and bullAngle and macdLine > signalLine and not noTradeZone
+putSignal  = crossDir == -1 and barsAfterCross <= maxBarsAfterCross and bearAngle and macdLine < signalLine and not noTradeZone
+
+// ===== STOP LOSS & TARGET =====
+longSL = ta.lowest(low, slLookback)
+shortSL = ta.highest(high, slLookback)
+longTP = close + (close - longSL) * riskReward
+shortTP = close - (shortSL - close) * riskReward
+
+// ===== STRATEGY EXECUTION =====
+if callSignal
+    strategy.entry("CALL", strategy.long)
+    strategy.exit("CALL Exit", "CALL", stop=longSL, limit=longTP)
+
+if putSignal
+    strategy.entry("PUT", strategy.short)
+    strategy.exit("PUT Exit", "PUT", stop=shortSL, limit=shortTP)
+
+// ===== SIGNAL LABELS =====
+plotshape(callSignal, location=location.belowbar, style=shape.labelup, text="CALL", color=color.green, textcolor=color.white)
+plotshape(putSignal, location=location.abovebar, style=shape.labeldown, text="PUT", color=color.red, textcolor=color.white)
+
+// ===== TREND STRENGTH METER =====
+trendStrength = math.abs(angle9) + math.abs(angle21)
+strengthColor = trendStrength > 60 ? color.green : trendStrength > 30 ? color.orange : color.red
+plot(trendStrength, title="Trend Strength Meter", color=strengthColor, linewidth=3)
+
+// ===== DASHBOARD TABLE =====
+var table dash = table.new(position.top_right, 2, 5, border_width=1)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "EMA 9 Angle")
+    table.cell(dash, 1, 0, str.tostring(angle9, "#.##") + "°")
+    
+    table.cell(dash, 0, 1, "EMA 21 Angle")
+    table.cell(dash, 1, 1, str.tostring(angle21, "#.##") + "°")
+    
+    table.cell(dash, 0, 2, "Bars After Cross")
+    table.cell(dash, 1, 2, str.tostring(barsAfterCross))
+    
+    table.cell(dash, 0, 3, "Trend Strength")
+    table.cell(dash, 1, 3, str.tostring(trendStrength, "#.##"))
+    
+    table.cell(dash, 0, 4, "Mode")
+    table.cell(dash, 1, 4, scalpMode ? "SCALP" : "NORMAL")
+
+// ===== ALERTS =====
+alertcondition(callSignal, title="SNIPER CALL", message="🏹 SNIPER CALL: EMA Cross + Angle + MACD + Trend Strength")
+alertcondition(putSignal, title="SNIPER PUT", message="🏹 SNIPER PUT: EMA Cross + Angle + MACD + Trend Strength")
+
+View in Pine Editor・106 lines
+Use on chart
+6
+612
+SNIPER EMA 9/21 + MACD + Angle for 3min and 5 min trading

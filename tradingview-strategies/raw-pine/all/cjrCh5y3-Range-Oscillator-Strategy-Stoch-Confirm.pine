@@ -1,0 +1,419 @@
+//@version=6
+strategy("Range Oscillator Strategy + Stoch Confirm", overlay=false, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, slippage=3, margin_long=0, margin_short=0, fill_orders_on_standard_ohlc=true)
+
+// === [Backtest Period] ===
+// User-controlled backtest window. Helps avoid cherry-picking a tiny period.
+startYear  = input.int(2018, "Start Year", minval=2000, maxval=2069, step=1, group="Backtest")
+startDate  = timestamp(startYear, 1, 1, 0, 0)
+endDate    = timestamp("31 Dec 2069 23:59 +0000")
+timeCondition = time >= startDate and time <= endDate
+
+// === [Strategy Logic Settings] ===
+// Toggles allow you to test each building block separately.
+useOscEntry   = input.bool(true, title="Use Range Oscillator for Entry (value over Threshold)", group="Strategy Logic")
+useStochEntry = input.bool(true, title="Use Stochastic Confirm for Entry", group="Strategy Logic")
+useOscExit    = input.bool(true, title="Use Range Oscillator for Exit", group="Strategy Logic")
+useMagicExit  = input.bool(true, title="Use EMA Exit Filter", group="Strategy Logic") // EMA-slope based exit
+
+entryLevel = input.float(100.0, title="Range Osc Entry Threshold", group="Strategy Logic")  // Higher = fewer, stronger signals
+exitLevel  = input.float(30.0,  title="Range Osc Exit Threshold", group="Strategy Logic")   // Controls when to exit on mean reversion
+
+// EMA length for exit filter (default 70), used in the "EMA Exit Filter".
+emaLength = input.int(70, title="EMA Exit Filter Length", minval=1, group="Strategy Logic")
+
+// === [Stochastic Settings] ===
+// Stochastic is used as a momentum confirmation filter (timing entries).
+periodK     = input.int(7, title="%K Length", minval=1, group="Stochastic")
+smoothK     = input.int(3, title="%K Smoothing", minval=1, group="Stochastic")
+periodD     = input.int(3, title="%D Smoothing", minval=1, group="Stochastic")
+crossLevel  = input.float(100.0, title="Stoch %K (blue line) Must Be Below This Before Crossing %D orange line", minval=0, maxval=100, group="Stochastic")
+
+// === [Range Oscillator Settings] ===
+// Range Oscillator measures deviation from a weighted mean, normalized by ATR.
+length    = input.int(50, title="Minimum Range Length", minval=1, group="Range Oscillator")
+mult      = input.float(2.0, title="Range Width Multiplier", minval=0.1, group="Range Oscillator")
+
+// === [Risk Management] ===
+// Optional risk exits. By default SL/TP are OFF in code – you can enable them in Inputs.
+// TradingView recommends using realistic SL/TP and small risk per trade.
+useSL = input.bool(false, title="Use Stop Loss", group="Risk Management")
+slPct = input.float(1.5, title="Stop Loss (%)", minval=0.0, step=0.1, group="Risk Management") // Example: 1.5% of entry price
+useTP = input.bool(false, title="Use Take Profit", group="Risk Management")
+tpPct = input.float(3.0, title="Take Profit (%)", minval=0.0, step=0.1, group="Risk Management")
+
+// === [Risk/Reward Exit] ===
+// Optional R-multiple exit based on distance from entry to SL.
+useRR = input.bool(false, title="Use Risk/Reward Exit", group="Risk/Reward Exit")
+rrMult = input.float(1.5, title="Reward/Risk Multiplier", minval=0.1, step=0.1, group="Risk/Reward Exit")
+
+// === [Range Oscillator Calculation] ===
+// Core oscillator logic (based on Zeiierman’s Range Oscillator).
+atrRaw   = nz(ta.atr(2000), ta.atr(200))
+rangeATR = atrRaw * mult
+
+sumWeightedClose = 0.0
+sumWeights = 0.0
+for i = 0 to length - 1
+    delta = math.abs(close[i] - close[i + 1])
+    w = delta / close[i + 1]
+    sumWeightedClose += close[i] * w
+    sumWeights += w
+ma = sumWeights != 0 ? sumWeightedClose / sumWeights : na
+
+distances = array.new_float(length)
+for i = 0 to length - 1
+    array.set(distances, i, math.abs(close[i] - ma))
+maxDist = array.max(distances)
+osc = rangeATR != 0 ? 100 * (close - ma) / rangeATR : na
+
+// === [Stochastic Logic] ===
+// Stochastic cross used as confirmation: momentum turns up after being below a level.
+k = ta.sma(ta.stoch(close, high, low, periodK), smoothK)
+d = ta.sma(k, periodD)
+stochCondition = k < crossLevel and ta.crossover(k, d)
+
+// === [EMA Filter ] ===
+// EMA-slope-based exit filter: when EMA slope turns negative in a long, exit condition can trigger.
+ema     = ta.ema(close, emaLength)
+chg     = ema - ema[1]
+pct     = ema[1] != 0 ? (chg / ema[1]) * 100.0 : 0.0
+isDown  = pct < 0
+magicExitCond = useMagicExit and isDown and strategy.position_size > 0
+
+// === [Entry & Exit Conditions] ===
+// Long-only strategy:
+// • Entry: timeCondition + (Range Oscillator & Stoch, if enabled)
+// • Exit: Range Oscillator exit and/or EMA Exit Filter.
+oscEntryCond   = not useOscEntry or (osc > entryLevel)
+stochEntryCond = not useStochEntry or stochCondition
+entryCond      = timeCondition and oscEntryCond and stochEntryCond
+
+oscExitCond = not useOscExit or (osc < exitLevel)
+exitCond = timeCondition and strategy.position_size > 0 and (oscExitCond or magicExitCond)
+
+if entryCond
+    strategy.entry("Long", strategy.long)
+
+if exitCond
+    strategy.close("Long")
+
+// === [Risk Management Exits] ===
+// Optional SL/TP and RR exits (OCO). They sit on top of the main exit logic.
+// Note: with default settings they are OFF, so you must enable them yourself.
+ap      = strategy.position_avg_price
+slPrice = useSL ? ap * (1 - slPct / 100) : na
+tpPrice = useTP ? ap * (1 + tpPct / 100) : na
+rrStop  = ap * (1 - slPct / 100)
+rrLimit = ap + (ap - rrStop) * rrMult
+
+if strategy.position_size > 0
+    if useSL or useTP
+        strategy.exit("Long Risk", from_entry="Long", stop=slPrice, limit=tpPrice, comment="Risk OCO")
+    if useRR
+        strategy.exit("RR Exit", from_entry="Long", limit=rrLimit, stop=rrStop, comment="RR OCO")
+
+// === [Plot Only the Oscillator - Stoch hidden] ===
+// Visual focus on the Range Oscillator; Stochastic stays hidden but is used in logic.
+inTrade  = strategy.position_size > 0
+oscColor = inTrade ? color.green : color.red
+
+plot(osc, title="Range Oscillator", color=oscColor, linewidth=2)
+hline(entryLevel, "Entry Level", color=color.green, linestyle=hline.style_dotted)
+hline(exitLevel,  "Exit Level",  color=color.red,   linestyle=hline.style_dotted)
+plot(k, title="%K", color=color.blue, display=display.none)
+plot(d, title="%D", color=color.orange, display=display.none)
+
+// Plot EMA (hidden) so it is available but not visible on the chart.
+plot(ema, title="EMA Exit Filter", display=display.none)
+
+View in Pine Editor・179 lines
+Use on chart
+4
+0
+1 231
+🔹 Short summary
+This is a free, educational long-only strategy built on top of the public “Range Oscillator” by Zeiierman (used under CC BY-NC-SA 4.0), combined with a Stochastic timing filter, an EMA-based exit filter and an optional risk-management layer (SL/TP and R-multiple exits). It is NOT financial advice and it is NOT a magic money machine. It’s a structured framework to study how range-expansion + momentum + trend slope can be combined into one rule-based system, often with intentionally RARE trades.
+
+────────────────────────
+0. Legal / risk disclaimer
+────────────────────────
+• This script is FREE and public. I do not charge any fee for it.
+• It is for EDUCATIONAL PURPOSES ONLY.
+• It is NOT financial advice and does NOT guarantee profits.
+• Backtest results can be very different from live results.
+• Markets change over time; past performance is NOT indicative of future performance.
+• You are fully responsible for your own trades and risk.
+
+Please DO NOT use this script with money you cannot afford to lose. Always start in a demo / paper trading environment and make sure you understand what the logic does before you risk any capital.
+
+────────────────────────
+1. About default settings and risk (very important)
+────────────────────────
+The script is configured with the following defaults in the `strategy()` declaration:
+
+• `initial_capital = 10000`
+→ This is only an EXAMPLE account size.
+
+• `default_qty_type = strategy.percent_of_equity`
+• `default_qty_value = 100`
+→ This means 100% of equity per trade in the default properties.
+→ This is AGGRESSIVE and should be treated as a STRESS TEST of the logic, not as a realistic way to trade.
+
+TradingView’s House Rules recommend risking only a small part of equity per trade (often 1–2%, max 5–10% in most cases). To align with these recommendations and to get more realistic backtest results, I STRONGLY RECOMMEND you to:
+
+1. Open **Strategy Settings → Properties**.
+2. Set:
+• Order size: **Percent of equity**
+• Order size (percent): e.g. **1–2%** per trade
+3. Make sure **commission** and **slippage** match your own broker conditions.
+• By default this script uses `commission_value = 0.1` (0.1%) and `slippage = 3`, which are reasonable example values for many crypto markets.
+
+If you choose to run the strategy with 100% of equity per trade, please treat it ONLY as a stress-test of the logic. It is NOT a sustainable risk model for live trading.
+
+────────────────────────
+2. What this strategy tries to do (conceptual overview)
+────────────────────────
+This is a LONG-ONLY strategy designed to explore the combination of:
+
+1. **Range Oscillator (Zeiierman-based)**
+- Measures how far price has moved away from an adaptive mean.
+- Uses an ATR-based range to normalize deviation.
+- High positive oscillator values indicate strong price expansion away from the mean in a bullish direction.
+
+2. **Stochastic as a timing filter**
+- A classic Stochastic (%K and %D) is used.
+- The logic requires %K to be below a user-defined level and then crossing above %D.
+- This is intended to catch moments when momentum turns up again, rather than chasing every extreme.
+
+3. **EMA Exit Filter (trend slope)**
+- An EMA with configurable length (default 70) is calculated.
+- The slope of the EMA is monitored: when the slope turns negative while in a long position, and the filter is enabled, it triggers an exit condition.
+- This acts as a trend-protection exit: if the medium-term trend starts to weaken, the strategy exits even if the oscillator has not yet fully reverted.
+
+4. **Optional risk-management layer**
+- Percentage-based Stop Loss and Take Profit (SL/TP).
+- Risk/Reward (R-multiple) exit based on the distance from entry to SL.
+- Implemented as OCO orders that work *on top* of the logical exits.
+
+The goal is not to create a “holy grail” system but to serve as a transparent, configurable framework for studying how these concepts behave together on different markets and timeframes.
+
+────────────────────────
+3. Components and how they work together
+────────────────────────
+
+(1) Range Oscillator (based on “Range Oscillator (Zeiierman)”)
+• The script computes a weighted mean price and then measures how far price deviates from that mean.
+• Deviation is normalized by an ATR-based range and expressed as an oscillator.
+• When the oscillator is above the **entry threshold** (default 100), it signals a strong move away from the mean in the bullish direction.
+• When it later drops below the **exit threshold** (default 30), it can trigger an exit (if enabled).
+
+(2) Stochastic confirmation
+• Classic Stochastic (%K and %D) is calculated.
+• An entry requires:
+- %K to be below a user-defined “Cross Level”, and
+- then %K to cross above %D.
+• This is a momentum confirmation: the strategy tries to enter when momentum turns up from a pullback rather than at any random point.
+
+(3) EMA Exit Filter
+• The EMA length is configurable via `emaLength` (default 70).
+• The script monitors the EMA slope: it computes the relative change between the current EMA and the previous EMA.
+• If the slope turns negative while the strategy holds a long position and the filter is enabled, it triggers an exit condition.
+• This is meant to help protect profits or cut losses when the medium-term trend starts to roll over, even if the oscillator conditions are not (yet) signalling exit.
+
+(4) Risk management (optional)
+• Stop Loss (SL) and Take Profit (TP):
+- Defined as percentages relative to average entry price.
+- Both are disabled by default, but you can enable them in the Inputs.
+• Risk/Reward Exit:
+- Uses the distance from entry to SL to project a profit target at a configurable R-multiple.
+- Also optional and disabled by default.
+
+These exits are implemented as `strategy.exit()` OCO orders and can close trades independently of oscillator/EMA conditions if hit first.
+
+────────────────────────
+4. Entry & Exit logic (high level)
+────────────────────────
+
+A) Time filter
+• You can choose a **Start Year** in the Inputs.
+• Only candles between the selected start date and 31 Dec 2069 are used for backtesting (`timeCondition`).
+• This prevents accidental use of tiny cherry-picked windows and makes tests more honest.
+
+B) Entry condition (long-only)
+A long entry is allowed when ALL the following are true:
+
+1. `timeCondition` is true (inside the backtest window).
+2. If `useOscEntry` is true:
+- Range Oscillator value must be above `entryLevel`.
+3. If `useStochEntry` is true:
+- Stochastic condition (`stochCondition`) must be true:
+- %K < `crossLevel`, then %K crosses above %D.
+
+If these filters agree, the strategy calls `strategy.entry("Long", strategy.long)`.
+
+C) Exit condition (logical exits)
+A position can be closed when:
+
+1. `timeCondition` is true AND a long position is open, AND
+2. At least one of the following is true:
+- If `useOscExit` is true: Oscillator is below `exitLevel`.
+- If `useMagicExit` (EMA Exit Filter) is true: EMA slope is negative (`isDown = true`).
+
+In that case, `strategy.close("Long")` is called.
+
+D) Risk-management exits
+While a position is open:
+
+• If SL or TP is enabled:
+- `strategy.exit("Long Risk", ...)` places an OCO stop/limit order based on the SL/TP percentages.
+
+• If Risk/Reward exit is enabled:
+- `strategy.exit("RR Exit", ...)` places an OCO order using a projected R-multiple (`rrMult`) of the SL distance.
+
+These risk-based exits can trigger before the logical oscillator/EMA exits if price hits those levels.
+
+────────────────────────
+5. Recommended backtest configuration (to avoid misleading results)
+────────────────────────
+
+To align with TradingView House Rules and avoid misleading backtests:
+
+1. **Initial capital**
+- 10 000 (or any value you personally want to work with).
+
+2. **Order size**
+- Type: **Percent of equity**
+- Size: **1–2%** per trade is a reasonable starting point.
+- Avoid risking more than 5–10% per trade if you want results that could be sustainable in practice.
+
+3. **Commission & slippage**
+- Commission: around 0.1% if that matches your broker.
+- Slippage: a few ticks (e.g. 3) to account for real fills.
+
+4. **Timeframe & markets**
+- Volatile symbols (e.g. crypto like BTCUSDT, or major indices).
+- Timeframes: 1H / 4H / **1D (Daily)** are typical starting points.
+- I strongly recommend trying the strategy on **different timeframes**, for example 1D, to see how the behaviour changes between intraday and higher timeframes.
+
+5. **No “caution warning”**
+- Make sure your chosen symbol + timeframe + settings do not trigger TradingView’s caution messages.
+- If you see warnings (e.g. “too few trades”), adjust timeframe/symbol or the backtest period.
+
+────────────────────────
+5a. About low trade count and rare signals
+────────────────────────
+This strategy is intentionally designed to trade RARELY:
+
+• It is **long-only**.
+• It uses strict filters (Range Oscillator threshold + Stochastic confirmation + optional EMA Exit Filter).
+• On higher timeframes (especially **1D / Daily**) this can result in a **low total number of trades**, sometimes WELL BELOW 100 trades over the whole backtest.
+
+TradingView’s House Rules mention 100+ trades as a guideline for more robust statistics. In this specific case:
+
+• The **low trade count is a conscious design choice**, not an attempt to cherry-pick a tiny, ultra-profitable window.
+• The goal is to study a **small number of high-conviction long entries** on higher timeframes, not to generate frequent intraday signals.
+• Because of the low trade count, results should NOT be interpreted as statistically strong or “proven” – they are only one sample of how this logic would have behaved on past data.
+
+Please keep this in mind when you look at the equity curve and performance metrics. A beautiful curve with only a handful of trades is still just a small sample.
+
+────────────────────────
+6. How to use this strategy (step-by-step)
+────────────────────────
+
+1. Add the script to your chart.
+2. Open the **Inputs** tab:
+- Set the backtest start year.
+- Decide whether to use Oscillator-based entry/exit, Stochastic confirmation, and EMA Exit Filter.
+- Optionally enable SL, TP, and Risk/Reward exits.
+
+3. Open the **Properties** tab:
+- Set a realistic account size if you want.
+- Set order size to a realistic % of equity (e.g. 1–2%).
+- Confirm that commission and slippage are realistic for your broker.
+
+4. Run the backtest:
+- Look at Net Profit, Max Drawdown, number of trades, and equity curve.
+- Remember that a low trade count means the statistics are not very strong.
+
+5. Experiment:
+- Tweak thresholds (`entryLevel`, `exitLevel`), Stochastic settings, EMA length, and risk params.
+- See how the metrics and trade frequency change.
+
+6. Forward-test:
+- Before using any idea in live trading, forward-test on a demo account and observe behaviour in real time.
+
+────────────────────────
+7. Originality and usefulness (why this is more than a mashup)
+────────────────────────
+
+This script is not intended to be a random visual mashup of indicators. It is designed as a coherent, testable strategy with clear roles for each component:
+
+• Range Oscillator:
+- Handles mean vs. range-expansion states via an adaptive, ATR-normalized metric.
+
+• Stochastic:
+- Acts as a timing filter to avoid entering purely on extremes and instead waits for momentum to turn.
+
+• EMA Exit Filter:
+- Trend-slope-based safety net to exit when the medium-term direction changes against the position.
+
+• Risk module:
+- Provides practical, rule-based exits: SL, TP, and R-multiple exit, which are useful for structuring risk even if you modify the core logic.
+
+It aims to give traders a ready-made **framework to study and modify**, not a black box or “signals” product.
+
+────────────────────────
+8. Limitations and good practices
+────────────────────────
+
+• No single strategy works on all markets or in all regimes.
+• This script is long-only; it does not short the market.
+• Performance can degrade when market structure changes.
+• Overfitting (curve fitting) is a real risk if you endlessly tweak parameters to maximise historical profit.
+
+Good practices:
+- Test on multiple symbols and timeframes.
+- Focus on stability and drawdown, not only on how high the profit line goes.
+- View this as a learning tool and a basis for your own research.
+
+────────────────────────
+9. Licensing and credits
+────────────────────────
+
+• Core oscillator idea & base code:
+- “Range Oscillator (Zeiierman)”
+- © Zeiierman, licensed under CC BY-NC-SA 4.0.
+
+• Strategy logic, Stochastic confirmation, EMA Exit Filter, and risk-management layer:
+- Modifications by jokiniemi.
+
+Please respect both the original license and TradingView House Rules if you fork or republish any part of this script.
+
+────────────────────────
+10. No payments / no vendor pitch
+────────────────────────
+
+• This script is completely FREE to use on TradingView.
+• There is no paid subscription, no external payment link, and no private signals group attached to it.
+• If you have questions, please use TradingView’s comment system or private messages instead of expecting financial advice.
+
+Use this script as a tool to learn, experiment, and build your own understanding of markets.
+
+────────────────────────
+11. Example backtest settings used in screenshots
+────────────────────────
+To avoid any confusion about how the results shown in screenshots were produced, here is one concrete example configuration:
+
+• Symbol: BTCUSDT (or similar major BTC pair)
+• Timeframe: 1D (Daily)
+• Backtest period: from 2018 to the most recent data
+• Initial capital: 10 000
+• Order size type: Percent of equity
+• Order size: 2% per trade
+• Commission: 0.1%
+• Slippage: 3 ticks
+• Risk settings: Stop Loss and Take Profit disabled by default, Risk/Reward exit disabled by default
+• Filters: Range Oscillator entry/exit enabled, Stochastic confirmation enabled, EMA Exit Filter enabled
+
+If you change any of these settings (symbol, timeframe, risk per trade, commission, slippage, filters, etc.), your results will look different. Please always adapt the configuration to your own risk tolerance, market, and trading style.
+

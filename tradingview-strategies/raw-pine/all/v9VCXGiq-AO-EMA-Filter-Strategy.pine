@@ -1,0 +1,45 @@
+//@version=6
+
+strategy("AO + EMA Filter Strategy", overlay=true)
+
+// Inputs
+fastPeriod = input.int(5, title="Fast AO Period")
+slowPeriod = input.int(34, title="Slow AO Period")
+trendFilterPeriod = input.int(10, title="Trend Filter EMA Period")
+
+
+import TradingView/ta/10
+import TradingView/RelativeValue/3 as TVrv
+
+
+// Calculations
+ao = ta.ao()
+trend_filter = ta.ema(close, trendFilterPeriod)
+
+// Conditions
+isBullishTrend = close > trend_filter
+isBearishTrend = close < trend_filter
+
+longCondition = ta.crossover(ao, 0) and isBullishTrend
+shortCondition = ta.crossunder(ao, 0) and isBearishTrend
+
+// Strategy execution
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+// Alert conditions for TradingView UI alerts
+alertcondition(longCondition, title="Long Condition", message="AO crossed above zero with price above EMA")
+alertcondition(shortCondition, title="Short Condition", message="AO crossed below zero with price below EMA")
+
+// Plots
+plot(trend_filter, "Trend Filter", color=color.yellow)
+
+View in Pine Editor・38 lines
+Use on chart
+2
+9
+1 017
+Zero Line Awesome Oscillator crossover coinciding with EMA 10 period cross.

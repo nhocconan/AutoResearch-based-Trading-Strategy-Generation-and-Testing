@@ -1,0 +1,64 @@
+//@version=6
+strategy("EMA 8/20 Crossover - 5% Equity per Trade",
+         shorttitle="EMA 8/20 5%",
+         overlay=true,
+         initial_capital=10000,
+         currency=currency.USD,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=5,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1)
+
+// ── INPUTS ───────────────────────────────────────────────────────────────
+short_len = input.int(8,  "Short EMA Length",  minval=1)
+long_len  = input.int(20, "Long EMA Length",   minval=1)
+
+// ── CALCULATIONS ─────────────────────────────────────────────────────────
+ema_short = ta.ema(close, short_len)
+ema_long  = ta.ema(close, long_len)
+
+// ── SIGNALS ──────────────────────────────────────────────────────────────
+buy_signal  = ta.crossover(ema_short, ema_long) and strategy.position_size <= 0
+sell_signal = ta.crossunder(ema_short, ema_long)
+
+// ── PLOTTING ─────────────────────────────────────────────────────────────
+plot(ema_short, title="Short EMA", color=color.blue,   linewidth=2)
+plot(ema_long,  title="Long EMA",  color=color.orange, linewidth=2)
+
+plotshape(buy_signal,  title="Buy",  location=location.belowbar,
+     color=color.new(color.green, 0), style=shape.triangleup, size=size.normal,
+     text="BUY", textcolor=color.white)
+
+plotshape(sell_signal and strategy.position_size > 0, title="Sell",
+     location=location.abovebar, color=color.new(color.red, 0),
+     style=shape.diamond, size=size.normal,
+     text="SELL", textcolor=color.white)
+
+// ── STRATEGY LOGIC ───────────────────────────────────────────────────────
+if buy_signal
+    strategy.entry("Long", strategy.long)
+
+if sell_signal and strategy.position_size > 0
+    strategy.close("Long", comment="EMA Cross Down")
+
+// ── ALERTS ───────────────────────────────────────────────────────────────
+if buy_signal
+    alert(syminfo.ticker + " • " + timeframe.period + " • BUY: 8 EMA crossed above 20 EMA",
+          alert.freq_once_per_bar_close)
+
+if sell_signal and strategy.position_size > 0
+    alert(syminfo.ticker + " • " + timeframe.period + " • SELL: 8 EMA crossed below 20 EMA",
+          alert.freq_once_per_bar_close)
+
+View in Pine Editor・51 lines
+Use on chart
+1
+1
+605
+Modeled with 10k buying power
+
+risking 5% account value per trade
+
+take profit when 8 day EMA crosses below 20 day EMA
+
+take long position when 8 day EMA crosses above 20 day EMA

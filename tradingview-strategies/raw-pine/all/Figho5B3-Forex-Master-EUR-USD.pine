@@ -1,0 +1,56 @@
+//@version=2
+strategy("FX Master Long/Short", overlay=true)
+
+price = close
+
+long_basis = rsi(price, input(10))
+long_rsiema = ema(long_basis, input(20))
+short_basis = rsi(price, input(30))
+short_rsiema = ema(short_basis, input(30))
+
+long_trigger = input(50)
+short_trigger = input(50)
+
+long_profit = input(500)
+long_loss = input(500)
+
+short_profit = input(500)
+short_loss = input(500)
+
+strategy.entry("enter long", true, when = crossover(long_rsiema, long_trigger))
+strategy.exit("exit long", "enter long", profit = long_profit, loss = long_loss)
+
+strategy.entry("enter short", false, when = crossunder(short_rsiema, short_trigger))
+strategy.exit("exit short", "enter short", profit = short_profit, loss = short_loss)
+
+View in Pine Editor・24 lines
+Use on chart
+8
+8
+9
+2
+35 030
+ATTENTION:
+
+This is a symmetrical algorithm designed only for trading EUR/USD on the 1h time frame. For other currency pairs and time frames, you need to re-calibrate the RSI-EMAs as well as the profit targets and stop losses.
+
+BACKTEST CONDITIONS:
+
+Initial equity = $100,000 (no leverage)
+Order size = 100% of equity
+Pyramiding = disabled
+
+TRADING RULES:
+
+Long entry = EMA20(RSI10) cross> 50
+Profit limit = 50 pips
+Stop loss = 50 pips
+
+Short entry = EMA30(RSI30) cross< 50
+Profit limit = 50 pips
+Stop loss = 50 pips
+
+Long entry = Short exit
+Short entry = long exit
+
+DISCLAIMER: None of my ideas and posts are investment advice. Past performance is not an indication of future results. This strategy was constructed with the benefit of hindsight and its future performance cannot be guaranteed.

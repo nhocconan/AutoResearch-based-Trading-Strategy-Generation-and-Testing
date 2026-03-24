@@ -1,0 +1,44 @@
+//@version=3
+strategy(title="Never Lose A Trade Again", shorttitle='NLATA', overlay=true, initial_capital=5000, pyramiding=10, default_qty_type=strategy.cash, default_qty_value=500, currency=currency.EUR)
+
+fastLength = 13
+slowLength = 34
+
+fastMovingAverage = ema(close, fastLength)
+slowMovingAverage = ema(close, slowLength)
+[_, _, hist] = macd(close, 12, 26, 9)
+delta = fastMovingAverage - slowMovingAverage
+fillingColor = delta > 0 ? color(red, 25) : color(lime, 25)
+
+fastMovingAveragePlot = plot(fastMovingAverage, title='FMA', color=fuchsia, linewidth=3)
+slowMovingAveragePlot = plot(slowMovingAverage, title='SMA', color=blue, linewidth=3)
+fill(fastMovingAveragePlot, slowMovingAveragePlot, color=fillingColor)
+
+shouldBuy = delta < 0 and hist < 0 and hist > hist[1]
+strategy.entry('BUY', strategy.long, when=shouldBuy)
+plotshape(shouldBuy, color=lime, style=shape.arrowup, text="BUY")
+
+shouldSell = delta > 0 and hist > 0 and hist < hist[1]
+strategy.exit('SELL', 'BUY', when=shouldSell)
+plotshape(shouldSell, color=red, style=shape.arrowdown, text="SELL")
+
+View in Pine Editor・23 lines
+Use on chart
+2
+2
+7
+14 441
+Disclaimer: I'm a noob.
+
+Hey there!
+
+I'm trying to implement a script which enter market long position when long EMA crossover short EMA and MACD histogram is positive and histogram at T time is lesser than histogram at T-1.
+
+And when short EMA crossover long EMA, plus MACD histogram is negative and histogram at T is greater than histogram at T-1, I want the script to exit market long position.
+
+Now, I have something pretty close to what I am looking for. What I am missing and can't figure out yet is:
+
+How to moderate entries, ie. I would like it to enter positions when trends are really interesting not just every time the conditions are fulfilled (same for exits) as there is way too much positions
+
+I need to find a way to exit appropriated positions.
+

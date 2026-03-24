@@ -1,0 +1,623 @@
+//@version=6 
+strategy(
+     "Elliott Wave Full Fractal System v2.0", 
+     overlay             = true,
+     max_labels_count    = 500,
+     max_lines_count     = 500,
+     max_boxes_count     = 500,
+     initial_capital     = 10000,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 1,
+     commission_type     = strategy.commission.cash_per_contract,
+     commission_value    = 0.005,
+     slippage            = 0
+)
+
+// 1. SETTINGS -------------------------------------------------------------
+
+// 1.1 Wave degrees
+grpCycle   = "1. Primary Degree (Macro Trend)"
+showPrimary = input.bool(true, "Show Primary Waves (1, 2...)", group = grpCycle)
+lenPriL     = input.int(21, "Primary Lookback Left",  group = grpCycle)
+lenPriR     = input.int(21, "Primary Lookback Right", group = grpCycle)
+
+grpInter   = "2. Intermediate Degree (Trading Degree)"
+showInter   = input.bool(true, "Show Intermediate Waves ((1), (2)...)", group = grpInter)
+lenIntL = input.int(5,   "Intermediate Lookback Left",  minval = 2, group = grpInter)
+lenIntR = input.int(5,   "Intermediate Lookback Right", minval = 2, group = grpInter)
+
+grpMinor   = "3. Minor Degree (Micro Structure)"
+showMinor   = input.bool(true, "Show Minor Waves (i, ii...)", group = grpMinor)
+lenMinL = input.int(3,   "Minor Lookback Left",  group = grpMinor)
+lenMinR = input.int(3,   "Minor Lookback Right", group = grpMinor)
+
+// 1.2 Rules
+grpRules    = "Theory Rules"
+rule_Strict = input.bool(false, "Strict Rules (No Overlap, W3 Not Shortest)", group = grpRules)
+showABC     = input.bool(true, "Show ABC Corrections", group = grpRules)
+
+// 1.3 Pivot / ATR
+grpVol = "Pivot Dynamics"
+atr_len = input.int(14, "ATR Lookback for Dynamic Pivots", group = grpVol)
+
+// 1.4 EMA Trend Filter
+grpFilter = "4. Trend Filter (Non-Wave)"
+ema_len = input.int(200, "EMA Trend Filter Length", group = grpFilter)
+ema_filter = ta.ema(close, ema_len)
+plot(ema_filter, color = color.blue, title = "Trend EMA")
+
+// 1.5 Dynamic Risk Management
+grpRisk = "5. Dynamic Risk Management"
+atr_stop_mult = input.float(2.0, "ATR Stop Multiplier (Stop = Entry +/- ATR*X)", minval = 1.0, step = 0.1, group = grpRisk)
+min_rr_ratio = input.float(2.0, "Minimum Reward/Risk Ratio (TP Target)", minval = 1.5, step = 0.5, group = grpRisk)
+
+// 1.6 Trading Settings
+grpTrade   = "STRATEGY SETTINGS"
+trade_on = input.bool(true, "Active Trading Signals", group = grpTrade)
+fib_entry = input.float(0.50, "W4 Entry Fib", minval = 0.2, maxval = 0.7, step = 0.02, group = grpTrade)
+fib_target = input.float(1.618, "W5 Target Extension (Deprecated)", group = grpTrade) 
+
+// 2. GLOBAL ARRAYS & STATE (Unchanged)
+var int[]  pri_idx = array.new_int()
+var float[] pri_prc = array.new_float()
+var int[]  pri_typ = array.new_int()
+
+var int[]  int_idx = array.new_int()
+var float[] int_prc = array.new_float()
+var int[]  int_typ = array.new_int()
+
+var int[]  min_idx = array.new_int()
+var float[] min_prc = array.new_float()
+var int[]  min_typ = array.new_int()
+
+var int[]  trd_idx = array.new_int()
+var float[] trd_prc = array.new_float()
+var int[]  trd_typ = array.new_int()
+
+var int[]  lastIdxArr     = array.new_int(3, 0)
+var int[]  lastW5IdxArr   = array.new_int(3, 0)
+var bool[] lastWasBullArr = array.new_bool(3, false)
+
+
+// 3. HELPER FUNCTIONS ---------------------------------------------------------
+
+// Visual Styles
+f_get_style(_degree) =>
+    color waveColor = color.new(color.blue, 0)
+    string fmt = "Circle"
+    int w = 2
+    if _degree == "Primary"
+        waveColor := color.new(color.blue, 0)
+        fmt := "Circle"
+        w := 3
+    else if _degree == "Intermediate"
+        waveColor := color.new(color.teal, 0)
+        fmt := "Paren"
+        w := 2
+    else
+        waveColor := color.new(color.red, 0)
+        fmt := "Roman"
+        w := 1
+    [waveColor, fmt, w]
+
+// Label Drawer
+f_draw_wave(int _idx, float _price, int _count, bool _isBull, string _degree) =>
+    [cWave, fmt, wid] = f_get_style(_degree)
+    string txt = ""
+    if fmt == "Circle"
+        txt := _count == 1 ? "①" : _count == 2 ? "②" : _count == 3 ? "③" : _count == 4 ? "④" : _count == 5 ? "⑤" : _count == 11 ? "Ⓐ" : _count == 12 ? "Ⓑ" : _count == 13 ? "Ⓒ" : "?"
+    else if fmt == "Paren"
+        txt := _count == 1 ? "(1)" : _count == 2 ? "(2)" : _count == 3 ? "(3)" : _count == 4 ? "(4)" : _count == 5 ? "(5)" : _count == 11 ? "(A)" : _count == 12 ? "(B)" : _count == 13 ? "(C)" : "?"
+    else
+        txt := _count == 1 ? "i" : _count == 2 ? "ii" : _count == 3 ? "iii" : _count == 4 ? "iv" : _count == 5 ? "v" : _count == 11 ? "a" : _count == 12 ? "b" : _count == 13 ? "c" : "?"
+
+    label.new(
+          _idx, _price, txt, xloc = xloc.bar_index, yloc = _isBull ? yloc.abovebar : yloc.belowbar,
+          style = _isBull ? label.style_label_down : label.style_label_up, color = cWave, textcolor = color.white,
+          size = _degree == "Primary" ? size.normal : size.small)
+
+// Utility: limit array size
+f_trim_arrays(int[] idx, float[] prc, int[] typ, int maxSize) =>
+    while array.size(idx) > maxSize
+        array.shift(idx)
+        array.shift(prc)
+        array.shift(typ)
+
+// Dynamic Pivot Updater
+f_update_pivots(int _L, int _R, int[] idx, float[] prc, int[] typ) =>
+    float atrValue = ta.atr(atr_len)
+    float avgAtr   = ta.ema(atrValue, 50)
+
+    int dynamic_L = math.round(_L * (atrValue > avgAtr ? 1.5 : 1.0))
+    int dynamic_R = math.round(_R * (atrValue > avgAtr ? 1.5 : 1.0))
+
+    dynamic_L := math.max(2, dynamic_L)
+    dynamic_R := math.max(2, dynamic_R)
+
+    float ph = ta.pivothigh(high, dynamic_L, dynamic_R)
+    float pl = ta.pivotlow(low,  dynamic_L, dynamic_R)
+
+    if not na(ph)
+        array.push(idx, bar_index[dynamic_R])
+        array.push(prc, ph)
+        array.push(typ, 1)
+    if not na(pl)
+        array.push(idx, bar_index[dynamic_R])
+        array.push(prc, pl)
+        array.push(typ, -1)
+
+    f_trim_arrays(idx, prc, typ, 300)
+
+// Visualization Engine for one degree
+f_process_degree(string _degName, int _degIndex, bool _show, int[] idx, float[] prc, int[] typ) =>
+    if not _show
+        [0, 0, false]
+    else
+        int  lastIdx     = array.get(lastIdxArr, _degIndex)
+        int  lastW5Idx   = array.get(lastW5IdxArr, _degIndex)
+        bool lastWasBull = array.get(lastWasBullArr, _degIndex)
+
+        if array.size(idx) >= 6
+            int sz = array.size(idx)
+
+            int  i0 = array.get(idx, sz - 6)
+            int  i1 = array.get(idx, sz - 5)
+            int  i2 = array.get(idx, sz - 4)
+            int  i3 = array.get(idx, sz - 3)
+            int  i4 = array.get(idx, sz - 2)
+            int  i5 = array.get(idx, sz - 1)
+            float p0 = array.get(prc, sz - 6)
+            float p1 = array.get(prc, sz - 5)
+            float p2 = array.get(prc, sz - 4)
+            float p3 = array.get(prc, sz - 3)
+            float p4 = array.get(prc, sz - 2)
+            float p5 = array.get(prc, sz - 1)
+            int  t0 = array.get(typ, sz - 6)
+
+            // ── IMPULSE WAVE DETECTION ───────────────────────────────────────
+            if i0 > lastIdx
+                // Bullish 5-wave
+                if t0 == -1 and p1 > p0 and p3 > p1 and p5 > p3 and p2 > p0 and p4 > p2
+                    
+                    bool r3_gt_r1      = rule_Strict ? (math.abs(p3 - p2) > math.abs(p1 - p0)) : true
+                    bool r4_no_overlap = rule_Strict ? (p4 > p1) : true
+
+                    float len1          = math.abs(p1 - p0)
+                    float len3          = math.abs(p3 - p2)
+                    float len5          = math.abs(p5 - p4)
+                    float min_len       = math.min(len1, math.min(len3, len5))
+                    bool  r3_not_short  = rule_Strict ? (len3 > min_len) : true
+
+                    if r3_gt_r1 and r4_no_overlap and r3_not_short
+                        lastIdx     := i5
+                        lastW5Idx   := i5
+                        lastWasBull := true
+
+                        f_draw_wave(i1, p1, 1, true, _degName)
+                        f_draw_wave(i2, p2, 2, true, _degName)
+                        f_draw_wave(i3, p3, 3, true, _degName)
+                        f_draw_wave(i4, p4, 4, true, _degName)
+                        f_draw_wave(i5, p5, 5, true, _degName)
+                        [c, _, w] = f_get_style(_degName)
+                        line.new(i0, p0, i1, p1, color = c, width = w)
+                        line.new(i1, p1, i2, p2, color = c, width = w)
+                        line.new(i2, p2, i3, p3, color = c, width = w)
+                        line.new(i3, p3, i4, p4, color = c, width = w)
+                        line.new(i4, p4, i5, p5, color = c, width = w)
+
+                // Bearish 5-wave
+                else if t0 == 1 and p1 < p0 and p3 < p1 and p5 < p3 and p2 < p0 and p4 < p2
+                    bool r3b_gt_r1b      = rule_Strict ? (math.abs(p2 - p3) > math.abs(p0 - p1)) : true
+                    bool r4b_no_overlap  = rule_Strict ? (p4 < p1) : true
+
+                    float len1b         = math.abs(p0 - p1)
+                    float len3b         = math.abs(p2 - p3)
+                    float len5b         = math.abs(p4 - p5)
+                    float min_lenb      = math.min(len1b, math.min(len3b, len5b))
+                    bool  r3_not_short_b = rule_Strict ? (len3b > min_lenb) : true
+
+                    if r3b_gt_r1b and r4b_no_overlap and r3_not_short_b
+                        lastIdx     := i5
+                        lastW5Idx   := i5
+                        lastWasBull := false
+
+                        f_draw_wave(i1, p1, 1, false, _degName)
+                        f_draw_wave(i2, p2, 2, false, _degName)
+                        f_draw_wave(i3, p3, 3, false, _degName)
+                        f_draw_wave(i4, p4, 4, false, _degName)
+                        f_draw_wave(i5, p5, 5, false, _degName)
+                        [c, _, w] = f_get_style(_degName)
+                        line.new(i0, p0, i1, p1, color = c, width = w)
+                        line.new(i1, p1, i2, p2, color = c, width = w)
+                        line.new(i2, p2, i3, p3, color = c, width = w)
+                        line.new(i3, p3, i4, p4, color = c, width = w)
+                        line.new(i4, p4, i5, p5, color = c, width = w)
+
+            // ── ABC CORRECTION DETECTION ─────────────────────────────────────
+            if showABC and lastW5Idx > 0 and i3 >= lastW5Idx
+                int  ia = i3, ib = i4, ic = i5
+                float pa = p3, pb = p4, pc = p5
+
+                // After bullish impulse: look for down-up-down
+                if lastWasBull and p3 < p2
+                    if pc < pa and pb < array.get(prc, sz - 4)
+                        lastIdx := ic
+                        f_draw_wave(ia, pa, 11, false, _degName)   // A
+                        f_draw_wave(ib, pb, 12, true,  _degName)   // B
+                        f_draw_wave(ic, pc, 13, false, _degName)   // C
+                        [cA, _, _wA] = f_get_style(_degName)
+                        line.new(i2, p2, ia, pa, color = color.new(cA, 50), width = 1, style = line.style_dashed)
+                        line.new(ia, pa, ib, pb, color = color.new(cA, 50), width = 1, style = line.style_dashed)
+                        line.new(ib, pb, ic, pc, color = color.new(cA, 50), width = 1, style = line.style_dashed)
+
+                // After bearish impulse: look for up-down-up
+                if not lastWasBull and p3 > p2
+                    if pc > pa and pb > array.get(prc, sz - 4)
+                        lastIdx := ic
+                        f_draw_wave(ia, pa, 11, true,  _degName)   // A
+                        f_draw_wave(ib, pb, 12, false, _degName)   // B
+                        f_draw_wave(ic, pc, 13, true,  _degName)   // C
+                        [cB, _, _wB] = f_get_style(_degName)
+                        line.new(i2, p2, ia, pa, color = color.new(cB, 50), width = 1, style = line.style_dashed)
+                        line.new(ia, pa, ib, pb, color = color.new(cB, 50), width = 1, style = line.style_dashed)
+                        line.new(ib, pb, ic, pc, color = color.new(cB, 50), width = 1, style = line.style_dashed)
+
+            // Save updated state back into arrays
+            array.set(lastIdxArr,     _degIndex, lastIdx)
+            array.set(lastW5IdxArr,   _degIndex, lastW5Idx)
+            array.set(lastWasBullArr, _degIndex, lastWasBull)
+
+        [lastIdx, lastW5Idx, lastWasBull]
+
+// 4. UPDATE PIVOTS (once per bar) ---------------------------------------------
+
+f_update_pivots(lenPriL, lenPriR, pri_idx, pri_prc, pri_typ)
+f_update_pivots(lenIntL, lenIntR, int_idx, int_prc, int_typ)
+f_update_pivots(lenMinL, lenMinR, min_idx, min_prc, min_typ)
+f_update_pivots(lenIntL, lenIntR, trd_idx, trd_prc, trd_typ)
+
+// 5. DRAW WAVES FOR EACH DEGREE -----------------------------------------------
+
+f_process_degree("Primary", 0, showPrimary, pri_idx, pri_prc, pri_typ)
+f_process_degree("Intermediate", 1, showInter, int_idx, int_prc, int_typ)
+f_process_degree("Minor", 2, showMinor, min_idx, min_prc, min_typ)
+
+// 6. TRADING ENGINE -----------------------------------------------------------
+
+// Trade state
+var int trade_lastW3 = 0
+var int trade_dir = 0
+var float trade_entry = na
+var float trade_stop = na
+var float trade_tp = na
+
+// 6.1 Setup detection based on trading pivots
+if trade_on and array.size(trd_idx) >= 4
+    int sz = array.size(trd_idx)
+
+    int i3 = array.get(trd_idx, sz - 1)
+    float p0 = array.get(trd_prc, sz - 4)
+    float p1 = array.get(trd_prc, sz - 3)
+    float p2 = array.get(trd_prc, sz - 2)
+    float p3 = array.get(trd_prc, sz - 1)
+    int t0 = array.get(trd_typ, sz - 4)
+    int t3 = array.get(trd_typ, sz - 1)
+    
+    // **FIXED: ATR calculation moved here**
+    float current_atr = ta.atr(atr_len)
+
+    // Only react to a fresh pivot sequence
+    if i3 > trade_lastW3
+        bool is_bull_trend = close > ema_filter
+        bool is_bear_trend = close < ema_filter
+
+        // ── LONG SETUP
+        if t0 == -1 and t3 == 1 and is_bull_trend
+            bool isBullStruct = (p1 > p0) and (p2 > p0) and (p2 < p1) and (p3 > p1)
+
+            float len1 = math.abs(p1 - p0)
+            float len3 = math.abs(p3 - p2)
+            bool r3_gt1 = rule_Strict ? (len3 > len1) : true
+
+            if isBullStruct and r3_gt1
+                trade_lastW3 := i3
+                float w3_height = p3 - p2
+
+                float entryPrice = p3 - (w3_height * fib_entry)
+                float stopPrice  = entryPrice - (current_atr * atr_stop_mult)
+                
+                // Calculate TP to GUARANTEE min_rr_ratio
+                float risk_long  = entryPrice - stopPrice
+                float tpPrice    = entryPrice + (risk_long * min_rr_ratio) 
+
+                // Check stop viability and ensure risk > 0
+                bool  rr_ok      = risk_long > 0 
+                
+                if entryPrice > stopPrice and rr_ok
+                    trade_dir  := 1
+                    trade_entry := entryPrice
+                    trade_stop := stopPrice
+                    trade_tp := tpPrice
+
+                    box.new(bar_index, p3, bar_index + 20, entryPrice, xloc = xloc.bar_index, bgcolor = color.new(color.green, 85), border_color = na)
+                    label.new(bar_index, entryPrice, "LONG SETUP\nLimit Buy: " + str.tostring(entryPrice, "#.##"), xloc = xloc.bar_index, yloc = yloc.belowbar, style = label.style_label_up, color = color.green, textcolor = color.white, size = size.small)
+
+
+        // ── SHORT SETUP
+        else if t0 == 1 and t3 == -1 and is_bear_trend
+            bool isBearStruct = (p1 < p0) and (p2 < p0) and (p2 > p1) and (p3 < p1)
+
+            float len1b  = math.abs(p0 - p1)
+            float len3b  = math.abs(p2 - p3)
+            bool r3_gt1b = rule_Strict ? (len3b > len1b) : true
+
+            if isBearStruct and r3_gt1b
+                trade_lastW3 := i3
+                float w3_height = p2 - p3
+
+                float entryPrice = p3 + (w3_height * fib_entry)
+                float stopPrice  = entryPrice + (current_atr * atr_stop_mult)
+                
+                // Calculate TP to GUARANTEE min_rr_ratio
+                float risk_short   = stopPrice - entryPrice
+                float tpPrice   = entryPrice - (risk_short * min_rr_ratio)
+
+                // Check stop viability and ensure risk > 0
+                bool  rr_ok      = risk_short > 0
+
+                if entryPrice < stopPrice and rr_ok
+                    trade_dir  := -1
+                    trade_entry := entryPrice
+                    trade_stop := stopPrice
+                    trade_tp := tpPrice
+
+                    box.new(bar_index, p3, bar_index + 20, entryPrice, xloc = xloc.bar_index, bgcolor = color.new(color.red, 85), border_color = na)
+                    label.new(bar_index, entryPrice, "SHORT SETUP\nLimit Sell: " + str.tostring(entryPrice, "#.##"), xloc = xloc.bar_index, yloc = yloc.abovebar, style = label.style_label_down, color = color.red, textcolor = color.white, size = size.small)
+
+// 7. ORDER EXECUTION ----------------------------------------------------------
+
+// Long execution
+if trade_dir == 1 and strategy.opentrades == 0
+    strategy.order("Sniper Long", strategy.long, limit = trade_entry, comment = "W4 Buy Limit")
+    strategy.exit("TP/SL Long", "Sniper Long", limit = trade_tp, stop = trade_stop, comment = "W5 TP / ATR SL")
+    trade_dir  := 0
+    trade_entry := na
+    trade_stop := na
+    trade_tp := na
+
+// Short execution
+if trade_dir == -1 and strategy.opentrades == 0
+    strategy.order("Sniper Short", strategy.short, limit = trade_entry, comment = "W4 Sell Limit")
+    strategy.exit("TP/SL Short", "Sniper Short", limit = trade_tp, stop = trade_stop, comment = "W5 TP / ATR SL")
+    trade_dir  := 0
+    trade_entry := na
+    trade_stop := na
+    trade_tp := na
+
+View in Pine Editor・398 lines
+Use on chart
+5
+6
+2 114
+Elliott Wave Full Fractal System v2.0 – Q.C. FINAL (Guaranteed R/R)
+
+Elliott Wave Full Fractal System is a multi-timeframe wave engine that automatically labels Elliott impulses and ABC corrections, then builds a rule-based, ATR-driven risk/reward framework around the “W3–W4–W5” leg.
+“Guaranteed R/R” here means every order is placed with a predefined stop-loss and take-profit that respect a minimum Reward:Risk ratio – it does not mean guaranteed profits.
+
+Core Idea
+This strategy turns a full fractal Elliott Wave labelling engine into a systematic trading model.
+It scans fractal pivots on three wave degrees (Primary, Intermediate, Minor) to detect 5-wave impulses and ABC corrections.
+A separate “Trading Degree” pivot stream, filtered by a 200-EMA trend filter and ATR-based dynamic pivots, is then used to find W4 pullback entries with a minimum, user-defined Reward:Risk ratio.
+
+Default Properties & Risk Assumptions
+The backtest uses realistic but conservative defaults:
+
+
+Pine Script®
+// Default properties used for backtesting
+strategy(
+"Elliott Wave Full Fractal System - Q.C. FINAL (Guaranteed R/R)",
+overlay           = true,
+initial_capital   = 10000,      // realistic account size
+default_qty_type  = strategy.percent_of_equity,
+default_qty_value = 1,          // 1% risk per trade
+commission_type   = strategy.commission.cash_per_contract,
+commission_value  = 0.005,      // example stock commission
+slippage          = 0           // see notes below
+)
+
+Expand 6 lines
+
+
+Account size: 10,000 (can be changed to match your own account).
+
+Position sizing: 1% of equity per trade to keep risk per idea sustainable and aligned with TradingView’s recommendations.
+
+Commission: 0.005 cash per contract/share as a realistic example for stock trading.
+
+Slippage: set to 0 in code for clarity of “pure logic” backtesting. Real-life trading will experience slippage, so users should adjust this according to their market and broker.
+
+
+Always re-run the backtest after changing any of these values, and avoid using high risk fractions (5–10%+) as that is rarely sustainable.
+
+1. Full Fractal Wave Engine
+The script builds and maintains four pivot streams using ATR-adaptive fractals:
+
+Primary Degree (Macro Trend):
+Captures the large swings that define the major trend. Labels ①–⑤ and ⒶⒷⒸ using blue “Circle” labels and thicker lines.
+
+Intermediate Degree (Trading Degree):
+Captures the medium swings (swing-trading horizon). Uses teal labels ( (1)…(5), (A)(B)(C) ).
+
+Minor Degree (Micro Structure):
+Tracks short-term swings inside the larger waves. Uses red roman numerals (i…v, a b c).
+
+ABC Corrections (Optional):
+When enabled, the engine tries to detect standard A–B–C corrective structures that follow a completed 5-wave impulse and plots them with dashed lines.
+
+
+Each degree uses a dynamic pivot lookback that expands when ATR is above its EMA, so the system naturally requires “stronger” pivots in volatile environments and reacts faster in quiet conditions.
+
+2. Theory Rules & Strict Mode
+
+Normal Mode: More permissive detection. Designed to show more wave structures for educational / exploratory use.
+
+Strict Mode: Enforces key Elliott constraints:
+Wave 3 not shorter than waves 1 and 5.
+No invalid W4 overlap with W1 (for standard impulses).
+
+ABC Logic: After a confirmed bullish impulse, the script expects a down-up-down corrective pattern (A,B,C). After a bearish impulse, it looks for up-down-up.
+
+
+3. Trend Filter & Pivots
+
+EMA Trend Filter: A configurable EMA (default 200) is used as a non-wave trend filter.
+Price above EMA → Only long setups are considered.
+Price below EMA → Only short setups are considered.
+
+ATR-Adaptive Pivots: The pivot engine scales its left/right bars based on current ATR vs ATR EMA, making waves and trading pivots more robust in volatile regimes.
+
+
+4. Dynamic Risk Management (Guaranteed R/R Engine)
+
+The trading engine is designed around risk, not just pattern recognition:
+
+ATR-Based Stop:
+Stop-loss is placed at:
+Entry ± ATR × Multiplier (user-configurable, default 2.0).
+This anchors risk to current volatility.
+
+Minimum Reward:Risk Ratio:
+For each setup, the script:
+Computes the distance from entry to stop (risk).
+Projects a take-profit target at risk × min_rr_ratio away from entry.
+Only accepts the setup if risk is positive and the required R:R ratio is achievable.
+
+Result: Every order is created with both TP and SL at a predefined distance, so each trade starts with a known, minimum Reward:Risk profile by design.
+
+
+“Guaranteed R/R” refers exclusively to this order placement logic (TP/SL geometry), not to win-rate or profitability.
+
+5. Trading Logic – W3–W4–W5 Pattern
+
+The Trading pivot stream (separate from visual wave degrees) looks for a simple but powerful pattern:
+
+Bullish structure:Sequence of pivots forms a higher-high / higher-low pattern.
+Price is above the EMA trend filter.
+A strong “W3” leg is confirmed with structure rules (optionally stricter in Strict mode).
+
+Entry (Long – W4 Pullback):The “height” of W3 is measured.
+Entry is placed at a configurable Fibonacci pullback (default 50%) inside that leg.
+ATR-based stop is placed below entry.
+Take-profit is projected to satisfy min Reward:Risk.
+
+Bearish structure:
+Mirrored logic (lower highs/lows, price below EMA, W3 down, W4 retrace up, W5 continuation down).
+
+
+Once a valid setup is found, the script draws a colored box around the entry zone and a label describing the type of signal (“LONG SETUP” or “SHORT SETUP”) with the suggested limit price.
+
+6. Orders & Execution
+
+Entry Orders: The strategy uses limit orders at the computed W4 level (“Sniper Long” or “Sniper Short”).
+
+Exits: A single strategy.exit() is attached to each entry with:
+Take-profit at the projected minimum R:R target.
+Stop-loss at ATR-based level.
+
+One Trade at a Time: New setups are only used when there is no open position (strategy.opentrades == 0) to keep the logic clear and risk contained.
+
+
+7. Visual Guide on the Chart
+
+Wave Labels:Primary: ①,②,③,④,⑤, ⒶⒷⒸ
+Intermediate: (1)…(5), (A)(B)(C)
+Minor: i…v, a b c
+
+Trend EMA: Single blue EMA showing the dominant trend.
+
+Setup Boxes:Green transparent box → long entry zone.
+Red transparent box → short entry zone.
+
+Labels: “LONG SETUP / SHORT SETUP” labels mark the proposed limit entry with price.
+
+
+8. How to Use This Strategy
+
+Attach the strategy to your chart
+Choose your market (stocks, indices, FX, crypto, futures, etc.) and timeframe (for example 1h, 4h, or Daily). Then add the strategy to the chart from your Scripts list.
+
+
+Start with the default settings
+Leave all inputs on their defaults first. This lets you see the “intended” behaviour and the exact properties used for the published backtest (account size, 1% risk, commission, etc.).
+
+
+Study the wave map
+Zoom in and out and look at the three wave degrees:
+Blue circles → Primary degree (big picture trend).
+Teal (1)…(5) → Intermediate degree (swing structure).
+Red i…v → Minor degree (micro waves).
+
+Use this to understand how the engine is interpreting the Elliott structure on your symbol.
+
+
+Watch for valid setups
+Look for the coloured boxes and labels:
+Green box + “LONG SETUP” label → potential W4 pullback long in an uptrend.
+Red box + “SHORT SETUP” label → potential W4 pullback short in a downtrend.
+
+Only trades in the direction of the EMA trend filter are allowed by the strategy.
+
+
+Check the Reward:Risk of each idea
+For each setup, inspect:
+Limit entry price.
+ATR-based stop level.
+Projected take-profit level.
+
+Make sure the minimum Reward:Risk ratio matches your own rules before you consider trading it.
+
+
+Backtest and evaluate
+Open the Strategy Tester:
+Verify you have a decent sample size (ideally 100+ trades).
+Check drawdowns, average trade, win-rate and R:R distribution.
+Change markets and timeframes to see where the logic behaves best.
+
+Adapt to your own risk profile
+If you plan to use it live:
+Set Initial Capital to your real account size.
+Adjust default_qty_value to a risk level you are comfortable with (often 0.5–2% per trade).
+Set commission and slippage to realistic broker values.
+Re-run the backtest after every major change.
+
+Use as a framework, not a signal machine
+Treat this as a structured Elliott/R:R framework:
+
+Filter signals by higher-timeframe trend, major S/R, volume, or fundamentals.
+
+Optionally hide some wave degrees or ABC labels if you want a cleaner chart.
+
+Combine the system’s structure with your own trade management and discretion.
+
+
+Best Practices & Limitations
+
+This is an approximate Elliott Wave engine based on fractal pivots. It does not replace a full discretionary Elliott analysis.
+
+All wave counts are algorithmic and can differ from a manual analyst’s interpretation.
+
+Like any backtest, results depend heavily on:
+Symbol and timeframe.
+Sample size (more trades are better).
+Realistic commission/slippage settings.
+
+The 0-slippage default is chosen only to show the “raw logic”. In real markets, slippage can significantly impact performance.
+
+No strategy wins all the time. Losing streaks and drawdowns will still occur even with a strict R:R framework.
+
+
+Disclaimer
+
+This script is for educational and research purposes only and does not constitute financial advice or a recommendation to buy or sell any security. Past performance, whether real or simulated, is not indicative of future results. Always test on multiple symbols/timeframes, use conservative risk, and consult your financial advisor before trading live capital.
+

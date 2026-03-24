@@ -1,0 +1,13 @@
+//@version=5
+lvl_in=##input(defval=0.0,type='INPUT_FLOAT',##id='in_3')
+lvl_out=##input(defval=0.0,type='INPUT_FLOAT',##id='in_4')
+lvl_tp=##input(defval=0.0,type='INPUT_FLOAT',##id='in_5')
+table_bg_c=##input(defval=#787B86,type='INPUT_COLOR',##id='in_15')
+table_txt_c=##input(defval=#FFFFFF,type='INPUT_COLOR',##id='in_16')
+sl=((lvl_out!=0)?lvl_out:na)
+tp=((lvl_tp!=0)?lvl_tp:na)
+##root(root_metainfo,rm_0,((lvl_in!=0)?lvl_in:na),input__float)
+##root(root_metainfo,rm_1,sl,input__float)
+##root(root_metainfo,rm_2,tp,input__float)
+##root(root_metainfo,rm_ic_0,table_bg_c,input__color)
+##root(root_metainfo,rm_ic_1,table_txt_c,input__color)

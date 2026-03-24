@@ -1,0 +1,433 @@
+//@version=6
+strategy("ORB Trailing Strategy", overlay=true,
+     process_orders_on_close=true, calc_on_every_tick=false,
+     initial_capital=25000, default_qty_type=strategy.fixed,
+     default_qty_value=1, commission_type=strategy.commission.cash_per_contract,
+     commission_value=3.10, currency=currency.USD,
+     margin_long=4, margin_short=4)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+i_sessionMode     = input.string("Both", "Session Mode", options=["London", "New York", "Both"])
+i_asiaFilter      = input.bool(false, "Asia Range Filter")
+i_minBreakout     = input.float(2.0, "Min Breakout Points Beyond Range", minval=0.0, step=0.5)
+i_riskPct         = input.float(0.5, "Risk % of Account", minval=0.1, step=0.1)
+i_dollarPerPoint  = input.float(20.0, "Dollar Per Point", minval=0.1, step=0.5)
+i_emaFilter       = input.bool(false, "EMA Filter (200 EMA 15-min)")
+i_emaPeriod       = input.int(200, "EMA Period (15-min)")
+i_showRangeBoxes  = input.bool(true, "Show ORB Range Boxes")
+i_showAsiaRange   = input.bool(true, "Show Asia Range")
+i_showRLevels     = input.bool(false, "Show R-Level Lines")
+i_showEMA         = input.bool(false, "Show 15-min EMA")
+i_beOffset        = input.float(4.0, "BE Offset Points", minval=0.0, step=0.5)
+i_londonClose     = input.bool(true, "Close London Trades at 6:00 AM")
+i_nyClose         = input.bool(true, "Close NY Trades at 3:00 PM")
+
+// ============================================================================
+// TIME CONDITIONS (EST/New York timezone)
+// ============================================================================
+tz = "America/New_York"
+barMins = hour(time, tz) * 60 + minute(time, tz)
+
+// London ORB: 3:00-3:15, Entry: 3:15-6:00, Close: 6:00
+londonORBActive = barMins >= 180 and barMins < 195
+londonEntryTime = barMins >= 195 and barMins < 360
+londonCloseTime = barMins >= 360 and barMins < 365
+
+// New York ORB: 9:30-9:45, Entry: 9:45-15:00, Close: 15:00
+nyORBActive     = barMins >= 570 and barMins < 585
+nyEntryTime     = barMins >= 585 and barMins < 900
+nyCloseTime     = barMins >= 900 and barMins < 905
+
+// First bar of each ORB window
+londonORBStart  = londonORBActive and not londonORBActive[1]
+nyORBStart      = nyORBActive and not nyORBActive[1]
+
+// Asia Range: 18:00-00:00 EST
+asiaRangeTime   = barMins >= 1080
+
+// ============================================================================
+// ASIA RANGE TRACKING
+// ============================================================================
+var float asiaHigh      = na
+var float asiaLow       = na
+var bool  asiaComplete  = false
+var bool  asiaBroken    = false
+var box   asiaBox       = na
+
+// Reset Asia range at 18:00 EST
+if asiaRangeTime and not asiaRangeTime[1]
+    asiaHigh     := high
+    asiaLow      := low
+    asiaComplete := false
+    asiaBroken   := false
+
+// Build Asia range 18:00-00:00
+if asiaRangeTime
+    asiaHigh := math.max(nz(asiaHigh, high), high)
+    asiaLow  := math.min(nz(asiaLow, low), low)
+
+// Mark Asia range complete at midnight
+if barMins < 180 and barMins >= 0 and not asiaComplete and not na(asiaHigh)
+    asiaComplete := true
+    if i_showAsiaRange and i_asiaFilter
+        asiaBox := box.new(bar_index - 1, asiaHigh, bar_index, asiaLow,
+             border_color=color.new(color.purple, 50), bgcolor=color.new(color.purple, 90))
+
+// Check if Asia range is broken before London ORB forms
+if asiaComplete and not asiaBroken and barMins < 180
+    if high > asiaHigh or low < asiaLow
+        asiaBroken := true
+
+// Extend Asia box
+if not na(asiaBox) and barMins < 195
+    box.set_right(asiaBox, bar_index)
+
+// ============================================================================
+// OPENING RANGE DETECTION
+// ============================================================================
+var float londonRangeHigh = na
+var float londonRangeLow  = na
+var bool  londonRangeSet  = false
+var int   londonBarCount  = 0
+var box   londonBox       = na
+var int   londonBoxStart  = na
+
+var float nyRangeHigh     = na
+var float nyRangeLow      = na
+var bool  nyRangeSet      = false
+var int   nyBarCount      = 0
+var box   nyBox           = na
+var int   nyBoxStart      = na
+
+// London ORB
+if londonORBStart
+    londonRangeHigh := high
+    londonRangeLow  := low
+    londonRangeSet  := false
+    londonBarCount  := 1
+    londonBoxStart  := bar_index
+else if londonORBActive and not londonRangeSet
+    londonRangeHigh := math.max(londonRangeHigh, high)
+    londonRangeLow  := math.min(londonRangeLow, low)
+    londonBarCount  += 1
+
+if londonBarCount >= 3 and not londonRangeSet
+    londonRangeSet := true
+    if i_showRangeBoxes and (i_sessionMode == "London" or i_sessionMode == "Both")
+        londonBox := box.new(londonBoxStart, londonRangeHigh, bar_index, londonRangeLow,
+             border_color=color.new(color.blue, 30), bgcolor=color.new(color.blue, 90),
+             border_width=2)
+
+// NY ORB
+if nyORBStart
+    nyRangeHigh := high
+    nyRangeLow  := low
+    nyRangeSet  := false
+    nyBarCount  := 1
+    nyBoxStart  := bar_index
+else if nyORBActive and not nyRangeSet
+    nyRangeHigh := math.max(nyRangeHigh, high)
+    nyRangeLow  := math.min(nyRangeLow, low)
+    nyBarCount  += 1
+
+if nyBarCount >= 3 and not nyRangeSet
+    nyRangeSet := true
+    if i_showRangeBoxes and (i_sessionMode == "New York" or i_sessionMode == "Both")
+        nyBox := box.new(nyBoxStart, nyRangeHigh, bar_index, nyRangeLow,
+             border_color=color.new(color.orange, 30), bgcolor=color.new(color.orange, 90),
+             border_width=2)
+
+// Extend range boxes through session
+if not na(londonBox) and londonEntryTime
+    box.set_right(londonBox, bar_index)
+if not na(nyBox) and nyEntryTime
+    box.set_right(nyBox, bar_index)
+
+// ============================================================================
+// TRADE TRACKING PER SESSION PER DAY
+// ============================================================================
+var int   londonTradeCount  = 0
+var bool  londonHadWinner   = false
+var int   nyTradeCount      = 0
+var bool  nyHadWinner       = false
+var bool  londonReverted    = true
+var bool  nyReverted        = true
+
+// Reset trade counts at ORB start
+if londonORBStart
+    londonTradeCount := 0
+    londonHadWinner  := false
+    londonReverted   := true
+
+if nyORBStart
+    nyTradeCount := 0
+    nyHadWinner  := false
+    nyReverted   := true
+
+// ============================================================================
+// ACTIVE TRADE STATE
+// ============================================================================
+var float entryPrice      = na
+var float stopPrice       = na
+var float oneR            = na
+var int   tradeDir        = 0     // 1 = long, -1 = short, 0 = flat
+var int   currentRLevel   = 0
+var string tradeSession   = ""    // "london" or "ny"
+
+// ============================================================================
+// HELPER: Can we trade this session?
+// ============================================================================
+canTradeLondon() =>
+    (i_sessionMode == "London" or i_sessionMode == "Both") and
+     londonRangeSet and
+     londonTradeCount < 2 and
+     not londonHadWinner and
+     londonReverted and
+     (not i_asiaFilter or asiaBroken)
+
+canTradeNY() =>
+    (i_sessionMode == "New York" or i_sessionMode == "Both") and
+     nyRangeSet and
+     nyTradeCount < 2 and
+     not nyHadWinner and
+     nyReverted and
+     (not i_asiaFilter or asiaBroken)
+
+// ============================================================================
+// SESSION CLOSE LOGIC - Force close positions (single-bar window)
+// ============================================================================
+if i_londonClose and tradeSession == "london" and londonCloseTime and tradeDir != 0
+    strategy.close_all(comment="London Close")
+    tradeDir     := 0
+    tradeSession := ""
+
+if i_nyClose and tradeSession == "ny" and nyCloseTime and tradeDir != 0
+    strategy.close_all(comment="NY Close")
+    tradeDir     := 0
+    tradeSession := ""
+
+// ============================================================================
+// DETECT CLOSED TRADES (for win tracking)
+// Must come AFTER session close so tradeSession is still set when stop-outs
+// are detected mid-session
+// ============================================================================
+if strategy.position_size[1] != 0 and strategy.position_size == 0 and tradeDir != 0
+    if currentRLevel >= 2
+        if tradeSession == "london"
+            londonHadWinner := true
+        if tradeSession == "ny"
+            nyHadWinner := true
+    // Mark reversion needed for re-entry after stop-out
+    if tradeSession == "london"
+        londonReverted := false
+    if tradeSession == "ny"
+        nyReverted := false
+    tradeDir     := 0
+    tradeSession := ""
+
+// ============================================================================
+// ENTRY LOGIC
+// ============================================================================
+// Sync tradeDir with actual position (handles unfilled entries)
+if tradeDir != 0 and strategy.position_size == 0 and strategy.position_size[1] == 0
+    tradeDir     := 0
+    tradeSession := ""
+
+// Reversion check: price must return inside range before re-entry
+if londonEntryTime and not londonReverted and londonRangeSet
+    if close < londonRangeHigh and close > londonRangeLow
+        londonReverted := true
+
+if nyEntryTime and not nyReverted and nyRangeSet
+    if close < nyRangeHigh and close > nyRangeLow
+        nyReverted := true
+
+isFlatNow = strategy.position_size == 0 and tradeDir == 0
+
+// 200 EMA on 15-min (for trend filter)
+ema15 = request.security(syminfo.tickerid, "15", ta.ema(close, i_emaPeriod))
+emaLongOk  = not i_emaFilter or close > ema15
+emaShortOk = not i_emaFilter or close < ema15
+
+// London entries
+if londonEntryTime and isFlatNow and canTradeLondon()
+    // Long breakout
+    if close >= londonRangeHigh + i_minBreakout and emaLongOk
+        entryPrice := close
+        stopPrice  := low
+        oneR       := close - low
+        if oneR > 0
+            tradeDir      := 1
+            tradeSession  := "london"
+            currentRLevel := 0
+            londonTradeCount += 1
+            riskAmt  = strategy.equity * i_riskPct / 100
+            qty      = math.max(1, math.floor(riskAmt / (oneR * i_dollarPerPoint)))
+            strategy.entry("Long", strategy.long, qty=qty, comment="L-ORB Long")
+            strategy.exit("SL", "Long", stop=low)
+
+    // Short breakout
+    else if close <= londonRangeLow - i_minBreakout and emaShortOk
+        entryPrice := close
+        stopPrice  := high
+        oneR       := high - close
+        if oneR > 0
+            tradeDir      := -1
+            tradeSession  := "london"
+            currentRLevel := 0
+            londonTradeCount += 1
+            riskAmt  = strategy.equity * i_riskPct / 100
+            qty      = math.max(1, math.floor(riskAmt / (oneR * i_dollarPerPoint)))
+            strategy.entry("Short", strategy.short, qty=qty, comment="L-ORB Short")
+            strategy.exit("SL", "Short", stop=high)
+
+// New York entries
+if nyEntryTime and isFlatNow and canTradeNY()
+    // Long breakout
+    if close >= nyRangeHigh + i_minBreakout and emaLongOk
+        entryPrice := close
+        stopPrice  := low
+        oneR       := close - low
+        if oneR > 0
+            tradeDir      := 1
+            tradeSession  := "ny"
+            currentRLevel := 0
+            nyTradeCount += 1
+            riskAmt  = strategy.equity * i_riskPct / 100
+            qty      = math.max(1, math.floor(riskAmt / (oneR * i_dollarPerPoint)))
+            strategy.entry("Long", strategy.long, qty=qty, comment="NY-ORB Long")
+            strategy.exit("SL", "Long", stop=low)
+
+    // Short breakout
+    else if close <= nyRangeLow - i_minBreakout and emaShortOk
+        entryPrice := close
+        stopPrice  := high
+        oneR       := high - close
+        if oneR > 0
+            tradeDir      := -1
+            tradeSession  := "ny"
+            currentRLevel := 0
+            nyTradeCount += 1
+            riskAmt  = strategy.equity * i_riskPct / 100
+            qty      = math.max(1, math.floor(riskAmt / (oneR * i_dollarPerPoint)))
+            strategy.entry("Short", strategy.short, qty=qty, comment="NY-ORB Short")
+            strategy.exit("SL", "Short", stop=high)
+
+// ============================================================================
+// TRAILING STOP LOGIC (only when position exists)
+// ============================================================================
+if strategy.position_size != 0 and tradeDir != 0 and not na(oneR) and oneR > 0
+    // Calculate how many R price has reached
+    float maxRReached = 0.0
+
+    if tradeDir == 1
+        maxRReached := (high - entryPrice) / oneR
+    else
+        maxRReached := (entryPrice - low) / oneR
+
+    // Update R level (integer floor)
+    int newRLevel = math.max(currentRLevel, int(math.floor(maxRReached)))
+
+    if newRLevel > currentRLevel
+        currentRLevel := newRLevel
+
+    // Calculate trailing stop based on R level
+    if currentRLevel >= 1
+        float newStop = na
+        if tradeDir == 1
+            newStop := currentRLevel == 1 ? entryPrice + i_beOffset : entryPrice + (currentRLevel - 1) * oneR
+        else
+            newStop := currentRLevel == 1 ? entryPrice - i_beOffset : entryPrice - (currentRLevel - 1) * oneR
+        stopPrice := newStop
+
+    // Update the exit with current stop
+    if tradeDir == 1
+        strategy.exit("SL", "Long", stop=stopPrice, comment="Stop " + str.tostring(currentRLevel) + "R")
+    else
+        strategy.exit("SL", "Short", stop=stopPrice, comment="Stop " + str.tostring(currentRLevel) + "R")
+
+// ============================================================================
+// EMA
+// ============================================================================
+plot(i_showEMA ? ema15 : na, "15-min EMA", color=color.new(color.yellow, 30), linewidth=2)
+
+// ============================================================================
+// R-LEVEL LINES (visual, off by default)
+// ============================================================================
+var line[] rLines = array.new<line>()
+
+if tradeDir != 0 and tradeDir[1] == 0 and i_showRLevels and not na(oneR) and oneR > 0
+    // Clear previous lines safely
+    for i = 0 to 9
+        if array.size(rLines) > 0
+            line.delete(array.pop(rLines))
+
+    // Draw R levels 1-10
+    for r = 1 to 10
+        float rPrice = tradeDir == 1 ? entryPrice + r * oneR : entryPrice - r * oneR
+        color rCol = r == 1 ? color.green : color.new(color.green, 30 + r * 5)
+        l = line.new(bar_index, rPrice, bar_index + 50, rPrice,
+             color=rCol, style=line.style_dotted, width=1)
+        array.push(rLines, l)
+
+// ============================================================================
+// INFO TABLE
+// ============================================================================
+var table infoTable = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80),
+     border_color=color.gray, border_width=1)
+
+if barstate.islastconfirmedhistory or barstate.isrealtime
+    table.cell(infoTable, 0, 0, "ORB Strategy", text_color=color.white, text_size=size.normal)
+    table.cell(infoTable, 1, 0, i_sessionMode, text_color=color.yellow, text_size=size.normal)
+
+    table.cell(infoTable, 0, 1, "Asia Filter", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, i_asiaFilter ? (asiaBroken ? "ON (Broken)" : "ON (Not Broken)") : "OFF",
+         text_color=i_asiaFilter ? (asiaBroken ? color.green : color.red) : color.gray, text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "London Range", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, londonRangeSet ? str.tostring(londonRangeHigh, "#.##") + " / " + str.tostring(londonRangeLow, "#.##") : "N/A",
+         text_color=color.aqua, text_size=size.small)
+
+    table.cell(infoTable, 0, 3, "NY Range", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, nyRangeSet ? str.tostring(nyRangeHigh, "#.##") + " / " + str.tostring(nyRangeLow, "#.##") : "N/A",
+         text_color=color.orange, text_size=size.small)
+
+    table.cell(infoTable, 0, 4, "London Trades", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(londonTradeCount) + "/2" + (londonHadWinner ? " (Winner)" : ""),
+         text_color=color.aqua, text_size=size.small)
+
+    table.cell(infoTable, 0, 5, "NY Trades", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, str.tostring(nyTradeCount) + "/2" + (nyHadWinner ? " (Winner)" : ""),
+         text_color=color.orange, text_size=size.small)
+
+    table.cell(infoTable, 0, 6, "Active Trade", text_color=color.white, text_size=size.small)
+    tradeInfo = tradeDir == 1 ? "LONG" : tradeDir == -1 ? "SHORT" : "FLAT"
+    tradeCol  = tradeDir == 1 ? color.green : tradeDir == -1 ? color.red : color.gray
+    table.cell(infoTable, 1, 6, tradeInfo + (tradeDir != 0 ? " " + str.tostring(currentRLevel) + "R" : ""),
+         text_color=tradeCol, text_size=size.small)
+
+    table.cell(infoTable, 0, 7, "Stop", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 7, tradeDir != 0 ? str.tostring(stopPrice, "#.##") : "N/A",
+         text_color=color.red, text_size=size.small)
+
+// ============================================================================
+// PLOT STOP LEVEL
+// ============================================================================
+plot(tradeDir != 0 ? stopPrice : na, "Trailing Stop", color=color.red, style=plot.style_steplinebr, linewidth=2)
+
+// ============================================================================
+// BACKGROUND COLORING FOR SESSIONS
+// ============================================================================
+bgcolor(londonORBActive and (i_sessionMode == "London" or i_sessionMode == "Both") ? color.new(color.blue, 92) : na)
+bgcolor(londonEntryTime and (i_sessionMode == "London" or i_sessionMode == "Both") ? color.new(color.blue, 97) : na)
+bgcolor(nyORBActive and (i_sessionMode == "New York" or i_sessionMode == "Both") ? color.new(color.orange, 92) : na)
+bgcolor(nyEntryTime and (i_sessionMode == "New York" or i_sessionMode == "Both") ? color.new(color.orange, 97) : na)
+
+View in Pine Editor・429 lines
+Use on chart
+1
+0
+398
+Use 4% account risk to simulate 0.5% risk on 50k APEX account

@@ -1,0 +1,82 @@
+//@version=5
+strategy("Sürekli Parçalı Alım Stratejisi v9.4 (Yayınlanabilir Final)", 
+          shorttitle="Sürekli Strateji v9.4", 
+          overlay=true, 
+          
+          default_qty_type=strategy.cash,
+          default_qty_value=100,
+          
+          initial_capital=50000,
+          pyramiding=500,
+          commission_value=0.05)
+
+// ----- Kullanıcı Ayarları (Inputs) -----
+lookbackPeriod = input.int(5, title="Zirve Arama Periyodu")
+dropPercent1 = input.float(5.0, title="1. Alım için Düşüş %")
+dropPercent2 = input.float(8.0, title="2. Alım için Düşüş %")
+
+// --- YAYINLAMA İÇİN GEÇİCİ AL-SAT (DUMMY TRADE) ---
+// Bu blok, raporun boş kalmasını engellemek için testin en başında sadece 1 tane al-sat işlemi yapar.
+// Stratejinin ana mantığını ve genel performansını ETKİLEMEZ.
+if bar_index == 1 // Testin ikinci barında (en başlarda)
+    strategy.entry("GeciciAlim", strategy.long, qty=1, comment="Yayınlama için geçici alım")
+
+if bar_index == 2 // Üçüncü barda, yani hemen sonra
+    strategy.close("GeciciAlim", comment="Yayınlama için geçici satış")
+
+
+// ----- Strateji Ana Mantığı -----
+float dynamicHigh = ta.highest(high, lookbackPeriod)
+float dropFromDynamicHigh = (dynamicHigh - close) / dynamicHigh * 100
+
+bool trigger1 = dropFromDynamicHigh >= dropPercent1
+bool trigger2 = dropFromDynamicHigh >= dropPercent2
+
+bool buySignal1 = trigger1 and not trigger1[1]
+bool buySignal2 = trigger2 and not trigger2[1]
+
+// ----- Ana Alım Koşulları -----
+if buySignal1
+    strategy.entry("Alim S1", strategy.long, comment="Alım %-" + str.tostring(dropPercent1))
+
+if buySignal2
+    strategy.entry("Alim S2", strategy.long, comment="Alım %-" + str.tostring(dropPercent2))
+
+// --- Test sonundaki pozisyonları kapatma (iyi bir pratiktir) ---
+if barstate.islast
+    strategy.close_all(comment="Test Sonu Kapanış")
+
+// ----- Grafik Üzerinde Gösterim -----
+plot(dynamicHigh, title="Dinamik Referans Zirvesi", color=color.new(color.orange, 0), style=plot.style_cross, linewidth=2)
+
+View in Pine Editor・50 lines
+Use on chart
+2
+1
+1
+1 171
+🇬🇧 English: Continuous Accumulation Strategy [DCA] v9.4
+
+This script is a full-featured strategy designed to backtest the "Buy the Dip" or "Dollar Cost Averaging" (DCA) philosophy. Its core feature is the Dynamic Peak Detection logic, which solves the "lock-in" problem of previous versions. Instead of getting stuck on an old high, the strategy constantly adapts to the market by referencing the most recent peak.
+
+Key Features
+
+* Dynamic Peak Detection: You define the "Peak Lookback Period." For example, on a Daily chart, setting it to `5` references the peak of the last business week.
+* Stable Order Management: The strategy consistently uses a fixed cash amount (e.g., $100) for each entry, which prevents any runtime errors related to negative equity.
+* Publishing-Ready: To meet TradingView's requirement for a backtest report, this strategy executes a symbolic, one-time "dummy trade" (one buy and one sell) at the very beginning of the test period. This first trade should be ignored when analyzing performance, as its only purpose is to enable publication.
+
+How It Works
+
+The main logic follows an adaptive cycle: Find Dynamic Peak -> Wait for a Drop -> Buy on Crossover -> Repeat.
+
+1. Finds the Dynamic Peak: On every bar, it identifies the highest price within your defined lookback period.
+2. Calculates the Drop: It constantly calculates the percentage drop from this moving peak.
+3. Executes an Entry: The moment the price crosses below a target drop percentage, it executes a buy order.
+4. Continuously Adapts: As the price moves, the dynamic peak is constantly updated, meaning the strategy never gets locked and is always ready for the next opportunity.
+
+How to Use This Strategy
+
+* Focus on the Strategy Tester: After adding it to the chart, analyze the Equity Curve, Net Profit, and Max Drawdown to see how this accumulation philosophy would have performed on your favorite asset.
+* Optimize Parameters: Adjust the "Peak Lookback Period" and "Drop Percentages" to fit the volatility of the asset you are testing.
+
+This is a tool for testing and analyzing a "buy and accumulate" philosophy. Its main logic does not generate sell signals.

@@ -1,0 +1,77 @@
+//@version=5
+strategy("EMA 50/200 – Clean BUY/SELL + Arrow + * Cross Mark (Strategy Version)", 
+     overlay=true, 
+     max_labels_count=500,
+     initial_capital=100000)
+
+// --- EMAs ---
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+plot(ema50,  "EMA 50",  color=color.blue, linewidth=2)
+plot(ema200, "EMA 200", color=color.red,  linewidth=2)
+
+// --- Signals ---
+buySignal  = ta.crossover(ema50, ema200) and barstate.isconfirmed
+sellSignal = ta.crossunder(ema50, ema200) and barstate.isconfirmed
+
+// --- ATR offset for spacing ---
+atr = ta.atr(14)
+offset = atr * 0.8   // Spacing for labels
+
+// --- Entry tracking for TP ---
+var float buyPrice = na
+if buySignal
+    buyPrice := close
+
+tpSignal = not na(buyPrice) and close >= buyPrice * 2
+if tpSignal
+    buyPrice := na
+
+// =======================================================
+//                STRATEGY TRADING LOGIC
+// =======================================================
+
+// BUY ENTRY
+if buySignal
+    strategy.entry("BUY", strategy.long)
+
+// SELL EXIT
+if sellSignal
+    strategy.close("BUY", comment="SELL")
+
+// TAKE PROFIT EXIT (Price Doubles)
+if tpSignal
+    strategy.close("BUY", comment="TP")
+
+// =======================================================
+//                      LABELS (AS IS)
+// =======================================================
+
+// BUY label BELOW with upward arrow
+if buySignal
+    label.new(bar_index, low - offset, "BUY ↑", style=label.style_label_up, color=color.green, textcolor=color.white)
+
+// SELL label ABOVE
+if sellSignal
+    label.new(bar_index, high + offset/2, "SELL ↓", style=label.style_label_down, color=color.red, textcolor=color.white)
+
+// TP label
+if tpSignal
+    label.new(bar_index, high + offset/2, "TP", style=label.style_label_down, color=color.blue, textcolor=color.white)
+
+// --- CROSSOVER MARKS (“*”) ---
+plotchar(buySignal,  char="*", location=location.belowbar, color=color.green, size=size.large)
+plotchar(sellSignal, char="*", location=location.abovebar, color=color.red,   size=size.large)
+
+// --- Alerts ---
+alertcondition(buySignal,  "BUY",  "EMA 50 crossed above EMA 200 — BUY")
+alertcondition(sellSignal, "SELL", "EMA 50 crossed below EMA 200 — SELL")
+alertcondition(tpSignal,   "TP",   "Price doubled — TAKE PROFIT")
+
+View in Pine Editor・70 lines
+Use on chart
+2
+9
+922
+EMA 50/200 clean buy and sell hence use this for golden cross for buy

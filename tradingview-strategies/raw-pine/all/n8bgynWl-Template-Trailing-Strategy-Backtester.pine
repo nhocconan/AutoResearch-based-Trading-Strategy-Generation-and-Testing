@@ -1,0 +1,602 @@
+//@version=6
+enum chr_Timezone
+	Utc="UTC"
+	Exchange="Exchange"
+	Honolulu="(UTC-10) Honolulu"
+	Anchorage="(UTC-9/-8) Anchorage"
+	Juneau="(UTC-9/-8) Juneau"
+	Los_Angeles="(UTC-8/-7) Los Angeles"
+	Vancouver="(UTC-8/-7) Vancouver"
+	Denver="(UTC-7/-6) Denver"
+	Phoenix="(UTC-7) Phoenix"
+	Chicago="(UTC-6/-5) Chicago"
+	Mexico_City="(UTC-6) Mexico City"
+	San_Salvador="(UTC-6) San Salvador"
+	Bogota="(UTC-5) Bogota"
+	Lima="(UTC-5) Lima"
+	New_York="(UTC-5/-4) New York"
+	Toronto="(UTC-5/-4) Toronto"
+	Caracas="(UTC-4) Caracas"
+	Santiago="(UTC-4/-3) Santiago"
+	Buenos_Aires="(UTC-3) Buenos Aires"
+	Sao_Palo="(UTC-3) Sao Paulo"
+	Azores="(UTC-1/+0) Azores"
+	Dublin="(UTC+0/+1) Dublin"
+	Lisbon="(UTC+0/+1) Lisbon"
+	London="(UTC+0/+1) London"
+	Reykjavik="(UTC) Reykjavik"
+	Amsterdam="(UTC+1/+2) Amsterdam"
+	Belgrade="(UTC+1/+2) Belgrade"
+	Berlin="(UTC+1/+2) Berlin"
+	Bratislava="(UTC+1/+2) Bratislava"
+	Brussels="(UTC+1/+2) Brussels"
+	Budapest="(UTC+1/+2) Budapest"
+	Casablanca="(UTC+1/+0) Casablanca"
+	Copenhagen="(UTC+1/+2) Copenhagen"
+	Lagos="(UTC+1) Lagos"
+	Luxembourg="(UTC+1/+2) Luxembourg"
+	Madrid="(UTC+1/+2) Madrid"
+	Malta="(UTC+1/+2) Malta"
+	Oslo="(UTC+1/+2) Oslo"
+	Paris="(UTC+1/+2) Paris"
+	Prague="(UTC+1/+2) Prague"
+	Rome="(UTC+1/+2) Rome"
+	Stockholm="(UTC+1/+2) Stockholm"
+	Tunis="(UTC+1) Tunis"
+	Vienna="(UTC+1/+2) Vienna"
+	Warsaw="(UTC+1/+2) Warsaw"
+	Zurich="(UTC+1/+2) Zurich"
+	Athens="(UTC+2/+3) Athens"
+	Bucharest="(UTC+2/+3) Bucharest"
+	Cairo="(UTC+2/+3) Cairo"
+	Helsinki="(UTC+2/+3) Helsinki"
+	Jerusalem="(UTC+2/+3) Jerusalem"
+	Johannesburg="(UTC+2) Johannesburg"
+	Nicosia="(UTC+2/+3) Nicosia"
+	Riga="(UTC+2/+3) Riga"
+	Tallinn="(UTC+2/+3) Tallinn"
+	Vilnius="(UTC+2/+3) Vilnius"
+	Bahrain="(UTC+3) Bahrain"
+	Istanbul="(UTC+3) Istanbul"
+	Kuwait="(UTC+3) Kuwait"
+	Moscow="(UTC+3) Moscow"
+	Nairobi="(UTC+3) Nairobi"
+	Qatar="(UTC+3) Qatar"
+	Riyadh="(UTC+3) Riyadh"
+	Tehran="(UTC+3:30) Tehran"
+	Dubai="(UTC+4) Dubai"
+	Muscat="(UTC+4) Muscat"
+	Kabul="(UTC+4:30) Kabul"
+	Ashgabat="(UTC+5) Ashgabat"
+	Astana="(UTC+5) Astana"
+	Karachi="(UTC+5) Karachi"
+	Colombo="(UTC+5:30) Colombo"
+	Kolkata="(UTC+5:30) Kolkata"
+	Kathmandu="(UTC+5:45) Kathmandu"
+	Dhaka="(UTC+6) Dhaka"
+	Yangon="(UTC+6:30) Yangon"
+	Bangkok="(UTC+7) Bangkok"
+	Ho_Chi_Minh="(UTC+7) Ho Chi Minh"
+	Jakarta="(UTC+7) Jakarta"
+	Chongqing="(UTC+8) Chongqing"
+	Hong_Kong="(UTC+8) Hong Kong"
+	Kuala_Lumpur="(UTC+8) Kuala Lumpur"
+	Manila="(UTC+8) Manila"
+	Perth="(UTC+8) Perth"
+	Shanghai="(UTC+8) Shanghai"
+	Singapore="(UTC+8) Singapore"
+	Taipei="(UTC+8) Taipei"
+	Seoul="(UTC+9) Seoul"
+	Tokyo="(UTC+9) Tokyo"
+	Adelaide="(UTC+9:30/+10:30) Adelaide"
+	Brisbane="(UTC+10) Brisbane"
+	Sydney="(UTC+10/+11) Sydney"
+	Norfolk_Island="(UTC+11/+12) Norfolk Island"
+	New_Zealand="(UTC+12/+13) New Zealand"
+	Chatham_Islands="(UTC+12:45/+13:45) Chatham Islands"
+	Tokelau="(UTC+13) Tokelau"
+enum chr_ViewMode
+	Boxes="Boxes"
+	Candles="Candles"
+	Bars="Bars"
+enum col_SeriesType
+	alma="ALMA"
+	dema="DEMA"
+	ema="EMA"
+	hma="HMA"
+	rma="RMA"
+	sma="SMA"
+	swma="SWMA"
+	vwma="VWMA"
+	wma="WMA"
+	highest="HIGHEST"
+	lowest="LOWEST"
+	hiloestavg="HILOESTAVG"
+	median="MEDIAN"
+	medianHighest="MEDIANHIGHEST"
+	medianLowest="MEDIANLOWEST"
+	linreg="LINREG"
+	pivotHigh="PIVOTHIGH"
+	pivotLow="PIVOTLOW"
+	source="SOURCE"
+enum dr_DistMethod
+	perc="PERC"
+	atr="ATR"
+	stdev="STDEV"
+	ticks="TICKS"
+	prof="PROF"
+	rr="RR"
+	cust="CUST"
+enum ant_Seasonality
+	monthOfYear="M/Y"
+	weekOfYear="W/Y"
+	dayOfMonth="D/M"
+enum DealConditionsMode
+	external='ð¨External'
+	internal='ð§Internal'
+enum OrderType
+	market='MARKET'
+	limit='LIMIT'
+	stop='STOP'
+	stopLimit='STOP-LIMIT'
+enum TrailMode
+	fixed='FIXED'
+	trail='TRAIL'
+enum MoveActMode
+	off='OFF'
+	onceTp='ONCETP'
+	oncePrice='ONCEPRICE'
+	multiTp='MULTITP'
+	multiPrice='MULTIPRICE'
+enum TrailActMode
+	off='OFF'
+	start='START'
+	tp='TP'
+enum EntryQuantityMethod
+	risk='RISK'
+	default='DEFAULT'
+enum BaseQuantityPrecision
+	auto='AUTO'
+	manual='MANUAL'
+enum TakeProfitQuantityMethod
+	equal='EQUAL'
+	manual='MANUAL'
+######0(##a0) =>
+    ##a0
+######16(##a10) =>
+    (##a10==DealConditionsMode.external)
+######26(##a20) =>
+    (##a20==DealConditionsMode.internal)
+######36(##a30,##a31) =>
+    ((##a30==DealConditionsMode.internal) and ##a31)
+######47(##a55) =>
+    (##a55==OrderType.stopLimit)
+######49(##a57) =>
+    (##a57!=OrderType.market)
+######51(##a59,##a60) =>
+    ((##a59!=OrderType.market) and (##a60==dr_DistMethod.cust))
+######56(##a68,##a69) =>
+    ((##a68!=OrderType.market) and ##a69)
+######60(##a74,##a75,##a76) =>
+    ((##a74!=OrderType.market) and (##a75 or ##a76))
+######64(##a82,##a83) =>
+    ((##a82!=OrderType.market) and (##a83==TrailMode.trail))
+######67(##a108) =>
+    (##a108==dr_DistMethod.cust)
+######73(##a114,##a115) =>
+    (##a114 or ##a115)
+######76(##a118) =>
+    (##a118==MoveActMode.onceTp)
+######77(##a119) =>
+    ((##a119==MoveActMode.oncePrice) or (##a119==MoveActMode.multiPrice))
+######79(##a121) =>
+    (##a121==TrailActMode.tp)
+######80(##a122) =>
+    (##a122!=TrailActMode.off)
+######103(##a196) =>
+    (##a196==EntryQuantityMethod.risk)
+######104(##a197) =>
+    (##a197==BaseQuantityPrecision.manual)
+######105(##a198) =>
+    (##a198==TakeProfitQuantityMethod.manual)
+######107(##a219) =>
+    (##a219>0)
+######109(##a221,##a222) =>
+    ((##a221>0) and (##a222==dr_DistMethod.cust))
+######114(##a230,##a231) =>
+    ((##a230>0) and ##a231)
+######118(##a236,##a237,##a238) =>
+    ((##a236>0) and (##a237 or ##a238))
+######122(##a244) =>
+    (##a244>1)
+######129(##a253,##a254,##a255) =>
+    ((##a253>1) and (##a254 or ##a255))
+######130(##a256,##a257) =>
+    ((##a256>1) and ##a257)
+##root(root_metainfo,rm_0,'percent_of_equity',"const&&string",strategy,default_qty_type,'55_158_55_183')
+##root(root_metainfo,rm_1,'percent',"const&&string",strategy,commission_type,'55_268_55_294')
+fromEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_1')
+toEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_2')
+##input_active_in_4VD=######0(fromEnabled)
+##root(root_metainfo,rm_2,##input_active_in_4VD,"input&&bool")
+##input_active_in_5VD=######0(toEnabled)
+##root(root_metainfo,rm_3,##input_active_in_5VD,"input&&bool")
+daysEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_6')
+##input_active_in_7VD=######0(daysEnabled)
+##root(root_metainfo,rm_4,##input_active_in_7VD,"input&&bool")
+##root(root_metainfo,rm_5,######0(daysEnabled),"input&&bool")
+##root(root_metainfo,rm_6,######0(daysEnabled),"input&&bool")
+##root(root_metainfo,rm_7,######0(daysEnabled),"input&&bool")
+##root(root_metainfo,rm_8,######0(daysEnabled),"input&&bool")
+##root(root_metainfo,rm_9,######0(daysEnabled),"input&&bool")
+##root(root_metainfo,rm_10,######0(daysEnabled),"input&&bool")
+timeRangeEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_14')
+##input_active_in_15VD=######0(timeRangeEnabled)
+##root(root_metainfo,rm_11,##input_active_in_15VD,"input&&bool")
+##var_104=##input(defval='ð§Internal',type='INPUT_STRING',##id='in_16')
+dealMode=##DealConditionsModeFromString(##var_104)
+##input_active_in_17VD=######16(dealMode)
+##root(root_metainfo,rm_12,##input_active_in_17VD,"input&&bool")
+showOpenLabels=##input(defval=true,type='INPUT_BOOL',##id='in_18')
+##input_active_in_19VD=######0(showOpenLabels)
+##root(root_metainfo,rm_13,##input_active_in_19VD,"input&&bool")
+##root(root_metainfo,rm_14,######0(showOpenLabels),"input&&bool")
+showCloseLabels=##input(defval=true,type='INPUT_BOOL',##id='in_21')
+##input_active_in_22VD=######0(showCloseLabels)
+##root(root_metainfo,rm_15,##input_active_in_22VD,"input&&bool")
+##root(root_metainfo,rm_16,######0(showCloseLabels),"input&&bool")
+showCnlOpenLabels=##input(defval=true,type='INPUT_BOOL',##id='in_24')
+##input_active_in_25VD=######0(showCnlOpenLabels)
+##root(root_metainfo,rm_17,##input_active_in_25VD,"input&&bool")
+##root(root_metainfo,rm_18,######0(showCnlOpenLabels),"input&&bool")
+showCnlCloseLabels=##input(defval=true,type='INPUT_BOOL',##id='in_27')
+##input_active_in_28VD=######0(showCnlCloseLabels)
+##root(root_metainfo,rm_19,##input_active_in_28VD,"input&&bool")
+##root(root_metainfo,rm_20,######0(showCnlCloseLabels),"input&&bool")
+cooldownEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_33')
+##input_active_in_34VD=######0(cooldownEnabled)
+##root(root_metainfo,rm_21,##input_active_in_34VD,"input&&bool")
+##input_active_in_35VD=######26(dealMode)
+##root(root_metainfo,rm_22,##input_active_in_35VD,"input&&bool")
+##root(root_metainfo,rm_23,######26(dealMode),"input&&bool")
+##root(root_metainfo,rm_24,######26(dealMode),"input&&bool")
+##root(root_metainfo,rm_25,######26(dealMode),"input&&bool")
+##root(root_metainfo,rm_26,######26(dealMode),"input&&bool")
+##root(root_metainfo,rm_27,######26(dealMode),"input&&bool")
+##root(root_metainfo,rm_28,######26(dealMode),"input&&bool")
+##root(root_metainfo,rm_29,######26(dealMode),"input&&bool")
+##root(root_metainfo,rm_30,######26(dealMode),"input&&bool")
+##root(root_metainfo,rm_31,######26(dealMode),"input&&bool")
+emaFilterEnabled=##input(defval=true,type='INPUT_BOOL',##id='in_44')
+##input_active_in_45VD=######36(dealMode,emaFilterEnabled)
+##root(root_metainfo,rm_32,##input_active_in_45VD,"input&&bool")
+##root(root_metainfo,rm_33,######36(dealMode,emaFilterEnabled),"input&&bool")
+##root(root_metainfo,rm_34,######36(dealMode,emaFilterEnabled),"input&&bool")
+##root(root_metainfo,rm_35,######26(dealMode),"input&&bool")
+emaAtrBandEnabled=##input(defval=true,type='INPUT_BOOL',##id='in_48')
+##input_active_in_49VD=######36(dealMode,emaAtrBandEnabled)
+##root(root_metainfo,rm_36,##input_active_in_49VD,"input&&bool")
+##root(root_metainfo,rm_37,######36(dealMode,emaAtrBandEnabled),"input&&bool")
+##root(root_metainfo,rm_38,######26(dealMode),"input&&bool")
+adxFilterEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_51')
+##input_active_in_52VD=######36(dealMode,adxFilterEnabled)
+##root(root_metainfo,rm_39,##input_active_in_52VD,"input&&bool")
+##root(root_metainfo,rm_40,######36(dealMode,adxFilterEnabled),"input&&bool")
+##root(root_metainfo,rm_41,######36(dealMode,adxFilterEnabled),"input&&bool")
+##root(root_metainfo,rm_42,((dealMode==DealConditionsMode.internal)?display.none:display.data_window),"cb&&input&&plot_display&&integer",plot,display,'347_90_347_165')
+##root(root_metainfo,rm_43,1,"input&&integer",plot,linewidth,'349_92_349_92')
+##root(root_metainfo,rm_44,plot.style_line,"cb&&input&&plot_style&&integer",plot,style,'349_103_349_117')
+##root(root_metainfo,rm_45,((dealMode==DealConditionsMode.internal)?##display$$4294967287:display.none),"cb&&input&&plot_display&&integer",plot,display,'349_130_349_219')
+##root(root_metainfo,rm_46,1,"input&&integer",plot,linewidth,'350_92_350_92')
+##root(root_metainfo,rm_47,plot.style_line,"cb&&input&&plot_style&&integer",plot,style,'350_103_350_117')
+##root(root_metainfo,rm_48,((dealMode==DealConditionsMode.internal)?##display$$4294967287:display.none),"cb&&input&&plot_display&&integer",plot,display,'350_130_350_219')
+##root(root_metainfo,rm_49,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'353_67_353_83')
+##root(root_metainfo,rm_50,2,"input&&integer",plot,linewidth,'353_98_353_98')
+##root(root_metainfo,rm_51,(((dealMode==DealConditionsMode.internal) and emaFilterEnabled)?##display$$4294967287:display.none),"cb&&input&&plot_display&&integer",plot,display,'353_131_353_241')
+bool BANDS_ENABLED=(((dealMode==DealConditionsMode.internal) and emaFilterEnabled) and emaAtrBandEnabled)
+##root(root_metainfo,rm_52,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'356_101_356_117')
+##root(root_metainfo,rm_53,(BANDS_ENABLED?display.data_window:display.none),"cb&&input&&plot_display&&integer",plot,display,'356_174_356_223')
+##root(root_metainfo,rm_54,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'357_101_357_117')
+##root(root_metainfo,rm_55,(BANDS_ENABLED?display.data_window:display.none),"cb&&input&&plot_display&&integer",plot,display,'357_174_357_223')
+##root(root_metainfo,rm_56,(BANDS_ENABLED?display.all:display.none),"cb&&input&&plot_simple_display&&bool",fill,display,'358_119_358_160')
+##var_113=##input(defval='MARKET',type='INPUT_STRING',##id='in_64')
+entryOrderType=##OrderTypeFromString(##var_113)
+##input_active_in_65VD=######47(entryOrderType)
+##root(root_metainfo,rm_57,##input_active_in_65VD,"input&&bool")
+##root(root_metainfo,rm_58,######47(entryOrderType),"input&&bool")
+##input_active_in_67VD=######49(entryOrderType)
+##root(root_metainfo,rm_59,##input_active_in_67VD,"input&&bool")
+##var_115=##input(defval='ATR',type='INPUT_STRING',##id='in_67')
+entryDistMethod=##dr_DistMethodFromString(##var_115)
+##root(root_metainfo,rm_60,######49(entryOrderType),"input&&bool")
+##input_active_in_69VD=######51(entryOrderType,entryDistMethod)
+##root(root_metainfo,rm_61,##input_active_in_69VD,"input&&bool")
+##root(root_metainfo,rm_62,######51(entryOrderType,entryDistMethod),"input&&bool")
+##root(root_metainfo,rm_63,######51(entryOrderType,entryDistMethod),"input&&bool")
+##root(root_metainfo,rm_64,######51(entryOrderType,entryDistMethod),"input&&bool")
+##root(root_metainfo,rm_65,######49(entryOrderType),"input&&bool")
+entryBiasEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_73')
+##input_active_in_74VD=######56(entryOrderType,entryBiasEnabled)
+##root(root_metainfo,rm_66,##input_active_in_74VD,"input&&bool")
+##root(root_metainfo,rm_67,######56(entryOrderType,entryBiasEnabled),"input&&bool")
+##root(root_metainfo,rm_68,######49(entryOrderType),"input&&bool")
+entryMinDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_76')
+##root(root_metainfo,rm_69,######49(entryOrderType),"input&&bool")
+entryMaxDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_77')
+##input_active_in_78VD=######60(entryOrderType,entryMinDistEnabled,entryMaxDistEnabled)
+##root(root_metainfo,rm_70,##input_active_in_78VD,"input&&bool")
+##input_active_in_79VD=######56(entryOrderType,entryMinDistEnabled)
+##root(root_metainfo,rm_71,##input_active_in_79VD,"input&&bool")
+##input_active_in_80VD=######56(entryOrderType,entryMaxDistEnabled)
+##root(root_metainfo,rm_72,##input_active_in_80VD,"input&&bool")
+##root(root_metainfo,rm_73,######49(entryOrderType),"input&&bool")
+##var_120=##input(defval='FIXED',type='INPUT_STRING',##id='in_81')
+entryTrailMode=##TrailModeFromString(##var_120)
+##input_active_in_82VD=######64(entryOrderType,entryTrailMode)
+##root(root_metainfo,rm_74,##input_active_in_82VD,"input&&bool")
+##root(root_metainfo,rm_75,1,"input&&integer",plot,linewidth,'677_181_677_181')
+##root(root_metainfo,rm_76,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'677_192_677_208')
+##root(root_metainfo,rm_77,1,"input&&integer",plot,linewidth,'678_174_678_174')
+##root(root_metainfo,rm_78,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'678_185_678_201')
+##root(root_metainfo,rm_79,##display$$3,"cb&&input&&plot_display&&integer",plot,display,'678_226_678_259')
+##root(root_metainfo,rm_80,1,"input&&integer",plot,linewidth,'682_186_682_186')
+##root(root_metainfo,rm_81,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'682_197_682_213')
+##root(root_metainfo,rm_82,1,"input&&integer",plot,linewidth,'683_179_683_179')
+##root(root_metainfo,rm_83,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'683_190_683_206')
+##root(root_metainfo,rm_84,##display$$3,"cb&&input&&plot_display&&integer",plot,display,'683_231_683_264')
+numOfTakeProfitTargets=##input(defval=1,type='INPUT_INTEGER',##id='in_86')
+##var_122=##input(defval='ATR',type='INPUT_STRING',##id='in_88')
+stopLossDistMethod=##dr_DistMethodFromString(##var_122)
+##input_active_in_90VD=######67(stopLossDistMethod)
+##root(root_metainfo,rm_85,##input_active_in_90VD,"input&&bool")
+##root(root_metainfo,rm_86,######67(stopLossDistMethod),"input&&bool")
+##root(root_metainfo,rm_87,######67(stopLossDistMethod),"input&&bool")
+##root(root_metainfo,rm_88,######67(stopLossDistMethod),"input&&bool")
+stopLossBiasEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_94')
+##input_active_in_95VD=######0(stopLossBiasEnabled)
+##root(root_metainfo,rm_89,##input_active_in_95VD,"input&&bool")
+##root(root_metainfo,rm_90,######0(stopLossBiasEnabled),"input&&bool")
+stopLossMinDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_97')
+stopLossMaxDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_98')
+##input_active_in_99VD=######73(stopLossMinDistEnabled,stopLossMaxDistEnabled)
+##root(root_metainfo,rm_91,##input_active_in_99VD,"input&&bool")
+##input_active_in_100VD=######0(stopLossMinDistEnabled)
+##root(root_metainfo,rm_92,##input_active_in_100VD,"input&&bool")
+##input_active_in_101VD=######0(stopLossMaxDistEnabled)
+##root(root_metainfo,rm_93,##input_active_in_101VD,"input&&bool")
+##var_127=##input(defval='OFF',type='INPUT_STRING',##id='in_103')
+stopLossMoveActMode=##MoveActModeFromString(##var_127)
+##input_active_in_104VD=######76(stopLossMoveActMode)
+##root(root_metainfo,rm_94,##input_active_in_104VD,"input&&bool")
+##input_active_in_105VD=######77(stopLossMoveActMode)
+##root(root_metainfo,rm_95,##input_active_in_105VD,"input&&bool")
+##root(root_metainfo,rm_96,######77(stopLossMoveActMode),"input&&bool")
+##var_129=##input(defval='OFF',type='INPUT_STRING',##id='in_107')
+stopLossTrailActMode=##TrailActModeFromString(##var_129)
+##input_active_in_108VD=######79(stopLossTrailActMode)
+##root(root_metainfo,rm_97,##input_active_in_108VD,"input&&bool")
+##input_active_in_109VD=######80(stopLossTrailActMode)
+##root(root_metainfo,rm_98,##input_active_in_109VD,"input&&bool")
+stopLossStepTrailDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_110')
+##input_active_in_111VD=######0(stopLossStepTrailDistEnabled)
+##root(root_metainfo,rm_99,##input_active_in_111VD,"input&&bool")
+##root(root_metainfo,rm_100,######0(stopLossStepTrailDistEnabled),"input&&bool")
+closeEarlyEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_115')
+##input_active_in_116VD=######0(closeEarlyEnabled)
+##root(root_metainfo,rm_101,##input_active_in_116VD,"input&&bool")
+##root(root_metainfo,rm_102,######0(closeEarlyEnabled),"input&&bool")
+##var_132=##input(defval='MARKET',type='INPUT_STRING',##id='in_122')
+exitOrderType=##OrderTypeFromString(##var_132)
+##input_active_in_123VD=######49(exitOrderType)
+##root(root_metainfo,rm_103,##input_active_in_123VD,"input&&bool")
+##var_133=##input(defval='ATR',type='INPUT_STRING',##id='in_123')
+exitDistMethod=##dr_DistMethodFromString(##var_133)
+##root(root_metainfo,rm_104,######49(exitOrderType),"input&&bool")
+##input_active_in_125VD=######51(exitOrderType,exitDistMethod)
+##root(root_metainfo,rm_105,##input_active_in_125VD,"input&&bool")
+##root(root_metainfo,rm_106,######51(exitOrderType,exitDistMethod),"input&&bool")
+##root(root_metainfo,rm_107,######51(exitOrderType,exitDistMethod),"input&&bool")
+##root(root_metainfo,rm_108,######51(exitOrderType,exitDistMethod),"input&&bool")
+##root(root_metainfo,rm_109,######49(exitOrderType),"input&&bool")
+exitBiasEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_129')
+##input_active_in_130VD=######56(exitOrderType,exitBiasEnabled)
+##root(root_metainfo,rm_110,##input_active_in_130VD,"input&&bool")
+##root(root_metainfo,rm_111,######56(exitOrderType,exitBiasEnabled),"input&&bool")
+##root(root_metainfo,rm_112,######49(exitOrderType),"input&&bool")
+exitMinDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_132')
+##root(root_metainfo,rm_113,######49(exitOrderType),"input&&bool")
+exitMaxDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_133')
+##input_active_in_134VD=######60(exitOrderType,exitMinDistEnabled,exitMaxDistEnabled)
+##root(root_metainfo,rm_114,##input_active_in_134VD,"input&&bool")
+##input_active_in_135VD=######56(exitOrderType,exitMinDistEnabled)
+##root(root_metainfo,rm_115,##input_active_in_135VD,"input&&bool")
+##input_active_in_136VD=######56(exitOrderType,exitMaxDistEnabled)
+##root(root_metainfo,rm_116,##input_active_in_136VD,"input&&bool")
+##root(root_metainfo,rm_117,######49(exitOrderType),"input&&bool")
+##var_138=##input(defval='FIXED',type='INPUT_STRING',##id='in_137')
+exitTrailMode=##TrailModeFromString(##var_138)
+##input_active_in_138VD=######64(exitOrderType,exitTrailMode)
+##root(root_metainfo,rm_118,##input_active_in_138VD,"input&&bool")
+##root(root_metainfo,rm_119,1,"input&&integer",plot,linewidth,'1112_113_1112_113')
+##root(root_metainfo,rm_120,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'1112_124_1112_140')
+##root(root_metainfo,rm_121,1,"input&&integer",plot,linewidth,'1113_116_1113_116')
+##root(root_metainfo,rm_122,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'1113_127_1113_143')
+##var_140=##input(defval='RISK',type='INPUT_STRING',##id='in_140')
+entryQuantityMethod=##EntryQuantityMethodFromString(##var_140)
+##input_active_in_141VD=######103(entryQuantityMethod)
+##root(root_metainfo,rm_123,##input_active_in_141VD,"input&&bool")
+##var_141=##input(defval='AUTO',type='INPUT_STRING',##id='in_142')
+baseQuantityPrecision=##BaseQuantityPrecisionFromString(##var_141)
+##input_active_in_143VD=######104(baseQuantityPrecision)
+##root(root_metainfo,rm_124,##input_active_in_143VD,"input&&bool")
+##var_142=##input(defval='EQUAL',type='INPUT_STRING',##id='in_148')
+takeProfitQuantityMethod=##TakeProfitQuantityMethodFromString(##var_142)
+##input_active_in_149VD=######105(takeProfitQuantityMethod)
+##root(root_metainfo,rm_125,##input_active_in_149VD,"input&&bool")
+##root(root_metainfo,rm_126,######105(takeProfitQuantityMethod),"input&&bool")
+##input_active_in_159VD=######107(numOfTakeProfitTargets)
+##root(root_metainfo,rm_127,##input_active_in_159VD,"input&&bool")
+##var_143=##input(defval='ATR',type='INPUT_STRING',##id='in_159')
+takeProfitInitDistMethod=##dr_DistMethodFromString(##var_143)
+##root(root_metainfo,rm_128,######107(numOfTakeProfitTargets),"input&&bool")
+##input_active_in_161VD=######109(numOfTakeProfitTargets,takeProfitInitDistMethod)
+##root(root_metainfo,rm_129,##input_active_in_161VD,"input&&bool")
+##root(root_metainfo,rm_130,######109(numOfTakeProfitTargets,takeProfitInitDistMethod),"input&&bool")
+##root(root_metainfo,rm_131,######109(numOfTakeProfitTargets,takeProfitInitDistMethod),"input&&bool")
+##root(root_metainfo,rm_132,######109(numOfTakeProfitTargets,takeProfitInitDistMethod),"input&&bool")
+##root(root_metainfo,rm_133,######107(numOfTakeProfitTargets),"input&&bool")
+takeProfitInitBiasEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_165')
+##input_active_in_166VD=######114(numOfTakeProfitTargets,takeProfitInitBiasEnabled)
+##root(root_metainfo,rm_134,##input_active_in_166VD,"input&&bool")
+##root(root_metainfo,rm_135,######114(numOfTakeProfitTargets,takeProfitInitBiasEnabled),"input&&bool")
+##root(root_metainfo,rm_136,######107(numOfTakeProfitTargets),"input&&bool")
+takeProfitInitMinDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_168')
+##root(root_metainfo,rm_137,######107(numOfTakeProfitTargets),"input&&bool")
+takeProfitInitMaxDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_169')
+##input_active_in_170VD=######118(numOfTakeProfitTargets,takeProfitInitMinDistEnabled,takeProfitInitMaxDistEnabled)
+##root(root_metainfo,rm_138,##input_active_in_170VD,"input&&bool")
+##input_active_in_171VD=######114(numOfTakeProfitTargets,takeProfitInitMinDistEnabled)
+##root(root_metainfo,rm_139,##input_active_in_171VD,"input&&bool")
+##input_active_in_172VD=######114(numOfTakeProfitTargets,takeProfitInitMaxDistEnabled)
+##root(root_metainfo,rm_140,##input_active_in_172VD,"input&&bool")
+##root(root_metainfo,rm_141,######107(numOfTakeProfitTargets),"input&&bool")
+##input_active_in_174VD=######122(numOfTakeProfitTargets)
+##root(root_metainfo,rm_142,##input_active_in_174VD,"input&&bool")
+##root(root_metainfo,rm_143,######122(numOfTakeProfitTargets),"input&&bool")
+##root(root_metainfo,rm_144,######107(numOfTakeProfitTargets),"input&&bool")
+takeProfitStepBiasEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_176')
+##input_active_in_177VD=######114(numOfTakeProfitTargets,takeProfitStepBiasEnabled)
+##root(root_metainfo,rm_145,##input_active_in_177VD,"input&&bool")
+##root(root_metainfo,rm_146,######114(numOfTakeProfitTargets,takeProfitStepBiasEnabled),"input&&bool")
+##root(root_metainfo,rm_147,######122(numOfTakeProfitTargets),"input&&bool")
+takeProfitStepMinDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_179')
+##root(root_metainfo,rm_148,######122(numOfTakeProfitTargets),"input&&bool")
+takeProfitStepMaxDistEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_180')
+##input_active_in_181VD=######129(numOfTakeProfitTargets,takeProfitStepMinDistEnabled,takeProfitStepMaxDistEnabled)
+##root(root_metainfo,rm_149,##input_active_in_181VD,"input&&bool")
+##input_active_in_182VD=######130(numOfTakeProfitTargets,takeProfitStepMinDistEnabled)
+##root(root_metainfo,rm_150,##input_active_in_182VD,"input&&bool")
+##input_active_in_183VD=######130(numOfTakeProfitTargets,takeProfitStepMaxDistEnabled)
+##root(root_metainfo,rm_151,##input_active_in_183VD,"input&&bool")
+##root(root_metainfo,rm_152,######122(numOfTakeProfitTargets),"input&&bool")
+##root(root_metainfo,rm_153,######107(numOfTakeProfitTargets),"input&&bool")
+##root(root_metainfo,rm_154,######107(numOfTakeProfitTargets),"input&&bool")
+##root(root_metainfo,rm_155,######107(numOfTakeProfitTargets),"input&&bool")
+##root(root_metainfo,rm_156,######107(numOfTakeProfitTargets),"input&&bool")
+showSeasonalTable=##input(defval=true,type='INPUT_BOOL',##id='in_191')
+##input_active_in_192VD=######0(showSeasonalTable)
+##root(root_metainfo,rm_157,##input_active_in_192VD,"input&&bool")
+##root(root_metainfo,rm_158,######0(showSeasonalTable),"input&&bool")
+##root(root_metainfo,rm_159,######0(showSeasonalTable),"input&&bool")
+showStatsTable=##input(defval=false,type='INPUT_BOOL',##id='in_196')
+##input_active_in_197VD=######0(showStatsTable)
+##root(root_metainfo,rm_160,##input_active_in_197VD,"input&&bool")
+##root(root_metainfo,rm_161,######0(showStatsTable),"input&&bool")
+showMetricsTable=##input(defval=false,type='INPUT_BOOL',##id='in_199')
+##input_active_in_200VD=######0(showMetricsTable)
+##root(root_metainfo,rm_162,##input_active_in_200VD,"input&&bool")
+##root(root_metainfo,rm_163,######0(showMetricsTable),"input&&bool")
+msgEnteredEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_206')
+##input_active_in_207VD=######0(msgEnteredEnabled)
+##root(root_metainfo,rm_164,##input_active_in_207VD,"input&&bool")
+##root(root_metainfo,rm_165,######0(msgEnteredEnabled),"input&&bool")
+##root(root_metainfo,rm_166,######0(msgEnteredEnabled),"input&&bool")
+##root(root_metainfo,rm_167,######0(msgEnteredEnabled),"input&&bool")
+msgClosedOrExitedEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_211')
+##input_active_in_212VD=######0(msgClosedOrExitedEnabled)
+##root(root_metainfo,rm_168,##input_active_in_212VD,"input&&bool")
+##root(root_metainfo,rm_169,######0(msgClosedOrExitedEnabled),"input&&bool")
+##root(root_metainfo,rm_170,######0(msgClosedOrExitedEnabled),"input&&bool")
+##root(root_metainfo,rm_171,######0(msgClosedOrExitedEnabled),"input&&bool")
+##root(root_metainfo,rm_172,######0(msgClosedOrExitedEnabled),"input&&bool")
+msgTakeProfitEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_217')
+##input_active_in_218VD=######0(msgTakeProfitEnabled)
+##root(root_metainfo,rm_173,##input_active_in_218VD,"input&&bool")
+##root(root_metainfo,rm_174,######0(msgTakeProfitEnabled),"input&&bool")
+##root(root_metainfo,rm_175,######0(msgTakeProfitEnabled),"input&&bool")
+##root(root_metainfo,rm_176,######0(msgTakeProfitEnabled),"input&&bool")
+##root(root_metainfo,rm_177,######0(msgTakeProfitEnabled),"input&&bool")
+##root(root_metainfo,rm_178,######0(msgTakeProfitEnabled),"input&&bool")
+##root(root_metainfo,rm_179,######0(msgTakeProfitEnabled),"input&&bool")
+##root(root_metainfo,rm_180,######0(msgTakeProfitEnabled),"input&&bool")
+##root(root_metainfo,rm_181,######0(msgTakeProfitEnabled),"input&&bool")
+##root(root_metainfo,rm_182,######0(msgTakeProfitEnabled),"input&&bool")
+msgStopLossEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_228')
+##input_active_in_229VD=######0(msgStopLossEnabled)
+##root(root_metainfo,rm_183,##input_active_in_229VD,"input&&bool")
+##root(root_metainfo,rm_184,######0(msgStopLossEnabled),"input&&bool")
+msgChgTrEntryEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_231')
+##input_active_in_232VD=######0(msgChgTrEntryEnabled)
+##root(root_metainfo,rm_185,##input_active_in_232VD,"input&&bool")
+##root(root_metainfo,rm_186,######0(msgChgTrEntryEnabled),"input&&bool")
+msgChgTrExitEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_234')
+##input_active_in_235VD=######0(msgChgTrExitEnabled)
+##root(root_metainfo,rm_187,##input_active_in_235VD,"input&&bool")
+##root(root_metainfo,rm_188,######0(msgChgTrExitEnabled),"input&&bool")
+msgChgSLEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_237')
+##input_active_in_238VD=######0(msgChgSLEnabled)
+##root(root_metainfo,rm_189,##input_active_in_238VD,"input&&bool")
+##root(root_metainfo,rm_190,######0(msgChgSLEnabled),"input&&bool")
+msgCnlLimitOrStopEntryEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_240')
+##input_active_in_241VD=######0(msgCnlLimitOrStopEntryEnabled)
+##root(root_metainfo,rm_191,##input_active_in_241VD,"input&&bool")
+##root(root_metainfo,rm_192,######0(msgCnlLimitOrStopEntryEnabled),"input&&bool")
+msgCnlLimitOrStopExitEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_243')
+##input_active_in_244VD=######0(msgCnlLimitOrStopExitEnabled)
+##root(root_metainfo,rm_193,##input_active_in_244VD,"input&&bool")
+##root(root_metainfo,rm_194,######0(msgCnlLimitOrStopExitEnabled),"input&&bool")
+msgRiskManagementEnabled=##input(defval=false,type='INPUT_BOOL',##id='in_246')
+##input_active_in_247VD=######0(msgRiskManagementEnabled)
+##root(root_metainfo,rm_195,##input_active_in_247VD,"input&&bool")
+##root(root_metainfo,rm_196,1,"input&&integer",plot,linewidth,'2182_177_2182_177')
+##root(root_metainfo,rm_197,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2182_188_2182_204')
+##root(root_metainfo,rm_198,plot.linestyle_dashed,"cb&&input&&plot_line_style&&integer",plot,linestyle,'2182_253_2182_273')
+##root(root_metainfo,rm_199,1,"input&&integer",plot,linewidth,'2183_181_2183_181')
+##root(root_metainfo,rm_200,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2183_192_2183_208')
+##root(root_metainfo,rm_201,plot.linestyle_dashed,"cb&&input&&plot_line_style&&integer",plot,linestyle,'2183_257_2183_277')
+##root(root_metainfo,rm_202,'Absolute',"input&&string",plotchar,location,'2185_118_2185_134')
+##root(root_metainfo,rm_203,'tiny',"const&&string",plotchar,size,'2185_220_2185_228')
+##root(root_metainfo,rm_204,display.pane,"cb&&input&&plot_display&&integer",plotchar,display,'2185_241_2185_252')
+##root(root_metainfo,rm_205,'Absolute',"input&&string",plotchar,location,'2186_121_2186_137')
+##root(root_metainfo,rm_206,'tiny',"const&&string",plotchar,size,'2186_223_2186_231')
+##root(root_metainfo,rm_207,display.pane,"cb&&input&&plot_display&&integer",plotchar,display,'2186_244_2186_255')
+##root(root_metainfo,rm_208,2,"input&&integer",plot,linewidth,'2189_195_2189_195')
+##root(root_metainfo,rm_209,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2189_206_2189_222')
+##root(root_metainfo,rm_210,2,"input&&integer",plot,linewidth,'2190_199_2190_199')
+##root(root_metainfo,rm_211,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2190_210_2190_226')
+##root(root_metainfo,rm_212,'Absolute',"input&&string",plotchar,location,'2192_163_2192_179')
+##root(root_metainfo,rm_213,'tiny',"const&&string",plotchar,size,'2192_267_2192_275')
+##root(root_metainfo,rm_214,display.pane,"cb&&input&&plot_display&&integer",plotchar,display,'2192_288_2192_299')
+##root(root_metainfo,rm_215,'Absolute',"input&&string",plotchar,location,'2193_166_2193_182')
+##root(root_metainfo,rm_216,'tiny',"const&&string",plotchar,size,'2193_270_2193_278')
+##root(root_metainfo,rm_217,display.pane,"cb&&input&&plot_display&&integer",plotchar,display,'2193_291_2193_302')
+##root(root_metainfo,rm_218,2,"input&&integer",plot,linewidth,'2204_345_2204_345')
+##root(root_metainfo,rm_219,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2204_356_2204_372')
+##root(root_metainfo,rm_220,((numOfTakeProfitTargets>0)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2204_397_2204_451')
+##root(root_metainfo,rm_221,2,"input&&integer",plot,linewidth,'2205_351_2205_351')
+##root(root_metainfo,rm_222,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2205_362_2205_378')
+##root(root_metainfo,rm_223,((numOfTakeProfitTargets>0)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2205_403_2205_457')
+##root(root_metainfo,rm_224,2,"input&&integer",plot,linewidth,'2206_345_2206_345')
+##root(root_metainfo,rm_225,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2206_356_2206_372')
+##root(root_metainfo,rm_226,((numOfTakeProfitTargets>1)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2206_397_2206_451')
+##root(root_metainfo,rm_227,2,"input&&integer",plot,linewidth,'2207_351_2207_351')
+##root(root_metainfo,rm_228,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2207_362_2207_378')
+##root(root_metainfo,rm_229,((numOfTakeProfitTargets>1)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2207_403_2207_457')
+##root(root_metainfo,rm_230,2,"input&&integer",plot,linewidth,'2208_345_2208_345')
+##root(root_metainfo,rm_231,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2208_356_2208_372')
+##root(root_metainfo,rm_232,((numOfTakeProfitTargets>2)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2208_397_2208_451')
+##root(root_metainfo,rm_233,2,"input&&integer",plot,linewidth,'2209_351_2209_351')
+##root(root_metainfo,rm_234,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2209_362_2209_378')
+##root(root_metainfo,rm_235,((numOfTakeProfitTargets>2)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2209_403_2209_457')
+##root(root_metainfo,rm_236,2,"input&&integer",plot,linewidth,'2210_345_2210_345')
+##root(root_metainfo,rm_237,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2210_356_2210_372')
+##root(root_metainfo,rm_238,((numOfTakeProfitTargets>3)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2210_397_2210_451')
+##root(root_metainfo,rm_239,2,"input&&integer",plot,linewidth,'2211_351_2211_351')
+##root(root_metainfo,rm_240,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2211_362_2211_378')
+##root(root_metainfo,rm_241,((numOfTakeProfitTargets>3)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2211_403_2211_457')
+##root(root_metainfo,rm_242,2,"input&&integer",plot,linewidth,'2212_345_2212_345')
+##root(root_metainfo,rm_243,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2212_356_2212_372')
+##root(root_metainfo,rm_244,((numOfTakeProfitTargets>4)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2212_397_2212_451')
+##root(root_metainfo,rm_245,2,"input&&integer",plot,linewidth,'2213_351_2213_351')
+##root(root_metainfo,rm_246,plot.style_linebr,"cb&&input&&plot_style&&integer",plot,style,'2213_362_2213_378')
+##root(root_metainfo,rm_247,((numOfTakeProfitTargets>4)?display.all:display.none),"cb&&input&&plot_display&&integer",plot,display,'2213_403_2213_457')

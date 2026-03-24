@@ -1,0 +1,138 @@
+//@version=4
+//@author=Daveatt
+
+StrategyName = "Best Supertrend CCI Strategy"
+ShortStrategyName = "Best Supertrend CCI Strategy"
+
+strategy(title=StrategyName, shorttitle=ShortStrategyName, overlay=true, 
+ pyramiding=0, default_qty_value=100, precision=7, currency=currency.USD,
+ commission_value=0.2,commission_type=strategy.commission.percent, initial_capital=10000)
+
+//////////////////////////
+//* COLOR CONSTANTS *//
+//////////////////////////
+
+AQUA = #00FFFFFF
+BLUE = #0000FFFF
+RED  = #FF0000FF
+LIME = #00FF00FF
+GRAY = #808080FF
+DARKRED   = #8B0000FF
+DARKGREEN = #006400FF
+GOLD = #FFD700
+WHITE = color.white
+
+// Plots
+GREEN_LIGHT     = color.new(color.green, 40)
+RED_LIGHT       = color.new(color.red, 40) 
+BLUE_LIGHT      = color.new(color.aqua, 40)
+PURPLE_LIGHT    = color.new(color.purple, 40) 
+
+source = input(close)
+
+/// Alerts Mode ////
+
+i_alert_mode = input(defval=alert.freq_once_per_bar_close, title="Alerts Mode", options=[alert.freq_once_per_bar_close, alert.freq_once_per_bar, alert.freq_all])
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////// CCI /////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+cci_period = input(28, "CCI Period")
+cci = cci(source, cci_period)
+//UL = input(80, "Upper level")
+//LL = input(20, "Lower Level")
+ML = input(0, "CCI Mid Line pivot")
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////// SUPERTREND /////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+Factor=input(3,title="[ST] Factor", minval=1,maxval = 100, type=input.float)
+Pd=input(3, title="[ST] PD", minval=1,maxval = 100)
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+/////////////////////// SUPERTREND DETECTION //////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+f_supertrend(Factor, Pd) =>
+
+    Up=hl2-(Factor*atr(Pd))
+    Dn=hl2+(Factor*atr(Pd))
+    
+    TrendUp = 0.0
+    TrendUp := cci[1] > ML ? max(Up,TrendUp[1]) : Up
+    TrendDown = 0.0
+    TrendDown := cci[1]< ML ? min(Dn,TrendDown[1]) : Dn
+    Trend = 0.0
+    Trend := cci > ML ? 1: cci < ML ? -1: nz(Trend[1],1)
+    Tsl = Trend==1? TrendUp: TrendDown
+
+    [Trend, Tsl]
+
+[st_trend, st_tsl] = f_supertrend(Factor, Pd)
+
+// Plot the ST
+linecolor = close >= st_tsl ? color.green : color.red
+plot(st_tsl, color = linecolor , linewidth = 3,title = "SuperTrend", transp=0)
+
+isLong  = st_trend == 1
+isShort = st_trend == -1
+
+longClose   = isLong[1] and isShort
+shortClose  = isShort[1] and isLong
+
+strategy.entry("Long", 1, when=isLong, alert_message="Long")
+strategy.close("Long", when=longClose, alert_message="Long Close")
+
+strategy.entry("Short", 0,  when=isShort, alert_message="Short")
+strategy.close("Short", when=shortClose, alert_message="Short Close")
+
+if isLong
+    alert("Long", i_alert_mode)
+
+if longClose
+    alert("Long Close", i_alert_mode)
+    
+if isShort
+    alert("Short", i_alert_mode)
+
+if shortClose
+    alert("Short Close", i_alert_mode)
+
+View in Pine Editor・107 lines
+Use on chart
+2.8 K
+13
+78 888
+Feb 14, 2020
+Hello traders
+
+Someone requested the strategy version of the Supertrend CCI indicator
+
+It's a Supertrend not based on candle close but based on a CCI ( Commodity Channel Index )
+
+How does it work?
+
+Bull event: CCI crossing over the 0 line
+Bear event: CCI crossing below the 0 line
+
+When the event is triggered, the script will plot the Supertrend as follow
+
+UP Trend = High + ATR * Factor
+DOWN Trend = Low - ATR * Factor
+
+This is an alternative of the classical Supertrend based on candle close being above/beyond the previous Supertrend level.
+
+Hope you'll enjoy it and it will improve your trading making you a better trader
+
+Dave
+Apr 7, 2021
+Release Notes
+Added the alerts

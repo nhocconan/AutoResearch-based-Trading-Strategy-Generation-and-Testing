@@ -1,0 +1,82 @@
+//@version=6
+
+strategy("RSI, Volume, MACD, EMA Combo", overlay=true)
+
+// === INPUTS ===
+EMA_L = input.int(defval = 200,title = "EMA LENGTH" )
+RSI_L = input.int(defval = 14,title = "RSI LENGTH" )
+OB = input.int(defval = 50,title = "OB")
+OS = input.int(defval =  50,title ="OS")
+SLOW_L = input.int(defval =26,title = "RSI LENGTH" )
+FAST_L = input.int(defval = 12,title = "RSI LENGTH" )
+SIG_L = input.int(defval = 9,title = "RSI LENGTH")
+SMA_L = input.int(defval = 20,title = "SMA LENGTH" )
+// TRADING INICATORS
+[macdLine, signalline, histLine] = ta.macd(close, FAST_L, SLOW_L, SIG_L)
+RSI = ta.rsi(close,RSI_L)
+EMA = ta.ema(close, EMA_L)
+VOLUME = volume
+sma_v = ta.sma(volume,SMA_L)
+// Trading Logic
+buy = macdLine > signalline and RSI > OB and close > EMA and volume > sma_v
+short = macdLine < signalline and RSI < OS and close < EMA and volume > sma_v
+sell = ta.crossunder(RSI,50)
+cover = ta.crossover(RSI, 50)
+// Strategy
+if buy
+    strategy.entry("long", direction = strategy.long, comment = "long")
+
+if sell
+    strategy.close("long", comment = "long exit")
+    
+if short
+    strategy.entry("short", direction = strategy.short, comment = "short" )
+
+if cover
+    strategy.close("short", comment = "short exit")
+
+//  Plot 
+plot(EMA, color = color.green, linewidth = 2)
+
+View in Pine Editor・39 lines
+Use on chart
+4
+5
+2
+9 770
+RSI + Volume + MACD + EMA Trading System
+This script combines four powerful indicators—Relative Strength Index (RSI), Volume, Moving Average Convergence Divergence (MACD), and Exponential Moving Average (EMA)—to create a comprehensive trading strategy for better trend confirmation and trade entries.
+
+How It Works
+
+RSI (Relative Strength Index)
+Helps identify overbought and oversold conditions.
+Used to confirm momentum strength before taking a trade.
+Volume
+Confirms the strength of price movements.
+Avoids false signals by ensuring there is sufficient trading activity.
+MACD (Moving Average Convergence Divergence)
+Confirms trend direction and momentum shifts.
+Provides buy/sell signals through MACD line crossovers.
+EMA (Exponential Moving Average)
+Acts as a dynamic support and resistance level.
+Helps filter out trades that go against the overall trend.
+Trading Logic
+
+Buy Signal:
+RSI is above 50 (bullish momentum).
+MACD shows a bullish crossover.
+The price is above the EMA (trend confirmation).
+Volume is increasing (strong participation).
+Sell Signal:
+RSI is below 50 (bearish momentum).
+MACD shows a bearish crossover.
+The price is below the EMA (downtrend confirmation).
+Volume is increasing (intense selling pressure).
+
+Backtesting & Risk Management
+
+The strategy is optimized for scalping on the 1-minute timeframe (adjustable for other timeframes).
+Default settings use realistic commission and slippage to simulate actual trading conditions.
+A stop-loss and take-profit system is integrated to manage risk effectively.
+This script is designed to help traders filter out false signals, improve trend confirmation, and increase trade accuracy by combining multiple indicators in a structured way.

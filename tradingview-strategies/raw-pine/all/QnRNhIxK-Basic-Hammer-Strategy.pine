@@ -1,0 +1,29 @@
+//@version=3
+//Dan Pasco
+strategy("Hammer Strategy" , shorttitle="Hammer Strategy $1000", overlay = true , initial_capital = 1000)
+
+//Bullish Hammer Up
+bhu1 = (close-open) > 0 and ((close-open)/3) > (high-close) and ((open-low)/2) > (close-open) and (close-open) > ((open-low)/8)
+plotshape(bhu1 , style = shape.arrowup , location = location.belowbar , text = "Hammer", color = green)
+
+//Bearish Hammer Up
+bhu2 = (open-close) > 0 and ((open-close)/3) > (high-open) and ((close-low)/2) > (open-close) and (open-close) > ((close-low)/8)
+plotshape(bhu2 , style = shape.arrowup , location = location.belowbar , text = "Hammer", color = green)
+
+//Declaring the buy and sell points
+buy = bhu1 == true or bhu2 == true
+profit1 = input(defval = 75, title = "Reward in Pennies", minval = 1)
+loss1 = input(defval = 200, title = "Risk in Pennies", minval = 1)
+
+//Execute historic backtesting
+ordersize = floor(strategy.equity/close) // To dynamically calculate the order size as the account equity increases or decreases.
+strategy.entry("long",strategy.long,ordersize,when=buy) // Buy 
+strategy.exit("Exit Long", from_entry = "long", profit = profit1 , loss = loss1) //Sell
+
+View in Pine Editor・21 lines
+Use on chart
+3
+2
+1
+7 837
+This is a basic strategy that will buy after a hammer is printed, and sell when a predetermined risk or reward price is hit. You can change the risk and reward values in the settings. Risk and reward values are in increments of $0.01. Default values are 75 ($0.75) and 200 ($2.00). If the strategy is producing losses, try adding a zero to the end of the risk value and the reward value. Example: Higher valued stocks may do better with a Risk of 750 ($7.50) and a Reward of 2000 ($20.00). Maybe even a Risk of 750 ($7.50) and reward of 1000 ($10.00). Play around with these values to get the best result for different charts. Initial investment is set to $1000

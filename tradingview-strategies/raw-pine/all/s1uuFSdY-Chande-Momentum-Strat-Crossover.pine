@@ -1,0 +1,5 @@
+//@version=4
+buyline=##input(defval=-80,type='INPUT_INTEGER',##id='in_8')
+sellline=##input(defval=80,type='INPUT_INTEGER',##id='in_9')
+##root(root_metainfo,rm_0,buyline,input__float)
+##root(root_metainfo,rm_1,sellline,input__float)

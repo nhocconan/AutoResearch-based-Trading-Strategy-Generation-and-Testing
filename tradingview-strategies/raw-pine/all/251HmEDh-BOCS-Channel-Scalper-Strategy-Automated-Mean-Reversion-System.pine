@@ -1,0 +1,515 @@
+//@version=6
+strategy("BOCS Channel Scalper Strategy", "BOCS-Strat", overlay=true, max_boxes_count=500, max_lines_count=500, default_qty_type=strategy.fixed, default_qty_value=1)
+import TradingView/ta/10
+
+// ============================================================================
+// INPUTS - POSITION SIZING
+// ============================================================================
+
+qty_type = input.string("Fixed Contracts", "Position Size Type", options=["Fixed Contracts", "% of Equity", "Cash Amount"], group="Position Sizing")
+fixed_contracts = input.int(1, "Number of Contracts", minval=1, group="Position Sizing", tooltip="Number of contracts/shares to trade")
+equity_pct = input.float(10.0, "% of Equity", minval=1, maxval=100, step=1, group="Position Sizing", tooltip="Percentage of equity to risk per trade")
+cash_amount = input.float(10000, "Cash Amount ($)", minval=100, step=100, group="Position Sizing", tooltip="Dollar amount to trade per position")
+
+// ============================================================================
+// INPUTS - CHANNEL SETTINGS
+// ============================================================================
+
+overlap = input.bool(false, "Nested Channels", group="Channel Settings")
+length_ = input.int(100, "Normalization Length", minval=1, group="Channel Settings")
+length = input.int(14, "Box Detection Length", minval=1, group="Channel Settings")
+
+// ============================================================================
+// INPUTS - SCALPING SETTINGS
+// ============================================================================
+
+enable_long = input.bool(true, "Enable Long Scalps", group="Scalping Settings")
+enable_short = input.bool(true, "Enable Short Scalps", group="Scalping Settings")
+entry_zone_pct = input.float(0.2, "Entry Zone % from Edge", minval=0.05, maxval=0.5, step=0.05, group="Scalping Settings")
+sl_offset_ticks = input.int(5, "SL Offset (Ticks)", minval=1, group="Scalping Settings")
+cooldown_bars = input.int(0, "Cooldown Period (Bars)", minval=0, group="Scalping Settings", tooltip="Minimum bars between signals. 0 = no cooldown")
+
+// ATR Filter
+use_atr_filter = input.bool(false, "Enable ATR Filter", group="ATR Filter")
+atr_timeframe = input.timeframe("1", "ATR Timeframe", group="ATR Filter", tooltip="Timeframe for ATR calculation (e.g., 1, 5, 15)")
+atr_length = input.int(14, "ATR Length", minval=1, group="ATR Filter")
+atr_min_value = input.float(10.0, "Min ATR Value", minval=0.1, step=0.5, group="ATR Filter", tooltip="Only trade if ATR is above this value")
+
+// TP Method Selection
+tp_method = input.string("Fixed Points", "TP Method", options=["Fixed Points", "% of Channel"], group="Take Profit Settings")
+tp_fixed_ticks = input.int(30, "TP Fixed (Ticks)", minval=1, group="Take Profit Settings")
+tp_channel_pct = input.float(0.5, "TP % of Channel", minval=0.1, maxval=1.0, step=0.1, group="Take Profit Settings")
+
+// ============================================================================
+// INPUTS - APPEARANCE
+// ============================================================================
+
+show_zones = input.bool(true, "Show Entry Zones", group="Appearance")
+show_info_table = input.bool(true, "Show Info Table", group="Appearance")
+table_position = input.string("Top Right", "Table Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Appearance")
+long_color = input.color(#00ffbb, "Long Color", group="Appearance")
+short_color = input.color(#ff1100, "Short Color", group="Appearance")
+tp_color = input.color(color.green, "TP Color", group="Appearance")
+sl_color = input.color(color.red, "SL Color", group="Appearance")
+
+// ============================================================================
+// VARIABLES
+// ============================================================================
+
+var boxes = array.new_box()
+var boxes_u = array.new_box()
+var boxes_l = array.new_box()
+var line[] centerLines = array.new<line>()
+
+var string lastSignalType = "None"
+var float lastEntryPrice = na
+var float lastTPPrice = na
+var float lastSLPrice = na
+var int lastLongBar = na
+var int lastShortBar = na
+
+// ============================================================================
+// FUNCTIONS
+// ============================================================================
+
+f_can_create(float tNew, float bNew) =>
+    ok = true
+    if array.size(boxes) > 0
+        for j = 0 to array.size(boxes)-1
+            boxObj = array.get(boxes, j)
+            if (tNew > box.get_bottom(boxObj)) and (bNew < box.get_top(boxObj))
+                ok := false
+                break
+    ok
+
+getTablePosition(pos) =>
+    switch pos
+        "Top Left" => position.top_left
+        "Top Right" => position.top_right
+        "Bottom Left" => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        => position.top_right
+
+// ============================================================================
+// CHANNEL CALCULATIONS
+// ============================================================================
+
+lowestLow = ta.lowest(low, length_)
+highestHigh = ta.highest(high, length_)
+normalizedPrice = (close - lowestLow) / (highestHigh - lowestLow)
+vol = ta.stdev(normalizedPrice, 14)
+
+upper = (ta.highestbars(vol, length + 1) + length)/length
+lower = (ta.lowestbars(vol, length + 1) + length)/length
+
+duration = math.max(nz(ta.barssince(ta.crossover(lower, upper))), 1)
+h = ta.highest(duration)
+l = ta.lowest(duration)
+
+vola = ta.atr(length)/2
+
+bool newChannelFormed = false
+bool longScalpSignal = false
+bool shortScalpSignal = false
+
+// Get ATR from specified timeframe
+float atr_value = request.security(syminfo.tickerid, atr_timeframe, ta.atr(atr_length))
+
+// Check if ATR filter allows trading
+bool atrOK = not use_atr_filter or (atr_value >= atr_min_value)
+
+// Form new channels
+if ta.crossover(upper, lower) and duration > 10
+    if overlap or f_can_create(h, l)
+        array.unshift(boxes, box.new(bar_index-duration, h, bar_index, l, bgcolor=color.new(chart.fg_color, 90), border_color=na))
+        array.unshift(boxes_u, box.new(bar_index-duration, h, bar_index, h-vola, bgcolor=color.new(short_color, 70), border_color=na))
+        array.unshift(boxes_l, box.new(bar_index-duration, l+vola, bar_index, l, bgcolor=color.new(long_color, 70), border_color=na))
+        
+        float centerY = (h + l) / 2
+        array.unshift(centerLines, line.new(bar_index-duration, centerY, bar_index, centerY, color=color.new(chart.fg_color, 50), width=1, style=line.style_dashed))
+        newChannelFormed := true
+
+// ============================================================================
+// STRATEGY LOGIC
+// ============================================================================
+
+// Calculate position size based on user selection
+float position_size = fixed_contracts
+if qty_type == "% of Equity"
+    position_size := (strategy.equity * equity_pct / 100) / close
+else if qty_type == "Cash Amount"
+    position_size := cash_amount / close
+
+if array.size(boxes) > 0
+    for i = 0 to array.size(boxes)-1
+        boxObj = array.get(boxes, i)
+        boxObjU = array.get(boxes_u, i)
+        boxObjL = array.get(boxes_l, i)
+        centerLineObj = array.get(centerLines, i)
+        
+        float topBound = box.get_top(boxObj)
+        float bottomBound = box.get_bottom(boxObj)
+        float channelRange = topBound - bottomBound
+        float entryZoneSize = channelRange * entry_zone_pct
+        
+        // Define entry zones
+        float longEntryZone = bottomBound + entryZoneSize
+        float shortEntryZone = topBound - entryZoneSize
+        
+        // Check for breakout (remove channel) - only on strong breaks
+        bool breakout = false
+        if close > topBound + (syminfo.mintick * 10) or close < bottomBound - (syminfo.mintick * 10)
+            breakout := true
+            
+        if breakout
+            array.remove(boxes, i)
+            array.remove(boxes_u, i)
+            array.remove(boxes_l, i)
+            array.remove(centerLines, i)
+            break
+        else
+            // Update channel visuals
+            box.set_right(boxObj, bar_index)
+            box.set_right(boxObjU, bar_index)
+            box.set_right(boxObjL, bar_index)
+            line.set_x2(centerLineObj, bar_index)
+            
+            // LONG ENTRY
+            bool longCooldownOK = cooldown_bars == 0 or na(lastLongBar) or (bar_index - lastLongBar) >= cooldown_bars
+            if enable_long and low <= longEntryZone and longCooldownOK and atrOK and strategy.position_size == 0
+                longScalpSignal := true
+                lastSignalType := "LONG"
+                lastLongBar := bar_index
+                
+                // Calculate TP/SL
+                entry_price = longEntryZone
+                sl_price = bottomBound - (sl_offset_ticks * syminfo.mintick)
+                
+                float tp_price = na
+                if tp_method == "Fixed Points"
+                    tp_price := entry_price + (tp_fixed_ticks * syminfo.mintick)
+                else
+                    tp_price := entry_price + (channelRange * tp_channel_pct)
+                
+                // Store for table display
+                lastEntryPrice := entry_price
+                lastTPPrice := tp_price
+                lastSLPrice := sl_price
+                
+                // Execute strategy entry
+                strategy.entry("Long", strategy.long, qty=position_size)
+                strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
+            
+            // SHORT ENTRY
+            bool shortCooldownOK = cooldown_bars == 0 or na(lastShortBar) or (bar_index - lastShortBar) >= cooldown_bars
+            if enable_short and high >= shortEntryZone and shortCooldownOK and atrOK and strategy.position_size == 0
+                shortScalpSignal := true
+                lastSignalType := "SHORT"
+                lastShortBar := bar_index
+                
+                // Calculate TP/SL
+                entry_price = shortEntryZone
+                sl_price = topBound + (sl_offset_ticks * syminfo.mintick)
+                
+                float tp_price = na
+                if tp_method == "Fixed Points"
+                    tp_price := entry_price - (tp_fixed_ticks * syminfo.mintick)
+                else
+                    tp_price := entry_price - (channelRange * tp_channel_pct)
+                
+                // Store for table display
+                lastEntryPrice := entry_price
+                lastTPPrice := tp_price
+                lastSLPrice := sl_price
+                
+                // Execute strategy entry
+                strategy.entry("Short", strategy.short, qty=position_size)
+                strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
+            
+            // Show entry zones if enabled
+            if show_zones
+                box.set_text(boxObjL, "LONG ZONE ▲")
+                box.set_text_color(boxObjL, color.new(long_color, 0))
+                box.set_text_size(boxObjL, size.small)
+                
+                box.set_text(boxObjU, "SHORT ZONE ▼")
+                box.set_text_color(boxObjU, color.new(short_color, 0))
+                box.set_text_size(boxObjU, size.small)
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+
+plotshape(longScalpSignal, "Long Scalp Signal", shape.labelup, location.belowbar, long_color, text="LONG", textcolor=chart.fg_color, size=size.small)
+plotshape(shortScalpSignal, "Short Scalp Signal", shape.labeldown, location.abovebar, short_color, text="SHORT", textcolor=chart.fg_color, size=size.small)
+
+// Plot TP/SL levels
+plot(strategy.position_size != 0 and not na(lastTPPrice) ? lastTPPrice : na, "Take Profit", tp_color, 1, plot.style_linebr)
+plot(strategy.position_size != 0 and not na(lastSLPrice) ? lastSLPrice : na, "Stop Loss", sl_color, 1, plot.style_linebr)
+plot(strategy.position_size != 0 and not na(lastEntryPrice) ? lastEntryPrice : na, "Entry", color.white, 2, plot.style_linebr)
+
+// ============================================================================
+// INFO TABLE
+// ============================================================================
+
+if show_info_table
+    var infoTable = table.new(position=getTablePosition(table_position), columns=2, rows=8, bgcolor=color.new(chart.bg_color, 10), border_width=1)
+    
+    // Clear table
+    table.clear(infoTable, 0, 0, 1, 7)
+    
+    // Header
+    table.cell(infoTable, 0, 0, "BOCS STRATEGY", text_color=chart.fg_color, text_size=size.normal, bgcolor=color.new(chart.fg_color, 80))
+    table.cell(infoTable, 1, 0, "", bgcolor=color.new(chart.fg_color, 80))
+    table.merge_cells(infoTable, 0, 0, 1, 0)
+    
+    // Position Status
+    string posStatus = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "No Position"
+    color posColor = strategy.position_size > 0 ? long_color : strategy.position_size < 0 ? short_color : color.gray
+    table.cell(infoTable, 0, 1, "Position:", text_color=chart.fg_color, text_size=size.small)
+    table.cell(infoTable, 1, 1, posStatus, text_color=posColor, text_size=size.small)
+    
+    // Channel Status
+    bool channelActive = array.size(boxes) > 0
+    string channelStatus = channelActive ? "Active" : "No Channel"
+    color channelColor = channelActive ? color.yellow : color.gray
+    table.cell(infoTable, 0, 2, "Channel:", text_color=chart.fg_color, text_size=size.small)
+    table.cell(infoTable, 1, 2, channelStatus, text_color=channelColor, text_size=size.small)
+    
+    // Last Signal
+    color signalColor = lastSignalType == "LONG" ? long_color : lastSignalType == "SHORT" ? short_color : color.gray
+    table.cell(infoTable, 0, 3, "Last Signal:", text_color=chart.fg_color, text_size=size.small)
+    table.cell(infoTable, 1, 3, lastSignalType, text_color=signalColor, text_size=size.small)
+    
+    // Entry Price
+    string entryText = na(lastEntryPrice) ? "N/A" : str.tostring(lastEntryPrice)
+    table.cell(infoTable, 0, 4, "Entry:", text_color=chart.fg_color, text_size=size.small)
+    table.cell(infoTable, 1, 4, entryText, text_color=color.white, text_size=size.small)
+    
+    // TP Price
+    string tpText = na(lastTPPrice) ? "N/A" : str.tostring(lastTPPrice)
+    table.cell(infoTable, 0, 5, "Take Profit:", text_color=chart.fg_color, text_size=size.small)
+    table.cell(infoTable, 1, 5, tpText, text_color=tp_color, text_size=size.small)
+    
+    // SL Price
+    string slText = na(lastSLPrice) ? "N/A" : str.tostring(lastSLPrice)
+    table.cell(infoTable, 0, 6, "Stop Loss:", text_color=chart.fg_color, text_size=size.small)
+    table.cell(infoTable, 1, 6, slText, text_color=sl_color, text_size=size.small)
+    
+    // ATR Status
+    if use_atr_filter
+        string atrText = str.tostring(math.round(atr_value, 2))
+        color atrColor = atr_value >= atr_min_value ? color.green : color.red
+        string atrStatus = atr_value >= atr_min_value ? atrText + " ✓" : atrText + " ✗"
+        table.cell(infoTable, 0, 7, "ATR (" + atr_timeframe + "):", text_color=chart.fg_color, text_size=size.small)
+        table.cell(infoTable, 1, 7, atrStatus, text_color=atrColor, text_size=size.small)
+    else
+        table.cell(infoTable, 0, 7, "ATR Filter:", text_color=chart.fg_color, text_size=size.small)
+        table.cell(infoTable, 1, 7, "Disabled", text_color=color.gray, text_size=size.small)
+
+View in Pine Editor・309 lines
+Use on chart
+3
+8
+0
+7 085
+# BOCS Channel Scalper Strategy - Automated Mean Reversion System
+
+## WHAT THIS STRATEGY DOES:
+This is an automated mean reversion trading strategy that identifies consolidation channels through volatility analysis and executes scalp trades when price enters entry zones near channel boundaries. Unlike breakout strategies, this system assumes price will revert to the channel mean, taking profits as price bounces back from extremes. Position sizing is fully customizable with three methods: fixed contracts, percentage of equity, or fixed dollar amount. Stop losses are placed just outside channel boundaries with take profits calculated either as fixed points or as a percentage of channel range.
+
+## KEY DIFFERENCE FROM ORIGINAL BOCS:
+**This strategy is designed for traders seeking higher trade frequency.** The original BOCS indicator trades breakouts OUTSIDE channels, waiting for price to escape consolidation before entering. This scalper version trades mean reversion INSIDE channels, entering when price reaches channel extremes and betting on a bounce back to center. The result is significantly more trading opportunities:
+
+- **Original BOCS**: 1-3 signals per channel (only on breakout)
+- **Scalper Version**: 5-15+ signals per channel (every touch of entry zones)
+- **Trade Style**: Mean reversion vs trend following
+- **Hold Time**: Seconds to minutes vs minutes to hours
+- **Best Markets**: Ranging/choppy conditions vs trending breakouts
+
+This makes the scalper ideal for active day traders who want continuous opportunities within consolidation zones rather than waiting for breakout confirmation. However, increased trade frequency also means higher commission costs and requires tighter risk management.
+
+## TECHNICAL METHODOLOGY:
+
+### Price Normalization Process:
+The strategy normalizes price data to create consistent volatility measurements across different instruments and price levels. It calculates the highest high and lowest low over a user-defined lookback period (default 100 bars). Current close price is normalized using: (close - lowest_low) / (highest_high - lowest_low), producing values between 0 and 1 for standardized volatility analysis.
+
+### Volatility Detection:
+A 14-period standard deviation is applied to the normalized price series to measure price deviation from the mean. Higher standard deviation values indicate volatility expansion; lower values indicate consolidation. The strategy uses ta.highestbars() and ta.lowestbars() to identify when volatility peaks and troughs occur over the detection period (default 14 bars).
+
+### Channel Formation Logic:
+When volatility crosses from a high level to a low level (ta.crossover(upper, lower)), a consolidation phase begins. The strategy tracks the highest and lowest prices during this period, which become the channel boundaries. Minimum duration of 10+ bars is required to filter out brief volatility spikes. Channels are rendered as box objects with defined upper and lower boundaries, with colored zones indicating entry areas.
+
+### Entry Signal Generation:
+The strategy uses immediate touch-based entry logic. Entry zones are defined as a percentage from channel edges (default 20%):
+- **Long Entry Zone**: Bottom 20% of channel (bottomBound + channelRange × 0.2)
+- **Short Entry Zone**: Top 20% of channel (topBound - channelRange × 0.2)
+
+Long signals trigger when candle low touches or enters the long entry zone. Short signals trigger when candle high touches or enters the short entry zone. This captures mean reversion opportunities as price reaches channel extremes.
+
+### Cooldown Filter:
+An optional cooldown period (measured in bars) prevents signal spam by enforcing minimum spacing between consecutive signals. If cooldown is set to 3 bars, no new long signal will fire until 3 bars after the previous long signal. Long and short cooldowns are tracked independently, allowing both directions to signal within the same period.
+
+### ATR Volatility Filter:
+The strategy includes a multi-timeframe ATR filter to avoid trading during low-volatility conditions. Using request.security(), it fetches ATR values from a specified timeframe (e.g., 1-minute ATR while trading on 5-minute charts). The filter compares current ATR to a user-defined minimum threshold:
+- If ATR ≥ threshold: Trading enabled
+- If ATR < threshold: No signals fire
+
+This prevents entries during dead zones where mean reversion is unreliable due to insufficient price movement.
+
+### Take Profit Calculation:
+Two TP methods are available:
+
+**Fixed Points Mode**:
+- Long TP = Entry + (TP_Ticks × syminfo.mintick)
+- Short TP = Entry - (TP_Ticks × syminfo.mintick)
+
+**Channel Percentage Mode**:
+- Long TP = Entry + (ChannelRange × TP_Percent)
+- Short TP = Entry - (ChannelRange × TP_Percent)
+
+Default 50% targets the channel midline, a natural mean reversion target. Larger percentages aim for opposite channel edge.
+
+### Stop Loss Placement:
+Stop losses are placed just outside the channel boundary by a user-defined tick offset:
+- Long SL = ChannelBottom - (SL_Offset_Ticks × syminfo.mintick)
+- Short SL = ChannelTop + (SL_Offset_Ticks × syminfo.mintick)
+
+This logic assumes channel breaks invalidate the mean reversion thesis. If price breaks through, the range is no longer valid and position exits.
+
+### Trade Execution Logic:
+When entry conditions are met (price in zone, cooldown satisfied, ATR filter passed, no existing position):
+1. Calculate entry price at zone boundary
+2. Calculate TP and SL based on selected method
+3. Execute strategy.entry() with calculated position size
+4. Place strategy.exit() with TP limit and SL stop orders
+5. Update info table with active trade details
+
+The strategy enforces one position at a time by checking strategy.position_size == 0 before entry.
+
+### Channel Breakout Management:
+Channels are removed when price closes more than 10 ticks outside boundaries. This tolerance prevents premature channel deletion from minor breaks or wicks, allowing the mean reversion setup to persist through small boundary violations.
+
+### Position Sizing System:
+Three methods calculate position size:
+
+**Fixed Contracts**:
+- Uses exact contract quantity specified in settings
+- Best for futures traders (e.g., "trade 2 NQ contracts")
+
+**Percentage of Equity**:
+- position_size = (strategy.equity × equity_pct / 100) / close
+- Dynamically scales with account growth
+
+**Cash Amount**:
+- position_size = cash_amount / close
+- Maintains consistent dollar exposure regardless of price
+
+## INPUT PARAMETERS:
+
+### Position Sizing:
+- **Position Size Type**: Choose Fixed Contracts, % of Equity, or Cash Amount
+- **Number of Contracts**: Fixed quantity per trade (1-1000)
+- **% of Equity**: Percentage of account to allocate (1-100%)
+- **Cash Amount**: Dollar value per position ($100+)
+
+### Channel Settings:
+- **Nested Channels**: Allow multiple overlapping channels vs single channel
+- **Normalization Length**: Lookback for high/low calculation (1-500, default 100)
+- **Box Detection Length**: Period for volatility detection (1-100, default 14)
+
+### Scalping Settings:
+- **Enable Long Scalps**: Toggle long entries on/off
+- **Enable Short Scalps**: Toggle short entries on/off
+- **Entry Zone % from Edge**: Size of entry zone (5-50%, default 20%)
+- **SL Offset (Ticks)**: Distance beyond channel for stop (1+, default 5)
+- **Cooldown Period (Bars)**: Minimum spacing between signals (0 = no cooldown)
+
+### ATR Filter:
+- **Enable ATR Filter**: Toggle volatility filter on/off
+- **ATR Timeframe**: Source timeframe for ATR (1, 5, 15, 60 min, etc.)
+- **ATR Length**: Smoothing period (1-100, default 14)
+- **Min ATR Value**: Threshold for trade enablement (0.1+, default 10.0)
+
+### Take Profit Settings:
+- **TP Method**: Choose Fixed Points or % of Channel
+- **TP Fixed (Ticks)**: Static distance in ticks (1+, default 30)
+- **TP % of Channel**: Dynamic target as channel percentage (10-100%, default 50%)
+
+### Appearance:
+- **Show Entry Zones**: Toggle zone labels on channels
+- **Show Info Table**: Display real-time strategy status
+- **Table Position**: Corner placement (Top Left/Right, Bottom Left/Right)
+- **Color Settings**: Customize long/short/TP/SL colors
+
+## VISUAL INDICATORS:
+
+- **Channel boxes** with semi-transparent fill showing consolidation zones
+- **Colored entry zones** labeled "LONG ZONE ▲" and "SHORT ZONE ▼"
+- **Entry signal arrows** below/above bars marking long/short entries
+- **Active TP/SL lines** with emoji labels (⊕ Entry, 🎯 TP, 🛑 SL)
+- **Info table** showing position status, channel state, last signal, entry/TP/SL prices, and ATR status
+
+## HOW TO USE:
+
+### For 1-3 Minute Scalping (NQ/ES):
+- ATR Timeframe: "1" (1-minute)
+- ATR Min Value: 10.0 (for NQ), adjust per instrument
+- Entry Zone %: 20-25%
+- TP Method: Fixed Points, 20-40 ticks
+- SL Offset: 5-10 ticks
+- Cooldown: 2-3 bars
+- Position Size: 1-2 contracts
+
+### For 5-15 Minute Day Trading:
+- ATR Timeframe: "5" or match chart
+- ATR Min Value: Adjust to instrument (test 8-15 for NQ)
+- Entry Zone %: 20-30%
+- TP Method: % of Channel, 40-60%
+- SL Offset: 5-10 ticks
+- Cooldown: 3-5 bars
+- Position Size: Fixed contracts or 5-10% equity
+
+### For 30-60 Minute Swing Scalping:
+- ATR Timeframe: "15" or "30"
+- ATR Min Value: Lower threshold for broader market
+- Entry Zone %: 25-35%
+- TP Method: % of Channel, 50-70%
+- SL Offset: 10-15 ticks
+- Cooldown: 5+ bars or disable
+- Position Size: % of equity recommended
+
+## BACKTEST CONSIDERATIONS:
+
+- Strategy performs best in ranging, mean-reverting markets
+- Strong trending markets produce more stop losses as price breaks channels
+- ATR filter significantly reduces trade count but improves quality during low volatility
+- Cooldown period trades signal quantity for signal quality
+- Commission and slippage materially impact sub-5-minute timeframe performance
+- Shorter timeframes require tighter entry zones (15-20%) to catch quick reversions
+- % of Channel TP adapts better to varying channel sizes than fixed points
+- Fixed contract sizing recommended for consistent risk per trade in futures
+
+**Backtesting Parameters Used**: This strategy was developed and tested using realistic commission and slippage values to provide accurate performance expectations. Recommended settings: Commission of $1.40 per side (typical for NQ futures through discount brokers), slippage of 2 ticks to account for execution delays on fast-moving scalp entries. These values reflect real-world trading costs that active scalpers will encounter. Backtest results without proper cost simulation will significantly overstate profitability.
+
+## COMPATIBLE MARKETS:
+Works on any instrument with price data including stock indices (NQ, ES, YM, RTY), individual stocks, forex pairs (EUR/USD, GBP/USD), cryptocurrency (BTC, ETH), and commodities. Volume-based features require data feed with volume information but are optional for core functionality.
+
+## KNOWN LIMITATIONS:
+
+- Immediate touch entry can fire multiple times in choppy zones without adequate cooldown
+- Channel deletion at 10-tick breaks may be too aggressive or lenient depending on instrument tick size
+- ATR filter from lower timeframes requires higher-tier TradingView subscription (request.security limitation)
+- Mean reversion logic fails in strong breakout scenarios leading to stop loss hits
+- Position sizing via % of equity or cash amount calculates based on close price, may differ from actual fill price
+- No partial closing capability - full position exits at TP or SL only
+- Strategy does not account for gap openings or overnight holds
+
+## RISK DISCLOSURE:
+Trading involves substantial risk of loss. Past performance does not guarantee future results. This strategy is for educational purposes and backtesting only. Mean reversion strategies can experience extended drawdowns during trending markets. Stop losses may not fill at intended levels during extreme volatility or gaps. Thoroughly test on historical data and paper trade before risking real capital. Use appropriate position sizing and never risk more than you can afford to lose. Consider consulting a licensed financial advisor before making trading decisions. Automated trading systems can malfunction - monitor all live positions actively.
+
+## ACKNOWLEDGMENT & CREDITS:
+
+This strategy is built upon the channel detection methodology created by **AlgoAlpha** in the "Smart Money Breakout Channels" indicator. Full credit and appreciation to AlgoAlpha for pioneering the normalized volatility approach to identifying consolidation patterns. The core channel formation logic using normalized price standard deviation is AlgoAlpha's original contribution to the TradingView community.
+
+Enhancements to the original concept include: mean reversion entry logic (vs breakout), immediate touch-based signals, multi-timeframe ATR volatility filtering, flexible position sizing (fixed/percentage/cash), cooldown period filtering, dual TP methods (fixed points vs channel percentage), automated strategy execution with exit management, and real-time position monitoring table.

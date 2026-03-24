@@ -1,0 +1,111 @@
+//@version=5
+strategy("DAX 08:30 - DEFINITIVE STABLE V2", overlay=true, initial_capital=10000, currency=currency.EUR)
+
+// --- INPUT ---
+sessionTime = input.session("0830-0900", "Range Orario")
+rischioEuro = input.float(250.0, "Rischio Fisso (€)")
+tpRR = input.float(2.0, "Rapporto R:R (Target)")
+
+// --- VARIABILI DI STATO ---
+var float rHigh = na
+var float rLow = na
+var int lastTradeDay = 0
+var float entryP = na
+var float slIniziale = na
+var float tpP = na
+var float beTrigger = na
+var bool isBEActive = false
+
+// Reset giornaliero
+if ta.change(time("D"))
+    rHigh := na
+    rLow := na
+    isBEActive := false
+
+inSession = not na(time(timeframe.period, sessionTime, "Europe/Berlin"))
+
+// 1. Cattura Range 08:30 - 09:00
+if inSession
+    rHigh := na(rHigh) ? high : math.max(rHigh, high)
+    rLow := na(rLow) ? low : math.min(rLow, low)
+
+// --- LOGICA DI INGRESSO ---
+rangeSet = not inSession and not na(rHigh)
+longCondition = rangeSet and ta.crossover(close, rHigh) and strategy.position_size == 0 and dayofmonth != lastTradeDay
+
+if longCondition
+    entryP := close
+    // SL al 50% del box
+    slIniziale := rLow + (rHigh - rLow) * 0.5
+    float diffPunti = entryP - slIniziale
+    
+    if diffPunti > 0
+        // CALCOLO SIZE: Rischio / (Punti * ValorePunto del Broker)
+        // Questo garantisce i 500€ di profitto su Purple Trading
+        float n_contratti = rischioEuro / (diffPunti * syminfo.pointvalue)
+        
+        tpP := entryP + (diffPunti * tpRR)
+        // BE al 50% del percorso verso il TP
+        beTrigger := entryP + (tpP - entryP) * 0.5
+        
+        lastTradeDay := dayofmonth
+        isBEActive := false
+        strategy.entry("Long", strategy.long, qty = n_contratti)
+
+// --- GESTIONE DINAMICA TRADE ---
+if strategy.position_size > 0
+    // Controllo se il prezzo tocca il trigger del Break-even
+    if high >= beTrigger
+        isBEActive := true
+
+    // Definizione stop: se BE è attivo usa entryP, altrimenti slIniziale
+    float currentSL = isBEActive ? entryP : slIniziale
+    
+    // Uscita con commento dinamico per il report
+    string commento = isBEActive ? "Break even" : "SL"
+    strategy.exit("Uscita", "Long", stop=currentSL, limit=tpP, comment=commento)
+
+// --- VISUALIZZAZIONE ---
+plot(strategy.position_size > 0 ? entryP : na, "Entry", color=color.blue, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? tpP : na, "TP", color=color.green, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? (isBEActive ? entryP : slIniziale) : na, "Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 and not isBEActive ? beTrigger : na, "Trigger BE", color=color.orange, style=plot.style_circles)
+bgcolor(inSession ? color.new(color.orange, 90) : na)
+
+View in Pine Editor・73 lines
+Use on chart
+1
+1
+408
+Mar 10
+Overview:
+This is a momentum strategy designed for the Germany 40 (DAX) index, focusing on the volatility of the European market open. It identifies a price "box" during the first 30 minutes of the session and trades the breakout of that range.
+
+1. Timeframe & Session:
+
+Timeframe: 5-minute chart.
+
+Observation Window: 08:30 to 09:00 (CET/Berlin Time).
+
+Execution: Only 1 trade per day to avoid overtrading.
+
+2. Entry Conditions (Long Only):
+
+Define the High and Low of the 08:30–09:00 range (including wicks).
+
+Enter Long when a 5-minute candle closes above the Range High.
+
+3. Risk Management:
+
+Position Sizing: Fixed risk of €250 per trade. The quantity is dynamically calculated based on the distance between the entry price and the Stop Loss.
+
+Stop Loss (SL): Placed at the 50% retracement (midpoint) of the 08:30–09:00 range.
+
+Take Profit (TP): Set at a minimum of 2:1 Reward-to-Risk (RR) ratio relative to the initial SL distance.
+
+4. Trade Management (Break-even Logic):
+
+The 0.5 Fibonacci Trigger: Once price reaches 50% of the distance between the entry and the Take Profit target, the Stop Loss is automatically moved to Break-even (Entry Price) to protect capital and ensure a "risk-free" trade.
+Mar 10
+Release Notes
+Version reloaded

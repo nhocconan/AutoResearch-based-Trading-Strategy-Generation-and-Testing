@@ -1,0 +1,246 @@
+//@version=5
+//TESTER AVEC Hull suite length 80
+
+//H4
+
+// Trade inputs//
+// New input for weekday trading
+weekdayOnly = input.bool(true, title="Stop trading on weekends", group = "Trade inputs")
+
+riskPercent = input.float(1.4, title = "Risk Percentage", group = "Trade inputs")
+priceDiffPercent = input.float(0.5, title = "Price diff percent when enter", group = "Trade inputs")
+lookBackCandles = input.int(5, title = "Look back High/Low (candle number)", group = "Trade inputs")
+
+buyVZOthreshold = input.float(-70, title = "Buy VZO Value", group = "Trade inputs")
+sellVZOthreshold = input.float(75, title = "Sell VZO Value", group = "Trade inputs")
+
+var bool readyToLong = false
+var bool readyToShort = false
+
+// Partie Hull //
+strategy("My strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1)
+ 
+//INPUT
+src = input(close, title="Source", group = "HULL")
+modeSwitch = input.string("Hma", title="Hull Variation", options=["Hma", "Thma", "Ehma"], group = "HULL")
+length = input.int(55, title="Length(180-200 for floating S/R , 55 for swing entry)", group = "HULL")
+lengthMult = input.float(8.0, title="Length multiplier (Used to view higher timeframes with straight band)", group = "HULL")
+
+useHtf = input.bool(false, title="Show Hull MA from X timeframe? (good for scalping)", group = "HULL")
+htf = input.timeframe("240", title="Higher timeframe", group = "HULL")
+
+switchColor = input.bool(true, "Color Hull according to trend?", group = "HULL")
+candleCol = input.bool(false, title="Color candles based on Hull's Trend?", group = "HULL")
+visualSwitch  = input.bool(true, title="Show as a Band?", group = "HULL")
+thicknesSwitch = input.int(1, title="Line Thickness", group = "HULL")
+transpSwitch = input.int(40, title="Band Transparency", step=5, group = "HULL")
+
+//FUNCTIONS
+//HMA
+HMA(_src, _length) => ta.wma(2 * ta.wma(_src, _length / 2) - ta.wma(_src, _length), math.round(math.sqrt(_length)))
+//EHMA    
+EHMA(_src, _length) => ta.ema(2 * ta.ema(_src, _length / 2) - ta.ema(_src, _length), math.round(math.sqrt(_length)))
+//THMA    
+THMA(_src, _length) => ta.wma(ta.wma(_src, _length / 3) * 3 - ta.wma(_src, _length / 2) - ta.wma(_src, _length), _length)
+    
+//SWITCH
+Mode(modeSwitch, src, len) =>
+      modeSwitch == "Hma"  ? HMA(src, len) :
+      modeSwitch == "Ehma" ? EHMA(src, len) : 
+      modeSwitch == "Thma" ? THMA(src, len / 2) : na
+
+//OUT
+_hull = Mode(modeSwitch, src, int(length * lengthMult))
+HULL = useHtf ? request.security(syminfo.tickerid, htf, _hull) : _hull
+MHULL = HULL[0]
+SHULL = HULL[2]
+
+//COLOR
+hullColor = switchColor ? (HULL > HULL[2] ? color.new(#00ff00, 0) : color.new(#ff0000, 0)) : color.new(#ff9800, 0)
+
+//PLOT
+///< Frame
+Fi1 = plot(MHULL, title="MHULL", color=color.new(hullColor, 50), linewidth=thicknesSwitch)
+Fi2 = plot(visualSwitch ? SHULL : na, title="SHULL", color=color.new(hullColor, 50), linewidth=thicknesSwitch)
+alertcondition(ta.crossover(MHULL, SHULL), title="Hull trending up.", message="Hull trending up.")
+alertcondition(ta.crossover(SHULL, MHULL), title="Hull trending down.", message="Hull trending down.")
+///< Ending Filler
+fill(Fi1, Fi2, title="Band Filler", color=color.new(hullColor, transpSwitch))
+///BARCOLOR
+barcolor(candleCol ? hullColor : na)
+
+// Partir W&FSVZO //
+
+// Importing required libraries
+import TradingView/ta/5
+import Celje_2300/aprox/1
+
+// Input options for enabling new versions of DFT and whitenoise
+version2 = input.bool(title = 'Double Fourier', tooltip="Improved Fourier Transform" ,defval = true, group = "VZO")
+version3 = input.bool(title = 'Improved whitenoise', tooltip="Improved Noice Reduction using aproximated price aswell ad close price.", defval = true, group = "VZO")
+
+magic = input.bool(title = 'Magical Wavelet Aproximation',tooltip="Uses Wavelet as Main aprox. instead of Fourier", defval = false, group = "Edition")
+
+
+// FAST FOURIER TRANSFORM
+// Selecting either DTF32 or FFT based on user preference
+dft = magic ? version2 ? aprox.Wavelet(src = aprox.smooth(aprox.DTF32(),aprox.Wavelet(src = aprox.DTF32(),len = 6))) : aprox.Wavelet(src = aprox.smooth(aprox.FFT(),aprox.Wavelet(src = aprox.FFT(),len = 6))) : version2 ? aprox.DTF32() : aprox.FFT()
+
+// VZO (Volume Zone Oscillator) calculation with EMA smoothing
+lengthV = input(2, title='VZO Length', tooltip="I suggest 2 for FAST and 5 or 7 for SLOW. Using FAST setting require averaging more than 1 Timeframe together. ", group = "VZO")
+VZO_1 = aprox.vzo_ema(dft, lengthV)
+
+// NOISE REDUCTION
+min_ = input(1, "NoiseR min length", tooltip="Keep it at 1 if you didn't read the code!! it's the range of EMA aproximation of the VZO depending on last 3 close prices." , group = "Noise")
+max_ = input(2, "NoiseR max length",tooltip="I suggest 2 for FAST and 7 or 8 for SLOW. Using FAST setting require averaging more than 1 Timeframe together.", group = "Noise")
+malen = input(2, title="Smooth Length", tooltip="Insert 1 if you use VZO > VZO[1] and 2 if you use VZO > ta.ema(VZO,2)", group = "Noise")
+
+// Using whitenoise function for noise reduction in VZO
+VZO_ = version3 ? aprox.whitenoise(VZO_1, dft, 10, minEmaLength = min_, maxEmaLength = max_) : 
+               aprox.whitenoise(VZO_1, 10, minEmaLength = min_, maxEmaLength = max_)
+
+// PLOTS
+nice_chart = input.bool(true, "Nice chart", tooltip="IF (FALSE): Shows the red falling line if VZO falling above 0", group = "Plots")
+
+// Conditions for plotting based on oscillator direction
+var greencon = false
+var redcon = false
+
+taema = ta.ema(VZO_, malen)
+
+greencon := malen < 2 ? VZO_ > VZO_[1] : (VZO_ > taema)
+redcon := malen < 2 ? VZO_ < VZO_[1] : (VZO_ < taema)
+
+leadosc = (VZO_)*0.8
+
+mar = input.int(0,"Vzvo difference",tooltip="bulish_VZO = true  WHEN  { Vzo = bulish AND VZO > this_input } ")
+close_all = input.bool(true,"Enable Close all", tooltip=" Position is always 1 or -1 if false, and 1, 0 or -1 if true. 0 Is falling above 0 or rising bellow 0")
+
+
+longCondition = greencon and VZO_ >mar
+shortCondition =  redcon and VZO_ < -mar
+// Strategy execution
+var pos = 0
+var long = 0
+
+if longCondition 
+    pos := 1
+    long := 1
+
+if shortCondition 
+    pos := -1
+    long := -1
+
+if not longCondition and not shortCondition and close_all
+    pos := 0
+
+
+// Plotting the indicators and colored zones
+mid = plot(0, color=color.new(#ffffff, 71), display = display.pane)
+lii = plot(leadosc, color = greencon ? color.rgb(0, 255, 187, math.abs(leadosc)) : color.rgb(255, 17, 0, math.abs(leadosc)), display = display.none)
+v3 = plot(VZO_ >= 0 ? math.min(VZO_, taema)*1.1 : math.max(VZO_, taema)*1.1, display = display.none)
+v4 = plot(VZO_ >= 0 ? math.min(VZO_, taema)*1: math.max(VZO_, taema)*1, display = display.none)
+
+fill(v3, lii, taema > 0 ? taema : 0, taema > 0 ? 0 : taema, taema > 0 ? #fbfbfb : #0d030300, taema > 0 ? #0b030300 : #0c0807, display = nice_chart ? display.all : display.none)
+fill(v4, lii, taema > 0 ? taema : 0, taema > 0 ? 0 : taema, taema > 0 ? color.rgb(9, 232, 173, math.abs(leadosc)) : color.rgb(1, 0, 0, 100), taema > 0 ? #0b030300 : color.rgb(208, 20, 7, math.abs(leadosc)), display = not nice_chart ? display.all : display.none)
+plot(VZO_, color = greencon ? color.rgb(9, 232, 173, math.abs(leadosc)) : redcon ? color.rgb(255, 17, 0, math.abs(leadosc)) : color.aqua, display = not nice_chart ? display.pane : display.none)
+
+// Plotting additional information on the status line
+plot(close, title="ClosePrice", display=display.status_line)
+plot(open, title="OpenPrice", display=display.status_line)
+
+plot(pos, color = greencon ? color.rgb(9, 232, 173, 50) : redcon ? color.rgb(255, 17, 0, 50) : color.aqua, title="position", display=display.status_line)
+
+plotchar(longCondition and long[1]==-1 ? -125 : na, char = "▲", color = color.rgb(0, 255, 187,40), location = location.absolute, size = size.tiny)
+plotchar(shortCondition  and long[1]==1 ? 125 : na, char = "▼", color = color.rgb(255, 17, 0, 40), location = location.absolute, size = size.tiny)
+
+//plot(longCondition and not(longCondition[1]) ? 1 :0)
+//plot(shortCondition and not(shortCondition[1]) ? 1 :0)
+//plot((not longCondition and not shortCondition and close_all )and not(not longCondition[1] and not shortCondition[1] and close_all ) ? 1 :0)
+alertcondition(longCondition and not(longCondition[1]),"Long","Go long!")
+alertcondition(shortCondition and not(shortCondition[1]),"Short","Go short!")
+alertcondition((not longCondition and not shortCondition and close_all )and not(not longCondition[1] and not shortCondition[1] and close_all ) ,"Close","Close position.")
+
+// Conditions entry Hull et W&FSVZO
+buyCondition = (HULL < HULL[2]) and ta.crossover(VZO_, buyVZOthreshold)   // Achat : Hull bullish et W&FSVZO < -buyVZOthreshold
+sellCondition = (HULL > HULL[2]) and ta.crossunder(VZO_, sellVZOthreshold)   // Vente : Hull bearish et W&FSVZO > sellVZOthreshold
+
+// High/Low
+highestHigh = request.security(syminfo.tickerid, "240", ta.highest(high, lookBackCandles), lookahead = barmerge.lookahead_off)
+lowestLow = request.security(syminfo.tickerid, "240", ta.lowest(low, lookBackCandles), lookahead = barmerge.lookahead_off)
+
+var float savedHigh = na
+var float savedLow = na
+
+var float slPrice = na
+var float tpPrice = na
+
+// Function to check if current bar is during weekdays
+isWeekday() => dayofweek(time) >= 2 and dayofweek(time) <= 6
+
+// Courbes High/Low
+plot(highestHigh, color=color.green, title="Highest High (240 min)")
+plot(lowestLow, color=color.red, title="Lowest Low (240 min)")
+
+// Fonction pour calculer la taille de position optimale en fonction du risque
+calcPositionSize(entryPrice, stopPrice) =>
+    // Calcul du risque monétaire (1% du capital)
+    riskCapital = strategy.equity * (riskPercent / 100)
+    // Calcul de la distance entre le prix d'entrée et le stop-loss
+    stopDistance = math.abs(entryPrice - stopPrice) * syminfo.pointvalue
+    // Taille de position pour un risque de 1%
+    positionSize = riskCapital / stopDistance
+    positionSize
+
+// Condition d'achat
+if buyCondition and (weekdayOnly and isWeekday())
+    readyToLong := true
+    savedLow := lowestLow  // SL sous la dernière confirmation (2e validation)
+
+// Croisement pour clôturer une position Sell et entrer en position Buy
+if ta.crossover(HULL, HULL[2]) 
+    strategy.close("Sell")
+    if readyToLong and (weekdayOnly and isWeekday())
+        //readyToLong := false
+
+        // Calcul du prix de SL
+        slPrice := savedLow - (close * (priceDiffPercent / 100))
+
+        // Calcul de la taille de la position
+        positionSize = calcPositionSize(close, slPrice)
+
+        // Entrée en position avec la taille calculée
+        strategy.entry("Buy", strategy.long, qty = positionSize)
+
+strategy.exit("Buy",comment_loss = "SL Buy", comment_profit = "TP Buy", stop = slPrice)
+
+// Condition de vente
+if sellCondition and (not weekdayOnly or isWeekday())
+    readyToShort := true
+    savedHigh := highestHigh  // SL au-dessus de la dernière confirmation
+
+// Croisement pour clôturer une position Buy et entrer en position Sell
+if ta.crossover(HULL[2], HULL)
+    strategy.close("Buy")
+    if readyToShort and (not weekdayOnly or isWeekday())
+        //readyToShort := false
+
+        // Calcul du prix de SL
+        slPrice := highestHigh + (close * (priceDiffPercent / 100))
+
+        // Calcul de la taille de la position
+        positionSize = calcPositionSize(close, slPrice)
+
+        // Entrée en position avec la taille calculée
+        strategy.entry("Sell", strategy.short, qty = positionSize)
+
+strategy.exit("Sell", comment_loss = "SL Sell", comment_profit = "TP Sell", stop = slPrice)
+
+View in Pine Editor・239 lines
+Use on chart
+2
+0
+890
+Momentum no weekend trades. It uses FVZO and Hull suite.
+
+This strategy has low win rate but successfully catches trends. Works well on ETH in High Time Frame multi-year.

@@ -1,0 +1,70 @@
+//@version=5
+strategy("Keltner Channel Strategy by Kevin Davey",  overlay=true, precision=2, calc_on_every_tick=true, initial_capital=50000, currency=currency.USD, slippage=1, commission_type=strategy.commission.cash_per_contract, commission_value=0.05)
+
+// Keltner Channel Inputs
+length = input.int(10, title="EMA Length")
+mult = input.float(1.6, title="ATR Multiplier")
+
+// Calculate EMA and ATR
+ema = ta.ema(close, length)
+atr = ta.atr(14)
+
+// Calculate Keltner Channel
+upperChannel = ema + mult * atr
+lowerChannel = ema - mult * atr
+
+// Entry and Exit Conditions
+longCondition = close < lowerChannel
+shortCondition = close > upperChannel
+
+// Trade Logic
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// Plot Keltner Channels
+plot(upperChannel, color=color.red, title="Upper Keltner Channel")
+plot(ema, color=color.blue, title="EMA")
+plot(lowerChannel, color=color.green, title="Lower Keltner Channel")
+
+View in Pine Editor・33 lines
+Use on chart
+1
+1
+3
+3 837
+Keltner Channel Strategy Description
+
+The Keltner Channel Strategy is a volatility-based trading approach that uses the Keltner Channel, a technical indicator derived from the Exponential Moving Average (EMA) and Average True Range (ATR). The strategy helps identify potential breakout or mean-reversion opportunities in the market by plotting upper and lower bands around a central EMA, with the channel width determined by a multiplier of the ATR.
+
+Components:
+
+1. Exponential Moving Average (EMA):
+
+The EMA smooths price data by placing greater weight on recent prices, allowing traders to track the market’s underlying trend more effectively than a simple moving average (SMA). In this strategy, a 20-period EMA is used as the midline of the Keltner Channel.
+
+2. Average True Range (ATR):
+
+The ATR measures market volatility over a 14-period lookback. By calculating the average of the true ranges (the greatest of the current high minus the current low, the absolute value of the current high minus the previous close, or the absolute value of the current low minus the previous close), the ATR captures how much an asset typically moves over a given period.
+
+3. Keltner Channel:
+
+The upper and lower boundaries are set by adding or subtracting 1.5 times the ATR from the EMA. These boundaries create a dynamic range that adjusts with market volatility.
+
+Trading Logic:
+
+• Long Entry Condition: The strategy enters a long position when the closing price falls below the lower Keltner Channel, indicating a potential buying opportunity at a support level.
+
+• Short Entry Condition: The strategy enters a short position when the closing price exceeds the upper Keltner Channel, signaling a potential selling opportunity at a resistance level.
+
+The strategy plots the upper and lower Keltner Channels and the EMA on the chart, providing a visual representation of support and resistance levels based on market volatility.
+
+Scientific Support for Volatility-Based Strategies:
+
+The use of volatility-based indicators like the Keltner Channel is supported by numerous studies on price momentum and volatility trading. Research has shown that breakout strategies, particularly those leveraging volatility bands such as the Keltner Channel or Bollinger Bands, can be effective in capturing trends and reversals in both trending and mean-reverting markets ￼ .
+
+Who is Kevin Davey?
+
+Kevin Davey is a highly respected algorithmic trader, author, and educator, known for his systematic approach to building and optimizing trading strategies. With over 25 years of experience in the markets, Davey has earned a reputation as an expert in quantitative and rule-based trading. He is particularly well-known for winning several World Cup Trading Championships, where he consistently demonstrated high returns with low risk.

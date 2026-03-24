@@ -1,0 +1,81 @@
+//@version=5
+strategy("Layered Bi-Directional Grid Maker (FIXED)", overlay=true, pyramiding=20, initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=12, currency=currency.USDT)
+
+// --- 1. INPUT PENGATURAN ---
+grp_main = "Pengaturan Grid"
+// Jarak antar layer order dalam persen.
+gridDistPct = input.float(0.15, "Jarak Grid (%)", step=0.01, group=grp_main) 
+// Target profit untuk menutup posisi rata-rata.
+takeProfitPct = input.float(0.25, "Target Profit (%)", step=0.01, group=grp_main) 
+// Input ini dipertahankan, namun visualisasinya disederhanakan (lihat bagian 4)
+maxLayers = input.int(10, "Maksimal Layer (Visualisasi Disederhanakan)", minval=1, maxval=20, group=grp_main) 
+
+// --- 2. LOGIKA ENTRY (2 ARAH) ---
+
+// Tentukan apakah ini adalah trade awal
+isInitialEntry = strategy.position_size == 0
+
+// Tentukan harga rata-rata acuan: 'close' saat posisi 0, atau 'strategy.position_avg_price' saat posisi ada.
+float avgPrice = strategy.position_avg_price == 0 ? close : strategy.position_avg_price
+
+// KONDISI ENTRY LONG (BUY)
+// Perhitungan Threshold/Ambang Batas untuk layer baru
+longEntryThreshold = avgPrice * (1 - gridDistPct/100)
+bool longEntryCond = isInitialEntry or close < longEntryThreshold
+
+if longEntryCond
+    // Limit order Buy ditempatkan sedikit di bawah harga close untuk mensimulasikan "Maker"
+    strategy.entry("Grid Buy", strategy.long, qty=12, limit=close * 0.9995, comment="🔵 Buy Layer")
+
+
+// KONDISI ENTRY SHORT (SELL)
+// Perhitungan Threshold/Ambang Batas untuk layer baru
+shortEntryThreshold = avgPrice * (1 + gridDistPct/100)
+bool shortEntryCond = isInitialEntry or close > shortEntryThreshold
+
+if shortEntryCond
+    // Limit order Sell ditempatkan sedikit di atas harga close
+    strategy.entry("Grid Sell", strategy.short, qty=12, limit=close * 1.0005, comment="🔴 Sell Layer")
+
+
+// --- 3. LOGIKA EXIT (TAKE PROFIT) ---
+// Exit untuk Long (Profit Target di atas rata-rata harga beli)
+if (strategy.position_size > 0)
+    tpLongPrice = strategy.position_avg_price * (1 + takeProfitPct/100)
+    strategy.exit("TP Long", "Grid Buy", profit=na, limit=tpLongPrice, comment="💰 TP Long")
+
+// Exit untuk Short (Profit Target di bawah rata-rata harga jual)
+if (strategy.position_size < 0)
+    tpShortPrice = strategy.position_avg_price * (1 - takeProfitPct/100)
+    strategy.exit("TP Short", "Grid Sell", profit=na, limit=tpShortPrice, comment="💰 TP Short")
+
+
+// --- 4. VISUALISASI GRID (PINESCRIPT V5 COMPLIANT) ---
+plotGrid = input.bool(true, "Tampilkan Level Grid", group="Visualisasi")
+
+// 4a. Plot Garis Rata-rata Posisi (Pusat Grid)
+float avgPricePlot = strategy.position_avg_price != 0 and plotGrid ? strategy.position_avg_price : na
+plot(avgPricePlot, color=color.new(color.black, 0), style=plot.style_line, linewidth=2, title="Average Entry Price")
+
+// 4b. Plot Level Grid Pertama (yang akan dieksekusi berikutnya)
+float nextLongLevel = avgPrice * (1 - (gridDistPct / 100))
+float nextShortLevel = avgPrice * (1 + (gridDistPct / 100))
+
+// Kondisikan nilai yang di-plot (menggunakan 'na' saat kondisi plot tidak terpenuhi)
+float plotNextLong = plotGrid ? nextLongLevel : na
+float plotNextShort = plotGrid ? nextShortLevel : na
+
+// Plotting Next Layers
+// NOTE: Fungsi plot() dipanggil dari global scope.
+plot(plotNextLong, color=color.new(color.green, 40), style=plot.style_linebr, title="Next Buy Layer") 
+plot(plotNextShort, color=color.new(color.red, 40), style=plot.style_linebr, title="Next Sell Layer")
+
+// Visualisasi Background
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) : strategy.position_size < 0 ? color.new(color.red, 95) : na)
+
+View in Pine Editor・74 lines
+Use on chart
+1
+8
+690
+super best for btc 1m scalp trade please be careful

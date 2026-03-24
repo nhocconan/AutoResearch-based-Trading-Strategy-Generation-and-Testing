@@ -1,0 +1,31 @@
+//@version=5
+strategy("ema strategy", overlay = true)
+
+ema = ta.ema(close, 5)
+e = ta.ema(close, 200)
+rsi = ta.rsi(close, 2)
+cond1 = close[1] < open[1] * 0.9999 and close[1] < ema and rsi < 10
+cond2 = close[1] > open[1] * 1.0001 and close[1] > ema and rsi > 90
+plot(ema)
+
+plotshape(cond1, style = shape.triangleup, location = location.belowbar, color = color.lime, text = "Buy" )
+plotshape(cond2, style = shape.triangledown, location = location.abovebar, color = color.red, text = "Sell" )
+
+pos = strategy.position_size
+
+
+strategy.entry("Buy", strategy.long,qty = strategy.opentrades > 0 ? pos*2 : 1000, when = cond1 )
+
+strategy.close("Buy",comment = "Exit", when = strategy.openprofit > 1 or strategy.opentrades > 5)
+
+View in Pine Editor・22 lines
+Use on chart
+1
+4
+6
+6
+2 585
+EMA STRATEGY Scalping with staggered buy and profit Booking
+
+try and like if you get profitable
+

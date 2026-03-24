@@ -1,0 +1,176 @@
+//@version=6
+strategy("Trader Tom Inspired Breakout Strategy v6", overlay=true, initial_capital=100000, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// =========================
+// INPUTS
+// =========================
+groupBreakout = "Breakout Rules"
+lookbackHigh  = input.int(50, "Breakout Lookback", minval=5, group=groupBreakout)
+useATH        = input.bool(false, "Use All-Time High instead of Lookback High", group=groupBreakout)
+confirmClose  = input.bool(true, "Require Candle Close Above Breakout Level", group=groupBreakout)
+
+groupTrend    = "Trend Filter"
+useTrendFilter = input.bool(true, "Use Trend Filter", group=groupTrend)
+emaShortLen    = input.int(20, "Short EMA", minval=1, group=groupTrend)
+emaLongLen     = input.int(50, "Long EMA", minval=1, group=groupTrend)
+
+groupVolume   = "Volume Filter"
+useVolumeFilter = input.bool(true, "Use Volume Filter", group=groupVolume)
+volMaLen        = input.int(20, "Volume MA Length", minval=1, group=groupVolume)
+volMultiplier   = input.float(1.5, "Volume Multiplier", minval=0.1, step=0.1, group=groupVolume)
+
+groupRisk      = "Risk Management"
+riskPercent    = input.float(1.0, "Risk % per Trade", minval=0.1, maxval=10, step=0.1, group=groupRisk)
+atrLen         = input.int(14, "ATR Length", minval=1, group=groupRisk)
+atrStopMult    = input.float(2.0, "ATR Stop Multiplier", minval=0.1, step=0.1, group=groupRisk)
+rewardRR       = input.float(3.0, "Take Profit R-Multiple", minval=0.5, step=0.5, group=groupRisk)
+useTrailingStop = input.bool(true, "Use ATR Trailing Stop", group=groupRisk)
+trailAtrMult    = input.float(2.0, "ATR Trailing Stop Multiplier", minval=0.1, step=0.1, group=groupRisk)
+
+groupExit      = "Exit Rules"
+exitOnEMABreak = input.bool(true, "Exit if Close Below Short EMA", group=groupExit)
+usePartialTP   = input.bool(true, "Take Partial Profit", group=groupExit)
+partialTP_R    = input.float(2.0, "Partial TP at R", minval=0.5, step=0.5, group=groupExit)
+partialTP_Percent = input.float(50.0, "Partial Close %", minval=1, maxval=99, step=1, group=groupExit)
+
+// =========================
+// CALCULATIONS
+// =========================
+emaShort = ta.ema(close, emaShortLen)
+emaLong  = ta.ema(close, emaLongLen)
+atr      = ta.atr(atrLen)
+volMA    = ta.sma(volume, volMaLen)
+
+// Previous highs only, to avoid same-bar breakout reference problems
+lookbackLevel = ta.highest(high[1], lookbackHigh)
+athLevel      = ta.highest(high[1], 5000)
+breakoutLevel = useATH ? athLevel : lookbackLevel
+
+trendPass      = not useTrendFilter or (close > emaShort and emaShort > emaLong)
+volumePass     = not useVolumeFilter or (volume > volMA * volMultiplier)
+priceBreakPass = confirmClose ? (close > breakoutLevel) : (high > breakoutLevel)
+
+longEntry = priceBreakPass and trendPass and volumePass and strategy.position_size == 0
+
+// =========================
+// POSITION SIZING
+// =========================
+entryPrice   = close
+initialStop  = entryPrice - atr * atrStopMult
+riskPerUnit  = entryPrice - initialStop
+capitalRisk  = strategy.equity * (riskPercent / 100.0)
+rawQty       = riskPerUnit > 0 ? capitalRisk / riskPerUnit : na
+qty          = not na(rawQty) and rawQty > 0 ? math.floor(rawQty) : na
+
+// =========================
+// ENTRY
+// =========================
+if longEntry and not na(qty) and qty > 0
+    strategy.entry("Long", strategy.long, qty=qty)
+
+// =========================
+// TRADE STATE VARIABLES
+// =========================
+var float tradeEntryPrice  = na
+var float tradeInitialStop = na
+var float tradeRisk        = na
+
+newLongOpened  = strategy.position_size > 0 and strategy.position_size[1] == 0
+positionClosed = strategy.position_size == 0 and strategy.position_size[1] > 0
+
+if newLongOpened
+    tradeEntryPrice  := strategy.position_avg_price
+    tradeInitialStop := strategy.position_avg_price - atr * atrStopMult
+    tradeRisk        := tradeEntryPrice - tradeInitialStop
+
+if positionClosed
+    tradeEntryPrice  := na
+    tradeInitialStop := na
+    tradeRisk        := na
+
+// =========================
+// EXIT VARIABLES
+// =========================
+float atrTrailStop = na
+float baseStop     = na
+float longStop     = na
+float longTP       = na
+float partialTP    = na
+
+// =========================
+// EXIT LOGIC
+// =========================
+if strategy.position_size > 0 and not na(tradeEntryPrice) and not na(tradeRisk)
+    longTP    := tradeEntryPrice + tradeRisk * rewardRR
+    partialTP := tradeEntryPrice + tradeRisk * partialTP_R
+
+    atrTrailStop := close - atr * trailAtrMult
+    baseStop     := tradeInitialStop
+
+    longStop := useTrailingStop ? math.max(baseStop, atrTrailStop) : baseStop
+
+    if exitOnEMABreak and close < emaShort
+        longStop := math.max(longStop, close)
+
+    strategy.exit("Full Exit", from_entry="Long", stop=longStop, limit=longTP)
+
+    if usePartialTP
+        strategy.exit("Partial Exit", from_entry="Long", limit=partialTP, qty_percent=partialTP_Percent)
+
+// =========================
+// PLOTS
+// =========================
+plot(breakoutLevel, "Breakout Level", color=color.orange, linewidth=2, style=plot.style_linebr)
+plot(emaShort, "EMA Short", color=color.aqua, linewidth=2)
+plot(emaLong, "EMA Long", color=color.blue, linewidth=2)
+
+plot(strategy.position_size > 0 ? tradeInitialStop : na, "Initial Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? longStop : na, "Trailing / Active Stop", color=color.maroon, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? longTP : na, "Take Profit", color=color.green, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size > 0 and usePartialTP ? partialTP : na, "Partial TP", color=color.lime, linewidth=1, style=plot.style_linebr)
+
+plotshape(longEntry, title="Buy Signal", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, text="BUY")
+
+// =========================
+// INFO TABLE
+// =========================
+var table t = table.new(position.top_right, 2, 9, border_width=1)
+
+if barstate.islast
+    table.cell(t, 0, 0, "Metric", bgcolor=color.black, text_color=color.white)
+    table.cell(t, 1, 0, "Value", bgcolor=color.black, text_color=color.white)
+
+    table.cell(t, 0, 1, "Breakout Level")
+    table.cell(t, 1, 1, str.tostring(breakoutLevel, format.mintick))
+
+    table.cell(t, 0, 2, "Trend Filter")
+    table.cell(t, 1, 2, trendPass ? "PASS" : "FAIL", text_color=trendPass ? color.lime : color.red)
+
+    table.cell(t, 0, 3, "Volume Filter")
+    table.cell(t, 1, 3, volumePass ? "PASS" : "FAIL", text_color=volumePass ? color.lime : color.red)
+
+    table.cell(t, 0, 4, "Breakout")
+    table.cell(t, 1, 4, priceBreakPass ? "YES" : "NO", text_color=priceBreakPass ? color.lime : color.red)
+
+    table.cell(t, 0, 5, "ATR")
+    table.cell(t, 1, 5, str.tostring(atr, format.mintick))
+
+    table.cell(t, 0, 6, "Qty")
+    table.cell(t, 1, 6, not na(qty) ? str.tostring(qty) : "N/A")
+
+    table.cell(t, 0, 7, "Risk / Trade")
+    table.cell(t, 1, 7, str.tostring(capitalRisk, format.mintick))
+
+    table.cell(t, 0, 8, "In Position")
+    table.cell(t, 1, 8, strategy.position_size > 0 ? "YES" : "NO", text_color=strategy.position_size > 0 ? color.lime : color.red)
+
+View in Pine Editor・165 lines
+Use on chart
+1
+3
+316
+This is just a test.
+
+More things need to be done
+
+Traders Tom is a very famous trader and always give talks to inspire the young and new traders. This is inspired from his technique

@@ -1,0 +1,335 @@
+//@version=6
+strategy("Solstice Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_every_tick=true)
+
+// === Heikin Ashi Candle Calculation ===
+haClose = (open + high + low + close) / 4
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+haHigh = math.max(high, math.max(haOpen, haClose))
+haLow = math.min(low, math.min(haOpen, haClose))
+
+// === ATR Daily and Weekly ===
+atrPeriod = input.int(9, title="ATR Period")
+atrDaily = request.security(syminfo.tickerid, "D", ta.atr(atrPeriod))
+atrWeekly = request.security(syminfo.tickerid, "W", ta.atr(atrPeriod))
+atrLabelText = "ATR(D): " + str.tostring(atrDaily, "#.##") + " | ATR(W): " + str.tostring(atrWeekly, "#.##")
+
+// === PSAR ===
+psar = ta.sar(0.02, 0.02, 0.2)
+psarUp = psar < haClose
+psarDown = psar > haClose
+psarReversal = (psarUp and psarDown[1]) or (psarDown and psarUp[1])
+lastPsarBar = ta.valuewhen(psarReversal, bar_index, 0)
+lastPsarLow = ta.valuewhen(psarReversal, haLow, 0)
+psarBarsAgo = bar_index - lastPsarBar
+psarLabelText = "Last PSAR Transition: " + str.tostring(psarBarsAgo) + " bars ago"
+
+var line psarLine = na
+var label psarLabel = na
+if psarReversal
+    if not na(psarLine)
+        line.delete(psarLine)
+    if not na(psarLabel)
+        label.delete(psarLabel)
+    psarLine := line.new(x1=bar_index, y1=haLow, x2=bar_index + 50, y2=haLow, color=color.blue, style=line.style_dotted, width=1)
+    psarLabel := label.new(x=bar_index, y=haLow - syminfo.mintick * 10, text="PSAR ↓", style=label.style_label_down, color=color.blue, textcolor=color.white, size=size.small)
+
+
+
+
+// === EMAs ===
+ema8 = ta.ema(haClose, 8)
+ema13 = ta.ema(haClose, 13)
+ema21 = ta.ema(haClose, 21)
+ema34 = ta.ema(haClose, 34)
+ema55 = ta.ema(haClose, 55)
+
+stackedBullish = ema8 > ema13 and ema13 > ema21 and ema21 > ema34 and ema34 > ema55
+stackedBearish = ema8 < ema13 and ema13 < ema21 and ema21 < ema34 and ema34 < ema55
+stackedColor = stackedBullish ? color.rgb(42, 196, 47, 72) : stackedBearish ? color.rgb(196, 17, 17, 75) : color.rgb(242, 242, 48, 44)
+stackedLabelText = stackedBullish ? "Stacked EMAs: Bullish" : stackedBearish ? "Stacked EMAs: Bearish" : "Stacked EMAs: Choppy"
+
+ema5 = ta.ema(haClose, 5)
+ema8_2 = ta.ema(haClose, 8)
+emaTrendColor = ema5 > ema8_2 ? color.green : color.red
+emaTrendLabelText = "EMA 5-8 Trend: " + (ema5 > ema8_2 ? "Bullish" : "Bearish")
+
+ttmTrend = ta.ema(haClose - haClose[1], 5)
+ttmColor = ttmTrend > 0 ? color.green : color.red
+ttmLabelText = "TTM Trend: " + (ttmTrend > 0 ? "Bullish" : "Bearish")
+
+overallTrend = stackedBullish and ema5 > ema8_2 and ttmTrend > 0 ? "OVERALL BULLISH" :
+               stackedBearish and ema5 < ema8_2 and ttmTrend < 0 ? "OVERALL BEARISH" :
+               "CHOP HOLD"
+overallColor = overallTrend == "OVERALL BULLISH" ? color.green :
+               overallTrend == "OVERALL BEARISH" ? color.red : color.yellow
+
+plot(ema8, title="EMA 8", color=color.new(color.green, 0))
+plot(ema55, title="EMA 55", color=color.new(color.red, 0))
+fill(plot(ema8, title="EMA 8 Fill", color=color.new(color.green, 90)),
+     plot(ema55, title="EMA 55 Fill", color=color.new(color.red, 90)),
+     color=stackedColor, title="EMA Cloud")
+
+// === ORB (Opening Range Breakout) ===
+orbMinutes = input.int(15, title="ORB Range (minutes)", minval=1, maxval=60)
+startHour = 9
+startMinute = 30
+orbStart = timestamp("GMT-5", year, month, dayofmonth, startHour, startMinute)
+orbEnd = orbStart + orbMinutes * 60 * 1000
+
+var float orbHigh = na
+var float orbLow = na
+var line orbHighLine = na
+var line orbLowLine = na
+var label orbStatusLabel = na
+
+isNewDay = ta.change(time("D")) != 0
+if isNewDay
+    orbHigh := na
+    orbLow := na
+    if not na(orbHighLine)
+        line.delete(orbHighLine)
+    if not na(orbLowLine)
+        line.delete(orbLowLine)
+    if not na(orbStatusLabel)
+        label.delete(orbStatusLabel)
+
+inORB = time >= orbStart and time <= orbEnd
+
+if inORB
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow := na(orbLow) ? low : math.min(orbLow, low)
+
+if not na(orbHigh) and not na(orbLow)
+    lineStyle = inORB ? line.style_dotted : line.style_solid
+
+    if na(orbHighLine)
+        orbHighLine := line.new(x1=bar_index, y1=orbHigh, x2=bar_index + 50, y2=orbHigh, color=color.yellow, style=lineStyle, width=1)
+    else
+        line.set_style(orbHighLine, lineStyle)
+        line.set_xy1(orbHighLine, bar_index, orbHigh)
+        line.set_xy2(orbHighLine, bar_index + 50, orbHigh)
+
+    if na(orbLowLine)
+        orbLowLine := line.new(x1=bar_index, y1=orbLow, x2=bar_index + 50, y2=orbLow, color=color.yellow, style=lineStyle, width=1)
+    else
+        line.set_style(orbLowLine, lineStyle)
+        line.set_xy1(orbLowLine, bar_index, orbLow)
+        line.set_xy2(orbLowLine, bar_index + 50, orbLow)
+
+    orbStatus = close > orbHigh ? "Above ORB" : close < orbLow ? "Below ORB" : "Inside ORB"
+
+
+    if not na(orbStatusLabel)
+        label.delete(orbStatusLabel)
+
+    orbStatusLabel := label.new(x=bar_index, y=close, text=orbStatus, style=label.style_label_left, color=color.yellow, textcolor=color.black, size=size.small)
+
+// === Volume Confirmation ===
+volMA = ta.sma(volume, 20)
+volConfirm = volume > volMA
+
+// === RSI Divergence ===
+rsi = ta.rsi(haClose, 14)
+bullDiv = ta.lowest(haClose, 5) < ta.lowest(haClose[5], 5) and ta.lowest(rsi, 5) > ta.lowest(rsi[5], 5)
+bearDiv = ta.highest(haClose, 5) > ta.highest(haClose[5], 5) and ta.highest(rsi, 5) < ta.highest(rsi[5], 5)
+
+//("CSR Buy/Sell Arrows with Kijun Filter", overlay=true)
+
+atrReversal = input.float(2.0, title="ATR Reversal Filter")
+usealerts = input.bool(true, title="Enable Alerts")
+
+// --- Ichimoku Kijun Line ---
+kijun_period = 26
+kijun = (ta.highest(high, kijun_period) + ta.lowest(low, kijun_period)) / 2
+avgPerc = ((kijun - close) / kijun) * 100
+
+// --- Custom ZigZag Logic ---
+priceh = ta.ema(high, 5)
+pricel = ta.ema(low, 5)
+
+pivotLen = input.float(1,"Pivot Length (can be decimal)")
+atrLen = input.int(1,"ATR Length (integer only)")
+atr = ta.atr(atrLen)
+
+pivotHigh = ta.pivothigh(priceh, pivotLen, pivotLen)
+pivotLow = ta.pivotlow(pricel, pivotLen, pivotLen)
+
+var float lastPivotPrice = na
+var int lastPivotDir = 0
+
+isValidHigh = not na(pivotHigh) and (na(lastPivotPrice) or math.abs(pivotHigh - lastPivotPrice) > atr * atrReversal)
+isValidLow = not na(pivotLow) and (na(lastPivotPrice) or math.abs(pivotLow - lastPivotPrice) > atr * atrReversal)
+
+if isValidHigh
+    lastPivotPrice := pivotHigh
+    lastPivotDir := 1
+else if isValidLow
+    lastPivotPrice := pivotLow
+    lastPivotDir := -1
+
+// --- Signal Conditions ---
+signal = isValidLow and low < kijun and avgPerc < 15 and avgPerc > 0 and avgPerc[1] < avgPerc
+kijunCrossCond = ta.crossover(close, kijun)
+kijunCross = signal and kijunCrossCond
+
+var bool overKijun = false
+overKijun := (kijunCross or overKijun[1]) and low > kijun
+
+// --- Plot Arrows ---
+//plotshape(isValidHigh, location=location.abovebar, style=shape.arrowdown, color=color.red, size=size.large, title="Short Signal")
+//plotshape(isValidLow, location=location.belowbar, style=shape.arrowup, color=color.green, size=size.large, title="Long Signal")
+
+// --- Labels and Bubbles ---
+if isValidHigh
+    label.new(bar_index, high, "Short", style=label.style_label_down, color=color.red, textcolor=color.white)
+
+if isValidLow
+    label.new(bar_index, low, "Long", style=label.style_label_up, color=color.green, textcolor=color.white)
+
+var position = 'none'
+if isValidHigh
+    //label.new(bar_index, high, "Short", style=label.style_label_down, color=color.red, textcolor=color.white)
+    strategy.close("long")
+    position := "none"
+
+// --- Persistent Long Signal ---
+var bool longSignalActive = false
+longSignalActive := isValidLow or (longSignalActive[1] and not isValidHigh)
+
+if longSignalActive
+   // label.new(bar_index, low, "Long", style=label.style_label_up, color=color.green, textcolor=color.white)
+    strategy.entry("long", strategy.long)
+    position := "long"
+
+//indicator("OS/OB – Pivot Weakness Dashboard", overlay=true)
+
+// — Inputs
+oscLen            = input.int(14, "Oscillator Length")
+obLevel           = input.int(80, "Overbought Level")
+osLevel           = input.int(20, "Oversold Level")
+pivotLookback     = input.int(10, "Pivot Lookback")
+structureLookback = input.int(20, "Structure Lookback")
+useStructureCheck = input.bool(true, "Use Structure Filter")
+showSoftResets    = input.bool(true, "Show Soft Reset Markers")
+
+// — Oscillator Values
+//rsi1      = ta.rsi(close, oscLen)
+//rsiPrev  = ta.rsi(close[1], oscLen)
+mfi      = ta.mfi(hl2, oscLen)
+mfiPrev  = ta.mfi(hl2[1], oscLen)
+kRaw     = ta.stoch(close, high, low, oscLen)
+k        = ta.sma(kRaw, 3)
+d        = ta.sma(k, 3)
+
+// — Global Extremes (for safe access inside logic)
+kHigh       = ta.highest(k, pivotLookback)
+kLow        = ta.lowest(k, pivotLookback)
+swingHigh   = ta.highest(high, structureLookback)
+swingLow    = ta.lowest(low, structureLookback)
+
+// — Extreme Zones
+isOB = mfi > obLevel and k > obLevel
+isOS = mfi < osLevel and k < osLevel
+
+//isOB = rsi > obLevel and mfi > obLevel and k > obLevel
+//isOS = rsi < osLevel and mfi < osLevel and k < osLevel
+
+// — Pivot Detection
+obPivot = isOB and k < kHigh
+osPivot = isOS and k > kLow
+
+// — Weakness Signals
+//rsiDivOB    = isOB and rsi < rsiPrev and close > close[1]
+mfiDropOB   = isOB and mfi < mfiPrev
+stochFlatOB = isOB and math.abs(k - d) < 2 and k < kHigh
+failHigh    = isOB and close < swingHigh
+
+//rsiDivOS    = isOS and rsi > rsiPrev and close < close[1]
+mfiRiseOS   = isOS and mfi > mfiPrev
+stochFlatOS = isOS and math.abs(k - d) < 2 and k > kLow
+failLow     = isOS and close > swingLow
+
+// — Scoring
+//obScore = (rsiDivOB ? 1 : 0) + (mfiDropOB ? 1 : 0) + (stochFlatOB ? 1 : 0) + (failHigh ? 1 : 0)
+//osScore = (rsiDivOS ? 1 : 0) + (mfiRiseOS ? 1 : 0) + (stochFlatOS ? 1 : 0) + (failLow ? 1 : 0)
+
+obScore = (mfiDropOB ? 1 : 0) + (stochFlatOB ? 1 : 0) + (failHigh ? 1 : 0)
+osScore =  (mfiRiseOS ? 1 : 0) + (stochFlatOS ? 1 : 0) + (failLow ? 1 : 0)
+
+
+resetOB = obScore >= 2 and (useStructureCheck ? failHigh : true)
+resetOS = osScore >= 2 and (useStructureCheck ? failLow : true)
+
+softOB  = showSoftResets and obScore == 1
+softOS  = showSoftResets and osScore == 1
+
+// — Heikin Ashi Reversal Confirmation (v6 safe proxy)
+haClose1    = request.security(syminfo.tickerid, timeframe.period, close, gaps=barmerge.gaps_off)
+haOpen1     = request.security(syminfo.tickerid, timeframe.period, open, gaps=barmerge.gaps_off)
+haBearish  = haClose < haOpen
+haBullish  = haClose > haOpen
+
+reversalDown = resetOB and haBearish
+reversalUp   = resetOS and haBullish
+softDown     = softOB and haBearish
+softUp       = softOS and haBullish
+
+// — Marker Plots
+
+
+
+offsetStep = syminfo.mintick * 10  // Adjust spacing as needed
+
+plotshape(obPivot, title="OB Pivot", location=location.abovebar, style=shape.flag, color=color.red, size=size.auto, offset=1)
+plotshape(reversalDown, title="OB Weakness Confirmed", location=location.abovebar, style=shape.triangledown, color=color.orange, size=size.auto, offset=0)
+plotshape(softDown, title="Soft OB Reset", location=location.abovebar, style=shape.diamond, color=color.maroon, size=size.auto, offset=0)
+plotshape(osPivot, title="OS Pivot", location=location.belowbar, style=shape.flag, color=color.green, size=size.auto, offset=1)
+plotshape(reversalUp, title="OS Weakness Confirmed", location=location.belowbar, style=shape.triangleup, color=color.lime, size=size.auto, offset=0)
+plotshape(softUp, title="Soft OS Reset", location=location.belowbar, style=shape.diamond, color=color.teal, size=size.auto, offset=0)
+
+// — Momentum Dashboard Label
+var label dash = na
+if resetOB or resetOS
+    dashText  = resetOB ? "▼ Pivot → Weak → Reversal [Bearish]" : "▲ Pivot → Weak → Reversal [Bullish]"
+    dashColor = color.rgb(207, 18, 194)
+    dashTextColor = color.white
+    dashYloc  = resetOB ? yloc.abovebar : yloc.belowbar
+    dashStyle = resetOB ? label.style_label_down : label.style_label_up
+    dashOutlineColor = resetOB ? color.red : color.green
+    if na(dash)
+        dash := label.new(bar_index, close, dashText, xloc=xloc.bar_index, yloc=dashYloc, style=dashStyle, color=dashColor, textcolor=dashTextColor, size=size.normal)
+        //label.set_.set_border_color(dash, dashOutlineColor)
+    else
+        label.set_xy(dash, bar_index, close)
+        label.set_text(dash, dashText)
+        label.set_color(dash, dashColor)
+        label.set_textcolor(dash, dashTextColor)
+        label.set_yloc(dash, dashYloc)
+        label.set_style(dash, dashStyle)
+       // label.set_border_color(dash, dashOutlineColor)
+
+// === Signal Conditions ===
+longSignal = isValidLow
+shortSignal = isValidHigh
+
+// === Right-Aligned Vertical Legend ===
+var table legend = table.new(position.middle_right, 1, 9, border_width=1)
+if bar_index % 5 == 0
+    table.cell(legend, 0, 0, atrLabelText, text_color=color.white, bgcolor=color.orange, text_size=size.small)
+    table.cell(legend, 0, 1, psarLabelText, text_color=color.white, bgcolor=color.blue, text_size=size.small)
+    table.cell(legend, 0, 2, stackedLabelText, text_color=color.white, bgcolor=stackedColor, text_size=size.small)
+    table.cell(legend, 0, 3, emaTrendLabelText, text_color=color.white, bgcolor=emaTrendColor, text_size=size.small)
+    table.cell(legend, 0, 4, ttmLabelText, text_color=color.white, bgcolor=ttmColor, text_size=size.small)
+    table.cell(legend, 0, 5, overallTrend, text_color=color.white, bgcolor=overallColor, text_size=size.small)
+    table.cell(legend, 0, 6, "🚩 Flag = OS/OB Pivot", text_color=color.white, bgcolor=color.aqua, text_size=size.small)
+    table.cell(legend, 0, 7, "🔷 Diamond = Soft Reset (OB/OS)", text_color=color.white, bgcolor=color.aqua, text_size=size.small)
+    table.cell(legend, 0, 8, "🔺/🔻 Triangle = OS/OB Weakness → Reversal", text_color=color.white, bgcolor=color.aqua, text_size=size.small)
+
+View in Pine Editor・330 lines
+Use on chart
+1
+3
+3
+2 386
+This strategy was developed by Vinay with inputs from Warren, Dodgie and others to replicate TOS AGAIG indicators. It is available for free of use.

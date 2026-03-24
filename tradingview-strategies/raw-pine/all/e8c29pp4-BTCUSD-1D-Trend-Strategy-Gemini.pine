@@ -1,0 +1,65 @@
+//@version=5
+strategy("BTC 5m Cycle Scalper", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1, slippage=1)
+
+// --- Parameters ---
+// We use a much longer SMA (800) to represent the "Macro" trend on a 5m chart
+smaLength = input.int(800, "Intraday HODL Line (800 SMA)")
+rsiLen = input.int(14, "RSI Period")
+rsiBuy = input.int(30, "Oversold Buy Zone")
+rsiSell = input.int(75, "Overbought Sell Zone")
+
+// --- Indicators ---
+sma800 = ta.sma(close, smaLength)
+rsiVal = ta.rsi(close, rsiLen)
+
+// --- Date Filter (2018-2069) ---
+inRange = time >= timestamp(2018, 1, 1, 0, 0) and time <= timestamp(2069, 12, 31, 23, 59)
+
+// --- Logic ---
+// BUY: Only when price is above the long-term SMA (Trend is up) and RSI hits a deep dip
+buyCondition = close > sma800 and ta.crossover(rsiVal, rsiBuy)
+
+// SELL: Take profit when RSI is overextended OR if price breaks below the 800 SMA
+sellCondition = rsiVal > rsiSell or ta.crossunder(close, sma800)
+
+// --- Execution (Strict No Line Breaks in Calls) ---
+if (inRange)
+    if (buyCondition)
+        strategy.entry("Long", strategy.long, comment="5m Dip Buy")
+    if (sellCondition)
+        strategy.close("Long", comment="5m Cycle Exit")
+
+// --- Visuals ---
+plot(sma800, color=color.new(color.yellow, 0), linewidth=2, title="800 SMA Trend")
+plotshape(buyCondition, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Buy")
+plotshape(rsiVal > rsiSell, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Take Profit")
+
+View in Pine Editor・35 lines
+Use on chart
+5
+605
+Jan 18
+1Dchart
+100% of equity per trade
+0.1% commission
+1 tick slippage
+
+please convert this indicator to a trading strategy as you see fit
+find attached the date of the chart and the indicator on BTCUSD 1D chart so you can make a better decision when to buy and sell
+avoid forward looking and repainting at all costs.
+Don't add tables to the chart
+don't ever use line breaks in function calls:
+long only
+2018-2069
+1D chart
+100% of
+Jan 19
+Release Notes
+create a strategy, which buys low and sell high, with the idea of smart hodl" and taking advantage of the crypto cycles.
+I have create a freash strategy which you can editas you wish.
+You can check the strategy tester to see if your reation works well and if not impve it forther until you have found a version, hich has the ighest profit to drawdown atio"
+
+Strategy settings:
+Make sure the straegyhas at least 2 trades stsrt trading from 2018-01-01 onwards. 0.1% commission. 1 tick slippage.
+
+Avoidng Basic Issues: Tp Paste your latest code into the pine editor click into the text area (middle of the area or at the end of a code line) so you can be sure you have activated the text area before you select all and paste the new code.

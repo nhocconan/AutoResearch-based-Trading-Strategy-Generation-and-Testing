@@ -1,0 +1,255 @@
+//@version=6
+strategy(
+     "Faraz Perfect Structure XL / XS (Trend-Filtered)",
+     overlay = true,
+     max_labels_count = 500,
+     initial_capital = 50000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10,
+     pyramiding = 0,
+     process_orders_on_close = true)
+
+// =====================
+// INPUTS
+// =====================
+pivotLen         = input.int(5,  "Swing Pivot Length (both sides)", minval = 2)
+lookbackBreakout = input.int(10, "Breakout / Breakdown Lookback",   minval = 3)
+
+rsiLen           = input.int(14, "RSI Length")
+rsiLongTrig      = input.float(40.0, "Base RSI Long Trigger",  minval = 5,  maxval = 95)
+rsiShortTrig     = input.float(60.0, "Base RSI Short Trigger", minval = 5,  maxval = 95)
+
+rsiPerfectLong   = input.float(50.0, "Perfect Long RSI Min",   minval = 5,  maxval = 95)
+rsiPerfectShort  = input.float(50.0, "Perfect Short RSI Max",  minval = 5,  maxval = 95)
+
+useMACD          = input.bool(true, "Use MACD filter?")
+riskBufferPts    = input.float(5.0, "Stop buffer (points)")
+
+// Trend filter settings (200 EMA)
+emaLenTrend      = input.int(200, "Trend EMA length", minval = 20)
+trendLookback    = input.int(10,  "Trend slope lookback bars", minval = 1)
+minSlopePts      = input.float(5.0, "Min EMA slope (points)",  minval = 0.0)
+
+// =====================
+// STRUCTURE LEVELS
+// =====================
+
+// Structure low for longs
+pivotLow      = ta.pivotlow(low, pivotLen, pivotLen)
+pivotLowPrice = ta.valuewhen(not na(pivotLow), low[pivotLen], 0)
+lowest50      = ta.lowest(low, 50)
+structLow     = na(pivotLowPrice) ? lowest50 : pivotLowPrice
+longStopLevel = structLow - riskBufferPts
+
+// Structure high for shorts
+pivotHigh      = ta.pivothigh(high, pivotLen, pivotLen)
+pivotHighPrice = ta.valuewhen(not na(pivotHigh), high[pivotLen], 0)
+highest50      = ta.highest(high, 50)
+structHigh     = na(pivotHighPrice) ? highest50 : pivotHighPrice
+shortStopLevel = structHigh + riskBufferPts
+
+// Breakout / breakdown levels (exclude current bar)
+breakoutLvl  = ta.highest(high, lookbackBreakout)[1]   // long breakout
+breakdownLvl = ta.lowest(low,  lookbackBreakout)[1]    // short breakdown
+
+// =====================
+// MOMENTUM FILTERS
+// =====================
+rsi = ta.rsi(close, rsiLen)
+
+[macdLine, macdSignal, macdHist] = ta.macd(close, 12, 26, 9)
+macdUp   = macdHist > macdHist[1]
+macdDown = macdHist < macdHist[1]
+
+// Simple RSI slope
+rsiUp   = rsi > rsi[1]
+rsiDown = rsi < rsi[1]
+
+// =====================
+// TREND FILTER (200 EMA)
+// =====================
+emaTrend   = ta.ema(close, emaLenTrend)
+emaTrendPB = nz(emaTrend[trendLookback], emaTrend)
+emaSlope   = emaTrend - emaTrendPB
+
+upTrend    = emaTrend > emaTrendPB and emaSlope >  minSlopePts
+downTrend  = emaTrend < emaTrendPB and emaSlope < -minSlopePts
+
+// =====================
+// BASE SIGNALS
+// =====================
+baseLong =
+     close > breakoutLvl and
+     close > structLow  and
+     rsi   > rsiLongTrig and
+     (not useMACD or macdUp)
+
+baseShort =
+     close < breakdownLvl and
+     close < structHigh   and
+     rsi   < rsiShortTrig and
+     (not useMACD or macdDown)
+
+// Price relative to structure channel
+trendLongOnly =
+     close > structHigh and
+     close > breakoutLvl
+
+trendShortOnly =
+     close < structLow and
+     close < breakdownLvl
+
+// =====================
+// "PERFECT" XL / XS SETUPS
+// =====================
+
+// Long: breakout + structure + RSI/MACD + above EMA + EMA sloping up
+perfectLong =
+     baseLong and
+     trendLongOnly and
+     rsi >= rsiPerfectLong and
+     rsiUp and
+     upTrend and
+     close > emaTrend
+
+// Short: breakdown + structure + RSI/MACD + below EMA + EMA sloping down
+perfectShort =
+     baseShort and
+     trendShortOnly and
+     rsi <= rsiPerfectShort and
+     rsiDown and
+     downTrend and
+     close < emaTrend
+
+// =====================
+// VISUALS
+// =====================
+
+// No-add zone (between structure and breakout / breakdown)
+longNoAddZone  = close > structLow  and close < breakoutLvl
+shortNoAddZone = close < structHigh and close > breakdownLvl
+inNoAddZone    = longNoAddZone or shortNoAddZone
+
+bgcolor(inNoAddZone ? color.new(color.orange, 88) : na)
+
+// Bar colors – only highlight perfect bars
+barcolor(
+     perfectLong  ? color.new(color.green, 0) :
+     perfectShort ? color.new(color.red,   0) :
+     na)
+
+// Tiny base signals (L / S) – optional
+plotshape(baseLong,
+     title     = "Base Long",
+     style     = shape.triangleup,
+     text      = "L",
+     color     = color.new(color.lime, 0),
+     textcolor = color.black,
+     location  = location.belowbar,
+     size      = size.tiny)
+
+plotshape(baseShort,
+     title     = "Base Short",
+     style     = shape.triangledown,
+     text      = "S",
+     color     = color.new(color.red, 0),
+     textcolor = color.white,
+     location  = location.abovebar,
+     size      = size.tiny)
+
+// XL / XS "perfect" labels
+plotshape(perfectLong,
+     title     = "Faraz Perfect Long (XL)",
+     style     = shape.labelup,
+     text      = "XL",
+     color     = color.new(color.green, 0),
+     textcolor = color.black,
+     location  = location.belowbar,
+     size      = size.small)
+
+plotshape(perfectShort,
+     title     = "Faraz Perfect Short (XS)",
+     style     = shape.labeldown,
+     text      = "XS",
+     color     = color.new(color.red, 0),
+     textcolor = color.white,
+     location  = location.abovebar,
+     size      = size.small)
+
+// Structure plots
+plot(structLow,
+     title     = "Structure Low (Red)",
+     color     = color.new(color.red, 0),
+     style     = plot.style_linebr,
+     linewidth = 2)
+
+plot(longStopLevel,
+     title     = "Long Stop Level",
+     color     = color.new(color.red, 60),
+     style     = plot.style_linebr,
+     linewidth = 1)
+
+plot(breakoutLvl,
+     title     = "Long Breakout (Green)",
+     color     = color.new(color.lime, 0),
+     style     = plot.style_linebr,
+     linewidth = 2)
+
+plot(structHigh,
+     title     = "Structure High (Blue)",
+     color     = color.new(color.blue, 0),
+     style     = plot.style_linebr,
+     linewidth = 2)
+
+plot(shortStopLevel,
+     title     = "Short Stop Level",
+     color     = color.new(color.blue, 60),
+     style     = plot.style_linebr,
+     linewidth = 1)
+
+plot(breakdownLvl,
+     title     = "Short Breakdown (Orange)",
+     color     = color.new(color.orange, 0),
+     style     = plot.style_linebr,
+     linewidth = 2)
+
+// =====================
+// STRATEGY ORDERS
+// =====================
+
+// Enter / flip long on perfect XL
+if perfectLong and strategy.position_size <= 0
+    strategy.entry("XL Long", strategy.long)
+
+// Enter / flip short on perfect XS
+if perfectShort and strategy.position_size >= 0
+    strategy.entry("XS Short", strategy.short)
+
+// Long stop
+if strategy.position_size > 0
+    strategy.exit("XL Long SL", from_entry = "XL Long", stop = longStopLevel)
+
+// Short stop
+if strategy.position_size < 0
+    strategy.exit("XS Short SL", from_entry = "XS Short", stop = shortStopLevel)
+
+// Alerts
+alertcondition(perfectLong,  title = "Faraz Perfect Long (XL)",  message = "XL long setup confirmed.")
+alertcondition(perfectShort, title = "Faraz Perfect Short (XS)", message = "XS short setup confirmed.")
+
+View in Pine Editor・238 lines
+Use on chart
+2
+5
+1 044
+Faraz’s Perfect Structure XL/XS identifies premium trend continuation and reversal setups using a three-filter system:
+
+structural breakouts using dynamic swing-based support/resistance,
+
+trend confirmation via 200-EMA slope,
+
+momentum validation through RSI and MACD.
+
+Signals only trigger when all factors align, eliminating noise, chop, and false signals.
+
+Designed for traders who want clean, high-probability long (XL) and short (XS) entries.

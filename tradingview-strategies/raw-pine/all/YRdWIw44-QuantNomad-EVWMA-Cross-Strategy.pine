@@ -1,0 +1,42 @@
+//@version=4
+strategy("QuantNomad - EVWMA Cross Strategy", shorttitle="EVWMA Cross", overlay=true)
+
+// Inputs
+fast_sum_length = input(10, title = "Fast Sum Length", type = input.integer)
+slow_sum_length = input(20, title = "Slow Sum Length", type = input.integer)
+
+// Calculate Volume Period
+fast_vol_period = sum(volume, fast_sum_length)
+slow_vol_period = sum(volume, slow_sum_length)
+
+// Calculate EVWMA
+fast_evwma = 0.0
+fast_evwma := ((fast_vol_period - volume) * nz(fast_evwma[1], close) + volume * close) / (fast_vol_period)
+
+// Calculate EVWMA
+slow_evwma = 0.0
+slow_evwma := ((slow_vol_period - volume) * nz(slow_evwma[1], close) + volume * close) / (slow_vol_period)
+
+// Plot 
+plot(fast_evwma, title = "EVWMA Fast", linewidth = 2, color = color.red)
+plot(slow_evwma, title = "EVWMA Slow", linewidth = 2, color = color.green)
+
+// Strategy
+strategy.entry("Long",   true, when = crossover(fast_evwma, slow_evwma))
+strategy.entry("Short", false, when = crossunder(fast_evwma, slow_evwma))
+
+View in Pine Editor・26 lines
+Use on chart
+2
+8
+4
+2
+5 145
+Pretty simple EVWMA (Elastic Volume Weighted Moving Average) Cross Strategy. Long on bullish cross, Short on Bearish Crosss.
+
+EVWMA is a quite interesting moving average where period of the MA is defined from volume itself.
+It incorporates volume information in a natural and logical way. The eVWMA can be looked at as an approximation to the average price paid per share.
+
+As a volume period you can use sum of the last x bars volumes.
+
+Here is EVWMA as an indicator:

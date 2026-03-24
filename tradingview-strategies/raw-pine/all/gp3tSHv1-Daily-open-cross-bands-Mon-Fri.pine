@@ -1,0 +1,98 @@
+//@version=6
+strategy("Daily open cross + bands |Mon-Fri|",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100)
+
+// ====== EMA (Michael's) ======
+src = close
+emaS_value = input.int(12, minval=1, title="EMA Small - Value")
+emaB_value = input.int(21, minval=1, title="EMA Big - Value")
+
+EMA_UpTrend_color   = input.color(color.green, title="EMA UpTrend Color")
+EMA_DownTrend_color = input.color(color.red,   title="EMA DownTrend Color")
+
+arrowColorUp   = input.color(color.green, title="Arrow Up Color")
+arrowColorDown = input.color(color.red,   title="Arrow Down Color")
+arrowSize      = input.int(50, minval=1, title="Arrow Size")
+
+emaS = ta.ema(src, emaS_value)
+emaB = ta.ema(src, emaB_value)
+
+// Trend states (color meaning)
+EMA_UpTrend   = emaS >= emaB   // GREEN = bullish
+EMA_DownTrend = emaS <  emaB   // RED   = bearish
+
+// optional arrows (kept)
+var float crossover = na
+if crossover == 1
+    crossover := na
+else if EMA_UpTrend[1] and EMA_DownTrend
+    crossover := -1
+else if crossover == -1
+    crossover := na
+else if EMA_DownTrend[1] and EMA_UpTrend
+    crossover := 1
+
+plot(emaS, title="EMA 12", color=color.new(EMA_UpTrend ? EMA_UpTrend_color : EMA_DownTrend_color, 0), linewidth=1)
+plot(emaB, title="EMA 21", color=color.new(EMA_UpTrend ? EMA_UpTrend_color : EMA_DownTrend_color, 0), linewidth=2)
+plotarrow(crossover == 1 ? 1 : crossover == -1 ? -1 : na,
+     title="Show Arrow on EMAs Cross",
+     colorup=arrowColorUp, colordown=arrowColorDown,
+     maxheight=arrowSize, offset=+1, display=display.none)
+
+// ====== Current Day Open (session-aligned) ======
+daily_open_current() =>
+    newDay  = ta.change(time("D")) != 0
+    trigger = na(time("D")) or newDay
+    ta.valuewhen(trigger, open, 0)
+
+dailyOpen = daily_open_current()
+
+plot(dailyOpen, title="Daily Open", color=color.blue, linewidth=2, style=plot.style_circles)
+
+// ====== Weekday filter (Mon–Fri only) ======
+isWeekday = dayofweek >= dayofweek.monday and dayofweek <= dayofweek.friday
+
+// ====== ENTRY RULES ======
+shortSignal = isWeekday and open > dailyOpen and close < dailyOpen and EMA_DownTrend
+longSignal  = isWeekday and open < dailyOpen and close > dailyOpen and EMA_UpTrend
+
+// ====== TRADE MANAGEMENT ======
+var float slLong  = na
+var float slShort = na
+flat = strategy.position_size == 0
+
+// Entries on bar close (only when flat)
+if shortSignal and flat
+    slShort := high
+    strategy.entry("Short", strategy.short)
+
+if longSignal and flat
+    slLong := low
+    strategy.entry("Long", strategy.long)
+
+// Attach/maintain SLs only if value is set
+if strategy.position_size > 0 and not na(slLong)   // in a long
+    strategy.exit("SL Long",  from_entry="Long",  stop=slLong)
+if strategy.position_size < 0 and not na(slShort)  // in a short
+    strategy.exit("SL Short", from_entry="Short", stop=slShort)
+
+// ====== EXIT RULES (TP when EMA flips) ======
+exitLongCond  = strategy.position_size > 0 and EMA_DownTrend
+exitShortCond = strategy.position_size < 0 and EMA_UpTrend
+
+if exitLongCond
+    strategy.close("Long")
+    slLong := na
+
+if exitShortCond
+    strategy.close("Short")
+    slShort := na
+
+View in Pine Editor・91 lines
+Use on chart
+1
+8
+734
+Entry at candle closed cross, stoploss at the same candle's wick

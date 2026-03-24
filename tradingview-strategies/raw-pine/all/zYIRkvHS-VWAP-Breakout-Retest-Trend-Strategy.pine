@@ -1,0 +1,134 @@
+//@version=6
+strategy(
+    "VWAP Breakout Retest Trend Strategy",
+    overlay = true,
+    initial_capital = 100000,
+    default_qty_type = strategy.percent_of_equity,
+    default_qty_value = 3,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.05,
+    slippage = 1
+)
+
+
+// Inputs
+emaLen  = input.int(100, "Trend EMA Length")
+atrLen  = input.int(14, "ATR Length")
+atrMult = input.float(1.8, "ATR Stop Multiplier")
+rr      = input.float(2.0, "Risk Reward")
+
+
+// Indicators
+vwapValue = ta.vwap(close)
+emaTrend  = ta.ema(close, emaLen)
+atrVal    = ta.atr(atrLen)
+
+
+// Trend Direction
+trendUp   = close > emaTrend
+trendDown = close < emaTrend
+
+
+// Breakout Detection
+breakUp   = ta.crossover(close, vwapValue)
+breakDown = ta.crossunder(close, vwapValue)
+
+
+// Retest Conditions
+retestLong  = low <= vwapValue and trendUp
+retestShort = high >= vwapValue and trendDown
+
+
+// Entry Conditions
+longCondition  = breakUp[1] and retestLong
+shortCondition = breakDown[1] and retestShort
+
+
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+
+
+// Risk Management
+longStop  = strategy.position_avg_price - atrVal * atrMult
+longTarget = strategy.position_avg_price + atrVal * atrMult * rr
+
+
+shortStop  = strategy.position_avg_price + atrVal * atrMult
+shortTarget = strategy.position_avg_price - atrVal * atrMult * rr
+
+
+strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longTarget)
+strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortTarget)
+
+
+// Visuals
+plot(vwapValue, title="VWAP", color=color.orange, linewidth=2)
+plot(emaTrend, title="Trend EMA", color=color.blue)
+
+View in Pine Editor・73 lines
+Use on chart
+1
+5
+613
+Strategy Idea
+This strategy focuses on trading continuation moves that occur after price breaks away from the Volume Weighted Average Price (VWAP) and then retests it.
+VWAP is commonly used to represent the average traded price during a session. When price moves away from this level and later returns to it, the area can act as a dynamic support or resistance level.
+The script attempts to capture trend continuation when price breaks VWAP and then confirms the move with a retest.
+
+How the Strategy Works
+1. VWAP Breakout
+The first step is identifying when price moves above or below the VWAP line.
+
+Price crossing above VWAP suggests bullish momentum.
+
+Price crossing below VWAP suggests bearish momentum.
+
+
+This initial move signals potential directional interest.
+
+2. Retest Confirmation
+Instead of entering immediately on the breakout, the strategy waits for price to pull back toward VWAP.
+This retest helps confirm whether the VWAP level is acting as support or resistance.
+
+3. Trend Alignment
+To reduce counter-trend trades, a trend filter using an exponential moving average (EMA) is applied.
+
+Price above the trend EMA favors long trades.
+
+Price below the trend EMA favors short trades.
+
+
+
+4. Risk Management
+Stop-loss and take-profit levels are based on ATR (Average True Range).
+This allows exits to adapt to market volatility rather than using fixed distances.
+
+Key Features
+
+VWAP-based market structure
+
+Retest confirmation before entry
+
+Trend filter using EMA
+
+ATR-based dynamic risk management
+
+Designed for testing and educational purposes
+
+
+
+When This Strategy May Work Better
+This type of approach may perform better in:
+
+intraday trending markets
+
+instruments with strong liquidity
+
+sessions where price frequently reacts to VWAP levels
+
+
+It may perform less effectively during low-volatility or sideways market conditions.

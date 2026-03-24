@@ -1,0 +1,27 @@
+//@version=6
+strategy("Mi estrategia", overlay=true, fill_orders_on_standard_ohlc = true)
+
+longCondition = ta.crossover(ta.sma(close, 14), ta.sma(close, 28))
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = ta.crossunder(ta.sma(close, 14), ta.sma(close, 28))
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・13 lines
+Use on chart
+1
+7
+7
+2 758
+
+Gold ramon strategy based on 50 candles and atr of 12
+
+You enter the maximum of 50 candles once the most bearish starts to rise, we expect 10 candles, if you don't go up in 10 candles, you don't enter, if you go up before 10 candles, you enter.
+
+When is TP? Enough with 5 candles
+
+The temporality is 1 hour. It can be adjusted to 1 minute temporality for scalping.
+
+It is never lost, because it always exceeds the previous maximums.

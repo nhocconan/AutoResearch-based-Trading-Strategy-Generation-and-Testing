@@ -1,0 +1,359 @@
+//@version=5
+strategy("维加斯双通道策略", shorttitle="Vegas Strategy", overlay=true, precision=2, pyramiding=50, 
+ calc_on_every_tick=true, backtest_fill_limits_assumption=1, default_qty_type=strategy.fixed, currency=currency.USD, 
+ slippage=1, commission_type=strategy.commission.percent, commission_value=.05, process_orders_on_close=true, 
+ initial_capital=10000, margin_long=100, margin_short=100)
+
+//================= 策略参数 =================//
+// 交易参数
+maxOrders = input.int(10, "最大订单数", minval=1, maxval=50, group="交易设置")
+totalAmount = input.float(1000, "下单总金额(美元)", minval=1, group="交易设置")
+orderPercent = input.float(10, "每笔交易百分比(%)", minval=0.1, maxval=100, step=0.1, group="交易设置")
+
+// 指标参数
+ema_fast_len  = input.int(12,  "短期 EMA", group="指标参数")
+ema_mid1_len  = input.int(144, "中期 EMA1", group="指标参数")
+ema_mid2_len  = input.int(169, "中期 EMA2", group="指标参数")
+ema_long1_len = input.int(576, "长期 EMA1", group="指标参数")
+ema_long2_len = input.int(676, "长期 EMA2", group="指标参数")
+
+// 信号开关
+useClassicCross = input.bool(true,  "启用 价穿169 入场", group="信号设置")
+useBreakout     = input.bool(true,  "启用 前高/前低 突破入场", group="信号设置")
+useRetest       = input.bool(true,  "启用 回踩通道 入场", group="信号设置")
+useTrendFilter  = input.bool(true,  "启用 趋势方向过滤（144 vs 576）", group="信号设置")
+useRSIMACD      = input.bool(true,  "启用 RSI+MACD 过滤", group="信号设置")
+useVolume       = input.bool(true,  "启用 成交量过滤", group="信号设置")
+
+// 其他参数
+breakoutLen     = input.int(20,  "突破回看长度", group="信号设置")
+rsi_len         = input.int(14,  "RSI 长度", group="信号设置")
+volLen          = input.int(20,  "成交量均线长度", group="信号设置")
+requireClose    = input.bool(true, "信号以收盘确认", group="信号设置")
+
+// 止盈止损参数
+atr_len         = input.int(14,   "ATR Length", group="风控设置")
+atr_mult_sl     = input.float(1.5, "止损 ATR 倍数", group="风控设置")
+atr_mult_tp     = input.float(2.0, "止盈 ATR 倍数", group="风控设置")
+
+// 时间范围
+startDateTime = input.time(timestamp("2024-01-01T00:00:00"), title='回测开始时间', group="时间设置")
+endDateTime = input.time(timestamp("2100-01-01T00:00:00"), title='回测结束时间', group="时间设置")
+inDateRange = (time >= startDateTime) and (time < endDateTime)
+
+// 显示设置
+showInfoPanel   = input.bool(true, "显示信息面板", group="显示设置")
+showSignals     = input.bool(true, "显示信号标记", group="显示设置")
+showLevels      = input.bool(true, "显示止盈止损线", group="显示设置")
+
+//================= 指标计算 =================//
+ema_fast  = ta.ema(close, ema_fast_len)
+ema_mid1  = ta.ema(close, ema_mid1_len)
+ema_mid2  = ta.ema(close, ema_mid2_len)
+ema_long1 = ta.ema(close, ema_long1_len)
+ema_long2 = ta.ema(close, ema_long2_len)
+
+rsiVal = ta.rsi(close, rsi_len)
+[macdLine, signalLine, _] = ta.macd(close, 12, 26, 9)
+atrVal = ta.atr(atr_len)
+
+// OBV (On-Balance Volume)
+var float obv = 0.0
+obv := close > close[1] ? nz(obv[1]) + volume :
+       close < close[1] ? nz(obv[1]) - volume :
+                          nz(obv[1])
+
+//================= 绘图：EMA / 通道 =================//
+// 短期 EMA
+plot(ema_fast,  color=color.yellow, title="EMA 短期", linewidth=1)
+
+// Vegas 短通道 (144/169)
+plot(ema_mid1,  color=color.orange, title="EMA 144", linewidth=1)
+plot(ema_mid2,  color=color.orange, title="EMA 169", linewidth=1)
+fill(plot(ema_mid1), plot(ema_mid2), color=color.new(color.orange, 85))
+
+// Vegas 长通道 (576/676)
+plot(ema_long1, color=color.blue,   title="EMA 576", linewidth=1)
+plot(ema_long2, color=color.blue,   title="EMA 676", linewidth=1)
+fill(plot(ema_long1), plot(ema_long2), color=color.new(color.blue, 88))
+
+//================= 过滤器 =================//
+trendLong  = not useTrendFilter or (ema_mid1 > ema_long1)
+trendShort = not useTrendFilter or (ema_mid1 < ema_long1)
+rsiMacdLong  = not useRSIMACD or (rsiVal > 50 and macdLine > signalLine)
+rsiMacdShort = not useRSIMACD or (rsiVal < 50 and macdLine < signalLine)
+volFilter = not useVolume or (volume > ta.sma(volume, volLen))
+
+// 收盘确认/内穿越 帮助函数
+srcCrossUp(b)   => requireClose ? ta.crossover(close, b)  : (close > b and open <= b)
+srcCrossDown(b) => requireClose ? ta.crossunder(close, b) : (close < b and open >= b)
+
+//================= 信号逻辑 =================//
+// 经典：价穿169
+classicLong  = useClassicCross and srcCrossUp(ema_mid2)
+classicShort = useClassicCross and srcCrossDown(ema_mid1)
+
+// 前高/前低突破
+prevHigh = ta.highest(high, breakoutLen)[1]
+prevLow  = ta.lowest(low,  breakoutLen)[1]
+breakoutLong  = useBreakout and ta.crossover(close, prevHigh)
+breakoutShort = useBreakout and ta.crossunder(close, prevLow)
+
+// 回踩通道后重获方向
+withinBandUpPrev = (low[1] <= math.max(ema_mid1[1], ema_mid2[1])) and (high[1] >= math.min(ema_mid1[1], ema_mid2[1]))
+reclaimUpNow     = (close > ema_mid1 and close > ema_mid2)
+retestLong       = useRetest and withinBandUpPrev and reclaimUpNow
+
+withinBandDnPrev = (high[1] >= math.min(ema_mid1[1], ema_mid2[1])) and (low[1] <= math.max(ema_mid1[1], ema_mid2[1]))
+reclaimDnNow     = (close < ema_mid1 and close < ema_mid2)
+retestShort      = useRetest and withinBandDnPrev and reclaimDnNow
+
+// 最终信号（包含时间范围过滤）
+longSignal  = (classicLong or breakoutLong or retestLong)    and trendLong  and rsiMacdLong  and volFilter and inDateRange
+shortSignal = (classicShort or breakoutShort or retestShort) and trendShort and rsiMacdShort and volFilter and inDateRange
+
+//================= 策略变量 =================//
+var float currentSL = na
+var float currentTP = na
+var int currentDirection = 0  // 1=多头, -1=空头, 0=无仓位
+var int orderCount = 0
+var float dynamicTotalAmount = totalAmount  // 动态总金额
+
+// 计算订单数量（基于动态总金额的百分比）
+orderAmount = dynamicTotalAmount * (orderPercent / 100)
+orderQty = orderAmount / close
+
+//================= 交易逻辑 =================//
+// 检测信号变化
+longSignalTriggered = longSignal and not longSignal[1]
+shortSignalTriggered = shortSignal and not shortSignal[1]
+
+// 反向信号：全部平仓
+if (currentDirection == 1 and shortSignalTriggered) or (currentDirection == -1 and longSignalTriggered)
+    strategy.close_all(comment="反向信号平仓")
+    currentDirection := 0
+    orderCount := 0
+    currentSL := na
+    currentTP := na
+
+// 多头信号处理
+if longSignalTriggered and currentDirection != 1
+    // 新多头信号，重置
+    currentDirection := 1
+    orderCount := 1
+    currentSL := close - atrVal * atr_mult_sl
+    currentTP := close + atrVal * atr_mult_tp
+    strategy.entry("Long", strategy.long, qty=orderQty, comment="多头入场 #1")
+    
+else if longSignalTriggered and currentDirection == 1 and orderCount < maxOrders
+    // 同向加仓
+    orderCount := orderCount + 1
+    currentSL := close - atrVal * atr_mult_sl
+    currentTP := close + atrVal * atr_mult_tp
+    strategy.entry("Long", strategy.long, qty=orderQty, comment="多头加仓 #" + str.tostring(orderCount))
+
+// 空头信号处理
+if shortSignalTriggered and currentDirection != -1
+    // 新空头信号，重置
+    currentDirection := -1
+    orderCount := 1
+    currentSL := close + atrVal * atr_mult_sl
+    currentTP := close - atrVal * atr_mult_tp
+    strategy.entry("Short", strategy.short, qty=orderQty, comment="空头入场 #1")
+    
+else if shortSignalTriggered and currentDirection == -1 and orderCount < maxOrders
+    // 同向加仓
+    orderCount := orderCount + 1
+    currentSL := close + atrVal * atr_mult_sl
+    currentTP := close - atrVal * atr_mult_tp
+    strategy.entry("Short", strategy.short, qty=orderQty, comment="空头加仓 #" + str.tostring(orderCount))
+
+// 检测仓位是否已关闭（止盈止损触发）
+if strategy.position_size == 0 and currentDirection != 0
+    // 仓位已关闭，更新总金额并重置状态
+    // 根据交易结果更新动态总金额
+    if strategy.closedtrades > 0
+        lastTradeProfit = strategy.closedtrades.exit_price(strategy.closedtrades - 1) * strategy.closedtrades.size(strategy.closedtrades - 1) - strategy.closedtrades.entry_price(strategy.closedtrades - 1) * strategy.closedtrades.size(strategy.closedtrades - 1)
+        dynamicTotalAmount := dynamicTotalAmount + lastTradeProfit
+    
+    currentDirection := 0
+    orderCount := 0
+    currentSL := na
+    currentTP := na
+
+// 止盈止损
+if strategy.position_size != 0 and not na(currentSL) and not na(currentTP)
+    if currentDirection == 1  // 多头
+        strategy.exit("Exit Long", "Long", stop=currentSL, limit=currentTP, comment="多头止盈止损")
+    else if currentDirection == -1  // 空头
+        strategy.exit("Exit Short", "Short", stop=currentSL, limit=currentTP, comment="空头止盈止损")
+
+//================= 绘图 =================//
+// 信号标记
+plotshape(showSignals and longSignalTriggered, title="多头信号", style=shape.triangleup, 
+         location=location.belowbar, size=size.small, color=color.green)
+plotshape(showSignals and shortSignalTriggered, title="空头信号", style=shape.triangledown, 
+         location=location.abovebar, size=size.small, color=color.red)
+
+// 止盈止损线
+plot(showLevels and currentDirection == 1 and not na(currentSL) ? currentSL : na, 
+     title="多头止损", color=color.red, linewidth=2, style=plot.style_line)
+plot(showLevels and currentDirection == 1 and not na(currentTP) ? currentTP : na, 
+     title="多头止盈", color=color.green, linewidth=2, style=plot.style_line)
+plot(showLevels and currentDirection == -1 and not na(currentSL) ? currentSL : na, 
+     title="空头止损", color=color.red, linewidth=2, style=plot.style_line)
+plot(showLevels and currentDirection == -1 and not na(currentTP) ? currentTP : na, 
+     title="空头止盈", color=color.green, linewidth=2, style=plot.style_line)
+
+//================= 信息面板 =================//
+if showInfoPanel
+    // 计算统计数据
+    totalOrders = strategy.closedtrades + strategy.opentrades
+    winRate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0
+    avgBarsPerTrade = strategy.closedtrades > 0 ? (strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) - strategy.closedtrades.entry_bar_index(0)) / strategy.closedtrades : 0
+    
+    // 当前交易信息
+    currentDirectionText = currentDirection == 1 ? "多头" : currentDirection == -1 ? "空头" : "无仓位"
+    positionInfo = "方向: " + currentDirectionText + " | 订单数: " + str.tostring(orderCount) + "/" + str.tostring(maxOrders)
+    
+    // 交易金额信息
+    currentOrderAmount = "$" + str.tostring(orderAmount, "#.##")
+    totalAmountText = "动态总金额: $" + str.tostring(dynamicTotalAmount, "#.##")
+    orderPercentText = "单笔比例: " + str.tostring(orderPercent, "#.#") + "%"
+    originalAmountText = "初始金额: $" + str.tostring(totalAmount, "#.##")
+    
+    // 止盈止损信息
+    slInfo = not na(currentSL) ? "止损: $" + str.tostring(currentSL, "#.##") : "止损: N/A"
+    tpInfo = not na(currentTP) ? "止盈: $" + str.tostring(currentTP, "#.##") : "止盈: N/A"
+    
+    // 策略表现
+    netProfit = strategy.netprofit
+    totalReturn = strategy.initial_capital > 0 ? (netProfit / strategy.initial_capital) * 100 : 0
+    maxDD = strategy.max_drawdown
+    
+    // 创建信息表格
+    var table infoTable = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 80), 
+                                   border_width=1, border_color=color.white)
+    
+    if barstate.islast
+        table.cell(infoTable, 0, 0, "策略信息", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.navy, 50))
+        table.cell(infoTable, 1, 0, "数值", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.navy, 50))
+        
+        table.cell(infoTable, 0, 1, positionInfo, text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 1, "", text_color=color.white, text_size=size.small)
+        
+        table.cell(infoTable, 0, 2, totalAmountText, text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 2, orderPercentText, text_color=color.white, text_size=size.small)
+        
+        table.cell(infoTable, 0, 3, originalAmountText, text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 3, currentOrderAmount, text_color=color.white, text_size=size.small)
+        
+        table.cell(infoTable, 0, 4, slInfo, text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 4, tpInfo, text_color=color.white, text_size=size.small)
+        
+        table.cell(infoTable, 0, 5, "总交易数", text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 5, str.tostring(totalOrders), text_color=color.white, text_size=size.small)
+        
+        table.cell(infoTable, 0, 6, "胜率", text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 6, str.tostring(winRate, "#.##") + "%", text_color=color.white, text_size=size.small)
+        
+        table.cell(infoTable, 0, 7, "净利润", text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 7, "$" + str.tostring(netProfit, "#.##"), text_color=color.white, text_size=size.small)
+        
+        table.cell(infoTable, 0, 8, "总收益率", text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 8, str.tostring(totalReturn, "#.##") + "%", text_color=color.white, text_size=size.small)
+        
+        table.cell(infoTable, 0, 9, "最大回撤", text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 9, "$" + str.tostring(maxDD, "#.##"), text_color=color.white, text_size=size.small)
+
+//================= 报警 =================//
+alertcondition(longSignalTriggered, title="维加斯多头信号", message="维加斯策略: 多头信号触发")
+alertcondition(shortSignalTriggered, title="维加斯空头信号", message="维加斯策略: 空头信号触发")
+
+View in Pine Editor・271 lines
+Use on chart
+7
+9
+1 807
+Vegas Channel Comprehensive Strategy Description
+Strategy Overview
+A comprehensive trading strategy based on the Vegas Dual Channel indicator, supporting dynamic position sizing and fund management. The strategy employs a multi-signal fusion mechanism including classic price crossover signals, breakout signals, and retest signals, combined with trend filtering, RSI+MACD filtering, and volume filtering to ensure signal reliability.
+Core Features
+Dynamic Position Sizing: Continue adding positions on same-direction signals, close all positions on opposite signals
+Smart Take Profit/Stop Loss: ATR-based dynamic TP/SL, updated with each new signal
+Fund Management: Supports dynamic total amount management for compound growth
+Time Filtering: Configurable trading time ranges
+Risk Control: Maximum order limit to prevent over-leveraging
+Leverage Usage Instructions
+Important: This strategy does not use TradingView's margin functionality
+Setup Method
+Total Amount = Actual Funds × Leverage Multiplier
+Example: Have 100U actual funds, want to use 10x leverage → Set total amount to 100 × 10 = 1000U
+Trading Amount Calculation
+Each trade percentage is calculated based on leveraged amount
+Example: Set 10% → Actually trade 100U margin × 10x leverage = 1000U trading amount
+Maximum Orders Configuration
+Must be used in conjunction with leveraged amount
+Example: 1000U total amount, 10% per trade, maximum 10 orders = maximum use of 1000U
+Note: Do not exceed 100% of total amount to avoid over-leveraging
+Parameter Configuration Recommendations
+Leverage Configuration Examples
+Actual funds 100U, 5x leverage, total amount setting 500U, 10% per trade, 50U per trade, recommended maximum orders 10
+Actual funds 100U, 10x leverage, total amount setting 1000U, 10% per trade, 100U per trade, recommended maximum orders 10
+Actual funds 100U, 20x leverage, total amount setting 2000U, 5% per trade, 100U per trade, recommended maximum orders 20
+Risk Control
+Conservative: 5-10x leverage, 10% per trade, maximum 5-8 orders
+Aggressive: 10-20x leverage, 5-10% per trade, maximum 10-15 orders
+Extreme: 20x+ leverage, 2-5% per trade, maximum 20+ orders
+Strategy Advantages
+Signal Reliability: Multiple filtering mechanisms reduce false signals
+Capital Efficiency: Dynamic fund management for compound growth
+Risk Controllable: Maximum order limits prevent liquidation
+Flexible Configuration: Supports various leverage and fund allocation schemes
+Time Control: Configurable trading hours to avoid high-risk periods
+Usage Notes
+Ensure total amount is set correctly (actual funds × leverage multiplier)
+Maximum orders should not exceed the range allowed by total funds
+Recommend starting with conservative configuration and gradually adjusting parameters
+Regularly monitor strategy performance and adjust parameters timely
+维加斯通道综合策略说明
+策略概述
+基于维加斯双通道指标的综合交易策略，支持动态加仓和资金管理。策略采用多信号融合机制，包括经典价穿信号、突破信号和回踩信号，结合趋势过滤、RSI+MACD过滤和成交量过滤，确保信号的可靠性。
+核心功能
+动态加仓：同向信号继续加仓，反向信号全部平仓
+智能止盈止损：基于ATR的动态止盈止损，每次新信号更新
+资金管理：支持动态总金额管理，实现复利增长
+时间过滤：可设置交易时间范围
+风险控制：最大订单数限制，防止过度加仓
+杠杆使用说明
+重要：本策略不使用TradingView的保证金功能
+设置方法
+总资金 = 实际资金 × 杠杆倍数
+示例：实际有100U，想使用10倍杠杆 → 总资金设置为 100 × 10 = 1000U
+交易金额计算
+每笔交易百分比基于杠杆后的金额计算
+示例：设置10% → 实际交易 100U保证金 × 10倍杠杆 = 1000U交易金额
+最大订单数配置
+必须配合杠杆后的金额使用
+示例：1000U总资金，10%单笔，最大10单 = 最多使用1000U
+注意：不要超过总资金的100%，避免过度杠杆
+参数配置建议
+杠杆配置示例
+实际资金100U，5倍杠杆，总资金设置500U，单笔百分比10%，单笔金额50U，建议最大订单数10单
+实际资金100U，10倍杠杆，总资金设置1000U，单笔百分比10%，单笔金额100U，建议最大订单数10单
+实际资金100U，20倍杠杆，总资金设置2000U，单笔百分比5%，单笔金额100U，建议最大订单数20单
+风险控制
+保守型：5-10倍杠杆，10%单笔，最大5-8单
+激进型：10-20倍杠杆，5-10%单笔，最大10-15单
+极限型：20倍以上杠杆，2-5%单笔，最大20单以上
+策略优势
+信号可靠性：多重过滤机制，减少假信号
+资金效率：动态资金管理，实现复利增长
+风险可控：最大订单数限制，防止爆仓
+灵活配置：支持多种杠杆和资金配置方案
+时间控制：可设置交易时间，避开高风险时段
+使用注意事项
+确保总资金设置正确（实际资金×杠杆倍数）
+最大订单数不要超过总资金允许的范围
+建议从保守配置开始，逐步调整参数
+定期监控策略表现，及时调整参数

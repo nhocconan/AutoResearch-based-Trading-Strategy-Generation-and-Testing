@@ -1,0 +1,31 @@
+//@version=2
+strategy(title='test', shorttitle='T', overlay=true, initial_capital=100000, currency=currency.USD)
+strategy.risk.max_intraday_filled_orders(2)
+strategy.risk.allow_entry_in(strategy.direction.all)
+trade_size = input(10000.0)
+take_profit_in_ticks = input(500)
+stop_loss_in_ticks = input(50)
+//  ||-----------------------------------------------------------------------------------------------------------------------------------------------------------||
+trade_session = input(title='Trade Session:', type=string, defval='0400-1500', confirm=false)
+istradingsession = not na(time('1', trade_session))
+bgcolor(istradingsession?gray:na)
+//  ||-----------------------------------------------------------------------------------------------------------------------------------------------------------||
+open_price = change(istradingsession) > 0 ? open : open_price[1]
+buy_entry_line = open_price + stop_loss_in_ticks * syminfo.mintick
+sel_entry_line = open_price - stop_loss_in_ticks * syminfo.mintick
+plot(open_price, color=black)
+plot(buy_entry_line, color=lime)
+plot(sel_entry_line, color=red)
+strategy.entry('buy', long=true, qty=trade_size, when=istradingsession > 0 and close > buy_entry_line)
+strategy.entry('sel', long=false, qty=trade_size, when=istradingsession > 0 and close < sel_entry_line)
+strategy.exit('exit buy', from_entry='buy', profit=take_profit_in_ticks, loss=stop_loss_in_ticks)
+strategy.exit('exit sel', from_entry='sel', profit=take_profit_in_ticks, loss=stop_loss_in_ticks)
+strategy.close_all(when=change(istradingsession) < 0)
+
+View in Pine Editor・23 lines
+Use on chart
+1
+6
+7
+4 805
+the way to work around the bug for this specific strategy, altho its not as efficient as it would if both orders activation was possible.

@@ -1,0 +1,108 @@
+//@version=5
+strategy("Multi-Timeframe Trend Following with 200 EMA Filter - Longs Only", shorttitle="MTF_TF_200EMA_Longs", overlay=true, initial_capital=1000, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// Inputs
+fast_length = input.int(9, title="Fast EMA Length", minval=1)
+slow_length = input.int(21, title="Slow EMA Length", minval=1)
+filter_length_200 = input.int(200, title="200 EMA Length", minval=1)
+stop_loss_perc = input.float(1.0, title="Stop Loss Percentage", minval=0.1) / 100
+take_profit_perc = input.float(3.0, title="Take Profit Percentage", minval=0.1) / 100
+
+// Calculate EMAs for 5-minute, 15-minute, and 30-minute timeframes
+ema_fast_5min = request.security(syminfo.tickerid, "5", ta.ema(close, fast_length), lookahead=barmerge.lookahead_on)
+ema_slow_5min = request.security(syminfo.tickerid, "5", ta.ema(close, slow_length), lookahead=barmerge.lookahead_on)
+
+ema_fast_15min = request.security(syminfo.tickerid, "15", ta.ema(close, fast_length), lookahead=barmerge.lookahead_on)
+ema_slow_15min = request.security(syminfo.tickerid, "15", ta.ema(close, slow_length), lookahead=barmerge.lookahead_on)
+
+ema_fast_30min = request.security(syminfo.tickerid, "30", ta.ema(close, fast_length), lookahead=barmerge.lookahead_on)
+ema_slow_30min = request.security(syminfo.tickerid, "30", ta.ema(close, slow_length), lookahead=barmerge.lookahead_on)
+
+// Calculate 200 EMA for the 5-minute timeframe
+ema_200_5min = ta.ema(close, filter_length_200)
+
+// Determine the trend for each timeframe
+trend_5min = ema_fast_5min > ema_slow_5min ? 1 : -1
+trend_15min = ema_fast_15min > ema_slow_15min ? 1 : -1
+trend_30min = ema_fast_30min > ema_slow_30min ? 1 : -1
+
+// Combine trend signals
+combined_trend = trend_5min + trend_15min + trend_30min
+
+// Define entry and exit conditions with 200 EMA filter
+enter_long = combined_trend == 3 and close > ema_200_5min
+exit_long = combined_trend < 3 or close < ema_200_5min
+
+// Plot EMAs for the 5-minute timeframe
+plot(ema_fast_5min, color=color.blue, linewidth=2, title="Fast EMA 5min")
+plot(ema_slow_5min, color=color.red, linewidth=2, title="Slow EMA 5min")
+plot(ema_200_5min, color=color.green, linewidth=2, title="200 EMA 5min")
+
+// Strategy execution
+if (enter_long)
+    strategy.entry("Long", strategy.long, stop=close * (1 - stop_loss_perc), limit=close * (1 + take_profit_perc))
+if (exit_long)
+    strategy.close("Long")
+
+View in Pine Editor・45 lines
+Use on chart
+1
+2
+0
+5 054
+Overview
+
+This strategy is designed to trade long positions based on multiple timeframe Exponential Moving Averages (EMAs) and a 200 EMA filter. The strategy ensures that trades are only entered in strong uptrends and aims to capitalize on sustained upward movements while minimizing risk with a defined stop-loss and take-profit mechanism.
+
+Key Components
+
+Initial Capital and Position Sizing
+
+Initial Capital: $1000.
+Lot Size: 1 unit per trade.
+Inputs
+
+Fast EMA Length (fast_length): The period for the fast EMA.
+Slow EMA Length (slow_length): The period for the slow EMA.
+200 EMA Length (filter_length_200): Set to 200 periods for the primary trend filter.
+Stop Loss Percentage (stop_loss_perc): Set to 1% of the entry price.
+Take Profit Percentage (take_profit_perc): Set to 3% of the entry price.
+Timeframes and EMAs
+
+EMAs are calculated for the following timeframes using the request.security function:
+5-minute: Short-term trend detection.
+15-minute: Intermediate-term trend detection.
+30-minute: Long-term trend detection.
+The strategy also calculates a 200-period EMA on the 5-minute timeframe to serve as a primary trend filter.
+Trend Calculation
+
+The strategy determines the trend for each timeframe by comparing the fast and slow EMAs:
+If the fast EMA is above the slow EMA, the trend is considered positive (1).
+If the fast EMA is below the slow EMA, the trend is considered negative (-1).
+Combined Trend Signal
+
+The combined trend signal is derived by summing the individual trends from the 5-minute, 15-minute, and 30-minute timeframes.
+A combined trend value of 3 indicates a strong uptrend across all timeframes.
+Any combined trend value less than 3 indicates a weakening or negative trend.
+Entry and Exit Conditions
+
+Entry Condition:
+A long position is entered if:
+The combined trend signal is 3 (indicating a strong uptrend across all timeframes).
+The current close price is above the 200 EMA on the 5-minute timeframe.
+Exit Condition:
+The long position is exited if:
+The combined trend signal is less than 3 (indicating a weakening trend).
+The current close price falls below the 200 EMA on the 5-minute timeframe.
+Stop Loss and Take Profit
+
+Stop Loss: Set at 1% below the entry price.
+Take Profit: Set at 3% above the entry price.
+These levels are automatically set when entering a trade using the strategy.entry function with stop and limit parameters.
+Plotting
+
+The strategy plots the fast and slow EMAs for the 5-minute timeframe and the 200 EMA for visual reference on the chart:
+Fast EMA (5-min): Plotted in blue.
+Slow EMA (5-min): Plotted in red.
+200 EMA (5-min): Plotted in green.
+

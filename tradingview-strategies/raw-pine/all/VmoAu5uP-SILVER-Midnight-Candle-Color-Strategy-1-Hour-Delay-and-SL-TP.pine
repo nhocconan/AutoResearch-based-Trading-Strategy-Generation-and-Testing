@@ -1,0 +1,72 @@
+//@version=4
+strategy("Midnight Candle Color Strategy with 1-Hour Delay and SL/TP", shorttitle="12AM +1H SL/TP Strat", overlay=true)
+
+// Adjust for New York time (UTC-5 or UTC-4 for Daylight Saving Time)
+// Assuming UTC-5 for now; adjust as necessary for Daylight Saving Time
+nyHour(hour) => (hour - 5) % 24
+
+// Function to check if the current bar is the 12:00 AM New York time bar
+isMidnightBar() =>
+    nyHour(hour) == 0 and minute == 0
+
+// Function to check if the current bar is the 1:00 AM New York time bar (1 hour after midnight)
+is1AMBar() =>
+    nyHour(hour) == 1 and minute == 0
+
+// Variable to store the color of the previous day's midnight candle
+var color midnightCandleColorPrevDay = na
+
+// Determine the color of the previous day's midnight candle
+if isMidnightBar()
+    midnightCandleColorPrevDay := close[1] > open[1] ? color.green : color.red
+
+// Strategy execution at 1:00 AM based on the color of the previous day's midnight candle
+if is1AMBar()
+    if midnightCandleColorPrevDay == color.green
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Take Profit", "Long", limit=close + 57 * syminfo.mintick, stop=close - 200 * syminfo.mintick)
+    if midnightCandleColorPrevDay == color.red
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Take Profit", "Short", limit=close - 48 * syminfo.mintick, stop=close + 200 * syminfo.mintick)
+
+// Optional: Plot a marker for visualization
+plotshape(series=isMidnightBar(), style=shape.triangleup, location=location.belowbar, color=color.new(midnightCandleColorPrevDay, 90), size=size.small)
+plotshape(series=is1AMBar(), style=shape.triangledown, location=location.abovebar, color=color.blue, size=size.small)
+
+View in Pine Editor・34 lines
+Use on chart
+2
+7
+5
+1
+9 169
+Overview:
+The "Midnight Candle Color Strategy with 1-Hour Delay and SL/TP" is a unique trading strategy designed for the Forex market. This strategy capitalizes on the color of the midnight candle based on New York time, making trade decisions one hour later, at 1:00 AM.
+
+Key Features:
+
+Time Zone Adjustment: Automatically adjusts to New York time (UTC-5 or UTC-4 during Daylight Saving Time).
+Midnight Candle Analysis: Utilizes the color of the midnight candle to gauge market sentiment.
+Trade Execution at 1 AM: Trades are executed one hour after midnight based on the previous day's candle color.
+Strategic SL/TP: Incorporates predefined stop loss (SL) and take profit (TP) levels for each trade.
+How It Works:
+
+The script first determines whether the current bar represents 12:00 AM or 1:00 AM in New York time.
+At midnight, it records the color of the candle (green for bullish, red for bearish).
+At 1:00 AM, the strategy:
+Enters a long position if the midnight candle was green, with specific TP and SL settings.
+Enters a short position if the midnight candle was red, again with defined TP and SL.
+Visualization:
+Optional markers are plotted on the chart for easy visualization of the strategy's entry points at midnight and 1 AM.
+
+Usage Tips:
+
+Ideal for traders focusing on overnight price movements and early morning trends.
+Best suited for SILVER trading due to the 24-hour trading cycle.
+We recommend backtesting the strategy with historical data to evaluate performance.
+Disclaimer:
+This strategy is provided for educational purposes and should not be considered as financial advice. Users should conduct their own research and exercise caution while trading. Past performance is not indicative of future results.
+
+
+I´m not a signal service, however I´m sharing my signals. For free. If you wish to buy something, contact some other signalist, preferably with 5-10-15-20K followers, selling signals on the premium channel, but in reality not trading them themselves. If you will realise after few blown account that something is wrong, ask yourself why is that. Trading is not pushing the buy-sell button and drinking tequila on the beach. If you want to learn, you know what to do.
+

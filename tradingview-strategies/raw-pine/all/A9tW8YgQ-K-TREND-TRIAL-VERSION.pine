@@ -1,0 +1,152 @@
+//@version=5
+strategy('K-TREND TRIAL VERSION', overlay=true, 
+     commission_type=strategy.commission.percent, 
+     commission_value=0.025, 
+     initial_capital=500000, 
+     default_qty_type=strategy.fixed, 
+     default_qty_value=3, 
+     pyramiding=1, 
+     process_orders_on_close=true, 
+     calc_on_every_tick=false)
+
+// ===== INPUTS =====
+// SuperTrend Parameters
+Periods = input(title='ATR Period', defval=10)
+src = input(hl2, title='Source')
+Multiplier = input.float(title='ATR Multiplier', step=0.1, defval=3.0)
+changeATR = input(title='Change ATR Calculation Method?', defval=true)
+
+// Heikin Ashi Smoothing Parameters
+ma1_len = input.int(title='MA1 (HA Smooth)', defval=11, minval=1, maxval=100, step=1)
+ma2_len = input.int(title='MA2 (HA Smooth)', defval=11, minval=1, maxval=100, step=1)
+ma3_len = input.int(title='MA3 (HA Slow)', defval=20, minval=1, maxval=100, step=1)
+ma4_len = input.int(title='MA4 (HA Slow)', defval=20, minval=1, maxval=100, step=1)
+
+// ===== SUPER TREND CALCULATION =====
+atr2 = ta.sma(ta.tr, Periods)
+atr = changeATR ? ta.atr(Periods) : atr2
+up = src - Multiplier * atr
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+dn = src + Multiplier * atr
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// ===== SMOOTHED HEIKIN ASHI CALCULATION =====
+// --- First Smoothing (11,11) ---
+o = ta.ema(open, ma1_len)
+c = ta.ema(close, ma1_len)
+h = ta.ema(high, ma1_len)
+l = ta.ema(low, ma1_len)
+ha_t = ticker.heikinashi(syminfo.tickerid)
+ha_o = request.security(ha_t, timeframe.period, o)
+ha_c = request.security(ha_t, timeframe.period, c)
+ha_h = request.security(ha_t, timeframe.period, h)
+ha_l = request.security(ha_t, timeframe.period, l)
+o2 = ta.ema(ha_o, ma2_len)
+c2 = ta.ema(ha_c, ma2_len)
+h2 = ta.ema(ha_h, ma2_len)
+l2 = ta.ema(ha_l, ma2_len)
+
+// --- Second Smoothing (20,20) ---
+o1 = ta.ema(open, ma3_len)
+c1 = ta.ema(close, ma3_len)
+h1 = ta.ema(high, ma3_len)
+l1 = ta.ema(low, ma3_len)
+[ha_o1, ha_c1, ha_h1, ha_l1] = request.security(ha_t, timeframe.period, [o1, c1, h1, l1], lookahead=barmerge.lookahead_on)
+o3 = ta.ema(ha_o1, ma4_len)
+c3 = ta.ema(ha_c1, ma4_len)
+h3 = ta.ema(ha_h1, ma4_len)
+l3 = ta.ema(ha_l1, ma4_len)
+
+// ===== GANN SQUARE OF 9 =====
+_normalise_squareRootCurrentClose = math.floor(math.sqrt(close))
+_upperGannLevel_1 = (_normalise_squareRootCurrentClose + 1) * (_normalise_squareRootCurrentClose + 1)
+_upperGannLevel_2 = (_normalise_squareRootCurrentClose + 2) * (_normalise_squareRootCurrentClose + 2)
+_zeroGannLevel = _normalise_squareRootCurrentClose * _normalise_squareRootCurrentClose
+_lowerGannLevel_1 = (_normalise_squareRootCurrentClose - 1) * (_normalise_squareRootCurrentClose - 1)
+_lowerGannLevel_2 = (_normalise_squareRootCurrentClose - 2) * (_normalise_squareRootCurrentClose - 2)
+
+// ===== YOUR ENTRY CONDITIONS =====
+// Bullish Crossover: Fast HA candle (11,11) breaks above Slow HA candle (20,20)
+haCrossUp = (l2 > h3) and (l2[1] <= h3[1])
+priceHitLowerGann = (low <= _lowerGannLevel_1 and close > _lowerGannLevel_1) or (low <= _lowerGannLevel_2 and close > _lowerGannLevel_2)
+gannBullishCondition1 = priceHitLowerGann and trend == 1
+gannBullishCondition2 = priceHitLowerGann and o2 < c2
+
+// Combine all possible long triggers with OR logic
+longCondition = ((o2 < c2 and trend == 1) or haCrossUp or gannBullishCondition1 or gannBullishCondition2) and barstate.isconfirmed
+
+// Bearish Crossunder: Fast HA candle (11,11) breaks below Slow HA candle (20,20)
+haCrossDown = (h2 < l3) and (h2[1] >= l3[1])
+priceHitUpperGann = (high >= _upperGannLevel_1 and close < _upperGannLevel_1) or (high >= _upperGannLevel_2 and close < _upperGannLevel_2)
+gannBearishCondition1 = priceHitUpperGann and trend == -1
+gannBearishCondition2 = priceHitUpperGann and o2 > c2
+
+// Combine all possible short triggers with OR logic
+shortCondition = ((o2 > c2 and trend == -1) or haCrossDown or gannBearishCondition1 or gannBearishCondition2) and barstate.isconfirmed
+
+// ===== STRATEGY EXECUTION =====
+if longCondition
+    SL = math.round(up, 2)
+    range_1 = math.abs(close - SL)
+    TARGET1 = close + range_1 * 1.7
+    TARGET2 = close + range_1 * 2.5
+    TARGET3 = close + range_1 * 3.0
+    
+    // Gann adjustments for BUY
+    if close > _upperGannLevel_1 and close < _upperGannLevel_2
+        TARGET1 := _upperGannLevel_2
+    if close > _zeroGannLevel and close < _upperGannLevel_1
+        TARGET1 := _upperGannLevel_1
+        TARGET2 := (_upperGannLevel_1 + _upperGannLevel_2) / 2
+        TARGET3 := _upperGannLevel_2
+    if close > _lowerGannLevel_1 and close < _zeroGannLevel
+        TARGET1 := _zeroGannLevel
+        TARGET2 := (_zeroGannLevel + _upperGannLevel_1) / 2
+        TARGET3 := _upperGannLevel_1
+    
+    strategy.entry('BUY', strategy.long)
+    strategy.exit('BUY T1', 'BUY', qty=1, limit=TARGET1)
+    strategy.exit('BUY T2', 'BUY', qty=1, limit=TARGET2)
+    strategy.exit('BUY T3', 'BUY', qty=1, limit=TARGET3)
+    strategy.exit('BUY SL', 'BUY', stop=SL)
+
+if shortCondition
+    SL = math.round(dn, 2)
+    range_2 = math.abs(close - SL)
+    TARGET1 = close - range_2 * 1.7
+    TARGET2 = close - range_2 * 2.5
+    TARGET3 = close - range_2 * 3.0
+    
+    // Gann adjustments for SELL
+    if close < _lowerGannLevel_1 and close > _lowerGannLevel_2
+        TARGET1 := _lowerGannLevel_2
+    if close < _zeroGannLevel and close > _lowerGannLevel_1
+        TARGET1 := _lowerGannLevel_1
+        TARGET2 := (_lowerGannLevel_1 + _lowerGannLevel_2) / 2
+        TARGET3 := _lowerGannLevel_2
+    if close < _upperGannLevel_1 and close > _zeroGannLevel
+        TARGET1 := _zeroGannLevel
+        TARGET2 := (_zeroGannLevel + _lowerGannLevel_1) / 2
+        TARGET3 := _lowerGannLevel_1
+    
+    strategy.entry('SELL', strategy.short)
+    strategy.exit('SELL T1', 'SELL', qty=1, limit=TARGET1)
+    strategy.exit('SELL T2', 'SELL', qty=1, limit=TARGET2)
+    strategy.exit('SELL T3', 'SELL', qty=1, limit=TARGET3)
+    strategy.exit('SELL SL', 'SELL', stop=SL)
+
+// Plot signals
+plotshape(longCondition ? close : na, title='Buy', text='BUY', location=location.belowbar, style=shape.labelup, size=size.tiny, color=color.new(color.green, 0), textcolor=color.new(color.white, 0))
+plotshape(shortCondition ? close : na, title='Sell', text='SELL', location=location.abovebar, style=shape.labeldown, size=size.tiny, color=color.new(color.red, 0), textcolor=color.new(color.white, 0))
+
+View in Pine Editor・145 lines
+Use on chart
+1
+6
+710
+TRIAL version only to test order exection for entry , sl and targets execution

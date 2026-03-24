@@ -1,0 +1,73 @@
+//@version=6
+strategy("Scalping Strategy Improved v2", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ===== INPUTS =====
+emaFast = input.int(50)
+emaSlow = input.int(200)
+
+rsiLen = input.int(3)
+rsiOB = input.int(80)
+rsiOS = input.int(20)
+
+adxLen = input.int(5)
+adxLevel = input.int(20)
+
+atrLen = input.int(14)
+atrMult = input.float(1.2)
+
+// ===== INDICADORES =====
+ema50 = ta.ema(close, emaFast)
+ema200 = ta.ema(close, emaSlow)
+
+rsi = ta.rsi(close, rsiLen)
+
+[diplus, diminus, adx] = ta.dmi(adxLen, adxLen)
+
+atr = ta.atr(atrLen)
+
+// fuerza de vela
+body = math.abs(close - open)
+candleRange = high - low
+strongBull = close > open and body > candleRange * 0.5
+strongBear = close < open and body > candleRange * 0.5
+
+// ===== TENDENCIA =====
+trendLong = close > ema50 and ema50 > ema200
+trendShort = close < ema50 and ema50 < ema200
+
+// ===== MOMENTUM =====
+rsiLong = ta.crossover(rsi, rsiOS)
+rsiShort = ta.crossunder(rsi, rsiOB)
+
+// ===== FUERZA =====
+trendStrength = adx > adxLevel
+
+// ===== CONDICIONES =====
+longCondition = trendLong and rsiLong and trendStrength and strongBull
+shortCondition = trendShort and rsiShort and trendStrength and strongBear
+
+// ===== STOP Y TP =====
+longStop = close - atr * atrMult
+shortStop = close + atr * atrMult
+
+longTP = close + (close - longStop) * 2
+shortTP = close - (shortStop - close) * 2
+
+// ===== ENTRADAS =====
+if longCondition
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("TP/SL BUY", "BUY", stop=longStop, limit=longTP, trail_points=atr)
+
+if shortCondition
+    strategy.entry("SELL", strategy.short)
+    strategy.exit("TP/SL SELL", "SELL", stop=shortStop, limit=shortTP, trail_points=atr)
+
+// ===== PLOTS =====
+plot(ema50, color=color.orange, linewidth=2)
+plot(ema200, color=color.blue, linewidth=2)
+
+View in Pine Editor・67 lines
+Use on chart
+5
+357
+Esta estrategia da mucha rentabilidad, integra muchos indicadores y medias moviles

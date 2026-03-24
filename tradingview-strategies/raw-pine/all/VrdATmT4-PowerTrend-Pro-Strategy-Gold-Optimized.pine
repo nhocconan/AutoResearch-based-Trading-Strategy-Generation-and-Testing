@@ -1,0 +1,196 @@
+//@version=5
+strategy("PowerTrend Pro Strategy - Gold Tuned (VWAP+Supertrend+RSI+MA/EMA+Trail+BE)",
+     overlay=true,
+     margin_long=100, margin_short=100,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=5) // default 5% per trade for Gold
+
+// ───────────────────────── Inputs & Presets
+preset = input.string(title="Preset (market/timeframe)", defval="XAUUSD 1H",
+     options=["Generic", "XAUUSD 1H", "XAUUSD 4H"])
+
+// Base inputs (will be overridden by preset defaults)
+rsi_period   = input.int(14, "RSI Period", group="Main")
+rsi_tf       = input.timeframe("D", "Higher TF RSI", group="Main")
+super_atrl   = input.int(10, "Supertrend ATR Length", group="Supertrend")
+super_mult   = input.float(3.0, "Supertrend Multiplier", group="Supertrend")
+ema_len      = input.int(50, "EMA Length", group="MAs")
+sma_len      = input.int(200, "SMA Length", group="MAs")
+tp_percent   = input.float(2.0, "Take Profit %", group="Risk")
+sl_percent   = input.float(1.0, "Initial Stop Loss %", group="Risk")
+trail_percent= input.float(1.0, "Trailing Stop %", group="Risk")
+breakeven_trig = input.float(1.0, "Move SL to BE after % in profit", group="Risk")
+
+// ───────────────────────── Preset overrides (Gold tuned)
+if preset == "XAUUSD 1H"
+    // 1-hour intraday gold: tighter, more reactive
+    rsi_period   := 14
+    rsi_tf       := "D"         // use daily RSI as higher timeframe filter
+    super_atrl   := 14
+    super_mult   := 3.5
+    ema_len      := 100
+    sma_len      := 200
+    tp_percent   := 1.8
+    sl_percent   := 0.9
+    trail_percent:= 0.9
+    breakeven_trig := 0.9
+else if preset == "XAUUSD 4H"
+    // 4-hour gold: smoother, allow wider swings
+    rsi_period   := 14
+    rsi_tf       := "D"
+    super_atrl   := 21
+    super_mult   := 3.8
+    ema_len      := 100
+    sma_len      := 300
+    tp_percent   := 3.0
+    sl_percent   := 1.5
+    trail_percent:= 1.2
+    breakeven_trig := 1.2
+else
+    // Generic defaults (already set by inputs)
+    na
+
+// ───────────────────────── VWAP
+vwap = ta.vwap(close)
+plot(vwap, title="VWAP", color=color.orange, linewidth=2)
+
+// ───────────────────────── Supertrend (anchored to VWAP)
+atr = ta.atr(super_atrl)
+upper = vwap + super_mult * atr
+lower = vwap - super_mult * atr
+var float supertrend = na
+supertrend := na(supertrend[1]) ? vwap : supertrend[1]
+supertrend := close > supertrend[1] ? math.max(lower, supertrend[1]) : math.min(upper, supertrend[1])
+trend_up = close > supertrend
+plot(supertrend, title="Supertrend", color = trend_up ? color.new(color.green,0) : color.new(color.red,0), linewidth=2)
+
+// ───────────────────────── RSI (MTF)
+rsi_cur = ta.rsi(close, rsi_period)
+rsi_htf = request.security(syminfo.tickerid, rsi_tf, ta.rsi(close, rsi_period))
+hline(70, "RSI OB", color=color.gray)
+hline(30, "RSI OS", color=color.gray)
+
+// ───────────────────────── Moving Averages
+ema = ta.ema(close, ema_len)
+sma = ta.sma(close, sma_len)
+plot(ema, title="EMA", color=color.blue)
+plot(sma, title="SMA", color=color.purple)
+
+// ───────────────────────── Trend & Signal Conditions
+bullTrend = trend_up and close > vwap and close > ema and ema > sma
+bearTrend = not trend_up and close < vwap and close < ema and ema < sma
+
+// RSI thresholds slightly relaxed for Gold noise
+longCondition  = bullTrend and rsi_cur < 40 and rsi_htf < 45
+shortCondition = bearTrend and rsi_cur > 60 and rsi_htf > 55
+
+// Prevent repeated entries on same signal bar
+canEnterLong  = longCondition and strategy.opentrades == 0
+canEnterShort = shortCondition and strategy.opentrades == 0
+
+// ───────────────────────── Entry Orders
+if (canEnterLong)
+    strategy.entry("Long", strategy.long)
+
+if (canEnterShort)
+    strategy.entry("Short", strategy.short)
+
+// ───────────────────────── Exit Logic (TP/SL + Trailing + BreakEven)
+if strategy.position_size > 0  // Longs
+    entryPrice = strategy.position_avg_price
+    slPrice = entryPrice * (1 - sl_percent/100)
+    tpPrice = entryPrice * (1 + tp_percent/100)
+
+    // Move SL to breakeven if profit ≥ breakeven_trig %
+    slPrice := close >= entryPrice * (1 + breakeven_trig/100) ? entryPrice : slPrice
+
+    // Trailing stop: use the better (higher) of current trailing or slPrice
+    trailStop = close * (1 - trail_percent/100)
+    slPrice := math.max(slPrice, trailStop)
+
+    strategy.exit("Exit Long", "Long", stop=slPrice, limit=tpPrice)
+
+if strategy.position_size < 0  // Shorts
+    entryPrice = strategy.position_avg_price
+    slPrice = entryPrice * (1 + sl_percent/100)
+    tpPrice = entryPrice * (1 - tp_percent/100)
+
+    // Move SL to breakeven if profit ≥ breakeven_trig %
+    slPrice := close <= entryPrice * (1 - breakeven_trig/100) ? entryPrice : slPrice
+
+    // Trailing stop: use the better (lower) of current trailing or slPrice
+    trailStop = close * (1 + trail_percent/100)
+    slPrice := math.min(slPrice, trailStop)
+
+    strategy.exit("Exit Short", "Short", stop=slPrice, limit=tpPrice)
+
+// ───────────────────────── Plots & Labels
+plotshape(longCondition, title="BUY", style=shape.labelup, location=location.belowbar, color=color.new(color.green,0), text="BUY", size=size.small)
+plotshape(shortCondition, title="SELL", style=shape.labeldown, location=location.abovebar, color=color.new(color.red,0), text="SELL", size=size.small)
+
+// Info label: preset and key params
+var label info = na
+if barstate.islast
+    label.delete(info)
+    infoText = "Preset: " + preset + "\nTP%: " + str.tostring(tp_percent, "#.##") + "  SL%: " + str.tostring(sl_percent, "#.##") + "  Trail%: " + str.tostring(trail_percent, "#.##")
+    info := label.new(bar_index, high, infoText, xloc=xloc.bar_index, yloc=yloc.abovebar, style=label.style_label_right, color=color.new(color.black,0), textcolor=color.white, size=size.small)
+
+View in Pine Editor・135 lines
+Use on chart
+1
+5
+9
+2
+4 809
+Tired of false signals on Gold?
+PowerTrend Pro combines VWAP, Supertrend, RSI, and smart MA filters with trailing stops & break-even logic to deliver high-probability trades on XAUUSD.
+
+PowerTrend Pro Strategy is a professional-grade trading system designed to capture high-probability swing and intraday opportunities on XAUUSD (Gold) and other volatile markets.
+
+🔑 Core Features
+
+VWAP Anchoring – institutional fair value reference to filter trades.
+
+Supertrend (ATR-based) – adaptive trend filter tuned for Gold’s volatility.
+
+Multi-Timeframe RSI – confirms momentum alignment across intraday and higher timeframe.
+
+EMA + SMA Combo – ensures trades follow strong directional bias, reducing false signals.
+
+Dynamic Risk Management
+
+Adjustable Take Profit / Stop Loss (%)
+
+Trailing Stop that locks in profits on extended moves
+
+Break-Even Logic (stop loss moves to entry once price is in profit)
+
+⚡ Gold-Tuned Presets
+
+XAUUSD 1H → tighter TP/SL & faster entries for active intraday trading.
+
+XAUUSD 4H → wider ATR filter & trailing stops to capture bigger swings.
+
+Generic Mode → works on Forex, Indices, and Crypto (fully customizable).
+
+🎯 Why It Works
+
+Gold is notoriously volatile — quick spikes wipe out weak strategies. PowerTrend Pro solves this by combining:
+✅ Institutional bias (VWAP)
+✅ Adaptive trend filter (Supertrend)
+✅ Momentum confirmation (RSI MTF)
+✅ Robust trend structure (EMA + SMA)
+✅ Smart exits (TP, SL, trailing & breakeven)
+
+This multi-layer confirmation makes entries stronger and keeps risk under control.
+
+🛠️ Usage
+
+Add the strategy to your chart.
+
+Choose a preset (XAUUSD 1H, 4H, or Generic).
+
+Run Strategy Tester for performance metrics.
+
+Optimize TP/SL and ATR values for your broker & market conditions.
+
+🔥 Pro Tip: Combine this strategy with a session filter (London/NY overlap) or volume confirmation to boost accuracy in Gold.

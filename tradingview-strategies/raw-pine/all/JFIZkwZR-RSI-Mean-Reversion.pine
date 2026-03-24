@@ -1,0 +1,85 @@
+//@version=6
+// RSI Mean Reversion Strategy
+// Optimized for Natural Gas Mini (MCX) on 4H timeframe
+// Best configs from optimization: RSI 3, Oversold 34-40, Overbought 70
+strategy('RSI Mean Reversion', shorttitle='RSI MR', overlay=true, initial_capital=200000, default_qty_type=strategy.fixed, default_qty_value=2, commission_type=strategy.commission.cash_per_order, commission_value=40)
+
+const string rsiGroup = 'RSI Settings'
+rsiLength = input.int(3, title='RSI Period', minval=1, maxval=50, group=rsiGroup)
+oversold = input.int(40, title='Oversold Level', minval=5, maxval=49, group=rsiGroup)
+overbought = input.int(70, title='Overbought Level', minval=51, maxval=95, group=rsiGroup)
+
+const string stratGroup = 'Strategy'
+tradeDirection = input.string('Both', title='Trade Direction', options=['Long Only', 'Short Only', 'Both'], group=stratGroup)
+awaitBarConfirmation = input.bool(true, title='Await Bar Confirmation', group=stratGroup)
+
+const string visualGroup = 'Visuals'
+showSignals = input.bool(true, title='Show Buy/Sell Labels', group=visualGroup)
+showRSIPanel = input.bool(true, title='Show RSI Background Shading', group=visualGroup)
+
+//--- RSI Calculation ---
+rsi = ta.rsi(close, rsiLength)
+
+//--- Signal Logic ---
+// Long: RSI crosses back above oversold (was below, now above)
+longSignal = ta.crossover(rsi, oversold)
+// Short: RSI crosses back below overbought (was above, now below)
+shortSignal = ta.crossunder(rsi, overbought)
+
+//--- Plotting ---
+const color longColor = color.green
+const color shortColor = color.red
+const color neutralColor = color.gray
+
+// Background shading when RSI is in extreme zones
+bgcolor(showRSIPanel and rsi < oversold ? color.new(longColor, 90) : na, title='Oversold Zone')
+bgcolor(showRSIPanel and rsi > overbought ? color.new(shortColor, 90) : na, title='Overbought Zone')
+
+// Signal markers
+plotshape(longSignal and showSignals ? low : na, title='Buy Signal', text='Buy', location=location.belowbar, style=shape.labelup, size=size.small, color=longColor, textcolor=color.white)
+plotshape(shortSignal and showSignals ? high : na, title='Sell Signal', text='Sell', location=location.abovebar, style=shape.labeldown, size=size.small, color=shortColor, textcolor=color.white)
+
+//--- Strategy Execution ---
+await = awaitBarConfirmation ? barstate.isconfirmed : true
+
+bool canLong = tradeDirection == 'Long Only' or tradeDirection == 'Both'
+bool canShort = tradeDirection == 'Short Only' or tradeDirection == 'Both'
+
+if longSignal and await
+    if canShort
+        strategy.close('Short')
+    if canLong
+        strategy.entry('Long', strategy.long)
+
+if shortSignal and await
+    if canLong
+        strategy.close('Long')
+    if canShort
+        strategy.entry('Short', strategy.short)
+
+//--- Alerts ---
+alertcondition(longSignal, title='RSI MR Buy', message='RSI Mean Reversion Buy Signal — {{exchange}}:{{ticker}} @ {{close}}')
+alertcondition(shortSignal, title='RSI MR Sell', message='RSI Mean Reversion Sell Signal — {{exchange}}:{{ticker}} @ {{close}}')
+alertcondition(longSignal or shortSignal, title='RSI MR Any Signal', message='RSI Mean Reversion Signal — {{exchange}}:{{ticker}} @ {{close}}')
+
+View in Pine Editor・65 lines
+Use on chart
+3
+1
+8
+2
+3 619
+This is classic Mean Reversion Strategy. I use this on commodities.
+
+This strategy trades mean reversion signals based on the Relative Strength Index (RSI). It is designed for volatile, mean-reverting instruments where price tends to snap back after reaching extreme levels.
+
+How it works:
+The strategy enters a long position when RSI crosses back above the oversold level, signalling that the selling pressure is fading and price is beginning to recover. It enters a short position when RSI crosses back below the overbought level, signalling that buying pressure is weakening and price is starting to pull back. Positions are reversed — a long is closed when a short signal fires and vice versa.
+
+Key feature: Signals trigger when RSI re-enters the normal channel from an extreme zone, not when it first enters the extreme zone. This provides confirmation that the reversal has begun rather than catching a falling knife.
+
+Recommended usage: This strategy works best on volatile instruments that exhibit mean-reverting behaviour, such as Natural Gas futures on the 4-hour timeframe. A short RSI period (3-5) with oversold levels around 30-40 and overbought levels around 70-80 is a good starting point. Optimise the parameters for your specific instrument using backtesting.
+
+Settings: RSI period, oversold level, overbought level, trade direction (Long Only / Short Only / Both), and bar confirmation toggle are all configurable from the settings panel. Alerts are built in for both buy and sell signals.
+
+

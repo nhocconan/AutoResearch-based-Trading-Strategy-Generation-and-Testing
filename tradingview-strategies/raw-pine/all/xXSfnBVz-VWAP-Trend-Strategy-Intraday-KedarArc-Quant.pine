@@ -1,0 +1,374 @@
+//@version=6
+strategy("VWAP Trend Strategy (Intraday) [KedarArc Quant]",
+  overlay=true, initial_capital=100000, pyramiding=0,
+  commission_type=strategy.commission.percent, commission_value=0.02,
+  calc_on_every_tick=true, process_orders_on_close=true,
+  default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+//@author [KedarArc]
+//@createdon 06-Sep-2025
+
+//================ Inputs (tuned defaults)
+htfTf            = input.timeframe("5", "Higher TF for Trend (min)", confirm=true)
+emaFastLen       = input.int(20, "EMA (fast) on entry TF", minval=1)
+emaSlowLen       = input.int(50, "EMA (slow) on entry TF", minval=1)
+emaHTFLen        = input.int(50, "EMA length on Higher TF", minval=1)
+volLen           = input.int(20, "Volume SMA length", minval=1)
+volMult          = input.float(1.0, "Min Volume multiple vs SMA", step=0.1, minval=0.5)
+entryMode        = input.string("Cross+Retest", "Entry mode", options=["Cross only","Cross+Retest"])
+pullbackLookback = input.int(12, "Retest lookback bars", minval=1)
+onePerSide       = input.bool(false, "Max 1 trade per side per day")
+minBarsBetween   = input.int(20, "Min bars between trades (per side)", minval=1)
+useATRStop       = input.bool(true, "Use ATR emergency stop")
+atrLen           = input.int(14, "ATR length", minval=1)
+atrMult          = input.float(1.5, "ATR stop multiplier", step=0.1, minval=0.1)
+// Momentum exception
+useMomentumEx    = input.bool(true, "Enable momentum exception")
+momVolMult       = input.float(1.2, "Momentum min Volume multiple", step=0.1, minval=0.5)
+momBodyPct       = input.float(0.25, "Momentum min candle body %", step=0.05, minval=0.05)
+intrabarEntries  = input.bool(false, "Allow intrabar entries (can repaint intrabar)")
+// Cooldown
+skipMinutes      = input.int(15, "Skip first N minutes after market open", minval=0)
+
+//================ Core calcs (entry TF)
+vwap  = ta.vwap(hlc3)
+emaF  = ta.ema(close, emaFastLen)
+emaS  = ta.ema(close, emaSlowLen)
+volOK = volume >= ta.sma(volume, volLen) * volMult
+// HTF filter (non-repainting)
+htfClose = request.security(syminfo.tickerid, htfTf, close,                    lookahead=barmerge.lookahead_off)
+htfEMA   = request.security(syminfo.tickerid, htfTf, ta.ema(close, emaHTFLen), lookahead=barmerge.lookahead_off)
+bullBias = htfClose > htfEMA
+bearBias = htfClose < htfEMA
+// Ingredients
+crossUp  = ta.crossover(close, vwap)
+crossDn  = ta.crossunder(close, vwap)
+trendUp  = emaF > emaS
+trendDn  = emaF < emaS
+// Precompute lookbacks (consistency)
+lbLow  = ta.lowest(low,  pullbackLookback)
+lbHigh = ta.highest(high, pullbackLookback)
+// Retest
+retestUp  = (close > vwap) and (lbLow  <= vwap) and trendUp and bullBias and volOK
+retestDn  = (close < vwap) and (lbHigh >= vwap) and trendDn and bearBias and volOK
+useRetest = entryMode == "Cross+Retest"
+// Base signals
+baseLong  = (bullBias and trendUp and volOK)  and (crossUp or (useRetest and retestUp))
+baseShort = (bearBias and trendDn and volOK)  and (crossDn or (useRetest and retestDn))
+// Momentum exception
+bodyPct = math.abs(close - open) / nz(open, close) * 100.0
+bigVol  = volume >= ta.sma(volume, volLen) * momVolMult
+momLong  = (close > vwap) and ((open <= vwap) or (low <= vwap)) and trendUp and bullBias and bigVol and (bodyPct >= momBodyPct)
+momShort = (close < vwap) and ((open >= vwap) or (high >= vwap)) and trendDn and bearBias and bigVol and (bodyPct >= momBodyPct)
+// Confirm vs intrabar
+okNow = intrabarEntries ? true : barstate.isconfirmed
+longSignal  = okNow and ( baseLong or (useMomentumEx and momLong) )
+shortSignal = okNow and ( baseShort or (useMomentumEx and momShort) )
+
+//================ Day limit
+var int longTradesToday  = 0
+var int shortTradesToday = 0
+newDay = ta.change(time("D")) != 0
+if newDay
+    longTradesToday  := 0
+    shortTradesToday := 0
+allowLongToday  = (not onePerSide) or (longTradesToday  == 0)
+allowShortToday = (not onePerSide) or (shortTradesToday == 0)
+
+//================ Min bars between trades
+var int lastLongBar  = na
+var int lastShortBar = na
+enoughBarsLong  = na(lastLongBar)  or (bar_index - lastLongBar  >= minBarsBetween)
+enoughBarsShort = na(lastShortBar) or (bar_index - lastShortBar >= minBarsBetween)
+
+//================ Cooldown (session-safe)
+inSession        = session.ismarket
+var int sessOpen = na
+isSessionOpenBar = inSession and not inSession[1]
+if isSessionOpenBar
+    sessOpen := time
+if not inSession
+    sessOpen := na
+minsFromOpen   = inSession and not na(sessOpen) ? (time - sessOpen) / 60000 : 1e9
+cooldownActive = inSession and (minsFromOpen < skipMinutes)
+
+//================ Position state
+pos         = nz(strategy.position_size, 0)
+canLongNow  = bool(pos <= 0)
+canShortNow = bool(pos >= 0)
+
+//================ Unified entries with cooldown
+entryLongNow  = longSignal  and allowLongToday  and canLongNow  and enoughBarsLong  and not cooldownActive
+entryShortNow = shortSignal and allowShortToday and canShortNow and enoughBarsShort and not cooldownActive
+
+//================ Emergency ATR stops
+atr = ta.atr(atrLen)
+longStopNow  = close - atr * atrMult
+shortStopNow = close + atr * atrMult
+if useATRStop
+    strategy.exit("LX-ATR", from_entry="L", stop=longStopNow)
+    strategy.exit("SX-ATR", from_entry="S", stop=shortStopNow)
+
+//================ LABEL STATE (entries/exits)
+var float  L_entry = na
+var float  S_entry = na
+var float  L_risk  = na
+var float  S_risk  = na
+var float  L_stop0 = na
+var float  S_stop0 = na
+var string L_reason = ""
+var string S_reason = ""
+var label  L_lab = na
+var label  S_lab = na
+var label  L_exitLab = na
+var label  S_exitLab = na
+var int    L_lastExitBar = na
+var int    S_lastExitBar = na
+
+//================ Orders + ENTRY LABELS
+if entryLongNow
+    strategy.entry("L", strategy.long)
+    longTradesToday += 1
+    lastLongBar := bar_index
+    L_entry  := close
+    L_stop0  := useATRStop ? longStopNow : (close - atr * atrMult)
+    L_risk   := math.max(0.01, L_entry - L_stop0)
+    L_reason := useMomentumEx and momLong and not baseLong ? "Momentum" : "Base"
+    if not na(L_lab)
+        label.delete(L_lab)
+    L_lab := label.new(bar_index, low, "BUY\n@ " + str.tostring(L_entry, format.mintick) +        "\nSL " + str.tostring(L_stop0, format.mintick) + "\n" + L_reason,        xloc.bar_index, yloc.belowbar, color.new(color.green, 0), label.style_label_up, color.white)
+
+if entryShortNow
+    strategy.entry("S", strategy.short)
+    shortTradesToday += 1
+    lastShortBar := bar_index
+    S_entry  := close
+    S_stop0  := useATRStop ? shortStopNow : (close + atr * atrMult)
+    S_risk   := math.max(0.01, S_stop0 - S_entry)
+    S_reason := useMomentumEx and momShort and not baseShort ? "Momentum" : "Base"
+    if not na(S_lab)
+        label.delete(S_lab)
+    S_lab := label.new(bar_index, high, "SELL\n@ " + str.tostring(S_entry, format.mintick) +        "\nSL " + str.tostring(S_stop0, format.mintick) + "\n" + S_reason,        xloc.bar_index, yloc.abovebar, color.new(color.red, 0), label.style_label_down, color.white)
+
+//================ STRUCTURAL EXITS (trend-break)
+longTrendBreak  = (close < vwap) and (emaF < emaS)
+shortTrendBreak = (close > vwap) and (emaF > emaS)
+if strategy.position_size > 0 and longTrendBreak
+    strategy.close("L", comment="TrendBreak")
+if strategy.position_size < 0 and shortTrendBreak
+    strategy.close("S", comment="TrendBreak")
+
+//================ EXIT LABELS (ATR vs Trend-break)
+longATRHit  = strategy.position_size > 0 and useATRStop and (low  <= longStopNow)
+shortATRHit = strategy.position_size < 0 and useATRStop and (high >= shortStopNow)
+
+// ===== Today stats (R-based): Net-R, Win%, PF =====
+var float todayNetR = 0.0
+var float todayGP   = 0.0   // gross profit (sum of positive R)
+var float todayGL   = 0.0   // gross loss   (sum of |negative R|)
+var int   todayN    = 0
+var int   todayWins = 0
+if newDay
+    todayNetR := 0.0
+    todayGP   := 0.0
+    todayGL   := 0.0
+    todayN    := 0
+    todayWins := 0
+
+// LONG exit labels + stat updates (ATR)
+if longATRHit and (na(L_lastExitBar) or L_lastExitBar != bar_index)
+    float exitPx = longStopNow
+    float rDen   = na(L_risk) ? 0.0 : L_risk
+    float rVal   = rDen > 0 ? (exitPx - L_entry) / rDen : na
+    if not na(L_exitLab)
+        label.delete(L_exitLab)
+    // (Optional text-only UI; not logic)
+    string exitTimeL = str.format("{0,time,HH:mm}", time)
+    L_exitLab := label.new(bar_index, exitPx, "LX-ATR\n@ " + str.tostring(exitPx, format.mintick) +
+                           "\nR=" + (na(rVal) ? "NA" : str.tostring(rVal, format.mintick)) +
+                           "\n" + exitTimeL,
+                           xloc.bar_index, yloc.price, color.new(color.purple, 0), label.style_label_down, color.white)
+    L_lastExitBar := bar_index
+    if not na(rVal)
+        todayN    += 1
+        todayNetR += rVal
+        if rVal > 0
+            todayWins += 1
+            todayGP   += rVal
+        else
+            todayGL   += math.abs(rVal)
+
+// LONG TrendBreak exit labels + stat updates
+if (strategy.position_size[1] > 0 and strategy.position_size == 0) and not longATRHit and (na(L_lastExitBar) or L_lastExitBar != bar_index)
+    float exitPx2 = close
+    float rDen2   = na(L_risk) ? 0.0 : L_risk
+    float rVal2   = rDen2 > 0 ? (exitPx2 - L_entry) / rDen2 : na
+    if not na(L_exitLab)
+        label.delete(L_exitLab)
+    string exitTimeL2 = str.format("{0,time,HH:mm}", time)
+    L_exitLab := label.new(bar_index, exitPx2, "LX TrendBreak\n@ " + str.tostring(exitPx2, format.mintick) +
+                           "\nR=" + (na(rVal2) ? "NA" : str.tostring(rVal2, format.mintick)) +
+                           "\n" + exitTimeL2,
+                           xloc.bar_index, yloc.price, color.new(color.purple, 0), label.style_label_down, color.white)
+    L_lastExitBar := bar_index
+    if not na(rVal2)
+        todayN    += 1
+        todayNetR += rVal2
+        if rVal2 > 0
+            todayWins += 1
+            todayGP   += rVal2
+        else
+            todayGL   += math.abs(rVal2)
+
+// SHORT exit labels + stat updates (ATR)
+if shortATRHit and (na(S_lastExitBar) or S_lastExitBar != bar_index)
+    float exitPxS = shortStopNow
+    float rDenS   = na(S_risk) ? 0.0 : S_risk
+    float rValS   = rDenS > 0 ? (S_entry - exitPxS) / rDenS : na
+    if not na(S_exitLab)
+        label.delete(S_exitLab)
+    string exitTimeS = str.format("{0,time,HH:mm}", time)
+    S_exitLab := label.new(bar_index, exitPxS, "SX-ATR\n@ " + str.tostring(exitPxS, format.mintick) +
+                           "\nR=" + (na(rValS) ? "NA" : str.tostring(rValS, format.mintick)) +
+                           "\n" + exitTimeS,
+                           xloc.bar_index, yloc.price, color.new(color.purple, 0), label.style_label_up, color.white)
+    S_lastExitBar := bar_index
+    if not na(rValS)
+        todayN    += 1
+        todayNetR += rValS
+        if rValS > 0
+            todayWins += 1
+            todayGP   += rValS
+        else
+            todayGL   += math.abs(rValS)
+
+// SHORT TrendBreak exit labels + stat updates
+if (strategy.position_size[1] < 0 and strategy.position_size == 0) and not shortATRHit and (na(S_lastExitBar) or S_lastExitBar != bar_index)
+    float exitPxS2 = close
+    float rDenS2   = na(S_risk) ? 0.0 : S_risk
+    float rValS2   = rDenS2 > 0 ? (S_entry - exitPxS2) / rDenS2 : na
+    if not na(S_exitLab)
+        label.delete(S_exitLab)
+    string exitTimeS2 = str.format("{0,time,HH:mm}", time)
+    S_exitLab := label.new(bar_index, exitPxS2, "SX TrendBreak\n@ " + str.tostring(exitPxS2, format.mintick) +
+                           "\nR=" + (na(rValS2) ? "NA" : str.tostring(rValS2, format.mintick)) +
+                           "\n" + exitTimeS2,
+                           xloc.bar_index, yloc.price, color.new(color.purple, 0), label.style_label_up, color.white)
+    S_lastExitBar := bar_index
+    if not na(rValS2)
+        todayN    += 1
+        todayNetR += rValS2
+        if rValS2 > 0
+            todayWins += 1
+            todayGP   += rValS2
+        else
+            todayGL   += math.abs(rValS2)
+
+//================ Small panel (top-right): Today Net-R | Win% | PF
+var table dash = table.new(position.top_right, 1, 3, frame_width=1, border_width=1)
+float todayWinPct = todayN > 0 ? (100.0 * todayWins / todayN) : na
+float todayPF     = todayGL > 0 ? (todayGP / todayGL) : na
+txtNetR = "Net-R: " + str.tostring(todayNetR, format.mintick)
+txtWin  = "Win%: " + (na(todayWinPct) ? "—" : str.tostring(todayWinPct, format.mintick))
+txtPF   = "PF: "   + (na(todayPF)    ? "—" : str.tostring(todayPF, format.mintick))
+table.cell(dash, 0, 0, txtNetR, text_color=color.white, bgcolor=color.new(color.black, 0))
+table.cell(dash, 0, 1, txtWin,  text_color=color.white, bgcolor=color.new(color.black, 0))
+table.cell(dash, 0, 2, txtPF,   text_color=color.white, bgcolor=color.new(color.black, 0))
+
+//================ Plots & markers (unchanged)
+plot(vwap, "VWAP", color=color.new(color.blue, 0), linewidth=2)
+plot(emaF, "EMA Fast", color=color.new(color.teal, 0), linewidth=2)
+plot(emaS, "EMA Slow", color=color.new(color.orange, 0), linewidth=2)
+plotshape(entryLongNow,  title="Long entry",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.small, text="BUY")
+plotshape(entryShortNow, title="Short entry", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.small, text="SELL")
+plotshape(strategy.position_size > 0 and longTrendBreak,  title="Long trend-break",  style=shape.xcross, location=location.abovebar, color=color.purple, size=size.tiny, text="LX")
+plotshape(strategy.position_size < 0 and shortTrendBreak, title="Short trend-break", style=shape.xcross, location=location.belowbar, color=color.purple, size=size.tiny, text="SX")
+
+//================ Alerts (unchanged)
+alertcondition(entryLongNow,  title="Long placed",  message="{{ticker}} {{interval}} LONG")
+alertcondition(entryShortNow, title="Short placed", message="{{ticker}} {{interval}} SHORT")
+alertcondition(strategy.position_size > 0 and longTrendBreak,  title="Long Trend Break Exit",  message="{{ticker}} {{interval}} LONG exit")
+alertcondition(strategy.position_size < 0 and shortTrendBreak, title="Short Trend Break Exit", message="{{ticker}} {{interval}} SHORT exit")
+
+View in Pine Editor・291 lines
+Use on chart
+1
+8
+8
+3 623
+Description:
+
+An intraday strategy that anchors to VWAP and only trades when a local EMA trend gate and a volume participation gate are both open. It offers two entry templates—Cross and Cross-and-Retest—with an optional Momentum Exception for impulsive moves. Exits combine a TrendBreak (structure flips) with an ATR emergency stop (risk cap).
+Updates will be published under this script.
+
+Why this merits a new script
+
+This is not a simple “VWAP + EMA + ATR” overlay. The components are sequenced as gates and branches that *change the trade set* in ways a visual mashup cannot:
+
+1. Trend Gate first (EMA fast vs. slow on the entry timeframe)
+Counter-trend VWAP crosses are suppressed. Many VWAP scripts fire on every cross; here, no entry logic even evaluates unless the trend gate is open.
+
+2. Participation Gate second (Volume SMA × multiplier)
+This gate filters thin liquidity moves around VWAP. Without it, the same visuals would produce materially more false triggers.
+
+3. Branching entries with structure awareness
+* Cross: Immediate VWAP cross in the trend direction.
+* Cross-and-Retest: Requires a revisit to VWAP vicinity within a lookback window (recent low near VWAP for longs; recent high for shorts). This explicitly removes first-touch fakeouts that a plain cross takes.
+* Momentum Exception (optional): A quantified body% + volume condition can bypass the retest when flow is impulsive—intentional risk-timing, not “just another indicator.”
+
+4. Dual exits that reference both anchor and structure
+* TrendBreak: Close only when price loses VWAP and EMA alignment flips.
+* ATR stop: Placed at entry to cap tail risk.
+These exits complement the entry structure rather than being generic stop/target add-ons.
+
+What it does
+
+* Trades the session’s fair value anchor (VWAP), but only with local-trend agreement (EMA fast vs. slow) and sufficient participation (volume filter).
+
+* Lets you pick Cross or Cross-and-Retest entries; optionally allow a fast Momentum Exception when candles expand with volume.
+
+* Manages positions with a structure exit (TrendBreak) and an emergency ATR stop from entry.
+
+How it works (concepts & calculations)
+
+* VWAP (session anchor):
+Standard VWAP of the active session; entries reference the cross and the retest proximity to VWAP.
+
+* Trend gate:
+Long context only if `EMA(fast) > EMA(slow)`; short only if `EMA(fast) < EMA(slow)`.
+A *gate*, not a trigger—entries aren’t considered unless this is true.
+
+* Participation (volume) gate:
+Require `volume > SMA(volume, volLen) × volMult`.
+Screens out low-participation wiggles around VWAP.
+
+Entries:
+* Cross: Price crosses VWAP in the trend direction while volume gate is open.
+* Cross-and-Retest: After crossing, price revisits VWAP vicinity within `lookback` (recent *low near VWAP* for longs; recent *high near VWAP* for shorts).
+* Momentum Exception (optional): If body% (|close−open| / range) and volume exceed thresholds, enter without waiting for the retest.
+
+Exits:
+* TrendBreak (structure):
+* Longs close when `price < VWAP` and `EMA(fast) < EMA(slow)` (mirror for shorts).
+* ATR stop (risk):
+* From entry: `stop = entry ± ATR(atrLen) × atrMult`.
+
+How to use it ?
+
+1. Select market & timeframe: Intraday on liquid symbols (equities, futures, crypto).
+2. Pick entry mode:
+* Start with Cross-and-Retest for fewer, more selective signals.
+* Enable Momentum Exception if strong moves leave without retesting.
+3. Tune guards:
+* Raise `volMult` to ignore thin periods; lower it for more activity.
+* Adjust `lookback` if retests come late/early on your symbol.
+4. Risk:
+* `atrLen` and `atrMult` set the emergency stop distance.
+5. Read results per session: Optional panel (if enabled) summarizes Net-R, Win%, and PF for today’s session to evaluate
+behavior regime by regime.
+
+
+⚠️ Disclaimer
+This script is provided for educational purposes only.
+Past performance does not guarantee future results.
+Trading involves risk, and users should exercise caution and use proper risk management when applying this strategy.

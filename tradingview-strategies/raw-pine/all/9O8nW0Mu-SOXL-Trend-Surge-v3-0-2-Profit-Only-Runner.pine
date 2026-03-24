@@ -1,0 +1,126 @@
+//@version=6
+strategy("SOXL Trend Surge v3.0.2 – Profit-Only Runner", overlay=true, 
+  default_qty_type=strategy.percent_of_equity, 
+  default_qty_value=100,  // 100% equity used per trade
+  initial_capital=500,    // realistic starting capital
+  commission_type=strategy.commission.percent, 
+  commission_value=0.1, 
+  slippage=1)
+
+emaLength = input(200, "EMA Length")
+atrLength = input(14, "ATR Length")
+atrMultTarget = input(2.0, "ATR Target for Partial Exit")
+cooldownBars = input(15, "Cooldown Bars Between Trades")
+supertrendFactor = input.float(3.0, "Supertrend Factor")
+supertrendATRPeriod = input(10, "Supertrend ATR Period")
+minBarsHeld = input(2, "Minimum Bars to Hold Before Exit")
+volFilterLen = input(20, "Volume MA Length")
+emaBuffer = input(0.005, "EMA No-Trade Buffer %")
+
+// Indicators
+ema = ta.ema(close, emaLength)
+atr = ta.atr(atrLength)
+[supertrend, direction] = ta.supertrend(supertrendFactor, supertrendATRPeriod)
+volOK = volume > ta.sma(volume, volFilterLen)
+atrRising = atr > ta.sma(atr, 20)
+hourOK = hour >= 14 and hour <= 19
+outsideBuffer = math.abs(close - ema) / ema > emaBuffer
+
+// Trade control
+var float entryPrice = na
+var int entryBar = na
+var bool tookPartial = false
+var int lastExitBar = na
+canTrade = na(lastExitBar) or bar_index - lastExitBar > cooldownBars
+
+// Entry condition
+longCondition = close > ema and direction == 1 and hourOK and volOK and outsideBuffer and atrRising and canTrade
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    entryPrice := close
+    entryBar := bar_index
+    tookPartial := false
+
+// Trade management
+barsHeld = bar_index - entryBar
+partialTarget = entryPrice + atr * atrMultTarget
+
+takePartial = not tookPartial and strategy.position_size > 0 and close >= partialTarget and barsHeld >= minBarsHeld
+if (takePartial)
+    strategy.close("Long", qty_percent=50)
+    tookPartial := true
+
+// Trailing stop on final 50% position
+trailOffset = atr * 1.5
+if (tookPartial)
+    strategy.exit("TrailingExit", from_entry="Long", trail_points=trailOffset, trail_offset=trailOffset)
+
+// No hard stop or RSI exit
+// Visuals
+plotshape(longCondition, location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(takePartial, location=location.abovebar, color=color.orange, style=shape.square, size=size.tiny)
+plot(ema, title="200 EMA", color=color.orange)
+
+View in Pine Editor・62 lines
+Use on chart
+9
+7
+2 771
+SOXL Trend Surge v3.0.2 – Profit-Only Runner
+This is a trend-following strategy built for leveraged ETFs like SOXL, designed to ride high-momentum waves with minimal interference. Unlike most short-term scalping scripts, this model allows trades to develop over multiple days to even several months, capitalizing on the full power of extended directional moves — all without using a stop-loss.
+
+🔍 How It Works
+Entry Logic:
+
+Price is above the 200 EMA (long-term trend confirmation)
+
+Supertrend is bullish (momentum confirmation)
+
+ATR is rising (volatility expansion)
+
+Volume is above its 20-bar average (liquidity filter)
+
+Price is outside a small buffer zone from the 200 EMA (to avoid whipsaws)
+
+Trades are restricted to market hours only (9 AM to 2 PM EST)
+
+Cooldown of 15 bars after each exit to prevent overtrading
+
+Exit Strategy:
+
+Takes partial profit at +2× ATR if held for at least 2 bars
+
+Rides the remaining position with a trailing stop at 1.5× ATR
+
+No hard stop-loss — giving space for volatile pullbacks
+
+⚙️ Strategy Settings
+Initial Capital: $500
+
+Risk per Trade: 100% of equity (fully allocated per entry)
+
+Commission: 0.1%
+
+Slippage: 1 tick
+
+Recalculate after order is filled
+
+Fill orders on bar close
+
+Timeframe Optimized For: 45-minute chart
+
+These parameters simulate an aggressive, high-volatility trading model meant for forward-testing compounding potential under realistic trading costs.
+
+✅ What Makes This Unique
+No stop-loss = fewer premature exits
+
+Partial profit-taking helps lock in early wins
+
+Trailing logic gives room to ride large multi-week moves
+
+Uses strict filters (volume, ATR, EMA bias) to enter only during high-probability windows
+
+Ideal for leveraged ETF swing or position traders looking to hold longer than the typical intraday or 2–3 day strategies
+
+⚠️ Important Note
+This is a high-risk, high-reward strategy meant for educational and testing purposes. Without a stop-loss, trades can experience deep drawdowns that may take weeks or even months to recover. Always test thoroughly and adjust position sizing to suit your risk tolerance. Past results do not guarantee future returns. Backtest range: May 8, 2020 – May 23, 2025

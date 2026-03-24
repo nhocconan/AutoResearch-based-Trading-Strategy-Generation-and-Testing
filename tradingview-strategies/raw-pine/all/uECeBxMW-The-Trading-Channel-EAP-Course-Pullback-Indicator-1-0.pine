@@ -1,0 +1,119 @@
+//@version=3
+strategy(title="Pullback 2.0", overlay=true)
+
+barsback = input(3, title='Bars back to check previous high/low')
+riskFactor = input(1.0, title='Risk Factor (TP = SL * risk)') 
+allowSell = input(title='Allow sell signals', type=bool, defval=true)
+allowBuy = input(title='Allow buy signals', type=bool, defval=true)
+ema50 = ema(close, 50)
+ema10 = ema(close, 10)
+
+// Helpers 
+isAboveEMA(index)=>
+    close[index] > ema50
+    // close[index] > ema50 and close[index] < ema10
+
+isBelowEMA(index)=>
+    close[index] < ema50
+    // close[index] < ema50 and close[index] > ema10
+
+isUpBar(index)=>
+    (close[index] - open[index]) > 0
+    
+isDownBar(index)=>
+    (close[index] - open[index]) < 0
+
+candleBodySize(index)=>
+    abs(close[index] - open[index])
+
+// Buy Validation Parts
+isValidBuyRetrace = true
+for i=2 to barsback
+    if(close[0] > high[i])
+        isValidBuyRetrace := false
+
+isValidAboveEMA()=>
+    isAboveEMA(0) and isAboveEMA(1) and isAboveEMA(2)
+
+isValidBuy123()=>
+    (low[0] < low[1] and low[0] < low[2]) or (low[1] < low[0] and low[1] < low[2])
+
+isValidBuyPullback()=>
+    isDownBar(2) and isDownBar(1) and isUpBar(0) and (candleBodySize(0) > candleBodySize(1))
+    // isDownBar(3) and isDownBar(2) and isDownBar(1) and isUpBar(0) and (candleBodySize(0) > candleBodySize(1))
+
+isValidBuyEntry()=>
+    allowBuy and isValidBuyRetrace and isValidAboveEMA() and isValidBuy123() and isValidBuyPullback()
+
+// Sell Validation Parts
+isValidSellRetrace = true
+for i=2 to barsback
+    if(close[0] < low[i])
+        isValidSellRetrace := false
+    
+isValidBelowEMA()=>
+    isBelowEMA(0) and isBelowEMA(1) and isBelowEMA(2)
+
+isValidSell123()=>
+    (high[0] > high[1] and high[0] > high[2]) or (high[1] > high[0] and high[1] > high[2])
+
+isValidSellPullback()=>
+    isUpBar(2) and isUpBar(1) and isDownBar(0) and (candleBodySize(0) > candleBodySize(1))
+    // isUpBar(3) and isUpBar(2) and isUpBar(1) and isDownBar(0) and (candleBodySize(0) > candleBodySize(1))
+
+isValidSellEntry()=>
+    allowSell and isValidSellRetrace and isValidBelowEMA() and isValidSell123() and isValidSellPullback()
+
+plotshape(isValidBuyEntry(), style=shape.arrowup, location=location.abovebar, color=green, text="SIG")
+plotshape(isValidSellEntry(), style=shape.arrowdown, location=location.abovebar, color=orange, text="SIG")
+
+
+// Create orders
+buyStopLoss()=>
+    min(low[0], low[1])
+
+buyProfit()=>
+    ((close[0]-buyStopLoss())*riskFactor)+close[0]
+
+sellStopLoss()=>
+    max(high[0], high[1])
+
+sellProfit()=>
+    close[0]-((sellStopLoss()-close[0])*riskFactor)
+
+
+strategy.entry("long", true, 100, when = isValidBuyEntry())
+strategy.exit("exit", "long", limit = buyProfit(), stop = buyStopLoss(), when = isValidBuyEntry())
+
+strategy.entry("short", false, 100, when = isValidSellEntry())
+strategy.exit("exit", "short", limit = sellProfit(), stop = sellStopLoss(), when = isValidSellEntry())
+
+// plot(sellProfit(), color=blue)
+// plot(sellStopLoss(), color=yellow)
+
+View in Pine Editor・92 lines
+Use on chart
+2
+4
+0
+10
+13 670
+Nov 8, 2018
+I've recently subscribed to TTC's EAP course and created this script to help me.
+
+This is a script to assist with backtesting the strategy outlined in the course. It follows the 5 basic rules of entry.
+Apr 17, 2019
+Release Notes
+Updated Pullback indicator for The Trading Channel EAP Course
+
+There is much clearer signals and improved and organized code
+Apr 23, 2019
+Release Notes
+Added strategy orders to see performance of chart history
+
+Note #1 - ATR hasnt been added to TP & SL yet
+Note #2 - These signals dont take into account retracement level, so verification is required on that front
+Aug 31, 2019
+Release Notes
+- Added risk factor variable to test different strategies
+- I've added checkbox options to ignore either buy or sell signals

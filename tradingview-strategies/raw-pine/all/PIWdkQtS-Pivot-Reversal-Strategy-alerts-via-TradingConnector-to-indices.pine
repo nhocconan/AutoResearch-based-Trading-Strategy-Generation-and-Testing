@@ -1,0 +1,50 @@
+//@version=4
+strategy("Pivot Reversal Strategy + alerts via TradingConnector to indices", overlay=true)
+leftBars = input(4)
+rightBars = input(2)
+swh = pivothigh(leftBars, rightBars)
+swl = pivotlow(leftBars, rightBars)
+swh_cond = not na(swh)
+hprice = 0.0
+hprice := swh_cond ? swh : hprice[1]
+le = false
+le := swh_cond ? true : (le[1] and high > hprice ? false : le[1])
+if (le)
+    strategy.entry("PivRevLE", strategy.long, comment="PivRevLE", stop=hprice + syminfo.mintick)
+    alert(message='long', freq=alert.freq_once_per_bar_close)
+swl_cond = not na(swl)
+lprice = 0.0
+lprice := swl_cond ? swl : lprice[1]
+se = false
+se := swl_cond ? true : (se[1] and low < lprice ? false : se[1])
+if (se)
+    strategy.entry("PivRevSE", strategy.short, comment="PivRevSE", stop=lprice - syminfo.mintick)
+    alert(message='short', freq=alert.freq_once_per_bar_close)
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+//Lines of code added to the original built-in script: 14 and 22 only.
+//They trigger alerts ready to be executed on real markets through TradingConnector
+//available for Forex, indices, crypto, stocks - anything your broker offers for trading via MetaTrader4/5
+
+View in Pine Editor・27 lines
+Use on chart
+9
+9
+5
+4
+27 817
+Software part of algotrading is simpler than you think. TradingView is a great place to do this actually. To present it, I'm publishing each of the default strategies you can find in Pinescript editor's "built-in" list with slight modification - I'm only adding 2 lines of code, which will trigger alerts, ready to be forwarded to your broker via TradingConnector and instantly executed there. Alerts added in this script: 14 and 22.
+
+How it works:
+1. TradingView alert fires.
+2. TradingConnector catches it and forwards to MetaTrader4/5 you got from your broker.
+3. Trade gets executed inside MetaTrader within 1 second of fired alert.
+
+When configuring alert, make sure to select "alert() function calls only" in CreateAlert popup. One alert per ticker is required.
+Adding stop-loss, take-profit, trailing-stop, break-even or executing pending orders is also possible. These topics have been covered in other example posts.
+
+This routing works for Forex, indices, stocks, crypto - anything your broker offers via their MetaTrader4 or 5.
+
+Disclaimer: This concept is presented for educational purposes only. Profitable results of trading this strategy are not guaranteed even if the backtest suggests so. By no means this post can be considered a trading advice. You trade at your own risk.
+
+If you are thinking to execute this particular strategy, make sure to find the instrument, settings and timeframe which you like most. You can do this by your own research only.

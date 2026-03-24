@@ -1,0 +1,118 @@
+//@version=6
+strategy("TickTock (UT entry + Signal stop)", overlay=true)
+
+//────────────────────────────────────
+// LineReg Candles + Signal (stop reference)
+//────────────────────────────────────
+signal_length = input.int(title="Signal Smoothing", minval=1, maxval=200, defval=10)
+sma_signal    = input.bool(title="Simple MA (Signal Line)", defval=true)
+
+lin_reg       = input.bool(title="Lin Reg", defval=true)
+linreg_length = input.int(title="Linear Regression Length", minval=1, maxval=200, defval=11)
+
+bopen  = lin_reg ? ta.linreg(open,  linreg_length, 0) : open
+bhigh  = lin_reg ? ta.linreg(high,  linreg_length, 0) : high
+blow   = lin_reg ? ta.linreg(low,   linreg_length, 0) : low
+bclose = lin_reg ? ta.linreg(close, linreg_length, 0) : close
+
+isGreen = bopen < bclose
+
+signal = sma_signal ? ta.sma(bclose, signal_length) : ta.ema(bclose, signal_length)
+
+plotcandle(isGreen ? bopen : na, isGreen ? bhigh : na, isGreen ? blow : na, isGreen ? bclose : na,
+     title="LinReg Candles Up", color=color.new(color.green, 0), wickcolor=color.new(color.green, 0), bordercolor=color.new(color.green, 0))
+
+plotcandle(isGreen ? na : bopen, isGreen ? na : bhigh, isGreen ? na : blow, isGreen ? na : bclose,
+     title="LinReg Candles Down", color=color.new(color.red, 0), wickcolor=color.new(color.red, 0), bordercolor=color.new(color.red, 0))
+
+plot(signal, title="Signal (Stop Reference)", color=color.white)
+
+// Stop behavior
+grpStop = "Stop-loss behavior"
+useFixedStopAtEntry = input.bool(true, "Stop = signal at entry (fixed)?", group=grpStop)
+
+//────────────────────────────────────
+// UT Bot Alerts (signals)
+//────────────────────────────────────
+grpUT = "UT Bot"
+a = input.float(2.0,  title="Key Value (sensitivity)", group=grpUT)
+c = input.int(1,      title="ATR Period",             group=grpUT)
+h = input.bool(false, title="Signals from Heikin Ashi Candles", group=grpUT)
+
+xATR  = ta.atr(c)
+nLoss = a * xATR
+
+src = h ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close, lookahead=barmerge.lookahead_off) : close
+
+// IMPORTANT: must persist across bars
+var float xATRTrailingStop = na
+prevStop = nz(xATRTrailingStop[1], src)
+
+xATRTrailingStop :=
+     (src > prevStop and src[1] > prevStop) ? math.max(prevStop, src - nLoss) :
+     (src < prevStop and src[1] < prevStop) ? math.min(prevStop, src + nLoss) :
+     (src > prevStop)                       ? (src - nLoss) :
+                                              (src + nLoss)
+
+var int pos = 0
+prevPos = nz(pos[1], 0)
+
+pos :=
+     (src[1] < prevStop and src > prevStop) ?  1 :
+     (src[1] > prevStop and src < prevStop) ? -1 :
+     prevPos
+
+// ema(1) == src, but keeping your structure
+ema   = ta.ema(src, 1)
+above = ta.crossover(ema, xATRTrailingStop)
+below = ta.crossover(xATRTrailingStop, ema)
+
+buy  = src > xATRTrailingStop and above
+sell = src < xATRTrailingStop and below
+
+plotshape(buy,  title="Buy",  text="Buy",  style=shape.labelup,   location=location.belowbar, color=color.green, textcolor=color.white, size=size.tiny)
+plotshape(sell, title="Sell", text="Sell", style=shape.labeldown, location=location.abovebar, color=color.red,   textcolor=color.white, size=size.tiny)
+
+// Optional bar coloring
+barcolor(src > xATRTrailingStop ? color.new(color.green, 80) : na)
+barcolor(src < xATRTrailingStop ? color.new(color.red,   80) : na)
+
+//────────────────────────────────────
+// Strategy wiring
+// - Entry moment = buy
+// - Exit moment  = sell (signal close)
+// - Stop-loss    = signal (fixed at entry OR dynamic)
+//────────────────────────────────────
+var float stopSnap = na
+if buy and strategy.position_size <= 0
+    stopSnap := signal
+    strategy.entry(id="Long", direction=strategy.long)
+
+if sell and strategy.position_size > 0
+    strategy.close(id="Long", comment="Take Profit")
+
+stopSeries = useFixedStopAtEntry ? stopSnap : signal
+
+// Only place/update stop while position is open AND we have a valid stop
+if strategy.position_size > 0 and not na(stopSeries)
+    strategy.exit(id="Long-StopLoss", from_entry="Long", stop=stopSeries)
+
+View in Pine Editor・108 lines
+Use on chart
+9
+4
+4
+4
+12 980
+The video stated to use LineReg Candels indicator combined with UT Bot Alerts
+Setting the inputs to the defvalues i've setted
+setting the chart on heiken ashi and a 30m interval
+Have in mind to follow indicator signals as a strategy, the confirmation of the signal and the entry happen in the
+next open. entering always late, yes but never failing and with automation possibilities. no fakouts real backtest
+as proven by the backtest this is not a good strategy! i should make a ticktok strategies series to disprove them
+
+Always backtest strategies published in ticktock! facebook.com/share/r/1C6iAmkNW4/?mibextid=wwXIfr
+
+
+if you have more strategies from ticktok you want dissproven hit me.
+

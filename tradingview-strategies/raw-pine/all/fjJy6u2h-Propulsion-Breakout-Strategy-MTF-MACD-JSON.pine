@@ -1,0 +1,203 @@
+//@version=5
+strategy("Propulsion Breakout Strategy [MTF + MACD + JSON]", overlay=true, max_bars_back=500, default_qty_type=strategy.percent_of_equity, default_qty_value=2, initial_capital=10000)
+
+// -------------------------------------------------------------------------
+// INPUTS & CONFIGURATION
+// -------------------------------------------------------------------------
+
+// Moving Averages (Trend & Momentum)
+emaShortLen = input.int(10, "Short Term EMA", group="Moving Averages")
+emaMedLen   = input.int(20, "Medium Term EMA", group="Moving Averages")
+
+// Multi-Timeframe
+htfSelect = input.timeframe("240", "Higher Timeframe for Trend", group="Multi-Timeframe")
+
+// MACD (Momentum & Divergence)
+macdFast   = input.int(12, "MACD Fast", group="MACD")
+macdSlow   = input.int(26, "MACD Slow", group="MACD")
+macdSignal = input.int(9,  "MACD Signal", group="MACD")
+
+// Breakout Logic
+pivotLen    = input.int(10, "Pivot Lookback Length", minval=2, group="Breakout Logic")
+touchTol    = input.float(0.5, "Level Touch Tolerance (%)", step=0.1, group="Breakout Logic") / 100
+volCheck    = input.bool(true, "Require Small Candles (Consolidation) before break", group="Breakout Logic")
+
+// -------------------------------------------------------------------------
+// INDICATOR CALCULATIONS
+// -------------------------------------------------------------------------
+
+// 1. Moving Averages (Exponential) - Current Timeframe
+ema10 = ta.ema(close, emaShortLen)
+ema20 = ta.ema(close, emaMedLen)
+
+// 2. Moving Averages - Higher Timeframe (MTF)
+// We use request.security to get HTF data to confirm the broader trend
+ema10_htf = request.security(syminfo.tickerid, htfSelect, ta.ema(close, emaShortLen))
+ema20_htf = request.security(syminfo.tickerid, htfSelect, ta.ema(close, emaMedLen))
+
+// Trend Definitions
+// Strong Up Trend: Price > 10 > 20 on both timeframes
+trendUp_CTF = close > ema10 and ema10 > ema20
+trendUp_HTF = ema10_htf > ema20_htf // Check structure on HTF
+fullUptrend = trendUp_CTF and trendUp_HTF
+
+// Strong Down Trend: Price < 10 < 20 on both timeframes
+trendDn_CTF = close < ema10 and ema10 < ema20
+trendDn_HTF = ema10_htf < ema20_htf
+fullDowntrend = trendDn_CTF and trendDn_HTF
+
+// 3. MACD Calculation (Convergence/Divergence)
+[macdLine, signalLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+// MACD Convergence Rules:
+// Long: MACD Histogram > 0 and Rising implies agreement with price up-move
+// Short: MACD Histogram < 0 and Falling implies agreement with price down-move
+macdBullish = macdHist > 0 and macdLine > signalLine
+macdBearish = macdHist < 0 and macdLine < signalLine
+
+// 4. Volatility / Candle Size Check
+// "Small candles leading into the break"
+// We compare recent ATR (5) to longer ATR (20) to find contraction
+atrShort = ta.atr(5)
+atrLong  = ta.atr(20)
+isConsolidated = volCheck ? (atrShort < atrLong) : true
+
+// -------------------------------------------------------------------------
+// HORIZONTAL LEVEL DETECTION (THE PROPULSION BASE)
+// -------------------------------------------------------------------------
+
+// Logic: 
+// 1. Identify Pivot Highs and Lows.
+// 2. Look for "Touches": Previous pivots that are within the tolerance range of the current pivot.
+// 3. A valid level requires at least 2 separate touches (Current Pivot + 1 Historical).
+
+// Arrays to store active levels
+var line[] resLines = array.new_line()
+var line[] supLines = array.new_line()
+
+// Variables to hold the 'Active' breakout level price
+var float activeResLevel = na
+var float activeSupLevel = na
+
+// Detect Pivots
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+// Function to check if a price is near a level
+isLevel(price1, price2, tol) =>
+    math.abs(price1 - price2) <= (price1 * tol)
+
+// --- RESISTANCE SCANNING (For Longs) ---
+if not na(ph)
+    // Pivot High found. Check history for touches.
+    // We strictly want horizontal levels. 
+    // We assume the high of the pivot is the potential resistance.
+    // In a real complex script, we'd loop back bars. Here, we simulate by checking recent previous pivots.
+    
+    // For visualization and trigger, we only update the active level if we are in an uptrend
+    if fullUptrend
+        activeResLevel := ph
+        
+        // Visual: Draw the line
+        // Remove old lines to reduce clutter (Strategy focuses on current setup)
+//        line.delete(array.get(resLines, 0)) // Clear old
+        array.clear(resLines)
+        
+        l = line.new(bar_index - pivotLen, activeResLevel, bar_index + 10, activeResLevel, color=color.rgb(255, 255, 255), width=1)
+        array.push(resLines, l)
+
+// --- SUPPORT SCANNING (For Shorts) ---
+if not na(pl)
+    if fullDowntrend
+        activeSupLevel := pl
+        
+        // Visual
+//        line.delete(array.get(supLines, 0))
+        array.clear(supLines)
+        
+        l = line.new(bar_index - pivotLen, activeSupLevel, bar_index + 10, activeSupLevel, color=color.red, width=2)
+        array.push(supLines, l)
+
+// Extend lines if they exist
+if array.size(resLines) > 0
+    line.set_x2(array.get(resLines, 0), bar_index)
+if array.size(supLines) > 0
+    line.set_x2(array.get(supLines, 0), bar_index)
+
+
+// -------------------------------------------------------------------------
+// STRATEGY EXECUTION
+// -------------------------------------------------------------------------
+
+// --- LONG SETUP ---
+// 1. Strong Trend (MTF & EMAs aligned)
+// 2. MACD Agreeing (Convergence)
+// 3. Price Breaks Resistance Level
+// 4. Consolidation before break (Checked via isConsolidated)
+
+breakoutUp = false
+if not na(activeResLevel) and fullUptrend and macdBearish == false
+    // Check crossover. Note: activeResLevel is established pivotLen bars ago.
+    // We want the Close to cross OVER the level.
+    if ta.crossover(close, activeResLevel) and isConsolidated
+        breakoutUp := true
+
+// --- SHORT SETUP ---
+breakoutDown = false
+if not na(activeSupLevel) and fullDowntrend and macdBullish == false
+    if ta.crossunder(close, activeSupLevel) and isConsolidated
+        breakoutDown := true
+
+// -------------------------------------------------------------------------
+// ORDERS & JSON ALERTS
+// -------------------------------------------------------------------------
+
+// JSON Payload Construction
+// { "ticker": "BTCUSD", "side": "buy", "timestamp": 1690000000 }
+getJsonPayload(side) =>
+    '{"ticker": "' + syminfo.ticker + '", "side": "' + side + '", "timestamp": ' + str.tostring(timenow) + '}'
+
+// Entry Long
+if breakoutUp and strategy.position_size == 0
+    alertMsg = getJsonPayload("buy")
+    strategy.entry("Long Breakout", strategy.long, alert_message=alertMsg)
+    // Stop Loss: Below the recent low or EMA 20
+    stopPrice = math.min(low, ema20) 
+    strategy.exit("Exit Long", "Long Breakout", stop=stopPrice)
+
+// Entry Short
+if breakoutDown and strategy.position_size == 0
+    alertMsg = getJsonPayload("sell")
+    strategy.entry("Short Breakout", strategy.short, alert_message=alertMsg)
+    // Stop Loss: Above the recent high or EMA 20
+    stopPrice = math.max(high, ema20)
+    strategy.exit("Exit Short", "Short Breakout", stop=stopPrice)
+
+// Trailing Exit / Trend Change Exit
+// If trend invalidates, close position
+if strategy.position_size > 0 and (close < ema20) // Trend broken
+    strategy.close("Long Breakout", comment="Trend Lost", alert_message=getJsonPayload("close_buy"))
+
+if strategy.position_size < 0 and (close > ema20) // Trend broken
+    strategy.close("Short Breakout", comment="Trend Lost", alert_message=getJsonPayload("close_sell"))
+
+// -------------------------------------------------------------------------
+// PLOTTING & CLEANUP
+// -------------------------------------------------------------------------
+
+// Only show markers for resistance/support line that marks the break point and entry/exit arrows.
+// The Lines are drawn in the logic block above using line.new
+
+// Plot EMAs for visual reference of trend (Optional, mostly for debugging, made invisible by default if preferred)
+plot(ema10, "EMA 10", color=color.new(color.yellow, 0))
+plot(ema20, "EMA 20", color=color.new(color.blue, 0))
+
+// Plot Breakout Signals (Arrows)
+plotshape(breakoutUp, title="Long Entry", style=shape.arrowup, location=location.belowbar, color=color.green, size=size.normal, text="BREAK")
+plotshape(breakoutDown, title="Short Entry", style=shape.arrowdown, location=location.abovebar, color=color.red, size=size.normal, text="BREAK")
+
+View in Pine Editor・197 lines
+Use on chart
+3
+367
+Breakout strategy to be used with MACD, Moving Averages on any chart.

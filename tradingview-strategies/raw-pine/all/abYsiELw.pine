@@ -1,0 +1,161 @@
+//@version=5
+strategy("Reflected EMA Difference (RED)", shorttitle="RED [by MarcosPna]", overlay=true) //mv30
+// Análisis de Riesgo
+// Risk Analysis
+media_delta = ta.wma(2 * ta.wma(close, 8 / 2) - ta.wma(close, 8), math.floor(math.sqrt(8)))
+
+// Calcular EMAs
+// Calculate EMAs
+ema_corta_delta = ta.hma(close, 36)
+ema_larga_delta = ta.hma(close, 44)
+
+// Calcular la diferencia entre las EMAs
+// Calculate the difference between EMAs
+diferencia_delta_ema = math.abs(ema_corta_delta - ema_larga_delta)
+
+// Calcular el valor reflejado basado en la posición de la EMA corta
+// Compute the reflected value based on the position of the short EMA
+valor_reflejado_delta = ema_corta_delta + (ema_corta_delta > ema_larga_delta ? diferencia_delta_ema : -diferencia_delta_ema)
+
+// Suavizar el valor reflejado
+// Smooth the reflected value
+periodo_suavizado_delta = input.int(2, title="Periodo extendido")
+ema_suavizada_delta = ta.hma(valor_reflejado_delta, periodo_suavizado_delta)
+
+// Ploteo de las EMAs y la línea reflejada
+// Plot EMAs and the reflected line
+plot(valor_reflejado_delta, title="Reflected EMA Difference (RED)", color=valor_reflejado_delta > ema_suavizada_delta ? color.rgb(253, 25, 238, 30) : color.rgb(183, 255, 30), linewidth=2, style=plot.style_line)
+
+// Parámetros ajustables para la reversión de tendencia
+// Adjustable parameters for trend reversal
+factor_correccion_delta = input.float(title='Porcentaje de cambio', minval=0, maxval=100, step=0.1, defval=0.04)
+tasa_correccion_delta = factor_correccion_delta * 0.01
+
+// Variables para la reversión de tendencia
+// Variables for trend reversal
+var int direccion_delta_tendencia = 0
+var float precio_maximo_delta = na
+var float precio_minimo_delta = na
+var float limite_tendencia_delta = na
+
+// Inicializar precio máximo y mínimo con el primer valor de la EMA suavizada reflejada
+// Initialize peak and trough prices with the first value of the smoothed reflected EMA
+if na(precio_maximo_delta)
+    precio_maximo_delta := ema_suavizada_delta
+if na(precio_minimo_delta)
+    precio_minimo_delta := ema_suavizada_delta
+
+// Lógica de reversión de tendencia con la EMA suavizada reflejada
+// Trend reversal logic with the smoothed reflected EMA
+if direccion_delta_tendencia >= 0
+    if ema_suavizada_delta > precio_maximo_delta
+        precio_maximo_delta := ema_suavizada_delta
+    limite_tendencia_delta := precio_maximo_delta - (precio_maximo_delta * tasa_correccion_delta)
+    if ema_suavizada_delta <= limite_tendencia_delta
+        direccion_delta_tendencia := -1
+        precio_minimo_delta := ema_suavizada_delta
+        strategy.entry("Venta", strategy.short)
+else
+    if ema_suavizada_delta < precio_minimo_delta
+        precio_minimo_delta := ema_suavizada_delta
+    limite_tendencia_delta := precio_minimo_delta + (precio_minimo_delta * tasa_correccion_delta)
+    if ema_suavizada_delta >= limite_tendencia_delta
+        direccion_delta_tendencia := 1
+        precio_maximo_delta := ema_suavizada_delta
+        strategy.entry("Compra", strategy.long)
+
+// Ploteo y señales
+// Plotting and signals
+indice_delta_ascendente = plot(direccion_delta_tendencia == 1 ? limite_tendencia_delta : na, title="Aumento de valor", style=plot.style_linebr, linewidth=3, color=color.new(color.green, 0))
+senal_compra_delta = direccion_delta_tendencia == 1 and direccion_delta_tendencia[1] == -1
+plotshape(senal_compra_delta ? limite_tendencia_delta : na, title="Estilo señal alcista", location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.green, 0))
+
+indice_delta_descendente = plot(direccion_delta_tendencia == 1 ? na : limite_tendencia_delta, title="Disminución de valor", style=plot.style_linebr, linewidth=3, color=color.new(color.red, 0))
+senal_venta_delta = direccion_delta_tendencia == -1 and direccion_delta_tendencia[1] == 1
+plotshape(senal_venta_delta ? limite_tendencia_delta : na, title="Estilo señal bajista", location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.red, 0))
+
+// Variables para manejo de cajas
+// Variables for box management
+var box caja_tendencia_delta = na
+
+// Condición: Cruce de HullMA hacia abajo
+// Condition: HullMA crosses below reflected EMA value
+cruce_bajista_delta = ta.crossunder(media_delta, valor_reflejado_delta)
+
+// Condición: Cruce de HullMA hacia arriba
+// Condition: HullMA crosses above reflected EMA value
+cruce_alcista_delta = ta.crossover(media_delta, valor_reflejado_delta)
+
+// Dibujar caja cuando HullMA cruza hacia abajo el valor reflejado de EMA
+// Draw a box when HullMA crosses below the reflected EMA value
+if (cruce_bajista_delta) and direccion_delta_tendencia == 1
+    caja_tendencia_delta := box.new(left=bar_index, top=high, right=bar_index, bottom=low, text = "Critical Areas", text_color = color.white, border_width=2, border_color=color.rgb(254, 213, 31), bgcolor=color.new(color.red, 90))
+
+// Cerrar caja cuando HullMA cruza hacia arriba el valor reflejado de EMA
+// Close the box when HullMA crosses above the reflected EMA value
+if (cruce_alcista_delta and not na(caja_tendencia_delta))
+    box.set_right(caja_tendencia_delta, bar_index)
+    caja_tendencia_delta := na  // Remove the reference to create a new box at the next cross down
+
+View in Pine Editor・98 lines
+Use on chart
+5
+3
+1
+1
+8 216
+This script, titled "Reflected EMA Difference (RED)," is based on the logic of evaluating the percentage of convergence and divergence between two moving averages, specifically the Hull Moving Averages (HMA), to make price-related decisions. The Hull Moving Average, created by Alan Hull, is used as the foundation of this strategy, offering a faster and more accurate way to analyze market trends. In this script, the concept is employed to measure and reflect price variations.
+
+Script Functionality Overview:
+Hull Moving Averages (HMA): The script utilizes two HMAs, one short-term and one long-term. The main idea is to compute the Delta Difference between these two moving averages, which represents how much they are converging or diverging from each other. This difference is key to identifying potential market trend changes.
+
+
+Reflected HMA Value: Using the Delta Difference between the HMAs, the value of the short-term HMA is reflected, creating a visual reference point that helps traders see the relationship between price and HMAs on the chart.
+
+Percentage Change Index: The second key parameter is the percentage change index. This determines when a trend is reversing, allowing buy or sell orders to be established based on significant changes in the relationship between the HMAs and the price.
+
+Delta Multiplier: The script comes with a default Delta multiplier of 2 for calculating the difference between HMAs, allowing traders to adjust the sensitivity of the analysis based on the time frame being analyzed.
+
+Trend Reversal Signals: When the price crosses the thresholds defined by the percentage change index, buy or sell signals are triggered, based on the detection of a potential trend reversal.
+
+Visual Cues with Boxes: Boxes are drawn on the chart when the HullMA crosses the reflected HMA value, providing a visual aid to identify critical moments where risk should be evaluated.
+
+Alerts for Receiving Signals:
+
+This script allows you to set up buy and sell alerts via TradingView's alert system. These alerts are triggered when trend changes are detected based on the conditions coded in the script. Traders can receive instant notifications, allowing them to make decisions without needing to constantly monitor the chart.
+
+
+
+Additional Considerations:
+The percentage change parameter is adjustable and should be configured based on the time frame you are trading on. For longer time frames, it's advisable to use a larger percentage change to avoid false signals.
+The use of Hull Moving Averages (HMA) provides a faster and more reactive approach to trend evaluation compared to other moving averages, making it a powerful tool for traders seeking quick reversal signals.
+This approach combines the power of Hull Moving Averages with an alert system to improve the trader’s response to trend changes.
+
+Spanish
+
+Este script, titulado "Reflected EMA Difference (RED)", está fundamentado en la lógica de evaluar el porcentaje de acercamiento y distancia entre dos medias móviles, específicamente las medias móviles de Hull (HMA), para tomar decisiones sobre el valor del precio. El creador de la media móvil de Hull, Alan Hull, diseñó este indicador para ofrecer una forma más rápida y precisa de analizar tendencias de mercado, y en este script se utiliza su concepto como base para medir y reflejar las variaciones de precio.
+
+Descripción del funcionamiento:
+Medias Móviles de Hull (HMA): Se utilizan dos HMAs, una de corto plazo y otra de largo plazo. La idea principal es calcular la diferencia Delta entre estas dos medias móviles, que representa cuánto se están alejando o acercando entre sí. Esta diferencia es clave para identificar cambios potenciales en la tendencia del mercado.
+
+
+Valor Reflejado de la HMA: Con la diferencia Delta calculada entre las HMAs, se refleja el valor de la HMA corta, creando un punto de referencia visual que ayuda a los traders a observar la relación entre el precio y las HMAs en el gráfico.
+
+Índice de Cambio de Porcentaje: El segundo parámetro clave del script es el índice de cambio porcentual. Este define el momento en que una tendencia está revirtiendo, permitiendo establecer órdenes de compra o venta en función de un cambio significativo en la relación entre las HMAs y el precio.
+
+Multiplicador Delta: El script tiene un multiplicador predeterminado de 2 para el cálculo de la diferencia Delta, lo que permite ajustar la sensibilidad del análisis según la temporalidad del gráfico.
+
+Señales de Reversión de Tendencia: Cuando el precio cruza los límites definidos por el índice de cambio porcentual, se emiten señales para comprar o vender, basadas en la detección de una posible reversión de tendencia.
+
+Visualización con Cajas: Se dibujan cajas en el gráfico cuando el indicador HullMA cruza el valor reflejado de la HMA, ayudando a identificar visualmente los momentos críticos en los que se debe evaluar el riesgo de las operaciones.
+
+Alertas para Recibir Señales:
+
+Este script permite configurar alertas de compra y venta desde el apartado de alertas de TradingView. Estas alertas se activan cuando se detectan cambios de tendencia en función de las condiciones establecidas en el código. El trader puede recibir notificaciones instantáneas, lo que facilita la toma de decisiones sin necesidad de estar constantemente observando el gráfico.
+
+
+Consideraciones adicionales:
+El porcentaje de cambio es un parámetro ajustable y debe configurarse según la temporalidad que se esté operando. En temporalidades más largas, es recomendable usar un porcentaje de cambio mayor para evitar señales falsas.
+La utilización de las medias móviles de Hull (HMA) proporciona un enfoque más rápido y reactivo para evaluar tendencias en comparación con otras medias móviles, lo que lo convierte en una herramienta poderosa para traders que buscan señales rápidas de reversión.
+Este enfoque combina la potencia de las medias móviles de Hull con un sistema de alertas que mejora la reactividad a cambios de tendencia.
+

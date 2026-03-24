@@ -1,0 +1,72 @@
+//@version=6
+strategy(
+     title="SMMA + StdDev Mean Reversion Strategy (Daily Trend Filter)",
+     overlay=true,
+     pyramiding=0,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     calc_on_every_tick=true
+)
+
+// ───── Inputs ─────
+len        = input.int(50, minval=1, title="SMMA Length (Hourly)")
+src        = input.source(close, title="Source")
+
+stdLen     = input.int(1000, minval=1, title="StdDev Length")
+stdMult    = input.float(0.5, minval=0.1, step=0.1, title="StdDev Multiplier (Upper Band)")
+lowerPct   = input.float(2.0, minval=0.0, step=0.1, title="Lower Band (%)")
+
+slPct      = input.float(1.0, minval=0.1, step=0.1, title="Stop Loss (%)")
+trendLen   = input.int(40, minval=1, title="Daily Trend SMMA Length")
+
+// ───── Hourly SMMA ─────
+smma = 0.0
+smma := na(smma[1]) ? ta.sma(src, len) : (smma[1] * (len - 1) + src) / len
+
+// ───── Daily 40-SMMA (Trend Filter) ─────
+dailySmma = request.security(
+     syminfo.tickerid,
+     "D",
+     ta.sma(src, trendLen),
+     lookahead=barmerge.lookahead_off
+)
+
+// Manual SMMA smoothing on daily series
+dailyTrendSmma = 0.0
+dailyTrendSmma := na(dailyTrendSmma[1]) ? dailySmma : (dailyTrendSmma[1] * (trendLen - 1) + dailySmma) / trendLen
+
+// ───── Trend Condition ─────
+dailyTrendUp = dailyTrendSmma > dailyTrendSmma[1]
+
+// ───── StdDev Bands (Hourly) ─────
+stdevVal = ta.stdev(src, stdLen)
+upper = smma + stdevVal * stdMult
+lower = smma * (1 - lowerPct / 100)
+
+// ───── Entry: CROSS UNDER ONLY ─────
+longEntry = ta.crossunder(close, lower) and dailyTrendUp and strategy.position_size == 0
+
+if longEntry
+    strategy.entry("Long", strategy.long)
+
+// ───── Stop Loss ─────
+if strategy.position_size > 0
+    slPrice = strategy.position_avg_price * (1 - slPct / 100)
+    strategy.exit("SL", from_entry="Long", stop=slPrice)
+
+// ───── Take Profit: FULL exit at upper band ─────
+if strategy.position_size > 0 and ta.crossover(close, upper)
+    strategy.close("Long")
+
+// ───── Plots ─────
+plot(smma, title="Hourly SMMA", color=#673AB7, linewidth=2)
+plot(upper, title="Upper StdDev Band", color=color.new(color.green, 0))
+plot(lower, title="Lower % Band", color=color.new(color.red, 0))
+plot(dailyTrendSmma, title="Daily 40 SMMA (Trend Filter)", color=color.orange, linewidth=2)
+
+View in Pine Editor・65 lines
+Use on chart
+2
+3
+564
+v1 - Spx hourly trading - low drawdown while at market returns for leverage

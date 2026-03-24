@@ -1,0 +1,174 @@
+//@version=6
+strategy(
+     "Gold Mastermind Pro v6",
+     overlay           = true,
+     initial_capital   = 100000,
+     default_qty_type  = strategy.cash,
+     default_qty_value = 10000,
+     max_labels_count  = 50,
+     max_lines_count   = 50)
+
+//======================
+// INPUTS
+//======================
+atr_period        = input.int(14,  "ATR Period")
+ema50_period      = input.int(50,  "EMA50 Period")
+ema200_period     = input.int(200, "EMA200 Period")
+
+rsi_period        = input.int(14,  "RSI Period")
+min_rsi_long      = input.float(40, "Min RSI for Long")
+max_rsi_short     = input.float(60, "Max RSI for Short")
+
+atr_multiplier    = input.float(1.5, "ATR Multiplier")
+reward_multiplier = input.float(2.0, "Reward / Risk Multiplier")
+vwap_tolerance    = input.float(0.25, "VWAP Tolerance (price distance)")
+cooldown_bars     = input.int(5,    "Cooldown (bars after entry)")
+
+risk_per_trade    = input.float(50,   "Risk per Trade ($)")
+tick_value        = input.float(10.0, "Dollar Value per 1.0 price move")
+max_contracts     = input.int(5,      "Max Contracts per Trade")
+
+show_dashboard    = input.bool(true, "Show Dashboard")
+
+//======================
+// INDICATORS
+//======================
+ema50    = ta.ema(close, ema50_period)
+ema200   = ta.ema(close, ema200_period)
+rsi_val  = ta.rsi(close, rsi_period)
+atr_val  = ta.atr(atr_period)
+vwap_val = ta.vwap(hlc3)
+
+// plot EMAs and VWAP
+plot(ema50,  color = color.blue,   linewidth = 2, title = "EMA50")
+plot(ema200, color = color.orange, linewidth = 2, title = "EMA200")
+plot(vwap_val, color = color.purple, linewidth = 2, title = "VWAP")
+
+//======================
+// TREND & SIGNALS
+//======================
+trend =
+     ema50 > ema200 ? "UP"   :
+     ema50 < ema200 ? "DOWN" :
+     "FLAT"
+
+near_vwap_long  = math.abs(close - vwap_val) <= vwap_tolerance
+near_ema50_long = math.abs(close - ema50)    <= atr_val * 0.5
+
+near_vwap_short  = near_vwap_long
+near_ema50_short = near_ema50_long
+
+long_condition =
+     trend == "UP" and
+     (near_vwap_long or near_ema50_long) and
+     rsi_val > min_rsi_long
+
+short_condition =
+     trend == "DOWN" and
+     (near_vwap_short or near_ema50_short) and
+     rsi_val < max_rsi_short
+
+// stop & target based on ATR
+long_stop   = long_condition  ? close - atr_val * atr_multiplier                           : na
+long_target = long_condition  ? close + atr_val * atr_multiplier * reward_multiplier       : na
+short_stop  = short_condition ? close + atr_val * atr_multiplier                           : na
+short_target= short_condition ? close - atr_val * atr_multiplier * reward_multiplier       : na
+
+//======================
+// RISK-BASED QTY FUNCTION
+//======================
+f_calc_qty(entry, stop) =>
+    per_contract_risk = math.abs(entry - stop) * tick_value
+    qty = per_contract_risk > 0 ? math.floor(risk_per_trade / per_contract_risk) : 1
+    qty := math.max(qty, 1)
+    qty := math.min(qty, max_contracts)
+    qty
+
+long_qty  = long_condition  ? f_calc_qty(close, long_stop)  : 0
+short_qty = short_condition ? f_calc_qty(close, short_stop) : 0
+
+//======================
+// COOLDOWN LOGIC
+//======================
+var int last_entry_bar = na
+
+cooldown_active = not na(last_entry_bar) and (bar_index - last_entry_bar) < cooldown_bars
+can_trade       = not cooldown_active and strategy.position_size == 0
+
+//======================
+// ORDER EXECUTION
+//======================
+if can_trade
+    if long_condition and long_qty > 0
+        strategy.entry("Long", strategy.long, qty = long_qty)
+        strategy.exit("Long TP/SL", from_entry = "Long", stop = long_stop, limit = long_target)
+        last_entry_bar := bar_index
+
+    if short_condition and short_qty > 0
+        strategy.entry("Short", strategy.short, qty = short_qty)
+        strategy.exit("Short TP/SL", from_entry = "Short", stop = short_stop, limit = short_target)
+        last_entry_bar := bar_index
+
+//======================
+// TREND BACKGROUND
+//======================
+bgcolor(
+     trend == "UP"   ? color.new(color.aqua,   85) :
+     trend == "DOWN" ? color.new(color.orange, 85) :
+     na)
+
+//======================
+// SIGNAL ARROWS
+//======================
+plotshape(
+     long_condition and can_trade,
+     title     = "Long Arrow",
+     location  = location.belowbar,
+     color     = color.new(color.aqua, 0),
+     style     = shape.arrowup,
+     size      = size.small)
+
+plotshape(
+     short_condition and can_trade,
+     title     = "Short Arrow",
+     location  = location.abovebar,
+     color     = color.new(color.orange, 0),
+     style     = shape.arrowdown,
+     size      = size.small)
+
+// ======================
+// DASHBOARD LABEL
+// ======================
+var label dash = na
+
+if show_dashboard and barstate.islast
+    if na(dash)
+        // create label one time
+        dash := label.new(bar_index, high, "",
+             xloc = xloc.bar_index,
+             yloc = yloc.abovebar,
+             style = label.style_label_left,
+             color = color.new(color.gray, 85),
+             textcolor = color.white,
+             size = size.normal)
+
+    // build dashboard text
+    txt = "Trend: " + trend + "\n" +
+          "Long Qty: "  + str.tostring(long_qty)  + " | SL/TP: " + (long_condition  ? str.tostring(long_stop)  + " / " + str.tostring(long_target)  : "N/A") + "\n" +
+          "Short Qty: " + str.tostring(short_qty) + " | SL/TP: " + (short_condition ? str.tostring(short_stop) + " / " + str.tostring(short_target) : "N/A") + "\n" +
+          "Cooldown: "  + (cooldown_active ? "ON" : "OFF")
+
+    label.set_text(dash, txt)
+    label.set_xy(dash, bar_index, high)
+
+View in Pine Editor・162 lines
+Use on chart
+9
+612
+EMA50 / EMA200 trend (UP / DOWN / FLAT)
+VWAP + ATR + RSI filters for entries
+ATR-based stop & 2R target
+Risk-based position sizing with max 5 contracts
+Cooldown in bars after each entry
+Long arrows = baby blue, Short arrows = bright orange
+Simple dashboard label showing trend, qty, stop & target

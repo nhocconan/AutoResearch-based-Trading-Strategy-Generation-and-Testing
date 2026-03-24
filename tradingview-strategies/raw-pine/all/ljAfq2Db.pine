@@ -1,0 +1,940 @@
+//@version=6
+strategy("AMD + CISD v14", overlay=true,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=10000, commission_type=strategy.commission.percent,
+     commission_value=0.05, slippage=2,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+grpBB = "📊 Bollinger Bands"
+bbLen  = input.int(20, "Longueur", minval=5, maxval=50, group=grpBB)
+bbMult = input.float(2.0, "Mult", minval=0.5, maxval=4.0, step=0.1, group=grpBB)
+showBB = input.bool(false, "Afficher", group=grpBB)
+
+grpSqueeze = "🔒 Squeeze"
+sqzPeriod    = input.int(60, "Lookback", minval=10, maxval=500, group=grpSqueeze)
+sqzThreshold = input.float(30.0, "Seuil %", minval=5.0, maxval=60.0, step=5.0, group=grpSqueeze)
+sqzMinBars   = input.int(5, "Min bars", minval=2, maxval=30, group=grpSqueeze)
+
+grpVol = "📈 Volume"
+volLen      = input.int(20, "Moyenne", minval=5, maxval=50, group=grpVol)
+volHighMult = input.float(1.3, "Fort (x)", minval=1.0, maxval=3.0, step=0.1, group=grpVol)
+
+grpLiq = "💧 Liquidité"
+liqSwingLen     = input.int(3, "Swing len", minval=1, maxval=10, group=grpLiq)
+liqEqualTol     = input.float(0.05, "Tolérance %", minval=0.01, maxval=0.5, step=0.01, group=grpLiq)
+liqScanBars     = input.int(50, "Scan bars", minval=10, maxval=200, group=grpLiq)
+liqMinTouches   = input.int(2, "Min touches", minval=2, maxval=5, group=grpLiq)
+showLiqLevels   = input.bool(true, "Niveaux", group=grpLiq)
+showLiqSweep    = input.bool(true, "Sweep", group=grpLiq)
+colBSL          = input.color(color.new(#F44336, 30), "BSL", group=grpLiq)
+colSSL          = input.color(color.new(#4CAF50, 30), "SSL", group=grpLiq)
+requireLiqSweep = input.bool(true, "Exiger sweep", group=grpLiq)
+
+grpCISD = "🔀 CISD"
+cisdLookback  = input.int(5, "Lookback", minval=1, maxval=20, group=grpCISD)
+showCISD      = input.bool(true, "Afficher", group=grpCISD)
+cisdInvalidOn = input.bool(true, "Invalidation", group=grpCISD)
+cisdInvalBuf  = input.float(0.5, "Buffer inval (xATR)", minval=0.0, maxval=2.0, step=0.1, group=grpCISD)
+cisdClosePos  = input.bool(false, "Fermer pos sur inval", group=grpCISD)
+
+grpManip = "🎯 Manipulation"
+manipBoxWidth = input.int(3, "Box width", minval=1, maxval=10, group=grpManip)
+manipTimeout  = input.int(20, "Timeout", minval=5, maxval=50, group=grpManip)
+
+grpKZ = "⏰ Killzones"
+useKZ      = input.bool(false, "Activer", group=grpKZ)
+showKZBg   = input.bool(true, "Fond", group=grpKZ)
+kzTimezone = input.string("UTC", "Fuseau", options=["UTC", "Europe/Paris", "Europe/London", "America/New_York", "America/Chicago", "Asia/Tokyo", "Asia/Hong_Kong", "Australia/Sydney"], group=grpKZ)
+useLondon   = input.bool(true, "London", group=grpKZ)
+londonStart = input.int(2, "LDN S", minval=0, maxval=23, group=grpKZ)
+londonEnd   = input.int(5, "LDN E", minval=0, maxval=23, group=grpKZ)
+colLdnBg    = input.color(color.new(#2196F3, 92), "LDN", group=grpKZ)
+useNY    = input.bool(true, "NY", group=grpKZ)
+nyStart  = input.int(7, "NY S", minval=0, maxval=23, group=grpKZ)
+nyEnd    = input.int(10, "NY E", minval=0, maxval=23, group=grpKZ)
+colNYBg  = input.color(color.new(#FF9800, 92), "NY", group=grpKZ)
+useAsian    = input.bool(false, "Asian", group=grpKZ)
+asianStart  = input.int(20, "Asia S", minval=0, maxval=23, group=grpKZ)
+asianEnd    = input.int(0, "Asia E", minval=0, maxval=23, group=grpKZ)
+colAsiaBg   = input.color(color.new(#9C27B0, 92), "Asia", group=grpKZ)
+
+grpSignals = "🚀 Signaux"
+signalMode = input.string("Les deux", "Mode", options=["Pullback", "Agressif", "Les deux"], group=grpSignals)
+rrRatio    = input.float(2.0, "R:R", minval=1.0, maxval=5.0, step=0.5, group=grpSignals)
+showTP     = input.bool(true, "TP", group=grpSignals)
+showSL     = input.bool(true, "SL", group=grpSignals)
+colBuy     = input.color(color.new(#00E676, 0), "Buy", group=grpSignals)
+colSell    = input.color(color.new(#FF1744, 0), "Sell", group=grpSignals)
+colTP      = input.color(color.new(#00BCD4, 0), "TP", group=grpSignals)
+colSL      = input.color(color.new(#FF5252, 0), "SL", group=grpSignals)
+
+grpSL = "🛡️ Stop Loss"
+slBuffer   = input.float(0.8, "Buffer (xATR)", minval=0.1, maxval=3.0, step=0.1, group=grpSL)
+slMinATR   = input.float(1.5, "Distance min (xATR)", minval=0.5, maxval=5.0, step=0.1, group=grpSL)
+useBE      = input.bool(true, "Breakeven à 1R", group=grpSL)
+useTrail   = input.bool(false, "Trailing SL", group=grpSL)
+trailATR   = input.float(1.5, "Trail (xATR)", minval=0.5, maxval=3.0, step=0.1, group=grpSL)
+
+grpColors = "🎨 Zones"
+colAccum       = input.color(color.new(color.green, 85), "Accum", group=grpColors)
+colAccumBorder = input.color(color.new(color.green, 40), "Bordure", group=grpColors)
+colManip       = input.color(color.new(color.red, 75), "Manip", group=grpColors)
+colDistrib     = input.color(color.new(color.blue, 85), "Distrib", group=grpColors)
+colCISD_       = input.color(color.new(color.orange, 0), "CISD", group=grpColors)
+colInvalid     = input.color(color.new(color.red, 0), "Invalid", group=grpColors)
+
+showLabels = input.bool(true, "Labels", group="🏷️")
+showAlerts = input.bool(true, "Alertes", group="🏷️")
+showDebug  = input.bool(true, "Debug", group="🐛")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// KILLZONES
+// ══════════════════════════════════════════════════════════════════════════════
+
+kzH = hour(time, kzTimezone)
+f_inSess(int s, int e) => s < e ? (kzH >= s and kzH < e) : (kzH >= s or kzH < e)
+inLdn = useLondon and f_inSess(londonStart, londonEnd)
+inNY  = useNY and f_inSess(nyStart, nyEnd)
+inAsi = useAsian and f_inSess(asianStart, asianEnd)
+bool sigOK = useKZ ? (inLdn or inNY or inAsi) : true
+
+bgcolor(showKZBg and useKZ and inLdn ? colLdnBg : na)
+bgcolor(showKZBg and useKZ and inNY ? colNYBg : na)
+bgcolor(showKZBg and useKZ and inAsi ? colAsiaBg : na)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BOLLINGER & SQUEEZE
+// ══════════════════════════════════════════════════════════════════════════════
+
+bbBasis = ta.sma(close, bbLen)
+bbDev   = bbMult * ta.stdev(close, bbLen)
+bbUp = bbBasis + bbDev
+bbLo = bbBasis - bbDev
+bbW  = (bbUp - bbLo) / bbBasis * 100
+
+plot(showBB ? bbUp : na, "BB+", color=color.new(color.gray, 60))
+plot(showBB ? bbBasis : na, "BB=", color=color.new(color.gray, 80))
+plot(showBB ? bbLo : na, "BB-", color=color.new(color.gray, 60))
+
+float bwMin = ta.lowest(bbW, sqzPeriod)
+float bwMax = ta.highest(bbW, sqzPeriod)
+float bwPct = bwMax != bwMin ? (bbW - bwMin) / (bwMax - bwMin) * 100 : 50.0
+
+volSma = ta.sma(volume, volLen)
+atrVal = ta.atr(14)
+isHVol = volume > volSma * volHighMult
+
+bool isSqz = bwPct <= sqzThreshold
+var int sqzCnt = 0
+sqzCnt := isSqz ? sqzCnt + 1 : 0
+bool sqzOK = sqzCnt >= sqzMinBars
+bool isBrk = (bwPct > sqzThreshold * 2) or isHVol
+
+// ══════════════════════════════════════════════════════════════════════════════
+// LIQUIDITY
+// ══════════════════════════════════════════════════════════════════════════════
+
+f_isSwingHigh(int idx, int len) =>
+    if idx < len or idx < 1
+        false
+    else
+        bool ok = true
+        for j = 1 to len
+            if high[idx] <= high[idx + j] or high[idx] <= high[idx - j]
+                ok := false
+                break
+        ok
+
+f_isSwingLow(int idx, int len) =>
+    if idx < len or idx < 1
+        false
+    else
+        bool ok = true
+        for j = 1 to len
+            if low[idx] >= low[idx + j] or low[idx] >= low[idx - j]
+                ok := false
+                break
+        ok
+
+f_findBSL(int scanLen, int swLen, float tolPct) =>
+    float bLv = na, int bCt = 0, int bBr = na
+    float lv = na, int ct = 0, int br = na
+    for i = swLen to scanLen
+        if f_isSwingHigh(i, swLen)
+            float h = high[i]
+            if na(lv)
+                lv := h
+                ct := 1
+                br := bar_index - i
+            else
+                if math.abs(h - lv) / lv * 100 <= tolPct
+                    ct += 1
+                    lv := math.max(lv, h)
+                else
+                    if ct > bCt
+                        bLv := lv
+                        bCt := ct
+                        bBr := br
+                    lv := h
+                    ct := 1
+                    br := bar_index - i
+    if ct > bCt
+        bLv := lv
+        bCt := ct
+        bBr := br
+    [bLv, bCt, bBr]
+
+f_findSSL(int scanLen, int swLen, float tolPct) =>
+    float bLv = na, int bCt = 0, int bBr = na
+    float lv = na, int ct = 0, int br = na
+    for i = swLen to scanLen
+        if f_isSwingLow(i, swLen)
+            float l = low[i]
+            if na(lv)
+                lv := l
+                ct := 1
+                br := bar_index - i
+            else
+                if math.abs(l - lv) / lv * 100 <= tolPct
+                    ct += 1
+                    lv := math.min(lv, l)
+                else
+                    if ct > bCt
+                        bLv := lv
+                        bCt := ct
+                        bBr := br
+                    lv := l
+                    ct := 1
+                    br := bar_index - i
+    if ct > bCt
+        bLv := lv
+        bCt := ct
+        bBr := br
+    [bLv, bCt, bBr]
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STATE MACHINE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var string PH = "IDLE"
+var float aHi = na, var float aLo = na
+var int aS = na, var int aE = na
+var bool isBr = false
+var float mLv = na, var int mBr = na
+
+// ═══ MANIPULATION ZONE EXTREMES ═══
+// Tracked continuously during MANIP phase
+var float mZoneHi = na   // Highest high since accum ended
+var float mZoneLo = na   // Lowest low since accum ended
+
+var float cLv = na, var int cBr = na
+var bool cInv = false
+var int dS = na
+var bool sF = false
+var float eP = na, var float tP = na, var float sP = na
+var float origSP = na
+var bool beOK = false
+
+var float bslLevel = na, var int bslCount = 0, var int bslBar = na
+var float sslLevel = na, var int sslCount = 0, var int sslBar = na
+var bool bslSwept = false, var bool sslSwept = false
+var line lnBSL = na, var line lnSSL = na
+
+var box bxA = na, var label lbA = na
+var box bxD = na, var label lbD = na
+var line lC = na
+var line lTP = na, var line lSL = na
+var label lbTP = na, var label lbSL = na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SL from stored manipulation zone
+// ══════════════════════════════════════════════════════════════════════════════
+
+f_slShort(float entry, float zoneHi) =>
+    float buf = atrVal * slBuffer
+    float rawSL = zoneHi + buf
+    float minSL = entry + atrVal * slMinATR
+    math.max(rawSL, minSL)
+
+f_slLong(float entry, float zoneLo) =>
+    float buf = atrVal * slBuffer
+    float rawSL = zoneLo - buf
+    float minSL = entry - atrVal * slMinATR
+    math.min(rawSL, minSL)
+
+// ── IDLE → ACCUM ──
+
+if PH == "IDLE" and sqzOK
+    PH := "ACCUM"
+    aHi := ta.highest(high, sqzMinBars)
+    aLo := ta.lowest(low, sqzMinBars)
+    aS := bar_index - sqzMinBars + 1
+    aE := na
+    mLv := na
+    mZoneHi := na
+    mZoneLo := na
+    cLv := na
+    cInv := false
+    dS := na
+    sF := false
+    eP := na
+    tP := na
+    sP := na
+    origSP := na
+    beOK := false
+    bslSwept := false
+    sslSwept := false
+    bxA := na
+    lbA := na
+    bxD := na
+    lbD := na
+    lC := na
+    lTP := na
+    lSL := na
+    lbTP := na
+    lbSL := na
+
+    [bsl, bslC, bslB] = f_findBSL(liqScanBars, liqSwingLen, liqEqualTol)
+    [ssl, sslC, sslB] = f_findSSL(liqScanBars, liqSwingLen, liqEqualTol)
+    bslLevel := bsl
+    bslCount := bslC
+    bslBar := bslB
+    sslLevel := ssl
+    sslCount := sslC
+    sslBar := sslB
+
+    if showLiqLevels and not na(bslLevel)
+        if not na(lnBSL)
+            line.delete(lnBSL)
+        lnBSL := line.new(nz(bslBar, bar_index - liqScanBars), bslLevel, bar_index + 20, bslLevel,
+             color=colBSL, style=line.style_solid, width=2)
+        label.new(bar_index + 20, bslLevel, "BSL" + (bslC >= liqMinTouches ? " 🔥" : ""),
+             color=color.new(colBSL, 70), textcolor=color.red, style=label.style_label_left, size=size.tiny)
+
+    if showLiqLevels and not na(sslLevel)
+        if not na(lnSSL)
+            line.delete(lnSSL)
+        lnSSL := line.new(nz(sslBar, bar_index - liqScanBars), sslLevel, bar_index + 20, sslLevel,
+             color=colSSL, style=line.style_solid, width=2)
+        label.new(bar_index + 20, sslLevel, "SSL" + (sslC >= liqMinTouches ? " 🔥" : ""),
+             color=color.new(colSSL, 70), textcolor=color.green, style=label.style_label_left, size=size.tiny)
+
+// ── ACCUM ──
+
+if PH == "ACCUM"
+    aHi := math.max(aHi, high)
+    aLo := math.min(aLo, low)
+
+    if not na(bxA)
+        box.set_right(bxA, bar_index)
+        box.set_top(bxA, aHi)
+        box.set_bottom(bxA, aLo)
+    else
+        bxA := box.new(aS, aHi, bar_index, aLo,
+             border_color=colAccumBorder, bgcolor=colAccum,
+             border_width=2, border_style=line.style_dashed)
+
+    if showLabels
+        if not na(lbA)
+            label.set_x(lbA, int(math.avg(aS, bar_index)))
+            label.set_y(lbA, aLo)
+        else
+            lbA := label.new(int(math.avg(aS, bar_index)), aLo, "A",
+                 color=color.new(color.green, 100), textcolor=color.new(color.green, 20),
+                 style=label.style_label_up, size=size.large)
+
+    if not na(lnBSL)
+        line.set_x2(lnBSL, bar_index + 20)
+    if not na(lnSSL)
+        line.set_x2(lnSSL, bar_index + 20)
+
+    if not isSqz and isBrk
+        aE := bar_index[1]
+        PH := "MANIP"
+        mBr := bar_index
+
+        // ═══ INIT ZONE TRACKING ═══
+        mZoneHi := high
+        mZoneLo := low
+
+        if not na(bxA)
+            box.set_right(bxA, bar_index[1])
+        bxA := na
+        lbA := na
+
+        line.new(aS, aHi, bar_index + 40, aHi, color=color.new(color.green, 70), style=line.style_dotted, width=1)
+        line.new(aS, aLo, bar_index + 40, aLo, color=color.new(color.green, 70), style=line.style_dotted, width=1)
+
+        if close > bbBasis
+            isBr := true
+            mLv := high
+        else
+            isBr := false
+            mLv := low
+
+    if bar_index - aS > 100
+        PH := "IDLE"
+
+// ── MANIP + WAIT_CISD ──
+
+if PH == "MANIP" or PH == "WAIT_CISD"
+
+    // ═══ TRACK ZONE EXTREMES EVERY BAR ═══
+    mZoneHi := math.max(nz(mZoneHi, high), high)
+    mZoneLo := math.min(nz(mZoneLo, low), low)
+
+    if isBr and high > mLv
+        mLv := high
+        mBr := bar_index
+    if not isBr and low < mLv
+        mLv := low
+        mBr := bar_index
+
+    if not na(lnBSL)
+        line.set_x2(lnBSL, bar_index + 10)
+    if not na(lnSSL)
+        line.set_x2(lnSSL, bar_index + 10)
+
+    if not bslSwept and not na(bslLevel) and high > bslLevel
+        bslSwept := true
+        if showLiqSweep
+            label.new(bar_index, high, "💧BSL", color=color.new(color.red, 60),
+                 textcolor=color.red, style=label.style_label_down, size=size.small)
+        if not na(lnBSL)
+            line.set_x2(lnBSL, bar_index)
+            line.set_style(lnBSL, line.style_dotted)
+
+    if not sslSwept and not na(sslLevel) and low < sslLevel
+        sslSwept := true
+        if showLiqSweep
+            label.new(bar_index, low, "💧SSL", color=color.new(color.green, 60),
+                 textcolor=color.green, style=label.style_label_up, size=size.small)
+        if not na(lnSSL)
+            line.set_x2(lnSSL, bar_index)
+            line.set_style(lnSSL, line.style_dotted)
+
+    bool mOK = false
+    if PH == "MANIP"
+        if isBr
+            bool liqOK = requireLiqSweep ? bslSwept : true
+            if liqOK and (high > aHi or mLv > aHi) and (close < open or close < (aHi + aLo) / 2)
+                mOK := true
+        else
+            bool liqOK = requireLiqSweep ? sslSwept : true
+            if liqOK and (low < aLo or mLv < aLo) and (close > open or close > (aHi + aLo) / 2)
+                mOK := true
+
+        if mOK
+            int mL = math.max(nz(aE, bar_index - manipBoxWidth), bar_index - manipBoxWidth)
+            if isBr
+                box.new(mL, mLv, bar_index, aHi, border_color=color.new(color.red, 30), bgcolor=colManip, border_width=2)
+            else
+                box.new(mL, aLo, bar_index, mLv, border_color=color.new(color.red, 30), bgcolor=colManip, border_width=2)
+            if showLabels
+                label.new(bar_index, isBr ? mLv : mLv, "M",
+                     color=color.new(color.red, 100), textcolor=color.red,
+                     style=isBr ? label.style_label_down : label.style_label_up, size=size.large)
+
+    // CISD
+    bool cOK = false
+    bool canSearch = PH == "WAIT_CISD" or mOK or (bar_index - nz(aE, bar_index) > 3 and (not requireLiqSweep or bslSwept or sslSwept))
+
+    if canSearch
+        if isBr
+            for i = 1 to cisdLookback
+                if close[i] > open[i] and close < low[i]
+                    cOK := true
+                    cLv := low[i]
+                    cBr := bar_index
+                    break
+        else
+            for i = 1 to cisdLookback
+                if close[i] < open[i] and close > high[i]
+                    cOK := true
+                    cLv := high[i]
+                    cBr := bar_index
+                    break
+
+        if cOK
+            PH := "DISTRIB"
+            dS := bar_index
+            cInv := false
+            sF := false
+            beOK := false
+
+            if showCISD
+                lC := line.new(bar_index - cisdLookback, cLv, bar_index + 10, cLv,
+                     color=colCISD_, style=line.style_dashed, width=2)
+            if showLabels
+                label.new(bar_index, cLv, " CISD ", color=color.new(color.orange, 70),
+                     textcolor=colCISD_, style=label.style_label_left, size=size.small)
+
+            // ═══ AGGRESSIVE ENTRY — SL from STORED mZoneHi/mZoneLo ═══
+            if (signalMode == "Agressif" or signalMode == "Les deux") and sigOK
+                if isBr
+                    eP := close
+                    sP := f_slShort(eP, mZoneHi)
+                    float risk = sP - eP
+                    tP := eP - risk * rrRatio
+                    origSP := sP
+                    if risk > atrVal * 0.3
+                        strategy.entry("S", strategy.short)
+                        strategy.exit("XS", "S", limit=tP, stop=sP)
+                        sF := true
+                        label.new(bar_index, high,
+                             "🔻SELL " + str.tostring(eP, format.mintick) +
+                             "\nSL " + str.tostring(sP, format.mintick) + " (" + str.tostring(risk / atrVal, "#.#") + "ATR)" +
+                             "\nTP " + str.tostring(tP, format.mintick),
+                             color=colSell, textcolor=color.white,
+                             style=label.style_label_down, size=size.small)
+                else
+                    eP := close
+                    sP := f_slLong(eP, mZoneLo)
+                    float risk = eP - sP
+                    tP := eP + risk * rrRatio
+                    origSP := sP
+                    if risk > atrVal * 0.3
+                        strategy.entry("L", strategy.long)
+                        strategy.exit("XL", "L", limit=tP, stop=sP)
+                        sF := true
+                        label.new(bar_index, low,
+                             "🔺BUY " + str.tostring(eP, format.mintick) +
+                             "\nSL " + str.tostring(sP, format.mintick) + " (" + str.tostring(risk / atrVal, "#.#") + "ATR)" +
+                             "\nTP " + str.tostring(tP, format.mintick),
+                             color=colBuy, textcolor=color.white,
+                             style=label.style_label_up, size=size.small)
+
+    if PH == "MANIP" and not cOK
+        if mOK
+            PH := "WAIT_CISD"
+        if bar_index - nz(aE, bar_index) > manipTimeout
+            PH := "IDLE"
+
+    if PH == "WAIT_CISD" and not cOK
+        if bar_index - nz(aE, bar_index) > manipTimeout
+            PH := "IDLE"
+
+// ── DISTRIB ──
+
+if PH == "DISTRIB"
+    // PULLBACK
+    if (signalMode == "Pullback" or signalMode == "Les deux") and not sF and not cInv and sigOK
+        if isBr
+            if high >= cLv * 0.9995 and close < cLv
+                eP := close
+                sP := f_slShort(eP, mZoneHi)
+                float risk = sP - eP
+                tP := eP - risk * rrRatio
+                origSP := sP
+                beOK := false
+                if risk > atrVal * 0.3
+                    strategy.entry("SPB", strategy.short)
+                    strategy.exit("XSPB", "SPB", limit=tP, stop=sP)
+                    sF := true
+                    label.new(bar_index, high,
+                         "🔻PB " + str.tostring(eP, format.mintick) +
+                         "\nSL " + str.tostring(sP, format.mintick),
+                         color=colSell, textcolor=color.white,
+                         style=label.style_label_down, size=size.small)
+        else
+            if low <= cLv * 1.0005 and close > cLv
+                eP := close
+                sP := f_slLong(eP, mZoneLo)
+                float risk = eP - sP
+                tP := eP + risk * rrRatio
+                origSP := sP
+                beOK := false
+                if risk > atrVal * 0.3
+                    strategy.entry("LPB", strategy.long)
+                    strategy.exit("XLPB", "LPB", limit=tP, stop=sP)
+                    sF := true
+                    label.new(bar_index, low,
+                         "🔺PB " + str.tostring(eP, format.mintick) +
+                         "\nSL " + str.tostring(sP, format.mintick),
+                         color=colBuy, textcolor=color.white,
+                         style=label.style_label_up, size=size.small)
+
+    // BE & TRAIL
+    if sF and strategy.opentrades > 0 and not cInv
+        float risk = math.abs(eP - origSP)
+        if useBE and not beOK
+            if isBr and eP - low >= risk
+                beOK := true
+                sP := eP - syminfo.mintick * 5
+                strategy.exit("XS", "S", limit=tP, stop=sP)
+                strategy.exit("XSPB", "SPB", limit=tP, stop=sP)
+                label.new(bar_index, eP, "BE🔒", color=color.new(color.yellow, 70),
+                     textcolor=color.yellow, style=label.style_label_center, size=size.tiny)
+            if not isBr and high - eP >= risk
+                beOK := true
+                sP := eP + syminfo.mintick * 5
+                strategy.exit("XL", "L", limit=tP, stop=sP)
+                strategy.exit("XLPB", "LPB", limit=tP, stop=sP)
+                label.new(bar_index, eP, "BE🔒", color=color.new(color.yellow, 70),
+                     textcolor=color.yellow, style=label.style_label_center, size=size.tiny)
+
+        if useTrail and beOK
+            float td = atrVal * trailATR
+            if isBr
+                float ns = low + td
+                if ns < sP
+                    sP := ns
+                    strategy.exit("XS", "S", limit=tP, stop=sP)
+                    strategy.exit("XSPB", "SPB", limit=tP, stop=sP)
+            else
+                float ns = high - td
+                if ns > sP
+                    sP := ns
+                    strategy.exit("XL", "L", limit=tP, stop=sP)
+                    strategy.exit("XLPB", "LPB", limit=tP, stop=sP)
+
+    // TP/SL lines
+    if sF and not na(tP) and not na(sP) and not cInv
+        if showTP
+            if not na(lTP)
+                line.set_x2(lTP, bar_index + 10)
+                line.set_y1(lTP, tP)
+                line.set_y2(lTP, tP)
+            else
+                lTP := line.new(nz(cBr, bar_index), tP, bar_index + 10, tP,
+                     color=colTP, style=line.style_solid, width=2)
+                lbTP := label.new(bar_index + 10, tP, "TP " + str.tostring(tP, format.mintick),
+                     color=color.new(colTP, 80), textcolor=colTP, style=label.style_label_left, size=size.tiny)
+            if not na(lbTP)
+                label.set_x(lbTP, bar_index + 10)
+                label.set_y(lbTP, tP)
+
+        if showSL
+            if not na(lSL)
+                line.set_x2(lSL, bar_index + 10)
+                line.set_y1(lSL, sP)
+                line.set_y2(lSL, sP)
+            else
+                lSL := line.new(nz(cBr, bar_index), sP, bar_index + 10, sP,
+                     color=colSL, style=line.style_solid, width=2)
+                lbSL := label.new(bar_index + 10, sP, "SL " + str.tostring(sP, format.mintick),
+                     color=color.new(colSL, 80), textcolor=colSL, style=label.style_label_left, size=size.tiny)
+            if not na(lbSL)
+                label.set_x(lbSL, bar_index + 10)
+                label.set_y(lbSL, sP)
+                label.set_text(lbSL, "SL " + str.tostring(sP, format.mintick) + (beOK ? " 🔒" : ""))
+
+        bool tpH = isBr ? low <= tP : high >= tP
+        bool slH = isBr ? high >= sP : low <= sP
+        if tpH
+            label.new(bar_index, tP, "✅TP", color=color.new(colTP, 70),
+                 textcolor=colTP, style=label.style_label_center, size=size.small)
+            sF := false
+            lTP := na
+            lSL := na
+            lbTP := na
+            lbSL := na
+            PH := "IDLE"
+        if slH and not tpH
+            label.new(bar_index, sP, "❌SL", color=color.new(colSL, 70),
+                 textcolor=colSL, style=label.style_label_center, size=size.small)
+            sF := false
+            lTP := na
+            lSL := na
+            lbTP := na
+            lbSL := na
+            PH := "IDLE"
+
+    // CISD Invalidation
+    if cisdInvalidOn and not cInv
+        float invalBuf = atrVal * cisdInvalBuf
+        bool inv = isBr ? close > (cLv + invalBuf) : close < (cLv - invalBuf)
+        if inv
+            cInv := true
+            label.new(bar_index, cLv, "✗", color=color.new(colInvalid, 100),
+                 textcolor=colInvalid, style=label.style_label_center, size=size.normal)
+            if cisdClosePos and strategy.opentrades > 0
+                strategy.close_all(comment="CISD X")
+                sF := false
+                lTP := na
+                lSL := na
+                lbTP := na
+                lbSL := na
+            if not na(lC)
+                line.set_x2(lC, bar_index)
+                lC := na
+            if not na(bxD)
+                box.set_right(bxD, bar_index)
+                bxD := na
+                lbD := na
+
+    if cInv and not sF and PH == "DISTRIB"
+        PH := "IDLE"
+
+    if not cInv and not na(lC)
+        line.set_x2(lC, bar_index + 5)
+
+    if not cInv and not na(dS)
+        float dT = na, float dB = na
+        if isBr
+            dT := cLv
+            dB := low
+            for i = 0 to math.min(bar_index - dS, 300)
+                if bar_index - i >= dS
+                    dB := math.min(dB, low[i])
+        else
+            dB := cLv
+            dT := high
+            for i = 0 to math.min(bar_index - dS, 300)
+                if bar_index - i >= dS
+                    dT := math.max(dT, high[i])
+
+        if not na(bxD)
+            box.set_right(bxD, bar_index)
+            box.set_top(bxD, dT)
+            box.set_bottom(bxD, dB)
+        else
+            bxD := box.new(dS, dT, bar_index, dB,
+                 border_color=color.new(color.blue, 40), bgcolor=colDistrib, border_width=1)
+
+        if showLabels
+            if not na(lbD)
+                label.set_x(lbD, int(math.avg(dS, bar_index)))
+                label.set_y(lbD, isBr ? dT : dB)
+            else
+                lbD := label.new(int(math.avg(dS, bar_index)), isBr ? dT : dB, "D",
+                     color=color.new(color.blue, 100), textcolor=color.new(color.blue, 20),
+                     style=isBr ? label.style_label_down : label.style_label_up, size=size.large)
+
+    if sqzOK and not cInv
+        if not na(bxD)
+            box.set_right(bxD, bar_index)
+        bxD := na
+        lbD := na
+        if not na(lC)
+            line.set_x2(lC, bar_index)
+        lC := na
+        lTP := na
+        lSL := na
+        lbTP := na
+        lbSL := na
+        PH := "IDLE"
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DEBUG
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table dbg = table.new(position.bottom_left, 2, 11, bgcolor=color.new(color.black, 85), border_width=1)
+if showDebug and barstate.islast
+    table.cell(dbg, 0, 0, "Phase", text_color=color.gray, text_size=size.tiny)
+    table.cell(dbg, 1, 0, PH, text_color=color.white, text_size=size.tiny)
+
+    table.cell(dbg, 0, 1, "ATR(14)", text_color=color.gray, text_size=size.tiny)
+    table.cell(dbg, 1, 1, str.tostring(atrVal, format.mintick), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dbg, 0, 2, "ManipZone Hi", text_color=color.gray, text_size=size.tiny)
+    table.cell(dbg, 1, 2, not na(mZoneHi) ? str.tostring(mZoneHi, format.mintick) : "—", text_color=color.red, text_size=size.tiny)
+
+    table.cell(dbg, 0, 3, "ManipZone Lo", text_color=color.gray, text_size=size.tiny)
+    table.cell(dbg, 1, 3, not na(mZoneLo) ? str.tostring(mZoneLo, format.mintick) : "—", text_color=color.green, text_size=size.tiny)
+
+    table.cell(dbg, 0, 4, "Entry", text_color=color.gray, text_size=size.tiny)
+    table.cell(dbg, 1, 4, sF ? str.tostring(eP, format.mintick) : "—", text_color=color.white, text_size=size.tiny)
+
+    table.cell(dbg, 0, 5, "SL", text_color=color.gray, text_size=size.tiny)
+    float slDist = sF and not na(eP) and not na(sP) ? math.abs(sP - eP) : na
+    table.cell(dbg, 1, 5, sF ? str.tostring(sP, format.mintick) + " (dist:" + str.tostring(slDist, format.mintick) + " = " + str.tostring(nz(slDist / atrVal, 0), "#.#") + "ATR)" : "—",
+         text_color=beOK ? color.yellow : colSL, text_size=size.tiny)
+
+    table.cell(dbg, 0, 6, "SL min requis", text_color=color.gray, text_size=size.tiny)
+    table.cell(dbg, 1, 6, str.tostring(atrVal * slMinATR, format.mintick) + " (" + str.tostring(slMinATR, "#.#") + "ATR)", text_color=color.yellow, text_size=size.tiny)
+
+    table.cell(dbg, 0, 7, "BSL", text_color=color.gray, text_size=size.tiny)
+    table.cell(dbg, 1, 7, not na(bslLevel) ? str.tostring(bslLevel, format.mintick) + (bslSwept ? " 💧" : "") : "—",
+         text_color=bslSwept ? color.red : color.white, text_size=size.tiny)
+
+    table.cell(dbg, 0, 8, "SSL", text_color=color.gray, text_size=size.tiny)
+    table.cell(dbg, 1, 8, not na(sslLevel) ? str.tostring(sslLevel, format.mintick) + (sslSwept ? " 💧" : "") : "—",
+         text_color=sslSwept ? color.green : color.white, text_size=size.tiny)
+
+    table.cell(dbg, 0, 9, "Sqz", text_color=color.gray, text_size=size.tiny)
+    table.cell(dbg, 1, 9, str.tostring(sqzCnt) + "/" + str.tostring(sqzMinBars) + " BW:" + str.tostring(bwPct, "#.#") + "%",
+         text_color=sqzOK ? color.green : color.orange, text_size=size.tiny)
+
+    table.cell(dbg, 0, 10, "Trades", text_color=color.gray, text_size=size.tiny)
+    float wr = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0
+    table.cell(dbg, 1, 10, str.tostring(strategy.closedtrades) + " W:" + str.tostring(strategy.wintrades) + " WR:" + str.tostring(wr, "#.#") + "%",
+         text_color=color.white, text_size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+if showAlerts and bslSwept and not bslSwept[1]
+    alert("💧BSL SWEPT", alert.freq_once_per_bar)
+if showAlerts and sslSwept and not sslSwept[1]
+    alert("💧SSL SWEPT", alert.freq_once_per_bar)
+if showAlerts and sF and not sF[1]
+    alert((isBr ? "SELL" : "BUY") + " E:" + str.tostring(eP, format.mintick) + " SL:" + str.tostring(sP, format.mintick) + " TP:" + str.tostring(tP, format.mintick), alert.freq_once_per_bar)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table dash = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(dash, 0, 0, "AMD+CISD", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, "v14", text_color=color.gray, text_size=size.tiny)
+
+    color pc = PH == "ACCUM" ? color.green : PH == "MANIP" or PH == "WAIT_CISD" ? color.red : PH == "DISTRIB" ? color.blue : color.gray
+    table.cell(dash, 0, 1, "Phase", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 1, PH, text_color=pc, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "Dir", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 2, PH != "IDLE" ? (isBr ? "🐻" : "🐂") : "—", text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Liq", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 3, (bslSwept ? "BSL💧 " : "") + (sslSwept ? "SSL💧" : (not bslSwept ? "⏳" : "")),
+         text_color=color.orange, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "── STATS ──", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 4, "", text_size=size.tiny)
+
+    float np = strategy.netprofit
+    table.cell(dash, 0, 5, "P&L", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 5, str.tostring(np, "#.##") + "$", text_color=np >= 0 ? color.green : color.red, text_size=size.tiny)
+
+    float tot = strategy.closedtrades
+    float w = strategy.wintrades
+    float wr = tot > 0 ? w / tot * 100 : 0
+    table.cell(dash, 0, 6, "WR", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 6, str.tostring(wr, "#.#") + "% (" + str.tostring(w, "#") + "/" + str.tostring(tot, "#") + ")",
+         text_color=wr >= 50 ? color.green : color.red, text_size=size.tiny)
+
+    float pf = strategy.grossloss != 0 ? math.abs(strategy.grossprofit / strategy.grossloss) : 0
+    table.cell(dash, 0, 7, "PF", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 7, str.tostring(pf, "#.##"), text_color=pf >= 1.5 ? color.green : pf >= 1 ? color.orange : color.red, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "DD", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 8, str.tostring(strategy.max_drawdown, "#.##") + "$", text_color=color.red, text_size=size.tiny)
+
+View in Pine Editor・818 lines
+Use on chart
+7
+2
+1
+2 240
+AMD + CISD v12 — Smart Money Concept Strategy
+📋 Description
+AMD + CISD is a complete strategy based on Smart Money Concepts (ICT) that automatically detects Accumulation → Manipulation → Distribution cycles by combining volatility analysis (Bollinger Bands), volume profiling and institutional liquidity detection.
+Unlike traditional AMD indicators relying on fixed session times, this strategy uses market structure itself to identify phases — making it universal across all markets (Crypto, Forex, Indices, Stocks) and all timeframes.
+
+🔑 Core Concepts
+Accumulation (A)
+The market enters a compression phase: Bollinger Bands squeeze and volume drops. Price builds a tight range where liquidity accumulates on both sides — buy stops AND sell stops stack above and below the range.
+Manipulation (M) — Liquidity Sweep
+Price violently breaks out of the range with a volume spike to grab liquidity:
+
+BSL (Buy Side Liquidity) 💧: Sweeps the highs — sellers' stops get triggered
+SSL (Sell Side Liquidity) 💧: Sweeps the lows — buyers' stops get triggered
+
+This is the institutional trap: the move lures retail traders into the wrong direction.
+CISD (Change In State of Delivery)
+The exact moment price reverses direction after manipulation. It's the break of the last opposing candle (the low of the last bullish candle for a bearish AMD, or the high of the last bearish candle for a bullish AMD). This is the entry trigger.
+Distribution (D)
+The real directional move begins — opposite to the manipulation. This is where smart money distributes positions and informed traders profit.
+
+🔍 How It Works
+Phase Detection
+
+Bollinger Squeeze (bandwidth in lowest percentiles) → Accumulation phase detected
+Breakout + Volume spike → Transition to Manipulation
+Liquidity pool scan (BSL/SSL) via clustered swing highs/lows
+Liquidity sweep confirmed 💧 → Manipulation validated
+CISD detected (structure break) → Entry signal
+Distribution → Trade active with TP/SL
+
+Trading Signals
+ModeDescriptionAggressiveImmediate entry on CISD confirmationPullbackEntry on CISD level retest with low volume — better R:RBothCombines both modes — double opportunity
+
+🛡️ Smart Stop Loss (3 Modes)
+The SL is the critical component of this strategy. Three modes available:
+ModeLogicManip Zone (recommended)SL placed above/below the ENTIRE manipulation zone + ATR bufferStructureSL at the last significant swing high/low + bufferFixed ATRSL at fixed ATR distance from manipulation level
+Additional Protections
+
+Minimum SL Distance: SL is always at least 1 ATR from entry — prevents tight stops getting hunted
+Configurable Buffer: Extra ATR buffer added to SL
+Auto Breakeven 🔒: SL moves to entry price when trade reaches 1R profit
+Trailing SL (optional): SL follows price at a set distance once in profit
+
+CISD Invalidation
+
+CISD is only invalidated if price closes beyond the level + an ATR buffer (not on a simple retest/wick)
+Configurable option: invalidation can close the trade immediately OR let TP/SL manage the exit (recommended OFF)
+
+
+💧 Liquidity Detection
+The indicator automatically scans for institutional liquidity pools:
+
+BSL (Buy Side Liquidity) 🔴: Cluster of swing highs at the same level — zone where sellers' stops are concentrated
+SSL (Sell Side Liquidity) 🟢: Cluster of swing lows — zone where buyers' stops are concentrated
+🔥 Strong Pool: Displayed when touch count exceeds the configured threshold
+💧 SWEPT: Marked when price runs through a liquidity pool
+
+The liquidity filter can be enabled to only allow signals when a BSL or SSL pool has actually been swept — significantly increases signal quality.
+
+⏰ Killzones (Session Filter)
+Optional filter to limit signals to the most active trading sessions:
+
+London (02:00-05:00 UTC default)
+New York (07:00-10:00 UTC default)
+Asian (20:00-00:00 UTC default)
+Configurable timezone (UTC, Paris, London, New York, Tokyo...)
+
+AMD patterns are always drawn on chart, only trading signals are filtered.
+
+📊 Dashboard & Debug
+Dashboard (top right)
+
+Current phase, direction, BSL/SSL status
+Active SL mode + breakeven status
+Backtest stats: Net P&L, Win Rate, Profit Factor, Max Drawdown
+
+Debug Panel (bottom left)
+
+Bandwidth percentile, squeeze count
+BSL/SSL levels and sweep status
+SL distance in ATR, CISD buffer
+Trade count
+
+
+⚙️ Recommended Settings
+Getting Started
+
+Squeeze: Threshold 30%, Min Duration 5, Lookback 60
+High Volume: 1.3x average
+SL Mode: Manip Zone, Buffer 0.5 ATR, Min 1 ATR
+R:R: 2.0
+Liquidity: Require sweep ON
+CISD: Invalidation ON, Buffer 0.5 ATR, Close position OFF
+Killzones: OFF to start, then enable to filter
+
+Market-Specific Adjustments
+
+Crypto: Increase squeeze threshold to 35-40%, SL buffer to 0.7 ATR
+Forex: Default settings, enable London + NY killzones
+Indices: Reduce bandwidth lookback to 40, squeeze min 3 bars
+
+
+⚠️ Disclaimer
+This indicator is a technical analysis tool and does not constitute financial advice. Past performance does not guarantee future results. Always backtest and paper trade before going live. Manage your risk responsibly.
+
+🔄 Changelog
+
+v12: Smart SL (3 modes), minimum distance, CISD buffer, BSL/SSL liquidity, killzones, breakeven, trailing
+v10: Institutional liquidity detection added
+v9: Backtest strategy() integrated
+v4: Switched from fixed sessions to Bollinger/Volume detection
+v1: AMD detection via fixed session times
+
+
+Tags: #SmartMoney #ICT #AMD #CISD #Liquidity #BSL #SSL #BollingerSqueeze #OrderFlow #InstitutionalTrading

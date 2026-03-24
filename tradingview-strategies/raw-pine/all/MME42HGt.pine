@@ -1,0 +1,90 @@
+//@version=2
+strategy("K crossover D & macd > 0", shorttitle="K crov D & macd >0", overlay=true)
+
+// MACD + Stochastic Strategy (by Unc1efrog) inspired by ChartArt and jasonluk28
+// inspired by CHARTART and jasonluk28
+//
+// This strategy combines the classic stochastic
+// strategy to buy when the stochastic is oversold
+// with a classic MACD strategy to buy when the
+// MACD histogram value goes above the zero line.
+//
+// Only difference to the classic stochastic is a
+// default setting of 71 for overbought
+// (classic setting 80) and 29 for oversold
+// (classic setting 20).
+//
+// This strategy goes long if the MACD histogram
+// goes above zero and the stochastic indicator
+// detects a oversold condition (value below 29).
+// If the inverse logic is true, the strategy
+// goes short (oversold condition value above 71).
+//
+// This pure double strategy does not have any
+// stop loss or take profit money management logic.
+// 
+
+// Input
+fastMAlen = input(11, minval=1, title="MACD fast moving average")
+slowMAlen = input(24,minval=1, title="MACD slow moving average")
+signalMACDlen = input(9,minval=1, title="MACD signal line moving average")
+StochLength = input(20, minval=1, title="Stochastic Length")
+OverBoughtOverSold = input(71, title="Overbought Level (Oversold = 100 - Overbought")
+switch=input(true, title="Enable MACD Bar Color?")
+
+// MACD Calculation
+MACD = ema(close, fastMAlen) - ema(close, slowMAlen)
+signalMACD = ema(MACD, signalMACDlen)
+delta = MACD - signalMACD
+fastMA = ema(close,fastMAlen)
+slowMA = ema(close,slowMAlen)
+veryslowMA = sma(close, 100)
+
+// Stochastic Calculation
+OverBought = OverBoughtOverSold
+OverSold = 100-OverBought
+smoothK = input(3, title="Smoothing of Stochastic %K ")
+smoothD = input(2, title="Moving Average of Stochastic %K")
+k = sma(stoch(close, high, low, StochLength), smoothK)
+d = sma(k, smoothD)
+
+// Colors
+bartrendcolor = close > fastMA and close > slowMA and close > veryslowMA and change(slowMA) > 0 ? green : close < fastMA and close < slowMA and close < veryslowMA and change(slowMA) < 0 ? red : blue
+barcolor(switch?bartrendcolor:na)
+
+// Strategy
+ma800= sma(close, 800)
+
+if (not na(k) and not na(d))
+    if (crossover(k,d) and MACD > 0)
+        strategy.entry("Stoch_L_MACD_L", strategy.long, comment="Stoch_L+_MACD_L")
+        
+    if (crossunder(k,d) and MACD < 0)
+        strategy.entry("Stoch_S_MACD_S", strategy.short, comment="Stoch_S+_MACD_S")
+strategy.close("Stoch_L_MACD_L", when = crossunder(k,d) and MACD < 0)
+strategy.close("Stoch_L_MACD_S", when = crossover(k,d) and MACD > 0)
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・67 lines
+Use on chart
+1
+0
+1
+6 273
+This strategy is inspired by ChartArt and jasonluk28.
+The following input changes from the initial ChartArt version to achieve higher stability and profit:
+Fast MA Len:11
+Slow MA len: 24
+Stoch Len: 20
+No difference is found in minor changes (+-10) lv. of overbought/oversold
+
+It works above 40% winning rate in Heng Heng Index, Shanghai Composite, Dow Jones Industrial Averge, S&P 500 NASDAQ, VT (World Total Market) and in 15 mins chart
+Profit: above ~10 to 30% in less than 1year backtest for most major indice of China and US and ~62% in Heng Seng Index (Hong Kong) & 40.5% in SZSE Composite (Shen Zhen)
+
+P.S. Profit: 700 (Tencent) +150.5%, 939 (CCB) +66.5%, 1299 (AIA) +45%, 2628 (CLIC) +41%, 1 (CK Hutchison) +31%
+NFLX +82.5%, BABA +55.5%, AMZN +44%, GOOG +38%, MCD +24.5%
+However, Loss in FB -19% , AMD -38.5%
+
+Not suitable for stocks with great influences in News or Events ???
+

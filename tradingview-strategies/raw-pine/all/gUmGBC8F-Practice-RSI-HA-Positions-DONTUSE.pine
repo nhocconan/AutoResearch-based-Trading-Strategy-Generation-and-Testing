@@ -1,0 +1,15 @@
+//@version=3
+strategy("DONTUSE", overlay = true)
+LC1P = close > .0001
+plotshape(LC1P, style = shape.xcross,color = red, size = size.large)
+
+View in Pine Editor・4 lines
+Use on chart
+1
+6
+2 367
+Sep 17, 2018
+Just practicing adding multiple indicators conditions and position size conditions to a strategy with signals.
+Oct 21, 2018
+Release Notes
+SCRIPT IS DEFUNCT

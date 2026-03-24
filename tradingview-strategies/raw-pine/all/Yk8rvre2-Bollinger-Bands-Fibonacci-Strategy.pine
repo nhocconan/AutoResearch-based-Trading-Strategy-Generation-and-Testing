@@ -1,0 +1,100 @@
+//@version=5
+strategy("Bollinger Bands & Fibonacci Strategy", shorttitle="BB & Fib Strategy", overlay=true)
+
+// Initialize position variables
+var bool long_position = false
+var bool short_position = false
+
+// Bollinger Bands settings
+length = input.int(20, title="Bollinger Bands Length")
+src = input(close, title="Source")
+mult = input.float(2.0, title="Standard Deviation Multiplier")
+
+basis = ta.sma(src, length)
+dev = mult * ta.stdev(src, length)
+
+upper_band = basis + dev
+lower_band = basis - dev
+
+// Fibonacci retracement levels
+fib_0 = input.float(0.0, title="Fibonacci 0% Level", minval=-100, maxval=100) / 100
+fib_100 = input.float(1.0, title="Fibonacci 100% Level", minval=-100, maxval=100) / 100
+
+// Plotting Bollinger Bands
+plot(upper_band, color=color.red, title="Upper Bollinger Band")
+plot(lower_band, color=color.green, title="Lower Bollinger Band")
+
+// Calculate Fibonacci levels
+fib_range = ta.highest(high, 50) - ta.lowest(low, 50)
+fib_high = ta.highest(high, 50) - fib_range * fib_0
+fib_low = ta.lowest(low, 50) + fib_range * fib_100
+
+// Plot Fibonacci retracement levels
+plot(fib_high, color=color.blue, title="Fibonacci High")
+plot(fib_low, color=color.orange, title="Fibonacci Low")
+
+// Entry conditions
+long_condition = ta.crossover(close, upper_band) and low > fib_low
+short_condition = ta.crossunder(close, lower_band) and high < fib_high
+
+// Plot arrows on the chart
+plotshape(series=long_condition, title="Long Entry", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(series=short_condition, title="Short Entry", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+// Entry and exit logic
+if long_condition and not short_position
+    strategy.entry("Long", strategy.long)
+    long_position := true
+    short_position := false
+
+if short_condition and not long_position
+    strategy.entry("Short", strategy.short)
+    short_position := true
+    long_position := false
+
+// Exit conditions (you can customize these)
+long_exit_condition = ta.crossunder(close, basis)
+short_exit_condition = ta.crossover(close, basis)
+
+if long_exit_condition
+    strategy.close("Long")
+    long_position := false
+
+if short_exit_condition
+    strategy.close("Short")
+    short_position := false
+
+View in Pine Editor・65 lines
+Use on chart
+1
+7
+8
+3
+6 874
+The Bollinger Bands & Fibonacci Strategy is a powerful technical analysis trading strategy designed to identify potential entry and exit points in financial markets. This strategy combines two widely used indicators, Bollinger Bands and Fibonacci retracement levels, to assist traders in making informed trading decisions.
+
+Key Features:
+
+Bollinger Bands: This strategy utilizes Bollinger Bands, a volatility-based indicator that consists of an upper band, a lower band, and a middle (basis) line. Bollinger Bands help traders visualize price volatility and potential reversal points.
+
+Fibonacci Retracement Levels: Fibonacci retracement levels are essential tools for identifying potential support and resistance levels in price charts. This strategy incorporates Fibonacci retracement levels, including the 0% and 100% levels, to aid in pinpointing key price levels.
+
+Long and Short Signals: The strategy generates long (buy) and short (sell) signals based on specific conditions derived from Bollinger Bands and Fibonacci levels. Long signals are generated when price crosses above the upper Bollinger Band and when the price is above the Fibonacci low level. Short signals are generated when price crosses below the lower Bollinger Band and when the price is below the Fibonacci high level.
+
+Position Management: To prevent multiple concurrent positions of the same type (long or short), the strategy employs position management logic. It tracks open positions and ensures that only one position type is active at a time.
+
+Exit Conditions: The strategy includes customizable exit conditions to manage and close open positions. Traders can fine-tune exit criteria to align with their risk management and profit-taking strategies.
+
+User-Friendly: This strategy script is user-friendly and can be easily integrated into the TradingView platform, allowing traders to apply it to various financial instruments and timeframes.
+
+Usage:
+
+Traders and investors can apply the Bollinger Bands & Fibonacci Strategy to a wide range of financial markets, including stocks, forex, commodities, and cryptocurrencies. It can be adapted to different timeframes to suit various trading styles, from day trading to swing trading.
+
+Disclaimer:
+
+Trading carries inherent risks, and this strategy is no exception. It is essential to use proper risk management techniques, including stop-loss orders, and thoroughly backtest the strategy on historical data before implementing it in live trading.
+
+The Bollinger Bands & Fibonacci Strategy is a valuable tool for technical traders seeking well-defined entry and exit points based on robust indicators. It can serve as a foundation for traders to build and customize their trading strategies according to their individual preferences and risk tolerance.
+
+Feel free to customize this description to add any additional details or specifications unique to your strategy. When publishing your strategy on a trading platform like TradingView, a clear and informative description can help potential users understand and use your strategy effectively.

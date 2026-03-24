@@ -1,0 +1,13 @@
+//@version=4
+longThres=##input(defval=-1.05,type='INPUT_FLOAT',##id='in_0')
+shortThres=##input(defval=1.05,type='INPUT_FLOAT',##id='in_1')
+exitLongThres=##input(defval=-0.05,type='INPUT_FLOAT',##id='in_2')
+exitShortThres=##input(defval=0.05,type='INPUT_FLOAT',##id='in_3')
+##root(root_metainfo,rm_0,longThres,input__float)
+##root(root_metainfo,rm_1,0,input__integer,hline,linestyle)
+##root(root_metainfo,rm_2,shortThres,input__float)
+##root(root_metainfo,rm_3,0,input__integer,hline,linestyle)
+##root(root_metainfo,rm_4,exitLongThres,input__float)
+##root(root_metainfo,rm_5,1,input__integer,hline,linestyle)
+##root(root_metainfo,rm_6,exitShortThres,input__float)
+##root(root_metainfo,rm_7,1,input__integer,hline,linestyle)

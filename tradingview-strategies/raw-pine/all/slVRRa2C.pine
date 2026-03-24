@@ -1,0 +1,164 @@
+//@version=5
+strategy("All-in-One: Stufen SL + Dead Cross + ReEntry", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// --- 1. Inputs ---
+len1 = input.int(25, title="SMA 25")
+len2 = input.int(50, title="SMA 50")
+len3 = input.int(100, title="SMA 100")
+len4 = input.int(200, title="SMA 200")
+
+// Stop Loss Inputs
+sl_initial_pct = input.float(10.0, title="Stufe 1: Initial Stop %") / 100
+stage2_trigger = input.float(12.0, title="Stufe 2: Aktivierung bei Gewinn %") / 100
+stage2_sl_dist = input.float(10.0, title="Stufe 2: Abstand %") / 100
+stage3_trigger = input.float(25.0, title="Stufe 3: Aktivierung bei Gewinn %") / 100
+stage3_trail   = input.float(8.0,  title="Stufe 3: Trailing %") / 100
+stage4_trigger = input.float(40.0, title="Stufe 4: Aktivierung bei Gewinn %") / 100
+stage4_trail   = input.float(5.0,  title="Stufe 4: Trailing %") / 100
+
+// --- 2. Berechnung SMAs ---
+sma25  = ta.sma(close, len1)
+sma50  = ta.sma(close, len2)
+sma100 = ta.sma(close, len3)
+sma200 = ta.sma(close, len4)
+
+plot(sma25, color=color.yellow, title="SMA 25")
+plot(sma50, color=color.orange, title="SMA 50")
+plot(sma100, color=color.blue, title="SMA 100")
+plot(sma200, color=color.white, title="SMA 200", linewidth=2)
+
+// --- 3. Variablen ---
+var float stop_price = na        
+var float highest_price = 0.0    
+var float entry_price = 0.0      
+var float last_trade_high = 0.0  
+
+in_position = strategy.position_size > 0
+
+// Initialisierung bei neuem Trade
+if in_position and strategy.position_size[1] == 0
+    entry_price := close
+    highest_price := high
+    stop_price := close * (1 - sl_initial_pct)
+
+// --- 4. Stop Loss & Dead Cross Management ---
+
+// A) Dead Cross Bedingungen definieren
+dc_25_50   = ta.crossunder(sma25, sma50)
+dc_50_100  = ta.crossunder(sma50, sma100)
+dc_100_200 = ta.crossunder(sma100, sma200)
+
+if in_position
+    // Höchststand tracken
+    if high > highest_price
+        highest_price := high
+    
+    gain_pct = (highest_price - entry_price) / entry_price
+
+    // B) Stop Loss Stufen Logik
+    if gain_pct >= stage4_trigger
+        new_sl = highest_price * (1 - stage4_trail)
+        stop_price := math.max(stop_price, new_sl)
+    else if gain_pct >= stage3_trigger
+        new_sl = highest_price * (1 - stage3_trail)
+        stop_price := math.max(stop_price, new_sl)
+    else if gain_pct >= stage2_trigger
+        new_sl = highest_price * (1 - stage2_sl_dist)
+        stop_price := math.max(stop_price, new_sl)
+        
+    // --- EXIT ENTSCHEIDUNG ---
+    // Wir prüfen: Wurde Stop Loss unterschritten? ODER Gab es einen Dead Cross?
+    sl_hit = close < stop_price
+    trend_broken = dc_25_50 or dc_50_100 or dc_100_200
+    
+    if sl_hit or trend_broken
+        // WICHTIG: Wir merken uns das Hoch für den Re-Entry, egal warum wir rausfliegen
+        last_trade_high := highest_price 
+        
+        // Kommentar setzen, damit du weißt warum verkauft wurde
+        exit_msg = sl_hit ? "SL Hit" : "Dead Cross"
+        
+        strategy.close_all(comment=exit_msg)
+        
+        // Reset
+        stop_price := na 
+        highest_price := 0.0 
+
+plot(in_position ? stop_price : na, color=color.red, style=plot.style_linebr, linewidth=2, title="Dynamic SL")
+
+// --- 5. Visualisierung Re-Entry Level ---
+plot(strategy.position_size == 0 and last_trade_high > 0 ? last_trade_high : na, color=color.green, style=plot.style_circles, title="Re-Entry Trigger")
+
+
+// --- 6. EINSTIEG & WIEDEREINSTIEG ---
+
+cross_25_50   = ta.crossover(sma25, sma50)
+cross_50_100  = ta.crossover(sma50, sma100)
+cross_100_200 = ta.crossover(sma100, sma200)
+
+// Re-Entry nur wenn wir über dem alten Hoch schließen
+re_entry_signal = (strategy.position_size == 0) and (close > sma200) and (close > last_trade_high) and (last_trade_high > 0)
+
+// Execution
+if cross_25_50
+    strategy.entry("Long Start", strategy.long, comment="Cross 25/50")
+if cross_50_100
+    strategy.entry("Long Mid", strategy.long, comment="Cross 50/100")
+if cross_100_200
+    strategy.entry("Long Macro", strategy.long, comment="Cross 100/200")
+
+if re_entry_signal
+    strategy.entry("Re-Entry Breakout", strategy.long, comment="Breakout High")
+
+View in Pine Editor・111 lines
+Use on chart
+1
+2
+943
+Description:
+
+This script implements a robust Trend Following strategy based on a multiple Simple Moving Average (SMA) crossover logic (25, 50, 100, 200). What sets this strategy apart is its advanced "4-Stage Risk Engine" and a smart "High-Water Mark" Re-Entry system, designed to protect profits during parabolic moves while filtering out chop during sideways markets.
+
+How it works:
+
+The strategy operates on three core pillars: Trend Identification, Dynamic Risk Management, and Momentum Re-Entry.
+
+1. Entry Logic (Trend Identification) The script looks for crossovers at different trend stages to capture early reversals as well as established trends:
+
+Short-Term: SMA 25 crosses over SMA 50.
+
+Mid-Term: SMA 50 crosses over SMA 100.
+
+Macro-Trend: SMA 100 crosses over SMA 200.
+
+2. The 4-Stage Risk Engine (Dynamic Stop Loss) Instead of a static Stop Loss, this strategy uses a progressive system that adapts as the price increases:
+
+Stage 1 (Protection): Starts with a fixed Stop Loss (default -10%) to give the trade room to breathe.
+
+Stage 2 (Break-Even): Once the price rises by 12%, the Stop is moved to trailing mode (10% distance), effectively securing a near break-even state.
+
+Stage 3 (Profit Locking): At 25% profit, the trailing stop tightens to 8% to lock in gains.
+
+Stage 4 (Parabolic Mode): At 40% profit, the trailing stop tightens further to 5% to capture the peak of parabolic moves.
+
+3. Dual Exit Mechanism The strategy exits a position if EITHER of the following happens:
+
+Stop Loss Hit: Price falls below the dynamic red line (Risk Engine).
+
+Dead Cross: The trend structure breaks (e.g., SMA 25 crosses under SMA 50), signaling a momentum loss even if the Stop Loss wasn't hit.
+
+4. "High-Water Mark" Re-Entry To avoid "whipsaws" in choppy markets, the script does not re-enter immediately after a stop-out.
+
+It marks the highest price of the previous trade (Green Dotted Line).
+
+A Re-Entry only occurs if the price breaks above this previous high (showing renewed strength) AND the long-term trend is bullish (Price > SMA 200).
+
+Visuals:
+
+SMAs: 25 (Yellow), 50 (Orange), 100 (Blue), 200 (White).
+
+Red Line: Visualizes the dynamic Stop Loss level.
+
+Green Dots: Visualizes the target price needed for a valid re-entry.
+
+Settings: All parameters (SMA lengths, Stop Loss percentages, Staging triggers) are fully customizable in the settings menu to fit different assets (Crypto, Stocks, Forex) and timeframes.

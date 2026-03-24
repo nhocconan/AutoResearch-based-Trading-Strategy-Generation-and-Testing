@@ -1,0 +1,195 @@
+//@version=5
+string it  = 'TASC 2024.06 REIT ETF Trading System'
+string st  = 'REIT TS'
+strategy(it, st, true)
+
+
+// --- Inputs ---
+string it0 = 'Bollinger Bands Length'
+string it1 = 'Bollinger Bands Multiplier'
+string it2 = 'Lookback Period for TNX Index'
+string it3 = 'Min TNX Change, %'
+string it4 = 'Donchian Channel Length'
+string it5 = 'Max Correlation for Buy Signal'
+string it6 = 'Min Yield (TNX/10)'
+string it7 = 'ATR Stop'
+string it8 = 'Stop Loss, %'
+
+int    iBBlen = input.int(15, it0)
+float  iBBmul = input.float(2.0, it1)
+int   iTNXlen = input.int(25, it2)
+int   iTNXper = input.int(15, it3)
+int    iDClen = input.int(30, it4)
+float iCORmax = input.float(0.3, it5)
+float iYLDmin = input.float(2.0, it6)
+float iATRstp = input.float(1.5, it7)
+int   iMAXlos = input.int(8, it8)
+
+
+// --- Helper Functions ---
+NotAtLoss (float src, float limit) =>
+    src < ((1.0 - iMAXlos / 100.0) * limit)
+
+
+// --- Calculations ---
+if not timeframe.isweekly
+    string er0 = 'The script should be applied on '+
+                 'a WEEKLY chart of any REIT ETF.'
+    runtime.error(er0)
+
+// Reference indices (SPY and TNX)
+float spy = request.security('SPY', timeframe.period, close, 
+                   barmerge.gaps_on, barmerge.lookahead_off)
+float tnx = request.security('TNX', timeframe.period, close, 
+                   barmerge.gaps_on, barmerge.lookahead_off)
+
+// Treasury Yield, Stochastic, ATR
+float yld     = tnx
+float stoch   = ta.sma(ta.stoch(close, high, low, 10), 3)
+float atr15   = ta.atr(15)
+
+// HH & LL of TNX
+float TNXll   = ta.lowest(tnx, iTNXlen)
+float TNXhh   = ta.highest(tnx, iTNXlen)
+float TNXup   = ((tnx - TNXll) / (TNXll + 0.001)) * 100.0
+float TNXdn   = ((tnx - TNXhh) / (TNXhh + 0.001)) * 100.0
+
+// HH & LL of ETF
+int   LLbars  = bar_index >= 100 ? 100 : bar_index + 1
+float ll      = ta.lowest(low, LLbars)
+float PERCup  = (close - ll) / (ll + 0.001) * 100.0
+float DCupper = ta.highest(close, iDClen)[1] 
+
+// Correlations
+float CORt    = ta.correlation(close, tnx, 20)
+float CORs    = ta.correlation(close, spy, 20)
+float BBlower = ta.sma(close, iBBlen) -
+     iBBmul * ta.stdev(close, iBBlen)
+bool  isStop  = close < ta.sma(close, 30) and 
+     NotAtLoss(close, ta.highest(close, 2)) and 
+     (NotAtLoss(spy, spy[1]) or 
+     CORs < 0)
+
+// Trade Signals
+bool BuyBB    = (low < BBlower and 
+     close > BBlower + 0.2 * atr15) and 
+     ((TNXdn < -iTNXper and CORt < iCORmax) or 
+     yld < iYLDmin) and close > hl2 and not isStop
+bool BuyTrend = close > DCupper and
+     spy > ta.sma(spy, 20) and 
+     (ta.highestbars(tnx, iDClen) > 10 or 
+     CORt > iCORmax or yld < iYLDmin)
+
+// Stop Loss
+bool Sell1  = (TNXup > iTNXper or 
+     (yld > 4.0 and TNXup > 0.0)) and 
+     close < ta.highest(close, 5) - iATRstp * atr15 and 
+     not BuyBB  // Chandelier Exit
+bool Stop0  = close < ta.sma(close, 30) and 
+     NotAtLoss(close, close[1]) and 
+     (NotAtLoss(spy, spy[1]) or 
+     CORs < 0)
+bool SellOB = PERCup > 50.0 and 
+     close < ta.highest(high, 3) - iATRstp * atr15 and 
+     ta.highest(stoch, 3) > 90
+
+// Execution
+switch
+    BuyBB =>
+        strategy.entry("BUY BB", strategy.long)
+    BuyTrend => 
+        strategy.entry("BUY Trend", strategy.long)
+    Sell1 =>
+        strategy.close_all('STOP Trail')
+    SellOB =>
+        strategy.close_all('STOP OB')
+    Stop0 =>
+        strategy.close_all('STOP Stop')
+
+View in Pine Editor・117 lines
+Use on chart
+1
+7
+1
+1
+5 428
+May 15, 2024
+█ OVERVIEW
+
+This strategy script demonstrates the application of the Real Estate Investment Trust (REIT) ETF trading system presented in the article by Markos Katsanos titled "Is The Price REIT?" from TASC's June 2024 edition of Traders' Tips
+.
+
+
+█ CONCEPTS
+
+REIT
+ stocks and ETFs offer a simplified, diversified approach to real estate investment. They exhibit sensitivity to interest rates, often moving inversely to interest rate and treasury yield
+ changes. Markos Katsanos explores this relationship and the correlation of prices with the broader market to develop a trading strategy for REIT ETFs.
+
+The script employs Bollinger Bands
+ and Donchian channel
+ indicators to identify oversold conditions and trends in REIT ETFs. It incorporates the 10-year treasury yield index (TNX) as a proxy for interest rates and the S&P 500 ETF (SPY) as a benchmark for the overall market. The system filters trade entries based on their behavior and correlation with the REIT ETF price. 
+
+
+█ CALCULATIONS
+
+The strategy initiates long entries (buy signals) under two conditions:
+1. Oversold condition
+
+The weekly ETF low price dips below the 15-week Bollinger Band bottom, the closing price is above the value by at least 0.2 * ATR (Average True Range
+), and the price exceeds the week's median.
+
+Either of the following:
+– The TNX index is down over 15% from its 25-week high, and its correlation with the ETF price is less than 0.3.
+– The yield is below 2%.
+
+
+
+2. Uptrend
+
+The weekly ETF price crosses above the previous week's 30-week Donchian channel high.
+
+The SPY ETF is above its 20-week moving average.
+
+Either of the following:
+– Over ten weeks have passed since the TNX index was at its 30-week high.
+– The correlation between the TNX value and the ETF price exceeds 0.3.
+– The yield is below 2%.
+
+
+
+The strategy also includes three exit (sell) rules:
+1. Trailing (Chandelier) stop
+
+The weekly close drops below the highest close over the last five weeks by over 1.5 * ATR.
+
+The TNX value rises over the latest 25 weeks, with a yield exceeding 4%, or its value surges over 15% above the 25-week low. 
+
+
+
+2. Stop-loss
+
+The ETF's price declines by at least 8% of the previous week's close and falls below the 30-week moving average. 
+
+The SPY price is down by at least 8%, or its correlation with the ETF's price is negative. 
+
+
+
+3. Overbought condition
+
+The ETF's value rises above the 100-week low by over 50%. 
+
+The ETF's price falls over 1.5 * ATR below the 3-week high.
+
+The ETF's 10-week Stochastic indicator exceeds 90 within the last three weeks. 
+
+
+
+
+█ DISCLAIMER
+
+This strategy script educates users on the system outlined by the TASC article. However, note that its default properties might not fully represent real-world trading conditions for an individual. By default, it uses 10% of equity as the order size and a slippage amount of 5 ticks. Traders should adjust these settings and the commission amount when using this script. Additionally, since this strategy utilizes compound conditions on weekly data to trigger orders, it will generate significantly fewer trades than other, higher-frequency strategies.
+
+May 24, 2024
+Release Notes
+Important Update: The yield calculation in the script has been corrected by removing the division of TNX by 10, addressing the discrepancy with the original publication that used TNX data from a different data provider. The symbol TNX used in this script represents actual yield and not the yield index.

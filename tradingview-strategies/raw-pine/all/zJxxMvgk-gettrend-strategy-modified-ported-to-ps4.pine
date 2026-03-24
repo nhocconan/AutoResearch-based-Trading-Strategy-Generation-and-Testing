@@ -1,0 +1,24 @@
+//@version=4
+strategy("GetTrend Strategy (ps4-del)", overlay=true)
+
+
+plot(close)
+
+View in Pine Editor・5 lines
+Use on chart
+7
+3
+0
+36
+16 807
+Aug 22, 2019
+This is a port to PS4 of an amazingly simple solution that may have good prospects as a standalone indicator, an add-on or an integral part of a trading system. Many thanks to its authors and contributors.
+Sep 1, 2019
+Release Notes
+Added repainting/non-repainting option.
+Sep 1, 2019
+Release Notes
+Added dummy with description.
+Apr 12, 2024
+Release Notes
+Deleted.

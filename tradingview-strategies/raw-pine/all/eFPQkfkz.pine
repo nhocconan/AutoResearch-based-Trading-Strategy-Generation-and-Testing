@@ -1,0 +1,74 @@
+//@version=5
+strategy("XiaoJiu_RSI_5m_Drop1_DCA", overlay=true,
+     initial_capital=600, 
+     commission_type=strategy.commission.percent,
+     commission_value=0.1)
+
+// === RSI ===
+rsi = ta.rsi(close, 14)
+
+// === 参数 ===
+singleBuy = 28.0           // 每次买入金额
+maxTimes  = 21             // 最大买入次数
+var buyCount = 0           // 买入次数
+var lastRSI = 100.0        // 上一次买入/补仓时的 RSI
+var totalQty = 0.0         // 总买入数量
+
+// === 首次买入条件 ===
+// 5m RSI < 30
+buyCond = (rsi < 30) and (buyCount == 0)
+
+// === 补仓条件 ===
+// 5m RSI 比上一次买入 RSI 再低 1
+addCond = (buyCount > 0) and (rsi <= lastRSI - 1) and (buyCount < maxTimes)
+
+// === 买入逻辑 ===
+if buyCond
+    qty = singleBuy / close
+    strategy.entry("Long", strategy.long, qty=qty)
+    buyCount += 1
+    lastRSI := rsi
+    totalQty += qty
+
+// === 补仓逻辑 ===
+if addCond
+    qty = singleBuy / close
+    strategy.entry("Add" + str.tostring(buyCount), strategy.long, qty=qty)
+    buyCount += 1
+    lastRSI := rsi
+    totalQty += qty
+
+// === 卖出条件 ===
+sellCond = (rsi > 70)
+
+// === 卖出逻辑 ===
+if sellCond and buyCount > 0
+    strategy.close_all()
+    buyCount := 0
+    totalQty := 0
+    lastRSI := 100
+
+// === 图形辅助 ===
+plot(rsi, color=color.new(color.blue, 0), title="RSI 5m")
+hline(30, "RSI 30", color=color.red)
+hline(70, "RSI 70", color=color.green)
+
+View in Pine Editor・54 lines
+Use on chart
+6
+492
+✔ Automatic buy when RSI < 30
+
+✔ Automatic averaging down for every 1 point drop in RSI (maximum 21 times)
+
+✔ Automatic liquidation when RSI > 70
+
+✔ 28U per average averaging down
+
+✔ Automatically calculates weighted average cost
+
+✔ Automatically displays actual profit
+
+✔ Can be tested on any coin and at any time
+
+✔ Complete DCA model

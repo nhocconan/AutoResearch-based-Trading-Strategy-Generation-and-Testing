@@ -1,0 +1,9 @@
+//@version=5
+ndErf=##input(defval=0.0,type='INPUT_FLOAT',##id='in_1')
+##root(root_metainfo,rm_0,hline.style_dotted,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_1,hline.style_dotted,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_2,(-ndErf),input__float)
+##root(root_metainfo,rm_3,hline.style_dotted,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_4,ndErf,input__float)
+##root(root_metainfo,rm_5,hline.style_dotted,cb__hline_style__integer,hline,linestyle)
+##root(root_metainfo,rm_6,plot.style_line,cb__plot_style__integer,plot,style)

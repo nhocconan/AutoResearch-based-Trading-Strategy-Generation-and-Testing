@@ -1,0 +1,6 @@
+//@version=5
+showMiddleLine=##input(defval=false,type='INPUT_BOOL',##id='in_3')
+transpMid=(showMiddleLine?70:100)
+##root(root_metainfo,rm_0,transpMid,input__integer)
+##root(root_metainfo,rm_1,transpMid,input__integer)
+##root(root_metainfo,rm_2,transpMid,input__integer)

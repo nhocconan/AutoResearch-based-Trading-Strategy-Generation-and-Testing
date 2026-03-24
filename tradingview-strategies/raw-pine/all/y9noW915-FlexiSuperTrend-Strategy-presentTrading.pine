@@ -1,0 +1,9 @@
+//@version=5
+upHTF=##input(defval=#09786680,type='INPUT_COLOR',##id='in_10')
+dnHTF=##input(defval=#9c192480,type='INPUT_COLOR',##id='in_11')
+upLTF=##input(defval=#089981ff,type='INPUT_COLOR',##id='in_12')
+dnLTF=##input(defval=#f23645ff,type='INPUT_COLOR',##id='in_13')
+##root(root_metainfo,plot_0_0,upHTF,input__color)
+##root(root_metainfo,plot_1_0,dnHTF,input__color)
+##root(root_metainfo,plot_2_0,upLTF,input__color)
+##root(root_metainfo,plot_3_0,dnLTF,input__color)

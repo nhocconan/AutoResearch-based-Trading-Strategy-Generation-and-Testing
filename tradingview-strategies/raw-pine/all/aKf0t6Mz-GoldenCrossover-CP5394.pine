@@ -1,0 +1,59 @@
+//@version=6
+strategy(
+     "EMA 5/13/26 Same Candle Cross Strategy",
+     overlay = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     process_orders_on_close = true
+)
+
+// Inputs
+ema5_len  = input.int(5,  title="EMA 5 Length")
+ema13_len = input.int(13, title="EMA 13 Length")
+ema26_len = input.int(26, title="EMA 26 Length")
+
+src = input(close, "Source")
+
+// EMA Calculations
+ema5  = ta.ema(src, ema5_len)
+ema13 = ta.ema(src, ema13_len)
+ema26 = ta.ema(src, ema26_len)
+
+// Plot EMAs
+plot(ema5,  color=color.red,    title="EMA 5")
+plot(ema13, color=color.blue,   title="EMA 13")
+plot(ema26, color=color.purple, title="EMA 26")
+
+// Buy condition
+buyCondition =
+     ema5[1] < ema13[1] and ema5[1] < ema26[1] and
+     ema5 > ema13 and ema5 > ema26
+
+// Sell condition
+sellCondition =
+     ema5[1] > ema13[1] and ema5[1] > ema26[1] and
+     ema5 < ema13 and ema5 < ema26
+
+// Strategy Orders
+if buyCondition
+    strategy.entry("Long", strategy.long)
+    alert("BUY SIGNAL: EMA 5 crossed above EMA 13 and EMA 26", alert.freq_once_per_bar_close)
+
+if sellCondition
+    strategy.close("Long")
+    alert("SELL SIGNAL: EMA 5 crossed below EMA 13 and EMA 26", alert.freq_once_per_bar_close)
+
+View in Pine Editor・45 lines
+Use on chart
+1
+5
+435
+Mar 8
+Crossover of 5 EMA on 13 and 26 EMA in same candle
+Mar 8
+Release Notes
+5 EMA crossing 13 and 26 at the same time with alerts
+Mar 8
+Release Notes
+5 EMA crossover 13 and 26 at same time with alert

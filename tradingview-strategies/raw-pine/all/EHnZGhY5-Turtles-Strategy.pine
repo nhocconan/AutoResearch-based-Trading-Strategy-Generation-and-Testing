@@ -1,0 +1,115 @@
+//@version=6
+strategy("Turtles Strategy (Fast System - Intrabar Entries, Realized Cash Only)", shorttitle="Turtle EA", overlay=true, pyramiding=0, default_qty_type=strategy.fixed, default_qty_value=1, process_orders_on_close=false, initial_capital=100000)
+
+// Inputs
+enter_fast = input.int(20, title="Entry Period", minval=1)
+exit_fast = input.int(10, title="Exit Period", minval=1)
+atr_length = input.int(20, title="ATR Length", minval=1)
+atr_mult = input.float(2.0, title="ATR Stop Multiplier", minval=0.1, step=0.1)
+risk_percent = input.float(1.0, title="Risk % of Equity", minval=0.1, maxval=100) // Default risk = 1%
+
+// Turtle Risk Management Variables (adapted for realized cash)
+var float peak_equity = na
+var int reduction_count = 0
+var float current_risk_multiplier = 1.0
+var float recovery_threshold = na
+var bool reductions_active = false
+
+// Realized equity: initial + net realized PnL (excludes open unrealized)
+realized_equity = strategy.initial_capital + strategy.netprofit
+
+// Update peak equity based on realized only
+if na(peak_equity)
+    peak_equity := realized_equity
+else
+    peak_equity := math.max(peak_equity, realized_equity)
+
+// Risk Management Logic (using realized equity only)
+if not reductions_active
+    if realized_equity < peak_equity * 0.9 and reduction_count < 3
+        reductions_active := true
+        recovery_threshold := peak_equity
+        current_risk_multiplier := 0.8
+        reduction_count := 1
+else if reductions_active
+    // Check for further reductions (at 20%, 30% drawdown from original peak)
+    dd_level = 1.0 - (0.1 * reduction_count)
+    if realized_equity < peak_equity * dd_level and reduction_count < 3
+        current_risk_multiplier *= 0.8
+        reduction_count += 1
+    // Check for recovery
+    if not na(recovery_threshold) and realized_equity > recovery_threshold
+        reductions_active := false
+        reduction_count := 0
+        current_risk_multiplier := 1.0
+        recovery_threshold := na
+
+// Calculations
+fastL = ta.highest(high, enter_fast)
+fastLC = ta.lowest(low, exit_fast)
+fastS = ta.lowest(low, enter_fast)
+fastSC = ta.highest(high, exit_fast)
+atr = ta.atr(atr_length)
+stop_distance = atr * atr_mult
+
+// Position Sizing (effective risk % of realized equity, adjusted for point value)
+pointvalue = syminfo.pointvalue // e.g., 1 for spot/forex/CFD, varies for futures contracts
+effective_risk = risk_percent * current_risk_multiplier
+position_size = pointvalue > 0 ? (realized_equity * (effective_risk / 100.0)) / (stop_distance * pointvalue) : 0
+
+// Persistent variable for initial stop distance
+var float initial_stop_distance = na
+
+// Entry stops with 1 tick slippage for confirmation
+tick = syminfo.mintick
+if strategy.position_size == 0 and not na(position_size) and position_size > 0
+    strategy.cancel_all()
+    strategy.entry("Long", strategy.long, stop=fastL[1] + tick, qty=position_size, oca_name="Breakout", oca_type=strategy.oca.cancel)
+    strategy.entry("Short", strategy.short, stop=fastS[1] - tick, qty=position_size, oca_name="Breakout", oca_type=strategy.oca.cancel)
+
+// Set initial stop distance on entry bar close
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    initial_stop_distance := atr * atr_mult
+
+// Manage exits: tighter of initial ATR stop or trailing stop (with tick slippage for confirmation)
+if strategy.position_size > 0 and not na(initial_stop_distance)
+    trail_stop = fastLC[1] - tick
+    init_stop = strategy.position_avg_price - initial_stop_distance
+    effective_stop = math.max(init_stop, trail_stop)
+    strategy.exit("Exit Long", "Long", stop=effective_stop)
+
+if strategy.position_size < 0 and not na(initial_stop_distance)
+    trail_stop = fastSC[1] + tick
+    init_stop = strategy.position_avg_price + initial_stop_distance
+    effective_stop = math.min(init_stop, trail_stop)
+    strategy.exit("Exit Short", "Short", stop=effective_stop)
+
+View in Pine Editor・85 lines
+Use on chart
+4
+9
+1 748
+Born from the 1980s "Turtle" experiment, this method of trading captures breakouts and places or closes trades with intrabar entries or exits and realized-equity risk controls.
+How It Works
+The strategy buys/sells on breakouts from recent highs/lows, using ATR for volatility-adjusted stops and sizing. It risks a fixed % (default 1%) of realized equity per trade—initial capital plus closed P&L, ignoring open positions for conservatism. Drawdown protection auto-reduces risk by 20% at 10% drops (up to three times), resetting only on full peak recovery. Single positions only, with 1-tick slippage simulated for realistic fills. Best for trending assets like forex,commodities, crypto, stocks. Backtest for optimal parameters.
+Main Operations
+The strategy works on any timeframe but it's meant to be used on daily charts.
+Entry Signals:
+
+Long: Buy-stop 1 tick above 20-bar high (default "Entry Period") when no position—enters intrabar on breakout.
+Short: Sell-stop 1 tick below 20-bar low. OCA cancels opposites.
+Size: (Realized equity × adjusted risk %) ÷ (2× ATR stop distance), scaled by point value.
+
+
+Exit Signals:
+
+Longs: Stop at tighter of (entry - 2× ATR) or (10-bar low - 1 tick trailing, default "Exit Period").
+Shorts: Stop at tighter of (entry + 2× ATR) or (10-bar high + 1 tick trailing).
+Locks profits in trends, exits fast on fades.
+
+
+Risk Controls:
+
+Tracks realized equity peak.
+10% drawdown: Risk ×0.8; 20%/30%: Further ×0.8 (max 3x).
+Full reset above peak—preserves capital in slumps.

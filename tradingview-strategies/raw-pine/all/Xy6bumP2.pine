@@ -1,0 +1,60 @@
+//@version=5
+strategy("S&P 100 Option Expiration Week Strategy", overlay=true, precision=2, calc_on_every_tick=true, initial_capital=50000, currency=currency.USD, slippage=1, commission_type=strategy.commission.cash_per_contract, commission_value=0.05)
+
+// Helper function to determine if today is the third Friday of the month
+isThirdFriday() =>
+    dayofweek == dayofweek.friday and dayofmonth >= 15 and dayofmonth <= 21
+
+// Calculate if it's option expiration week
+isOptionExpirationWeek = (dayofmonth >= 15 and dayofmonth <= 21) and (dayofweek >= dayofweek.monday and dayofweek <= dayofweek.friday)
+
+// Entry condition: Enter long on Monday of option expiration week
+if (dayofweek == dayofweek.monday and isOptionExpirationWeek)
+    strategy.entry("Long SP100 during Expiration Week", strategy.long)
+
+// Exit condition: Close position on Friday of option expiration week
+if (isThirdFriday())
+    strategy.close("Long SP100 during Expiration Week")
+
+// Visual aid: Highlight the option expiration week
+bgcolor(isOptionExpirationWeek ? color.new(color.blue, 80) : na, title="Option Expiration Week Highlight")
+
+View in Pine Editor・23 lines
+Use on chart
+3
+3
+1 432
+The Option Expiration Week Strategy aims to capitalize on increased volatility and trading volume that often occur during the week leading up to the expiration of options on stocks in the S&P 100 index. This period, known as the option expiration week, culminates on the third Friday of each month when stock options typically expire in the U.S. During this week, investors in this strategy take a long position in S&P 100 stocks or an equivalent ETF from the Monday preceding the third Friday, holding until Friday. The strategy capitalizes on potential upward price pressures caused by increased option-related trading activity, rebalancing, and hedging practices.
+
+The phenomenon leveraged by this strategy is well-documented in finance literature. Studies demonstrate that options expiration dates have a significant impact on stock returns, trading volume, and volatility. This effect is driven by various market dynamics, including portfolio rebalancing, delta hedging by option market makers, and the unwinding of positions by institutional investors (Stoll & Whaley, 1987; Ni, Pearson, & Poteshman, 2005). These market activities intensify near option expiration, causing price adjustments that may create short-term profitable opportunities for those aware of these patterns (Roll, Schwartz, & Subrahmanyam, 2009).
+
+The paper by Johnson and So (2013), Returns and Option Activity over the Option-Expiration Week for S&P 100 Stocks, provides empirical evidence supporting this strategy. The study analyzes the impact of option expiration on S&P 100 stocks, showing that these stocks tend to exhibit abnormal returns and increased volume during the expiration week. The authors attribute these patterns to intensified option trading activity, where demand for hedging and arbitrage around options expiration causes temporary price adjustments.
+Scientific Explanation
+
+Research has found that option expiration weeks are marked by predictable increases in stock returns and volatility, largely due to the role of options market makers and institutional investors. Option market makers often use delta hedging to manage exposure, which requires frequent buying or selling of the underlying stock to maintain a hedged position. As expiration approaches, their activity can amplify price fluctuations. Additionally, institutional investors often roll over or unwind positions during expiration weeks, creating further demand for underlying stocks (Stoll & Whaley, 1987). This increased demand around expiration week typically leads to temporary stock price increases, offering profitable opportunities for short-term strategies.
+
+Key Research and Bibliography
+
+Johnson, T. C., & So, E. C. (2013). Returns and Option Activity over the Option-Expiration Week for S&P 100 Stocks. Journal of Banking and Finance, 37(11), 4226-4240.
+
+This study specifically examines the S&P 100 stocks and demonstrates that option expiration weeks are associated with abnormal returns and trading volume due to increased activity in the options market.
+
+Stoll, H. R., & Whaley, R. E. (1987). Program Trading and Expiration-Day Effects. Financial Analysts Journal, 43(2), 16-28.
+
+Stoll and Whaley analyze how program trading and portfolio insurance strategies around expiration days impact stock prices, leading to temporary volatility and increased trading volume.
+
+Ni, S. X., Pearson, N. D., & Poteshman, A. M. (2005). Stock Price Clustering on Option Expiration Dates. Journal of Financial Economics, 78(1), 49-87.
+
+This paper investigates how option expiration dates affect stock price clustering and volume, driven by delta hedging and other option-related trading activities.
+
+Roll, R., Schwartz, E., & Subrahmanyam, A. (2009). Options Trading Activity and Firm Valuation. Journal of Financial Markets, 12(3), 519-534.
+
+The authors explore how options trading activity influences firm valuation, finding that higher options volume around expiration dates can lead to temporary price movements in underlying stocks.
+
+Cao, C., & Wei, J. (2010). Option Market Liquidity and Stock Return Volatility. Journal of Financial and Quantitative Analysis, 45(2), 481-507.
+
+This study examines the relationship between options market liquidity and stock return volatility, finding that increased liquidity needs during expiration weeks can heighten volatility, impacting stock returns.
+
+Summary
+
+The Option Expiration Week Strategy utilizes well-researched financial market phenomena related to option expiration. By positioning long in S&P 100 stocks or ETFs during this period, traders can potentially capture abnormal returns driven by option market dynamics. The literature suggests that options-related activities—such as delta hedging, position rollovers, and portfolio adjustments—intensify demand for underlying assets, creating short-term profit opportunities around these key dates.

@@ -1,0 +1,72 @@
+//@version=6
+
+strategy("30-70 RSI Strategy with Colored Bar", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === RSI Calculation ===
+src = close
+len = input.int(14, minval=1, title="RSI Length")
+up = ta.rma(math.max(ta.change(src), 0), len)
+down = ta.rma(-math.min(ta.change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+// === RSI Thresholds ===
+upper = input.int(70, title="Overbought Level")
+lower = input.int(30, title="Oversold Level")
+
+// === Entry/Exit Conditions ===
+buySignal = rsi < lower
+sellSignal = rsi > upper
+
+// === Plotting Colored Bars ===
+barcolor(buySignal ? color.red : sellSignal ? color.green : na)
+
+// === Strategy Orders ===
+if buySignal
+    strategy.entry("RSI Buy", strategy.long, comment="RSI Buy Signal")
+
+if sellSignal
+    strategy.close("RSI Buy", comment="RSI Sell Signal")
+
+// === Plot RSI for Reference ===
+plot(rsi, title="RSI", color=color.blue)
+hline(upper, "Overbought", color=color.red)
+hline(lower, "Oversold", color=color.green)
+
+// === Alert Conditions ===
+alertcondition(buySignal, title="RSI Buy Alert", message="RSI dropped below {{lower}} – Buy Signal")
+alertcondition(sellSignal, title="RSI Sell Alert", message="RSI rose above {{upper}} – Sell Signal")
+
+View in Pine Editor・37 lines
+Use on chart
+4
+7
+1 882
+This script colors price bars based on Relative Strength Index (RSI) levels, giving traders a quick and visual way to assess overbought or oversold market conditions directly on the chart.
+
+📈 Key Features:
+✅ RSI-Based Bar Coloring:
+
+Green bars when RSI is above the upper threshold (default 70) – suggests bullish momentum.
+
+Red bars when RSI is below the lower threshold (default 30) – indicates bearish pressure.
+
+Bars remain uncolored when RSI is between thresholds – a neutral zone.
+
+🔧 Customizable RSI Settings:
+
+Adjustable RSI length (default: 14 periods)
+
+Adjustable overbought/oversold levels (default: 70/30)
+
+🧠 Helps traders:
+
+Quickly spot potential reversals or trend continuations
+
+Visually align price action with momentum
+
+🛠️ Usage:
+Ideal for trend-following, reversal, and momentum strategies.
+
+Works across any timeframe (1m, 5m, 1h, daily, etc.).
+
+

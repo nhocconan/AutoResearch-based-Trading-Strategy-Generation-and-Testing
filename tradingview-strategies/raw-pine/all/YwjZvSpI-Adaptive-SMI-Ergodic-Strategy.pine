@@ -1,0 +1,5 @@
+//@version=5
+overS=##input(defval=-0.4,type='INPUT_FLOAT',##id='in_3')
+overB=##input(defval=0.4,type='INPUT_FLOAT',##id='in_4')
+##root(root_metainfo,rm_0,overB,input__float)
+##root(root_metainfo,rm_1,overS,input__float)

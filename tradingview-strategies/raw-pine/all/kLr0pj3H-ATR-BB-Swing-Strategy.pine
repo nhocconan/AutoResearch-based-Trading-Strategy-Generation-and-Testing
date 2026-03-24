@@ -1,0 +1,81 @@
+//@version=5
+strategy("ATR + BB Swing Strategy", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ================= Inputs =================
+bbLength    = input.int(20, "BB Length")
+bbDev       = input.float(2.25, "BB Deviation", step=0.05)
+atrLen      = input.int(14, "ATR Length")
+atrTrailNormal   = input.float(2.0, "ATR Trail Normal")
+atrTrailProtect  = input.float(1.5, "ATR Trail Profit Protect")
+atrInitialMult   = input.float(3.0, "Initial ATR Stop Multiplier")
+smaLength   = input.int(50, "50 SMA Filter")
+
+// ================= Indicators =================
+// Bollinger Bands
+basis = ta.ema(close, bbLength)
+dev   = ta.stdev(close, bbLength)
+upper = basis + bbDev * dev
+lower = basis - bbDev * dev
+
+// 50 SMA (trend filter)
+sma50 = ta.sma(close, smaLength)
+
+// ATR
+atr = ta.atr(atrLen)
+
+// ================= Heikin Ashi =================
+haClose = (open + high + low + close) / 4
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close)/2 : (haOpen[1] + haClose[1])/2
+haBull = haClose > haOpen
+
+// ================= Entry Condition =================
+longCondition = close > sma50 and haBull
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+// ================= Trailing Stop and Profit Protection =================
+var float trailStop = na
+var float entryPrice = na
+var float highestClose = na
+var bool profitProtect = false
+
+if strategy.position_size > 0
+    // Track entry price
+    entryPrice := strategy.position_avg_price
+    
+    // Track highest close since entry
+    highestClose := na(highestClose) ? close : math.max(highestClose, close)
+    
+    // Compute current trade R multiple (profit in terms of initial ATR)
+    rMultiple = (close - entryPrice) / (atrInitialMult * atr)
+    
+    // Profit protection trigger: +2R, fail upper BB twice, HA flip
+    failUpperBB = close < upper and close[1] < upper[1]
+    haFlip = not haBull and not haBull[1]
+    
+    if rMultiple >= 2 and failUpperBB and haFlip
+        profitProtect := true
+    
+    // Choose ATR multiplier for trailing stop
+    atrMult = profitProtect ? atrTrailProtect : atrTrailNormal
+    newStop = highestClose - atrMult * atr
+    
+    // Initialize or update trailing stop
+    trailStop := na(trailStop) ? entryPrice - atrInitialMult * atr : math.max(trailStop, newStop)
+    
+    // Exit
+    strategy.exit("Exit", "Long", stop=trailStop)
+    
+else
+    // Reset vars when flat
+    trailStop := na
+    highestClose := na
+    profitProtect := false
+
+View in Pine Editor・74 lines
+Use on chart
+1
+9
+682
+Mechanical daily stock swing strategy using ATR stops, Heikin Ashi trend confirmation, and Bollinger Bands context. Entries occur above 50 SMA on bullish Heikin Ashi candles; initial stop is 3xATR with trailing stop of highest close minus 2xAtr, reducing to 1.5xATR when profit protection triggers (+2R and momentum weakening). Exits are fully ATR-based, giving a simple, rules-driven approach to ride trends while protecting gains

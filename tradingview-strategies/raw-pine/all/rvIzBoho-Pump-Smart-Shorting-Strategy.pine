@@ -1,0 +1,169 @@
+//@version=5
+strategy("Pump-Smart Shorting Strategy", overlay=true, default_qty_type=strategy.fixed, default_qty_value=3126000)
+
+// Inputs
+lookbackPeriod = input.int(20, "Lookback Period for New High", minval=5)
+minProfitPerc  = input.float(0.02, "Take Profit %", minval=0.001)
+stopLossPerc   = input.float(0.06, "Stop Loss %", minval=0.001)
+hedgeTokens    = input.int(3126000, "Hedge Tokens")
+
+// Pump detection inputs
+rsiPeriod = input.int(14, "RSI Period")
+rsiHigh   = input.float(70, "Pump RSI ≥")
+rsiCool   = input.float(60, "Pump cool-off RSI ≤")
+volMult   = input.float(1.5, "Volume Pump Multiplier")
+pctUp     = input.float(0.05, "1-bar Up % for Pump")
+barsWait  = input.int(0, "Bars to wait after pump ends", minval=0, maxval=10)
+
+// Tech
+rsi = ta.rsi(close, rsiPeriod)
+avgVol = ta.sma(volume, 20)
+oneBarUp = (close - close[1]) / close[1]
+
+// Pump on if any strong up-move pattern
+pumpOn = (rsi >= rsiHigh) or (volume > avgVol * volMult and oneBarUp > pctUp)
+
+// Track pump state with var and transitions
+var bool wasPump = false
+pumpStart = not wasPump and pumpOn
+pumpEnd   = wasPump and not pumpOn
+
+// Update state each bar
+wasPump := pumpOn
+
+// Count bars since pump ended
+var int barsSincePumpEnd = 10000
+barsSincePumpEnd := pumpEnd ? 0 : math.min(10000, barsSincePumpEnd + 1)
+
+// Define "pump ended and cooled" condition
+cooled = (rsi <= rsiCool) and (oneBarUp <= pctUp/2 or volume <= avgVol * (volMult * 0.8))
+
+// Immediate short signal when pump finishes and cooled (with optional wait)
+shortAfterPump = (barsSincePumpEnd >= barsWait) and cooled and not pumpOn and strategy.position_size == 0
+
+// Also allow shorts on fresh new highs when not pumping (optional, keep for more entries)
+isNewHigh = high > ta.highest(high, lookbackPeriod)[1]
+shortOnPeak = isNewHigh and not pumpOn and strategy.position_size == 0
+
+// Define conditions where we DON'T short (for red background)
+noShortZone = pumpOn or (isNewHigh and pumpOn) or (barsSincePumpEnd < barsWait) or not cooled
+
+// Preemptive close if pump turns on while short
+var float shortEntry = na
+inShort = strategy.position_size < 0 and not na(shortEntry)
+if inShort and pumpOn
+    strategy.close("Short")
+    shortEntry := na
+
+// Entry rules: short either right after pump ends OR on new high when not pumping
+if (shortAfterPump or shortOnPeak) and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=hedgeTokens)
+    shortEntry := na
+
+// Track entry price
+if strategy.position_size < 0 and na(shortEntry)
+    shortEntry := strategy.position_avg_price
+if strategy.position_size == 0
+    shortEntry := na
+inShort := strategy.position_size < 0 and not na(shortEntry)
+
+// TP/SL
+tp = shortEntry * (1 - minProfitPerc)
+sl = shortEntry * (1 + stopLossPerc)
+exitTP = inShort and close <= tp
+exitSL = inShort and close >= sl
+if exitTP
+    strategy.close("Short")
+if exitSL
+    strategy.close("Short")
+
+// Visuals - REMOVED TEXT FROM ARROWS
+plotshape(pumpStart, style=shape.circle, color=color.orange, location=location.abovebar, size=size.tiny)
+plotshape(pumpEnd, style=shape.circle, color=color.teal, location=location.abovebar, size=size.tiny)
+plotshape(shortAfterPump, style=shape.triangledown, color=color.blue, location=location.abovebar, size=size.small)
+plotshape(shortOnPeak, style=shape.triangledown, color=color.red, location=location.abovebar, size=size.tiny)
+
+plot(inShort ? shortEntry : na, color=color.blue, linewidth=2, title="Short Entry")
+plot(inShort ? tp : na, color=color.green, linewidth=2, title="TP")
+plot(inShort ? sl : na, color=color.red, linewidth=2, title="SL")
+
+// Background colors - ADDED RED NO-SHORT ZONES
+bgcolor(pumpOn ? color.new(color.orange, 92) : na, title="Pump Zone")
+bgcolor(shortAfterPump ? color.new(color.blue, 92) : na, title="Post-Pump Short Zone")
+bgcolor(noShortZone and not pumpOn ? color.new(color.red, 95) : na, title="No Short Zone")
+
+// Panel
+var table t = table.new(position.top_right, 2, 6, bgcolor=color.white, border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "Pump On:", text_color=color.black)
+    table.cell(t, 1, 0, pumpOn ? "YES" : "NO", text_color=pumpOn ? color.red : color.green)
+    table.cell(t, 0, 1, "Pump Ended:", text_color=color.black)
+    table.cell(t, 1, 1, pumpEnd ? "YES" : "NO", text_color=pumpEnd ? color.teal : color.gray)
+    table.cell(t, 0, 2, "Bars Since End:", text_color=color.black)
+    table.cell(t, 1, 2, str.tostring(barsSincePumpEnd), text_color=color.navy)
+    table.cell(t, 0, 3, "Short After Pump:", text_color=color.black)
+    table.cell(t, 1, 3, shortAfterPump ? "YES" : "NO", text_color=shortAfterPump ? color.blue : color.gray)
+    table.cell(t, 0, 4, "New High Short:", text_color=color.black)
+    table.cell(t, 1, 4, shortOnPeak ? "YES" : "NO", text_color=shortOnPeak ? color.red : color.gray)
+    table.cell(t, 0, 5, "No Short Zone:", text_color=color.black)
+    table.cell(t, 1, 5, noShortZone ? "YES" : "NO", text_color=noShortZone ? color.red : color.green)
+
+View in Pine Editor・109 lines
+Use on chart
+2
+9
+1 188
+This strategy is built to keep your portfolio hedged as much as possible while maximizing profitability. Shorts are opened after pumps cool off and on new highs (when safe), and closed quickly during strong upward moves or if stop loss/profit targets are hit. It uses visual overlays to clearly show when hedging is on, off, or blocked due to momentum, ensuring you’re protected in most market conditions but never short against the pump. Fast re-entry keeps the hedge active with minimal downtime.
+
+Pump Detection:
+
+RSI (Relative Strength Index): Calculated over a custom period (default 14 bars). If RSI rises above a threshold (default 70), the strategy considers the market to be in a pump (strong upward momentum).
+
+Volume Spike: The current volume is compared to a 20-bar simple moving average of volume. If it exceeds the average by 1.5× and price increases at least 5% in one bar, pump conditions are triggered.
+
+Price Jump: Measured by (close - close[1]) / close[1]. A single-bar change > 5% helps confirm rapid momentum.
+
+Pump Zone (No Short): If any of these conditions is true, an orange or red background is shown and shorts are blocked.
+
+
+
+Cooldown and Re-Entry:
+
+Cooldown Detection: After the pump ends, RSI must fall below a set value (default ≤ 60), and either volume returns towards average or price momentum is less than half the original spike (oneBarUp <= pctUp/2).
+
+barsWait Parameter: You can specify a waiting period after cooldown before a short is allowed.
+
+Short Entry After Pump/Cooldown: When these cooldown conditions are met, and no short is active, a blue background is shown and a short position is opened at the next signal.
+
+
+
+New High Entry:
+
+Lookback New High: If the current high is greater than the highest high in the last N bars (default 20), and pump is NOT active, a short can be opened.
+
+
+
+Take Profit (TP) & Stop Loss (SL):
+
+Take Profit: Short is closed if price falls to a threshold below the entry (minProfitPerc, default 2%).
+
+Stop Loss: Short is closed if price rises to a threshold above the entry (stopLossPerc, default 6%).
+
+
+
+Preemptive Exit:
+
+Any time a pump is detected while a short position is open, the strategy closes the short immediately to avoid losses.
+
+
+
+Visual Feedback:
+
+Orange Background: Market is pumping, do not short.
+
+Red Background: Other conditions block shorts (cooldown or waiting).
+
+Blue Background: Shorts allowed.
+
+Triangles/Circles: Mark entries, pump start/end, for clear trading signals.
+

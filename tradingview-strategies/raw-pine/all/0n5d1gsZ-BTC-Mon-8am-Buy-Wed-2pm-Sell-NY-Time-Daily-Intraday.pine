@@ -1,0 +1,80 @@
+//@version=5
+strategy("BTC Mon 8am Buy / Wed 2pm Sell (NY Time, Daily + Intraday)",
+     overlay = true,
+     initial_capital = 10000,
+     pyramiding = 0,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1,
+     process_orders_on_close = true)
+
+// --- Get time in New York timezone tied to chart's resolution ---
+nyTime   = time(timeframe.period, "America/New_York")
+
+dayNY    = dayofweek(nyTime)
+hourNY   = hour(nyTime)
+minuteNY = minute(nyTime)
+weekNY   = weekofyear(nyTime)
+
+isIntraday = timeframe.isintraday
+
+// --- Intraday exact-time logic (best on <= 1h charts) ---
+// Buy: Monday 08:00 NY
+enterIntraday = isIntraday and dayNY == dayofweek.monday    and hourNY == 8  and minuteNY == 0
+// Sell: Wednesday 14:00 (2pm) NY
+exitIntraday  = isIntraday and dayNY == dayofweek.wednesday and hourNY == 14 and minuteNY == 0
+
+// --- Daily-or-higher logic: approximate by day only ---
+enterDaily = (not isIntraday) and dayNY == dayofweek.monday
+exitDaily  = (not isIntraday) and dayNY == dayofweek.wednesday
+
+// --- Combined conditions ---
+enterCond = enterIntraday or enterDaily
+exitCond  = exitIntraday  or exitDaily
+
+// --- Only one entry per week ---
+var int lastEntryWeek = na
+canEnter = na(lastEntryWeek) or (weekNY != lastEntryWeek)
+
+if enterCond and canEnter and strategy.position_size == 0
+    strategy.entry("Long_Mon8", strategy.long)
+    lastEntryWeek := weekNY
+
+if exitCond and strategy.position_size > 0
+    strategy.close("Long_Mon8")
+
+View in Pine Editor・43 lines
+Use on chart
+5
+781
+This strategy implements a fixed weekly time-based trading schedule for Bitcoin, using New York market hours as the reference clock. It is designed to test whether a consistent pattern exists between early-week accumulation and mid-week distribution in BTC price behavior.
+Entry Rule — Monday 8:00 AM (NY Time)
+The strategy enters a long position every Monday at exactly 08:00 AM Eastern Time, one hour after the U.S. equities market pre-open activity begins influencing global liquidity.
+This timing attempts to capture early-week directional moves in Bitcoin, which sometimes occur as traditional markets come online.
+Exit Rule — Wednesday 2:00 PM (NY Time)
+The strategy closes the position every Wednesday at 2:00 PM Eastern Time, a point in the week where:
+U.S. equity markets are still open
+BTC often experiences mid-week volatility rotations
+Liquidity is generally high
+This exit removes exposure before later-week uncertainty and gives a consistent, measurable time window for each trade.
+Timeframe Compatibility
+Works on intraday charts (recommended 1h or lower) using precise time-based triggers.
+Also runs on daily charts, where entries and exits occur on the Monday and Wednesday bars respectively (daily charts cannot show intraday timestamps).
+All timestamps are synced to America/New_York regardless of the exchange’s native timezone.
+Trading Frequency
+Exactly one trade per week, preventing overtrading and allowing comparison of weekly performance across years of historical BTC price data.
+Purpose of the Strategy
+This is not a value-based or trend-following system, but a behavioral/time-cycle analysis tool.
+It helps evaluate whether a repeating short-term edge exists based solely on:
+Weekday timing
+Liquidity cycles
+Institutional market influence
+BTC’s habitual early-week momentum patterns
+It is ideal for:
+Backtesting weekly BTC behavior
+Studying time-based edges
+Comparing alternative weekday/time combinations
+Visualizing weekly P&L structure
+Risk Notes
+This strategy does not attempt to predict price direction and should not be assumed profitable without robust backtesting.
+Time-based edges can appear, disappear, or invert depending on macro conditions.
+There is no stop loss or risk management included by default, so the strategy reflects raw timing-based performance.

@@ -1,0 +1,57 @@
+//@version=5
+strategy("Strategia S&P 500 vs US10Y Yield (od 2000)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// --- USTAWIENIA ---
+yieldSymbol = input.symbol("TVC:US10Y", "Symbol Rentowności (Yield)") 
+lookbackPeriod = input.int(63, "Okres zakresu (dni)", minval=1)
+thresholdPercent = input.float(0.80, "Próg zakresu (0.80 = 80%)", step=0.01)
+
+// NOWE: Ustawienie daty startowej
+startYear = input.int(2000, "Rok początkowy backtestu", minval=1900)
+
+// --- POBIERANIE DANYCH ---
+// Zabezpieczenie: gaps=barmerge.gaps_off uzupełnia luki w danych
+yieldClose = request.security(yieldSymbol, "D", close, gaps=barmerge.gaps_off)
+
+// --- DIAGNOSTYKA (DEBUG) ---
+plotchar(na(yieldClose), "Brak Danych", "❌", location.top, color.red, size=size.tiny, text="Brak danych US10Y!")
+
+// --- OBLICZENIA WSKAŹNIKA ---
+validData = not na(yieldClose)
+
+yieldHigh = ta.highest(yieldClose, lookbackPeriod)
+yieldLow  = ta.lowest(yieldClose, lookbackPeriod)
+
+rangeDiff = yieldHigh - yieldLow
+yieldPosition = (rangeDiff > 0) ? (yieldClose - yieldLow) / rangeDiff : 0.5
+
+// --- LOGIKA STRATEGII ---
+isRiskOff = validData and (yieldPosition > thresholdPercent)
+isRiskOn = validData and (yieldPosition <= thresholdPercent)
+
+// --- FILTR CZASOWY ---
+// Tworzymy znacznik czasu dla 1 stycznia wybranego roku
+startTime = timestamp(startYear, 1, 1, 0, 0)
+// Sprawdzamy, czy obecna świeczka jest po tej dacie
+inDateRange = time >= startTime
+
+// --- WYKONYWANIE ZLECEŃ ---
+// Dodano warunek "and inDateRange"
+if (bar_index > lookbackPeriod and inDateRange)
+    if (isRiskOn)
+        strategy.entry("Long SP500", strategy.long, comment="Kupno")
+    
+    if (isRiskOff)
+        strategy.close("Long SP500", comment="Gotówka")
+
+// --- WIZUALIZACJA ---
+// Tło rysuje się tylko w wybranym zakresie dat
+bgcolor(isRiskOff and inDateRange ? color.new(color.red, 85) : na, title="Cash Mode")
+
+View in Pine Editor・49 lines
+Use on chart
+7
+455
+This strategy explores the macroeconomic relationship between the equity market (S&P 500) and the debt market (10-Year Treasury Yield). Historically, rapid spikes in bond yields often exert downward pressure on equity valuations, leading to corrections or bear markets.
+
+The goal of this strategy is capital preservation. It attempts to switch to cash when yields are rising too aggressively and re-enter the stock market when the bond market stabilizes.

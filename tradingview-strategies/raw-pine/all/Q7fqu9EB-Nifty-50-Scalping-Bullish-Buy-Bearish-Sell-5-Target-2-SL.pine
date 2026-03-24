@@ -1,0 +1,33 @@
+//@version=6
+strategy("Nifty 50 Scalping - Bullish Buy & Bearish Sell (5 Target / 2 SL)", overlay=true, margin_long=100, margin_short=100, process_orders_on_close=true)
+
+// Candle check
+isBull = close > open
+isBear = close < open
+
+// Long Entry: Bullish candle
+if (isBull)
+    longEntry = close
+    longTP = longEntry + 5     // Fixed 5 points target
+    longSL = longEntry - 2     // Fixed 2 points stop-loss
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+// Short Entry: Bearish candle
+if (isBear)
+    shortEntry = close
+    shortTP = shortEntry - 5   // Fixed 5 points target
+    shortSL = shortEntry + 2   // Fixed 2 points stop-loss
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// Plot signals
+plotshape(isBull, title="Bullish Candle Buy", style=shape.triangleup, color=color.green, size=size.small, location=location.belowbar)
+plotshape(isBear, title="Bearish Candle Sell", style=shape.triangledown, color=color.red, size=size.small, location=location.abovebar)
+
+View in Pine Editor・29 lines
+Use on chart
+4
+5
+2 348
+Nifty 50 Scalping - Bullish Buy & Bearish Sell (5 Target / 2 SL)

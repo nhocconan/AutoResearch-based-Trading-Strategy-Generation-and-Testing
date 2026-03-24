@@ -1,0 +1,279 @@
+//@version=6
+//strategy("Ticker Pulse Meter + Fear EKG Strategy", overlay=true, initial_capital=2500, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=2, pyramiding=2, max_bars_back=5000)
+strategy("Ticker Pulse Meter + Fear EKG Strategy", overlay=true, initial_capital=2500, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=2, pyramiding=2, max_bars_back=5000, commission_type=strategy.commission.percent, commission_value=1, slippage=15)
+
+/////////////////////////////////////////////
+// Group Labels
+const string GRP2 = "BACKTESTING SETTINGS"
+const string GRP3 = "TICKER PULSE SETTINGS"
+const string GRP4 = "ENTRY/EXIT THRESHOLD SETTINGS"
+const string GRP5 = "MOVING AVERAGE SETTINGS"
+const string GRP6 = "BOLLINGER BANDS SETTINGS"
+const string GRP7 = "LINEAR REGRESSION SETTINGS"
+
+/////////////////////////////////////////
+// Backtest Start Date
+input_time = input.time(timestamp("2000-01-01T00:00:00"), group=GRP2, title="Backtest Start Date")
+
+/////////////////////////////////////////
+// Lookback Settings
+lookback_short = input.int(50, title="Short Lookback Period", minval=1, group=GRP3)
+lookback_long = input.int(200, title="Long Lookback Period", minval=1, group=GRP3)
+i_res = input.timeframe("D", title="Resolution", options=["60", "240", "D", "W", "M"], group=GRP3)
+profitTake = input.int(95, title="Profit Take Level", minval=1, maxval=100, group=GRP4)
+entryThresholdhigh = input.int(20, title="Above Long/Above Short Level", group=GRP4)
+entryThresholdlow = input.int(40, title="Below Long/Below Short Level", group=GRP4)
+orangeEntryThreshold = input.int(95, title="Irrational Selling", minval=40, maxval=99, group=GRP4)
+
+/////////////////////////////////////////
+// Exit Settings
+enable_short_signal = input.bool(true, "Enable Exit Signal", group=GRP2)
+enable_yellow_signals = input.bool(true, "Include Orange Buy Signals In Backtesting", group=GRP2)
+exitAmt = input.float(50.0, "Exit Percentage (e.g., 25 for 25%, 100 for 100%)", minval=0.01, maxval=100, step=0.01, group=GRP2)
+exitPercentage = exitAmt > 1 ? exitAmt / 100 : exitAmt
+
+/////////////////////////////////////////
+// Validation
+if lookback_short >= lookback_long
+    runtime.error("Short lookback must be less than long lookback")
+
+/////////////////////////////////////////
+// Request OHLC from higher timeframe with lookahead OFF
+stock_ticker = syminfo.ticker
+[price_open, price_high, price_low, price_close] = request.security(stock_ticker, i_res, [open, high, low, close], lookahead=barmerge.lookahead_off)
+
+/////////////////////////////////////////
+// Indicator Calculations
+min_price_short = ta.lowest(price_low, lookback_short)
+max_price_short = ta.highest(price_high, lookback_short)
+pct_above_short = (price_close - min_price_short) / (max_price_short - min_price_short)
+min_price_long = ta.lowest(price_low, lookback_long)
+max_price_long = ta.highest(price_high, lookback_long)
+pct_above_long = (price_close - min_price_long) / (max_price_long - min_price_long)
+pct_above_long_above_short = pct_above_long * pct_above_short * 100
+pct_above_long_below_short = pct_above_long * (1 - pct_above_short) * 100
+pct_below_long_below_short = (1 - pct_above_long) * (1 - pct_above_short) * 100
+
+/////////////////////////////////////////
+// Bar confirmed check
+barClosed = bar_index > 0 and barstate.isconfirmed
+
+/////////////////////////////////////////
+// Signal Conditions (shifted back 1 bar to prevent repainting)
+cross_pct_above = ta.crossover(pct_above_long_above_short[1], entryThresholdhigh)
+cross_upper2 = ta.crossunder(pct_below_long_below_short[1], orangeEntryThreshold)
+
+fekg = cross_upper2
+tpm = cross_pct_above and pct_below_long_below_short[1] < entryThresholdlow
+long_entry = tpm or (fekg and enable_yellow_signals)
+
+/////////////////////////////////////////
+// Exit Logic
+long_exit = ta.crossunder(pct_above_long_above_short[1], profitTake)
+
+/////////////////////////////////////////
+// Position Tracking
+var float total_position_size = 0.0
+var int exit_count = 0
+var float last_position_size = 0.0
+
+/////////////////////////////////////////
+// Trade Execution
+if time >= input_time and long_entry
+    strategy.entry("Long", strategy.long)
+    if strategy.position_size > last_position_size
+        total_position_size := strategy.position_size
+        exit_count := 0
+    last_position_size := strategy.position_size
+
+if long_exit and strategy.position_size > 0 and (exitPercentage < 1.0 or exit_count < 4) and enable_short_signal
+    qty_to_exit = math.round(strategy.position_size * exitPercentage)
+    qty_to_exit := math.max(1, qty_to_exit)
+    strategy.close("Long", qty=qty_to_exit, comment="Exit " + str.tostring(exitPercentage * 100) + "% - " + str.tostring(exit_count + 1))
+    exit_count := exit_count + 1
+    last_position_size := strategy.position_size
+
+/////////////////////////////////////////
+// Sell-off Background Highlighting
+selloff_start = ta.crossover(pct_below_long_below_short[1], entryThresholdhigh)
+selloff_end = ta.crossunder(pct_below_long_below_short[1], entryThresholdhigh)
+var bool in_selloff = false
+if selloff_start
+    in_selloff := true
+if selloff_end
+    in_selloff := false
+bgcolor(in_selloff ? color.new(color.red, 80) : na)
+
+/////////////////////////////////////////
+// Plot Entry and Exit Dots with bar confirmation to avoid repainting
+plotshape(barClosed and fekg, title="LE (Orange)", style=shape.circle, location=location.belowbar, color=color.new(color.orange, 30), size=size.tiny)
+plotshape(barClosed and tpm, title="LE (Green)", style=shape.circle, location=location.belowbar, color=color.new(color.green, 40), size=size.tiny)
+plotshape(barClosed and long_exit, title="LX", style=shape.circle, location=location.abovebar, color=color.new(color.red, 50), size=size.tiny)
+
+/////////////////////////////////////////
+// Position Info Table
+var table position_table = na
+if bar_index == 0
+    position_table := table.new(position=position.bottom_right, columns=1, rows=4, border_width=1, bgcolor=color.new(color.white, 40))
+if strategy.position_size > 0 or strategy.position_size != last_position_size
+    table.cell(position_table, 0, 0, "Open Positions: " + str.tostring(strategy.position_size), text_color=color.gray, bgcolor=color.new(color.white, 40))
+    table.cell(position_table, 0, 1, "Fear EKG: " + str.tostring(math.round(pct_below_long_below_short, 1)) + "%", text_color=pct_below_long_below_short > 20 ? color.red : color.orange, bgcolor=color.new(color.white, 40))
+    table.cell(position_table, 0, 2, "Ticker Pulse: " + str.tostring(math.round(pct_above_long_above_short, 1)) + "%", text_color=pct_above_long_above_short > 20 ? color.green : color.orange, bgcolor=color.new(color.white, 40))
+    table.cell(position_table, 0, 3, " ", text_color=color.gray, bgcolor=color.new(color.white, 40))  // Padding
+
+/////////////////////////////////////////
+// Alerts, in event of indicator
+//alertcondition(barClosed and long_entry, title="Long Entry Alert", message="Long Entry Signal")
+//alertcondition(barClosed and long_exit, title="Long Exit Alert", message="Long Exit Signal")
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// --- BELOW IS PROUDLY SOURCED SOURCED AND INSPIRED FROM PUBLIC DOMAIN---
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// --- Simple Moving Average Indicator ---
+//Note: Visual and contextual enhancer. Optional and not core to trading strategy. Adapted from commonly available and standard Pine Script practices, inspired by public scripts on Tradingview. 
+len = input.int(200, minval=1, title="Length", group=GRP5)
+src = input(close, title="Source", group=GRP5)
+out = ta.sma(src, len)
+plot(out, color=#f6f8fa, title="MA", linewidth=3)
+
+///////////////////////////////////////
+// --- Smoothing MA Inputs ---
+//Note: Visual and contextual enhancer. Optional and not core to trading strategy. Adapted from commonly available and standard Pine Script practices, inspired by public scripts on Tradingview. 
+TT_BB = "Only applies when 'SMA + Bollinger Bands' is selected. Determines the distance between the SMA and the bands."
+maTypeInput = input.string("SMA + Bollinger Bands", "Type", options=["None", "SMA", "SMA + Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group=GRP6, display=display.data_window)
+maLengthInput = input.int(100, "Smoothing Length", minval=1, group=GRP6, display=display.data_window)
+bbMultInput = input.float(2.0, "BB StdDev", minval=0.001, maxval=50, step=0.5, tooltip=TT_BB, group=GRP6, display=display.data_window)
+var enableMA = maTypeInput != "None"
+var isBB = maTypeInput == "SMA + Bollinger Bands"
+
+///////////////////////////////////////
+// --- Smoothing MA Calculation ---
+//Note: Visual and contextual enhancer. Optional and not core to trading strategy. Adapted from commonly available and standard Pine Script practices, inspired by public scripts on Tradingview. 
+ma(source, length, MAtype) =>
+    switch MAtype
+        "SMA"                   => ta.sma(source, length)
+        "SMA + Bollinger Bands" => ta.sma(source, length)
+        "EMA"                   => ta.ema(source, length)
+        "SMMA (RMA)"            => ta.rma(source, length)
+        "WMA"                   => ta.wma(source, length)
+        "VWMA"                  => ta.vwma(source, length)
+
+///////////////////////////////////////
+// --- Smoothing MA Plots ---
+//Note: Visual and contextual enhancer. Optional and not core to trading strategy. Adapted from commonly available and standard Pine Script practices, inspired by public scripts on Tradingview. 
+smoothingMA = enableMA ? ma(out, maLengthInput, maTypeInput) : na
+smoothingStDev = isBB ? ta.stdev(out, maLengthInput) * bbMultInput : na
+plot(smoothingMA, "SMA-based MA", color=color.yellow, display=enableMA ? display.all : display.none)
+bbUpperBand = plot(smoothingMA + smoothingStDev, title="Upper Bollinger Band", color=color.green, display=isBB ? display.all : display.none)
+bbLowerBand = plot(smoothingMA - smoothingStDev, title="Lower Bollinger Band", color=color.green, display=isBB ? display.all : display.none)
+fill(bbUpperBand, bbLowerBand, color=isBB ? color.new(color.green, 90) : na, title="Bollinger Bands Background Fill", display=isBB ? display.all : display.none)
+
+View in Pine Editor・172 lines
+Use on chart
+3
+9
+1 614
+Jun 27, 2025
+Description
+The Ticker Pulse Meter + Fear EKG Strategy is a technical analysis tool designed to identify potential entry and exit points for long positions based on price action relative to historical ranges. It combines two proprietary indicators: the Ticker Pulse Meter (TPM), which measures price positioning within short- and long-term ranges, and the Fear EKG, a VIX-inspired oscillator that detects extreme market conditions. The strategy is non-repainting, ensuring signals are generated only on confirmed bars to avoid false positives. Visual enhancements, such as optional moving averages and Bollinger Bands, provide additional context but are not core to the strategy's logic. This script is suitable for traders seeking a systematic approach to capturing momentum and mean-reversion opportunities.
+How It Works
+The strategy evaluates price action using two key metrics:
+Ticker Pulse Meter (TPM): Measures the current price's position within short- and long-term price ranges to identify momentum or overextension.
+
+Fear EKG: Detects extreme selling pressure (akin to "irrational selling") by analyzing price behavior relative to historical lows, inspired by volatility-based oscillators.
+
+Entry signals are generated when specific conditions align, indicating potential buying opportunities. Exits are triggered based on predefined thresholds or partial position closures to manage risk. The strategy supports customizable lookback periods, thresholds, and exit percentages, allowing flexibility across different markets and timeframes. Visual cues, such as entry/exit dots and a position table, enhance usability, while optional overlays like moving averages and Bollinger Bands provide additional chart context.
+
+Calculation Overview
+Price Range Calculations:
+Short-Term Range: Uses the lowest low (min_price_short) and highest high (max_price_short) over a user-defined short lookback period (lookback_short, default 50 bars).
+
+Long-Term Range: Uses the lowest low (min_price_long) and highest high (max_price_long) over a user-defined long lookback period (lookback_long, default 200 bars).
+
+Percentage Metrics:
+pct_above_short: Percentage of the current close above the short-term range.
+
+pct_above_long: Percentage of the current close above the long-term range.
+
+Combined metrics (pct_above_long_above_short, pct_below_long_below_short) normalize price action for signal generation.
+
+Signal Generation:
+Long Entry (TPM): Triggered when pct_above_long_above_short crosses above a user-defined threshold (entryThresholdhigh, default 20) and pct_below_long_below_short is below a low threshold (entryThresholdlow, default 40).
+
+Long Entry (Fear EKG): Triggered when pct_below_long_below_short crosses under an extreme threshold (orangeEntryThreshold, default 95), indicating potential oversold conditions.
+
+Long Exit: Triggered when pct_above_long_above_short crosses under a profit-taking level (profitTake, default 95). Partial exits are supported via a user-defined percentage (exitAmt, default 50%).
+
+Non-Repainting Logic: Signals are calculated using data from the previous bar ([1]) and only plotted on confirmed bars (barstate.isconfirmed), ensuring reliability.
+
+Visual Enhancements:
+Optional moving averages (SMA, EMA, WMA, VWMA, or SMMA) and Bollinger Bands can be enabled for trend context.
+
+A position table displays real-time metrics, including open positions, Fear EKG, and Ticker Pulse values.
+
+Background highlights mark periods of high selling pressure.
+
+Entry Rules
+Long Entry:
+TPM Signal: Occurs when the price shows strength relative to both short- and long-term ranges, as defined by pct_above_long_above_short crossing above entryThresholdhigh and pct_below_long_below_short below entryThresholdlow.
+
+Fear EKG Signal: Triggered by extreme selling pressure, when pct_below_long_below_short crosses under orangeEntryThreshold. This signal is optional and can be toggled via enable_yellow_signals.
+
+Entries are executed only on confirmed bars to prevent repainting.
+
+Exit Rules
+Long Exit: Triggered when pct_above_long_above_short crosses under profitTake.
+
+Partial exits are supported, with the strategy closing a user-defined percentage of the position (exitAmt) up to four times per position (exit_count limit).
+
+Exits can be disabled or adjusted via enable_short_signal and exitPercentage settings.
+
+Inputs
+Backtest Start Date: Defines the start of the backtesting period (default: Jan 1, 2017).
+
+Lookback Periods: Short (lookback_short, default 50) and long (lookback_long, default 200) periods for range calculations.
+
+Resolution: Timeframe for price data (default: Daily).
+
+Entry/Exit Thresholds:
+entryThresholdhigh (default 20): Threshold for TPM entry.
+
+entryThresholdlow (default 40): Secondary condition for TPM entry.
+
+orangeEntryThreshold (default 95): Threshold for Fear EKG entry.
+
+profitTake (default 95): Exit threshold.
+
+exitAmt (default 50%): Percentage of position to exit.
+
+Visual Options: Toggle for moving averages and Bollinger Bands, with customizable types and lengths.
+
+Notes
+The strategy is designed to work across various timeframes and assets, with data sourced from user-selected resolutions (i_res).
+
+Alerts are included for long entry and exit signals, facilitating integration with TradingView's alert system.
+
+The script avoids repainting by using confirmed bar data and shifted calculations ([1]).
+
+Visual elements (e.g., SMA, Bollinger Bands) are inspired by standard Pine Script practices and are optional, not integral to the core logic.
+
+Usage
+Apply the script to a chart, adjust input settings to suit your trading style, and use the visual cues (entry/exit dots, position table) to monitor signals. Enable alerts for real-time notifications.
+
+Designed to work best on Daily timeframe.
+
+
+Jun 28, 2025
+Release Notes
+Updated properties tab to include realistic commission of 1% and slippage of 15 ticks. Check with your broker regarding commissions and update accordingly. Slippage may vary as well depending on the asset being traded.
+
+Updated Initial capital to $5,000, updated Order size to $300 USD, 0.06% of total capital, a reasonable amount of risk per trade and allow for a max of 5 trades deep, so roughly no more than roughly $1,500 out there in working capital, or roughly 30% of total capital ($5,000).
+
+Extended the backtesting period to 01/01/2000 (~24.5 years) to allow for adequate trade volumes and strengthen backtesting results.
+Jun 30, 2025
+Release Notes
+Update this:
+strategy("Ticker Pulse Meter + Fear EKG Strategy", overlay=true, initial_capital=2500, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=2, pyramiding=2, max_bars_back=5000)
+
+To this, which includes the commission and slippage:
+strategy("Ticker Pulse Meter + Fear EKG Strategy", overlay=true, initial_capital=2500, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=2, pyramiding=2, max_bars_back=5000, commission_type=strategy.commission.percent, commission_value=1, slippage=15)

@@ -1,0 +1,44 @@
+{
+  "generated_at": "2026-03-23T08:47:29.924252+00:00",
+  "queue_rank": 4,
+  "page": 1,
+  "name": "ZigZag Elliott Wave Strategy (Demo)",
+  "slug": "qnlqq9ab",
+  "chart_url": "https://www.tradingview.com/script/qNLQQ9aB/",
+  "pine_file": "raw-pine/all/qNLQQ9aB.pine",
+  "symbol_name": "NASDAQ:NBIS",
+  "repo_timeframe_hint": "4h",
+  "status": "converted",
+  "classification": "partial",
+  "timeframe": "4h",
+  "reason": "Uses lag-confirmed pivots and pyramiding/partial-close behavior that must be approximated in the repo target-position signal model.",
+  "adaptations": [
+    "Implement ta.pivothigh/ta.pivotlow as delayed confirmation pivots without lookahead",
+    "Approximate repeated Wave 4 strategy.entry adds as capped position scaling",
+    "Approximate strategy.close qty_percent partial close as target-position reduction",
+    "Map strategy.close_all exit to full flat position when wave3 target is reached"
+  ],
+  "attempts_used": 1,
+  "attempt_log": [],
+  "conversion_notes": [
+    "Converted as partial because Pine order-ticket semantics are richer than a single position-intent array.",
+    "Wave logic follows Pine structure: Wave 2 zone entry, Wave 4 add, partial TP, full exit.",
+    "Pivot outputs are emitted only after right-side bars confirm, matching non-lookahead behavior.",
+    "No external imports beyond numpy/pandas and no file/API access in strategy module.",
+    "generate_signals returns numeric numpy.ndarray with exact input length."
+  ],
+  "python_file": "python-strategies/stage2-local/qnlqq9ab.py",
+  "failed_python_files": [],
+  "validation": {
+    "module_name": "ZigZag Elliott Wave Strategy (Demo)",
+    "module_timeframe": "4h",
+    "symbol": "BTCUSDT",
+    "bars_checked": 907,
+    "signals_len": 907,
+    "non_zero_signals": 705,
+    "finite_ratio": 1.0,
+    "min_signal": 0.0,
+    "max_signal": 1.5
+  },
+  "last_error": null
+}

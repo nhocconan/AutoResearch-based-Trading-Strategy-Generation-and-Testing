@@ -1,0 +1,127 @@
+//@version=4
+strategy("HTF High/Low Repaint Strategy", overlay=true, initial_capital = 20000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, pyramiding = 1, commission_value = 0.01)
+
+i_startTime = input(defval = timestamp("01 Jan 2010 00:00 +0000"), title = "Start Time", type = input.time)
+i_endTime = input(defval = timestamp("01 Jan 2099 00:00 +0000"), title = "End Time", type = input.time)
+inDateRange = time >= i_startTime and time <= i_endTime
+
+resolution = input("3M", type=input.resolution)
+HTFMultiplier = input(22, minval=1, step=1)
+offset = input(0, minval=0, step=1)
+lookahead = input(true)
+gaps = false
+
+f_secureSecurity_on_on(_symbol, _res, _src, _offset) => security(_symbol, _res, _src[_offset], lookahead = barmerge.lookahead_on, gaps=barmerge.gaps_on)
+f_secureSecurity_on_off(_symbol, _res, _src, _offset) => security(_symbol, _res, _src[_offset], lookahead = barmerge.lookahead_on, gaps=barmerge.gaps_off)
+f_secureSecurity_off_on(_symbol, _res, _src, _offset) => security(_symbol, _res, _src[_offset], lookahead = barmerge.lookahead_off, gaps=barmerge.gaps_on)
+f_secureSecurity_off_off(_symbol, _res, _src, _offset) => security(_symbol, _res, _src[_offset], lookahead = barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+f_multiple_resolution(HTFMultiplier) => 
+    target_Res_In_Min = timeframe.multiplier * HTFMultiplier * (
+      timeframe.isseconds   ? 1. / 60. :
+      timeframe.isminutes   ? 1. :
+      timeframe.isdaily     ? 1440. :
+      timeframe.isweekly    ? 7. * 24. * 60. :
+      timeframe.ismonthly   ? 30.417 * 24. * 60. : na)
+
+    target_Res_In_Min     <= 0.0417       ? "1S"  :
+      target_Res_In_Min   <= 0.167        ? "5S"  :
+      target_Res_In_Min   <= 0.376        ? "15S" :
+      target_Res_In_Min   <= 0.751        ? "30S" :
+      target_Res_In_Min   <= 1440         ? tostring(round(target_Res_In_Min)) :
+      tostring(round(min(target_Res_In_Min / 1440, 365))) + "D"
+
+f_get_htfHighLow(resolution, HTFMultiplier, lookahead, gaps, offset)=>
+    derivedResolution = resolution == ""?f_multiple_resolution(HTFMultiplier):resolution
+    nhigh_on_on = f_secureSecurity_on_on(syminfo.tickerid, derivedResolution, high, offset) 
+    nlow_on_on = f_secureSecurity_on_on(syminfo.tickerid, derivedResolution, low, offset)
+    
+    nhigh_on_off = f_secureSecurity_on_off(syminfo.tickerid, derivedResolution, high, offset) 
+    nlow_on_off = f_secureSecurity_on_off(syminfo.tickerid, derivedResolution, low, offset)
+    
+    nhigh_off_on = f_secureSecurity_off_on(syminfo.tickerid, derivedResolution, high, offset) 
+    nlow_off_on = f_secureSecurity_off_on(syminfo.tickerid, derivedResolution, low, offset)
+    
+    nhigh_off_off = f_secureSecurity_off_off(syminfo.tickerid, derivedResolution, high, offset) 
+    nlow_off_off = f_secureSecurity_off_off(syminfo.tickerid, derivedResolution, low, offset)
+    
+    nhigh = lookahead and gaps ? nhigh_on_on :
+             lookahead and not gaps ? nhigh_on_off :
+             not lookahead and gaps ? nhigh_off_on :
+             not lookahead and not gaps ? nhigh_off_off : na
+    nlow = lookahead and gaps ? nlow_on_on :
+             lookahead and not gaps ? nlow_on_off :
+             not lookahead and gaps ? nlow_off_on :
+             not lookahead and not gaps ? nlow_off_off : na
+    [nhigh, nlow]
+    
+[nhigh, nlow] = f_get_htfHighLow(resolution, HTFMultiplier, lookahead, gaps, offset)
+[nhighlast, nlowlast] = f_get_htfHighLow(resolution, HTFMultiplier, lookahead, gaps, offset+1)
+plot(nhigh , title="HTF High",style=plot.style_circles, color=color.green, linewidth=1) 
+plot(nlow , title="HTF Low",style=plot.style_circles, color=color.red, linewidth=1)
+
+buyCondition = nhigh > nhighlast and nlow > nlowlast
+sellCondition = nhigh < nhighlast and nlow < nlowlast
+
+strategy.entry("Buy", strategy.long, when= buyCondition and inDateRange, oca_name="oca_buy", oca_type=strategy.oca.cancel)
+strategy.entry("Sell", strategy.short, when= sellCondition and inDateRange, oca_name="oca_sell", oca_type=strategy.oca.cancel)
+
+View in Pine Editor・70 lines
+Use on chart
+1 K
+14
+28 528
+Here is an another attempt to demonstrate repainting and how to avoid them. It happened few times to me that I develop a strategy which is giving immense returns - only to realize after few forward testing that it is repainting. Sometimes, it is well disguised even during forward testing.
+
+In this simple strategy, conditions are as below:
+
+Buy : When a 3M bar produces high and low higher than it's previous 3M bar high, low
+Sell : When a 3M bar produces high and low lower than its previous 3M bar high, low.
+
+Default setting is : lookahead = on and offset = 0
+
+This means current 3M bar high low is plotted for all the daily bars within this month. Which means, strategy looks ahead of time to see this 3M bar high is higher than previous 3M bar high during the start of the first daily bar. Hence, this combination leads to massive repaint.
+
+For example, trade made on October 2nd 2018 already knows well ahead of time that price is going to go down in next 3 months:
+
+
+
+
+Similarly, after 2 years on October 2nd 2020 - the strategy already knows that last 3M high is going to be breached on 7th December 2020
+
+
+
+
+
+Solution: If you are using security for higher timeframes, safer option is always to use offset 1. Further details in the trading view script:
+
+
+
+BUT
+
+It may still repaint if we are passing function to security.
+
+For example:
+f_secureSecurity(_symbol, _res, _src) => security(_symbol, _res, _src[1], lookahead = barmerge.lookahead
+
+This function will likely avoid any repainting with Higher timeframe if we are passing in built variables such as high, low, close, open etc. But, if we try to pass supertrend, this will not produce right results. This is because supertrend calculation in turn uses high/low/close values which do not consider the offset while calculating. Hence, even with offset 1, this will still produce issues.
+
+Hence, the call:
+[supertrend, dir] = f_secureSecurity(syminfo.tickerid, derivedResolution, supertrend(3,10), offset) will again lead to massive repainting. Solution to this is to implement supertrend function and use high, low, close values derived from secureSecurity.
+
+Quick tips to identify or be suspicious about repainting
+
+
+Unbelievable results on all timeframes and all instruments with both long and short trades
+
+Lower timeframes giving significantly higher returns on backtest when compared to higher timeframe
+
+
+
+If these things happen, be wary about repainting and do a through check of all security function usage in your strategy.
+
+All the best :)
+
+PS: Apply 3-5 days resolution and see the fun. Also, 
+WHC
+ is one hell of a Christmas tree. Could have made immense profit in the same strategy even without repainting.

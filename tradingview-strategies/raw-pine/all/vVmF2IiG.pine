@@ -1,0 +1,275 @@
+//@version=5
+strategy("XAUUSD Institutional OB MTF v2 (Daily S/R + Candle Mode | 2R/5R)",
+     overlay=true, pyramiding=0,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     commission_type=strategy.commission.percent, commission_value=0.04,
+     calc_on_every_tick=true, process_orders_on_close=true)
+
+// ===================== Inputs =====================
+useOnlyXAU = input.bool(true, "Confirm: Use on XAUUSD only")
+
+// 4H Trend Filter
+ema20Len   = input.int(20,  "4H EMA 20",  minval=1)
+ema50Len   = input.int(50,  "4H EMA 50",  minval=1)
+ema200Len  = input.int(200, "4H EMA 200", minval=1)
+
+// Weekly Level
+holdBarsW  = input.int(2, "Weekly Hold bars above Prev Week High", minval=1)
+
+// OB
+obLookback = input.int(20, "OB Search Lookback (LTF)", minval=5)
+atrLen     = input.int(14, "ATR Length (LTF)", minval=1)
+slAtrPad   = input.float(0.15, "SL Padding (ATR)", minval=0.0, step=0.05)
+retestTolOB= input.float(0.25, "OB Retest Tolerance (ATR)", minval=0.0, step=0.05)
+
+// TP/SL RR
+rr1        = input.float(2.0, "TP1 RR", minval=0.5, step=0.25)
+rr2        = input.float(5.0, "TP2 RR", minval=1.0, step=0.25)
+
+// Position sizing (percent of equity total, split 50/50)
+posPctTotal = input.float(10.0, "Total Position Size (% of equity)", minval=0.1, step=0.1)
+qtyEachPct  = posPctTotal / 2.0
+
+// ===================== Candle Confirmation Mode =====================
+// Applies to BOTH: Daily logic + OB confirmation
+candleMode = input.string("Engulfing + Strong Body", "Candle Confirmation Mode",
+     options=["Simple", "Engulfing", "Strong Body", "Engulfing + Strong Body"])
+
+strongBodyATR = input.float(0.60, "Strong Body Min (ATR)", minval=0.1, step=0.05)
+
+// ===================== Safety =====================
+if not useOnlyXAU
+    runtime.error("Enable 'Confirm: Use on XAUUSD only' to run this strategy.")
+
+// ===================== ATR =====================
+atr = ta.atr(atrLen)
+
+// ===================== Candle Confirmation Functions (Long) =====================
+bullSimple() =>
+    close > open
+
+bullEngulfing() =>
+    // Current bullish body engulfs previous bearish body
+    (close > open) and (close[1] < open[1]) and (open <= close[1]) and (close >= open[1])
+
+bullStrongBody() =>
+    // Body size relative to ATR + bullish close
+    (close > open) and (math.abs(close - open) >= strongBodyATR * atr)
+
+bullConfirmLong =
+     candleMode == "Simple" ? bullSimple() :
+     candleMode == "Engulfing" ? bullEngulfing() :
+     candleMode == "Strong Body" ? bullStrongBody() :
+     // Engulfing + Strong Body
+     (bullEngulfing() and bullStrongBody())
+
+// ===================== Weekly Level (Prev Week High) =====================
+prevWkHigh = request.security(syminfo.tickerid, "W", high[1], barmerge.gaps_off, barmerge.lookahead_off)
+plot(prevWkHigh, "Prev Week High", color=color.new(color.green, 65), linewidth=2)
+
+// Hold above prevWkHigh
+isAboveW = close > prevWkHigh
+holdCountW = ta.barssince(not isAboveW)
+holdOKW = holdCountW >= (holdBarsW - 1)
+
+// ===================== 4H Trend Filter (EMA 20/50/200) =====================
+ema20_4h  = request.security(syminfo.tickerid, "240", ta.ema(close, ema20Len),  barmerge.gaps_off, barmerge.lookahead_off)
+ema50_4h  = request.security(syminfo.tickerid, "240", ta.ema(close, ema50Len),  barmerge.gaps_off, barmerge.lookahead_off)
+ema200_4h = request.security(syminfo.tickerid, "240", ta.ema(close, ema200Len), barmerge.gaps_off, barmerge.lookahead_off)
+c_4h      = request.security(syminfo.tickerid, "240", close, barmerge.gaps_off, barmerge.lookahead_off)
+
+trendLongOK = (c_4h > ema200_4h) and (ema50_4h > ema200_4h) and (ema20_4h > ema50_4h)
+
+// ===================== OB Detection on Entry TF (LTF) =====================
+f_lastBearish(_lb) =>
+    int idx = na
+    for i = 1 to _lb
+        if close[i] < open[i]
+            idx := i
+            break
+    idx
+
+// define OB when price first transitions above prevWkHigh
+breakoutNowW = isAboveW and not isAboveW[1]
+
+var float obHigh = na
+var float obLow  = na
+var bool  obActive = false
+
+if breakoutNowW
+    int b = f_lastBearish(obLookback)
+    if not na(b)
+        obHigh := high[b]
+        obLow  := low[b]
+        obActive := true
+
+tolOB = retestTolOB * atr
+inOB = obActive and (low <= obHigh + tolOB) and (high >= obLow - tolOB)
+
+// OB confirmation candle uses the SAME candle mode
+confirmOB = inOB and bullConfirmLong
+
+// invalidate OB if clearly broken below
+if obActive and close < obLow - tolOB
+    obActive := false
+
+plot(obActive ? obHigh : na, "OB High", color=color.new(color.aqua, 0), style=plot.style_linebr, linewidth=2)
+plot(obActive ? obLow  : na, "OB Low",  color=color.new(color.aqua, 0), style=plot.style_linebr, linewidth=2)
+
+// ===================== Daily Levels (Prev Day) =====================
+pdh = request.security(syminfo.tickerid, "D", high[1],  barmerge.gaps_off, barmerge.lookahead_off)
+pdl = request.security(syminfo.tickerid, "D", low[1],   barmerge.gaps_off, barmerge.lookahead_off)
+pdc = request.security(syminfo.tickerid, "D", close[1], barmerge.gaps_off, barmerge.lookahead_off)
+
+plot(pdh, "PDH (Prev Day High)",  color=color.new(color.orange, 40), linewidth=2, style=plot.style_linebr)
+plot(pdl, "PDL (Prev Day Low)",   color=color.new(color.orange, 40), linewidth=2, style=plot.style_linebr)
+plot(pdc, "PDC (Prev Day Close)", color=color.new(color.gray,   70), linewidth=1, style=plot.style_linebr)
+
+// Daily toggles (3 modes ON/OFF from settings)
+useDailyRejection   = input.bool(true, "Daily: Rejection (Touch + Confirm)")
+useDailyBreakHold   = input.bool(true, "Daily: Break + Hold")
+useDailyRetestMom   = input.bool(true, "Daily: Retest + Momentum")
+
+touchTolATR = input.float(0.20, "Daily Touch Tolerance (ATR)", step=0.05)
+holdBarsD   = input.int(2, "Daily Hold Bars (PDH)", minval=1)
+momRSILen   = input.int(14, "Momentum RSI Len (Entry TF)")
+momRSIMin   = input.int(55, "Momentum RSI Min (Long)", minval=50)
+
+tolD = touchTolATR * atr
+rsiMom = ta.rsi(close, momRSILen)
+
+// ---- 1) Rejection Long from PDL/PDC (trend must be OK later)
+touchPDL = low <= (pdl + tolD)
+touchPDC = math.abs(close - pdc) <= tolD
+dailyRejectionLong = (touchPDL or touchPDC) and bullConfirmLong and (rsiMom >= momRSIMin)
+
+// ---- 2) Break + Hold above PDH
+abovePDH = close > pdh
+holdCountPDH = ta.barssince(not abovePDH)
+dailyBreakHoldLong = abovePDH and (holdCountPDH >= (holdBarsD - 1))
+
+// ---- 3) Retest + Momentum after Break/Hold
+retestPDH = (low <= (pdh + tolD)) and abovePDH
+dailyRetestMomLong = dailyBreakHoldLong and retestPDH and bullConfirmLong and (rsiMom >= momRSIMin)
+
+// Final Daily permission (any of the enabled modes)
+dailyOKLong =
+     (useDailyRejection and dailyRejectionLong) or
+     (useDailyBreakHold and dailyBreakHoldLong) or
+     (useDailyRetestMom and dailyRetestMomLong)
+
+// ===================== Entry Condition =====================
+longCondition = trendLongOK and holdOKW and confirmOB and dailyOKLong
+
+// ===================== Auto Entry + Instant SL/TP Split =====================
+if longCondition and strategy.position_size == 0
+    sl = (obLow - slAtrPad * atr)
+    risk = close - sl
+    if risk > 0
+        tp1 = close + rr1 * risk
+        tp2 = close + rr2 * risk
+
+        // split into two positions (percent of equity)
+        strategy.entry("L1", strategy.long, qty=qtyEachPct)
+        strategy.entry("L2", strategy.long, qty=qtyEachPct)
+
+        // instant exits
+        strategy.exit("X1", from_entry="L1", stop=sl, limit=tp1)
+        strategy.exit("X2", from_entry="L2", stop=sl, limit=tp2)
+
+// ===================== Visual Debug =====================
+plotchar(trendLongOK, "4H Trend OK", "✔", location.top)
+plotchar(holdOKW, "Weekly Hold OK", "W", location.top)
+plotchar(obActive, "OB Active", "OB", location.top)
+plotchar(dailyOKLong, "Daily OK", "D", location.top)
+
+View in Pine Editor・185 lines
+Use on chart
+8
+561
+First)
+
+XAUUSD Institutional OB MTF v2
+
+(Daily S/R + Candle Mode | 2R / 5R System)
+
+This strategy is designed specifically for XAUUSD (Gold) using a multi-timeframe institutional concept.
+
+🔎 Strategy Logic
+
+This system combines:
+• Daily Support & Resistance (PDH / PDL / PDC)
+• 1H Trend Direction Filter
+• 15m Entry Confirmation
+• Optional Lower Timeframe Scalp Confirmation (5m / 1m)
+• Engulfing + Strong Body Candle Confirmation
+• Momentum (RSI-based strength filter)
+• Split Take Profit system (2R / 5R)
+
+⸻
+
+📊 How It Works
+
+1️⃣ Trend is confirmed on 1H timeframe
+2️⃣ Price reacts from Daily S/R zone
+3️⃣ Entry confirmed on 15m with candle confirmation
+4️⃣ Optional scalp entries on 5m / 1m if momentum appears
+5️⃣ Position split into:
+• TP1 = 2R
+• TP2 = 5R
+• Dynamic Stop Loss based on ATR
+
+⸻
+
+⚡ Scalp Mode
+
+If strong momentum appears after main entry:
+• Additional scalp trades may trigger
+• Scalp trades are independent from main position
+• Can repeat if conditions repeat
+
+⸻
+
+⚠ Risk Management
+
+Recommended:
+• 1% – 2% risk per trade
+• Avoid trading during high-impact news
+• Best performance on London & NY session volatility
+
+⸻
+
+🎯 Best Timeframes
+• Trend: 1H
+• Entry: 15m
+• Confirmation: 5m / 1m
+
+⸻استراتيجية الذهب المؤسسية متعددة الفريمات
+
+تعتمد هذه الاستراتيجية على مفهوم السيولة المؤسسية باستخدام:
+• دعم ومقاومة يومية
+• تحديد الاتجاه من فريم الساعة
+• دخول من فريم 15 دقيقة
+• تأكيد شموع ابتلاعية + جسم قوي
+• فلتر زخم RSI
+• تقسيم الهدف إلى 2R و 5R
+• وقف خسارة ديناميكي حسب ATR
+
+⸻
+
+آلية العمل
+
+1️⃣ تحديد الاتجاه من الساعة
+2️⃣ انتظار ارتداد أو كسر وتثبيت عند دعم/مقاومة يومية
+3️⃣ تأكيد شموع على 15 دقيقة
+4️⃣ دخول سكالب إضافي عند ظهور زخم قوي على 5 أو 1 دقيقة
+5️⃣ تقسيم الصفقة إلى هدفين
+
+⸻
+
+إدارة رأس المال
+• مخاطرة لا تتجاوز 1–2% لكل صفقة
+• تجنب الأخبار القوية
+• أفضل أداء في جلسة لندن ونيويورك
+

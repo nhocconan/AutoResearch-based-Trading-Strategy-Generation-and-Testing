@@ -1,0 +1,78 @@
+//@version=6
+strategy('Turn around Tuesday on Steroids Strategy', overlay = true, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, margin_long = 5, margin_short = 5, process_orders_on_close = true, precision = 4, calc_on_every_tick = true)
+
+in_start_time = input.time(timestamp('1 Jan 2014'), title = 'Start Time', group = 'Time Settings')
+in_end_time = input.time(timestamp('1 Jan 2099'), title = 'End Time', group = 'Time Settings')
+in_window = time >= in_start_time and time <= in_end_time
+
+startingDayInput = input.string(defval = 'Sunday', options = ['Sunday', 'Monday'], title = 'Starting Day', tooltip = 'For ETFs and Stocks, use Monday. For everything else, use Sunday')
+useMaFilter = input.bool(defval = false, title = 'Use MA Filter')
+
+isFirstDayOfWeek = startingDayInput == 'Sunday' ? dayofweek == dayofweek.sunday or dayofweek == dayofweek.monday : dayofweek == dayofweek.monday or dayofweek == dayofweek.tuesday
+
+_ema = ta.sma(close, 200)
+plot(_ema, color = color.red)
+
+longCondition = isFirstDayOfWeek and close < close[1] and close[1] < close[2] and in_window
+exitCondition = close > high[1]
+
+if useMaFilter
+    longCondition := longCondition and close > _ema
+
+if longCondition
+    strategy.entry('long', strategy.long)
+if exitCondition
+    strategy.close_all()
+
+View in Pine Editor・28 lines
+Use on chart
+7
+0
+1
+2 025
+█ STRATEGY DESCRIPTION
+The "Turn around Tuesday on Steroids Strategy" is a mean-reversion strategy designed to identify potential price reversals at the start of the trading week. It enters a long position when specific conditions are met and exits when the price shows strength by exceeding the previous bar's high. This strategy is optimized for ETFs, stocks, and other instruments on the daily timeframe.
+
+█ WHAT IS THE STARTING DAY?
+The Starting Day determines the first day of the trading week for the strategy. It can be set to either Sunday or Monday, depending on the instrument being traded. For ETFs and stocks, Monday is recommended. For other instruments, Sunday is recommended.
+
+█ SIGNAL GENERATION
+1. LONG ENTRY
+A Buy Signal is triggered when:
+
+The current day is the first day of the trading week (either Sunday or Monday, depending on the Starting Day setting).
+
+The close price is lower than the previous day's close (`close < close[1]`).
+
+The previous day's close is also lower than the close two days ago (`close[1] < close[2]`).
+
+The signal occurs within the specified time window (between `Start Time` and `End Time`).
+
+If the MA Filter is enabled, the close price must also be above the 200-period Simple Moving Average (SMA).
+
+
+
+2. EXIT CONDITION
+
+A Sell Signal is generated when the current closing price exceeds the high of the previous bar (`close > high[1]`). This indicates that the price has shown strength, potentially confirming the reversal and prompting the strategy to exit the position.
+
+
+
+█ ADDITIONAL SETTINGS
+
+Starting Day: Determines the first day of the trading week. Options are Sunday or Monday. Default is Sunday.
+
+Use MA Filter: Enables or disables the 200-period SMA filter for long entries. Default is disabled.
+
+Start Time and End Time: The time window during which the strategy is allowed to execute trades.
+
+
+
+█ PERFORMANCE OVERVIEW
+
+This strategy is designed for markets with frequent weekly reversals.
+
+It performs best in volatile conditions where price movements are significant at the start of the trading week.
+
+Backtesting results should be analysed to optimize the Starting Day and MA Filter settings for specific instruments.
+

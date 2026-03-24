@@ -1,0 +1,345 @@
+//@version=6
+strategy('is_strategy', overlay = true, margin_long = 100, margin_short = 100, max_bars_back = 3000, default_qty_type = "cash_per_order", default_qty_value = 5000, initial_capital = 10000)
+hb5 = input.source(close, 'Source')
+icon = input.bool(false, 'Revers')
+ivv = input.bool(true, 'Sell - On')
+pol = input.float(0.5, '%Profit', minval = 0, maxval = 30)
+pol2 = input.float(0.5, '%Loss', minval = 0, maxval = 30)
+varip ii = 0
+varip i2 = 0
+if icon == false
+    ii := 1
+    i2 := 2
+else
+    ii := 2
+    i2 := 1
+varip count = 0
+varip count2 = 0
+varip TP = 0.0
+varip SL = 0.0
+if hb5 == ii and hb5[1] != ii
+    strategy.entry('buy', strategy.long)
+    TP := close + close * pol
+    SL := close - close * pol2
+else
+    if hb5 == i2 and hb5[1] != i2
+        strategy.close('buy')
+if hb5 == i2 and hb5[1] != i2 and ivv
+    strategy.entry('sell', strategy.short)
+    TP := close - close * pol
+    SL := close + close * pol2
+else
+    if hb5 == ii and hb5[1] != ii and ivv
+        strategy.close('sell')
+
+if close >= TP
+    strategy.close('buy')
+else
+    if close <= TP
+        strategy.close('sell')
+if close <= SL
+    strategy.close('buy')
+else
+    if close >= SL
+        strategy.close('sell')
+
+View in Pine Editor・46 lines
+Use on chart
+5
+7
+1 388
+Mar 1, 2025
+Correction-Adaptive Trend Strategy (Open-Source)
+Core Advantage: Designed specifically for the is_correction indicator, with full transparency and customization options.
+
+Key Features:
+
+Open-Source Code:
+
+✅ Full access to the strategy logic – study how every trade signal is generated.
+
+✅ Freedom to customize – modify entry/exit rules, risk parameters, or add new indicators.
+
+✅ No black boxes – understand and trust every decision the strategy makes.
+
+Built for is_correction:
+
+Filters out false signals during market noise.
+
+Works only in confirmed trends (is_correction = false).
+
+Adaptable for Your Needs:
+
+Change Take Profit/Stop Loss ratios directly in the code.
+
+Add alerts, notifications, or integrate with other tools (e.g., Volume Profile).
+
+For Developers/Traders:
+
+Use the code as a template for your own strategies.
+
+Test modifications risk-free on historical data.
+
+How the Strategy Works:
+Main Goal:
+Automatically buys when the price starts rising and sells when it starts falling, but only during confirmed trends (ignoring temporary pullbacks).
+
+What You See on the Chart:
+
+📈 Up arrows ▼ (below the candle) = Buy signal.
+
+📉 Down arrows ▲ (above the candle) = Sell signal.
+
+Gray background = Market is in a correction (no trades).
+
+Key Mechanics:
+Buy Condition:
+
+Price closes higher than the previous candle + is_correction confirms the main trend (not a pullback).
+
+Example: Red candle → green candle → ▼ arrow → buy.
+
+Sell Condition:
+
+Price closes lower than the previous candle + is_correction confirms the trend (optional: turn off short-selling in settings).
+
+Exit Rules:
+
+Closes trades automatically at:
+
++0.5% profit (adjustable in settings).
+
+-0.5% loss (adjustable).
+
+Or if a reverse signal appears (e.g., sell signal after a buy).
+
+User-Friendly Settings:
+Sell – On (default: ON):
+
+ON → Allows short-selling (selling when price falls).
+
+OFF → Strategy only buys and closes positions.
+
+Revers (default: OFF):
+
+ON → Inverts signals (▼ = sell, ▲ = buy).
+
+%Profit & %Loss:
+
+Adjust these values (0-30%) to increase/decrease profit targets and risk.
+
+Example Scenario:
+Buy Signal:
+
+Price rises for 3 days → green ▼ arrow → strategy buys.
+
+Stop loss set 0.5% below entry price.
+
+If price keeps rising → trade closes at +0.5% profit.
+
+Correction Phase:
+
+After a rally, price drops for 1 day → gray background → strategy ignores the drop (no action).
+
+Stop Loss Trigger:
+
+If price drops 0.5% from entry → trade closes automatically.
+
+Key Features:
+Correction Filter (is_correction):
+
+Acts as a “noise filter” → avoids trades during temporary pullbacks.
+
+Flexibility:
+
+Disable short-selling, flip signals, or tweak profit/loss levels in seconds.
+
+Transparency:
+
+Open-source code → see exactly how every signal is generated (click “Source” in TradingView).
+
+Tips for Beginners:
+Test First:
+
+Run the strategy on historical data (click the “Chart” icon in TradingView).
+
+See how it performed in the past.
+
+Customize It:
+
+Increase %Profit to 2-3% for volatile assets like crypto.
+
+Turn off Sell – On if short-selling confuses you.
+
+Trust the Stop Loss:
+
+Even if you think the price will rebound, the strategy will close at -0.5% to protect your capital.
+
+Where to Find Settings:
+
+Click the strategy name on the top-left of your chart → adjust sliders/toggles in the menu.
+
+Русская Версия
+Трендовая стратегия с открытым кодом
+Главное преимущество: Полная прозрачность логики и адаптация под ваши нужды.
+
+Особенности:
+
+Открытый исходный код:
+
+✅ Видите всю «кухню» стратегии – как формируются сигналы, когда открываются сделки.
+
+✅ Меняйте правила – корректируйте тейк-профит, стоп-лосс или добавляйте новые условия.
+
+✅ Никаких секретов – вы контролируете каждое правило.
+
+Заточка под is_correction:
+
+Игнорирует ложные сигналы в коррекциях.
+
+Работает только в сильных трендах (is_correction = false).
+
+Гибкая настройка:
+
+Подстройте параметры под свой риск-менеджмент.
+
+Добавьте свои индикаторы или условия для входа.
+
+Для трейдеров и разработчиков:
+
+Используйте код как основу для своих стратегий.
+
+Тестируйте изменения на истории перед реальной торговлей.
+
+Простыми словами:
+Почему это удобно:
+
+Открытый код = полный контроль. Вы можете:
+
+Увидеть, как именно стратегия решает купить или продать.
+
+Изменить правила закрытия сделок (например, поставить TP=2% вместо 1.5%).
+
+Добавить новые условия (например, торговать только при высоком объёме).
+
+Примеры кастомизации:
+
+Новички: Меняйте только TP/SL в настройках (без кодинга).
+
+Продвинутые: Добавьте RSI-фильтр, чтобы избегать перекупленности.
+
+Разработчики: Встройте стратегию в свою торговую систему.
+
+Как начать:
+
+Скачайте код из TradingView.
+
+Изучите логику в разделе strategy.entry/exit.
+
+Меняйте параметры в блоке input.* (безопасно!).
+
+Тестируйте изменения и оптимизируйте под свои цели.
+
+Как работает стратегия:
+Главная задача:
+Автоматически покупает, когда цена начинает расти, и продаёт, когда падает. Но делает это «умно» — только когда рынок в основном тренде, а не во временном откате (коррекции).
+
+Что видно на графике:
+
+📈 Стрелки вверх ▼ (под свечой) — сигнал на покупку.
+
+📉 Стрелки вниз ▲ (над свечой) — сигнал на продажу.
+
+Серый фон — рынок в коррекции (не торгуем).
+
+Как это работает:
+Когда покупаем:
+
+Если цена закрылась выше предыдущей и индикатор is_correction показывает «основной тренд» (не коррекция).
+
+Пример: Была красная свеча → стала зелёная → появилась стрелка ▼ → покупаем.
+
+Когда продаём:
+
+Если цена закрылась ниже предыдущей и is_correction подтверждает тренд (опционально, можно отключить в настройках).
+
+Когда закрываем сделку:
+
+Автоматически при достижении:
+
++0.5% прибыли (можно изменить в настройках).
+
+-0.5% убытка (можно изменить).
+
+Или если появился противоположный сигнал (например, после покупки пришла стрелка продажи).
+
+Настройки для чайников:
+«Sell – On» (включено по умолчанию):
+
+Если включено → стратегия будет продавать в шорт.
+
+Если выключено → только покупки и закрытие позиций.
+
+«Revers» (выключено по умолчанию):
+
+Если включить → стратегия будет работать наоборот (стрелки ▼ = продажа, ▲ = покупка).
+
+«%Profit» и «%Loss»:
+
+Меняйте эти цифры (от 0 до 30), чтобы увеличить/уменьшить прибыль и риски.
+
+Пример работы:
+Сигнал на покупку:
+
+Цена 3 дня растет → появляется зелёная стрелка ▼ → стратегия покупает.
+
+Стоп-лосс ставится на 0.5% ниже цены входа.
+
+Если цена продолжает расти → сделка закрывается при +0.5% прибыли.
+
+Коррекция:
+
+После роста цена падает на 1 день → фон становится серым → стратегия игнорирует это падение (не закрывает сделку).
+
+Стоп-лосс:
+
+Если цена упала на 0.5% от точки входа → сделка закрывается автоматически.
+
+Важные особенности:
+Фильтр коррекций (is_correction):
+
+Это «защита от шума» — стратегия не реагирует на мелкие откаты, работая только в сильных трендах.
+
+Гибкие настройки:
+
+Можно запретить шорты, перевернуть сигналы или изменить уровни прибыли/убытка за 2 клика.
+
+Прозрачность:
+
+Весь код открыт → вы можете увидеть, как формируется каждый сигнал (меню «Исходник» в TradingView).
+
+Советы для новичков:
+Начните с теста:
+
+Запустите стратегию на исторических данных (кнопка «Свеча» в окне TradingView).
+
+Посмотрите, как она работала в прошлом.
+
+Настройте под себя:
+
+Увеличьте %Profit до 2-3%, если торгуете валюты.
+
+Отключите «Sell – On», если не понимаете шорты.
+
+Доверяйте стоп-лоссу:
+
+Даже если кажется, что цена развернётся — стратегия закроет сделку при -0.5%, защитив ваш депозит.
+
+Где найти настройки:
+
+Кликните на название стратегии в верхнем левом углу графика → откроется меню с ползунками и переключателями.
+
+Важно: Стратегия предоставляет «рыбу» – чтобы она стала «уловистой», адаптируйте её под свой стиль торговли!
+Mar 2, 2025
+Release Notes
+initial data is updated for faster testing

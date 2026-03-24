@@ -1,0 +1,1112 @@
+//@version=6
+strategy("KAM final 1:1R", overlay=true, 
+     max_boxes_count=500,max_lines_count=500, 
+     max_labels_count=500, pyramiding=20,
+     calc_on_every_tick = true,
+     dynamic_requests = true)
+
+
+// ================================================
+// === INDICATOR PART =================================
+// ================================================
+
+// === ALLOWED TRADING WINDOW: Mon 07:30 – Sat 05:55 Shanghai time ===
+// Use explicit timezone everywhere
+string tz = "Asia/Shanghai"
+
+// 1. Get current time components in Shanghai TZ
+int h = hour(time, tz)
+int m = minute(time, tz)
+int dow = dayofweek(time, tz)  // 1=Sunday, 2=Monday, ..., 7=Saturday
+
+// 2. Define allowed periods
+bool isWeekday = dow >= 2 and dow <= 6  // Mon(2)–Fri(6)
+bool isSaturday = dow == 7
+
+bool inWeekdayWindow = isWeekday and (h > 0 or (h == 0 and m >= 01))
+bool inSaturdayWindow = isSaturday and (h < 5 or (h == 5 and m <= 55))
+
+bool inAllowedWindow = inWeekdayWindow or inSaturdayWindow
+
+// 3. Detect just exited (for force close)
+bool justExitedWindow = strategy.position_size != 0 and not inAllowedWindow and inAllowedWindow[1]
+
+// Force close outside window (including precise Saturday cutoff)
+if justExitedWindow
+    strategy.close_all(comment="Force close: Outside Mon 07:30–Sat 05:55 SHT")
+
+// Optional: Alert on forced close
+// if justExitedWindow
+//     alert("All positions CLOSED: Outside allowed window", alert.freq_once_per_bar_close)
+
+// Use this for entries instead of previous allowNewEntries
+bool allowNewEntries = inAllowedWindow
+
+
+// ==================================================
+// === DOJI filter
+// ==================================================
+bodyPercent = input.float(1, "Max Doji Body % of Range", minval=1, maxval=100)
+
+// --- Doji calculation ---
+body        = math.abs(close - open)
+candleRange = high - low
+isDoji      = candleRange > 0 and body <= candleRange * bodyPercent / 100
+
+// Previous candle doji
+prevIsDoji = isDoji[1]
+
+
+//=======Engulfing========
+
+
+// ================================================
+// === 1-minute ENGULFING =========================
+// ================================================
+// Get session time in Asia/Singapore (UTC+8), day starts at 06:00
+
+isNewDay = (hour == 6 and minute == 0)
+
+var float sumBody = 0.0
+var int countBody = 0
+
+if isNewDay
+    sumBody := 0.0
+    countBody := 0
+
+bodySize = math.abs(close - open)
+sumBody += bodySize
+countBody += 1
+avgBody = countBody > 0 ? sumBody / countBody : na
+
+
+bearishEngulfing = (close[1] > open[1] and open > close and open >= close[1] and close <= open[1] and (open - close) > (close[1] - open[1]) and high > high[1] and low < low[1] and close < low[1])
+bullishEngulfing = (open[1] > close[1] and close > open and close >= open[1] and open <= close[1] and (close - open) > (open[1] - close[1]) and high > high[1] and low < low[1] and close > high[1])
+
+bearishAbove = bearishEngulfing and bodySize > avgBody
+bearishBelow = bearishEngulfing and bodySize <= avgBody
+bullishAbove = bullishEngulfing and bodySize > avgBody 
+bullishBelow = bullishEngulfing and bodySize <= avgBody
+
+
+// Plots
+plotshape(bearishAbove, title="Bearish Engulfing Above Avg", location=location.abovebar, color=color.red, style=shape.labeldown, text="Bearish")
+plotshape(bearishBelow, title="Bearish Engulfing Below Avg", location=location.abovebar, color=color.rgb(255, 255, 255), style=shape.labeldown, text="Bearish")
+plotshape(bullishAbove, title="Bullish Engulfing Above Avg", location=location.belowbar, color=color.lime, style=shape.labelup, text="Bullish")
+plotshape(bullishBelow, title="Bullish Engulfing Below Avg", location=location.belowbar, color=color.rgb(255, 255, 255), style=shape.labelup, text="Bullish")
+
+
+// ================================================
+// === 15-minutes ENGULFING =======================
+// ================================================
+
+bullEng15 = request.security(syminfo.tickerid, "15",
+     (open[1] > close[1]) and (close > open) and 
+     (close >= open[1]) and (open <= close[1]) and 
+     (close - open) > (open[1] - close[1]) and 
+     high > high[1] and low < low[1] and close > high[1])
+
+bearEng15 = request.security(syminfo.tickerid, "15",
+     (close[1] > open[1]) and (open > close) and 
+     (open >= close[1]) and (close <= open[1]) and 
+     (open - close) > (close[1] - open[1]) and 
+     high > high[1] and low < low[1] and close < low[1])
+
+new15Close = ta.change(time("15")) != 0
+
+
+
+//===================
+//===EMA BUY SELL PART
+//====================
+
+// ====== EMAs ======
+ema_01_len = input.int(9, title='Ema 9', step=1)
+ema_02_len = input.int(21, title='Ema 21', step=1)
+ema_03_len = input.int(50, title='Ema 50', step=1)
+ema_04_len = input.int(100, title='Ema 100', step=1)
+ema_05_len = input.int(200, title='Ema 200', step=1)
+ema_src = input.source(close, title='Source')
+
+ema_01 = ta.ema(ema_src, ema_01_len)
+ema_02 = ta.ema(ema_src, ema_02_len)
+ema_03 = ta.ema(ema_src, ema_03_len)
+ema_04 = ta.ema(ema_src, ema_04_len)
+ema_05 = ta.ema(ema_src, ema_05_len)
+
+plot(ema_01, title='ema_01', color=color.new(#E0FFFF, 0), style=plot.style_line, linewidth=1)
+plot(ema_02, title='ema_02', color=color.new(#ff0040, 0), style=plot.style_line, linewidth=1)
+plot(ema_03, title='ema_03', color=color.new(#1900ff, 0), style=plot.style_line, linewidth=2)
+plot(ema_04, title='ema_04', color=color.new(#87CEFA, 0), style=plot.style_line, linewidth=1)
+plot(ema_05, title='ema_05', color=color.new(#FAFAD2, 0), style=plot.style_line, linewidth=1)
+
+// ====== Supertrend ======
+atrPeriod = input.int(10, "ATR Length")
+factor = input.float(4.0, "Factor", step=0.01)
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+bodyMiddle = plot((open + close) / 2, display=display.none)
+upTrend = plot(direction < 0 ? supertrend : na, "Up Trend", color=color.green, style=plot.style_linebr)
+downTrend = plot(direction < 0 ? na : supertrend, "Down Trend", color=color.red, style=plot.style_linebr)
+fill(bodyMiddle, upTrend, color.new(color.green, 90), fillgaps=false)
+fill(bodyMiddle, downTrend, color.new(color.red, 90), fillgaps=false)
+
+// ====== NovaWave-Style Trend Cloud ======
+nw_fast_len = input.int(9, title="NovaWave Fast EMA")
+nw_slow_len = input.int(21, title="NovaWave Slow EMA")
+nw_signal_len = input.int(10, title="NovaWave Signal MA")
+
+nw_fast = ta.ema(close, nw_fast_len)
+nw_slow = ta.ema(close, nw_slow_len)
+nw_signal = ta.sma(close, nw_signal_len)
+
+nw_bull = nw_fast > nw_slow
+nw_cloud_color = nw_bull ? color.new(color.green, 80) : color.new(color.red, 80)
+p_nw_fast = plot(nw_fast, color=color.rgb(216, 237, 252), linewidth=1, title="NovaWave Fast EMA")
+p_nw_slow = plot(nw_slow, color=color.rgb(122, 230, 113), linewidth=1, title="NovaWave Slow EMA")
+plot(nw_signal, color=color.purple, linewidth=1, title="NovaWave Signal MA")
+fill(p_nw_fast, p_nw_slow, color=nw_cloud_color, title="NovaWave Cloud")
+
+// ====== 20, 50, 200 DMA (Displaced Moving Averages) ======
+dma_src = input.source(close, title="DMA Source")
+dma_disp20 = input.int(0, title="DMA 20 Displacement")
+dma_disp50 = input.int(0, title="DMA 50 Displacement")
+dma_disp200 = input.int(0, title="DMA 200 Displacement")
+dma20 = ta.sma(dma_src, 20)
+dma50 = ta.sma(dma_src, 50)
+dma200 = ta.sma(dma_src, 200)
+plot(dma20[dma_disp20], title="DMA 20", color=color.fuchsia, linewidth=2)
+plot(dma50[dma_disp50], title="DMA 50", color=color.yellow, linewidth=2)
+plot(dma200[dma_disp200], title="DMA 200", color=color.teal, linewidth=2)
+
+// ====== Buy/Sell Signals: 9 EMA crossover 21 EMA ======
+buy_signal = ta.crossover(nw_fast, nw_slow)
+sell_signal = ta.crossunder(nw_fast, nw_slow)
+
+// Plot buy text label below bar
+if buy_signal
+    label.new(bar_index, low, "BUY", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.small)
+
+// Plot sell text label above bar
+if sell_signal
+    label.new(bar_index, high, "SELL", color=color.red, style=label.style_label_down, textcolor=color.white, size=size.small)
+
+//==========================================
+//=========bollingerbands PART==============
+// Custom Types
+type cPts
+    array<chart.point> a1
+    array<chart.point> a2
+    array<chart.point> a3
+    array<chart.point> a4
+
+type drw
+    polyline l1
+    polyline l2
+    polyline l3
+    polyline l4
+    label uL
+    label dL
+
+
+// ＩＮＰＵＴＳ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+length       = input.int(40, "Length")
+mult         = input.float(2.0, "Multiplier", step = 0.1)
+src          = input.source(close, "Source")
+forecastBars = input.int(40, "Forecast Bars")
+
+uCol  = input.color(color.rgb(0, 137, 123, 50), "Upper", inline = "Col")
+lCol  = input.color(color.rgb(0, 137, 123, 50), "Lower", inline = "Col")
+fCol  = input.color(color.rgb(0, 187, 212, 92), "Fill", inline = "Col")
+bColU = input.color(color.teal, "Basis +", inline = "Col1")
+bColD = input.color(color.red, "Basis -", inline = "Col1")
+widthB = input.int(3, "Width", inline = "Col1")
+// }
+
+// ＣＡＬＣＵＬＡＴＩＯＮＳ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+bas  = ta.sma(src, length)
+dev  = mult * ta.stdev(src, length)
+up   = bas + dev
+dn   = bas - dev
+bSl  = ta.linreg(bas, length, 0) - ta.linreg(bas, length, 1)
+dSl  = ta.linreg(dev, length, 0) - ta.linreg(dev, length, 1)
+minW = ta.lowest(up - dn, 50)
+
+// 15-minute Bollinger Bands (only for detecting the extreme close)
+float basis15 = request.security(syminfo.tickerid, "15", ta.sma(close, length), barmerge.gaps_off, barmerge.lookahead_off)
+float dev15   = request.security(syminfo.tickerid, "15", mult * ta.stdev(close, length), barmerge.gaps_off, barmerge.lookahead_off)
+float up15    = basis15 + dev15
+float dn15    = basis15 - dev15
+float close15 = request.security(syminfo.tickerid, "15", close, barmerge.gaps_off, barmerge.lookahead_off)
+
+
+bCol = bas > bas[2] ? bColU : bColD
+
+if barstate.islast
+    var pls = array.new<drw>()
+    var y2 = 0.
+    if pls.size() > 0
+        for p in pls
+            p.l1.delete()
+            p.l2.delete()
+            p.l3.delete()
+            p.l4.delete()
+            p.uL.delete()
+            p.dL.delete()
+
+    cps = array.new<cPts>()
+
+    a1 = array.new<chart.point>()
+    a2 = array.new<chart.point>()
+    a3 = array.new<chart.point>()
+    a4 = array.new<chart.point>()
+
+    for i = 0 to forecastBars
+        bF  = bas + bSl * i
+        dF  = math.max(dev + dSl * i, minW)
+        uF  = bF + dF
+        dF_ = bF - dF
+        w   = i / forecastBars
+
+        uSm = up * (1 - w) + uF * w
+        dSm = dn * (1 - w) + dF_ * w
+        bSm = bas * (1 - w) + bF * w
+
+        a1.push(chart.point.from_index(bar_index + i, uSm))
+        a2.push(chart.point.from_index(bar_index + i, bSm))
+        a3.push(chart.point.from_index(bar_index + i, dSm))
+        a4.push(chart.point.from_index(bar_index + i, uSm))
+
+        if i == forecastBars
+            y2 := bSm
+            for k = forecastBars to 0
+                w_   = k / forecastBars
+                bF_  = bas + bSl * k
+                dF__ = math.max(dev + dSl * k, minW)
+                dSm_ = bF_ - dF__
+                dSm2 = dn * (1 - w_) + dSm_ * w_
+                a4.push(chart.point.from_index(bar_index + k, dSm2))
+
+        cps.push(cPts.new(a1, a2, a3, a4))
+
+    c1 = cps.last()
+// }
+
+// ＰＬＯＴ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+    bCol1 = bas < y2 ? bColU : bColD
+
+    l1 = polyline.new(c1.a1, line_color = uCol)
+    l2 = polyline.new(c1.a2, line_color = bCol1, line_width = widthB)
+    l3 = polyline.new(c1.a3, line_color = lCol)
+    l4 = polyline.new(c1.a4, closed = true, line_color = color(na), fill_color = fCol)
+
+    uLb = label.new(c1.a1.last(), style = "llf", color = color(na), textcolor = chart.fg_color)
+    dLb = label.new(c1.a3.last(), style = "llf", color = color(na), textcolor = chart.fg_color)
+
+    uLb.set_text(str.tostring(uLb.get_y(), "##,###,###.####"))
+    dLb.set_text(str.tostring(dLb.get_y(), "##,###,###.####"))
+
+    pls.push(drw.new(l1, l2, l3, l4, uLb, dLb))
+
+var start = 0
+
+
+plot(bas, "Basis", color = bCol, editable = false, linewidth = widthB)
+fill(plot(up, "Upper", color = uCol, editable = false), plot(dn, "Lower", color = lCol, editable = false), color = fCol)
+
+
+
+//================================
+//===WT OB OS PART================
+
+// === INPUTS ===
+n1 = input.int(10, "Channel Length")
+n2 = input.int(21, "Average Length")
+obLevel = input.float(60, "Overbought Level")
+osLevel = input.float(-60, "Oversold Level")
+
+// === WAVETREND FUNCTION ===
+f_wavetrend() =>
+    ap = hlc3
+    esa = ta.ema(ap, n1)
+    d = ta.ema(math.abs(ap - esa), n1)
+    ci = (ap - esa) / (0.015 * d)
+    ta.ema(ci, n2)
+
+// === WT1 FOR EACH TIMEFRAME ===
+wt1_1m  = request.security(syminfo.tickerid, "1", f_wavetrend())
+wt1_3m  = request.security(syminfo.tickerid, "3", f_wavetrend(), lookahead=barmerge.lookahead_on)
+wt1_5m  = request.security(syminfo.tickerid, "5", f_wavetrend(), lookahead=barmerge.lookahead_on)
+wt1_15m = request.security(syminfo.tickerid, "15", f_wavetrend(), lookahead=barmerge.lookahead_on)
+
+// Signal line (1m)
+signal_1m = ta.sma(wt1_1m, 4)
+
+// === OB/OS CONDITIONS ===
+isOB(val) => val > obLevel
+isOS(val) => val < osLevel
+
+is3m_OB = isOB(wt1_3m)
+is5m_OB = isOB(wt1_5m)
+is15m_OB = isOB(wt1_15m)
+
+is3m_OS = isOS(wt1_3m)
+is5m_OS = isOS(wt1_5m)
+is15m_OS = isOS(wt1_15m)
+
+hasOtherTF_OB = is3m_OB or is5m_OB or is15m_OB
+hasOtherTF_OS = is3m_OS or is5m_OS or is15m_OS
+
+// === STRING BUILDERS ===
+buildOBList() =>
+    listStr = "1 min"
+    if is3m_OB
+        listStr += ", 3 min"
+    if is5m_OB
+        listStr += ", 5 min"
+    if is15m_OB
+        listStr += ", 15 min"
+    listStr
+
+buildOSList() =>
+    listStr = "1 min"
+    if is3m_OS
+        listStr += ", 3 min"
+    if is5m_OS
+        listStr += ", 5 min"
+    if is15m_OS
+        listStr += ", 15 min"
+    listStr
+
+// === CROSS DETECTION ===
+crossIntoOB_1m = ta.crossover(wt1_1m, obLevel) and barstate.isconfirmed
+crossIntoOS_1m = ta.crossunder(wt1_1m, osLevel) and barstate.isconfirmed
+
+crossIntoOB_3m = ta.crossover(wt1_3m, obLevel) and barstate.isconfirmed
+crossIntoOS_3m = ta.crossunder(wt1_3m, osLevel) and barstate.isconfirmed
+
+crossIntoOB_5m = ta.crossover(wt1_5m, obLevel) and barstate.isconfirmed
+crossIntoOS_5m = ta.crossunder(wt1_5m, osLevel) and barstate.isconfirmed
+
+crossIntoOB_15m = ta.crossover(wt1_15m, obLevel) and barstate.isconfirmed
+crossIntoOS_15m = ta.crossunder(wt1_15m, osLevel) and barstate.isconfirmed
+
+// === TIMEFRAME LABEL ===
+getCurrentTFLabel() =>
+    tf = timeframe.period
+    tf == "1"  ? "1 min"  :tf == "3"  ? "3 min"  :tf == "5"  ? "5 min"  :tf == "15" ? "15 min" :""
+
+// === CURRENT LABEL TEXTS ===
+obText = buildOBList()
+osText = buildOSList()
+currentTFLabel = getCurrentTFLabel()
+
+// === LABEL OFFSET ===
+labelOffset = 5.0
+
+// === FILTERED LABEL DISPLAY ===
+labelOffsetTicks = 10 * syminfo.mintick  // adjust vertical spacing
+
+// OB Labels
+if crossIntoOB_1m and str.contains(obText, currentTFLabel)
+    label.new(bar_index, high + labelOffsetTicks, obText + " OB",style=label.style_label_down, yloc=yloc.price,color=color.red, textcolor=color.white)
+
+if crossIntoOB_3m and str.contains(obText, currentTFLabel)
+    label.new(bar_index, high + labelOffsetTicks, obText + " OB",style=label.style_label_down, yloc=yloc.price,color=color.red, textcolor=color.white)
+
+if crossIntoOB_5m and str.contains(obText, currentTFLabel)
+    label.new(bar_index, high + labelOffsetTicks, obText + " OB",style=label.style_label_down, yloc=yloc.price,color=color.red, textcolor=color.white)
+
+if crossIntoOB_15m and str.contains(obText, currentTFLabel)
+    label.new(bar_index, high + labelOffsetTicks, obText + " OB",style=label.style_label_down, yloc=yloc.price,color=color.red, textcolor=color.white)
+
+// OS Labels
+if crossIntoOS_1m and str.contains(osText, currentTFLabel)
+    label.new(bar_index, low - labelOffsetTicks, osText + " OS",style=label.style_label_up, yloc=yloc.price,color=color.green, textcolor=color.white)
+
+if crossIntoOS_3m and str.contains(osText, currentTFLabel)
+    label.new(bar_index, low - labelOffsetTicks, osText + " OS",style=label.style_label_up, yloc=yloc.price,color=color.green, textcolor=color.white)
+
+if crossIntoOS_5m and str.contains(osText, currentTFLabel)
+    label.new(bar_index, low - labelOffsetTicks, osText + " OS",style=label.style_label_up, yloc=yloc.price,color=color.green, textcolor=color.white)
+
+if crossIntoOS_15m and str.contains(osText, currentTFLabel)
+    label.new(bar_index, low - labelOffsetTicks, osText + " OS",style=label.style_label_up, yloc=yloc.price,color=color.green, textcolor=color.white)
+
+//=================================================
+//=1m Sliding A-B-C FVG + Shadow Boxes + Engulfing
+// ===== INPUTS =====
+transp          = input.int(85, "FVG Transparency")
+bull_col        = color.new(color.blue, transp)
+bear_col        = color.new(color.orange, transp)
+shadow_col      = color.new(color.gray, 80)
+
+// ===== STATE =====
+var int minute_in_cycle = 0
+
+// Common arrays for all FVGs
+var array<box>   bull_fvg_boxes     = array.new<box>()
+var array<float> bull_upper         = array.new<float>()
+var array<float> bull_lower         = array.new<float>()
+var array<bool>  bull_fvg_active    = array.new<bool>()
+var array<int>   bull_creation_bar  = array.new<int>()
+var array<int>   bull_start_bar     = array.new<int>()
+
+var array<box>   bull_shadow_boxes  = array.new<box>()
+var array<bool>  bull_shadow_active = array.new<bool>()
+
+var array<box>   bear_fvg_boxes     = array.new<box>()
+var array<float> bear_upper         = array.new<float>()
+var array<float> bear_lower         = array.new<float>()
+var array<bool>  bear_fvg_active    = array.new<bool>()
+var array<int>   bear_creation_bar  = array.new<int>()
+var array<int>   bear_start_bar     = array.new<int>()
+
+var array<box>   bear_shadow_boxes  = array.new<box>()
+var array<bool>  bear_shadow_active = array.new<bool>()
+
+// Offset-specific states
+var float bull_high_A0 = na
+var float bull_low_C0  = na
+var int   bull_start_A0 = na
+
+var float bear_low_A0  = na
+var float bear_high_C0 = na
+var int   bear_start_A0 = na
+
+var float bull_high_A15 = na
+var float bull_low_C15  = na
+var int   bull_start_A15 = na
+
+var float bear_low_A15  = na
+var float bear_high_C15 = na
+var int   bear_start_A15 = na
+
+var float bull_high_A30 = na
+var float bull_low_C30  = na
+var int   bull_start_A30 = na
+
+var float bear_low_A30  = na
+var float bear_high_C30 = na
+var int   bear_start_A30 = na
+
+// ===== ADVANCE CYCLE =====
+minute_in_cycle += 1
+if minute_in_cycle == 45
+    minute_in_cycle := 0
+
+// ===== BULLISH FVG ACCUMULATION =====
+// Offset 0
+if minute_in_cycle == 0
+    bull_high_A0  := high
+    bull_start_A0 := bar_index
+else if minute_in_cycle > 0 and minute_in_cycle < 15
+    bull_high_A0 := math.max(bull_high_A0, high)
+
+if minute_in_cycle == 30
+    bull_low_C0 := low
+else if minute_in_cycle > 30 and minute_in_cycle < 45
+    bull_low_C0 := math.min(bull_low_C0, low)
+
+// Offset 15
+if minute_in_cycle == 15
+    bull_high_A15  := high
+    bull_start_A15 := bar_index
+else if minute_in_cycle > 15 and minute_in_cycle < 30
+    bull_high_A15 := math.max(bull_high_A15, high)
+
+if minute_in_cycle == 0
+    bull_low_C15 := low
+else if minute_in_cycle > 0 and minute_in_cycle < 15
+    bull_low_C15 := math.min(bull_low_C15, low)
+
+// Offset 30
+if minute_in_cycle == 30
+    bull_high_A30  := high
+    bull_start_A30 := bar_index
+else if minute_in_cycle > 30 and minute_in_cycle < 45
+    bull_high_A30 := math.max(bull_high_A30, high)
+
+if minute_in_cycle == 15
+    bull_low_C30 := low
+else if minute_in_cycle > 15 and minute_in_cycle < 30
+    bull_low_C30 := math.min(bull_low_C30, low)
+
+// ===== BULLISH FVG DETECTION =====
+// Offset 0 at 44
+if minute_in_cycle == 44
+    if not na(bull_high_A0) and not na(bull_low_C0) and bull_low_C0 > bull_high_A0
+        upper = bull_low_C0
+        lower = bull_high_A0
+        fvg_box = box.new(bull_start_A0, upper, bar_index, lower, bgcolor=bull_col, border_color=color.blue)
+        array.push(bull_fvg_boxes, fvg_box)
+        array.push(bull_upper, upper)
+        array.push(bull_lower, lower)
+        array.push(bull_fvg_active, true)
+        array.push(bull_creation_bar, bar_index)
+        array.push(bull_start_bar, bull_start_A0)
+
+        shadow_box = box.new(bull_start_A0, upper, bar_index, lower, bgcolor=shadow_col, border_color=color.gray)
+        array.push(bull_shadow_boxes, shadow_box)
+        array.push(bull_shadow_active, true)
+
+// Offset 15 at 14
+if minute_in_cycle == 14
+    if not na(bull_high_A15) and not na(bull_low_C15) and bull_low_C15 > bull_high_A15
+        upper = bull_low_C15
+        lower = bull_high_A15
+        fvg_box = box.new(bull_start_A15, upper, bar_index, lower, bgcolor=bull_col, border_color=color.blue)
+        array.push(bull_fvg_boxes, fvg_box)
+        array.push(bull_upper, upper)
+        array.push(bull_lower, lower)
+        array.push(bull_fvg_active, true)
+        array.push(bull_creation_bar, bar_index)
+        array.push(bull_start_bar, bull_start_A15)
+
+        shadow_box = box.new(bull_start_A15, upper, bar_index, lower, bgcolor=shadow_col, border_color=color.gray)
+        array.push(bull_shadow_boxes, shadow_box)
+        array.push(bull_shadow_active, true)
+
+// Offset 30 at 29
+if minute_in_cycle == 29
+    if not na(bull_high_A30) and not na(bull_low_C30) and bull_low_C30 > bull_high_A30
+        upper = bull_low_C30
+        lower = bull_high_A30
+        fvg_box = box.new(bull_start_A30, upper, bar_index, lower, bgcolor=bull_col, border_color=color.blue)
+        array.push(bull_fvg_boxes, fvg_box)
+        array.push(bull_upper, upper)
+        array.push(bull_lower, lower)
+        array.push(bull_fvg_active, true)
+        array.push(bull_creation_bar, bar_index)
+        array.push(bull_start_bar, bull_start_A30)
+
+        shadow_box = box.new(bull_start_A30, upper, bar_index, lower, bgcolor=shadow_col, border_color=color.gray)
+        array.push(bull_shadow_boxes, shadow_box)
+        array.push(bull_shadow_active, true)
+
+// ===== BEARISH FVG ACCUMULATION =====
+// Offset 0
+if minute_in_cycle == 0
+    bear_low_A0  := low
+    bear_start_A0 := bar_index
+else if minute_in_cycle > 0 and minute_in_cycle < 15
+    bear_low_A0 := math.min(bear_low_A0, low)
+
+if minute_in_cycle == 30
+    bear_high_C0 := high
+else if minute_in_cycle > 30 and minute_in_cycle < 45
+    bear_high_C0 := math.max(bear_high_C0, high)
+
+// Offset 15
+if minute_in_cycle == 15
+    bear_low_A15  := low
+    bear_start_A15 := bar_index
+else if minute_in_cycle > 15 and minute_in_cycle < 30
+    bear_low_A15 := math.min(bear_low_A15, low)
+
+if minute_in_cycle == 0
+    bear_high_C15 := high
+else if minute_in_cycle > 0 and minute_in_cycle < 15
+    bear_high_C15 := math.max(bear_high_C15, high)
+
+// Offset 30
+if minute_in_cycle == 30
+    bear_low_A30  := low
+    bear_start_A30 := bar_index
+else if minute_in_cycle > 30 and minute_in_cycle < 45
+    bear_low_A30 := math.min(bear_low_A30, low)
+
+if minute_in_cycle == 15
+    bear_high_C30 := high
+else if minute_in_cycle > 15 and minute_in_cycle < 30
+    bear_high_C30 := math.max(bear_high_C30, high)
+
+// ===== BEARISH FVG DETECTION =====
+// Offset 0 at 44
+if minute_in_cycle == 44
+    if not na(bear_low_A0) and not na(bear_high_C0) and bear_high_C0 < bear_low_A0
+        upper = bear_low_A0
+        lower = bear_high_C0
+        fvg_box = box.new(bear_start_A0, upper, bar_index, lower, bgcolor=bear_col, border_color=color.orange)
+        array.push(bear_fvg_boxes, fvg_box)
+        array.push(bear_upper, upper)
+        array.push(bear_lower, lower)
+        array.push(bear_fvg_active, true)
+        array.push(bear_creation_bar, bar_index)
+        array.push(bear_start_bar, bear_start_A0)
+
+        shadow_box = box.new(bear_start_A0, upper, bar_index, lower, bgcolor=shadow_col, border_color=color.gray)
+        array.push(bear_shadow_boxes, shadow_box)
+        array.push(bear_shadow_active, true)
+
+// Offset 15 at 14
+if minute_in_cycle == 14
+    if not na(bear_low_A15) and not na(bear_high_C15) and bear_high_C15 < bear_low_A15
+        upper = bear_low_A15
+        lower = bear_high_C15
+        fvg_box = box.new(bear_start_A15, upper, bar_index, lower, bgcolor=bear_col, border_color=color.orange)
+        array.push(bear_fvg_boxes, fvg_box)
+        array.push(bear_upper, upper)
+        array.push(bear_lower, lower)
+        array.push(bear_fvg_active, true)
+        array.push(bear_creation_bar, bar_index)
+        array.push(bear_start_bar, bear_start_A15)
+
+        shadow_box = box.new(bear_start_A15, upper, bar_index, lower, bgcolor=shadow_col, border_color=color.gray)
+        array.push(bear_shadow_boxes, shadow_box)
+        array.push(bear_shadow_active, true)
+
+// Offset 30 at 29
+if minute_in_cycle == 29
+    if not na(bear_low_A30) and not na(bear_high_C30) and bear_high_C30 < bear_low_A30
+        upper = bear_low_A30
+        lower = bear_high_C30
+        fvg_box = box.new(bear_start_A30, upper, bar_index, lower, bgcolor=bear_col, border_color=color.orange)
+        array.push(bear_fvg_boxes, fvg_box)
+        array.push(bear_upper, upper)
+        array.push(bear_lower, lower)
+        array.push(bear_fvg_active, true)
+        array.push(bear_creation_bar, bar_index)
+        array.push(bear_start_bar, bear_start_A30)
+
+        shadow_box = box.new(bear_start_A30, upper, bar_index, lower, bgcolor=shadow_col, border_color=color.gray)
+        array.push(bear_shadow_boxes, shadow_box)
+        array.push(bear_shadow_active, true)
+
+// ===== UPDATE SHADOW BOXES TO CURRENT BAR =====
+if array.size(bull_shadow_boxes) > 0
+    for i = 0 to array.size(bull_shadow_boxes) - 1
+        if array.get(bull_shadow_active, i)
+            box.set_right(array.get(bull_shadow_boxes, i), bar_index)
+
+if array.size(bear_shadow_boxes) > 0
+    for i = 0 to array.size(bear_shadow_boxes) - 1
+        if array.get(bear_shadow_active, i)
+            box.set_right(array.get(bear_shadow_boxes, i), bar_index)
+
+// ===== INVALIDATE FVG & STOP SHADOW AT BREAK POINT =====
+// Bullish - check every 15 bars after creation
+if array.size(bull_fvg_boxes) > 0
+    for i = 0 to array.size(bull_fvg_boxes) - 1
+        if array.get(bull_fvg_active, i)
+            lower = array.get(bull_lower, i)
+            creation = array.get(bull_creation_bar, i)
+            
+            // Check only on bar_index that is multiple of 15 after creation (i.e., end of each 15-min group)
+            if (bar_index - creation) % 15 == 0 and bar_index > creation
+                if close < lower  // Full 15-min candle closes below the FVG
+                    box.set_right(array.get(bull_shadow_boxes, i), bar_index)
+                    array.set(bull_fvg_active, i, false)
+                    array.set(bull_shadow_active, i, false)
+// Bearish - check every 15 bars after creation
+if array.size(bear_fvg_boxes) > 0
+    for i = 0 to array.size(bear_fvg_boxes) - 1
+        if array.get(bear_fvg_active, i)
+            upper = array.get(bear_upper, i)
+            creation = array.get(bear_creation_bar, i)
+            
+            if (bar_index - creation) % 15 == 0 and bar_index > creation
+                if close > upper  // Full 15-min candle closes above the FVG
+                    box.set_right(array.get(bear_shadow_boxes, i), bar_index)
+                    array.set(bear_fvg_active, i, false)
+                    array.set(bear_shadow_active, i, false)
+
+// ===== ENGULFING WICK TOUCH FILTER =====
+// Bullish engulfing: candle low (wick) must be inside an active bullish shadow box
+// Bearish engulfing: candle high (wick) must be inside an active bearish shadow box
+var float touched_bull_level = na
+var float touched_bear_level = na
+
+touched_bull = false
+touched_bull_level := na
+
+touched_bear = false
+touched_bear_level := na
+
+// Now the loop to detect touch and set the level
+if array.size(bull_shadow_boxes) > 0
+    for i = 0 to array.size(bull_shadow_boxes) - 1
+        if array.get(bull_shadow_active, i)
+            zone_top = array.get(bull_upper, i)
+            zone_bot = array.get(bull_lower, i)
+            if low <= zone_top and open <= zone_top and close <= zone_top and high <= zone_top and 
+               low >= zone_bot and open >= zone_bot and close >= zone_bot and high >= zone_bot
+                touched_bull := true
+                touched_bull_level := zone_bot
+                break
+
+if array.size(bear_shadow_boxes) > 0
+    for i = 0 to array.size(bear_shadow_boxes) - 1
+        if array.get(bear_shadow_active, i)
+            zone_top = array.get(bear_upper, i)
+            zone_bot = array.get(bear_lower, i)
+            if high >= zone_bot and open >= zone_bot and close >= zone_bot and low >= zone_bot and 
+               high <= zone_top and open <= zone_top and close <= zone_top and low <= zone_top
+                touched_bear := true
+                touched_bear_level := zone_top
+                break
+
+
+
+// ================================================
+// === STRATEGY LOGIC =============================
+// ================================================
+
+var float currentRiskDistance = na
+var string currentTradeId     = na
+var bool beActivated = false
+var bool tp1WasHit = false
+
+f_newTrade(_prefix, _isBuy, _entry, _sl) =>
+    string id = _prefix + "_" + str.tostring(bar_index)
+    
+    float risk = _isBuy ? (_entry - _sl) : (_sl - _entry)
+    
+    float tp1_price = _isBuy ? _entry + risk     : _entry - risk
+    float tp2_price = _isBuy ? _entry + risk * 2 : _entry - risk * 2
+    
+    strategy.entry(id, _isBuy ? strategy.long : strategy.short)
+    
+    strategy.exit(id + "_TP1", from_entry=id, limit=tp1_price, stop=_sl, qty_percent=50)
+    strategy.exit(id + "_TP2", from_entry=id, limit=tp2_price, stop=_sl, qty_percent=50)
+    
+    // Return multiple values (tuple-like via multiple returns)
+    [id, risk]
+
+
+// ── When calling the function ──────────────────────────────
+// (replace your existing calls like if BuyBoll ... f_newTrade(...))
+
+
+
+// ── Position management: early exit + TP1 tracking + breakeven ────────
+if strategy.position_size != 0 and not na(currentRiskDistance)
+
+    bool isLong     = strategy.position_size > 0
+    float entry     = strategy.position_avg_price
+    float risk      = currentRiskDistance
+    float tp1_level = isLong ? entry + risk : entry - risk
+    float tp2_level = isLong ? entry + risk*2 : entry - risk*2
+
+    string tradeId  = strategy.opentrades.entry_id(strategy.opentrades - 1)
+
+    // ── 1. First priority: opposite engulfing → immediate close ─────
+    bool opposite = isLong ? ta.crossunder(nw_fast, nw_slow) :  ta.crossover(nw_fast, nw_slow)
+
+    if opposite and not tp1WasHit
+        strategy.close(tradeId, comment="Opposite close before TP1")
+        // reset will happen on next bar via position_size == 0 check
+
+    // ── 2. Only if no early exit → check TP1 ────────────────────────
+    else
+        bool tp1_hit_this_bar = isLong ? high >= tp1_level : low <= tp1_level
+
+        if tp1_hit_this_bar and not tp1WasHit
+            tp1WasHit := true
+
+            float beStop = entry   // ← can be entry + 1* syminfo.mintick for long, etc.
+
+            // Update / replace remaining TP2 exit
+            strategy.exit(tradeId + "_TP2",
+                 from_entry = tradeId,
+                 limit      = tp2_level,
+                 stop       = beStop)
+
+
+// ── Full reset only after position is flat ────────────────────────────
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    tp1WasHit           := false
+    beActivated         := false
+    currentRiskDistance := na
+    currentTradeId      := na
+
+
+//=== Bollinger trades=========
+// ── 15-min extreme close detection window ────────
+var int obBarIndex = na   // 15m closed above upper BB
+var int osBarIndex = na   // 15m closed below lower BB
+
+is_15min_close = ta.barssince(new15Close) == 14
+
+if not na(osBarIndex) and bar_index > osBarIndex + 6
+    osBarIndex := na
+if not na(obBarIndex) and bar_index > obBarIndex + 6
+    obBarIndex := na
+
+if is_15min_close
+    if close15 > up15
+        obBarIndex := bar_index
+    if close15 < dn15
+        osBarIndex := bar_index
+
+inBuyWindow  = not na(osBarIndex) and bar_index > osBarIndex and bar_index <= osBarIndex + 6
+inSellWindow = not na(obBarIndex) and bar_index > obBarIndex and bar_index <= obBarIndex + 6
+
+
+//====EMA1 trades 15Buy 1m engulfing=======================
+// ================================================
+// === 15-MIN BUY LABEL DETECTION =================
+// ================================================
+
+// Get 15-min values
+nw_fast_15  = request.security(syminfo.tickerid, "15", ta.ema(close, 9),   barmerge.gaps_off, barmerge.lookahead_off)
+nw_slow_15  = request.security(syminfo.tickerid, "15", ta.ema(close, 21),  barmerge.gaps_off, barmerge.lookahead_off)
+buy_signal_15 = request.security(syminfo.tickerid, "15", ta.crossover(ta.ema(close,9), ta.ema(close,21)), barmerge.gaps_off, barmerge.lookahead_off)
+sell_signal_15 = request.security(syminfo.tickerid, "15", ta.crossunder(ta.ema(close,9), ta.ema(close,21)), barmerge.gaps_off, barmerge.lookahead_off)
+
+
+// We simulate the label condition that would appear on 15 min chart
+bool fifteen_min_has_buy_label = buy_signal_15
+bool fifteen_min_has_sell_label = buy_signal_15
+
+// Detect when a new 15-min candle has just closed (on 1-min chart)
+bool new_15m_candle_closed = ta.change(time("15")) != 0
+
+// ── Window logic ─────────────────────────────────────
+var int buyLabelBar = na
+var int sellLabelBar = na
+var float buyCandleLow_15m  = na     // lowest low of the 15m BUY candle
+var float sellCandleHigh_15m = na    // highest high of the 15m SELL candle
+
+// Reset expired window
+if not na(buyLabelBar) and bar_index > buyLabelBar + 15
+    buyLabelBar := na
+    buyCandleLow_15m := na
+
+if not na(sellLabelBar) and bar_index > sellLabelBar + 15
+    sellLabelBar := na
+    sellCandleHigh_15m := na
+
+// When a new 15-min bar closes → check if it has BUY condition
+if new_15m_candle_closed
+    if fifteen_min_has_buy_label
+        buyLabelBar := bar_index
+        buyCandleLow_15m := request.security(syminfo.tickerid, "15", low, barmerge.gaps_off, barmerge.lookahead_off)
+
+if new_15m_candle_closed
+    if fifteen_min_has_sell_label
+        sellLabelBar := bar_index
+        sellCandleHigh_15m := request.security(syminfo.tickerid, "15", high, barmerge.gaps_off, barmerge.lookahead_off)
+
+// Window is open if we're in the next 15 candles after the BUY label candle
+inBuyConfirmationWindow = not na(buyLabelBar) and bar_index > buyLabelBar and bar_index <= buyLabelBar + 15 
+inSellConfirmationWindow = not na(sellLabelBar) and bar_index > sellLabelBar and bar_index <= sellLabelBar + 15
+
+//====EMA2 trades 15min engulfing 1m BUY/SELL======
+// ================================================
+// === SAFE 15-min ENGULFING DETECTION ============
+// ================================================
+// Window variables
+var int   bullEngulfBar    = na
+var float bullCandleLow15   = na
+var int   bearEngulfBar    = na
+var float bearCandleHigh15  = na
+
+// Expire windows (18 candles)
+if not na(bullEngulfBar) and bar_index > bullEngulfBar + 18
+    bullEngulfBar   := na
+    bullCandleLow15 := na
+
+if not na(bearEngulfBar) and bar_index > bearEngulfBar + 18
+    bearEngulfBar   := na
+    bearCandleHigh15 := na
+
+// Capture engulfing when data has settled (next bar after close)
+if new15Close[1]
+    if bullEng15
+        bullEngulfBar   := bar_index
+        bullCandleLow15 := request.security(syminfo.tickerid, "15", low)
+    
+    if bearEng15
+        bearEngulfBar   := bar_index
+        bearCandleHigh15 := request.security(syminfo.tickerid, "15", high)
+
+// Window status (after 15 is engulfing this is 1 min window for trades)
+inLongWindow  = not na(bullEngulfBar)  and bar_index > bullEngulfBar  and bar_index <= bullEngulfBar  + 18
+inShortWindow = not na(bearEngulfBar)  and bar_index > bearEngulfBar and bar_index <= bearEngulfBar + 18
+
+//====WT OSOB =====================================
+// ================================================
+// === DETECT FULL ALIGNMENT FOR LABELS ===
+// We'll define "full OS label" as when the text would be "1 min, 3 min, 5 min, 15 min OS"
+// (all TFs OS at the moment of any cross)
+bool fullOsAlignment = isOS(wt1_1m) and is3m_OS and is5m_OS and is15m_OS  // Add isOS(wt1_1m) since labels imply 1m is included
+bool fullObAlignment = isOB(wt1_1m) and is3m_OB and is5m_OB and is15m_OB
+
+// Any cross into OS (mirrors the label triggers)
+bool anyCrossIntoOS = crossIntoOS_1m or crossIntoOS_3m or crossIntoOS_5m or crossIntoOS_15m
+bool anyCrossIntoOB = crossIntoOB_1m or crossIntoOB_3m or crossIntoOB_5m or crossIntoOB_15m
+
+// Detect when a full OS/OB label would be drawn (cross + full alignment + contains current TF, which it always does)
+bool fullOsLabelAppears = anyCrossIntoOS and fullOsAlignment and str.contains(osText, currentTFLabel)
+bool fullObLabelAppears = anyCrossIntoOB and fullObAlignment and str.contains(obText, currentTFLabel)
+
+// === TRACK BAR INDEX FOR LABEL WINDOWS ===
+var int osLabelBarIndex = na
+var int obLabelBarIndex = na
+maxBarsAfterLabel = 9  // your 9-candle window
+
+// Update index when full label appears (slides if multiple labels in a row)
+if fullOsLabelAppears
+    osLabelBarIndex := bar_index
+if fullObLabelAppears
+    obLabelBarIndex := bar_index
+
+// Expire if too old (optional, but prevents infinite windows)
+if not na(osLabelBarIndex) and bar_index > osLabelBarIndex + maxBarsAfterLabel  // e.g., hard cap at 30 total
+    osLabelBarIndex := na
+if not na(obLabelBarIndex) and bar_index > obLabelBarIndex + maxBarsAfterLabel
+    obLabelBarIndex := na
+
+
+// ── FINAL SIGNALS ────────────────────────────────
+
+//====Bollinger====================================
+// engulfing + inside the 6-candle window + open outside the **1-minute** band
+BuyBoll  = bullishEngulfing and inBuyWindow  and open < dn
+SellBoll = bearishEngulfing and inSellWindow and open > up
+
+//====EMA1 15Buy 1m engulfing========================
+// 15min BUY / SELL + engulfing inside the 15-candle window + open outside the **1-minute** band
+BuyEMA1  = bullishEngulfing and inBuyConfirmationWindow and direction < 0
+SellEMA1 = bearishEngulfing and inSellConfirmationWindow and direction > 0
+
+//====EMA2 15min engulfing 1m BUY/SELL================
+// 15min BUY / SELL + engulfing inside the 15-candle window + open outside the **1-minute** band
+BuyEMA2  = ta.crossover(nw_fast, nw_slow) and inLongWindow
+SellEMA2 = ta.crossunder(nw_fast, nw_slow) and inShortWindow
+
+//====WT OSOB =====================================
+// === CHECK IF ENGULFING OCCURS ON SAME CANDLE OR WITHIN NEXT 9 CANDLES AFTER CROSS ===
+BuyWT = bullishEngulfing and not na(osLabelBarIndex) and (bar_index >= osLabelBarIndex) and (bar_index <= osLabelBarIndex + maxBarsAfterLabel)
+SellWT = bearishEngulfing and not na(obLabelBarIndex) and (bar_index >= obLabelBarIndex) and (bar_index <= obLabelBarIndex + maxBarsAfterLabel)
+
+// === RESET BAR INDEX AFTER TRIGGER OR TIME WINDOW EXPIRES ===
+if BuyWT or (not na(osLabelBarIndex) and bar_index > osLabelBarIndex + maxBarsAfterLabel)
+    osLabelBarIndex := na
+
+if SellWT or (not na(obLabelBarIndex) and bar_index > obLabelBarIndex + maxBarsAfterLabel)
+    obLabelBarIndex := na
+
+//=================================================
+//=1m Sliding A-B-C FVG + Shadow Boxes + Engulfing
+Sig1 = bearishAbove and not na(touched_bear_level) and direction > 0 // and ta.crossunder(nw_fast, nw_slow) 
+Sig2 = bearishBelow and not na(touched_bear_level) and direction > 0 //and ta.crossunder(nw_fast, nw_slow) 
+Sig3 = bullishAbove and not na(touched_bull_level) and direction < 0 // and ta.crossover(nw_fast, nw_slow)
+Sig4 = bullishBelow and not na(touched_bull_level) and direction < 0 // and ta.crossover(nw_fast, nw_slow)
+
+// Optional: small buffer in points/pips below/above the FVG extreme
+sl_buffer_points = input.float(3.0, "SL Buffer (points)", minval=0) * syminfo.mintick
+
+
+
+if allowNewEntries and  BuyBoll
+    [entry_id, risk_dist] = f_newTrade("BUY_BOL", true, close, low)
+    currentRiskDistance := risk_dist
+    alert("BUY Bollinger reversal @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(low, "#.#####"), alert.freq_once_per_bar_close)
+    osBarIndex := na
+
+if allowNewEntries and  SellBoll
+    [entry_id, risk_dist] = f_newTrade("SELL_BOL", false, close, high)
+    currentRiskDistance := risk_dist
+    alert("SELL Bollinger reversal @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(high, "#.#####"), alert.freq_once_per_bar_close)
+    obBarIndex := na
+
+if allowNewEntries and  BuyEMA1
+    float sl_long = buyCandleLow_15m
+    if na(sl_long)
+        sl_long := low
+    [entry_id, risk_dist] = f_newTrade("BUY_15mBUY→1mENGLF", true, close, sl_long)
+    currentRiskDistance := risk_dist
+    alert("BUY EMA1 (15m buy + 1m engulf) @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(sl_long, "#.#####"), alert.freq_once_per_bar_close)
+    buyLabelBar      := na
+    buyCandleLow_15m := na
+
+if allowNewEntries and  SellEMA1
+    float sl_short = sellCandleHigh_15m
+    if na(sl_short)
+        sl_short := high
+    [entry_id, risk_dist] = f_newTrade("SELL_15mSELL→1mENGLF", false, close, sl_short)
+    currentRiskDistance := risk_dist
+    alert("SELL EMA1 (15m sell + 1m engulf) @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(sl_short, "#.#####"), alert.freq_once_per_bar_close)
+    sellLabelBar        := na
+    sellCandleHigh_15m  := na
+
+if allowNewEntries and  BuyEMA2
+    float sl_long = bullCandleLow15
+    if na(sl_long)
+        sl_long := low
+    [entry_id, risk_dist] = f_newTrade("BUY_15mEng→1mEMA", true, close, sl_long)
+    currentRiskDistance := risk_dist
+    alert("BUY EMA2 (15m engulf + 1m cross) @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(sl_long, "#.#####"), alert.freq_once_per_bar_close)
+    bullEngulfBar   := na
+    bullCandleLow15 := na
+
+if allowNewEntries and  SellEMA2
+    float sl_short = bearCandleHigh15
+    if na(sl_short)
+        sl_short := high
+    [entry_id, risk_dist] = f_newTrade("SELL_15mEng→1mEMA", false, close, sl_short)
+    currentRiskDistance := risk_dist
+    alert("SELL EMA2 (15m engulf + 1m cross) @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(sl_short, "#.#####"), alert.freq_once_per_bar_close)
+    bearEngulfBar    := na
+    bearCandleHigh15 := na
+
+if allowNewEntries and  BuyWT
+    [entry_id, risk_dist] = f_newTrade("BUY_WT", true, close, low)
+    currentRiskDistance := risk_dist
+    alert("BUY WaveTrend OSOB @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(low, "#.#####"), alert.freq_once_per_bar_close)
+
+if allowNewEntries and  SellWT
+    [entry_id, risk_dist] = f_newTrade("SELL_WT", false, close, high)
+    currentRiskDistance := risk_dist
+    alert("SELL WaveTrend OSOB @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(high, "#.#####"), alert.freq_once_per_bar_close)
+
+if allowNewEntries and Sig1 
+    float sl_short = touched_bear_level + sl_buffer_points
+    [entry_id, risk_dist] = f_newTrade("SELL_1FVG", false, close, sl_short)
+    currentRiskDistance := risk_dist
+    alert("SELL FVG ABC Sig1 @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(sl_short, "#.#####"), alert.freq_once_per_bar_close)
+
+if allowNewEntries and Sig2 
+    float sl_short = touched_bear_level + sl_buffer_points
+    [entry_id, risk_dist] = f_newTrade("SELL_2FVG", false, close, sl_short)
+    currentRiskDistance := risk_dist
+    alert("SELL FVG ABC Sig2 @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(sl_short, "#.#####"), alert.freq_once_per_bar_close)
+
+if allowNewEntries and Sig3 
+    float sl_long = touched_bull_level - sl_buffer_points
+    [entry_id, risk_dist] = f_newTrade("BUY_1FVG", true, close, sl_long)
+    currentRiskDistance := risk_dist
+    alert("BUY FVG ABC Sig3 @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(sl_long, "#.#####"), alert.freq_once_per_bar_close)
+
+if allowNewEntries and Sig4 
+    float sl_long = touched_bull_level - sl_buffer_points
+    [entry_id, risk_dist] = f_newTrade("BUY_2FVG", true, close, sl_long)
+    currentRiskDistance := risk_dist
+    alert("BUY FVG ABC Sig4 @ " + str.tostring(close, "#.#####") + "  SL=" + str.tostring(sl_long, "#.#####"), alert.freq_once_per_bar_close)
+
+
+// Visual debug helpers
+plotshape(BuyBoll,  "BUY",  shape.triangleup,   location.belowbar, color.lime,  size=size.small)
+plotshape(SellBoll, "SELL", shape.triangledown, location.abovebar, color.red,   size=size.small)
+
+// Visual helpers
+plotshape(BuyEMA1,  "BUY Trigger",  shape.triangleup,   location.belowbar, color.new(color.lime, 0),  size=size.small)
+plotshape(SellEMA1, "SELL Trigger", shape.triangledown, location.abovebar, color.new(color.red, 0),   size=size.small)
+
+// Visual helpers
+plotshape(BuyEMA2,  "BUY Trigger",  shape.triangleup,   location.belowbar, color.lime,  size=size.small)
+plotshape(SellEMA2, "SELL Trigger", shape.triangledown, location.abovebar, color.red,   size=size.small)
+
+// Background color to see the window
+bgcolor(inAllowedWindow ? color.new(color.green, 92) : na, title="Allowed Window")
+bgcolor(justExitedWindow  ? color.new(color.orange, 70) : na, title="Just Exited Window")
+
+plotshape(justExitedWindow, "Force Close Trigger", shape.xcross, location.top, color.red, size=size.small)
+
+View in Pine Editor・1105 lines
+Use on chart
+1
+7
+621
+nothing special just trying something new if it works hurray , dont use without extensive back testing

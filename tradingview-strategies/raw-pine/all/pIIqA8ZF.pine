@@ -1,0 +1,49 @@
+//@version=3
+strategy("StableSwap", overlay=true)
+sar = vwap(close)
+//Renko Zone
+renko_tickerid = renko(tickerid, "open", "ATR", 20)
+renko_close = security(renko_tickerid, period, close)
+renkoTrend = close > renko_close ? true : false
+plot(renko_close,color=close < renko_close ? red:green,linewidth=4,style=circles)
+
+//HL Zone 
+length = input(title="Length", type=integer, defval=35)
+offset = input(title="Offset", type=integer, defval=0)
+leftBars = input(2)
+rightBars=input(2)
+ph = pivothigh(leftBars, rightBars)
+plot(sma(ph,25), style=line, linewidth=3, color= red, offset=-rightBars,title="Price High")
+pl = pivotlow(close, leftBars, rightBars)
+plot(sma(pl,25), style=line, linewidth=3, color= blue, offset=-rightBars,title="Price Low")
+
+//LRC Zone
+src = input(close, title="Source")
+lsma = linreg(sma(renko_close,35), length, offset)
+slope = ((lsma - lsma[1]) / interval)
+bgcolor(close < lsma ? red:green,transp=80)
+
+//Plotter
+plot(lsma,linewidth=3,title="LREG")
+plot(sar,linewidth=3,color=white,title="VWAP")
+
+//Decide
+corresline = cross(lsma,close)
+longCondition =    crossunder(lsma,sar) and renkoTrend or renko_close[1] < renko_close and close > renko_close
+strategy.entry("long", true, when = longCondition)
+shortCondition =  crossunder(close,sar)  
+strategy.close("long", when = shortCondition)
+
+View in Pine Editor・35 lines
+Use on chart
+7
+0
+1
+2 798
+Use to identify large market movement.
+
+Indicate when to left & go (to play upper 1hr for noise).
+
+Have fun
+
+MouN1R

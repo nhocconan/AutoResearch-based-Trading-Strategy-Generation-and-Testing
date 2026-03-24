@@ -1,0 +1,6 @@
+//@version=5
+rsiUpper=##input(defval=98,type='INPUT_INTEGER',##id='in_6')
+rsiLower=##input(defval=2,type='INPUT_INTEGER',##id='in_7')
+##root(root_metainfo,rm_0,1,input__integer,plot,linewidth)
+##root(root_metainfo,rm_1,rsiUpper,input__float)
+##root(root_metainfo,rm_2,rsiLower,input__float)

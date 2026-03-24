@@ -1,0 +1,116 @@
+//@version=5
+strategy("Quant Scoring System Long Only", overlay=true, initial_capital=92, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.02)
+
+// === Inputs ===
+leverage = input.float(1.0, "Leverage", minval=1.0, step=0.5)
+lenFast = input.int(20, "Fast Length")
+lenSlow = input.int(100, "Slow Length")
+lenMom = input.int(1, "Momentum Length")
+lenVol = input.int(10, "Volatility Length")
+lenZ = input.int(20, "ZScore Length")
+longTh = input.float(2.0, "Long Score Threshold", step=0.1)
+exitTh = input.float(0.0, "Exit Score Threshold", step=0.1)
+atrLen = input.int(14, "ATR Length")
+atrSL = input.float(2.0, "Stop ATR", step=0.1)
+atrTP = input.float(300.5, "Target ATR", step=0.1)
+hardSLPct = input.float(2.0, "Hard Stop %", minval=0.1, step=0.1)
+
+// === Runner mode inputs ===
+bigTradePct = input.float(8.0, "Runner Trigger Profit %", minval=0.1, step=0.1)
+htfTf = input.timeframe("240", "Runner Higher Timeframe")
+htfEmaLen = input.int(50, "Runner HTF EMA Length", minval=1)
+
+// === Helpers ===
+zscore(src, len) =>
+    m = ta.sma(src, len)
+    s = ta.stdev(src, len)
+    s == 0.0 ? 0.0 : (src - m) / s
+
+clamp(x, lo, hi) =>
+    math.max(lo, math.min(hi, x))
+
+norm(src, len) =>
+    clamp(zscore(src, len), -3.0, 3.0) / 3.0
+
+// === Features ===
+emaFast = ta.ema(close, lenFast)
+emaSlow = ta.ema(close, lenSlow)
+atr = ta.atr(atrLen)
+trend = atr == 0.0 ? 0.0 : clamp((emaFast - emaSlow) / atr, -3.0, 3.0) / 3.0
+momRaw = ta.roc(close, lenMom)
+mom = norm(momRaw, lenZ)
+basis = ta.vwma(close, lenFast)
+stretch = atr == 0.0 ? 0.0 : (close - basis) / atr
+mr = clamp(-stretch, -3.0, 3.0) / 3.0
+volRaw = ta.stdev(math.log(close / close[1]), lenVol)
+volReg = norm(volRaw, lenZ)
+volConf = norm(volume, lenZ)
+slope = ta.linreg(close, lenFast, 0) - ta.linreg(close, lenFast, 1)
+slopeN = norm(slope, lenZ)
+
+// === Weighted score ===
+score = 0.20 * trend + 0.20 * mom + 0.10 * mr + 0.0 * volReg * math.sign(trend) + 0.10 * volConf * math.sign(mom) + 0.10 * slopeN
+scoreScaled = score * 7.0
+
+// === Regime filter ===
+regimeLong = emaFast > emaSlow and close > emaSlow
+
+// === Entry / Exit ===
+longSignal = scoreScaled > longTh and regimeLong
+baseExitSignal = scoreScaled < exitTh or close < emaFast
+
+// === Manual leveraged sizing ===
+safeEquity = math.max(strategy.equity, 0)
+posQtyRaw = close > 0 ? (safeEquity * leverage) / close : 0
+posQty = math.max(posQtyRaw, 0)
+
+if barstate.isconfirmed and longSignal and strategy.position_size == 0 and posQty > 0
+    strategy.entry("Long", strategy.long, qty=posQty)
+
+// === Stops / target ===
+atrStop = strategy.position_avg_price - atrSL * atr
+hardStop = strategy.position_avg_price * (1.0 - hardSLPct / 100.0)
+normalStop = math.max(atrStop, hardStop)
+runnerStop = hardStop
+longTake = strategy.position_avg_price + atrTP * atr
+
+// === Higher timeframe runner logic ===
+htfClose = request.security(syminfo.tickerid, htfTf, close)
+htfEma200 = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen))
+htfBearish = htfClose < htfEma200 and htfEma200 < htfEma200[1]
+
+var bool runnerMode = false
+
+if strategy.position_size <= 0
+    runnerMode := false
+
+runnerTriggerPrice = strategy.position_avg_price * (1.0 + bigTradePct / 100.0)
+
+if strategy.position_size > 0 and not runnerMode and high >= runnerTriggerPrice
+    runnerMode := true
+
+// === Order management ===
+if strategy.position_size > 0
+    if runnerMode
+        strategy.exit("Long Exit", from_entry="Long", stop=runnerStop)
+        if barstate.isconfirmed and htfBearish
+            strategy.close("Long", comment="Runner HTF Bearish Exit")
+    else
+        strategy.exit("Long Exit", from_entry="Long", stop=normalStop, limit=longTake)
+        if barstate.isconfirmed and baseExitSignal
+            strategy.close("Long", comment="Base Exit")
+
+// === Visualization ===
+barcolor(longSignal ? color.lime : color.gray)
+plot(scoreScaled, "Score", color=color.white, linewidth=2)
+hline(longTh, "Long Threshold", color=color.lime)
+hline(exitTh, "Exit Threshold", color=color.orange)
+plot(emaFast, "EMA Fast", color=color.teal)
+plot(emaSlow, "EMA Slow", color=color.orange)
+
+View in Pine Editor・109 lines
+Use on chart
+5
+1
+309
+Long only, High cagr low risk trading system. Can be scaled using leverage and reach cagr up to around 90-100%

@@ -1,0 +1,139 @@
+//@version=5
+strategy("Strategia Somma HMA con Filtro Barre", 
+     overlay=true, 
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     calc_on_every_tick=true)
+
+// === INPUT ===
+
+// --- Input Strategia ---
+grp_strategy = "Parametri Strategia"
+priceSource = input.source(close, title="Sorgente Prezzo per HMA", group=grp_strategy)
+basePeriod = input.int(21, title="Periodo Base (X)", 
+     tooltip="Questo è il valore X. Le medie saranno calcolate su X, 2X, 3X e 5X.",
+     minval=1, group=grp_strategy)
+tradeValue = input.float(10000.0, title="Controvalore Ordine ($)", 
+     tooltip="Importo in valuta da usare per ogni trade.",
+     minval=1, group=grp_strategy)
+
+// --- Input Filtro Temporale ---
+grp_filter = "Filtro Temporale"
+maxBarsBack = input.int(2000, title="Numero Massimo di Barre Storiche", 
+     tooltip="La strategia aprirà nuove posizioni solo sulle ultime N barre del grafico. Imposta un valore molto alto per disabilitare.",
+     minval=1, group=grp_filter)
+
+// --- Input Gestione del Rischio ---
+grp_risk = "Gestione del Rischio (Long)"
+useStopLoss = input.bool(true, title="Abilita Stop Loss", group=grp_risk)
+stopLossPercent = input.float(2.0, title="Stop Loss (%)", minval=0.1, group=grp_risk) / 100
+
+useBreakeven = input.bool(true, title="Abilita Breakeven", group=grp_risk)
+breakevenActivationPercent = input.float(1.5, title="Soglia Attivazione Breakeven (%)", minval=0.1, group=grp_risk) / 100
+
+useTrailingStop = input.bool(true, title="Abilita Trailing Stop", group=grp_risk)
+trailingStopPercent = input.float(3.0, title="Trailing Stop (%)", minval=0.1, group=grp_risk) / 100
+
+// --- Input Visualizzazione ---
+enableLogs = input.bool(true, title="Abilita Log dei Risultati", group="Visualizzazione")
+
+
+// === CALCOLI ===
+hma1 = ta.hma(priceSource, basePeriod)
+hma2 = ta.hma(priceSource, basePeriod * 2)
+hma3 = ta.hma(priceSource, basePeriod * 3)
+hma4 = ta.hma(priceSource, basePeriod * 5)
+compositeValue = hma1 + hma2 + hma3 + hma4
+slope = compositeValue - compositeValue[1]
+
+// === FILTRO TEMPORALE ===
+// Calcola la finestra di barre su cui operare. 'last_bar_index' è l'indice dell'ultima barra del grafico.
+startBarIndex = last_bar_index - maxBarsBack + 1
+isWithinLookback = bar_index >= startBarIndex
+
+// === VARIABILI DI GESTIONE TRADE ===
+var float stopPrice = na
+var float highestHighSinceEntry = na
+
+// === CONDIZIONI DI TRADING ===
+// L'ingresso è ora condizionato anche dal filtro temporale
+goLong = slope > 0 and slope[1] <= 0 and isWithinLookback
+exitLongSignal = slope < 0 and slope[1] >= 0
+
+// === ESECUZIONE ORDINI E GESTIONE RISCHIO ===
+
+// --- Logica di Ingresso ---
+if (goLong and strategy.position_size == 0)
+    qtyToBuy = tradeValue / close
+    strategy.entry("Ingresso Long", strategy.long, qty=qtyToBuy)
+
+// --- Gestione della Posizione Aperta ---
+if (strategy.position_size > 0)
+    if strategy.position_size[1] == 0 
+        highestHighSinceEntry := high
+        if useStopLoss
+            stopPrice := strategy.opentrades.entry_price(0) * (1 - stopLossPercent)
+    else 
+        highestHighSinceEntry := math.max(highestHighSinceEntry, high)
+
+    if useBreakeven
+        breakevenActivationPrice = strategy.opentrades.entry_price(0) * (1 + breakevenActivationPercent)
+        if (high >= breakevenActivationPrice)
+            stopPrice := math.max(stopPrice, strategy.opentrades.entry_price(0))
+
+    if useTrailingStop
+        trailingStopPrice = highestHighSinceEntry * (1 - trailingStopPercent)
+        stopPrice := math.max(stopPrice, trailingStopPrice)
+
+    if exitLongSignal
+        strategy.close("Ingresso Long", comment="Uscita da Pendenza")
+        stopPrice := na 
+        highestHighSinceEntry := na
+    else
+        strategy.exit("Uscita Risk", from_entry="Ingresso Long", stop=stopPrice)
+
+// === LOGICA DI LOGGING ===
+if (strategy.closedtrades > strategy.closedtrades[1] and enableLogs)
+    lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    log.info(str.tostring(lastProfit, "#.##"))
+
+// === VISUALIZZAZIONE ===
+bgcolor(slope > 0 ? color.new(color.green, 90) : color.new(color.red, 90), title="Colore Sfondo Pendenza")
+plot(strategy.position_size > 0 ? stopPrice : na, color=color.new(color.orange, 0), style=plot.style_linebr, linewidth=2, title="Livello Stop Attivo")
+
+// --- Etichetta con la quantità al momento del segnale ---
+if (goLong and strategy.position_size == 0) // La condizione 'goLong' contiene già il filtro
+    qtyForLabel = tradeValue / close
+    label.new(bar_index, low, text="Qty: " + str.tostring(qtyForLabel, "#.##"), 
+         style=label.style_label_up, 
+         color=color.new(color.green, 25), 
+         textcolor=color.white, 
+         yloc=yloc.price,
+         size=size.small)
+
+// --- TABELLA INFORMATIVA ---
+if (barstate.islast)
+    var table infoTable = table.new(position.top_right, 2, 3, border_width=1)
+    
+    header_color = color.new(color.blue, 80)
+    cell_color = color.new(color.gray, 90)
+
+    table.cell(infoTable, 0, 0, "Parametro", bgcolor=header_color, text_color=color.white)
+    table.cell(infoTable, 1, 0, "Valore", bgcolor=header_color, text_color=color.white)
+
+    table.cell(infoTable, 0, 1, "Controvalore Trade ($)", bgcolor=cell_color)
+    table.cell(infoTable, 1, 1, str.tostring(tradeValue, format.mintick), bgcolor=cell_color)
+
+    nextTradeQty = tradeValue / close
+    table.cell(infoTable, 0, 2, "Quantità Stimata Prox Trade", bgcolor=cell_color)
+    table.cell(infoTable, 1, 2, str.tostring(nextTradeQty, "#.####"), bgcolor=cell_color)
+
+View in Pine Editor・130 lines
+Use on chart
+6
+0
+2 333
+Great and simple helping tool to find good entry/exit point for mid/long term trading on stocks especially but also indexes and other..... Good on daily timeframe, but better with weekly and monthly. Based on Hull average slope. Hold the average period value among 30 and 50 or more. I prefer the version WITHOUT stop loss and other exit rules (optional).
+All the best and good trading!
+SB

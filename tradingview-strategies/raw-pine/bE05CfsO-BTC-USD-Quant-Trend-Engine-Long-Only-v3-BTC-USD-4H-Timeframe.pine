@@ -1,0 +1,202 @@
+//@version=5
+strategy("Quant Trend Engine Long Only v2 - Manual Leverage Fixed", overlay=true, initial_capital=10000, pyramiding=0, calc_on_every_tick=false, process_orders_on_close=true)
+
+// === Backtest start ===
+startYear = input.int(2000, "Start Year")
+startTime = timestamp(startYear, 1, 1, 0, 0)
+allowTrade = time >= startTime
+
+// === Core lengths ===
+fastLen = input.int(18, "Fast EMA")
+midLen = input.int(50, "Mid EMA")
+slowLen = input.int(120, "Slow EMA")
+smoothLen = input.int(3, "EMA Smoothing")
+pullbackLen = input.int(8, "Pullback Lookback")
+breakoutLen = input.int(20, "Breakout Length")
+effLen = input.int(18, "Efficiency Length")
+persistLen = input.int(7, "Persistence Length")
+momLen = input.int(12, "Momentum Length")
+slopeLen = input.int(10, "Slope Length")
+atrLen = input.int(14, "ATR Length")
+atrBaseLen = input.int(40, "ATR Baseline Length")
+
+// === Thresholds ===
+minScore = input.float(5.0, "Minimum Entry Score", step=0.25)
+exitScore = input.float(2.5, "Weak Trend Exit Score", step=0.25)
+minSepPerc = input.float(0.30, "Min EMA Separation %", step=0.05)
+minSlowSlopePerc = input.float(0.03, "Min Slow Slope %", step=0.01)
+minEff = input.float(0.33, "Min Efficiency", step=0.01)
+minAtrRegime = input.float(0.95, "Min ATR Regime", step=0.05)
+minBreakoutAtr = input.float(0.15, "Min Breakout ATR Strength", step=0.05)
+pullbackAtrMult = input.float(0.90, "Pullback Distance ATR", step=0.05)
+reclaimAtrMult = input.float(0.15, "Reclaim Distance ATR", step=0.05)
+cooldownBars = input.int(5, "Cooldown Bars After Exit")
+
+// === Risk ===
+leverage = input.float(3.0, "Leverage", step=0.1, minval=0.1)
+hardStopPerc = input.float(2.0, "Hard Stop %", step=0.1)
+trailAtrMult = input.float(2.8, "ATR Trail Mult", step=0.1)
+profitLockAtrMult = input.float(20.8, "Profit Lock ATR Mult", step=0.1)
+
+// === No weekend hold / Friday 4 PM EST close ===
+nyHour = hour(time, "America/New_York")
+nyMinute = minute(time, "America/New_York")
+nyDay = dayofweek(time, "America/New_York")
+isWeekend = nyDay == dayofweek.saturday or nyDay == dayofweek.sunday
+isFridayAfterClose = nyDay == dayofweek.friday and (nyHour > 16 or (nyHour == 16 and nyMinute >= 0))
+blockedSession = isWeekend or isFridayAfterClose
+canEnterNow = not blockedSession
+forceFridayClose = strategy.position_size > 0 and isFridayAfterClose
+
+// === Smoothed EMAs ===
+fast = ta.ema(ta.ema(close, fastLen), smoothLen)
+mid = ta.ema(ta.ema(close, midLen), smoothLen)
+slow = ta.ema(ta.ema(close, slowLen), smoothLen)
+
+// === Regime structure ===
+bullStack = fast > mid and mid > slow
+sepPerc = slow != 0 ? math.abs(fast - slow) / slow * 100 : 0.0
+sepOk = sepPerc >= minSepPerc
+
+fastSlope = fast[slopeLen] != 0 ? (fast - fast[slopeLen]) / fast[slopeLen] * 100 : 0.0
+midSlope = mid[slopeLen] != 0 ? (mid - mid[slopeLen]) / mid[slopeLen] * 100 : 0.0
+slowSlope = slow[slopeLen] != 0 ? (slow - slow[slopeLen]) / slow[slopeLen] * 100 : 0.0
+slopeOk = slowSlope >= minSlowSlopePerc and midSlope > 0 and fastSlope > 0
+
+// === Path efficiency ===
+netMove = math.abs(close - close[effLen])
+stepMove = 0.0
+for i = 1 to effLen
+    stepMove += math.abs(close[i - 1] - close[i])
+efficiency = stepMove != 0 ? netMove / stepMove : 0.0
+effOk = efficiency >= minEff
+
+// === Momentum persistence ===
+upBars = 0.0
+for i = 0 to persistLen - 1
+    upBars += close[i] > close[i + 1] ? 1 : 0
+persistRatio = persistLen > 0 ? upBars / persistLen : 0.0
+momRaw = close[momLen] != 0 ? (close - close[momLen]) / close[momLen] * 100 : 0.0
+momOk = momRaw > 0 and persistRatio >= 0.57
+
+// === Volatility regime ===
+atr = ta.atr(atrLen)
+atrBase = ta.sma(atr, atrBaseLen)
+atrRegime = atrBase != 0 ? atr / atrBase : 0.0
+atrOk = atrRegime >= minAtrRegime
+
+// === Breakout quality ===
+hh = ta.highest(high, breakoutLen)[1]
+breakoutDist = close - hh
+breakoutStrength = atr != 0 ? breakoutDist / atr : 0.0
+breakoutOk = close > hh and breakoutStrength >= minBreakoutAtr
+
+// === Pullback / reclaim logic ===
+pullbackLow = ta.lowest(low, pullbackLen)
+distFromFastAtr = atr != 0 ? (fast - pullbackLow) / atr : 0.0
+deepEnoughPullback = distFromFastAtr >= pullbackAtrMult
+reclaimFast = close > fast and close[1] <= fast[1]
+reclaimMid = close > mid and close[1] <= mid[1]
+reclaimStrength = atr != 0 ? (close - fast) / atr : 0.0
+reclaimOk = (reclaimFast or reclaimMid) and reclaimStrength >= reclaimAtrMult
+
+// === Transition memory ===
+bullCross = ta.crossover(fast, mid) or ta.crossover(fast, slow) or ta.crossover(mid, slow)
+barsSinceBullCross = ta.barssince(bullCross)
+recentTrendBirth = barsSinceBullCross >= 0 and barsSinceBullCross <= 14
+
+// === Weighted score ===
+trendScore = 0.0
+trendScore += bullStack ? 1.50 : 0.0
+trendScore += sepOk ? 0.90 : 0.0
+trendScore += slopeOk ? 1.10 : 0.0
+trendScore += effOk ? 1.00 : 0.0
+trendScore += atrOk ? 0.80 : 0.0
+trendScore += momOk ? 1.00 : 0.0
+trendScore += breakoutOk ? 1.25 : 0.0
+trendScore += reclaimOk ? 1.10 : 0.0
+
+// === Entry models ===
+trendContinuationEntry = bullStack and breakoutOk and slopeOk and effOk and momOk
+pullbackReentry = bullStack and sepOk and slopeOk and deepEnoughPullback and reclaimOk and effOk
+earlyTrendEntry = recentTrendBirth and bullStack and sepOk and slopeOk and atrOk and momOk
+
+// === Cooldown ===
+var int lastExitBar = na
+cooldownOk = na(lastExitBar) or bar_index - lastExitBar > cooldownBars
+
+// === Final entry ===
+enterLong = allowTrade and canEnterNow and strategy.position_size == 0 and cooldownOk and trendScore >= minScore and close > slow and (trendContinuationEntry or pullbackReentry or earlyTrendEntry)
+
+// === Manual leveraged sizing only ===
+equity = math.max(strategy.equity, 0)
+positionValue = equity * leverage
+qty = positionValue > 0 ? positionValue / (close * syminfo.pointvalue) : 0.0
+
+// === Entry tracking / mandatory 1 full candle hold ===
+var int entryBarIndex = na
+justOpened = strategy.position_size > 0 and strategy.position_size[1] == 0
+if justOpened
+    entryBarIndex := bar_index
+
+canExitNow = strategy.position_size > 0 and not na(entryBarIndex) and bar_index > entryBarIndex
+
+// === Entry order ===
+if enterLong and qty > 0
+    strategy.entry("Long", strategy.long, qty=qty)
+
+// === Risk logic ===
+hardStopPrice = strategy.position_size > 0 ? strategy.position_avg_price * (1 - hardStopPerc / 100) : na
+
+var float trailStop = na
+var float highSinceEntry = na
+highSinceEntry := strategy.position_size > 0 ? (na(highSinceEntry) ? high : math.max(highSinceEntry, high)) : na
+
+rawTrail = strategy.position_size > 0 ? close - atr * trailAtrMult : na
+profitLock = strategy.position_size > 0 ? highSinceEntry - atr * profitLockAtrMult : na
+combinedTrail = strategy.position_size > 0 ? math.max(rawTrail, profitLock) : na
+trailStop := strategy.position_size > 0 ? (na(trailStop) ? combinedTrail : math.max(trailStop, combinedTrail)) : na
+
+// === Exit logic ===
+bearCross = ta.crossunder(fast, mid) or ta.crossunder(fast, slow)
+structureBreak = close < mid and fast < mid
+scoreWeak = trendScore <= exitScore
+momentumFailure = persistRatio < 0.40 and momRaw < 0
+regimeFailure = atrRegime < 0.80 and efficiency < 0.25
+timeExit = forceFridayClose
+
+exitLong = strategy.position_size > 0 and canExitNow and (bearCross or structureBreak or scoreWeak or momentumFailure or regimeFailure)
+
+// Only allow stop/trailing exits after 1 full candle has passed
+if strategy.position_size > 0 and canExitNow
+    strategy.exit("Risk Exit", from_entry="Long", stop=math.max(hardStopPrice, trailStop))
+
+if timeExit and canExitNow
+    strategy.close("Long", comment="Friday 4PM EST Close")
+
+justClosed = strategy.position_size[1] > 0 and strategy.position_size == 0
+if justClosed
+    lastExitBar := bar_index
+    trailStop := na
+    highSinceEntry := na
+    entryBarIndex := na
+
+if exitLong and not timeExit
+    strategy.close("Long")
+
+// === Plots ===
+plot(fast, color=color.green, linewidth=2, title="Fast EMA")
+plot(mid, color=color.orange, linewidth=2, title="Mid EMA")
+plot(slow, color=color.red, linewidth=2, title="Slow EMA")
+plot(strategy.position_size > 0 ? trailStop : na, color=color.blue, linewidth=2, title="Adaptive Trail")
+plot(trendScore, title="Trend Score", color=color.aqua, display=display.data_window)
+plot(efficiency, title="Efficiency", color=color.fuchsia, display=display.data_window)
+plot(atrRegime, title="ATR Regime", color=color.yellow, display=display.data_window)
+plot(breakoutStrength, title="Breakout Strength", color=color.lime, display=display.data_window)
+plot(persistRatio, title="Persistence Ratio", color=color.white, display=display.data_window)
+
+View in Pine Editor・196 lines
+Use on chart
+8
+242
+NOTE: This best trades on BTC/USD on the 4H Timeframe. This is a long-only trend-following strategy that tries to enter on strong bullish moves and then stay in them until the trend meaningfully weakens. Right now, it uses 3x leverage, you can always change that input to whatever amount of leverage you like, although the max I would recommend is 5x leverage. This is also version 3.

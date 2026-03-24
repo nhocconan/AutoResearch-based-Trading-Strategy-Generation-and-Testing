@@ -1,0 +1,209 @@
+//@version=6
+strategy(
+     "Liquidity Sweep + VWAP Reversal (v6 clean + Presets)",
+     overlay = true,
+     initial_capital = 10000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.01,
+     process_orders_on_close = true
+)
+
+// ==================== PRESET SELECTOR ====================
+preset = input.string("Index", "Preset Profile", options = ["Index", "Forex", "Crypto", "Custom"])
+
+// ==================== CUSTOM INPUTS (used when preset = Custom) ====================
+tfHTF_in          = input.timeframe("D", "HTF for Previous Day Levels")
+emaLen_in         = input.int(200, "EMA Trend Filter Length", minval = 1)
+atrLen_in         = input.int(14, "ATR Length", minval = 1)
+slATR_in          = input.float(1.5, "Stop Loss (ATR Multiplier)", step = 0.1)
+tpATR_in          = input.float(3.0, "Take Profit (ATR Multiplier)", step = 0.1)
+useSession_in     = input.bool(true, "Use Session Filter")
+sessionStr_in     = input.session("0930-1600", "Session (Exchange Time)")
+oneTradePerDay_in = input.bool(true, "Max 1 Trade per Day")
+
+// ==================== PRESET VALUES ====================
+// Index preset
+tfHTF_idx          = "D"
+emaLen_idx         = 200
+atrLen_idx         = 14
+slATR_idx          = 1.5
+tpATR_idx          = 3.0
+useSession_idx     = true
+sessionStr_idx     = "0930-1600"
+oneTradePerDay_idx = true
+
+// Forex preset
+tfHTF_fx          = "D"
+emaLen_fx         = 200
+atrLen_fx         = 14
+slATR_fx          = 1.6
+tpATR_fx          = 3.2
+useSession_fx     = true
+sessionStr_fx     = "0700-1700"   // Exchange time; adjust per symbol/exchange if needed
+oneTradePerDay_fx = true
+
+// Crypto preset
+tfHTF_cr          = "D"
+emaLen_cr         = 150
+atrLen_cr         = 14
+slATR_cr          = 2.2
+tpATR_cr          = 4.4
+useSession_cr     = false
+sessionStr_cr     = "0000-2359"
+oneTradePerDay_cr = false
+
+// ==================== EFFECTIVE SETTINGS ====================
+tfHTF = preset == "Index" ? tfHTF_idx : preset == "Forex" ? tfHTF_fx : preset == "Crypto" ? tfHTF_cr : tfHTF_in
+
+emaLen = preset == "Index" ? emaLen_idx : preset == "Forex" ? emaLen_fx : preset == "Crypto" ? emaLen_cr : emaLen_in
+atrLen = preset == "Index" ? atrLen_idx : preset == "Forex" ? atrLen_fx : preset == "Crypto" ? atrLen_cr : atrLen_in
+slATR  = preset == "Index" ? slATR_idx  : preset == "Forex" ? slATR_fx  : preset == "Crypto" ? slATR_cr  : slATR_in
+tpATR  = preset == "Index" ? tpATR_idx  : preset == "Forex" ? tpATR_fx  : preset == "Crypto" ? tpATR_cr  : tpATR_in
+
+useSession = preset == "Index" ? useSession_idx : preset == "Forex" ? useSession_fx : preset == "Crypto" ? useSession_cr : useSession_in
+sessionStr = preset == "Index" ? sessionStr_idx : preset == "Forex" ? sessionStr_fx : preset == "Crypto" ? sessionStr_cr : sessionStr_in
+oneTradePerDay = preset == "Index" ? oneTradePerDay_idx : preset == "Forex" ? oneTradePerDay_fx : preset == "Crypto" ? oneTradePerDay_cr : oneTradePerDay_in
+
+// ==================== SESSION ====================
+inSession = not useSession or not na(time(timeframe.period, sessionStr))
+
+// ==================== INDICATORS ====================
+emaTrend = ta.ema(close, emaLen)
+vwapV    = ta.vwap(hlc3)
+atr      = ta.atr(atrLen)
+
+// ==================== PREVIOUS DAY LEVELS (NON-REPAINT) ====================
+pdHigh = request.security(
+    syminfo.tickerid, tfHTF, high[1],
+    barmerge.gaps_off, barmerge.lookahead_off
+)
+
+pdLow = request.security(
+    syminfo.tickerid, tfHTF, low[1],
+    barmerge.gaps_off, barmerge.lookahead_off
+)
+
+// ==================== PLOTS ====================
+plot(emaTrend, "EMA Trend", linewidth = 2)
+plot(vwapV, "VWAP", linewidth = 2)
+plot(pdHigh, "Prev Day High", style = plot.style_linebr)
+plot(pdLow,  "Prev Day Low",  style = plot.style_linebr)
+
+// ==================== DAILY LIMIT ====================
+var bool tradedToday = false
+newDay = ta.change(time("D")) > 0
+if newDay
+    tradedToday := false
+
+canTrade = inSession and (not oneTradePerDay or not tradedToday)
+
+// ==================== LOGIC ====================
+sweepDown = low < pdLow
+sweepUp   = high > pdHigh
+
+bull = close > emaTrend
+bear = close < emaTrend
+
+longConfirm  = sweepDown and close > pdLow  and close > vwapV
+shortConfirm = sweepUp   and close < pdHigh and close < vwapV
+
+// ==================== ENTRIES ====================
+if canTrade and bull and longConfirm and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long)
+    tradedToday := true
+
+if canTrade and bear and shortConfirm and strategy.position_size == 0
+    strategy.entry("SHORT", strategy.short)
+    tradedToday := true
+
+// ==================== EXITS ====================
+longSL  = strategy.position_avg_price - slATR * atr
+longTP  = strategy.position_avg_price + tpATR * atr
+shortSL = strategy.position_avg_price + slATR * atr
+shortTP = strategy.position_avg_price - tpATR * atr
+
+strategy.exit("LONG EXIT",  from_entry = "LONG",  stop = longSL,  limit = longTP)
+strategy.exit("SHORT EXIT", from_entry = "SHORT", stop = shortSL, limit = shortTP)
+
+// ==================== ALERTS ====================
+alertcondition(longConfirm  and bull and canTrade,  "Long Setup",  "LONG: Liquidity sweep + VWAP reversal")
+alertcondition(shortConfirm and bear and canTrade, "Short Setup", "SHORT: Liquidity sweep + VWAP reversal")
+
+View in Pine Editor・130 lines
+Use on chart
+2
+3
+1
+2
+4 347
+_mr_beach Liquidity Sweep + VWAP Reversal V2 (Trend Filter, Presets)
+Overview
+This strategy models a common institutional market behavior:
+Liquidity is taken above the previous day’s high or below the previous day’s low, followed by a return toward fair value (VWAP) and a reversal in the direction of the dominant trend.
+The script is designed as a TradingView Strategy for systematic backtesting and optimization.
+________________________________________
+Core Logic
+• Liquidity Levels
+o Previous Day High
+o Previous Day Low
+Used as typical stop-liquidity zones.
+• Fair Value
+o VWAP is used as confirmation that price has returned to a fair value area.
+• Trend Filter
+o EMA-based trend direction filter to avoid counter-trend trades.
+________________________________________
+Trading Rules
+Trend Filter
+• Long trades only when price closes above EMA.
+• Short trades only when price closes below EMA.
+Liquidity Sweep
+• Bullish sweep: Price trades below Previous Day Low.
+• Bearish sweep: Price trades above Previous Day High.
+Entry Confirmation
+• Long
+o Sweep below Previous Day Low
+o Close back above Previous Day Low
+o Close above VWAP
+• Short
+o Sweep above Previous Day High
+o Close back below Previous Day High
+o Close below VWAP
+________________________________________
+Risk Management
+• Stop Loss: ATR-based
+• Take Profit: ATR-based
+• Risk automatically adapts to market volatility.
+• All multipliers are user-adjustable.
+________________________________________
+Preset Profiles
+The script includes ready-to-use preset profiles:
+• Index – conservative, session-based, one trade per day
+• Forex – session-filtered, moderate volatility settings
+• Crypto – higher volatility parameters, no session filter
+• Custom – fully manual configuration
+Presets control EMA length, ATR settings, SL/TP multipliers, session usage, and trade frequency.
+________________________________________
+Session & Trade Control
+• Optional session filter (default: US regular session)
+• Optional one trade per day limit to reduce overtrading and noise
+________________________________________
+Chart Elements
+• EMA (trend direction)
+• VWAP (fair value)
+• Previous Day High / Low (liquidity zones)
+________________________________________
+Alerts
+• Long setup: Liquidity sweep + VWAP reversal
+• Short setup: Liquidity sweep + VWAP reversal
+________________________________________
+Recommended Usage
+• Markets: Indices, liquid stocks, Forex majors, crypto
+• Timeframes: 5m and 15m
+• Parameters should be optimized per market and timeframe.
+________________________________________
+Disclaimer
+This script is for educational and backtesting purposes only.
+It does not constitute financial advice.
+Performance depends on market conditions, timeframe, fees, and execution.
+Tags: Liquidity, VWAP, EMA, Reversal, Sweep, Smart Money, ICT, ATR, Strategy
+

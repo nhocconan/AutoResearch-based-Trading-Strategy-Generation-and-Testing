@@ -1,0 +1,94 @@
+//@version=6
+strategy("EMA Crossover Strategy with Trailing Stop and Alerts", overlay=true)
+
+// Input for EMA lengths
+emaLength1 = input.int(9, title="Short EMA Length")
+emaLength2 = input.int(21, title="Long EMA Length")
+
+// Input for trailing stop percentage
+trailStopPercent = input.float(1.0, title="Trailing Stop Percentage", minval=0.1, step=0.1) / 100
+
+// Calculate EMAs
+ema1 = ta.ema(close, emaLength1)
+ema2 = ta.ema(close, emaLength2)
+
+// Plot EMAs
+plot(ema1, color=color.blue, title="Short EMA")
+plot(ema2, color=color.red, title="Long EMA")
+
+// Crossover and Crossunder conditions
+crossoverCondition = ta.crossover(ema1, ema2)
+crossunderCondition = ta.crossunder(ema1, ema2)
+
+// Buy and Sell conditions
+buyCondition = crossoverCondition
+sellCondition = crossunderCondition
+
+// Trailing stop logic
+var float highestPrice = na
+var float lowestPrice = na
+
+if (buyCondition)
+    highestPrice := close
+if (sellCondition)
+    lowestPrice := close
+
+if (strategy.position_size > 0)
+    highestPrice := math.max(highestPrice, close)
+    trailStopPrice = highestPrice * (1 - trailStopPercent)
+    if (close < trailStopPrice)
+        strategy.close("Buy")
+
+if (strategy.position_size < 0)
+    lowestPrice := math.min(lowestPrice, close)
+    trailStopPrice = lowestPrice * (1 + trailStopPercent)
+    if (close > trailStopPrice)
+        strategy.close("Sell")
+
+// Plot buy and sell signals
+plotshape(series=buyCondition, location=location.belowbar, color=color.green, style=shape.labelup, title="Buy Signal")
+plotshape(series=sellCondition, location=location.abovebar, color=color.red, style=shape.labeldown, title="Sell Signal")
+
+// Alerts
+alertcondition(buyCondition, title="Buy Alert", message="Buy Signal: EMA crossover")
+alertcondition(sellCondition, title="Sell Alert", message="Sell Signal: EMA crossunder")
+
+// Strategy execution
+if (buyCondition)
+    strategy.entry("Buy", strategy.long)
+if (sellCondition)
+    strategy.entry("Sell", strategy.short)
+
+View in Pine Editor・60 lines
+Use on chart
+4
+1
+1 869
+Powerful EMA Crossover Strategy with Dynamic Trailing Stop and Real-Time Alerts
+
+This strategy combines the simplicity and effectiveness of EMA crossovers with a dynamic trailing stop-loss mechanism for robust risk management.
+
+**Key Features:**
+
+* **EMA Crossover Signals:** Identifies potential trend changes using customizable short and long period Exponential Moving Averages.
+* **Trailing Stop-Loss:** Automatically adjusts the stop-loss level as the price moves favorably, helping to protect profits and limit downside risk. The trailing stop percentage is fully adjustable.
+* **Visual Buy/Sell Signals:** Clear buy (green upward label) and sell (red downward label) signals are plotted directly on the price chart.
+* **Customizable Inputs:** Easily adjust the lengths of the short and long EMAs, as well as the trailing stop percentage, to optimize the strategy for different assets and timeframes.
+* **Real-Time Alerts:** Receive instant alerts for buy and sell signals, ensuring you don't miss potential trading opportunities.
+
+**How to Use:**
+
+1. Add the strategy to your TradingView chart.
+2. Customize the "Short EMA Length," "Long EMA Length," and "Trailing Stop Percentage" in the strategy's settings.
+3. Enable alerts in TradingView to receive notifications when buy or sell signals are generated.
+
+This strategy is intended to provide automated trading signals based on EMA crossovers with built-in risk management. Remember to backtest thoroughly on your chosen instruments and timeframes before using it for live trading.
+
+#EMA
+#Crossover
+#TrailingStop
+#Strategy
+#TradingView
+#TechnicalAnalysis
+#Alerts
+#TradingStrategy

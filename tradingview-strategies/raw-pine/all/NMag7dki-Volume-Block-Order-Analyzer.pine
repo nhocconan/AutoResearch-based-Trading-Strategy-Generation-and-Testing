@@ -1,0 +1,10 @@
+//@version=6
+lineWidth=##input(defval=2,type='INPUT_INTEGER',##id='in_37')
+##root(root_metainfo,rm_0,1,input__integer,plot,linewidth,'173_99_173_99')
+##root(root_metainfo,rm_1,1,input__integer,plot,linewidth,'174_96_174_96')
+##root(root_metainfo,rm_2,1,input__integer,plot,linewidth,'175_99_175_99')
+##root(root_metainfo,rm_3,lineWidth,input__integer,plot,linewidth,'205_68_205_76')
+##root(root_metainfo,rm_4,lineWidth,input__integer,plot,linewidth,'208_73_208_81')
+##root(root_metainfo,rm_5,lineWidth,input__integer,plot,linewidth,'211_68_211_76')
+##root(root_metainfo,rm_6,2,input__integer,plot,linewidth,'511_136_511_136')
+##root(root_metainfo,rm_7,2,input__integer,plot,linewidth,'512_139_512_139')

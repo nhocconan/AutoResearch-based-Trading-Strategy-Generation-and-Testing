@@ -1,0 +1,267 @@
+//@version=6
+// Creator: K@lTony
+strategy("SuperBreak Elite ORB Gold Lon & NY Intelligent Pro Filters", overlay=true,
+         default_qty_type = strategy.percent_of_equity,
+         default_qty_value = 1)
+
+// ── INPUTS ─────────────────────────────────────
+useStrategy = input.bool(true, "Attiva Test Strategia")
+tpPoints = input.int(1500, "Take Profit (punti)", minval=500)
+slMultiplier = input.float(3.0, "SL Multiplicatore (triplo)", minval=1.5)
+useTrendFilter = input.bool(true, "Usa Filtro Trend EMA (per win rate alto)")
+useBBFilter = input.bool(false, "Usa Filtro Bande di Bollinger (per volatilità e win rate alto)")
+bbLength = input.int(20, "Lunghezza BB", minval=1)
+bbStdDev = input.float(2.0, "Deviazione Std BB", minval=0.1)
+minBBWidth = input.float(1.0, "Larghezza Minima BB (%)", minval=0.1)
+orbMinutes = input.int(15, "ORB Durata (minuti)", minval=5, maxval=30)
+
+// ── SESSIONI (orari in formato HHMM – adattati per ora italiana CET/UTC+1) ──────
+londonSession = input.session("0900-1000", "Sessione Londra (09:00-10:00 IT)")
+nySession = input.session("1430-1530", "Sessione NY (14:30-15:30 IT)")
+
+// Calcola numero di barre per ORB
+tfMin = str.tonumber(timeframe.period)
+orbBars = math.round(orbMinutes / tfMin)
+sessionBars = math.round(60 / tfMin)
+
+// Rileva sessioni
+inLondon = not na(time(timeframe.period, londonSession))
+inNY = not na(time(timeframe.period, nySession))
+newLondonBar = inLondon and not inLondon[1]
+newNYBar = inNY and not inNY[1]
+
+// ── VARIABILI PER ORB ───────────────────────────
+var int londonBarCount = 0
+var float londonORBHigh = na
+var float londonORBLow = na
+var bool londonSignalGiven = false
+
+var int nyBarCount = 0
+var float nyORBHigh = na
+var float nyORBLow = na
+var bool nySignalGiven = false
+
+// Reset e aggiornamento ORB London
+if newLondonBar
+    londonBarCount := 1
+    londonORBHigh := high
+    londonORBLow := low
+    londonSignalGiven := false
+else if inLondon
+    londonBarCount := londonBarCount[1] + 1
+    if londonBarCount <= orbBars
+        londonORBHigh := math.max(londonORBHigh, high)
+        londonORBLow := math.min(londonORBLow, low)
+
+// Reset e aggiornamento ORB NY
+if newNYBar
+    nyBarCount := 1
+    nyORBHigh := high
+    nyORBLow := low
+    nySignalGiven := false
+else if inNY
+    nyBarCount := nyBarCount[1] + 1
+    if nyBarCount <= orbBars
+        nyORBHigh := math.max(nyORBHigh, high)
+        nyORBLow := math.min(nyORBLow, low)
+
+// ── INDICATORI BASE ────────────────────────────
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+// Bande di Bollinger
+bbMiddle = ta.sma(close, bbLength)
+bbStd = ta.stdev(close, bbLength)
+bbUpper = bbMiddle + bbStdDev * bbStd
+bbLower = bbMiddle - bbStdDev * bbStd
+bbWidth = ((bbUpper - bbLower) / bbMiddle) * 100
+
+// Bias esterni (DXY, VIX, US10Y)
+dxy_close = request.security("TVC:DXY", "", close, ignore_invalid_symbol=true)
+dxy_ema50 = ta.ema(dxy_close, 50)
+vix_close = request.security("CBOE:VIX", "", close, ignore_invalid_symbol=true)
+vix_ema = ta.ema(vix_close, 50)
+us10y_close = request.security("TVC:US10Y", "", close, ignore_invalid_symbol=true)
+us10y_ema = ta.ema(us10y_close, 50)
+
+// ── SCORES PER BIAS ────────────────────────────
+trendScore = ema50 > ema200 ? 1 : -1
+dxyScore = dxy_close < dxy_ema50 ? 1 : dxy_close > dxy_ema50 ? -1 : 0
+vixScore = vix_close > vix_ema ? 1 : vix_close < vix_ema ? -1 : 0
+us10yScore = us10y_close < us10y_ema ? 1 : us10y_close > us10y_ema ? -1 : 0
+totalScore = trendScore + dxyScore + vixScore + us10yScore
+bullBias = totalScore >= 0
+bearBias = totalScore < 0
+
+bullTrend = ema50 > ema200
+bearTrend = ema50 < ema200
+
+volOk = not useBBFilter or bbWidth > minBBWidth
+
+// ── DETEZIONE ULTIMI 5 MINUTI DELLA SESSIONE (PER FORZARE SEMPRE) ──────
+// Parse session times for London and NY on first bar
+var int london_start_h = na
+var int london_start_m = na
+var int london_end_h = na
+var int london_end_m = na
+
+var int ny_start_h = na
+var int ny_start_m = na
+var int ny_end_h = na
+var int ny_end_m = na
+
+if barstate.isfirst
+    array<string> london_parts = str.split(londonSession, "-")
+    string london_start_str = array.get(london_parts, 0)
+    string london_end_str = array.get(london_parts, 1)
+    london_start_h := int(str.tonumber(str.substring(london_start_str, 0, 2)))
+    london_start_m := int(str.tonumber(str.substring(london_start_str, 2, 4)))
+    london_end_h := int(str.tonumber(str.substring(london_end_str, 0, 2)))
+    london_end_m := int(str.tonumber(str.substring(london_end_str, 2, 4)))
+    
+    array<string> ny_parts = str.split(nySession, "-")
+    string ny_start_str = array.get(ny_parts, 0)
+    string ny_end_str = array.get(ny_parts, 1)
+    ny_start_h := int(str.tonumber(str.substring(ny_start_str, 0, 2)))
+    ny_start_m := int(str.tonumber(str.substring(ny_start_str, 2, 4)))
+    ny_end_h := int(str.tonumber(str.substring(ny_end_str, 0, 2)))
+    ny_end_m := int(str.tonumber(str.substring(ny_end_str, 2, 4)))
+
+// Session timestamps
+var float london_start_timestamp = na
+var float london_end_timestamp = na
+if newLondonBar
+    london_start_timestamp := time
+    london_end_timestamp := timestamp(year(time), month(time), dayofmonth(time), london_end_h, london_end_m, 0)
+
+var float ny_start_timestamp = na
+var float ny_end_timestamp = na
+if newNYBar
+    ny_start_timestamp := time
+    ny_end_timestamp := timestamp(year(time), month(time), dayofmonth(time), ny_end_h, ny_end_m, 0)
+
+// Force period
+int force_min = 5
+float london_force_start = london_end_timestamp - (force_min * 60 * 1000)
+float ny_force_start = ny_end_timestamp - (force_min * 60 * 1000)
+float bar_close = time + (timeframe.in_seconds() * 1000)
+
+// End phase detection (bar overlaps last 5 minutes)
+londonEndPhase = inLondon and not na(london_end_timestamp) and bar_close > london_force_start and time < london_end_timestamp
+nyEndPhase = inNY and not na(ny_end_timestamp) and bar_close > ny_force_start and time < ny_end_timestamp
+
+// ── SEGNALI BREAKOUT (ora senza limite superiore di barre → possibilità fino all'ultimo minuto) ──
+buyLondon = false
+sellLondon = false
+if inLondon and londonBarCount > orbBars and not londonSignalGiven
+    if close > londonORBHigh and (not useTrendFilter or bullTrend) and volOk
+        buyLondon := true
+        londonSignalGiven := true
+    else if close < londonORBLow and (not useTrendFilter or bearTrend) and volOk
+        sellLondon := true
+        londonSignalGiven := true
+
+// ── FORZA SEGNALE (sempre negli ultimi 5 minuti se non è uscito niente) ──────
+if londonEndPhase and not londonSignalGiven
+    if bullBias
+        buyLondon := true
+        londonSignalGiven := true
+    else if bearBias
+        sellLondon := true
+        londonSignalGiven := true
+
+buyNY = false
+sellNY = false
+if inNY and nyBarCount > orbBars and not nySignalGiven
+    if close > nyORBHigh and (not useTrendFilter or bullTrend) and volOk
+        buyNY := true
+        nySignalGiven := true
+    else if close < nyORBLow and (not useTrendFilter or bearTrend) and volOk
+        sellNY := true
+        nySignalGiven := true
+
+if nyEndPhase and not nySignalGiven
+    if bullBias
+        buyNY := true
+        nySignalGiven := true
+    else if bearBias
+        sellNY := true
+        nySignalGiven := true
+
+buySignal = buyLondon or buyNY
+sellSignal = sellLondon or sellNY
+
+// ── ESECUZIONE ─────────────────────────────────
+if buySignal and strategy.position_size <= 0 and useStrategy
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("TP/SL BUY", from_entry="BUY", profit=tpPoints, loss=tpPoints * slMultiplier)
+
+if sellSignal and strategy.position_size >= 0 and useStrategy
+    strategy.entry("SELL", strategy.short)
+    strategy.exit("TP/SL SELL", from_entry="SELL", profit=tpPoints, loss=tpPoints * slMultiplier)
+
+// ── VISUALI ────────────────────────────────────
+plot(ema50, "EMA 50", color=color.blue, linewidth=2)
+plot(ema200, "EMA 200", color=color.orange, linewidth=2)
+
+plot(bbUpper, "BB Upper", color=color.purple, linewidth=1)
+plot(bbMiddle, "BB Middle", color=color.gray, linewidth=1)
+plot(bbLower, "BB Lower", color=color.purple, linewidth=1)
+
+plot(inLondon ? londonORBHigh : na, "London ORB High", color=color.green, style=plot.style_linebr)
+plot(inLondon ? londonORBLow : na, "London ORB Low", color=color.red, style=plot.style_linebr)
+plot(inNY ? nyORBHigh : na, "NY ORB High", color=color.green, style=plot.style_linebr)
+plot(inNY ? nyORBLow : na, "NY ORB Low", color=color.red, style=plot.style_linebr)
+
+plotshape(buySignal, title="BUY", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.large, text="BUY")
+plotshape(sellSignal, title="SELL", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.large, text="SELL")
+
+bgcolor(newLondonBar ? color.new(color.blue, 85) : na, title="London Open")
+bgcolor(newNYBar ? color.new(color.orange, 85) : na, title="NY Open")
+
+// ── ALERT ──────────────────────────────────────
+alertcondition(buySignal, title="BUY ORB/Forced", message="🚀 BUY XAUUSD – Sessione Open (ORB/Forced)")
+alertcondition(sellSignal, title="SELL ORB/Forced", message="🔻 SELL XAUUSD – Sessione Open (ORB/Forced)")
+
+View in Pine Editor・224 lines
+Use on chart
+1
+6
+600
+Strategy Description (English)
+The "SuperBreak Elite ORB Gold London & NY with High Win Rate and Intelligent Pro Filters" is an advanced Opening Range Breakout (ORB) trading strategy designed specifically for XAUUSD (Gold). It targets the high-volatility periods during the London (09:00-10:00 CET) and New York (14:30-15:30 CET) open sessions, aiming for a high win rate through intelligent filters and external market biases.
+Key Features:
+
+ORB Calculation: Establishes the high and low range over the first 15 minutes (configurable) of each session. Buy signals trigger on breakouts above the ORB high, and sell signals on breakouts below the ORB low, provided filters are met.
+Trend Filter (EMA-based): Uses EMA 50 and EMA 200 to ensure trades align with the prevailing trend (bullish if EMA50 > EMA200, bearish otherwise). This filter is enabled by default to boost win rate by avoiding counter-trend trades.
+Volatility Filter (Bollinger Bands): Optional filter that requires BB width > 1% (configurable) to confirm sufficient market volatility, reducing false signals in ranging conditions.
+External Bias Scoring: Incorporates data from DXY (US Dollar Index), VIX (Volatility Index), and US10Y (10-Year Treasury Yield) to compute a total score for bull/bear bias. This influences forced signals.
+Forced Signals: If no breakout occurs by the last 5 minutes of the session, a signal is forced based on the bias score (buy if bullish, sell if bearish) to ensure an entry.
+Risk Management: Take Profit (TP) at 1500 points (configurable), Stop Loss (SL) at 3x TP (configurable). Uses 1% of equity per trade.
+Visuals and Alerts: Plots ORB levels, EMAs, BBs, and signal shapes. Includes alerts for buy/sell entries.
+
+Advice on Timeframe and Filters:
+
+Recommended Timeframe: Use intraday charts like 1-minute or 5-minute for optimal session detection and ORB accuracy. Higher timeframes (e.g., 15m or hourly) may cause session misalignment or zero orbBars, leading to no signals. Test on recent data (last 1-2 years) with high gold volatility.
+Filters Usage: Enable the Trend Filter for conservative, high-win-rate trading (ideal for beginners). Activate BB Filter in low-volatility markets to avoid whipsaws, but disable it during news events for more entries. Adjust ORB duration (5-30 min) based on market conditions—shorter for aggressive breakouts, longer for stability. Always backtest with "useStrategy" enabled to verify performance, and disable filters temporarily if no trades generate in the tester.
+
+This strategy excels in trending gold markets but may underperform in sideways conditions—combine with manual discretion.
+Descrizione della Strategia (Italiano)
+La "SuperBreak Elite ORB Gold London & NY with High Win Rate and Intelligent Pro Filters" è una strategia di trading avanzata basata su Opening Range Breakout (ORB) progettata specificamente per XAUUSD (Oro). Si concentra sui periodi di alta volatilità durante le aperture di Londra (09:00-10:00 CET) e New York (14:30-15:30 CET), puntando a un alto win rate grazie a filtri intelligenti e bias esterni di mercato.
+Caratteristiche Principali:
+
+Calcolo ORB: Stabilisce il range alto e basso nei primi 15 minuti (configurabile) di ogni sessione. I segnali di buy si attivano su breakout sopra l'ORB high, e di sell su breakout sotto l'ORB low, purché i filtri siano soddisfatti.
+Filtro Trend (basato su EMA): Utilizza EMA 50 e EMA 200 per assicurare che i trade siano allineati con il trend prevalente (bullish se EMA50 > EMA200, bearish altrimenti). Questo filtro è abilitato di default per aumentare il win rate evitando trade contro-trend.
+Filtro Volatilità (Bande di Bollinger): Filtro opzionale che richiede una larghezza BB > 1% (configurabile) per confermare una volatilità di mercato sufficiente, riducendo segnali falsi in condizioni di range.
+Punteggio Bias Esterno: Incorpora dati da DXY (Indice Dollaro USA), VIX (Indice di Volatilità) e US10Y (Rendimento Treasury a 10 Anni) per calcolare un punteggio totale per bias bull/bear. Questo influenza i segnali forzati.
+Segnali Forzati: Se non avviene breakout entro gli ultimi 5 minuti della sessione, un segnale viene forzato in base al punteggio bias (buy se bullish, sell se bearish) per garantire un'entrata.
+Gestione del Rischio: Take Profit (TP) a 1500 punti (configurabile), Stop Loss (SL) a 3x TP (configurabile). Usa l'1% dell'equity per trade.
+Visuali e Alert: Plotta livelli ORB, EMA, BB e forme di segnale. Include alert per entrate buy/sell.
+
+Consigli su Timeframe e Filtri:
+
+Timeframe Raccomandato: Usa grafici intraday come 1-minuto o 5-minuti per un rilevamento ottimale delle sessioni e accuratezza ORB. Timeframe più alti (es. 15m o orari) potrebbero causare disallineamenti delle sessioni o orbBars a zero, portando a nessun segnale. Testa su dati recenti (ultimi 1-2 anni) con alta volatilità dell'oro.
+Uso dei Filtri: Abilita il Filtro Trend per un trading conservativo ad alto win rate (ideale per principianti). Attiva il Filtro BB in mercati a bassa volatilità per evitare whipsaw, ma disabilitalo durante eventi di news per più entrate. Regola la durata ORB (5-30 min) in base alle condizioni di mercato—più corta per breakout aggressivi, più lunga per stabilità. Esegui sempre backtest con "useStrategy" abilitato per verificare le performance, e disabilita temporaneamente i filtri se non generano trade nel tester.
+
+Questa strategia eccelle nei mercati di oro in trend ma potrebbe sottoperformare in condizioni laterali—combinala con discrezionalità manuale.
+Autore: Kltony

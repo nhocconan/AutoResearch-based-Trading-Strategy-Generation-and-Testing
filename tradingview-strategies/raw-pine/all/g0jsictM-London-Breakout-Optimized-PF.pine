@@ -1,0 +1,154 @@
+//@version=5
+strategy("Prop-Firm London Breakout – Optimized PF≥2", overlay=true, pyramiding=1, default_qty_type=strategy.fixed, initial_capital=10000)
+
+// ================= INPUTS =================
+atrLen      = input.int(14, "ATR Length")
+atrMult     = input.float(1.2, "ATR SL Multiplier")       // Tight SL to reduce losses
+rr          = input.float(2.0, "Risk:Reward")            // Fixed RR=2
+riskPct     = input.float(1.0, "Risk % per Trade")
+londonStart = input.int(7, "London Start Hour")
+londonEnd   = input.int(10, "London End Hour")
+emaLen      = input.int(50, "EMA Length")
+adxLen      = input.int(14, "ADX Length")
+adxMin      = input.int(25, "Minimum ADX for Strong Trend")
+atrBreakout = input.float(1.0, "ATR Breakout Minimum")    // Require breakout ≥ 1 ATR
+
+// ================= INDICATORS =================
+emaVal = ta.ema(close, emaLen)
+[dip, dim, adx] = ta.dmi(adxLen, adxLen)
+atr = ta.atr(atrLen)
+
+// ================= LONDON RANGE =================
+inLondon = hour(time) >= londonStart and hour(time) < londonEnd
+var float lonHigh = na
+var float lonLow  = na
+var bool londonReset = true
+var bool longTaken = false
+var bool shortTaken = false
+
+if inLondon and londonReset
+    lonHigh := high
+    lonLow := low
+    londonReset := false
+    longTaken := false
+    shortTaken := false
+else if inLondon
+    lonHigh := math.max(lonHigh, high)
+    lonLow := math.min(lonLow, low)
+if not inLondon
+    londonReset := true
+
+// ================= STRONG BREAKOUT SIGNALS =================
+strongLongSignal  = close > emaVal and adx > adxMin and high > lonHigh + atr * atrBreakout and not longTaken
+strongShortSignal = close < emaVal and adx > adxMin and low < lonLow - atr * atrBreakout and not shortTaken
+
+// ================= RISK =================
+risk = strategy.equity * riskPct / 100
+
+// ================= FIXED SL/TP =================
+var float fixedSL = na
+var float fixedTP = na
+var float tradeQty = na
+
+// ================= LABELS =================
+var label entryLabel = na
+var label tpLabel = na
+var label slLabel = na
+
+// ================= EXECUTION =================
+// LONG ENTRY
+if strongLongSignal
+    fixedSL := close - atr * atrMult
+    fixedTP := close + (close - fixedSL) * rr
+    tradeQty := risk / math.abs(close - fixedSL)
+    strategy.entry("Long Entry", strategy.long, qty=tradeQty)
+    strategy.exit("Long Exit – TP/SL", "Long Entry", stop=fixedSL, limit=fixedTP)
+    longTaken := true
+
+// SHORT ENTRY
+if strongShortSignal
+    fixedSL := close + atr * atrMult
+    fixedTP := close - (fixedSL - close) * rr
+    tradeQty := risk / math.abs(close - fixedSL)
+    strategy.entry("Short Entry", strategy.short, qty=tradeQty)
+    strategy.exit("Short Exit – TP/SL", "Short Entry", stop=fixedSL, limit=fixedTP)
+    shortTaken := true
+
+// ================= ENTRY MARKERS =================
+if not na(entryLabel)
+    label.delete(entryLabel)
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    if strategy.position_size > 0
+        entryLabel := label.new(bar_index, close, "▲ LONG ENTRY", style=label.style_label_up, color=color.green, textcolor=color.white, yloc=yloc.price)
+    if strategy.position_size < 0
+        entryLabel := label.new(bar_index, close, "▼ SHORT ENTRY", style=label.style_label_down, color=color.red, textcolor=color.white, yloc=yloc.price)
+
+// ================= TP/SL MARKERS =================
+if not na(tpLabel)
+    label.delete(tpLabel)
+if not na(slLabel)
+    label.delete(slLabel)
+
+if strategy.position_size > 0
+    tpLabel := label.new(bar_index, fixedTP, "✚ TP", style=label.style_label_center, color=color.green, textcolor=color.white, yloc=yloc.price)
+    slLabel := label.new(bar_index, fixedSL, "✚ SL", style=label.style_label_center, color=color.red, textcolor=color.white, yloc=yloc.price)
+if strategy.position_size < 0
+    tpLabel := label.new(bar_index, fixedTP, "✚ TP", style=label.style_label_center, color=color.green, textcolor=color.white, yloc=yloc.price)
+    slLabel := label.new(bar_index, fixedSL, "✚ SL", style=label.style_label_center, color=color.red, textcolor=color.white, yloc=yloc.price)
+
+// Reset labels when trade closes
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    if not na(entryLabel)
+        label.delete(entryLabel)
+    if not na(tpLabel)
+        label.delete(tpLabel)
+    if not na(slLabel)
+        label.delete(slLabel)
+    entryLabel := na
+    tpLabel := na
+    slLabel := na
+
+View in Pine Editor・110 lines
+Use on chart
+1
+5
+549
+Best Practices:
+
+Only take trades in trend and above/below VWAP
+
+Avoid trading in low-volume or sideways markets
+
+Use it for intraday 5-min charts (15-min for trend confirmation)
+
+Track trades in a Trading Journal → improves discipline
+Entry Rules:
+
+Long (Buy):
+
+Price above EMA21 & VWAP → bullish trend
+
+EMA slope positive → strong trend confirmation
+
+Pullback to entry zone OR breakout above resistance
+
+Volume above 1.3× average → avoids weak moves
+
+Short (Sell):
+
+Price below EMA21 & VWAP → bearish trend
+
+EMA slope negative → strong downtrend
+
+Pullback to entry zone OR breakout below support
+
+Volume above 1.3× average
+
+Exit Rules:
+
+Stop-Loss: ATR-based, dynamic (tight for fewer losses)
+
+Take Profit: Risk × 3 (3:1 R:R)
+
+Automatically handled by the strategy (strategy.exit)

@@ -1,0 +1,40 @@
+//@version=2
+strategy("The Always Winning Holy Grail Strategy - Not (by ChartArt)", shorttitle="CA_-_Not_The_Holy_Grail_Strat", pyramiding = 0, overlay=true)
+
+// Strategy entry condition:
+if 1+1 == 2   // go long if 1+1 = 2
+    strategy.entry("long", strategy.long, comment="long", qty = 10)
+
+
+// Money management of the strategy:
+TakeProfit = input(100,step=25)
+StopLoss = input(999999999999999,step=999999999999999)
+
+
+// Strategy exit condition: (always take profit and use a super extreme ridiculous wide stop loss)
+strategy.exit("exit", "long", profit = TakeProfit, loss = StopLoss)
+
+View in Pine Editor・15 lines
+Use on chart
+2.3 K
+21
+52 928
+How to win all the time if 1+1 = 2
+
+The most upvoted strategies on Tradingview are those which seemingly work 100%, but they actually don't at all because they are repainting and would not work in live trading reality. They are using the multi-time-frame strategy testing bug and thereby trade during the backtest on close prices before the bar has closed in reality.
+
+Top list of these cheating repainting strategies:
+
+
+1569 upvotes ANN Strategytradingview.com/v/bPT7VWjA/
+877 upvotes Vdub FX SniperVX3 Strategytradingview.com/v/yjtTce6w/
+481 upvotes Get Trend Strategytradingview.com/v/PHnPTxTd/
+
+
+I guess there are much more strategies among the top upvoted strategies on Tradingview which cheat with a multi-time-frame close price, but three examples are enough. The ANN Strategy uses the daily close price as multi-time-frame and cheats with that. The Vdub FX SniperVX3 Strategy uses the half-day (720 minute) close price to cheat and the Get Trend Strategy uses the 160 minute bar close for repaint cheating (at least here the author of this strategy explains that his strategy is only demo and would not work, which might be the reason why it has 1000 less upvotes than the ANN Strategy. I already wrote months ago a comment underneat these strategies to explain this issue but it hasn't stopped these strategies from getting more and more upvotes and staying in the top list.
+
+I thought this way of cheating is lame, so I invented a new way to cheat my way to seemingly reach 100% profitable trades all the time by going long if 1+1 is equal to 2. Welcome to super wide stop losses. Simply use a extreme unrealistic large stop loss and take profit after a realistic amount of pips and according to Tradingview's current backtest module you win 100% all the time. Yay! :)
+
+My recommendation for the Tradingview team is to add a function to let the user define a stop out and margin call level and maybe set a realistic setting as default, like 100%.
+
+Please don't trade with this strategy!

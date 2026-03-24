@@ -1,0 +1,104 @@
+//@version=6
+strategy("EMA 200 Trendline Break Strategy", overlay=true)
+
+// Inputs
+emaLength = input.int(200, "EMA Length")
+lookback = input.int(8, "Trendline Lookback")
+rr = input.float(2.0, "Risk Reward")
+
+// EMA
+ema200 = ta.ema(close, emaLength)
+plot(ema200, color=color.orange, linewidth=2)
+
+// Recent swing highs/lows
+recentHigh = ta.highest(high, lookback)
+recentLow = ta.lowest(low, lookback)
+
+// Build trendlines
+downTrend = ta.highest(high[1], lookback)
+upTrend = ta.lowest(low[1], lookback)
+
+// Entry Conditions
+buyCondition =
+ close > ema200 and
+ close > downTrend and
+ close[1] <= downTrend
+
+sellCondition =
+ close < ema200 and
+ close < upTrend and
+ close[1] >= upTrend
+
+// Stop Loss
+longSL = ta.lowest(low,3)
+shortSL = ta.highest(high,3)
+
+// Take Profit
+longTP = close + (close - longSL) * rr
+shortTP = close - (shortSL - close) * rr
+
+// Entries
+if buyCondition
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("TP/SL", "BUY", stop=longSL, limit=longTP)
+
+if sellCondition
+    strategy.entry("SELL", strategy.short)
+    strategy.exit("TP/SL", "SELL", stop=shortSL, limit=shortTP)
+
+// Entry labels
+plotshape(buyCondition, location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(sellCondition, location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// TP/SL Boxes
+var box tpBox = na
+var box slBox = na
+
+if buyCondition
+    tpBox := box.new(bar_index, longTP, bar_index+8, close, bgcolor=color.new(color.green,80))
+    slBox := box.new(bar_index, close, bar_index+8, longSL, bgcolor=color.new(color.red,80))
+
+if sellCondition
+    tpBox := box.new(bar_index, close, bar_index+8, shortTP, bgcolor=color.new(color.green,80))
+    slBox := box.new(bar_index, shortSL, bar_index+8, close, bgcolor=color.new(color.red,80))
+
+View in Pine Editor・63 lines
+Use on chart
+2
+1
+618
+This indicator is designed to identify high-probability breakout and breakdown opportunities by combining trendline structure with EMA trend filtering. The goal is to trade only in the direction of the dominant market trend while avoiding low-quality counter-trend setups.
+
+How the Strategy Works
+1. Trend Identification
+The indicator uses the 200 EMA (Exponential Moving Average) to determine the overall market trend.
+• Price above 200 EMA → Bullish trend
+• Price below 200 EMA → Bearish trend
+2. Trendline Detection
+The script automatically identifies short-term trendlines based on recent price swings. These trendlines help detect potential momentum shifts and breakout zones.
+3. Trade Signals
+Signals are generated when price breaks a valid trendline in the direction of the main trend.
+Buy Setup
+• Price is above the 200 EMA
+• A downward trendline is broken
+• Candle closes above the trendline
+Sell Setup
+• Price is below the 200 EMA
+• An upward trendline is broken
+• Candle closes below the trendline
+4. Risk Management
+The indicator visually plots:
+• Entry level
+• Stop Loss
+• Take Profit zone
+This helps traders maintain clear risk-to-reward structures and avoid emotional decision making.
+
+Best Timeframes
+
+This strategy works best on intraday timeframes, especially:
+• 1 minute
+• 3 minute
+• 5 minute
+• 15 minute
+
+It can be applied to crypto, forex, indices, and commodities.

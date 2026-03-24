@@ -1,0 +1,7 @@
+//@version=5
+stoploss_colour=##input(defval=#ffff00ff,type='INPUT_COLOR',##id='in_17')
+up_trend_line_colour=##input(defval=#00ff00b3,type='INPUT_COLOR',##id='in_18')
+down_trend_line_colour=##input(defval=#ff0000b3,type='INPUT_COLOR',##id='in_19')
+##root(root_metainfo,plot_0_0,stoploss_colour,input__color)
+##root(root_metainfo,plot_3_0,up_trend_line_colour,input__color)
+##root(root_metainfo,plot_5_0,down_trend_line_colour,input__color)

@@ -1,0 +1,229 @@
+//@version=4
+
+strategy("COT + ema + aux ticker", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+src = close
+
+bFX = false 
+
+startDate = input(title="Start Date", type=input.integer,
+     defval=1, minval=1, maxval=31)
+startMonth = input(title="Start Month", type=input.integer,
+     defval=1, minval=1, maxval=12)
+startYear = input(title="Start Year", type=input.integer,
+     defval=2010, minval=1800, maxval=2100)
+afterStartDate = (time >= timestamp(syminfo.timezone,
+     startYear, startMonth, startDate, 0, 0))
+
+string ticket00 = input(defval='EUR', type=input.string, options=["AUD","GBP","CAD","EUR","JPY","CHF","NZD","USD"], title='1st', group='Tickets:', inline='T0')
+string ticket01 = input(defval='EUR', type=input.string, options=["AUD","GBP","CAD","EUR","JPY","CHF","NZD","USD"],title='2nd', group='Tickets:', inline='T0')
+
+usecot = input(title="COT ON/OFF", type=input.bool, defval=true)
+useema = input(title="EMA ON/OFF", type=input.bool, defval=true)
+
+
+len = input(4, minval=1, title="Length")
+srcsma = input(close, title="Source")
+offset = input(title="Offset COT", defval=0, minval=0, maxval=10)
+out = ema(srcsma, len)
+
+
+
+useaux1 = input(title="Aux 1 ON/OFF", type=input.bool, defval=true)
+auxinv1 = input(title="Aux 1 inv.", type=input.bool, defval=false)
+lenaux1 = input( 4, minval=1, title="Ema aux 1 period.")
+auxsma1 = input(title="AUX Symbol", type=input.symbol, defval="DELL")
+s1 = security(auxsma1, "W", close)
+outaux1 = ema(s1, lenaux1)
+useaux2 = input(title="Aux 2 ON/OFF", type=input.bool, defval=true)
+auxinv2 = input(title="Aux 2 inv.", type=input.bool, defval=false)
+lenaux2 = input( 4, minval=1, title="Ema aux 2 period.")
+auxsma2 = input(title="AUX 2 Symbol", type=input.symbol, defval="DELL")
+s2 = security(auxsma2, "W", close)
+outaux2 = ema(s2, lenaux2)
+//Can't set bFX as an input because plot and legend titles require literals
+
+// INPUTS
+
+sCalc  = "MARKETS"
+
+
+// ***** MARKET TYPES *****
+
+// Financial Markets (Commercial)
+
+bTotal = (sCalc == "MARKETS")
+sHead = "QUANDL:CFTC/"
+
+sLong = "_F_L_ALL|4"
+sShort = "_F_L_ALL|5"
+iWidth = 2
+
+
+// Non-Commercials (Speculators)
+
+bTotal2 = (sCalc == "NON-COMS")
+sHead2  = "QUANDL:CFTC/"
+
+sLong2  = "_F_L_ALL|1"
+sShort2 = "_F_L_ALL|2"
+iWidth2 = 2
+
+
+//***** CFTC MARKET CODES *****
+
+// 1 - Futures
+
+
+sCode1 =
+
+         
+         ticket00 == "AUD" ? "232741" :  
+         ticket00 == "GBP" ? "096742" : 
+         ticket00 == "CAD" ? "090741" :
+         ticket00 == "EUR" ? "099741" :
+         ticket00 == "JPY" ? "097741" : 
+         ticket00 == "CHF" ? "092741" :
+         ticket00 == "NZD" ? "112741" : 
+         ticket00 == "USD" ? "098662" :
+         ""
+
+sCode2 =
+
+         
+         ticket01 == "AUD" ? "232741" :  
+         ticket01 == "GBP" ? "096742" : 
+         ticket01 == "CAD" ? "090741" :
+         ticket01 == "EUR" ? "099741" :
+         ticket01 == "JPY" ? "097741" : 
+         ticket01 == "CHF" ? "092741" :
+         ticket01 == "NZD" ? "112741" : 
+         ticket01 == "USD" ? "098662" :
+         ""
+
+//Titles
+
+sTitle1 =  "1st Ticker" 
+
+
+// COT CFTC Auto Generation Codes 
+
+//Data functions
+dLong(asCode) =>  security(sHead + asCode + (sLong),   "W", close[0 + offset] - close[1 + offset], lookahead=barmerge.lookahead_on)
+dShort(asCode) => security(sHead +asCode + (sShort),   "W", close[0 + offset] - close[1 + offset], lookahead=barmerge.lookahead_on)
+
+// COMMERCIALS 1 ticker 
+
+_pos_coms1_short = dShort(sCode1)
+_pos_coms1_long  = dLong (sCode1)
+
+
+net_com1 = _pos_coms1_long - _pos_coms1_short
+
+// COMMERCIALS 2 ticker
+
+sTitle2 =  "2nd Ticker"
+
+
+dLong2(asCode2) =>  security(sHead + asCode2 + (sLong),   "W", close[0 + offset] - close[1 + offset], lookahead=barmerge.lookahead_on)
+dShort2(asCode2) => security(sHead +asCode2 + (sShort),   "W", close[0 + offset] - close[1 + offset], lookahead=barmerge.lookahead_on)
+
+_pos_coms2_long    =  dLong2(sCode2)
+_pos_coms2_short   =  dShort2(sCode2)
+
+net_com2 = _pos_coms2_long - _pos_coms2_short
+
+
+
+
+buy =  false
+sell = false
+//if(not useaux1)
+//    buy :=  (net_com1 > 0) and (net_com2 < 0)  and (out[0] > out[1])  and afterStartDate
+//    sell :=  (net_com1 < 0) and (net_com2 > 0) and (out[0] < out[1])  and afterStartDate
+// Plot data 
+buy_aux1 = false
+buy_aux2 = false
+sell_aux1 = false
+sell_aux2 = false
+buy_cot = ((net_com1 > 0) and (net_com2 < 0) and usecot) or (not usecot)
+sell_cot = ((net_com1 < 0) and (net_com2 > 0) and usecot) or (not usecot)
+buy_ema = ((out[0] > out[1]) and useema) or (not useema)
+sell_ema = ((out[0] < out[1]) and useema) or (not useema)
+
+if(auxinv1)
+    buy_aux1 := ((outaux1[0]<outaux1[1]) and useaux1) or (not useaux1)
+    sell_aux1 := ((outaux1[0]>outaux1[1]) and useaux1) or not useaux1
+
+if not auxinv1
+    buy_aux1:= ((outaux1[0]>outaux1[1]) and useaux1) or not useaux1
+    sell_aux1 := ((outaux1[0]<outaux1[1]) and useaux1) or not useaux1
+
+if auxinv2
+    buy_aux2 := ((outaux2[0]<outaux2[1]) and useaux2) or not useaux2
+    sell_aux2 := ((outaux2[0]>outaux2[1]) and useaux2) or not useaux2
+
+if not auxinv2
+    buy_aux2:= ((outaux2[0]>outaux2[1]) and useaux2) or not useaux2
+    sell_aux2 := ((outaux2[0]<outaux2[1]) and useaux2) or not useaux2
+
+
+buy :=  buy_cot  and buy_ema and buy_aux1 and buy_aux2 and afterStartDate
+sell :=  sell_cot and sell_ema and sell_aux1 and sell_aux2 and afterStartDate
+
+if (sell)
+    strategy.entry("Short", strategy.short,  qty = 100000)
+    strategy.exit("SL-TP Short","Short",stop = high[0])
+    
+if (buy)
+    strategy.entry("Long", strategy.long,  qty = 100000)
+    strategy.exit("SL-TP Long","Long",stop = low[0])
+
+//if close[0] < close[1] or close[0] > close[1]
+//    strategy.close("Short")
+//    strategy.close("Long")
+    
+if strategy.openprofit > 0 
+    strategy.close("Short")
+    strategy.close("Long")
+
+plotshape(buy, style=shape.triangleup,   location=location.belowbar, offset=0, color=color.green, size = size.small)
+plotshape(sell, style=shape.triangledown,   location=location.abovebar, offset=0, color=color.red, size = size.small)
+
+View in Pine Editor・194 lines
+Use on chart
+1
+4
+8
+4 241
+Purpose: Create a script for backtesting the idea that COT can steer weekly Bias on Forex Market.
+How does it works: the script use Commercials Delta Conctract, EMA of the selected ticker, EMA of 2 auxiliary tickers (e.g. correlated ticker) to generates buy and sell signals, it allows to include or not each of these.
+If you use all the indicator, The buy or sell signals are generated following that rules:
+(Example for buy signals on GBPCAD)
+
+1) Commercials add net contract to GBP futures + remove net contract to CAD
+2) EMA of GBPCAD is rising
+3) EMA of 1st aux ticker is rising (or decline if select inv option)
+4) EMA of 2nd aux ticker is rising (or decline if select inv option)
+
+The scripts set the stop at low of the week for long orders and high of the week for shorts.
+The exit strategy is to exit at first week of profit
+
+
+How could you use it: [WARNING IT WORKS ONLY IN 1W Timeframe]
+1) Choose your FX Ticker e.g. GBPCAD and set 1W TimeFrame
+2) Select ticker in the strategy setting, remember to select the currency in right order, if you want to study GBP CAD 1st currency is GBP and 2nd CAD
+3) Choose if you want to use EMA (and its period of calculation)
+4) Choose if you want to use a aux ticker, the direction, and the relative ema period
+
+What could be better;
+1) you can just buy on begin of the week.
+2) the exit strategy isn't best you can do
+3) No level of delta contract is consider, its generate a buy signial also for 1 contract in the right direction
+
+For any question, suggestion of improvemet, ideas, insult:) write to me
+
+It all started from a script i find here on tradingview that extract COT data. Don't remember the name of that guy but Thanks a lot.
+My English isn't perfect but i hope you can understand as well.
+
+
+

@@ -1,0 +1,50 @@
+//@version=6
+strategy("Long‑only Swing/Scalp", overlay=true, pyramiding=0, max_bars_back=1000, default_qty_type=strategy.fixed, default_qty_value=1)
+tf = input.string("5", "Timeframe", options=["5","15"])
+takeProf = input.float(1.0, "Take‑Profit %")/100
+stopLoss = input.float(2.0, "Stop‑Loss %")/100
+breakeven = input.bool(false, "Breakeven at +0.5%")
+trail = input.bool(false, "Trail by ATR(14)×0.6")
+investmentUSD = input.int(1000, "Investment Size USD", minval=1)
+botUUID = input.string("uuid", "Bot UUID")
+startTS = input.int(0, "Backtest Start", inline="start")
+endTS = input.int(0, "Backtest End", inline="end")
+ema200 = ta.ema(close,200)
+ema21  = ta.ema(close,21)
+rsi14  = ta.rsi(close,14)
+atr14  = ta.atr(14)
+range20_h = ta.highest(high,20)
+range20_l = ta.lowest(low,20)
+mid20   = (range20_h+range20_l)/2
+plusDM   = math.max(high - high[1],0)
+minusDM  = math.max(low[1] - low,0)
+trarto   = math.max(high - low, math.max(math.abs(high - close[1]),math.abs(low - close[1])))
+plusDI   = 100 * ta.rma(plusDM,14) / trarto
+minusDI  = 100 * ta.rma(minusDM,14) / trarto
+dx       = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx14    = ta.rma(dx,14)
+atrGuard = atr14/close < 0.0025
+midGuard = math.abs(close-mid20)/mid20 < 0.003
+chooseTrade = not atrGuard and not midGuard
+timeValid = (startTS==0 or time>=startTS) and (endTS==0 or time<endTS)
+pullback  = close <= ema21 and close > ema200
+rsiCond   = rsi14 > 38 and rsi14 < 55 and ta.rising(rsi14,3)
+adxCond   = adx14 > 20
+longEntry = chooseTrade and pullback and rsiCond and adxCond and strategy.position_size<=0 and timeValid
+var int qty = math.floor(investmentUSD/close)
+if longEntry
+    strategy.entry("Long", strategy.long, qty=qty)
+strategy.exit("TP_SL", from_entry="Long", limit=close*(1+takeProf), stop=close*(1-stopLoss))
+var bool beActive=false
+if strategy.position_size>0 and not beActive and breakeven
+    if close > strategy.position_avg_price*1.005
+        beActive:=true
+        trOffset = trail ? atr14*0.6 : na
+        strategy.exit("BREAKEVEN", from_entry="Long", stop=strategy.position_avg_price*1.005, trail_offset=trOffset)
+
+View in Pine Editor・44 lines
+Use on chart
+1
+7
+762
+This is a basic scalper stategy for algos or crypto bots, tested on BNB, not the best backtest but you can tweak and get better results. Take profit at 1% and Sl at 2% , adjust those settings first to see different back test resutls.

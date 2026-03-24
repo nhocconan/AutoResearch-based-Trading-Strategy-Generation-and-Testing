@@ -1,0 +1,567 @@
+//@version=6
+strategy("Stochastic Hash Strat [Hash Capital Research]",
+     overlay=false,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,
+     commission_type=strategy.commission.percent,
+     commission_value=0.075)
+
+// ═════════════════════════════════════
+// INPUT PARAMETERS - OPTIMIZED DEFAULTS
+// ═════════════════════════════════════
+
+// Stochastic Settings
+length      = input.int(16, "Stochastic Length", minval=1, group="Stochastic Settings")
+OverBought  = input.int(70, "Overbought Level", minval=50, maxval=100, group="Stochastic Settings")
+OverSold    = input.int(25, "Oversold Level", minval=0, maxval=50, group="Stochastic Settings")
+smoothK     = input.int(7, "Smooth K", minval=1, group="Stochastic Settings")
+smoothD     = input.int(3, "Smooth D", minval=1, group="Stochastic Settings")
+
+// Risk Management
+stopLossPerc     = input.float(2.2, "Stop Loss %", minval=0.1, maxval=10, step=0.1, group="Risk Management")
+takeProfitPerc   = input.float(7.0, "Take Profit %", minval=0.1, maxval=20, step=0.1, group="Risk Management")
+
+// Exit Settings
+exitOnOppositeExtreme = input.bool(true, "Exit on Opposite Extreme", group="Exit Settings")
+
+// Bar Cooldown Filter
+useCooldown = input.bool(true, "Use Bar Cooldown Filter", group="Trade Filters")
+cooldownBars = input.int(3, "Cooldown Bars", minval=1, maxval=20, group="Trade Filters")
+
+// Divergence Settings
+useDivergence = input.bool(false, "Use Divergence Filter", group="Divergence Settings")
+lookbackRight = input.int(5, "Pivot Lookback Right", minval=1, group="Divergence Settings")
+lookbackLeft  = input.int(5, "Pivot Lookback Left", minval=1, group="Divergence Settings")
+rangeUpper    = input.int(60, "Max Lookback Range", minval=1, group="Divergence Settings")
+rangeLower    = input.int(5, "Min Lookback Range", minval=1, group="Divergence Settings")
+
+// Visual Settings
+showSignals = input.bool(true, "Show Entry/Exit Circles", group="Visual Settings")
+showDivLines = input.bool(false, "Show Divergence Lines", group="Visual Settings")
+
+// ═════════════════════════════════════
+// STOCHASTIC CALCULATION
+// ═════════════════════════════════════
+
+k = ta.sma(ta.stoch(close, high, low, length), smoothK)
+d = ta.sma(k, smoothD)
+
+// Crossover signals
+bullishCross = ta.crossover(k, d)
+bearishCross = ta.crossunder(k, d)
+
+// ═════════════════════════════════════
+// BAR COOLDOWN FILTER
+// ═════════════════════════════════════
+
+var int lastExitBar = na
+var bool inCooldown = false
+
+// Track when position closes
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    lastExitBar := bar_index
+    inCooldown := true
+
+// Check if cooldown period has passed
+if not na(lastExitBar) and bar_index - lastExitBar >= cooldownBars
+    inCooldown := false
+
+// Apply cooldown filter
+cooldownFilter = useCooldown ? not inCooldown : true
+
+// ═════════════════════════════════════
+// DIVERGENCE DETECTION
+// ═════════════════════════════════════
+
+priceLowPivot  = ta.pivotlow(close, lookbackLeft, lookbackRight)
+priceHighPivot = ta.pivothigh(close, lookbackLeft, lookbackRight)
+stochLowPivot  = ta.pivotlow(k, lookbackLeft, lookbackRight)
+stochHighPivot = ta.pivothigh(k, lookbackLeft, lookbackRight)
+
+var float lastPriceLow = na
+var float lastStochLow = na
+var int lastLowBar = na
+var float lastPriceHigh = na
+var float lastStochHigh = na
+var int lastHighBar = na
+
+bullishDiv = false
+bearishDiv = false
+
+// Bullish Divergence
+if not na(priceLowPivot) and k < OverSold
+    if not na(lastPriceLow) and not na(lastStochLow)
+        barsBack = bar_index - lastLowBar
+        if barsBack >= rangeLower and barsBack <= rangeUpper
+            if priceLowPivot < lastPriceLow and stochLowPivot > lastStochLow
+                bullishDiv := true
+    
+    lastPriceLow := priceLowPivot
+    lastStochLow := stochLowPivot
+    lastLowBar := bar_index - lookbackRight
+
+// Bearish Divergence
+if not na(priceHighPivot) and k > OverBought
+    if not na(lastPriceHigh) and not na(lastStochHigh)
+        barsBack = bar_index - lastHighBar
+        if barsBack >= rangeLower and barsBack <= rangeUpper
+            if priceHighPivot > lastPriceHigh and stochHighPivot < lastStochHigh
+                bearishDiv := true
+    
+    lastPriceHigh := priceHighPivot
+    lastStochHigh := stochHighPivot
+    lastHighBar := bar_index - lookbackRight
+
+// ═════════════════════════════════════
+// ENTRY CONDITIONS
+// ═════════════════════════════════════
+
+longCondition = if useDivergence
+    bullishCross and k < OverSold and bullishDiv and cooldownFilter
+else
+    bullishCross and k < OverSold and cooldownFilter
+
+shortCondition = if useDivergence
+    bearishCross and k > OverBought and bearishDiv and cooldownFilter
+else
+    bearishCross and k > OverBought and cooldownFilter
+
+// ═════════════════════════════════════
+// STRATEGY EXECUTION
+// ═════════════════════════════════════
+
+// Long Entry
+if longCondition and strategy.position_size == 0
+    stopPrice = close * (1 - stopLossPerc / 100)
+    targetPrice = close * (1 + takeProfitPerc / 100)
+    
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=stopPrice, limit=targetPrice)
+
+// Short Entry
+if shortCondition and strategy.position_size == 0
+    stopPrice = close * (1 + stopLossPerc / 100)
+    targetPrice = close * (1 - takeProfitPerc / 100)
+    
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=stopPrice, limit=targetPrice)
+
+// Exit on Opposite Extreme
+if exitOnOppositeExtreme
+    if strategy.position_size > 0 and k > OverBought
+        strategy.close("Long", comment="Exit OB")
+    
+    if strategy.position_size < 0 and k < OverSold
+        strategy.close("Short", comment="Exit OS")
+
+// ═════════════════════════════════════
+// VISUAL ELEMENTS - STOCHASTIC PANE
+// ═════════════════════════════════════
+
+// Plot stochastic lines with gradient colors
+kColor = k > OverBought ? color.new(#FF0055, 0) : k < OverSold ? color.new(#00FF88, 0) : color.new(#00BBFF, 0)
+dColor = color.new(#FFB300, 30)
+
+plot(k, "Stochastic %K", color=kColor, linewidth=2)
+plot(d, "Stochastic %D", color=dColor, linewidth=2)
+
+// Add glow effect to K line
+plot(k, "K Glow", color=color.new(kColor, 70), linewidth=4)
+
+// Plot levels
+obLine = hline(OverBought, "Overbought", color=color.new(#FF0055, 60), linestyle=hline.style_dashed, linewidth=1)
+osLine = hline(OverSold, "Oversold", color=color.new(#00FF88, 60), linestyle=hline.style_dashed, linewidth=1)
+midLine = hline(50, "Midline", color=color.new(color.gray, 70), linestyle=hline.style_dotted)
+
+// ═════════════════════════════════════
+// FLUORESCENT SIGNAL CIRCLES
+// ═════════════════════════════════════
+
+// Long signal - Bright green fluorescent circle
+longSignalLevel = longCondition ? k : na
+plot(longSignalLevel, "Long Signal", color=color.new(#00FF88, 0), style=plot.style_circles, linewidth=6)
+plot(longSignalLevel, "Long Glow", color=color.new(#00FF88, 60), style=plot.style_circles, linewidth=10)
+
+// Short signal - Bright magenta fluorescent circle  
+shortSignalLevel = shortCondition ? k : na
+plot(shortSignalLevel, "Short Signal", color=color.new(#FF0055, 0), style=plot.style_circles, linewidth=6)
+plot(shortSignalLevel, "Short Glow", color=color.new(#FF0055, 60), style=plot.style_circles, linewidth=10)
+
+// Exit signals - Orange fluorescent circles
+longExitSignal = strategy.position_size[1] > 0 and strategy.position_size == 0
+shortExitSignal = strategy.position_size[1] < 0 and strategy.position_size == 0
+
+exitLevel = longExitSignal or shortExitSignal ? k : na
+plot(exitLevel, "Exit Signal", color=color.new(#FF8800, 0), style=plot.style_circles, linewidth=4)
+plot(exitLevel, "Exit Glow", color=color.new(#FF8800, 70), style=plot.style_circles, linewidth=8)
+
+// ═════════════════════════════════════
+// DIVERGENCE INDICATORS
+// ═════════════════════════════════════
+
+if showDivLines and bullishDiv
+    label.new(bar_index, 10, "🔺 Bull Div", style=label.style_none, color=na, textcolor=color.new(#00FF88, 0), size=size.tiny)
+
+if showDivLines and bearishDiv
+    label.new(bar_index, 90, "🔻 Bear Div", style=label.style_none, color=na, textcolor=color.new(#FF0055, 0), size=size.tiny)
+
+// Cooldown indicator
+if useCooldown and inCooldown
+    label.new(bar_index, k, "⏸", style=label.style_none, color=na, textcolor=color.new(color.gray, 50), size=size.tiny, tooltip="Cooldown Active")
+
+View in Pine Editor・211 lines
+Use on chart
+9
+5
+1 925
+# Stochastic Hash Strategy by Hash Capital Research
+
+## 🎯 What Is This Strategy?
+The **Stochastic Slow Strategy** is a momentum-based trading system that identifies oversold and overbought market conditions to capture mean-reversion opportunities. Think of it as a "buy low, sell high" approach with smart mathematical filters that remove emotion from your trading decisions.
+
+Unlike fast-moving indicators that generate excessive noise, this strategy uses **smoothed stochastic oscillators** to identify only the highest-probability setups when momentum truly shifts.
+
+---
+
+## 💡 Why This Strategy Works
+Most traders fail because they:
+- **Chase prices** after big moves (buying high, selling low)
+- **Overtrade** in choppy, directionless markets
+- **Exit too early** or hold losses too long
+
+This strategy solves all three problems:
+1. **Entry Discipline**: Only trades when the stochastic oscillator crosses in extreme zones (oversold for longs, overbought for shorts)
+2. **Cooldown Filter**: Prevents revenge trading by forcing a waiting period after each trade
+3. **Fixed Risk/Reward**: Pre-defined stop-loss and take-profit levels ensure consistent risk management
+
+**The Math Behind It**: The stochastic oscillator measures where the current price sits relative to its recent high-low range. When it's below 25, the market is oversold (time to buy). When above 70, it's overbought (time to sell). The crossover with its moving average confirms momentum is shifting.
+
+---
+
+## 📊 Best Markets & Timeframes
+
+### ⭐ OPTIMAL PERFORMANCE:
+
+**Crude Oil (WTI) - 12H Timeframe**
+- **Why it works**: Oil markets have predictable volatility patterns and respect technical levels
+
+**AAVE/USD - 4H to 12H Timeframe**
+- **Why it works**: DeFi tokens exhibit strong momentum cycles with clear extremes
+
+### ✅ Also Works Well On:
+- **BTC/USD** (12H, Daily) - Lower frequency but high win rate
+- **ETH/USD** (8H, 12H) - Balanced volatility and liquidity
+- **Gold (XAU/USD)** (Daily) - Classic mean-reversion asset
+- **EUR/USD** (4H, 8H) - Lower volatility, requires patience
+
+### ❌ Avoid Using On:
+- Timeframes below 4H (too much noise)
+- Low-liquidity altcoins (wide spreads kill performance)
+- Strongly trending markets without pullbacks (Bitcoin in 2021)
+- News-driven instruments during major events
+
+---
+
+## 🎛️ Understanding The Settings
+
+### Core Stochastic Parameters
+
+**Stochastic Length (Default: 16)**
+- Controls the lookback period for price comparison
+- Lower = faster reactions, more signals (10-14 for volatile markets)
+- Higher = smoother signals, fewer trades (16-21 for stable markets)
+- **Pro tip**: Use 10 for crypto 4H, 16 for commodities 12H
+
+**Overbought Level (Default: 70)**
+- Threshold for short entries
+- Lower values (65-70) = more trades, earlier entries
+- Higher values (75-80) = fewer but higher-conviction trades
+- **Sweet spot**: 70 works for most assets
+
+**Oversold Level (Default: 25)**
+- Threshold for long entries
+- Higher values (25-30) = more trades, earlier entries
+- Lower values (15-20) = fewer but stronger bounce setups
+- **Sweet spot**: 20-25 depending on market conditions
+
+**Smooth K & Smooth D (Default: 7 & 3)**
+- Additional smoothing to filter out whipsaws
+- K=7 makes the indicator slower and more reliable
+- D=3 is the signal line that confirms the trend
+- **Don't change these unless you know what you're doing**
+
+---
+
+### Risk Management
+
+**Stop Loss % (Default: 2.2%)**
+- Automatically exits losing trades
+- Should be 1.5x to 2x your average market volatility
+- Too tight = death by a thousand cuts
+- Too wide = uncontrolled losses
+- **Calibration**: Check ATR indicator and set SL slightly above it
+
+**Take Profit % (Default: 7%)**
+- Automatically exits winning trades
+- Should be 2.5x to 3x your stop loss (reward-to-risk ratio)
+- This default gives 7% / 2.2% = 3.18:1 R:R
+- **The golden rule**: Never have R:R below 2:1
+
+---
+
+### Trade Filters
+
+**Bar Cooldown Filter (Default: ON, 3 bars)**
+- **What it does**: Forces you to wait X bars after closing a trade before entering a new one
+- **Why it matters**: Prevents emotional revenge trading and overtrading in choppy markets
+- **Settings guide**:
+- 3 bars = Standard (good for most cases)
+- 5-7 bars = Conservative (oil, slow-moving assets)
+- 1-2 bars = Aggressive (only for experienced traders)
+
+**Exit on Opposite Extreme (Default: ON)**
+- Closes your long when stochastic hits overbought (and vice versa)
+- Acts as an early profit-taking mechanism
+- **Leave this ON** unless you're testing other exit strategies
+
+**Divergence Filter (Default: OFF)**
+- Looks for price/momentum divergences for additional confirmation
+- **When to enable**: Trending markets where you want fewer but higher-quality trades
+- **Keep OFF for**: Mean-reverting markets (oil, forex, most of the time)
+
+---
+
+## 🚀 Quick Start Guide
+
+### Step 1: Set Up in TradingView
+
+1. Open TradingView and navigate to your chart
+2. Click "Pine Editor" at the bottom
+3. Copy and paste the strategy code
+4. Click "Add to Chart"
+5. The strategy will appear in a separate pane below your price chart
+
+### Step 2: Choose Your Market
+
+**If you're trading Crude Oil:**
+- Timeframe: 12H
+- Keep all default settings
+- Watch for signals during London/NY overlap (8am-11am EST)
+
+**If you're trading AAVE or crypto:**
+- Timeframe: 4H or 12H
+- Consider these adjustments:
+- Stochastic Length: 10-14 (faster)
+- Oversold: 20 (more aggressive)
+- Take Profit: 8-10% (higher targets)
+
+### Step 3: Wait for Your First Signal
+
+**LONG Entry** (Green circle appears):
+- Stochastic crosses up below oversold level (25)
+- Price likely near recent lows
+- System places limit order at take profit and stop loss
+
+**SHORT Entry** (Red circle appears):
+- Stochastic crosses down above overbought level (70)
+- Price likely near recent highs
+- System places limit order at take profit and stop loss
+
+**EXIT** (Orange circle):
+- Position closes either at stop, target, or opposite extreme
+- Cooldown period begins
+
+### Step 4: Let It Run
+
+The biggest mistake? **Interfering with the system.**
+
+- Don't close trades early because you're scared
+- Don't skip signals because you "have a feeling"
+- Don't increase position size after a big win
+- Don't revenge trade after a loss
+
+**Follow the system or don't use it at all.**
+
+---
+
+### Important Risks:
+1. **Drawdown Pain**: You WILL experience losing streaks of 5-7 trades. This is mathematically normal.
+2. **Whipsaw Markets**: Choppy, range-bound conditions can trigger multiple small losses.
+3. **Gap Risk**: Overnight gaps can cause your actual fill to be worse than the stop loss.
+4. **Slippage**: Real execution prices differ from backtested prices (factor in 0.1-0.2% slippage).
+
+---
+
+## 🔧 Optimization Guide
+
+### When to Adjust Settings:
+
+**Market Volatility Increased?**
+- Widen stop loss by 0.5-1%
+- Increase take profit proportionally
+- Consider increasing cooldown to 5-7 bars
+
+**Getting Too Few Signals?**
+- Decrease stochastic length to 10-12
+- Increase oversold to 30, decrease overbought to 65
+- Reduce cooldown to 2 bars
+
+**Getting Too Many Losses?**
+- Increase stochastic length to 18-21 (slower, smoother)
+- Enable divergence filter
+- Increase cooldown to 5+ bars
+- Verify you're on the right timeframe
+
+### A/B Testing Method:
+
+1. **Run default settings for 50 trades** on your chosen market
+2. Document: Win rate, profit factor, max drawdown, emotional tolerance
+3. **Change ONE variable** (e.g., oversold from 25 to 20)
+4. Run another 50 trades
+5. Compare results
+6. Keep the better version
+
+**Never change multiple settings at once** or you won't know what worked.
+
+---
+
+## 📚 Educational Resources
+
+### Key Concepts to Learn:
+
+**Stochastic Oscillator**
+- Developed by George Lane in the 1950s
+- Measures momentum by comparing closing price to price range
+- Formula: %K = (Close - Low) / (High - Low) × 100
+- Similar to RSI but more sensitive to price movements
+
+**Mean Reversion vs. Trend Following**
+- This is a **mean reversion** strategy (price returns to average)
+- Works best in ranging markets with defined support/resistance
+- Fails in strong trending markets (2017 Bitcoin, 2020 Tech stocks)
+- Complement with trend filters for better results
+
+**Risk:Reward Ratio**
+- The cornerstone of profitable trading
+- Winning 40% of trades with 3:1 R:R = profitable
+- Winning 60% of trades with 1:1 R:R = breakeven (after fees)
+- **This strategy aims for 45% win rate with 2.5-3:1 R:R**
+
+### Recommended Reading:
+- *"Trading Systems and Methods"* by Perry Kaufman (Chapter on Oscillators)
+- *"Mean Reversion Trading Systems"* by Howard Bandy
+- *"The New Trading for a Living"* by Dr. Alexander Elder
+
+---
+
+## 🛠️ Troubleshooting
+
+### "I'm not seeing any signals!"
+
+**Check:**
+- Is your timeframe 4H or higher?
+- Is the stochastic actually reaching extreme levels (check if your asset is stuck in middle range)?
+- Is cooldown still active from a previous trade?
+- Are you on a low-liquidity pair?
+
+**Solution**: Switch to a more volatile asset or lower the overbought/oversold thresholds.
+
+---
+
+### "The strategy keeps losing money!"
+
+**Check:**
+- What's your win rate? (Below 35% is concerning)
+- What's your profit factor? (Below 0.8 means serious issues)
+- Are you trading during major news events?
+- Is the market in a strong trend?
+
+**Solution**:
+1. Verify you're using recommended markets/timeframes
+2. Increase cooldown period to avoid choppy markets
+3. Reduce position size to 5% while you diagnose
+4. Consider switching to daily timeframe for less noise
+
+---
+
+### "My stop losses keep getting hit!"
+
+**Check:**
+- Is your stop loss tighter than the average ATR?
+- Are you trading during high-volatility sessions?
+- Is slippage eating into your buffer?
+
+**Solution**:
+1. Calculate the 14-period ATR
+2. Set stop loss to 1.5x the ATR value
+3. Avoid trading right after market open or major news
+4. Factor in 0.2% slippage for crypto, 0.1% for oil
+
+---
+
+## 💪 Pro Tips from the Trenches
+
+### Psychological Discipline
+
+**The Three Deadly Sins:**
+1. **Skipping signals** - "This one doesn't feel right"
+2. **Early exits** - "I'll just take profit here to be safe"
+3. **Revenge trading** - "I need to make back that loss NOW"
+
+**The Solution:** Treat your strategy like a business system. Would McDonald's skip making fries because the cashier "doesn't feel like it today"? No. Systems work because of consistency.
+
+---
+
+### Position Management
+
+**Scaling In/Out** (Advanced)
+- Enter 50% position at signal
+- Add 50% if stochastic reaches 10 (oversold) or 90 (overbought)
+- Exit 50% at 1.5x take profit, let the rest run
+
+**This is NOT for beginners.** Master the basic system first.
+
+---
+
+### Market Awareness
+
+**Oil Traders:**
+- OPEC meetings = volatility spikes (avoid or widen stops)
+- US inventory reports (Wed 10:30am EST) = avoid trading 2 hours before/after
+- Summer driving season = different patterns than winter
+
+**Crypto Traders:**
+- Monday-Tuesday = typically lower volatility (fewer signals)
+- Thursday-Sunday = higher volatility (more signals)
+- Avoid trading during exchange maintenance windows
+
+---
+
+## ⚖️ Legal Disclaimer
+
+This trading strategy is provided for **educational purposes only**.
+
+- Past performance does not guarantee future results
+- Trading involves substantial risk of loss
+- Only trade with capital you can afford to lose
+- No one associated with this strategy is a licensed financial advisor
+- You are solely responsible for your trading decisions
+
+**By using this strategy, you acknowledge that you understand and accept these risks.**
+
+---
+
+## 🙏 Acknowledgments
+
+Strategy development inspired by:
+- George Lane's original Stochastic Oscillator work
+- Modern quantitative trading research
+- Community feedback from hundreds of backtests
+
+Built with ❤️ for retail traders who want systematic, disciplined approaches to the markets.
+
+---
+
+**Good luck, stay disciplined, and trade the system, not your emotions.**
+

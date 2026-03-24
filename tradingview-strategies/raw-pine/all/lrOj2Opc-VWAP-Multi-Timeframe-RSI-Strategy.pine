@@ -1,0 +1,78 @@
+//@version=5
+strategy("VWAP + Multi-Timeframe RSI Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// --- Inputs
+rsiLength     = input.int(14, "RSI Length")
+rsiOB         = input.int(70, "RSI Overbought")
+rsiOS         = input.int(30, "RSI Oversold")
+higherTF      = input.timeframe("60", "Higher Timeframe RSI") // default H1
+
+// --- VWAP
+vwapValue = ta.vwap
+
+// --- RSI (current TF)
+rsiCurr = ta.rsi(close, rsiLength)
+
+// --- RSI (higher TF)
+rsiHTF = request.security(syminfo.tickerid, higherTF, ta.rsi(close, rsiLength))
+
+// --- Conditions
+longCondition  = close > vwapValue and rsiCurr < rsiOB and rsiHTF > 50
+shortCondition = close < vwapValue and rsiCurr > rsiOS and rsiHTF < 50
+
+// --- Strategy Execution
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// --- Exit rules (TP/SL relative to VWAP)
+strategy.exit("Exit Long",  from_entry="Long", stop=vwapValue * 0.995, profit=vwapValue * 1.02)
+strategy.exit("Exit Short", from_entry="Short", stop=vwapValue * 1.005, profit=vwapValue * 0.98)
+
+// --- Alerts
+alertcondition(longCondition, title="Buy Signal", message="📈 BUY - VWAP + MTF RSI Bullish Confirmation")
+alertcondition(shortCondition, title="Sell Signal", message="📉 SELL - VWAP + MTF RSI Bearish Confirmation")
+
+// --- Plot
+plot(vwapValue, "VWAP", color=color.yellow, linewidth=2)
+plotshape(longCondition, title="Buy", style=shape.labelup, color=color.green, text="BUY")
+plotshape(shortCondition, title="Sell", style=shape.labeldown, color=color.red, text="SELL")
+
+View in Pine Editor・41 lines
+Use on chart
+2
+7
+1 306
+This strategy combines VWAP trend direction with confirmation from RSI on a higher timeframe. The idea is to only take trades when both intraday momentum and higher-timeframe trend are aligned, increasing accuracy.
+
+LONG Entry:
+
+Price above VWAP (bullish environment).
+
+RSI on the current timeframe is below overbought (room to rise).
+
+RSI on the higher timeframe (default H1) is above 50 (bullish confirmation).
+
+SHORT Entry:
+
+Price below VWAP (bearish environment).
+
+RSI on the current timeframe is above oversold (room to fall).
+
+RSI on the higher timeframe is below 50 (bearish confirmation).
+
+Exit Rule:
+
+Stop-loss near VWAP.
+
+Take-profit at ~2x risk or when major levels are reached.
+
+Best Timeframes:
+
+Use 15m or 30m chart with H1 RSI for intraday trading.
+
+Use 1H chart with Daily RSI for swing trading.
+
+⚡ The higher-timeframe RSI filter reduces false signals and aligns trades with institutional flow.

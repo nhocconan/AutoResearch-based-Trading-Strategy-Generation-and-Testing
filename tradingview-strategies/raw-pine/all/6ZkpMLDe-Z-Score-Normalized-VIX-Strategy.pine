@@ -1,0 +1,144 @@
+//@version=6
+strategy("Z-Score Normalized VIX Strategy", overlay = false, initial_capital=20000, pyramiding=0, commission_type=strategy.commission.cash_per_contract, commission_value=0.05, slippage=1)
+
+// Z-Score function
+zscore(src, length) =>
+    mean = ta.sma(src, length)
+    std = ta.stdev(src, length)
+    std != 0 ? (src - mean) / std : 0
+
+// Inputs
+zscore_length = input.int(6, title = "Z-Score Lookback Period for VIX")
+threshold = input.float(1, title = "Z-Score Threshold for Entry", step = 0.1)
+
+// Checkbox Inputs for VIX Indices
+use_vix = input.bool(true, title = "Use VIX")
+use_vix3m = input.bool(true, title = "Use VIX3M")
+use_vix9d = input.bool(true, title = "Use VIX9D")
+use_vvix = input.bool(true, title = "Use VVIX")
+
+// Volatility indices with lookahead bias protection
+vix   = request.security("CBOE:VIX", "D", close, barmerge.gaps_off, barmerge.lookahead_off)
+vix3m = request.security("CBOE:VIX3M", "D", close, barmerge.gaps_off, barmerge.lookahead_off)
+vix9d = request.security("CBOE:VIX9D", "D", close, barmerge.gaps_off, barmerge.lookahead_off)
+vvix  = request.security("CBOE:VVIX", "D", close, barmerge.gaps_off, barmerge.lookahead_off)
+
+// Z-Score Normalization for selected indices
+z_vix   = use_vix   ? zscore(vix, zscore_length)   : na
+z_vix3m = use_vix3m ? zscore(vix3m, zscore_length) : na
+z_vix9d = use_vix9d ? zscore(vix9d, zscore_length) : na
+z_vvix  = use_vvix  ? zscore(vvix, zscore_length)  : na
+
+// Calculate combined Z-Score correctly
+float zscore_sum = 0
+int count = 0
+
+// Add each z-score to the sum if it's selected and valid
+if use_vix and not na(z_vix)
+    zscore_sum := zscore_sum + z_vix
+    count := count + 1
+if use_vix3m and not na(z_vix3m)
+    zscore_sum := zscore_sum + z_vix3m
+    count := count + 1
+if use_vix9d and not na(z_vix9d)
+    zscore_sum := zscore_sum + z_vix9d
+    count := count + 1
+if use_vvix and not na(z_vvix)
+    zscore_sum := zscore_sum + z_vvix
+    count := count + 1
+
+// Calculate the combined Z-Score if count > 0
+float combined_zscore = count > 0 ? zscore_sum / count : na
+
+// Entry Condition: Long when the Z-Score is below the threshold
+long_condition = not na(combined_zscore) and combined_zscore < -threshold  // Negativ für bearish VIX, bullish Markt
+
+// Exit Condition: Close the position when the Z-Score exceeds the threshold
+exit_condition = not na(combined_zscore) and combined_zscore > -threshold
+
+// Execute the Strategy
+if long_condition
+    strategy.entry("Long", strategy.long)
+
+if exit_condition
+    strategy.close("Long")
+
+// Plotting the combined Z-Score
+plot(combined_zscore, title = "Combined Z-Score", color = color.rgb(0, 128, 255), linewidth = 2)
+
+// Line
+hline(threshold, "Short Threshold", color = color.rgb(255, 0, 0), linestyle = hline.style_dashed)
+
+View in Pine Editor・70 lines
+Use on chart
+5
+5
+1 870
+This strategy leverages the concept of the Z-score applied to multiple VIX-based volatility indices, specifically designed to capture market reversals based on the normalization of volatility. The strategy takes advantage of VIX-related indicators to measure extreme levels of market fear or greed and adjusts its position accordingly.
+
+1. Overview of the Z-Score Methodology
+
+The Z-score is a statistical measure that describes the position of a value relative to the mean of a distribution in terms of standard deviations. In this strategy, the Z-score is calculated for various volatility indices to assess how far their values are from their historical averages, thus normalizing volatility levels. The Z-score is calculated as follows:
+
+Z = \frac{X - \mu}{\sigma}
+
+Where:
+• X is the current value of the volatility index.
+• \mu is the mean of the index over a specified period.
+• \sigma is the standard deviation of the index over the same period.
+
+This measure tells us how many standard deviations the current value of the index is away from its average, indicating whether the market is experiencing unusually high or low volatility (fear or calm).
+
+2. VIX Indices Used in the Strategy
+
+The strategy utilizes four commonly referenced volatility indices:
+
+• VIX (CBOE Volatility Index): Measures the market’s expectations of 30-day volatility based on S&P 500 options.
+
+• VIX3M (3-Month VIX): Reflects expectations of volatility over the next three months.
+
+• VIX9D (9-Day VIX): Reflects shorter-term volatility expectations.
+
+• VVIX (VIX of VIX): Measures the volatility of the VIX itself, indicating the level of uncertainty in the volatility index.
+
+These indices provide a comprehensive view of the current volatility landscape across different time horizons.
+
+3. Strategy Logic
+
+The strategy follows a long entry condition and an exit condition based on the combined Z-score of the selected volatility indices:
+
+• Long Entry Condition: The strategy enters a long position when the combined Z-score of the selected VIX indices falls below a user-defined threshold, indicating an abnormally low level of volatility (suggesting a potential market bottom and a bullish reversal). The threshold is set as a negative value (e.g., -1), where a more negative Z-score implies greater deviation below the mean.
+
+• Exit Condition: The strategy exits the long position when the combined Z-score exceeds the threshold (i.e., when the market volatility increases above the threshold, indicating a shift in market sentiment and reduced likelihood of continued upward momentum).
+
+4. User Inputs
+
+• Z-Score Lookback Period: The user can adjust the lookback period for calculating the Z-score (e.g., 6 periods).
+
+• Z-Score Threshold: A customizable threshold value to define when the market has reached an extreme volatility level, triggering entries and exits.
+
+The strategy also allows users to select which VIX indices to use, with checkboxes to enable or disable each index in the calculation of the combined Z-score.
+
+5. Trade Execution Parameters
+
+• Initial Capital: The strategy assumes an initial capital of $20,000.
+
+• Pyramiding: The strategy does not allow pyramiding (multiple positions in the same direction).
+
+• Commission and Slippage: The commission is set at $0.05 per contract, and slippage is set at 1 tick.
+
+6. Statistical Basis of the Z-Score Approach
+
+The Z-score methodology is a standard technique in statistics and finance, commonly used in risk management and for identifying outliers or unusual events. According to Dumas, Fleming, and Whaley (1998), volatility indices like the VIX serve as a useful proxy for market sentiment, particularly during periods of high uncertainty. By calculating the Z-score, we normalize volatility and quantify the degree to which the current volatility deviates from historical norms, allowing for systematic entry and exit based on these deviations.
+
+7. Implications of the Strategy
+
+This strategy aims to exploit market conditions where volatility has deviated significantly from its historical mean. When the Z-score falls below the threshold, it suggests that the market has become excessively calm, potentially indicating an overreaction to past market events. Entering long positions under such conditions could capture market reversals as fear subsides and volatility normalizes. Conversely, when the Z-score rises above the threshold, it signals increased volatility, which could be indicative of a bearish shift in the market, prompting an exit from the position.
+
+By applying this Z-score normalized approach, the strategy seeks to achieve more consistent entry and exit points by reducing reliance on subjective interpretation of market conditions.
+
+8. Scientific Sources
+
+• Dumas, B., Fleming, J., & Whaley, R. (1998). “Implied Volatility Functions: Empirical Tests”. The Journal of Finance, 53(6), 2059-2106. This paper discusses the use of volatility indices and their empirical behavior, providing context for volatility-based strategies.
+
+• Black, F., & Scholes, M. (1973). “The Pricing of Options and Corporate Liabilities”. Journal of Political Economy, 81(3), 637-654. The original Black-Scholes model, which forms the basis for many volatility-related strategies.

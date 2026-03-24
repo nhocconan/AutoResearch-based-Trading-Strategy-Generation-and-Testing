@@ -1,0 +1,57 @@
+//@version=5
+strategy("Estrategia Momentum Seguro (EMS) v4", overlay=true, margin_long=100, margin_short=100)
+
+// === Parámetros configurables ===
+tpPerc = input.float(3.0, title="Take Profit (%)", minval=0.5, step=0.1)
+slPerc = input.float(1.5, title="Stop Loss (%)", minval=0.5, step=0.1)
+emaFastLen = input.int(20, title="EMA rápida (tendencia corta)")
+emaSlowLen = input.int(50, title="EMA lenta (tendencia larga)")
+rsiLen = input.int(14, title="RSI (longitud)")
+macdFast = input.int(12, title="MACD rápida")
+macdSlow = input.int(26, title="MACD lenta")
+macdSignal = input.int(9, title="MACD señal")
+
+// === Cálculos de indicadores ===
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsi = ta.rsi(close, rsiLen)
+macd = ta.ema(close, macdFast) - ta.ema(close, macdSlow)
+signal = ta.ema(macd, macdSignal)
+
+// === Condiciones de entrada y salida confirmadas ===
+longCondition = barstate.isconfirmed and emaFast > emaSlow and rsi > 58 and rsi < 65 and macd > signal and macd > 0
+exitCondition = barstate.isconfirmed and ((rsi > 70) or (close < emaFast))
+
+// === Lógica de operaciones con persistencia de estado ===
+var bool inTrade = false
+var bool entryActive = false
+
+if (longCondition and not inTrade and not entryActive)
+    strategy.entry("Compra EMS", strategy.long)
+    entryActive := true
+    inTrade := true
+
+if (strategy.position_size > 0)
+    tpPrice = strategy.position_avg_price * (1 + tpPerc / 100)
+    slPrice = strategy.position_avg_price * (1 - slPerc / 100)
+    strategy.exit("Cierre EMS", from_entry="Compra EMS", limit=tpPrice, stop=slPrice)
+
+if (exitCondition and inTrade)
+    strategy.close("Compra EMS")
+    inTrade := false
+    entryActive := false
+
+// === Visualización simplificada ===
+plotshape(longCondition and not entryActive, title="Entrada EMS", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.large, text="BUY")
+plotshape(exitCondition and inTrade, title="Salida EMS", location=location.abovebar, color=color.new(color.red, 0), style=shape.xcross, size=size.large, text="SELL")
+
+// === Alertas ===
+alertcondition(longCondition and not entryActive, title="Alerta Entrada EMS", message="Señal EMS: tendencia confirmada, posible entrada LONG.")
+alertcondition(exitCondition and inTrade, title="Alerta Salida EMS", message="Señal EMS: posible salida o agotamiento del impulso.")
+
+View in Pine Editor・50 lines
+Use on chart
+1
+2
+661
+Entry and exit signals, this indicator helps or suggests where to enter, exit, or place a stop loss.

@@ -1,0 +1,47 @@
+//@version=4
+strategy("My Script", initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent , commission_value=0.1 )
+
+
+var candela = 0.0
+
+
+candela := (high+low+open+close)/4
+
+long = candela > candela[1] and candela[1] > candela[2] and candela[2] > candela[3] and candela[3] > candela[4] and candela[4] > candela[5]
+short = candela< candela[1] and candela[1] < candela[2] and candela[2] < candela[3] and candela[3] < candela[4] //and candela[4] < candela[5] 
+
+plot(candela, color=long? color.green : short? color.red : color.white ,linewidth=4)
+
+
+
+strategy.entry("long",1,when=long)
+//strategy.entry('short',0,when=short)
+    
+strategy.close("long", when = short)
+
+risk= input(25)
+strategy.risk.max_intraday_loss(risk, strategy.percent_of_equity)
+//strategy.close("short", when = not long or short)
+
+View in Pine Editor・27 lines
+Use on chart
+1
+3
+8
+4 376
+Today I bring another crypto strategy that works greatly with pairs like BTCEUR, ETHEUR, for 3h+ time frames.
+
+Its a risky strategy because we have a hard stop loss of 25% of our capital which can be modified.
+
+The idea behind its simple, we have a candle which is made from open+high+low+close / 4 , and we make the decision based on this one.
+
+We only go long with this strategy .
+
+For entry: if we have 5 ascending candles we enter, and we exit when we have 4 descending candles.
+
+
+For this example, I used 100% of the initial capital(1000 EUR/USD), with a commission of 0.1% per each deal.
+At the same time, the max capital that can be lost in a trade is going to be the equity risk, in this example 25% .
+
+
+Overall we can see that's more or less around the same level as buy and hold strategy

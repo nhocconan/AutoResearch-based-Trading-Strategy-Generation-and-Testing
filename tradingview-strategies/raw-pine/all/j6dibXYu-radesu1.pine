@@ -1,0 +1,94 @@
+//@version=5
+strategy("RSI 75/27 Strategy + Supertrend Filter + TP/SL + Time + Weekend + Side Toggles", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+rsiLength     = input.int(14, title="RSI Length")
+rsiOverbought = input.int(75, title="Overbought Level")
+rsiOversold   = input.int(27, title="Oversold Level")
+
+enableLongs   = input.bool(true,  title="Enable Longs")
+enableShorts  = input.bool(true,  title="Enable Shorts")
+tradeWeekends = input.bool(true,  title="Trade on Weekends?")
+trade24h      = input.bool(false, title="Trade 24 Hours?")
+
+tpInput = input.float(0.3, "Take Profit (%)", step=0.1, minval=0.0)
+slInput = input.float(0.3, "Stop Loss (%)",   step=0.1, minval=0.0)
+tpPerc  = tpInput / 100.0
+slPerc  = slInput / 100.0
+
+// === SUPERTREND (10 / 3 by default) ===
+useSupertrendFilter = input.bool(true, title="Use Supertrend Filter?")
+stAtrLen  = input.int(10, title="Supertrend ATR Length", minval=1)
+stFactor  = input.float(3.0, title="Supertrend Factor", step=0.1, minval=0.1)
+exitOnSTFlip = input.bool(false, title="Close position when Supertrend flips?")
+
+// ta.supertrend returns [supertrendLine, direction]
+// direction: 1 = uptrend, -1 = downtrend
+[stLine, stDir] = ta.supertrend(stFactor, stAtrLen)
+
+// Use "price vs line" logic (often matches the visual indicator better)
+stLongAllowed  = (not useSupertrendFilter) or (close > stLine)
+stShortAllowed = (not useSupertrendFilter) or (close < stLine)
+
+// === RSI ===
+rsi = ta.rsi(close, rsiLength)
+
+// === TIME FILTER (CET) ===
+currentHour = hour(time, "CET")
+timeAllowed = trade24h ? true : not (currentHour >= 2 and currentHour < 9)
+
+// === WEEKEND FILTER ===
+isWeekend      = (dayofweek == dayofweek.saturday) or (dayofweek == dayofweek.sunday)
+weekendAllowed = tradeWeekends or (not isWeekend)
+
+// === FINAL TRADE PERMISSION ===
+tradeAllowed = timeAllowed and weekendAllowed
+
+// === CONDITIONS ===
+longCondition  = ta.crossover(rsi, rsiOversold)
+shortCondition = ta.crossunder(rsi, rsiOverbought)
+
+// === ENTRIES ===
+if enableLongs and tradeAllowed and stLongAllowed and longCondition
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+
+if enableShorts and tradeAllowed and stShortAllowed and shortCondition
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+
+// === OPTIONAL: FORCE EXIT ON SUPERTREND FLIP ===
+if exitOnSTFlip and strategy.position_size > 0 and stDir == -1
+    strategy.close("Long")
+
+if exitOnSTFlip and strategy.position_size < 0 and stDir == 1
+    strategy.close("Short")
+
+// === TP / SL ===
+if strategy.position_size > 0
+    longTP = strategy.position_avg_price * (1 + tpPerc)
+    longSL = strategy.position_avg_price * (1 - slPerc)
+    strategy.exit("Long Exit", from_entry="Long", limit=longTP, stop=longSL)
+
+if strategy.position_size < 0
+    shortTP = strategy.position_avg_price * (1 - tpPerc)
+    shortSL = strategy.position_avg_price * (1 + slPerc)
+    strategy.exit("Short Exit", from_entry="Short", limit=shortTP, stop=shortSL)
+
+// === VISUALS ===
+// RSI (will plot on main chart because overlay=true; that's fine, but optional)
+plot(rsi, title="RSI", color=color.blue)
+hline(rsiOverbought, "Overbought", color=color.red)
+hline(rsiOversold, "Oversold", color=color.green)
+
+// Supertrend line on price chart
+plot(stLine, title="Supertrend", color=(stDir == 1 ? color.green : color.red), linewidth=2)
+
+// Background tint to confirm filter is switching
+bgcolor(useSupertrendFilter ? (stDir == 1 ? color.new(color.green, 92) : color.new(color.red, 92)) : na)
+
+View in Pine Editor・88 lines
+Use on chart
+7
+391
+just testing 1m xaut on bybit perpetuals to see how RSI performs on lower timeframes

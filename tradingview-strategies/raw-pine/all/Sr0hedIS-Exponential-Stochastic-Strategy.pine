@@ -1,0 +1,11 @@
+//@version=5
+stg=##input(defval=true,type='INPUT_BOOL',##id='in_1')
+distb=((stg==true)?display.all:display.none)
+##root(root_metainfo,rm_0,distb,cb__input__plot_display__integer,plotcandle,display)
+##root(root_metainfo,rm_1,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_2,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_3,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_4,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_5,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_6,'small',const__string,plotshape,size)
+##root(root_metainfo,rm_7,'small',const__string,plotshape,size)

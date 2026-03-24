@@ -1,0 +1,67 @@
+//@version=5
+strategy("Williams %R Cross Strategy with MA Filter", overlay=true)
+
+// User Inputs
+wrLength = input(14, title="Williams %R Length")
+crossPips = input(10, title="Cross Threshold (Pips)")
+takeProfitPips = input(30, title="Take Profit (Pips)")
+stopLossPips = input(20, title="Stop Loss (Pips)")
+
+// Calculate Williams %R
+wrHigh = ta.highest(high, wrLength)
+wrLow = ta.lowest(low, wrLength)
+wr = (wrHigh - close) / (wrHigh - wrLow) * -100
+
+// Calculate 200-period Simple Moving Average
+ma200 = ta.sma(close, 200)
+
+// Entry Conditions
+enterLong = ta.crossover(wr, -50 - crossPips) and close > ma200
+enterShort = ta.crossunder(wr, -50 + crossPips) and close < ma200
+
+// Exit Conditions
+exitLong = close >= (strategy.position_avg_price + (takeProfitPips / syminfo.mintick)) or close <= (strategy.position_avg_price - (stopLossPips / syminfo.mintick))
+exitShort = close <= (strategy.position_avg_price - (takeProfitPips / syminfo.mintick)) or close >= (strategy.position_avg_price + (stopLossPips / syminfo.mintick))
+
+// Order Management
+if enterLong
+    strategy.entry("Long", strategy.long)
+    
+if enterShort
+    strategy.entry("Short", strategy.short)
+
+if exitLong
+    strategy.close("Long")
+
+if exitShort
+    strategy.close("Short")
+
+View in Pine Editor・37 lines
+Use on chart
+1
+2
+8
+1
+4 719
+
+1. The script is a trading strategy based on the Williams %R indicator and a 200-period moving average (MA) filter.
+
+2. The user can input the length of the Williams %R indicator (`wrLength`), the threshold for %R crossing (`crossPips`), the take profit level in pips (`takeProfitPips`), and the stop loss level in pips (`stopLossPips`).
+
+3. The script calculates the Williams %R using the `ta.highest` and `ta.lowest` functions to find the highest high and lowest low over the specified length (`wrLength`).
+
+4. It also calculates a 200-period simple moving average (`ma200`) using the `ta.sma` function.
+
+5. The entry conditions are defined as follows:
+- For a long entry, it checks if the Williams %R crosses above the -50 line by a threshold of `crossPips` and if the close price is above the 200-period MA.
+- For a short entry, it checks if the Williams %R crosses below the -50 line by a threshold of `crossPips` and if the close price is below the 200-period MA.
+
+6. The exit conditions are defined as follows:
+- For a long position, it checks if the close price reaches the take profit level (defined as the average entry price plus `takeProfitPips` in pips) or the stop loss level (defined as the average entry price minus `stopLossPips` in pips).
+- For a short position, it checks if the close price reaches the take profit level (defined as the average entry price minus `takeProfitPips` in pips) or the stop loss level (defined as the average entry price plus `stopLossPips` in pips).
+
+7. The script uses the `strategy.entry` function to place long and short orders when the respective entry conditions are met.
+
+8. It uses the `strategy.close` function to close the long and short positions when the respective exit conditions are met.
+
+The script allows you to customize the parameters such as the length of Williams %R, the crossing threshold, take profit and stop loss levels, and the moving average period to suit your trading preferences.

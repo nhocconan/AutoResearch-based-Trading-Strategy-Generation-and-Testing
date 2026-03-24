@@ -1,0 +1,79 @@
+//@version=2
+
+strategy(title = "OCC-TSI", shorttitle = "OCC-TSI", overlay = true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+// === INPUTS ===
+useRes      = input(defval = true, title = "Use Alternate Resolution? ( recommended )")
+stratRes    = input(defval = "15", title = "Set Resolution ( should not be lower than chart )", type = resolution)
+useMA       = input(defval = true, title = "Use MA? ( otherwise use simple Open/Close data )")
+basisType   = input(defval = "EMA", title = "MA Type: SMA, EMA, DEMA, TEMA, WMA, VWMA, SMMA, HullMA, LSMA, ALMA ( case sensitive )", type = string)
+basisLen    = input(defval = 14, title = "MA Period", minval = 1)
+offsetSigma = input(defval = 6, title = "Offset for LSMA / Sigma for ALMA", minval = 0)
+offsetALMA  = input(defval = 0.85, title = "Offset for ALMA", minval = 0, step = 0.01)
+useStop     = input(defval = true, title = "Use Trailing Stop?")
+slPoints    = input(defval = 200, title = "Stop Loss Trail Points", minval = 1)
+slOffset    = input(defval = 400, title = "Stop Loss Trail Offset", minval = 1)
+// === /INPUTS ===
+
+// === BASE FUNCTIONS ===
+// Returns MA input selection variant, default to SMA if blank or typo.
+variant(type, src, len, offSig, offALMA) =>
+    v1 = sma(src, len)                                                  // Simple
+    v2 = ema(src, len)                                                  // Exponential
+    v3 = 2 * v2 - ema(v2, len)                                          // Double Exponential
+    v4 = 3 * (v2 - ema(v2, len)) + ema(ema(v2, len), len)               // Triple Exponential
+    v5 = wma(src, len)                                                  // Weighted
+    v6 = vwma(src, len)                                                 // Volume Weighted
+    v7 = na(v5[1]) ? sma(src, len) : (v5[1] * (len - 1) + src) / len    // Smoothed
+    v8 = wma(2 * wma(src, len / 2) - wma(src, len), round(sqrt(len)))   // Hull
+    v9 = linreg(src, len, offSig)                                       // Least Squares
+    v10 = alma(src, len, offALMA, offSig)                               // Arnaud Legoux
+    type=="EMA"?v2 : type=="DEMA"?v3 : type=="TEMA"?v4 : type=="WMA"?v5 : type=="VWMA"?v6 : type=="SMMA"?v7 : type=="HullMA"?v8 : type=="LSMA"?v9 : type=="ALMA"?v10 : v1
+// security wrapper for repeat calls
+reso(exp, use, res) => use ? security(tickerid, res, exp) : exp
+// === /BASE FUNCTIONS ===
+//@version=3
+long = input(title="Long Length", type=integer, defval=25)
+short = input(title="Short Length", type=integer, defval=13)
+signal = input(title="Signal Length", type=integer, defval=13)
+price = close
+double_smooth(src, long, short) =>
+    fist_smooth = ema(src, long)
+    ema(fist_smooth, short)
+pc = change(price)
+double_smoothed_pc = double_smooth(pc, long, short)
+double_smoothed_abs_pc = double_smooth(abs(pc), long, short)
+tsi_value = 100 * (double_smoothed_pc / double_smoothed_abs_pc)
+// === SERIES SETUP ===
+// open/close
+closeSeries = useMA ? reso(variant(basisType, close, basisLen, offsetSigma, offsetALMA), useRes, stratRes) : reso(close, useRes, stratRes)
+openSeries  = useMA ? reso(variant(basisType, open, basisLen, offsetSigma, offsetALMA), useRes, stratRes) : reso(open, useRes, stratRes)
+trendState  = (closeSeries > openSeries) and (ema(tsi_value, signal) < tsi_value) ? true : (closeSeries < openSeries) and (ema(tsi_value, signal) > tsi_value) ? false :trendState[1]
+// === /SERIES ==#
+
+// === PLOTTING ===
+//barcolor(color = closeSeries > openSeries ? #006600 : #990000, title = "Bar Colours")
+// channel outline
+//closePlot   = plot(closeSeries, title = "Close Line", color = #009900, linewidth = 2, style = line, transp = 90)
+//openPlot    = plot(openSeries, title = "Open Line", color = #CC0000, linewidth = 2, style = line, transp = 90)
+// channel fill
+closePlotU  = plot(trendState ? closeSeries : na, transp = 100, editable = false)
+openPlotU   = plot(trendState ? openSeries : na, transp = 100, editable = false)
+closePlotD  = plot(trendState ? na : closeSeries, transp = 100, editable = false)
+openPlotD   = plot(trendState ? na : openSeries, transp = 100, editable = false)
+fill(openPlotU, closePlotU, title = "Up Trend Fill", color = #009900, transp = 40)
+fill(openPlotD, closePlotD, title = "Down Trend Fill", color = #CC0000, transp = 40)
+// === /PLOTTING ===
+
+View in Pine Editor・66 lines
+Use on chart
+1
+3
+4
+3
+9 929
+Jun 12, 2019
+123456
+Jun 12, 2019
+Release Notes
+Added TSI to OCC as validator.

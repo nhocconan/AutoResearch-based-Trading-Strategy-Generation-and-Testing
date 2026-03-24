@@ -1,0 +1,22 @@
+//@version=4
+strategy("Simple RSI Buy/Sell at a level", shorttitle="Simple RSI Strategy", overlay=true,calc_on_every_tick=false,pyramiding=0, default_qty_type=strategy.cash,default_qty_value=1000, currency=currency.USD, initial_capital=1000,commission_type=strategy.commission.percent, commission_value=0.075)
+overbought = input(70, title="overbought value")
+oversold = input(30, title="oversold value")
+myrsi = rsi(close, 14) > overbought
+myrsi2 = rsi(close, 14) < oversold
+
+barcolor(myrsi ? color.black : na)
+barcolor(myrsi2 ? color.blue : na)
+
+strategy.entry("Buy Signal",strategy.long, when = myrsi)
+strategy.entry("Sell Signal",strategy.short, when = myrsi2)
+
+View in Pine Editor・15 lines
+Use on chart
+3
+7
+3
+9
+17 434
+Simple Strategy based on RSI, using overbought or oversold levels, defined by us, sell or buy an asset.
+Backtest: ETHUSD (Bitmex) - 3h

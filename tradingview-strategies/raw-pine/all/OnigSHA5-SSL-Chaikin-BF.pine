@@ -1,0 +1,170 @@
+//@version=4
+strategy("SSL Chaikin BF 🚀", overlay=true, precision=2, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075)
+
+/////////////// Time Frame ///////////////
+_0 = input(false,  "════════ Test Period ═══════")
+testStartYear = input(2017, "Backtest Start Year") 
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay, 0, 0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(31, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay, 0, 0)
+
+testPeriod() => time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+/////////////// Chaikin MF /////////////// 
+_1 = input(false,  "═══════ Chaikin MF ═══════")
+length = input(20, minval=1, title = "Chaikin SMA Length")
+upperThreshold = input(0.04, step=0.01, title="Upper Threshold")
+lowerThreshold = input(0.02, step=0.01, title="Lower Threshold")
+ad = close==high and close==low or high==low ? 0 : ((2*close-low-high)/(high-low))*volume
+mf = sum(ad, length) / sum(volume, length)
+
+/////////////// SSL Channels /////////////// 
+_2 = input(false,  "═════════ SSL ══════════")
+len1=input(title="SMA Length 1", defval=12)
+len2=input(title="SMA Length 2", defval=13)
+
+smaHigh = sma(high, len1)
+smaLow = sma(low, len2)
+
+Hlv = 0
+Hlv := close > smaHigh ? 1 : close < smaLow ? -1 : Hlv[1]
+sslDown = Hlv < 0 ? smaHigh : smaLow
+sslUp = Hlv < 0 ? smaLow : smaHigh
+
+///////////// Rate Of Change ///////////// 
+_3 = input(false,  "══════ Rate of Change ══════")
+source = close
+roclength = input(13, "ROC Length",  minval=1)
+pcntChange = input(4, "ROC % Change", minval=1)
+roc = 100 * (source - source[roclength]) / source[roclength]
+emaroc = ema(roc, roclength / 2)
+isMoving() => emaroc > (pcntChange / 2) or emaroc < (0 - (pcntChange / 2))
+
+///////////////  Strategy  /////////////// 
+long = sslUp > sslDown and isMoving() or crossover(mf, upperThreshold)
+short = sslUp < sslDown and isMoving() or crossunder(mf, lowerThreshold)
+
+last_long = 0.0
+last_short = 0.0
+last_long := long ? time : nz(last_long[1])
+last_short := short ? time : nz(last_short[1])
+
+long_signal = crossover(last_long, last_short)
+short_signal = crossover(last_short, last_long)
+
+last_open_long_signal = 0.0
+last_open_short_signal = 0.0
+last_open_long_signal := long_signal ? open : nz(last_open_long_signal[1])
+last_open_short_signal := short_signal ? open : nz(last_open_short_signal[1])
+
+last_long_signal = 0.0
+last_short_signal = 0.0
+last_long_signal := long_signal ? time : nz(last_long_signal[1])
+last_short_signal := short_signal ? time : nz(last_short_signal[1])
+
+in_long_signal = last_long_signal > last_short_signal
+in_short_signal = last_short_signal > last_long_signal
+
+last_high = 0.0
+last_low = 0.0
+last_high := not in_long_signal ? na : in_long_signal and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_short_signal ? na : in_short_signal and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+
+since_longEntry = barssince(last_open_long_signal != last_open_long_signal[1]) 
+since_shortEntry = barssince(last_open_short_signal != last_open_short_signal[1]) 
+
+//////////////// Stop loss /////////////// 
+_4 = input(false,  "════════ Stop Loss ═══════")
+SL_type = input("Fixed", options=["Fixed", "ATR Derived"], title="Stop Loss Type")
+sl_inp = input(2.0, title='Fixed Stop Loss %') / 100
+atrLkb = input(1, minval=1, title='ATR Stop Period')
+atrMult = input(1.5, step=0.25, title='ATR Stop Multiplier') 
+atr = atr(atrLkb)
+
+longStop = 0.0
+longStop :=  short_signal ? na : long_signal ? close - (atr * atrMult) : longStop[1]
+shortStop = 0.0
+shortStop := long_signal ? na : short_signal ? close + (atr * atrMult) : shortStop[1]
+
+slLong = in_long_signal ? strategy.position_avg_price * (1 - sl_inp) : na
+slShort = strategy.position_avg_price * (1 + sl_inp)
+long_sl = in_long_signal ? slLong : na
+short_sl = in_short_signal ? slShort : na
+
+/////////////// Longs or Shorts ///////////////
+_5 = input(false,  "══════ Longs or Shorts ═════")
+useLongs = input(true, title="Use Longs")
+useShorts = input(true, title="Use Shorts")
+
+/////////////// Execution ///////////////
+if testPeriod()
+    if useLongs
+        strategy.entry("L", strategy.long, when=long)
+        strategy.exit("L SL", "L", stop = SL_type == "Fixed" ? long_sl : longStop, when=since_longEntry > 0)
+    if useShorts
+        strategy.exit("S SL", "S", stop = SL_type == "Fixed" ? short_sl : shortStop, when=since_shortEntry > 0)
+        strategy.entry("S", strategy.short, when=short)
+    if not useShorts
+        strategy.close("L", when=short)
+    if not useLongs
+        strategy.close("S", when=long)
+
+/////////////// Plotting /////////////// 
+p1 = plot(sslDown, linewidth = 1, color=color.red)
+p2 = plot(sslUp, linewidth = 1, color=color.lime)
+fill(p1, p2,  color = sslDown < sslUp ? color.lime : color.red, transp=80)
+bgcolor(isMoving() ? long ? color.green : short ? color.red : na : color.white, transp=80)
+bgcolor(long_signal ? color.lime : short_signal ? color.red : na, transp=30)
+bgcolor(crossover(mf, upperThreshold) ? color.blue : crossunder(mf, lowerThreshold) ? color.orange : na, transp=30)
+
+View in Pine Editor・123 lines
+Use on chart
+2
+5
+1
+14 210
+Oct 11, 2019
+Combined my earlier SSL Channel script with the Chaikin Money Flow indicator.
+Link to the SSL Channel script here:
+
+
+INSTRUCTIONS
+Look at the background, the signals are represented by the colors.
+
+Bright green = long signal from SSL Channel
+
+Bright blue = long signal from Chaikin Money Flow
+
+Bright red = short signal from SSL Channel
+
+Bright orange = short signal from Chaikin Money Flow
+
+Green = we should be in a long from one of the signals - ok to enter back in if we get stopped out and still green
+
+Red = we should be in a short from one of the signals - ok to enter back in if we get stopped out and still red
+
+White = no trade
+
+
+
+SIGNAL GENERATION
+The SSL calculation prints a channel on the chart consisting of 2 lines.
+This strategy gives a Long signal when price closes above the top of these 2 lines and a Short signal when it closes below the bottom.
+A long signal occurs when EITHER we get an SSL long cross OR the Chaikin MF crosses above the upper threshold.
+A short signal occurs when EITHER we get an SSL short cross OR the Chaikin MF crosses below the lower threshold (see settings to adjust upper and lower threshold).
+
+STOP LOSS AND RE-ENTRY
+We use a fixed stop loss of 2%
+If we get stopped out but we still have the conditions for our trade (i.e. we get stopped out of a long but the next candle still shows a long condition after closing) then we re-enter.
+
+Note: The SSL signals are generated on a cross of the price and the channels but there is still an active long signal as long as price stays above the upper band, same for below the lower band for short. Similarly, the Chaikin signal occurs as long as the Chaikin line is above the upper threshold (or below the lower threshold if short).
+
+Tested and optimised for XBT/USD on Bitmex.
+Oct 16, 2019
+Release Notes
+Added switch for longs or shorts and a function to choose ATR derived or fixed stop losses

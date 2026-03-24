@@ -1,0 +1,196 @@
+//@version=6
+strategy("Ross GPT - Momentum Scalp 1m", overlay=true, default_qty_type=strategy.fixed, default_qty_value=500, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.1, slippage=1)
+
+// --- INPUTS: Date Range ---
+startDate = input.time(timestamp("1 Feb 2026 00:00 +0000"), "Start Date")
+endDate = input.time(timestamp("31 Dec 2069 23:59 +0000"), "End Date")
+
+// Check if current time is within the date range
+inDateRange = time >= startDate and time <= endDate
+
+// --- INDICATOR CALCULATIONS ---
+
+// 1. VWAP
+vwapValue = ta.vwap(close)
+
+// 2. MACD (Standard 12, 26, 9)
+[macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+
+// 3. EMAs
+ema9   = ta.ema(close, 9)
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+// 4. Volume Color
+volColor = close > open ? color.new(#00ff08, 50) : color.new(#ff0000, 50)
+
+
+// --- PLOTTING ---
+
+// Plot EMAs
+plot(ema9, color=color.rgb(42, 127, 255), title="EMA 9", linewidth=2)
+plot(ema20, color=color.rgb(0, 255, 85), title="EMA 20", linewidth=2)
+plot(ema50, color=color.rgb(174, 0, 255), title="EMA 50", linewidth=2)
+plot(ema200, color=color.rgb(255, 0, 0), title="EMA 200", linewidth=2)
+
+// Plot VWAP
+plot(vwapValue, color=color.rgb(255, 174, 0), title="VWAP", linewidth=2)
+
+
+// Plot MACD info (Hidden from visual chart to preserve scale, visible in Data Window)
+plot(macdLine, title="MACD Line", color=color.blue, display=display.data_window)
+plot(signalLine, title="Signal Line", color=color.orange, display=display.data_window)
+
+
+// --- STRATEGY LOGIC ---
+
+// 1. Time Condition: 6:30 AM - 9:00 AM
+// We use the "time" function to check the session. 
+// "0630-0900" allows trading during these hours.
+isValidTime = not na(time(timeframe.period, "0659-0900"))
+
+// 2. Buy Volume Analysis (3 out of last 5 candles must be green)
+// We check if Close > Open. We sum true values over the last 5 bars.
+greenCandle = close > open ? 1 : 0
+greenCount = math.sum(greenCandle, 5)
+hasBuyVolume = greenCount >= 3
+
+// 3. EMA Alignment (9 > 20 > 50 > 200)
+isEmaAligned = (ema9 > ema20) and (ema20 > ema50)
+
+// --- EXECUTION ---
+
+// Condition Aggregation
+// Buy Condition
+longCondition = inDateRange and isValidTime and (close > vwapValue) and (macdLine > signalLine) and hasBuyVolume and isEmaAligned
+
+// Sell Condition
+sellCondition = macdLine < signalLine
+
+// Trade Execution
+// We check strategy.position_size to ensure we only Open Long if we are Flat, and Close if we are Long.
+
+if (longCondition and strategy.position_size == 0)
+    strategy.entry("Long", strategy.long, comment="Buy")
+
+if (sellCondition and strategy.position_size > 0)
+    strategy.close("Long", comment="Sell")
+
+View in Pine Editor・78 lines
+Use on chart
+1
+3
+687
+Feb 2
+This strategy is a long-only momentum scalping system designed for the 1-minute timeframe, combining VWAP, EMA trend alignment, MACD momentum, volume confirmation, and session filtering to identify high-probability intraday entries for pre-market session and U.S small cap stocks with high % change compared to previous day. Apply only for stock price between $2-$20.
+
+⸻
+
+1️⃣ Date Range Filter
+
+The strategy trades only within a user-defined date range.
+• Default range: Feb 1, 2026 – Dec 31, 2069
+• Trades are ignored outside this period
+• Useful for controlled backtesting and forward testing
+
+⸻
+
+2️⃣ Indicators Used
+
+VWAP
+• Used as a trend and mean-reversion filter
+• Only long trades are allowed when price is above VWAP
+
+MACD (12, 26, 9)
+• Momentum confirmation
+• Entry requires MACD line > Signal line
+• Exit is triggered if MACD crosses below Signal
+
+Exponential Moving Averages
+• EMA 9
+• EMA 20
+• EMA 50
+• EMA 200 (visual reference)
+
+Trend Bias Requirement
+• Bullish alignment:
+• EMA 9 > EMA 20 > EMA 50
+
+Volume Strength (Price Action Proxy)
+• Counts bullish candles over the last 5 bars
+• Entry requires at least 3 green candles
+• Used as a confirmation of buying pressure
+
+⸻
+
+3️⃣ Session Filter
+
+Trades are allowed only during a specific intraday session:
+• 06:59 – 09:00 (exchange time)
+• Designed to focus on high-liquidity morning momentum
+
+⸻
+
+4️⃣ Entry Conditions (Long Only)
+
+A buy signal is generated when all of the following are true:
+• Price is above VWAP
+• MACD line is above Signal line
+• EMA alignment confirms bullish trend
+• Bullish candle count condition is met
+• Current bar is within the allowed session
+• Current bar is within the selected date range
+• No existing open position
+
+Only one position at a time is allowed.
+
+⸻
+
+5️⃣ Trade Execution
+• Market entry when all conditions align
+• Fixed position sizing (default: 500 units)
+• Commission and slippage are included for realism
+
+⸻
+
+6️⃣ Exit Logic
+
+Primary Exit (Bracket Order)
+• Take Profit: +0.25
+• Stop Loss: -0.10
+• Managed using strategy.exit for intra-bar accuracy
+
+Indicator-Based Exit
+• If MACD crosses below the Signal line, the position is closed immediately at market
+
+This dual exit system allows both quick scalps and early momentum failure exits.
+
+⸻
+
+7️⃣ Visual Aids
+
+The strategy plots all key indicators used in decision-making:
+• EMA 9, 20, 50, 200
+• VWAP
+
+This allows easy visual verification of entries and exits directly on the chart.
+
+
+⸻
+
+⚠️ Notes
+• Designed for scalping and short-duration trades
+• Best suited for high-liquidity instruments
+• Results may vary depending on symbol, spread, and market conditions
+• This script is for educational and research purposes only
+Feb 5
+Release Notes
+use it for momentum scalp - small cap stocks $2-$20 for pre-market sessions.
+
+good in 1m chart - Agressive trader
+better in 2m chart - moderate trader
+best in 5m chart - safe trader
+
+- for educational purpose
+

@@ -1,0 +1,90 @@
+//@version=5
+strategy(title="PVT Crossover Strategy", shorttitle="PVT Strategy", overlay=false, calc_on_every_tick=true)
+
+// PVTの計算
+var cumVol = 0.
+cumVol += nz(volume)
+if barstate.islast and cumVol == 0
+    runtime.error("No volume is provided by the data vendor.")
+src = close
+pvt = ta.cum(ta.change(src) / src[1] * volume)
+
+// EMAの計算（PVTをソースに使用）
+emaLength = input.int(20, minval=1, title="EMA Length")
+emaPVT = ta.ema(pvt, emaLength)
+// プロットをオフにする
+plot(emaPVT, title="EMA of PVT", color=#f37f20, display=display.none)
+
+// クロスオーバー戦略
+longCondition = ta.crossover(pvt, emaPVT)
+shortCondition = ta.crossunder(pvt, emaPVT)
+
+// シグナル表示もオフにする
+plotshape(series=longCondition, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY", display=display.none)
+plotshape(series=shortCondition, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL", display=display.none)
+
+// 戦略エントリー
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+if (shortCondition)
+    strategy.entry("Sell", strategy.short)
+
+View in Pine Editor・33 lines
+Use on chart
+1
+0
+6
+3 599
+**Release Notes**
+**Strategy Name**: PVT Crossover Strategy
+**Purpose**: This strategy aims to capture entry and exit points in the market using the Price-Volume Trend (PVT) and its Exponential Moving Average (EMA). It specifically uses the crossover of PVT with its EMA as signals to identify changes in market trends.
+
+**Uniqueness and Usefulness**
+**Uniqueness**: This strategy is unique in its use of the PVT indicator, which combines price changes with trading volume to track trends. The filtering with EMA reduces noise and provides more accurate signals compared to other indicators.
+
+**Usefulness**: This strategy is effective for traders looking to detect trend changes early. The signals based on PVT and its EMA crossover work particularly well in markets where volume fluctuations are significant.
+
+**Entry Conditions**
+**Long Entry**:
+
+- **Condition**: A crossover occurs where PVT crosses above its EMA.
+- **Signal**: A buy signal is generated, indicating a potential uptrend.
+
+**Short Entry**:
+
+- **Condition**: A crossunder occurs where PVT crosses below its EMA.
+- **Signal**: A sell signal is generated, indicating a potential downtrend.
+
+**Exit Conditions**
+**Exit Strategy**:
+
+- The strategy does not explicitly program exit conditions beyond the entry signals, but traders are encouraged to close positions manually based on signals or apply their own risk management strategy.
+
+**Risk Management**
+This strategy does not include default risk management rules, so traders should implement their own. Consider using trailing stops or fixed stop losses to manage risk.
+
+**Account Size**: ¥100,000
+**Commissions and Slippage**: 94 pips per trade for commissions and 1 pip for slippage
+**Risk per Trade**: 10% of account equity
+
+**Configurable Options**
+**Configurable Options**:
+
+- **EMA Length**: The length of the EMA used to calculate the EMA of PVT (default is 20).
+- **Signal Display Control**: The option to turn the display of signals on or off.
+
+**Adequate Sample Size**
+To ensure the robustness and reliability of this strategy, it is recommended to backtest it with a sufficiently long period of historical data, especially across different market conditions.
+
+**Credits**
+**Acknowledgments**:
+This strategy is based on the concept of the PVT indicator and its application in strategy design, drawing on contributions from technical analysis and the trading community.
+
+**Clean Chart Description**
+**Chart Appearance**:
+This strategy is designed to maintain a clean and simple chart by turning off the plot of PVT, its EMA, and entry signals. This reduces clutter and allows for more effective trend analysis.
+
+**Addressing the House Rule Violations**
+**Omissions and Unrealistic Claims**
+**Clarification**:
+This strategy does not make unrealistic or unsupported claims about its performance, and all signals are for educational purposes only, not guaranteeing future results. It is important to understand that past performance does not guarantee future outcomes.

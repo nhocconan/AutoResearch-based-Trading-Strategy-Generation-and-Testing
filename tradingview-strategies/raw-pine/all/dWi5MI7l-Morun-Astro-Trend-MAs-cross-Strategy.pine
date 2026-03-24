@@ -1,0 +1,5 @@
+//@version=4
+vp_bar_color=##input(defval=#787B8666,type='INPUT_COLOR',##id='in_6')
+vp_poc_color=##input(defval=#FF9800e6,type='INPUT_COLOR',##id='in_7')
+##root(root_metainfo,rm_ic_0,vp_bar_color,input__color)
+##root(root_metainfo,rm_ic_1,vp_poc_color,input__color)

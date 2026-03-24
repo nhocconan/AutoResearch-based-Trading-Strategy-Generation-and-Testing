@@ -1,0 +1,125 @@
+//@version=3
+// Simple yet effective MA cross strategy.
+// You'll have to tune the parameters to get an optimal win ratio.
+// If JPY or XAU or any other currency with pips defined as the 
+// second decimal digit are involved, do not forget to set the respective flag on.
+//
+// Created by vitelot/yanez/Vts, who's the same fellow with different user names
+// December 2018 -- Merry Xmas
+//
+// March 2019: no need to treat JPY differently
+//             nr of traded lots adjusted according to SL and risk
+//             cleaner trade management, avoid superposed trades
+//             added ema200 filter: if active long possible only when ema200 is increasing
+//                                  short only if it decreases
+//             cleaner code
+//
+strategy("MA cross strategy Vts", overlay=true, initial_capital=1000, currency="EUR", pyramiding=0)
+
+yr  = input(2019, title="Starting year to analyse")
+src = input(close, title="Source")
+maType = input(type=string, defval="McG", title="MA Type", options=["SMA","EMA","HMA","McG","WMA","Tenkan"])
+//
+//isJPY = input(false, title="Is JPY or XAU involved?") // JPY and Gold have the pips defined as the 2 decimal digit
+
+maPar1 = input(5, minval=1, title="MA fast period")
+maPar2 = input(8, minval=2, title="MA slow period")
+
+atrPar = input(140,minval=1, title="ATR period")
+atrMulSL = input(1.5, title="SL ATR multiplicator")
+atrMulTP = input(1.0, title="TP ATR multiplicator")
+
+percentRisk = input(1.0, title="Risk %")
+
+ema200Filter = input(false, title="EMA200 Filter")
+
+hma(sig, n) => // Hull moving average definition
+    wma( 2*wma(sig,round(n/2))-wma(sig,n), round(sqrt(n)))
+
+mcg(sig,length) => // Mc Ginley MA definition
+    mg = 0.0
+    mg := na(mg[1]) ? ema(sig, length) : mg[1] + (sig - mg[1]) / (length * pow(sig/mg[1], 4))
+
+tenkan(sig,len) => 
+    0.5*(highest(sig,len)+lowest(sig,len))
+
+ma(t,sig,len) =>
+    sss = na
+    if t =="SMA"
+        sss := sma(sig,len)
+    if t == "EMA"
+        sss := ema(sig,len)
+    if t == "HMA"
+        sss := hma(sig,len)
+    if t == "McG"
+        sss := mcg(sig,len)// Mc Ginley
+    if t == "Tenkan"
+        sss := tenkan(sig,len)
+    if t == "WMA"
+        sss := wma(sig,len)
+    sss
+        
+sig1 = ma(maType, src, maPar1)
+sig2 = ma(maType, src, maPar2)
+
+ema200 = ema200Filter? ema(close,200):na
+ema200Long  = ema200Filter? (change(ema200)>0): true
+ema200Short = ema200Filter? (change(ema200)<0): true
+
+tickFactor = 1.0/syminfo.mintick
+sl = atrMulSL*atr(atrPar)*tickFactor
+tp = atrMulTP*atr(atrPar)*tickFactor
+
+plot(sig1, color=aqua, title="MA1", linewidth=2)
+plot(sig2, color=orange, title="MA2", linewidth=2)
+plot(ema200, color=red, title="EMA200", linewidth=3)
+
+q = strategy.equity *percentRisk / sl * 1000
+//q=1000
+longCondition = crossunder(sig2, sig1) and ema200Long and year==yr // change the >= to == if you like exact years not a range
+if (longCondition)
+    strategy.close("Long")
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long, qty=q)//, stop=hi+buffer)
+    strategy.exit("Exit Long", "Long", loss=sl, profit=tp) // exit trade when SL and TP are hit
+
+shortCondition = crossover(sig2,sig1) and ema200Short and year==yr // change the >= to == if you like exact years not a range
+if (shortCondition)
+    strategy.close("Short")
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short, qty=q)//, stop=lo-buffer)
+    strategy.exit("Exit Short", "Short", loss=sl, profit=tp)
+
+View in Pine Editor・91 lines
+Use on chart
+2
+1
+8
+9
+5 150
+Dec 20, 2018
+The simple Moving average cross strategy is here implemented.
+I guess there are multitudes of similar scripts around.
+I post this one since I was asked by some friends, and I'll let it free to use for anybody.
+Here you can choose the year where to start backtesting, the source, the type of MA, the SL and TP multiplicators of ATR, for which you can also choose the averaging period.
+Feel free to modify this script. I would be grateful if you could preserve the first lines of comments including my user names.
+The MA cross strategies can be very effective, especially when used on the daily TF.
+Try for example the combo EMA15-EMA30 SL=1.5ATR TP=1ATR on EURCHF daily to get an impressive 83% win ratio.
+Or EMA20-EMA81 on the GBPCHF to get an 87%.
+In those cases where EMA does not perform well, try to set a less lagging MA, like the Hull MA.
+I hope you like this script so that you could push the like button multiple (odd) times and you start following me.
+I've got a bunch of other interesting scripts to share.
+Comments and suggestions are welcome.
+Mar 8, 2019
+Release Notes
+1) added Tenkan lines
+2) no need to treat JPY differently
+Mar 19, 2019
+Release Notes
+// March 2019:
+// nr of traded lots adjusted according to SL and risk
+// cleaner trade management, avoid superposed trades
+// added ema200 filter: if active long possible only when ema200 is increasing
+// short only if it decreases
+// cleaner code
+

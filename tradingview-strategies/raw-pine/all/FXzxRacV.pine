@@ -1,0 +1,5 @@
+//@version=4
+rsi_top=##input(defval=75,type='INPUT_INTEGER',##id='in_16')
+rsi_bot=##input(defval=25,type='INPUT_INTEGER',##id='in_17')
+##root(root_metainfo,rm_0,rsi_top,input__float)
+##root(root_metainfo,rm_1,rsi_bot,input__float)

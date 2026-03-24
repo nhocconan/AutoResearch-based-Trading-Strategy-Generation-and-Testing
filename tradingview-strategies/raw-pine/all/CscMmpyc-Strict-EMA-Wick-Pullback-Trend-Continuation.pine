@@ -1,0 +1,135 @@
+//@version=6
+strategy("Strict EMA Wick Pullback – Trend Continuation Entry (Long Only)",
+     overlay=true,
+     initial_capital=100,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     pyramiding=0,
+     process_orders_on_close=true)
+
+// === Inputs ===
+emaFastLen = input.int(12, "Fast EMA Length", minval=1)
+emaSlowLen = input.int(21, "Slow EMA Length", minval=1)
+
+touchBufferPct = input.float(0.5, "Wick touch buffer (%)", step=0.1)  // 0.5 = 0.5%
+slBelowFastPct  = input.float(0.3, "Stop below Fast EMA (%)", step=0.1) // 0.3 = 0.3%
+
+useTrendFilter  = input.bool(true, "Use trend filter (Slow EMA rising)")
+trendLookback   = input.int(3, "Trend filter lookback bars", minval=1)
+
+// === EMAs ===
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+// Use prior-bar EMAs for wick-touch logic (more "strict"/stable)
+emaFastRef = emaFast[1]
+emaSlowRef = emaSlow[1]
+
+// === Trend filter ===
+slowRising = emaSlow > emaSlow[trendLookback]
+trendOK = not useTrendFilter or slowRising
+
+// === Entry Conditions ===
+isGreen         = close > open
+wickTouchesFast = low <= emaFastRef * (1 + touchBufferPct/100)
+notTouchSlow    = low > emaSlowRef
+entryCond       = trendOK and isGreen and wickTouchesFast and notTouchSlow
+
+// === Stop-loss: only tightens (never loosens) ===
+rawStop = emaFast * (1 - slBelowFastPct/100)
+
+// Track stop while in position so it only moves up
+var float trailStop = na
+if strategy.position_size == 0
+    trailStop := na
+else
+    trailStop := na(trailStop) ? rawStop : math.max(trailStop, rawStop)
+
+// === Exit on EMA flip ===
+exitCond = ta.crossunder(emaFast, emaSlow)
+
+// === Orders ===
+if entryCond and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long, comment="EMA Wick Touch")
+
+strategy.exit("SL", from_entry="LONG", stop=trailStop)
+
+if exitCond
+    strategy.close("LONG", comment="EMA Flip Exit")
+
+// === Visuals ===
+plot(emaFast, color=color.orange, title="EMA Fast")
+plot(emaSlow, color=color.blue,   title="EMA Slow")
+plotshape(entryCond, location=location.belowbar, color=color.green, style=shape.triangleup, title="Entry Signal")
+plotshape(exitCond,  location=location.abovebar, color=color.red,   style=shape.triangledown, title="Exit Signal")
+
+plot(strategy.position_size > 0 ? trailStop : na, title="Trailing Stop (Tightens Only)", color=color.red, style=plot.style_linebr, linewidth=2)
+
+View in Pine Editor・68 lines
+Use on chart
+9
+1
+932
+This script is a strict EMA pullback entry model
+designed exclusively for trend continuation traders.
+
+It does NOT attempt to predict tops or bottoms.
+It waits for established trends and enters only
+on shallow pullbacks with defined risk.
+
+OVERVIEW
+This strategy is built for disciplined trend continuation trading.
+It looks for shallow pullbacks into a fast EMA during established uptrends
+and exits when trend structure breaks.
+
+There is no counter-trend logic and no optimization for win rate.
+
+
+ENTRY LOGIC
+A long entry is triggered when:
+• Price pulls back into the fast EMA area (wick touch)
+• The pullback remains above the slow EMA (trend integrity)
+• The candle closes bullish
+• Optional: slow EMA is rising (trend filter)
+
+
+RISK MANAGEMENT
+• A dynamic stop is placed just below the fast EMA
+• The stop only tightens — it never loosens
+• Losses are small and predefined
+• The system is designed to be scaled via position sizing
+
+
+EXIT LOGIC
+• Positions are closed when the fast EMA crosses below the slow EMA
+• This represents a breakdown of trend continuation structure
+
+
+WHAT THIS STRATEGY IS
+• A trend continuation entry module
+• Risk-first by design
+• Low win-rate, high payoff profile
+• Designed for trending markets
+
+
+WHAT THIS STRATEGY IS NOT
+• Not a reversal system
+• Not a scalping strategy
+• Not a signal service
+• Not optimized for ranging markets
+• Not a promise of profitability
+
+
+IMPORTANT NOTES
+• Long-only by design (BTC context)
+• No repainting logic
+• Best used with higher-timeframe trend confirmation
+• This is a tool, not financial advice
+
+Recommended markets: BTCUSD / BTCUSDT
+Timeframe: 1D
+Trend filter: ON
+Risk: fixed % per trade (user-defined)
+

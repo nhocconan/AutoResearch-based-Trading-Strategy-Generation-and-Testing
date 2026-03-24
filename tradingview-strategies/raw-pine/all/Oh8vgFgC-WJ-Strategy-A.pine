@@ -1,0 +1,148 @@
+//@version=6
+strategy("WJ Strategy A", overlay=true, initial_capital=2000000, default_qty_type=strategy.cash, default_qty_value=100000, pyramiding=20, process_orders_on_close=true, calc_on_every_tick=true)
+
+// [설정] 1회 진입 시 투자할 고정 금액 (기본값: 100,000)
+entry_amount = input.float(100000)
+
+
+// ==========================================
+// 1. 입력 설정
+// ==========================================
+bb_len = input.int(40, title="BB 길이")
+bb_mult = input.float(2.0, title="BB 표준편차")
+ma_len1 = input.int(120, title="MA 1 (0.5점)")
+ma_len2 = input.int(240, title="MA 2 (1.0점)")
+ma_len3 = input.int(400, title="MA 3 (1.5점)")
+rsi_len = input.int(14, title="RSI 길이")
+
+confirm_days = input.int(2, title="점수 하강 유지 기간(일)", minval=1)
+entry_ma_len = input.int(10, title="진입 기준 이평선(일)", minval=1)
+
+start_year = input.int(2024, title="시작 연도")
+start_month = input.int(1, title="시작 월")
+start_day = input.int(1, title="시작 일")
+
+start_time = timestamp(start_year, start_month, start_day, 0, 0)
+in_date_range = time >= start_time
+
+
+// ==========================================
+// 2. WJ Score 및 지표 계산
+// ==========================================
+[_, _, bb_lower] = ta.bb(close, bb_len, bb_mult)
+ma1 = ta.sma(close, ma_len1)
+ma2 = ta.sma(close, ma_len2)
+ma3 = ta.sma(close, ma_len3)
+rsi_val = ta.rsi(close, rsi_len)
+
+// 1) 볼린저밴드 점수
+score_bb = 0.0
+if close < bb_lower
+    score_bb := 1.0
+
+// 2) 이동평균선 점수
+score_ma = 0.0
+if close < ma3
+    score_ma := 1.5
+else if close < ma2
+    score_ma := 1.0
+else if close < ma1
+    score_ma := 0.5
+
+// 3) RSI 점수 (수정됨: 25이하 조건 추가)
+score_rsi = 0.0
+if rsi_val <= 25        // RSI 25 이하: 2.0점
+    score_rsi := 2.0
+else if rsi_val <= 30   // RSI 30 이하: 1.5점
+    score_rsi := 1.5
+else if rsi_val <= 35   // RSI 35 이하: 1.0점
+    score_rsi := 1.0
+else if rsi_val <= 40   // RSI 40 이하: 0.5점
+    score_rsi := 0.5
+
+final_score = score_bb + score_ma + score_rsi
+entry_ma = ta.sma(close, entry_ma_len)
+
+
+// ==========================================
+// 3. 전략 로직 (깔끔한 버전)
+// ==========================================
+
+// 라벨과 가격을 저장할 배열 (수익률 표시용)
+var label[] lbl_list = array.new_label()
+var float[] price_list = array.new_float()
+
+// 상태 변수
+var bool monitoring = false       
+var int days_maintained = 0       
+
+if in_date_range
+    // A. 감시 시작 (Trigger)
+    // 점수가 2.0 이상이면 무조건 감시 모드 ON, 카운트 초기화
+    if final_score >= 2.0
+        monitoring := true
+        days_maintained := 0
+    
+    // B. 감시 중 (Action)
+    // 2.0 미만으로 내려온 상태에서 로직 수행
+    if monitoring and final_score < 2.0
+        
+        // 1) 점수 추세 확인
+        if final_score > final_score[1]
+            // 점수가 오르면 실패 -> 카운트만 0으로 리셋 (감시는 계속함)
+            days_maintained := 0
+        else
+            // 점수가 같거나 내리면 -> 성공 -> 카운트 증가
+            days_maintained := days_maintained + 1
+
+            // 2) 진입 조건 확인
+            // (1) 점수 하강세가 설정한 일수(2일) 이상 유지됨
+            cond_days = days_maintained >= confirm_days
+            // (2) 종가가 10일 이평선 위에 있음
+            cond_ma = close >= entry_ma
+            
+            if cond_days and cond_ma
+                // 매수 실행
+                strategy.entry("WJ Buy", strategy.long)
+                
+                // 매수 완료 후 감시 종료 (다음 3.0을 기다림)
+                monitoring := false
+                
+            // [신규 추가] 장 중 실시간 알림 (봉 1개당 1번만 울리도록 방지)
+                alert("WJ Strategy A", alert.freq_once_per_bar)
+
+// ==========================================
+// 4. 최종 청산 (수익률 확인용)
+// ==========================================
+if barstate.islast
+    strategy.close_all(comment=" ")
+
+View in Pine Editor・121 lines
+Use on chart
+8
+277
+[Strategy Concept]
+The WJ Strategy A is a systematic mean-reversion system designed to capture high-probability buying opportunities during market corrections. Instead of chasing momentum, this strategy focuses on identifying "exhaustion points" where multiple technical factors signal an oversold condition. Its primary goal is to build a position safely through a disciplined scale-in approach rather than making a single risky entry.
+
+[Technical Indicators Used]
+This strategy aggregates insights from three different dimensions of market analysis to form a holistic view:
+Volatility Analysis (Bollinger Bands): Used to identify price extremes and potential reversal zones when the price deviates significantly from its mean.
+Trend Context (Multiple Moving Averages): Analyzes the long-term structural health of the asset by comparing the current price against various historical averages.
+Momentum Analysis (Relative Strength Index): Measures the internal strength of a price move to detect oversold conditions that are often invisible on the price chart alone.
+
+[Objective & Methodology]
+The core objective of the WJ Strategy A is Risk-Adjusted Accumulation. It follows a two-step confirmation process:
+Phase 1: Detection: The system continuously monitors for a convergence of oversold signals across all indicators.
+Phase 2: Confirmation & Entry: To avoid "falling knives," the strategy requires a brief period of stabilization and a short-term price recovery before executing a trade.
+
+[Key Features]
+Dynamic Scoring: Combines multiple indicators into a single unified score for objective decision-making.
+Pyramiding & Scale-in: Specifically designed for traders who prefer to "buy the dip" in increments, reducing the impact of short-term volatility.
+Trend Filter: An integrated safety switch ensures that entries are made only when there is a sign of a price floor being established.
+Optimized for Large-Caps: WJ Strategy A is engineered for large-cap stocks with relatively lower price volatility. By lowering the scoring threshold to 2.0, it adopts a more aggressive stance, allowing it to capture subtle entry points in stable blue-chip assets that more conservative models might overlook.
+
+[Summary]
+The WJ Strategy A is ideal for investors looking for a quant-based, disciplined approach to entering high-quality, stable assets (such as Mega-cap Tech or Blue-chip stocks) during pullbacks. It removes emotional bias by relying on a data-driven scoring system to identify the optimal moment for capital deployment even in less volatile market environments.
+
+Disclaimer
+Trading involves significant risk. The WJ Strategy A and its associated indicators are provided for educational and informational purposes only. They do not constitute financial, investment, or trading advice. Past performance is not indicative of future results. Even large-cap stocks carry risks, and aggressive strategies may lead to increased exposure during prolonged downturns. Always perform your own due diligence and consult with a professional financial advisor before making any investment decisions.

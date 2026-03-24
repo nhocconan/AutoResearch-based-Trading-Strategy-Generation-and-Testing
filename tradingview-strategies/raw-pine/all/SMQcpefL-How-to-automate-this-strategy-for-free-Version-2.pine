@@ -1,0 +1,155 @@
+//@version=3
+strategy("4All V3", shorttitle="Strategy", overlay=true, pyramiding=100, default_qty_value=100)
+
+/////////////// Component Code Start ///////////////
+testStartYear = input(2011, "Backtest Start Year") 
+testStartMonth = input(8, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2018, "Backtest Stop Year")
+testStopMonth = input(9, "Backtest Stop Month")
+testStopDay = input(29, "Backtest Stop Day")
+// testStopDay = testStartDay + 1
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+// A switch to control background coloring of the test period
+testPeriodBackground = input(title="Color Background?", type=bool, defval=true)
+testPeriodBackgroundColor = testPeriodBackground and (time >= testPeriodStart) and (time <= testPeriodStop) ? #00FF00 : na
+bgcolor(testPeriodBackgroundColor, transp=97)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+/////////////// Component Code Stop ///////////////
+
+src = close
+len = input(4, minval=1, title="Length")
+
+up = rma(max(change(src), 0), len)
+down = rma(-min(change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+rsin = input(5)
+sn = 100 - rsin
+ln = 0 + rsin
+
+/////////////// STRATEGY ///////////////
+ts = input(99999, "Trailing Stop") / 10000
+tp = input(15, "Take Profit") / 10000
+sl = input(23, "Stop Loss") / 10000
+
+pyr = input(5, "Pyramiding")
+
+short = crossover(rsi, sn)
+long = crossunder(rsi, ln)
+
+totalLongs = 0
+totalLongs := nz(totalLongs[1])
+totalShorts = 0
+totalShorts := nz(totalShorts[1])
+
+totalLongsPrice = 0
+totalLongsPrice := nz(totalLongsPrice[1])
+totalShortsPrice = 0
+totalShortsPrice := nz(totalShortsPrice[1])
+
+sectionLongs = 0
+sectionLongs := nz(sectionLongs[1])
+sectionShorts = 0
+sectionShorts := nz(sectionShorts[1])
+
+if long
+    sectionLongs := sectionLongs + 1
+    sectionShorts := 0
+
+if short
+    sectionLongs := 0
+    sectionShorts := sectionShorts + 1
+
+longCondition = long and sectionLongs <= pyr
+shortCondition = short and sectionShorts <= pyr
+
+last_long = na
+last_short = na
+last_long := longCondition ? time : nz(last_long[1])
+last_short := shortCondition ? time : nz(last_short[1])
+
+last_open_longCondition = na
+last_open_shortCondition = na
+last_open_longCondition := longCondition ? open : nz(last_open_longCondition[1])
+last_open_shortCondition := shortCondition ? open : nz(last_open_shortCondition[1])
+
+last_longCondition = na
+last_shortCondition = na
+last_longCondition := longCondition ? time : nz(last_longCondition[1])
+last_shortCondition := shortCondition ? time : nz(last_shortCondition[1])
+
+in_longCondition = last_longCondition > last_shortCondition
+in_shortCondition = last_shortCondition > last_longCondition
+
+last_high = na
+last_low = na
+last_high := not in_longCondition ? na : in_longCondition and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_shortCondition ? na : in_shortCondition and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+
+long_ts = not na(last_high) and high <= (last_high - ts) //and high >= last_open_longCondition
+short_ts = not na(last_low) and low >= (last_low + ts) //and low <= last_open_shortCondition
+
+long_tp = high >= (last_open_longCondition + tp)
+short_tp = low <= (last_open_shortCondition - tp)
+
+long_sl = low <= (last_open_longCondition - sl)
+short_sl = high >= (last_open_shortCondition + sl)
+
+leverage = input(1, "Leverage")
+long_call = last_open_longCondition - (0.8 + 0.2 * (1/leverage)) / leverage * last_open_longCondition
+short_call = last_open_shortCondition + (0.78 + 0.2 * (1/leverage)) / leverage * last_open_shortCondition
+long_call_signal = low <= long_call
+short_call_signal = high >= short_call
+
+if testPeriod()
+    strategy.entry("Long", strategy.long, when=longCondition)
+    strategy.entry("Short", strategy.short, when=shortCondition)
+    
+    strategy.close("Long", when=long_call_signal)
+    strategy.close("Short", when=short_call_signal)
+    strategy.close("Long", when=long_tp)
+    strategy.close("Short", when=short_tp)
+    strategy.close("Long", when=long_sl)
+    strategy.close("Short", when=short_sl)
+    strategy.close("Long", when=long_ts)
+    strategy.close("Short", when=short_ts)
+
+View in Pine Editor・121 lines
+Use on chart
+1.5 K
+5
+31 001
+Aug 12, 2017
+Hello fellow traders and automation lovers.
+
+It has been about 2 years since we originally created Autoview to connect your exchanges/brokers with your TradingView alerts. We've since added multiple exchanges, parameters and have built a large community filled with awesome, passionate traders.
+
+One of the first strategies we built was sadly not a viable one for trading due to it using built-in variables that resulted in the backtest results being inaccurate in comparison to placing live trades. Luckily, we did not encounter repainting until a few strategies in, however, there was a point where we published a few of them as well. We will be going through all of our scripts again to not only eliminate any repainting and update to version 3, but to also include all the code snippets that we've learned to use over the years that allow for accurate backtesting and live trading.
+
+The first script we are redoing is our How to automate this strategy for free using a chrome extension..
+
+Easter egg: This includes a new snippet of code that makes controlling how many orders you pyramid within a study fast and easy.
+
+We look forward to bringing all of our scripts and delving deep into Pine again :)
+
+Happy Trading
+
+Autoview
+
+
+
+Aug 15, 2017
+Release Notes
+Corrected a few bugs.
+
+Had the pyramiding set to be greater than the setting/input when it should be less than.
+
+Also had the old long_signal/short_signal logic that did not properly use the new pyramiding code snippet.
+
+Should be good now!

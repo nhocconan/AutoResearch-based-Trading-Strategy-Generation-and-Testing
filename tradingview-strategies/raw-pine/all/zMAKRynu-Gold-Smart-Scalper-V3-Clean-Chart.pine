@@ -1,0 +1,91 @@
+//@version=5
+strategy("Gold Smart Scalper V3 - Clean Chart", overlay=true, initial_capital=1000, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// --- Inputs ---
+fastLen      = input.int(9, "Fast EMA (Signal)")
+slowLen      = input.int(21, "Slow EMA (Baseline)")
+htfLen       = input.int(50, "HTF Trend EMA")
+atrLen       = input.int(14, "ATR Length for SL")
+slMultiplier = input.float(2.0, "Stop Loss ATR Multiplier")
+tpMultiplier = input.float(3.0, "Take Profit ATR Multiplier") 
+
+// --- Calculations (Background Only) ---
+ema9  = ta.ema(close, fastLen)
+ema21 = ta.ema(close, slowLen)
+ema50 = ta.ema(close, htfLen)
+atr   = ta.atr(atrLen)
+
+// --- Logic Gate ---
+var bool tradeTakenInThisCross = false
+crossUp = ta.crossover(ema9, ema21)
+crossDown = ta.crossunder(ema9, ema21)
+
+if crossUp or crossDown
+    tradeTakenInThisCross := false
+
+// --- Entry Logic ---
+isBullishTrend = close > ema50 and ema9 > ema21
+isBearishTrend = close < ema50 and ema9 < ema21
+
+inValueZoneLong  = low <= ema9 and low >= (ema21 * 0.9995)
+inValueZoneShort = high >= ema9 and high <= (ema21 * 1.0005)
+
+confirmedLong    = ta.crossover(close, ema9)
+confirmedShort   = ta.crossunder(close, ema9)
+
+longCondition  = isBullishTrend and inValueZoneLong and confirmedLong and not tradeTakenInThisCross
+shortCondition = isBearishTrend and inValueZoneShort and confirmedShort and not tradeTakenInThisCross
+
+// --- Fixed Target & SL Variables ---
+var float targetPrice = na
+var float stopPrice = na
+
+// --- Execution ---
+if (longCondition)
+    strategy.entry("Long", strategy.long, comment="Buy")
+    tradeTakenInThisCross := true
+    stopPrice   := close - (atr * slMultiplier)
+    targetPrice := close + (atr * tpMultiplier)
+    strategy.exit("Exit Long", "Long", limit=targetPrice, stop=stopPrice, comment_loss="SL", comment_profit="TP")
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short, comment="Sell")
+    tradeTakenInThisCross := true
+    stopPrice   := close + (atr * slMultiplier)
+    targetPrice := close - (atr * tpMultiplier)
+    strategy.exit("Exit Short", "Short", limit=targetPrice, stop=stopPrice, comment_loss="SL", comment_profit="TP")
+
+// --- Visuals (Exits Only) ---
+// We only plot the target and stop levels while a trade is active to keep the chart clean.
+plot(strategy.position_size != 0 ? targetPrice : na, color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=2, title="TP Target")
+plot(strategy.position_size != 0 ? stopPrice : na, color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2, title="SL Level")
+
+// Optional: Small background highlight when in a trade
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) : strategy.position_size < 0 ? color.new(color.red, 95) : na)
+
+View in Pine Editor・64 lines
+Use on chart
+4
+0
+1 517
+Overview
+The Gold Smart Scalper V3 is a trend-following momentum strategy specifically optimized for XAU/USD (Gold). It focuses on catching "value pullbacks" within a strong trend, avoiding the noise of sideways markets. Unlike many scalpers that use lagging indicators for exits, this version uses fixed ATR-based targets to lock in profits during high-volatility moves common in Gold.
+
+Core Methodology
+The strategy operates on three layers of confirmation:
+Macro Trend (HTF Filter): Uses a 50-period EMA to ensure trades are only taken in the direction of the higher-timeframe momentum.
+The Value Zone: Instead of "chasing" green or red candles, the script waits for a pullback to the space between the 9 EMA and 21 EMA. This ensures a better risk-to-reward entry point.
+The Trigger: A trade is only executed when price confirms the resumption of the trend by crossing back over the signal EMA after the pullback.
+
+Key Features
+Fixed Profit Targets: Replaced dynamic trailing stops with fixed Take Profit (TP) and Stop Loss (SL) levels based on ATR, ensuring exits aren't "hunted" by Gold's signature volatility spikes.
+Clean Chart Interface: All moving average plots are hidden. The only visuals provided are the active TP/SL levels when a trade is live, keeping your workspace clutter-free.
+Single-Trade Logic: The script includes a "One Trade Per Cross" gate, preventing the strategy from over-trading or "stacking" positions during choppy price action.
+
+Settings & OptimizationATR Multipliers:
+Stop Loss (SL): Default $2.0 \times ATR$. Protects against standard market noise.Take Profit (TP): Default $3.0 \times ATR$. Designed for a high Risk/Reward profile.Timeframe Recommendation: Optimized for 15m and 1H for swing scalping, or 5m for aggressive scalping.Instrument: Specifically tuned for Gold (XAU/USD), but applicable to other high-volatility pairs like GBP/JPY or NASDAQ.
+
+
+
+Disclaimer
+This script is for educational and backtesting purposes only. Past performance does not guarantee future results. Always practice proper risk management.

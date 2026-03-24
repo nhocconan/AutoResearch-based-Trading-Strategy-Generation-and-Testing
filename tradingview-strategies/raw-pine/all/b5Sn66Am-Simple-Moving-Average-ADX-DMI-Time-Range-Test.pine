@@ -1,0 +1,3 @@
+//@version=1
+th=##input(defval=20,type=integer,##id='in_1')
+##root(root_metainfo,rm_0,th)

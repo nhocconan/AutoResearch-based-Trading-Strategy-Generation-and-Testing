@@ -1,0 +1,892 @@
+//@version=6
+// (c) BertTradeTech - Machine Learning - Lorentzian KNN Classifier
+// Lorentzian distance metric d(x,y) = Sum log(1+|xi-yi|) for non-Euclidean
+// feature space classification. Kernel regression envelope with adaptive
+// bandwidth. Multi-layer confluence scoring with institutional filters.
+// berttradetech.com | Telegram: @ursainusa
+//
+// v2.0 — NO REPAINTING: calc_on_every_tick=false, entries on confirmed bars only
+//      — AI Trade Quality Grade (A+/A/B/C/D/F)
+//      — Light dashboard, bottom-right
+
+strategy("Machine Learning - Lorentzian KNN Classifier [BertTradeTech]",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,
+     pyramiding=0,
+     calc_on_every_tick=false,        // ◄ FIX: no repainting
+     max_labels_count=500,
+     max_lines_count=200,
+     max_boxes_count=500)
+
+// ===========================================================================
+// 1. SETTINGS
+// ===========================================================================
+
+// TIME FILTER
+use_time_filter = input.bool(true, "Trade Only During Session", group="Time Filter")
+trading_session = input.session("0900-2200", "Trading Hours", group="Time Filter")
+
+// TREND FOLLOWING
+trend_ema_fast = input.int(21, "Trend EMA Fast", minval=5, group="Trend Following")
+trend_ema_slow = input.int(50, "Trend EMA Slow", minval=10, group="Trend Following")
+trend_ema_filter = input.int(200, "Trend Filter EMA", minval=50, group="Trend Following")
+
+// MTF FILTER
+use_mtf_filter = input.bool(true, "Use MTF Filter", group="MTF Filter")
+mtf_timeframe = input.timeframe("240", "Higher Timeframe", group="MTF Filter")
+mtf_ema_fast = input.int(21, "MTF EMA Fast", minval=5, group="MTF Filter")
+mtf_ema_slow = input.int(55, "MTF EMA Slow", minval=10, group="MTF Filter")
+
+// MA RIBBON
+use_ma_ribbon = input.bool(true, "Use MA Ribbon", group="MA Ribbon")
+ribbon_type = input.string("EMA", "Ribbon MA Type", options=["EMA", "SMA", "HMA"], group="MA Ribbon")
+ribbon_ma1 = input.int(8, "Ribbon MA 1", minval=2, group="MA Ribbon")
+ribbon_ma2 = input.int(13, "Ribbon MA 2", minval=2, group="MA Ribbon")
+ribbon_ma3 = input.int(21, "Ribbon MA 3", minval=2, group="MA Ribbon")
+ribbon_ma4 = input.int(34, "Ribbon MA 4", minval=2, group="MA Ribbon")
+ribbon_ma5 = input.int(55, "Ribbon MA 5", minval=2, group="MA Ribbon")
+ribbon_ma6 = input.int(89, "Ribbon MA 6", minval=2, group="MA Ribbon")
+ribbon_ma7 = input.int(144, "Ribbon MA 7", minval=2, group="MA Ribbon")
+ribbon_ma8 = input.int(233, "Ribbon MA 8", minval=2, group="MA Ribbon")
+ribbon_threshold = input.int(6, "Ribbon Alignment Threshold", minval=4, maxval=8, group="MA Ribbon")
+
+// ORDER FLOW
+use_order_flow = input.bool(true, "Enable Order Flow Analysis", group="Order Flow")
+show_vwap = input.bool(false, "Show VWAP Bands", group="Order Flow")
+vwap_std_mult1 = input.float(1.0, "VWAP Std 1", minval=0.1, step=0.1, group="Order Flow")
+vwap_std_mult2 = input.float(2.0, "VWAP Std 2", minval=0.1, step=0.1, group="Order Flow")
+vwap_std_mult3 = input.float(3.0, "VWAP Std 3", minval=0.1, step=0.1, group="Order Flow")
+cvd_length = input.int(20, "CVD Period", minval=1, group="Order Flow")
+cvd_threshold = input.float(0.6, "CVD Threshold", minval=0.1, maxval=1.0, step=0.1, group="Order Flow")
+show_volume_profile = input.bool(true, "Show Volume Profile POC", group="Order Flow")
+volume_profile_bins = input.int(20, "VP Bins", minval=10, maxval=50, group="Order Flow")
+
+// SMART MONEY
+use_smc = input.bool(true, "Enable Smart Money Concepts", group="Smart Money")
+show_order_blocks = input.bool(true, "Show Order Blocks", group="Smart Money")
+show_fvg = input.bool(true, "Show Fair Value Gaps", group="Smart Money")
+show_liquidity = input.bool(true, "Show Liquidity Sweeps", group="Smart Money")
+show_bos = input.bool(true, "Show BOS/CHoCH", group="Smart Money")
+show_demand_supply = input.bool(true, "Show Demand/Supply Zones", group="Smart Money")
+ob_lookback = input.int(10, "Order Block Lookback", minval=5, group="Smart Money")
+fvg_min_size = input.float(0.5, "FVG Min Size (ATR mult)", minval=0.1, step=0.1, group="Smart Money")
+liquidity_lookback = input.int(20, "Liquidity Lookback", minval=10, group="Smart Money")
+bos_pivot_length = input.int(5, "BOS Pivot Length", minval=3, group="Smart Money")
+ds_impulse_mult = input.float(1.5, "D/S Impulse Strength (ATR mult)", minval=0.5, step=0.1, group="Smart Money")
+ds_max_zones = input.int(8, "Max D/S Zones Each Side", minval=2, maxval=20, group="Smart Money")
+
+// VOLATILITY
+use_vol_regime = input.bool(true, "Enable Volatility Regime", group="Volatility Regime")
+bb_vr_length = input.int(20, "BB VR Period", minval=10, group="Volatility Regime")
+bb_vr_mult = input.float(2.0, "BB VR Multiplier", minval=1.0, step=0.1, group="Volatility Regime")
+atr_percentile_length = input.int(100, "ATR Percentile Period", minval=20, group="Volatility Regime")
+vol_expansion_threshold = input.float(1.5, "Expansion Threshold", minval=1.0, step=0.1, group="Volatility Regime")
+vol_contraction_threshold = input.float(0.7, "Contraction Threshold", minval=0.1, maxval=1.0, step=0.1, group="Volatility Regime")
+
+// STRATEGY PARAMS
+breakout_length = input.int(20, "Breakout Period", minval=5, group="Breakout")
+breakout_atr_mult = input.float(1.5, "Breakout ATR Multiplier", minval=0.5, step=0.1, group="Breakout")
+bb_length = input.int(20, "Bollinger Bands Period", minval=5, group="Mean Reversion")
+bb_mult = input.float(2.0, "BB Std Dev", minval=0.5, step=0.1, group="Mean Reversion")
+rsi_length = input.int(14, "RSI Period", minval=2, group="Mean Reversion")
+rsi_ob = input.int(70, "RSI Overbought", minval=50, maxval=100, group="Mean Reversion")
+rsi_os = input.int(30, "RSI Oversold", minval=0, maxval=50, group="Mean Reversion")
+
+// RISK MANAGEMENT
+atr_length = input.int(14, "ATR Period", minval=1, group="Risk Management")
+stop_atr_mult = input.float(2.0, "Stop Loss ATR Multiplier", minval=0.5, step=0.1, group="Risk Management")
+tp_atr_mult = input.float(3.0, "Take Profit ATR Multiplier", minval=0.5, step=0.1, group="Risk Management")
+use_trailing = input.bool(true, "Use Trailing Stop", group="Risk Management")
+trailing_atr_mult = input.float(1.5, "Trailing ATR Multiplier", minval=0.5, step=0.1, group="Risk Management")
+
+// FILTERS
+adx_length = input.int(14, "ADX Period", minval=1, group="Filters")
+adx_threshold = input.int(20, "ADX Threshold", minval=10, maxval=50, group="Filters")
+volume_mult = input.float(1.2, "Volume Multiplier", minval=1.0, step=0.1, group="Filters")
+
+// LORENTZIAN KNN
+grp_knn = "== Lorentzian KNN =="
+knn_neighbors  = input.int(8,   "K Neighbors",       minval=3, maxval=20, group=grp_knn)
+knn_lookback   = input.int(50,  "Training Window",   minval=20, maxval=100, group=grp_knn)
+knn_weight     = input.float(0.55, "KNN Signal Weight", minval=0.0, maxval=1.0, step=0.05, group=grp_knn)
+knn_rsi_len    = input.int(14,  "Feature: RSI Period",       minval=5,  maxval=50, group=grp_knn)
+knn_wt_n1      = input.int(10,  "Feature: WaveTrend Ch Len", minval=5,  maxval=30, group=grp_knn)
+knn_wt_n2      = input.int(21,  "Feature: WaveTrend Avg Len",minval=5,  maxval=50, group=grp_knn)
+knn_cci_len    = input.int(20,  "Feature: CCI Period",       minval=5,  maxval=50, group=grp_knn)
+knn_adx_len    = input.int(14,  "Feature: ADX Period",       minval=5,  maxval=50, group=grp_knn)
+
+// KERNEL ENVELOPE
+grp_kernel = "== Kernel Envelope =="
+show_kernel    = input.bool(true,  "Show Kernel Envelope",  group=grp_kernel)
+kernel_len     = input.int(34,     "Kernel EMA Length",      minval=8, maxval=100, group=grp_kernel)
+kernel_atr_len = input.int(20,     "Kernel ATR Period",      minval=5, maxval=50,  group=grp_kernel)
+
+// DISPLAY
+showDashboard = input.bool(true, "Show Dashboard", group="Display")
+show_support_resistance = input.bool(true, "Show Support/Resistance Lines", group="Display")
+show_tp_sl_lines = input.bool(true, "Show TP/SL Lines", group="Display")
+sr_lookback = input.int(50, "S/R Lookback Period", minval=20, group="Display")
+sr_line_width = input.int(2, "S/R Line Width", minval=1, maxval=5, group="Display")
+tp_sl_line_width = input.int(2, "TP/SL Line Width", minval=1, maxval=5, group="Display")
+sr_line_style = input.string("Solid", "S/R Line Style", options=["Solid", "Dashed", "Dotted"], group="Display")
+tp_sl_line_style = input.string("Dashed", "TP/SL Line Style", options=["Solid", "Dashed", "Dotted"], group="Display")
+use_gradient = input.bool(true, "Use Gradient Candle Colors", group="Display")
+
+// ===========================================================================
+// 2. HELPERS & INDICATORS
+// ===========================================================================
+hma(src, len) =>
+    wma1 = ta.wma(src, len / 2)
+    wma2 = ta.wma(src, len)
+    ta.wma(2 * wma1 - wma2, math.round(math.sqrt(len)))
+
+calc_ma(src, len, ma_type) =>
+    switch ma_type
+        "EMA" => ta.ema(src, len)
+        "SMA" => ta.sma(src, len)
+        "HMA" => hma(src, len)
+        => ta.ema(src, len)
+
+sr_style = sr_line_style == "Dashed" ? line.style_dashed : sr_line_style == "Dotted" ? line.style_dotted : line.style_solid
+tp_sl_style = tp_sl_line_style == "Dashed" ? line.style_dashed : tp_sl_line_style == "Dotted" ? line.style_dotted : line.style_solid
+
+atr = ta.atr(atr_length)
+ema_fast = ta.ema(close, trend_ema_fast)
+ema_slow = ta.ema(close, trend_ema_slow)
+ema_filter = ta.ema(close, trend_ema_filter)
+[diPlus, diMinus, adx] = ta.dmi(adx_length, adx_length)
+bb_basis = ta.sma(close, bb_length)
+bb_dev = bb_mult * ta.stdev(close, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+rsi = ta.rsi(close, rsi_length)
+volume_sma = ta.sma(volume, 20)
+volume_spike = volume > volume_sma * volume_mult
+highest_high = ta.highest(high, breakout_length)
+lowest_low = ta.lowest(low, breakout_length)
+
+// MA Ribbon
+r1 = calc_ma(close, ribbon_ma1, ribbon_type)
+r2 = calc_ma(close, ribbon_ma2, ribbon_type)
+r3 = calc_ma(close, ribbon_ma3, ribbon_type)
+r4 = calc_ma(close, ribbon_ma4, ribbon_type)
+r5 = calc_ma(close, ribbon_ma5, ribbon_type)
+r6 = calc_ma(close, ribbon_ma6, ribbon_type)
+r7 = calc_ma(close, ribbon_ma7, ribbon_type)
+r8 = calc_ma(close, ribbon_ma8, ribbon_type)
+ribbon_bullish_count = (r1>r2?1:0)+(r2>r3?1:0)+(r3>r4?1:0)+(r4>r5?1:0)+(r5>r6?1:0)+(r6>r7?1:0)+(r7>r8?1:0)
+ribbon_bearish_count = (r1<r2?1:0)+(r2<r3?1:0)+(r3<r4?1:0)+(r4<r5?1:0)+(r5<r6?1:0)+(r6<r7?1:0)+(r7<r8?1:0)
+ribbon_bullish = ribbon_bullish_count >= (ribbon_threshold - 1)
+ribbon_bearish = ribbon_bearish_count >= (ribbon_threshold - 1)
+
+// MTF Filter
+mtf_ema_fast_val = request.security(syminfo.tickerid, mtf_timeframe, ta.ema(close, mtf_ema_fast), lookahead=barmerge.lookahead_off)
+mtf_ema_slow_val = request.security(syminfo.tickerid, mtf_timeframe, ta.ema(close, mtf_ema_slow), lookahead=barmerge.lookahead_off)
+mtf_close = request.security(syminfo.tickerid, mtf_timeframe, close, lookahead=barmerge.lookahead_off)
+mtf_bullish = mtf_ema_fast_val > mtf_ema_slow_val and mtf_close > mtf_ema_fast_val
+mtf_bearish = mtf_ema_fast_val < mtf_ema_slow_val and mtf_close < mtf_ema_fast_val
+mtf_filter_long = not use_mtf_filter or mtf_bullish
+mtf_filter_short = not use_mtf_filter or mtf_bearish
+ribbon_filter_long = not use_ma_ribbon or ribbon_bullish
+ribbon_filter_short = not use_ma_ribbon or ribbon_bearish
+
+// VWAP & CVD
+var float vwap_sum = 0.0, var float vol_sum = 0.0, var float vwap = 0.0
+is_new_day = ta.change(time('D')) != 0
+if barstate.isfirst or is_new_day
+    vwap_sum := 0.0
+    vol_sum := 0.0
+vwap_sum += volume * hlc3
+vol_sum += volume
+vwap := vol_sum > 0 ? vwap_sum / vol_sum : close
+vwap_dev = ta.stdev(close, cvd_length)
+vwap_upper1 = vwap + vwap_std_mult1 * vwap_dev
+vwap_lower1 = vwap - vwap_std_mult1 * vwap_dev
+vwap_upper2 = vwap + vwap_std_mult2 * vwap_dev
+vwap_lower2 = vwap - vwap_std_mult2 * vwap_dev
+vwap_upper3 = vwap + vwap_std_mult3 * vwap_dev
+vwap_lower3 = vwap - vwap_std_mult3 * vwap_dev
+buy_volume = close > open ? volume : 0
+sell_volume = close < open ? volume : 0
+delta = buy_volume - sell_volume
+cvd = ta.cum(delta)
+cvd_sma = ta.sma(cvd, cvd_length)
+cvd_bullish = cvd > cvd_sma and close < close[1] and cvd > cvd[1]
+cvd_bearish = cvd < cvd_sma and close > close[1] and cvd < cvd[1]
+volume_ratio = buy_volume / math.max(sell_volume, 1)
+strong_buying = volume_ratio > (1 + cvd_threshold)
+strong_selling = volume_ratio < (1 - cvd_threshold)
+price_above_vwap = close > vwap
+price_below_vwap = close < vwap
+vwap_cross_up = ta.crossover(close, vwap)
+vwap_cross_down = ta.crossunder(close, vwap)
+of_bullish = use_order_flow and ((cvd_bullish or strong_buying) and (vwap_cross_up or price_above_vwap))
+of_bearish = use_order_flow and ((cvd_bearish or strong_selling) and (vwap_cross_down or price_below_vwap))
+
+// Volume Profile POC
+var float[] volume_levels = array.new_float(volume_profile_bins, 0.0)
+var float poc_price = na
+vp_highest = ta.highest(high, volume_profile_bins)
+vp_lowest = ta.lowest(low, volume_profile_bins)
+if barstate.islastconfirmedhistory and show_volume_profile
+    price_range = vp_highest - vp_lowest
+    bin_size = price_range / volume_profile_bins
+    array.fill(volume_levels, 0.0)
+    for i = 0 to volume_profile_bins - 1
+        bin_price = vp_lowest + i * bin_size
+        for j = 0 to volume_profile_bins - 1
+            if low[j] <= bin_price and high[j] >= bin_price
+                array.set(volume_levels, i, array.get(volume_levels, i) + volume[j])
+    max_volume = array.max(volume_levels)
+    max_index = array.indexof(volume_levels, max_volume)
+    poc_price := vp_lowest + max_index * bin_size
+
+// ===========================================================================
+// SMC — Order Blocks, Demand/Supply, FVG, Liquidity, BOS
+// ===========================================================================
+bullish_ob = close > open and close[1] < open[1] and high - close < (high - low) * 0.3
+bearish_ob = close < open and close[1] > open[1] and close - low < (high - low) * 0.3
+var box[] bullish_ob_boxes = array.new_box()
+var box[] bearish_ob_boxes = array.new_box()
+if barstate.isconfirmed
+    if bullish_ob and use_smc and show_order_blocks
+        array.push(bullish_ob_boxes, box.new(bar_index-1, high[1], bar_index+15, low[1], border_color=color.new(color.green,100), bgcolor=color.new(color.green,90)))
+        if array.size(bullish_ob_boxes) > 8
+            box.delete(array.shift(bullish_ob_boxes))
+    if bearish_ob and use_smc and show_order_blocks
+        array.push(bearish_ob_boxes, box.new(bar_index-1, high[1], bar_index+15, low[1], border_color=color.new(color.red,100), bgcolor=color.new(color.red,90)))
+        if array.size(bearish_ob_boxes) > 8
+            box.delete(array.shift(bearish_ob_boxes))
+
+// D/S Zones
+impulse_up = (close - open) > atr * ds_impulse_mult and close > open
+impulse_down = (open - close) > atr * ds_impulse_mult and close < open
+demand_zone = impulse_up and close[1] < open[1]
+supply_zone = impulse_down and close[1] > open[1]
+var box[] demand_boxes = array.new_box()
+var float[] demand_tops = array.new_float()
+var float[] demand_bottoms = array.new_float()
+var box[] supply_boxes = array.new_box()
+var float[] supply_tops = array.new_float()
+var float[] supply_bottoms = array.new_float()
+if barstate.isconfirmed
+    if demand_zone and use_smc and show_demand_supply
+        zone_top = math.max(open[1], close[1])
+        zone_bot = math.min(open[1], close[1])
+        array.push(demand_boxes, box.new(bar_index-1, zone_top, bar_index+200, zone_bot, border_color=color.new(#2196F3,100), bgcolor=color.new(#2196F3,85)))
+        array.push(demand_tops, zone_top)
+        array.push(demand_bottoms, zone_bot)
+        if array.size(demand_boxes) > ds_max_zones
+            box.delete(array.shift(demand_boxes))
+            array.shift(demand_tops)
+            array.shift(demand_bottoms)
+    if supply_zone and use_smc and show_demand_supply
+        zone_top = math.max(open[1], close[1])
+        zone_bot = math.min(open[1], close[1])
+        array.push(supply_boxes, box.new(bar_index-1, zone_top, bar_index+200, zone_bot, border_color=color.new(#FF9800,100), bgcolor=color.new(#FF9800,85)))
+        array.push(supply_tops, zone_top)
+        array.push(supply_bottoms, zone_bot)
+        if array.size(supply_boxes) > ds_max_zones
+            box.delete(array.shift(supply_boxes))
+            array.shift(supply_tops)
+            array.shift(supply_bottoms)
+if array.size(demand_boxes) > 0
+    for i = array.size(demand_boxes) - 1 to 0
+        if i < array.size(demand_boxes)
+            if low <= array.get(demand_tops, i) and close < array.get(demand_bottoms, i)
+                box.delete(array.get(demand_boxes, i))
+                array.remove(demand_boxes, i)
+                array.remove(demand_tops, i)
+                array.remove(demand_bottoms, i)
+            else
+                box.set_right(array.get(demand_boxes, i), bar_index + 20)
+if array.size(supply_boxes) > 0
+    for i = array.size(supply_boxes) - 1 to 0
+        if i < array.size(supply_boxes)
+            if high >= array.get(supply_bottoms, i) and close > array.get(supply_tops, i)
+                box.delete(array.get(supply_boxes, i))
+                array.remove(supply_boxes, i)
+                array.remove(supply_tops, i)
+                array.remove(supply_bottoms, i)
+            else
+                box.set_right(array.get(supply_boxes, i), bar_index + 20)
+
+// FVG, Liquidity, BOS
+bullish_fvg = low > high[2] and (low - high[2]) > atr * fvg_min_size
+bearish_fvg = high < low[2] and (low[2] - high) > atr * fvg_min_size
+recent_high = ta.highest(high, liquidity_lookback)
+recent_low = ta.lowest(low, liquidity_lookback)
+liquidity_grab_high = high > recent_high[1] and close < open and close < recent_high[1]
+liquidity_grab_low = low < recent_low[1] and close > open and close > recent_low[1]
+swing_high = ta.pivothigh(high, bos_pivot_length, bos_pivot_length)
+swing_low = ta.pivotlow(low, bos_pivot_length, bos_pivot_length)
+var float last_swing_high = na, var float last_swing_low = na
+if not na(swing_high)
+    last_swing_high := swing_high
+if not na(swing_low)
+    last_swing_low := swing_low
+bullish_bos = not na(last_swing_high) and close > last_swing_high and close[1] <= last_swing_high
+bearish_bos = not na(last_swing_low) and close < last_swing_low and close[1] >= last_swing_low
+smc_bullish = use_smc and (bullish_ob or bullish_fvg or liquidity_grab_low or bullish_bos)
+smc_bearish = use_smc and (bearish_ob or bearish_fvg or liquidity_grab_high or bearish_bos)
+
+// Volatility & Market Regime
+bb_vr_basis = ta.sma(close, bb_vr_length)
+bb_vr_dev = bb_vr_mult * ta.stdev(close, bb_vr_length)
+bb_vr_width = (bb_vr_basis + bb_vr_dev - (bb_vr_basis - bb_vr_dev)) / bb_vr_basis
+atr_percentile = ta.percentrank(atr, atr_percentile_length)
+high_volatility = atr_percentile > 70
+low_volatility = atr_percentile < 30
+bb_vr_width_sma = ta.sma(bb_vr_width, bb_vr_length)
+bb_expansion = bb_vr_width > bb_vr_width_sma * vol_expansion_threshold
+bb_contraction = bb_vr_width < bb_vr_width_sma * vol_contraction_threshold
+is_trending = adx > adx_threshold
+is_ranging = adx <= adx_threshold
+bullish_trend = ema_fast > ema_slow and close > ema_filter
+bearish_trend = ema_fast < ema_slow and close < ema_filter
+
+// ===========================================================================
+// LORENTZIAN KNN CLASSIFIER
+// ===========================================================================
+knn_rsi_val = ta.rsi(close, knn_rsi_len)
+wt_ap = hlc3
+wt_esa = ta.ema(wt_ap, knn_wt_n1)
+wt_d = ta.ema(math.abs(wt_ap - wt_esa), knn_wt_n1)
+wt_ci = wt_d != 0 ? (wt_ap - wt_esa) / (0.015 * wt_d) : 0.0
+knn_wt_val = ta.ema(wt_ci, knn_wt_n2)
+knn_cci_val = ta.cci(close, knn_cci_len)
+[knn_dp, knn_dm, knn_adx_val] = ta.dmi(knn_adx_len, knn_adx_len)
+
+f_normalize(src, len) =>
+    mean = ta.sma(src, len)
+    std  = ta.stdev(src, len)
+    std == 0 ? 0.0 : (src - mean) / std
+
+knn_f1 = f_normalize(knn_rsi_val, 50)
+knn_f2 = f_normalize(knn_wt_val,  50)
+knn_f3 = f_normalize(knn_cci_val, 50)
+knn_f4 = f_normalize(knn_adx_val, 50)
+knn_f1 := nz(knn_f1)
+knn_f2 := nz(knn_f2)
+knn_f3 := nz(knn_f3)
+knn_f4 := nz(knn_f4)
+max_bars_back(knn_f1, 200)
+max_bars_back(knn_f2, 200)
+max_bars_back(knn_f3, 200)
+max_bars_back(knn_f4, 200)
+
+var float knn_score = 0.0
+var float knn_conf  = 50.0
+if bar_index > 80
+    float bull_w = 0.0, float bear_w = 0.0
+    int knn_max = math.min(knn_lookback, bar_index - 10)
+    for i = 10 to knn_max
+        float d = math.log(1.0 + math.abs(knn_f1 - knn_f1[i]))
+        d += math.log(1.0 + math.abs(knn_f2 - knn_f2[i]))
+        d += math.log(1.0 + math.abs(knn_f3 - knn_f3[i]))
+        d += math.log(1.0 + math.abs(knn_f4 - knn_f4[i]))
+        float w = 1.0 / math.max(d, 0.01)
+        float fut = i >= 5 ? (close[i - 5] - close[i]) / math.max(close[i], 0.001) : 0.0
+        if fut > 0
+            bull_w += w
+        else
+            bear_w += w
+    float tw = bull_w + bear_w
+    knn_score := tw > 0 ? (bull_w - bear_w) / tw : 0.0
+    knn_conf  := tw > 0 ? math.max(bull_w, bear_w) / tw * 100.0 : 50.0
+
+knn_smooth = ta.ema(knn_score, 3)
+knn_bullish = knn_smooth > 0.1
+knn_bearish = knn_smooth < -0.1
+knn_class = knn_bullish ? "BULL" : knn_bearish ? "BEAR" : "NEUTRAL"
+knn_color = knn_bullish ? #00C853 : knn_bearish ? #FF1744 : #9E9E9E
+
+// ===========================================================================
+// 3. CONFLUENCE SCORING + AI TRADE QUALITY GRADE
+// ===========================================================================
+universal_long_sl = close - (atr * stop_atr_mult)
+universal_long_tp = close + (atr * tp_atr_mult)
+universal_short_sl = close + (atr * stop_atr_mult)
+universal_short_tp = close - (atr * tp_atr_mult)
+
+pivot_high = ta.pivothigh(high, sr_lookback, sr_lookback)
+pivot_low = ta.pivotlow(low, sr_lookback, sr_lookback)
+var float dynamic_resistance = na, var float dynamic_support = na
+highest_price = ta.highest(high, sr_lookback)
+lowest_price = ta.lowest(low, sr_lookback)
+if not na(pivot_high)
+    dynamic_resistance := pivot_high
+if not na(pivot_low)
+    dynamic_support := pivot_low
+dynamic_resistance := na(dynamic_resistance) ? highest_price : dynamic_resistance
+dynamic_support := na(dynamic_support) ? lowest_price : dynamic_support
+
+var int total_trades = 0, var int winning_trades = 0
+var float total_profit = 0.0, var float total_loss = 0.0
+if strategy.closedtrades > total_trades
+    total_trades := strategy.closedtrades
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) > 0
+        winning_trades += 1
+        total_profit += strategy.closedtrades.profit(strategy.closedtrades - 1)
+    else
+        total_loss += math.abs(strategy.closedtrades.profit(strategy.closedtrades - 1))
+win_rate = total_trades > 0 ? winning_trades / total_trades : 0.5
+pf_val = total_loss > 0 ? total_profit / total_loss : 0.0
+
+of_filter_long = not use_order_flow or of_bullish or price_above_vwap
+of_filter_short = not use_order_flow or of_bearish or price_below_vwap
+smc_filter_long = not use_smc or smc_bullish or bullish_ob or bullish_fvg
+smc_filter_short = not use_smc or smc_bearish or bearish_ob or bearish_fvg
+
+float knn_boost_long  = knn_bullish ? knn_weight : 0.0
+float knn_boost_short = knn_bearish ? knn_weight : 0.0
+signal_strength_long  = (mtf_filter_long?1:0) + (ribbon_filter_long?1:0) + (of_filter_long?1:0) + (smc_filter_long?1:0) + (adx>adx_threshold?1:0) + knn_boost_long
+signal_strength_short = (mtf_filter_short?1:0) + (ribbon_filter_short?1:0) + (of_filter_short?1:0) + (smc_filter_short?1:0) + (adx>adx_threshold?1:0) + knn_boost_short
+current_signal = signal_strength_long > signal_strength_short ? "LONG" : signal_strength_short > signal_strength_long ? "SHORT" : "WAIT"
+confluence_score = math.max(signal_strength_long, signal_strength_short)
+
+universal_sl_display = current_signal == "LONG" ? universal_long_sl : universal_short_sl
+universal_tp_display = current_signal == "LONG" ? universal_long_tp : universal_short_tp
+
+// ── AI TRADE QUALITY GRADE ──
+// Combines: KNN confidence (40%), confluence score (35%), regime fitness (25%)
+// Regime fitness: trending regime + trending signal = 100%, ranging + MR = 100%, mismatch = 30%
+regime_fitness = (is_trending and (bullish_trend or bearish_trend)) ? 1.0 : is_ranging ? 0.8 : 0.3
+quality_raw = (knn_conf / 100.0) * 0.40 + (confluence_score / 5.55) * 0.35 + regime_fitness * 0.25
+quality_pct = math.round(quality_raw * 100, 0)
+
+grade_text = quality_pct >= 90 ? "A+" : quality_pct >= 80 ? "A" : quality_pct >= 70 ? "B" : quality_pct >= 55 ? "C" : quality_pct >= 40 ? "D" : "F"
+grade_color = quality_pct >= 80 ? #00C853 : quality_pct >= 70 ? #2196F3 : quality_pct >= 55 ? #FF9800 : #FF1744
+grade_bg = quality_pct >= 80 ? color.new(#00C853, 80) : quality_pct >= 70 ? color.new(#2196F3, 80) : quality_pct >= 55 ? color.new(#FF9800, 80) : color.new(#FF1744, 80)
+
+// BOS tracking
+var float last_bos_level = na, var string last_bos_type = "NONE"
+if bullish_bos
+    last_bos_level := close
+    last_bos_type := "BULLISH"
+if bearish_bos
+    last_bos_level := close
+    last_bos_type := "BEARISH"
+
+// Volume pressure
+var float volume_buy_pct = 50.0, var string volume_pressure = "NEUTRAL", var color volume_pressure_color = color.gray
+if bar_index >= 20
+    float cb = 0.0, float cs = 0.0
+    for i = 0 to 19
+        cb += (close[i] > open[i] ? volume[i] : 0)
+        cs += (close[i] < open[i] ? volume[i] : 0)
+    float tv = cb + cs
+    volume_buy_pct := tv > 0 ? (cb / tv * 100) : 50.0
+    volume_pressure := volume_buy_pct > 60 ? "BUYING" : volume_buy_pct < 40 ? "SELLING" : "NEUTRAL"
+    volume_pressure_color := volume_buy_pct > 60 ? #00C853 : volume_buy_pct < 40 ? #FF1744 : #9E9E9E
+
+// Sessions
+london_session = not na(time(timeframe.period, "0800-1600"))
+ny_session = not na(time(timeframe.period, "1300-2100"))
+asia_session = not na(time(timeframe.period, "0000-0800"))
+current_session = london_session and ny_session ? "LON/NY" : london_session ? "LONDON" : ny_session ? "NEW YORK" : asia_session ? "ASIA" : "OFF"
+
+// ===========================================================================
+// 4. STRATEGY EXECUTION — NO REPAINTING
+// ===========================================================================
+in_session = not use_time_filter or not na(time(timeframe.period, trading_session))
+confirmed = barstate.isconfirmed  // ◄ FIX: only on closed bars
+
+ema_cross_up = ta.crossover(ema_fast, ema_slow)
+ema_cross_down = ta.crossunder(ema_fast, ema_slow)
+rsi_cross_up = ta.crossover(rsi, rsi_os)
+rsi_cross_down = ta.crossunder(rsi, rsi_ob)
+
+trend_long = is_trending and bullish_trend and ema_cross_up and volume_spike
+trend_short = is_trending and bearish_trend and ema_cross_down and volume_spike
+breakout_long = close > highest_high[1] and volume_spike and close > ema_filter
+breakout_short = close < lowest_low[1] and volume_spike and close < ema_filter
+mean_reversion_long = is_ranging and close < bb_lower and rsi < rsi_os and rsi_cross_up
+mean_reversion_short = is_ranging and close > bb_upper and rsi > rsi_ob and rsi_cross_down
+
+long_condition = (trend_long or breakout_long or mean_reversion_long) and mtf_filter_long and ribbon_filter_long and of_filter_long and smc_filter_long and in_session and confirmed
+short_condition = (trend_short or breakout_short or mean_reversion_short) and mtf_filter_short and ribbon_filter_short and of_filter_short and smc_filter_short and in_session and confirmed
+
+if long_condition and strategy.position_size == 0
+    stop_loss = close - (atr * stop_atr_mult)
+    take_profit = close + (atr * tp_atr_mult)
+    strategy.entry("Long", strategy.long)
+    alert("BUY " + grade_text + " | " + str.tostring(close) + " | Q:" + str.tostring(quality_pct) + "%", alert.freq_once_per_bar_close)
+    if use_trailing
+        strategy.exit("Exit Long", "Long", stop=stop_loss, trail_offset=atr * trailing_atr_mult / syminfo.mintick, trail_points=atr * trailing_atr_mult / syminfo.mintick)
+    else
+        strategy.exit("Exit Long", "Long", stop=stop_loss, limit=take_profit)
+
+if short_condition and strategy.position_size == 0
+    stop_loss = close + (atr * stop_atr_mult)
+    take_profit = close - (atr * tp_atr_mult)
+    strategy.entry("Short", strategy.short)
+    alert("SELL " + grade_text + " | " + str.tostring(close) + " | Q:" + str.tostring(quality_pct) + "%", alert.freq_once_per_bar_close)
+    if use_trailing
+        strategy.exit("Exit Short", "Short", stop=stop_loss, trail_offset=atr * trailing_atr_mult / syminfo.mintick, trail_points=atr * trailing_atr_mult / syminfo.mintick)
+    else
+        strategy.exit("Exit Short", "Short", stop=stop_loss, limit=take_profit)
+
+// ===========================================================================
+// 5. KERNEL ENVELOPE VISUAL
+// ===========================================================================
+kernel_center = ta.ema(close, kernel_len)
+k_atr = ta.atr(kernel_atr_len)
+c_bull_1 = #00C853, c_bull_2 = #1B5E20, c_bear_1 = #D32F2F, c_bear_2 = #4E0000
+ku1 = kernel_center + k_atr*0.5, ku2 = kernel_center + k_atr*1.0
+ku3 = kernel_center + k_atr*1.5, ku4 = kernel_center + k_atr*2.0, ku5 = kernel_center + k_atr*3.0
+kl1 = kernel_center - k_atr*0.5, kl2 = kernel_center - k_atr*1.0
+kl3 = kernel_center - k_atr*1.5, kl4 = kernel_center - k_atr*2.0, kl5 = kernel_center - k_atr*3.0
+plot(show_kernel ? kernel_center : na, "Kernel Center", color=color.white, linewidth=2)
+pk_u1=plot(show_kernel?ku1:na,"",color=color.new(c_bull_1,80))
+pk_u2=plot(show_kernel?ku2:na,"",color=color.new(c_bull_1,85))
+pk_u3=plot(show_kernel?ku3:na,"",color=color.new(c_bull_2,88))
+pk_u4=plot(show_kernel?ku4:na,"",color=color.new(c_bull_2,90))
+pk_u5=plot(show_kernel?ku5:na,"",color=color.new(c_bull_2,93))
+pk_l1=plot(show_kernel?kl1:na,"",color=color.new(c_bear_1,80))
+pk_l2=plot(show_kernel?kl2:na,"",color=color.new(c_bear_1,85))
+pk_l3=plot(show_kernel?kl3:na,"",color=color.new(c_bear_2,88))
+pk_l4=plot(show_kernel?kl4:na,"",color=color.new(c_bear_2,90))
+pk_l5=plot(show_kernel?kl5:na,"",color=color.new(c_bear_2,93))
+pk_center=plot(show_kernel?kernel_center:na,"",color=na,display=display.none)
+fill(pk_center,pk_u1,color=color.new(c_bull_1,85))
+fill(pk_u1,pk_u2,color=color.new(c_bull_1,88))
+fill(pk_u2,pk_u3,color=color.new(c_bull_2,90))
+fill(pk_u3,pk_u4,color=color.new(c_bull_2,92))
+fill(pk_u4,pk_u5,color=color.new(c_bull_2,94))
+fill(pk_center,pk_l1,color=color.new(c_bear_1,85))
+fill(pk_l1,pk_l2,color=color.new(c_bear_1,88))
+fill(pk_l2,pk_l3,color=color.new(c_bear_2,90))
+fill(pk_l3,pk_l4,color=color.new(c_bear_2,92))
+fill(pk_l4,pk_l5,color=color.new(c_bear_2,94))
+
+plot(ema_fast, "EMA Fast", color=color.new(color.blue, 60), linewidth=1)
+plot(ema_slow, "EMA Slow", color=color.new(color.orange, 60), linewidth=1)
+plot(ema_filter, "EMA 200", color=color.new(color.red, 50), linewidth=1)
+plot(show_vwap ? vwap : na, "VWAP", color=color.purple, linewidth=2)
+plot(show_vwap?vwap_upper1:na,"",color=color.new(color.purple,60))
+plot(show_vwap?vwap_lower1:na,"",color=color.new(color.purple,60))
+plot(show_vwap?vwap_upper2:na,"",color=color.new(color.purple,75))
+plot(show_vwap?vwap_lower2:na,"",color=color.new(color.purple,75))
+plot(show_vwap?vwap_upper3:na,"",color=color.new(color.purple,85))
+plot(show_vwap?vwap_lower3:na,"",color=color.new(color.purple,85))
+
+// Entry signals — only on confirmed bars
+plotshape(long_condition, "Long", shape.triangleup, location.belowbar, #00C853, size=size.small)
+plotshape(short_condition, "Short", shape.triangledown, location.abovebar, #FF1744, size=size.small)
+if long_condition
+    label.new(bar_index, low - atr*0.6, "BUY " + grade_text, color=color.new(#00C853,60), textcolor=color.white, style=label.style_label_up, size=size.small)
+if short_condition
+    label.new(bar_index, high + atr*0.6, "SELL " + grade_text, color=color.new(#FF1744,60), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// SMC labels
+if show_liquidity and use_smc and barstate.isconfirmed
+    if liquidity_grab_high
+        label.new(bar_index, high + atr*0.35, "LIQ ✕", color=color.new(color.orange,70), textcolor=color.orange, style=label.style_label_down, size=size.tiny)
+    if liquidity_grab_low
+        label.new(bar_index, low - atr*0.35, "LIQ ✕", color=color.new(color.orange,70), textcolor=color.orange, style=label.style_label_up, size=size.tiny)
+if show_bos and use_smc and barstate.isconfirmed
+    if bullish_bos
+        label.new(bar_index, low - atr*0.15, "BOS ↑", color=color.new(#00C853,85), textcolor=#00C853, style=label.style_label_up, size=size.tiny)
+    if bearish_bos
+        label.new(bar_index, high + atr*0.15, "BOS ↓", color=color.new(#FF1744,85), textcolor=#FF1744, style=label.style_label_down, size=size.tiny)
+
+// FVG boxes
+var box[] fvg_bull_boxes = array.new_box(), var box[] fvg_bear_boxes = array.new_box()
+if show_fvg and use_smc and barstate.isconfirmed
+    if bullish_fvg
+        array.push(fvg_bull_boxes, box.new(bar_index-2, low, bar_index+10, high[2], border_color=color.new(color.teal,100), bgcolor=color.new(color.teal,90)))
+        if array.size(fvg_bull_boxes) > 6
+            box.delete(array.shift(fvg_bull_boxes))
+    if bearish_fvg
+        array.push(fvg_bear_boxes, box.new(bar_index-2, low[2], bar_index+10, high, border_color=color.new(color.maroon,100), bgcolor=color.new(color.maroon,90)))
+        if array.size(fvg_bear_boxes) > 6
+            box.delete(array.shift(fvg_bear_boxes))
+
+// S/R & TP/SL Lines
+var line resistance_line=na, var line support_line=na, var label resistance_label=na, var label support_label=na
+var line tp_line=na, var line sl_line=na, var label tp_label=na, var label sl_label=na
+if show_support_resistance and barstate.islastconfirmedhistory
+    if not na(resistance_line)
+        line.delete(resistance_line)
+    if not na(support_line)
+        line.delete(support_line)
+    if not na(resistance_label)
+        label.delete(resistance_label)
+    if not na(support_label)
+        label.delete(support_label)
+    resistance_line := line.new(bar_index-50, dynamic_resistance, bar_index+10, dynamic_resistance, color=color.new(color.red,20), width=sr_line_width, style=sr_style, extend=extend.right)
+    support_line := line.new(bar_index-50, dynamic_support, bar_index+10, dynamic_support, color=color.new(color.green,20), width=sr_line_width, style=sr_style, extend=extend.right)
+    resistance_label := label.new(bar_index-45, dynamic_resistance, "R: "+str.tostring(dynamic_resistance, format.mintick), color=color.new(color.red,80), textcolor=color.red, style=label.style_label_down, size=size.small)
+    support_label := label.new(bar_index-45, dynamic_support, "S: "+str.tostring(dynamic_support, format.mintick), color=color.new(color.green,80), textcolor=color.green, style=label.style_label_up, size=size.small)
+if show_tp_sl_lines and strategy.position_size != 0 and barstate.islastconfirmedhistory
+    if not na(tp_line)
+        line.delete(tp_line)
+    if not na(sl_line)
+        line.delete(sl_line)
+    if not na(tp_label)
+        label.delete(tp_label)
+    if not na(sl_label)
+        label.delete(sl_label)
+    float display_tp = strategy.position_size > 0 ? universal_long_tp : universal_short_tp
+    float display_sl = strategy.position_size > 0 ? universal_long_sl : universal_short_sl
+    tp_line := line.new(bar_index-10, display_tp, bar_index+10, display_tp, color=color.new(#00C853,30), width=tp_sl_line_width, style=tp_sl_style)
+    sl_line := line.new(bar_index-10, display_sl, bar_index+10, display_sl, color=color.new(#FF1744,30), width=tp_sl_line_width, style=tp_sl_style)
+    tp_label := label.new(bar_index+11, display_tp, "TP: "+str.tostring(display_tp, format.mintick), color=color.new(#00C853,80), textcolor=#00C853, style=label.style_label_left, size=size.tiny)
+    sl_label := label.new(bar_index+11, display_sl, "SL: "+str.tostring(display_sl, format.mintick), color=color.new(#FF1744,80), textcolor=#FF1744, style=label.style_label_left, size=size.tiny)
+
+// Gradient candles
+grad_rsi = ta.rsi(close, 14)
+get_candle_color() =>
+    if grad_rsi > 60 and close > open
+        color.from_gradient(grad_rsi, 60, 80, color.new(#1B5E20,0), color.new(#00E676,0))
+    else if grad_rsi < 40 and close < open
+        color.from_gradient(grad_rsi, 20, 40, color.new(#FF1744,0), color.new(#B71C1C,0))
+    else
+        color.new(#78909C, 0)
+barcolor(use_gradient ? get_candle_color() : na)
+
+// ===========================================================================
+// 6. DASHBOARD — LIGHT THEME, BOTTOM-RIGHT + AI TRADE QUALITY GRADE
+// ===========================================================================
+// MTF trends
+mtf_15m_trend = request.security(syminfo.tickerid, "15", ta.ema(close, 21) > ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+mtf_15m_neutral = request.security(syminfo.tickerid, "15", math.abs(ta.ema(close, 21) - ta.ema(close, 50)) < atr * 0.5, lookahead=barmerge.lookahead_off)
+mtf_15m_status = mtf_15m_neutral ? "—" : (mtf_15m_trend ? "↑" : "↓")
+mtf_1h_trend = request.security(syminfo.tickerid, "60", ta.ema(close, 21) > ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+mtf_1h_neutral = request.security(syminfo.tickerid, "60", math.abs(ta.ema(close, 21) - ta.ema(close, 50)) < atr * 0.5, lookahead=barmerge.lookahead_off)
+mtf_1h_status = mtf_1h_neutral ? "—" : (mtf_1h_trend ? "↑" : "↓")
+mtf_4h_trend = request.security(syminfo.tickerid, "240", ta.ema(close, 21) > ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+mtf_4h_neutral = request.security(syminfo.tickerid, "240", math.abs(ta.ema(close, 21) - ta.ema(close, 50)) < atr * 0.5, lookahead=barmerge.lookahead_off)
+mtf_4h_status = mtf_4h_neutral ? "—" : (mtf_4h_trend ? "↑" : "↓")
+
+trend_15m = mtf_15m_status == "↑" ? 1 : mtf_15m_status == "↓" ? -1 : 0
+trend_1h  = mtf_1h_status  == "↑" ? 1 : mtf_1h_status  == "↓" ? -1 : 0
+trend_4h  = mtf_4h_status  == "↑" ? 1 : mtf_4h_status  == "↓" ? -1 : 0
+ta_score = math.abs(trend_15m) + math.abs(trend_1h) + math.abs(trend_4h)
+ta_dir = (trend_15m + trend_1h + trend_4h) > 0 ? "↑" : (trend_15m + trend_1h + trend_4h) < 0 ? "↓" : "—"
+ta_color = ta_score == 3 ? #00C853 : ta_score == 2 ? #FF9800 : #FF1744
+
+rr_ratio = current_signal == "LONG" ? (universal_long_tp > universal_long_sl ? (universal_long_tp - close) / math.max(close - universal_long_sl, syminfo.mintick) : 0) : (universal_short_sl > universal_short_tp ? (close - universal_short_tp) / math.max(universal_short_sl - close, syminfo.mintick) : 0)
+ds_status = "D:" + str.tostring(array.size(demand_boxes)) + " S:" + str.tostring(array.size(supply_boxes))
+wr_display = total_trades > 0 ? str.tostring(math.round(win_rate * 100, 1)) + "%" : "—"
+pf_display = pf_val > 0 ? str.tostring(math.round(pf_val, 1)) : "—"
+
+if showDashboard
+    var table dash = table.new(position.bottom_right, 2, 18, border_width=1, border_color=color.new(#BDBDBD, 30), frame_width=1, frame_color=color.new(#BDBDBD, 30))
+    if barstate.islastconfirmedhistory
+        // Light theme colors
+        bg_header = color.new(#F5F5F5, 0)
+        bg_row    = color.new(#FFFFFF, 0)
+        bg_alt    = color.new(#FAFAFA, 0)
+        txt_dark  = #212121
+        txt_mid   = #616161
+        txt_light = #9E9E9E
+        sz = size.small
+        szT = size.tiny
+
+        // ── Header: AI Grade (big, prominent) ──
+        table.cell(dash, 0, 0, "AI Grade", text_color=txt_dark, bgcolor=bg_header, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 0, grade_text + "  " + str.tostring(quality_pct) + "%", text_color=color.white, bgcolor=grade_color, text_size=size.normal, text_halign=text.align_right)
+
+        // ── KNN ──
+        table.cell(dash, 0, 1, "KNN " + str.tostring(knn_neighbors) + "N", text_color=txt_mid, bgcolor=bg_row, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 1, knn_class + " " + str.tostring(math.round(knn_conf, 0)) + "%", text_color=color.white, bgcolor=knn_color, text_size=sz, text_halign=text.align_right)
+
+        // ── Features ──
+        table.cell(dash, 0, 2, "RSI/WT/CCI/ADX", text_color=txt_light, bgcolor=bg_alt, text_size=szT, text_halign=text.align_left)
+        table.cell(dash, 1, 2, str.tostring(math.round(knn_rsi_val,0))+"/"+str.tostring(math.round(knn_wt_val,0))+"/"+str.tostring(math.round(knn_cci_val,0))+"/"+str.tostring(math.round(knn_adx_val,0)), text_color=txt_mid, bgcolor=bg_alt, text_size=szT, text_halign=text.align_right)
+
+        // ── Stats ──
+        table.cell(dash, 0, 3, "Stats", text_color=txt_dark, bgcolor=bg_header, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 3, str.tostring(total_trades) + " trades", text_color=txt_mid, bgcolor=bg_header, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 4, "Win Rate", text_color=txt_mid, bgcolor=bg_row, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 4, wr_display, text_color=color.white, bgcolor=win_rate>0.55?#00C853:win_rate>0.45?#FF9800:#FF1744, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 5, "Profit Factor", text_color=txt_mid, bgcolor=bg_alt, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 5, pf_display, text_color=color.white, bgcolor=pf_val>1.5?#00C853:pf_val>1.0?#FF9800:#FF1744, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 6, "R:R", text_color=txt_mid, bgcolor=bg_row, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 6, "1:"+str.tostring(math.round(rr_ratio,2)), text_color=rr_ratio>=2?#00C853:rr_ratio>=1.5?#FF9800:#FF1744, bgcolor=bg_row, text_size=sz, text_halign=text.align_right)
+
+        // ── Analysis ──
+        table.cell(dash, 0, 7, "Analysis", text_color=txt_dark, bgcolor=bg_header, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 7, "", bgcolor=bg_header, text_size=sz)
+
+        table.cell(dash, 0, 8, "15m / 1h / 4h", text_color=txt_mid, bgcolor=bg_row, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 8, mtf_15m_status+" / "+mtf_1h_status+" / "+mtf_4h_status+"  "+str.tostring(ta_score)+"/3", text_color=color.white, bgcolor=ta_color, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 9, "Ribbon", text_color=txt_mid, bgcolor=bg_alt, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 9, ribbon_bullish?"BULL":ribbon_bearish?"BEAR":"FLAT", text_color=color.white, bgcolor=ribbon_bullish?#00C853:ribbon_bearish?#FF1744:#9E9E9E, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 10, "Smart Money", text_color=txt_mid, bgcolor=bg_row, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 10, smc_bullish?"BULL":smc_bearish?"BEAR":"—", text_color=color.white, bgcolor=smc_bullish?#00C853:smc_bearish?#FF1744:#9E9E9E, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 11, "Volatility", text_color=txt_mid, bgcolor=bg_alt, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 11, str.tostring(math.round(atr_percentile,0))+"%", text_color=txt_dark, bgcolor=bg_alt, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 12, "Volume", text_color=txt_mid, bgcolor=bg_row, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 12, volume_pressure+" "+str.tostring(math.round(volume_buy_pct,0))+"%", text_color=color.white, bgcolor=volume_pressure_color, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 13, "D/S Zones", text_color=txt_mid, bgcolor=bg_alt, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 13, ds_status, text_color=txt_dark, bgcolor=bg_alt, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 14, "Confluence", text_color=txt_mid, bgcolor=bg_row, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 14, str.tostring(math.round(confluence_score,1))+"/5.5", text_color=confluence_score>=4?#00C853:confluence_score>=3?#FF9800:#FF1744, bgcolor=bg_row, text_size=sz, text_halign=text.align_right)
+
+        table.cell(dash, 0, 15, "SL / TP", text_color=txt_light, bgcolor=bg_alt, text_size=szT, text_halign=text.align_left)
+        table.cell(dash, 1, 15, str.tostring(universal_sl_display, format.mintick)+" / "+str.tostring(universal_tp_display, format.mintick), text_color=txt_light, bgcolor=bg_alt, text_size=szT, text_halign=text.align_right)
+
+        // ── Signal ──
+        signal_bg = current_signal == "LONG" ? #00C853 : current_signal == "SHORT" ? #FF1744 : #9E9E9E
+        table.cell(dash, 0, 16, "SIGNAL", text_color=txt_dark, bgcolor=bg_header, text_size=sz, text_halign=text.align_left)
+        table.cell(dash, 1, 16, current_signal, text_color=color.white, bgcolor=signal_bg, text_size=size.normal, text_halign=text.align_right)
+
+        // ── Branding ──
+        table.cell(dash, 0, 17, "berttradetech.com", text_color=txt_light, bgcolor=bg_row, text_size=szT, text_halign=text.align_left)
+        table.cell(dash, 1, 17, current_session + " | v2.0", text_color=txt_light, bgcolor=bg_row, text_size=szT, text_halign=text.align_right)
+
+View in Pine Editor・749 lines
+Use on chart
+3
+7
+2
+4 122
+══════════════════════════════════════════
+TRADINGVIEW DESCRIPTION
+══════════════════════════════════════════
+SHORT DESCRIPTION:
+Non-repainting ML classifier using Lorentzian distance metric with 4-feature KNN, kernel regression envelope, multi-layer confluence scoring, and AI Trade Quality Grade. Updated v2.0.
+
+══════════════════════════════════════════
+FULL DESCRIPTION:
+══════════════════════════════════════════
+
+█ UPDATE v2.0 — CRITICAL IMPROVEMENTS
+
+This is a major update to the Lorentzian KNN Classifier strategy. The previous version contained a repainting issue that inflated backtest results. This has been fully resolved:
+
+✦ calc_on_every_tick disabled — all calculations on confirmed (closed) bars only
+✦ Entry conditions gated by barstate.isconfirmed — no mid-bar decisions
+✦ Trailing stop values properly converted to ticks via syminfo.mintick
+✦ Backtest results now reflect realistic, achievable performance
+
+If you were using the previous version, please update immediately. Live trading results will now match what the backtest shows.
+
+
+█ WHAT IS THIS?
+
+A machine learning classification strategy that uses the Lorentzian distance metric — a non-Euclidean measure better suited for financial time series than traditional Euclidean distance. The classifier analyzes 4 normalized features across a sliding training window and predicts short-term price direction using inverse-distance-weighted K-Nearest Neighbors voting.
+
+
+█ HOW THE KNN CLASSIFIER WORKS
+
+The Lorentzian distance between two points is calculated as:
+
+d(x, y) = Σ log(1 + |xᵢ − yᵢ|)
+
+Unlike Euclidean distance, Lorentzian distance is less sensitive to outliers in individual features — a property that makes it more robust for noisy financial data.
+
+The classifier uses 4 features, each z-score normalized over 50 bars:
+• RSI (default 14) — momentum oscillator
+• WaveTrend (LazyBear, channel 10, average 21) — cycle detection
+• CCI (default 20) — mean reversion pressure
+• ADX (default 14) — trend strength
+
+For each bar, the algorithm scans a training window (default 50 bars back) and computes the Lorentzian distance to every historical bar. Each neighbor casts a weighted vote (weight = 1/distance) based on its 5-bar forward return label. The aggregate bull vs bear vote produces a score smoothed by EMA(3).
+
+KNN Score > +0.1 → BULL classification
+KNN Score < −0.1 → BEAR classification
+Otherwise → NEUTRAL
+
+
+█ NEW: AI TRADE QUALITY GRADE
+
+Every signal receives a letter grade from A+ to F, calculated from three components:
+
+• KNN Confidence (40%) — how decisive the classifier vote was
+• Confluence Score (35%) — how many independent filters agree (MTF, Ribbon, Order Flow, Smart Money, ADX)
+• Regime Fitness (25%) — whether market conditions match the strategy type (trending market + trend signal = high fitness)
+
+Grade interpretation:
+A+ / A → High-conviction setup, all systems aligned
+B → Good setup, minor disagreements
+C → Marginal, proceed with caution
+D / F → Weak setup, consider skipping
+
+The grade appears on entry labels ("BUY A+", "SELL B") and in alert messages, giving you an instant read on trade quality without analyzing the dashboard.
+
+
+█ MULTI-LAYER CONFLUENCE ENGINE
+
+The strategy combines 3 entry types with 5 institutional-grade filters:
+
+Entry Types:
+• Trend Following — EMA 21/50 crossover + EMA 200 direction + volume spike
+• Breakout — Donchian channel break + volume confirmation
+• Mean Reversion — Bollinger Band extreme + RSI reversal (ranging markets only)
+
+Filters (each independently toggleable):
+• MTF Filter — higher timeframe EMA alignment (default 4H)
+• MA Ribbon — 8-layer Fibonacci ribbon (8/13/21/34/55/89/144/233) with alignment threshold
+• Order Flow — VWAP position + CVD divergence + volume delta analysis
+• Smart Money Concepts — Order blocks, fair value gaps, liquidity sweeps, BOS/CHoCH, demand/supply zones
+• Volatility Regime — Bollinger Band width expansion/contraction + ATR percentile ranking
+
+Confluence score: 0–5.55 (5 base filters + KNN weight 0.55)
+
+
+█ KERNEL REGRESSION ENVELOPE
+
+Visual overlay showing an EMA-based kernel center with ATR-scaled bands (±0.5σ to ±3σ). Green gradient above center, red gradient below. Provides instant visual context for where price sits relative to the statistical envelope.
+
+
+█ RISK MANAGEMENT
+
+• ATR-based stop loss (default 2.0x ATR)
+• ATR-based take profit (default 3.0x ATR)
+• Optional trailing stop (default 1.5x ATR activation)
+• Session time filter
+• All values properly tick-normalized for accurate backtesting
+
+
+█ DASHBOARD
+
+Light-themed panel (bottom-right) showing:
+• AI Trade Quality Grade (prominent, color-coded)
+• KNN classification + confidence %
+• Feature values (RSI/WT/CCI/ADX)
+• Win rate, profit factor, R:R ratio
+• Multi-timeframe trend alignment (15m/1h/4h)
+• Ribbon, Smart Money, Volatility status
+• Volume pressure analysis
+• Demand/Supply zone count
+• Current session indicator
+• Active signal with SL/TP levels
+
+
+█ USAGE NOTES
+
+• Works on any instrument and timeframe
+• Best results on 15m–4H for intraday/swing trading
+• All filters can be individually enabled/disabled
+• KNN lookback window (20–100) trades off speed vs accuracy
+• Gradient candle coloring provides additional visual momentum context
+• The strategy does NOT repaint — what you see in backtest is what you get live
+
+
+█ CHANGELOG
+
+v2.0 (current):
+— Fixed repainting: calc_on_every_tick=false + barstate.isconfirmed gate
+— Fixed trailing stop tick conversion (/ syminfo.mintick)
+— Added AI Trade Quality Grade (A+/A/B/C/D/F)
+— Light dashboard theme, repositioned to bottom-right
+— Compact layout (18 rows vs 22)
+— Grade shown on entry labels and alerts
+— barstate.islast → barstate.islastconfirmedhistory for dashboard
+
+v1.0:
+— Initial release with Lorentzian KNN, kernel envelope, SMC, order flow

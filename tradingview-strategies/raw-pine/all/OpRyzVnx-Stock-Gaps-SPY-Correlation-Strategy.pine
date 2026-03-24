@@ -1,0 +1,61 @@
+//@version=5
+
+strategy("Stock Gaps SPY Correlation Strategy", overlay = true)
+
+
+open_spy = request.security("SPY", timeframe.period, open)
+high_spy = request.security("SPY", timeframe.period, high)
+low_spy = request.security("SPY", timeframe.period, low)
+close_spy = request.security("SPY", timeframe.period, close)
+
+minimalDeviationTooltip = "Specifies the minimal size of detected gaps, as a percentage of the average high-low range for the last 14 bars."
+minimalDeviationInput = nz(input.float(30.0, "Minimal Deviation (%)", tooltip = minimalDeviationTooltip, minval=1, maxval=100) / 100 * ta.sma(high_spy-low_spy, 14))
+sec = request.security("PCTABOVEVWAP.US", timeframe.period, close)
+sec2 = request.security("USI:ADDQ", timeframe.period, close)
+
+
+
+
+// Detect gaps.
+isGapDown = open_spy < close_spy[1] and low_spy[1] - high_spy >= minimalDeviationInput 
+isGapUp = open_spy > close_spy[1] and low_spy - high_spy[1] >= minimalDeviationInput
+
+t2 = time(timeframe.period, input.session("0930-1000"))
+exitt = time(timeframe.period, input.session("1430-1600"))
+
+long = isGapUp and t2 and ( sec2>=0) 
+short = isGapDown and t2  and ( sec <=50 and  sec2<0)
+
+if(long)
+    strategy.entry("long",strategy.long)
+
+if(short)
+    strategy.entry('short',strategy.short)
+
+
+strategy.close_all(when=exitt)
+
+View in Pine Editor・36 lines
+Use on chart
+1
+4
+1
+5 803
+This is daytrade stock strategy, designed to take the best out of the daily gaps that are forming between the close of previous day and opening of present day.
+
+At the same time its logic has been adapted for SPY chart, in order to use correlation with the other stocks/assets/ etf which are linked with SP500 movement.
+
+Lastly it has been added 2 new confirmation logics, based on the USI: advance/decline chart and percentage above vwap among all US stocks.
+
+
+The rules for entry are simple :
+
+We are at the opening daily candle, we have a long/short gap based on where the opening is happening and at the same time we are checking to see that the current different between the current difference between low and previous high (or viceversa) is higher than an established parameter(minimal deviation )
+
+For exit, we exit based on time/clock parameter, in this case by default I selected 1h and half before close of the US session.
+
+For testing purposes I have used 10% of the available capital, with a 0.0035$ comission per each share bought ( IBKR comissions)
+
+
+
+If there are any questions, please let me know either here or in private !

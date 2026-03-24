@@ -1,0 +1,116 @@
+//@version=5
+//@version=5
+strategy("SMC Strategy with Premium, Equilibrium, and Discount Zones", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === Instellingen voor Swing High en Swing Low ===
+swingHighLength = input.int(8, title="Swing High Length")
+swingLowLength = input.int(8, title="Swing Low Length")
+
+// Vind de recente swing highs en lows
+var float swingHigh = na
+var float swingLow = na
+
+if (ta.highestbars(high, swingHighLength) == 0)
+    swingHigh := high
+
+if (ta.lowestbars(low, swingLowLength) == 0)
+    swingLow := low
+
+// Bereken Equilibrium, Premium en Discount Zones
+equilibrium = (swingHigh + swingLow) / 2
+premiumZone = swingHigh
+discountZone = swingLow
+
+// Plot de zones op de grafiek
+plot(equilibrium, title="Equilibrium", color=color.blue, linewidth=2)
+plot(premiumZone, title="Premium Zone (Resistance)", color=color.red, linewidth=1)
+plot(discountZone, title="Discount Zone (Support)", color=color.green, linewidth=1)
+
+// === Simple Moving Average om trendrichting te bepalen ===
+smaLength = input.int(50, title="SMA Length")
+sma = ta.sma(close, smaLength)
+plot(sma, title="SMA", color=color.orange)
+
+// === Entry- en Exitregels op basis van zones en trendrichting ===
+
+// Koop- en verkoopsignalen
+buySignal = close < equilibrium and close > discountZone and close > sma // Prijs in discount zone en boven SMA
+sellSignal = close > equilibrium and close < premiumZone and close < sma // Prijs in premium zone en onder SMA
+
+// Order Blocks (Eenvoudig: hoogste en laagste kaars binnen de laatste 20 kaarsen)
+orderBlockLength = input.int(20, title="Order Block Length")
+orderBlockHigh = ta.highest(high, orderBlockLength)
+orderBlockLow = ta.lowest(low, orderBlockLength)
+
+// Koop- en verkoopsignalen met order block bevestiging
+buySignalOB = buySignal and close >= orderBlockLow // Koop in discount zone met ondersteuning van order block
+sellSignalOB = sellSignal and close <= orderBlockHigh // Verkoop in premium zone met weerstand van order block
+
+// === Uitvoeren van Trades ===
+if (buySignalOB)
+    strategy.entry("Buy", strategy.long)
+    
+if (sellSignalOB)
+    strategy.entry("Sell", strategy.short)
+
+// === Plots voor visuele feedback ===
+plotshape(buySignalOB, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(sellSignalOB, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// === Liquiditeitsjachten aangeven ===
+// Simpel: markeer recente swing highs en lows als liquiditeitszones
+liquidityZoneHigh = ta.valuewhen(high == swingHigh, high, 0)
+liquidityZoneLow = ta.valuewhen(low == swingLow, low, 0)
+
+// Markeer liquiditeitszones
+plot(liquidityZoneHigh, title="Liquidity Zone High", color=color.red, linewidth=1, style=plot.style_cross)
+plot(liquidityZoneLow, title="Liquidity Zone Low", color=color.green, linewidth=1, style=plot.style_cross)
+
+View in Pine Editor・67 lines
+Use on chart
+1.1 K
+5
+46 017
+Nov 6, 2024
+This Pine Script strategy is based on Smart Money Concepts (SMC), designed for TradingView. Here's a brief summary of what the script does:
+
+1. Swing High and Low Calculation: It identifies recent swing highs and lows, which are used to define key zones.
+
+2. Equilibrium, Premium, and Discount Zones:
+- Equilibrium is the midpoint between the swing high and low.
+- Premium Zone is above the equilibrium, indicating a potential resistance area (sell zone).
+- Discount Zone is below the equilibrium, indicating a potential support area (buy zone).
+
+3. Simple Moving Average (SMA): It uses a 50-period SMA to determine the trend direction. If the price is above the SMA, the trend is bullish; if it's below, the trend is bearish.
+
+4. Buy and Sell Signals:
+- Buy Signal: Generated when the price is in the discount zone and above the equilibrium, with the price also above the SMA.
+- Sell Signal: Triggered when the price is in the premium zone and below the equilibrium, with the price also below the SMA.
+
+5. Order Blocks: It detects basic order blocks by identifying the highest high and lowest low within the last 20 bars. These levels help confirm the buy and sell signals.
+
+6. Liquidity Zones: It marks the swing high and low as potential liquidity zones, indicating where price may reverse due to institutional players' activity.
+
+The strategy then executes trades based on these signals, plotting buy and sell markers on the chart and showing the key levels (zones) and trend direction.
+Nov 12, 2024
+Release Notes
+This Pine Script strategy is based on Smart Money Concepts (SMC) in according to Discount en Premium zones. Be careful: workst best with crypto! Here's a brief summary of what the script does:
+
+1. Swing High and Low Calculation: It identifies recent swing highs and lows, which are used to define key zones.
+
+2. Equilibrium, Premium, and Discount Zones:
+- Equilibrium is the midpoint between the swing high and low.
+- Premium Zone is above the equilibrium, indicating a potential resistance area (sell zone).
+- Discount Zone is below the equilibrium, indicating a potential support area (buy zone).
+
+3. Simple Moving Average (SMA): It uses a 50-period SMA to determine the trend direction. If the price is above the SMA, the trend is bullish; if it's below, the trend is bearish.
+
+4. Buy and Sell Signals:
+- Buy Signal: Generated when the price is in the discount zone and above the equilibrium, with the price also above the SMA.
+- Sell Signal: Triggered when the price is in the premium zone and below the equilibrium, with the price also below the SMA.
+
+5. Order Blocks: It detects basic order blocks by identifying the highest high and lowest low within the last 20 bars. These levels help confirm the buy and sell signals.
+
+6. Liquidity Zones: It marks the swing high and low as potential liquidity zones, indicating where price may reverse due to institutional players' activity.
+
+The strategy then executes trades based on these signals, plotting buy and sell markers on the chart and showing the key levels (zones) and trend direction.

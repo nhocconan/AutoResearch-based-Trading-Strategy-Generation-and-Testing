@@ -1,0 +1,807 @@
+//@version=6
+strategy('13 EMA Breakout + Liquidity Sweep + BOS Confirmation (A / A+)', overlay = true, process_orders_on_close = true, calc_on_every_tick = false, pyramiding = 0, commission_type = strategy.commission.percent, commission_value = 0.02, slippage = 1, initial_capital = 100000)
+
+//====================================================
+// Notes (Pine v5 constraints)
+// - strategy() properties (pyramiding/commission/slippage) must be constants.
+// - Change them from Strategy Properties after adding script.
+//====================================================
+
+//==============================
+// Inputs
+//==============================
+grpCore = 'Core Logic'
+grpSweep = 'Liquidity Sweep'
+grpBOS = 'BOS / Structure'
+grpPattern = 'Pattern (A Setup)'
+grpFilters = 'Confluence Filters'
+grpRisk = 'Risk Management'
+grpKill = 'Daily Kill Switch'
+grpSess = 'Sessions / Time'
+
+useSlope = input.bool(true, 'Require EMA13 slope confirmation', group = grpCore)
+entryMode = input.string('Breakout close', 'Entry mode', options = ['Breakout close', 'EMA13 retest entry', 'Structure retest entry'], group = grpCore)
+setupValidBars = input.int(20, 'Setup validity bars (post qualification)', minval = 1, group = grpCore)
+
+liqSource = input.string('Previous Day High/Low', 'Key liquidity source', options = ['Previous Day High/Low', 'Previous Session High/Low', 'First N-bar session range'], group = grpSweep)
+sweepAtrMult = input.float(0.20, 'Sweep ATR(14) multiplier', minval = 0.0, step = 0.05, group = grpSweep)
+sweepMinTicks = input.int(2, 'Sweep minimum ticks', minval = 0, group = grpSweep)
+sweepConfirmBars = input.int(3, 'Bars allowed to confirm sweep', minval = 1, group = grpSweep)
+sweepValidBars = input.int(30, 'Sweep validity bars (A+ path)', minval = 1, group = grpSweep)
+
+bosLeft = input.int(3, 'Pivot left bars', minval = 1, group = grpBOS)
+bosRight = input.int(3, 'Pivot right bars', minval = 1, group = grpBOS)
+bosTimingMode = input.string('EMA Break THEN BOS', 'BOS timing mode', options = ['EMA Break THEN BOS', 'BOS THEN EMA Break', 'Either order within N bars'], group = grpBOS)
+bosTimingBars = input.int(10, 'N bars for timing relation', minval = 1, group = grpBOS)
+requireBosRetest = input.bool(false, 'Require BOS retest before entry', group = grpBOS)
+bosRetestBars = input.int(10, 'BOS retest validity bars', minval = 1, group = grpBOS)
+
+patternType = input.string('Double Top / Bottom', 'Pattern type (A path)', options = ['Double Top / Bottom', 'Range breakout', 'Wedge compression proxy'], group = grpPattern)
+patternValidBars = input.int(20, 'Pattern validity bars', minval = 1, group = grpPattern)
+dblAtrTol = input.float(0.30, 'Double top/bottom tolerance (ATR multiple)', minval = 0.01, step = 0.05, group = grpPattern)
+dblMinSep = input.int(4, 'Double top/bottom minimum pivot separation', minval = 1, group = grpPattern)
+rangeBars = input.int(20, 'Range box bars', minval = 5, group = grpPattern)
+rangeMaxAtr = input.float(1.20, 'Max range width ATR multiple', minval = 0.1, step = 0.1, group = grpPattern)
+
+useEMA50 = input.bool(true, 'EMA50 directional filter', group = grpFilters)
+useEMA200 = input.bool(false, 'EMA200 directional filter', group = grpFilters)
+useStackedEMA = input.bool(false, 'Stacked EMA alignment filter', group = grpFilters)
+useVolFilter = input.bool(false, 'Volume above SMA filter', group = grpFilters)
+volLen = input.int(20, 'Volume SMA length', minval = 1, group = grpFilters)
+useATRFilter = input.bool(false, 'ATR volatility filter', group = grpFilters)
+atrFilterLen = input.int(50, 'ATR SMA length', minval = 1, group = grpFilters)
+atrFilterMult = input.float(1.0, 'ATR min multiple vs ATR SMA', minval = 0.1, step = 0.1, group = grpFilters)
+useSessionFilter = input.bool(true, 'Session time filter', group = grpFilters)
+oneTradeOnly = input.bool(true, 'One-trade-at-a-time', group = grpFilters)
+
+tzInput = input.string('America/New_York', 'Session timezone', group = grpSess)
+tradeSession = input.session('0930-1600', 'Allowed trade session', group = grpSess)
+prevSessionName = input.string('London', 'Previous session (for liquidity source)', options = ['Asia', 'London', 'New York'], group = grpSess)
+firstNRangeBars = input.int(12, 'First N bars for session range', minval = 1, group = grpSess)
+
+stopMethod = input.string('Pivot structure stop', 'Stop method', options = ['Pivot structure stop', 'ATR stop', 'Fixed tick stop'], group = grpRisk)
+stopBufferTicks = input.int(2, 'Structure stop buffer (ticks)', minval = 0, group = grpRisk)
+stopAtrMult = input.float(1.5, 'ATR stop multiplier', minval = 0.1, step = 0.1, group = grpRisk)
+fixedStopTicks = input.int(20, 'Fixed stop (ticks)', minval = 1, group = grpRisk)
+tp1ClosePct = input.float(50.0, 'TP1 close %', minval = 1, maxval = 100, step = 1, group = grpRisk)
+runnerTp2Mode = input.string('2R', 'Runner TP2 mode', options = ['2R', '3R', 'Opposite liquidity level', 'ATR trailing stop', 'EMA13 trailing stop'], group = grpRisk)
+trailAtrMult = input.float(1.2, 'ATR trailing multiplier', minval = 0.1, step = 0.1, group = grpRisk)
+
+killMode = input.string('None', 'Daily loss kill switch mode', options = ['None', 'Max $ Loss', 'Max % Equity'], group = grpKill)
+maxDailyLossUSD = input.float(1000, 'Max daily loss ($)', minval = 0, group = grpKill)
+maxDailyLossPct = input.float(2.0, 'Max daily loss (% equity)', minval = 0, step = 0.1, group = grpKill)
+
+//==============================
+// Base calculations
+//==============================
+atr = ta.atr(14)
+ema13 = ta.ema(close, 13)
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+plot(ema13, 'EMA13', color = color.new(color.teal, 0), linewidth = 2)
+plot(ema50, 'EMA50', color = color.new(color.orange, 0))
+plot(ema200, 'EMA200', color = color.new(color.blue, 0))
+
+inTradeSession = not na(time(timeframe.period, tradeSession, tzInput))
+sessionStr = prevSessionName == 'Asia' ? '0000-0800' : prevSessionName == 'London' ? '0800-1300' : '1300-1700'
+inSelectedSession = not na(time(timeframe.period, sessionStr, tzInput))
+
+//==============================
+// Previous day/session/range levels
+//==============================
+newDay = ta.change(time('D')) != 0
+
+var float dayHigh = na
+var float dayLow = na
+var float prevDayHigh = na
+var float prevDayLow = na
+
+if barstate.isfirst
+    dayHigh := high
+    dayLow := low
+    dayLow
+
+if newDay
+    prevDayHigh := dayHigh
+    prevDayLow := dayLow
+    dayHigh := high
+    dayLow := low
+    dayLow
+else
+    dayHigh := math.max(dayHigh, high)
+    dayLow := math.min(dayLow, low)
+    dayLow
+
+var float currSelHigh = na
+var float currSelLow = na
+var float prevSelHigh = na
+var float prevSelLow = na
+
+if inSelectedSession and not inSelectedSession[1]
+    currSelHigh := high
+    currSelLow := low
+    currSelLow
+else if inSelectedSession
+    currSelHigh := math.max(currSelHigh, high)
+    currSelLow := math.min(currSelLow, low)
+    currSelLow
+
+if not inSelectedSession and inSelectedSession[1]
+    prevSelHigh := currSelHigh
+    prevSelLow := currSelLow
+    currSelHigh := na
+    currSelLow := na
+    currSelLow
+
+var int sessionBarCount = 0
+var float firstNHigh = na
+var float firstNLow = na
+var bool firstNReady = false
+
+if inTradeSession and not inTradeSession[1]
+    sessionBarCount := 1
+    firstNHigh := high
+    firstNLow := low
+    firstNReady := firstNRangeBars == 1
+    firstNReady
+else if inTradeSession
+    sessionBarCount := sessionBarCount + 1
+    if sessionBarCount <= firstNRangeBars
+        firstNHigh := math.max(firstNHigh, high)
+        firstNLow := math.min(firstNLow, low)
+        if sessionBarCount == firstNRangeBars
+            firstNReady := true
+            firstNReady
+else
+    sessionBarCount := 0
+    firstNReady := false
+    firstNReady
+
+liqHigh = liqSource == 'Previous Day High/Low' ? prevDayHigh : liqSource == 'Previous Session High/Low' ? prevSelHigh : firstNReady ? firstNHigh : na
+liqLow = liqSource == 'Previous Day High/Low' ? prevDayLow : liqSource == 'Previous Session High/Low' ? prevSelLow : firstNReady ? firstNLow : na
+
+plot(liqHigh, 'Liquidity High', color = color.new(color.red, 25), style = plot.style_linebr)
+plot(liqLow, 'Liquidity Low', color = color.new(color.green, 25), style = plot.style_linebr)
+
+//==============================
+// Sweep detection
+//==============================
+sweepDist = math.max(sweepMinTicks * syminfo.mintick, atr * sweepAtrMult)
+
+var int upSweepBreachBar = na
+var int dnSweepBreachBar = na
+var int lastBearSweepBar = na
+var int lastBullSweepBar = na
+
+bearSweepEvent = false
+bullSweepEvent = false
+
+if barstate.isconfirmed
+    if not na(liqHigh) and high > liqHigh + sweepDist
+        upSweepBreachBar := bar_index
+        upSweepBreachBar
+    if not na(upSweepBreachBar)
+        if bar_index - upSweepBreachBar <= sweepConfirmBars and close < liqHigh
+            bearSweepEvent := true
+            lastBearSweepBar := bar_index
+            upSweepBreachBar := na
+            upSweepBreachBar
+        else if bar_index - upSweepBreachBar > sweepConfirmBars
+            upSweepBreachBar := na
+            upSweepBreachBar
+
+    if not na(liqLow) and low < liqLow - sweepDist
+        dnSweepBreachBar := bar_index
+        dnSweepBreachBar
+    if not na(dnSweepBreachBar)
+        if bar_index - dnSweepBreachBar <= sweepConfirmBars and close > liqLow
+            bullSweepEvent := true
+            lastBullSweepBar := bar_index
+            dnSweepBreachBar := na
+            dnSweepBreachBar
+        else if bar_index - dnSweepBreachBar > sweepConfirmBars
+            dnSweepBreachBar := na
+            dnSweepBreachBar
+
+if bullSweepEvent
+    label.new(bar_index, low, 'Sweep (Bull)', style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny)
+if bearSweepEvent
+    label.new(bar_index, high, 'Sweep (Bear)', style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny)
+
+//==============================
+// BOS / Structure (confirmed pivots only)
+//==============================
+ph = ta.pivothigh(high, bosLeft, bosRight)
+pl = ta.pivotlow(low, bosLeft, bosRight)
+
+var float swingHigh = na
+var float swingLow = na
+
+if not na(ph)
+    swingHigh := ph
+    swingHigh
+if not na(pl)
+    swingLow := pl
+    swingLow
+
+plot(swingHigh, 'Active Swing High', color = color.new(color.maroon, 0), style = plot.style_linebr, linewidth = 2)
+plot(swingLow, 'Active Swing Low', color = color.new(color.lime, 0), style = plot.style_linebr, linewidth = 2)
+
+bosUpEvent = barstate.isconfirmed and not na(swingHigh) and close > swingHigh and close[1] <= swingHigh
+bosDnEvent = barstate.isconfirmed and not na(swingLow) and close < swingLow and close[1] >= swingLow
+
+var int lastBosUpBar = na
+var int lastBosDnBar = na
+
+if bosUpEvent
+    lastBosUpBar := bar_index
+    label.new(bar_index, high, 'BOS ↑', style = label.style_label_up, color = color.new(color.green, 60), textcolor = color.white, size = size.tiny)
+if bosDnEvent
+    lastBosDnBar := bar_index
+    label.new(bar_index, low, 'BOS ↓', style = label.style_label_down, color = color.new(color.red, 60), textcolor = color.white, size = size.tiny)
+
+var float bosUpLevel = na
+var float bosDnLevel = na
+var int bosUpBreakBar = na
+var int bosDnBreakBar = na
+var bool bosUpRetested = false
+var bool bosDnRetested = false
+
+if bosUpEvent
+    bosUpLevel := swingHigh
+    bosUpBreakBar := bar_index
+    bosUpRetested := not requireBosRetest
+    bosUpRetested
+if bosDnEvent
+    bosDnLevel := swingLow
+    bosDnBreakBar := bar_index
+    bosDnRetested := not requireBosRetest
+    bosDnRetested
+
+if requireBosRetest and not na(bosUpBreakBar) and not bosUpRetested
+    if bar_index - bosUpBreakBar <= bosRetestBars
+        if low <= bosUpLevel and close > bosUpLevel
+            bosUpRetested := true
+            bosUpRetested
+    else
+        bosUpBreakBar := na
+        bosUpBreakBar
+
+if requireBosRetest and not na(bosDnBreakBar) and not bosDnRetested
+    if bar_index - bosDnBreakBar <= bosRetestBars
+        if high >= bosDnLevel and close < bosDnLevel
+            bosDnRetested := true
+            bosDnRetested
+    else
+        bosDnBreakBar := na
+        bosDnBreakBar
+
+//==============================
+// EMA confirmation + BOS timing
+//==============================
+emaSlopeUp = ema13 > ema13[1]
+emaSlopeDn = ema13 < ema13[1]
+
+emaBreakUp = barstate.isconfirmed and ta.crossover(close, ema13) and (not useSlope or emaSlopeUp)
+emaBreakDn = barstate.isconfirmed and ta.crossunder(close, ema13) and (not useSlope or emaSlopeDn)
+
+var int lastEmaUpBar = na
+var int lastEmaDnBar = na
+
+if emaBreakUp
+    lastEmaUpBar := bar_index
+    lastEmaUpBar
+if emaBreakDn
+    lastEmaDnBar := bar_index
+    lastEmaDnBar
+
+longBaseEvent = false
+shortBaseEvent = false
+
+if bosTimingMode == 'EMA Break THEN BOS'
+    longBaseEvent := bosUpEvent and not na(lastEmaUpBar) and bar_index - lastEmaUpBar <= bosTimingBars
+    shortBaseEvent := bosDnEvent and not na(lastEmaDnBar) and bar_index - lastEmaDnBar <= bosTimingBars
+    shortBaseEvent
+else if bosTimingMode == 'BOS THEN EMA Break'
+    longBaseEvent := emaBreakUp and not na(lastBosUpBar) and bar_index - lastBosUpBar <= bosTimingBars
+    shortBaseEvent := emaBreakDn and not na(lastBosDnBar) and bar_index - lastBosDnBar <= bosTimingBars
+    shortBaseEvent
+else
+    longBaseEvent := bosUpEvent and not na(lastEmaUpBar) and bar_index - lastEmaUpBar <= bosTimingBars or emaBreakUp and not na(lastBosUpBar) and bar_index - lastBosUpBar <= bosTimingBars or bosUpEvent and emaBreakUp
+    shortBaseEvent := bosDnEvent and not na(lastEmaDnBar) and bar_index - lastEmaDnBar <= bosTimingBars or emaBreakDn and not na(lastBosDnBar) and bar_index - lastBosDnBar <= bosTimingBars or bosDnEvent and emaBreakDn
+    shortBaseEvent
+
+var int lastLongQualifiedBar = na
+var int lastShortQualifiedBar = na
+
+if longBaseEvent and (not requireBosRetest or bosUpRetested)
+    lastLongQualifiedBar := bar_index
+    lastLongQualifiedBar
+if shortBaseEvent and (not requireBosRetest or bosDnRetested)
+    lastShortQualifiedBar := bar_index
+    lastShortQualifiedBar
+
+setupLongReady = not na(lastLongQualifiedBar) and bar_index - lastLongQualifiedBar <= setupValidBars
+setupShortReady = not na(lastShortQualifiedBar) and bar_index - lastShortQualifiedBar <= setupValidBars
+
+//==============================
+// Pattern detection (A path)
+//==============================
+var float prevPH = na
+var float lastPH = na
+var int prevPHBar = na
+var int lastPHBar = na
+
+var float prevPL = na
+var float lastPL = na
+var int prevPLBar = na
+var int lastPLBar = na
+
+if not na(ph)
+    prevPH := lastPH
+    prevPHBar := lastPHBar
+    lastPH := ph
+    lastPHBar := bar_index - bosRight
+    lastPHBar
+
+if not na(pl)
+    prevPL := lastPL
+    prevPLBar := lastPLBar
+    lastPL := pl
+    lastPLBar := bar_index - bosRight
+    lastPLBar
+
+dblBottomEvent = not na(pl) and not na(prevPL) and lastPLBar - prevPLBar >= dblMinSep and math.abs(lastPL - prevPL) <= atr * dblAtrTol
+dblTopEvent = not na(ph) and not na(prevPH) and lastPHBar - prevPHBar >= dblMinSep and math.abs(lastPH - prevPH) <= atr * dblAtrTol
+
+prevRangeHi = ta.highest(high[1], rangeBars)
+prevRangeLo = ta.lowest(low[1], rangeBars)
+rangeWidth = prevRangeHi - prevRangeLo
+rangeTight = rangeWidth <= atr * rangeMaxAtr
+rangeBullEvent = barstate.isconfirmed and rangeTight and close > prevRangeHi
+rangeBearEvent = barstate.isconfirmed and rangeTight and close < prevRangeLo
+
+wedgeConverging = not na(prevPH) and not na(lastPH) and not na(prevPL) and not na(lastPL) and lastPH < prevPH and lastPL > prevPL
+wedgeBullEvent = barstate.isconfirmed and wedgeConverging and close > lastPH
+wedgeBearEvent = barstate.isconfirmed and wedgeConverging and close < lastPL
+
+patBullEvent = patternType == 'Double Top / Bottom' ? dblBottomEvent : patternType == 'Range breakout' ? rangeBullEvent : wedgeBullEvent
+patBearEvent = patternType == 'Double Top / Bottom' ? dblTopEvent : patternType == 'Range breakout' ? rangeBearEvent : wedgeBearEvent
+
+var int lastBullPatternBar = na
+var int lastBearPatternBar = na
+
+if patBullEvent
+    lastBullPatternBar := bar_index
+    label.new(bar_index, low, 'Pattern Bull', style = label.style_label_up, color = color.new(color.green, 75), textcolor = color.white, size = size.tiny)
+if patBearEvent
+    lastBearPatternBar := bar_index
+    label.new(bar_index, high, 'Pattern Bear', style = label.style_label_down, color = color.new(color.red, 75), textcolor = color.white, size = size.tiny)
+
+hasBullPattern = not na(lastBullPatternBar) and bar_index - lastBullPatternBar <= patternValidBars
+hasBearPattern = not na(lastBearPatternBar) and bar_index - lastBearPatternBar <= patternValidBars
+
+//==============================
+// Path qualification
+//==============================
+hasBullSweep = not na(lastBullSweepBar) and bar_index - lastBullSweepBar <= sweepValidBars
+hasBearSweep = not na(lastBearSweepBar) and bar_index - lastBearSweepBar <= sweepValidBars
+
+emaRetestLong = barstate.isconfirmed and low <= ema13 and close > ema13
+emaRetestShort = barstate.isconfirmed and high >= ema13 and close < ema13
+
+structureRetestLong = barstate.isconfirmed and not na(bosUpLevel) and low <= bosUpLevel and close > bosUpLevel
+structureRetestShort = barstate.isconfirmed and not na(bosDnLevel) and high >= bosDnLevel and close < bosDnLevel
+
+entryModeLongOk = entryMode == 'Breakout close' ? true : entryMode == 'EMA13 retest entry' ? emaRetestLong : structureRetestLong
+entryModeShortOk = entryMode == 'Breakout close' ? true : entryMode == 'EMA13 retest entry' ? emaRetestShort : structureRetestShort
+
+pathAPlusLong = hasBullSweep and setupLongReady
+pathAPlusShort = hasBearSweep and setupShortReady
+pathALong = not hasBullSweep and hasBullPattern and setupLongReady
+pathAShort = not hasBearSweep and hasBearPattern and setupShortReady
+
+//==============================
+// Confluence filters
+//==============================
+ema50LongOk = not useEMA50 or close > ema50
+ema50ShortOk = not useEMA50 or close < ema50
+ema200LongOk = not useEMA200 or close > ema200
+ema200ShortOk = not useEMA200 or close < ema200
+
+stackLongOk = not useStackedEMA or ema13 > ema50 and ema50 > ema200
+stackShortOk = not useStackedEMA or ema13 < ema50 and ema50 < ema200
+
+volOk = not useVolFilter or volume > ta.sma(volume, volLen)
+atrOk = not useATRFilter or atr > ta.sma(atr, atrFilterLen) * atrFilterMult
+sessOk = not useSessionFilter or inTradeSession
+
+filterLongOk = ema50LongOk and ema200LongOk and stackLongOk and volOk and atrOk and sessOk
+filterShortOk = ema50ShortOk and ema200ShortOk and stackShortOk and volOk and atrOk and sessOk
+
+//==============================
+// Daily kill switch
+//==============================
+var float dayStartNet = na
+var float dayStartEq = na
+var bool killActive = false
+
+if barstate.isfirst
+    dayStartNet := strategy.netprofit
+    dayStartEq := strategy.equity
+    dayStartEq
+
+if newDay
+    dayStartNet := strategy.netprofit
+    dayStartEq := strategy.equity
+    killActive := false
+    killActive
+
+dailyPnL = strategy.netprofit - dayStartNet
+
+lossUSDHit = killMode == 'Max $ Loss' and dailyPnL <= -maxDailyLossUSD
+lossPctHit = killMode == 'Max % Equity' and dayStartEq > 0 and dailyPnL <= -(dayStartEq * maxDailyLossPct * 0.01)
+
+if lossUSDHit or lossPctHit
+    killActive := true
+    killActive
+
+//==============================
+// Position/risk state
+//==============================
+var float posEntry = na
+var float posStop = na
+var float posRisk = na
+var float posTp1 = na
+var float posTp2 = na
+var float posTrail = na
+var bool tp1Done = false
+var string activePath = ''
+var string activeStopMethod = ''
+var int activeDir = 0 // 1 long, -1 short
+
+flat = strategy.position_size == 0
+longPos = strategy.position_size > 0
+shortPos = strategy.position_size < 0
+
+if flat
+    posEntry := na
+    posStop := na
+    posRisk := na
+    posTp1 := na
+    posTp2 := na
+    posTrail := na
+    tp1Done := false
+    activePath := ''
+    activeStopMethod := ''
+    activeDir := 0
+    activeDir
+
+//==============================
+// Entry conditions
+//==============================
+tradeAllowed = barstate.isconfirmed and not killActive and (not oneTradeOnly or flat)
+
+longPathOk = pathAPlusLong or pathALong
+shortPathOk = pathAPlusShort or pathAShort
+
+longEntrySignal = tradeAllowed and longPathOk and entryModeLongOk and filterLongOk
+shortEntrySignal = tradeAllowed and shortPathOk and entryModeShortOk and filterShortOk
+
+longStopCandidate = stopMethod == 'Pivot structure stop' ? not na(swingLow) ? swingLow - stopBufferTicks * syminfo.mintick : na : stopMethod == 'ATR stop' ? close - atr * stopAtrMult : close - fixedStopTicks * syminfo.mintick
+shortStopCandidate = stopMethod == 'Pivot structure stop' ? not na(swingHigh) ? swingHigh + stopBufferTicks * syminfo.mintick : na : stopMethod == 'ATR stop' ? close + atr * stopAtrMult : close + fixedStopTicks * syminfo.mintick
+
+longRiskCandidate = not na(longStopCandidate) ? close - longStopCandidate : na
+shortRiskCandidate = not na(shortStopCandidate) ? shortStopCandidate - close : na
+
+longStopValid = not na(longRiskCandidate) and longRiskCandidate > syminfo.mintick
+shortStopValid = not na(shortRiskCandidate) and shortRiskCandidate > syminfo.mintick
+
+if longEntrySignal and longStopValid
+    strategy.entry('L', strategy.long)
+    posEntry := close
+    posStop := longStopCandidate
+    posRisk := longRiskCandidate
+    posTp1 := posEntry + posRisk
+    posTp2 := runnerTp2Mode == '2R' ? posEntry + 2.0 * posRisk : runnerTp2Mode == '3R' ? posEntry + 3.0 * posRisk : runnerTp2Mode == 'Opposite liquidity level' ? liqHigh : na
+    posTrail := na
+    tp1Done := false
+    activePath := pathAPlusLong ? 'A+' : 'A'
+    activeStopMethod := stopMethod
+    activeDir := 1
+    label.new(bar_index, low, 'ENTRY L (' + activePath + ')\nStop: ' + activeStopMethod + '\nTP1=1R', style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.small)
+
+if shortEntrySignal and shortStopValid
+    strategy.entry('S', strategy.short)
+    posEntry := close
+    posStop := shortStopCandidate
+    posRisk := shortRiskCandidate
+    posTp1 := posEntry - posRisk
+    posTp2 := runnerTp2Mode == '2R' ? posEntry - 2.0 * posRisk : runnerTp2Mode == '3R' ? posEntry - 3.0 * posRisk : runnerTp2Mode == 'Opposite liquidity level' ? liqLow : na
+    posTrail := na
+    tp1Done := false
+    activePath := pathAPlusShort ? 'A+' : 'A'
+    activeStopMethod := stopMethod
+    activeDir := -1
+    label.new(bar_index, high, 'ENTRY S (' + activePath + ')\nStop: ' + activeStopMethod + '\nTP1=1R', style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+//==============================
+// Management (close-confirmed)
+//==============================
+if barstate.isconfirmed and longPos and activeDir == 1
+    if not tp1Done and close >= posTp1
+        strategy.close('L', qty_percent = tp1ClosePct, comment = 'TP1 1R')
+        tp1Done := true
+        tp1Done
+
+    effStop = tp1Done ? math.max(posStop, posEntry) : posStop
+
+    if tp1Done and runnerTp2Mode == 'ATR trailing stop'
+        posTrail := na(posTrail) ? close - atr * trailAtrMult : math.max(posTrail, close - atr * trailAtrMult)
+        effStop := math.max(effStop, posTrail)
+        effStop
+    if tp1Done and runnerTp2Mode == 'EMA13 trailing stop'
+        effStop := math.max(effStop, ema13)
+        effStop
+
+    stopHit = close <= effStop
+    tp2HitFixed = tp1Done and (runnerTp2Mode == '2R' or runnerTp2Mode == '3R') and not na(posTp2) and close >= posTp2
+    tp2HitOppLiq = tp1Done and runnerTp2Mode == 'Opposite liquidity level' and not na(posTp2) and close >= posTp2
+
+    if stopHit
+        strategy.close('L', comment = tp1Done ? 'BE/Trail Stop' : 'Initial Stop')
+    else if tp2HitFixed or tp2HitOppLiq
+        strategy.close('L', comment = 'TP2')
+
+if barstate.isconfirmed and shortPos and activeDir == -1
+    if not tp1Done and close <= posTp1
+        strategy.close('S', qty_percent = tp1ClosePct, comment = 'TP1 1R')
+        tp1Done := true
+        tp1Done
+
+    effStopS = tp1Done ? math.min(posStop, posEntry) : posStop
+
+    if tp1Done and runnerTp2Mode == 'ATR trailing stop'
+        posTrail := na(posTrail) ? close + atr * trailAtrMult : math.min(posTrail, close + atr * trailAtrMult)
+        effStopS := math.min(effStopS, posTrail)
+        effStopS
+    if tp1Done and runnerTp2Mode == 'EMA13 trailing stop'
+        effStopS := math.min(effStopS, ema13)
+        effStopS
+
+    stopHitS = close >= effStopS
+    tp2HitFixedS = tp1Done and (runnerTp2Mode == '2R' or runnerTp2Mode == '3R') and not na(posTp2) and close <= posTp2
+    tp2HitOppLiqS = tp1Done and runnerTp2Mode == 'Opposite liquidity level' and not na(posTp2) and close <= posTp2
+
+    if stopHitS
+        strategy.close('S', comment = tp1Done ? 'BE/Trail Stop' : 'Initial Stop')
+    else if tp2HitFixedS or tp2HitOppLiqS
+        strategy.close('S', comment = 'TP2')
+
+//==============================
+// Debug table
+//==============================
+var table t = table.new(position.top_right, 2, 5, bgcolor = color.new(color.black, 75), frame_color = color.new(color.white, 70), frame_width = 1)
+
+if barstate.islast
+    sessText = inTradeSession ? 'In Session' : 'Out of Session'
+    killText = killActive ? 'ACTIVE' : 'OFF'
+    filtersText = 'E50:' + (useEMA50 ? 'Y' : 'N') + ' E200:' + (useEMA200 ? 'Y' : 'N') + ' Vol:' + (useVolFilter ? 'Y' : 'N') + ' ATR:' + (useATRFilter ? 'Y' : 'N')
+    table.cell(t, 0, 0, 'Current Session', text_color = color.white)
+    table.cell(t, 1, 0, sessText, text_color = color.white)
+    table.cell(t, 0, 1, 'Daily PnL', text_color = color.white)
+    table.cell(t, 1, 1, str.tostring(dailyPnL, format.mintick), text_color = dailyPnL >= 0 ? color.lime : color.red)
+    table.cell(t, 0, 2, 'Kill Switch', text_color = color.white)
+    table.cell(t, 1, 2, killText, text_color = killActive ? color.red : color.lime)
+    table.cell(t, 0, 3, 'Active Filters', text_color = color.white)
+    table.cell(t, 1, 3, filtersText, text_color = color.white)
+    table.cell(t, 0, 4, 'Path / Stop', text_color = color.white)
+    table.cell(t, 1, 4, (activePath == '' ? '-' : activePath) + ' / ' + (activeStopMethod == '' ? '-' : activeStopMethod), text_color = color.white)
+
+View in Pine Editor・600 lines
+Use on chart
+1
+2
+611
+========================================================
+CORE STRATEGY LOGIC
+========================================================
+
+A trade is valid ONLY if it satisfies one of these qualification paths:
+
+--------------------------------------------------------
+PATH 1 — A+ Setup (Liquidity Sweep + EMA + BOS)
+--------------------------------------------------------
+
+1) LIQUIDITY SWEEP (REQUIRED)
+Price must sweep a key level BEFORE entry.
+
+Key level options (user selectable):
+- Previous Day High/Low (default)
+- Previous Session High/Low (Asia/London/NY)
+- First N-bar session range high/low
+
+Sweep Definition (user adjustable):
+- Price trades beyond level by:
+max(X ticks OR ATR(14)*Y)
+- AND closes back inside level within Z bars
+
+User inputs:
+- ATR multiplier
+- Minimum tick distance
+- Bars allowed to confirm sweep
+
+--------------------------------------------------------
+2) 13 EMA CONFIRMATION (REQUIRED)
+--------------------------------------------------------
+
+Long:
+- Close crosses above EMA13
+- EMA13 slope positive (optional toggle)
+
+Short:
+- Close crosses below EMA13
+- EMA13 slope negative (optional toggle)
+
+Entry mode (user selectable):
+- Breakout close
+- EMA13 retest entry
+- Structure retest entry
+
+--------------------------------------------------------
+3) BREAK OF STRUCTURE (BOS) — REQUIRED
+--------------------------------------------------------
+
+BOS is mandatory for BOTH A and A+ setups.
+
+STRUCTURE DEFINITION (non-repainting):
+- Use ta.pivothigh(high, leftBars, rightBars)
+- Use ta.pivotlow(low, leftBars, rightBars)
+- Only confirmed after rightBars
+
+Track latest confirmed swingHigh and swingLow.
+
+Bullish BOS:
+- Close breaks above most recent confirmed swingHigh
+
+Bearish BOS:
+- Close breaks below most recent confirmed swingLow
+
+BOS Timing Modes (input dropdown):
+1) EMA Break THEN BOS (default)
+2) BOS THEN EMA Break
+3) Either order within N bars
+
+Optional BOS Retest Toggle:
+- After break, require retest of broken level before entry
+
+Default pivot settings:
+leftBars = 3
+rightBars = 3
+
+--------------------------------------------------------
+PATH 2 — A Setup (Pattern + EMA + BOS)
+--------------------------------------------------------
+
+If NO sweep, then a pattern must be detected.
+
+Pattern options (user selectable):
+- Double Top / Double Bottom (M/W)
+- Range breakout (box of N bars)
+- Wedge compression proxy (converging pivots)
+
+EMA confirmation required.
+BOS confirmation required.
+If no sweep AND no pattern → NO TRADE.
+
+========================================================
+CONFLUENCE FILTERS
+========================================================
+
+Optional filters (user toggles):
+
+- EMA50 directional filter
+- EMA200 directional filter
+- Stacked EMA alignment filter
+- Volume above SMA filter
+- ATR volatility filter
+- Session time filter (timezone input)
+- One-trade-at-a-time toggle
+
+Defaults:
+EMA50 filter ON
+EMA200 filter OFF
+Session filter ON
+
+========================================================
+RISK MANAGEMENT
+========================================================
+
+Stop Methods (selectable):
+1) Pivot structure stop (+ buffer)
+2) ATR stop
+3) Fixed tick stop
+
+TP1:
+- Exactly 1:1 R
+
+After TP1:
+- Move stop to breakeven
+- Close X% of position (default 50%)
+
+Runner TP2 options:
+- 2R
+- 3R
+- Opposite liquidity level
+- ATR trailing stop
+- EMA13 trailing stop
+
+Include:
+- Commission input
+- Slippage input
+- Pyramiding input (default 0)
+
+========================================================
+DAILY LOSS KILL SWITCH
+========================================================
+
+User input:
+- Max daily loss in $
+OR
+- Max % of equity
+
+If exceeded:
+- No new trades until new exchange day
+
+========================================================
+VISUALS & DEBUG
+========================================================
+
+Plot:
+- EMA13
+- EMA50
+- EMA200
+- Active swingHigh / swingLow
+- Key liquidity levels
+
+Label:
+- Sweep detected
+- BOS detected
+- Pattern detected
+- Entry path used (A+ or A)
+- Stop method
+- R targets
+
+Include a small table on chart displaying:
+- Current session
+- Daily PnL
+- Kill switch status
+- Active filters
+
+========================================================
+EXECUTION RULES
+========================================================
+
+- Use barstate.isconfirmed
+- Use confirmed pivots only
+- No repainting logic
+- No future-looking code
+- Trades only when full conditions met
+- No fallback entries
+- If conditions not satisfied → NO TRADE
+
+========================================================
+DELIVERABLE
+========================================================
+Runner TP2 options:
+- 2R
+- 3R
+- Opposite liquidity level
+- ATR trailing stop
+- EMA13 trailing stop
+
+Include:
+- Commission input
+- Slippage input
+- Pyramiding input (default 0)

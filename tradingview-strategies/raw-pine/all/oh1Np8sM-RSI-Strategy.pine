@@ -1,0 +1,25 @@
+//@version=4
+strategy("RSI Strategy", overlay=true)
+length = input( 14 )
+overSold = input( 30 )
+overBought = input( 70 )
+price = close
+
+vrsi = rsi(price, length)
+
+if (not na(vrsi))
+    if (crossover(vrsi, overSold))
+        strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+    if (crossunder(vrsi, overBought))
+        strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+View in Pine Editor・16 lines
+Use on chart
+1
+1
+6
+2
+5 012
+Nothing special in this strategy its just purely and application of RSI in 1hour chart of XAUUSD.

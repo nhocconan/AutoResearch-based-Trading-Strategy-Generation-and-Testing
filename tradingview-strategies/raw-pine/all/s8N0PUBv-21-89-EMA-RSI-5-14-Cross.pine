@@ -1,0 +1,58 @@
+//@version=5
+strategy("21/89 EMA + RSI5/14 Window Cross", overlay=true)
+
+// ==== INPUTS ====
+windowBars = input.int(3, "RSI Cross Window (bars)", minval=1, maxval=10)
+
+// ==== EMAs ====
+ema21 = ta.ema(close, 21)
+ema89 = ta.ema(close, 89)
+
+// ==== RSI ====
+rsi5  = ta.rsi(close, 5)
+rsi14 = ta.rsi(close, 14)
+
+// ==== CROSS CONDITIONS ====
+emaBull = ta.crossover(ema21, ema89)
+emaBear = ta.crossunder(ema21, ema89)
+
+rsiBull = ta.crossover(rsi5, rsi14)
+rsiBear = ta.crossunder(rsi5, rsi14)
+
+// ==== STORE LAST RSI CROSS BAR ====
+var int lastRSIBull = na
+var int lastRSIBear = na
+
+if rsiBull
+    lastRSIBull := bar_index
+
+if rsiBear
+    lastRSIBear := bar_index
+
+// ==== WINDOW CHECK ====
+rsiBullInWindow = not na(lastRSIBull) and (bar_index - lastRSIBull <= windowBars)
+rsiBearInWindow = not na(lastRSIBear) and (bar_index - lastRSIBear <= windowBars)
+
+// ==== ENTRY LOGIC ====
+longCondition  = emaBull and rsiBullInWindow
+shortCondition = emaBear and rsiBearInWindow
+
+if longCondition
+    strategy.entry("LONG", strategy.long)
+
+if shortCondition
+    strategy.entry("SHORT", strategy.short)
+
+// ==== EXIT RULE ====
+strategy.close("LONG", when=shortCondition)
+strategy.close("SHORT", when=longCondition)
+
+// ==== PLOTS ====
+plot(ema21, color=color.green, title="EMA 21")
+plot(ema89, color=color.red, title="EMA 89")
+
+View in Pine Editor・52 lines
+Use on chart
+7
+386
+Its Combination of EMA cross and RSI cross. Trend + Momentum Confirmation Strategy. Best for: Intraday & Swing Trading.Entry: On candle close after both confirmations.

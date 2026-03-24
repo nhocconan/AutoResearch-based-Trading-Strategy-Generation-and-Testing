@@ -1,0 +1,45 @@
+//@version=3
+strategy(title="Relative Strength Index", shorttitle="RSI")
+src = close, len = input(14, minval=1, title="Length")
+up = rma(max(change(src), 0), len)
+down = rma(-min(change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+band1 = hline(70)
+band0 = hline(30)
+take_Profit=input(15, title="Take Profit", type=integer)
+close_Overbought = input(true, "Close at overbought levels", type=bool)
+buyCondition = 0
+sellCondition = 0
+partialSell = 0
+counter = 0
+if rsi<=30 and strategy.position_size==0
+    buyCondition := 1
+    strategy.entry("Buy", strategy.long)
+profit = ((close-strategy.position_avg_price)/strategy.position_avg_price) * 100
+if profit>=take_Profit and strategy.position_size>=1
+    quantity = 40
+    if close_Overbought == false
+        quantity:= 100
+    partialSell := 1
+    strategy.exit("Buy", profit=20, qty_percent=quantity)
+if close_Overbought == true
+    if rsi>=70 and strategy.position_size>=1
+        sellCondition := 1
+        strategy.close("Buy")
+plot(sellCondition[1], "SELL", red)
+plot(buyCondition, "BUY", green)
+plot(partialSell, "SELL", blue)
+
+View in Pine Editor・31 lines
+Use on chart
+2
+8
+3
+6
+11 245
+Hello everyone, this is my first script on TV. I have done some research on cryptocurrency strategies and much of which has been in technical indicators by combining trend and momentum analysis together. Pine Script is quite a difficult language to learn as opposed to Python.
+
+Anyways, I made some adjustments for the RSI strategy to include a stop loss/take profit and added indicators upon the first initial overbought and oversold levels(70 and 30 respectively). Please DO give me advice or recommendations. Primarily, I am confused as to what metric the stop loss and take profit parameters are using as they do not change when the values are changed in the input. I am unable to tell whether the strategy repaints. Could someone explain why repainting typically occurs in crossovers?
+
+*DISCLAIMER*
+This script is merely to help myself and others learn about the Pine Script language. I would not advise you to use this script for live trading. Thanks!

@@ -1,0 +1,126 @@
+//@version=5
+strategy("All-Day Futures Scalper (EMA Trend + Cross + ATR Brackets)",
+     overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.0,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     process_orders_on_close=true)
+
+// ─────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────
+useLongs   = input.bool(true,  "Enable Longs")
+useShorts  = input.bool(true,  "Enable Shorts")
+
+fastLen    = input.int(9,   "Fast EMA Length", minval=1)
+slowLen    = input.int(21,  "Slow EMA Length", minval=1)
+trendLen   = input.int(200, "Trend EMA Length", minval=1)
+
+atrLen     = input.int(14,  "ATR Length", minval=1)
+slATR      = input.float(1.0, "Stop (ATR Mult)", step=0.1)
+tpATR      = input.float(1.5, "Take Profit (ATR Mult)", step=0.1)
+
+useBE      = input.bool(true, "Move Stop to Breakeven")
+beATR      = input.float(1.0, "Breakeven Trigger (ATR Mult)", step=0.1)
+
+cooldownBars = input.int(3, "Cooldown Bars After Exit", minval=0)
+
+// Optional “chop filter”
+useChopFilter = input.bool(true, "Chop Filter: Require ATR% of Price")
+minAtrPct     = input.float(0.05, "Min ATR %", step=0.01) // e.g., 0.05 = 0.05%
+
+// ─────────────────────────────────────────────────────────────
+// Indicators
+// ─────────────────────────────────────────────────────────────
+fastEma  = ta.ema(close, fastLen)
+slowEma  = ta.ema(close, slowLen)
+trendEma = ta.ema(close, trendLen)
+atr      = ta.atr(atrLen)
+
+atrPct = (atr / close) * 100.0
+
+// ─────────────────────────────────────────────────────────────
+// State: cooldown
+// ─────────────────────────────────────────────────────────────
+var int lastFlatBar = na
+justWentFlat = strategy.position_size == 0 and strategy.position_size[1] != 0
+if justWentFlat
+    lastFlatBar := bar_index
+
+inCooldown = cooldownBars > 0 and (not na(lastFlatBar)) and (bar_index - lastFlatBar) <= cooldownBars
+
+// ─────────────────────────────────────────────────────────────
+// Conditions
+// ─────────────────────────────────────────────────────────────
+trendUp   = close > trendEma
+trendDown = close < trendEma
+
+longTrig  = ta.crossover(fastEma, slowEma)
+shortTrig = ta.crossunder(fastEma, slowEma)
+
+chopOK = not useChopFilter or atrPct >= minAtrPct
+
+canTrade = not inCooldown and chopOK
+
+// ─────────────────────────────────────────────────────────────
+// Entries
+// ─────────────────────────────────────────────────────────────
+longCond  = canTrade and useLongs  and trendUp   and longTrig
+shortCond = canTrade and useShorts and trendDown and shortTrig
+
+if longCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+
+if shortCond and strategy.position_size == 0
+    strategy.entry("S", strategy.short)
+
+// ─────────────────────────────────────────────────────────────
+// Exits (Bracket: stop + take profit)
+// ─────────────────────────────────────────────────────────────
+longStop  = strategy.position_avg_price - (slATR * atr)
+longTP    = strategy.position_avg_price + (tpATR * atr)
+
+shortStop = strategy.position_avg_price + (slATR * atr)
+shortTP   = strategy.position_avg_price - (tpATR * atr)
+
+// Breakeven logic (optional): once price moves in favor by beATR*ATR, stop -> entry price
+longBETriggered  = useBE and strategy.position_size > 0 and (high - strategy.position_avg_price) >= (beATR * atr)
+shortBETriggered = useBE and strategy.position_size < 0 and (strategy.position_avg_price - low)  >= (beATR * atr)
+
+longStopFinal  = longBETriggered  ? math.max(longStop,  strategy.position_avg_price) : longStop
+shortStopFinal = shortBETriggered ? math.min(shortStop, strategy.position_avg_price) : shortStop
+
+strategy.exit("L-Exit", from_entry="L", stop=longStopFinal, limit=longTP)
+strategy.exit("S-Exit", from_entry="S", stop=shortStopFinal, limit=shortTP)
+
+// ─────────────────────────────────────────────────────────────
+// Plots
+// ─────────────────────────────────────────────────────────────
+plot(fastEma,  "Fast EMA",  color=color.new(color.teal, 0))
+plot(slowEma,  "Slow EMA",  color=color.new(color.orange, 0))
+plot(trendEma, "Trend EMA", color=color.new(color.white, 0))
+
+// Visual cues
+bgcolor(inCooldown ? color.new(color.gray, 85) : na)
+plotchar(longCond,  title="Long Signal",  char="▲", location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny)
+plotchar(shortCond, title="Short Signal", char="▼", location=location.abovebar, color=color.new(color.red, 0),  size=size.tiny)
+
+View in Pine Editor・108 lines
+Use on chart
+1
+8
+515
+All-Day Futures Scalper (EMA Trend + Cross + ATR Brackets) is a trend-following scalping strategy designed for intraday futures trading. It uses a fast and slow EMA crossover for entries while filtering trades with a higher-timeframe trend EMA to align with market direction.
+
+Risk management is handled automatically using ATR-based stop loss and take profit levels. The strategy also includes optional breakeven protection, a volatility filter to avoid low-movement markets, and a cooldown period after trades to reduce overtrading.
+
+Key features:
+• EMA crossover entries with trend confirmation
+• ATR-based stop loss and profit targets
+• Optional breakeven stop adjustment
+• Volatility (ATR%) filter to avoid choppy markets
+• Cooldown period between trades
+
+This strategy is designed for continuous intraday trading and works well on fast timeframes such as 1–5 minute charts.

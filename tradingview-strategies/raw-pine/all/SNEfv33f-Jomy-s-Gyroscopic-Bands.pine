@@ -1,0 +1,63 @@
+//@version=4
+//2 revert
+strategy("Jomy's Gyroscopic Bands",precision=8,commission_value=.03,overlay=true,initial_capital =10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100,  pyramiding=0)//,calc_on_order_fills= true, calc_on_every_tick=false) 
+leverage=input(1,"leverage")
+a=0
+a:= if volume > -1
+    nz(a[1])+1
+else
+    nz(a)
+    
+vara=input(4.0,"variable a (10 to the power of __ ",step=.5)
+vara:=pow(10,vara)
+varb=input(12,"variable b")
+pos=0.0
+pos:=if a<=5
+    close
+else
+    nz(pos[1])
+grav=1/sqrt((close*close))*vara
+traj=0.0
+traj:=(nz(close[1])-nz(close[2])+nz(traj[1])*varb)/(varb+1)
+pos:=if pos<close
+    nz(pos[1])+grav+traj
+else
+    nz(pos[1])-(grav)+traj
+
+plot(pos,color=color.white)
+plot(close)
+
+avgdist=abs(close-pos)
+bbl=pos-sma(avgdist,varb)
+bbh=pos+sma(avgdist,varb)
+
+plbbh=plot(bbh,color=color.red)
+plbbl=plot(bbl,color=color.red)
+
+long = close>pos
+short = close<pos
+
+fill(plbbh,plbbl,color=long?color.lime:color.red)
+//bgcolor(close>bbh?color.lime:close<bbl?color.red:na,transp=90)
+
+strategy.entry("Long1",strategy.long,when=long,qty=(strategy.equity*leverage/open)) 
+strategy.close("Long1",when=not long)
+strategy.entry("Short1",strategy.short,when=short,qty=(strategy.equity*leverage/open)) 
+strategy.close("Short1",when=not short)
+
+
+//plot(strategy.equity,color=color.lime,linewidth=4)
+
+View in Pine Editor・49 lines
+Use on chart
+8
+3
+3
+2 165
+Price above white line? Long it. Price below white line? Short it. Tuned to XBTUSD on BitMEX. 12h chart. The bands aren't really needed, but you can also choose to long if the price goes above the band, and short if the price goes below the band. If used on other cryptos you should probably tinker with vara (variable a) until you get a respectable result, as that makes a huge difference when dealing with different prices.
+
+How does it work? I send a particle into the chart, which moves towards the price level like a moon around a planet. It swings around the price like a sine wave . I find the average gyration distance for the last x bars, and plot them like Bollinger Bands around the particle's trajectory from a point x bars ago. This system seems to produce fewer whipsaw trades than classical EMAs.
+
+Just like Bollinger bands, you can expect a big move if the bands tighten for a period of time.
+
+Feel free to tinker with this, and if you get some amazing backtests, please share.

@@ -1,0 +1,3 @@
+//@version=4
+Athlc=##input(defval=#E040FB80,type='INPUT_COLOR',##id='in_1')
+##root(root_metainfo,rm_ic_0,Athlc,input__color)

@@ -1,0 +1,62 @@
+//@version=4
+//Created by Sv3nla 5-Jan-2021
+strategy(title="Sv3nla RSI EMA SMA Strat", shorttitle="Sv3nla RSI EMA SMA Strat", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === BACKTEST RANGE ===
+FromMonth = input(defval = 5, title = "From Month", minval = 1)
+FromDay   = input(defval = 1, title = "From Day", minval = 1)
+FromYear  = input(defval = 2015, title = "From Year", minval = 2015)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1)
+ToDay     = input(defval = 1, title = "To Day", minval = 1)
+ToYear    = input(defval = 9999, title = "To Year", minval = 2022) 
+// syminfo.mintick = 0.01$ for BTCUSDT
+
+testPeriod() =>
+    (time > timestamp(FromYear, FromMonth, FromDay, 00, 00)) and (time < timestamp(ToYear, ToMonth, ToDay, 23, 59))
+
+//INPUTS
+rsilen = input(defval = 16, minval=1, title="RSILength")
+RSIemaLen = input(defval = 12, minval=1, title="RSI EMA Length")
+RSIsmaLen2 = input(defval = 29, minval=1, title="RSI SMA Length2")
+length = input(defval = 8, minval=1, title="EMA price Length")
+
+// RSI
+RSIsrc = close
+RSIup = rma(max(change(RSIsrc), 0), rsilen)
+RSIdown = rma(-min(change(RSIsrc), 0), rsilen)
+rsi = RSIdown == 0 ? 100 : RSIup == 0 ? 0 : 100 - 100 / (1 + RSIup / RSIdown)
+emavalue=ema(rsi,RSIemaLen)
+smavalue=sma(rsi,RSIsmaLen2)
+
+//EMA
+ema=ema(close,length)
+
+//PLOT
+plot(ema(rsi, RSIemaLen), color=color.yellow, linewidth=2, title="EMA", transp=0)
+plot(sma(rsi, RSIsmaLen2), color=color.aqua, linewidth=2, title="SMA", transp=0)
+
+//ORDERS
+if (testPeriod())
+    strategy.entry("long",strategy.long, comment="RSIEMA", when=(emavalue > smavalue and close>ema))
+    strategy.close(id="long", when=(emavalue < smavalue))
+
+// Colour background when in a trade and 50 horizontal line
+backgroundColour = (strategy.position_size > 0) ? color.green : na    
+bgcolor(color=backgroundColour, transp=85)
+hline(50, color=color.yellow)
+View in Pine Editor・46 lines
+Use on chart
+2
+1
+4
+2
+6 941
+This script looks at the RSI EMA and RSI SMA crossovers when above a certain price EMA
+
+It was mainly written for swingtrading and only for long positions on a daily timeframe for BTC and ETH. They idea is to have a script that indicates when to convert your BTC /ETC to a stable coin and when to buy in again.
+
+You could try to use it for other positions (short, long, etc..) and other coins but I didn't test these.
+
+When the RSI EMA & SMA hover around 50 for a few days in flat lines and you get a buy signal it may be best to wait a few days longer to see what direction they take.
+
+The default values for RSI EMA , RSI SMA and price EMA gave the best return (start out with an amount of x coins in 2015 and end up with the biggest possible amount of coins today). Again, this was only tested on daily. Feel free to tweak these when using other timeframes or other coins

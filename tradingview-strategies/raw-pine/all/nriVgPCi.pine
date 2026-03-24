@@ -1,0 +1,49 @@
+//@version=6
+strategy("[Outperforms Bitcoin Since 2011] Professional MA Strategy", "BTC Professional MA Strategy", true, 
+  initial_capital = 1000000, default_qty_value = 100,  default_qty_type = strategy.percent_of_equity, 
+  margin_long = 10, margin_short = 10, currency = currency.USD)
+
+fast = ta.wma(hlc3, input.int(30, "fast")) 
+slow = ta.wma(hlc3, input.int(360, 'slow'))
+
+plot(fast, 'fast', color.blue, 2)
+plot(slow, 'slow', color.black, 2)
+
+buy = hlc3 > fast and (hlc3 < fast)[1] 
+sell = hlc3 < fast and (hlc3 > fast)[1]
+
+if buy and hlc3 > slow 
+    strategy.entry('long', strategy.long)
+
+if sell and hlc3 < slow 
+    strategy.entry('short', strategy.short)
+
+if hlc3 < fast 
+    strategy.close('long')
+
+if hlc3 > fast 
+    strategy.close('short')
+
+View in Pine Editor・25 lines
+Use on chart
+4
+4
+1 138
+This Strategy OUTPEFORMS Bitcoin since 2011.
+
+Timeframe: Daily
+MA used (Fast and Slow): WMA (Weighted Moving Average)
+Fast MA Length: 30 days (Reflects the Monthly Trend - Short Term Perspective)
+Slow MA Length: 360 days (Reflects the Annual Trend - Long Term Perspective)
+
+Position Size: 100% of equity
+Margin for Long = 10% of equity
+Margin for Short = 10% of equity
+
+Open Long = Typical Price Crosses Above its Fast MA and Price is above its Slow MA
+Open Short = Typical Price Crosses Below its Fast MA and Price is below its Slow MA
+
+Close Long = Typical Price Crosses Below its Fast MA
+Close Short = Typical Price Crosses Below its Fast MA
+
+note: Typical Price = (high + low + close) / 3

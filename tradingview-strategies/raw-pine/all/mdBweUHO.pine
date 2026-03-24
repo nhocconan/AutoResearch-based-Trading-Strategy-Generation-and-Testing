@@ -1,0 +1,173 @@
+//@version=5
+strategy("Stufen Modell + QQQ ATH Filter", overlay=true, initial_capital=5000, default_qty_type=strategy.percent_of_equity, default_qty_value=20)
+
+// --- 1. Inputs ---
+len1 = input.int(25, title="SMA 25")
+len2 = input.int(50, title="SMA 50")
+len3 = input.int(100, title="SMA 100")
+len4 = input.int(200, title="SMA 200")
+
+// Stop Loss Inputs
+sl_initial_pct = input.float(10.0, title="Stufe 1: Initial Stop %") / 100
+stage2_trigger = input.float(12.0, title="Stufe 2: Aktivierung bei Gewinn %") / 100
+stage2_sl_dist = input.float(10.0, title="Stufe 2: Abstand %") / 100
+stage3_trigger = input.float(25.0, title="Stufe 3: Aktivierung bei Gewinn %") / 100
+stage3_trail   = input.float(8.0,  title="Stufe 3: Trailing %") / 100
+stage4_trigger = input.float(40.0, title="Stufe 4: Aktivierung bei Gewinn %") / 100
+stage4_trail   = input.float(5.0,  title="Stufe 4: Trailing %") / 100
+
+// --- 2. Berechnung SMAs (Aktie) ---
+sma25  = ta.sma(close, len1)
+sma50  = ta.sma(close, len2)
+sma100 = ta.sma(close, len3)
+sma200 = ta.sma(close, len4)
+
+plot(sma25, color=color.yellow, title="SMA 25")
+plot(sma50, color=color.orange, title="SMA 50")
+plot(sma100, color=color.blue, title="SMA 100")
+plot(sma200, color=color.white, title="SMA 200", linewidth=2)
+
+
+// --- 3. DER INTELLIGENTE MARKT FILTER ---
+
+// A. Daten vom QQQ holen
+[qqq_close, qqq_sma200] = request.security("NASDAQ:QQQ", timeframe.period, [close, ta.sma(close, 200)])
+
+// B. All-Time-High (ATH) Tracking
+// Wir nutzen eine persistente Variable (var), die sich das höchste Hoch merkt
+var float qqq_ath = 0.0
+if qqq_close > qqq_ath
+    qqq_ath := qqq_close
+
+// C. Drawdown berechnen (Wie weit sind wir vom ATH weg?)
+// Wenn ATH noch 0 ist (Start), ist Drawdown 0
+qqq_drawdown_pct = qqq_ath > 0 ? ((qqq_ath - qqq_close) / qqq_ath) : 0.0
+
+// D. Die Filter-Logik
+// Regel: Filter ist nur aktiv, wenn Drawdown > 20% (0.20)
+circuit_breaker_active = qqq_drawdown_pct > 0.20
+
+// Erlaubnis zum Handeln:
+// 1. Wenn Circuit Breaker NICHT aktiv ist (Crash < 20%) -> Immer erlaubt (true)
+// 2. Wenn Circuit Breaker aktiv IST -> Nur erlaubt wenn QQQ über SMA 200
+trading_allowed = circuit_breaker_active ? (qqq_close > qqq_sma200) : true
+
+// Visualisierung des Status (Info Panel im Hintergrund)
+// Rot = Crash Modus & Unter SMA 200 (Handel blockiert)
+bgcolor(not trading_allowed ? color.new(color.red, 90) : na, title="Trading Blocked")
+// Blau = Crash Modus ist an, aber wir sind über SMA 200 (Vorsichtiger Handel)
+bgcolor(circuit_breaker_active and trading_allowed ? color.new(color.blue, 95) : na, title="Crisis Recovery Mode")
+
+
+// --- 4. Variablen für Trade Management ---
+var float stop_price = na        
+var float highest_price = 0.0    
+var float entry_price = 0.0      
+var float last_trade_high = 0.0  
+
+in_position = strategy.position_size > 0
+
+if in_position and strategy.position_size[1] == 0
+    entry_price := close
+    highest_price := high
+    stop_price := close * (1 - sl_initial_pct)
+
+// --- 5. Stop Loss & Dead Cross Logic ---
+dc_25_50   = ta.crossunder(sma25, sma50)
+dc_50_100  = ta.crossunder(sma50, sma100)
+dc_100_200 = ta.crossunder(sma100, sma200)
+
+if in_position
+    if high > highest_price
+        highest_price := high
+    
+    gain_pct = (highest_price - entry_price) / entry_price
+
+    if gain_pct >= stage4_trigger
+        new_sl = highest_price * (1 - stage4_trail)
+        stop_price := math.max(stop_price, new_sl)
+    else if gain_pct >= stage3_trigger
+        new_sl = highest_price * (1 - stage3_trail)
+        stop_price := math.max(stop_price, new_sl)
+    else if gain_pct >= stage2_trigger
+        new_sl = highest_price * (1 - stage2_sl_dist)
+        stop_price := math.max(stop_price, new_sl)
+        
+    sl_hit = close < stop_price
+    trend_broken = dc_25_50 or dc_50_100 or dc_100_200
+    
+    if sl_hit or trend_broken
+        last_trade_high := highest_price 
+        exit_msg = sl_hit ? "SL Hit" : "Dead Cross"
+        strategy.close_all(comment=exit_msg)
+        stop_price := na 
+        highest_price := 0.0 
+
+plot(in_position ? stop_price : na, color=color.red, style=plot.style_linebr, linewidth=2, title="Dynamic SL")
+plot(strategy.position_size == 0 and last_trade_high > 0 ? last_trade_high : na, color=color.green, style=plot.style_circles, title="Re-Entry Trigger")
+
+
+// --- 6. EINSTIEG (Gesteuert durch Filter) ---
+
+cross_25_50   = ta.crossover(sma25, sma50)
+cross_50_100  = ta.crossover(sma50, sma100)
+cross_100_200 = ta.crossover(sma100, sma200)
+
+re_entry_signal = (strategy.position_size == 0) and (close > sma200) and (close > last_trade_high) and (last_trade_high > 0)
+
+// HIER WIRD GEPRÜFT
+if trading_allowed
+    if cross_25_50
+        strategy.entry("Long Start", strategy.long, comment="Cross 25/50")
+    if cross_50_100
+        strategy.entry("Long Mid", strategy.long, comment="Cross 50/100")
+    if cross_100_200
+        strategy.entry("Long Macro", strategy.long, comment="Cross 100/200")
+
+    if re_entry_signal
+        strategy.entry("Re-Entry Breakout", strategy.long, comment="Breakout High")
+
+View in Pine Editor・128 lines
+Use on chart
+1
+4
+891
+Description:
+
+This strategy implements a systematic Trend Following approach designed to capture major moves while actively protecting capital during severe bear markets. It combines a classic Moving Average "Fan" logic with two advanced risk management layers: a 4-Stage Dynamic Stop Loss and a macro-economic "Circuit Breaker" filter.
+
+Core Concepts:
+
+1. Trend Identification (Entry Logic) The script uses a cascade of Simple Moving Averages (SMA 25, 50, 100, 200) to identify the maturity of a trend.
+
+Entries are triggered by specific crossovers (e.g., SMA 25 crossing SMA 50) or by breaking above the previous trade's high ("High-Water Mark" Re-Entry).
+
+2. The "Circuit Breaker" (Crash Protection) To prevent trading during historical market collapses (like 2000 or 2008), the strategy monitors the Nasdaq 100 (QQQ) as a global benchmark:
+
+Normal Regime: If the market is within 20% of its All-Time High, the strategy operates normally.
+
+Crisis Regime: If the QQQ falls more than 20% from its ATH, the "Circuit Breaker" activates (Visualized by a Red Background).
+
+Recovery Rule: In a Crisis Regime, new long positions are blocked unless the QQQ reclaims its SMA 200. This filters out "bull traps" in secular bear markets.
+
+3. 4-Stage Risk Engine (Exit Logic) Once in a trade, the risk management adapts to the position's performance:
+
+Stage 1: Fixed initial Stop Loss (default 10%) for breathing room.
+
+Stage 2: Moves to Break-Even area once the price rises 12%.
+
+Stage 3: Tightens to a trailing stop (8%) after 25% profit.
+
+Stage 4: Maximizes gains with a tight trailing stop (5%) during parabolic moves (>40% profit).
+
+Visual Guide:
+
+SMAs: 25/50/100/200 period lines for trend visualization.
+
+Red Background: Indicates the "Crisis Regime" where trading is halted due to broad market weakness.
+
+Blue Background: Indicates a "Recovery Phase" (Crisis is active, but market is above SMA 200).
+
+Red Line: Shows the dynamic Stop Loss level for active positions.
+
+Settings: All parameters (SMA lengths, Drawdown threshold, Risk Stages) are fully customizable. The QQQ benchmark ticker can also be changed to SPY or other indices depending on the asset class traded.

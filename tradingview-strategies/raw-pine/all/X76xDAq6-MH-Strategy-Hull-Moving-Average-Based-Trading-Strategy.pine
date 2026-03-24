@@ -1,0 +1,71 @@
+//@version=6
+strategy("mh", shorttitle="my", default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=true, calc_on_every_tick=true, pyramiding=0)
+hullperiod = input.int(title="HullMA Period", defval=210, minval=1)
+price = input.source(open, title="Price data")
+
+n2ma = 2 * ta.wma(price, math.round(hullperiod / 2))
+nma = ta.wma(price, hullperiod)
+diff = n2ma - nma
+sqn = math.round(math.sqrt(hullperiod))
+n2ma1 = 2 * ta.wma(price[1], math.round(hullperiod / 2))
+nma1 = ta.wma(price[1], hullperiod)
+diff1 = n2ma1 - nma1
+n1 = ta.wma(diff, sqn)
+n2 = ta.wma(diff1, sqn)
+Hull_Line = n1 / n1 * n2
+Hull_retracted = if n1 > n2
+    Hull_retracted = Hull_Line - 2
+else
+    Hull_retracted = Hull_Line + 2
+c1 = Hull_retracted + n1 - price
+c2 = Hull_retracted - n2 + price
+c4 = n1 > n2 ? color.green : color.red
+c2p = plot(c2, color=color.black, linewidth=1)
+c3p = plot(price, color=color.black, linewidth=1)
+fill(c3p, c2p, color=c4)
+//plot(cross(c1, c2) ? c1 : na, style=plot.style_circles, color=c4, linewidth=4)
+if price < c2
+    strategy.close("BUY")
+if price > c2
+    strategy.close("SELL")
+
+if price > c2 and price[1] > c1
+    strategy.entry("BUY", strategy.long  , alert_message = 'Buy')
+    // alert('Buy')
+if price < c1 and price[1] < c2
+    strategy.entry("SELL", strategy.short, alert_message = 'Sell')
+    // alert('Sell')
+
+// if price > c2 and price[1] > c1
+//     alert('Buy', alert.freq_once_per_bar_close)
+// if price < c1 and price[1] < c2
+//     alert('Sell', alert.freq_once_per_bar_close)
+
+View in Pine Editor・42 lines
+Use on chart
+9
+1 434
+The MH Strategy is a TradingView strategy that leverages the Hull Moving Average (HullMA) to generate precise buy and sell signals. This strategy is designed to identify trend reversals and momentum shifts using a combination of weighted moving averages and HullMA-based calculations.
+
+Key Features:
+✅ Hull Moving Average-Based Signals – Uses a modified HullMA calculation to detect trend changes.
+✅ Dynamic Support & Resistance – The strategy plots adaptive levels that act as dynamic entry and exit points.
+✅ Trend-Based Entries & Exits – Generates long (buy) signals when the price moves above the calculated Hull retraction level and short (sell) signals when the price moves below it.
+✅ Automated Trade Execution – Integrates with TradingView’s strategy function to open and close trades automatically based on signal conditions.
+✅ Customizable Parameters – Allows users to adjust the HullMA period and price data source to optimize performance across different markets and timeframes.
+
+How It Works:
+HullMA Calculation: The strategy calculates a smoothed Hull Moving Average (HullMA) using a two-step weighted moving average method.
+Trend Confirmation: The difference between the HullMA values helps determine trend direction and retraction levels.
+Entry Conditions:
+A buy signal is generated when the price is above the retraction level, and the previous price confirms the trend.
+A sell signal is triggered when the price is below the retraction level with trend confirmation.
+Exit Conditions:
+The strategy closes long trades when the price drops below a threshold.
+It closes short trades when the price rises above a set level.
+Ideal Use Cases:
+🔹 Swing & trend traders looking for momentum-based entries and exits.
+🔹 Traders aiming for reduced lag compared to traditional moving averages.
+🔹 Markets with strong price trends, such as forex, stocks, and crypto.
+
+Try the MH Strategy and enhance your trading decisions with a refined HullMA-based trend detection system! 🚀

@@ -1,0 +1,199 @@
+//@version=6
+strategy("Composite Score Strategy – Unified Lookback v5", overlay=true, max_lines_count=500, max_labels_count=500, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ============================
+// USER CONFIG INPUTS
+rsi_len    = input.int(14, "AJFFRSI Length")
+qqe_src    = input.source(close, "QQE Source")
+qqe_len    = input.int(14, "QQE Length")
+qqe_factor = input.float(4.236, "QQE Factor")
+qqe_smooth = input.int(5, "QQE Smooth")
+keltner_src = input.source(close, "Keltner Source")
+
+score_threshold_long  = input.float(1, "Composite Score Long Threshold")
+score_threshold_short = input.float(-1, "Composite Score Short Threshold")
+lookback_bars         = input.int(144, "Unified Lookback (bars)")
+colorbars             = input.bool(true, "Color bars?")
+
+// ============================
+// AJFFRSI MODULE
+_rsx_rsi(src,len)=>
+    src_out = 100 * src
+    mom0 = ta.change(src_out)
+    moa0 = math.abs(mom0)
+    Kg = 3 / (len + 2)
+    Hg = 1 - Kg
+    f28 = 0.0
+    f30 = 0.0
+    f28 := Kg * mom0 + Hg * nz(f28[1])
+    f30 := Kg * f28 + Hg * nz(f30[1])
+    mom1 = f28 * 1.5 - f30 * 0.5
+    f38 = 0.0
+    f40 = 0.0
+    f38 := Hg * nz(f38[1]) + Kg * mom1
+    f40 := Kg * f38 + Hg * nz(f40[1])
+    mom2 = f38 * 1.5 - f40 * 0.5
+    f48 = 0.0
+    f50 = 0.0
+    f48 := Hg * nz(f48[1]) + Kg * mom2
+    f50 := Kg * f48 + Hg * nz(f50[1])
+    mom_out = f48 * 1.5 - f50 * 0.5
+    f58 = 0.0
+    f60 = 0.0
+    f58 := Hg * nz(f58[1]) + Kg * moa0
+    f60 := Kg * f58 + Hg * nz(f60[1])
+    moa1 = f58 * 1.5 - f60 * 0.5
+    f68 = 0.0
+    f70 = 0.0
+    f68 := Hg * nz(f68[1]) + Kg * moa1
+    f70 := Kg * f68 + Hg * nz(f70[1])
+    moa2 = f68 * 1.5 - f70 * 0.5
+    f78 = 0.0
+    f80 = 0.0
+    f78 := Hg * nz(f78[1]) + Kg * moa2
+    f80 := Kg * f78 + Hg * nz(f80[1])
+    moa_out = f78 * 1.5 - f80 * 0.5
+    math.max(math.min((mom_out / moa_out + 1.0) * 50.0, 100.0), 0.0)
+
+ajf_rsi = _rsx_rsi(close, rsi_len)
+plot(ajf_rsi, color=color.white, linewidth=2, title="AJFFRSI")
+
+// ============================
+// QQE MODULE
+var float ts = na
+delta = qqe_src - qqe_src[1]
+num = ta.rma(delta, qqe_len)
+den = ta.rma(math.abs(delta), qqe_len)
+rsi_qqe = 50 * ta.ema(num / den, qqe_smooth) + 50
+diff = ta.rma(math.abs(rsi_qqe - rsi_qqe[1]), qqe_len)
+crossover_cond  = rsi_qqe > nz(ts) and rsi_qqe[1] <= nz(ts[1])
+crossunder_cond = rsi_qqe < nz(ts) and rsi_qqe[1] >= nz(ts[1])
+ts := na(ts) ? rsi_qqe : crossover_cond ? rsi_qqe - diff * qqe_factor : crossunder_cond ? rsi_qqe + diff * qqe_factor : ts
+
+plot(rsi_qqe, color=color.blue, title="QQE RSI")
+plot(ts, color=rsi_qqe>ts ? color.teal : color.red, title="QQE Trailing Stop")
+
+// ============================
+// SIGNALS
+bull_cross = ta.crossover(ajf_rsi, ts)
+bear_cross = ta.crossunder(ajf_rsi, ts)
+
+// ============================
+// KELTNER MODULE
+ma = ta.ema(keltner_src, 34)
+atr_val = ta.ema(ta.tr(true), 88)
+kc_mid = ma
+kc_top = kc_mid + atr_val * 1.5
+kc_bottom = kc_mid - atr_val * 1.5
+
+kc_buy_zone = close <= kc_bottom
+kc_sell_zone = close >= kc_top
+
+kc_cross_up_lower = ta.crossover(close, kc_bottom)
+kc_cross_up_upper = ta.crossover(close, kc_top)
+
+// ============================
+// WAVETREND MODULE
+wt_src = hlc3
+wt_movingAverage = ta.ema(wt_src, 10)
+wt_movingAverageChannel = ta.ema(math.abs(wt_src - wt_movingAverage), 10)
+wt_channelIndex = (wt_src - wt_movingAverage)/(0.015 * wt_movingAverageChannel)
+wt_waveTrend1 = ta.ema(wt_channelIndex, 3)
+wt_waveTrend2 = ta.sma(wt_waveTrend1, 3)
+wt_cross_up = ta.crossover(wt_waveTrend1, wt_waveTrend2)
+wt_cross_down = ta.crossunder(wt_waveTrend1, wt_waveTrend2)
+
+// Compute module scores
+bull_score = bull_cross ? 1 : 0
+bear_score = bear_cross ? -1 : 0
+ajf_score  = bull_score + bear_score
+qqe_score  = rsi_qqe > ts ? 1 : rsi_qqe < ts ? -1 : 0
+kc_score   = kc_buy_zone ? 1 : kc_sell_zone ? -1 : 0
+wt_score   = wt_cross_up ? 1 : wt_cross_down ? -1 : 0
+
+// Rolling composite score over lookback_bars (used for trade entries)
+composite_score_rolling = math.sum(ajf_score + qqe_score + kc_score + wt_score, lookback_bars)
+
+// Cumulative score (for plotting only)
+var float composite_score_cum = 0
+composite_score_cum := composite_score_cum + ajf_score + qqe_score + kc_score + wt_score
+
+// Entry conditions based on rolling score
+if composite_score_rolling >= score_threshold_long
+    strategy.entry("Long", strategy.long)
+
+if composite_score_rolling <= score_threshold_short
+    strategy.entry("Short", strategy.short)
+
+// Plot cumulative score for visual reference
+plot(composite_score_cum, color=color.orange, title="Composite Score (Cumulative)", linewidth=2)
+
+barcolor(colorbars ? (composite_score_cum > 0 ? color.new(color.green,0) : composite_score_cum < 0 ? color.new(color.red,0) : na) : na)
+
+
+// ============================
+// ALERTS
+alertcondition(bull_cross, title="AJFFRSI Bull Cross", message="AJFFRSI crossed above QQE trailing stop – Bullish Signal")
+alertcondition(bear_cross, title="AJFFRSI Bear Cross", message="AJFFRSI crossed below QQE trailing stop – Bearish Signal")
+alertcondition(kc_buy_zone, title="KC Buy Zone", message="Price touched Keltner support zone")
+alertcondition(kc_sell_zone, title="KC Sell Zone", message="Price touched Keltner resistance zone")
+alertcondition(wt_cross_up, title="WT Cross Up", message="WaveTrend crossed up")
+alertcondition(wt_cross_down, title="WT Cross Down", message="WaveTrend crossed down")
+
+// ============================
+// TABLE
+var table score_table = table.new(position.top_right, 5, 2, frame_color=color.gray, border_color=color.white)
+table.cell(score_table, 0, 0, "Signal", text_color=color.white, bgcolor=color.gray)
+table.cell(score_table, 0, 1, "Score", text_color=color.white, bgcolor=color.gray)
+table.cell(score_table, 1, 0, "AJFFRSI Cross", text_color=color.green)
+table.cell(score_table, 1, 1, str.tostring(ajf_score))
+table.cell(score_table, 2, 0, "QQE", text_color=color.blue)
+table.cell(score_table, 2, 1, str.tostring(qqe_score))
+table.cell(score_table, 3, 0, "Keltner Zone", text_color=color.lime)
+table.cell(score_table, 3, 1, str.tostring(kc_score))
+table.cell(score_table, 4, 0, "WaveTrend", text_color=color.orange)
+table.cell(score_table, 4, 1, str.tostring(wt_score))
+
+View in Pine Editor・157 lines
+Use on chart
+1
+589
+Nov 25, 2025
+Overview:
+A multi-factor, market-adaptive swing strategy designed for intraday and short-term crypto trading. It synthesizes momentum, volatility, and trend signals into a unified composite score over a configurable lookback window. The strategy leverages a modular, signal-weighted approach to ensure robust entry timing while remaining compatible with human-in-the-loop validation and algorithmic execution.
+
+Core Modules:
+
+AJFFRSI (RSX-based Momentum): Measures smoothed price momentum with noise-reduction filters to detect crossovers relative to the QQE trailing stop.
+
+QQE (Quantitative Qualitative Easing RSI): A modified RSI with a dynamic trailing stop that adapts to short-term volatility, identifying exhaustion and potential reversal points.
+
+Keltner Channel Zones: Determines overextension relative to trend, providing buy/sell zones based on ATR-banded EMA.
+
+WaveTrend Oscillator: Confirms short-term swings and market direction through smoothed oscillator cross signals.
+
+Rolling Composite Score: Aggregates module signals over a unified lookback (e.g., 144 bars) to normalize noise and capture consistent trends.
+
+Signal Logic:
+
+Each module outputs a discrete score (+1 / 0 / -1).
+
+The rolling composite score sums all module scores over the lookback period.
+
+Long positions trigger when the rolling score meets or exceeds the long threshold.
+
+Short positions trigger when the rolling score meets or falls below the short threshold.
+
+Multi-dimensional signal aggregation reduces false positives from single indicators.
+
+Rolling lookback ensures score normalization across different volatility regimes.
+
+Highly modular: easy to adapt modules or weights to different instruments or timeframes.
+
+Fully compatible with automated execution pipelines, including custom exchange screener bots.
+
+Use Case:
+Ideal for quant-driven altcoin or multi-asset strategies where high-frequency validation is critical and sequential module weighting enhances trend flip detection.
+Nov 25, 2025
+Release Notes
+UPD1

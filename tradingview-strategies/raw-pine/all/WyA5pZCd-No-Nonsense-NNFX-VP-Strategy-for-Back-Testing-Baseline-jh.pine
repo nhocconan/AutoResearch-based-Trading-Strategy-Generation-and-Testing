@@ -1,0 +1,4 @@
+//@version=4
+show_atr=##input(defval=true,type='INPUT_BOOL',##id='in_10')
+##root(root_metainfo,rm_0,(show_atr?95:100),input__integer)
+##root(root_metainfo,rm_1,(show_atr?95:100),input__integer)

@@ -1,0 +1,61 @@
+//@version=5
+strategy("SuperTrend + RSI Breakout Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// === Inputs ===
+// SuperTrend
+atrPeriod   = input.int(15, "SuperTrend ATR Period")
+atrMult     = input.float(2.0, "SuperTrend ATR Multiplier")
+
+// RSI
+rsiLength   = input.int(14, "RSI Length")
+rsiOS       = input.int(30, "RSI Oversold Level")
+rsiOB       = input.int(70, "RSI Overbought Level")
+
+// Pip-based SL/TP
+slPips      = input.int(20, "Stop Loss (pips)")
+tpPips      = input.int(30, "Take Profit (pips)")
+
+// === SuperTrend Calculation ===
+[superTrend, dir] = ta.supertrend(atrMult, atrPeriod)
+// dir == -1 → bullish trend, dir == 1 → bearish trend
+bullTrend = dir == -1
+bearTrend = dir == 1
+
+plot(superTrend, "SuperTrend", color=bullTrend ? color.green : color.red)
+
+// === RSI Calculation ===
+rsi = ta.rsi(close, rsiLength)
+plot(rsi, "RSI", color=color.blue)
+hline(rsiOS, "Oversold", color=color.green)
+hline(rsiOB, "Overbought", color=color.red)
+
+// === Pip Conversion ===
+pipValue = syminfo.mintick
+slDist   = slPips * pipValue
+tpDist   = tpPips * pipValue
+
+// === Entry Conditions ===
+// Long: RSI crosses below oversold + SuperTrend bullish
+longCondition  = ta.crossunder(rsi, rsiOS) and bullTrend and strategy.position_size == 0
+
+// Short: RSI crosses above overbought + SuperTrend bearish
+shortCondition = ta.crossover(rsi, rsiOB) and bearTrend and strategy.position_size == 0
+
+// === Orders ===
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", "Long", stop=close - slDist, limit=close + tpDist)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", "Short", stop=close + slDist, limit=close - tpDist)
+
+View in Pine Editor・51 lines
+Use on chart
+7
+421
+This strategy combines the SuperTrend indicator with RSI extremes to generate clear, rule‑based entries, using fixed pip stop loss and take profit levels for risk management.
+• SuperTrend bias: Trades are only taken in the direction of the SuperTrend trend. When the SuperTrend is green (bullish), only long trades are allowed. When the SuperTrend is red (bearish), only short trades are allowed. The SuperTrend is calculated with an ATR period of 15 and a multiplier of 2.
+• RSI trigger: Long entries occur when RSI closes below the oversold threshold, while short entries occur when RSI closes above the overbought threshold. The RSI is set to a length of 3, with thresholds at 30 (oversold) and 70 (overbought).
+• Risk management: Stop loss is placed at a fixed pip distance (adjustable between 50–80 pips for 15‑minute charts). Take profit is set at a fixed pip distance in the opposite direction.
+• Flexibility: Key parameters such as ATR period/multiplier (for SuperTrend), RSI length and thresholds, and pip distances for SL/TP can be adjusted to fit different markets and timeframes.

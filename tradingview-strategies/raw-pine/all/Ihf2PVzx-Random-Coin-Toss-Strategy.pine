@@ -1,0 +1,132 @@
+//@version=6
+strategy("Random Coin Toss Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === Inputs ===
+atrLength    = input.int(14, "ATR Length", minval=1)
+slMultiplier = input.float(1.0, "SL Multiplier (e.g., 1 = 1x ATR)", minval=0.1)
+tpMultiplier = input.float(2.0, "TP Multiplier (e.g., 2 = 2x ATR)", minval=0.1)
+entryFreq    = input.int(10, "Entry Frequency (bars)", minval=1)
+showZones    = input.bool(true, "Show TP/SL Zones")
+boxSize      = input.int(5, "TP SL Box size based on number of Bars")
+// === ATR Calculation ===
+atr = ta.atr(atrLength)
+padding = atr * 0.01  // Small vertical gap
+
+// === Coin Toss Logic ===
+randSource = math.sin(close + bar_index) * 1000
+randNorm   = randSource - math.floor(randSource)
+isBuy      = randNorm > 0.5
+newToss    = bar_index % entryFreq == 0
+canEnter   = strategy.position_size == 0
+
+// === Trade Variables ===
+var string tradeDir     = na
+var float entryPrice    = na
+var float stopLoss      = na
+var float takeProfit    = na
+
+// === Box references (draw once only) ===
+var box slBox = na
+var box tpBox = na
+
+// === Entry Logic ===
+if newToss and canEnter and not na(atr)
+    entryPrice := close
+    stopLoss   := isBuy ? entryPrice - atr * slMultiplier : entryPrice + atr * slMultiplier
+    takeProfit := isBuy ? entryPrice + atr * tpMultiplier : entryPrice - atr * tpMultiplier
+    tradeDir   := isBuy ? "long" : "short"
+
+    // Delete old boxes
+    if not na(slBox)
+        box.delete(slBox)
+    if not na(tpBox)
+        box.delete(tpBox)
+
+    // Enter trade
+    if isBuy
+        strategy.entry("Long", strategy.long)
+    else
+        strategy.entry("Short", strategy.short)
+
+    // Draw TP/SL Zones (one time)
+    if showZones
+        slBox := box.new(bar_index, isBuy ? entryPrice - padding : stopLoss, bar_index + boxSize, isBuy ? stopLoss : entryPrice + padding, border_color=color.red, bgcolor=color.new(color.red, 85))
+        tpBox := box.new(bar_index, isBuy ? takeProfit : entryPrice - padding, bar_index + boxSize, isBuy ? entryPrice + padding : takeProfit, border_color=color.green, bgcolor=color.new(color.green, 85))
+
+// === Exit Logic
+if strategy.position_size > 0 and tradeDir == "long"
+    strategy.exit("TP/SL Long", from_entry="Long", stop=stopLoss, limit=takeProfit)
+
+if strategy.position_size < 0 and tradeDir == "short"
+    strategy.exit("TP/SL Short", from_entry="Short", stop=stopLoss, limit=takeProfit)
+
+// === ATR Display Table ===
+var table atrTable = table.new(position.top_right, 1, 1, frame_color=color.gray, frame_width=1)
+if bar_index % 5 == 0
+    table.cell(atrTable, 0, 0, "ATR: " + str.tostring(atr, "#.##"), text_color=color.white, bgcolor=color.blue)
+
+View in Pine Editor・66 lines
+Use on chart
+4
+4
+1
+1 492
+📌 Overview
+This strategy is a probability-based trading simulation that randomly decides trade direction using a coin-toss mechanism and executes trades with a customizable risk-reward ratio. It's designed primarily for testing entry frequency and risk dynamics, not predictive accuracy.
+
+🎯 Core Concept
+Every N bars (configurable), the strategy performs a pseudo-random coin toss.
+
+Based on the result:
+
+If heads → Buy
+
+If tails → Sell
+
+Once a position is opened, it sets a Stop-Loss (SL) and Take-Profit (TP) based on a multiple of the current ATR (Average True Range) value.
+
+⚙️ Configurable Inputs
+
+ATR Length Period for ATR calculation, determines volatility basis.
+SL Multiplier SL distance = ATR × multiplier (e.g., 1.0 means 1x ATR).
+
+TP Multiplier TP distance = ATR × multiplier (e.g., 2.0 = 2x ATR).
+
+Entry Frequency Bars to wait between each new coin toss decision.
+Show TP/SL Zones Toggle on/off for drawing visual TP and SL zones.
+Box Size Number of bars used to define the width of the TP/SL boxes.
+
+
+🔁 Entry & Exit Logic
+Entry:
+Happens only when no current position exists and it's the correct bar interval.
+Entry direction is randomly decided.
+
+Exit:
+Positions exit at either:
+
+Take-Profit (TP) level
+
+Stop-Loss (SL) level
+
+
+Both are calculated using the configured ATR-based distances.
+
+
+🖼️ Visual Features
+TP and SL zones:
+Rendered as shaded rectangles (boxes) only once per trade.
+Green box for TP zone, red box for SL zone.
+Automatically deleted and redrawn for each new trade to avoid chart clutter.
+
+ATR Display Table:
+A minimal info table at the top-right shows the current ATR value.
+Updates every few bars for performance.
+
+🧪 Use Cases
+Ideal for risk-reward modeling, strategy prototyping, and understanding how volatility-based SL/TP behavior affects results.
+
+Great for backtesting frequency, RR tweaks (e.g., 2:5 or 3:1), and execution structure in random conditions.
+
+⚠️ Disclaimer
+Since the trade direction is random, this script is not meant for predictive trading but serves as a powerful experiment framework for studying how SL, TP, and volatility interact with random chance in a controlled, repeatable system.

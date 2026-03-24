@@ -1,0 +1,71 @@
+//@version=4
+
+strategy("WEEKLY BTC TRADING SCRYPT","WBTS",overlay=false,default_qty_type=strategy.fixed)
+
+source=input(defval=close,title="source",group="STRATEGY")
+
+btc=security('BTCUSDT','1W', source)
+ma=sma(btc,8)
+
+buy_condition= crossover(btc,ma) 
+sell_condition= crossunder(btc,ma)
+
+ma_color=input(defval=#FF3232,title="COLOR",group="MA")
+ma_linewidth=input(defval=2,title="LINE WIDTH",group="MA")
+graphic_color=input(defval=#6666FF,title="COLOR",group="GRAPHIC")
+graphic_linewidth=input(defval=2,title="LINE WIDTH",group="GRAPHIC")
+
+start_date=input(defval=2020,title="YEAR",group="STRATEGY EXECUTION YEAR")
+
+loss_ratio=input(defval=1,title="LOSS RATIO", group="STRATEGY")
+reward_ratio=input(defval=3,title="REWARD RATIO", group="STRATEGY")
+
+if(year>=start_date)
+    strategy.entry('BUY',long=true,when=buy_condition,alert_message='Price came to buying value!')
+
+    if(strategy.long)
+        alert('BTC buy order trigerred!',alert.freq_once_per_bar)
+    strategy.exit(id="SELL",loss=loss_ratio,profit=reward_ratio,when=sell_condition,alert_message='Price came to position closing value!')
+    if(sell_condition)
+        alert('BTC sell order trigerred!',alert.freq_once_per_bar)
+plot(series=source,title="WEEKLY CLOSE",color=graphic_color,linewidth=graphic_linewidth)
+plot(ma,title="SMA8 WEEKLY",color=ma_color,linewidth=ma_linewidth)
+plot(strategy.equity,display=0)
+View in Pine Editor・37 lines
+Use on chart
+1
+0
+0
+3 990
+Weekly BTC Trading Scrypt(WBTS)
+This script is only suggested for cryptocurrencies and weekly buying strategy which is long term.Using it in another markets(e.g forex,stock,e.t.c) is not suggested. The thing makes it different than other strategies we try to understand bull and bear seasons and buying selected crypto currency as using formula if weekly closing value crossover eight weeks simple moving avarage buy,else if selected crypto currency's weekly closing value crossunder eight weeks simple avarage sell. Eight week moving avarage is also uses weekly closing prices but for being able to use this strategy ,trading pair must have more than eight candles in weekly chart otherwise the 8 weeks simple moving avarage value cannot be calculated and script does not work.
+This script has a chart called WBTS and it has following features:
+Strategy group consist of 3 inputs:
+1)Source: Close by default. Our whole strategy uses close values. You can change it but not suggested.
+2)Loss Ratio: Because of the cases like the circumstances that manipulates market or high volatility , sometimes graphic show wrong buying signals and this ratio saves user from big money looses(Note : This ratio will always work when selling condition occurs to make user take his profit or prevent him to loss more money because of a wrong positive comes from the indicator.)
+3)Reward Ratio : When selling condition happens it will exit user with more profit(if price is already higher than buying point) otherwise it will dimunish loss a bit(if user is below of buying point) or prevents looses(if user is in buying point when selling condition happened.
+MA group consist of 2 inputs:
+COLOR:Specifies color of the moving avarage.It is equal to #FF3232by hex color code by default.
+LINE WIDTH: Specifies linewidth of the moving avarage. It is 2 by default.
+GRAPHIC group consist of 2 inputs:
+COLOR: It specifies the color of the line which consist of weekly closing prices. It is equal to #6666FF hex color code by default.
+LINE WIDTH: Specifies linewidth of the line which consist of weekly closing prices. It is 2 by default.
+STRATEGY EXECUTION YEAR: It will show the orders,profits and looses done by script after the input year giving in it.It is 2020 by default.
+The last feature is strategy equity,it is not in one of these groups. User should click on settings button on the WBTS indicator than chose Style section and there is a deactivated check box near in the plot section if user activate it, the equity line will show in indicator's graph.
+
+Logic of This Strategy:The story of this strategy began when I studied BTC's price movement from 2020 to today with 8 weeks simple moving avarage (it takes weekly closes as source) and weekly clossing values. I understood that there was a perfect interest between bull and bear market and following conditions:
+buy_condition=crossover(weekly_closing_values,8_week_simple_moving_avarage)
+sell_condition=crossover(weekly_closing_values,8_week_simple_moving_avarage)
+and I tried same thing on the same and bigger time frames("for example i studied how the strategy works from the beginning to today with bitcoin and what is our final equity") with bitcoin and other cryptocurrencies and this made me saw better the relation between giving conditions and general market psychology, however I also witnessed some wrong positives coming by script and used a risk reward ratio to save user and set risk reward ratio 1/3 after a research.
+
+For both conditions(buy_condition and sell_condition),when they are realised,script will alert users and an order will be triggered.
+
+Before finishing the description,from settings/properties/ user can set initial capital,base currency,order size and type,but it is 100000 for initial_amount and 1 contract for order size by default.
+In backtesting I used the options like the following example :
+Initial capital=1000
+Base_curreny=USD
+Order size=40 USD
+
+Properties place must set different by every single user according to his or her capital and order size must not be higher than his total money because this script is not the best or a good script for derivatives. It is only written for long term-crypto spot trading and I strongly recommend to users that margin may cause bad results and please do not use it with any margin or any market different than crypto market.
+
+Thank you very much for reading)

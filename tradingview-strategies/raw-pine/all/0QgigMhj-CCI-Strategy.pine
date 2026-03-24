@@ -1,0 +1,139 @@
+//@version=4
+
+strategy(title="CCI Strategy", overlay=true, initial_capital = 10000, default_qty_value = 10000, default_qty_type = strategy.cash)
+
+
+//CCI Code
+
+length = input(20, minval=1, title="CCI Length")
+src = input(close, title="Source")
+ma = sma(src, length)
+cci = (src - ma) / (0.015 * dev(src, length))
+
+
+// Strategy Backtesting
+startDate  = input(timestamp("2021-10-01T00:00:00"), type = input.time, title='Backtesting Start Date')
+finishDate = input(timestamp("9999-12-31T00:00:00"), type = input.time, title='Backtesting End Date')
+
+time_cond  = time >= startDate and time <= finishDate
+
+
+//Time Restriction Settings
+startendtime = input("", title='Time Frame To Enter Trades')
+enableclose = input(false, title='Enable Close Trade At End Of Time Frame')
+timetobuy = (time(timeframe.period, startendtime))
+timetoclose = na(time(timeframe.period, startendtime))
+
+
+//Strategy Settings
+
+//Strategy Settings - Enable Check Boxes
+enableentry = input(true, title="Enter First Trade ASAP")
+enableconfirmation = input(false, title="Wait For Cross To Enter First Trade")
+enablezero =input(true, title="Use CCI Simple Cross Line For Entries & Exits")
+enablebands = input(false, title="Use Upper & Lower Bands For Entries & Exits")
+
+//Strategy Settings - Band Sources
+ccisource = input(0, title="CCI Simple Cross")
+upperbandsource =input(100, title="CCI Enter Long Band")
+upperbandexitsource =input(100, title="CCI Exit Long Band")
+lowerbandsource =input(-100, title="CCI Enter Short Band")
+lowerbandexitsource =input(-100, title="CCI Exit Short Band")
+
+//Strategy Settings - Crosses
+simplecrossup = crossover(cci, ccisource)
+simplecrossdown = crossunder(cci, ccisource)
+uppercrossup = crossover(cci, upperbandsource)
+lowercrossdown = crossunder(cci, lowerbandsource)
+uppercrossdown = crossunder(cci, upperbandexitsource)
+lowercrossup = crossover(cci, lowerbandexitsource)
+upperstop = crossunder(cci, upperbandsource)
+lowerstop = crossover(cci, lowerbandsource)
+
+
+// Stop Loss & Take Profit % Based
+enablesl = input(false, title='Enable Stop Loss')
+enabletp = input(false, title='Enable Take Profit')
+stopTick = input(5.0, title='Stop Loss %', type=input.float, step=0.1) / 100
+takeTick = input(10.0, title='Take Profit %', type=input.float, step=0.1) / 100
+
+longStop = strategy.position_avg_price * (1 - stopTick)
+shortStop = strategy.position_avg_price * (1 + stopTick)
+shortTake = strategy.position_avg_price * (1 - takeTick)
+longTake = strategy.position_avg_price * (1 + takeTick)
+
+plot(strategy.position_size > 0 and enablesl ? longStop : na, style=plot.style_linebr, color=color.red, linewidth=1, title="Long Fixed SL")
+plot(strategy.position_size < 0 and enablesl ? shortStop : na, style=plot.style_linebr, color=color.red, linewidth=1, title="Short Fixed SL")
+plot(strategy.position_size > 0 and enabletp ? longTake : na, style=plot.style_linebr, color=color.green, linewidth=1, title="Long Take Profit")
+plot(strategy.position_size < 0 and enabletp ? shortTake : na, style=plot.style_linebr, color=color.green, linewidth=1, title="Short Take Profit")
+
+
+// Alert messages
+message_enterlong  = input("", title="Long Entry message")
+message_entershort = input("", title="Short Entry message")
+message_closelong = input("", title="Close Long message")
+message_closeshort = input("", title="Close Short message")
+    
+
+//Strategy Execution
+
+//Strategy Execution - Simple Line Cross
+if (cci > ccisource and enablezero and enableentry and time_cond and timetobuy)
+    strategy.entry("Long", strategy.long, alert_message = message_enterlong)
+if (cci < ccisource and enablezero and enableentry and time_cond and timetobuy)
+    strategy.entry("Short", strategy.short, alert_message = message_entershort)
+
+if (simplecrossup and enablezero and enableconfirmation and time_cond and timetobuy)
+    strategy.entry("Long", strategy.long, alert_message = message_enterlong)
+if (simplecrossdown and enablezero and enableconfirmation and time_cond and timetobuy)
+    strategy.entry("Short", strategy.short, alert_message = message_entershort)
+
+//Strategy Execution - Upper and Lower Band Entry
+if (uppercrossup and enablebands and time_cond and timetobuy)
+    strategy.entry("Long", strategy.long, alert_message = message_enterlong)
+if (lowercrossdown and enablebands and time_cond and timetobuy)
+    strategy.entry("Short", strategy.short, alert_message = message_entershort)
+
+//Strategy Execution - Upper and Lower Band Exit
+if strategy.position_size > 0 and uppercrossdown and enablebands and time_cond and timetobuy
+    strategy.close_all(alert_message = message_closelong)
+if strategy.position_size < 0 and lowercrossup and enablebands and time_cond and timetobuy
+    strategy.close_all(alert_message = message_closeshort)
+
+//Strategy Execution - Upper and Lower Band Stops
+if strategy.position_size > 0 and upperstop and enablebands and time_cond and timetobuy
+    strategy.close_all(alert_message = message_closelong)
+if strategy.position_size < 0 and lowerstop and enablebands and time_cond and timetobuy
+    strategy.close_all(alert_message = message_closeshort)
+
+//Strategy Execution - Close Trade At End Of Time Frame    
+if strategy.position_size > 0 and timetoclose and enableclose and time_cond
+    strategy.close_all(alert_message = message_closelong)
+if strategy.position_size < 0 and timetoclose and enableclose and time_cond
+    strategy.close_all(alert_message = message_closeshort)
+
+//Strategy Execution - Stop Loss and Take Profit
+if strategy.position_size > 0 and enablesl and time_cond
+    strategy.exit(id="Close Long", stop=longStop, limit=longTake, alert_message = message_closelong)
+if strategy.position_size < 0 and enablesl and time_cond
+    strategy.exit(id="Close Short", stop=shortStop, limit=shortTake, alert_message = message_closeshort)
+    
+if strategy.position_size > 0 and enabletp and time_cond
+    strategy.exit(id="Close Long", stop=longStop, limit=longTake, alert_message = message_closelong)
+if strategy.position_size < 0 and enabletp and time_cond
+    strategy.exit(id="Close Short", stop=shortStop, limit=shortTake, alert_message = message_closeshort)
+
+View in Pine Editor・127 lines
+Use on chart
+2
+1
+7
+4
+5 587
+This CCI strategy will allow you to enter a long or short off a CCI zero line cross or control entries and exits from custom upper and lower band lengths. You can set a custom upper band which it will buy when it crosses up and then a custom upper band exit which it will sell when it crosses down. For a short you can set a custom lower band which it will short when it crosses down and the custom lower band exit which it will exit the short when it crosses up. Be sure to enter slippage and commission into the properties to give you realistic results.
+
+I've also built in backtesting date ranges and the ability to trade only within certain times of day and have it close all trades at the end of that time frame. This is especially useful for day trading stocks. If you check off "Enter First Trade ASAP" then when using the time frame option it will enter the current trade. If however you uncheck that box and instead check off "Wait To Enter First Trade" it will wait for the trend to change and then enter.
+
+You can also specify a % based take profit and stop loss. Also keep in mind that if you have "Enter First Trade ASAP" checked off and use the stop loss and/or take profit then it will re-enter the current trend again.
+
+Finally there's custom alert fields so you can send custom alert messages for strategy entry and exit for use with automated trading services. Simply enter your messages in the fields within the strategy properties and then put {{strategy.order.alert_message}} in your alert message body and it will dynamically pull in the appropriate message.

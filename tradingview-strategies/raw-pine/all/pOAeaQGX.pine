@@ -1,0 +1,211 @@
+//@version=6
+strategy("FON60DK by leventsah", overlay=true)
+
+// Girdi AL
+t3_length = input.int(5, title="Tillson Per AL", minval=1)
+t3_opt = input.float(0.1, title="Tillson Opt AL", step=0.1, minval=0)
+tott_length = input.int(5, title="TOTT Per AL", minval=1)
+tott_opt = input.float(0.1, title="TOTT Opt AL", step=0.1, minval=0)
+tott_coeff = input.float(0.006, title="TOTT Coeff AL", step=0.001, minval=0)
+
+//GİRDİ SAT
+t3_lengthSAT = input.int(5, title="Tillson Per SAT", minval=1)
+t3_optSAT = input.float(0.1, title="Tillson Opt SAT", step=0.1, minval=0)
+tott_lengthSAT = input.int(5, title="TOTT Per SAT", minval=1)
+tott_opt_SAT = input.float(0.1, title="TOTT Opt SAT", step=0.1, minval=0)
+tott_coeff_SAT = input.float(0.006, title="TOTT Coeff SAT", step=0.001, minval=0)
+
+william_length = input.int(3, title="William %R Periyodu", minval=1)
+
+// Tillson T3 AL
+t3(src, length, opt) =>
+    k = 2 / (length + 1)
+    ema1 = ta.ema(src, length)
+    ema2 = ta.ema(ema1, length)
+    ema3 = ta.ema(ema2, length)
+    ema4 = ta.ema(ema3, length)
+    c1 = -opt * opt * opt
+    c2 = 3 * opt * opt + 3 * opt * opt * opt
+    c3 = -6 * opt * opt - 3 * opt - 3 * opt * opt * opt
+    c4 = 1 + 3 * opt + opt * opt * opt + 3 * opt * opt
+    t3_val = c1 * ema4 + c2 * ema3 + c3 * ema2 + c4 * ema1
+    t3_val
+
+t3_value = t3(close, t3_length, t3_opt)
+t3_valueSAT = t3(close, t3_lengthSAT, t3_optSAT)
+
+
+// TOTT hesaplaması (Twin Optimized Trend Tracker)
+Var_Func(src, length) =>
+    valpha = 2 / (length + 1)
+    vud1 = math.max(src - src[1], 0)
+    vdd1 = math.max(src[1] - src, 0)
+    vUD = math.sum(vud1, 9)
+    vDD = math.sum(vdd1, 9)
+    vCMO = (vUD - vDD) / (vUD + vDD)
+    var float VAR = na
+    VAR := valpha * math.abs(vCMO) * src + (1 - valpha * math.abs(vCMO)) * nz(VAR[1], src)
+    VAR
+
+VAR = Var_Func(close, tott_length)
+VAR_SAT = Var_Func(close, tott_lengthSAT)
+
+//LONG 
+MAvg = VAR
+fark = MAvg * tott_opt * 0.01
+longStop = MAvg - fark
+longStopPrev = nz(longStop[1], longStop)
+longStop := MAvg > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+shortStop = MAvg + fark
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop := MAvg < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+dir = 1
+dir := nz(dir[1], dir)
+dir := dir == -1 and MAvg > shortStopPrev ? 1 : dir == 1 and MAvg < longStopPrev ? -1 : dir
+MT = dir == 1 ? longStop : shortStop
+OTT = MAvg > MT ? MT * (200 + tott_opt) / 200 : MT * (200 - tott_opt) / 200
+OTTup = OTT * (1 + tott_coeff)
+OTTdn = OTT * (1 - tott_coeff)
+
+//CLOSE
+MAvgS = VAR_SAT
+farkS = MAvgS * tott_opt_SAT * 0.01
+longStopS = MAvgS - farkS
+longStopPrevS = nz(longStopS[1], longStopS)
+longStopS := MAvgS > longStopPrevS ? math.max(longStopS, longStopPrevS) : longStopS
+shortStopS = MAvgS + farkS
+shortStopPrevS = nz(shortStopS[1], shortStopS)
+shortStopS := MAvgS < shortStopPrevS ? math.min(shortStopS, shortStopPrevS) : shortStopS
+dirS = 1
+dirS := nz(dirS[1], dirS)
+dirS := dirS == -1 and MAvgS > shortStopPrevS ? 1 : dirS == 1 and MAvgS < longStopPrevS ? -1 : dirS
+MTS = dirS == 1 ? longStopS : shortStopS
+OTTS = MAvgS > MTS ? MTS * (200 + tott_opt_SAT) / 200 : MTS * (200 - tott_opt_SAT) / 200
+OTTupS = OTTS * (1 + tott_coeff_SAT)
+OTTdnS = OTTS * (1 - tott_coeff_SAT)
+
+// Calculation of Williams %R
+williamsR = -100 * (ta.highest(high, william_length) - close) / (ta.highest(high, william_length) - ta.lowest(low, william_length))
+
+// Alım koşulu
+longCondition = (t3_value > OTTup) and (williamsR > -20)
+
+// Short koşulu (long pozisyonunu kapatmak için)
+shortCondition = (t3_valueSAT < OTTdnS) and (williamsR < -70)
+
+// Alım pozisyonu açma
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+// Short koşulu sağlandığında long pozisyonunu kapama
+if (shortCondition)
+    strategy.close("Long")
+
+
+// Alım pozisyonu boyunca barları yeşil yapma
+barcolor(strategy.position_size > 0 ? color.green : na)
+
+// Grafikte göstergeleri çizme
+plot(t3_value, color=color.blue, linewidth=1, title="Tillson AL")
+plot(OTTup, color=color.green, linewidth=1, title="TOTT Up AL")
+plot(OTTdn, color=color.red, linewidth=1, title="TOTT Down AL")
+
+// Grafikte göstergeleri çizme
+plot(t3_valueSAT, color=color.blue, linewidth=1, title="Tillson SAT")
+plot(OTTupS, color=color.green, linewidth=1, title="TOTT Up SAT")
+plot(OTTdnS, color=color.red, linewidth=1, title="TOTT Down SAT")
+
+View in Pine Editor・116 lines
+Use on chart
+2
+9
+7
+2
+3 448
+Jan 12, 2025
+The strategy generates buy and sell signals using the Tillson T3 and TOTT (Twin Optimized Trend Tracker) indicators. Additionally, the Williams %R indicator is used to filter the signals. Below is an explanation of the main components of the code:
+
+1. Input Parameters:
+Tillson T3 and TOTT parameters: Separate parameters are defined for both buy (AL) and sell (SAT) conditions. These parameters control the sensitivity and behavior of the indicators.
+
+Williams %R period: The period for the Williams %R indicator is set to determine overbought and oversold levels.
+
+2. Tillson T3 Calculation:
+The Tillson T3 indicator is a smoothed moving average that uses an exponential moving average (EMA) with additional smoothing. The formula calculates a weighted average of multiple EMAs to produce a smoother line.
+
+The t3 function computes the Tillson T3 value based on the close price and the input parameters.
+
+3. TOTT Calculation (Twin Optimized Trend Tracker):
+The TOTT indicator is a trend-following tool that adjusts its sensitivity based on market conditions. It uses a combination of price action and a volatility coefficient to determine trend direction.
+
+The Var_Func function calculates the TOTT value, which is then used to derive the OTT (Optimized Trend Tracker) levels for both buy and sell conditions.
+
+4. Williams %R Calculation:
+Williams %R is a momentum oscillator that measures overbought and oversold levels. It is calculated using the highest high and lowest low over a specified period.
+
+5. Buy and Sell Conditions:
+Buy Condition: A buy signal is generated when the Tillson T3 value crosses above the TOTT upper band (OTTup) and the Williams %R is above -20 (indicating an oversold condition).
+
+Sell Condition: A sell signal is generated when the Tillson T3 value crosses below the TOTT lower band (OTTdnS) and the Williams %R is above -70 (used to close long positions).
+
+6. Strategy Execution:
+The strategy.entry function is used to open a long position when the buy condition is met.
+
+The strategy.close function is used to close the long position when the sell condition is met.
+
+7. Visualization:
+The bars on the chart are colored green when a long position is open.
+
+The Tillson T3, TOTT upper band (OTTup), and TOTT lower band (OTTdn) are plotted on the chart for both buy and sell conditions.
+
+8. Plots:
+The Tillson T3 values for buy and sell conditions are plotted in blue.
+
+The TOTT upper and lower bands are plotted in green and red, respectively, for both buy and sell conditions.
+
+Summary:
+This strategy combines trend-following indicators (Tillson T3 and TOTT) with a momentum oscillator (Williams %R) to generate buy and sell signals. The use of separate parameters for buy and sell conditions allows for fine-tuning the strategy based on market behavior. The visual elements, such as colored bars and plotted indicators, help traders quickly identify signals and trends on the chart.
+Jan 23, 2025
+Release Notes
+The strategy generates buy and sell signals using the Tillson T3 and TOTT (Twin Optimized Trend Tracker) indicators. Additionally, the Williams %R indicator is used to filter the signals. Below is an explanation of the main components of the code:
+
+1. Input Parameters:
+Tillson T3 and TOTT parameters: Separate parameters are defined for both buy (AL) and sell (SAT) conditions. These parameters control the sensitivity and behavior of the indicators.
+
+Williams %R period: The period for the Williams %R indicator is set to determine overbought and oversold levels.
+
+2. Tillson T3 Calculation:
+The Tillson T3 indicator is a smoothed moving average that uses an exponential moving average (EMA) with additional smoothing. The formula calculates a weighted average of multiple EMAs to produce a smoother line.
+
+The t3 function computes the Tillson T3 value based on the close price and the input parameters.
+
+3. TOTT Calculation (Twin Optimized Trend Tracker):
+The TOTT indicator is a trend-following tool that adjusts its sensitivity based on market conditions. It uses a combination of price action and a volatility coefficient to determine trend direction.
+
+The Var_Func function calculates the TOTT value, which is then used to derive the OTT (Optimized Trend Tracker) levels for both buy and sell conditions.
+
+4. Williams %R Calculation:
+Williams %R is a momentum oscillator that measures overbought and oversold levels. It is calculated using the highest high and lowest low over a specified period.
+
+5. Buy and Sell Conditions:
+Buy Condition: A buy signal is generated when the Tillson T3 value crosses above the TOTT upper band (OTTup) and the Williams %R is above -20 (indicating an oversold condition).
+
+Sell Condition: A sell signal is generated when the Tillson T3 value crosses below the TOTT lower band (OTTdnS) and the Williams %R is above -70 (used to close long positions).
+
+6. Strategy Execution:
+The strategy.entry function is used to open a long position when the buy condition is met.
+
+The strategy.close function is used to close the long position when the sell condition is met.
+
+7. Visualization:
+The bars on the chart are colored green when a long position is open.
+
+The Tillson T3, TOTT upper band (OTTup), and TOTT lower band (OTTdn) are plotted on the chart for both buy and sell conditions.
+
+8. Plots:
+The Tillson T3 values for buy and sell conditions are plotted in blue.
+
+The TOTT upper and lower bands are plotted in green and red, respectively, for both buy and sell conditions.
+
+Summary:
+This strategy combines trend-following indicators (Tillson T3 and TOTT) with a momentum oscillator (Williams %R) to generate buy and sell signals. The use of separate parameters for buy and sell conditions allows for fine-tuning the strategy based on market behavior. The visual elements, such as colored bars and plotted indicators, help traders quickly identify signals and trends on the chart.

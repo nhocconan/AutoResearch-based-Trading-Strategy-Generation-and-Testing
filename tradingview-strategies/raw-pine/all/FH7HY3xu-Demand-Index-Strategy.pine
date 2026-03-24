@@ -1,0 +1,73 @@
+//@version=3
+strategy(title="Demand Index Strategy 2", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, shorttitle = "DIS")
+
+// Inputs
+// All user inputs. Stoploss and multiple order system required.
+smooth = input(title="Smooth", type=integer, defval=10)
+sma = input(title="SMA", type=bool, defval=false)
+
+// Compute moving averages
+// Data sources, required by the system.
+p = (close - open) / open
+di = 0.0
+va = 0.0
+h = 0.0
+l = 0.0
+
+if (high > high[1])
+    h := high
+else
+    h := high[1]
+if (low < low[1])
+    l := low
+else
+    l := low[1]
+va := h - l
+if (sma)
+    va := sma(va, 10)
+else
+    va := avg(va, 10)
+if (va == 0)
+    va := 1
+k = (3*close) / va
+p := p * k
+bp = 1.0
+sp = 1.0
+if (close > open) 
+    bp := volume
+    sp := volume / p
+else 
+    bp := volume / p
+    sp := volume
+if (abs(bp) > abs(sp))
+    di := sp/bp
+else
+    di := bp/sp
+di := ema(di, smooth)
+
+// Plot values
+//plot(di)
+//plot(0, color=purple, transp=60)
+
+// Submit orders
+longCondition = di > 0
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = di < 0
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・59 lines
+Use on chart
+9
+5
+1
+5 699
+Demand Index Strategy
+
+Goes Long if Indicator is > 1
+Goes Short if Indicator is < 1
+
+I have no clue how and when to use it.
+Please message me if you found something.

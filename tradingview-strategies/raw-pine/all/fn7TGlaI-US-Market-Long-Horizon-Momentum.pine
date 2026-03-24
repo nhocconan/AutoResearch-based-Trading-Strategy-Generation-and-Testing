@@ -1,0 +1,188 @@
+//@version=6
+strategy(    "US Long Horizon Momentum",    overlay = false,    initial_capital = 100000,    commission_type = strategy.commission.percent,    commission_value = 0.03,    pyramiding = 0,    process_orders_on_close = true,    calc_on_every_tick = false)
+
+// === CONFIG ===
+group_momentum = "Momentum"
+lookback_months = input.int(18, "Momentum Lookback (months)", minval = 3, maxval = 24, group = group_momentum)
+
+group_risk = "Risk & Sizing"
+use_vol_target   = false//input.bool(false, "Use Volatility Targeting", group = group_risk)
+target_vol_annual = 0.2//input.float(0.15, "Target Vol (annual)", minval = 0.05, maxval = 0.5, step = 0.01, group = group_risk)
+vol_lookback_days = 63//input.int(63, "Vol Lookback (days)", minval = 20, maxval = 252, group = group_risk)
+max_leverage      = 2.0//input.float(2.0, "Max Leverage", minval = 0.1, maxval = 5.0, group = group_risk)
+
+group_exec = "Execution"
+allow_shorts = input.bool(false, "Allow Shorts", group = group_exec)
+
+symbol = input.symbol("SPY")
+// === CONSTANTS ===
+bars_per_year  = 252.0
+bars_per_month = math.round(bars_per_year / 12.0)
+mom_lookback   = int(lookback_months * bars_per_month)
+
+// === HELPER FUNCTIONS ===
+
+//** * Annualized volatility of daily log returns. */
+f_annualized_vol(daily_log_ret, lookback) =>
+    float vol_daily  = ta.stdev(daily_log_ret, lookback)
+    float vol_annual = vol_daily * math.sqrt(bars_per_year)
+    vol_annual
+
+//** * Target position leverage from annual vol. */
+f_target_leverage(target_vol, realized_vol, max_lev) =>
+    float lev_raw = realized_vol > 0 ? target_vol / realized_vol : 0.0
+    float lev     = math.min(max_lev, lev_raw)
+    lev
+
+// === CALC SECTION ===
+
+// 1) 12‑month log momentum
+have_history = bar_index >= mom_lookback
+
+float mom_log = na
+if have_history
+    mom_log := request.security(symbol, timeframe.period, math.log(close / close[mom_lookback]),lookahead = barmerge.lookahead_off)
+
+float signal_dir = 0.0
+if have_history and not na(mom_log)
+    if mom_log > 0
+        signal_dir := 1.0
+    else if mom_log < 0 and allow_shorts
+        signal_dir := -1.0
+    else
+        signal_dir := 0.0
+
+// 2) Volatility (optional sizing)
+daily_log_ret = math.log(close / close[1])
+realized_vol  = f_annualized_vol(daily_log_ret, vol_lookback_days)
+
+float leverage = 1.0
+if use_vol_target
+    leverage := f_target_leverage(target_vol_annual, realized_vol, max_leverage)
+
+// === RISK / EXECUTION SECTION ===
+
+// Current position direction
+pos_dir = strategy.position_size > 0 ? 1.0 : strategy.position_size < 0 ? -1.0 : 0.0
+
+// Target notional and quantity (rebalance only when direction changes)
+float equity          = strategy.equity
+float target_notional = equity * leverage * signal_dir
+float target_qty      = target_notional / close
+
+bool new_signal = have_history and barstate.isconfirmed and (signal_dir != pos_dir)
+
+// Flip or open positions on new signal
+if new_signal
+    // Close any open position first
+    if pos_dir != 0
+        strategy.close_all(comment = "Flip")
+
+    // Open new position if non‑flat signal
+    if signal_dir == 1
+        strategy.entry("Long", strategy.long)
+    else if signal_dir == -1
+        strategy.entry("Short", strategy.short, qty = math.abs(target_qty))
+
+// === PLOTS / UI SECTION ===
+plot(mom_log, title = "12M Log Momentum", color = mom_log >= 0 ? color.new(color.green, 0) : color.new(color.red, 0))
+hline(0.0, "Momentum Zero", color = color.gray)
+
+bgcolor(signal_dir == 1 ? color.new(color.green, 90) : signal_dir == -1 ? color.new(color.red, 90) : na)
+
+View in Pine Editor・94 lines
+Use on chart
+2
+9
+1 115
+Dec 8, 2025
+Summary in one paragraph
+US Market Long Horizon Momentum is a trend following strategy for US index ETFs and futures built around a single eighteen month time series momentum measure. It helps you stay long during persistent bull regimes and step aside or flip short when long term momentum turns negative.
+
+Scope and intent
+• Markets. Large cap US equity indices, liquid US index ETFs, index futures
+• Timeframes. 4h/ Daily charts
+• Default demo used in the publication. SPY on 4h timeframe chart
+• Purpose. Provide a minimal long bias index timing model that can reduce deep drawdowns and capture major cycles without parameter mining
+• Limits. This is a strategy. Orders are simulated on standard candles only
+
+Originality and usefulness
+• Unique concept or fusion. One unscaled multiple month log return of an external benchmark symbol drives all entries and exits, with optional volatility targeting as a single risk control switch.
+• Failure mode addressed. Fully passive buy and hold ignores the sign of long horizon momentum and can sit through multi year drawdowns. This script offers a way to step down risk in prolonged negative momentum without chasing short term noise.
+• Testability. All parameters are visible in Inputs and the momentum series is plotted so users can verify every regime change in the Tester and on price history.
+• Portable yardstick. The log return over a fixed window is a unit that can be applied to any liquid symbol with daily data.
+
+
+Method overview in plain language
+The method looks at how far the benchmark symbol has moved in log return terms over an eighteen month window in our example. If that long horizon return is positive the strategy allows a long stance on the traded symbol. If it is negative and shorts are enabled the strategy can flip short, otherwise it goes flat. There is an optional realised volatility estimate on the traded symbol that can scale position size toward a target annual volatility, but in the default configuration the model uses unit leverage and only the sign of momentum matters.
+
+Base measures
+Return basis. The core yardstick is the natural log of close divided by the close eighteen months ago on the benchmark symbol. Daily log returns of the traded symbol feed the realised volatility estimate when volatility targeting is enabled.
+
+Components
+• Component one Momentum eighteen months. Log of benchmark close divided by its close mom_lookback bars ago. Its sign defines the trend regime. No extra smoothing is applied beyond the long window itself.
+• Component two Realised volatility optional. Standard deviation of daily log returns on the traded symbol over sixty three days. Annualised by the square root of 252. Used only when volatility targeting is enabled.
+• Optional component Volatility targeting. Converts target annual volatility and realised volatility into a leverage factor clipped by a maximum leverage setting.
+
+Fusion rule
+The model uses a simple gate. First compute the sign of eighteen month log momentum on the benchmark symbol. Optionally compute leverage from volatility. The sign decides whether the strategy wants to be long, short, or flat. Leverage only rescales position size when enabled and does not change direction.
+
+Signal rule
+• Long suggestion. When eighteen month log momentum on the benchmark symbol is greater than zero, the strategy wants to be long.
+• Short suggestion. When that log momentum is less than zero and shorts are allowed, the strategy wants to be short. If shorts are disabled it stays flat instead.
+• Wait state. When the log momentum is exactly zero or history is not long enough the strategy stays flat.
+• In position. In practice the strategy sits IN LONG while the sign stays positive and flips to IN SHORT or flat only when the sign changes.
+
+Inputs with guidance
+Setup
+• Momentum Lookback (months). Controls the horizon of the log return on the benchmark symbol. Typical range 6 to 24 months. Raising it makes the model slower and more selective. Lowering it makes it more reactive and sensitive to medium term noise.
+• Symbol. External symbol used for the momentum calculation, SPY by default. Changing it lets you time other indices or run signals from a benchmark while trading a correlated instrument.
+
+Logic
+• Allow Shorts. When true the strategy will open short positions during negative momentum regimes. When false it will stay flat whenever momentum is negative. Practical setting is tied to whether you use a margin account or an ETF that supports shorting.
+
+Internal risk parameters (not exposed as inputs in this version) are:
+• Target Vol (annual). Target annual volatility for volatility targeting, default 0.2.
+• Vol Lookback (days). Window for realised volatility, default 63 trading days.
+• Max Leverage. Cap on leverage when volatility targeting is enabled, default 2.
+
+
+Usage recipes
+
+Swing continuation
+• Signal timeframe. Use the daily chart.
+• Benchmark symbol. Leave at SPY for US equity index exposure.
+• Momentum lookback. Eighteen months as a default, with twelve months as an alternative preset for a faster swing bias.
+
+
+Properties visible in this publication
+• Initial capital. 100000
+• Base currency. USD
+• Default order size method. 5% of the total capital in this example
+• Pyramiding. 0
+• Commission. 0.03 percent
+• Slippage. 3 ticks
+• Process orders on close. On
+• Bar magnifier. Off
+• Recalculate after order is filled. Off
+• Calc on every tick. Off
+• All request.security calls use lookahead = barmerge.lookahead_off
+
+Realism and responsible publication
+The strategy is for education and research only. It does not claim any guaranteed edge or future performance. All results in Strategy Tester are hypothetical and depend on the data vendor, costs, and slippage assumptions. Intrabar motion is not modeled inside daily bars so extreme moves and gaps can lead to fills that differ from live trading. The logic is built for standard candles and should not be used on synthetic chart types for execution decisions.
+Performance is sensitive to regime structure in the US equity market, which may change over time. The strategy does not protect against single day crash risk inside bars and does not model gap risk explicitly. Past behavior of SPY and the momentum effect does not guarantee future persistence.
+
+Honest limitations and failure modes
+• Long sideways regimes with small net change over eighteen months can lead to whipsaw around the zero line.
+• Very sharp V shaped reversals after deep declines will often be missed because the model waits for momentum to turn positive again.
+• The sample size in a full SPY history is small because regime changes are infrequent, so any test must be interpreted as indicative rather than statistically precise.
+• The model is highly dependent on the chosen lookback. Users should test nearby values and validate that behavior is qualitatively stable.
+
+
+Legal
+Education and research only. Not investment advice. You are responsible for your own decisions. Always test on historical data and in simulation with realistic costs before any live use.
+
+
+Dec 8, 2025
+Release Notes
+.

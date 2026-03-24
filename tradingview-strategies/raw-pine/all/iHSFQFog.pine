@@ -1,0 +1,132 @@
+//@version=3
+strategy("RSI Strategy", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+//Starter Parameters
+
+length = input(title="RSI Lenght",type=integer, defval=2)
+overBoughtRSI = input(title="OverBought Level for RSI", type=integer, defval=10)
+shortLength = input(title="Short MA Length", type=integer, defval=5)
+longLength = input(title="Long MA Length", type=integer, defval=200)
+
+RuleMRSI=input(title="RSI Moving Average Filter", defval= true)
+lengthmrsi=input(title="RSI Moving Average Length", type=integer, defval=4)
+overBoughtMRSI=input(title="OverBought Level for the Moving Average of the RSI", type=integer, defval=30)
+
+Rulestop=input(title="Apply Stop Loss", defval=false)
+stop_percentual=input(title="% Stop Loss", type=integer, defval=10)
+
+//RSI
+
+vrsi = rsi(close, length)
+
+//Moving Averages
+
+longma = sma(close,longLength)
+shortma = sma(close,shortLength)
+mrsi=sma(vrsi,lengthmrsi)
+
+//Stop Loss
+
+stop_level = strategy.position_avg_price*((100-stop_percentual)/100)
+
+//Backtest Period
+testStartYear = input(2009, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(2, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2020, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+    
+//Strategy
+
+if testPeriod() and (not na(vrsi))
+    if  (RuleMRSI==false) and (Rulestop==false)
+        if (vrsi<overBoughtRSI) and (close>longma)
+            strategy.entry("RsiLE", strategy.long , comment="Open")
+        if (close>shortma)
+            strategy.close_all()
+
+    if (RuleMRSI==true) and (Rulestop==false)
+        if (vrsi<overBoughtRSI) and (close>longma) and (mrsi<overBoughtMRSI)
+            strategy.entry("RsiLE", strategy.long , comment="Open")
+        if (close>shortma)
+            strategy.close_all()
+
+    if (RuleMRSI==false) and (Rulestop==true)
+        if (vrsi<overBoughtRSI) and (close>longma)
+            strategy.entry("RsiLE", strategy.long , comment="Open")
+            strategy.exit("RsiLE", stop = stop_level)
+        if (close>shortma)
+            strategy.close_all()
+
+    if (RuleMRSI==true) and (Rulestop==true)
+        if (vrsi<overBoughtRSI) and (close>longma) and (mrsi<overBoughtMRSI)
+            strategy.entry("RsiLE", strategy.long , comment="Open")
+            strategy.exit("RsiLE", stop = stop_level)
+        if (close>shortma)
+            strategy.close_all()
+
+View in Pine Editor・73 lines
+Use on chart
+4
+2
+1
+12
+12 482
+2-period RSI strategy backtest described in several books of the trader Larry Connors . This strategy uses a 2 periods RSI , one slow arithmetic moving average and one fast arithmetic moving average.
+
+Entry signal:
+- RSI 2 value below oversold level (Larry Connors usually sets oversold to be below 5, but other authors prefer to work below 10 due to the higher number of signals).
+- Closing above the slow average (200 periods).
+- Entry at closing of candle or opening of next candle.
+
+Exit signal:
+- Occurs when the candlestick closes above the fast average (the most common fast average is 5 periods, but some traders also suggest the 10 period average).
+
+Entry Filter (modification made by me):
+- Applied an RSI2 arithmetic moving average to smooth out oscillations.
+- Entered only when RSI2 is below oversold level and RSI2 moving average is below 30.
+* NOTE: In the stocks that I evaluate daily the averages of 4 and 6 periods work very well as a filter.
+
+Comments:
+This strategy works very well in Daily charts but can be applied in other chart times as well. As this is a strategy to catch market fluctuations, it presents different results with different stocks.
+I have been applying this strategy to the stocks of the Brazilian market (BOVESPA) and have enjoyed the result. Every day I evaluate the stocks that are generating entry signals and choose which one to trade based on the stocks with the highest Profit Value.
+The RSI 2 averaging filter probably will reduce profit of the backtests because reduces the number of signals, but the Profit Value will usually increase. For me this was a good thing because without the filter, this strategy usually shows more signals than I have capital to allocate.
+Before entering a trade I look at which fast average the paper has the highest Profit Value and then I use this average as my output signal for that trade (this change has greatly improved the result of the outputs).
+This strategy does not use Stop Loss because normally Stop Loss decreases effectiveness (profit). In any case, the option to apply a percentage Stop Loss if desired is added in the script. As the strategy does not use stop, extra caution with risk management is advisable. I advise not to allocate more than 20% of the trade capital in the same operation.
+
+I'm still studying ways to improve this strategy, but so far this is the best setup I've found. Suggestions are always welcome and we can test to see if they improve the backtest result.
+Good luck and good trades.
+
+================================================
+
+Backtest das estratégia do IFR de 2 períodos descrita em varios livros do trader Larry Connors . Esta estratégia usa um IFR de 2 períodos, uma média movel aritmética lenta e uma média movel aritmética rápida.
+
+Sinal de entrada:
+- Valor do IFR 2 abaixo do nível de sobrevenda (Larry Connors usualmente define sobrevenda sendo abaixo de 5, mas outros autores preferem trabalhar abaixo de 10 devido ao maior número de sinais).
+- Fechamento acima da média lenta (200 períodos).
+- Realizado a compra no fechamento do candle ou na abertura do candle seguinte.
+
+Sinal de saída:
+- Ocorre quando o candle fecha acima da média rápida (a média rápida mais comum é a de 5 períodos, mas alguns traders sugerem também a média de 10 períodos).
+
+Filtro para entrada (modificação feita por mim):
+- Aplicado uma média móvel aritmética do IFR2 para suavisar as oscilações.
+- Realizado a entrada apenas quando o IFR2 está abaixo do nível de sobrevenda e a média móvel do IFR2 está abaixo de 30.
+*OBS: nos ativos que avalio diariamente as médias de 4 e 6 períodos funcionam muito bem como filtro.
+
+Comentários:
+Esta estratégia funciona muito bem no tempo gráfico Diário mas pode ser aplicada tambem em outros tempos gráficos. Como trata-se de uma estratégia para pegar oscilações do mercado, ela apresenta diferentes resultados com diferentes ativos.
+Eu venho aplicando esta estratégia nos ativos do mercado brasileiro (BOVESPA) e tenho gostado do resultado. Diariamente eu avalio os papeis que estão gerando entrada e escolho qual irei realizar o trade baseado nos papeis que apresentam maior Profit Value.
+O filtro da média do IFR 2 reduz o lucro nos backtests pois reduz também a quantidade de sinais, mas em compensação o Profit Value irá normalmente aumentar. Para mim isto foi algo positivo pois, sem o filtro, normalmente esta estratégia apresenta mais sinais do que possuo capital para alocar.
+Antes de entrar em um trade eu olho em qual média rápida o papel apresenta maior Profit Value e então eu utilizo está média como meu sinal de saída para aquele trade (esta mudança tem melhorado bastante o resultado das saídas).
+Está estratégia não utiliza Stop Loss pois normalmente o Stop Loss diminui a eficácia (lucro). De qualquer maneira, foi acrescentado no script a opção de aplicar um Stop Loss percentual caso seja desejado. Como a estratégia não utiliza stop é aconselhável um cuidado redobrado com o gerenciamento de risco. Eu aconselho não alocar mais de 20% do capital de trade em uma mesma operação.
+
+Ainda estou estudando formas de melhorar esta estratégia, mas até o momento está é a melhor configuração que encontrei. Sugestões são sempre bem vindas e podemos testar para verificar se melhoram o resultado do backtest.
+Boa sorte e bons trades.

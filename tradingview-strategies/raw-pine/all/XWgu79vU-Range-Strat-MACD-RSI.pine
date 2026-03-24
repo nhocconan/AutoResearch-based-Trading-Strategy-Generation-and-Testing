@@ -1,0 +1,95 @@
+//@version=5
+strategy("Range Strat - MACD/RSI", 
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10, precision=2, initial_capital=1000,
+     pyramiding=2,
+     commission_value=0.05)
+
+//Backtest date range
+StartDate = input.time(timestamp("13 Jun 2022"), title="Start Date")
+EndDate = input.time(timestamp("13 Jun 2024"), title="Start Date")
+inDateRange = (time >= StartDate) and (time < EndDate)
+
+// RSI Input Settings
+rsisrc = input(title="RSI Source", defval=open, group="RSI Settings")
+length = input(title="Length", defval=14, group="RSI Settings" )
+overSold = input(title="Over Sold Threshold", defval=55, group="RSI Settings" )
+overBought = input(title="Over Bought Threshold", defval=50, group="RSI Settings" )
+
+// Calculating RSI
+vrsi = ta.rsi(rsisrc, length)
+RSIunder = (vrsi <= overSold)
+RSIover = (vrsi >= overBought)
+
+// MACD Input Settings
+macdsrc = input(title="MACD Source", defval=open, group="MACD Settings")
+fast_length = input(title="Fast Length", defval=12, group="MACD Settings")
+slow_length = input(title="Slow Length", defval=26, group="MACD Settings")
+signal_length = input.int(title="Signal Smoothing",  minval = 1, maxval = 50, defval = 9, group="MACD Settings")
+sma_source = input.string(title="Oscillator MA Type",  defval="EMA", options=["SMA", "EMA"], group="MACD Settings")
+sma_signal = input.string(title="Signal Line MA Type", defval="EMA", options=["SMA", "EMA"], group="MACD Settings")
+
+// Calculating MACD
+fast_ma = sma_source == "SMA" ? ta.sma(macdsrc, fast_length) : ta.ema(macdsrc, fast_length)
+slow_ma = sma_source == "SMA" ? ta.sma(macdsrc, slow_length) : ta.ema(macdsrc, slow_length)
+macd = fast_ma - slow_ma
+signal = sma_signal == "SMA" ? ta.sma(macd, signal_length) : ta.ema(macd, signal_length)
+delta = macd - signal
+
+MACDcrossover = ta.crossover(delta, 0)
+MACDcrossunder = ta.crossunder(delta, 0)
+
+// Stop Loss Input Settings
+longLossPerc = input(title="Long Stop Loss (%)", defval=15, group="Stop Loss Settings") * 0.01
+shortLossPerc = input(title="Short Stop Loss (%)", defval=15, group="Stop Loss Settings") * 0.01
+
+// Calculating Stop Loss
+longStopPrice  = strategy.position_avg_price * (1 - longLossPerc)
+shortStopPrice = strategy.position_avg_price * (1 + shortLossPerc)
+
+// Strategy Entry
+if (not na(vrsi))
+    if (inDateRange and MACDcrossover and RSIunder)
+        strategy.entry("LONG", strategy.long, comment="LONG")
+    if (inDateRange and MACDcrossunder and RSIover)
+        strategy.entry("SHORT", strategy.short, comment="SHORT")
+
+// Submit exit orders based on calculated stop loss price
+if (strategy.position_size > 0)
+    strategy.exit(id="LONG STOP", stop=longStopPrice)
+if (strategy.position_size < 0)
+    strategy.exit(id="SHORT STOP", stop=shortStopPrice)
+
+View in Pine Editor・62 lines
+Use on chart
+1.1 K
+9
+20 932
+Aug 22, 2022
+This strategy uses a trend based indicator (MACD) for entry/exit signals with a momentum oscillator (RSI) to act as confirmation. Although relying on a trend based indicator this has been created for range bound crypto markets, which have been in a period of chop since June 2022.
+
+Long/Short signals are generated from MACD with the RSI oscillator thresholds suppressing entries at price extremes. This is not a mean reversion RSI strategy! As the indicators are contrary to each other you will need to be generous with the RSI settings in order for signals to trigger.
+
+Strategy is designed for use on the 4h timeframe, it may work well on higher timeframes, but lower time frames will lead to false signals. Use fixed percentage of equity for order size to capture the compounding effect. As a reversal strategy bear in mind that should market trend strongly in either direction stops will be required.
+
+The RSI thresholds can be tailored to provide higher frequency or safer signals. Similarly tweaking MACD settings will provide earlier/more frequent or safer signals. As this is intended to enter near range high / low you should check the visual cues to ensure a ping-pong effect is observed, so that peaks and troughs are captured. Once an observable range is established the strategy works well across a range of crypto markets,
+
+The script is open source, so feel free to amend as you wish. Using a different momentum oscillator may provide better results. I have prior coding experience, but first time using PineScript was last night, so it's not very tidy. I will update this with some additional customisation and TP/SL in the near future.
+
+Usage: Range bound markets
+Markets: Cryptocurrency Alts/BTC/ETH
+Timeframe: 4h
+
+Aug 23, 2022
+Release Notes
+Tidied up a bit and included some additional options:
+Stop loss for long/short positions
+EMA/SMA options for MACD lines
+Select source drop downs for RSI and MACD
+Aug 25, 2022
+Release Notes
+No logic changes here. I've got a bit better handle on Pine scripting and have gone through a tidy up process of the variables, so I can use this again later as a template. Quality of life improvements include input settings grouped by category and use of the date picker rather than filling the input screen with date stuff.
+Aug 25, 2022
+Release Notes
+Knocked back the percentage of equity in trade to just 10% as running at 100% was unrealistically exaggerating performance due to the compounding effect. Also notched down the stop loss to a more reasonable 15%.

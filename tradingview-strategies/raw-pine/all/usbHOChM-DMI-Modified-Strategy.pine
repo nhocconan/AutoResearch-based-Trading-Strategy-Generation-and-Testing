@@ -1,0 +1,7 @@
+//@version=4
+color_green=##input(defval=#66bb6a,type='INPUT_COLOR',##id='in_13')
+color_red=##input(defval=#d32f2f,type='INPUT_COLOR',##id='in_14')
+line_width=##input(defval=3,type='INPUT_INTEGER',##id='in_15')
+##root(root_metainfo,rm_0,line_width,input__integer)
+##root(root_metainfo,plot_0_0,color_red,input__color)
+##root(root_metainfo,plot_0_1,color_green,input__color)

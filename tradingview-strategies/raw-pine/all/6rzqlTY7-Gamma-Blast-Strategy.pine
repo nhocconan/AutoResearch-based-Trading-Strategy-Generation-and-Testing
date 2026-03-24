@@ -1,0 +1,50 @@
+//@version=5
+strategy("Gamma Blast Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// ───── Inputs ─────
+emaLength   = input.int(50, "EMA Length")
+bbLength    = input.int(20, "Bollinger Bands Length")
+bbMult      = input.float(2.0, "Bollinger Multiplier")
+atrLength   = input.int(14, "ATR Length")
+riskReward  = input.float(2.0, "Risk/Reward Ratio")
+
+// ───── Indicators ─────
+ema  = ta.ema(close, emaLength)
+basis = ta.sma(close, bbLength)
+dev   = bbMult * ta.stdev(close, bbLength)
+upper = basis + dev
+lower = basis - dev
+atr   = ta.atr(atrLength)
+
+// ───── Gamma Blast Logic ─────
+// Long when price "blasts" above upper Bollinger + above EMA
+longCondition  = close > upper and close > ema
+// Short when price "blasts" below lower Bollinger + below EMA
+shortCondition = close < lower and close < ema
+
+// ───── Risk Management ─────
+longSL  = close - atr
+longTP  = close + atr * riskReward
+shortSL = close + atr
+shortTP = close - atr * riskReward
+
+// ───── Entries & Exits ─────
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// ───── Plotting ─────
+plot(ema, color=color.orange, title="EMA")
+plot(upper, color=color.green, title="Upper BB")
+plot(lower, color=color.red, title="Lower BB")
+
+View in Pine Editor・43 lines
+Use on chart
+7
+0
+2 384
+Gamma Blast Strategy used for quick 2-5 ticks on Buys, but on a sideways market can get up to 15-20 ticks.

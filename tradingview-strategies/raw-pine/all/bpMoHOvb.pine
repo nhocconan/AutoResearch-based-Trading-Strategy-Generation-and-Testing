@@ -1,0 +1,46 @@
+//@version=3
+//Author: HighProfit
+
+//Lead-In
+strategy("Double Exponential Moving Avarage & Arnoud Legoux Moving Avarage Strategy", shorttitle="ST-DEMA+ALMA", overlay=true)
+
+//Arnoud Legoux Moving Avarage Inputs
+source = close
+windowsize = input(title="Window Size", type=integer, defval=50)
+offset = input(title="Offset", type=float, defval=0.85)
+sigma = input(title="Sigma", type=float, defval=6)
+
+//Exponential Moving Avarage Inputs
+L1= input(5,"EMA-1")
+L2= input(10,"EMA-2")
+
+//Exponential Moving Avarage Calculations
+e1= ema(close, L1)
+e2= ema(close, L2)
+
+//Conditions
+longCondition = e1 and e2 > alma(source, windowsize, offset, sigma)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = e1 and e2 < alma(source, windowsize, offset, sigma)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+//Plots   
+plot(alma(source, windowsize, offset, sigma), color=lime, linewidth=1, title="ALMA")
+plot(e1, color=orange, linewidth=1, title="EMA-1")
+plot(e2, color=blue, linewidth=1, title="EMA-2")
+
+View in Pine Editor・33 lines
+Use on chart
+1
+9
+4
+2
+11 491
+The ALMA (50 period) acts as the main trend filter, meaning that long positions are taken above the ALMA and short positions are taken below the ALMA. For instance, the 5 and 10 period exponential moving averages are added on the chart to give early signals to the trend.
+
+Therefore, when the 5/10 EMA triggers a bullish crossover, long signals are taken when price is above the ALMA, likewise, when the 5/10 EMA triggers a bearish crossover, short signals are taken when price is below the ALMA.
+
+Find out optimal values by trying. May not produce accurate results in horizontal markets. Thank you.

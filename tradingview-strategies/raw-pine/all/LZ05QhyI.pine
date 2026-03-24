@@ -1,0 +1,169 @@
+//@version=5
+strategy("FVG ICT + D100", shorttitle = "FVG-D100", overlay = true, margin_long = 100, margin_short = 100)
+
+// === 핵심 파라미터 ===
+minFvgSize = input.float(0.5, "FVG 최소 크기", minval = 0.1, maxval = 5.0)
+donchianPeriod = input.int(100, "Donchian 기간", minval=50, maxval=200)
+riskRewardRatio = input.float(1.7, "손익비 (1:X)", minval=1.0, maxval=5.0, step=0.1)
+
+// === 디버깅 모드 ===
+debugMode = input.bool(true, "디버깅 모드 활성화")
+showDonchian = input.bool(true, "Donchian 채널 표시")
+
+// 30분봉 데이터
+[close30m, high30m, low30m, open30m] = request.security(syminfo.tickerid, "30", [close, high, low, open], barmerge.gaps_on)
+
+// 30분봉 FVG 감지
+fvg_up_30m = request.security(syminfo.tickerid, "30", low > high[2] and close[1] > high[2] and (low - high[2]) > minFvgSize)
+fvg_down_30m = request.security(syminfo.tickerid, "30", high < low[2] and close[1] < low[2] and (low[2] - high) > minFvgSize)
+
+// === Donchian 계산 ===
+upperDonchian = ta.highest(high, donchianPeriod)
+lowerDonchian = ta.lowest(low, donchianPeriod)
+middleDonchian = (upperDonchian + lowerDonchian) / 2
+
+// FVG 모드 관리
+var bool bullMode = false
+var bool bearMode = false
+var bool alreadyEnteredThisMode = false
+var string currentFvgMode = "NONE"
+
+if fvg_up_30m and currentFvgMode != "BULL"
+    bullMode := true
+    bearMode := false
+    alreadyEnteredThisMode := false
+    currentFvgMode := "BULL"
+    
+if fvg_down_30m and currentFvgMode != "BEAR"
+    bearMode := true
+    bullMode := false
+    alreadyEnteredThisMode := false
+    currentFvgMode := "BEAR"
+
+if strategy.position_size == 0 and not bullMode and not bearMode
+    currentFvgMode := "NONE"
+
+// === 배경색 표시 ===
+bgcolor(bullMode ? color.new(color.green, 95) : bearMode ? color.new(color.red, 95) : na, title = "FVG 모드 배경")
+
+// 포지션 상태
+var bool inLongPosition = false
+var bool inShortPosition = false
+
+// === 진입 정보 저장 변수 ===
+var float entryPrice = na
+var float stopLossPrice = na
+var float takeProfitPrice = na
+var string positionType = "none"
+
+// 진입 조건
+longEntryCondition = bullMode and not inLongPosition and not alreadyEnteredThisMode and barstate.isconfirmed
+shortEntryCondition = bearMode and not inShortPosition and not alreadyEnteredThisMode and barstate.isconfirmed
+
+// === 롱 포지션 처리 ===
+if longEntryCondition
+    inLongPosition := true
+    inShortPosition := false
+    alreadyEnteredThisMode := true
+    
+    entryPrice := close
+    positionType := "long"
+    stopLossPrice := lowerDonchian
+    riskAmount = entryPrice - stopLossPrice
+    takeProfitPrice := entryPrice + (riskAmount * riskRewardRatio)
+    
+    if strategy.position_size < 0
+        strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+
+// === 숏 포지션 처리 ===  
+if shortEntryCondition
+    inShortPosition := true
+    inLongPosition := false
+    alreadyEnteredThisMode := true
+    
+    entryPrice := close
+    positionType := "short"
+    stopLossPrice := upperDonchian
+    riskAmount = stopLossPrice - entryPrice
+    takeProfitPrice := entryPrice - (riskAmount * riskRewardRatio)
+    
+    if strategy.position_size > 0
+        strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+
+// 포지션 리셋
+if strategy.position_size == 0
+    inLongPosition := false
+    inShortPosition := false
+
+// === 주문 실행 ===
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", stop=stopLossPrice, limit=takeProfitPrice)
+    
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", stop=stopLossPrice, limit=takeProfitPrice)
+
+// === 청산 감지 ===
+var float lastPositionSize = 0.0
+lastPositionSize := strategy.position_size
+
+// === 시각화 (수정된 부분) ===
+
+// Donchian 채널 표시 - 제목을 간단하게 수정
+plot(showDonchian ? upperDonchian : na, "Upper Donchian", color=color.blue, linewidth=1)
+plot(showDonchian ? lowerDonchian : na, "Lower Donchian", color=color.red, linewidth=1)
+plot(showDonchian ? middleDonchian : na, "Middle Donchian", color=color.gray, linewidth=1)
+
+// 손절/익절 라인 표시
+plot(strategy.position_size != 0 ? stopLossPrice : na, "Stop Loss", 
+     color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? takeProfitPrice : na, "Take Profit", 
+     color=color.green, style=plot.style_linebr, linewidth=2)
+
+// 디버깅 정보 표시
+if barstate.islast and debugMode
+    var infoTable = table.new(position.top_right, 2, 11, bgcolor=color.white, border_width=1)
+    
+    table.cell(infoTable, 0, 0, "FVG + Donchian " + str.tostring(donchianPeriod), text_color=color.black, bgcolor=color.yellow)
+    table.cell(infoTable, 1, 0, "현재 값", text_color=color.black, bgcolor=color.yellow)
+    
+    table.cell(infoTable, 0, 1, "FVG 모드", text_color=color.black)
+    table.cell(infoTable, 1, 1, currentFvgMode, text_color=currentFvgMode == "BULL" ? color.green : currentFvgMode == "BEAR" ? color.red : color.gray)
+    
+    table.cell(infoTable, 0, 2, "포지션", text_color=color.black)
+    table.cell(infoTable, 1, 2, positionType, text_color=positionType == "long" ? color.green : positionType == "short" ? color.red : color.gray)
+    
+    table.cell(infoTable, 0, 3, "진입가", text_color=color.black)
+    table.cell(infoTable, 1, 3, na(entryPrice) ? "없음" : str.tostring(entryPrice, "#.##"), text_color=color.blue)
+    
+    table.cell(infoTable, 0, 4, "손절가", text_color=color.black)
+    table.cell(infoTable, 1, 4, na(stopLossPrice) ? "없음" : str.tostring(stopLossPrice, "#.##"), text_color=color.red)
+    
+    table.cell(infoTable, 0, 5, "익절가", text_color=color.black)
+    table.cell(infoTable, 1, 5, na(takeProfitPrice) ? "없음" : str.tostring(takeProfitPrice, "#.##"), text_color=color.green)
+    
+    table.cell(infoTable, 0, 6, "손익비", text_color=color.black)
+    table.cell(infoTable, 1, 6, "1:" + str.tostring(riskRewardRatio, "#.#"), text_color=color.purple)
+    
+    table.cell(infoTable, 0, 7, "Donchian 기간", text_color=color.black)
+    table.cell(infoTable, 1, 7, str.tostring(donchianPeriod), text_color=color.blue)
+    
+    table.cell(infoTable, 0, 8, "Donchian 상단", text_color=color.black)
+    table.cell(infoTable, 1, 8, str.tostring(upperDonchian, "#.##"), text_color=color.blue)
+    
+    table.cell(infoTable, 0, 9, "Donchian 하단", text_color=color.black)
+    table.cell(infoTable, 1, 9, str.tostring(lowerDonchian, "#.##"), text_color=color.red)
+    
+    table.cell(infoTable, 0, 10, "현재 포지션 크기", text_color=color.black)
+    table.cell(infoTable, 1, 10, str.tostring(strategy.position_size), text_color=color.orange)
+
+View in Pine Editor・159 lines
+Use on chart
+2
+6
+1 304
+30min FVG + Donchian Channel strategy
+buy sell by 30min fvg
+and stoploss , take profit by Donchian Channel
+Run the strategy on the 1min timeframe!

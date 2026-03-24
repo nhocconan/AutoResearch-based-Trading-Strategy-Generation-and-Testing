@@ -1,0 +1,103 @@
+//@version=6
+strategy("6AM–10AM 50% Cross Strategy PRO", 
+     overlay = true,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10)
+
+// ===== INPUTS =====
+sessionInput = input.session("0600-1000", "Session Time")
+rr = input.float(2.0, "Risk/Reward", minval = 0.5, step = 0.5)
+
+// ===== WEEKDAY FILTER (MON–FRI ONLY) =====
+isWeekday = dayofweek >= dayofweek.monday and dayofweek <= dayofweek.friday
+
+// ===== SESSION LOGIC =====
+inSession     = not na(time(timeframe.period, sessionInput)) and isWeekday
+newSession    = inSession and not inSession[1]
+sessionEnded  = not inSession and inSession[1]
+
+// ===== DAILY RESET (BOOLEAN SAFE) =====
+newDay = ta.change(time("D")) != 0
+
+// ===== VARIABLES =====
+var float sessOpen  = na
+var float sessClose = na
+var float sessHigh  = na
+var float sessLow   = na
+var float wickMid   = na
+var float bodyMid   = na
+var bool  levelsReady = false
+var bool  tradedToday = false
+
+// Reset at new day
+if newDay
+    tradedToday := false
+    levelsReady := false
+    wickMid := na
+    bodyMid := na
+
+// ===== BUILD 6AM–10AM CANDLE =====
+if newSession
+    sessOpen := open
+    sessHigh := high
+    sessLow  := low
+
+if inSession
+    sessHigh := math.max(sessHigh, high)
+    sessLow  := math.min(sessLow, low)
+    sessClose := close
+
+// ===== CALCULATE MIDPOINTS AT 10AM =====
+if sessionEnded
+    wickMid := (sessHigh + sessLow) / 2.0
+
+    bodyHigh = math.max(sessOpen, sessClose)
+    bodyLow  = math.min(sessOpen, sessClose)
+    bodyMid  := (bodyHigh + bodyLow) / 2.0
+
+    levelsReady := true
+
+// ===== ENTRY CONDITIONS =====
+longCondition =
+     levelsReady and
+     not tradedToday and
+     close > wickMid and
+     close > bodyMid and
+     close[1] <= wickMid
+
+shortCondition =
+     levelsReady and
+     not tradedToday and
+     close < wickMid and
+     close < bodyMid and
+     close[1] >= wickMid
+
+// ===== EXECUTION =====
+if longCondition
+    risk = close - sessLow
+    takeProfit = close + (risk * rr)
+
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=sessLow, limit=takeProfit)
+
+    tradedToday := true
+
+if shortCondition
+    risk = sessHigh - close
+    takeProfit = close - (risk * rr)
+
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=sessHigh, limit=takeProfit)
+
+    tradedToday := true
+
+// ===== PLOTS =====
+plot(wickMid, title="Wick 50%", color=color.orange, linewidth=2)
+plot(bodyMid, title="Body 50%", color=color.green, linewidth=2)
+
+View in Pine Editor・98 lines
+Use on chart
+1
+6
+405
+6AM–10AM 50% Cross Strategy PRO to identify the range of entry and analysis

@@ -1,0 +1,38 @@
+//@version=5
+strategy("RSI Test Entry", overlay=true, initial_capital=10000, currency=currency.USD, pyramiding=1)
+
+// Inputs
+rsiLen  = input.int(14, "RSI Periodo")
+rsiBuy  = input.int(55, "RSI compra")
+rsiSell = input.int(45, "RSI venta")
+slPct   = input.float(1.0, "Stop Loss (%)")
+tpPct   = input.float(2.0, "Take Profit (%)")
+
+// Indicador
+rsi = ta.rsi(close, rsiLen)
+
+// Señales por cruce
+longCond  = ta.crossover(rsi, rsiBuy)
+shortCond = ta.crossunder(rsi, rsiSell)
+
+// Ejecución
+if (longCond)
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("SL/TP BUY", "BUY", stop = close * (1 - slPct/100), limit = close * (1 + tpPct/100))
+
+if (shortCond)
+    strategy.entry("SELL", strategy.short)
+    strategy.exit("SL/TP SELL", "SELL", stop = close * (1 + slPct/100), limit = close * (1 - tpPct/100))
+
+// Visual
+plot(rsi, "RSI", color=color.blue)
+hline(rsiBuy, "RSI BUY", color=color.green)
+hline(rsiSell, "RSI SELL", color=color.red)
+
+View in Pine Editor・30 lines
+Use on chart
+1
+7
+1
+691
+rsi mas refinado e indicadores correctos a corto ,mediano y largo plazo .. el mejor indicador

@@ -1,0 +1,110 @@
+//@version=6
+strategy('[SHORT ONLY] Internal Bar Strength (IBS) Mean Reversion Strategy', overlay = false, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, margin_long = 5, margin_short = 5, process_orders_on_close = true, precision = 4)
+
+//#region INPUTS SECTION
+// ============================================
+// Inputs Section
+// ============================================
+//#region Time Settings
+startTimeInput = input.time(timestamp('1 Jan 2014'), title = 'Start Time', group = 'Time Settings')
+endTimeInput = input.time(timestamp('1 Jan 2099'), title = 'End Time', group = 'Time Settings')
+isWithinTradingWindow = time >= startTimeInput and time <= endTimeInput
+//#endregion
+
+//#region IBS Thresholds
+upperThresholdInput = input.float(defval = 0.9, title = 'Upper Threshold', step = 0.1, maxval=1, group = 'IBS Settings')
+lowerThresholdInput = input.float(defval = 0.3, title = 'Lower Threshold', step = 0.1, minval=0, group = 'IBS Settings')
+//#endregion
+//#endregion
+
+//#region IBS CALCULATION
+// ============================================
+// IBS Value Calculation
+// ============================================
+internalBarStrength  = (close - low) / (high - low)
+//#endregion
+
+//#region TRADING CONDITIONS
+// ============================================
+// Entry/Exit Logic
+// ============================================
+shortCondition = internalBarStrength  >= upperThresholdInput and close>high[1] and isWithinTradingWindow
+exitCondition = internalBarStrength  <= lowerThresholdInput
+//#endregion
+
+//#region STRATEGY EXECUTION
+// ============================================
+// Order Management
+// ============================================
+if shortCondition
+    strategy.entry('short', strategy.short)
+if exitCondition
+    strategy.close_all()
+//#endregion
+
+//#region PLOTTING
+// ============================================
+// Visual Components
+// ============================================
+plot(internalBarStrength, color = color.white, title = "IBS Value")
+plot(upperThresholdInput, color = color.yellow, title = "Upper Threshold")
+plot(lowerThresholdInput, color = color.yellow, title = "Lower Threshold")
+//#endregion
+
+View in Pine Editor・55 lines
+Use on chart
+6
+1
+2 097
+█ STRATEGY DESCRIPTION
+The "Internal Bar Strength (IBS) Strategy" is a mean-reversion strategy designed to identify trading opportunities based on the closing price's position within the daily price range. It enters a short position when the IBS indicates overbought conditions and exits when the IBS reaches oversold levels. This strategy is Short-Only and was designed to be used on the Daily timeframe for Stocks and ETFs.
+
+█ WHAT IS INTERNAL BAR STRENGTH (IBS)?
+Internal Bar Strength (IBS) measures where the closing price falls within the high-low range of a bar. It is calculated as:
+
+Pine Script®
+IBS = (Close - Low) / (High - Low)
+
+
+- Low IBS (≤ 0.2): Indicates the close is near the bar's low, suggesting oversold conditions.
+- High IBS (≥ 0.8): Indicates the close is near the bar's high, suggesting overbought conditions.
+
+
+█ SIGNAL GENERATION
+1. SHORT ENTRY
+A Short Signal is triggered when:
+
+The IBS value rises to or above the Upper Threshold (default: 0.9).
+
+The Closing price is greater than the previous bars High (close>high[1]).
+
+The signal occurs within the specified time window (between `Start Time` and `End Time`).
+
+
+
+2. EXIT CONDITION
+
+An exit Signal is generated when the IBS value drops to or below the Lower Threshold (default: 0.3). This prompts the strategy to exit the position.
+
+
+
+█ ADDITIONAL SETTINGS
+
+Upper Threshold: The IBS level at which the strategy enters trades. Default is 0.9.
+
+Lower Threshold: The IBS level at which the strategy exits short positions. Default is 0.3.
+
+Start Time and End Time: The time window during which the strategy is allowed to execute trades.
+
+
+
+█ PERFORMANCE OVERVIEW
+
+This strategy is designed for Stocks and ETFs markets and performs best when prices frequently revert to the mean.
+
+The strategy can be optimized further using additional conditions such as using volume or volatility filters.
+
+It is sensitive to extreme IBS values, which help identify potential reversals.
+
+Backtesting results should be analyzed to optimize the Upper/Lower Thresholds for specific instruments and market conditions.
+

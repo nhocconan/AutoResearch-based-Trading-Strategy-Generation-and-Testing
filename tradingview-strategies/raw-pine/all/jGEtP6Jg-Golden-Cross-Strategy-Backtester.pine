@@ -1,0 +1,115 @@
+//@version=6
+strategy("Golden Cross Strategy", 
+         overlay=true, 
+         commission_value=0.07,
+         slippage=2,
+         initial_capital=100000)
+
+// =============================================================================
+//                             USER INPUTS
+// =============================================================================
+// Use the 'group' parameter to organize inputs in the settings window.
+int gc_short = input.int(50, title="Short MA Length", group="Golden Cross Settings")
+int gc_long  = input.int(200, title="Long MA Length", group="Golden- Cross Settings")
+
+// =============================================================================
+//                         SIGNAL CALCULATION
+// =============================================================================
+// Calculate the short-term and long-term simple moving averages.
+float ma_short = ta.sma(close, gc_short)
+float ma_long  = ta.sma(close, gc_long)
+
+// A buy signal is generated when the short MA crosses above the long MA.
+bool buy_signal = ta.crossover(ma_short, ma_long)
+// A sell signal is generated when the short MA crosses below the long MA.
+bool sell_signal = ta.crossunder(ma_short, ma_long)
+
+// =============================================================================
+//                           ORDER EXECUTION
+// =============================================================================
+// When a buy signal occurs, calculate the position size and enter a long trade.
+if buy_signal
+    // Use 98% of equity to leave a 2% buffer for slippage and other costs.
+    float available_capital = strategy.equity * 0.98
+    // Calculate the maximum number of shares that can be purchased.
+    float position_size = math.floor(available_capital / close)
+    // Only enter a trade if the calculated position size is greater than 0.
+    if (position_size > 0)
+        strategy.entry("Long", strategy.long, qty = position_size)
+
+// When a sell signal occurs, close the entire long position.
+if sell_signal
+    strategy.close("Long", comment = "Exit")
+
+// =============================================================================
+//                              VISUALIZATION
+// =============================================================================
+// 1. Plot the Moving Averages on the chart.
+// The titles "Short MA" and "Long MA" will appear in the chart legend.
+plot(ma_short, "Short MA", color=color.new(color.orange, 0), linewidth=2)
+plot(ma_long, "Long MA", color=color.new(color.blue, 0), linewidth=2)
+
+// 2. Highlight the background color when a position is held.
+// 'strategy.position_size > 0' is true when the strategy is in a trade.
+bool is_in_position = strategy.position_size > 0
+bgcolor(is_in_position ? color.new(color.green, 85) : na, title="Position Highlight")
+
+// 3. Plot buy and sell signals on the chart.
+// These are visual markers and do not affect the actual trade execution.
+// An upward triangle for buy signals.
+plotshape(buy_signal, "Buy Signal", 
+          style=shape.triangleup, 
+          location=location.belowbar, 
+          color=color.lime, 
+          size=size.small)
+
+// A downward triangle for sell signals.
+plotshape(sell_signal, "Sell Signal", 
+          style=shape.triangledown, 
+          location=location.abovebar, 
+          color=color.red, 
+          size=size.small)
+
+View in Pine Editor・71 lines
+Use on chart
+1
+0
+2
+2 159
+Golden Cross Strategy & Backtester 📈🚀
+Overview
+This script provides a complete backtesting environment for the classic Golden Cross trend-following strategy. It is designed to be simple, visual, and easy to use. 💪
+
+The strategy operates on the following logic:
+
+🔼 Long Entry: A "Buy" signal is generated when the short-term moving average (Short MA) crosses above the long-term moving average (Long MA).
+
+🔽 Exit: The position is closed when the short-term moving average crosses back below the long-term moving average (a "Death Cross").
+
+The background of the chart will be shaded green 🎨 during periods when the strategy is holding an active position.
+
+How to Use for Backtesting 🔬
+This is a strategy script, which means its main purpose is to test the historical performance of this trading idea.
+
+Add this script to your chart.
+
+Open the "Strategy Tester" panel at the bottom of your chart.
+
+In the "Overview" and "Performance" tabs, you can see detailed results 📊, such as the Net Profit and Max Drawdown, to evaluate the strategy's effectiveness.
+
+Customization ⚙️
+You can easily customize the strategy's parameters without editing the code.
+
+Click the Settings/Gear icon (⚙️) next to the script's name on your chart.
+
+In the "Inputs" tab, you can change:
+
+📏 Short MA Length: The period for the fast-moving average (default is 50).
+
+📏 Long MA Length: The period for the slow-moving average (default is 200).
+
+In the "Properties" tab, you can change:
+
+💰 Initial Capital: The starting balance for the backtest.
+
+Feel free to test different settings to find what works best for your preferred asset and timeframe! Happy testing! 🎉

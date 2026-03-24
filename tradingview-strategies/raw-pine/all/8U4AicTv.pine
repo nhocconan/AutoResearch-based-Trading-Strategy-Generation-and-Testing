@@ -1,0 +1,99 @@
+//@version=5
+strategy("Fibonacci & Bollinger Bands Strategy", overlay=true)
+
+// Inputs for Bollinger Bands
+length = input(20, title="Bollinger Bands Length")
+src = input(close, title="Source for Bollinger Bands")
+mult = input(2.0, title="Bollinger Bands Multiplier")
+
+// Bollinger Bands Calculation
+basis = ta.sma(src, length)
+dev = mult * ta.stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+
+// Plot Bollinger Bands
+plot(basis, color=color.blue, linewidth=1)
+p1 = plot(upper, color=color.red, linewidth=1)
+p2 = plot(lower, color=color.green, linewidth=1)
+fill(p1, p2, color=color.new(color.blue, 90))
+
+// Variables to store Fibonacci High and Low
+var float fibLow = na
+var float fibHigh = na
+
+// Fibonacci Retracement Calculation
+if (ta.crossover(close, ta.highest(high, 50))) 
+    fibHigh := high
+if (ta.crossunder(close, ta.lowest(low, 50))) 
+    fibLow := low
+
+// Create Fibonacci levels array
+var fibLevels = array.new_float(0)
+if (not na(fibHigh) and not na(fibLow)) // Ensure fibHigh and fibLow are defined
+    array.clear(fibLevels) // Clear the array before adding new levels
+    array.push(fibLevels, fibHigh)
+    array.push(fibLevels, fibHigh - 0.618 * (fibHigh - fibLow))  // 61.8% level
+    array.push(fibLevels, fibHigh - 0.786 * (fibHigh - fibLow))  // 78.6% level
+    array.push(fibLevels, fibLow)                               // 100% level
+    array.push(fibLevels, fibLow - 0.618 * (fibHigh - fibLow))  // Extension level
+
+// Only plot Fibonacci levels if the array is populated
+if array.size(fibLevels) > 0
+    for i = 0 to array.size(fibLevels) - 1
+        var color fibColor = i == 0 or i == 3 ? color.green : color.red
+        line.new(bar_index[1], array.get(fibLevels, i), bar_index, array.get(fibLevels, i), color=fibColor, width=1, style=line.style_dotted)
+
+// Entry Condition: Price touches or crosses below lower Bollinger Band and is near a Fibonacci extension level
+longCondition = close < lower and not na(fibLow) and not na(fibHigh) and (close > fibLow - 0.618 * (fibHigh - fibLow))
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+
+// Exit Condition: Price touches or crosses above upper Bollinger Band or hits a Fibonacci retracement level
+shortCondition = close > upper or (not na(fibHigh) and close >= fibHigh)
+if (shortCondition)
+    strategy.close("Buy")
+
+View in Pine Editor・55 lines
+Use on chart
+1
+0
+2
+2 985
+This strategy combines Bollinger Bands and Fibonacci retracement/extension levels to identify potential entry and exit points in the market. Here’s a breakdown of each component and how the strategy works:
+
+1. Bollinger Bands:
+Bollinger Bands consist of a simple moving average (SMA) and two standard deviations (upper and lower bands) plotted above and below the SMA. The bands expand and contract based on market volatility.
+Purpose in Strategy:
+The lower band represents an area where the market might be oversold.
+The upper band represents an area where the market might be overbought.
+The price crossing these bands suggests overextended market conditions, which can be used to identify potential reversals.
+2. Fibonacci Retracement and Extension Levels:
+Fibonacci retracement levels are horizontal lines that indicate where price might find support or resistance as it retraces some of its previous movement. Common retracement levels are 61.8% and 78.6%.
+Fibonacci extension levels are used to project areas where the price might extend after completing a retracement. These levels can help determine potential targets after a significant price movement.
+Purpose in Strategy:
+The strategy calculates the most recent swing high (fibHigh) and swing low (fibLow) over a lookback period. It then plots Fibonacci retracement and extension levels based on this range.
+The Fibonacci levels are used as key support and resistance areas. The price approaching or touching these levels signals potential turning points in the market.
+3. Entry Criteria:
+A long position (buy) is triggered when:
+The price crosses below the lower Bollinger Band, indicating an oversold condition.
+The price is near or above a Fibonacci extension level (calculated based on the most recent price swing).
+This suggests that the price is potentially reaching a strong support area, where a reversal is likely.
+4. Exit Criteria:
+The long position is closed (exit trade) when either:
+The price touches or crosses the upper Bollinger Band, signaling an overbought condition.
+The price reaches a Fibonacci retracement level or exceeds the recent swing high (fibHigh), indicating a potential exhaustion point or a reversal area.
+5. General Strategy Logic:
+The strategy takes advantage of market volatility (captured by the Bollinger Bands) and key support/resistance levels (determined by Fibonacci retracement and extension levels).
+By combining these two techniques, the strategy identifies potential entry points at oversold levels with the expectation that the market will retrace or reverse upward, especially when near key Fibonacci extension levels.
+Exit points are identified by potential overbought levels (Bollinger upper band) or key Fibonacci retracement levels, where the price might reverse downward.
+6. Conditions to Execute the Strategy:
+The Fibonacci levels are only calculated once the price has made a significant movement, establishing a recent high and low over a 50-bar period (which you can adjust). This ensures the Fibonacci levels are based on meaningful swings.
+The entry and exit signals are filtered using both Bollinger Bands and Fibonacci levels to ensure that trades are not taken solely based on one indicator, thus reducing false signals.
+Key Features of the Strategy:
+Trend-following with reversal: It tries to catch reversals when the price hits extreme levels (Bollinger Bands) while respecting important Fibonacci levels.
+Dynamic market adaptation: The strategy adapts to market conditions as it recalculates Fibonacci levels based on recent price swings and adjusts the Bollinger Bands for market volatility.
+Confirmation through multiple indicators: It uses both the volatility-based signals from Bollinger Bands and the price structure from Fibonacci levels to confirm trade entries and exits.
+Summary of the Strategy:
+The strategy looks to buy low and sell high based on oversold/overbought signals from Bollinger Bands and Fibonacci levels that indicate key support and resistance zones.
+By combining these two technical indicators, the strategy aims to reduce risk and increase accuracy by only entering trades when both indicators suggest favorable conditions.

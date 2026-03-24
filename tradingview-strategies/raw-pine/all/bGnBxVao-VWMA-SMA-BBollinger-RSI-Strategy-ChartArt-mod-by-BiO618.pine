@@ -1,0 +1,114 @@
+//@version=2
+strategy("SMA Bollinger + VWMA (by ChartArt)", shorttitle="VWMA(Aqua) vs SMA(Orange)BBands", overlay=true)
+
+// ChartArt's RSI + Bollinger Bands, Double Strategy
+//
+// Version 1.0
+// Idea by ChartArt on January 14, 2015.
+//
+// This strategy uses a modfied RSI to sell
+// when the RSI increases over the value of 55
+// (or to buy when the value falls below 45),
+// with the classic Bollinger Bands strategy
+// to sell when the price is above the
+// upper Bollinger Band (and to buy when
+// this value is below the lower band).
+//
+// This simple strategy only triggers when
+// both the RSI and the Bollinger Bands
+// indicators are at the same time in
+// a overbought or oversold condition.
+//
+// List of my work: 
+// https://www.tradingview.com/u/ChartArt/
+// 
+//  __             __  ___       __  ___ 
+// /  ` |__|  /\  |__)  |   /\  |__)  |  
+// \__, |  | /~~\ |  \  |  /~~\ |  \  |  
+// 
+// 
+
+
+///////////// RSI
+RSIlength = input( 13 ,title="RSI Period Length") 
+RSIvalue = input( 21 ,title="RSI Value Range") 
+RSIoverSold = 0 + RSIvalue
+RSIoverBought = 100 - RSIvalue
+price = close
+vrsi = rsi(price, RSIlength)
+
+
+///////////// Bollinger Bands
+BBlength = input(21, minval=1,title="Bollinger Bands SMA Period Length")
+BBmult = input(2.0, minval=0.001, maxval=50,title="Bollinger Bands Standard Deviation")
+BBbasis = sma(price, BBlength)
+BBdev = BBmult * stdev(price, BBlength)
+BBupper = BBbasis + BBdev
+BBlower = BBbasis - BBdev
+source = close
+buyEntry = crossover(source, BBlower)
+sellEntry = crossunder(source, BBupper)
+plot(BBbasis, color=orange,title="Bollinger Bands SMA Basis Line")
+p1 = plot(BBupper, color=silver,title="Bollinger Bands Upper Line")
+p2 = plot(BBlower, color=silver,title="Bollinger Bands Lower Line")
+fill(p1, p2)
+
+basis2 = vwma(source, BBlength)                                           //Notice that the basis is based on a vwma and not a sma.
+
+vwma = plot(basis2, color=#00FFFF, linewidth=1, title="VWMA Basis") 
+
+///////////// Colors
+//switch1=input(true, title="Enable Bar Color?")
+//switch2=input(true, title="Enable Background Color?")
+//TrendColor = RSIoverBought and (price[1] > BBupper and price < BBupper) ? red : RSIoverSold and (price[1] < BBlower and price > BBlower)  ? green : na
+//barcolor(switch1?TrendColor:na)
+//bgcolor(switch2?TrendColor:na,transp=50)
+
+
+///////////// RSI + Bollinger Bands Strategy
+//if (not na(vrsi))
+
+//    if (crossover(vrsi, RSIoverSold) and crossover(source, BBlower))
+//        strategy.entry("RSI_BB_L", strategy.long, stop=BBlower, oca_type=strategy.oca.cancel, comment="RSI_BB_L")
+//    else
+//        strategy.cancel(id="RSI_BB_L")
+//        
+//    if (crossunder(vrsi, RSIoverBought) and crossunder(source, BBupper))
+//        strategy.entry("RSI_BB_S", strategy.short, stop=BBupper, oca_type=strategy.oca.cancel, comment="RSI_BB_S")
+//    else
+//        strategy.cancel(id="RSI_BB_S")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・81 lines
+Use on chart
+1
+7
+0
+1
+11 660
+Aug 6, 2018
+This is a script I remade from the original ChartArt's "CA_RSI_Bolling_Strat".
+I added a VWMA following the SMA basis curve.
+BBand was made with the SMA curve, +2DS.
+The point of adding VWMA to the script is to get a fast correlation between price change and volume change.
+How to interpret it:
+Since 3-Intervals-VWMA = (P1*V1 + P2*V2 + P3*V3) / (V1+V2+V3)
+As the volume grows, VWMA get smaller.
+
+If the price goes to the upper band, and the VWMA follows it, Price grew more than Volume, and a correction would happen soon.
+If the price goes to the lower band, and the VWMA follows it, Price dipped with a lot of Volume, and a continuation of trend would be expected.
+
+If the price goes to the upper band, and the VWMA stays close to SMA, Price grew with a correspondient Volume, and the continuation of trend would be expected.
+If the price goes to the lower band, and the VWMA stays close to SMA, Price dipped with low Volume, a correction would happen soon.
+
+Remember that NO INDICATOR is flawless, support your interpretation with other indicators like RSI and MACD.
+
+Hope you enjoy it!
+φ!
+Aug 7, 2018
+Release Notes
+Some minor changes to cleanse it.
+Also:
+Aqua = VWMA
+Orange = SMA

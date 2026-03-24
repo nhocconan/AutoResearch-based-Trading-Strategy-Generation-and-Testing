@@ -1,0 +1,153 @@
+//@version=5
+strategy("Simple ZigZag Double", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, pyramiding=0, commission_value=0.1)
+
+needlong = input.bool(true, title="Use Long", inline="dir_long")
+needshort = input.bool(true, title="Use Short", inline="dir_short")
+Length = input.int(5, minval=2, title="Long Length", inline="zz")
+Detection = input.int(3, minval=1, title="Detection", inline="zz")
+Length2 = input.int(5, minval=2, title="Short Length", inline="zz2")
+Detection2 = input.int(3, minval=1, title="Detection", inline="zz2")
+fixed_lot = input(false, title="Fixed lot", inline="lot")
+lot_long = input.float(defval=100, minval=1, maxval=10000, title="Lot Long, %", inline="lot")
+lot_short = input.float(defval=100, minval=1, maxval=10000, title="Short, %", inline="lot")
+timestamp_start = input.time(defval = timestamp("01 Jan 2014 00:00 +0000"), title = "Time Start", inline="time")
+timestamp_end = input.time(defval = timestamp("30 Dec 2050 23:59 +0000"), title = "Time End  ", inline="time")
+truetime = time > timestamp_start and time < timestamp_end
+strict_position = input.bool(false, title="Strict position", tooltip = "Открывать позицию строго по стратегии. Если стратегия включена после того как по ней был открыт ЛОНГ то новый лонг не будет открыт.")
+
+LOT_LONG = 0.0
+LOT_SHORT = 0.0
+LOT_LONG := fixed_lot == false ? strategy.position_size != strategy.position_size[1] ? strategy.equity / close * lot_long / 100 : LOT_LONG[1] : lot_long
+LOT_SHORT := fixed_lot == false ? strategy.position_size != strategy.position_size[1] ? strategy.equity / close * lot_short / 100 : LOT_SHORT[1] : lot_short
+
+l = ta.lowest(Detection)
+h = ta.highest(Detection)
+ema1 = ta.ema(close, math.round(Length/3 * 3))
+ema2 = ta.ema(ema1, math.round(Length/3 * 2))
+ema3 = ta.ema(ema2, math.round(Length/3))
+z = ema3 >= ema3[1] and ema3[1] < ema3[2] ? l : ema3 < ema3[1] and ema3[1] >= ema3[2] ? h : 0.0
+
+l2 = ta.lowest(Detection2)
+h2 = ta.highest(Detection2)
+ema12 = ta.ema(close, math.round(Length2/3 * 3))
+ema22 = ta.ema(ema12, math.round(Length2/3 * 2))
+ema32 = ta.ema(ema22, math.round(Length2/3))
+z2 = ema32 >= ema32[1] and ema32[1] < ema32[2] ? l2 : ema32 < ema32[1] and ema32[1] >= ema32[2] ? h2 : 0.0
+
+point = 0.0
+option_offset_l = 0.0
+option_offset_sh = 0.0
+point := z == 0.0 ? point[1] : z
+
+point2 = 0.0
+option_offset_l2 = 0.0
+option_offset_sh2 = 0.0
+point2 := z2 == 0.0 ? point2[1] : z2
+
+LEVEL_LONG = 0.0
+LEVEL_SHORT = 0.0
+LEVEL_LONG := (point > point[1] ? z : LEVEL_LONG[1])
+LEVEL_SHORT := (point < point[1] ? z : LEVEL_SHORT[1])
+
+LEVEL_LONG2 = 0.0
+LEVEL_SHORT2 = 0.0
+LEVEL_LONG2 := (point2 > point2[1] ? z2 : LEVEL_LONG2[1])
+LEVEL_SHORT2 := (point2 < point2[1] ? z2 : LEVEL_SHORT2[1])
+
+plot(LEVEL_LONG, title = "LONG", color = color.lime, style = plot.style_line, linewidth=2)
+plot(LEVEL_SHORT2, title = "SHORT", color = color.red, style = plot.style_line, linewidth=2)
+
+// Virtual position indicator
+var int virtual_pos = 0
+
+if strict_position
+    // Check for virtual exits
+    if virtual_pos == 1 and close <= LEVEL_SHORT2 and close[1] > LEVEL_SHORT2
+        virtual_pos := 0
+    if virtual_pos == -1 and close >= LEVEL_LONG and close[1] < LEVEL_LONG
+        virtual_pos := 0
+
+    if virtual_pos != 1 and close >= LEVEL_LONG
+        virtual_pos := 1
+    if virtual_pos != -1 and close <= LEVEL_SHORT2
+        virtual_pos := -1
+
+// Entry conditions with virtual position filter
+bool long_entry_condition = LEVEL_LONG > 0 and needlong and truetime and virtual_pos != 1
+bool short_entry_condition = LEVEL_SHORT2 > 0 and needshort and truetime and virtual_pos != -1
+
+if long_entry_condition
+    strategy.entry("Long", strategy.long, LOT_LONG, stop = LEVEL_LONG)
+if short_entry_condition
+    strategy.entry("Short", strategy.short, LOT_SHORT, stop = LEVEL_SHORT2)
+
+strategy.cancel("Long", when = needlong == false) 
+strategy.exit("Exit Long", "Long", stop = LEVEL_SHORT2, when = needshort == false)  
+strategy.cancel("Short", when = needshort == false)
+strategy.exit("Exit Short", "Short", stop = LEVEL_LONG, when = needlong == false)
+
+if time > timestamp_end
+    strategy.close_all()
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    virtual_pos := 0
+
+// Plot virtual position as indicator
+bgcolor(virtual_pos == 1 ? color.rgb(76, 175, 79, 75) : virtual_pos == -1 ? color.rgb(255, 82, 82, 75) : na)
+
+View in Pine Editor・96 lines
+Use on chart
+3
+3
+871
+Mar 10
+Strategy Description
+
+A simple trend-following strategy with a minimal number of parameters.
+
+The logic is based on the ZigZag concept, but interpreted in a different way so that the algorithm does not repaint and does not rely on pivot indicators.
+
+The key difference from many similar approaches is that Long and Short levels have separate settings, allowing more flexible tuning of the strategy behavior.
+
+By default, the strategy includes a 0.1% commission in the backtest.
+
+Settings
+
+Use Long – Enable or disable opening Long positions.
+Use Short – Enable or disable opening Short positions.
+Length – Affects the frequency of level creation and the position of the ZigZag point used by the algorithm.
+Detection – Determines the price level. It controls how many candles after the ZigZag point are used to search for the minimum or maximum price.
+Lot Long, % – Percentage of equity allocated to opening a Long position.
+Lot Short, % – Percentage of equity allocated to opening a Short position.
+Time Start – Start of the testing period.
+Time End – End of the testing period.
+Example: you can test only a specific time range (for example, August 2020).
+
+Recommended Timeframes
+The strategy is designed primarily for timeframes of 4H and higher.
+
+Strategy Logic
+The main idea of the strategy is to capture strong trending market movements as early as possible and hold the position during the trend.
+Trades are opened when the price breaks predefined levels built from previous highs or lows.
+The strategy generally keeps a position open and reverses from Short to Long (or vice versa) when an opposite signal occurs, unless additional modifications of the strategy are used.
+
+⚠️ The strategy may generate losing trades during sideways markets and during sharp V-shaped reversals.
+
+Order Type
+The strategy uses Market Stop orders (on some exchanges these may be called Conditional or Trigger orders).
+
+Green level – price where a conditional order to open a Long position is placed.
+Red level – price where a conditional order to open a Short position is placed.
+
+Order Logic
+When the strategy starts:
+If there is no open position and the price is between the levels, two orders are placed:
+one order to open a Long position
+one order to open a Short position
+If the price is not between the levels, or if a position is already open, only one order will be placed.
+
+When a position is open, the strategy maintains only one active order.
+
+By default, the size of this order equals position size × 2, which allows the strategy to close the current position and immediately open a new one in the opposite direction when the level is triggered.
+Release Notes
+New parameter strict_position. If enabled, it prohibits opening a long position if the strategy already requires an open long position. The same logic applies to short positions. This is necessary to prevent a trade from being entered into after the strategy is enabled that wasn't backtested.

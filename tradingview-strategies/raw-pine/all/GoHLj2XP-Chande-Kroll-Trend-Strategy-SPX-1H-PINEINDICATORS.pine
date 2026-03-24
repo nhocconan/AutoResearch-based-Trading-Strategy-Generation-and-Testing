@@ -1,0 +1,135 @@
+//@version=5
+strategy("Chande Kroll Stop Strategy", overlay=true, initial_capital = 1000, commission_type = strategy.commission.percent, commission_value = 0.01, slippage = 3)
+
+// Chande Kroll Stop parameters
+calcMode = input.string(title="Calculation Mode", defval="Exponential", options=["Linear", "Exponential"])
+riskMultiplier = input(5, "Risk Multiplier")
+atrPeriod = input(10, "ATR Period")
+atrMultiplier = input(3, "ATR Multiplier")
+stopLength = input(21, "Stop Length")
+smaLength = input(21, "SMA Length")
+
+// Calculate ATR
+atr = ta.atr(atrPeriod)
+
+// Calculate Chande Kroll Stop
+highStop = ta.highest(high, stopLength) - atrMultiplier * atr
+lowStop = ta.lowest(low, stopLength) + atrMultiplier * atr
+
+sma21 = ta.sma(close, smaLength)
+
+// Entry and Exit conditions
+longCondition = ta.crossover(close, lowStop) and close > sma21
+exitLongCondition = close < highStop
+
+// Funktion zur Berechnung der Menge
+calc_qty(mode, riskMultiplier) =>
+    lowestClose = ta.lowest(close, 1560)
+    if mode == "Exponential"
+        qty = riskMultiplier / lowestClose * 1000 * strategy.equity / strategy.initial_capital
+    else
+        qty = riskMultiplier / lowestClose * 1000
+
+// Berechnung der Menge basierend auf der Benutzerwahl
+qty = calc_qty(calcMode, riskMultiplier)
+
+// Execute strategy
+if (longCondition)
+    strategy.entry("Long", strategy.long, qty=qty)
+    alert("Buy Signal", alert.freq_once_per_bar_close)
+
+if (exitLongCondition)
+    strategy.close("Long")
+    alert("Sell Signal", alert.freq_once_per_bar_close)
+
+// Plotting
+plotshape(series=longCondition, location=location.belowbar, color=#0097a7, style=shape.triangleup, size=size.small, title="Buy Signal")
+plotshape(series=ta.crossunder(close, highStop), location=location.abovebar, color=#ff195f, style=shape.triangledown, size=size.small, title="Sell Signal")
+plot(sma21, color=color.gray)
+plot(highStop, color=#0097a7)
+plot(lowStop, color=#ff195f)
+
+View in Pine Editor・50 lines
+Use on chart
+4
+9
+1
+7
+10 072
+The "Chande Kroll Stop Strategy" is designed to optimize trading on the SPX using a 1-hour timeframe. This strategy effectively combines the Chande Kroll Stop indicator with a Simple Moving Average (SMA) to create a robust method for identifying long entry and exit points. This detailed description will explain the components, rationale, and usage to ensure compliance with TradingView's guidelines and help traders understand the strategy's utility and application.
+
+Objective
+The primary goal of this strategy is to identify potential long trading opportunities in the SPX by leveraging volatility-adjusted stop levels and trend-following principles. It aims to capture upward price movements while managing risk through dynamically calculated stops.
+
+Chande Kroll Stop Parameters:
+Calculation Mode: Offers "Linear" and "Exponential" options for position size calculation. The default mode is "Exponential."
+Risk Multiplier: An adjustable multiplier for risk management and position sizing, defaulting to 5.
+ATR Period: Defines the period for calculating the Average True Range (ATR), with a default of 10.
+ATR Multiplier: A multiplier applied to the ATR to set stop levels, defaulting to 3.
+Stop Length: Period used to determine the highest high and lowest low for stop calculation, defaulting to 21.
+SMA Length: Period for the Simple Moving Average, defaulting to 21.
+
+Calculation Details:
+ATR Calculation: ATR is calculated over the specified period to measure market volatility.
+Chande Kroll Stop Calculation:
+High Stop: The highest high over the stop length minus the ATR multiplied by the ATR multiplier.
+Low Stop: The lowest low over the stop length plus the ATR multiplied by the ATR multiplier.
+SMA Calculation: The 21-period SMA of the closing price is used as a trend filter.
+
+Entry and Exit Conditions:
+Long Entry: A long position is initiated when the closing price crosses over the low stop and is above the 21-period SMA. This condition ensures that the market is trending upward and that the entry is made in the direction of the prevailing trend.
+Exit Long: The long position is exited when the closing price falls below the high stop, indicating potential downward movement and protecting against significant drawdowns.
+
+Position Sizing:
+The quantity of shares to trade is calculated based on the selected calculation mode (linear or exponential) and the risk multiplier. This ensures position size is adjusted dynamically based on current market conditions and user-defined risk tolerance.
+Exponential Mode: Quantity is calculated using the formula: riskMultiplier / lowestClose * 1000 * strategy.equity / strategy.initial_capital.
+Linear Mode: Quantity is calculated using the formula: riskMultiplier / lowestClose * 1000.
+
+Execution:
+When the long entry condition is met, the strategy triggers a buy signal, and a long position is entered with the calculated quantity. An alert is generated to notify the trader.
+When the exit condition is met, the strategy closes the position and triggers a sell signal, accompanied by an alert.
+
+Plotting:
+Buy Signals: Indicated with an upward triangle below the bar.
+Sell Signals: Indicated with a downward triangle above the bar.
+
+Application
+This strategy is particularly effective for trading the SPX on a 1-hour timeframe, capitalizing on price movements by adjusting stop levels dynamically based on market volatility and trend direction.
+
+Default Setup
+Initial Capital: $1,000
+Risk Multiplier: 5
+ATR Period: 10
+ATR Multiplier: 3
+Stop Length: 21
+SMA Length: 21
+Commission: 0.01
+Slippage: 3 Ticks
+
+Backtesting Results
+Backtesting indicates that the "Chande Kroll Stop Strategy" performs optimally on the SPX when applied to the 1-hour timeframe. The strategy's dynamic adjustment of stop levels helps manage risk effectively while capturing significant upward price movements. Backtesting was conducted with a realistic initial capital of $1,000, and commissions and slippage were included to ensure the results are not misleading.
+
+Risk Management
+The strategy incorporates risk management through dynamically calculated stop levels based on the ATR and a user-defined risk multiplier. This approach ensures that position sizes are adjusted according to market volatility, helping to mitigate potential losses. Trades are sized to risk a sustainable amount of equity, adhering to the guideline of risking no more than 5-10% per trade.
+
+Usage Notes
+Customization: Users can adjust the ATR period, ATR multiplier, stop length, and SMA length to better suit their trading style and risk tolerance.
+Alerts: The strategy includes alerts for buy and sell signals to keep traders informed of potential entry and exit points.
+Pyramiding: Although possible, the strategy yields the best results without pyramiding.
+
+Justification of Components
+The Chande Kroll Stop indicator and the 21-period SMA are combined to provide a robust framework for identifying long trading opportunities in trending markets. Here is why they work well together:
+
+Chande Kroll Stop Indicator: This indicator provides dynamic stop levels that adapt to market volatility, allowing traders to set logical stop-loss levels that account for current price movements. It is particularly useful in volatile markets where fixed stops can be easily hit by random price fluctuations. By using the ATR, the stop levels adjust based on recent market activity, ensuring they remain relevant in varying market conditions.
+
+21-Period SMA: The 21-period SMA acts as a trend filter to ensure trades are taken in the direction of the prevailing market trend. By requiring the closing price to be above the SMA for long entries, the strategy aligns itself with the broader market trend, reducing the risk of entering trades against the overall market direction. This helps to avoid false signals and ensures that the trades are in line with the dominant market movement.
+
+Combining these two components creates a balanced approach that captures trending price movements while protecting against significant drawdowns through adaptive stop levels. The Chande Kroll Stop ensures that the stops are placed at levels that reflect current volatility, while the SMA filter ensures that trades are only taken when the market is trending in the desired direction.
+
+Concepts Underlying Calculations
+ATR (Average True Range): Used to measure market volatility, which informs the stop levels.
+SMA (Simple Moving Average): Used to filter trades, ensuring positions are taken in the direction of the trend.
+Chande Kroll Stop: Combines high and low price levels with ATR to create dynamic stop levels that adapt to market conditions.
+
+Risk Disclaimer
+Trading involves substantial risk, and most day traders incur losses. The "Chande Kroll Stop Strategy" is provided for informational and educational purposes only. Past performance is not indicative of future results. Users are advised to adjust and personalize this trading strategy to better match their individual trading preferences and risk tolerance.

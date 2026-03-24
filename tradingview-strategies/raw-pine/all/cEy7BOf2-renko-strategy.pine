@@ -1,0 +1,75 @@
+//@version=3
+strategy("RENKO strategy", overlay=true, pyramiding = 0, calc_on_order_fills = false, commission_type =  strategy.commission.percent, commission_value = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+//inputs
+atrLen = input(14, minval=1, title="ATR Length")
+isATR = input(false, title="ATR Renkos?")
+tradLen1 = input(115, minval=0, title="Input value for Non-ATR Renkos")
+wfil = input(50, minval=1, title="Warning zone, % of Renko")
+y = input(title="calculate strategy since year (if orders limit reached)",type=integer,defval=2000)
+
+//plots
+pla = input(true, title="plot buy/sell arrows")   
+plb = input(true, title="plot arrows if price crosses warning zone")      
+
+//functions RENKO    
+tradLen = tradLen1 * .01
+param = isATR ? renko(tickerid, "open", "ATR", atrLen) : renko(tickerid, "open", "Traditional", tradLen)
+renko_close = security(param, period, close, lookahead=true)
+renko_open = security(param, period, open, lookahead=true)
+renko_dif = abs(renko_close - renko_open)
+
+//plots
+col = renko_close < renko_open ? red : lime
+p1=plot(renko_close+renko_dif, linewidth=1, color=col, title='renko close')
+p2=plot(renko_close-renko_dif, linewidth=1, color=col, title='renko open')
+fill(p1, p2, color=col, transp=85, title='renko fill')
+
+col1 = renko_close < renko_open ? yellow : na
+col2 = renko_close > renko_open ? yellow : na
+col3 = renko_close < renko_open ? yellow : black
+col4 = renko_close > renko_open ? yellow : black
+p3=plot(renko_close+renko_dif+(renko_dif*(wfil/100)), linewidth=1, color=col1, title='renko close warning')
+p4=plot(renko_close-renko_dif-(renko_dif*(wfil/100)), linewidth=1, color=col2, title='renko open warning')
+
+fill(p1, p3, color=col3, transp=85, title='renko warning fill')
+fill(p2, p4, color=col4, transp=85, title='renko warning fill')
+
+
+//strategy
+longCondition =  crossover(renko_close, renko_open)
+shortCondition = crossunder(renko_close, renko_open)
+short = renko_close < renko_open
+long = renko_close > renko_open
+longClose = (close < renko_open-(renko_dif/2)) and long ? -1 :na
+shortClose = (close > renko_open+(renko_dif/2)) and short ? 1 :na
+
+strategy.entry("BUY", strategy.long, when = longCondition and year >= y)
+strategy.entry("SELL", strategy.short, when = shortCondition and year >= y)
+
+//arrows    
+longarrow = crossover(renko_close, renko_open) == 1? 1: na
+shortarrow = crossunder(renko_close, renko_open) == 1? -1: na
+plotarrow(pla and longarrow ? longarrow :na, colorup = aqua, transp = 0, title='buy arrow')
+plotarrow(pla and shortarrow ? shortarrow :na, colordown = red, transp = 0, title='sell arrow')
+plotarrow(plb and longClose ? longClose :na, colordown = red, transp = 60, title='close buy arrow')
+plotarrow(plb and shortClose ? shortClose :na, colorup = aqua, transp = 60, title='close sell arrow')
+
+View in Pine Editor・56 lines
+Use on chart
+6
+2
+5
+7
+16 592
+Jan 30, 2019
+Standard simple strategy RENKO. Entry on the first reversing bar. No repaints. Caution arrows when price crossing RENKO levels
+Feb 11, 2019
+Release Notes
+Added warning zones
+Feb 11, 2019
+Release Notes
+Updated comission value 0%
+Feb 11, 2019
+Release Notes
+Added adjustable warning zone

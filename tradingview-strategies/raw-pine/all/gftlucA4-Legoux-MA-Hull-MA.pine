@@ -1,0 +1,43 @@
+//@version=3
+strategy("Legoux_MA<>Hull_MA", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=420, default_qty_value=100, calc_on_order_fills= true, calc_on_every_tick=true, pyramiding=0)
+z=input(type=integer,defval=1000,title="HullMA period")
+p=input(open)
+pine_alma(series, windowsize, offset, sigma) =>
+    m = floor(offset * (windowsize - 1))
+    s = windowsize / sigma
+    norm = 0.0
+    sum = 0.0
+    for i = 0 to windowsize - 1
+        weight = exp(-1 * pow(i - m, 2) / (2 * pow(s, 2)))
+        norm := norm + weight
+        sum := sum + series[windowsize - i - 1] * weight
+    sum / norm
+plot(pine_alma(close, 9, 0.85, 6))
+n2ma=2*wma(p,round(z/2))
+nma=wma(p,z)
+diff=n2ma-nma
+sqn=round(sqrt(z))
+n1=wma(diff,sqn)
+c4=p>n1?green:red
+n1e=plot(p,color=c4,linewidth=1)
+n2e=plot(n1,color=c4,linewidth=1)
+fill(n1e, n2e,color=c4,transp=75)
+plot(cross(p,n1)?n1:na,style=circles,color=c4,linewidth=4)
+longcondition=p>n1 and p>p[10] and n1>pine_alma(close, 9, 0.85, 6)
+shortcondition=p<n1 and p<p[10] and n1<pine_alma(close, 9, 0.85, 6)
+if (longcondition)
+    strategy.entry("Long",strategy.long)
+if (shortcondition)
+    strategy.entry("Short",strategy.short)
+
+View in Pine Editor・31 lines
+Use on chart
+3
+4
+1
+1
+7 555
+Arnaud Legoux MA > Hull MA
+Long Hull period default, for use with low timeframe
+probably not as good if a trading commision is applied etc
+script open, help yourself :)

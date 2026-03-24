@@ -1,0 +1,34 @@
+//@version=3
+strategy("PPO Strategy", overlay=true)
+ 
+shortlen=input(21, minval=1)
+longlen=input(55, minval=1)
+siglen=input(9,minval=1) 
+threshold=input(0.4,minval=0)   
+
+src = input(close, title="Source")
+short = ema(src, shortlen)
+long = ema(src, longlen)
+po = (short - long)/long*100
+signal = ema(po, siglen)
+difference = po - signal 
+
+if (crossover(difference, threshold))
+    strategy.entry("PPO buy", strategy.long, comment="buy")
+
+if (crossunder(difference, threshold*0.7))
+    strategy.entry("PPO sell", strategy.short, comment="sell")
+
+View in Pine Editor・20 lines
+Use on chart
+4
+2
+2 468
+PPO strategy, similar to MACD but with percentage
+
+
+Buy when PPO cross over a threshold, ex 0.4
+
+Sell when cross under ...
+
+You may use it in 2h time frame or more ... to get strong signal

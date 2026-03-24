@@ -1,0 +1,170 @@
+//@version=5
+strategy("Phase Cross Strategy with Zone", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// Inputs
+length = input.int(20, title="Smoothing Length")
+source = input(close, title="Source")
+offset = input.float(0.5, title="Offset Amount", minval=0.0)  // Offset for spacing
+
+// Simulating "Phases" with Smoothed Oscillators
+lead_phase = ta.sma(source, length) + offset  // Leading phase with offset
+lag_phase = ta.ema(source, length) - offset  // Lagging phase with offset
+
+// Signal Logic
+buySignal = ta.crossover(lead_phase, lag_phase)
+sellSignal = ta.crossunder(lead_phase, lag_phase)
+
+// Plot Phases (as `plot` objects for `fill`)
+lead_plot = plot(lead_phase, color=color.green, title="Leading Phase", linewidth=1)
+lag_plot = plot(lag_phase, color=color.red, title="Lagging Phase", linewidth=1)
+
+// Fill Zone Between Phases
+fill_color = lead_phase > lag_phase ? color.new(color.green, 90) : color.new(color.red, 90)
+fill(plot1=lead_plot, plot2=lag_plot, color=fill_color, title="Phase Zone")
+
+// Plot Buy and Sell Signals
+plotshape(buySignal, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), title="Buy Signal", size=size.small)
+plotshape(sellSignal, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), title="Sell Signal", size=size.small)
+
+// Strategy Entry and Exit
+if buySignal
+    strategy.entry("Buy", strategy.long)
+
+if sellSignal
+    strategy.close("Buy")
+
+// Define the EMAs
+ema13 = ta.ema(close, 13)
+ema26 = ta.ema(close, 26)
+ema50 = ta.ema(close, 50)
+ema100 = ta.ema(close, 100)
+ema200 = ta.ema(close, 200)
+
+// Plot the EMAs
+plot(ema13, color=color.blue, linewidth=2, title="EMA 13")
+plot(ema26, color=color.red, linewidth=2, title="EMA 26")
+plot(ema50, color=color.orange, linewidth=2, title="EMA 50")
+plot(ema100, color=color.green, linewidth=2, title="EMA 100")
+plot(ema200, color=color.purple, linewidth=2, title="EMA 200")
+
+View in Pine Editor・48 lines
+Use on chart
+9
+4
+1
+2 880
+Jan 6, 2025
+### Introduction to the Strategy
+
+Welcome to the **Phase Cross Strategy with Zone and EMA Analysis**. This strategy is designed to help traders identify potential buy and sell opportunities based on the crossover of smoothed oscillators (referred to as "phases") and exponential moving averages (EMAs). By combining these two methods, the strategy offers a versatile tool for both trend-following and short-term trading setups.
+
+### Key Features
+1. **Phase Cross Signals**:
+- The strategy uses two smoothed oscillators:
+- **Leading Phase**: A simple moving average (SMA) with an upward offset.
+- **Lagging Phase**: An exponential moving average (EMA) with a downward offset.
+- Buy and sell signals are generated when these phases cross over or under each other, visually represented on the chart with green (buy) and red (sell) labels.
+
+2. **Phase Zone Visualization**:
+- The area between the two phases is filled with a green or red zone, indicating bullish or bearish conditions:
+- Green zone: Leading phase is above the lagging phase (potential uptrend).
+- Red zone: Leading phase is below the lagging phase (potential downtrend).
+
+3. **EMA Analysis**:
+- Includes five commonly used EMAs (13, 26, 50, 100, and 200) for additional trend analysis.
+- Crossovers of the EMA 13 and EMA 26 act as secondary buy/sell signals to confirm or enhance the phase-based signals.
+
+4. **Customizable Parameters**:
+- You can adjust the smoothing length, source (price data), and offset to fine-tune the strategy for your preferred trading style.
+
+### What to Pay Attention To
+1. **Phases and Zones**:
+- Use the green/red phase zone as an overall trend guide.
+- Avoid taking trades when the phases are too close or choppy, as it may indicate a ranging market.
+
+2. **EMA Trends**:
+- Align your trades with the longer-term trend shown by the EMAs. For example:
+- In an uptrend (price above EMA 50 or EMA 200), prioritize buy signals.
+- In a downtrend (price below EMA 50 or EMA 200), prioritize sell signals.
+
+3. **Signal Confirmation**:
+- Consider combining phase cross signals with EMA crossovers for higher-confidence trades.
+- Look for confluence between the phase signals and EMA trends.
+
+4. **Risk Management**:
+- Always set stop-loss and take-profit levels to manage risk.
+- Use the phase and EMA zones to estimate potential support/resistance areas for exits.
+
+5. **Whipsaws and False Signals**:
+- Be cautious in low-volatility or sideways markets, as the strategy may generate false signals.
+- Use additional indicators or filters to avoid entering trades during unclear market conditions.
+
+### How to Use
+1. Add the strategy to your chart in TradingView.
+2. Adjust the input settings (e.g., smoothing length, offsets) to suit your trading preferences.
+3. Enable the strategy tester to evaluate its performance on historical data.
+4. Combine the signals with your own analysis and risk management plan for best results.
+
+This strategy is a versatile tool, but like any trading method, it requires proper understanding and discretion. Always backtest thoroughly and trade with discipline. Let me know if you need further assistance or adjustments to the strategy!
+Jan 7, 2025
+Release Notes
+### Introduction to the Strategy
+
+Welcome to the **Phase Cross Strategy with Zone and EMA Analysis**. This strategy is designed to help traders identify potential buy and sell opportunities based on the crossover of smoothed oscillators (referred to as "phases") and exponential moving averages (EMAs). By combining these two methods, the strategy offers a versatile tool for both trend-following and short-term trading setups.
+
+### Key Features
+1. **Phase Cross Signals**:
+- The strategy uses two smoothed oscillators:
+- **Leading Phase**: A simple moving average (SMA) with an upward offset.
+- **Lagging Phase**: An exponential moving average (EMA) with a downward offset.
+- Buy and sell signals are generated when these phases cross over or under each other, visually represented on the chart with green (buy) and red (sell) labels.
+
+2. **Phase Zone Visualization**:
+- The area between the two phases is filled with a green or red zone, indicating bullish or bearish conditions:
+- Green zone: Leading phase is above the lagging phase (potential uptrend).
+- Red zone: Leading phase is below the lagging phase (potential downtrend).
+
+3. **EMA Analysis**:
+- Includes five commonly used EMAs (13, 26, 50, 100, and 200) for additional trend analysis.
+- Crossovers of the EMA 13 and EMA 26 act as secondary buy/sell signals to confirm or enhance the phase-based signals.
+
+4. **Customizable Parameters**:
+- You can adjust the smoothing length, source (price data), and offset to fine-tune the strategy for your preferred trading style.
+
+### What to Pay Attention To
+1. **Phases and Zones**:
+- Use the green/red phase zone as an overall trend guide.
+- Avoid taking trades when the phases are too close or choppy, as it may indicate a ranging market.
+
+2. **EMA Trends**:
+- Align your trades with the longer-term trend shown by the EMAs. For example:
+- In an uptrend (price above EMA 50 or EMA 200), prioritize buy signals.
+- In a downtrend (price below EMA 50 or EMA 200), prioritize sell signals.
+
+3. **Signal Confirmation**:
+- Consider combining phase cross signals with EMA crossovers for higher-confidence trades.
+- Look for confluence between the phase signals and EMA trends.
+
+4. **Risk Management**:
+- Always set stop-loss and take-profit levels to manage risk.
+- Use the phase and EMA zones to estimate potential support/resistance areas for exits.
+
+5. **Whipsaws and False Signals**:
+- Be cautious in low-volatility or sideways markets, as the strategy may generate false signals.
+- Use additional indicators or filters to avoid entering trades during unclear market conditions.
+
+### How to Use
+1. Add the strategy to your chart in TradingView.
+2. Adjust the input settings (e.g., smoothing length, offsets) to suit your trading preferences.
+3. Enable the strategy tester to evaluate its performance on historical data.
+4. Combine the signals with your own analysis and risk management plan for best results.
+
+This strategy is a versatile tool, but like any trading method, it requires proper understanding and discretion. Always backtest thoroughly and trade with discipline. Let me know if you need further assistance or adjustments to the strategy!
+Jan 11, 2025
+Release Notes
+This version of the Phase Cross Strategy with Zone is configured with realistic trading conditions:
+
+Account Size: $10,000
+Risk Per Trade: 10% of equity
+Commission: 0.1% per trade
+These settings are designed to reflect practical trading scenarios and provide more accurate backtesting results. Feel free to adjust these parameters to match your trading preferences or market conditions. Remember, backtest results may vary based on asset, timeframe, and slippage. Happy trading! 🚀

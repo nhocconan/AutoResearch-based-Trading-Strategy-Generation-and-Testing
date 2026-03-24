@@ -1,0 +1,9 @@
+//@version=4
+upper=##input(defval=55.0,type='INPUT_FLOAT',##id='in_1')
+lower=##input(defval=45.0,type='INPUT_FLOAT',##id='in_2')
+ovb=##input(defval=70.0,type='INPUT_FLOAT',##id='in_3')
+ovs=##input(defval=30.0,type='INPUT_FLOAT',##id='in_4')
+##root(root_metainfo,rm_0,upper,input__float)
+##root(root_metainfo,rm_1,lower,input__float)
+##root(root_metainfo,rm_2,ovb,input__float)
+##root(root_metainfo,rm_3,ovs,input__float)

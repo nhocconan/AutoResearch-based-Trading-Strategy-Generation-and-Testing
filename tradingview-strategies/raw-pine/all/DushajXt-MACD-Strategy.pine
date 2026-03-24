@@ -1,0 +1,28 @@
+//@version=3
+strategy("MACD Strategy", overlay=true)
+strategy.risk.allow_entry_in(strategy.direction.short) // There will be no short entries, only exits from long.
+
+sma18 = ema(close, 18)
+
+[macdLine, signalLine, histLine] = macd(close, 12, 26, 9)
+// macd signals
+macd_sell_sig = crossover(signalLine,macdLine)
+macd_buy_sig = crossover(macdLine, signalLine)
+plotshape(macd_sell_sig, style=shape.xcross, color=red)
+plotshape(macd_buy_sig, style=shape.xcross, color=green)
+plot(sma18, title="sma18", color=white)
+
+// enter long by market if macd crossed up
+if(sma18 < high)
+    strategy.order("buy", strategy.long,  when = macd_buy_sig)
+    if(not macd_buy_sig[1])
+        strategy.order("sell", strategy.short, when = macd_sell_sig and (strategy.position_size > 0))
+
+View in Pine Editor・19 lines
+Use on chart
+3
+9
+4
+3
+12 636
+BTC/USD 1 min MACD trading

@@ -1,0 +1,84 @@
+//@version=2
+strategy(title='Sniper & Strategy by CSBender_', shorttitle='Sniper & Strategy by CSBender_', overlay=true, pyramiding=0, initial_capital=1, currency=currency.USD)
+//============ signal Generator ==================================//
+Piriod=input('720')//630
+ch1 = security(tickerid, Piriod, open)
+ch2 = security(tickerid, Piriod, close)
+longCondition = crossover(ch2,ch1)
+shortCondition = crossunder(ch2,ch1)
+if (longCondition)
+    strategy.entry(".", strategy.long)
+plotshape(longCondition, style=shape.labelup, color=lime, text="Señal de\nCompra\nActivada", textcolor=black, location=location.belowbar)
+if (shortCondition)
+    strategy.entry(".", strategy.short)
+plotshape(shortCondition, style=shape.labeldown, color=red, text="Señal de\nVenta\nActivada", textcolor=black)
+//============ Directional Projection ==================================//
+channel3=input(false, title="Connect Projection High/Low")
+tf2 = input('1', title="Trend Projection TF / Mins/D/W")
+M2 = input('ATR')
+P2 = input(13.00, type=float)
+W2 = input(1)
+pf2 = pointfigure(tickerid, 'close', M2, P2, W2)
+spfc2 = security(pf2, tf2, close)
+p22=plot(channel3?spfc2:spfc2==nz(spfc2[1])?spfc2:na, color=blue, linewidth=2, style=linebr, title="Projection", offset=0)
+//====================colour bar======================
+mysignal = ema(close, 13) - ema(close, 26)
+barcolor(mysignal[0] > mysignal[1] ? green : red)
+//============ Trend colour ema 1 y 2 ==================================//
+src0 = close, len0 = input(13, minval=1, title="EMA 1")
+ema0 = ema(src0, len0)
+direction = rising(ema0, 2) ? +1 : falling(ema0, 2) ? -1 : 0
+plot_color = direction > 0  ? lime: direction < 0 ? red : na
+plot(ema0, title="EMA", style=line, linewidth=2, color = plot_color)
+//============ ema 2 ==================================//
+src02 = close, len02 = input(21, minval=1, title="EMA 2")
+ema02 = ema(src02, len02)
+direction2 = rising(ema02, 2) ? +1 : falling(ema02, 2) ? -1 : 0
+plot_color2 = direction2 > 0  ? lime: direction2 < 0 ? red : na
+plot(ema02, title="EMA Signal 2", style=line, linewidth=2, color = plot_color2)
+//=============Hull MA ==================================//
+show_hma = input(false, title="Display Hull MA Set:")
+hma_src = input(close, title="Hull MA's Source:")
+hma_base_length = input(8, minval=1, title="Hull MA's Base Length:")
+hma_length_scalar = input(5, minval=0, title="Hull MA's Length Scalar:")
+hullma(src, length)=>wma(2*wma(src, length/2)-wma(src, length), round(sqrt(length)))
+plot(not show_hma ? na : hullma(hma_src, hma_base_length+hma_length_scalar*6), color=black, linewidth=2, title="Hull MA")
+//============ Supertrend Generator ==================================//
+Factor=input(1, minval=1,maxval = 000, title="Trend Transition Signal")
+Pd=input(1, minval=1,maxval = 100)
+Up=hl2-(Factor*atr(Pd))
+Dn=hl2+(Factor*atr(Pd))
+TrendUp=close[1]>TrendUp[1]? max(Up,TrendUp[1]) : Up
+TrendDown=close[1]<TrendDown[1]? min(Dn,TrendDown[1]) : Dn
+Trend = close > TrendDown[1] ? 1: close< TrendUp[1]? -1: nz(Trend[1],0)
+plotarrow(Trend == 1 and Trend[1] == -1 ? Trend : na, title="Up Entry Arrow", colorup=lime, maxheight=1000, minheight=50, transp=85)
+plotarrow(Trend == -1 and Trend[1] == 1 ? Trend : na, title="Down Entry Arrow", colordown=red, maxheight=1000, minheight=50, transp=85)
+//============ Trend Generator ==================================//
+slow = 8
+fast = 5
+vh1 = ema(highest(avg(low, close), fast), 5)
+vl1 = ema(lowest(avg(high, close), slow), 8)
+e_ema1 = ema(close, 1)
+e_ema2 = ema(e_ema1, 1)
+e_ema3 = ema(e_ema2, 1)
+tema = 1 * (e_ema1 - e_ema2) + e_ema3
+e_e1 = ema(close, 8)
+e_e2 = ema(e_e1, 5)
+dema = 2 * e_e1 - e_e2
+signal = tema > dema ? max(vh1, vl1) : min(vh1, vl1)
+is_call = tema > dema and signal > low and (signal-signal[1] > signal[1]-signal[2])
+is_put = tema < dema and signal < high and (signal[1]-signal > signal[2]-signal[1])
+plotshape(is_call ? 1 : na, title="BUY ARROW", color=green, text="B", style=shape.arrowup, location=location.belowbar)
+plotshape(is_put ? -1 : na, title="SELL ARROW", color=red, text="S", style=shape.arrowdown)
+//============ END ==================================//
+
+View in Pine Editor・73 lines
+Use on chart
+1.3 K
+26
+58 650
+SniperTrading permite detectar los momentos exactos de compra y venta obteniendo un buen rendimiento.
+
+Como aplicarlo:
+* Realice una compra cuando el indicador de COMPRA aparezca en la pantalla.
+* Realice una venta cuando el indicador de VENTA aparezca en la pantalla.

@@ -1,0 +1,100 @@
+//@version=6
+strategy("AI Volume Strategy", overlay=true)
+
+// === Parameters ===
+volumeEmaLength = input.int(20, title="Volume EMA Length")
+volumeMultiplier = input.float(2.0, title="Multiplier (for spike detection)")
+exitBars = input.int(5, title="Exit After How Many Bars?", minval=1)  // Default exit after 5 bars
+showVolumeEMA = input.bool(false, title="Show Volume EMA", tooltip="Check to show the Volume EMA on the chart")  // Default is false
+
+// === Calculations ===
+volumeEMA = ta.ema(volume, volumeEmaLength)
+volumeSpike = volume > volumeEMA * volumeMultiplier
+
+// Trend conditions – simple MA to filter direction
+priceMA = ta.ema(close, 50)
+trendUp = close > priceMA
+trendDown = close < priceMA
+
+// Candle conditions (candle color)
+isBullishCandle = close > open  // Bullish candle
+isBearishCandle = close < open  // Bearish candle
+
+// === Signals ===
+buySignal = volumeSpike and trendUp and isBullishCandle
+sellSignal = volumeSpike and trendDown and isBearishCandle
+
+// Tracking bars since entry
+var int barsSinceEntry = 0
+
+// Entry logic
+if buySignal
+    strategy.entry("BUY", strategy.long)
+    barsSinceEntry := 0  // Reset bars since entry after buying
+
+if sellSignal
+    strategy.entry("SELL", strategy.short)
+    barsSinceEntry := 0  // Reset bars since entry after selling
+
+// Count bars since entry
+barsSinceEntry := barsSinceEntry + 1
+
+// Exit condition after the specified number of bars
+exitCondition = barsSinceEntry >= exitBars
+
+// Close positions after the specified number of bars
+if exitCondition
+    strategy.close("BUY", comment="Exit after " + str.tostring(exitBars) + " bars")
+    strategy.close("SELL", comment="Exit after " + str.tostring(exitBars) + " bars")
+
+// === Visualization ===
+plotshape(buySignal, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(sellSignal, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// Conditionally plot the Volume EMA line based on user input
+plot(showVolumeEMA ? volumeEMA : na, title="Volume EMA", color=color.orange)
+
+// === Alerts ===
+alertcondition(buySignal, title="Buy Alert", message="AI Volume Signal: BUY")
+alertcondition(sellSignal, title="Sell Alert", message="AI Volume Signal: SELL")
+
+View in Pine Editor・59 lines
+Use on chart
+1
+3
+3
+2
+4 610
+AI Volume Strategy detects significant volume spikes and combines them with trend direction and candlestick color to generate buy and sell signals. The strategy uses an Exponential Moving Average (EMA) of volume to identify abnormal volume spikes that may indicate strong market activity. Additionally, it uses a 50-period EMA of price to filter the trend and decide on entry direction.
+
+Key Features:
+
+Volume Spike Detection: The strategy detects when the current volume exceeds the EMA of volume by a user-defined multiplier, signaling abnormal increases in market activity.
+
+Trend Direction Filter: The strategy uses a 50-period EMA of price to determine the market trend. Buy signals are generated when the price is above the EMA (uptrend), and sell signals are generated when the price is below the EMA (downtrend).
+
+Candle Color Filter: The strategy generates a buy signal only when the current candle is bullish (green) and a sell signal only when the current candle is bearish (red).
+
+Exit after X Bars: The strategy automatically closes the position after a specified number of bars (default is 5 bars), but the exit condition can be adjusted based on user preference, timeframe, and backtesting results. The default exit is after 5 bars, but users can set it to 1 bar or any other number depending on their preferences and strategy.
+
+Signals:
+
+Buy Signal: Generated when a volume spike occurs, the trend is upward, and the current candle is bullish.
+
+Sell Signal: Generated when a volume spike occurs, the trend is downward, and the current candle is bearish.
+
+Alerts:
+
+Buy Alert: Alerts the user when a buy signal is triggered.
+
+Sell Alert: Alerts the user when a sell signal is triggered.
+
+Visualization:
+
+Buy Signal: A green label appears below the bar when the buy conditions are met.
+
+Sell Signal: A red label appears above the bar when the sell conditions are met.
+
+Volume EMA: Optionally, the Volume EMA line can be plotted on the chart to visualize volume trends.
+
+This strategy helps traders identify potential entry points based on increased volume activity while considering trend direction and candlestick patterns. With the ability to adjust the exit condition, users can fine-tune the strategy to their specific needs and backtest results.

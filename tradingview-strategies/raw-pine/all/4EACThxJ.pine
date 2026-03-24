@@ -1,0 +1,18 @@
+//@version=6
+strategy("استراتيجيتي", overlay=true, fill_orders_on_standard_ohlc = true)
+
+longCondition = ta.crossover(ta.sma(close, 14), ta.sma(close, 28))
+if (longCondition)
+    strategy.entry("My Long Entry Id", strategy.long)
+
+shortCondition = ta.crossunder(ta.sma(close, 14), ta.sma(close, 28))
+if (shortCondition)
+    strategy.entry("My Short Entry Id", strategy.short)
+
+View in Pine Editor・13 lines
+Use on chart
+1
+6
+710
+Can you help identify the buy and sell zones
+It makes it easier to follow the index.

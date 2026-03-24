@@ -1,0 +1,182 @@
+//@version=6
+strategy('MACD Volume Strategy (BBO + MACD State, Reversal Type)', overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+src = close
+
+// === Volume Oscillator ===
+shortlen = input.int(6, minval = 1, title = 'Volume Short Length')
+longlen = input.int(12, minval = 1, title = 'Volume Long Length')
+shortVol = ta.ema(volume, shortlen)
+longVol = ta.ema(volume, longlen)
+osc = 100 * (shortVol - longVol) / longVol
+
+// === MACD Calculation ===
+fast_length = input(11, title = 'MACD Fast Length')
+slow_length = input(21, title = 'MACD Slow Length')
+signal_length = input.int(10, title = 'Signal Smoothing')
+sma_source = input.string('SMA', title = 'Oscillator MA Type', options = ['SMA', 'EMA'])
+sma_signal = input.string('SMA', title = 'Signal Line MA Type', options = ['SMA', 'EMA'])
+
+fast_ma = sma_source == 'SMA' ? ta.sma(src, fast_length) : ta.ema(src, fast_length)
+slow_ma = sma_source == 'SMA' ? ta.sma(src, slow_length) : ta.ema(src, slow_length)
+macd = fast_ma - slow_ma
+signal = sma_signal == 'SMA' ? ta.sma(macd, signal_length) : ta.ema(macd, signal_length)
+
+// === MACD State Check ===
+macdAboveSignal = macd > signal
+macdBelowSignal = macd < signal
+
+// === BBO Arrow Signals ===
+bboBuyArrow = ta.crossover(macd, 0) and osc > 0
+bboSellArrow = ta.crossunder(macd, 0) and osc > 0
+
+// === Entry Signals ===
+longSignal = bboBuyArrow and macdAboveSignal
+shortSignal = bboSellArrow and macdBelowSignal
+
+// === SL/TP Calculation ===
+riskReward = 1.5
+lastLow = ta.lowest(low, 10)
+lastHigh = ta.highest(high, 10)
+
+// === Long Entry (Reversal Type) ===
+if longSignal
+    strategy.close('Short') // Close short position first
+    float entryPrice = close
+    float sl = lastLow
+    float tp = entryPrice + (entryPrice - sl) * riskReward
+    strategy.entry('Long', strategy.long)
+    strategy.exit('Long TP/SL', from_entry = 'Long', stop = sl, limit = tp)
+
+// === Short Entry (Reversal Type) ===
+if shortSignal
+    strategy.close('Long') // Close long position first
+    float entryPrice = close
+    float sl = lastHigh
+    float tp = entryPrice - (sl - entryPrice) * riskReward
+    strategy.entry('Short', strategy.short)
+    strategy.exit('Short TP/SL', from_entry = 'Short', stop = sl, limit = tp)
+
+View in Pine Editor・61 lines
+Use on chart
+1
+2
+4
+4 343
+Overview
+MACD Volume Strategy (BBO + MACD State, Reversal Type) is a momentum-based reversal system that combines MACD crossover logic with volume filtering to enhance signal accuracy and minimize noise. It aims to identify structural trend shifts and manage risk using predefined parameters.
+
+※This strategy is for educational and research purposes only. All results are based on historical simulations and do not guarantee future performance.
+
+Strategy Objectives
+Identify early trend transitions with high probability
+
+Filter entries using volume dynamics to validate momentum
+
+Maintain continuous exposure using a reversal-style model
+
+Apply a consistent 1:1.5 risk-to-reward ratio per trade
+
+Key Features
+Integrated MACD and volume oscillator filtering
+
+Zero repainting (all signals confirmed on closed candles)
+
+Automatic position flipping for seamless direction shifts
+
+Stop-loss and take-profit based on recent structural highs/lows
+
+Trading Rules
+Long Entry Conditions
+MACD crosses above the zero line (BBO Buy arrow)
+
+Volume oscillator is positive (short EMA > long EMA)
+
+MACD is above the signal line
+
+Close any existing short and enter a new long
+
+Short Entry Conditions
+MACD crosses below the zero line (BBO Sell arrow)
+
+Volume oscillator is positive
+
+MACD is below the signal line
+
+Close any existing long and enter a new short
+
+Exit Rules
+Take Profit (TP) = Entry ± (risk distance × 1.5)
+
+Stop Loss (SL) = Recent swing low (for long) or high (for short)
+
+Early Exit = Triggered when a reversal signal appears (flip logic)
+
+Risk Management Parameters
+Pair: ETH/USD
+
+Timeframe: 10-minute
+
+Starting Capital: $3,000
+
+Commission: 0.02%
+
+Slippage: 2 pip
+
+Risk per Trade: 5% of account equity (adjusted for sustainable practice)
+
+Total Trades: 312 (backtest on selected dataset)
+
+※Risk parameters are fully configurable and should be adjusted to suit each trader's personal setup and broker conditions.
+
+Parameters & Configurations
+Volume Short Length: 6
+Volume Long Length: 12
+MACD Fast Length: 11
+MACD Slow Length: 21
+Signal Smoothing: 10
+Oscillator MA Type: SMA
+Signal Line MA Type: SMA
+
+Visual Support
+Green arrow = Long entry
+
+Red arrow = Short entry
+
+MACD lines, signal line, and histogram
+
+SL/TP markers plotted directly on the chart
+
+
+Strategic Advantages & Uniqueness
+Volume filtering eliminates low-participation, weak signals
+
+Structurally aligned SL/TP based on recent market pivots
+
+No repainting — decisions are made only on closed candles
+
+Always in the market due to the reversal-style framework
+
+Inspirations & Attribution
+This strategy is inspired by the excellent work of:
+
+Bitcoinblockchainonline – “BBO_Roxana_Signals MACD + vol”
+Leveraging MACD zero-line cross and volume oscillator for intuitive signal generation.
+
+HasanRifat – “MACD Fake Filter [RH]”
+Introduced a signal filter using MACD wave height averaging to reduce false positives.
+
+This strategy builds upon those ideas to create a more automated, risk-aware, and technically adaptive system.
+
+Summary
+MACD Volume Strategy is a clean, logic-first automated trading system built for precision-seeking traders. It avoids discretionary bias and provides consistent signal logic under backtested historical conditions.
+
+100% mechanical — no discretionary input required
+
+Designed for high-confidence entries
+
+Can be extended with filters, alerts, or trailing stops
+
+※Strategy performance depends on market context. Past performance is not indicative of future results. Use with proper risk management and careful configuration.
+
+

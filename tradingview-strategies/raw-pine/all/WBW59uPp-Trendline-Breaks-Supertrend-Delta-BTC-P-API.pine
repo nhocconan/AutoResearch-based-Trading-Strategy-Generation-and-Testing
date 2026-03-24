@@ -1,0 +1,119 @@
+//@version=6
+strategy("Trendline Breaks + Supertrend [Delta BTC-P] (API)",
+     overlay = true,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     initial_capital = 100000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.0,
+     max_labels_count = 500,
+     max_lines_count = 500)
+
+// ───── INPUTS ─────
+length           = input.int(14, "Swing Detection Lookback")
+mult             = input.float(1.0, "Slope Multiplier", minval = 0)
+calcMethod       = input.string("Atr", "Slope Calculation Method", options = ["Atr", "Stdev", "Linreg"])
+supertrendFactor = input.float(3.0, "Supertrend ATR Mult")
+supertrendPeriod = input.int(10, "Supertrend ATR Period")
+slPerc           = input.float(1.0, "Stop Loss %", minval = 0.1)
+tpPerc           = input.float(2.0, "Take Profit %", minval = 0.1)
+manualTP         = input.float(0.0, "Manual Take Profit Price (0 = disabled)", minval = 0)
+manualSL         = input.float(0.0, "Manual Stop Loss Price (0 = disabled)", minval = 0)
+
+// ───── TRENDLINES ─────
+var float upper   = na
+var float lower   = na
+var float slopePH = na
+var float slopePL = na
+src = close
+n   = bar_index
+
+ph = ta.pivothigh(length, length)
+pl = ta.pivotlow(length, length)
+isPh = not na(ph)
+isPl = not na(pl)
+
+slope = switch calcMethod
+    "Atr"    => ta.atr(length) / length * mult
+    "Stdev"  => ta.stdev(src, length) / length * mult
+    "Linreg" => math.abs(ta.sma(src * n, length) - ta.sma(src, length) * ta.sma(n, length)) / ta.variance(n, length) / 2 * mult
+
+slopePH := isPh ? slope : slopePH
+slopePL := isPl ? slope : slopePL
+
+upper := isPh ? ph : upper - slopePH
+lower := isPl ? pl : lower + slopePL
+
+upos = isPh ? 0 : close > upper - slopePH * length ? 1 : 0
+dnos = isPl ? 0 : close < lower + slopePL * length ? 1 : 0
+
+// ───── SUPERTREND ─────
+atr = ta.atr(supertrendPeriod)
+hl2 = (high + low) / 2
+upperBand = hl2 + supertrendFactor * atr
+lowerBand = hl2 - supertrendFactor * atr
+
+var bool inUpTrend = true
+inUpTrend := close[1] > upperBand[1] ? true :
+             close[1] < lowerBand[1] ? false :
+             inUpTrend[1]
+
+supertrendDir = inUpTrend ? 1 : -1
+
+// ───── CONDITIONS ─────
+longCondition  = supertrendDir == 1 and upos > upos[1]
+shortCondition = supertrendDir == -1 and dnos > dnos[1]
+longExit       = supertrendDir == -1 or dnos > dnos[1]
+shortExit      = supertrendDir == 1 or upos > upos[1]
+
+// ───── TP/SL ─────
+slLong  = manualSL > 0 ? manualSL : close * (1 - slPerc / 100)
+tpLong  = manualTP > 0 ? manualTP : close * (1 + tpPerc / 100)
+slShort = manualSL > 0 ? manualSL : close * (1 + slPerc / 100)
+tpShort = manualTP > 0 ? manualTP : close * (1 - tpPerc / 100)
+
+// ───── ORDERS ─────
+if longCondition
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", from_entry = "Long", stop = slLong, limit = tpLong)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", from_entry = "Short", stop = slShort, limit = tpShort)
+
+if strategy.position_size > 0 and longExit
+    strategy.close("Long", comment = "Reversal Exit")
+
+if strategy.position_size < 0 and shortExit
+    strategy.close("Short", comment = "Reversal Exit")
+
+// ───── API OUTPUTS ─────
+buySignal  = longCondition ? 1 : 0
+sellSignal = shortCondition ? 1 : 0
+exitLong   = longExit ? 1 : 0
+exitShort  = shortExit ? 1 : 0
+trendDir   = supertrendDir
+trailUp    = inUpTrend ? lowerBand : na
+trailDown  = inUpTrend ? na : upperBand
+
+plot(buySignal,       "BUY_SERIES",        color = color.new(color.green, 60))
+plot(sellSignal,      "SELL_SERIES",       color = color.new(color.red, 60))
+plot(exitLong,        "EXIT_LONG_SERIES",  color = color.new(color.orange, 60))
+plot(exitShort,       "EXIT_SHORT_SERIES", color = color.new(color.orange, 60))
+plot(trendDir,        "TREND_DIR",         color = color.new(color.blue, 70))
+plot(atr,             "ATR_VALUE",         color = color.new(color.yellow, 60))
+plot(trailUp,         "TRAIL_UP",          color = color.new(color.green, 50))
+plot(trailDown,       "TRAIL_DOWN",        color = color.new(color.red, 50))
+
+plotshape(longCondition,  title = "Buy Label",  location = location.belowbar, color = color.green, style = shape.labelup,   text = "Buy")
+plotshape(shortCondition, title = "Sell Label", location = location.abovebar, color = color.red,   style = shape.labeldown, text = "Sell")
+plotshape(longExit and strategy.position_size > 0,  title = "Exit L", location = location.abovebar, color = color.orange, style = shape.xcross, text = "Exit L")
+plotshape(shortExit and strategy.position_size < 0, title = "Exit S", location = location.belowbar, color = color.orange, style = shape.xcross, text = "Exit S")
+
+View in Pine Editor・111 lines
+Use on chart
+2
+9
+1 173
+Trendline Breaks + Supertrend [Delta BTC-P] (API)
+best on 5 min

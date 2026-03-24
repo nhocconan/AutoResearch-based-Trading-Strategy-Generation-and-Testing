@@ -1,0 +1,9 @@
+//@version=4
+##root(root_metainfo,rm_0,'shape_label_up',input__string,plotshape,style)
+##root(root_metainfo,rm_1,'Absolute',input__string,plotshape,location)
+##root(root_metainfo,rm_2,'shape_label_up',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'Absolute',input__string,plotshape,location)
+##root(root_metainfo,rm_4,'shape_label_down',input__string,plotshape,style)
+##root(root_metainfo,rm_5,'Absolute',input__string,plotshape,location)
+##root(root_metainfo,rm_6,'shape_label_down',input__string,plotshape,style)
+##root(root_metainfo,rm_7,'Absolute',input__string,plotshape,location)

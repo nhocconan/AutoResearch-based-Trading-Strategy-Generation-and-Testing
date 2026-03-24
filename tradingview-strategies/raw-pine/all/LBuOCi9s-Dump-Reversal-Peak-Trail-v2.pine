@@ -1,0 +1,371 @@
+//@version=6
+strategy("DP2", overlay=true, initial_capital=1000, currency=currency.USDT, commission_value = 0.1, slippage = 10, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, margin_long=20, calc_on_every_tick=false, process_orders_on_close=true, pyramiding=1)
+
+
+// === CONFIG FOR WUNDERTRADING COMMENT FORMAT ===
+symbolPair   = syminfo.basecurrency + syminfo.currency       // <-- dynamically from chart, normalized (e.g., SUIUSDT.P -> SUIUSDT)
+
+// Inputs
+var string grpDump = "Dump Detection"
+fromSource = input.source(open, "From", group=grpDump)
+toSource = input.source(close, "To", group=grpDump)
+anomalyThresholdPct = input.float(1.0, "Anomaly Threshold (%)", step=0.1, minval=0.0, group=grpDump)
+daysBreakLen = input.int(7, "Days Lookback for Low Break (0=disabled)", minval=0, group=grpDump)
+dumpCapPct = input.float(2.0, "Dump Cap (%) - ignore dumps larger than this", step=0.1, minval=0.0, group=grpDump)
+
+var string grpRisk = "Risk / Exits"
+armProfitPct = input.float(5.0, "Arm Exit After Profit %", step=0.1, minval=0.1, group=grpRisk)
+peakRetracePct = input.float(1.5, "Exit on Peak Retrace %", step=0.1, minval=0.1, group=grpRisk)
+enableSL = input.bool(false, "Enable Stop Loss", group=grpRisk)
+stopLossPct = input.float(15.0, "Stop Loss % (from avg)", step=0.1, minval=0.1, group=grpRisk)
+maxHoursInLoss = input.int(0, "Max Hours In Loss (0=disabled)", minval=0, group=grpRisk)
+
+// Proximity filters
+var string grpFilters = "Filters"
+resistLookbackDays = input.int(3, "Resistance Lookback (days)", minval=1, group=grpFilters)
+resistProximityPct = input.float(1.0, "Block entries within % of resistance", step=0.1, minval=0.0, group=grpFilters)
+
+// Entry confirmation
+var string grpEntry = "Entry Timing"
+var string grpEntryClassic = "Entry: Classic"
+var string grpEntryTwoCloses = "Entry: TwoCloses"
+var string grpEntryBreakRetest = "Entry: BreakRetest"
+var string grpEntryATRStop = "Entry: ATRStop"
+var string grpEntryAuto = "Entry: Auto"
+var string grpEntryRebound = "Entry: Rebound"
+// Use enum for robust comparisons in active flags
+enum EntryMode
+    Classic
+    TwoCloses
+    BreakRetest
+    ATRStop
+    Auto
+    Rebound
+entryMode = input.enum(EntryMode.ATRStop, "Entry Mode", options=[EntryMode.Classic, EntryMode.TwoCloses, EntryMode.BreakRetest, EntryMode.ATRStop, EntryMode.Auto, EntryMode.Rebound], group=grpEntry)
+// Per-mode flags for enabling relevant inputs only
+modeClassic = entryMode == EntryMode.Classic
+modeTwoCloses = entryMode == EntryMode.TwoCloses
+modeBreakRetest = entryMode == EntryMode.BreakRetest
+modeATRStop = entryMode == EntryMode.ATRStop
+modeAuto = entryMode == EntryMode.Auto
+modeRebound = entryMode == EntryMode.Rebound
+// TwoCloses
+twoClosesBars = input.int(2, "Closes Above Level", minval=1, maxval=5, group=grpEntryTwoCloses, active = modeTwoCloses)
+// BreakRetest
+brAtrLen = input.int(14, "ATR Length", minval=1, group=grpEntryBreakRetest, active = modeBreakRetest)
+retestOffsetAtr = input.float(0.2, "Retest Offset ATR Mult", step=0.05, minval=-2.0, group=grpEntryBreakRetest, active = modeBreakRetest)
+retestExpiryBars = input.int(8, "Retest Order Expiry Bars", minval=1, group=grpEntryBreakRetest, active = modeBreakRetest)
+// ATRStop
+atrStopAtrLen = input.int(14, "ATR Length", minval=1, group=grpEntryATRStop, active = modeATRStop)
+atrStopMult = input.float(0.5, "ATR Stop Buffer", step=0.1, minval=0.0, group=grpEntryATRStop, active = modeATRStop)
+stopExpiryBars = input.int(12, "Stop Order Expiry Bars", minval=1, group=grpEntryATRStop, active = modeATRStop)
+// Auto
+autoAtrLen = input.int(14, "ATR Length", minval=1, group=grpEntryAuto, active = modeAuto)
+autoSensitivity = input.string("Medium", "Auto Sensitivity", options=["Low", "Medium", "High"], group=grpEntryAuto, active = modeAuto)
+autoRetestExpiryBars = input.int(8, "Retest Order Expiry Bars", minval=1, group=grpEntryAuto, active = modeAuto)
+autoStopExpiryBars = input.int(12, "Stop Order Expiry Bars", minval=1, group=grpEntryAuto, active = modeAuto)
+// Rebound
+flatLookbackBars = input.int(5, "Flat Lookback Bars", minval=1, group=grpEntryRebound, active = modeRebound)
+maxFlatRangePct = input.float(0.4, "Max Flat Range %", step=0.1, minval=0.0, group=grpEntryRebound, active = modeRebound)
+minReboundFromLowPct = input.float(0.8, "Min Rebound From Low %", step=0.1, minval=0.0, group=grpEntryRebound, active = modeRebound)
+
+brAtr = ta.atr(brAtrLen)
+atrStopAtr = ta.atr(atrStopAtrLen)
+autoAtr = ta.atr(autoAtrLen)
+
+// Rebound helpers
+flatHH = ta.highest(high, flatLookbackBars)
+flatLL = ta.lowest(low, flatLookbackBars)
+flatRangePct = flatLL > 0 ? (flatHH - flatLL) / flatLL * 100.0 : 0.0
+isFlat = flatRangePct <= maxFlatRangePct
+
+// Auto-mode derived parameters
+autoSensLow = autoSensitivity == "Low"
+autoSensMed = autoSensitivity == "Medium"
+autoSensHigh = autoSensitivity == "High"
+autoTwoClosesBars = autoSensLow ? 1 : autoSensMed ? 2 : 3
+autoRetestOffsetAtr = autoSensLow ? 0.10 : autoSensMed ? 0.20 : 0.35
+autoAtrStopMult = autoSensLow ? 0.40 : autoSensMed ? 0.50 : 0.80
+
+// Cooldown after trade closes
+cooldownHours = input.int(4, "Cooldown Hours After Trade", minval=0, group=grpRisk)
+cooldownMs = cooldownHours * 60 * 60 * 1000
+var int cooldownUntilMs = na
+
+// Dump detection (anomaly-based)
+diff = fromSource != 0.0 ? (toSource / fromSource - 1.0) * 100.0 : 0.0
+isAnomaly = math.abs(diff) > anomalyThresholdPct
+withinDumpCap = math.abs(diff) <= dumpCapPct or dumpCapPct == 0.0
+dumpSignal = isAnomaly and close < open and withinDumpCap
+
+// N-day (configurable) low break filter using daily timeframe; 0 disables filter
+daysFilterEnabled = daysBreakLen > 0
+dailyLow = request.security(syminfo.tickerid, "D", low)
+safeDaysLen = math.max(1, daysBreakLen)
+priorDaysLowestSeries = request.security(syminfo.tickerid, "D", ta.lowest(low, safeDaysLen))
+priorDaysLowest = daysFilterEnabled ? priorDaysLowestSeries[1] : na
+breaksNDaysLow = daysFilterEnabled ? (low < priorDaysLowest) : true
+
+// 3-day resistance proximity filter (uses prior completed daily bar)
+safeResDays = math.max(1, resistLookbackDays)
+dailyHighestSeries = request.security(syminfo.tickerid, "D", ta.highest(high, safeResDays))
+resistancePrice = dailyHighestSeries[1]
+nearResistance = not na(resistancePrice) and resistancePrice > 0 and close < resistancePrice and ((resistancePrice - close) / resistancePrice * 100.0) <= resistProximityPct
+
+// BTC 4h trend filter (hourly change over last 4 hours)
+useBtcTrendFilter = input.bool(true, "Require BTC uptrend (last 4h)", group=grpFilters)
+btcTrendSymbol = input.symbol("BYBIT:BTCUSDT.P", "BTC Perpetual Trend Symbol", group=grpFilters)
+btc4hChange = request.security(btcTrendSymbol, "60", ta.change(close, 4))
+btcTrendUp = btc4hChange > 0
+
+canEnter = not nearResistance and (not useBtcTrendFilter or btcTrendUp)
+canPyramid = strategy.opentrades < 5
+
+// Entry state - track dump candle for structure break
+var float dumpCandleHigh = na
+var bool waitingForReclaim = false
+var bool waitForGreen = false
+var float armedLow = na
+var float dumpLegLowestLow = na
+
+// Pending order state
+var bool retestOrderActive = false
+var bool stopOrderActive = false
+var int retestExpiresBar = na
+var int stopExpiresBar = na
+var float retestPrice = na
+var float stopTriggerPrice = na
+
+// Trailing/Exit logic
+inLong = strategy.position_size > 0
+avg = strategy.position_avg_price
+profitPct = inLong ? (close - avg) / avg * 100.0 : 0.0
+var float peakProfitPct = na
+var int entryOpenTimeMs = na
+// Detect position close and start cooldown timer
+closedThisBar = inLong[1] and not inLong
+if barstate.isconfirmed and closedThisBar
+    cooldownUntilMs := time + cooldownMs
+    peakProfitPct := na
+    entryOpenTimeMs := na
+    if retestOrderActive or stopOrderActive
+        strategy.cancel("Long")
+        retestOrderActive := false
+        stopOrderActive := false
+        retestExpiresBar := na
+        stopExpiresBar := na
+        retestPrice := na
+        stopTriggerPrice := na
+
+// Gate entries by cooldown
+noPos = strategy.position_size == 0
+isCoolingDown = not na(cooldownUntilMs) and time < cooldownUntilMs
+
+// Arm structure break watcher on dump detection
+if barstate.isconfirmed and not isCoolingDown and dumpSignal and breaksNDaysLow and (noPos or (inLong and canPyramid))
+    if retestOrderActive or stopOrderActive
+        strategy.cancel("Long")
+        retestOrderActive := false
+        stopOrderActive := false
+        retestExpiresBar := na
+        stopExpiresBar := na
+        retestPrice := na
+        stopTriggerPrice := na
+    if modeRebound
+        waitForGreen := true
+        armedLow := low
+    else
+        waitingForReclaim := true
+        dumpCandleHigh := high
+    dumpLegLowestLow := low
+
+// Cancel waiting during cooldown
+if barstate.isconfirmed and isCoolingDown and waitingForReclaim
+    waitingForReclaim := false
+    dumpCandleHigh := na
+    dumpLegLowestLow := na
+    if retestOrderActive or stopOrderActive
+        strategy.cancel("Long")
+        retestOrderActive := false
+        stopOrderActive := false
+        retestExpiresBar := na
+        stopExpiresBar := na
+        retestPrice := na
+        stopTriggerPrice := na
+
+// Cancel rebound arming during cooldown
+if barstate.isconfirmed and isCoolingDown and waitForGreen
+    waitForGreen := false
+    armedLow := na
+
+// While waiting to reclaim, if new lower lows form within per-bar dump cap, reset reference to that bar
+if barstate.isconfirmed and waitingForReclaim and not isCoolingDown
+    // per-bar dump from open->close on this bar
+    currDiff = open != 0.0 ? (close / open - 1.0) * 100.0 : 0.0
+    currWithinCap = math.abs(currDiff) <= dumpCapPct or dumpCapPct == 0.0
+    if low < nz(dumpLegLowestLow, 1e10) and currWithinCap
+        // Cancel any pending entries as reference resets to new lowest bar
+        if retestOrderActive or stopOrderActive
+            strategy.cancel("Long")
+            retestOrderActive := false
+            stopOrderActive := false
+            retestExpiresBar := na
+            stopExpiresBar := na
+            retestPrice := na
+            stopTriggerPrice := na
+        dumpLegLowestLow := low
+        dumpCandleHigh := high
+
+// Entry handling by mode
+if barstate.isconfirmed and waitingForReclaim and not isCoolingDown and (noPos or (inLong and canPyramid))
+    classicBreak = close > dumpCandleHigh
+    // TwoCloses confirmation
+    if entryMode == EntryMode.TwoCloses
+        closesAbove = ta.lowest(close, twoClosesBars) > dumpCandleHigh
+        if closesAbove and canEnter
+            strategy.entry("Long", strategy.long)
+            waitingForReclaim := false
+            dumpCandleHigh := na
+    // Break-and-Retest limit entry with expiry
+    if entryMode == EntryMode.BreakRetest
+        crossedUp = ta.crossover(close, dumpCandleHigh)
+        if crossedUp and not retestOrderActive and canEnter
+            retestPrice := dumpCandleHigh + (retestOffsetAtr * brAtr)
+            strategy.entry("Long", strategy.long, limit=retestPrice)
+            retestOrderActive := true
+            retestExpiresBar := bar_index + (modeAuto ? autoRetestExpiryBars : retestExpiryBars)
+            waitingForReclaim := false
+    // ATR-buffered stop entry with expiry
+    if entryMode == EntryMode.ATRStop
+        if not stopOrderActive and canEnter
+            stopTriggerPrice := dumpCandleHigh + (atrStopMult * atrStopAtr)
+            strategy.entry("Long", strategy.long, stop=stopTriggerPrice)
+            stopOrderActive := true
+            stopExpiresBar := bar_index + (modeAuto ? autoStopExpiryBars : stopExpiryBars)
+            waitingForReclaim := false
+    // Auto: retest-first with fallback to ATR-stop on expiry
+    if entryMode == EntryMode.Auto
+        crossedUp = ta.crossover(close, dumpCandleHigh)
+        if crossedUp and not retestOrderActive and not stopOrderActive and canEnter
+            retestPrice := dumpCandleHigh + (autoRetestOffsetAtr * autoAtr)
+            strategy.entry("Long", strategy.long, limit=retestPrice)
+            retestOrderActive := true
+            retestExpiresBar := bar_index + autoRetestExpiryBars
+            waitingForReclaim := false
+        else
+            closesAboveAuto = ta.lowest(close, autoTwoClosesBars) > dumpCandleHigh
+            if closesAboveAuto and not retestOrderActive and not stopOrderActive and canEnter
+                strategy.entry("Long", strategy.long)
+                waitingForReclaim := false
+                dumpCandleHigh := na
+    // Classic immediate break (baseline)
+    if entryMode == EntryMode.Classic and classicBreak and canEnter
+        strategy.entry("Long", strategy.long)
+        waitingForReclaim := false
+        dumpCandleHigh := na
+
+// Rebound entry handling
+if barstate.isconfirmed and modeRebound
+    // Track lowest low since arming
+    if waitForGreen
+        armedLow := na(armedLow) ? low : math.min(armedLow, low)
+    reboundPctFromArmedLow = not na(armedLow) and armedLow > 0 ? (close - armedLow) / armedLow * 100.0 : 0.0
+    reboundOk = reboundPctFromArmedLow >= minReboundFromLowPct
+    if (noPos or (inLong and canPyramid)) and not isCoolingDown and waitForGreen and close > open and isFlat and reboundOk and canEnter
+        strategy.entry("Long", strategy.long)
+        waitForGreen := false
+        armedLow := na
+
+// Reset state when position opens
+openedThisBar = not inLong[1] and inLong
+if barstate.isconfirmed and openedThisBar
+    waitingForReclaim := false
+    dumpCandleHigh := na
+    waitForGreen := false
+    armedLow := na
+    dumpLegLowestLow := na
+    entryOpenTimeMs := time
+    peakProfitPct := na
+    if retestOrderActive or stopOrderActive
+        retestOrderActive := false
+        stopOrderActive := false
+        retestExpiresBar := na
+        stopExpiresBar := na
+        retestPrice := na
+        stopTriggerPrice := na
+
+// Reset pending add state when position size increases (pyramiding add filled)
+addFilledThisBar = inLong and strategy.position_size > strategy.position_size[1]
+if barstate.isconfirmed and addFilledThisBar
+    waitingForReclaim := false
+    dumpCandleHigh := na
+    waitForGreen := false
+    armedLow := na
+    dumpLegLowestLow := na
+    peakProfitPct := na
+    if retestOrderActive or stopOrderActive
+        retestOrderActive := false
+        stopOrderActive := false
+        retestExpiresBar := na
+        stopExpiresBar := na
+        retestPrice := na
+        stopTriggerPrice := na
+
+// (legacy trailing/ATR TP removed)
+
+// Profit-taking: overall position peak profit retrace using weighted average entry
+if barstate.isconfirmed and inLong
+    // profitPct already computed vs avg above
+    peakProfitPct := na(peakProfitPct) ? profitPct : math.max(peakProfitPct, profitPct)
+    armed = peakProfitPct >= armProfitPct
+    retraceFromPeakPct = peakProfitPct - profitPct
+    if armed and retraceFromPeakPct >= peakRetracePct
+        strategy.close("Long")
+
+    // Configurable stop loss
+    if enableSL
+        stopPrice = avg * (1.0 - stopLossPct / 100.0)
+        strategy.exit("SL-Long", from_entry="Long", stop=stopPrice)
+
+    // Time-in-loss limiter
+    if maxHoursInLoss > 0 and avg > 0 and close < avg and not na(entryOpenTimeMs)
+        lossDurationMs = time - entryOpenTimeMs
+        limitMs = maxHoursInLoss * 60 * 60 * 1000
+        if lossDurationMs >= limitMs
+            strategy.close("Long")
+
+// Cancel pending entries on expiry
+if barstate.isconfirmed
+    if retestOrderActive and not na(retestExpiresBar) and bar_index >= retestExpiresBar
+        strategy.cancel("Long")
+        retestOrderActive := false
+        retestExpiresBar := na
+        retestPrice := na
+        // Auto-mode fallback to ATR stop after retest timeout
+        if entryMode == EntryMode.Auto and not stopOrderActive and canEnter and (noPos or (inLong and canPyramid))
+            stopTriggerPrice := dumpCandleHigh + (autoAtrStopMult * autoAtr)
+            strategy.entry("Long", strategy.long, stop=stopTriggerPrice)
+            stopOrderActive := true
+            stopExpiresBar := bar_index + autoStopExpiryBars
+    if stopOrderActive and not na(stopExpiresBar) and bar_index >= stopExpiresBar
+        strategy.cancel("Long")
+        stopOrderActive := false
+        stopExpiresBar := na
+        stopTriggerPrice := na
+
+View in Pine Editor・354 lines
+Use on chart
+6
+6
+1 625
+Feb 13
+A non‑repainting reversal strategy that buys capitulation dips and rides the rebound with a peak‑retrace trailing exit. It detects single‑bar dump anomalies that break the N‑day low (based on prior daily bars), then “arms” and waits for the first green close that also passes flatness and minimum‑rebound filters—avoiding knife‑catching. Once in a trade, it tracks the highest close since entry; after a minimum profit, it exits on a configurable retrace from that peak. A cooldown prevents immediate re‑entries. DRPT suits liquid majors/top alts on 5–15m charts. Tune anomaly threshold, flatness, rebound, and trailing parameters per symbol and venue.
+
+Developed by (me)
+geektrade.online
+Feb 13
+Release Notes
+A non‑repainting reversal strategy that buys capitulation dips and rides the rebound with a peak‑retrace trailing exit. It detects single‑bar dump anomalies that break the N‑day low (based on prior daily bars), then “arms” and waits for the first green close that also passes flatness and minimum‑rebound filters—avoiding knife‑catching. Once in a trade, it tracks the highest close since entry; after a minimum profit, it exits on a configurable retrace from that peak. A cooldown prevents immediate re‑entries. DRPT suits liquid majors/top alts on 5–15m charts. Tune anomaly threshold, flatness, rebound, and trailing parameters per symbol and venue.
+
+Developed by (me)
+geektrade.online

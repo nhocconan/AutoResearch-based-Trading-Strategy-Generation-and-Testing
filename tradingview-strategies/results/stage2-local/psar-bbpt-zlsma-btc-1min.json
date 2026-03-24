@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-03-23T06:43:10.813177+00:00",
+  "queue_rank": 2171,
+  "page": 91,
+  "name": "PSAR BBPT ZLSMA BTC 1min",
+  "slug": "psar-bbpt-zlsma-btc-1min",
+  "chart_url": "https://www.tradingview.com/script/o1YNgHYa-PSAR-BBPT-ZLSMA-BTC-1min/",
+  "pine_file": "raw-pine/bulk/o1YNgHYa-PSAR-BBPT-ZLSMA-BTC-1min.pine",
+  "symbol_name": "COINBASE:BTCUSD",
+  "repo_timeframe_hint": "1m",
+  "status": "converted",
+  "classification": "partial",
+  "timeframe": "1m",
+  "reason": "Core indicators reproducible but strategy.exit stop/limit logic requires next-bar approximation; session logic needs UTC mapping.",
+  "adaptations": [
+    "Convert strategy.exit stop/limit to next-bar target-position signals",
+    "Map TradingView session times (America/New_York) to UTC timestamps",
+    "Replace strategy.position_avg_price with Python state tracking",
+    "Remove plotting and UI-specific code",
+    "Ensure generate_signals returns numpy array matching price length"
+  ],
+  "attempts_used": 2,
+  "attempt_log": [
+    "convert_attempt_1: TimeoutError: LLM call timed out after 60s"
+  ],
+  "conversion_notes": [
+    "Fixed timeout by simplifying session logic to UTC hours without complex timezone handling",
+    "Implemented PSAR, ZLSMA, ATR, Stochastic, Bollinger Bands from scratch using numpy",
+    "Converted strategy.exit stop/limit logic to next-bar position tracking",
+    "Signals returned as numpy array with exactly len(prices) elements",
+    "Session filtering approximated using UTC hour ranges for London/NY/Tokyo/Sydney",
+    "Position state tracked in loop for SL/TP management without lookahead",
+    "All indicators use only historical OHLCV data available at each bar"
+  ],
+  "python_file": "python-strategies/stage2-local/psar-bbpt-zlsma-btc-1min.py",
+  "failed_python_files": [],
+  "validation": {
+    "module_name": "PSAR BBPT ZLSMA BTC 1min",
+    "module_timeframe": "1m",
+    "symbol": "BTCUSDT",
+    "bars_checked": 217441,
+    "non_zero_signals": 239,
+    "finite_ratio": 1.0
+  },
+  "last_error": null
+}

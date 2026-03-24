@@ -1,0 +1,439 @@
+//@version=5
+strategy("Time-Based Trading Strategy", overlay=true, 
+         initial_capital=10000, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=100,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         process_orders_on_close=true)
+
+// ==================== Input Parameters ====================
+
+// Trading Time Settings
+tradingEnabled = input.bool(true, "Enable Time-Based Trading", group="Trading Time")
+tradeDirection = input.string("Long", "Trade Direction", options=["Long", "Short"], group="Trading Time")
+timezoneOffset = input.int(7, "Timezone Offset (hours)", minval=-12, maxval=14, tooltip="Adjust if your chart timezone differs from exchange timezone. Example: +7 for Bangkok/Laos", group="Trading Time")
+
+// Time Inputs - Multiple Trading Windows
+enableWindow1 = input.bool(true, "Enable Trading Window", group="Trading Time")
+startHour1 = input.int(3, "Start Hour (Window 1)", minval=0, maxval=23, group="Trading Time")
+startMinute1 = input.int(30, "Start Minute (Window 1)", minval=0, maxval=59, group="Trading Time")
+endHour1 = input.int(18, "End Hour (Window 1)", minval=0, maxval=23, group="Trading Time")
+endMinute1 = input.int(30, "End Minute (Window 1)", minval=0, maxval=59, group="Trading Time")
+
+// Risk Management
+tpType = input.string("Pips", "TP Type", options=["Percentage", "Pips", "Fixed Price"], group="Risk Management")
+tpPercent = input.float(2.0, "Take Profit (%)", minval=0.1, step=0.1, group="Risk Management")
+tpPips = input.float(450, "Take Profit (Pips)", minval=1, step=1, group="Risk Management")
+
+slType = input.string("Pips", "SL Type", options=["Percentage", "Pips", "Fixed Price"], group="Risk Management")
+slPercent = input.float(1.0, "Stop Loss (%)", minval=0.1, step=0.1, group="Risk Management")
+slPips = input.float(450, "Stop Loss (Pips)", minval=1, step=1, group="Risk Management")
+
+// Entry Signal Settings
+entryType = input.string("On Red Candle", "Entry Type", options=["Immediate", "On Green Candle", "On Red Candle"], group="Entry Signal")
+
+// Position Management
+oneTradePerDay = input.bool(false, "One Trade Per Day", group="Position Management")
+closeAtEndOfDay = input.bool(true, "Close All Positions at End of Day", group="Position Management")
+useEntryTimeAsEOD = input.bool(false, "Use Entry Time as End of Day", tooltip="When enabled, position closes at the same time it was opened", group="Position Management")
+eodHour = input.int(18, "End of Day Hour", minval=0, maxval=23, group="Position Management")
+eodMinute = input.int(30, "End of Day Minute", minval=0, maxval=59, group="Position Management")
+waitAfterClose = input.bool(true, "Wait 1 Hour After Close", tooltip="Wait 1 hour after position closes before next entry", group="Position Management")
+
+// Visual Settings
+tpFillColor = input.color(color.new(color.green, 90), "TP Zone Color", group="Visual Settings")
+slFillColor = input.color(color.new(color.red, 90), "SL Zone Color", group="Visual Settings")
+showDashboard = input.bool(true, "Show Dashboard", group="Visual Settings")
+dashboardPosition = input.string("Top Right", "Dashboard Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Visual Settings")
+
+// ==================== Time Functions ====================
+
+timeToMinutes(h, m) =>
+    h * 60 + m
+
+isInWindow(startH, startM, endH, endM) =>
+    adjustedHour = (hour + timezoneOffset + 24) % 24
+    currentMinutes = timeToMinutes(adjustedHour, minute)
+    startMinutes = timeToMinutes(startH, startM)
+    endMinutes = timeToMinutes(endH, endM)
+    if endMinutes > startMinutes
+        currentMinutes >= startMinutes and currentMinutes <= endMinutes
+    else
+        currentMinutes >= startMinutes or currentMinutes <= endMinutes
+
+isTimeToTrade = tradingEnabled and ((enableWindow1 and isInWindow(startHour1, startMinute1, endHour1, endMinute1)))
+
+adjustedHour = (hour + timezoneOffset + 24) % 24
+
+// Track entry time for dynamic EOD
+var int entryHour = na
+var int entryMinute = na
+
+// Track last close time for waiting period
+var int lastCloseTime = na
+
+// Determine EOD time based on settings
+currentEODHour = useEntryTimeAsEOD and not na(entryHour) ? entryHour : eodHour
+currentEODMinute = useEntryTimeAsEOD and not na(entryMinute) ? entryMinute : eodMinute
+
+isEndOfDay = closeAtEndOfDay and adjustedHour == currentEODHour and minute == currentEODMinute
+
+// ==================== Technical Indicators ====================
+
+bullishCandle = close > open
+bearishCandle = close < open
+
+// ==================== Entry Conditions ====================
+
+var bool longCondition = false
+var bool shortCondition = false
+
+switch entryType
+    "Immediate" =>
+        longCondition := true
+        shortCondition := true
+    "On Green Candle" =>
+        longCondition := bullishCandle
+        shortCondition := bullishCandle
+    "On Red Candle" =>
+        longCondition := bearishCandle
+        shortCondition := bearishCandle
+
+longCondition := longCondition and (tradeDirection == "Long")
+shortCondition := shortCondition and (tradeDirection == "Short")
+
+// ==================== Calculate TP/SL Levels ====================
+
+calcTP(entryPrice, isLong) =>
+    float tp = na
+    if tpType == "Percentage"
+        tp := isLong ? entryPrice * (1 + tpPercent/100) : entryPrice * (1 - tpPercent/100)
+    else if tpType == "Pips"
+        pipValue = syminfo.mintick * 10
+        tp := isLong ? entryPrice + (tpPips * pipValue) : entryPrice - (tpPips * pipValue)
+    tp
+
+calcSL(entryPrice, isLong) =>
+    float sl = na
+    if slType == "Percentage"
+        sl := isLong ? entryPrice * (1 - slPercent/100) : entryPrice * (1 + slPercent/100)
+    else if slType == "Pips"
+        pipValue = syminfo.mintick * 10
+        sl := isLong ? entryPrice - (slPips * pipValue) : entryPrice + (slPips * pipValue)
+    sl
+
+// ==================== Strategy Logic ====================
+
+var bool tradeTakenToday = false
+var int lastTradeDay = 0
+
+// Scoring system
+var array<float> tradeScores = array.new_float(0)
+var float totalScore = 0
+var int totalTrades = 0
+var int winTrades = 0
+var int loseTrades = 0
+var int eodTrades = 0
+
+// Track current trade info for scoring
+var float currentEntryPrice = na
+var float currentTPLevel = na
+var float currentSLLevel = na
+var bool currentIsLong = na
+
+// Create unique day identifier: YYYYMMDD format
+currentDay = year * 10000 + month * 100 + dayofmonth
+
+// Reset daily counter when day changes
+if bar_index == 0
+    tradeTakenToday := false
+    lastTradeDay := currentDay
+else if currentDay != lastTradeDay
+    tradeTakenToday := false
+    lastTradeDay := currentDay
+
+// Determine if we can trade today
+canTradeToday = not oneTradePerDay or not tradeTakenToday
+
+// Detect position close and save close time
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    // Save close time in minutes since midnight
+    lastCloseTime := adjustedHour * 60 + minute
+
+// Check if 1 hour has passed since last close
+currentTimeInMinutes = adjustedHour * 60 + minute
+canTradeAfterWait = true
+if waitAfterClose and not na(lastCloseTime)
+    minutesSinceClose = currentTimeInMinutes - lastCloseTime
+    // Handle day rollover (if current time is less than close time, add 24 hours)
+    if minutesSinceClose < 0
+        minutesSinceClose := minutesSinceClose + (24 * 60)
+    canTradeAfterWait := minutesSinceClose >= 60  // 60 minutes = 1 hour
+
+// Combine all conditions
+canEnterTrade = canTradeToday and canTradeAfterWait
+
+// Track if entry was executed on this bar
+var bool entryExecutedThisBar = false
+entryExecutedThisBar := false
+
+// Only allow entry if all conditions are met
+if isTimeToTrade and strategy.position_size == 0 and canEnterTrade
+    if longCondition
+        tpLevel = calcTP(close, true)
+        slLevel = calcSL(close, true)
+        strategy.entry("Long", strategy.long)
+        strategy.exit("TP/SL Long", "Long", limit=tpLevel, stop=slLevel)
+        entryExecutedThisBar := true
+        tradeTakenToday := true
+        // Save entry time for dynamic EOD
+        if useEntryTimeAsEOD
+            entryHour := adjustedHour
+            entryMinute := minute
+        // Save trade info for scoring
+        currentEntryPrice := close
+        currentTPLevel := tpLevel
+        currentSLLevel := slLevel
+        currentIsLong := true
+    else if shortCondition
+        tpLevel = calcTP(close, false)
+        slLevel = calcSL(close, false)
+        strategy.entry("Short", strategy.short)
+        strategy.exit("TP/SL Short", "Short", limit=tpLevel, stop=slLevel)
+        entryExecutedThisBar := true
+        tradeTakenToday := true
+        // Save entry time for dynamic EOD
+        if useEntryTimeAsEOD
+            entryHour := adjustedHour
+            entryMinute := minute
+        // Save trade info for scoring
+        currentEntryPrice := close
+        currentTPLevel := tpLevel
+        currentSLLevel := slLevel
+        currentIsLong := false
+
+// Close all positions at end of day
+if isEndOfDay
+    strategy.close_all("End of Day")
+    // Entry time persists - not reset after closing
+
+// ==================== Plotting ====================
+
+// Track TP/SL hits and entries - store in arrays
+var array<int> tpBars = array.new_int(0)
+var array<int> slBars = array.new_int(0)
+var array<int> entryBars = array.new_int(0)
+
+// Track entry bar
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    array.push(entryBars, bar_index)
+
+// Detect position closure and determine if it was TP or SL
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    wasLong = strategy.position_size[1] > 0
+    avgPrice = strategy.position_avg_price[1]
+    tpLevel = calcTP(avgPrice, wasLong)
+    slLevel = calcSL(avgPrice, wasLong)
+    
+    // Calculate score
+    float score = 0
+    
+    // Check if close price hit TP or SL
+    if wasLong
+        if close >= tpLevel
+            array.push(tpBars, bar_index)
+            score := 100  // Win
+            winTrades += 1
+        else if close <= slLevel
+            array.push(slBars, bar_index)
+            score := -100  // Loss
+            loseTrades += 1
+        else
+            // EOD close - calculate score based on profit/loss
+            eodTrades += 1
+            profitLoss = close - avgPrice
+            maxProfit = tpLevel - avgPrice
+            maxLoss = avgPrice - slLevel
+            
+            if profitLoss > 0
+                // In profit - scale from 0 to 100
+                score := (profitLoss / maxProfit) * 100
+            else
+                // In loss - scale from 0 to -100
+                score := (profitLoss / maxLoss) * 100
+    else
+        if close <= tpLevel
+            array.push(tpBars, bar_index)
+            score := 100  // Win
+            winTrades += 1
+        else if close >= slLevel
+            array.push(slBars, bar_index)
+            score := -100  // Loss
+            loseTrades += 1
+        else
+            // EOD close - calculate score based on profit/loss
+            eodTrades += 1
+            profitLoss = avgPrice - close
+            maxProfit = avgPrice - tpLevel
+            maxLoss = slLevel - avgPrice
+            
+            if profitLoss > 0
+                // In profit - scale from 0 to 100
+                score := (profitLoss / maxProfit) * 100
+            else
+                // In loss - scale from 0 to -100
+                score := (profitLoss / maxLoss) * 100
+    
+    // Store score
+    array.push(tradeScores, score)
+    totalScore += score
+    totalTrades += 1
+
+// Check if current bar is a TP/SL/Entry bar
+isTpBar = array.includes(tpBars, bar_index)
+isSlBar = array.includes(slBars, bar_index)
+isEntryBar = array.includes(entryBars, bar_index)
+
+bgcolor(isTimeToTrade ? color.new(color.green, 90) : na, title="Trading Window")
+bgcolor(isEndOfDay ? color.new(color.red, 80) : na, title="End of Day")
+bgcolor(isEntryBar ? color.new(color.blue, 70) : na, title="Entry Executed")
+bgcolor(isTpBar ? color.new(color.green, 60) : na, title="Take Profit Hit")
+bgcolor(isSlBar ? color.new(color.red, 60) : na, title="Stop Loss Hit")
+
+// Position Active background based on P&L
+color positionBgColor = na
+if strategy.position_size != 0
+    isLong = strategy.position_size > 0
+    avgPrice = strategy.position_avg_price
+    
+    // Check if position is in profit or loss
+    inProfit = isLong ? close > avgPrice : close < avgPrice
+    
+    positionBgColor := inProfit ? color.new(color.green, 85) : color.new(color.red, 85)
+
+bgcolor(positionBgColor, title="Position Active")
+
+// Draw TP/SL lines - store all historical lines
+var array<line> tpLines = array.new_line(0)
+var array<line> slLines = array.new_line(0)
+var array<line> entryLines = array.new_line(0)
+var array<linefill> tpFills = array.new_linefill(0)
+var array<linefill> slFills = array.new_linefill(0)
+var line currentTpLine = na
+var line currentSlLine = na
+var line currentEntryLine = na
+var linefill currentTpFill = na
+var linefill currentSlFill = na
+
+if strategy.position_size != 0
+    isLong = strategy.position_size > 0
+    avgPrice = strategy.position_avg_price
+    tpLevel = calcTP(avgPrice, isLong)
+    slLevel = calcSL(avgPrice, isLong)
+    
+    // Create new lines when position opens
+    if strategy.position_size[1] == 0
+        currentTpLine := line.new(bar_index, tpLevel, bar_index + 1, tpLevel, color=color.green, width=2, style=line.style_solid)
+        currentSlLine := line.new(bar_index, slLevel, bar_index + 1, slLevel, color=color.red, width=2, style=line.style_solid)
+        currentEntryLine := line.new(bar_index, avgPrice, bar_index + 1, avgPrice, color=color.blue, width=1, style=line.style_solid)
+        
+        // Create fills between lines with user-defined colors
+        currentTpFill := linefill.new(currentEntryLine, currentTpLine, tpFillColor)
+        currentSlFill := linefill.new(currentEntryLine, currentSlLine, slFillColor)
+        
+        array.push(tpLines, currentTpLine)
+        array.push(slLines, currentSlLine)
+        array.push(entryLines, currentEntryLine)
+        array.push(tpFills, currentTpFill)
+        array.push(slFills, currentSlFill)
+    else
+        // Extend current lines
+        if not na(currentTpLine)
+            line.set_x2(currentTpLine, bar_index + 1)
+        if not na(currentSlLine)
+            line.set_x2(currentSlLine, bar_index + 1)
+        if not na(currentEntryLine)
+            line.set_x2(currentEntryLine, bar_index + 1)
+else if strategy.position_size == 0 and strategy.position_size[1] != 0
+    // Position just closed - finalize lines at current bar
+    if not na(currentTpLine)
+        line.set_x2(currentTpLine, bar_index)
+    if not na(currentSlLine)
+        line.set_x2(currentSlLine, bar_index)
+    if not na(currentEntryLine)
+        line.set_x2(currentEntryLine, bar_index)
+
+// Plot entry signals
+plotshape(isTimeToTrade and longCondition and strategy.position_size == 0 and canEnterTrade, "Long Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(isTimeToTrade and shortCondition and strategy.position_size == 0 and canEnterTrade, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// ==================== Alerts ====================
+
+// Alert for Long Entry
+alertcondition(isTimeToTrade and longCondition and strategy.position_size == 0 and canEnterTrade, 
+               title="Long Entry", 
+               message="Long Entry Signal - Time-Based Trading Strategy")
+
+// Alert for Short Entry
+alertcondition(isTimeToTrade and shortCondition and strategy.position_size == 0 and canEnterTrade, 
+               title="Short Entry", 
+               message="Short Entry Signal - Time-Based Trading Strategy")
+
+// ==================== Dashboard ====================
+
+// Determine position
+var string dashPos = dashboardPosition == "Top Left" ? position.top_left : 
+                 dashboardPosition == "Top Right" ? position.top_right :
+                 dashboardPosition == "Bottom Left" ? position.bottom_left : position.bottom_right
+
+// Create table once
+var table dashboard = table.new(dashPos, 2, 8, border_width=2, border_color=color.gray, frame_width=1, frame_color=color.gray)
+
+// Update table on last bar
+if showDashboard and barstate.islast
+    // Clear table
+    table.clear(dashboard, 0, 0, 1, 7)
+    
+    // Header
+    table.cell(dashboard, 0, 0, "Score Dashboard", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.normal)
+    table.merge_cells(dashboard, 0, 0, 1, 0)
+    
+    // Total Score
+    scoreColor = totalScore > 0 ? color.new(color.green, 70) : totalScore < 0 ? color.new(color.red, 70) : color.new(color.gray, 70)
+    table.cell(dashboard, 0, 1, "Total Score:", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(dashboard, 1, 1, str.tostring(totalScore, "#.##"), text_color=color.white, bgcolor=scoreColor, text_size=size.normal)
+    
+    // Total Trades
+    table.cell(dashboard, 0, 2, "Total Trades:", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(dashboard, 1, 2, str.tostring(totalTrades), text_color=color.white, bgcolor=color.new(color.gray, 70), text_size=size.normal)
+    
+    // Wins
+    table.cell(dashboard, 0, 3, "Wins (TP):", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(dashboard, 1, 3, str.tostring(winTrades), text_color=color.white, bgcolor=color.new(color.green, 70), text_size=size.normal)
+    
+    // Losses
+    table.cell(dashboard, 0, 4, "Losses (SL):", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(dashboard, 1, 4, str.tostring(loseTrades), text_color=color.white, bgcolor=color.new(color.red, 70), text_size=size.normal)
+    
+    // EOD Closes
+    table.cell(dashboard, 0, 5, "EOD Closes:", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(dashboard, 1, 5, str.tostring(eodTrades), text_color=color.white, bgcolor=color.new(color.orange, 70), text_size=size.normal)
+    
+    // Win Rate
+    winRate = totalTrades > 0 ? (winTrades / totalTrades) * 100 : 0
+    table.cell(dashboard, 0, 6, "Win Rate:", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(dashboard, 1, 6, str.tostring(winRate, "#.##") + "%", text_color=color.white, bgcolor=color.new(color.gray, 70), text_size=size.normal)
+    
+    // Average Score
+    avgScore = totalTrades > 0 ? totalScore / totalTrades : 0
+    avgScoreColor = avgScore > 0 ? color.new(color.green, 70) : avgScore < 0 ? color.new(color.red, 70) : color.new(color.gray, 70)
+    table.cell(dashboard, 0, 7, "Avg Score:", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(dashboard, 1, 7, str.tostring(avgScore, "#.##"), text_color=color.white, bgcolor=avgScoreColor, text_size=size.normal)
+
+View in Pine Editor・432 lines
+Use on chart
+3
+1
+633
+A comprehensive automated trading strategy that executes trades within specific time windows with intelligent entry signals, dynamic risk management, and a unique performance scoring system. Perfect for forex, crypto, and other markets requiring time-specific trading approaches.

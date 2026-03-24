@@ -1,0 +1,210 @@
+//@version=5
+strategy("BOLLINGER BANDS STRATEGY", shorttitle="BB STRATEGY", overlay=true, initial_capital=1000, default_qty_type=strategy.cash, default_qty_value=950, commission_type=strategy.commission.percent, commission_value=0.18, slippage=3)
+
+
+//---------------------------------------TOOL TIPS-----------------------------------------//
+
+t1 = "Bollinger Bands length. Corresponds to the SMA length to which we add/substract the standard deviation to create upper and lower bands."
+t2 = "Corresponds to the number of standard deviations to be added/subtracted to obtain the two bands. This number can be decimal."
+t3 = "The length of the SMA sending the output signals."
+t4 = "The maximum percentage of the trade value we can lose. Default is 6%"
+t5 = "Each gain or losse (relative to the previous reference) in an amount equal to this fixed ratio will change quantity of orders."
+t6 = "The amount of money to be added to or subtracted from orders once the fixed ratio has been reached."
+
+
+//----------------------------------------FUNCTIONS---------------------------------------//
+
+//@function Displays text passed to `txt` when called.
+debugLabel(txt, color) =>
+    label.new(bar_index, high, text = txt, color=color, style = label.style_label_lower_right, textcolor = color.black, size = size.small)
+
+//@function which looks if the close date of the current bar falls inside the date range
+inBacktestPeriod(start, end) => (time >= start) and (time <= end)
+
+
+//---------------------------------------USER INPUTS--------------------------------------//
+
+//Technical parameters
+bbLength = input.int(defval=120, minval=1, title="BB Length", group="Technical Parameters", tooltip=t1)
+mult = input.float(defval=2, minval=0.1, title="Standard Deviation Multipler", group="Technical Parameters", tooltip=t2)
+smaLength = input.int(defval=110, minval=1, title="SMA Exit Signal Length", group="Technical Parameters", tooltip=t3)
+slMax = input.float(6, minval=0, title="Max Risk per trade (in %)", group="Risk Management", tooltip=t4)
+//Money Management
+fixedRatio = input.int(defval=400, minval=1, title="Fixed Ratio Value ($)", group="Money Management", tooltip=t5)
+increasingOrderAmount = input.int(defval=200, minval=1, title="Increasing Order Amount ($)", group="Money Management", tooltip=t6)
+//Backtesting period
+startDate = input.time(title="Start Date", defval=timestamp("1 Jan 2017 00:00:00"), group="Backtesting Period")
+endDate = input.time(title="End Date", defval=timestamp("1 July 2024 00:00:00"), group="Backtesting Period")
+
+
+//----------------------------------VARIABLES INITIALISATION-----------------------------//
+
+//Exit
+smaExit = ta.sma(close, smaLength)
+//BB Calculation
+basis = ta.sma(close, bbLength)
+dev = mult * ta.stdev(close, bbLength)
+upperBB = basis + dev
+lowerBB = basis - dev
+//Money management
+equity = math.abs(strategy.equity - strategy.openprofit)
+var float capital_ref = strategy.initial_capital
+var float cashOrder = strategy.initial_capital * 0.95
+//Backtesting period
+bool inRange = na
+
+
+//------------------------------CHECKING SOME CONDITIONS ON EACH SCRIPT EXECUTION-------------------------------//
+
+//Checking if the date belong to the range
+inRange := inBacktestPeriod(startDate, endDate)
+
+//Checking performances of the strategy
+if equity > capital_ref + fixedRatio
+    spread = (equity - capital_ref)/fixedRatio
+    nb_level = int(spread)
+    increasingOrder = nb_level * increasingOrderAmount
+    cashOrder := cashOrder + increasingOrder
+    capital_ref := capital_ref + nb_level*fixedRatio
+if equity < capital_ref - fixedRatio
+    spread = (capital_ref - equity)/fixedRatio
+    nb_level = int(spread)
+    decreasingOrder = nb_level * increasingOrderAmount
+    cashOrder := cashOrder - decreasingOrder
+    capital_ref := capital_ref - nb_level*fixedRatio
+
+//Checking if we close all trades in case where we exit the backtesting period
+if strategy.position_size!=0 and not inRange
+    strategy.close_all()
+    debugLabel("END OF BACKTESTING PERIOD : we close the trade", color=color.rgb(116, 116, 116))
+
+
+//-----------------------------------EXIT SIGNAL------------------------------//
+
+//SMA Exit Signal
+if strategy.position_size > 0 and close < smaExit
+    strategy.close("Long")
+if strategy.position_size < 0 and close > smaExit
+    strategy.close("Short")
+
+
+//----------------------------------LONG/SHORT CONDITION---------------------------//
+
+//Long Condition
+if close > upperBB and strategy.position_size==0 and inRange
+    qty = cashOrder/close
+    strategy.entry("Long", strategy.long, qty)
+    strategy.exit("Exit Long", "Long", stop=close*(1-slMax/100))
+
+//Short Condition
+if close < lowerBB and strategy.position_size==0 and inRange
+    qty = cashOrder/close
+    strategy.entry("Short", strategy.short, qty)
+    strategy.exit("Exit Short", "Short", stop=close*(1+slMax/100))
+
+
+//---------------------------------PLOTTING ELEMENT----------------------------------//
+
+plot(smaExit, color=color.orange)
+upperBBPlot = plot(upperBB, color=color.blue)
+lowerBBPlot = plot(lowerBB, color=color.blue)
+fill(upperBBPlot, lowerBBPlot, title = "Background", color=strategy.position_size>0 ? color.rgb(0, 255, 0, 90) : strategy.position_size<0 ? color.rgb(255, 0, 0, 90) : color.rgb(33, 150, 243, 95))
+
+View in Pine Editor・116 lines
+Use on chart
+5
+4
+6
+2
+10 596
+Bollinger Bands Strategy :
+
+
+INTRODUCTION :
+
+This strategy is based on the famous Bollinger Bands. These are constructed using a standard moving average (SMA) and the standard deviation of past prices. The theory goes that 90% of the time, the price is contained between these two bands. If it were to break out, this would mean either a reversal or a continuation. However, when a reversal occurs, the movement is weak, whereas when a continuation occurs, the movement is substantial and profits can be interesting. We're going to use BB to take advantage of this strong upcoming movement, while managing our risks reasonably. There's also a money management method for reinvesting part of the profits or reducing the size of orders in the event of substantial losses.
+
+
+BOLLINGER BANDS :
+
+The construction of Bollinger bands is straightforward. First, plot the SMA of the price, with a length specified by the user. Then calculate the standard deviation to measure price dispersion in relation to the mean, using this formula :
+
+stdv = (((P1 - avg)^2 + (P2 - avg)^2 + ... + (Pn - avg)^2) / n)^1/2
+
+To plot the two Bollinger bands, we then add a user-defined number of standard deviations to the initial SMA. The default is to add 2. The result is :
+
+Upper_band = SMA + 2*stdv
+Lower_band = SMA - 2*stdv
+
+When the price leaves this channel defined by the bands, we obtain buy and sell signals.
+
+
+PARAMETERS :
+
+
+BB Length : This is the length of the Bollinger Bands, i.e. the length of the SMA used to plot the bands, and the length of the price series used to calculate the standard deviation. The default is 120.
+
+Standard Deviation Multipler : adds or subtracts this number of times the standard deviation from the initial SMA. Default is 2.
+
+SMA Exit Signal Length : Exit signals for winning and losing trades are triggered by another SMA. This parameter defines the length of this SMA. The default is 110.
+
+Max Risk per trade (in %) : It's the maximum percentage the user can lose in one trade. The default is 6%.
+
+Fixed Ratio : This is the amount of gain or loss at which the order quantity is changed. The default is 400, meaning that for each $400 gain or loss, the order size is increased or decreased by a user-selected amount.
+
+Increasing Order Amount : This is the amount to be added to or subtracted from orders when the fixed ratio is reached. The default is $200, which means that for every $400 gain, $200 is reinvested in the strategy. On the other hand, for every $400 loss, the order size is reduced by $200.
+
+Initial capital : $1000
+
+Fees : Interactive Broker fees apply to this strategy. They are set at 0.18% of the trade value.
+
+Slippage : 3 ticks or $0.03 per trade. Corresponds to the latency time between the moment the signal is received and the moment the order is executed by the broker.
+
+Important : A bot has been used to test the different parameters and determine which ones maximize return while limiting drawdown. This strategy is the most optimal on 
+BTCUSD
+ in 8h timeframe with the following parameters :
+
+
+BB Length = 120
+Standard Deviation Multipler = 2
+SMA Exit Signal Length = 110
+Max Risk per trade (in %) = 6%
+
+
+ENTER RULES :
+
+The entry rules are simple:
+
+If close > Upper_band it's a LONG signal
+
+If close < Lower_band it's a SHORT signal
+
+
+
+EXIT RULES :
+
+
+If we are LONG and close < SMA_EXIT, position is closed
+
+If we are SHORT and close > SMA_EXIT, the position is closed
+
+Positions close automatically if they lose more than 6% to limit risk
+
+
+
+RISK MANAGEMENT :
+
+This strategy is subject to losses. We manage our risk using the exit SMA or using a SL sets to 6%. This SMA gives us exit signals when the price closes below or above, thus limiting losses. If the signal arrives too late, the position is closed after a loss of 6%.
+
+
+MONEY MANAGEMENT :
+
+The fixed ratio method was used to manage our gains and losses. For each gain of an amount equal to the fixed ratio value, we increase the order size by a value defined by the user in the "Increasing order amount" parameter. Similarly, each time we lose an amount equal to the value of the fixed ratio, we decrease the order size by the same user-defined value. This strategy increases both performance and drawdown.
+
+
+NOTE :
+
+Please note that the strategy is backtested from 2017-01-01. As the timeframe is 8h, this strategy is a medium/long-term strategy. That's why only 51 trades were closed. Be careful, as the test sample is small and performance may not necessarily reflect what may happen in the future.
+
+
+Enjoy the strategy and don't forget to take the trade :)

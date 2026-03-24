@@ -1,0 +1,30 @@
+//@version=4
+strategy("Consecutive Up/Down Strategy", overlay=true)
+
+consecutiveBarsUp = input(2)
+consecutiveBarsDown = input(2)
+
+price = close
+
+ups = 0.0
+ups := price > price[1] ? nz(ups[1]) + 1 : 0
+
+dns = 0.0
+dns := price < price[1] ? nz(dns[1]) + 1 : 0
+
+if (ups >= consecutiveBarsUp)
+    strategy.entry("ConsUpLE", strategy.long, comment="ConsUpLE")
+    strategy.exit("ConsUpLE",loss=100)
+    
+if (dns >= consecutiveBarsDown)
+    strategy.entry("ConsDnSE", strategy.short, comment="ConsUpLE")
+    strategy.exit("ConsDnSE",loss=100)
+
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+View in Pine Editor・23 lines
+Use on chart
+7
+2
+3 485
+Consecutive Up/Down Strategy V1

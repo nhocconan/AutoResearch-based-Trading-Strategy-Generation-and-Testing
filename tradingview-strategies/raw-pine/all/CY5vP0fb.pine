@@ -1,0 +1,316 @@
+//@version=6
+strategy("Mean-Reversion with Cooldown", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=90, pyramiding=1)
+
+// === PARAMETER ===
+sl_percent = input.float(0.2, "Stop Loss (%)") / 100
+tp_percent = input.float(2.5, "Take Profit (%)") / 100
+
+enum cd_mode
+    fib  = "FIBONACCI"
+    pow = "POWER OF TWO"
+
+cooldown_mode = input.enum(cd_mode.fib, "Cooldwon pause calculation")
+max_cooldown = input.int(16, "Max Cooldown Candles")
+
+// === VARIABLEN ===
+var float tp_price = na
+var float sl_price = na
+
+var int loss_count = 0
+var int cooldown_bars = 0    // How many bars do we wait until opening the next long position?
+var int cooldown_timer = 0   // current Countdown
+
+var bool had_position_prev_bar = false
+
+f_fib(n) =>
+    if n <= 1
+        n
+    else
+        a = 0 
+        b = 1
+        for i = 2 to n
+            c = a + b
+            a := b
+            b := c
+        b
+
+f_cooldown(n) =>
+    switch cooldown_mode
+        cd_mode.fib => f_fib(n)
+        cd_mode.pow => math.round(math.pow(2, n))
+
+// === STATUS ===
+has_open_trade = strategy.position_size > 0
+
+// === TRIGGER FOR NEW TRADES ===
+new_trade_allowed = not has_open_trade and cooldown_timer <= 0
+
+// === ENTRY ===
+if new_trade_allowed
+    sl_price := close * (1 - sl_percent)
+    tp_price := close * (1 + tp_percent)
+
+    strategy.entry("long", strategy.long, alert_message = "enter Long now! SL @ " + str.tostring(sl_price) + "; TP @ " + str.tostring(tp_price))
+
+    // marker: how many bars do we have to wait for re-entering?
+    cooldown_timer := na
+
+// === EXIT-BEFEHL ===
+if has_open_trade
+    strategy.exit("exit", "long", stop=sl_price, limit=tp_price, alert_loss = "stop your loss now!", alert_profit = "take yout profit! (yay)")
+
+// === Evaluation of closed trades ===
+if not has_open_trade and had_position_prev_bar
+    // There was an exit
+    last_idx = strategy.closedtrades - 1
+    pnl = strategy.closedtrades.profit(last_idx)
+
+    if pnl < 0
+        loss_count += 1
+        cooldown_bars := f_cooldown(loss_count) % max_cooldown
+    else
+        loss_count := 0
+        cooldown_bars := 0
+
+    cooldown_timer := cooldown_bars   // Setze Countdown aktiv
+
+// === DECREMENT COOLDOWN COUNTER ===
+if not has_open_trade and cooldown_timer > 0
+    cooldown_timer -= 1
+
+// === POSITION-STATUS ===
+had_position_prev_bar := has_open_trade
+
+View in Pine Editor・85 lines
+Use on chart
+1
+2
+701
+Nov 30, 2025
+This strategy requires no indicators or fundamental analysis. It is designed for longer-term positions and works especially well on unleveraged instruments with strong long-term upward trends, such as precious metals. Feel free to experiment with different timeframes — I’ve found that 1-hour charts work particularly well for cryptocurrencies.
+The idea is to filter out ongoing bear phases as effectively as possible and capitalize on long-term bull runs.
+The script implements an idea that came to me in a state of complete sleep deprivation: open a random long position with a fixed take-profit (TP) and a tight stop-loss (SL).
+If the TP is hit — great, we simply try again.
+If the SL is triggered — too bad, we pause for a while and then try again.
+
+## Cooldown (Waiting) Mechanism
+
+The waiting mechanism is simple: the more consecutive SL hits we get, the longer we wait before opening the next trade. The waiting time is measured in closed candles, and thus depends on the timeframe you are using.
+
+## Two cooldown calculation modes are currently supported:
+
+### 1. FIBONACCI
+
+The cooldown follows the Fibonacci sequence, based on the number of consecutive losses:
+
+1st loss → wait 1 bar
+
+2nd loss → wait 1 bar
+
+3rd loss → wait 2 or 3 bars (depending on definition)
+
+4th loss → wait 3 or 5 bars
+
+etc.
+
+### 2. POWER OF TWO
+
+The cooldown increases exponentially:
+
+1st loss → wait 2 bars
+
+2nd loss → wait 4 bars
+
+3rd loss → wait 8 bars
+
+4th loss → wait 16 bars
+
+and so on, using the formula 2ⁿ.
+
+## Configurable Parameters
+
+### Cooldown Pause Calculation
+The settings allow you to define the SL and TP as percentages of the position value.
+The "Cooldown Pause Calculation" option determines how the next cooldown duration is computed after a losing trade.
+
+The system keeps track of how many consecutive losses have occurred since the last profitable trade. That counter is then used to compute how many bars we must wait before opening the next position.
+
+### Maximum Cooldown
+
+The "Max Cooldown Candles" setting defines the maximum number of bars we are allowed to wait before placing a new trade. This prevents the strategy from “locking itself out” for too long and mitigates the fear of missing out (FOMO).
+
+Once the cooldown duration reaches this maximum, the system essentially wraps around and starts the progression again. In the script, this is handled using a simple modulo operation based on the chosen maximum.
+Dec 1, 2025
+Release Notes
+This strategy requires no indicators or fundamental analysis. It is designed for longer-term positions and works especially well on unleveraged instruments with strong long-term upward trends, such as precious metals. Feel free to experiment with different timeframes — I’ve found that 1-hour charts work particularly well for cryptocurrencies.
+The idea is to filter out ongoing bear phases as effectively as possible and capitalize on long-term bull runs.
+The script implements an idea that came to me in a state of complete sleep deprivation: open a random long position with a fixed take-profit (TP) and a tight stop-loss (SL).
+If the TP is hit — great, we simply try again.
+If the SL is triggered — too bad, we pause for a while and then try again.
+
+Cooldown (Waiting) Mechanism
+
+The waiting mechanism is simple: the more consecutive SL hits we get, the longer we wait before opening the next trade. The waiting time is measured in closed candles, and thus depends on the timeframe you are using.
+
+Two cooldown calculation modes are currently supported:
+
+1. FIBONACCI
+
+The cooldown follows the Fibonacci sequence, based on the number of consecutive losses:
+
+1st loss → wait 1 bar
+
+2nd loss → wait 1 bar
+
+3rd loss → wait 2 bars
+
+4th loss → wait 3 bars
+
+etc.
+
+2. POWER OF TWO
+
+The cooldown increases exponentially:
+
+1st loss → wait 2 bars
+
+2nd loss → wait 4 bars
+
+3rd loss → wait 8 bars
+
+4th loss → wait 16 bars
+
+and so on, using the formula 2ⁿ.
+
+Configurable Parameters
+
+Cooldown Pause Calculation
+The settings allow you to define the SL and TP as percentages of the position value.
+The "Cooldown Pause Calculation" option determines how the next cooldown duration is computed after a losing trade.
+
+The system keeps track of how many consecutive losses have occurred since the last profitable trade. That counter is then used to compute how many bars we must wait before opening the next position.
+
+Maximum Cooldown
+
+The "Max Cooldown Candles" setting defines the maximum number of bars we are allowed to wait before placing a new trade. This prevents the strategy from “locking itself out” for too long and mitigates the fear of missing out (FOMO).
+
+Once the cooldown duration reaches this maximum, the system essentially wraps around and starts the progression again. In the script, this is handled using a simple modulo operation based on the chosen maximum.
+Feb 12
+Release Notes
+This strategy requires no indicators or fundamental analysis. It is designed for longer-term positions and works especially well on unleveraged instruments with strong long-term upward trends, such as precious metals. Feel free to experiment with different timeframes — I’ve found that 1-hour charts work particularly well for cryptocurrencies.
+The idea is to filter out ongoing bear phases as effectively as possible and capitalize on long-term bull runs.
+The script implements an idea that came to me in a state of complete sleep deprivation: open a random long position with a fixed take-profit (TP) and a tight stop-loss (SL).
+If the TP is hit — great, we simply try again.
+If the SL is triggered — too bad, we pause for a while and then try again.
+
+## Cooldown (Waiting) Mechanism
+
+The waiting mechanism is simple: the more consecutive SL hits we get, the longer we wait before opening the next trade. The waiting time is measured in closed candles, and thus depends on the timeframe you are using.
+
+## Two cooldown calculation modes are currently supported:
+
+### 1. FIBONACCI
+
+The cooldown follows the Fibonacci sequence, based on the number of consecutive losses:
+
+1st loss → wait 1 bar
+
+2nd loss → wait 1 bar
+
+3rd loss → wait 2 or 3 bars (depending on definition)
+
+4th loss → wait 3 or 5 bars
+
+etc.
+
+### 2. POWER OF TWO
+
+The cooldown increases exponentially:
+
+1st loss → wait 2 bars
+
+2nd loss → wait 4 bars
+
+3rd loss → wait 8 bars
+
+4th loss → wait 16 bars
+
+and so on, using the formula 2ⁿ.
+
+## Configurable Parameters
+
+### Cooldown Pause Calculation
+The settings allow you to define the SL and TP as percentages of the position value.
+The "Cooldown Pause Calculation" option determines how the next cooldown duration is computed after a losing trade.
+
+The system keeps track of how many consecutive losses have occurred since the last profitable trade. That counter is then used to compute how many bars we must wait before opening the next position.
+
+### Maximum Cooldown
+
+The "Max Cooldown Candles" setting defines the maximum number of bars we are allowed to wait before placing a new trade. This prevents the strategy from “locking itself out” for too long and mitigates the fear of missing out (FOMO).
+
+Once the cooldown duration reaches this maximum, the system essentially wraps around and starts the progression again. In the script, this is handled using a simple modulo operation based on the chosen maximum.
+Dec 1, 2025
+Release Notes
+This strategy requires no indicators or fundamental analysis. It is designed for longer-term positions and works especially well on unleveraged instruments with strong long-term upward trends, such as precious metals. Feel free to experiment with different timeframes — I’ve found that 1-hour charts work particularly well for cryptocurrencies.
+The idea is to filter out ongoing bear phases as effectively as possible and capitalize on long-term bull runs.
+The script implements an idea that came to me in a state of complete sleep deprivation: open a random long position with a fixed take-profit (TP) and a tight stop-loss (SL).
+If the TP is hit — great, we simply try again.
+If the SL is triggered — too bad, we pause for a while and then try again.
+
+Cooldown (Waiting) Mechanism
+
+The waiting mechanism is simple: the more consecutive SL hits we get, the longer we wait before opening the next trade. The waiting time is measured in closed candles, and thus depends on the timeframe you are using.
+
+Two cooldown calculation modes are currently supported:
+
+1. FIBONACCI
+
+The cooldown follows the Fibonacci sequence, based on the number of consecutive losses:
+
+1st loss → wait 1 bar
+
+2nd loss → wait 1 bar
+
+3rd loss → wait 2 bars
+
+4th loss → wait 3 bars
+
+etc.
+
+2. POWER OF TWO
+
+The cooldown increases exponentially:
+
+1st loss → wait 2 bars
+
+2nd loss → wait 4 bars
+
+3rd loss → wait 8 bars
+
+4th loss → wait 16 bars
+
+and so on, using the formula 2ⁿ.
+
+Configurable Parameters
+
+Cooldown Pause Calculation
+The settings allow you to define the SL and TP as percentages of the position value.
+The "Cooldown Pause Calculation" option determines how the next cooldown duration is computed after a losing trade.
+
+The system keeps track of how many consecutive losses have occurred since the last profitable trade. That counter is then used to compute how many bars we must wait before opening the next position.
+
+Maximum Cooldown
+
+The "Max Cooldown Candles" setting defines the maximum number of bars we are allowed to wait before placing a new trade. This prevents the strategy from “locking itself out” for too long and mitigates the fear of missing out (FOMO).
+
+Once the cooldown duration reaches this maximum, the system essentially wraps around and starts the progression again. In the script, this is handled using a simple modulo operation based on the chosen maximum.
+
+# Edit 2026-02-12:
+Adds alert messages;
+To activate click "Add Alert"
+-> Condition:select this strategy
+-> Choose: "Order fills"
+(NOT "Any alert() function call")
+
+If you choose the wrong alert type, you will NOT receive the alert_loss or alert_profit messages.

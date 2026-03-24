@@ -1,0 +1,93 @@
+//@version=5
+strategy("Kronos Scalper (Clean Final)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=1, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0.075)
+
+// === INPUTS ===
+fastLen    = input.int(8,  "Fast EMA length", minval=1)
+slowLen    = input.int(21, "Slow EMA length", minval=1)
+rsiLen     = input.int(9,  "RSI length", minval=1)
+rsiEntry   = input.int(50, "RSI entry crossover level", minval=1, maxval=99)
+rsiOverb   = input.int(70, "RSI overbought (avoid long)", minval=50, maxval=99)
+rsiOvers   = input.int(30, "RSI oversold (avoid short)", minval=1, maxval=50)
+
+atrLen     = input.int(14, "ATR length", minval=1)
+stopATR    = input.float(1.0, "Stop Loss (ATR multiplier)", step=0.1)
+tpATR      = input.float(1.5, "Take Profit (ATR multiplier)", step=0.1)
+useTrail   = input.bool(true, "Use trailing stop after profit?")
+trailStart = input.float(1.0, "Start trailing after X ATR profit", step=0.1)
+trailATR   = input.float(0.8, "Trail distance (ATR multiplier)", step=0.1)
+
+minBars    = input.int(50, "Minimum bars before trading", minval=1)
+showEMAs   = input.bool(true, "Show EMAs")
+showLabels = input.bool(true, "Show entry/exit labels")
+
+// === CALCULATIONS ===
+fastEMA = ta.ema(close, fastLen)
+slowEMA = ta.ema(close, slowLen)
+rsiVal  = ta.rsi(close, rsiLen)
+atrVal  = ta.atr(atrLen)
+
+// Trend filter
+isBull = fastEMA > slowEMA
+isBear = fastEMA < slowEMA
+
+// Entry conditions
+longCond  = isBull and ta.crossover(rsiVal, rsiEntry)
+shortCond = isBear and ta.crossunder(rsiVal, rsiEntry)
+longAllow = rsiVal < rsiOverb
+shortAllow= rsiVal > rsiOvers
+
+canTrade = bar_index > minBars
+
+// === ENTRIES & FIXED EXITS ===
+if (canTrade)
+    if (longCond and longAllow)
+        stopPx = close - atrVal * stopATR
+        tpPx   = close + atrVal * tpATR
+        strategy.entry("Kronos Long", strategy.long)
+        strategy.exit("Exit Long", from_entry="Kronos Long", stop=stopPx, limit=tpPx)
+
+    if (shortCond and shortAllow)
+        stopPxS = close + atrVal * stopATR
+        tpPxS   = close - atrVal * tpATR
+        strategy.entry("Kronos Short", strategy.short)
+        strategy.exit("Exit Short", from_entry="Kronos Short", stop=stopPxS, limit=tpPxS)
+
+// === TRAILING STOP (parameterized correctly) ===
+trail_offset_val = atrVal * trailATR
+
+if (useTrail)
+    if (strategy.position_size > 0)
+        entryPrice = strategy.position_avg_price
+        profitATR  = (close - entryPrice) / atrVal
+        if (profitATR >= trailStart)
+            // Must provide both trail_price and trail_offset (or trail_points)
+            strategy.exit("Trail Long", from_entry="Kronos Long", trail_price=close, trail_offset=trail_offset_val)
+
+    if (strategy.position_size < 0)
+        entryPriceS = strategy.position_avg_price
+        profitATRS  = (entryPriceS - close) / atrVal
+        if (profitATRS >= trailStart)
+            strategy.exit("Trail Short", from_entry="Kronos Short", trail_price=close, trail_offset=trail_offset_val)
+
+// === VISUALS ===
+plot(showEMAs ? fastEMA : na, title="Fast EMA", linewidth=2)
+plot(showEMAs ? slowEMA : na, title="Slow EMA", linewidth=2)
+
+plotshape(showLabels and longCond and canTrade ? low : na, title="Buy", style=shape.triangleup, location=location.belowbar, size=size.tiny, text="Buy")
+plotshape(showLabels and shortCond and canTrade ? high : na, title="Sell", style=shape.triangledown, location=location.abovebar, size=size.tiny, text="Sell")
+
+bgcolor(isBull ? color.new(color.green, 92) : isBear ? color.new(color.red, 92) : na)
+
+// === ALERTS ===
+if (longCond and canTrade)
+    alert("Kronos Scalper — LONG Signal", alert.freq_once_per_bar_close)
+if (shortCond and canTrade)
+    alert("Kronos Scalper — SHORT Signal", alert.freq_once_per_bar_close)
+
+View in Pine Editor・85 lines
+Use on chart
+5
+8
+1 378
+Nice — below is a ready-to-copy TradingView Pine Script (v5) strategy named “Kronos Scalper”.
+It’s a self-contained scalping strategy (non-repainting) with configurable EMAs trend filter, RSI entry filter, ATR-based stop loss / take profit, optional trailing stop, plots and entry/exit labels. Drop it into TradingView’s Pine editor and Add to Chart → Strategy Tester.

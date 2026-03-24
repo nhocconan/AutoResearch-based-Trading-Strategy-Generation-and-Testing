@@ -1,0 +1,107 @@
+//@version=5
+strategy("GM-8 and ADX Strategy with Second EMA", overlay=true)
+
+// Input parameters
+gm_period = input(15, title="GM-15 Period")
+second_ema_period = input(59, title="Second EMA Period")
+adx_period = input(8, title="ADX Period")
+adx_threshold = input(34, title="ADX Threshold")
+lot_size = input.float(0.4, title="Lot Size")
+
+// Calculate the ADX manually
+adx(high, low, close, length) =>
+    sum_truerange = 0.0
+    sum_plusDM = 0.0
+    sum_minusDM = 0.0
+    for i = 1 to length
+        truerange_calc = high[i] - low[i]
+        truerange_prev_close = high[i] - close[i-1]
+        truerange_close = low[i] - close[i-1]
+        truerange_calc := truerange_prev_close > truerange_calc ? truerange_prev_close : truerange_calc
+        truerange_calc := truerange_close > truerange_calc ? truerange_close : truerange_calc
+        sum_truerange := sum_truerange + truerange_calc
+        plusDM = high[i] - high[i-1] > low[i-1] - low[i] and high[i] - high[i-1] > 0 ? high[i] - high[i-1] : 0
+        sum_plusDM := sum_plusDM + plusDM
+        minusDM = low[i-1] - low[i] > high[i] - high[i-1] and low[i-1] - low[i] > 0 ? low[i-1] - low[i] : 0
+        sum_minusDM := sum_minusDM + minusDM
+    plusDI = sum_plusDM / sum_truerange * 100
+    minusDI = sum_minusDM / sum_truerange * 100
+    sumDI = plusDI + minusDI
+    adx_value = 100 * (plusDI - minusDI) / (sumDI == 0 ? 1 : sumDI)
+
+// Calculate indicators
+gm_8 = ta.sma(close, gm_period)
+second_ema = ta.ema(close, second_ema_period)
+adx_value = adx(high, low, close, adx_period)
+
+// Define buy and sell conditions
+buy_condition = ta.crossover(close, gm_8) and close > gm_8 and close > second_ema and adx_value > adx_threshold
+sell_condition = ta.crossunder(close, gm_8) and close < gm_8 and close < second_ema and adx_value > adx_threshold
+
+// Entry and exit logic
+if (buy_condition)
+    strategy.entry("Buy", strategy.long, qty=lot_size)
+
+if (sell_condition)
+    strategy.entry("Sell", strategy.short, qty=lot_size)
+
+// Exit conditions
+exit_buy_condition = ta.crossunder(close, gm_8) and close < gm_8
+exit_sell_condition = ta.crossover(close, gm_8) and close > gm_8
+
+if (exit_buy_condition)
+    strategy.close("Buy")
+
+if (exit_sell_condition)
+    strategy.close("Sell")
+
+View in Pine Editor・56 lines
+Use on chart
+9
+7
+2 670
+Description:
+This TradingView script implements a trading strategy based on the Moving Average (GM-8), the Average Directional Index (ADX), and the second Exponential Moving Average (EMA). The strategy utilizes these indicators to identify potential buy and sell signals on the chart.
+
+Indicators:
+
+GM-8 (Moving Average 8): This indicator calculates the average price of the last 8 periods and is used to identify trends.
+ADX (Average Directional Index): The ADX measures the strength of a trend and is used to determine whether the market is moving in a particular direction or not.
+Second EMA (Exponential Moving Average): This is an additional EMA line with a period of 59, which is used to provide additional confirmation signals for the trend.
+Trading Conditions:
+
+Buy Condition: A buy signal is generated when the closing price is above the GM-8 and the second EMA, and the ADX value is above the specified threshold.
+Sell Condition: A sell signal is generated when the closing price is below the GM-8 and the second EMA, and the ADX value is above the specified threshold.
+Trading Logic:
+
+If a buy condition is met, a long position is opened with a user-defined lot size.
+If a sell condition is met, a short position is opened with the same user-defined lot size.
+Positions are closed when the opposite conditions are met.
+User Parameters:
+
+Users can adjust the periods for the GM-8, the second EMA, and the ADX, as well as the threshold for the ADX and the lot size according to their preferences.
+Note:
+This script has been developed for use on a $100,000 account with FTMO, therefore the account size is set to $100,000. Please ensure that the strategy parameters and settings meet the requirements of your trading strategy and carefully review the results before committing real capital.
+--------------------------------------------------------------------------------------------------------------
+Beschreibung:
+Dieses TradingView-Skript implementiert eine Handelsstrategie, die auf dem gleitenden Mittelwert (GM-8), dem Average Directional Index (ADX) und der zweiten exponentiellen gleitenden Durchschnittslinie (EMA) basiert. Die Strategie verwendet diese Indikatoren, um potenzielle Kauf- und Verkaufssignale auf dem Chart zu identifizieren.
+
+Indikatoren:
+
+GM-8 (Gleitender Mittelwert 8): Dieser Indikator berechnet den Durchschnittspreis der letzten 8 Perioden und wird verwendet, um Trends zu identifizieren.
+ADX (Average Directional Index): Der ADX misst die Stärke eines Trends und wird verwendet, um festzustellen, ob sich der Markt in eine bestimmte Richtung bewegt oder nicht.
+Zweite EMA (Exponential Moving Average): Dies ist eine zusätzliche EMA-Linie mit einer Periode von 59, die verwendet wird, um zusätzliche Bestätigungssignale für den Trend zu liefern.
+Handelsbedingungen:
+
+Kaufbedingung: Es wird ein Kaufsignal generiert, wenn der Schlusskurs über dem GM-8 und der zweiten EMA liegt und der ADX-Wert über dem angegebenen Schwellenwert liegt.
+Verkaufsbedingung: Es wird ein Verkaufssignal generiert, wenn der Schlusskurs unter dem GM-8 und der zweiten EMA liegt und der ADX-Wert über dem angegebenen Schwellenwert liegt.
+Handelslogik:
+
+Wenn eine Kaufbedingung erfüllt ist, wird eine Long-Position mit einer benutzerdefinierten Losgröße eröffnet.
+Wenn eine Verkaufsbedingung erfüllt ist, wird eine Short-Position mit derselben benutzerdefinierten Losgröße eröffnet.
+Positionen werden geschlossen, wenn die Gegenbedingungen erfüllt sind.
+Benutzerparameter:
+
+Benutzer können die Perioden für den GM-8, die zweite EMA und den ADX sowie den Schwellenwert für den ADX und die Losgröße nach ihren eigenen Präferenzen anpassen.
+Hinweis:
+Dieses Skript wurde für die Verwendung auf einem $100.000-Konto bei FTMO entwickelt, daher ist die Kontogröße auf $100.000 festgelegt. Bitte stellen Sie sicher, dass die Strategieparameter und -einstellungen den Anforderungen Ihrer Handelsstrategie entsprechen und dass Sie die Ergebnisse sorgfältig überprüfen, bevor Sie echtes Kapital einsetzen.

@@ -1,0 +1,42 @@
+//@version=6
+strategy("Price Action & Economic Data Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Basic price action conditions
+longCondition = close > open
+shortCondition = close < open
+
+// Manage entries and exits
+if (longCondition)
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+
+// Request economic data (US GDP) using request.economic()
+gdp = request.economic("US", "GDP")
+
+// Plot the economic data in the data window
+plot(gdp, title="US GDP", display=display.data_window)
+
+View in Pine Editor・21 lines
+Use on chart
+2
+1
+1 456
+This indicator combines price-action logic with macroeconomic data to generate trading signals.
+
+Features:
+- Price-action signals: A bullish signal occurs when a candle closes above its open; a bearish signal occurs when a candle closes below its open.
+- Signal gap: The indicator includes an input called "Signal Gap (bars)" that defines the minimum number of bars between signals. By default the gap is set to 3, but you can adjust this between 1 and 10 to control signal frequency.
+- Alerts: The script defines alert conditions for long and short signals, allowing you to create TradingView alerts that notify you when a new signal occurs.
+- Economic data: The script uses TradingView's built-in `request.economic()` function to request U.S. GDP data. The GDP series is plotted in the Data Window for additional macroeconomic context.
+
+How to use:
+1. Add the indicator to a chart.
+2. Open the indicator's settings and adjust the "Signal Gap (bars)" input to set the minimum bar gap between signals.
+3. Look for green triangles plotted below the bars (bullish signals) and red triangles plotted above the bars (bearish signals). These appear only when the gap criterion is met.
+4. If you want alerts, click the Alert button in TradingView, select this indicator, and choose either the Long or Short alert conditions.
+5. To view the GDP data, open the Data Window; the GDP value will be shown alongside other series for each bar.
+6. Use these signals in combination with your own analysis; this indicator is for educational purposes and does not constitute financial advice.

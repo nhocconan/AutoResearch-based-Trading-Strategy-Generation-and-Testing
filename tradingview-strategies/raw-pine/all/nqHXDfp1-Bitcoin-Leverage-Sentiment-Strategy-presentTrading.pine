@@ -1,0 +1,7 @@
+//@version=5
+thresholdLongEntry=##input(defval=1.0,type='INPUT_FLOAT',##id='in_3')
+thresholdShortEntry=##input(defval=-1.618,type='INPUT_FLOAT',##id='in_5')
+##root(root_metainfo,rm_0,thresholdLongEntry,input__float)
+##root(root_metainfo,rm_1,thresholdShortEntry,input__float)
+##var_8=##input(defval=#00000000,type='INPUT_COLOR',##id='__chart_fgcolor')
+##root(root_metainfo,rm_ic_0,##var_8,input__color)

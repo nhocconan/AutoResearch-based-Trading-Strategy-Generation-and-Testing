@@ -1,0 +1,60 @@
+//@version=3 
+strategy(title = "Chop Zone Strategy - Buy Only")
+
+colorTurquoise = #34dddd
+colorDarkGreen = #006400
+colorPaleGreen = #98fb98
+colorLime = lime
+colorDarkRed = #8B0000
+colorRed = red
+colorOrange = orange
+colorLightOrange = #ffc04c
+colorYellow = yellow
+
+source = close
+avg = hlc3
+
+pi = atan(1) * 4
+periods = 30
+highestHigh = highest(periods)
+lowestLow = lowest(periods)
+range = 25 / (highestHigh - lowestLow) * lowestLow
+
+ema34 = ema(source, 34)
+x1_ema34 = 0
+x2_ema34 = 1
+y1_ema34 = 0
+y2_ema34 = (ema34[1] - ema34) / avg * range
+c_ema34 = sqrt((x2_ema34 - x1_ema34)*(x2_ema34 - x1_ema34) + (y2_ema34 - y1_ema34)*(y2_ema34 - y1_ema34))
+emaAngle_1 = round(180 * acos((x2_ema34 - x1_ema34)/c_ema34) / pi)
+emaAngle = iff(y2_ema34 > 0, - emaAngle_1, emaAngle_1)
+
+chopZoneColor = emaAngle >= 5 ? colorTurquoise : emaAngle < 5 and emaAngle >= 3.57 ? colorDarkGreen : emaAngle < 3.57 and emaAngle >= 2.14 ? colorPaleGreen : emaAngle < 2.14 and emaAngle >= .71 ? colorLime : emaAngle <= -1 * 5 ? colorDarkRed : emaAngle > -1 * 5 and emaAngle <= -1 * 3.57 ? colorRed : emaAngle > -1 * 3.57 and emaAngle <= -1 * 2.14 ? colorOrange : emaAngle > -1 * 2.14 and emaAngle <= -1 * .71 ? colorLightOrange : colorYellow
+plot(1, color=chopZoneColor, style=columns)
+
+sensitivity = input(title="Sensitivity", type=integer, defval=3, minval=1, maxval=100)
+
+boolclose = (chopZoneColor!=colorTurquoise)
+boolbuy = (chopZoneColor==colorTurquoise and chopZoneColor[sensitivity]!=colorTurquoise)
+
+for i = 1 to sensitivity-1
+    if (chopZoneColor[i]==colorTurquoise) 
+        boolclose := false
+    if (chopZoneColor[i]!=colorTurquoise) 
+        boolbuy := false
+
+strategy.entry("buy", strategy.long, when=boolbuy)
+strategy.close("buy", when = boolclose)
+
+View in Pine Editor・47 lines
+Use on chart
+3
+4
+4
+4
+23 670
+Uses build-in indicator "Chop Zone" which measures angle of EMA-34.
+
+Buy when there are 3 consecutive turquoise bar.
+Close when there are 3 consecutive non-turquoise bar.
+

@@ -1,0 +1,111 @@
+//@version=6
+strategy("US Index First 30m Candle Strategy (10m Chart)", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=true)
+
+// === CONFIGURATION ===
+risk_reward = 1.0
+trade_size = 1
+
+// === SESSION TIME (US Regular Market, NY timezone) ===
+tzone = "America/New_York"
+time_in_session = (time >= timestamp(tzone, year, month, dayofmonth, 9, 30) and time <= timestamp(tzone, year, month, dayofmonth, 16, 0))
+
+// === FIRST 30-MIN CANDLE AGGREGATION (09:30–10:00 ET) ===
+start_30m = timestamp(tzone, year, month, dayofmonth, 9, 30)
+end_30m   = timestamp(tzone, year, month, dayofmonth,10, 0)  // end exclusive
+
+curr_ymd = year * 10000 + month * 100 + dayofmonth
+var int first_30m_ymd = na
+var float first_30m_high = na
+var float first_30m_low  = na
+var bool range_locked = false
+
+// Reset all at the start of a new day
+if na(first_30m_ymd) or first_30m_ymd != curr_ymd
+    first_30m_ymd := curr_ymd
+    first_30m_high := na
+    first_30m_low := na
+    range_locked := false
+
+// If within first 30m window, keep updating highs/lows
+if time >= start_30m and time < end_30m
+    first_30m_high := na(first_30m_high) ? high : math.max(first_30m_high, high)
+    first_30m_low  := na(first_30m_low)  ? low  : math.min(first_30m_low, low)
+
+// Lock the range after the 10:00 bar starts
+if not range_locked and time >= end_30m and not na(first_30m_high) and not na(first_30m_low)
+    range_locked := true
+
+carry_high = range_locked ? first_30m_high : na
+carry_low  = range_locked ? first_30m_low  : na
+
+// === SINGLE TRADE PER DAY LOGIC ===
+var int last_trade_ymd = na
+var bool traded_today = false
+
+if na(last_trade_ymd) or last_trade_ymd != curr_ymd
+    traded_today := false  // New day, reset flag
+
+can_trade = time_in_session and not na(carry_high) and not traded_today
+
+// === TRADE ENTRY/EXIT CONDITIONS ===
+long_condition  = can_trade and strategy.position_size == 0 and high >= carry_high
+short_condition = can_trade and strategy.position_size == 0 and low  <= carry_low
+
+stop_long  = carry_low
+take_long  = carry_high + (carry_high - carry_low) * risk_reward
+stop_short = carry_high
+take_short = carry_low - (carry_high - carry_low) * risk_reward
+
+if long_condition
+    strategy.entry("Long", strategy.long, qty=trade_size, stop=carry_high)
+    strategy.exit("TP/SL Long", "Long", stop=stop_long, limit=take_long)
+    last_trade_ymd := curr_ymd
+    traded_today := true
+
+if short_condition
+    strategy.entry("Short", strategy.short, qty=trade_size, stop=carry_low)
+    strategy.exit("TP/SL Short", "Short", stop=stop_short, limit=take_short)
+    last_trade_ymd := curr_ymd
+    traded_today := true
+
+// === PLOTS ===
+plot(carry_high, title="", color=color.green, linewidth=2)
+plot(carry_low,  title="", color=color.red,   linewidth=2)
+
+View in Pine Editor・73 lines
+Use on chart
+9
+779
+Strategy Description for Publishing
+Title: US Index First 30-Minute Candle Strategy (10m Chart)
+
+Overview:
+This Pine Script implements a trading strategy designed to capitalize on price movements within the first 30 minutes of the U.S. stock market opening. It is specifically tailored for use on a 15-minute chart and is optimized for trading U.S. indices during regular market hours.
+
+Features:
+
+Session Time Configuration: The strategy operates within the U.S. market hours, specifically from 9:30 AM to 4:00 PM (Eastern Time).
+
+First 30-Minute Candle Aggregation: The script identifies the high and low of the first 30-minute candle, which is considered a critical time frame for market momentum.
+
+Single Trade Per Day: To minimize risk, the strategy is designed to execute only one trade per day based on the established range of the first 30 minutes.
+
+Dynamic Trade Conditions: Buy and sell signals are generated when the price breaks above the high or below the low of the first 30-minute candle, with defined stop-loss and take-profit levels based on a customizable risk-reward ratio.
+How It Works:
+
+Initialization:
+At the start of each trading day, the script resets the high and low values for the first 30 minutes.
+Range Locking: After the first 30 minutes, the high and low values are locked, allowing for trade entries based on these levels.
+Trade Execution:
+Long Entry: Triggered when the price moves above the locked high.
+Short Entry: Triggered when the price drops below the locked low.
+Risk Management: Each trade comes with a stop-loss and take-profit mechanism to manage potential losses and secure profits.
+
+Visuals:
+The script also plots the locked high and low levels on the chart, providing a visual reference for traders.
+
+Conclusion:
+This strategy leverages the volatility often seen in the first 30 minutes of trading, aiming to capture significant price movements while maintaining a disciplined trading approach. It is suitable for traders looking to implement a systematic strategy based on early market behavior.
+
+Usage:
+To use this strategy, simply add the script to your TradingView chart, set your desired parameters, and monitor for trade signals during the specified market hours. Adjust the risk-reward ratio as needed to align with your trading style.

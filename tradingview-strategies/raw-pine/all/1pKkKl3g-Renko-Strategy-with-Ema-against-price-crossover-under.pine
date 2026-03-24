@@ -1,0 +1,48 @@
+//@version=4
+strategy("Renko Strategy with long short ema band", overlay=true)
+
+offset = input(2, maxval=50)
+atr = input(14, maxval=50)
+shortlen = input(5, minval=3, title="Short Length")
+longlen = input(10, minval=7, title="Long Length")
+matype = input(title="MA Type", defval="EMA", options=["EMA", "SMA"])
+
+renko_t = renko(syminfo.tickerid, "ATR", 14)
+renko_low = security(renko_t, timeframe.period, low)
+renko_close = security(renko_t, timeframe.period, close)
+c = renko_low[1] >= renko_low ? color.red : color.lime 
+// c = close >= open ? color.lime : color.red
+plot(renko_low, linewidth=4, color=c, offset=offset)
+
+
+shortma = if matype == 'EMA' 
+    ema(renko_close, shortlen) 
+else 
+    sma(renko_close, shortlen)
+
+
+longma = if matype == 'EMA' 
+    ema(renko_close, longlen)
+else 
+    sma(renko_close, longlen)
+
+plot(shortma, color=#f0c518, linewidth=2)
+plot(longma, color=color.purple, linewidth=2)
+
+
+longCondition = crossover(shortma, longma) and close > shortma and close > longma
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+
+shortCondition = crossunder(shortma, longma) and close < shortma and close < longma
+if (shortCondition)
+    strategy.entry("Sell", strategy.short)
+
+View in Pine Editor・39 lines
+Use on chart
+4
+5
+8
+1
+19 557
+Renko Strategy with Ema against price crossover/under

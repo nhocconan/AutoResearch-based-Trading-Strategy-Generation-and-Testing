@@ -1,0 +1,107 @@
+//@version=5
+strategy("SMA Buy/Sell Strategy with Significant Slope", overlay=true)
+
+// Parametri configurabili
+smaPeriod = input.int(20, title="SMA Period", minval=1)
+initialTPPercent = input.float(5.0, title="Initial Take Profit (%)", minval=0.1)  // Take Profit iniziale (ambizioso)
+trailingSLPercent = input.float(1.0, title="Trailing Stop Loss (%)", minval=0.1) // Percentuale di trailing SL
+slopeThreshold = input.float(0.05, title="Slope Threshold (%)", minval=0.01)    // Soglia minima di pendenza significativa
+
+// SMA calcolate su HIGH e LOW
+smaHigh = ta.sma(high, smaPeriod)
+smaLow = ta.sma(low, smaPeriod)
+
+// Funzioni per pendenza significativa
+isSignificantSlope(sma, threshold) =>
+    math.abs(sma - sma[5]) / sma[5] > threshold / 100
+
+slopePositive(sma) =>
+    sma > sma[1] and isSignificantSlope(sma, slopeThreshold)
+
+slopeNegative(sma) =>
+    sma < sma[1] and isSignificantSlope(sma, slopeThreshold)
+
+// Condizioni di BUY e SELL
+buyCondition = close > smaHigh and low < smaHigh and close[1] < smaHigh and slopePositive(smaHigh)
+sellCondition = close < smaLow and high > smaLow and close[1] > smaLow and slopeNegative(smaLow)
+
+// Plot delle SMA
+plot(smaHigh, color=color.green, linewidth=2, title="SMA 20 High")
+plot(smaLow, color=color.red, linewidth=2, title="SMA 20 Low")
+
+// Gestione TP/SL dinamici
+longInitialTP = strategy.position_avg_price * (1 + initialTPPercent / 100)
+shortInitialTP = strategy.position_avg_price * (1 - initialTPPercent / 100)
+
+// Trailing SL dinamico
+longTrailingSL = close * (1 - trailingSLPercent / 100)
+shortTrailingSL = close * (1 + trailingSLPercent / 100)
+
+// Chiusura di posizioni attive su segnali opposti
+if strategy.position_size > 0 and sellCondition
+    strategy.close("Buy", comment="Close Long on Sell Signal")
+if strategy.position_size < 0 and buyCondition
+    strategy.close("Sell", comment="Close Short on Buy Signal")
+
+// Apertura di nuove posizioni con TP iniziale e Trailing SL
+if buyCondition
+    strategy.entry("Buy", strategy.long, comment="Open Long")
+    strategy.exit("Long TP/Trailing SL", from_entry="Buy", limit=longInitialTP, stop=longTrailingSL)
+
+if sellCondition
+    strategy.entry("Sell", strategy.short, comment="Open Short")
+    strategy.exit("Short TP/Trailing SL", from_entry="Sell", limit=shortInitialTP, stop=shortTrailingSL)
+
+View in Pine Editor・53 lines
+Use on chart
+1
+4
+6
+6 334
+Description:
+This strategy uses a simple moving average (SMA) to detect trading opportunities based on the slope and proximity of price action. It ensures trades are only executed during significant trends, reducing false signals caused by sideways movements. The strategy incorporates dynamic risk management with an initial ambitious Take Profit (TP) and a Trailing Stop Loss (SL) to protect profits.
+
+Key Features:
+Trend Detection with SMA:
+
+Two SMAs are calculated: one on High values and one on Low values.
+Signals are generated when the price crosses these SMAs, ensuring:
+Buy: Price closes above the SMA on High, with a significant upward slope.
+Sell: Price closes below the SMA on Low, with a significant downward slope.
+Slope Significance Check:
+
+The slope of the SMA is calculated over a configurable period.
+Only trends with a slope variation exceeding a user-defined percentage threshold are considered significant.
+Dynamic Risk Management:
+
+Ambitious Initial TP: Positions target a high percentage gain upon entry.
+Trailing SL: Automatically adjusts as the price moves in favor of the trade, locking in profits.
+Automatic Position Management:
+
+Opposing signals close existing positions to avoid conflicting trades.
+Configurable position size for risk control.
+
+Parameters:
+SMA Period: Number of candles for calculating the SMA.
+Initial Take Profit (%): Percentage gain for the initial TP.
+Trailing Stop Loss (%): Percentage for trailing SL based on the current price.
+Slope Threshold (%): Minimum percentage change in SMA slope to confirm trend significance.
+
+How It Works:
+Buy Signal:
+The price closes above the SMA on High values.
+The slope of the SMA (on High) is positive and exceeds the slope threshold.
+Sell Signal:
+The price closes below the SMA on Low values.
+The slope of the SMA (on Low) is negative and exceeds the slope threshold.
+Exits:
+A position closes at the Take Profit level, Trailing Stop Loss, or when an opposing signal is generated.
+
+Use Case:
+This strategy is ideal for trending markets where price action respects moving averages. It can be used on any timeframe or asset but is particularly effective in markets with clear directional movements.
+
+Recommended Settings:
+Timeframe: Works well on higher timeframes (e.g., 1H, 4H, Daily).
+Slope Threshold (%): Default is 5%, adjust based on market volatility.
+Initial TP and Trailing SL: Tailor to your risk/reward preferences.
+By utilizing this strategy, traders can capitalize on significant market trends while dynamically managing risk. Test it on historical data to optimize the parameters for your preferred market!

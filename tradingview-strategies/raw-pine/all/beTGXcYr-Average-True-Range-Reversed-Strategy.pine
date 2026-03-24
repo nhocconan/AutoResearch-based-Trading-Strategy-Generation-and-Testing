@@ -1,0 +1,33 @@
+//@version = 2
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 22/11/2016
+// Average True Range Trailing Stops Strategy, by Sylvain Vervoort 
+// The related article is copyrighted material from Stocks & Commodities Jun 2009 
+// Please, use it only for learning or paper trading. Do not for real trading.
+////////////////////////////////////////////////////////////
+strategy(title="Average True Range Reversed Strategy, by Sylvain Vervoort", overlay = true)
+nATRPeriod = input(5)
+nATRMultip = input(3.5)
+xATR = atr(nATRPeriod)
+nLoss = nATRMultip * xATR
+xATRTrailingStop =  iff(close > nz(xATRTrailingStop[1], 0) and close[1] > nz(xATRTrailingStop[1], 0), max(nz(xATRTrailingStop[1]), close - nLoss),
+                     iff(close < nz(xATRTrailingStop[1], 0) and close[1] < nz(xATRTrailingStop[1], 0), min(nz(xATRTrailingStop[1]), close + nLoss), 
+                      iff(close > nz(xATRTrailingStop[1], 0), close - nLoss, close + nLoss)))
+pos = iff(close[1] < nz(xATRTrailingStop[1], 0) and close > nz(xATRTrailingStop[1], 0), -1,
+       iff(close[1] > nz(xATRTrailingStop[1], 0) and close < nz(xATRTrailingStop[1], 0), 1, nz(pos[1], 0))) 
+if (pos == 1) 
+    strategy.entry("Long", strategy.long)
+if (pos == -1)
+    strategy.entry("Short", strategy.short)       
+barcolor(pos == -1 ? red: pos == 1 ? green : blue )
+//plot(xATRTrailingStop, color=red, title="ATR Trailing Stop")
+
+View in Pine Editor・23 lines
+Use on chart
+4
+9
+8
+13 578
+Average True Range Trailing Stops Strategy, by Sylvain Vervoort
+The related article is copyrighted material from Stocks & Commodities Jun 2009
+Please, use it only for learning or paper trading. Do not for real trading.

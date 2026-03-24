@@ -1,0 +1,208 @@
+//@version=6
+strategy("Trend Pulse Channel Strategy", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1, slippage=1, margin_long=0, margin_short=0,
+     fill_orders_on_standard_ohlc=true)
+
+// ── Date Range
+startDate   = input.time(timestamp("1 Jan 2018"), "Start Date")
+endDate     = input.time(timestamp("31 Dec 2069"), "End Date")
+inDateRange = time >= startDate and time <= endDate
+
+// ── Inputs
+src      = input(hlc3, "Source")
+poles    = input.int(4, "Poles", 1, 9)
+period   = input.int(144, "Period", 2)
+mult     = input.float(1.414, "Range Multiplier", 0)
+lagMode  = input.bool(false, "Reduced Lag")
+fastMode = input.bool(false, "Fast Response")
+
+// ── Calculate Alpha
+pi    = math.asin(1) * 2
+beta  = (1 - math.cos(2 * pi / period)) / (math.pow(1.414, 2 / poles) - 1)
+alpha = -beta + math.sqrt(beta * beta + 2 * beta)
+
+// ── Apply lag reduction if enabled
+lag     = lagMode ? int((period - 1) / (2 * poles)) : 0
+srcData = lagMode ? src + (src - src[lag]) : src
+tr      = ta.tr(true)  // true range as a series
+trData  = lagMode ? tr + (tr - tr[lag]) : tr
+
+// ── AI Filter (EMA approximation)
+AIFilter(data, a, p) =>
+    ema1   = ta.ema(data, int(2 / a))
+    result = ema1
+    if p >= 2
+        result := ta.ema(result, int(2 / a))
+    if p >= 3
+        result := ta.ema(result, int(2 / a))
+    if p >= 4
+        result := ta.ema(result, int(2 / a))
+    result
+
+// ── Apply filter
+filt   = AIFilter(srcData, alpha, poles)
+filtTR = AIFilter(trData,  alpha, poles)
+
+// ── Fast mode: average with single-pole versions
+if fastMode
+    filt1   = AIFilter(srcData, alpha, 1)
+    filtTR1 = AIFilter(trData,  alpha, 1)
+    filt    := (filt + filt1) / 2
+    filtTR  := (filtTR + filtTR1) / 2
+
+// ── Bands
+upper = filt + filtTR * mult
+lower = filt - filtTR * mult
+
+// ── Colors
+trendColor = filt > filt[1] ? #0aff68 : filt < filt[1] ? #ff0a5a : #cccccc
+
+// ── Plots
+plot(filt,  "Filter",     trendColor, 3,  force_overlay=true)
+p1 = plot(upper, "Upper Band", trendColor,      force_overlay=true)
+p2 = plot(lower, "Lower Band", trendColor,      force_overlay=true)
+fill(p1, p2, color.new(trendColor, 80))
+
+// ── Bar coloring
+barCol = src > src[1] and src > filt and src < upper ? #0aff68 :
+         src > src[1] and src >= upper              ? #0aff1b :
+         src <= src[1] and src >  filt              ? #00752d :
+         src <  src[1] and src <  filt and src > lower ? #ff0a5a :
+         src <  src[1] and src <= lower             ? #ff0a11 :
+         src >= src[1] and src <  filt              ? #990032 : #cccccc
+barcolor(barCol)
+
+// ── Strategy logic
+if ta.crossover(close, upper) and inDateRange
+    strategy.entry("long", strategy.long)
+if ta.crossunder(close, upper) and inDateRange
+    strategy.close("long")
+
+// ── Equity line
+plot(title="Equity Line", series=strategy.equity, trackprice=true,
+     display=display.data_window, color=color.black, force_overlay=true)
+
+// ── CAGR / MDD (define cagr so it's usable)
+msPerYear = 365.25 * 24 * 60 * 60 * 1000
+startTs   = startDate
+finalTs   = time[1]
+years     = not na(finalTs) ? float(finalTs - startTs) / msPerYear : na
+cagr      = years > 0 ? math.pow(strategy.equity / strategy.initial_capital, 1 / years) - 1 : na
+cagrByMddRatio = na(strategy.max_drawdown_percent) or strategy.max_drawdown_percent == 0 ? na : (cagr * 100) / strategy.max_drawdown_percent
+// plot(cagr * 100, title="CAGR %", color=color.teal, linewidth=2)
+// plot(cagrByMddRatio, title="CAGR/MDD Ratio", color=color.red, linewidth=2)
+
+View in Pine Editor・99 lines
+Use on chart
+3
+2
+5
+4 505
+Overview
+
+Trend Pulse Channel Strategy is a long-only trend-following breakout strategy built around an adaptive multi-pole smoothing filter and a volatility-adjusted price channel.
+The strategy is designed to participate in sustained directional moves by entering only when price confirms momentum strength beyond a dynamic upper boundary, while avoiding mean-reversion and low-quality consolidation phases.
+
+This script is published as a strategy and includes realistic backtesting assumptions for position sizing, commissions, and slippage.
+
+Core Concept
+
+At the heart of the strategy is a multi-pole adaptive EMA-based filter, inspired by advanced digital signal smoothing techniques.
+Using multiple poles allows the filter to reduce noise while preserving responsiveness to genuine trend changes.
+
+To adapt the channel width to changing market conditions, the strategy applies the same filtering logic to True Range, producing a volatility-aware envelope rather than a static or fixed-percentage band.
+
+This combination allows the strategy to:
+
+Track directional bias using a smoothed central filter
+
+Adjust channel width dynamically based on market volatility
+
+Trigger entries only when price expansion confirms trend strength
+
+Entry Logic
+
+A long position is opened when:
+
+Price crosses above the upper channel band
+
+The signal occurs within the user-defined date range
+
+This condition represents a volatility-confirmed breakout aligned with the prevailing directional filter.
+
+Exit Logic
+
+The long position is closed when:
+
+Price crosses back below the upper band
+
+This exit logic aims to stay in trending moves while exiting when upside momentum weakens.
+
+The strategy does not open short positions by design.
+
+Inputs and Defaults
+
+The default inputs are selected to balance smoothness, responsiveness, and stability:
+
+Source (HLC3): Reduces single-price noise by averaging high, low, and close
+
+Period (144): Defines the primary smoothing horizon of the adaptive filter
+
+Poles (4): Controls the smoothness vs. responsiveness trade-off
+
+Range Multiplier (1.414): Scales the volatility envelope using filtered True Range
+
+Reduced Lag (optional): Applies lag compensation to improve responsiveness
+
+Fast Response (optional): Blends multi-pole and single-pole filters for quicker reaction at the cost of smoothness
+
+All inputs are fully configurable and can be adjusted to suit different instruments and timeframes.
+
+Risk Management & Position Sizing
+
+The strategy uses:
+
+Position size: 10% of equity per trade
+
+No pyramiding
+
+Long positions only
+
+This sizing approach is intended to reflect sustainable risk exposure rather than aggressive capital deployment. Users may further adjust position size based on their own risk tolerance.
+
+Backtesting Assumptions
+
+The strategy is tested using:
+
+Initial capital: 10,000
+
+Commission: 0.1%
+
+Slippage: 1 tick
+
+Order fill model: Standard OHLC
+
+These settings are chosen to provide more realistic performance estimates compared to idealized backtests.
+
+This strategy is best suited for:
+
+Trend-oriented markets
+
+Higher timeframes where breakouts are more reliable
+
+Users seeking systematic trend participation rather than frequent scalping
+
+In sideways or range-bound market conditions, price may cross the channel boundaries frequently.
+This can result in a higher number of entry and exit signals that do not develop into sustained trends.
+
+For this reason, the strategy should be used with an understanding of basic technical analysis concepts, including market structure, trend identification, and consolidation behavior.
+It is intended as a decision-support tool, not a standalone trading system.
+
+Users—whether beginners or experienced traders—should avoid relying solely on this strategy and are encouraged to combine it with broader market context and additional analysis methods.
+
+Disclaimer
+
+This script is provided for educational and analytical purposes only. It does not constitute financial advice. Past performance does not guarantee future results.

@@ -1,0 +1,65 @@
+//@version=5
+strategy("RSI Break Strategy with EMA Filter", overlay=true, margin_long=100, margin_short=100)
+
+// === Inputs ===
+// RSI
+rsiLength   = input.int(14, "RSI Length")
+rsiLongLvl  = input.int(40, "RSI Long Level (Oversold)")
+rsiShortLvl = input.int(80, "RSI Short Level (Overbought)")
+
+// EMA
+emaLength   = input.int(200, "EMA Length")
+
+// Pip-based SL/TP
+slPips      = input.int(20, "Stop Loss (pips)")
+tpPips      = input.int(30, "Take Profit (pips)")  // default 1.5× SL
+
+// === RSI Calculation ===
+rsi = ta.rsi(close, rsiLength)
+plot(rsi, "RSI", color=color.blue)
+hline(rsiLongLvl, "RSI Long Level", color=color.green)
+hline(rsiShortLvl, "RSI Short Level", color=color.red)
+
+// === EMA Calculation ===
+ema = ta.ema(close, emaLength)
+plot(ema, "EMA", color=color.orange)
+
+// === Pip Conversion ===
+pipValue = syminfo.mintick
+slDist   = slPips * pipValue
+tpDist   = tpPips * pipValue
+
+// === State Tracking ===
+// Track whether RSI has returned inside before allowing another trade
+var bool canLong = true
+var bool canShort = true
+
+// Reset conditions: RSI must return inside levels
+if rsi > rsiLongLvl
+    canLong := true
+if rsi < rsiShortLvl
+    canShort := true
+
+// === Entry Conditions ===
+// Long: RSI breaks below long level + close above EMA + allowed
+longCondition  = rsi <= rsiLongLvl and close > ema and strategy.position_size == 0 and canLong
+
+// Short: RSI breaks above short level + close below EMA + allowed
+shortCondition = rsi >= rsiShortLvl and close < ema and strategy.position_size == 0 and canShort
+
+// === Orders ===
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", "Long", stop=close - slDist, limit=close + tpDist)
+    canLong := false  // disable until RSI resets
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", "Short", stop=close + slDist, limit=close - tpDist)
+    canShort := false // disable until RSI resets
+
+View in Pine Editor・59 lines
+Use on chart
+0
+281
+this is a simple stratergy to give you an edge manule adjust

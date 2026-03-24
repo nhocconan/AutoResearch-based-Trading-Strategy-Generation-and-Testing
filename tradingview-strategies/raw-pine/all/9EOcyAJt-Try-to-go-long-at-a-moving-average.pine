@@ -1,0 +1,26 @@
+//@version=3
+strategy("Try to go long at SMA", overlay=true, pyramiding=1000)
+
+ma = sma(close, input(200, title="moving average period"))
+bounce = low <= ma and close >= ma
+
+if(bounce)
+    strategy.entry("buy", strategy.long, 10, stop=ma)
+else
+    strategy.cancel("buy")
+
+strategy.exit("stop", "buy", limit=strategy.position_avg_price * 1.1, stop=strategy.position_avg_price * (1 - atr(14)), when=strategy.position_size > 0)
+
+// strategy.close("buy", when=strategy.position_size > 0)
+
+View in Pine Editor・14 lines
+Use on chart
+1
+1
+6
+4 757
+May 18, 2018
+A simple experimental strategy that tries to go long at a moving average bounce / support level, and looks for upside.
+May 18, 2018
+Release Notes
+Update strategy title / description

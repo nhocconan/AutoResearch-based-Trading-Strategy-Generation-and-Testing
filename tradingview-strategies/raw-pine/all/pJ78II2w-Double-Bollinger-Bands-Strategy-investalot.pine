@@ -1,0 +1,73 @@
+//@version=5
+strategy("Double Bollinger Bands Strategy", overlay=true, initial_capital=10000)
+
+// Inputs
+length = input.int(20, "MA Length")
+src = input(close, "Source")
+std1 = input.float(1.0, "Inner StdDev")
+std2 = input.float(2.0, "Outer StdDev")
+
+// Calculations
+basis = ta.sma(src, length)
+dev = ta.stdev(src, length)
+
+upper1 = basis + dev * std1
+lower1 = basis - dev * std1
+upper2 = basis + dev * std2
+lower2 = basis - dev * std2
+
+// Plot
+plot(basis, "Middle", color=color.orange)
+plot(upper1, "Upper 1σ", color=color.green)
+plot(lower1, "Lower 1σ", color=color.green)
+plot(upper2, "Upper 2σ", color=color.red)
+plot(lower2, "Lower 2σ", color=color.red)
+
+// Entry Conditions
+longCond = close > basis and close < upper2 and close > upper1
+shortCond = close < basis and close > lower2 and close < lower1
+
+// Execute Trades
+if longCond
+    strategy.entry("Long", strategy.long)
+
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// Exit
+strategy.close("Long", when=close < basis)
+strategy.close("Short", when=close > basis)
+
+View in Pine Editor・39 lines
+Use on chart
+1
+2
+526
+Dual Bollinger Band Swing Trading System Indicator Setup
+• Bollinger Band 1: Period 20, Deviation 2
+• Bollinger Band 2: Period 20, Deviation 0.7
+• Timeframe: Daily (Primary)
+• Markets: NSE Equity – Liquid Large & Mid Caps
+Market Conditions
+• 20 SMA must slope upward for long trades • Price must hold above 200 DMA
+• Avoid flat or sideways markets
+Buy Setup – Trend Continuation
+1. Strong impulse move into upper BB (20,2)
+2. Pullback into zone between BB (20,0.7) and 20 SMA 3. Bullish candle confirmation inside value zone
+Entry Rules
+• Buy above bullish confirmation candle high
+• Volume should be at least average or higher
+Stop Loss Rules
+• Initial SL below 20 SMA
+• Aggressive SL below BB (20,0.7) lower
+Targets & Exit
+• Target 1: Upper BB (20,0.7)
+• Target 2: Upper BB (20,2)
+• Trail SL to 20 SMA once price enters momentum zone
+Risk Management
+• Risk per trade: 0.5% – 1% of capital
+• Maximum 3 open swing trades at a time
+Trade Avoidance Rules
+• Avoid earnings weeks
+• Avoid low volume stocks
+• Avoid trades when price remains inside BB (20,0.7)

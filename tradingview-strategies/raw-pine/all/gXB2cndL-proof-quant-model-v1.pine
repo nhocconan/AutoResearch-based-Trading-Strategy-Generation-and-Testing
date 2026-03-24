@@ -1,0 +1,27 @@
+//@version=6
+strategy("Test Strategy – MA Crossover", overlay=true)
+
+// === INPUTS ===
+fastLength = input.int(10, title="Fast MA Length")
+slowLength = input.int(30, title="Slow MA Length")
+
+// === CALCULATIONS ===
+fastMA = ta.sma(close, fastLength)
+slowMA = ta.sma(close, slowLength)
+
+// === PLOTS ===
+plot(fastMA, title="Fast MA", linewidth=2)
+plot(slowMA, title="Slow MA", linewidth=2)
+
+// === TRADING LOGIC ===
+if ta.crossover(fastMA, slowMA)
+    strategy.entry("Long", strategy.long)
+
+if ta.crossunder(fastMA, slowMA)
+    strategy.close("Long")
+
+View in Pine Editor・24 lines
+Use on chart
+7
+470
+team, this is the model for our class. It is public but yeah its not like there will be specific ip or stuff like that. Get to work

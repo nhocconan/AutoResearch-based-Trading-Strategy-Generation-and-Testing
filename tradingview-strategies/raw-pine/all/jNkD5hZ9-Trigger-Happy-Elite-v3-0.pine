@@ -1,0 +1,120 @@
+//@version=6
+strategy("Trigger Happy Elite v3.0", overlay=true, initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=4, calc_on_every_tick=true)
+
+// --- INPUTS ---
+grp_con = "Position Sizing & Targets"
+contract_qty = input.int(4, "Number of Contracts (Micros)", minval=1, group=grp_con) 
+daily_profit_target = input.float(2000.0, "Daily Profit Goal ($)", group=grp_con) 
+daily_loss_limit = input.float(350.0, "Max Daily Loss ($)", group=grp_con) 
+
+grp_time = "Trading Session"
+use_time_filter = input.bool(false, "Enable Trading Window?", group=grp_time) 
+trading_session = input.session("0930-1545", "Session Time (EST)", group=grp_time) 
+timezone = "America/New_York"
+
+grp_risk = "Elite Risk Settings"
+tp_ticks = input.int(250, "Take Profit (Ticks)", group=grp_risk) 
+sl_ticks = input.int(45, "Hard Stop Loss (Ticks)", group=grp_risk) 
+trail_activation = input.int(20, "Trail Activation (Ticks)", group=grp_risk) 
+trail_offset     = input.int(10, "Trail Offset (Ticks)", minval=1, group=grp_risk)
+
+grp_filt = "Sniper & Ghost Filters"
+trade_ghosts = input.bool(true, "Trade Ghost Reversals (👻)?", group=grp_filt) 
+atr_min = input.float(2.2, "Min ATR Volatility", group=grp_filt) 
+rsi_buy = input.int(45, "Max RSI for Buy", group=grp_filt) 
+rsi_sell = input.int(55, "Min RSI for Sell", group=grp_filt) 
+
+// --- LOGIC ---
+var float start_day_profit = 0.0
+is_new_day = ta.change(time("D", timezone)) != 0
+if is_new_day
+    start_day_profit := strategy.netprofit
+current_daily_profit = strategy.netprofit - start_day_profit
+can_trade_today = current_daily_profit < daily_profit_target and current_daily_profit > -daily_loss_limit
+
+in_session = not use_time_filter or not na(time(timeframe.period, trading_session, timezone))
+
+length = 1 
+ph = ta.pivothigh(length, length)          // series float: price or na
+pl = ta.pivotlow(length, length)           // series float: price or na
+
+// Bool detection of actual pivots
+is_ph = not na(ph)
+is_pl = not na(pl)
+
+rsi = ta.rsi(close, 14)
+atr = ta.atr(14)
+
+// Pre-calculate to avoid inconsistent execution warning in v6
+recent_highest = ta.highest(high, 50)
+recent_lowest  = ta.lowest(low, 50)
+
+// Ghost conditions (using pre-calculated values)
+ghost_high = is_ph and high[length] < recent_highest[length+1]
+ghost_low  = is_pl and low[length]  > recent_lowest[length+1]
+
+// --- GHOST MESSAGES ---
+buy_msg  = '{"ticker": "' + syminfo.ticker + '", "action": "buy", "price": ' + str.tostring(close) + '}'
+sell_msg = '{"ticker": "' + syminfo.ticker + '", "action": "sell", "price": ' + str.tostring(close) + '}'
+exit_msg = '{"ticker": "' + syminfo.ticker + '", "action": "close"}'
+
+// --- EXECUTION ---
+buy_signal = in_session and can_trade_today and (strategy.position_size == 0) and (is_pl or (trade_ghosts and ghost_low)) and rsi < rsi_buy and atr > atr_min
+sell_signal = in_session and can_trade_today and (strategy.position_size == 0) and (is_ph or (trade_ghosts and ghost_high)) and rsi > rsi_sell and atr > atr_min
+
+if buy_signal
+    strategy.entry("Long", strategy.long, qty=contract_qty, comment="🎯 TRIGGER BUY", alert_message=buy_msg)
+if sell_signal
+    strategy.entry("Short", strategy.short, qty=contract_qty, comment="🎯 TRIGGER SELL", alert_message=sell_msg)
+
+// Exit with 5-space indentation for continuation
+strategy.exit("Exit", 
+     loss          = sl_ticks, 
+     profit        = tp_ticks, 
+     trail_points  = trail_activation, 
+     trail_offset  = trail_offset, 
+     alert_message = exit_msg
+)
+
+View in Pine Editor・77 lines
+Use on chart
+5
+0
+6
+3
+6 445
+Trigger Happy Elite v3.0 - GHOST PROTOCOL
+
+is an ultra-aggressive, reversal-focused scalping strategy designed for high-frequency trades on volatile instruments like micro futures (MES, MNQ, MYM, etc.) during active sessions.
+
+Core Logic:
+• Entries trigger on ultra-sensitive 1-bar pivot highs/lows — pure "trigger happy" price action reversals.
+• Optional "Ghost Reversals" (👻) mode: Catches stealth/failed pivots where a detected high/low fails to exceed the recent 50-bar extreme — often signaling liquidity grabs, traps, or hidden institutional reversals before the crowd notices.
+• Dual filters ensure quality:
+- RSI(14) must be in favorable territory (below Max RSI for buys, above Min RSI for sells).
+- ATR(14) > Min Volatility threshold (default 2.2) — blocks entries in dead/choppy markets.
+
+Risk & Reward Engine:
+• Fixed targets: 250 ticks profit, 45 ticks hard stop (strong ~5.5:1 R:R on paper).
+• Dynamic trailing stop: Activates after +20 ticks profit, then trails by user-defined offset (default 10 ticks) — locks in gains quickly while allowing some breathing room.
+• Daily gates: Stops trading after hitting profit goal ($2000 default) or max drawdown (-$350 default).
+• One position at a time — no pyramiding/overlapping.
+
+Trading Window (optional):
+• Restrict to RTH (e.g., 09:30–15:45 EST) or any custom session.
+
+Alerts & Automation:
+• Built-in JSON alert messages for easy webhook integration (buy/sell/close with ticker & price).
+• Works best on 1–15 min charts of micro index futures during high-vol periods (open, news, power hours).
+
+Important Notes:
+• This is a high-trade-frequency scalper — expect many signals. Use on liquid micros with tight spreads.
+• Backtest thoroughly — adjust pivot sensitivity (currently 1-bar), ghost lookback, ATR min, trail offset, etc., to match your symbol/timeframe.
+• Risk management is built-in but NEVER risk more than 1–2% per trade in live accounts.
+• Past performance ≠ future results. Trade at your own risk.
+
+Inspired by structural reversal concepts and "missed reversal" / ghost logic seen in advanced SMC tools.
+
+Happy scalping — stay trigger happy, but trade smart! 🎯👻
+
+Credit goes to MelisFantasticMind on Discord.

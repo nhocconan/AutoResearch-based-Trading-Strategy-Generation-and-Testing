@@ -1,0 +1,176 @@
+//@version=6
+strategy("Supertrend - SSL Strategy with Toggle [LePasha]", "SP-SSL [LePasha]", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=15)
+// Watermark
+watermarkTable = table.new(position.bottom_left, 1, 1, border_width=3, force_overlay=true)
+table.cell(watermarkTable, 0, 0, text='AlPashaTrader ', text_color=color.new(color.white, 95), text_size=size.huge)
+
+// === Toggle between strategies ===
+useConfirmation = input.bool(true, "Require confirmation from both indicators?")
+
+// === User-defined date range ===
+startDate = input.time(timestamp("2024-05-15 00:00 +0000"), "Start Date")
+endDate   = input.time(timestamp("2050-05-15 00:00 +0000"), "End Date")
+inDateRange = (time >= startDate and time <= endDate)
+
+// === Supertrend ===
+atrPeriod = input.int(10, "ATR Length")
+factor    = input.float(2.4, "Factor", step = 0.01)
+[_, supertrendDir] = ta.supertrend(factor, atrPeriod)
+
+supertrendBuy  = ta.change(supertrendDir) < 0
+supertrendSell = ta.change(supertrendDir) > 0
+
+// === SSL Channel ===
+sslPeriod = input.int(13, title="SSL Period")
+smaHigh   = ta.sma(high, sslPeriod)
+smaLow    = ta.sma(low, sslPeriod)
+
+var float hlv = na
+hlv := close > smaHigh ? 1 : close < smaLow ? -1 : hlv[1]
+
+sslDown = hlv < 0 ? smaHigh : smaLow
+sslUp   = hlv < 0 ? smaLow  : smaHigh
+
+plot(sslDown, title="SSL Down", linewidth=2, color=inDateRange ? #ff5d00 : color.new(#ff5d00, 85))
+plot(sslUp,   title="SSL Up",   linewidth=2, color=inDateRange ? #2157f3 : color.new(#2157f3, 85))
+
+sslBuy  = ta.crossover(sslUp, sslDown)
+sslSell = ta.crossunder(sslUp, sslDown)
+
+// === Waiting signals ===
+var bool waitForSSLBuy  = false
+var bool waitForSSLSell = false
+var bool waitForSTBuy   = false
+var bool waitForSTSell  = false
+
+if inDateRange
+    if useConfirmation
+        // Long setup
+        if sslBuy and not waitForSTBuy
+            waitForSSLBuy := true
+        if supertrendBuy and not waitForSSLBuy
+            waitForSTBuy := true
+
+        if sslBuy and waitForSTBuy
+            strategy.entry("Long", strategy.long)
+            waitForSTBuy := false
+            waitForSSLBuy := false
+        if supertrendBuy and waitForSSLBuy
+            strategy.entry("Long", strategy.long)
+            waitForSTBuy := false
+            waitForSSLBuy := false
+
+        // Short setup
+        if sslSell and not waitForSTSell
+            waitForSSLSell := true
+        if supertrendSell and not waitForSSLSell
+            waitForSTSell := true
+
+        if sslSell and waitForSTSell
+            strategy.entry("Short", strategy.short)
+            waitForSTSell := false
+            waitForSSLSell := false
+        if supertrendSell and waitForSSLSell
+            strategy.entry("Short", strategy.short)
+            waitForSTSell := false
+            waitForSSLSell := false
+
+        // Exit positions
+        if strategy.position_size > 0 and (sslSell or supertrendSell)
+            strategy.close("Long")
+            waitForSTBuy := false
+            waitForSSLBuy := false
+        if strategy.position_size < 0 and (sslBuy or supertrendBuy)
+            strategy.close("Short")
+            waitForSTSell := false
+            waitForSSLSell := false
+    else
+        if sslBuy or supertrendBuy
+            strategy.entry("Long", strategy.long)
+        if sslSell or supertrendSell
+            strategy.entry("Short", strategy.short)
+
+        if strategy.position_size > 0 and (sslSell or supertrendSell)
+            strategy.close("Long")
+        if strategy.position_size < 0 and (sslBuy or supertrendBuy)
+            strategy.close("Short")
+
+View in Pine Editor・99 lines
+Use on chart
+4
+0
+2 120
+May 22, 2025
+📈 Overview of the Supertrend - SSL Strategy with Toggle Indicator
+This strategy combines two powerful technical tools—Supertrend and SSL Channel—to deliver precise and reliable trading signals, designed for traders who value confirmation and risk management. 🎯
+
+⚙️ How This Indicator Was Created
+The strategy was meticulously crafted to harness the complementary strengths of:
+
+Supertrend Indicator: A trend-following tool based on Average True Range (ATR) and a multiplier factor, it detects bullish or bearish trends by calculating dynamic support and resistance levels. 📊
+
+SSL Channel: A channel indicator built using two Simple Moving Averages (SMA) of the highs and lows over a set period. It cleverly determines trend direction by comparing price action relative to these moving averages. 🔄
+
+These two indicators are merged into one cohesive strategy with an optional toggle feature allowing the trader to choose whether to require confirmation from both indicators before taking a position or to act on signals from either. 🎚️
+
+The script includes user-friendly controls for:
+
+Defining a custom trading date range 📅, useful for backtesting or restricting trading to specific market conditions.
+
+Setting the ATR length and multiplier for Supertrend sensitivity ⚙️.
+
+Adjusting the SSL channel period for responsiveness to price changes ⏱️.
+
+Choosing whether to require dual confirmation (both Supertrend and SSL signals) for more conservative trading or a single indicator trigger for a more aggressive approach 🛡️ vs ⚔️.
+
+🔍 How This Indicator Works
+Signal Generation:
+
+Supertrend analyzes market volatility and trend direction, signaling a potential buy when the trend turns bullish 📈 and a sell when bearish 📉.
+
+SSL Channel tracks price relative to its high and low moving averages to identify uptrends and downtrends. A crossover of the SSL Up and SSL Down lines generates buy or sell signals 🔔.
+
+Confirmation Logic:
+
+When confirmation is enabled, the strategy waits for agreement between both indicators before entering a trade ✅, reducing false signals.
+
+When confirmation is disabled, it trades based on signals from either indicator ⚡, allowing more frequent entries but potentially higher risk.
+
+Entry and Exit Rules:
+
+Entry occurs when the indicator(s) signal a new trend direction 🚀 for long, or decline for short.
+
+Exit happens when opposing signals appear 🛑, closing existing positions to lock in profits or cut losses.
+
+Visual Aids:
+
+The SSL Channel lines are plotted directly on the chart with distinct colors to intuitively show trend shifts 🎨.
+
+The system respects the specified date range ⏳, ensuring trades only occur within user-defined periods.
+
+🎯 How to Use This Strategy Effectively
+Set Your Preferences: Adjust ATR length, factor, and SSL period to your style. More sensitive? Decrease lengths. Smoother? Increase them ⚙️.
+
+Choose Confirmation Mode: Use the toggle depending on your risk appetite:
+
+Confirmation ON ✅: For conservative traders wanting high-probability setups.
+
+Confirmation OFF ⚡: For aggressive traders who want more signals.
+
+Apply Date Filters: Focus your trading or backtesting on specific periods 📅.
+
+Monitor Entry/Exit Signals: Watch crossovers and Supertrend changes closely 👀.
+
+Risk Management: The strategy uses position sizing as a percentage of equity (default 15%) 💰. Adjust accordingly.
+
+Combine with Other Tools: Enhance results by combining this with volume, price action, or fundamentals 🔧.
+
+📝 Summary
+This Supertrend - SSL Strategy with Toggle is a dynamic and flexible trading tool blending volatility-based trend detection with moving-average channel insights. It empowers traders to customize confirmation strictness, control trading periods, and efficiently capture trending opportunities while managing risk smartly.
+
+By integrating proven indicators in a user-friendly, visually intuitive package, this strategy stands as a sophisticated tool suitable for various markets and trading styles. 🚀📊
+
+
+May 26, 2025
+Release Notes
+Minor changes , Bug fixes , To update: Refresh, remove & re-add the indicator to your chart.

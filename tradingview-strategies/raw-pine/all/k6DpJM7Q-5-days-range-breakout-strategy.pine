@@ -1,0 +1,6 @@
+//@version=4
+width=##input(defval=2,type='INPUT_INTEGER',##id='in_3')
+##root(root_metainfo,rm_0,width)
+##root(root_metainfo,rm_1,width)
+##root(root_metainfo,rm_2,width)
+##root(root_metainfo,rm_3,width)

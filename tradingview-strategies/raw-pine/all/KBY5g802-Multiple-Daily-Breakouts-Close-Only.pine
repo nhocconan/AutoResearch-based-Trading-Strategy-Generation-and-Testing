@@ -1,0 +1,77 @@
+//@version=5
+strategy("Multiple Daily Breakouts (Close Only)", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === Inputs ===
+nySession  = input.session("0900-1300", "NY First 4H Session")
+tz         = input.string("America/New_York", "Time Zone")
+rr         = input.float(2.0, "Risk/Reward", step=0.1)
+useRangeSL = input.bool(true, "Stop at Opposite Range")
+
+// === Session Detection ===
+inNY4H = not na(time(timeframe.period, nySession, tz))
+newDay = ta.change(time("D", tz))
+
+// === Variables ===
+var float rangeHigh = na
+var float rangeLow  = na
+var bool  rangeSet  = false
+var line highLine = na
+var line lowLine  = na
+
+// === Reset range each NY day ===
+if bool(newDay)
+    rangeHigh := na
+    rangeLow  := na
+    rangeSet  := false
+    if not na(highLine)
+        line.delete(highLine)
+        highLine := na
+    if not na(lowLine)
+        line.delete(lowLine)
+        lowLine := na
+
+// === Build range during NY 4H ===
+if bool(inNY4H)
+    rangeHigh := na(rangeHigh) ? high : math.max(rangeHigh, high)
+    rangeLow  := na(rangeLow) ? low : math.min(rangeLow, low)
+
+// === Lock range after 1PM and draw horizontal lines ===
+if not bool(inNY4H) and not na(rangeHigh) and not rangeSet
+    rangeSet := true
+    // Draw horizontal lines with small end bar to ensure visibility
+    highLine := line.new(bar_index, rangeHigh, bar_index + 1, rangeHigh, xloc.bar_index, extend=extend.right, color=color.green, width=2)
+    lowLine  := line.new(bar_index, rangeLow, bar_index + 1, rangeLow, xloc.bar_index, extend=extend.right, color=color.red, width=2)
+
+// === Breakout Conditions (Close Only) ===
+longBreakout  = rangeSet and close > rangeHigh
+shortBreakout = rangeSet and close < rangeLow
+
+// === Risk Calculation ===
+rangeSize = rangeHigh - rangeLow
+
+// === LONG Entry ===
+if bool(longBreakout)
+    sl = useRangeSL ? rangeLow : close - rangeSize
+    tp = close + (close - sl) * rr
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long TP/SL", "Long", stop=sl, limit=tp)
+    // Plot marker
+    label.new(bar_index, high, "▲", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.tiny)
+
+// === SHORT Entry ===
+if bool(shortBreakout)
+    sl = useRangeSL ? rangeHigh : close + rangeSize
+    tp = close - (sl - close) * rr
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short TP/SL", "Short", stop=sl, limit=tp)
+    // Plot marker
+    label.new(bar_index, low, "▼", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.tiny)
+
+View in Pine Editor・68 lines
+Use on chart
+6
+473
+Pine Script strategy builds the high and low of the first four hours of the New York session (9:00 AM–1:00 PM ET), locks that range after the 1:00 PM candle closes, and then trades breakouts based strictly on candle closes (wicks ignored). The strategy allows multiple breakouts per day, entering long when price closes above the NY range and short when it closes below, with configurable position sizing and risk-reward targets; stops can be set at the opposite side of the range or dynamically calculated. It works both for historical backtesting in the Strategy Tester and for live trading/alerts, making it suitable for intraday markets on lower timeframes such as 5- to 15-minute charts.
+Update: removed continuous lines between bars
+Update: added h/l lines
+Update: renamed

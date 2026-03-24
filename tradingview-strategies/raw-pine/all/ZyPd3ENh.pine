@@ -1,0 +1,260 @@
+//@version=6
+strategy(title="Stratégie SMC V18.2 (BTC/EUR FINAL R3 - Tendance)", shorttitle="SMC-BTC-FINAL-Tendance", overlay=true,
+     currency=currency.EUR, // <--- CHANGÉ EN EUR
+     initial_capital=1000, // Capital initial de 1000 euros pour coller à votre compte démo
+     pyramiding=0, 
+     default_qty_type=strategy.cash, 
+     default_qty_value=1) 
+
+// --- PARAMÈTRES ADAPTÉS POUR BTC (M15) ---
+i_max_lot_size = input.float(0.01, title="Lot Max (Quantité Max BTC)", minval=0.00001, step=0.001)
+i_min_lot_size = input.float(0.00001, title="Lot Min Réel (Exigence Broker)", minval=0.00001, step=0.00001) 
+i_swing_length = input.int(4, title="Long. Swing (BOS) pour BTC", minval=2) // ADAPTÉ M15
+i_ob_opacity = input.int(80, title="Opacité OB", minval=0, maxval=100)
+i_liq_tolerance = input.float(0.1, title="Tolérance Liq. (%) pour BTC", minval=0.01, step=0.01)
+i_liq_search = input.int(7, title="Long. Recherche Liq.", minval=5) // ADAPTÉ M15
+
+// --- PARAMÈTRES DE FILTRE DE TENDANCE (H1/EMA 200 PAR DÉFAUT) ---
+i_tf_tendance = input.string("60", title="Timeframe Tendance (ex: 60 pour H1)", options=["30", "60", "120", "240"]) // ADAPTÉ H1
+i_ema_length = input.int(200, title="Longueur EMA Tendance", minval=1)
+
+// --- GESTION DU RISQUE DÉDIÉE ---
+float risk_amount = 2.0 // Risque de 2.00 EUROS par transaction
+float min_sl_distance = 0.0001 
+
+// --- VARIABLES SMC ---
+var float obHigh = na
+var float obLow = na
+var bool obIsBullish = false 
+var box currentBox = na          
+var float last_swing_low = na
+var float last_swing_high = na
+var label active_label = na      
+var bool signal_entry_long = false
+var bool signal_entry_short = false
+var float entry_sl_level = na
+var float entry_tp_level = na
+var float entry_qty_to_risk = na 
+var bool signal_persistant_long = false
+var bool signal_persistant_short = false
+
+// --- FONCTION DE FILTRE DE TENDANCE (EMA sur TF supérieur) ---
+f_get_ema_hl() => 
+    request.security(syminfo.tickerid, i_tf_tendance, ta.ema(close, i_ema_length))
+
+ema_tendance = f_get_ema_hl()
+
+// PLOT de l'EMA pour la visualisation (Titre corrigé)
+plot(ema_tendance, color=color.new(color.white, 20), title="EMA Tendance (Filtre)", linewidth=2)
+
+
+// --- RÉINITIALISATION ---
+if not na(active_label)
+    label.delete(active_label)
+active_label := na 
+
+signal_entry_long := false 
+signal_entry_short := false 
+entry_qty_to_risk := na 
+
+
+// Mise à jour des Swings Highs/Lows
+sh_confirmed = ta.barssince(high == ta.highest(i_swing_length * 2 + 1)) == i_swing_length
+sl_confirmed = ta.barssince(low == ta.lowest(i_swing_length * 2 + 1)) == i_swing_length
+
+// Initialisation des swings 
+if na(last_swing_high)
+    last_swing_high := ta.highest(200)
+if na(last_swing_low)
+    last_swing_low := ta.lowest(200)
+
+if sh_confirmed
+    last_swing_high := high[i_swing_length]
+if sl_confirmed
+    last_swing_low := low[i_swing_length]
+
+float fib_0_5_level = not na(last_swing_high) and not na(last_swing_low) ? (last_swing_high + last_swing_low) / 2 : na
+
+// PLOT DE DÉBOGAGE: Visualisation des derniers swings
+plot(last_swing_high, color=color.new(color.fuchsia, 50), style=plot.style_line, linewidth=2, title="Last Swing High")
+plot(last_swing_low, color=color.new(color.lime, 50), style=plot.style_line, linewidth=2, title="Last Swing Low")
+
+
+// --- FONCTIONS DE DÉTECTION (unchanged) ---
+fvg_bullish() => high[1] < low[3]
+fvg_bearish() => low[1] > high[3]
+
+f_has_liquidity(direction) =>
+    result = false
+    price_to_search = direction ? low : high 
+    
+    search_price = direction ? ta.lowest(i_liq_search) : ta.highest(i_liq_search)
+
+    tolerance = close * i_liq_tolerance / 100 
+    
+    if direction 
+        result := search_price < price_to_search - tolerance
+    else 
+        result := search_price > price_to_search + tolerance
+        
+    result
+
+// --- LOGIQUE DE DÉCLENCHEMENT DE L'ORDRE BLOCK (unchanged) ---
+is_bullish_ob() =>
+    isBearCandle = close[1] < open[1] 
+    hasFVG = fvg_bullish() 
+    isBOS = not na(last_swing_low) and close > last_swing_low 
+    hasLiquiditySupport = f_has_liquidity(true)
+    isDiscount = not na(fib_0_5_level) and close < fib_0_5_level
+
+    isBearCandle and hasFVG and isBOS and hasLiquiditySupport and isDiscount
+
+is_bearish_ob() =>
+    isBullCandle = close[1] > open[1] 
+    hasFVG = fvg_bearish() 
+    isBOS = not na(last_swing_high) and close < last_swing_high 
+    hasLiquiditySupport = f_has_liquidity(false)
+    isPremium = not na(fib_0_5_level) and close > fib_0_5_level
+
+    isBullCandle and hasFVG and isBOS and hasLiquiditySupport and isPremium
+
+// --- CRÉATION / MISE À JOUR DE L'OB ACTIF (unchanged) ---
+if na(obHigh) or strategy.position_size == 0
+    if is_bullish_ob() or is_bearish_ob()
+        obIsBullish := is_bullish_ob()
+        obHigh := high[1]
+        obLow := low[1]
+        
+        obColor = color.new(color.gray, 60) 
+        if not na(currentBox) 
+            box.delete(currentBox)
+        
+        currentBox := box.new(left=bar_index[1], top=obHigh, right=bar_index, bottom=obLow, border_color=obColor, bgcolor=obColor, xloc=xloc.bar_index)
+
+
+// --- GESTION DE LA MITIGATION ET VALIDATION ---
+if not na(obHigh) 
+    
+    float mitigation_buffer = 0.00005 * close 
+
+    isTouched = obIsBullish ? low <= obHigh + mitigation_buffer : high >= obLow - mitigation_buffer
+    isInvalidatedBull = obIsBullish and close < obLow
+    isInvalidatedBear = not obIsBullish and close > obHigh
+    
+    if not na(currentBox) 
+        box.set_right(currentBox, bar_index) 
+
+    // L'OB est touché ET nous ne sommes pas déjà en position
+    if isTouched and strategy.position_size == 0
+        
+        // --- CALCULS ET SIGNAL ---
+        var float sl_level = obIsBullish ? obLow : obHigh
+        var float rr_distance_usd = math.abs(close - sl_level) 
+        float safe_rr_distance = math.max(rr_distance_usd, min_sl_distance)
+        
+        float desired_risk_amount = risk_amount 
+        
+        float calculated_qty = desired_risk_amount / safe_rr_distance
+        
+        // LOGIQUE POUR GÉRER LOT MAX/MIN
+        float minimum_lot_for_market = i_min_lot_size 
+        
+        entry_qty_to_risk := math.max(calculated_qty, minimum_lot_for_market)
+        
+        entry_qty_to_risk := math.min(entry_qty_to_risk, i_max_lot_size) 
+        
+        entry_sl_level := sl_level
+        
+        // TP FIXE : R:R 1:3
+        entry_tp_level := obIsBullish ? close + safe_rr_distance * 3 : close - safe_rr_distance * 3 
+        
+        // VÉRIFICATION DU LOT MINIMUM 
+        if entry_qty_to_risk >= minimum_lot_for_market
+            if obIsBullish
+                signal_entry_long := true
+            else
+                signal_entry_short := true
+
+        // Logique visuelle (unchanged)
+        if signal_entry_long or signal_entry_short
+            final_color = obIsBullish ? color.new(color.green, i_ob_opacity) : color.new(color.red, i_ob_opacity)
+            box.set_bgcolor(currentBox, final_color)
+            box.set_border_color(currentBox, final_color)
+            
+            if not na(active_label)
+                label.delete(active_label)
+            
+            label_y_pos = obIsBullish ? obHigh : obLow 
+            label_text = obIsBullish ? "ACTIF (ACHAT)!" : "ACTIF (VENTE)!"
+            label_style = obIsBullish ? label.style_label_up : label.style_label_down
+            
+            active_label := label.new(bar_index, label_y_pos, 
+                                     text=label_text, 
+                                     color=final_color, 
+                                     textcolor=color.white, 
+                                     style=label_style, 
+                                     yloc=obIsBullish ? yloc.belowbar : yloc.abovebar)
+
+    // L'OB est invalidé (unchanged)
+    if isInvalidatedBull or isInvalidatedBear
+        if not na(currentBox)
+            box.delete(currentBox)
+        obHigh := na
+        obLow := na
+        currentBox := na 
+
+        if not na(active_label)
+            label.delete(active_label)
+        active_label := na
+
+
+// --- EXÉCUTION DE LA STRATÉGIE ---
+
+// Persistance du signal
+if signal_entry_long and strategy.position_size == 0
+    signal_persistant_long := true
+
+if signal_entry_short and strategy.position_size == 0
+    signal_persistant_short := true
+
+// EXÉCUTION AVEC FILTRE DE TENDANCE
+if strategy.position_size == 0
+    
+    // EXÉCUTION LONG
+    if signal_persistant_long and not na(entry_qty_to_risk)
+        // FILTRE LONG : Prix M15 au-dessus de l'EMA de tendance H1
+        if close > ema_tendance
+            strategy.entry("LongEntry", strategy.long, qty=entry_qty_to_risk, comment="OB Long Actif")
+            strategy.exit("ExitLong", from_entry="LongEntry", stop=entry_sl_level, limit=entry_tp_level) 
+        signal_persistant_long := false 
+
+    // EXÉCUTION SHORT
+    if signal_persistant_short and not na(entry_qty_to_risk)
+        // FILTRE SHORT : Prix M15 en dessous de l'EMA de tendance H1
+        if close < ema_tendance
+            strategy.entry("ShortEntry", strategy.short, qty=entry_qty_to_risk, comment="OB Short Actif")
+            strategy.exit("ExitShort", from_entry="ShortEntry", stop=entry_sl_level, limit=entry_tp_level)
+        signal_persistant_short := false 
+
+// S'assurer que le signal actif est effacé après l'entrée/sortie
+if strategy.position_size != 0
+    signal_persistant_long := false
+    signal_persistant_short := false
+
+View in Pine Editor・242 lines
+Use on chart
+3
+7
+1 504
+This strategy is an automated implementation of Smart Money Concepts (SMC), designed to operate on the Bitcoin/Euro (BTC/EUR) chart using the 15-minute Timeframe (M15).It focuses on identifying high-probability zones (Order Blocks) after a confirmed Break of Structure (BOS) and a Liquidity Sweep, utilizing an H1/EMA 200 trend filter to only execute trades in the direction of the dominant market flow.Risk management is strict: every trade uses a fixed Risk-to-Reward Ratio (R:R) of 1:3.🧱 Core Logic Components
+
+1. Trend Filter (H1/EMA 200)Objective: To avoid counter-trend entries, which has allowed the success rate to increase to nearly $65\%$ in backtests.Mechanism: A $200$-period EMA is plotted on a higher timeframe (Default: H1/60 minutes).Long (Buy): Entry is only permitted if the current price (M15) is above the trend EMA.Short (Sell): Entry is only permitted if the current price (M15) is below the trend EMA.
+
+2. Order Block (OB) DetectionA potential Order Block is identified on the previous candle if it is
+accompanied by an inefficiency (FVG - Fair Value Gap).
+
+3. Advanced SMC ValidationBOS (Break of Structure): A recent BOS must be confirmed by breaking the swing high/low defined by the swing length (Default: 4 M15 candles).Liquidity (Liquidity Sweep): The Order Block zone must have swept recent liquidity (defined by the Liquidity Search Length) within a certain tolerance (Default: $0.1\%$).Point of Interest: The OB must form in a premium zone (for shorts) or a discount zone (for longs) relative to the current swing range (above or below the $50\%$ level of the range).
+
+4. Execution and Risk ManagementEntry: The trade is triggered when the price touches the active Order Block (mitigation).Stop Loss (SL): The SL is fixed at the low of the OB (for longs) or the high of the OB (for shorts).Take Profit (TP): The TP is strictly set at a level corresponding to 3 times the SL distance (R:R 1:3).Lot Sizing: The trade quantity is calculated to risk a fixed amount (Default: 2.00 Euros) per transaction, capped by a Lot Max and Lot Min defined by the user.
+
+Input Parameters (Optimized for BTC/EUR M15)Users can adjust these parameters to modify sensitivity and risk profile. The default values are those optimized for the high-performing backtest (Profit Factor $> 3$).ParameterDescriptionDefault Value (M15)Long. Swing (BOS)Candle length used to define the swing (and thus the BOS).4Long. Recherche Liq.Number of candles to scan to confirm a liquidity sweep.7Tolérance Liq. (%)Price tolerance to validate the liquidity sweep (as a percentage of price).0.1Timeframe TendanceChart timeframe used for the EMA filter (e.g., 60 = H1).60 (H1)Longueur EMA TendancePeriods used for the trend EMA.200Lot Max (Quantité Max BTC)Maximum quantity of BTC the strategy is allowed to trade.0.01Lot Min Réel (Exigence Broker)Minimum quantity required by the broker/exchange.0.00001

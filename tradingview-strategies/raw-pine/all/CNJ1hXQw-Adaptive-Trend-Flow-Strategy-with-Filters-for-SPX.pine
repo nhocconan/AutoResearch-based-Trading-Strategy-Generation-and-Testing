@@ -1,0 +1,8 @@
+//@version=6
+##root(root_metainfo,rm_0,'cash_per_order',const__string,strategy,commission_type,'2_140_2_173')
+##root(root_metainfo,rm_1,2,input__integer,plot,linewidth,'80_72_80_72')
+##root(root_metainfo,rm_2,2,input__integer,plot,linewidth,'81_75_81_75')
+##var_7=##input(defval=#00000000,type='INPUT_COLOR',##id='__chart_bgcolor')
+##var_8=##input(defval=#00000000,type='INPUT_COLOR',##id='__chart_fgcolor')
+##root(root_metainfo,rm_ic_0,##var_7,input__color)
+##root(root_metainfo,rm_ic_1,##var_8,input__color)

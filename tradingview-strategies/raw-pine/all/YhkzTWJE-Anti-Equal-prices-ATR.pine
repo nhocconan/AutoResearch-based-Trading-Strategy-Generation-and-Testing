@@ -1,0 +1,297 @@
+//@version=6
+// (c) TedDibiase21 - EQL/EQH Reversal System
+strategy("EQL/EQH Reversal System", overlay=true, pyramiding=1, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=2.0, calc_on_every_tick=false)
+
+// ============================================================
+// INPUTS
+// ============================================================
+i_lookback   = input.int(30,    "Lookback Bars",           minval=5,    maxval=200,  group="Detection")
+i_tolerance  = input.float(5.0, "Tolerance (pts)",         minval=0.25, step=0.25,   group="Detection")
+i_minTouches = input.int(3,     "Min Touches",             minval=2,    maxval=6,    group="Detection")
+i_useSession = input.bool(true,  "Use Session Filter",                              group="Session")
+i_sessStr    = input.session("0945-1400", "Session (ET)",                           group="Session")
+i_entryDist  = input.float(5.0, "Entry Within (pts)",      minval=0.25, step=0.25,  group="Entries")
+i_cooldown   = input.int(3,     "Cooldown Bars",           minval=1,    maxval=50,   group="Entries")
+i_stopPts    = input.float(10.0,"Stop Loss (pts)",         minval=1.0,  step=0.25,   group="Risk")
+i_tgtMult    = input.float(3.0, "Target ATR Multiplier",   minval=0.5,  step=0.25,   group="Risk")
+i_useRSI     = input.bool(true,  "RSI Filter",                                      group="Filters")
+i_rsiLen     = input.int(14,    "RSI Length",              minval=2,    maxval=30,   group="Filters")
+i_rsiOB      = input.int(60,    "RSI Overbought (Shorts)", minval=50,   maxval=80,   group="Filters")
+i_rsiOS      = input.int(40,    "RSI Oversold (Longs)",    minval=20,   maxval=50,   group="Filters")
+i_useReject  = input.bool(true,  "Rejection Candle Filter",                         group="Filters")
+i_longOnly   = input.bool(true,  "Longs Only",                                      group="Filters")
+
+// ============================================================
+// CALCULATIONS
+// ============================================================
+atr    = ta.atr(14)
+rsi    = ta.rsi(close, i_rsiLen)
+inSess = i_useSession ? not na(time(timeframe.period, i_sessStr, "America/New_York")) : true
+
+// ============================================================
+// DETECTION
+// ============================================================
+eqhCount = 0
+eqlCount = 0
+for i = 1 to i_lookback
+    if math.abs(high[i] - high) <= i_tolerance
+        eqhCount += 1
+    if math.abs(low[i]  - low)  <= i_tolerance
+        eqlCount += 1
+
+isEQH = eqhCount >= i_minTouches and not i_longOnly
+isEQL = eqlCount >= i_minTouches
+
+// ============================================================
+// FILTERS
+// ============================================================
+candleMid  = (high + low) / 2.0
+eqhReject  = i_useReject ? close < candleMid : true
+eqlReject  = i_useReject ? close > candleMid : true
+rsiShortOK = i_useRSI ? rsi >= i_rsiOB : true
+rsiLongOK  = i_useRSI ? rsi <= i_rsiOS : true
+
+// ============================================================
+// ENTRY TRACKING
+// ============================================================
+var float anchorEQH = na
+var float anchorEQL = na
+var bool  eqhDone   = false
+var bool  eqlDone   = false
+var int   barsShort = 999
+var int   barsLong  = 999
+
+barsShort += 1
+barsLong  += 1
+
+if isEQH
+    if na(anchorEQH) or math.abs(high - anchorEQH) > i_tolerance * 2.0
+        anchorEQH := high
+        eqhDone   := false
+
+if isEQL
+    if na(anchorEQL) or math.abs(low - anchorEQL) > i_tolerance * 2.0
+        anchorEQL := low
+        eqlDone   := false
+
+// ============================================================
+// SIGNALS
+// ============================================================
+eqhDist  = isEQH ? math.abs(high - anchorEQH) : 9999.0
+eqlDist  = isEQL ? math.abs(low  - anchorEQL) : 9999.0
+
+shortSig = isEQH and inSess and not eqhDone and eqhDist <= i_entryDist and rsiShortOK and eqhReject and barsShort >= i_cooldown
+longSig  = isEQL and inSess and not eqlDone  and eqlDist <= i_entryDist and rsiLongOK  and eqlReject and barsLong  >= i_cooldown
+
+// ============================================================
+// ORDERS
+// ============================================================
+tgtDist = atr * i_tgtMult
+
+if shortSig
+    eqhDone   := true
+    barsShort := 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", "Short", stop=anchorEQH + i_stopPts, limit=anchorEQH - tgtDist)
+
+if longSig
+    eqlDone  := true
+    barsLong := 0
+    strategy.entry("Long", strategy.long)
+    strategy.exit("LX", "Long", stop=anchorEQL - i_stopPts, limit=anchorEQL + tgtDist)
+
+if not inSess and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+
+// ============================================================
+// VISUALS
+// ============================================================
+plotshape(isEQH and not isEQH[1], "EQH", shape.triangledown, location.abovebar, color.new(color.red,   40), size=size.tiny)
+plotshape(isEQL and not isEQL[1], "EQL", shape.triangleup,   location.belowbar, color.new(color.green, 40), size=size.tiny)
+plotshape(shortSig, "Short", shape.labeldown, location.abovebar, color.new(color.red,   0), text="S", textcolor=color.white, size=size.small)
+plotshape(longSig,  "Long",  shape.labelup,   location.belowbar, color.new(color.green, 0), text="L", textcolor=color.white, size=size.small)
+plot(i_useRSI ? rsi : na, "RSI", color.new(color.purple, 60), display=display.pane)
+hline(i_rsiOB, "OB", color.new(color.red,   50), linestyle=hline.style_dashed)
+hline(i_rsiOS, "OS", color.new(color.green, 50), linestyle=hline.style_dashed)
+bgcolor(inSess ? color.new(color.blue, 97) : na)
+
+// ============================================================
+// TABLE
+// ============================================================
+if barstate.islast
+    var t = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 60), border_color=color.gray, border_width=1)
+    table.cell(t, 0, 0, "EQL/EQH Reversal",  text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 40))
+    table.cell(t, 1, 0, "Longs Only",        text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 40))
+    table.cell(t, 0, 1, "Lookback/Touches",  text_color=color.gray)
+    table.cell(t, 1, 1, str.tostring(i_lookback) + " bars / " + str.tostring(i_minTouches) + "+", text_color=color.white)
+    table.cell(t, 0, 2, "Tolerance",         text_color=color.gray)
+    table.cell(t, 1, 2, str.tostring(i_tolerance) + " pts",                                       text_color=color.white)
+    table.cell(t, 0, 3, "Stop / Target",     text_color=color.gray)
+    table.cell(t, 1, 3, str.tostring(i_stopPts) + " pts / " + str.tostring(i_tgtMult) + "x ATR", text_color=color.white)
+    table.cell(t, 0, 4, "RSI Oversold",      text_color=color.gray)
+    table.cell(t, 1, 4, i_useRSI ? "RSI <= " + str.tostring(i_rsiOS) : "OFF",                    text_color=i_useRSI ? color.lime : color.orange)
+    table.cell(t, 0, 5, "Session",           text_color=color.gray)
+    table.cell(t, 1, 5, i_useSession ? i_sessStr : "OFF",                                         text_color=i_useSession ? color.lime : color.orange)
+
+View in Pine Editor・134 lines
+Use on chart
+1
+0
+371
+This strategy identifies equal highs and equal lows - horizontal price levels where multiple swing points cluster within a defined tolerance. These levels represent liquidity pools where stop losses accumulate, making them prime areas for reversals.
+
+How It Works
+Equal Highs Detection:
+
+Scans the lookback period for the highest high
+Counts how many bars have highs within the tolerance of that level
+If 2+ touches exist, an "equal highs" zone is confirmed
+Equal Lows Detection:
+
+Scans the lookback period for the lowest low
+Counts how many bars have lows within the tolerance of that level
+If 2+ touches exist, an "equal lows" zone is confirmed
+Entry Logic:
+
+Short Entry: When equal highs exist AND current bar touches/reaches that level
+Long Entry: When equal lows exist AND current bar touches/reaches that level
+Exit Logic (ATR-Based):
+
+Stop Loss: ATR × Stop Multiplier (default 1.5)
+Take Profit: ATR × Target Multiplier (default 2.5)
+Settings
+Parameter Default Description
+Lookback Bars 30 Period to scan for equal levels
+Tolerance 5.0 Points within which highs/lows are considered "equal"
+ATR Length 14 ATR calculation period
+ATR Stop Mult 1.5 Stop distance = ATR × this value
+ATR Target Mult 2.5 Target distance = ATR × this value
+Session 0830-1500 Trading hours filter
+Best Used On
+NQ, ES, and other index futures
+1-minute to 15-minute timeframes
+High-volume sessions (US market hours)
+Release Notes
+A counter-trend strategy that identifies and trades reversals at Equal Highs (EQH) and Equal Lows (EQL) — institutional liquidity levels where stop-loss orders cluster. The strategy anticipates liquidity grabs followed by price reversals.
+
+Strategy Logic:
+
+This system scans for price levels that have been tested multiple times within a configurable tolerance. These "equal" levels represent liquidity pools that attract institutional order flow:
+
+• Equal Highs (EQH): When price touches the same high level 2+ times, shorts are triggered on the next touch — anticipating a reversal after the liquidity sweep.
+
+• Equal Lows (EQL): When price touches the same low level 2+ times, longs are triggered on the next touch — anticipating a bounce after stops are taken.
+
+Key Features:
+
+• Session Filter (9:45–14:00 ET): Avoids the volatile opening 15 minutes and late-day chop, focusing on the most tradeable hours.
+
+• ATR-Based Risk Management: Dynamic stop-loss (1.5x ATR) and profit target (2.5x ATR) adapt to current market volatility, maintaining a 1.67:1 reward-to-risk ratio.
+
+• Clean Execution: One position at a time, no pyramiding, flat by session end.
+
+Settings:
+
+Parameter Default Description
+Lookback Bars 30 Period to scan for equal levels
+Tolerance 5.0 pts How close prices must be to count as "equal"
+Session 9:45–14:00 Active trading window
+ATR Length 14 Volatility measurement period
+ATR Stop Mult 1.5 Stop-loss distance
+ATR Target Mult 2.5 Take-profit distance
+Recommended Use:
+
+• Designed for NQ/MNQ futures on 1-minute or 5-minute charts
+
+• Works on other liquid instruments — adjust tolerance for price scale
+
+• Backtest on your specific market before live trading
+
+Risk Disclosure:
+
+Trading futures involves substantial risk of loss. Past performance does not guarantee future results. This strategy is provided for educational purposes. Always use appropriate position sizing and never risk more than you can afford to lose.
+Release Notes
+A counter-trend strategy that identifies and trades reversals at Equal Lows (EQL) —
+institutional liquidity levels where stop-loss clusters form. When price revisits the
+same low 3 or more times within a configurable lookback window, it signals a high-
+probability demand zone. The strategy enters long on the next qualified touch,
+anticipating a bounce as institutional orders absorb the selling pressure.
+
+---
+
+Strategy Logic
+
+Equal Lows (EQL) represent price levels where sell-stops accumulate below the market.
+When price tests the same low repeatedly without breaking down, it signals that buyers
+are defending that level. This system scans the last 30 bars for lows within 5 points
+of the current low — requiring at least 3 prior touches before a signal is valid. The
+more times a level holds, the stronger the institutional interest.
+
+Three filters work together to ensure only the highest-quality setups trigger:
+
+RSI Oversold Filter: Entries only fire when RSI(14) is at or below 40, confirming
+that momentum is genuinely depressed at the level rather than price merely drifting
+into support.
+
+Rejection Candle Filter: The signal bar must close above its midpoint — meaning price
+wicked down into the EQL level but closed back up, showing immediate rejection. This
+single-bar confirmation dramatically improves entry timing.
+
+Longs Only: Backtesting across 13 months confirmed that EQL longs carry a statistically
+significant edge while EQH shorts do not. This version trades only the long side.
+
+---
+
+Risk Management
+
+Stop Loss: Fixed 10 points below the Equal Low anchor, providing defined risk on every
+trade regardless of volatility.
+
+Profit Target: Dynamic, set at 3x ATR(14) above the entry level. Using ATR for the
+target rather than a fixed point distance allows the strategy to capture larger moves
+during high-volatility sessions while keeping targets realistic during quiet periods.
+
+This creates an asymmetric risk profile — a fixed small loss against a variable larger
+gain — which is the foundation of the strategy's edge.
+
+Session Filter: Active 09:45 to 14:00 ET, avoiding the volatile opening 15 minutes
+and late-session liquidity decay.
+
+Cooldown: A minimum 3-bar gap between entries on the same level prevents over-trading
+a single setup.
+
+---
+
+Settings
+
+Parameter | Default | Description
+-------------------|---------|------------------------------------------
+Lookback Bars | 30 | Bars scanned for equal low touches
+Tolerance | 5 pts | Max distance between lows to qualify
+Min Touches | 3 | Prior touches required before signal
+Session | 0945-1400 ET | Active trading window
+Entry Within | 5 pts | Max distance from anchor to enter
+Cooldown Bars | 3 | Min bars between entries on same level
+Stop Loss | 10 pts | Fixed points below the EQL anchor
+Target Multiplier | 3.0x | Profit target = ATR x multiplier
+RSI Filter | ON / 40 | Only enter when RSI(14) <= 40
+Rejection Candle | ON | Close must be above bar midpoint
+Longs Only | ON | EQL longs only — shorts disabled
+
+---
+
+Recommended Use
+
+Designed for NQ and MNQ futures on the 1-minute chart.
+Works on other liquid instruments — adjust tolerance to match the instrument's
+typical tick range.
+Always backtest on your specific market and time period before live trading.
+
+---
+
+Risk Disclosure
+
+Trading futures involves substantial risk of loss and is not appropriate for all
+investors. Past performance is not indicative of future results. This strategy is
+provided for educational purposes only. Always use appropriate position sizing and
+never risk more than you can afford to lose.

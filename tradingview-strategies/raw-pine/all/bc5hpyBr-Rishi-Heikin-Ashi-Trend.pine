@@ -1,0 +1,198 @@
+//@version=5
+strategy("Rishi Heikin-Ashi Trend Strategy (Color Flip + Confirmations) + Buy/Sell Tags",
+     overlay=true, initial_capital=100000, pyramiding=0,
+     commission_type=strategy.commission.percent, commission_value=0.01,
+     calc_on_order_fills=true, calc_on_every_tick=true, process_orders_on_close=true)
+
+//=====================
+// Inputs
+//=====================
+useLong           = input.bool(true,  "Enable Longs")
+useShort          = input.bool(true,  "Enable Shorts")
+useMACDConfirm    = input.bool(true,  "MACD confirmation")
+useRSIConfirm     = input.bool(false, "RSI confirmation")
+useEMAConfirm     = input.bool(true,  "EMA trend filter (real price)")
+
+emaLen            = input.int(200, "EMA length (trend filter)", minval=1)
+fastLen           = input.int(12,  "MACD Fast", minval=1)
+slowLen           = input.int(26,  "MACD Slow", minval=1)
+sigLen            = input.int(9,   "MACD Signal", minval=1)
+rsiLen            = input.int(14,  "RSI length", minval=1)
+rsiBull           = input.float(55, "RSI min for Longs", minval=0, maxval=100)
+rsiBear           = input.float(45, "RSI max for Shorts", minval=0, maxval=100)
+
+atrLen            = input.int(14,  "ATR length", minval=1)
+atrMultSL         = input.float(2.0, "Stop = ATR x", step=0.1)
+atrMultTP         = input.float(3.0, "Target = ATR x", step=0.1)
+
+riskPct           = input.float(1.0, "Risk % per trade", step=0.1, minval=0.1, maxval=10)
+useSessionFilter  = input.bool(false, "Restrict to session?")
+sessionInput      = input.session("0930-1600", "Session (exchange time)")
+use5CandleRule    = input.bool(false, "Require 5-candle reversal for entries?")
+
+// ---------- BUY/SELL tag inputs ----------
+showEntryTags     = input.bool(true,  "Show BUY/SELL tags")
+showPriceLabels   = input.bool(true,  "Show entry price labels")
+labelYOffsetTicks = input.int(10,     "Label vertical offset (ticks)", minval=0)
+tagSize           = input.string("small", "Tag size", options=["tiny","small","normal","large"])
+
+// ---------- FIX: compute tag size without a function (single line) ----------
+sizeOpt = tagSize == "tiny"  ? size.tiny  :
+          tagSize == "small" ? size.small :
+          tagSize == "normal"? size.normal: size.large
+
+//=====================
+// Heikin-Ashi series
+//=====================
+haTicker = ticker.heikinashi(syminfo.tickerid)
+haOpen   = request.security(haTicker, timeframe.period, open)
+haHigh   = request.security(haTicker, timeframe.period, high)
+haLow    = request.security(haTicker, timeframe.period, low)
+haClose  = request.security(haTicker, timeframe.period, close)
+
+// Real-price (regular candles) for risk mgmt & filters
+prOpen  = open
+prHigh  = high
+prLow   = low
+prClose = close
+
+//=====================
+// HA color & flip logic
+//=====================
+haBull    = haClose >= haOpen
+haBear    = haClose <  haOpen
+bullNoLowWick = haLow == math.min(haOpen, haClose)
+bearNoUpWick  = haHigh == math.max(haOpen, haClose)
+
+haBullFlip = ta.change(haBull) and haBull
+haBearFlip = ta.change(haBear) and haBear
+
+// Optional 5-candle reversal
+fiveBullBefore = ta.barssince(haBull) >= 5 and haBullFlip
+fiveBearBefore = ta.barssince(haBear) >= 5 and haBearFlip
+entryBullCond  = use5CandleRule ? fiveBullBefore : haBullFlip
+entryBearCond  = use5CandleRule ? fiveBearBefore : haBearFlip
+
+//=====================
+// Confirmations (real price)
+//=====================
+ema      = ta.ema(prClose, emaLen)
+emaBull  = prClose > ema
+emaBear  = prClose < ema
+
+macdLine = ta.ema(prClose, fastLen) - ta.ema(prClose, slowLen)
+macdSig  = ta.ema(macdLine, sigLen)
+macdHist = macdLine - macdSig
+macdBull = macdHist > 0
+macdBear = macdHist < 0
+
+rsi      = ta.rsi(prClose, rsiLen)
+rsiBullOk= rsi >= rsiBull
+rsiBearOk= rsi <= rsiBear
+
+confirmBull = (not useEMAConfirm or emaBull) and (not useMACDConfirm or macdBull) and (not useRSIConfirm or rsiBullOk)
+confirmBear = (not useEMAConfirm or emaBear) and (not useMACDConfirm or macdBear) and (not useRSIConfirm or rsiBearOk)
+
+//=====================
+// Session filter
+//=====================
+inSession = useSessionFilter ? not na(time(timeframe.period, sessionInput)) : true
+
+//=====================
+// ATR-based stops/targets (real prices)
+//=====================
+atr = ta.atr(atrLen)
+longSL  = prClose - atrMultSL * atr
+longTP  = prClose + atrMultTP * atr
+shortSL = prClose + atrMultSL * atr
+shortTP = prClose - atrMultTP * atr
+
+// Position sizing by risk %
+capital      = strategy.equity
+riskValue    = capital * (riskPct / 100.0)
+qtyLong      = riskValue / math.max(1e-6, (prClose - longSL))
+qtyShort     = riskValue / math.max(1e-6, (shortSL - prClose))
+qtyLongSafe  = math.max(0, qtyLong)
+qtyShortSafe = math.max(0, qtyShort)
+
+//=====================
+// Entry & Exit rules
+//=====================
+enterLong  = useLong  and inSession and entryBullCond and confirmBull
+enterShort = useShort and inSession and entryBearCond and confirmBear
+
+if enterLong
+    strategy.close("Short")
+    strategy.entry(id="Long", direction=strategy.long,  qty=qtyLongSafe)
+
+if enterShort
+    strategy.close("Long")
+    strategy.entry(id="Short", direction=strategy.short, qty=qtyShortSafe)
+
+// Exits
+strategy.exit("Long-Exit",  from_entry="Long",  stop=longSL,  limit=longTP)
+strategy.exit("Short-Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+useColorFlipExit = input.bool(true, "Exit on opposite HA flip as well?")
+if useColorFlipExit
+    if strategy.position_size > 0 and haBearFlip
+        strategy.close("Long")
+    if strategy.position_size < 0 and haBullFlip
+        strategy.close("Short")
+
+//=====================
+// Visuals (existing)
+//=====================
+plot(ema, "EMA (real)", color=color.new(color.teal, 0), linewidth=2)
+plotshape(enterLong,  title="Long Entry",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="HA↑")
+plotshape(enterShort, title="Short Entry", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  size=size.tiny, text="HA↓")
+
+bgcolor(haBull and bullNoLowWick ? color.new(color.lime, 90) : na)
+bgcolor(haBear and bearNoUpWick  ? color.new(color.red,  90) : na)
+
+//=====================
+// BUY/SELL tags & price labels
+//=====================
+plotshape(showEntryTags and enterLong,  title="BUY Tag",  text="BUY",  style=shape.labelup,   location=location.belowbar,
+     color=color.new(color.green, 0), textcolor=color.white, size=size.tiny, offset=0)
+
+plotshape(showEntryTags and enterShort, title="SELL Tag", text="SELL", style=shape.labeldown, location=location.abovebar,
+     color=color.new(color.maroon, 0), textcolor=color.white, size=size.tiny, offset=0)
+
+if showPriceLabels and enterLong
+    y = prLow - labelYOffsetTicks * syminfo.mintick
+    label.new(bar_index, y, text="BUY @ " + str.tostring(prClose, format.mintick), style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white)
+
+if showPriceLabels and enterShort
+    y = prHigh + labelYOffsetTicks * syminfo.mintick
+    label.new(bar_index, y, text="SELL @ " + str.tostring(prClose, format.mintick), style=label.style_label_down, color=color.new(color.maroon, 0), textcolor=color.white)
+
+// Optional perf label
+showPerf = input.bool(false, "Show perf labels?")
+if showPerf and barstate.islast
+    label.new(bar_index, high, text="Net Profit: " + str.tostring(strategy.netprofit) +  "\nTrades: " + str.tostring(strategy.closedtrades) +   "\nWin Rate: " + str.tostring(strategy.wintrades, "#.##") + "%", textcolor=color.white, style=label.style_label_right, color=color.new(color.blue, 65))
+
+View in Pine Editor・173 lines
+Use on chart
+1
+0
+597
+High‑Level Purpose of Your Strategy
+Your script is a Heikin‑Ashi trend‑following strategy that:
+1. Enters trades when HA candles flip color
+- Bullish flip → potential long
+- Bearish flip → potential short
+2. Confirms the flip using real‑price indicators
+- EMA trend filter
+- MACD histogram direction
+- Optional RSI filter
+3. Uses ATR‑based stop‑loss and take‑profit
+- Risk‑based position sizing
+- Optional exit on opposite HA flip
+4. Adds visual clarity
+- BUY/SELL tags
+- Price labels
+- Trend shading
+- Performance label
+It’s a complete, professional‑grade strategy.
+

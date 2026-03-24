@@ -1,0 +1,25 @@
+//@version=3
+strategy("High/Low Cross Strategy", overlay=true)
+bc() => close > high[1]
+sc() => close < low[1]
+alertcondition(bc(), title="Buy", message="Buy")
+alertcondition(sc(), title="Sell", message="Sell")
+Buy() => close[1] < open[1] and high > high[1] // and open==low
+Sell() => close[1] > open[1] and low < low[1] //and open==high 
+//plotshape(Buy() and close > sma(close, 8) and strategy.position_size > 0, style=shape.triangleup, location=location.belowbar, color=white, text="B")
+//plotshape(Sell() and strategy.position_size < 0, style=shape.triangledown, location=location.abovebar, color=yellow, text="S")
+//plot(sma(close, 8), color=white)
+//plot(ema(close, 20), color=red)
+strategy.entry("Buy", true, 100, when=bc())// and close > sma(close, 8))
+strategy.entry("Sell", false, 100, when=sc())// and close < sma(close, 8))
+//strategy.entry("Long", true, 100, when=low < ema(close, 20) and close > ema(close, 20))
+//strategy.entry("Short", false, 100, when=high > ema(close, 20) and close < ema(close, 20))
+
+View in Pine Editor・16 lines
+Use on chart
+6
+9
+8
+2 017
+Use with Hiken-Ashi.
+

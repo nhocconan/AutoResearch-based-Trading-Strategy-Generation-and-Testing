@@ -1,0 +1,204 @@
+//@version=5
+strategy("extradestrategy.limited.editiom with Order Block Filter", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=15)
+
+// === INPUT PARAMETERS ===
+atrPeriod = input.int(10, "ATR Length")
+factor = input.float(3.0, "Factor", step=0.1)
+riskvalue = input.float(0.1, "Risk Value", step=0.01)
+LicenseID = input.string("0", title="License ID")
+accountType = input.string("m", title="Jenis Akun (ditempel di belakang simbol)")
+
+// === INPUT KHUSUS UNTUK PESAN ALERT ===
+group_alert = "Alert Settings"
+slPips_alert = input.int(8000, "SL untuk Pesan Alert", group=group_alert)
+trailOffset_alert = input.int(15, "Trailing Trigger (Alert)", group=group_alert)
+trailStop_alert = input.int(10, "Trailing Distance (Alert)", group=group_alert)
+trailStep_alert = input.int(12, "Trailing Step (Alert)", group=group_alert)
+
+slPips = input.int(8000, "Stop Loss (Pips)")
+tpPips = input.int(16000, "Take Profit (Pips)")
+
+// === NEWS FILTER SETTINGS ===
+enableNewsFilter = input.bool(true, "Aktifkan Filter News Waktu?")
+newsStartHour = input.int(12, "Jam Mulai News", minval=0, maxval=23)
+newsStartMinute = input.int(0, "Menit Mulai News", minval=0, maxval=59)
+newsEndHour = input.int(14, "Jam Selesai News", minval=0, maxval=23)
+newsEndMinute = input.int(0, "Menit Selesai News", minval=0, maxval=59)
+
+// === CANDLE FILTER SETTINGS ===
+enableCandleFilter = input.bool(true, "Aktifkan Filter Panjang Candle?")
+candleFilterMode = input.string("Both", title="Mode Filter Candle", options=["Range", "Body", "Both"])
+atrMultiplier = input.float(2.0, "Multiplier ATR untuk Filter Candle", step=0.1)
+
+// === ADX FILTER SETTINGS ===
+enableAdxFilter = input.bool(true, "Aktifkan ADX Filter?")
+adxLength = input.int(14, "ADX Period")
+adxThreshold = input.float(20.0, "Minimal ADX (Threshold)", step=0.5)
+
+// === RSI DIVERGENCE SETTINGS ===
+enableRsiDiv = input.bool(true, "Aktifkan RSI Divergence Filter?")
+rsiLength = input.int(14, "RSI Period")
+
+// === ORDER BLOCK FILTER SETTINGS ===
+enableOrderBlockFilter = input.bool(true, "Aktifkan Order Block Filter?")
+orderBlockATRMultiplier = input.float(1.5, "Order Block ATR Multiplier", step=0.1)
+orderBlockLookback = input.int(5, "Order Block Lookback (candle)", minval=1)
+
+// === PRICE CONVERSIONS ===
+pipValue = syminfo.mintick * 10
+slPrice = close - slPips * pipValue
+tpPrice = close + tpPips * pipValue
+
+// === INDICATORS ===
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+ma200 = ta.sma(close, 200)
+atr = ta.atr(atrPeriod)
+rsi = ta.rsi(close, rsiLength)
+
+// === MANUAL ADX CALCULATION ===
+upMove = high - high[1]
+downMove = low[1] - low
+plusDM = (upMove > downMove and upMove > 0) ? upMove : 0
+minusDM = (downMove > upMove and downMove > 0) ? downMove : 0
+trur = ta.rma(ta.tr(true), adxLength)
+plusDI = 100 * ta.rma(plusDM, adxLength) / trur
+minusDI = 100 * ta.rma(minusDM, adxLength) / trur
+dx = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx = ta.rma(dx, adxLength)
+
+// === RSI DIVERGENCE LOGIC ===
+rsiBullDiv = ta.lowest(close, 5)[1] > close and ta.lowest(rsi, 5)[1] < rsi
+rsiBearDiv = ta.highest(close, 5)[1] < close and ta.highest(rsi, 5)[1] > rsi
+
+// === ORDER BLOCK DETECTION ===
+// Bullish Order Block: sebuah candle bearish yang memiliki low yang menahan support minimal (berdasarkan ATR filter)
+bullishOB = ta.valuewhen(close < open and low <= ta.lowest(low, orderBlockLookback), low, 0)
+bullishOB_found = close > bullishOB and close > open and (close - open) < (atr * orderBlockATRMultiplier)
+
+// Bearish Order Block: candle bullish yang memiliki high yang menahan resistance minimal (berdasarkan ATR filter)
+bearishOB = ta.valuewhen(close > open and high >= ta.highest(high, orderBlockLookback), high, 0)
+bearishOB_found = close < bearishOB and close < open and (open - close) < (atr * orderBlockATRMultiplier)
+
+// Contoh filter kekuatan order block berdasarkan proximity harga saat ini ke order block
+distToBullOB = math.abs(close - bullishOB)
+distToBearOB = math.abs(close - bearishOB)
+maxDistance = atr * orderBlockATRMultiplier
+
+// Filter Order Block untuk Buy: hanya boleh buy jika jarak ke bullish order block <= maxDistance
+validBuyOB = distToBullOB <= maxDistance and bullishOB_found
+
+// Filter Order Block untuk Sell: hanya boleh sell jika jarak ke bearish order block <= maxDistance
+validSellOB = distToBearOB <= maxDistance and bearishOB_found
+
+// === SIGNAL LOGIC ===
+buySignalRaw = ta.change(direction) < 0 and close > ma200
+sellSignalRaw = ta.change(direction) > 0 and close < ma200
+
+// === FILTER LOGIC UNTUK RSI DIVERGENSI ===
+rejectBuySignal = enableRsiDiv and rsiBearDiv
+rejectSellSignal = enableRsiDiv and rsiBullDiv
+
+// === FILTER ORDER BLOCK ===
+rejectBuySignal := rejectBuySignal or (enableOrderBlockFilter and not validBuyOB)
+rejectSellSignal := rejectSellSignal or (enableOrderBlockFilter and not validSellOB)
+
+// Final Signals
+buySignal = buySignalRaw and not rejectBuySignal
+sellSignal = sellSignalRaw and not rejectSellSignal
+
+// === FILTER LOGIC LAIN ===
+currentSessionStart = timestamp(year, month, dayofmonth, newsStartHour, newsStartMinute)
+currentSessionEnd = timestamp(year, month, dayofmonth, newsEndHour, newsEndMinute)
+currentTime = time
+isNewsTime = (currentTime >= currentSessionStart) and (currentTime <= currentSessionEnd)
+
+candleRange = high - low
+isCandleTooBig = candleRange > (atr * atrMultiplier)
+bodySize = math.abs(close - open)
+isBodyTooBig = bodySize > (atr * atrMultiplier)
+
+isCandleProblem = false
+isCandleProblem := candleFilterMode == "Range" ? isCandleTooBig :
+                   candleFilterMode == "Body" ? isBodyTooBig :
+                   (isCandleTooBig or isBodyTooBig)
+
+isAdxWeak = adx < adxThreshold
+
+canTrade = true
+canTrade := enableNewsFilter and isNewsTime ? false : canTrade
+canTrade := enableCandleFilter and isCandleProblem ? false : canTrade
+canTrade := enableAdxFilter and isAdxWeak ? false : canTrade
+
+// === STRATEGY EXECUTION ===
+var bool plotBuy = false
+var bool plotSell = false
+plotBuy := false
+plotSell := false
+
+var float buySL = na
+var float buyTP = na
+var float sellSL = na
+var float sellTP = na
+
+symbolWithAccount = syminfo.ticker + accountType
+
+if strategy.position_size == 0 and canTrade
+    if buySignal
+        strategy.entry("Buy Entry", strategy.long)
+        buySL := close - slPips * pipValue
+        buyTP := close + tpPips * pipValue
+        strategy.exit("TP/SL", from_entry="Buy Entry", stop=buySL, limit=buyTP)
+        alertMessage = "buy " + symbolWithAccount + " Q=" + str.tostring(riskvalue) +
+                       " SL=" + str.tostring(slPips) +
+                       " TP=" + str.tostring(tpPips) +
+                       " TT=" + str.tostring(trailOffset_alert) +
+                       " TD=" + str.tostring(trailStop_alert) +
+                       " TS=" + str.tostring(trailStep_alert)
+        alert(alertMessage, alert.freq_once_per_bar_close)
+        plotBuy := true
+
+    if sellSignal
+        strategy.entry("Sell Entry", strategy.short)
+        sellSL := close + slPips * pipValue
+        sellTP := close - tpPips * pipValue
+        strategy.exit("TP/SL", from_entry="Sell Entry", stop=sellSL, limit=sellTP)
+        alertMessage = "sell " + symbolWithAccount + " Q=" + str.tostring(riskvalue) +
+                       " SL=" + str.tostring(slPips) +
+                       " TP=" + str.tostring(tpPips) +
+                       " TT=" + str.tostring(trailOffset_alert) +
+                       " TD=" + str.tostring(trailStop_alert) +
+                       " TS=" + str.tostring(trailStep_alert)
+        alert(alertMessage, alert.freq_once_per_bar_close)
+        plotSell := true
+
+// === PLOTTING ===
+plot(ma200, title="MA 200", color=color.blue, linewidth=2)
+
+
+if (plotBuy)
+    line.new(x1=bar_index, y1=buySL, x2=bar_index + 3, y2=buySL, color=color.red, style=line.style_dashed, width=1)
+    line.new(x1=bar_index, y1=buyTP, x2=bar_index + 3, y2=buyTP, color=color.green, style=line.style_dashed, width=1)
+    label.new(x=bar_index + 3, y=buySL, text="SL: " + str.tostring(buySL, format.mintick), style=label.style_label_left, color=color.red, textcolor=color.white)
+    label.new(x=bar_index + 3, y=buyTP, text="TP: " + str.tostring(buyTP, format.mintick), style=label.style_label_left, color=color.green, textcolor=color.white)
+    label.new(x=bar_index + 3, y=close, text="Entry: " + str.tostring(close, format.mintick), style=label.style_label_left, color=color.blue, textcolor=color.white)
+
+if (plotSell)
+    line.new(x1=bar_index, y1=sellSL, x2=bar_index + 3, y2=sellSL, color=color.red, style=line.style_dashed, width=1)
+    line.new(x1=bar_index, y1=sellTP, x2=bar_index + 3, y2=sellTP, color=color.green, style=line.style_dashed, width=1)
+    label.new(x=bar_index + 3, y=sellSL, text="SL: " + str.tostring(sellSL, format.mintick), style=label.style_label_left, color=color.red, textcolor=color.white)
+    label.new(x=bar_index + 3, y=sellTP, text="TP: " + str.tostring(sellTP, format.mintick), style=label.style_label_left, color=color.green, textcolor=color.white)
+    label.new(x=bar_index + 3, y=close, text="Entry: " + str.tostring(close, format.mintick), style=label.style_label_left, color=color.blue, textcolor=color.white)
+
+plotshape(enableCandleFilter and isCandleTooBig, title="Candle Range Terlalu Besar", location=location.abovebar, color=color.orange, style=shape.cross)
+plotshape(enableCandleFilter and isBodyTooBig, title="Candle Body Terlalu Besar", location=location.abovebar, color=color.fuchsia, style=shape.triangledown)
+plotshape(enableNewsFilter and isNewsTime, title="Waktu News", location=location.bottom, color=color.purple, style=shape.circle)
+
+plotshape(plotBuy, title="Buy Signal Executed", location=location.belowbar, color=color.green, style=shape.labelup, text="Buy", size=size.large)
+plotshape(plotSell, title="Sell Signal Executed", location=location.abovebar, color=color.red, style=shape.labeldown, text="Sell", size=size.large)
+
+View in Pine Editor・197 lines
+Use on chart
+4
+5
+1 613
+cocok untuk btc usd tidak di perjual belikan harap tidak menggunakan sembarangan

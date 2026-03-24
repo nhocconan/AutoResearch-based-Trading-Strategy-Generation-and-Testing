@@ -1,0 +1,44 @@
+//@version=4
+strategy("Consecutive Up/Down Strategy with alerts via TradingConnector to Forex", overlay=true, default_qty_value=1000)
+consecutiveBarsUp = input(3)
+consecutiveBarsDown = input(3)
+price = close
+ups = 0.0
+ups := price > price[1] ? nz(ups[1]) + 1 : 0
+dns = 0.0
+dns := price < price[1] ? nz(dns[1]) + 1 : 0
+if (ups >= consecutiveBarsUp)
+    strategy.entry("ConsUpLE", strategy.long, comment="ConsUpLE")
+    alert(message='long', freq=alert.freq_once_per_bar_close)
+if (dns >= consecutiveBarsDown)
+    strategy.entry("ConsDnSE", strategy.short, comment="ConsUpLE")
+    alert(message='short', freq=alert.freq_once_per_bar_close)
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+
+//Lines of code added to the original built-in script: 12 and 15 only.
+//They trigger alerts ready to be executed on real markets through TradingConnector
+//available for Forex, indices, crypto, stocks - anything your broker offers for trading via MetaTrader4/5
+
+View in Pine Editor・21 lines
+Use on chart
+4
+4
+3
+2
+14 054
+Software part of algotrading is simpler than you think. TradingView is a great place to do this actually. To present it, I'm publishing each of the default strategies you can find in Pinescript editor's "built-in" list with slight modification - I'm only adding 2 lines of code, which will trigger alerts, ready to be forwarded to your broker via TradingConnector and instantly executed there. Alerts added in this script: 12 and 15.
+
+How it works:
+1. TradingView alert fires.
+2. TradingConnector catches it and forwards to MetaTrader4/5 you got from your broker.
+3. Trade gets executed inside MetaTrader within 1 second of fired alert.
+
+When configuring alert, make sure to select "alert() function calls only" in CreateAlert popup. One alert per ticker is required.
+Adding stop-loss, take-profit, trailing-stop, break-even or executing pending orders is also possible. These topics have been covered in other example posts.
+
+This routing works for Forex, indices, stocks, crypto - anything your broker offers via their MetaTrader4 or 5.
+
+Disclaimer: This concept is presented for educational purposes only. Profitable results of trading this strategy are not guaranteed even if the backtest suggests so. By no means this post can be considered a trading advice. You trade at your own risk.
+
+If you are thinking to execute this particular strategy, make sure to find the instrument, settings and timeframe which you like most. You can do this by your own research only.

@@ -1,0 +1,233 @@
+//@version=5
+strategy("SAFE PUBLIC – BTC EMA 5/9 Trend Strategy (Delta Ready)",
+     overlay=true,
+     calc_on_every_tick=false,
+     process_orders_on_close=true,
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=20)  // always fixed lots, never increases automatically
+
+// ===== INPUTS =====
+orderQty = input.int(20, "Order Quantity (Lots)") // safe fixed quantity
+useATR   = input.bool(true, "Use ATR Volatility Filter")
+useST    = input.bool(true, "Use Supertrend Filter")
+useHTF   = input.bool(true, "Use Higher Timeframe Trend Filter")
+
+// ===== BASE EMAs =====
+fastEMA = ta.ema(close, 5)
+slowEMA = ta.ema(close, 9)
+ema20   = ta.ema(close, 20)
+ema50   = ta.ema(close, 50)
+
+plot(fastEMA, color=color.new(color.green, 0), title="EMA 5")
+plot(slowEMA, color=color.new(color.red,   0), title="EMA 9")
+plot(ema20,  color=color.yellow, title="EMA 20")
+plot(ema50,  color=color.blue,   title="EMA 50")
+
+// ===== HIGHER TIMEFRAME TREND (1 HOUR) =====
+htfEMA20 = request.security(syminfo.tickerid, "60", ta.ema(close, 20))
+htfEMA50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50))
+htfUp    = htfEMA20 > htfEMA50
+htfDown  = htfEMA20 < htfEMA50
+
+// ===== SUPERTREND FILTER =====
+[stLine, stDir] = ta.supertrend(3, 10)
+stBuy  = stDir == 1
+stSell = stDir == -1
+
+// ===== ATR VOLATILITY FILTER =====
+atr = ta.atr(14)
+atrPerc = (atr / close) * 100
+atrOK = atrPerc > 0.30   // safe threshold: avoid low volatility days
+
+// ===== TREND CONDITIONS =====
+upTrend   = ema20 > ema50
+downTrend = ema20 < ema50
+
+// ===== SIGNALS =====
+bullCross = ta.crossover(fastEMA, slowEMA) and barstate.isconfirmed
+bearCross = ta.crossunder(fastEMA, slowEMA) and barstate.isconfirmed
+
+// ===== FINAL SAFE ENTRY CONDITIONS =====
+buyAllowed  = upTrend and htfUp and stBuy and atrOK
+sellAllowed = downTrend and htfDown and stSell and atrOK
+
+// ===== SAFE ENTRY / EXIT LOGIC =====
+
+// BUY LOGIC
+if bullCross
+    // Always close old trade first
+    if strategy.position_size < 0
+        strategy.close("Short")
+    // Enter long only if all filters pass
+    if buyAllowed
+        strategy.close_all()
+        strategy.entry("Long", strategy.long, qty=orderQty)
+
+// SELL LOGIC
+if bearCross
+    // Always close old trade first
+    if strategy.position_size > 0
+        strategy.close("Long")
+    // Enter short only if all filters pass
+    if sellAllowed
+        strategy.close_all()
+        strategy.entry("Short", strategy.short, qty=orderQty)
+
+// ===== ALERTS =====
+alertcondition(bullCross and buyAllowed, "BUY", "BUY")
+alertcondition(bearCross and sellAllowed, "SELL", "SELL")
+
+View in Pine Editor・79 lines
+Use on chart
+2
+8
+2
+1 468
+Nov 17, 2025
+This strategy is designed for fast and accurate trend-following trades on Bitcoin.
+It uses a crossover between EMA 5 and EMA 9 to detect instant trend reversals and automatically flips between Long and Short positions.
+
+How the strategy works
+
+EMA 5 crossing above EMA 9 → Long
+
+EMA 5 crossing below EMA 9 → Short
+
+Automatically closes the opposite trade during a flip
+
+Executes trades only on candle close
+
+Prevents double entries with internal position-state logic
+
+Fully compatible with automated trading via webhooks (Delta Exchange)
+
+Why this strategy works
+
+EMA 5–9 is extremely responsive for BTC’s volatility
+
+Captures trend reversals early
+
+Works best on 15-minute timeframe
+
+Clean, simple logic without over-filtering reduces missed opportunities
+
+Performs well in both uptrends and downtrends
+
+Automation Ready
+
+This strategy includes alert conditions and webhook-ready JSON for automated execution.
+
+This is a fast-reacting BTC bot designed for intraday and swing crypto trend trading.
+Nov 18, 2025
+Release Notes
+SAFE PUBLIC – BTC EMA 5/9 Trend Strategy
+
+This strategy is designed to be a safe, simple, and reliable trend-following model for BTC.
+It uses the classic EMA 5 × EMA 9 crossover for entries, but adds multiple layers of trend, volatility, and safety filters to avoid bad trades and protect users during sideways or choppy market conditions.
+
+🔥 Core Logic
+
+The strategy enters trades only when multiple confirmations align:
+
+1️⃣ Primary Entry Signal
+
+BUY when EMA 5 crosses ABOVE EMA 9
+
+SELL when EMA 5 crosses BELOW EMA 9
+
+2️⃣ Local Trend Filter
+
+Trade direction must match:
+
+BUY only if EMA20 > EMA50
+
+SELL only if EMA20 < EMA50
+
+3️⃣ Higher Timeframe Confirmation (1-Hour)
+
+Prevents trading against major market direction:
+
+BUY only if 1H EMA20 > 1H EMA50
+
+SELL only if 1H EMA20 < 1H EMA50
+
+4️⃣ Supertrend Confirmation
+
+BUY only when Supertrend = LONG
+
+SELL only when Supertrend = SHORT
+
+5️⃣ ATR Volatility Filter
+
+Trades ONLY when volatility is healthy.
+Avoids low-movement traps and random spikes.
+
+🛡 Safety Features
+
+This strategy includes multiple protections for users:
+
+✔ Never increases position size
+
+Every trade uses a fixed quantity.
+
+✔ Closes any open trade before entering a new one
+
+Prevents lot stacking or accidental doubling.
+
+✔ No trades during low volatility, sideways markets
+
+Avoids the most common source of losses.
+
+✔ No trades against the major trend
+
+Keeps the model disciplined and stable.
+
+✔ No repainting
+
+All signals occur on candle close.
+
+⭐ Why this version is “Safe Public”
+
+This strategy is designed for public use, meaning:
+
+No aggressive martingale behavior
+
+No leverage assumptions
+
+No unrealistic expectations
+
+No risky flip-trading
+
+No unbounded drawdowns
+
+No forced exits in wrong direction
+
+It aims to give users:
+
+A clean trend-following system
+
+Minimal noise
+
+Stable behavior
+
+Beginner-friendly experience
+
+Consistent signals
+
+Strong filters for safety
+
+This may not catch every move, but it avoids the worst trades, which is far more important for long-term survival.
+
+⚠️ Important Disclaimer
+
+This is NOT financial advice.
+Past performance does not guarantee future results.
+Crypto is volatile—use appropriate position sizing and risk management.
+
+Always test before using real capital.
+
+🔔 Alerts / Automation
+
+Compatible with webhook automation (such as Delta Exchange bots).
+Signals are sent only when ALL filters align.

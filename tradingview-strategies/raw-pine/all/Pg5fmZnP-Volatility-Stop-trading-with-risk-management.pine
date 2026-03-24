@@ -1,0 +1,50 @@
+//@version=2
+strategy("MaVStop", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+length = input(20)
+mult = input(type=float, defval=2.0, minval=0.1, step=0.1)
+Risk = input(type=float, defval=10.0, minval=0.1, step=0.1, title="Risk %")
+EnableRiskManagement = input(false)
+
+// === INPUT BACKTEST RANGE ===
+FromMonth = input(defval = 1, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2018, title = "From Year", minval = 2012)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 2020, title = "To Year", minval = 2012)
+
+// === FUNCTION EXAMPLE ===
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  // backtest start window
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false // create function "within window of time"
+
+atr_ = atr(length)
+max1 = max(nz(max_[1]), close)
+min1 = min(nz(min_[1]), close)
+is_uptrend_prev = nz(is_uptrend[1], true)
+stop = is_uptrend_prev ? max1 - mult * atr_ : min1 + mult * atr_
+vstop_prev = nz(vstop[1])
+vstop1 = is_uptrend_prev ? max(vstop_prev, stop) : min(vstop_prev, stop)
+is_uptrend = close - vstop1 >= 0
+is_trend_changed = is_uptrend != is_uptrend_prev
+max_ = is_trend_changed ? close : max1
+min_ = is_trend_changed ? close : min1
+vstop = is_trend_changed ? is_uptrend ? max_ - mult * atr_ : min_ + mult * atr_ : vstop1
+
+if (EnableRiskManagement == true)
+    strategy.entry("MaVStop", strategy.long, qty = (strategy.equity / close) * (Risk / ((1 - vstop/close) * 100)), comment="MaVStop", when = is_uptrend == true and is_uptrend_prev == false and window())
+if (EnableRiskManagement == false)
+    strategy.entry("MaVStop", strategy.long, comment="MaVStop", when = is_uptrend == true and is_uptrend_prev == false and window())
+
+strategy.close("MaVStop",is_uptrend == false and is_uptrend_prev == true)
+
+plot(vstop, color = is_uptrend ? green : red, style=line, linewidth=2)
+
+View in Pine Editor・42 lines
+Use on chart
+1
+7
+7
+6 163
+Quick coding of a trading system based on the Volatility Stop (VStop) indicator. In addition to that I added the possibility to calculate the position size based on the amount that you want to risk. Beware, this is the amount you want to risk per trade. The total draw-down might be higher, as you can have multiple loosing trades.

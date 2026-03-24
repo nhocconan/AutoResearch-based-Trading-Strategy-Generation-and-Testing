@@ -1,0 +1,110 @@
+//@version=5
+strategy('Trend-based Price Action Strategy', overlay=true, shorttitle='TBPA Strategy')
+
+// Custom function to calculate maximum of two values
+maxValue(a, b) =>
+    a > b ? a : b
+
+// Custom function to calculate minimum of two values
+minValue(a, b) =>
+    a < b ? a : b
+
+// Custom function to calculate absolute difference
+absValue(a, b) =>
+    a > b ? a - b : b - a
+
+// Price Action Candlestick Patterns
+bullishEngulf = close >= open[1] and close[1] < open[1]
+bearishEngulf = close <= open[1] and close[1] > open[1]
+bullishInsideBar = high < high[1] and low > low[1] and close > low[1] and close < high[1]
+bearishInsideBar = high < high[1] and low > low[1] and close < low[1] and close > high[1]
+morningStar = low[2] > low[1] and low[1] < low and close[2] < open[2] and close[1] > open[1] and close > maxValue(open, close)[1] and absValue(close[1], open[1]) < absValue(open[2], close[2])
+eveningStar = high[2] < high[1] and high[1] > high and close[2] > open[2] and close[1] < open[1] and close < minValue(open, close)[1] and absValue(close[1], open[1]) < absValue(open[2], close[2])
+
+bullishPattern = morningStar or bullishEngulf //or bullishInsideBar
+bearishPattern = eveningStar or bearishEngulf //or bearishInsideBar
+
+// RSI integration
+rsiLength = input(title='RSI Length', defval=14)
+rsiOBValue = input(title='RSI Overbought', defval=70)
+rsiOSValue = input(title='RSI Oversold', defval=30)
+rsiValue = ta.rsi(close, rsiLength)
+rsiOverbought = rsiValue >= rsiOBValue
+rsiOversold = rsiValue <= rsiOSValue
+
+// EMA Trend Filter Settings
+emaFastLength = input(title='EMA Fast Length', defval=200)
+emaMediumLength = input(title='EMA Medium Length', defval=600)
+emaSlowLength = input(title='EMA Slow Length', defval=1000)
+emaFast = ta.ema(close, emaFastLength)
+emaMedium = ta.ema(close, emaMediumLength)
+emaSlow = ta.ema(close, emaSlowLength)
+
+longEmaAlign = emaFast > emaMedium and emaMedium > emaSlow
+shortEmaAlign = emaSlow > emaMedium and emaMedium > emaFast
+
+longFilter = close > emaFast and close > emaMedium and close > emaSlow and longEmaAlign
+shortFilter = close < emaFast and close < emaMedium and close < emaSlow and shortEmaAlign
+
+//longFilter = close > emaFast and close > emaMedium and close > emaSlow
+//shortFilter = close < emaFast and close < emaMedium and close < emaSlow 
+
+// Take Profit and Stop Loss parameters
+tpPoints = input.int(title='Take Profit (Points)', defval=400)
+slPoints = input.int(title='Stop Loss (Points)', defval=300)
+
+longCondition = ((rsiOversold or rsiOversold[1] or rsiOversold[2]) and rsiValue < 50 and bullishPattern) and longFilter
+shortCondition = ((rsiOverbought or rsiOverbought[1] or rsiOverbought[2]) and rsiValue > 50 and bearishPattern) and shortFilter
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long TP/SL", from_entry="Long", profit=tpPoints, loss=slPoints) 
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short TP/SL", from_entry="Short", profit=tpPoints, loss=slPoints) 
+
+// Plot signals
+plotshape(longCondition, title='BUY', location=location.belowbar, color=color.new(color.white, 0), style=shape.triangleup, size=size.tiny, text='')
+plotshape(shortCondition, title='SELL', location=location.abovebar, color=color.new(color.white, 0), style=shape.triangledown, size=size.tiny, text='')
+
+// Plot EMAs when EMA Trend filter is enabled
+plot(emaFast, title='Fast EMA', color=color.rgb(4, 197, 197))
+plot(emaMedium, title='Medium EMA', color=color.rgb(252, 204, 116))
+plot(emaSlow, title='Slow EMA', color=color.rgb(248, 143, 174))
+
+View in Pine Editor・74 lines
+Use on chart
+4
+8
+8
+2
+13 135
+This is a strategy script that combines trend-based price action analysis with the Relative Strength Index (RSI) and Exponential Moving Averages (EMA) as trend filters. Here's a summary of the key components and logic:
+
+Price Action Candlestick Patterns:
+Bullish patterns: Engulfing candle and Morning Star.
+Bearish patterns: Engulfing candle and Evening Star.
+
+RSI Integration:
+RSI is used to identify overbought and oversold conditions.
+
+EMA Trend Filter:
+Three EMAs with different periods: Fast , Medium and Slow.
+Long trend condition occur when the fast EMA is above the medium and the medium is above the slow EMA.
+Short trend condition occur when the slow EMA is above the medium and the medium is above the fast EMA.
+
+Long entry conditions: RSI is oversold, RSI is decreasing, bullish candlestick pattern, and EMA trend filter conditions are met.
+Short entry conditions: RSI is overbought, RSI is decreasing, bearish candlestick pattern, and EMA trend filter conditions are met.
+
+
+Exit conditions:
+Take profit or stop loss is reached.
+
+Plotting:
+Signals are plotted on the chart when entry conditions are met.
+EMAs are plotted when the EMA trend filter is enabled.
+
+This script aims to capture potential trend reversal points based on a combination of candlestick patterns, RSI, and EMA trend analysis.
+
+Traders can use this script as a starting point for further customization or as a reference for developing their own trading strategies. It's important to note that past performance is not indicative of future results, and thorough testing and validation are recommended before deploying any trading strategy.

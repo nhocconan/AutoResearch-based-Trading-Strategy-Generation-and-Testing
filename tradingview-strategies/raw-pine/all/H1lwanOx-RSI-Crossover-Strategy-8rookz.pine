@@ -1,0 +1,27 @@
+//@version=3
+strategy("RSI Crossover Strategy 8rookz", overlay=true)
+length = input( 13 )
+lengthfast = input( 5 )
+// overSold = input( 30 )
+// overBought = input( 70 )
+price = close
+
+vrsi = rsi(price, length)
+vrsiFast = rsi(price, lengthfast)
+
+if (not na(vrsi))
+    if (crossover(vrsiFast, vrsi))
+        strategy.entry("Long", strategy.long, comment="Long")
+    if (crossunder(vrsiFast, vrsi))
+        strategy.entry("Short", strategy.short, comment="Short")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・18 lines
+Use on chart
+3
+3
+2 513
+RSI Crossover Strategy
+
+used to create entry points for increasing relative strength

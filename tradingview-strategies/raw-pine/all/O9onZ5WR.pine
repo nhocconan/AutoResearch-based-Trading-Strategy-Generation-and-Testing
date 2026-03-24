@@ -1,0 +1,255 @@
+//@version=5
+strategy("NARROW RANGE STRATEGY", shorttitle="NR STRATEGY", overlay=true, initial_capital=1000, commission_type=strategy.commission.percent, commission_value=0.18, slippage=3)
+
+
+//------------------------------TOOL TIPS-------------------------------------//
+
+t1 = "Corresponds to the number of candles back to compare current volatility. Default is 4 to compare current volatility with that of 4 candles ago."
+t2 = "Percentage of the reference range on which an exit order is set to limit losses. The minimum value is 0.001, while the maximum is 1. The default value is 0.35"
+t3 = "Each gain or losse (relative to the previous reference) in an amount equal to this fixed ratio will change quantity of orders."
+t4 = "The amount of money to be added to or subtracted from orders once the fixed ratio has been reached."
+
+
+//--------------------------------FUNCTIONS------------------------------------//
+
+//@function to print label
+debugLabel(txt, color) =>
+    label.new(bar_index, high, text = txt, color=color, style = label.style_label_lower_right, textcolor = color.black, size = size.small)
+
+//@function which looks if the close date of the current bar falls inside the date range
+inBacktestPeriod(start, end) => (time >= start) and (time <= end)
+
+
+//--------------------------------USER INPUTS------------------------------------//
+
+//Narrow Range Length 
+nrLength = input.int(4, minval=2, title="Narrow Range Length", group="Strategy parameters", tooltip=t1)
+//Risk Management
+stopLossInput = input.float(0.35, minval=0.001, maxval=1, title="Stop Loss (in percentage of reference range)", group="Strategy parameters", tooltip=t2)
+//Money Management
+fixedRatio = input.int(defval=400, minval=1, title="Fixed Ratio Value ($)", group="Money Management", tooltip=t3)
+increasingOrderAmount = input.int(defval=200, minval=1, title="Increasing Order Amount ($)", group="Money Management", tooltip=t4)
+//Backtesting period
+startDate = input.time(title="Start Date", defval=timestamp("1 Janv 2017 00:00:00"), group="Backtesting Period")
+endDate = input.time(title="End Date", defval=timestamp("1 July 2024 00:00:00"), group="Backtesting Period")
+
+
+//--------------------------------VARIABLES INITIALISATION--------------------------//
+
+bool nr = na
+var bool long = na
+var bool short = na
+var float stopPriceLong = na
+var float stopLossLong = na
+var float takeProfitLong = na
+var float stopPriceShort = na
+var float stopLossShort = na
+var float takeProfitShort = na
+var float takeProfit = na
+var float stopLoss = na
+bool inRange = na
+int closedtrades = strategy.closedtrades
+equity = math.abs(strategy.equity - strategy.openprofit)
+var float capital_ref = strategy.initial_capital
+var float cashOrder = strategy.initial_capital * 0.95
+
+
+//------------------------------CHECKING SOME CONDITIONS ON EACH SCRIPT EXECUTION-------------------------------//
+
+//Checking if the date belong to the range
+inRange := inBacktestPeriod(startDate, endDate)
+
+//Checking performances of the strategy
+if equity > capital_ref + fixedRatio
+    spread = (equity - capital_ref)/fixedRatio
+    nb_level = int(spread)
+    increasingOrder = nb_level * increasingOrderAmount
+    cashOrder := cashOrder + increasingOrder
+    capital_ref := capital_ref + nb_level*fixedRatio
+if equity < capital_ref - fixedRatio
+    spread = (capital_ref - equity)/fixedRatio
+    nb_level = int(spread)
+    decreasingOrder = nb_level * increasingOrderAmount
+    cashOrder := cashOrder - decreasingOrder
+    capital_ref := capital_ref - nb_level*fixedRatio
+
+//We check if a trade has been closed to cancel all previous orders
+if closedtrades > closedtrades[1]
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    stopPriceLong := na
+    stopPriceShort := na
+
+//Checking if we close all trades in case where we exit the backtesting period
+if strategy.position_size!=0 and not inRange
+    debugLabel("END OF BACKTESTING PERIOD : we close the trade", color=color.rgb(116, 116, 116))
+    strategy.close_all()
+    long := na
+    short := na
+    stopPriceLong := na
+    stopLossLong := na
+    takeProfitLong := na
+    stopPriceShort := na
+    stopLossShort := na
+    takeProfitShort := na
+    takeProfit := na
+    stopLoss := na
+
+//----------------------------------FINDING NARROW RANGE DAY------------------------------------------//
+
+// We find the Narrow Range Day
+if low > low[nrLength] and high < high[nrLength]
+    nr := true 
+
+
+//------------------------------------STOP ORDERS--------------------------------------------//
+
+// We handle plotting of stop orders and cancellation of other side order if one order is triggered
+if strategy.position_size > 0 and not na(stopPriceLong) and not na(stopPriceShort)
+    long := true
+    strategy.cancel("Short")
+    stopPriceLong := na
+    stopPriceShort := na
+    takeProfit := takeProfitLong
+    stopLoss := stopLossLong
+if strategy.position_size < 0 and not na(stopPriceLong) and not na(stopPriceShort)
+    short := true
+    strategy.cancel("Long") 
+    stopPriceLong := na
+    stopPriceShort := na
+    takeProfit := takeProfitShort
+    stopLoss := stopLossShort
+
+
+//------------------------------------STOP LOSS & TAKE PROFIT--------------------------------//
+
+// If an order is triggered we plot TP and SL
+if not na(takeProfit) and not na(stopLoss) and long
+    if high >= takeProfit and closedtrades == closedtrades[1] + 1
+        takeProfit := na
+        stopLoss := na
+        long := na
+    if low <= stopLoss and closedtrades == closedtrades[1] + 1
+        takeProfit := na
+        stopLoss := na
+        long := na
+if not na(takeProfit) and not na(stopLoss) and short
+    if high >= stopLoss and closedtrades == closedtrades[1] + 1
+        takeProfit := na
+        stopLoss := na
+        short := na
+    if low <= takeProfit and closedtrades == closedtrades[1] + 1
+        takeProfit := na
+        stopLoss := na
+        short := na
+
+
+//-----------------------------LONG/SHORT CONDITION-------------------------//
+
+// Conditions to create two stop orders (one for Long and one for Short) and SL & TP calculation
+if nr and inRange and strategy.position_size == 0
+    //LONG
+    stopPriceLong := high[4]
+    takeProfitLong := high[4] + (high[4] - low[4])
+    stopLossLongNr = high[4] - (high[4] - low[4])*stopLossInput
+    if (stopLossLongNr/stopPriceLong) - 1 < -0.10
+        stopLossLong := stopPriceLong*0.9
+    else
+        stopLossLong := stopLossLongNr
+    qtyLong = cashOrder/stopPriceLong
+    strategy.entry("Long", strategy.long, qtyLong, stop=stopPriceLong)
+    strategy.exit("Exit Long", "Long", limit=takeProfitLong ,stop=stopLossLong)
+
+    //SHORT
+    stopPriceShort := low[4]
+    takeProfitShort := low[4] - (high[4] - low[4])
+    stopLossShortNr = low[4] + (high[4] - low[4])*stopLossInput
+    if (stopLossShortNr/stopPriceShort) - 1 > 0.10
+        stopLossShort := stopPriceShort*1.1
+    else
+        stopLossShort := stopLossShortNr
+    qtyShort = cashOrder/stopPriceShort
+    strategy.entry("Short", strategy.short, qtyShort, stop=stopPriceShort)
+    strategy.exit("Exit Short", "Short", limit=takeProfitShort ,stop=stopLossShort)
+
+
+//--------------------------PLOTTING ELEMENT----------------------------//
+
+plotshape(nr, "NR", shape.arrowdown, location.abovebar, color.rgb(255, 132, 0), text= "NR4", size=size.huge)
+plot(stopPriceLong, "Stop Order", color.blue, 3, plot.style_linebr)
+plot(stopPriceShort, "Stop Order", color.blue, 3, plot.style_linebr)
+plot(takeProfit, "Take Profit", color.green, 3, plot.style_linebr)
+plot(stopLoss, "Stop Loss", color.red, 3, plot.style_linebr)
+
+View in Pine Editor・188 lines
+Use on chart
+1
+1
+6
+3
+3 826
+Narrow Range Strategy :
+
+
+INTRODUCTION :
+
+This strategy is based on the Narrow Range Day concept, implying that low volatility will generate higher volatility in the days ahead. The strategy sends us buy and sell signals with well-defined profit targets. It's a medium/long-term strategy. There's also a money management method that allows us to reinvest part of the profits or reduce the size of orders in the event of substantial losses.
+
+
+NARROW RANGE (NR) DAY :
+
+A Narrow Range Day is a day in which price variations are included in those of a specific day some time before. The high and low of this specific day form the "reference range". In general, we compare these variations with those of 4 or 7 days ago. The mathematical formula for finding an NR4 is :
+
+If low > low(4) and high < high(4) :
+nr = true
+
+This implies that the current low is greater than the low of 4 days ago, and the current high is smaller than the high of 4 days ago. So today's volatility is lower than that of 4 days ago, and may be a sign of high volatility to come.
+
+
+PARAMETERS :
+
+
+Narrow Range Length : Corresponds to the number of candles back to compare current volatility. The default is 4, allowing comparison of current volatility with that of 4 candles ago.
+
+Stop Loss : Percentage of the reference range on which to set an exit order to limit losses. The minimum value is 0.001, while the maximum is 1. The default value is 0.35.
+
+Fixed Ratio : This is the amount of gain or loss at which the order quantity is changed. The default is 400, which means that for each $400 gain or loss, the order size is increased or decreased by an amount chosen by the user.
+
+Increasing Order Amount : This is the amount to be added to or subtracted from orders when the fixed ratio is reached. The default is $200, which means that for every $400 gain, $200 is reinvested in the strategy. On the other hand, for every $400 loss, the order size is reduced by $200.
+
+Initial capital : $1000
+
+Fees : Interactive Broker fees apply to this strategy. They are set at 0.18% of the trade value.
+
+Slippage : 3 ticks or $0.03 per trade. Corresponds to the latency time between the moment the signal is received and the moment the order is executed by the broker.
+
+Important : A bot was used to test NR4 and NR7 with all possible Stop Losses in order to find out which combination generates the highest return on 
+ETHUSD
+ while limiting the drawdown. This strategy is the most optimal with an NR4 and a SL of 35% of the reference range size in 5D timeframe.
+
+
+
+
+BUY AND SHORT SIGNALS :
+
+When an NR is spotted, we create two stop orders on the high and low of the reference range. As soon as there's a breakout from this reference range (shown in blue on the chart), we open a position. We're LONG if there's a breakout on the high and SHORT if there's a breakout on the low. Executing a stop order cancels the second stop order.
+
+
+RISK MANAGEMENT :
+
+This strategy is subject to losses. We manage our risk with Stop Losses. The user is free to enter a SL as a percentage of the reference range. The maximum amount risked per trade therefore depends on the size of the range. The larger the range, the greater the risk. That's why we have set a maximum Stop Loss to 10% to limiting risks per trade.
+The special feature of this strategy is that it targets a precise profit objective. This corresponds to the size of the reference range at the top of the high if you're LONG, or at the bottom of the low if you're short. In the same way, the larger the reference range, the greater the potential profits.
+The risk reward remains the same for all trades and amounts to : 100/35 = 2.86. If the reference range is too high, we have set a SL to 10% of the trade value to limit losses. In that case, the risk reward is less than 2.86.
+
+
+MONEY MANAGEMENT :
+
+The fixed ratio method was used to manage our gains and losses. For each gain of an amount equal to the value of the fixed ratio, we increase the order size by a value defined by the user in the "Increasing order amount" parameter. Similarly, each time we lose an amount equal to the value of the fixed ratio, we decrease the order size by the same user-defined value. This strategy increases both performance and drawdown.
+
+
+NOTE :
+
+Please note that the strategy is backtested from 2017-01-01. As the timeframe is 5D, this strategy is a medium/long-term strategy. That's why only 37 trades were closed. Be careful, as the test sample is small and performance may not necessarily reflect what may happen in the future.
+
+
+Enjoy the strategy and don't forget to take the trade :)

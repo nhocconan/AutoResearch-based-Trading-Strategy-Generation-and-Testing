@@ -1,0 +1,66 @@
+//@version=5
+strategy("Breadth Strategy: McClellan + ADn", overlay=true, margin_long=100, margin_short=100, initial_capital=100000)
+
+// === INPUTS ===
+// Symbols for breadth data (adjust these depending on your broker/data)
+symUpVolNyse   = input.symbol("UPVOL.NY", "Up Volume NYSE")
+symUpVolNasdaq = input.symbol("UPVOL.NQ", "Up Volume NASDAQ")
+symDnVolNyse   = input.symbol("DNVOL.NY", "Down Volume NYSE")
+symDnVolNasdaq = input.symbol("DNVOL.NQ", "Down Volume NASDAQ")
+symUpIssuesNyse   = input.symbol("ADVN.NY", "Advancing Issues NYSE")
+symUpIssuesNasdaq = input.symbol("ADVN.NQ", "Advancing Issues NASDAQ")
+symDnIssuesNyse   = input.symbol("DECL.NY", "Declining Issues NYSE")
+symDnIssuesNasdaq = input.symbol("DECL.NQ", "Declining Issues NASDAQ")
+
+tf = input.timeframe("D", "Breadth Timeframe")
+
+// === McClellan Oscillator ===
+upVolNyse   = request.security(symUpVolNyse, tf, close)
+dnVolNyse   = request.security(symDnVolNyse, tf, close)
+upVolNasdaq = request.security(symUpVolNasdaq, tf, close)
+dnVolNasdaq = request.security(symDnVolNasdaq, tf, close)
+
+ratWS = 100 * ((upVolNyse + upVolNasdaq) - (dnVolNyse + dnVolNasdaq)) / (upVolNyse + upVolNasdaq + dnVolNyse + dnVolNasdaq)
+
+mcoWS = ta.ema(ratWS, 19) - ta.ema(ratWS, 39)
+plot(mcoWS, "McClellan Oscillator (WS)", color=color.new(color.blue, 0))
+
+// === AD Line (ADn) ===
+upIssuesNyse   = request.security(symUpIssuesNyse, tf, close)
+dnIssuesNyse   = request.security(symDnIssuesNyse, tf, close)
+upIssuesNasdaq = request.security(symUpIssuesNasdaq, tf, close)
+dnIssuesNasdaq = request.security(symDnIssuesNasdaq, tf, close)
+
+amplWS = (upIssuesNyse - dnIssuesNyse) + (upIssuesNasdaq - dnIssuesNasdaq)
+lineaADWS = ta.cum(amplWS)
+
+// Convert to %K stochastic of AD Line
+estADWS = ta.stoch(lineaADWS, lineaADWS, lineaADWS, 21)
+lineaADnWS = ta.ema(estADWS, 7)
+plot(lineaADnWS, "ADn Line (WS)", color=color.new(color.green, 0))
+
+// === STRATEGY CONDITIONS ===
+longCond  = (mcoWS > 0) and (lineaADnWS > 40)
+shortCond = (mcoWS < 3) and (lineaADnWS < 70)
+
+// === ENTRIES ===
+if (longCond)
+    strategy.entry("Long", strategy.long)
+
+if (shortCond)
+    strategy.entry("Short", strategy.short)
+
+// Optional: close opposite
+if (shortCond)
+    strategy.close("Long")
+if (longCond)
+    strategy.close("Short")
+
+View in Pine Editor・57 lines
+Use on chart
+2
+526
+This script uses only McClellan Oscillator + ADn Line, exactly as you specified.
+Runs breadth calculations on daily timeframe by default (tf = D). You can change to weekly, etc.
+Entries/exits are instant when conditions flip.
+Both mcoWS and ADn are plotted for visualization.

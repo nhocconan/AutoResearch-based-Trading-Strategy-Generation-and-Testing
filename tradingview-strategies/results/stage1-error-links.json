@@ -1,0 +1,2938 @@
+[
+  {
+    "queue_rank": 35,
+    "page": 2,
+    "name": "S3.1 SFP EMA Turtle Strategy for Hyperliquid [HYPR-run]",
+    "chart_url": "https://www.tradingview.com/script/qbpP1RqN-S3-1-SFP-EMA-Turtle-Strategy-for-Hyperliquid-HYPR-run/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 37,
+    "page": 2,
+    "name": "S2.1 EMA Turtle ATR Strategy for Hyperliquid [HYPR-run]",
+    "chart_url": "https://www.tradingview.com/script/Dnud09x8-S2-1-EMA-Turtle-ATR-Strategy-for-Hyperliquid-HYPR-run/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 39,
+    "page": 2,
+    "name": "S1.1 EMA Crossover Strategy for Hyperliquid [HYPR-run]",
+    "chart_url": "https://www.tradingview.com/script/DBe1ib2N-S1-1-EMA-Crossover-Strategy-for-Hyperliquid-HYPR-run/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 233,
+    "page": 10,
+    "name": "Simpleton v0.01 KIMI - Multi-Strategy (good in 30/45 min.. ?)",
+    "chart_url": "https://www.tradingview.com/script/gYqkmQoN-Simpleton-v0-01-KIMI-Multi-Strategy-good-in-30-45-min/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 261,
+    "page": 11,
+    "name": "4H Range Scalp V3 - Smart Fakeout",
+    "chart_url": "https://www.tradingview.com/script/MfYqi6rS/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 308,
+    "page": 13,
+    "name": "Reverse Pulse System FractalTP",
+    "chart_url": "https://www.tradingview.com/script/E5WeyC4P-Reverse-Pulse-System-FractalTP/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 310,
+    "page": 13,
+    "name": "Reverse Pulse System",
+    "chart_url": "https://www.tradingview.com/script/N53tMEhp-Reverse-Pulse-System/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 334,
+    "page": 14,
+    "name": "Yzkvng SMC Confirmations & webhook",
+    "chart_url": "https://www.tradingview.com/script/HmP5T23G-Yzkvng-SMC-Confirmations-webhook/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 519,
+    "page": 22,
+    "name": "Smart Trader,Episode 1, by Ata Sabanci  | Unified Matrix",
+    "chart_url": "https://www.tradingview.com/script/f09TPuYj-Smart-Trader-Episode-1-by-Ata-Sabanci-Unified-Matrix/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 573,
+    "page": 24,
+    "name": "OCC Strategy Optimized (MA 5 + Delayed TSL)",
+    "chart_url": "https://www.tradingview.com/script/oeDm4xHc-OCC-Strategy-Optimized-MA-5-Delayed-TSL/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 586,
+    "page": 25,
+    "name": "Antigravity OCC Strategy (MA 5 + Delayed TSL)",
+    "chart_url": "https://www.tradingview.com/script/1tMfiPij-Antigravity-OCC-Strategy-MA-5-Delayed-TSL/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 702,
+    "page": 30,
+    "name": "G-BOT ENGULFING CANDLE - FIXED SL & TP ",
+    "chart_url": "https://www.tradingview.com/script/yWaHb1wO-G-BOT-ENGULFING-CANDLE-FIXED-SL-TP/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 749,
+    "page": 32,
+    "name": "Vital Wave 20-50",
+    "chart_url": "https://www.tradingview.com/script/Ua0HFFQR/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 819,
+    "page": 35,
+    "name": "Vandan V2",
+    "chart_url": "https://www.tradingview.com/script/o9RQXXax-Vandan-V2/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 843,
+    "page": 36,
+    "name": "Vandan V2",
+    "chart_url": "https://www.tradingview.com/script/tmdG7J14-Vandan-V2/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 864,
+    "page": 36,
+    "name": "Monthly First-Day Range Breakout (Long-Only)",
+    "chart_url": "https://www.tradingview.com/script/NAPe8im5-Monthly-First-Day-Range-Breakout-Long-Only/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 983,
+    "page": 41,
+    "name": "Hazel nut BB Strategy, volume base- lite version",
+    "chart_url": "https://www.tradingview.com/script/c0rLsU20-Hazel-nut-BB-Strategy-volume-base-lite-version/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 1003,
+    "page": 42,
+    "name": "Daily CMO + Volume Intraday Strategy v6 by Subirr",
+    "chart_url": "https://www.tradingview.com/script/IqgPfsdk-Daily-CMO-Volume-Intraday-Strategy-v6-by-Subirr/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 1019,
+    "page": 43,
+    "name": "Turtle 20-Day Breakout + ATR (v6 Clean)",
+    "chart_url": "https://www.tradingview.com/script/VhLgxDfw-Turtle-20-Day-Breakout-ATR-v6-Clean/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 1020,
+    "page": 43,
+    "name": "EMA20 Cross Strategy with countertrades and signals",
+    "chart_url": "https://www.tradingview.com/script/VCZe7vwV/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 1043,
+    "page": 44,
+    "name": "EMA 1/8 Cross - Fixed Pip TP/SL",
+    "chart_url": "https://www.tradingview.com/script/PFVymIwZ-EMA-1-8-Cross-Fixed-Pip-TP-SL/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1122,
+    "page": 47,
+    "name": "Canuck Trading Traders Strategy [Candle Entropy Edition]",
+    "chart_url": "https://www.tradingview.com/script/UbiYgrSE-Canuck-Trading-Traders-Strategy-Candle-Entropy-Edition/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 1141,
+    "page": 48,
+    "name": "Options Strategy V2.0",
+    "chart_url": "https://www.tradingview.com/script/ct88NzIm-Options-Strategy-V2-0/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 1225,
+    "page": 52,
+    "name": "Warrior Trading Momentum Strategy",
+    "chart_url": "https://www.tradingview.com/script/RuvGSExs-Warrior-Trading-Momentum-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1239,
+    "page": 52,
+    "name": "Canuck Trading Trader Strategy",
+    "chart_url": "https://www.tradingview.com/script/OKsWbKwY-Canuck-Trading-Trader-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 1451,
+    "page": 61,
+    "name": "Optimized Auto-Detect Strategy (MA, ATR, Trend, RSI)",
+    "chart_url": "https://www.tradingview.com/script/yvuKGEbS-Optimized-Auto-Detect-Strategy-MA-ATR-Trend-RSI/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1472,
+    "page": 62,
+    "name": "Trend Vanguard Strategy",
+    "chart_url": "https://www.tradingview.com/script/HhSwguVI-Trend-Vanguard-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1505,
+    "page": 63,
+    "name": "JMA Quantum Edge: Adaptive Precision Trading System ",
+    "chart_url": "https://www.tradingview.com/script/HkbggSLP-JMA-Quantum-Edge-Adaptive-Precision-Trading-System/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1689,
+    "page": 71,
+    "name": "XAUUSD 10-Minute Strategy",
+    "chart_url": "https://www.tradingview.com/script/LxrgnsTO-XAUUSD-10-Minute-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1714,
+    "page": 72,
+    "name": "Exponantial Spread Strategy",
+    "chart_url": "https://www.tradingview.com/script/jcBpu44W-Exponantial-Spread-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1721,
+    "page": 72,
+    "name": "Adaptive MA Scalping Strategy",
+    "chart_url": "https://www.tradingview.com/script/CcA86JkG-Adaptive-MA-Scalping-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1729,
+    "page": 73,
+    "name": "KAMA Cloud ST",
+    "chart_url": "https://www.tradingview.com/script/tzg05DpR-KAMA-Cloud-ST/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1732,
+    "page": 73,
+    "name": "Fibonacci Swing Trading Bot",
+    "chart_url": "https://www.tradingview.com/script/dzhi1xb7-Fibonacci-Swing-Trading-Bot/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1768,
+    "page": 74,
+    "name": "Fractal Proximity MA Aligment Scalping Strategy",
+    "chart_url": "https://www.tradingview.com/script/M9mByw1M-Fractal-Proximity-MA-Aligment-Scalping-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1826,
+    "page": 77,
+    "name": "Versatile Moving Average Strategy",
+    "chart_url": "https://www.tradingview.com/script/lLM6rAZr-Versatile-Moving-Average-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 1885,
+    "page": 79,
+    "name": "Bitcoin Momentum Strategy",
+    "chart_url": "https://www.tradingview.com/script/Tce7SnL7-Bitcoin-Momentum-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 1957,
+    "page": 82,
+    "name": "Engulfing with Trend",
+    "chart_url": "https://www.tradingview.com/script/qVRxr42U/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2020,
+    "page": 85,
+    "name": "Buy Only Strategy with Dynamic Re-Entry and Exit",
+    "chart_url": "https://www.tradingview.com/script/2au7bXud-Buy-Only-Strategy-with-Dynamic-Re-Entry-and-Exit/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2046,
+    "page": 86,
+    "name": "D-BoT Alpha 'Short' SMA and RSI Strategy",
+    "chart_url": "https://www.tradingview.com/script/YAidkd8K/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2059,
+    "page": 86,
+    "name": "Monthly Strategy Performance Table",
+    "chart_url": "https://www.tradingview.com/script/aHwncfep-Monthly-Strategy-Performance-Table/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2061,
+    "page": 86,
+    "name": "Hobbiecode - Five Day Low RSI Strategy",
+    "chart_url": "https://www.tradingview.com/script/PmJa1OXL/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2103,
+    "page": 88,
+    "name": "Lorentzian Classification Strategy ",
+    "chart_url": "https://www.tradingview.com/script/SfyBCHIJ/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2106,
+    "page": 88,
+    "name": "Moving Average Trap Strategy by D. Brigaglia",
+    "chart_url": "https://www.tradingview.com/script/8FsO4OyJ-Moving-Average-Trap-Strategy-by-D-Brigaglia/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2141,
+    "page": 90,
+    "name": "Ema Scalp",
+    "chart_url": "https://www.tradingview.com/script/kUncyS8L-Ema-Scalp/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2162,
+    "page": 91,
+    "name": "Strategy: Range Breakout",
+    "chart_url": "https://www.tradingview.com/script/pEf6ohWk-Strategy-Range-Breakout/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2202,
+    "page": 92,
+    "name": "Extended Recursive Bands Strategy",
+    "chart_url": "https://www.tradingview.com/script/ZE5dQUPR-Extended-Recursive-Bands-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2238,
+    "page": 94,
+    "name": "[Sniper] SuperTrend + SSL Hybrid + QQE MOD",
+    "chart_url": "https://www.tradingview.com/script/6w9Jchj6/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2239,
+    "page": 94,
+    "name": "[Sniper] SSL Hybrid + QQE MOD + Waddah Attar Strategy",
+    "chart_url": "https://www.tradingview.com/script/FxJdGwmG/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2246,
+    "page": 94,
+    "name": "[D] Dudu 95 Strategy Template ver.1.1.",
+    "chart_url": "https://www.tradingview.com/script/C3D8ElZZ/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2249,
+    "page": 94,
+    "name": "[DuDu95] SSL 4C MACD Laugerre RSI Strategy",
+    "chart_url": "https://www.tradingview.com/script/BckFbevb/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2251,
+    "page": 94,
+    "name": "[fpemehd] Strategy Template",
+    "chart_url": "https://www.tradingview.com/script/hzvQpMZa/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2252,
+    "page": 94,
+    "name": "[2022] MACD Cross Strategy (version 1)",
+    "chart_url": "https://www.tradingview.com/script/IkcC7lDu-2022-MACD-Cross-Strategy-version-1/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2259,
+    "page": 95,
+    "name": "[fpemehd] SSL Baseline Strategy",
+    "chart_url": "https://www.tradingview.com/script/r4SVQcwp/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2270,
+    "page": 95,
+    "name": "Fake Strategy",
+    "chart_url": "https://www.tradingview.com/script/ekQPU4LF-Fake-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2311,
+    "page": 97,
+    "name": "EMA + Bullish Engulfing Candle Pattern Strategy",
+    "chart_url": "https://www.tradingview.com/script/TlG2Vs8L/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2331,
+    "page": 98,
+    "name": "DCA After Downtrend (by BHD_Trade_Bot)",
+    "chart_url": "https://www.tradingview.com/script/L4ffblzk-DCA-After-Downtrend-by-BHD-Trade-Bot/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2350,
+    "page": 98,
+    "name": "Take Profit On Trend v2 (by BHD_Trade_Bot)",
+    "chart_url": "https://www.tradingview.com/script/3vXbvuTO-Take-Profit-On-Trend-v2-by-BHD-Trade-Bot/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2475,
+    "page": 104,
+    "name": "Gap Reversion Strategy",
+    "chart_url": "https://www.tradingview.com/script/sef1hUMe-Gap-Reversion-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2622,
+    "page": 110,
+    "name": "Overnight Gap Analysis",
+    "chart_url": "https://www.tradingview.com/script/rEZ9Pggd-Overnight-Gap-Analysis/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2646,
+    "page": 111,
+    "name": "R3 ETF Strategy",
+    "chart_url": "https://www.tradingview.com/script/5CDSns2I-R3-ETF-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2656,
+    "page": 111,
+    "name": "Bollinger Stop Strategy",
+    "chart_url": "https://www.tradingview.com/script/jCFatPh6-bollinger-stop-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2667,
+    "page": 112,
+    "name": "KDJ Strategy @ionvolution",
+    "chart_url": "https://www.tradingview.com/script/bgS2Ww4R/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2679,
+    "page": 112,
+    "name": "robotrading body-limit",
+    "chart_url": "https://www.tradingview.com/script/MtvROUAk-robotrading-body-limit/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2700,
+    "page": 113,
+    "name": "ETF 3-Day Reversion Strategy",
+    "chart_url": "https://www.tradingview.com/script/Cvi9Zf0q-ETF-3-Day-Reversion-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2717,
+    "page": 114,
+    "name": "Brrrrr strategy",
+    "chart_url": "https://www.tradingview.com/script/j9sReNnw-brrrrr-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2750,
+    "page": 115,
+    "name": "Two Moving Average Cross test",
+    "chart_url": "https://www.tradingview.com/script/LxJV6uyx-Two-Moving-Average-Cross-test/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2754,
+    "page": 115,
+    "name": "robotrading ZeroCCI",
+    "chart_url": "https://www.tradingview.com/script/YF4olFdu-robotrading-zerocci/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2756,
+    "page": 115,
+    "name": "robotrading linreg",
+    "chart_url": "https://www.tradingview.com/script/3BCn3EJ4-robotrading-linreg/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2761,
+    "page": 116,
+    "name": "P-Signal Strategy & Alert",
+    "chart_url": "https://www.tradingview.com/script/OHxaBY1y-P-Signal-Strategy-Alert/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2768,
+    "page": 116,
+    "name": "P-Signal Strategy (BTCUSD Multi Frame)",
+    "chart_url": "https://www.tradingview.com/script/Z4LZnUwe-P-Signal-Strategy-BTCUSD-Multi-Frame/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2770,
+    "page": 116,
+    "name": "Instrument-Z (3Commas Bot)",
+    "chart_url": "https://www.tradingview.com/script/1OX9Wu8g-Instrument-Z-3Commas-Bot/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2772,
+    "page": 116,
+    "name": "P-Signal Strategy",
+    "chart_url": "https://www.tradingview.com/script/UEsendw6-P-Signal-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2778,
+    "page": 116,
+    "name": "robotrading ZZ-8 fractals",
+    "chart_url": "https://www.tradingview.com/script/ddFmph9w-robotrading-zz-8-fractals/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2792,
+    "page": 117,
+    "name": "Low-High-Trend Strategy",
+    "chart_url": "https://www.tradingview.com/script/o97hSCY4-Low-High-Trend-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2795,
+    "page": 117,
+    "name": "grid strategy long",
+    "chart_url": "https://www.tradingview.com/script/6Nayl7hU/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2816,
+    "page": 118,
+    "name": "TradingGroundhog - Strategy & Fractal V1",
+    "chart_url": "https://www.tradingview.com/script/OXDJ6Bdd/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2818,
+    "page": 118,
+    "name": "TradingGroundhog - Strategy & Wavetrend V2",
+    "chart_url": "https://www.tradingview.com/script/Qwy0Fi3g/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2826,
+    "page": 118,
+    "name": "Repaint Demonstration in Security Function Call using Higher TF",
+    "chart_url": "https://www.tradingview.com/script/tOxtvIxI-Repaint-Demonstration-in-Security-Function-Call-using-Higher-TF/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2841,
+    "page": 119,
+    "name": "strategy.convert_to_symbol() demo",
+    "chart_url": "https://www.tradingview.com/script/K0z3yajM-strategy-convert-to-symbol-demo/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2861,
+    "page": 120,
+    "name": "TemaRSI Strategy",
+    "chart_url": "https://www.tradingview.com/script/kukHjxw6-TemaRSI-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2867,
+    "page": 120,
+    "name": "Take Profit On Trend (by BHD_Trade_Bot)",
+    "chart_url": "https://www.tradingview.com/script/iqtkNFT2-Take-Profit-On-Trend-by-BHD-Trade-Bot/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2870,
+    "page": 120,
+    "name": "PSAR + EMA/TEMA/RSI/OBV",
+    "chart_url": "https://www.tradingview.com/script/vziSE13p-PSAR-EMA-TEMA-RSI-OBV/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2872,
+    "page": 120,
+    "name": "robotrading body",
+    "chart_url": "https://www.tradingview.com/script/zUaR3Vbb-robotrading-body/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2938,
+    "page": 123,
+    "name": "Date Range Demonstration",
+    "chart_url": "https://www.tradingview.com/script/TzCa3XcU-Date-Range-Demonstration/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2956,
+    "page": 124,
+    "name": "TEMA/MAMA Cross",
+    "chart_url": "https://www.tradingview.com/script/ZON6m4qu-TEMA-MAMA-Cross/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2958,
+    "page": 124,
+    "name": "8 Whittle Down",
+    "chart_url": "https://www.tradingview.com/script/2GKQre3R-8-Whittle-Down/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2986,
+    "page": 125,
+    "name": "M8 BUY @ END OF DAY",
+    "chart_url": "https://www.tradingview.com/script/X1Ee5NVw-M8-BUY-END-OF-DAY/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 2994,
+    "page": 125,
+    "name": "ADX / RSI Strategy by Trade Rush (created by SirPoggy)",
+    "chart_url": "https://www.tradingview.com/script/JuOqMfBq-ADX-RSI-Strategy-by-Trade-Rush-created-by-SirPoggy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 2995,
+    "page": 125,
+    "name": "robotrading trendweek",
+    "chart_url": "https://www.tradingview.com/script/oLBYs6KB-robotrading-trendweek/",
+    "extract_attempts": 3,
+    "last_error": "Command '('agent-browser', '--session', 'tv-cache-f9e7f814db46-2', 'open', 'https://www.tradingview.com/script/oLBYs6KB-robotrading-trendweek/')' died with <Signals.SIGTERM: 15>."
+  },
+  {
+    "queue_rank": 2997,
+    "page": 125,
+    "name": "REVERSALS",
+    "chart_url": "https://www.tradingview.com/script/Fzw2bz39-REVERSALS/",
+    "extract_attempts": 3,
+    "last_error": "Command '('agent-browser', '--session', 'tv-cache-085fdd6b2541-2', 'open', 'https://www.tradingview.com/script/Fzw2bz39-REVERSALS/')' died with <Signals.SIGKILL: 9>."
+  },
+  {
+    "queue_rank": 2998,
+    "page": 125,
+    "name": "DUAL RSI",
+    "chart_url": "https://www.tradingview.com/script/ZiZBBmq8-DUAL-RSI/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3001,
+    "page": 126,
+    "name": "HYE Trend Hunter [Strategy]",
+    "chart_url": "https://www.tradingview.com/script/fP0itaGR/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3059,
+    "page": 128,
+    "name": "HYE Mean Reversion VWAP [Strategy]",
+    "chart_url": "https://www.tradingview.com/script/WeAMGj9j/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3060,
+    "page": 128,
+    "name": "HYE Mean Reversion SMA [Strategy]",
+    "chart_url": "https://www.tradingview.com/script/fdhtixF2/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3137,
+    "page": 131,
+    "name": "AkiMosi Super Super Trend",
+    "chart_url": "https://www.tradingview.com/script/FwGCjVXl-AkiMosi-Super-Super-Trend/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3144,
+    "page": 131,
+    "name": "Ratings",
+    "chart_url": "https://www.tradingview.com/script/iyNlFPJF-ratings/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3157,
+    "page": 132,
+    "name": "Jaws Mean Reversion [Strategy]",
+    "chart_url": "https://www.tradingview.com/script/RZ1GZGP3-Jaws-Mean-Reversion-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3220,
+    "page": 135,
+    "name": "Bollinger DCA v1",
+    "chart_url": "https://www.tradingview.com/script/P93CsDY0-Bollinger-DCA-v1/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3222,
+    "page": 135,
+    "name": "Excitement - Crypto Surfer v1",
+    "chart_url": "https://www.tradingview.com/script/Vbwo4hZX-Excitement-Crypto-Surfer-v1/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3224,
+    "page": 135,
+    "name": "Improved simple RSI Buy/Sell at a level (SL/TP)",
+    "chart_url": "https://www.tradingview.com/script/dCUPcQNh-Improved-simple-RSI-Buy-Sell-at-a-level-SL-TP/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3278,
+    "page": 137,
+    "name": "SuperTrend",
+    "chart_url": "https://www.tradingview.com/script/t3vishEw/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3283,
+    "page": 137,
+    "name": "Bollinger bubble | Forex edition",
+    "chart_url": "https://www.tradingview.com/script/6vefGGyk-Bollinger-bubble-Forex-edition/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3284,
+    "page": 137,
+    "name": "Bollinger bubble | Stock Edition",
+    "chart_url": "https://www.tradingview.com/script/Wkz8ol2L-Bollinger-bubble-Stock-Edition/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3295,
+    "page": 138,
+    "name": "Triple EMA Strategy",
+    "chart_url": "https://www.tradingview.com/script/a9mAFvYF-Triple-EMA-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3315,
+    "page": 139,
+    "name": "kdj Strategy 41 - 31",
+    "chart_url": "https://www.tradingview.com/script/XdRQT2R2-kdj-Strategy-41-31/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3316,
+    "page": 139,
+    "name": "RSI-VWAP Indicator %",
+    "chart_url": "https://www.tradingview.com/script/d0FZtMLp/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3356,
+    "page": 140,
+    "name": "Advanced Bollinger Bands Strategy",
+    "chart_url": "https://www.tradingview.com/script/XNhHlCE6-Advanced-Bollinger-Bands-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3371,
+    "page": 141,
+    "name": "Donchian Channel Strategy",
+    "chart_url": "https://www.tradingview.com/script/UEbrJcmh-donchian-channel-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3416,
+    "page": 143,
+    "name": "Daily Open Strategy (DOS)",
+    "chart_url": "https://www.tradingview.com/script/0yqWAi1B-Daily-Open-Strategy-DOS/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3428,
+    "page": 143,
+    "name": "no dice",
+    "chart_url": "https://www.tradingview.com/script/rcqZ5wUR-no-dice/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3460,
+    "page": 145,
+    "name": "888 BOT #backtest",
+    "chart_url": "https://www.tradingview.com/script/futPZepe/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3479,
+    "page": 145,
+    "name": "Pinescript v4 - The Holy Grail (Trailing Stop)",
+    "chart_url": "https://www.tradingview.com/script/Mc2wPUg2-Pinescript-v4-The-Holy-Grail-Trailing-Stop/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3480,
+    "page": 145,
+    "name": "Noro's SRSI Strategy",
+    "chart_url": "https://www.tradingview.com/script/PS8RkcfQ-noro-s-srsi-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3519,
+    "page": 147,
+    "name": "VWAP + Fibo Dev Extensions Strategy",
+    "chart_url": "https://www.tradingview.com/script/EaBACrDi/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3545,
+    "page": 148,
+    "name": "RSI on VWAP Upgraded strategy",
+    "chart_url": "https://www.tradingview.com/script/Q5TPHHLs/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3552,
+    "page": 148,
+    "name": "Lagged Donchian Channel + EMA",
+    "chart_url": "https://www.tradingview.com/script/1952PBhO/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3573,
+    "page": 149,
+    "name": "ETF / Stocks / Crypto - DCA Strategy v1",
+    "chart_url": "https://www.tradingview.com/script/AkLrIlan-ETF-Stocks-Crypto-DCA-Strategy-v1/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3576,
+    "page": 149,
+    "name": "Bitcoin - MA Crossover Strategy",
+    "chart_url": "https://www.tradingview.com/script/BdxVpRvJ-Bitcoin-MA-Crossover-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Command '('agent-browser', '--session', 'tv-cache-ed0daeb01442-2', 'open', 'https://www.tradingview.com/script/BdxVpRvJ-Bitcoin-MA-Crossover-Strategy/')' died with <Signals.SIGTERM: 15>."
+  },
+  {
+    "queue_rank": 3585,
+    "page": 150,
+    "name": "PineScript v4 - Forex Pin-Bar Trading Strategy",
+    "chart_url": "https://www.tradingview.com/script/ekUY41fE-PineScript-v4-Forex-Pin-Bar-Trading-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3592,
+    "page": 150,
+    "name": "The Lazy Trader - Index (ETF) Trend Following Robot",
+    "chart_url": "https://www.tradingview.com/script/1kEpR229-The-Lazy-Trader-Index-ETF-Trend-Following-Robot/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3645,
+    "page": 152,
+    "name": "Power X Strategy Back-test",
+    "chart_url": "https://www.tradingview.com/script/l6OmaYnY-Power-X-Strategy-Back-test/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3666,
+    "page": 153,
+    "name": "Noro's RiskChannel Strategy",
+    "chart_url": "https://www.tradingview.com/script/6nASafZA-noro-s-riskchannel-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3669,
+    "page": 153,
+    "name": "Noro's RiskDonchian Strategy",
+    "chart_url": "https://www.tradingview.com/script/JHBIDlp8-noro-s-riskdonchian-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3673,
+    "page": 154,
+    "name": "Noro's RiskTurtle Strategy",
+    "chart_url": "https://www.tradingview.com/script/cUBda2di-noro-s-riskturtle-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3675,
+    "page": 154,
+    "name": "Noro's SimpleTurtle Strategy",
+    "chart_url": "https://www.tradingview.com/script/SsiA8TNL-noro-s-simpleturtle-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3678,
+    "page": 154,
+    "name": "Noro's Turtles Strategy",
+    "chart_url": "https://www.tradingview.com/script/ASswCSKm-noro-s-turtles-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3698,
+    "page": 155,
+    "name": "Bollinger Band Breakout",
+    "chart_url": "https://www.tradingview.com/script/j5rUYNN1-Bollinger-Band-Breakout/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3706,
+    "page": 155,
+    "name": "CoGrid Management",
+    "chart_url": "https://www.tradingview.com/script/3kMUl7fJ/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3709,
+    "page": 155,
+    "name": "TSI BTCUSD WS",
+    "chart_url": "https://www.tradingview.com/script/paq771aX-TSI-BTCUSD-WS/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3716,
+    "page": 155,
+    "name": "Noro's Donchian Strategy",
+    "chart_url": "https://www.tradingview.com/script/HeRJBY0A-noro-s-donchian-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3739,
+    "page": 156,
+    "name": "Ichimoku Kinko Hyo: ETH 3h Strategy by tobuno",
+    "chart_url": "https://www.tradingview.com/script/NFUkMBs6-Ichimoku-Kinko-Hyo-ETH-3h-Strategy-by-tobuno/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3752,
+    "page": 157,
+    "name": "Mean Reversion w/ Bollinger Bands",
+    "chart_url": "https://www.tradingview.com/script/tOPhJYcd-Mean-Reversion-w-Bollinger-Bands/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3753,
+    "page": 157,
+    "name": "Noro's Trend Ribbon Strategy",
+    "chart_url": "https://www.tradingview.com/script/ZsKsLiUU-noro-s-trend-ribbon-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3755,
+    "page": 157,
+    "name": "Noro's Channel Close Strategy",
+    "chart_url": "https://www.tradingview.com/script/12DtNLFY-noro-s-channel-close-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3768,
+    "page": 157,
+    "name": "Noro's TrendMA Strategy",
+    "chart_url": "https://www.tradingview.com/script/BRDFaufy-noro-s-trendma-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3769,
+    "page": 158,
+    "name": "[Daveatt] BEST ABCD Pattern Strategy (Trailing SL + TP)",
+    "chart_url": "https://www.tradingview.com/script/HkuqtyQ7-Daveatt-BEST-ABCD-Pattern-Strategy-Trailing-SL-TP/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3771,
+    "page": 158,
+    "name": "eha Moving Averages Strategy",
+    "chart_url": "https://www.tradingview.com/script/Pdisufy1-eha-Moving-Averages-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3790,
+    "page": 158,
+    "name": "STRAT_STEMWAP",
+    "chart_url": "https://www.tradingview.com/script/o0CWk20n-STRAT-STEMWAP/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3832,
+    "page": 160,
+    "name": "Renko Stock Daily",
+    "chart_url": "https://www.tradingview.com/script/g1E93ugk/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3849,
+    "page": 161,
+    "name": "BEST ABCD Pattern Strategy",
+    "chart_url": "https://www.tradingview.com/script/TWSr0hGH-BEST-ABCD-Pattern-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3851,
+    "page": 161,
+    "name": "kurdistan MACD & RSI & EMA ",
+    "chart_url": "https://www.tradingview.com/script/d3VaCs8a-kurdistan-MACD-RSI-EMA/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3864,
+    "page": 161,
+    "name": "Stochastic Pop and Drop by Jake Bernstein v1 [Bitduke]",
+    "chart_url": "https://www.tradingview.com/script/kWhNGFXX-Stochastic-Pop-and-Drop-by-Jake-Bernstein-v1-Bitduke/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3865,
+    "page": 162,
+    "name": "TFs Golden Cross - Status Box",
+    "chart_url": "https://www.tradingview.com/script/klcnDny7-TFs-Golden-Cross-Status-Box/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3887,
+    "page": 162,
+    "name": "MacD (Future Known or Unknown) Strategy",
+    "chart_url": "https://www.tradingview.com/script/qTSctRJf-MacD-Future-Known-or-Unknown-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3888,
+    "page": 162,
+    "name": "Linear Regression Pearson's R - Trend Channel Strategy",
+    "chart_url": "https://www.tradingview.com/script/6VHnjgfp-Linear-Regression-Pearson-s-R-Trend-Channel-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3898,
+    "page": 163,
+    "name": "BB+RSI strategy",
+    "chart_url": "https://www.tradingview.com/script/bYcerj8a-BB-RSI-strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3909,
+    "page": 163,
+    "name": "YJ Mean Reversion",
+    "chart_url": "https://www.tradingview.com/script/XWuHQCUp-YJ-Mean-Reversion/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3919,
+    "page": 164,
+    "name": "Noro's CrossLimit",
+    "chart_url": "https://www.tradingview.com/script/tSixyE0W-noro-s-crosslimit/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3931,
+    "page": 164,
+    "name": "True Strength Indicator BTCUSD 15p thaieibvn",
+    "chart_url": "https://www.tradingview.com/script/VWrDRERB-True-Strength-Indicator-BTCUSD-15p-thaieibvn/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3932,
+    "page": 164,
+    "name": "Squeeze Momentum Strategy based on Indicator [LazyBear][Bitduke]",
+    "chart_url": "https://www.tradingview.com/script/5tuGpzpd-Squeeze-Momentum-Strategy-based-on-Indicator-LazyBear-Bitduke/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 3936,
+    "page": 164,
+    "name": "Noro's Bands Strategy",
+    "chart_url": "https://www.tradingview.com/script/OOBWuKih-noro-s-bands-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3957,
+    "page": 165,
+    "name": "Moving Average Ribbon strategy [2H timeframe]",
+    "chart_url": "https://www.tradingview.com/script/ma6lj5WR/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3959,
+    "page": 165,
+    "name": "STEM_MATCS_BTC_STRATEGY",
+    "chart_url": "https://www.tradingview.com/script/f0NnKUwv-STEM-MATCS-BTC-STRATEGY/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 3973,
+    "page": 166,
+    "name": "Noro's CrossMA",
+    "chart_url": "https://www.tradingview.com/script/LoTEGrZN-noro-s-crossma/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4022,
+    "page": 168,
+    "name": "Robot WhiteBox Channel",
+    "chart_url": "https://www.tradingview.com/script/yY7GH7OG-robot-whitebox-channel/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4033,
+    "page": 169,
+    "name": "ATR Strategy Back test ",
+    "chart_url": "https://www.tradingview.com/script/DW1GWSWQ-ATR-Strategy-Back-test/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4057,
+    "page": 170,
+    "name": "Noro's ZZ-4 Strategy",
+    "chart_url": "https://www.tradingview.com/script/aWVio6dp-noro-s-zz-4-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4067,
+    "page": 170,
+    "name": "Robot WhiteBox StopMA",
+    "chart_url": "https://www.tradingview.com/script/oR7vPyoS-robot-whitebox-stopma/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4069,
+    "page": 170,
+    "name": "Strategy based on the principles of Price Action",
+    "chart_url": "https://www.tradingview.com/script/BJxmNjRC-strategy-based-on-the-principles-of-price-action/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4085,
+    "page": 171,
+    "name": "Open Close Cross Strategy (PineScript=v4)",
+    "chart_url": "https://www.tradingview.com/script/QyrNCxvj-open-close-cross-strategy-pinescript-v4/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4134,
+    "page": 173,
+    "name": "Noro's Ichimoku Stop Strategy",
+    "chart_url": "https://www.tradingview.com/script/8FdTBZHD-noro-s-ichimoku-stop-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4138,
+    "page": 173,
+    "name": "EMA and VWAP CROSS",
+    "chart_url": "https://www.tradingview.com/script/Yet4DpeW-EMA-and-VWAP-CROSS/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4175,
+    "page": 174,
+    "name": "Noro's DEX Strategy",
+    "chart_url": "https://www.tradingview.com/script/SK4l04qm-noro-s-dex-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4179,
+    "page": 175,
+    "name": "Noro's DDL Strategy",
+    "chart_url": "https://www.tradingview.com/script/NlIIByhz-noro-s-ddl-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4191,
+    "page": 175,
+    "name": "Noro's ShiftMA+TP+SL Strategy",
+    "chart_url": "https://www.tradingview.com/script/m2a04xmb-noro-s-shiftma-tp-sl-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4193,
+    "page": 175,
+    "name": "simple momentum",
+    "chart_url": "https://www.tradingview.com/script/jJmg1sbp-simple-momentum/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4195,
+    "page": 175,
+    "name": "Robot WhiteBox Iceberg",
+    "chart_url": "https://www.tradingview.com/script/Oty9KQiu-robot-whitebox-iceberg/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4214,
+    "page": 176,
+    "name": "Robot WhiteBox MultiMA",
+    "chart_url": "https://www.tradingview.com/script/p2y7o8RN-robot-whitebox-multima/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4215,
+    "page": 176,
+    "name": "Noro's Trailing-Stop Strategy",
+    "chart_url": "https://www.tradingview.com/script/51EIXTQe-noro-s-trailing-stop-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4234,
+    "page": 177,
+    "name": "Leveler v2",
+    "chart_url": "https://www.tradingview.com/script/KduRuFdH-Leveler-v2/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4236,
+    "page": 177,
+    "name": "Layne Corp SCRIPT",
+    "chart_url": "https://www.tradingview.com/script/NKCTNglZ-Layne-Corp-SCRIPT/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4240,
+    "page": 177,
+    "name": "Noro's ShiftMA-multi Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/qI4J1ejC-noro-s-shiftma-multi-strategy-v1-1/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4243,
+    "page": 177,
+    "name": "Noro's ShiftMA-multi Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/iKnhl9mI-noro-s-shiftma-multi-strategy-v1-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4261,
+    "page": 178,
+    "name": "SlingShotStrategy",
+    "chart_url": "https://www.tradingview.com/script/0M0wfs7E-SlingShotStrategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4282,
+    "page": 179,
+    "name": "Noro's MA+ATR Strategy",
+    "chart_url": "https://www.tradingview.com/script/Wmch7RYL-noro-s-ma-atr-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4325,
+    "page": 181,
+    "name": "Noro's DI Strategy",
+    "chart_url": "https://www.tradingview.com/script/QFC5tySs-noro-s-di-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4328,
+    "page": 181,
+    "name": "stoch pop and RSI2 strategy",
+    "chart_url": "https://www.tradingview.com/script/0EJ6ny4g-stoch-pop-and-RSI2-strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4341,
+    "page": 181,
+    "name": "YBTS-RSI",
+    "chart_url": "https://www.tradingview.com/script/WEdqC3lx/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4352,
+    "page": 182,
+    "name": "Noro's TrendTrader Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/NKcpZG9n-noro-s-trendtrader-strategy-v1-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4358,
+    "page": 182,
+    "name": "Noro's ShiftEx Strategy v2.0",
+    "chart_url": "https://www.tradingview.com/script/FbU0bYzj-noro-s-shiftex-strategy-v2-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4368,
+    "page": 182,
+    "name": "Breton Composite BTC Volume -turningpoint -strategy",
+    "chart_url": "https://www.tradingview.com/script/FtsbUpew-Breton-Composite-BTC-Volume-turningpoint-strategy/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4374,
+    "page": 183,
+    "name": "Noro's ShiftEx Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/uY3LjKGG-noro-s-shiftex-strategy-v1-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4380,
+    "page": 183,
+    "name": "Noro's DD Strategy",
+    "chart_url": "https://www.tradingview.com/script/KaVuuDJx-noro-s-dd-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4382,
+    "page": 183,
+    "name": "Multi MA MACD SMA BB TCO Indicator Heatband copy & debuging",
+    "chart_url": "https://www.tradingview.com/script/35czXUwM-Multi-MA-MACD-SMA-BB-TCO-Indicator-Heatband-copy-debuging/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4384,
+    "page": 183,
+    "name": "Noro's RevBar Strategy",
+    "chart_url": "https://www.tradingview.com/script/JXKgN7WF-noro-s-revbar-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4390,
+    "page": 183,
+    "name": "Noro's Alligator Strategy by Bill Williams",
+    "chart_url": "https://www.tradingview.com/script/1XqXYO1S-noro-s-alligator-strategy-by-bill-williams/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4398,
+    "page": 184,
+    "name": "my scr",
+    "chart_url": "https://www.tradingview.com/script/ptNWjR4L-my-scr/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4403,
+    "page": 184,
+    "name": "Noro's SuperTrend Strategy v2.0 Limit",
+    "chart_url": "https://www.tradingview.com/script/lXFsQFBb-noro-s-supertrend-strategy-v2-0-limit/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4406,
+    "page": 184,
+    "name": "Noro's 3Bars Strategy by Larry Williams",
+    "chart_url": "https://www.tradingview.com/script/ZuhkhFfS-noro-s-3bars-strategy-by-larry-williams/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4408,
+    "page": 184,
+    "name": "Noro's ZZ-3 Strategy",
+    "chart_url": "https://www.tradingview.com/script/TuV2Aqh6-noro-s-zz-3-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4410,
+    "page": 184,
+    "name": "++++R&G DD LINE STRAT",
+    "chart_url": "https://www.tradingview.com/script/KB81kYI5-R-G-DD-LINE-STRAT/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4411,
+    "page": 184,
+    "name": "++++R&G DD LINE STRAT",
+    "chart_url": "https://www.tradingview.com/script/ITReEJap-R-G-DD-LINE-STRAT/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4413,
+    "page": 184,
+    "name": "Noro's Brakeout Strategy v2.0",
+    "chart_url": "https://www.tradingview.com/script/pXh4yqtC-noro-s-brakeout-strategy-v2-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4414,
+    "page": 184,
+    "name": "Noro's Singapore Strategy",
+    "chart_url": "https://www.tradingview.com/script/5iEQqicE-noro-s-singapore-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4422,
+    "page": 185,
+    "name": "pfr",
+    "chart_url": "https://www.tradingview.com/script/fbORILRB/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4431,
+    "page": 185,
+    "name": "On Balance Volume w MA Strat",
+    "chart_url": "https://www.tradingview.com/script/2LsLKtlc-On-Balance-Volume-w-MA-Strat/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4460,
+    "page": 186,
+    "name": "Noro's KAMA Strategy",
+    "chart_url": "https://www.tradingview.com/script/Pcav6Ztg-noro-s-kama-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4461,
+    "page": 186,
+    "name": "Anuj4912",
+    "chart_url": "https://www.tradingview.com/script/iR94Oj6W-Anuj4912/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4462,
+    "page": 186,
+    "name": "EMA_Trade_System",
+    "chart_url": "https://www.tradingview.com/script/zEVVedk4-EMA-Trade-System/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4467,
+    "page": 187,
+    "name": "SARSI Reversal Strategy",
+    "chart_url": "https://www.tradingview.com/script/W4maFatM-SARSI-Reversal-Strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4471,
+    "page": 187,
+    "name": "Noro's Fishnet Strategy",
+    "chart_url": "https://www.tradingview.com/script/BHom43Zt-noro-s-fishnet-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4490,
+    "page": 188,
+    "name": "Silent Trader",
+    "chart_url": "https://www.tradingview.com/script/4rEgaYGB-Silent-Trader/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4512,
+    "page": 188,
+    "name": "Noro's HullMA Strategy",
+    "chart_url": "https://www.tradingview.com/script/P9r4mHUb-noro-s-hullma-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4515,
+    "page": 189,
+    "name": "Noro's ZZ-2 Strategy",
+    "chart_url": "https://www.tradingview.com/script/TU9yaCLD-noro-s-zz-2-strategy/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4521,
+    "page": 189,
+    "name": "Noro's ZigTrend Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/EDiy3P4V-noro-s-zigtrend-strategy-v1-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4552,
+    "page": 190,
+    "name": "Noro's PCMA Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/fODSrLvL-noro-s-pcma-strategy-v1-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4554,
+    "page": 190,
+    "name": "Gui's Turtle or The everythings Script",
+    "chart_url": "https://www.tradingview.com/script/DW3wCRKw-Gui-s-Turtle-or-The-everythings-Script/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4558,
+    "page": 190,
+    "name": "Robot WhiteBox ShiftMA",
+    "chart_url": "https://www.tradingview.com/script/9KvLceQ9-robot-whitebox-shiftma/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4566,
+    "page": 191,
+    "name": "RSI Alligator Strategy [forked from jedireza]",
+    "chart_url": "https://www.tradingview.com/script/OQICfRi3-RSI-Alligator-Strategy-forked-from-jedireza/",
+    "extract_attempts": 3,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4569,
+    "page": 191,
+    "name": "Caylum X - Long Only RSI",
+    "chart_url": "https://www.tradingview.com/script/vugtr86H-Caylum-X-Long-Only-RSI/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4588,
+    "page": 192,
+    "name": "TDI - Traders Dynamic Index - Roshan [Mehdi]",
+    "chart_url": "https://www.tradingview.com/script/WSmycbDG-TDI-Traders-Dynamic-Index-Roshan-Mehdi/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4589,
+    "page": 192,
+    "name": "Noro's SuperTrend Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/NfjOgmGi-noro-s-supertrend-strategy-v1-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4596,
+    "page": 192,
+    "name": "Noro's BB + RSI Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/RwRhnOgw-noro-s-bb-rsi-strategy-v1-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4602,
+    "page": 192,
+    "name": "Noro's Shift Close Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/Xn30EZXW-noro-s-shift-close-strategy-v1-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4613,
+    "page": 193,
+    "name": "Noro's Volty Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/gEktwpNZ-noro-s-volty-strategy-v1-0/",
+    "extract_attempts": 3,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4614,
+    "page": 193,
+    "name": "Noro's BitFinex Long/Shorts Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/QeY3dcYy-noro-s-bitfinex-long-shorts-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4619,
+    "page": 193,
+    "name": "Candle analysis & long/short strategy (HF) inspired by TurtleBC",
+    "chart_url": "https://www.tradingview.com/script/CiBoe8ql/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4624,
+    "page": 193,
+    "name": "TurtleBC Strategy review by V.Troussel",
+    "chart_url": "https://www.tradingview.com/script/sA1hEpCP-TurtleBC-Strategy-review-by-V-Troussel/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4628,
+    "page": 193,
+    "name": "Noro's Aroon Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/g8cS0CS6-noro-s-aroon-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4644,
+    "page": 194,
+    "name": "Inverse Fisher RSI-MTF2",
+    "chart_url": "https://www.tradingview.com/script/UfLWnWQ6-Inverse-Fisher-RSI-MTF2/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4656,
+    "page": 194,
+    "name": "TK Cross > EMA200 Strat",
+    "chart_url": "https://www.tradingview.com/script/3OsygWhP/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4658,
+    "page": 195,
+    "name": "SimpleCrossOver_Bot",
+    "chart_url": "https://www.tradingview.com/script/dfAHq3ex-SimpleCrossOver-Bot/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4660,
+    "page": 195,
+    "name": "Coding lesson 3 - Color SMA",
+    "chart_url": "https://www.tradingview.com/script/L9fYapdW-coding-lesson-3-color-sma/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4662,
+    "page": 195,
+    "name": "Coding lesson 2",
+    "chart_url": "https://www.tradingview.com/script/danSWA85-coding-lesson-2/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4664,
+    "page": 195,
+    "name": "Coding lesson 1",
+    "chart_url": "https://www.tradingview.com/script/NU1RGYCF-coding-lesson-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4667,
+    "page": 195,
+    "name": "Noro's ShiftMA Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/O2K7Q3Wo-noro-s-shiftma-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4670,
+    "page": 195,
+    "name": "Trading View Guide to Your First Backtest",
+    "chart_url": "https://www.tradingview.com/script/78ODVkyh-Trading-View-Guide-to-Your-First-Backtest/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4676,
+    "page": 195,
+    "name": "Noro's Shift MA Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/Z88oSEID-noro-s-shift-ma-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4682,
+    "page": 196,
+    "name": "EMA Cross by MarketAlpha",
+    "chart_url": "https://www.tradingview.com/script/kja6Vug1-EMA-Cross-by-MarketAlpha/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4687,
+    "page": 196,
+    "name": "Noro's Levels Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/XBEG3KaA-noro-s-levels-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4697,
+    "page": 196,
+    "name": "SMA+CF str",
+    "chart_url": "https://www.tradingview.com/script/AHMm9ctU-sma-cf-str/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4704,
+    "page": 196,
+    "name": "BB%/MFI/RSI",
+    "chart_url": "https://www.tradingview.com/script/kJUsuQzr-bb-mfi-rsi/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4706,
+    "page": 197,
+    "name": "Noro's Extremum Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/S2h62R4N-noro-s-extremum-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4707,
+    "page": 197,
+    "name": "Noro's ZZ Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/6VfA6sTZ-noro-s-zz-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4710,
+    "page": 197,
+    "name": "Noro's Levels+RSI Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/hbtRC9zs-noro-s-levels-rsi-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4713,
+    "page": 197,
+    "name": "Noro's Symphony Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/Ny1Sus0t-noro-s-symphony-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4714,
+    "page": 197,
+    "name": "Noro's Symphony v1.0",
+    "chart_url": "https://www.tradingview.com/script/BOQabwim-noro-s-symphony-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4717,
+    "page": 197,
+    "name": "Noro's Levels Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/LGO3AACq-noro-s-levels-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4734,
+    "page": 198,
+    "name": "Noro's Advanced Bollinger Bands Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/QJxCUlsC-noro-s-advanced-bollinger-bands-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4736,
+    "page": 198,
+    "name": "Noro's SMA-3 Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/MuDJLEVF-noro-s-sma-3-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4747,
+    "page": 198,
+    "name": "Noro's Multima v1.0",
+    "chart_url": "https://www.tradingview.com/script/kgHNqZB2-noro-s-multima-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4751,
+    "page": 198,
+    "name": "Pivot Points H/L by Himansu",
+    "chart_url": "https://www.tradingview.com/script/2F0c1psm-Pivot-Points-H-L-by-Himansu/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4768,
+    "page": 199,
+    "name": "Robot BitMEX Fast RSI v1.0 (overlay)",
+    "chart_url": "https://www.tradingview.com/script/StYrq9xc-robot-bitmex-fast-rsi-v1-0-overlay/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4777,
+    "page": 200,
+    "name": "Slow Stochastic OB/OS Strategy",
+    "chart_url": "https://www.tradingview.com/script/5A9ic6K5-Slow-Stochastic-OB-OS-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4792,
+    "page": 200,
+    "name": "SLOW RSI OB/OS Strategy",
+    "chart_url": "https://www.tradingview.com/script/xLBZSeTs-SLOW-RSI-OB-OS-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4800,
+    "page": 200,
+    "name": "MACD+EMA crossovers Strategy custom",
+    "chart_url": "https://www.tradingview.com/script/mCNOuWe5/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4837,
+    "page": 202,
+    "name": "Noro's Anti RSI Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/WComo2P9-noro-s-anti-rsi-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4841,
+    "page": 202,
+    "name": "Noro's Wizard Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/umhZ45PJ-noro-s-wizard-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4846,
+    "page": 202,
+    "name": "Noro's Wizard Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/1KTILGrF-noro-s-wizard-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4848,
+    "page": 202,
+    "name": "Noro's Fast RSI Strategy v2.0",
+    "chart_url": "https://www.tradingview.com/script/bUWKJjQ1-noro-s-fast-rsi-strategy-v2-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4855,
+    "page": 203,
+    "name": "Noro's Brakeout Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/YEsQ8gri-noro-s-brakeout-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4860,
+    "page": 203,
+    "name": "Noro's Bollinger Strategy v1.4",
+    "chart_url": "https://www.tradingview.com/script/AohN8CVy-noro-s-bollinger-strategy-v1-4/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4863,
+    "page": 203,
+    "name": "Noro's Connors RSI Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/WjANy7UB-noro-s-connors-rsi-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4864,
+    "page": 203,
+    "name": "Noro's Distance Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/D6f016Bx-noro-s-distance-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4866,
+    "page": 203,
+    "name": "Noro's Fast RSI Strategy v1.7",
+    "chart_url": "https://www.tradingview.com/script/tUQcbV7X-noro-s-fast-rsi-strategy-v1-7/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4868,
+    "page": 203,
+    "name": "Noro's Ichimoku Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/2GWcpQfq-noro-s-ichimoku-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4870,
+    "page": 203,
+    "name": "Noro's Stochastic Strategy v1.3",
+    "chart_url": "https://www.tradingview.com/script/LbUmtya9-noro-s-stochastic-strategy-v1-3/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4871,
+    "page": 203,
+    "name": "Noro's Stochastic Strategy v1.2",
+    "chart_url": "https://www.tradingview.com/script/JZK2IQU5-noro-s-stochastic-strategy-v1-2/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4872,
+    "page": 203,
+    "name": "Noro's Transient Zones Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/6camlPpU-noro-s-transient-zones-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4874,
+    "page": 204,
+    "name": "Noro's Week Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/y2vumXmK-noro-s-week-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4877,
+    "page": 204,
+    "name": "Noro's CandleModels Tests",
+    "chart_url": "https://www.tradingview.com/script/ApQBTeGZ-noro-s-candlemodels-tests/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4878,
+    "page": 204,
+    "name": "Noro's Stochastic Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/fNuNMeMG-noro-s-stochastic-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4880,
+    "page": 204,
+    "name": "Noro's Stochastic Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/IclxiWxx-noro-s-stochastic-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4882,
+    "page": 204,
+    "name": "Noro's PriceChannel Strategy v1.2",
+    "chart_url": "https://www.tradingview.com/script/ndHWwreK-noro-s-pricechannel-strategy-v1-2/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4883,
+    "page": 204,
+    "name": "Noro's Hundred Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/DmmbIaTz-noro-s-hundred-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4888,
+    "page": 204,
+    "name": "Noro's Harami Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/f7qRawxg-noro-s-harami-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4890,
+    "page": 204,
+    "name": "Noro's Correlation Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/RdlEedpB-noro-s-correlation-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4892,
+    "page": 204,
+    "name": "Pivot Profit Taker Strategy - With TimeFrames",
+    "chart_url": "https://www.tradingview.com/script/tq5DLFBC-Pivot-Profit-Taker-Strategy-With-TimeFrames/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4893,
+    "page": 204,
+    "name": "Pivot Reversal Strategy - TimeFramed",
+    "chart_url": "https://www.tradingview.com/script/QTnrNj6i-Pivot-Reversal-Strategy-TimeFramed/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4894,
+    "page": 204,
+    "name": "ChannelBreakOutStrategy - With Time Frames",
+    "chart_url": "https://www.tradingview.com/script/BwuDGqy6-ChannelBreakOutStrategy-With-Time-Frames/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4898,
+    "page": 205,
+    "name": "Noro's VixFix + RSI Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/Uok9nlIR-noro-s-vixfix-rsi-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4900,
+    "page": 205,
+    "name": "Noro's PriceChannel for D1 v1.0",
+    "chart_url": "https://www.tradingview.com/script/6CvAmvTm-noro-s-pricechannel-for-d1-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4902,
+    "page": 205,
+    "name": "Noro's Squeeze Momentum Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/ttaXHsrU-noro-s-squeeze-momentum-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4905,
+    "page": 205,
+    "name": "Noro's Triple RSI Top/Bottom v1.1",
+    "chart_url": "https://www.tradingview.com/script/KSFgvPHJ-noro-s-triple-rsi-top-bottom-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4906,
+    "page": 205,
+    "name": "Noro's Triple RSI Top/Bottom",
+    "chart_url": "https://www.tradingview.com/script/lVMH2Qsa-noro-s-triple-rsi-top-bottom/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4907,
+    "page": 205,
+    "name": "Noro's Double RSI Strategy 1.0",
+    "chart_url": "https://www.tradingview.com/script/HdZwtkEJ-noro-s-double-rsi-strategy-1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4912,
+    "page": 205,
+    "name": "Noro's Price Channel Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/wMtESAgD-noro-s-price-channel-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4913,
+    "page": 205,
+    "name": "Noro's Price Channel Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/TjgVJNbq-noro-s-price-channel-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4915,
+    "page": 205,
+    "name": "Noro's Fast RSI Strategy v1.6",
+    "chart_url": "https://www.tradingview.com/script/umDxcIGE-noro-s-fast-rsi-strategy-v1-6/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4917,
+    "page": 205,
+    "name": "Noro's Fast RSI Strategy v1.5",
+    "chart_url": "https://www.tradingview.com/script/Yfhs6o49-noro-s-fast-rsi-strategy-v1-5/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4918,
+    "page": 205,
+    "name": "Noro's Trend MAs Strategy v2.3",
+    "chart_url": "https://www.tradingview.com/script/ffv2jtEM-noro-s-trend-mas-strategy-v2-3/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4920,
+    "page": 205,
+    "name": "Noro's Fast RSI Strategy v1.4",
+    "chart_url": "https://www.tradingview.com/script/pNH656Qn-noro-s-fast-rsi-strategy-v1-4/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4923,
+    "page": 206,
+    "name": "Noro's Bollinger Strategy v1.3",
+    "chart_url": "https://www.tradingview.com/script/tjW0QkIW-noro-s-bollinger-strategy-v1-3/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4924,
+    "page": 206,
+    "name": "Noro's Bollinger Strategy v1.2",
+    "chart_url": "https://www.tradingview.com/script/mnEjDglM-noro-s-bollinger-strategy-v1-2/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4932,
+    "page": 206,
+    "name": "Noro's Martingale Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/UDCdmbqO-noro-s-martingale-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4934,
+    "page": 206,
+    "name": "Noro's Fast RSI Strategy v1.3",
+    "chart_url": "https://www.tradingview.com/script/v2vUUwu5-noro-s-fast-rsi-strategy-v1-3/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4936,
+    "page": 206,
+    "name": "Noro's Squeeze Momentum Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/hA8ML2Q4-noro-s-squeeze-momentum-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4937,
+    "page": 206,
+    "name": "Noro's Fast RSI Strategy v1.2",
+    "chart_url": "https://www.tradingview.com/script/ACPcJ8nn-noro-s-fast-rsi-strategy-v1-2/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4941,
+    "page": 206,
+    "name": "Noro's Fast RSI Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/JJ0wPsOe-noro-s-fast-rsi-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4943,
+    "page": 206,
+    "name": "Ichimoku Crypto Breakout",
+    "chart_url": "https://www.tradingview.com/script/DbsCZWxj-Ichimoku-Crypto-Breakout/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4944,
+    "page": 206,
+    "name": "Noro's Fast RSI Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/QKZRoNxo-noro-s-fast-rsi-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4947,
+    "page": 207,
+    "name": "Noro's Bollinger Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/Y7ZufUM0-noro-s-bollinger-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4953,
+    "page": 207,
+    "name": "Noro's Locomotive Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/WjofwDDo-noro-s-locomotive-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4958,
+    "page": 207,
+    "name": "Noro's Primitive Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/pbiU7h30-noro-s-primitive-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4964,
+    "page": 207,
+    "name": "Noro's ColorBar Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/wIdn4b1R-noro-s-colorbar-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4965,
+    "page": 207,
+    "name": "Noro's Bollinger Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/Mg9VTYf2-noro-s-bollinger-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4967,
+    "page": 207,
+    "name": "Noro's Color Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/hSbL7WiX-noro-s-color-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4968,
+    "page": 207,
+    "name": "Noro's Bands Scalper Strategy v1.6",
+    "chart_url": "https://www.tradingview.com/script/nWSGZciA-noro-s-bands-scalper-strategy-v1-6/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4969,
+    "page": 208,
+    "name": "Noro's MAs Cross Tests v1.0",
+    "chart_url": "https://www.tradingview.com/script/OWofkCNG-noro-s-mas-cross-tests-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4970,
+    "page": 208,
+    "name": "Noro's Candles Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/zr0UB5FC-noro-s-candles-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4971,
+    "page": 208,
+    "name": "Noro's Color Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/HLiMJNkP-noro-s-color-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4972,
+    "page": 208,
+    "name": "Noro's Bands Scalper Strategy v1.5",
+    "chart_url": "https://www.tradingview.com/script/kzBdTlyZ-noro-s-bands-scalper-strategy-v1-5/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4975,
+    "page": 208,
+    "name": "Noro's Bands Day Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/NJ669po0-noro-s-bands-day-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4976,
+    "page": 208,
+    "name": "Noro's Bands Scalper Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/jYUnE48W-noro-s-bands-scalper-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4978,
+    "page": 208,
+    "name": "Noro's Bands Scalper Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/B8MQIXUJ-noro-s-bands-scalper-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4980,
+    "page": 208,
+    "name": "Noro's Bands Strategy v1.5",
+    "chart_url": "https://www.tradingview.com/script/STH56j0F-noro-s-bands-strategy-v1-5/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4982,
+    "page": 208,
+    "name": "Noro's MinMax tests",
+    "chart_url": "https://www.tradingview.com/script/W2rS2jZK-noro-s-minmax-tests/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4984,
+    "page": 208,
+    "name": "Noro's Bands Strategy v1.4",
+    "chart_url": "https://www.tradingview.com/script/H01MpZ9e-noro-s-bands-strategy-v1-4/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4986,
+    "page": 208,
+    "name": "Noro's Bands Strategy v1.3",
+    "chart_url": "https://www.tradingview.com/script/2nWGBclu-noro-s-bands-strategy-v1-3/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4987,
+    "page": 208,
+    "name": "Noro's Bands Strategy v1.2",
+    "chart_url": "https://www.tradingview.com/script/b2VRNxUl-noro-s-bands-strategy-v1-2/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4988,
+    "page": 208,
+    "name": "Stripped Down Vdub Renko Sniper Strategy",
+    "chart_url": "https://www.tradingview.com/script/WcmvfLTc-Stripped-Down-Vdub-Renko-Sniper-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 4991,
+    "page": 208,
+    "name": "Noro's Bands Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/uLFXYtqX-noro-s-bands-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4992,
+    "page": 208,
+    "name": "Noro's Bands Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/ZaHXEfsM-noro-s-bands-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4995,
+    "page": 209,
+    "name": "Noro's Accuracy Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/2Sd1S6MF-noro-s-accuracy-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 4998,
+    "page": 209,
+    "name": "Noro's Trend MAs Strategy v2.0",
+    "chart_url": "https://www.tradingview.com/script/01KhVWQx-noro-s-trend-mas-strategy-v2-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5002,
+    "page": 209,
+    "name": "Noro's MAs Tests v1.1",
+    "chart_url": "https://www.tradingview.com/script/XPTuU99H-noro-s-mas-tests-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5004,
+    "page": 209,
+    "name": "Noro's Trend MAs Strategy v1.9 Extreme",
+    "chart_url": "https://www.tradingview.com/script/l7xivrLX-noro-s-trend-mas-strategy-v1-9-extreme/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5005,
+    "page": 209,
+    "name": "Noro's Candles test",
+    "chart_url": "https://www.tradingview.com/script/9wx0Sprc-noro-s-candles-test/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5007,
+    "page": 209,
+    "name": "Noro's MACD Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/0IuavTKP-noro-s-macd-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5009,
+    "page": 209,
+    "name": "Noro's Trend MAs Strategy v1.8",
+    "chart_url": "https://www.tradingview.com/script/o6r7AKho-noro-s-trend-mas-strategy-v1-8/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5011,
+    "page": 209,
+    "name": "Noro's Trend MAs Strategy v1.7",
+    "chart_url": "https://www.tradingview.com/script/6we1SGKz-noro-s-trend-mas-strategy-v1-7/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5012,
+    "page": 209,
+    "name": "Noro's Trend MAs Strategy v1.6",
+    "chart_url": "https://www.tradingview.com/script/Ni3lNAwb-noro-s-trend-mas-strategy-v1-6/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5013,
+    "page": 209,
+    "name": "Noro's Trend MAs Strategy 1.5",
+    "chart_url": "https://www.tradingview.com/script/Ku9NSS1l-noro-s-trend-mas-strategy-1-5/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5014,
+    "page": 209,
+    "name": "Noro's MAs Tests",
+    "chart_url": "https://www.tradingview.com/script/V2GDe7Z5-noro-s-mas-tests/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5015,
+    "page": 209,
+    "name": "Noro's CryptoBottom Strategy",
+    "chart_url": "https://www.tradingview.com/script/FBko9iQV-noro-s-cryptobottom-strategy/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5016,
+    "page": 209,
+    "name": "Noro's Trend SMA Strategy v1.4",
+    "chart_url": "https://www.tradingview.com/script/DejDfmGq-noro-s-trend-sma-strategy-v1-4/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5017,
+    "page": 210,
+    "name": "Noro's Trend SMA Strategy v1.3",
+    "chart_url": "https://www.tradingview.com/script/DhXzIAb6-noro-s-trend-sma-strategy-v1-3/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5018,
+    "page": 210,
+    "name": "Noro's Trend SMA Strategy v1.2",
+    "chart_url": "https://www.tradingview.com/script/TGfJbNsp-noro-s-trend-sma-strategy-v1-2/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5019,
+    "page": 210,
+    "name": "Noro's Trend SMA Strategy v1.1",
+    "chart_url": "https://www.tradingview.com/script/MuEmSvnL-noro-s-trend-sma-strategy-v1-1/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5025,
+    "page": 210,
+    "name": "Noro's Trend SMA Strategy",
+    "chart_url": "https://www.tradingview.com/script/TgQ5WK4S-noro-s-trend-sma-strategy/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5054,
+    "page": 211,
+    "name": "Keltner Channel Strategy",
+    "chart_url": "https://www.tradingview.com/script/lr30aANv/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5082,
+    "page": 212,
+    "name": "True Strength Indicator BTCUSD 2H",
+    "chart_url": "https://www.tradingview.com/script/YvVM8ce3-True-Strength-Indicator-BTCUSD-2H/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5088,
+    "page": 212,
+    "name": "MACD Strategy- Script Example how to use % SL in your script ",
+    "chart_url": "https://www.tradingview.com/script/q2sXF38I-MACD-Strategy-Script-Example-how-to-use-SL-in-your-script/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5090,
+    "page": 213,
+    "name": "Best SuperTrend BTCUSD",
+    "chart_url": "https://www.tradingview.com/script/xsofIOja-Best-SuperTrend-BTCUSD/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5093,
+    "page": 213,
+    "name": "Bat MACD",
+    "chart_url": "https://www.tradingview.com/script/fkw91bYx-Bat-MACD/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5097,
+    "page": 213,
+    "name": "DEMA Double Exponential Moving Average Strategy",
+    "chart_url": "https://www.tradingview.com/script/uk1XyAub/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5099,
+    "page": 213,
+    "name": "Wavefinder",
+    "chart_url": "https://www.tradingview.com/script/zvElHKiQ-Wavefinder/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5100,
+    "page": 213,
+    "name": "Cuathro EMA Strategy",
+    "chart_url": "https://www.tradingview.com/script/ZTWiav7B/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5107,
+    "page": 213,
+    "name": "EMA Envelope",
+    "chart_url": "https://www.tradingview.com/script/nWpTN12k-EMA-Envelope/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5112,
+    "page": 213,
+    "name": "SlingShot + MTF + Open Close Cross Strategy",
+    "chart_url": "https://www.tradingview.com/script/6RrnYult/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5127,
+    "page": 214,
+    "name": "Noro's WaveTrend Strategy v1.0",
+    "chart_url": "https://www.tradingview.com/script/FDCf5Nus-noro-s-wavetrend-strategy-v1-0/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5130,
+    "page": 214,
+    "name": "Noro's SILA v1.6L Strategy",
+    "chart_url": "https://www.tradingview.com/script/qVvld2ti-noro-s-sila-v1-6l-strategy/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5136,
+    "page": 214,
+    "name": "MA Cross",
+    "chart_url": "https://www.tradingview.com/script/khymv1fi-MA-Cross/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5142,
+    "page": 215,
+    "name": "BitCoin Simple Buyer",
+    "chart_url": "https://www.tradingview.com/script/R5F9Rf4n-BitCoin-Simple-Buyer/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5153,
+    "page": 215,
+    "name": "Line Break Strategy",
+    "chart_url": "https://www.tradingview.com/script/7wgvQ883-Line-Break-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5165,
+    "page": 216,
+    "name": "LONG TERM INVESTMENT TECHNICAL STRATEGY SCRIPT",
+    "chart_url": "https://www.tradingview.com/script/QNLBstQJ-LONG-TERM-INVESTMENT-TECHNICAL-STRATEGY-SCRIPT/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5180,
+    "page": 216,
+    "name": "Ichimoku Kinko Hyo: Basic Strategy",
+    "chart_url": "https://www.tradingview.com/script/XZcsLIEW-Ichimoku-Kinko-Hyo-Basic-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5182,
+    "page": 216,
+    "name": "Shadow Trading",
+    "chart_url": "https://www.tradingview.com/script/uRbwIkyf-Shadow-Trading/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5203,
+    "page": 217,
+    "name": "Squeeze Momentum on Reversal Strategy",
+    "chart_url": "https://www.tradingview.com/script/Fckzv8iH-Squeeze-Momentum-on-Reversal-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5211,
+    "page": 218,
+    "name": "Stochastic RSI Strategy",
+    "chart_url": "https://www.tradingview.com/script/22FnhBk9-Stochastic-RSI-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5232,
+    "page": 218,
+    "name": "Exponential Bollinger Band Strategy",
+    "chart_url": "https://www.tradingview.com/script/SAZM7jRJ-Exponential-Bollinger-Band-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5233,
+    "page": 219,
+    "name": "EMAMA strategy",
+    "chart_url": "https://www.tradingview.com/script/z5QiBRBc-EMAMA-strategy/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5250,
+    "page": 219,
+    "name": "PerfectStrategy",
+    "chart_url": "https://www.tradingview.com/script/9JoYuVLt-PerfectStrategy/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5263,
+    "page": 220,
+    "name": "Swing Hull/rsi/EMA Strategy",
+    "chart_url": "https://www.tradingview.com/script/syRkfqhT-Swing-Hull-rsi-EMA-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5264,
+    "page": 220,
+    "name": "ARGO_BAND-STRATEGY",
+    "chart_url": "https://www.tradingview.com/script/Dyk8sfYS-ARGO-BAND-STRATEGY/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5265,
+    "page": 220,
+    "name": "Optimized Moving Average Strategy",
+    "chart_url": "https://www.tradingview.com/script/L30FDRXH-Optimized-Moving-Average-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "No Pine code extracted from page"
+  },
+  {
+    "queue_rank": 5278,
+    "page": 220,
+    "name": "EA_3Minute_MagnetStrat",
+    "chart_url": "https://www.tradingview.com/script/D5zC7CYi-EA-3Minute-MagnetStrat/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5310,
+    "page": 222,
+    "name": "EMA Strategy For Index Futures",
+    "chart_url": "https://www.tradingview.com/script/OTsy7tID-EMA-Strategy-For-Index-Futures/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5331,
+    "page": 223,
+    "name": "Simple Moving Average Strategy",
+    "chart_url": "https://www.tradingview.com/script/hXrtpUdS-Simple-Moving-Average-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5345,
+    "page": 223,
+    "name": "EA_Binary Option Spfrat Strategy",
+    "chart_url": "https://www.tradingview.com/script/R18oLPBL-EA-Binary-Option-Spfrat-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5347,
+    "page": 223,
+    "name": "3 Min BO Strategy",
+    "chart_url": "https://www.tradingview.com/script/odu9HNEb-3-Min-BO-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5349,
+    "page": 223,
+    "name": "Spyfrat RSI Strategy",
+    "chart_url": "https://www.tradingview.com/script/LC8cz33c-Spyfrat-RSI-Strategy/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5350,
+    "page": 223,
+    "name": "My EA Strategy for 3 minute BO",
+    "chart_url": "https://www.tradingview.com/script/nkHQMAwn-My-EA-Strategy-for-3-minute-BO/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5356,
+    "page": 224,
+    "name": "[STRATEGY][RS]ZigZag PA Strategy V4.1",
+    "chart_url": "https://www.tradingview.com/script/NEDEDcsP-STRATEGY-RS-ZigZag-PA-Strategy-V4-1/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5359,
+    "page": 224,
+    "name": "[STRATEGY][RS]ZigZag PA Strategy V4",
+    "chart_url": "https://www.tradingview.com/script/DYONEypp-STRATEGY-RS-ZigZag-PA-Strategy-V4/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5362,
+    "page": 224,
+    "name": "[STRATEGY][RS]MarxBabu 4 Oscillators V0",
+    "chart_url": "https://www.tradingview.com/script/21JnEuwF-STRATEGY-RS-MarxBabu-4-Oscillators-V0/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  },
+  {
+    "queue_rank": 5363,
+    "page": 224,
+    "name": "[STRATEGY][RS]MarxBabu 4 Oscillators V0",
+    "chart_url": "https://www.tradingview.com/script/jG5QmbAr-STRATEGY-RS-MarxBabu-4-Oscillators-V0/",
+    "extract_attempts": 2,
+    "last_error": "Open-source page loaded but Pine code was not visible after code-tab attempts"
+  }
+]

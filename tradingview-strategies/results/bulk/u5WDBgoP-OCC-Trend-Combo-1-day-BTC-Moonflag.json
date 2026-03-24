@@ -1,0 +1,13 @@
+{
+  "slug": "u5WDBgoP-OCC-Trend-Combo-1-day-BTC-Moonflag",
+  "chart_url": "https://www.tradingview.com/script/u5WDBgoP-OCC-Trend-Combo-1-day-BTC-Moonflag/",
+  "name": "OCC Trend Combo 1 day BTC Moonflag",
+  "pine_file": "raw-pine/bulk/u5WDBgoP-OCC-Trend-Combo-1-day-BTC-Moonflag.pine",
+  "classification": "unsupported",
+  "strategy_name": "u5WDBgoP-OCC-Trend-Combo-1-day-BTC-Moonflag",
+  "timeframe": "1d",
+  "reason": "uses higher-timeframe lookahead_on",
+  "adaptations": [],
+  "queue_rank": 33,
+  "updated_at": "2026-03-22T04:43:01.070986+00:00"
+}

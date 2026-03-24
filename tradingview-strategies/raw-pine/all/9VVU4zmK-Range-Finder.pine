@@ -1,0 +1,248 @@
+//@version=5
+strategy('Range Finder', overlay = true, margin_long = 100, margin_short = 100)
+
+// --- Input Parameters ---
+account_balance = input.float(10000, 'Account Balance', minval = 1000, tooltip = 'Initial account balance for position sizing and risk calculation.')
+pivot_length = input.int(5, 'Pivot Length', minval = 1, tooltip = 'Number of bars left/right for detecting pivot highs/lows to define range boundaries.')
+wick_ratio = input.float(1.1, 'Wick to Body Ratio (1.25 = 25% larger)', minval = 1.0, step = 0.05, tooltip = 'Minimum ratio of wick size to body size for a valid signal; higher values require larger wicks.')
+risk_percent = input.float(2.0, 'Risk Per Trade (%)', minval = 0.1, step = 0.1, tooltip = 'Percentage of account balance risked per trade; adjust to manage risk.')
+rr_ratio = input.float(6.0, 'Risk:Reward Ratio', minval = 1.0, step = 0.1, tooltip = 'Ratio of potential reward to risk; higher values target larger profits.')
+sl_multiplier = input.float(9.0, 'SL Multiplier', minval = 0.1, step = 0.1, tooltip = 'Multiplier for stop loss distance based on ATR; default is 9.0.')
+tp_multiplier = input.float(6.0, 'TP Multiplier', minval = 0.1, step = 0.1, tooltip = 'Multiplier for take profit distance based on ATR; default is 6.0, scaled by Risk:Reward ratio.')
+line_length = input.int(25, 'Line Length (bars)', minval = 5, step = 5, tooltip = 'Duration in bars for displaying TP, SL, and entry lines on the chart.')
+label_position = input.string('left', 'Label Position', options = ['left', 'right'], tooltip = 'Position of text relative to lines; choose left or right for visibility.')
+atr_period = input.int(14, 'ATR Period', minval = 1, tooltip = 'Number of periods for ATR calculation; higher values smooth the volatility measure, affecting SL distance.')
+ema_timeframe = input.timeframe('5', 'EMA Timeframe', tooltip = 'Timeframe for EMA 200 and 50 calculation; default is 5 minutes.')
+
+// --- Range Detection via Pivots (Marks the dynamic range based on swing highs/lows) ---
+pivot_high = ta.pivothigh(high, pivot_length, pivot_length)
+pivot_low = ta.pivotlow(low, pivot_length, pivot_length)
+var float range_high = na
+var float range_low = na
+if not na(pivot_high)
+    range_high := pivot_high
+if not na(pivot_low)
+    range_low := pivot_low
+plot(range_high, 'Range High', color = color.orange, style = plot.style_linebr, linewidth = 2)
+plot(range_low, 'Range Low', color = color.purple, style = plot.style_linebr, linewidth = 2)
+
+// --- EMA Calculation on Selected Timeframe ---
+ema200 = request.security(syminfo.tickerid, ema_timeframe, ta.ema(close, 200))
+ema50 = request.security(syminfo.tickerid, ema_timeframe, ta.ema(close, 50))
+plot(ema200, 'EMA 200', color = color.red)
+plot(ema50, 'EMA 50', color = color.green)
+
+// --- Wick Detection (Pattern: Rejection wicks at range boundaries) ---
+body_size = math.abs(close - open)
+upper_wick = high - math.max(open, close)
+lower_wick = math.min(open, close) - low
+wick_up = not na(range_high) and high > range_high and close < open and upper_wick >= body_size * wick_ratio
+wick_down = not na(range_low) and low < range_low and close > open and lower_wick >= body_size * wick_ratio
+
+// --- EMA Crossover Confluence ---
+var bool ema_trend_up = false
+var bool ema_trend_down = false
+if ta.crossover(ema50, ema200)
+    ema_trend_up := true
+    ema_trend_down := false
+if ta.crossunder(ema50, ema200)
+    ema_trend_up := false
+    ema_trend_down := true
+
+// --- Risk Management ---
+risk_amount = account_balance * (risk_percent / 100)
+stop_distance = ta.atr(atr_period)
+position_size = math.floor(risk_amount / stop_distance)
+
+// --- Entry Logic (Trades according to range: Sell on rejection at high, Buy on rejection at low) ---
+var float sell_stop_price = na
+var float sell_take_profit = na
+var float buy_stop_price = na
+var float buy_take_profit = na
+
+if wick_up and ema_trend_down and close < ema200
+    strategy.entry('Sell', strategy.short, qty = position_size)
+    sell_stop_price := high + stop_distance * sl_multiplier
+    sell_take_profit := close - stop_distance * tp_multiplier * rr_ratio
+    strategy.exit('Sell Exit', 'Sell', stop = sell_stop_price, limit = sell_take_profit)
+    // Plot TP and SL lines immediately after entry
+    line.new(bar_index, sell_stop_price, bar_index + line_length, sell_stop_price, color = color.red, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), sell_stop_price, text = 'SL: ' + str.tostring(sell_stop_price, '#.##'), color = color.red, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+    line.new(bar_index, sell_take_profit, bar_index + line_length, sell_take_profit, color = color.green, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), sell_take_profit, text = 'TP: ' + str.tostring(sell_take_profit, '#.##'), color = color.green, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+    line.new(bar_index, high, bar_index + line_length, high, color = color.red, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), high, text = 'Sell (Range Rejection)', color = color.red, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+
+if wick_down and ema_trend_up and close > ema200
+    strategy.entry('Buy', strategy.long, qty = position_size)
+    buy_stop_price := low - stop_distance * sl_multiplier
+    buy_take_profit := close + stop_distance * tp_multiplier * rr_ratio
+    strategy.exit('Buy Exit', 'Buy', stop = buy_stop_price, limit = buy_take_profit)
+    // Plot TP and SL lines immediately after entry
+    line.new(bar_index, buy_stop_price, bar_index + line_length, buy_stop_price, color = color.red, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), buy_stop_price, text = 'SL: ' + str.tostring(buy_stop_price, '#.##'), color = color.red, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+    line.new(bar_index, buy_take_profit, bar_index + line_length, buy_take_profit, color = color.green, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), buy_take_profit, text = 'TP: ' + str.tostring(buy_take_profit, '#.##'), color = color.green, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+    line.new(bar_index, low, bar_index + line_length, low, color = color.green, style = line.style_solid)
+    label.new(bar_index + (label_position == 'left' ? -1 : line_length + 1), low, text = 'Buy (Range Rejection)', color = color.green, textcolor = color.white, style = label_position == 'left' ? label.style_label_right : label.style_label_left, size = size.small)
+
+// --- Alert Conditions for Bitget Webhook ---
+alertcondition(wick_up, title = 'Sell Signal', message = '{"action":"{{strategy.order.action}}","contracts":"{{strategy.order.contracts}}","marketPosition":"{{strategy.market_position}}","positionSize":"{{strategy.position_size}}","prevMarketPosition":"{{strategy.prev_market_position}}","price":"{{close}}","symbol":"{{ticker}}","time":"{{timenow}}"}')
+alertcondition(wick_down, title = 'Buy Signal', message = '{"action":"{{strategy.order.action}}","contracts":"{{strategy.order.contracts}}","marketPosition":"{{strategy.market_position}}","positionSize":"{{strategy.position_size}}","prevMarketPosition":"{{strategy.prev_market_position}}","price":"{{close}}","symbol":"{{ticker}}","time":"{{timenow}}"}')
+
+View in Pine Editor・91 lines
+Use on chart
+3
+9
+985
+Range Finder Strategy for TradingView
+
+Overview
+
+The Range Finder Strategy is a sophisticated trading system designed for forex and cryptocurrency markets, leveraging dynamic range detection, wick-based rejection patterns, and EMA confluence to execute high-probability trades. This strategy identifies key price ranges using pivot points and triggers trades when price rejects from these boundaries with significant wick formations, aligning with the broader market trend as confirmed by EMA crossovers. It incorporates robust risk management, customizable parameters, and visual aids for clear trade visualization, making it suitable for both manual and automated trading on platforms like Bitget via webhook alerts.
+
+Strategy Components
+
+1. Dynamic Range Detection
+
+
+
+
+
+Pivot Points: The strategy identifies range boundaries using pivot highs and lows, calculated with a user-defined Pivot Length (default: 5 bars left/right). These pivots mark significant swing points, defining the upper (range high) and lower (range low) boundaries of the price range.
+
+
+
+Visualization: The range high is plotted as an orange line, and the range low as a purple line, using a broken line style (plot.style_linebr) to show only confirmed pivot levels, providing a clear visual of the trading range.
+
+2. Wick-Based Rejection Pattern
+
+
+
+
+
+Wick Detection: The strategy looks for rejection candles at the range boundaries, characterized by significant wicks. A wick is considered valid if its size is at least the user-defined Wick to Body Ratio (default: 1.1, or 10% larger than the candle body).
+
+
+
+
+
+Sell Signal: Triggered when the high exceeds the range high, the candle closes bearish (close < open), and the upper wick meets the ratio requirement.
+
+
+
+Buy Signal: Triggered when the low falls below the range low, the candle closes bullish (close > open), and the lower wick meets the ratio requirement.
+
+
+
+Purpose: These wicks indicate strong rejection at key levels, often signaling a reversal back into the range, providing high-probability entry points.
+
+3. EMA Trend Confirmation
+
+
+
+
+
+EMA Calculation: Uses two Exponential Moving Averages (EMAs) calculated on a user-selectable timeframe (default: 5-minute):
+
+
+
+
+
+EMA 200: Long-term trend indicator (plotted in red).
+
+
+
+EMA 50: Short-term trend indicator (plotted in green).
+
+
+
+Crossover Logic:
+
+
+
+
+
+A bullish trend is confirmed when the EMA 50 crosses above the EMA 200 (ema_trend_up = true).
+
+
+
+A bearish trend is confirmed when the EMA 50 crosses below the EMA 200 (ema_trend_down = true).
+
+
+
+Confluence Requirement: Trades are only executed when the wick rejection aligns with the EMA trend (e.g., sell signals require close < ema200 and bearish trend; buy signals require close > ema200 and bullish trend).
+
+4. Risk Management
+
+
+
+
+
+Position Sizing: Calculated based on the user-defined Account Balance (default: $10,000) and Risk Per Trade (default: 2%). The position size is determined as risk_amount / stop_distance, where stop_distance is derived from the Average True Range (ATR, default period: 14).
+
+
+
+Stop Loss (SL): Set using an ATR-based multiplier (SL Multiplier, default: 9.0). For sells, SL is placed above the high; for buys, below the low.
+
+
+
+Take Profit (TP): Set using an ATR-based multiplier (TP Multiplier, default: 6.0) scaled by the Risk:Reward Ratio (default: 6.0), ensuring a favorable reward-to-risk profile.
+
+
+
+Example: For a $10,000 account with 2% risk, if ATR is 0.5, the position size is 400 units, with SL and TP dynamically adjusted to market volatility.
+
+5. Trade Execution
+
+
+
+
+
+Sell Entry: Triggered on a wick rejection above the range high, with bearish EMA confluence (ema_trend_down and close < ema200). Enters a short position with calculated SL and TP.
+
+
+
+Buy Entry: Triggered on a wick rejection below the range low, with bullish EMA confluence (ema_trend_up and close > ema200). Enters a long position with calculated SL and TP.
+
+
+
+Exit Logic: Uses strategy.exit to set SL and TP levels, closing trades when either is hit.
+
+6. Visual Feedback
+
+
+
+
+
+Lines and Labels: Upon trade entry, the strategy plots:
+
+
+
+
+
+Red SL line and label (e.g., "SL: 123.45").
+
+
+
+Green TP line and label (e.g., "TP: 120.00").
+
+
+
+Entry line (red for sell, green for buy) labeled with "Sell (Range Rejection)" or "Buy (Range Rejection)".
+
+
+
+Customization: Users can adjust the Line Length (default: 25 bars) for how long lines persist and Label Position (left or right) for optimal chart visibility.
+
+7. Alert Conditions
+
+
+
+
+
+Webhook Integration: Generates alerts for Bitget webhook integration, providing JSON-formatted messages with trade details (action, contracts, market position, size, price, symbol, and timestamp).
+
+
+
+Usage: Traders can set up automated trading by connecting these alerts to trading bots or platforms supporting webhooks.

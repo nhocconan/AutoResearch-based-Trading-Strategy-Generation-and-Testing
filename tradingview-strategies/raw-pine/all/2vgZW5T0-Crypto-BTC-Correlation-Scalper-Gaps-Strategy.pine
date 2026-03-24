@@ -1,0 +1,140 @@
+//@version=5
+strategy("Crypto BTC Correlation Scalper Gaps Strategy", overlay = true)
+
+inverse=input.bool(false, title="Inverse Mode / Long = Short or Long = Long")
+
+ex_symbol = input.symbol("CME:BTC1!")
+ex_high = request.security(ex_symbol, timeframe.period,high)
+ex_low = request.security(ex_symbol, timeframe.period,low)
+ex_open = request.security(ex_symbol, timeframe.period,open)
+ex_close = request.security(ex_symbol, timeframe.period,close)
+
+apply_correlation = input.bool(true, title="Correlation Candles")
+def_high = 0.0
+def_low =0.0
+def_open =0.0
+def_close =0.0
+
+def_high := apply_correlation? ex_high : high
+def_low := apply_correlation? ex_low : low
+def_open := apply_correlation? ex_open : open
+def_close := apply_correlation? ex_close : close
+
+daily_sma = request.security(ex_symbol, "D", ta.sma(request.security(ex_symbol, "D", close), input(1)))
+//plot(daily_sma)
+
+legnth_tp_sl = input(50, title="Length for Checking Highest High/Lowest Low Points")
+minimalDeviationInput = nz(input.float(30.0, "Minimal Deviation (%)", minval=1, maxval=100) / 100 * ta.sma(def_high-def_low, 14))
+
+// Detect gaps.
+isGapDown = def_high < def_low[1] and def_low[1] - def_high >= minimalDeviationInput
+isGapUp = def_low > def_high[1] and def_low - def_high[1] >= minimalDeviationInput
+isGap = isGapDown or isGapUp
+isGapClosed = false
+
+
+
+lowest_low=ta.lowest(def_low, legnth_tp_sl)
+highest_high=ta.highest(def_high, legnth_tp_sl)
+
+long = isGapUp and def_close > daily_sma
+short = isGapDown and def_close < daily_sma
+
+
+
+var longOpened = false
+var int timeOfBuyLong = na
+var float lowest_low_var_tp = na
+var float lowest_low_var_sl = na
+var bool longEntry = na
+
+
+longEntry := long and not longOpened 
+
+if longEntry
+    longOpened := true
+    timeOfBuyLong := time
+    lowest_low_var_tp := def_close * (1 + ((def_close / lowest_low) -1))
+    lowest_low_var_sl := lowest_low
+
+longExitSignal = short or  def_high > lowest_low_var_tp //or def_low < lowest_low_var_sl
+longExit = longOpened[1] and longExitSignal
+
+
+if longExit 
+    longOpened := false
+    timeOfBuyLong := na
+    lowest_low_var_tp:=na
+    lowest_low_var_sl :=na
+ 
+
+    
+//-------------------------------------------------------------------------------
+var shortOpened = false
+var int timeOfBuyShort = na
+var float highest_high_var_tp = na
+var float highest_high_var_sl = na
+var bool shortEntry = na
+
+shortEntry := short and not shortOpened  
+
+if shortEntry
+    shortOpened := true
+    timeOfBuyShort := time
+    timeOfBuyShort
+    highest_high_var_tp := def_close * (1 - ((highest_high / def_close) - 1  ))
+    highest_high_var_sl := highest_high
+ 
+
+
+shortExitSignal = long  or  def_low < highest_high_var_tp //or def_high > highest_high_var_sl
+shortExit = shortOpened[1] and shortExitSignal 
+
+
+if shortExit
+  
+    shortOpened := false
+    timeOfBuyShort := na
+    highest_high_var_tp := na
+    highest_high_var_sl := na
+    
+if(inverse)
+    strategy.entry("long",strategy.short,when=longEntry)
+    strategy.close("long",when=longExit)
+    
+    strategy.entry("short",strategy.long,when=shortEntry)
+    strategy.close("short",when=shortExit)
+
+if(not inverse)
+    strategy.entry("long",strategy.long,when=longEntry)
+    strategy.close("long",when=longExit)
+    
+    strategy.entry("short",strategy.short,when=shortEntry)
+    strategy.close("short",when=shortExit)
+
+View in Pine Editor・116 lines
+Use on chart
+3
+8
+1
+9
+9 200
+This strategy is based on the gaps theory.
+In this case we have the BTC futures from CME, which acts in a way similar to stocks, and we can have gaps present between close/open session, and also sometimes between same candle due to huge movements intra candle.
+
+At the same time I have combined this with a daily moving average, to help out a bit with the trend, since we are looking at small timeframe like 1-15/30min .
+
+On top of that we have a reverse option, where long = short and viceversa, which can be used with against BTC pairs .
+
+
+Rule are simple:
+For long, we have a long gap and the close of the correlated candle is above daily sma
+For short, we have a short gap and the close of the correlated candle is below daily sma
+
+For exit:
+For exit, we take the highest highest values for short entry TP, meaning we get the different from the HH and rest the current open candle distance, and use that distance as a TP.
+At the same time for long entry, we take the lowest low value and rest current close of the candle to that value, and we get the TP.
+Can also be applied this logic for SL aswell but from the test I have found out that exiting based on a reverse condition(when tp is not being hit), gives better results/dd overall.
+
+
+If you have any questions, please let me know !

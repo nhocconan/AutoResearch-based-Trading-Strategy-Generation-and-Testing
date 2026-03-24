@@ -1,0 +1,315 @@
+//@version=6
+strategy("CATalyst Purrfit Sniper",
+     shorttitle           = "CATalyst",
+     overlay              = true,
+     initial_capital      = 300000,
+     default_qty_type     = strategy.fixed,
+     default_qty_value    = 35,
+     commission_type      = strategy.commission.cash_per_contract,
+     commission_value     = 0.52,
+     slippage             = 2,
+     process_orders_on_close = false,
+     calc_on_every_tick   = false,
+     max_labels_count     = 20,
+     max_lines_count      = 20)
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  DIRECTION                                                    │
+// └──────────────────────────────────────────────────────────────┘
+
+i_direction = input.string("Long", "Direction",
+              options = ["Long", "Short"],
+              group   = "🐱 Direction")
+
+bool isLong = i_direction == "Long"
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  ENTRY DATE & TIME  (US Eastern / Exchange TZ)                │
+// └──────────────────────────────────────────────────────────────┘
+
+i_year  = input.int(2026, "Year",   minval = 2024, maxval = 2030, group = "🐾 Entry Date")
+i_month = input.int(2,    "Month",  minval = 1,    maxval = 12,   group = "🐾 Entry Date")
+i_day   = input.int(13,   "Day",    minval = 1,    maxval = 31,   group = "🐾 Entry Date")
+
+i_hour  = input.int(8,    "Hour",   minval = 0, maxval = 23, group = "🐾 Entry Time (ET)")
+i_min   = input.int(29,   "Minute", minval = 0, maxval = 59, group = "🐾 Entry Time (ET)")
+i_sec   = input.int(55,   "Second", minval = 0, maxval = 59, group = "🐾 Entry Time (ET)",
+          tooltip = "Fires on first tick at or after this time.\nSet to 0 if using 1-minute chart.")
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  TAKE PROFIT                                                  │
+// └──────────────────────────────────────────────────────────────┘
+
+i_tpTicks = input.int(123, "TP (ticks)", minval = 1, maxval = 2000, group = "🐟 Take Purrfit",
+            tooltip = "MNQ: 1 tick = 0.25 pts = $0.50\n123 ticks = 30.75 pts = $61.50")
+
+i_slTicks = input.int(50, "SL (ticks)", minval = 1, maxval = 2000, group = "🐟 Take Purrfit",
+            tooltip = "Fixed stop loss. No trailing.\n50 ticks = 12.50 pts = $25.00")
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  DISPLAY                                                      │
+// └──────────────────────────────────────────────────────────────┘
+
+i_showTable  = input.bool(true, "Dashboard",    group = "😺 Display")
+i_showLevels = input.bool(true, "TP line",      group = "😺 Display")
+
+// ════════════════════════════════════════════════════════════════════════════
+// CORE LOGIC — IDENTICAL TO CPI SNIPER v6
+// ════════════════════════════════════════════════════════════════════════════
+
+TICK_SIZE  = syminfo.mintick
+TICK_VALUE = syminfo.pointvalue * TICK_SIZE
+TP_POINTS  = i_tpTicks * TICK_SIZE
+TP_DOLLAR  = i_tpTicks * TICK_VALUE
+SL_POINTS  = i_slTicks * TICK_SIZE
+SL_DOLLAR  = i_slTicks * TICK_VALUE
+
+int fireTime = timestamp("America/New_York", i_year, i_month, i_day, i_hour, i_min, i_sec)
+
+var bool  hasFired   = false
+var float entryPrice = na
+
+// ════════════════════════════════════════════════════════════════════════════
+// ENTRY + TP — IDENTICAL TO CPI SNIPER v6
+// ════════════════════════════════════════════════════════════════════════════
+
+bool fireNow = time >= fireTime and not hasFired
+
+if fireNow
+    hasFired   := true
+    entryPrice := close
+
+    if isLong
+        strategy.entry("Long",  strategy.long)
+        strategy.exit("TP",     from_entry = "Long",  profit = i_tpTicks, loss = i_slTicks)
+    else
+        strategy.entry("Short", strategy.short)
+        strategy.exit("TP",     from_entry = "Short", profit = i_tpTicks, loss = i_slTicks)
+
+// ════════════════════════════════════════════════════════════════════════════
+// CHART — IDENTICAL TO CPI SNIPER v6
+// ════════════════════════════════════════════════════════════════════════════
+
+bgcolor(fireNow ? color.new(color.yellow, 80) : na)
+
+if fireNow
+    label.new(bar_index, isLong ? low : high,
+              (isLong ? "▲ LONG" : "▼ SHORT") + " @ " + str.tostring(close, format.mintick),
+              style     = isLong ? label.style_label_up : label.style_label_down,
+              color     = isLong ? color.new(#00C853, 0) : color.new(#FF1744, 0),
+              textcolor = color.white, size = size.normal)
+
+if i_showLevels and fireNow and not na(entryPrice)
+    float tpPrice = isLong ? entryPrice + TP_POINTS : entryPrice - TP_POINTS
+    float slPrice = isLong ? entryPrice - SL_POINTS : entryPrice + SL_POINTS
+
+    line.new(bar_index, entryPrice, bar_index + 400, entryPrice,
+             color = color.new(color.white, 40), style = line.style_solid, width = 1)
+    line.new(bar_index, tpPrice, bar_index + 400, tpPrice,
+             color = color.new(#00C853, 20), style = line.style_dashed, width = 2)
+    line.new(bar_index, slPrice, bar_index + 400, slPrice,
+             color = color.new(#FF1744, 20), style = line.style_dashed, width = 2)
+    label.new(bar_index + 400, tpPrice,
+              "TP " + str.tostring(tpPrice, format.mintick) + "  ($" + str.tostring(TP_DOLLAR, "#.##") + ")",
+              style = label.style_label_left, color = color.new(#00C853, 40),
+              textcolor = color.white, size = size.small)
+    label.new(bar_index + 400, slPrice,
+              "SL " + str.tostring(slPrice, format.mintick) + "  ($" + str.tostring(SL_DOLLAR, "#.##") + ")",
+              style = label.style_label_left, color = color.new(#FF1744, 40),
+              textcolor = color.white, size = size.small)
+
+// ════════════════════════════════════════════════════════════════════════════
+// 🐱 THE MEOW DASHBOARD 🐱
+// ════════════════════════════════════════════════════════════════════════════
+
+if i_showTable and barstate.islast
+    var table t = table.new(position.top_right, 4, 11,
+                            bgcolor      = color.new(#0d1117, 5),
+                            frame_color  = color.new(#0d1117, 5), frame_width  = 0,
+                            border_color = color.new(color.gray, 80), border_width = 1)
+
+    // ── Countdown ──
+    float secsLeft = (fireTime - timenow) / 1000.0
+    string countdown = hasFired ? "" : secsLeft > 3600 ? "  " + str.tostring(math.round(secsLeft / 3600)) + "h" : secsLeft > 60 ? "  " + str.tostring(math.round(secsLeft / 60)) + "m" : secsLeft > 0 ? "  " + str.tostring(math.round(secsLeft)) + "s" : "  NOW"
+
+    // ── Mood Cat — changes with countdown! ──
+    string moodCat  = ""
+    string moodText = ""
+    color  moodClr  = color.yellow
+
+    if hasFired
+        if strategy.position_size != 0
+            moodCat  := "😼"
+            moodText := "POUNCED"
+            moodClr  := #FF1744
+        else if strategy.netprofit >= 0
+            moodCat  := "😹"
+            moodText := "PURRFECT"
+            moodClr  := #00C853
+        else
+            moodCat  := "🔥"
+            moodText := "BURNT!"
+            moodClr  := #FF1744
+    else if secsLeft > 3600
+        moodCat  := "🙀"
+        moodText := "STALKING"
+        moodClr  := color.new(color.yellow, 0)
+    else if secsLeft > 300
+        moodCat  := "😾"
+        moodText := "FOCUSED"
+        moodClr  := color.new(color.yellow, 0)
+    else if secsLeft > 60
+        moodCat  := "😼"
+        moodText := "CROUCHING"
+        moodClr  := color.orange
+    else if secsLeft > 10
+        moodCat  := "😸"
+        moodText := "WIGGLING"
+        moodClr  := color.orange
+    else if secsLeft > 0
+        moodCat  := "😻"
+        moodText := "POUNCE!"
+        moodClr  := #00C853
+    else
+        moodCat  := "😻"
+        moodText := "MEOW!"
+        moodClr  := #00C853
+
+    // ── Date + time strings ──
+    string dateStr = str.tostring(i_year) + "-" + (i_month < 10 ? "0" : "") + str.tostring(i_month) + "-" + (i_day < 10 ? "0" : "") + str.tostring(i_day)
+    string timeStr = (i_hour < 10 ? "0" : "") + str.tostring(i_hour) + ":" + (i_min < 10 ? "0" : "") + str.tostring(i_min) + ":" + (i_sec < 10 ? "0" : "") + str.tostring(i_sec)
+
+    // ── TP price ──
+    string tpStr = "—"
+    string slStr = "—"
+    if not na(entryPrice)
+        float tp = isLong ? entryPrice + TP_POINTS : entryPrice - TP_POINTS
+        float sl = isLong ? entryPrice - SL_POINTS : entryPrice + SL_POINTS
+        tpStr := str.tostring(tp, format.mintick)
+        slStr := str.tostring(sl, format.mintick)
+
+    // ── P&L cat ──
+    string pnlCat = strategy.netprofit >= 0 ? "😸" : "😿"
+    string pnlStr = pnlCat + " $" + str.tostring(strategy.netprofit, "#.##")
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 0 — TOP BORDER
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 0, "😺",             text_size = 10, text_halign = text.align_center)
+    t.cell(1, 0, "😸🐱😸🐱😸🐱", text_size = 10, text_halign = text.align_center)
+    t.cell(2, 0, "🐱😸🐱😸🐱😸", text_size = 10, text_halign = text.align_center)
+    t.cell(3, 0, "😺",             text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 1 — HEADER
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 1, "😸", text_size = 10, text_halign = text.align_center)
+    t.cell(1, 1, "🐱 CATalyst",
+           text_color = color.white, text_size = 11, text_halign = text.align_left)
+    t.cell(2, 1, moodCat + (isLong ? " ▲ LONG" : " ▼ SHORT"),
+           text_color = isLong ? #00C853 : #FF1744, text_size = 11, text_halign = text.align_right)
+    t.cell(3, 1, "😸", text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 2 — STATUS + MOOD
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 2, "😹", text_size = 10, text_halign = text.align_center)
+    t.cell(1, 2, "Status",
+           text_color = color.gray, text_size = 10, text_halign = text.align_left)
+    t.cell(2, 2, moodCat + " " + moodText + countdown,
+           text_color = moodClr, text_size = 10, text_halign = text.align_right)
+    t.cell(3, 2, "😹", text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 3 — DATE
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 3, "😻", text_size = 10, text_halign = text.align_center)
+    t.cell(1, 3, "Date",
+           text_color = color.gray, text_size = 10, text_halign = text.align_left)
+    t.cell(2, 3, dateStr,
+           text_color = color.white, text_size = 10, text_halign = text.align_right)
+    t.cell(3, 3, "😻", text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 4 — TIME
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 4, "😼", text_size = 10, text_halign = text.align_center)
+    t.cell(1, 4, "Time",
+           text_color = color.gray, text_size = 10, text_halign = text.align_left)
+    t.cell(2, 4, timeStr + " ET",
+           text_color = color.white, text_size = 10, text_halign = text.align_right)
+    t.cell(3, 4, "😼", text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 5 — ENTRY
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 5, "😽", text_size = 10, text_halign = text.align_center)
+    t.cell(1, 5, "🐾 Entry",
+           text_color = color.gray, text_size = 10, text_halign = text.align_left)
+    t.cell(2, 5, na(entryPrice) ? "—" : str.tostring(entryPrice, format.mintick),
+           text_color = color.white, text_size = 10, text_halign = text.align_right)
+    t.cell(3, 5, "😽", text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 6 — TAKE PURRFIT
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 6, "😺", text_size = 10, text_halign = text.align_center)
+    t.cell(1, 6, "🐟 Purrfit",
+           text_color = color.gray, text_size = 10, text_halign = text.align_left)
+    t.cell(2, 6, str.tostring(i_tpTicks) + "t · " + tpStr + " · $" + str.tostring(TP_DOLLAR, "#.##"),
+           text_color = #00C853, text_size = 10, text_halign = text.align_right)
+    t.cell(3, 6, "😺", text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 7 — STOP LOSS
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 7, "🙀", text_size = 10, text_halign = text.align_center)
+    t.cell(1, 7, "🛑 Stoploss",
+           text_color = color.gray, text_size = 10, text_halign = text.align_left)
+    t.cell(2, 7, str.tostring(i_slTicks) + "t · " + slStr + " · $" + str.tostring(SL_DOLLAR, "#.##"),
+           text_color = #FF1744, text_size = 10, text_halign = text.align_right)
+    t.cell(3, 7, "🙀", text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 8 — SYMBOL
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 8, "😸", text_size = 10, text_halign = text.align_center)
+    t.cell(1, 8, "Symbol",
+           text_color = color.gray, text_size = 10, text_halign = text.align_left)
+    t.cell(2, 8, syminfo.ticker,
+           text_color = color.aqua, text_size = 10, text_halign = text.align_right)
+    t.cell(3, 8, "😸", text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 9 — P&L
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 9, "🐱", text_size = 10, text_halign = text.align_center)
+    t.cell(1, 9, "P&L",
+           text_color = color.gray, text_size = 10, text_halign = text.align_left)
+    t.cell(2, 9, pnlStr,
+           text_color = strategy.netprofit >= 0 ? #00C853 : #FF1744,
+           text_size = 10, text_halign = text.align_right)
+    t.cell(3, 9, "🐱", text_size = 10, text_halign = text.align_center)
+
+    // ════════════════════════════════════════════════════════════
+    // ROW 10 — BOTTOM BORDER
+    // ════════════════════════════════════════════════════════════
+    t.cell(0, 10, "😺",             text_size = 10, text_halign = text.align_center)
+    t.cell(1, 10, "🐱😸🐱😸🐱😸", text_size = 10, text_halign = text.align_center)
+    t.cell(2, 10, "😸🐱😸🐱😸🐱", text_size = 10, text_halign = text.align_center)
+    t.cell(3, 10, "😺",             text_size = 10, text_halign = text.align_center)
+
+View in Pine Editor・309 lines
+Use on chart
+6
+9
+1 102
+Feb 13
+CATalyst Purrfit Sniper fires a single market order (long or short) at a user-defined date, hour, minute and second, then manages the position with a take-profit target measured in ticks.😼 There is no built-in stop loss 😸.
+
+Important: Must be used on a 1-second chart for accurate timing. On higher timeframes the entry may be delayed by up to one full bar 🙀.
+
+Designed for scheduled news events (CPI, NFP, FOMC, etc.) where you want precise, timed execution 😻.
+Feb 13
+Release Notes
+Added stop loss.

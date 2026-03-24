@@ -1,0 +1,134 @@
+//@version=5
+strategy("Bollinger Breakout Strategy with Direction Control", overlay=true)
+
+// === Input Parameters ===
+length = input(20, title="Bollinger Bands Length")
+src = close
+mult = input(2.0, title="Bollinger Bands Multiplier")
+rsi_length = input(14, title="RSI Length")
+rsi_midline = input(50, title="RSI Midline")
+risk_reward_ratio = input(2.0, title="Risk/Reward Ratio")
+
+// === Trade Direction Option ===
+trade_direction = input.string("Both", title="Trade Direction", options=["Long", "Short", "Both"])
+
+// === Bollinger Bands Calculation ===
+basis = ta.sma(src, length)
+dev = mult * ta.stdev(src, length)
+upper_band = basis + dev
+lower_band = basis - dev
+
+// === RSI Calculation ===
+rsi_val = ta.rsi(src, rsi_length)
+
+// === Breakout Conditions ===
+// Long: Prijs sluit boven de bovenste Bollinger Band en RSI > RSI Midline
+long_condition = close > upper_band and rsi_val > rsi_midline and (trade_direction == "Long" or trade_direction == "Both")
+
+// Short: Prijs sluit onder de onderste Bollinger Band en RSI < RSI Midline
+short_condition = close < lower_band and rsi_val < rsi_midline and (trade_direction == "Short" or trade_direction == "Both")
+
+// === Entry Prices ===
+var float entry_price_long = na
+var float entry_price_short = na
+
+if (long_condition)
+    entry_price_long := close
+    strategy.entry("Long", strategy.long, when=long_condition)
+
+if (short_condition)
+    entry_price_short := close
+    strategy.entry("Short", strategy.short, when=short_condition)
+
+// === Stop-Loss and Take-Profit ===
+long_stop_loss = entry_price_long * 0.98  // 2% onder instapprijs
+long_take_profit = entry_price_long * (1 + (0.02 * risk_reward_ratio))
+
+short_stop_loss = entry_price_short * 1.02  // 2% boven instapprijs
+short_take_profit = entry_price_short * (1 - (0.02 * risk_reward_ratio))
+
+if (strategy.position_size > 0)  // Long Positie
+    strategy.exit("Exit Long", "Long", stop=long_stop_loss, limit=long_take_profit)
+
+if (strategy.position_size < 0)  // Short Positie
+    strategy.exit("Exit Short", "Short", stop=short_stop_loss, limit=short_take_profit)
+
+// === Plotting ===
+plot(upper_band, color=color.green, title="Upper Band")
+plot(lower_band, color=color.red, title="Lower Band")
+plot(basis, color=color.blue, title="Basis")
+
+View in Pine Editor・59 lines
+Use on chart
+5
+3
+2 461
+Bollinger Breakout Strategy with Direction Control - User Guide
+This strategy leverages Bollinger Bands, RSI, and directional filters to identify potential breakout trading opportunities. It is designed for traders looking to capitalize on significant price movements while maintaining control over trade direction (long, short, or both). Here’s how to use this strategy effectively:
+
+How the Strategy Works
+Indicators Used:
+
+Bollinger Bands:
+A volatility-based indicator with an upper and lower band around a simple moving average (SMA). The bands expand or contract based on market volatility.
+RSI (Relative Strength Index):
+Measures momentum to determine overbought or oversold conditions. In this strategy, RSI is used to confirm breakout strength.
+Trade Direction Control:
+
+You can select whether to trade:
+Long only: Buy positions.
+Short only: Sell positions.
+Both: Trade in both directions depending on conditions.
+Breakout Conditions:
+
+Long Trade:
+The price closes above the upper Bollinger Band.
+RSI is above the midline (50), confirming upward momentum.
+The "Trade Direction" setting allows either "Long" or "Both."
+Short Trade:
+The price closes below the lower Bollinger Band.
+RSI is below the midline (50), confirming downward momentum.
+The "Trade Direction" setting allows either "Short" or "Both."
+Risk Management:
+
+Stop-Loss:
+Long trades: Set at 2% below the entry price.
+Short trades: Set at 2% above the entry price.
+Take-Profit:
+Calculated using a Risk/Reward Ratio (default is 2:1).
+Adjust this in the strategy settings.
+Inputs and Customization
+Key Parameters:
+
+Bollinger Bands Length: Default is 20. Adjust based on the desired sensitivity.
+Multiplier: Default is 2.0. Higher values widen the bands; lower values narrow them.
+RSI Length: Default is 14, which is standard for RSI.
+Risk/Reward Ratio: Default is 2.0. Increase for more aggressive profit targets, decrease for conservative exits.
+Trade Direction:
+
+Options: "Long," "Short," or "Both."
+Example: Set to "Long" in a bullish market to focus only on buy trades.
+How to Use This Strategy
+Adding the Strategy:
+
+Paste the script into TradingView’s Pine Editor and add it to your chart.
+Setting Parameters:
+
+Adjust the Bollinger Band settings, RSI, and Risk/Reward Ratio to fit the asset and timeframe you're trading.
+Analyzing Signals:
+
+Green line (Upper Band): Signals breakout potential for long trades.
+Red line (Lower Band): Signals breakout potential for short trades.
+Blue line (Basis): Central Bollinger Band (SMA), helpful for understanding price trends.
+Testing the Strategy:
+
+Use the Strategy Tester in TradingView to backtest performance on your chosen asset and timeframe.
+Optimizing for Assets:
+
+Forex pairs, cryptocurrencies (like BTC), or stocks with high volatility are ideal for this strategy.
+Works best on higher timeframes like 4H or Daily.
+Best Practices
+Combine with Volume: Confirm breakouts with increased volume for higher reliability.
+Avoid Sideways Markets: Use additional trend filters (like ADX) to avoid trades in low-volatility conditions.
+Optimize Parameters: Regularly adjust the Bollinger Bands multiplier and RSI settings to match the asset's behavior.
+By utilizing this strategy, you can effectively trade breakouts while maintaining flexibility in trade direction. Adjust the parameters to match your trading style and market conditions for optimal results!

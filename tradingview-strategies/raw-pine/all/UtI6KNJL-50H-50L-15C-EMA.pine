@@ -1,0 +1,32 @@
+//@version=2
+ 
+strategy(title = "EMA-15-50-50", shorttitle="EMA-15-50-50", overlay=true)
+src = close
+length1=input(50)
+length2=input(50)
+length3=input(15)
+
+e=ema(close, length3)
+eu = ema(high, length1)
+el = ema(low, length2)
+
+plot(e, color=black, linewidth=2)
+plot(eu, color=red, linewidth=2)
+plot(el, color=green, linewidth=2)
+
+if (crossover(e, eu))
+    strategy.entry("Buy", strategy.long, comment="Buy")
+else
+    strategy.cancel(id="cancel")
+if (crossunder(e, el))
+    strategy.entry("Sell", strategy.short, comment="Sell")
+else
+    strategy.cancel(id="cancel")
+
+View in Pine Editor・24 lines
+Use on chart
+4
+7
+1
+2 579
+This consists of Moving Average 50H-50L-15C EMA crossover. Works well in Trending Environment.

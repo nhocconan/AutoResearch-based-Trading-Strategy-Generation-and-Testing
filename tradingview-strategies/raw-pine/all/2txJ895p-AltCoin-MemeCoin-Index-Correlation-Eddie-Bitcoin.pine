@@ -1,0 +1,532 @@
+//@version=6
+strategy("AltCoin & MemeCoin Index Correlation [Eddie_Bitcoin]", overlay=true, initial_capital = 100, commission_type=strategy.commission.percent, slippage = 3 , commission_value=0.055,  margin_long = 0.001, margin_short = 0.001)
+
+// =====================
+// DATE FILTER
+// =====================
+// Allows filtering backtest results to a specific date range
+useDateFilter = input.bool(false, title="Filter Date Range of Backtest", group="───────────────[ BACKTEST DATE FILTER ]", tooltip="Enable this to limit the backtest to a specific date range using the fields below.")
+backtestStartDate = input.time(timestamp("01 Aug 2025 00:00:00 GMT+0"), title="Start Date", inline="TOP", group="───────────────[ BACKTEST DATE FILTER ]", tooltip="Start date for the backtest window. Trades will only be simulated on or after this date.")
+backtestEndDate   = input.time(timestamp("31 Dec 2049 00:00:00 GMT+0"), title="End Date", inline="TOP", group="───────────────[ BACKTEST DATE FILTER ]", tooltip="End date for the backtest window. Trades will only be simulated before this date.")
+inTradeWindow = not useDateFilter or (time >= backtestStartDate and time < backtestEndDate)
+
+// =====================
+// INPUTS
+// =====================
+// EMAs for current symbol and reference index
+lenFast = input.int(47, minval = 1, title="Coin Fast EMA", group="───────────────[ EMA SETTINGS ]", tooltip="Shorter-period EMA for the asset being traded. Used to detect local trend direction.")
+lenSlow = input.int(50, minval = 2, title="Coin Slow EMA", group="───────────────[ EMA SETTINGS ]", tooltip="Longer-period EMA for the asset. Compared with the Fast EMA to determine uptrend or downtrend.")
+
+idxlenFast = input.int(47, minval = 1, title="Index Fast EMA", group="───────────────[ EMA SETTINGS ]", tooltip="Shorter-period EMA applied to the selected index (OTHERS.D or MEME.D). Helps detect macro trend in the market segment.")
+idxlenSlow = input.int(50, minval = 2, title="Index Slow EMA", group="───────────────[ EMA SETTINGS ]", tooltip="Longer-period EMA for the index. Combined with Index Fast EMA to evaluate broader trend conditions.")
+
+// Reference index settings
+SkipIndexReference = input.bool(false, title="Don't Use Index Reference", group="───────────────[ INDEX REFERENCE ]", tooltip="Enable this to trade based only on the asset's EMAs, ignoring index correlation. Just for comparison with a classic EMA crossover strategy")
+indexReference_type = input.string("OTHERS.D", title="Reference Index", options=["OTHERS.D", "MEME.D"], group="───────────────[ INDEX REFERENCE ]", tooltip="Select which index to use as the market benchmark for correlation.\n- OTHERS.D: DOMINANCE of all altcoins excluding TOP 10 capitalization\n- MEME.D: DOMINANCE of all Meme tokens capitalization")
+
+// Perc_of_equity and position sizing
+UseCompound = input.bool(false, title="Compound profits?", group="───────────────[ RISK MANAGEMENT ]", tooltip="If enabled, trade size will scale with current equity. If disabled, trade size is based on a fixed percentage of initial capital.")
+Perc_of_equity = input.float(10, title="% of equity", step=10., minval=1., maxval=200., group="───────────────[ RISK MANAGEMENT ]", tooltip="Percentage of equity (or initial capital) to allocate to each trade. E.g., 10% of $1,000 = $100 trade." ) / 100.
+
+// Take Profit and Stop Loss thresholds
+TakeProfit = input.float(99999., title="Take Profit (%)", minval = 0.1, step=0.5, group="───────────────[ TAKE PROFIT / STOP LOSS ]", tooltip="Percentage gain at which to automatically take profit. Set high (e.g. 99999) to disable.")
+StopLoss = input.float(5., title="Stop Loss (%)", minval = 0.1, maxval = 100., step=0.5, group="───────────────[ TAKE PROFIT / STOP LOSS ]", tooltip="Percentage loss at which to automatically exit the trade. Helps prevent large drawdowns.")
+
+scaleOutOnChangeColor = input.bool(true, title="Scale Position on Weak Trend?", group="───────────────[ TAKE PROFIT / STOP LOSS ]", tooltip="Enable to partially exit a position when the trend weakens but is still profitable. Reduces risk while maintaining exposure.")
+ScaleOut_Perc_onChangeColor = input.float(65., title="Scaled Percentage", step=1., minval=1., maxval=100., group="───────────────[ TAKE PROFIT / STOP LOSS ]", tooltip="Percentage of the open position to close when trend weakness is detected and scale-out is triggered.")
+
+// USER CONFIG: STATS TABLE POSITION
+tablePositionInput = input.string("Bottom Right", title="Stats Table Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="───────────────[ STATS DISPLAY ]", tooltip="Choose where the performance statistics table should be displayed on the chart.")
+
+// =====================
+// FUNCTIONS
+// =====================
+// Dynamically estimates minimum tradable quantity (tick size) based on price
+EstimatedTickSize = close > 10000 ? 0.001 : close > 100 ? 0.01 : close > 10 ? 0.1 : close > 0.1 ? 1 : close >  0.01 ? 10 : 100
+minQuantity   = EstimatedTickSize 
+
+// Calculates the remainder of a division (used for rounding quantities)
+DivisionReminder(a, b) =>
+    wholeDivision = math.floor(a / b)
+    Reminder = a - wholeDivision * b
+    Reminder
+
+// Calculates a valid quantity for scale-out, respecting tick size
+calcolaQty_Scaleout(ScaleOut_Perc) =>
+    ScaleOut_qty =  math.abs(strategy.position_size) * ScaleOut_Perc / 100.
+    ScaleOut_qty := ScaleOut_qty < minQuantity ? minQuantity : ScaleOut_qty
+    Reminder = DivisionReminder(ScaleOut_qty, minQuantity)
+    ScaleOut_qty := ScaleOut_qty - Reminder // ensures quantity is a valid multiple
+    if ScaleOut_qty < 0.
+        ScaleOut_qty := minQuantity
+    ScaleOut_qty
+
+// =====================
+// CALCULATIONS
+// =====================
+// EMA calculation for current symbol and reference index
+this_ema1 = ta.ema(close, lenFast)
+this_ema2 = ta.ema(close, lenSlow)
+
+TOTAL_capitalization  = request.security("CRYPTOCAP:TOTAL",  timeframe.period, close, lookahead = barmerge.lookahead_off)
+OTHERS_capitalization = request.security("CRYPTOCAP:OTHERS", timeframe.period, close, lookahead = barmerge.lookahead_off)
+MEME_capitalization   = request.security("CRYPTOCAP:MEME.C", timeframe.period, close, lookahead = barmerge.lookahead_off)
+
+OTHERS_D = OTHERS_capitalization / TOTAL_capitalization * 100.0
+MEME_D   = MEME_capitalization / TOTAL_capitalization * 100.0
+
+idx_dom = OTHERS_D
+if indexReference_type == "MEME.D"
+    idx_dom := MEME_D
+
+idx_ema1 = ta.ema(idx_dom, idxlenFast)
+idx_ema2 = ta.ema(idx_dom, idxlenSlow)
+
+var float Equity_AtStartTrade = na
+var float TruePnL = na
+TruePnL := na(Equity_AtStartTrade) ? na : ((strategy.equity / Equity_AtStartTrade) - 1.0) * 100.0
+
+// =====================
+// ENTRY CONDITIONS
+// =====================
+// Entry logic based on dual EMA crossover alignment
+positionSize = UseCompound ? strategy.equity * Perc_of_equity / close : strategy.initial_capital * Perc_of_equity / close
+
+goLong  = idx_ema1 > idx_ema2 and this_ema1 > this_ema2
+goShort = idx_ema1 < idx_ema2 and this_ema1 < this_ema2
+
+
+// Optionally ignore index reference
+if SkipIndexReference
+    goLong  := this_ema1 > this_ema2
+    goShort := this_ema1 < this_ema2
+
+// Assign colors based on correlation state
+color_This = this_ema1 >= this_ema2 and idx_ema1 >= idx_ema2 ? color.lime : this_ema1 >= this_ema2 and idx_ema1 < idx_ema2 ?  color.teal : this_ema1 < this_ema2 and idx_ema1 > idx_ema2 ? color.maroon :  color.red
+
+// =====================
+// EXIT CONDITIONS
+// =====================
+// Tracks real-time PnL to enforce dynamic exits
+var PnL = 0.
+LastTriggeredPrice = strategy.opentrades.entry_price(strategy.opentrades - 1)
+if strategy.position_size > 0.0 and LastTriggeredPrice != 0.0
+    PnL := ((close - LastTriggeredPrice) / LastTriggeredPrice) * 100.0
+else if strategy.position_size < 0.0 and LastTriggeredPrice != 0.0
+    PnL := ((LastTriggeredPrice - close) / LastTriggeredPrice) * 100.0
+
+// Dynamic scale-out logic, custom stop and take profit
+var TruePnLToDisplay = PnL
+var DontGo = ""
+
+// Prevent trading outside of user-specified time window
+if not inTradeWindow and math.abs(strategy.position_size) != 0.0 
+    strategy.close_all("NotTradeTime")
+
+// Exit based on profit or loss thresholds
+if (PnL > TakeProfit) and math.abs(strategy.position_size) != 0.0
+    strategy.close_all("TAKEPROFIT")
+if (PnL < -StopLoss) and math.abs(strategy.position_size) != 0.0
+    if strategy.position_size > 0. and not goShort
+        DontGo := "LONG"
+        strategy.close("Long","STOPLOSS Long")
+    if strategy.position_size < 0. and not goLong
+        DontGo := "SHORT"
+        strategy.close("Short","STOPLOSS Short")
+
+// Reset 'DontGo' when trend conditions improve
+if DontGo == "LONG" and (color_This[1] == color.lime or color_This[1] == color.teal) and color_This != color.maroon
+    DontGo := ""
+if DontGo == "SHORT" and (color_This[1] == color.red or color_This[1] == color.maroon) and color_This != color.teal
+    DontGo := ""
+
+// Flag to prevent duplicate scale-outs per position
+var Scaled = false
+
+// Scale-out when trend weakens but still in profit
+if scaleOutOnChangeColor and strategy.position_size > 0. and (color_This[1] == color.lime and color_This != color.lime) and PnL > 0.1 and not Scaled and not goShort
+    ScaleOut_qty = calcolaQty_Scaleout(ScaleOut_Perc_onChangeColor)
+    strategy.close('Long', comment = "ScaleOut Long", qty = ScaleOut_qty)
+    Scaled := true
+
+if scaleOutOnChangeColor and strategy.position_size < 0. and (color_This[1] == color.red and color_This != color.red) and PnL > 0.1 and not Scaled and not goLong
+    ScaleOut_qty = calcolaQty_Scaleout(ScaleOut_Perc_onChangeColor)
+    strategy.close('Short', comment = "ScaleOut Short", qty = ScaleOut_qty)
+    Scaled := true
+
+// =======================
+// ENTRY / REVERSE
+// =======================
+// Entry condition that includes capital check and 'DontGo' flag logic
+if inTradeWindow and strategy.equity > strategy.initial_capital / 30.
+    if strategy.position_size <= 0. and goLong and DontGo != "LONG"
+        Equity_AtStartTrade := strategy.equity
+        strategy.entry("Long", strategy.long, qty=positionSize)
+        Scaled := false
+        DontGo := ""
+    if strategy.position_size >= 0. and goShort and DontGo != "SHORT"
+        Equity_AtStartTrade := strategy.equity
+        strategy.entry("Short", strategy.short, qty=positionSize)
+        Scaled := false
+        DontGo := ""
+
+//
+//-----<VISUALS>-----------------------------------------------------------------------------------------------<>
+
+// =====================
+// DEBUG PLOTS
+// =====================
+// Plot useful debug values like equity and EMAs for the current and index symbol
+plotchar(strategy.equity,"Equity","",location.top,color=color.white)
+plotchar(this_ema1,"ema_fast","",location.top,color=color.yellow)
+plotchar(this_ema2,"ema_slow","",location.top,color=color.yellow)
+plotchar(idx_ema1,"idx_ema_fast","",location.top,color=color.purple)
+plotchar(idx_ema2,"idx_ema_slow","",location.top,color=color.purple)
+colorPnL = PnL > 0.0? color.green : color.red
+plotchar(PnL,"PnL","",location.top,color=colorPnL) 
+plotchar(TruePnL,"Perc_of_equityPnL","",location.top,color=color.aqua)                  
+
+// =====================
+// PLOTS FOR LAST TRADE PNL
+// =====================
+// Visual label showing % PnL of last trade directly on the chart
+//
+
+rangeR = high - low
+avgRangeR = ta.sma(rangeR, 20)
+if strategy.closedtrades > 0
+    lastTradeIndex = strategy.closedtrades - 1
+    lastTradeProfit = strategy.closedtrades.profit_percent(lastTradeIndex)
+    lastTradeEntryBar = strategy.closedtrades.exit_bar_index(lastTradeIndex)
+    lastTradeDirection = strategy.closedtrades.size(lastTradeIndex)
+
+    // Se l'ultimo trade è stato chiuso in questa barra
+    if lastTradeEntryBar == bar_index
+        tradeColor = TruePnLToDisplay > 0 ? color.green : color.red
+        uscitaFinale = strategy.position_size == 0. or lastTradeDirection > 0.0 and strategy.position_size < 0. or lastTradeDirection < 0.0 and strategy.position_size > 0.
+        _size = size.normal 
+        SO_PnL = TruePnLToDisplay * (ScaleOut_Perc_onChangeColor / 100.)
+        Perc_PL = str.tostring(math.round(SO_PnL, 1)) + '%' + "\n(" + str.tostring(math.round(PnL[1],1)) + '%' + ")"
+        text_color = color.black
+        if uscitaFinale
+            _size   := size.large
+            Perc_PL := str.tostring(math.round(TruePnLToDisplay, 1)) + '%' + "\n(" + str.tostring(math.round(lastTradeProfit,1)) + '%' + ")"
+            text_color := color.white
+        TradePL_Y_pos = high+(avgRangeR*5) 
+        ProOPer = label.new(x = bar_index, y = TradePL_Y_pos, text = Perc_PL, color = tradeColor, textcolor = text_color, style = label.style_label_down, size = _size)
+    else
+        TruePnLToDisplay := TruePnL
+        //
+
+
+// =====================
+// BACKGROUND COLORING
+// =====================
+// Fills background between entry price and close for visual cue on position
+lowestClose = ta.lowest(close, 10)
+_css = strategy.position_size == 0.0 ? color.gray : strategy.position_size > 0.0 ? color.yellow : strategy.position_size < 0.0 ? color.purple :  na
+plotBottom = LastTriggeredPrice
+if strategy.position_size == 0.0 
+    _css := color.white
+    plotBottom := lowestClose
+_plot0 = plot(plotBottom, color=na,display=display.none)
+_plot1 = plot(close, color=na,display=display.none)
+fill(_plot0,_plot1,color.new(_css,70))
+
+// Highlight EMA trend line
+plot(this_ema2,"EMA SLOW ColorCoded",color=color_This, linewidth = 2)
+
+//
+// ============================================================================== FINAL STATS ========
+
+// === Final Stats (includes the current trade) ===
+totalTrades     = strategy.closedtrades + (strategy.opentrades > 0 ? 1 : 0)
+winningTrades   = strategy.wintrades + (strategy.opentrades > 0 and strategy.openprofit > 0 ? 1 : 0)
+losingTrades    = totalTrades - winningTrades
+openProfit      = strategy.openprofit
+netProfit       = strategy.netprofit + openProfit
+netProfitPerc   = netProfit / strategy.initial_capital * 100
+winRate         = totalTrades > 0 ? winningTrades / totalTrades * 100 : na
+max_drawdown_percent = strategy.max_drawdown_percent
+
+// Calculate current trade % PnL
+thisTradePnl    = strategy.opentrades > 0 ? strategy.openprofit : 0
+thisTradePerc   = strategy.opentrades > 0 and strategy.opentrades.entry_price(0) > 0 ?  thisTradePnl / (strategy.opentrades.entry_price(0) * math.abs(strategy.opentrades.size(0))) * 100 : 0
+
+// Calculate APR (Annualized Percentage Return)
+firstTradeTime  = strategy.closedtrades > 0 ? strategy.closedtrades.entry_time(0) : na
+lastTradeTime   = timenow
+daysRunning     = (lastTradeTime - firstTradeTime) / (1000 * 60 * 60 * 24)
+daysRounded     = math.round(daysRunning)
+apr             = daysRunning > 0 ? (math.pow((strategy.equity / strategy.initial_capital), (365 / daysRunning)) - 1) * 100 : na
+Result           = str.tostring(math.round(strategy.equity / strategy.initial_capital,1)) + "x" 
+color_Result     = netProfit > 0 ? color.green : netProfit < 0 ? color.red : color.gray
+icon_Result      = thisTradePnl > 0 ? "💚" : thisTradePnl < 0 ? "😡" :"📊"
+
+// === Color coding based on DD / APR / PnL ===
+ddColor = max_drawdown_percent <= 20  ? color.rgb(0, 255, 132)   :
+          max_drawdown_percent <= 35  ? color.green  :
+          max_drawdown_percent <= 50  ? color.white  :
+          max_drawdown_percent <= 70  ? color.yellow :
+          max_drawdown_percent <= 85  ? color.orange :
+          max_drawdown_percent <= 99  ? color.red    : color.maroon
+
+aprColor = apr > 500     ? color.rgb(0, 255, 132)   :
+           apr > 100     ? color.green  :
+           apr >= 0      ? color.white  :
+           apr >= -20    ? color.yellow :
+           apr >= -50    ? color.orange :
+           apr >= -90    ? color.red    : color.maroon
+
+thisTradeColor = thisTradePnl > 0 ? color.green : thisTradePnl < 0 ? color.red : color.gray
+totalPnlColor  = netProfit > 0 ? color.green : netProfit < 0 ? color.red : color.gray
+totalPnlPercColor = netProfitPerc > 0 ? color.green : netProfitPerc < 0 ? color.red : color.gray
+
+apr_STR = str.tostring(apr, "#.##") + "%"
+if apr > 100000
+    apr_STR := "💰💰💰💰💰"
+
+// =====================
+// FINAL PERFORMANCE TABLE
+// =====================
+// Dynamically updates in the corner of the chart with summary stats
+color LabelColor = color.gray
+color LabelTextColor = color.white
+if strategy.position_size > 0.0
+    LabelColor := color.rgb(255, 235, 59, 01)
+    LabelTextColor := color.black
+if strategy.position_size < 0.0
+    LabelColor := color.rgb(155, 39, 176, 30)
+    LabelTextColor := color.white
+if strategy.position_size == 0.0
+    LabelColor := color.rgb(24, 24, 24, 30)
+    LabelTextColor := color.white
+
+tablePosition = switch tablePositionInput
+    "Top Left"     => position.top_left
+    "Top Right"    => position.top_right
+    "Bottom Left"  => position.bottom_left
+    => position.bottom_right  // Default fallback
+
+var table statTable = table.new(tablePosition, 2, 11, border_width=1)
+if bar_index == ta.highest(bar_index, 10)
+    table.cell(statTable, 0, 0, icon_Result + " STATS ", text_color = LabelTextColor, bgcolor=LabelColor, text_size=size.large)
+    table.cell(statTable, 1, 0, Result, text_color=color.white, bgcolor=color_Result, text_size=size.large)
+
+    table.cell(statTable, 0, 1, "Trades", text_color=color.white, bgcolor=color.black)
+    table.cell(statTable, 1, 1, str.tostring(totalTrades), text_color=color.white, bgcolor=color.black)
+
+    table.cell(statTable, 0, 2, "Win Rate", text_color=color.white, bgcolor=color.black)
+    table.cell(statTable, 1, 2, str.tostring(winRate, "#.##") + "%", text_color=color.white, bgcolor=color.black)
+
+    table.cell(statTable, 0, 3, "Max Drawdown", text_color=color.white, bgcolor=color.black)
+    table.cell(statTable, 1, 3, str.tostring(max_drawdown_percent, "#.##")+"%", text_color=ddColor, bgcolor=color.black)
+
+    table.cell(statTable, 0, 4, "Running Days", text_color=color.white, bgcolor=color.black)
+    table.cell(statTable, 1, 4, str.tostring(daysRounded), text_color=color.white, bgcolor=color.black)
+
+    table.cell(statTable, 0, 5, "This Trade P&L", text_color=color.white, bgcolor=color.black)
+    table.cell(statTable, 1, 5, str.tostring(thisTradePnl, "$#.##"), text_color=thisTradeColor, bgcolor=color.black)
+
+    table.cell(statTable, 0, 6, "This Trade %", text_color=color.white, bgcolor=color.black)
+    table.cell(statTable, 1, 6, str.tostring(thisTradePerc, "#.##")+"%", text_color=color.white, bgcolor=color.black)
+
+    table.cell(statTable, 0, 7, "TOTAL P&L", text_color=color.white, bgcolor=color.black)
+    table.cell(statTable, 1, 7, str.tostring(netProfit, "$#.##"), text_color=totalPnlColor, bgcolor=color.black)
+
+    table.cell(statTable, 0, 8, "TOTAL %", text_color=color.white, bgcolor=color.black)
+    table.cell(statTable, 1, 8, str.tostring(netProfitPerc, "#.##")+"%", text_color=color.white, bgcolor=color.black)
+
+    table.cell(statTable, 0, 9, "APR", text_color=color.white, bgcolor=color.black)
+    table.cell(statTable, 1, 9, apr_STR, text_color=aprColor, bgcolor=color.black)
+
+View in Pine Editor・357 lines
+Use on chart
+1
+0
+6
+2 731
+🧠 Philosophy of the Strategy
+
+The AltCoin & MemeCoin Index Correlation Strategy by Eddie_Bitcoin is a carefully engineered trend-following system built specifically for the highly volatile and sentiment-driven world of altcoins and memecoins.
+
+This strategy recognizes that crypto markets—especially niche sectors like memecoins—are not only influenced by individual price action but also by the relative strength or weakness of their broader sector. Hence, it attempts to improve the reliability of trading signals by requiring alignment between a specific coin’s trend and its sector-wide index trend.
+
+Rather than treating each crypto asset in isolation, this strategy dynamically incorporates real-time dominance metrics from custom indices (OTHERS.D and MEME.D) and combines them with local price action through dual exponential moving average (EMA) crossovers. Only when both the asset and its sector are moving in the same direction does it allow for trade entries—making it a confluence-based system rather than a single-signal strategy.
+
+It supports risk-aware capital allocation, partial exits, configurable stop loss and take profit levels, and a scalable equity-compounding model.
+
+✅ Why did I choose OTHERS.D and MEME.D as reference indices?
+
+I selected OTHERS.D and MEME.D because they offer a sector-focused view of crypto market dynamics, especially relevant when trading altcoins and memecoins.
+
+🔹 OTHERS.D tracks the market dominance of all cryptocurrencies outside the top 10 by market cap.
+This excludes not only BTC and ETH, but also major stablecoins like USDT and USDC, making it a cleaner indicator of risk appetite across true altcoins.
+
+🔹 This is particularly useful for detecting "Altcoin Season"—periods where capital rotates away from Bitcoin and flows into smaller-cap coins.
+A rising OTHERS.D often signals the start of broader altcoin rallies.
+
+🔹 MEME.D, on the other hand, captures the speculative behavior of memecoin segments, which are often driven by retail hype and social media activity.
+It's perfect for timing momentum shifts in high-risk, high-reward tokens.
+
+By using these indices, the strategy aligns entries with broader sector trends, filtering out noise and increasing the probability of catching true directional moves, especially in phases of capital rotation and altcoin risk-on behavior.
+
+📐 How It Works — Core Logic and Execution Model
+
+At its heart, this strategy employs dual EMA crossover detection—one pair for the asset being traded and one pair for the selected market index.
+
+A trade is only executed when both EMA crossovers agree on the direction. For example:
+
+Long Entry: Coin's fast EMA > slow EMA and Index's fast EMA > slow EMA
+Short Entry: Coin's fast EMA < slow EMA and Index's fast EMA < slow EMA
+
+You can disable the index filter and trade solely based on the asset’s trend just to make a comparison and see if improves a classic EMA crossover strategy.
+
+Additionally, the strategy includes:
+- Adaptive position sizing, based on fixed capital or current equity (compound mode)
+- Take Profit and Stop Loss in percentage terms
+- Smart partial exits when trend momentum fades
+- Date filtering for precise backtesting over specific timeframes
+- Real-time performance stats, equity tracking, and visual cues on chart
+
+⚙️ Parameters & Customization
+🔁 EMA Settings
+
+Each EMA pair is customizable:
+Coin Fast EMA: Default = 47
+Coin Slow EMA: Default = 50
+Index Fast EMA: Default = 47
+Index Slow EMA: Default = 50
+
+These control the sensitivity of the trend detection. A wider spread gives smoother, slower entries; a narrower spread makes it more responsive.
+
+🧭 Index Reference
+
+The correlation mechanism uses CryptoCap sector dominance indexes:
+OTHERS.D: Dominance of all coins EXCLUDING Top 10 ones
+MEME.D: Dominance of all Meme coins
+
+These are dynamically calculated using:
+OTHERS_D = OTHERS_cap / TOTAL_cap * 100
+MEME_D = MEME_cap / TOTAL_cap * 100
+
+
+You can select:
+Reference Index: OTHERS.D or MEME.D
+Or disable the index reference completely (Don't Use Index Reference)
+
+💰 Position Sizing & Risk Management
+
+Two capital allocation models are supported:
+- Fixed % of initial capital (default)
+- Compound profits, which scales positions as equity grows
+
+Settings:
+- Compound profits?: true/false
+- % of equity: Between 1% and 200% (default = 10%)
+
+This is critical for users who want to balance growth with risk.
+
+🎯 Take Profit / Stop Loss
+
+Customizable thresholds determine automatic exits:
+- TakeProfit: Default = 99999 (disabled)
+- StopLoss: Default = 5 (%)
+
+These exits are percentage-based and operate off the entry price vs. current close.
+
+📉 Trend Weakening Exit (Scale Out)
+
+If the position is in profit but the trend weakens (e.g., EMA color signals trend loss), the strategy can partially close a configurable portion of the position:
+
+- Scale Position on Weak Trend?: true/false
+- Scaled Percentage: % to close (default = 65%)
+
+This feature is useful for preserving profits without exiting completely.
+
+📆 Date Filter
+
+Useful for segmenting performance over specific timeframes (e.g., bull vs bear markets):
+
+- Filter Date Range of Backtest: ON/OFF
+- Start Date and End Date: Custom time range
+
+OTHER PARAMETERS EXPLANATION (Strategy "Properties" Tab):
+- Initial Capital is set to 100 USD
+- Commission is set to 0.055% (The ones I have on Bybit)
+- Slippage is set to 3 ticks
+- Margin (short and long) are set to 0.001% to avoid "overspending" your initial capital allocation
+
+
+📊 Visual Feedback and Debug Tools
+📈 EMA Trend Visualization
+
+The slow EMA line is dynamically color-coded to visually display the alignment between the asset trend and the index trend:
+
+Lime: Coin and index both bullish
+Teal: Only coin bullish
+Maroon: Only index bullish
+Red: Both bearish
+
+This allows for immediate visual confirmation of current trend strength.
+
+💬 Real-Time PnL Labels
+
+When a trade closes, a label shows:
+
+Previous trade return in % (first value is the effective PL)
+Green background for profit, Red for losses.
+
+
+📑 Summary Table Overlay
+
+This table appears in a corner of the chart (user-defined) and shows live performance data including:
+
+Trade direction (yellow long, purple short)
+Emojis: 💚 for current profit, 😡 for current loss
+Total number of trades
+Win rate
+Max drawdown
+Duration in days
+Current trade profit/loss (absolute and %)
+Cumulative PnL (absolute and %)
+APR (Annualized Percentage Return)
+
+Each metric is color-coded:
+
+Green for strong results
+Yellow/orange for average
+Red/maroon for poor performance
+
+You can select where this appears:
+
+Top Left
+Top Right
+Bottom Left
+Bottom Right (default)
+
+📚 Interpretation of Key Metrics
+
+Equity Multiplier: How many times initial capital has grown (e.g., “1.75x”)
+Net Profit: Total gains including open positions
+Max Drawdown: Largest peak-to-valley drop in strategy equity
+APR: Annualized return calculated based on equity growth and days elapsed
+Win Rate: % of profitable trades
+PnL %: Percentage profit on the most recent trade
+
+🧠 Advanced Logic & Safety Features
+🛑 “Don’t Re-Enter” Filter
+
+If a trade is closed due to StopLoss without a confirmed reversal, the strategy avoids re-entering in that same direction until conditions improve. This prevents false reversals and repetitive losses in sideways markets.
+
+🧷 Equity Protection
+
+No new trades are initiated if equity falls below initial_capital / 30. This avoids overleveraging or continuing to trade when capital preservation is critical.
+
+
+
+
+Keep in mind that past results in no way guarantee future performance.
+
+Eddie Bitcoin
+

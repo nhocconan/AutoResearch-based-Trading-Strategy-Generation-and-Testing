@@ -1,0 +1,63 @@
+//@version=4
+strategy("利润目标止损的移动平均线", overlay=true)
+
+period = input(80,'')
+ptper = input(252,'')
+ptfactor = input(12,'')
+sizeper = input(20, '')
+
+trend = 0.0
+signal = 0
+size = 1.0
+investment = 100000
+atrange = 0.0
+ptrange = 0.0
+stoph = 0.0
+stopl = 0.0
+
+
+if sizeper != 0
+    atrange := atr(sizeper)
+
+if atrange == 0 or sizeper == 0 
+    size := 1
+else
+    size := investment/atrange * 0.1
+
+trend := sma(close,period)
+
+
+if signal != 1 and nz(trend[1]) < nz(trend[2]) and trend > nz(trend[1])
+    strategy.entry('long',strategy.long, comment='open_long')
+    signal := 1
+else
+    signal := nz(signal[1])
+    
+if signal != -1 and nz(trend[1]) > nz(trend[2]) and trend < nz(trend[1])
+    strategy.entry('short',strategy.short, comment='open_short')
+    signal := -1
+else
+    if signal == 0
+        signal := nz(signal[1])
+
+ptrange := atr(ptper)
+
+if strategy.position_size > 0
+    strategy.exit("exit_long", "long", qty = strategy.position_size, limit = close + ptfactor*ptrange , comment='trail_long') 
+else
+    if strategy.position_size < 0
+        strategy.exit("exit_short", "short", qty = abs(strategy.position_size), limit = close - ptfactor*ptrange, comment='trail_short')
+
+View in Pine Editor・52 lines
+Use on chart
+5
+5
+6 315
+Profit target:
+Profit targets are those scenarios where the system expects to be greater than the actual return at the end of the transaction: they may be short-term benefits, such as a favorable price shock model.
+In short-term transactions, profit objectives are essential. Price fluctuations make any favorable event likely to turn around in an instant. Moreover, profit objectives are more difficult to integrate into the longer-term trading system, because they are afraid of losing larger profits at risk, so they will replace them with smaller but more frequent gains. As a follower of the trend, once you make a profit and stop earning, but the trend direction is still intact, you need to find a way to re-enter the transaction to avoid losing the rare but very large market situation.
+
+Profit target is best calculated based on price volatility (V), and the most commonly used method:
+For Long, the system buy point (E), needs to be multiplied by the average true volatility or annualized volatility :E+f×V.
+The net value multiplier f used to calculate the profit level is usually obtained through data mining.
+

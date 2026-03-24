@@ -1,0 +1,177 @@
+//@version=5
+strategy(title="SMAcross-mvrNew (v2)", overlay=true, pyramiding=0, calc_on_every_tick=true, calc_on_order_fills=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=100000, currency=currency.USD)
+
+// === INPUTS ===
+entryMode = input.string("A: Short SMA crosses Long SMA", "Entry Mode", options=["A: Short SMA crosses Long SMA", "B: Price crosses Long SMA"])
+useExitOpposite = input.bool(true, "Exit: Opposite signal")
+useExitClose10 = input.bool(false, "Exit: Close vs Short SMA")
+tradeDir = input.string("Both", "Trade Direction", options=["Both", "Long Only", "Short Only"])
+showCrossLabels = input.bool(false, "Show cross price labels")
+labelOffsetTicks = input.int(20, "Label offset (ticks)", minval=0)
+
+// Short SMA (10)
+maFastSource = input.source(open, "Short SMA Source")
+maFastLength = input.int(10, "Short SMA Period", minval=1)
+
+// Long SMA (50)
+maSlowSource = input.source(open, "Long SMA Source")
+maSlowLength = input.int(50, "Long SMA Period", minval=1)
+
+// Price source for Entry B
+priceCrossSource = input.source(close, "Price source for Entry Mode B")
+
+// 200 MA (OFF by default)
+show200 = input.bool(false, "Show 200 MA")
+len200 = input.int(200, "200 MA Length", minval=1)
+src200 = input.source(close, "200 MA Source")
+
+// === SERIES ===
+maFast = ta.sma(maFastSource, maFastLength)
+maSlow = ta.sma(maSlowSource, maSlowLength)
+ma200 = ta.sma(src200, len200)
+
+// === PLOTS ===
+fastPlot = plot(maFast, title="Short SMA", color=color.new(color.blue, 10), linewidth=2)
+slowPlot = plot(maSlow, title="Long SMA", color=color.new(color.orange, 10), linewidth=2)
+plot(show200 ? ma200 : na, title="200_MA", color=color.new(color.red, 10), linewidth=2)
+fill(fastPlot, slowPlot, color=maFast > maSlow ? color.new(color.green, 40) : color.new(color.red, 40))
+
+// === ENTRY LOGIC ===
+longEntryA = ta.crossover(maFast, maSlow)
+shortEntryA = ta.crossunder(maFast, maSlow)
+
+longEntryB = ta.crossover(priceCrossSource, maSlow)
+shortEntryB = ta.crossunder(priceCrossSource, maSlow)
+
+useA = entryMode == "A: Short SMA crosses Long SMA"
+longEntry = useA ? longEntryA : longEntryB
+shortEntry = useA ? shortEntryA : shortEntryB
+
+// === OPTIONAL LABELS ===
+tick = syminfo.mintick
+longY = high + (labelOffsetTicks * tick)
+shortY = low - (labelOffsetTicks * tick)
+
+if showCrossLabels and longEntry
+    label.new(bar_index, longY, useA ? "Long A @ " + str.tostring(close, format.mintick) : "Long B @ " + str.tostring(close, format.mintick), xloc=xloc.bar_index, style=label.style_label_up, textcolor=color.white, color=color.green, size=size.small)
+
+if showCrossLabels and shortEntry
+    label.new(bar_index, shortY, useA ? "Short A @ " + str.tostring(close, format.mintick) : "Short B @ " + str.tostring(close, format.mintick), xloc=xloc.bar_index, style=label.style_label_down, textcolor=color.white, color=color.red, size=size.small)
+
+// === ORDERS ===
+canLong = tradeDir == "Both" or tradeDir == "Long Only"
+canShort = tradeDir == "Both" or tradeDir == "Short Only"
+
+if longEntry and canLong
+    strategy.entry("Long", strategy.long)
+
+if shortEntry and canShort
+    strategy.entry("Short", strategy.short)
+
+// === EXIT LOGIC (checkboxes) ===
+inLong = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+longExitOpposite = useExitOpposite and inLong and shortEntry
+shortExitOpposite = useExitOpposite and inShort and longEntry
+
+longExitClose10 = useExitClose10 and inLong and close < maFast
+shortExitClose10 = useExitClose10 and inShort and close > maFast
+
+if longExitOpposite or longExitClose10
+    strategy.close("Long")
+
+if shortExitOpposite or shortExitClose10
+    strategy.close("Short")
+
+// === ALERTS (STATIC STRINGS ONLY) ===
+alertcondition(longEntryA and canLong, title="Long Entry A", message="LONG Entry A: Short SMA crossed above Long SMA")
+alertcondition(shortEntryA and canShort, title="Short Entry A", message="SHORT Entry A: Short SMA crossed below Long SMA")
+alertcondition(longEntryB and canLong, title="Long Entry B", message="LONG Entry B: Price crossed above Long SMA")
+alertcondition(shortEntryB and canShort, title="Short Entry B", message="SHORT Entry B: Price crossed below Long SMA")
+
+alertcondition(longExitOpposite, title="Long Exit (Opposite)", message="LONG Exit: Opposite signal")
+alertcondition(shortExitOpposite, title="Short Exit (Opposite)", message="SHORT Exit: Opposite signal")
+alertcondition(longExitClose10, title="Long Exit (Close<Short)", message="LONG Exit: Close below Short SMA")
+alertcondition(shortExitClose10, title="Short Exit (Close>Short)", message="SHORT Exit: Close above Short SMA")
+
+View in Pine Editor・96 lines
+Use on chart
+4
+9
+1
+6
+5 925
+Overview
+
+SMAcross-mvrNew is a flexible, non-repainting moving-average strategy designed for clarity, configurability, and reliable backtesting.
+It supports multiple entry styles, optional layered exits, and full-capital position sizing, while remaining stable during chart zooming and dragging.
+
+🚀 What’s New in v2
+✅ Multiple Entry Modes
+
+You can now choose how trades are entered:
+
+Entry Mode A: Short SMA crosses Long SMA
+
+Entry Mode B: Price crosses Long SMA
+
+This allows both classic MA-crossover trading and trend-continuation pullback entries using the same strategy.
+
+✅ Modular Exit System (Checkbox-Based)
+
+Exit logic is now fully modular using independent checkboxes:
+
+☑ Exit on opposite signal
+
+☑ Exit when price closes beyond Short SMA
+
+You may enable one, both, or neither.
+If both are enabled, the strategy exits on whichever condition occurs first.
+
+✅ Terminology Clarity
+
+All labels, inputs, and alerts now use semantic naming:
+
+Short SMA (formerly 13 SMA)
+
+Long SMA (formerly 30 SMA)
+
+This makes the strategy easier to understand and future-proof if SMA lengths are changed.
+
+✅ Full-Capital Position Sizing
+
+Each trade uses 100% of available equity, allowing performance to naturally compound over time during backtests.
+
+✅ Optional Visual Enhancements
+
+Optional cross price labels (can be toggled on/off)
+
+Color-filled zone between Short and Long SMAs for quick trend recognition
+
+Optional 200 SMA (off by default) for higher-timeframe context
+
+✅ Alert-Ready (TV-Safe)
+
+All alerts use static messages compatible with TradingView’s alert system, making the strategy suitable for:
+
+Manual trade notifications
+
+Webhook-based automation
+
+Broker integrations
+
+🔒 Design Principles
+
+No repainting
+
+No line continuations (TradingView-safe formatting)
+
+Stable behavior when zooming or scrolling
+
+Clear separation of entry logic, exit logic, and visuals
+
+⚠️ Notes
+
+This script is intended for educational and research purposes.
+Always forward-test and apply proper risk management before live trading.

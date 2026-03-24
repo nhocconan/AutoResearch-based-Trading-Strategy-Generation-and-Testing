@@ -1,0 +1,115 @@
+//@version=5
+strategy("High/Low Breakout Strategy", overlay=true, precision=2, calc_on_every_tick=true, initial_capital=20000, currency=currency.USD, slippage=1, commission_type=strategy.commission.percent, commission_value=0.01)
+
+// Dropdown for selecting the entry strategy
+entry_option = input.string(defval="Long at High", title="Entry Strategy", options=["Long at High", "Short at High", "Long at Low", "Short at Low"])
+
+// Dropdown for selecting the timeframe
+timeframe_option = input.string(defval="Daily", title="Choose Timeframe", options=["Daily", "Weekly", "Monthly"])
+
+// Holding period of the position in bars
+holding_period = input.int(defval=5, title="Holding Period", minval=1)
+
+// Colors for the lines (RGB)
+high_color = color.rgb(193, 205, 193)  // Color for High
+low_color = color.rgb(193, 205, 193)   // Color for Low
+
+// Calculating highs and lows for all timeframes
+daily_high = request.security(syminfo.tickerid, "D", high)
+daily_low = request.security(syminfo.tickerid, "D", low)
+
+weekly_high = request.security(syminfo.tickerid, "W", high)
+weekly_low = request.security(syminfo.tickerid, "W", low)
+
+monthly_high = request.security(syminfo.tickerid, "M", high)
+monthly_low = request.security(syminfo.tickerid, "M", low)
+
+// Selecting the correct values based on the dropdown selection
+var float high_level = na
+var float low_level = na
+
+if (timeframe_option == "Daily")
+    high_level := daily_high
+    low_level := daily_low
+else if (timeframe_option == "Weekly")
+    high_level := weekly_high
+    low_level := weekly_low
+else if (timeframe_option == "Monthly")
+    high_level := monthly_high
+    low_level := monthly_low
+
+// Drawing lines for High and Low
+plot(high_level, color=high_color, linewidth=1, title="High Level")
+plot(low_level, color=low_color, linewidth=1, title="Low Level")
+
+// Trading logic based on the selected strategy
+if (entry_option == "Long at High" and ta.crossover(close, high_level))
+    strategy.entry("Long at High", strategy.long)
+
+if (entry_option == "Short at High" and ta.crossunder(close, high_level))
+    strategy.entry("Short at High", strategy.short)
+
+if (entry_option == "Long at Low" and ta.crossover(close, low_level))
+    strategy.entry("Long at Low", strategy.long)
+
+if (entry_option == "Short at Low" and ta.crossunder(close, low_level))
+    strategy.entry("Short at Low", strategy.short)
+
+// Close positions after the set holding period
+if (strategy.opentrades > 0)
+    if (bar_index >= strategy.opentrades.entry_bar_index(0) + holding_period)
+        strategy.close(strategy.opentrades.entry_id(0))
+
+View in Pine Editor・61 lines
+Use on chart
+4
+3
+2 264
+This Pine Script strategy is designed to assist in the statistical analysis of breakout systems on a monthly, weekly, or daily timeframe. It allows the user to select whether to open a long or short position when the price breaks above or below the respective high or low for the chosen timeframe. The user can also define the holding period for each position in terms of bars.
+
+Core Functionality:
+
+Breakout Logic:
+
+The strategy triggers trades based on price crossing over (for long positions) or crossing under (for short positions) the high or low of the selected period (daily, weekly, or monthly).
+
+Timeframe Selection:
+
+A dropdown menu enables the user to switch between the desired timeframe (monthly, weekly, or daily).
+
+Trade Direction:
+
+Another dropdown allows the user to select the type of trade (long or short) depending on whether the breakout occurs at the high or low of the timeframe.
+
+Holding Period:
+
+Once a trade is opened, it is automatically closed after a user-defined number of bars, making it useful for analyzing how breakout signals perform over short-term periods.
+
+This strategy is intended exclusively for research and statistical purposes rather than real-time trading, helping users to assess the behavior of breakouts over different timeframes.
+
+Relevance of Breakout Systems:
+
+Breakout trading systems, where trades are executed when the price moves beyond a significant price level such as the high or low of a given period, have been extensively studied in financial literature for their potential predictive power.
+
+Momentum and Trend Following:
+
+Breakout strategies are a form of momentum-based trading, exploiting the tendency of prices to continue moving in the direction of a strong initial movement after breaching a critical support or resistance level. According to academic research, momentum strategies, including breakouts, can produce returns above average market returns when applied consistently. For example, Jegadeesh and Titman (1993) demonstrated that stocks that performed well in the past 3-12 months continued to outperform in the subsequent months, suggesting that price continuation patterns, like breakouts, hold value .
+
+Market Efficiency Hypothesis:
+
+While the Efficient Market Hypothesis (EMH) posits that markets are generally efficient, and it is difficult to outperform the market through technical strategies, some studies show that in less liquid markets or during specific times of market stress, breakout systems can capitalize on temporary inefficiencies. Taylor (2005) and other researchers have found instances where breakout systems can outperform the market under certain conditions.
+
+Volatility and Breakouts:
+
+Breakouts are often linked to periods of increased volatility, which can generate trading opportunities. Coval and Shumway (2001) found that periods of heightened volatility can make breakouts more significant, increasing the likelihood that price trends will follow the breakout direction. This correlation between volatility and breakout reliability makes it essential to study breakouts across different timeframes to assess their potential profitability .
+In summary, this breakout strategy offers an empirical way to study price behavior around key support and resistance levels. It is useful for researchers and traders aiming to statistically evaluate the effectiveness and consistency of breakout signals across different timeframes, contributing to broader research on momentum and market behavior.
+
+References:
+
+Jegadeesh, N., & Titman, S. (1993). Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency. Journal of Finance, 48(1), 65-91.
+
+Fama, E. F., & French, K. R. (1996). Multifactor Explanations of Asset Pricing Anomalies. Journal of Finance, 51(1), 55-84.
+
+Taylor, S. J. (2005). Asset Price Dynamics, Volatility, and Prediction. Princeton University Press.
+
+Coval, J. D., & Shumway, T. (2001). Expected Option Returns. Journal of Finance, 56(3), 983-1009.

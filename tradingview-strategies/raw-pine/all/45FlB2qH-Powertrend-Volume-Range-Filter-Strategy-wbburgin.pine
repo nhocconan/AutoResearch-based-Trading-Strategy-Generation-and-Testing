@@ -1,0 +1,136 @@
+//@version=5
+strategy("Powertrend - Volume Range Filter [wbburgin]",overlay=true,initial_capital = 1000, default_qty_type = strategy.percent_of_equity,
+ default_qty_value=10, commission_value=0.00, slippage = 0, shorttitle="Powertrend [wbburgin]")
+
+import wbburgin/wbburgin_utils/2 as utils
+
+rngfilt_volumeadj(float source1, float tethersource, float smoothrng)=>
+    rngfilt = source1
+    if tethersource > nz(tethersource[1])
+        rngfilt := (source1 - smoothrng) < nz(rngfilt[1]) ? nz(rngfilt[1]) : (source1 - smoothrng)
+    else
+        rngfilt := (source1 + smoothrng) > nz(rngfilt[1]) ? nz(rngfilt[1]) : (source1 + smoothrng)
+    rngfilt
+
+l = input.int(200,"Length",group="General")
+
+
+useadx = input.bool(false,"ADX Filter",group="Filters",inline="ADX")
+lengthadx = input.int(14,title="",group="Filters",inline="ADX")
+
+usehl = input.bool(false,"Range Supertrend",group="Filters",inline="HL")
+lengthhl = input.int(14,title="",group="Filters",inline="HL")
+showhl = input.bool(false,"Plot",group="Filters",inline="HL")
+
+usevwma = input.bool(false,"VWMA Filter",group="Filters",inline="VWMA")
+lengthvwma = input.int(200,title="",group="Filters",inline="VWMA")
+showvwma = input.bool(false,"Plot",group="Filters",inline="VWMA")
+
+highlighting = input.bool(true,"Highlighting",group="Display")
+barcolors = input.bool(true,"Bar Colors",group="Display")
+buyselllabels = input.bool(true,"Entry-Exit Labels",group="Display")
+
+volrng = rngfilt_volumeadj(close,volume,utils.smoothrng(close,l,3))
+
+smoothrng = utils.smoothrng(close,l,3)
+
+basetype = volrng
+hband = basetype + smoothrng
+lowband = basetype - smoothrng
+
+// Filters
+
+    // -- Built-in
+uprng = utils.trendUp(basetype)
+
+    // -- ADX
+[x,y,adx] = ta.dmi(lengthadx,lengthadx)
+adx_vwma = ta.vwma(adx,lengthadx)
+adx_filter = not useadx ? true : adx > adx_vwma ? true : false
+
+    // -- High/Low
+lowband_trendfollow = ta.lowest(lowband,lengthhl)
+highband_trendfollow = ta.highest(hband,lengthhl)
+in_general_uptrend = ta.barssince(ta.crossover(close,highband_trendfollow[1])) < ta.barssince(ta.crossunder(close,lowband_trendfollow[1]))
+igu_filter_positive = not usehl ? true : in_general_uptrend ? true : false
+igu_filter_negative = not usehl ? true : not in_general_uptrend ? true : false
+
+    // -- VWMA
+vwma = ta.vwma(volrng,lengthvwma)
+vwma_filter_positive = not usevwma ? true : volrng > vwma ? true : false
+//No negative needed
+
+b = uprng and ta.crossover(close,hband) and igu_filter_positive and adx_filter and vwma_filter_positive
+s = not uprng and ta.crossunder(close,lowband) and igu_filter_negative and adx_filter
+in_b = ta.barssince(b)[1] < ta.barssince(s)[1]
+in_s = ta.barssince(s)[1] < ta.barssince(b)[1]
+
+
+if b
+    strategy.entry("Long",strategy.long)
+    alert("Powertrend Entry",freq=alert.freq_once_per_bar)
+if s
+    strategy.close("Long")
+    alert("Powertrend Exit",freq=alert.freq_once_per_bar)
+
+
+mp=plot(basetype,color=color.white,title="Volume Range")
+hp=plot(hband,color=na,title="High Range")
+lp=plot(lowband,color=na, title="Low Range")
+bb=plot(not showhl ? na : in_general_uptrend ? lowband_trendfollow : na, color=color.lime, title="Bullish Trend Follow",style=plot.style_linebr)
+uu=plot(not showhl ? na : not in_general_uptrend ? highband_trendfollow : na,color=color.yellow,title="Bearish Trend Follow",style=plot.style_linebr)
+plot(not showvwma ? na : vwma, color = color.orange,title="VWMA")
+
+fill(hp,mp,color=not highlighting ? na : color.new(color.lime,88))
+fill(mp,lp,color=not highlighting ? na : color.new(color.yellow,88))
+fill(uu,hp,color=not highlighting ? na : in_general_uptrend ? na : color.new(color.red,88))
+fill(bb,lp,color=not highlighting ? na : not in_general_uptrend ? na : color.new(color.blue,88))
+
+plotshape(b and not in_b and buyselllabels ? lowband : na,"Buy Label",style=shape.labelup,location=location.absolute,
+ color=color.green,textcolor=color.white,text = "Buy", size=size.tiny)
+plotshape(s and not in_s and buyselllabels ? hband : na,"Sell Label",style=shape.labeldown,location=location.absolute,
+ color=color.red,textcolor=color.white,text = "Sell", size=size.tiny)
+
+barcolor(barcolors ? uprng ? color.lime : color.yellow : na)
+
+//alertcondition(b,"PT Buy")
+//alertcondition(s,"PT Sell")
+
+View in Pine Editor・100 lines
+Use on chart
+3.2 K
+27
+79 147
+Jun 28, 2023
+The Powertrend is a range filter that is based off of volume, instead of price. This helps the range filter capture trends more accurately than a price-based range filter, because the range filter will update itself from changes in volume instead of changes in price. In certain scenarios this means that the Powertrend will be more profitable than a normal range filter.
+
+Essentials of the Strategy
+This is a breakout strategy which works best on trending assets with high volume and liquidity. It should be used on middle to higher timeframes and can be used on all assets that have volume provided by the data source (stocks, crypto, forex). It is long-only as of now. It can work on lower timeframes if you optimize the strategy filters to make less trades or if your exchange/broker is low/no fees, provided that your exchange/broker has high liquidity and volume.
+
+The strategy enters a long position if the range filter is trending upwards and the price crosses over the upper range band, which signifies a price-volume breakout. The strategy closes the long position if the range filter is trending downwards and the price crosses under the lower range band, which signifies a breakdown. Both these conditions can be altered by the three filter options in the settings. The default trend filter is not alterable because it helps prevent false entries and exits that are against the trend.
+
+Settings
+The Length setting is the lookback period for the range smoothing.
+
+The ADX Filter setting enables you to turn on an ADX filter, which will halt entries and exits unless the ADX of your customizable length is above a ADX VWMA of that length.
+
+The Range Supertrend setting creates a supertrend from the top and bottom ranges, which can be used to filter entries and exits. The length is customizable. The filter can show you whether the range is making higher highs and lower lows. Below is an example of the Range Supertrend being used as a filter and plotted on-chart:
+https://www.tradingview.com/x/Z2W2kSgu
+
+The VWMA setting halts entries if they are below a customizable length VWMA.
+
+Both the Range Supertrend and the VWMA can also be plotted separately without actually filtering the strategy, so that you can use them independently if you wish. You can turn off the bar color, the highlighting, and the labels if you wish in the settings. A note about the bar color: if the color changes but the strategy does not signal an exit or entry this means that the crossover was against the trend. In these circumstances it may be indicative of a pullback to enter or exit or to add onto your position.
+
+About the Strategy Results Below
+A range filter is normally composed of two components - the range filter itself and a smoothing function. In the development of this script I tested both normal and volume-based varieties of the range filter and the smoothing function:
+
+Tests Performed
+Volume-based Range x VWMA smoothing
+Price-based Range x VWMA smoothing
+Price-based Range x EMA smoothing
+Volume-based Range x EMA smoothing (final result)
+
+The highest-performing was a volume-based range filter and a normal EMA-based smoothing function, but that does not mean that this strategy will be profitable - exits are based off of signal reversion so I strongly encourage you to develop your own take profits/stop losses for the strategy if you think it may be a good fit for you. The results below are with a commission value of 0.05% (because I built the strategy first for equities), slippage of 3, so if your exchange/broker has a higher fee schedule, I recommend adding filters and/or moving to higher timeframes for the strategy. Additionally, I used 10% of equity in each trade, while using the Range Supertrend filter (the previous upload was unrealistic because it used 100% of equity - missed a 0, apologies, and added in slippage).
+Jul 28, 2023
+Release Notes
+Added alerts.

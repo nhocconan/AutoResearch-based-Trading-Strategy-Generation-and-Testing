@@ -1,0 +1,278 @@
+//@version=4
+//@author=LucF, for PineCoders
+
+// Backtesting on Non-Standard Charts: Caution! - PineCoders FAQ
+//  v1.3, 2020.09.06 21:57 — LucF
+
+// PineCoders, Tools and ideas for all Pine coders: pinecoders.com
+
+// This script is a strategy intended to show the results of backtesting 
+// on non-standard chart types using chart (normal backtesting) prices vs market prices.
+
+// PineCoders FAQ & Code question linking here: http://www.pinecoders.com/faq_and_code/#why-is-backtesting-on-heikin-ashi-and-other-non-standard-charts-not-recommended
+// This indicator's TradingView page: https://www.tradingview.com/script/q9laJNG9-Backtesting-on-Non-Standard-Charts-Caution-PineCoders-FAQ/
+
+strategy("Backtesting on Non-Standard Charts: Caution! [PineCoders]", "", true, precision = 8, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// ——————————————— Functions
+// ————— Round prices to tick size.
+f_roundToTick( _price) => round(_price / syminfo.mintick) * syminfo.mintick
+// ————— Round values to given decimal places.
+f_round( _val, _decimals) => _p = pow(10, _decimals), round(_val * _p) / _p
+
+
+// ——————————————— Inputs
+ST1 = "Second reversal bar"
+ST2 = "MA crosses"
+strategy    = input(ST1,    "Strategy used", options = [ST1, ST2])
+useHA       = input(false,  "Use Heikin Ashi instead of chart prices to calculate strategy")
+noRepaint   = input(true,   "No repainting (delays signals one bar)")
+showMas     = input(false,  "Show MAs")
+showMarkers = input(false,  "Show entry/exit markers")
+showFills   = input(true,   "Show market fills")
+showCandles = input(false,  "Show market price candlesticks")
+showOpen    = input(false,  "Show market open as line")
+showBg      = input(false,  "Show background on fill delta")
+fastLength  = input(5,      "Fast MA length", minval = 2)
+slowLength  = input(25,     "Slow MA length", minval = 3)
+
+
+// ——————————————— Get market, HA and chart prices, all rounded to tick.
+// ————— Fetch underlying normal bar (market) prices.
+// "lookahead" must be used so that the correct price is retrieved when fetching prices from a chart 
+// where there is no one-to-one correspondence between the time of non-standard bars and real market underlying bars.
+ticker      = tickerid(syminfo.prefix, syminfo.ticker)
+realOpen    = security(ticker, timeframe.period, open,   lookahead = barmerge.lookahead_on)
+realHigh    = security(ticker, timeframe.period, high,   lookahead = barmerge.lookahead_on)
+realLow     = security(ticker, timeframe.period, low,    lookahead = barmerge.lookahead_on)
+realClose   = security(ticker, timeframe.period, close,  lookahead = barmerge.lookahead_on)
+// ————— Calculate Heikin Ashi prices.
+// Full precision for HA calcs.
+haClose_    = 0.0
+haOpen_     = 0.0
+haClose_    := avg(realOpen, realHigh, realLow, realClose)
+haOpen_     := avg(nz(haOpen_[1], realOpen), nz(haClose_[1], realClose))
+haHigh_     =  max(max(realHigh, haOpen_), haClose_)
+haLow_      =  min(min(realLow, haOpen_), haClose_)
+// Tick precision HA values for display.
+haOpen      = f_roundToTick(haOpen_)
+haHigh      = f_roundToTick(haHigh_)
+haLow       = f_roundToTick(haLow_)
+haClose     = f_roundToTick(haClose_)
+// ————— Get current chart prices rounded to tick.
+chartOpen   = f_roundToTick(open)
+chartHigh   = f_roundToTick(high)
+chartLow    = f_roundToTick(low)
+chartClose  = f_roundToTick(close)
+// ————— Get prices used for calculations from HA or chart.
+calcOpen    = useHA ? haOpen  : chartOpen
+calcClose   = useHA ? haClose : chartClose
+
+
+// ——————————————— Calculations and conditions
+// ————— When not repainting, we will reference bars one bar back.
+idx = noRepaint ? 1 : 0
+// ————— Long/Short conditions.
+upBar   = calcClose > calcOpen
+fastMa  = sma(calcClose, fastLength)
+slowMa  = sma(calcClose, slowLength)
+longCondition   = strategy == ST1 ? upBar[idx] and upBar[idx + 1] and not upBar[idx + 2]        : crossover(fastMa, slowMa)[idx]
+shortCondition  = strategy == ST1 ? not upBar[idx] and not upBar[idx + 1] and upBar[idx + 2]    : crossunder(fastMa, slowMa)[idx]
+
+
+// ——————————————— Entries & Exits
+// ————— We initialize this variable only once (with "var" keyword) because we want its value to persist across bars until it is changed when an order is issued.
+var inLong = false
+// ————— We re-initialize these vars to false every bar because we only want them true for one bar when the order must be given.
+goLong  = false
+goShort = false
+// ————— We will only emit an order if our trigger condition occurs and:
+//  - we are in a trade in the opposite direction,
+//  - there is some equity left,
+//  - we have not issued an order on the previous bar (because we need to process trade transitions),
+//  - we have underlying real market data.
+if not inLong and longCondition and strategy.equity > 0 and not goShort[1] and not na(realOpen)
+    goLong  := true
+    inLong  := true
+if inLong and shortCondition and strategy.equity > 0 and not goLong[1] and not na(realOpen)
+    goShort := true
+    inLong  := false
+// ————— Enter/Exit trades at chart price as usual, but also fetch real market prices.
+var float chartFill = na
+var float marketFill = na
+var float previousChartFill = na
+var float previousMarketFill = na
+var float contracts = na
+// An order is emitted on this bar's close.
+onOrderBar = goLong or goShort
+// An order is filled on this bar's open.
+onFillBar = goLong[1] or goShort[1] 
+// ————— Save previous fills before emitting order.
+if onOrderBar
+    // Save previous fills.
+    previousChartFill   := chartFill
+    previousMarketFill  := marketFill
+    // Emit order.
+    if goLong
+        strategy.entry("Long", strategy.long)
+    else
+        if goShort
+            strategy.entry("Short", strategy.short)
+// ————— An order was filled on this bar; remember chart and market fills.
+if onFillBar
+    chartFill   := strategy.position_avg_price
+    marketFill  := realOpen
+    contracts   := abs(strategy.position_size)
+
+
+// ——————————————— Stats
+var marketNetProfit = 0.0
+chartProfit = 0.0
+chartPctProfit = 0.0
+marketProfit = 0.0
+marketPctProfit = 0.0
+marketTradeProfit = 0.0
+// ————— After the first fill, whenever a new fill occurs, update stats.
+if onFillBar and not na(previousChartFill)
+    chartProfit := (chartFill - previousChartFill) * (goShort[1] ? 1 : -1)
+    chartPctProfit := chartProfit / previousChartFill
+    marketProfit := (marketFill - previousMarketFill) * (goShort[1] ? 1 : -1)
+    marketPctProfit := marketProfit / previousMarketFill
+    marketTradeProfit := contracts[1] * marketProfit
+    marketNetProfit := marketNetProfit + marketTradeProfit
+// ————— Global numbers.
+chartNetProfit = strategy.netprofit
+deltaImpactPct = 100 * (marketNetProfit - chartNetProfit) / abs(chartNetProfit)
+
+
+// ——————————————— Plots
+// ————— Function to return green/red/blue color from value.
+f_color(_val) => _val > 0 ? color.green : _val < 0 ? color.red : color.blue
+invisible = #00000000
+// ————— Stats.
+// Global.
+plotchar(false,                         "═══════════ Cumulative Results", "", location.top, invisible)
+plotchar(f_round(chartNetProfit, 2),    "Chart Net Profit", "", location.top, f_color(chartNetProfit))
+plotchar(f_round(marketNetProfit, 2),   "Market Net Profit", "", location.top, f_color(marketNetProfit))
+plotchar(f_round(deltaImpactPct, 2),    "Delta Net Profit %", "", location.top, f_color(deltaImpactPct))
+plotchar(false,                                 "═══════════ Trade Fills", "", location.top, invisible)
+plotchar(onFillBar ? previousChartFill : na,    "Chart Previous Fill", "", location.top)
+plotchar(onFillBar ? chartFill : na,            "Chart Current Fill", "", location.top)
+plotchar(onFillBar ? previousMarketFill : na,   "Market Previous Fill", "", location.top, f_color((previousMarketFill - previousChartFill) * (goShort[1] ? -1 : 1)))
+plotchar(onFillBar ? marketFill : na,           "Market Current Fill", "", location.top, f_color((marketFill - chartFill) * (goShort[1] ? 1 : -1)))
+plotchar(false,                                                 "═══════════ Trade Results", "", location.top, invisible)
+plotchar(onFillBar ? f_round(100 * chartPctProfit, 2) : na,     "Chart Trade Profit %", "", location.top, f_color(chartPctProfit))
+plotchar(onFillBar ? f_round(100 * marketPctProfit, 2) : na,    "Market Trade Profit %", "", location.top, f_color(marketPctProfit))
+plotchar(onFillBar ? f_round(100 * (marketPctProfit - chartPctProfit), 2): na,    "Delta Trade Profit %", "", location.top, f_color(marketPctProfit - chartPctProfit))
+plotchar(false, "══════════════════════", "", location.top, invisible)
+// ————— Mas
+plot(strategy == ST2 and showMas ? fastMa : na, "Fast MA", color.fuchsia)
+plot(strategy == ST2 and showMas ? slowMa : na, "Slow MA")
+// ————— Entry/Exit markers.
+plotchar(showMarkers and goLong, "goLong", "▲", location.bottom, color.green, size = size.tiny)
+plotchar(showMarkers and goShort, "goShort", "▼", location.top, color.red, size = size.tiny)
+// ————— Market Fills.
+plot(showFills and not change(marketFill) ? marketFill : na, "Market Fills", color.gray, style = plot.style_linebr, offset = -1)
+// ————— Market open.
+plot(showOpen ? realOpen : na, "Market open", color = color.gray, linewidth = 3, trackprice = true)
+// ————— Market candles.
+plotcandle(showCandles ? realOpen : na, showCandles ? realHigh : na, showCandles ? realLow : na, showCandles ? realClose : na, "Candles", realClose > realOpen ? color.orange : color.fuchsia, color.orange)
+// ————— Label.
+var lbl = label(na)
+label.delete(lbl)
+labelText = "Chart Net Profit (currency) = " + tostring(chartNetProfit, "###,###,###.00") + "\nMarket Net Profit (currency) = " + tostring(marketNetProfit, "###,###,###.00") + "\nDelta % = " + tostring(deltaImpactPct, "#.##") + " %"
+labelType = deltaImpactPct < 0 ? label.style_label_down : label.style_label_up
+lbl := label.new(bar_index, highest(20), labelText, xloc.bar_index, yloc.price, f_color(deltaImpactPct), size = size.normal, style = labelType)
+// Background on fill deltas.
+bgcolor(showBg and onFillBar and chartFill != marketFill ? color.red : na)
+
+View in Pine Editor・187 lines
+Use on chart
+1.8 K
+50
+54 307
+Nov 11, 2019
+Much confusion exists in the TradingView community about backtesting on non-standard charts. This script tries to shed some light on the subject in the hope that traders make better use of those chart types.
+Non-standard charts are:
+
+Heikin Ashi (HA)
+
+Renko
+
+Kagi
+
+Point & Figure
+
+Range
+
+
+These chart types are called non-standard because they all transform market prices into synthetic views of price action. Some focus on price movement and disregard time. Others like HA use the same division of bars into fixed time intervals but calculate artificial open, high, low and close (OHLC) values.
+
+Non-standard chart types can provide traders with alternative ways of interpreting price action, but they are not designed to test strategies or run automated traded systems where results depend on the ability to enter and exit trades at precise price levels at specific times, whether orders are issued manually or algorithmically. Ironically, the same characteristics that make non-standard chart types interesting from an analytical point of view also make them ill-suited to trade execution. Why? Because of the dislocation that a synthetic view of price action creates between its non-standard chart prices and real market prices at any given point in time. Switching from a non-standard chart price point into the market always entails a translation of time/price dimensions that results in uncertainty—and uncertainty concerning the level or the time at which orders are executed is detrimental to all strategies.
+
+The delta between the chart’s price when an order is issued (which is assumed to be the expected price) and the price at which that order is filled is called slippage. When working from normal chart types, slippage can be caused by one or more of the following conditions:
+• Time delay between order submission and execution. During this delay the market may move normally or be subject to large orders from other traders that will cause large moves of the bid/ask levels.
+• Lack of bids for a market sell or lack of asks for a market buy at the current price level.
+• Spread taken by middlemen in the order execution process.
+• Any other event that changes the expected fill price.
+
+
+When a market order is submitted, matching engines attempt to fill at the best possible price at the exchange. TradingView strategies usually fill market orders at the opening price of the next candle. A non-standard chart type can produce misleading results because the open of the next candle may or may not correspond to the real market price at that time. This creates artificial and often beneficial slippage that would not exist on standard charts.
+
+Consider an HA chart. The open for each candle is the average of the previous HA bar’s open and close prices. The open of the HA candle is a synthetic value, but the real market open at the time the new HA candle begins on the chart is the unrelated, regular open at the chart interval. The HA open will often be lower on long entries and higher on short entries, resulting in unrealistically advantageous fills.
+
+Another example is a Renko chart. A Renko chart is a type of chart that only measures price movement. The purpose of a Renko chart is to cluster price action into regular intervals, which consequently removes the time element. Because Trading View does not provide tick data as a price source, it relies on chart interval close values to construct Renko bricks. As a consequence, a new brick is constructed only when the interval close penetrates one or more brick thresholds. When a new brick starts on the chart, it is because the previous interval’s close was above or below the next brick threshold. The open price of the next brick will likely not represent the current price at the time this new brick begins, so correctly simulating an order is impossible.
+
+Some traders have argued with us that backtesting and trading off HA charts and other non-standard charts is useful, and so we have written this script to show traders what happens when order fills from backtesting on non-standard charts are compared to real-world fills at market prices.
+
+Let’s review how TV backtesting works. TV backtesting uses a broker emulator to execute orders. When an order is executed by the broker emulator on historical bars, the price used for the fill is either the close of the order’s submission bar or, more often, the open of the next. The broker emulator only has access to the chart’s prices, and so it uses those prices to fill orders. When backtesting is run on a non-standard chart type, orders are filled at non-standard prices, and so backtesting results are non-standard—i.e., as unrealistic as the prices appearing on non-standard charts. This is not a bug; where else is the broker emulator going to fetch prices than from the chart?
+
+This script is a strategy that you can run on either standard or non-standard chart types. It is meant to help traders understand the differences between backtests run on both types of charts. For every backtest, a label at the end of the chart shows two global net profit results for the strategy:
+• The net profits (in currency) calculated by TV backtesting with orders filled at the chart’s prices.
+• The net profits (in currency) calculated from the same orders, but filled at market prices (fetched through security() calls from the underlying real market prices) instead of the chart’s prices.
+
+If you run the script on a non-standard chart, the top result in the label will be the result you would normally get from the TV backtesting results window. The bottom result will show you a more realistic result because it is calculated from real market fills.
+
+If you run the script on a normal chart type (bars, candles, hollow candles, line, area or baseline) you will see the same result for both net profit numbers since both are run on the same real market prices. You will sometimes see slight discrepancies due to occasional differences between chart prices and the corresponding information fetched through security() calls.
+
+Features
+• Results shown in the Data Window (third icon from the top right of your chart) are:
+— Cumulative results
+— For each order execution bar on the chart, the chart and market previous and current fills, and the trade results calculated from both chart and market fills.
+• You can choose between 2 different strategies, both elementary.
+• You can use HA prices for the calculations determining entry/exit conditions. You can use this to see how a strategy calculated from HA values can run on a normal chart. You will notice that such strategies will not produce the same results as the real market results generated from HA charts. This is due to the different environment backtesting is running on where for example, position sizes for entries on the same bar will be calculated differently because HA and standard chart close prices differ.
+• You can choose repainting/non-repainting signals.
+• You can show MAs, entry/exit markers and market fill levels.
+• You can show candles built from the underlying market prices.
+• You can color the background for occurrences where an order is filled at a different real market price than the chart’s price.
+
+Notes
+• On some non-standard chart types you will not obtain any results. This is sometimes due to how certain types of non-standard types work, and sometimes because the script will not emit orders if no underlying market information is detected.
+• The script illustrates how those who want to use HA values to calculate conditions can do so from a standard chart. They will then be getting orders emitted on HA conditions but filled at more realistic prices because their strategy can run on a standard chart.
+• On some non-standard chart types you will see market results surpass chart results. While this may seem interesting, our way of looking at it is that it points to how unreliable non-standard chart backtesting is, and why it should be avoided.
+• In order not to extend an already long description, we do not discuss the particulars of executing orders on the realtime bar when using non-standard charts. Unless you understand the minute details of what’s going on in the realtime bar on a particular non-standard chart type, we recommend staying away from this.
+• Some traders ask us: Why does TradingView allow backtesting on non-standard chart types if it produces unrealistic results? That’s somewhat like asking a hammer manufacturer why it makes hammers if hammers can hurt you. We believe it’s a trader’s responsibility to understand the tools he is using.
+
+Takeaways
+• Non-standard charts are not bad per se, but they can be badly used.
+• TV backtesting on non-standard charts is not broken and doesn’t require fixing. Traders asking for a fix are in dire need of learning more about trading. We recommend they stop trading until they understand why.
+• Stay away from—even better, report—any vendor presenting you with strategies running on non-standard charts and implying they are showing reliable results.
+• If you don’t understand everything we discussed, don’t use non-standard charts at all.
+• Study carefully how non-standard charts are built and the inevitable compromises used in calculating them so you can understand their limitations.
+
+Thanks to allanster and mortdiggiddy for their help in editing this description.
+
+
+
+Look first. Then leap.
+
+
+Nov 12, 2019
+Release Notes
+Updated comments.
+Nov 12, 2019
+Release Notes
+Updated comments.
+Sep 7, 2020
+Release Notes
+Fixed a bug in the code determining the label type. Thx allanster!

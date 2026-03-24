@@ -1,0 +1,112 @@
+//@version=5
+strategy('K-algo trail', overlay=true,currency=currency.INR,initial_capital=500000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=3,
+     commission_type=strategy.commission.percent,
+     commission_value=0.025,
+     slippage=1,
+     pyramiding=1,
+     process_orders_on_close=true,
+     calc_on_every_tick=false)
+
+// ===== INPUTS =====
+Periods = input(title='ATR Period', defval=10)
+src = input(hl2, title='Source')
+Multiplier = input.float(title='ATR Multiplier', step=0.1, defval=3)
+changeATR = input(title='Change ATR Calculation Method ?', defval=true)
+showsignals = input(title='Show Buy/Sell Signals ?', defval=true)
+
+// ===== ATR & SUPER TREND (K-TREND) CALCULATION =====
+atr2 = ta.sma(ta.tr, Periods)
+atr = changeATR ? ta.atr(Periods) : atr2
+up = src - Multiplier * atr
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+dn = src + Multiplier * atr
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// Plot SuperTrend
+upPlot = plot(trend == 1 ? up : na, title='Up Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.green, 0))
+buySignal = trend == 1 and trend[1] == -1
+plotshape(buySignal ? up : na, title='UpTrend Begins', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.green, 0))
+dnPlot = plot(trend == 1 ? na : dn, title='Down Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.red, 0))
+sellSignal = trend == -1 and trend[1] == 1
+plotshape(sellSignal ? dn : na, title='DownTrend Begins', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.red, 0))
+
+// ===== GANN SQUARE OF 9 =====
+_normalise_squareRootCurrentClose = math.floor(math.sqrt(close))
+_upperGannLevel_1 = (_normalise_squareRootCurrentClose + 1) * (_normalise_squareRootCurrentClose + 1)
+_upperGannLevel_2 = (_normalise_squareRootCurrentClose + 2) * (_normalise_squareRootCurrentClose + 2)
+_zeroGannLevel = _normalise_squareRootCurrentClose * _normalise_squareRootCurrentClose
+_lowerGannLevel_1 = (_normalise_squareRootCurrentClose - 1) * (_normalise_squareRootCurrentClose - 1)
+_lowerGannLevel_2 = (_normalise_squareRootCurrentClose - 2) * (_normalise_squareRootCurrentClose - 2)
+
+// ===== SMOOTHED HEIKIN ASHI CALCULATION =====
+ma1_len = input.int(title='MA1', defval=11, minval=1, maxval=100, step=1)
+ma2_len = input.int(title='MA2', defval=11, minval=1, maxval=100, step=1)
+
+// First Smoothing (11,11)
+o = ta.ema(open, ma1_len)
+c = ta.ema(close, ma1_len)
+h = ta.ema(high, ma1_len)
+l = ta.ema(low, ma1_len)
+ha_t = ticker.heikinashi(syminfo.tickerid)
+ha_o = request.security(ha_t, timeframe.period, o)
+ha_c = request.security(ha_t, timeframe.period, c)
+ha_h = request.security(ha_t, timeframe.period, h)
+ha_l = request.security(ha_t, timeframe.period, l)
+o2 = ta.ema(ha_o, ma2_len)
+c2 = ta.ema(ha_c, ma2_len)
+h2 = ta.ema(ha_h, ma2_len)
+l2 = ta.ema(ha_l, ma2_len)
+ha_col = o2 > c2 ? color.orange : color.blue
+plotcandle(o2, h2, l2, c2, title='Heikin Ashi Smoothed', color=ha_col, wickcolor=#00000000)
+
+// ===== STRATEGY LOGIC =====
+// Final Combined Long Condition
+longCondition = (o2 < c2 and trend == 1) and barstate.isconfirmed
+
+// Final Combined Short Condition
+shortCondition = (o2 > c2 and trend == -1) and barstate.isconfirmed
+
+// ===== STRATEGY EXECUTION =====
+if longCondition
+    SL = math.round(up, 2)
+    range_1 = math.abs(close - SL)
+    TARGET1 = close + range_1 * 1.7
+    TARGET2 = close + range_1 * 2.5
+    TARGET3 = close + range_1 * 3.0
+    
+    strategy.entry('BUY', strategy.long)
+    strategy.exit('BUY T1', 'BUY', qty=1, limit=TARGET1)
+    strategy.exit('BUY T2', 'BUY', qty=1, limit=TARGET2)
+    strategy.exit('BUY T3', 'BUY', qty=1, limit=TARGET3)
+    strategy.exit('BUY SL', 'BUY', stop=SL)
+
+if shortCondition
+    SL = math.round(dn, 2)
+    range_2 = math.abs(close - SL)
+    TARGET1 = close - range_2 * 1.7
+    TARGET2 = close - range_2 * 2.5
+    TARGET3 = close - range_2 * 3.0
+    
+    strategy.entry('SELL', strategy.short)
+    strategy.exit('SELL T1', 'SELL', qty=1, limit=TARGET1)
+    strategy.exit('SELL T2', 'SELL', qty=1, limit=TARGET2)
+    strategy.exit('SELL T3', 'SELL', qty=1, limit=TARGET3)
+    strategy.exit('SELL SL', 'SELL', stop=SL)
+
+// Plot entry signals
+plotshape(longCondition ? close : na, title='Buy', text='BUY', location=location.belowbar, style=shape.labelup, size=size.tiny, color=color.new(color.green, 0), textcolor=color.new(color.white, 0))
+plotshape(shortCondition ? close : na, title='Sell', text='SELL', location=location.abovebar, style=shape.labeldown, size=size.tiny, color=color.new(color.red, 0), textcolor=color.new(color.white, 0))
+
+View in Pine Editor・105 lines
+Use on chart
+1
+8
+681
+its a trial for entry, sl and targets with order execution

@@ -1,0 +1,123 @@
+//@version=5
+// -----------------------------------------------------------------------------
+// Gold H1 - Breakout Failure (Mean Reversion) Strategy (V11.0)
+// This strategy trades the "fake breakout" or "liquidity grab" of the Asian Range.
+// Coded by Gemini AI
+// -----------------------------------------------------------------------------
+
+strategy("Gold H1 Breakout Failure (V11.0)", 
+     overlay=true, 
+     initial_capital=25000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=1) // Use 1% equity risk per trade
+
+// --- 1. User Inputs ---
+g_sessions = "--- 1. Session Times (Chart Timezone) ---"
+asia_session = input.session("0000-0800", "Asian Session")
+killzone_session = input.session("0900-1700", "Killzone (London/NY)")
+
+g_risk = "--- 2. Risk Management ---"
+inp_atr_len = input.int(14, "ATR Length (for SL)")
+inp_atr_mult = input.float(1.5, "ATR Stop Loss Multiplier")
+inp_rr_ratio = input.float(2.0, "Risk/Reward Ratio (TP)")
+
+// --- 2. Session Time Logic ---
+// Check if the current bar is inside the specified session
+bool inAsia = time(timeframe.period, asia_session)
+bool inKillzone = time(timeframe.period, killzone_session)
+
+// Detect the start of a new Asian session
+bool newAsiaSession = inAsia and not inAsia[1]
+
+// --- 3. Asian Range Calculation ---
+var float asiaHigh = 0.0
+var float asiaLow = 0.0
+var box asiaBox = na
+
+if (newAsiaSession)
+    // Start of a new session, set initial High/Low
+    asiaHigh := high
+    asiaLow := low
+    // Create a new box for the visual range
+    asiaBox := box.new(left=bar_index, top=high, right=bar_index + 1, bottom=low, 
+         bgcolor=color.new(color.gray, 85), border_color=color.new(color.gray, 50))
+else if (inAsia)
+    // We are still in the Asian session, update the High/Low
+    asiaHigh := math.max(asiaHigh, high)
+    asiaLow := math.min(asiaLow, low)
+    // Extend the box to the current bar
+    box.set_top(asiaBox, asiaHigh)
+    box.set_bottom(asiaBox, asiaLow)
+    box.set_right(asiaBox, bar_index + 1)
+
+
+// --- 4. Breakout Failure Logic ---
+
+// We need to look at the previous bar [1] and the bar before that [2]
+float prev_close = close[1]
+float prev_open = open[1]
+float prev_high = high[1]
+float prev_low = low[1]
+
+float prev_prev_close = close[2]
+
+// --- SELL SIGNAL (Liquidity Grab Above) ---
+// 1. Must be in the Killzone (London/NY)
+// 2. The bar before [2] must have closed *inside* the range.
+// 3. The previous bar [1] must have closed *above* the range (the "fakeout").
+// 4. The *current* bar [0] must close *back inside* the range (the "failure confirmation").
+bool sell_signal = inKillzone and 
+     (prev_prev_close <= asiaHigh) and 
+     (prev_close > asiaHigh) and 
+     (close < asiaHigh)
+
+// --- BUY SIGNAL (Liquidity Grab Below) ---
+// 1. Must be in the Killzone.
+// 2. The bar before [2] must have closed *inside* the range.
+// 3. The previous bar [1] must have closed *below* the range (the "fakeout").
+// 4. The *current* bar [0] must close *back inside* the range (the "failure confirmation").
+bool buy_signal = inKillzone and 
+     (prev_prev_close >= asiaLow) and 
+     (prev_close < asiaLow) and 
+     (close > asiaLow)
+
+
+// --- 5. Risk & Position Sizing ---
+float atr = ta.atr(inp_atr_len)
+float sl_distance = atr * inp_atr_mult
+float tp_distance_buy = sl_distance * inp_rr_ratio
+float tp_distance_sell = sl_distance * inp_rr_ratio
+
+// Calculate position size based on 1% risk
+float risk_per_trade = strategy.equity * 0.01
+float pos_size = risk_per_trade / sl_distance
+
+// --- 6. Strategy Execution ---
+if (buy_signal)
+    strategy.entry("Buy (Failure)", strategy.long, qty=pos_size)
+    strategy.exit("Buy Exit", from_entry="Buy (Failure)", 
+         stop=close - sl_distance, 
+         limit=close + tp_distance_buy)
+
+if (sell_signal)
+    strategy.entry("Sell (Failure)", strategy.short, qty=pos_size)
+    strategy.exit("Sell Exit", from_entry="Sell (Failure)", 
+         stop=close + sl_distance, 
+         limit=close - tp_distance_sell)
+
+View in Pine Editor・106 lines
+Use on chart
+2
+0
+894
+This strategy is designed for trading XAU/USD (Gold) on the 1-hour timeframe. It identifies and trades fake breakouts of the Asian session range.
+
+The logic is simple yet effective:
+
+The script first marks the Asian session high and low.
+
+Once price breaks out of this range and closes outside, it waits for confirmation by watching for price to close back inside the range.
+
+When this re-entry occurs, the strategy takes a position in the opposite direction of the initial breakout, anticipating a false breakout or liquidity trap setup.
+
+By focusing on these fakeouts, the strategy aims to capture reversal momentum after liquidity sweeps, making it especially effective during sessions when volatility transitions from Asia to London or New York.

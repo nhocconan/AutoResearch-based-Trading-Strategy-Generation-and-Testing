@@ -1,0 +1,394 @@
+//@version=5
+strategy("Options Scalper v2 - SPY/QQQ", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ============================================
+// INPUTS
+// ============================================
+emaFastLen = input.int(9, "Fast EMA", minval=1, group="EMAs")
+emaSlowLen = input.int(21, "Slow EMA", minval=1, group="EMAs")
+ema200Len = input.int(200, "Trend EMA", minval=1, group="EMAs")
+
+rsiLen = input.int(14, "RSI Length", minval=1, group="RSI")
+rsiOB = input.int(65, "RSI Overbought", group="RSI")
+rsiOS = input.int(35, "RSI Oversold", group="RSI")
+
+useVwap = input.bool(true, "Use VWAP Filter", group="VWAP")
+
+volMult = input.float(1.2, "Volume Spike Multiplier", minval=1.0, group="Volume")
+volLen = input.int(20, "Volume MA Length", group="Volume")
+
+atrLen = input.int(14, "ATR Length", group="Risk")
+atrMult = input.float(1.5, "ATR Stop Multiplier", group="Risk")
+tpMult = input.float(2.0, "ATR Take Profit Multiplier", group="Risk")
+
+useSession = input.bool(true, "Trade Only During Market Hours", group="Session")
+sessionStart = input.session("0930-1100", "Morning Session", group="Session")
+sessionEnd = input.session("1430-1555", "Afternoon Session", group="Session")
+
+// Signal Strength Filter
+minSignalStrength = input.int(4, "Min Signal Strength (1-6)", minval=1, maxval=6, group="Filters")
+
+// ============================================
+// CALCULATIONS
+// ============================================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+ema200 = ta.ema(close, ema200Len)
+
+rsi = ta.rsi(close, rsiLen)
+vwapValue = ta.vwap(hlc3)
+
+volMA = ta.sma(volume, volLen)
+volSpike = volume > volMA * volMult
+
+atr = ta.atr(atrLen)
+
+// MACD for additional confirmation
+[macdLine, signalLine, histLine] = ta.macd(close, 12, 26, 9)
+macdBullish = macdLine > signalLine and histLine > histLine[1]
+macdBearish = macdLine < signalLine and histLine < histLine[1]
+
+// Stochastic for oversold/overbought
+stochK = ta.stoch(close, high, low, 14)
+stochD = ta.sma(stochK, 3)
+stochOS = stochK < 25 and stochD < 25
+stochOB = stochK > 75 and stochD > 75
+
+// ============================================
+// STRICT CROSSOVER SIGNALS ONLY
+// ============================================
+// Only trigger on ACTUAL crossovers, not continuation
+emaCrossUp = ta.crossover(emaFast, emaSlow)
+emaCrossDown = ta.crossunder(emaFast, emaSlow)
+
+// Require crossover within last N bars for signal validity
+lookback = input.int(3, "Crossover Lookback Bars", group="Filters")
+recentCrossUp = ta.barssince(emaCrossUp) <= lookback
+recentCrossDown = ta.barssince(emaCrossDown) <= lookback
+
+// Price relative to key levels
+aboveVwap = close > vwapValue
+belowVwap = close < vwapValue
+aboveEma200 = close > ema200
+belowEma200 = close < ema200
+
+// Candle patterns
+bullishCandle = close > open and (close - open) > (high - low) * 0.5
+bearishCandle = close < open and (open - close) > (high - low) * 0.5
+
+// Higher highs / Lower lows
+higherHigh = high > ta.highest(high[1], 5)
+lowerLow = low < ta.lowest(low[1], 5)
+
+// Session Check
+inMorningSession = time(timeframe.period, sessionStart)
+inAfternoonSession = time(timeframe.period, sessionEnd)
+inSession = useSession ? (inMorningSession or inAfternoonSession) : true
+
+// ============================================
+// SCORING SYSTEM (More Balanced)
+// ============================================
+var int callScore = 0
+var int putScore = 0
+
+// Calculate CALL score
+callScore := 0
+callScore := callScore + (recentCrossUp ? 2 : 0)                    // EMA cross (2 pts)
+callScore := callScore + (emaFast > emaSlow ? 1 : 0)                // EMA alignment (1 pt)
+callScore := callScore + (rsi > 45 and rsi < rsiOB ? 1 : 0)         // RSI in range (1 pt)
+callScore := callScore + (aboveVwap and useVwap ? 1 : 0)            // Above VWAP (1 pt)
+callScore := callScore + (macdBullish ? 1 : 0)                       // MACD bullish (1 pt)
+callScore := callScore + (volSpike and bullishCandle ? 1 : 0)       // Volume on green (1 pt)
+callScore := callScore + (stochOS or stochK > stochD ? 1 : 0)       // Stoch setup (1 pt)
+callScore := callScore + (aboveEma200 ? 1 : 0)                       // Above 200 EMA (1 pt)
+callScore := callScore + (higherHigh ? 1 : 0)                        // Breaking higher (1 pt)
+
+// Calculate PUT score  
+putScore := 0
+putScore := putScore + (recentCrossDown ? 2 : 0)                    // EMA cross (2 pts)
+putScore := putScore + (emaFast < emaSlow ? 1 : 0)                  // EMA alignment (1 pt)
+putScore := putScore + (rsi < 55 and rsi > rsiOS ? 1 : 0)           // RSI in range (1 pt)
+putScore := putScore + (belowVwap and useVwap ? 1 : 0)              // Below VWAP (1 pt)
+putScore := putScore + (macdBearish ? 1 : 0)                         // MACD bearish (1 pt)
+putScore := putScore + (volSpike and bearishCandle ? 1 : 0)         // Volume on red (1 pt)
+putScore := putScore + (stochOB or stochK < stochD ? 1 : 0)         // Stoch setup (1 pt)
+putScore := putScore + (belowEma200 ? 1 : 0)                         // Below 200 EMA (1 pt)
+putScore := putScore + (lowerLow ? 1 : 0)                            // Breaking lower (1 pt)
+
+// ============================================
+// SIGNAL LOGIC - REQUIRE CROSSOVER + MIN SCORE
+// ============================================
+// Key fix: REQUIRE recent crossover, don't just check trend direction
+callSignal = recentCrossUp and callScore >= minSignalStrength and inSession and callScore > putScore
+putSignal = recentCrossDown and putScore >= minSignalStrength and inSession and putScore > callScore
+
+// Prevent signals too close together
+var int barsSinceSignal = 0
+barsSinceSignal := barsSinceSignal + 1
+
+minBarsBetween = input.int(5, "Min Bars Between Signals", group="Filters")
+canTrade = barsSinceSignal >= minBarsBetween
+
+finalCallSignal = callSignal and canTrade
+finalPutSignal = putSignal and canTrade
+
+if finalCallSignal or finalPutSignal
+    barsSinceSignal := 0
+
+// ============================================
+// RISK MANAGEMENT
+// ============================================
+longStop = close - (atr * atrMult)
+longTP = close + (atr * tpMult)
+shortStop = close + (atr * atrMult)
+shortTP = close - (atr * tpMult)
+
+// ============================================
+// STRATEGY EXECUTION
+// ============================================
+if finalCallSignal and strategy.position_size == 0
+    strategy.entry("CALL", strategy.long)
+    strategy.exit("CALL Exit", "CALL", stop=longStop, limit=longTP)
+
+if finalPutSignal and strategy.position_size == 0
+    strategy.entry("PUT", strategy.short)
+    strategy.exit("PUT Exit", "PUT", stop=shortStop, limit=shortTP)
+
+// Exit on opposite signal
+if strategy.position_size > 0 and finalPutSignal
+    strategy.close("CALL", comment="Flip to PUT")
+    
+if strategy.position_size < 0 and finalCallSignal
+    strategy.close("PUT", comment="Flip to CALL")
+
+// ============================================
+// PLOTTING
+// ============================================
+plot(emaFast, "Fast EMA", color=color.new(color.green, 0), linewidth=2)
+plot(emaSlow, "Slow EMA", color=color.new(color.red, 0), linewidth=2)
+plot(ema200, "200 EMA", color=color.new(color.gray, 50), linewidth=1)
+plot(useVwap ? vwapValue : na, "VWAP", color=color.new(color.purple, 0), linewidth=2, style=plot.style_circles)
+
+// Signal Markers - Only on actual signals
+plotshape(finalCallSignal, "CALL", shape.triangleup, location.belowbar, color.new(color.lime, 0), size=size.normal, text="CALL")
+plotshape(finalPutSignal, "PUT", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.normal, text="PUT")
+
+// EMA Crossover markers (small, for reference)
+plotshape(emaCrossUp, "EMA Cross Up", shape.circle, location.belowbar, color.new(color.green, 50), size=size.tiny)
+plotshape(emaCrossDown, "EMA Cross Down", shape.circle, location.abovebar, color.new(color.red, 50), size=size.tiny)
+
+// ============================================
+// INFO TABLE
+// ============================================
+var table infoTable = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "CALL Score", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, str.tostring(callScore) + "/9", text_color=callScore >= minSignalStrength ? color.lime : color.gray, text_size=size.small)
+    
+    table.cell(infoTable, 0, 1, "PUT Score", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(putScore) + "/9", text_color=putScore >= minSignalStrength ? color.red : color.gray, text_size=size.small)
+    
+    table.cell(infoTable, 0, 2, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(rsi, "#.#"), text_color=rsi > rsiOB ? color.red : rsi < rsiOS ? color.green : color.white, text_size=size.small)
+    
+    table.cell(infoTable, 0, 3, "MACD", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, macdBullish ? "BULL" : macdBearish ? "BEAR" : "NEUTRAL", text_color=macdBullish ? color.lime : macdBearish ? color.red : color.gray, text_size=size.small)
+    
+    table.cell(infoTable, 0, 4, "Stoch", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(stochK, "#.#"), text_color=stochOB ? color.red : stochOS ? color.green : color.white, text_size=size.small)
+    
+    table.cell(infoTable, 0, 5, "VWAP", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, aboveVwap ? "ABOVE" : "BELOW", text_color=aboveVwap ? color.lime : color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 6, "200 EMA", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 6, aboveEma200 ? "ABOVE" : "BELOW", text_color=aboveEma200 ? color.lime : color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 7, "Cross", text_color=color.white, text_size=size.small)
+    crossText = recentCrossUp ? "UP (" + str.tostring(ta.barssince(emaCrossUp)) + ")" : recentCrossDown ? "DOWN (" + str.tostring(ta.barssince(emaCrossDown)) + ")" : "NONE"
+    table.cell(infoTable, 1, 7, crossText, text_color=recentCrossUp ? color.lime : recentCrossDown ? color.red : color.gray, text_size=size.small)
+    
+    table.cell(infoTable, 0, 8, "Signal", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 8, finalCallSignal ? ">>> CALL <<<" : finalPutSignal ? ">>> PUT <<<" : "WAIT", text_color=finalCallSignal ? color.lime : finalPutSignal ? color.red : color.gray, text_size=size.small)
+
+// ============================================
+// ALERTS
+// ============================================
+alertcondition(finalCallSignal, "CALL Entry", "🟢 CALL: {{ticker}} @ {{close}}")
+alertcondition(finalPutSignal, "PUT Entry", "🔴 PUT: {{ticker}} @ {{close}}")
+
+// High confidence alerts (score >= 6)
+alertcondition(finalCallSignal and callScore >= 6, "Strong CALL", "🟢🟢 STRONG CALL: {{ticker}} @ {{close}}")
+alertcondition(finalPutSignal and putScore >= 6, "Strong PUT", "🔴🔴 STRONG PUT: {{ticker}} @ {{close}}")
+
+View in Pine Editor・222 lines
+Use on chart
+1
+9
+7
+3 314
+Here's a comprehensive description of the Options Scalper v2 strategy:
+
+---
+
+## Options Scalper v2 - SPY/QQQ
+
+### Overview
+
+A multi-indicator confluence-based scalping strategy designed for trading SPY and QQQ options on short timeframes (1-5 minute charts). The strategy uses a scoring system to generate high-probability CALL and PUT signals by requiring alignment across multiple technical indicators before triggering entries.
+
+---
+
+### Core Logic
+
+The strategy operates on a **scoring system (0-9 points)** where both bullish (CALL) and bearish (PUT) conditions are evaluated independently. A signal only fires when:
+
+1. A recent EMA crossover occurred (within the last 3 bars)
+2. The direction's score meets the minimum threshold (default: 4 points)
+3. The signal's score is higher than the opposite direction
+4. Enough bars have passed since the last signal (cooldown period)
+5. Price action occurs during valid trading sessions
+
+---
+
+### Indicators Used
+
+| Indicator | Purpose | CALL Condition | PUT Condition |
+|-----------|---------|----------------|---------------|
+| **9/21 EMA Cross** | Primary trigger | Fast EMA crosses above slow | Fast EMA crosses below slow |
+| **200 EMA** | Trend filter | Price above 200 EMA | Price below 200 EMA |
+| **RSI (14)** | Momentum filter | RSI between 45-65 | RSI between 35-55 |
+| **VWAP** | Institutional level | Price above VWAP | Price below VWAP |
+| **MACD (12,26,9)** | Momentum confirmation | MACD line > Signal line | MACD line < Signal line |
+| **Stochastic (14,3)** | Overbought/Oversold | Oversold or K > D | Overbought or K < D |
+| **Volume** | Participation confirmation | Spike on green candle | Spike on red candle |
+| **Price Structure** | Breakout detection | Higher high formed | Lower low formed |
+
+---
+
+### Scoring Breakdown
+
+**CALL Score (Max 9 points):**
+- Recent EMA cross up: +2 pts
+- EMA alignment (fast > slow): +1 pt
+- RSI in bullish range: +1 pt
+- Above VWAP: +1 pt
+- MACD bullish: +1 pt
+- Volume spike on green candle: +1 pt
+- Stochastic setup: +1 pt
+- Above 200 EMA: +1 pt
+- Breaking higher high: +1 pt
+
+**PUT Score (Max 9 points):**
+- Recent EMA cross down: +2 pts
+- EMA alignment (fast < slow): +1 pt
+- RSI in bearish range: +1 pt
+- Below VWAP: +1 pt
+- MACD bearish: +1 pt
+- Volume spike on red candle: +1 pt
+- Stochastic setup: +1 pt
+- Below 200 EMA: +1 pt
+- Breaking lower low: +1 pt
+
+---
+
+### Risk Management
+
+The strategy uses **ATR-based dynamic stops and targets**:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Stop Loss | 1.5x ATR | Distance below entry for longs, above for shorts |
+| Take Profit | 2.0x ATR | Creates a 1:1.33 risk-reward ratio |
+
+Positions are also closed on:
+- Opposite direction signal (flip trade)
+- Take profit or stop loss hit
+
+---
+
+### Session Filtering
+
+Trades are restricted to high-liquidity periods by default:
+- **Morning Session:** 9:30 AM - 11:00 AM EST
+- **Afternoon Session:** 2:30 PM - 3:55 PM EST
+
+This avoids choppy midday price action and captures the highest volume periods.
+
+---
+
+### Input Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Fast EMA | 9 | Fast moving average period |
+| Slow EMA | 21 | Slow moving average period |
+| Trend EMA | 200 | Long-term trend filter |
+| RSI Length | 14 | RSI calculation period |
+| RSI Overbought | 65 | Upper RSI threshold |
+| RSI Oversold | 35 | Lower RSI threshold |
+| Volume Multiplier | 1.2x | Volume spike detection threshold |
+| Min Signal Strength | 4 | Minimum score required to trigger |
+| Crossover Lookback | 3 | Bars to consider crossover "recent" |
+| Min Bars Between Signals | 5 | Cooldown period between signals |
+
+---
+
+### Visual Elements
+
+**Chart Plots:**
+- Green line: 9 EMA (fast)
+- Red line: 21 EMA (slow)
+- Gray line: 200 EMA (trend)
+- Purple dots: VWAP
+
+**Signal Markers:**
+- Green triangle up + "CALL" label: Buy call signal
+- Red triangle down + "PUT" label: Buy put signal
+- Small circles: EMA crossover reference points
+
+**Info Table (Top Right):**
+- Real-time CALL and PUT scores
+- RSI, MACD, Stochastic values
+- VWAP and 200 EMA position
+- Recent crossover status
+- Current signal state
+
+---
+
+### Alerts
+
+| Alert Name | Trigger |
+|------------|---------|
+| CALL Entry | Standard call signal fires |
+| PUT Entry | Standard put signal fires |
+| Strong CALL | Call signal with score ≥ 6 |
+| Strong PUT | Put signal with score ≥ 6 |
+
+---
+
+### Recommended Usage
+
+| Setting | 0DTE Scalping | Intraday Swings |
+|---------|---------------|-----------------|
+| Timeframe | 1-2 min | 5 min |
+| Min Signal Strength | 5-6 | 4 |
+| ATR Stop Mult | 1.0 | 1.5 |
+| ATR TP Mult | 1.5 | 2.0 |
+| Option Delta | 0.40-0.50 | 0.30-0.40 |
+
+---
+
+### Key Improvements Over v1
+
+1. **Requires actual crossover** - Eliminates false signals from simple trend continuation
+2. **Balanced scoring** - Both directions evaluated equally, highest score wins
+3. **Signal cooldown** - Prevents overtrading with minimum bar spacing
+4. **Multi-indicator confluence** - 8 factors must align for signal generation
+5. **Volume-candle alignment** - Volume spikes only count when matching candle direction
+
+---
+
+### Disclaimer
+
+This strategy is for educational purposes. Backtest thoroughly before live trading. Options trading involves significant risk of loss. Past performance does not guarantee future results.

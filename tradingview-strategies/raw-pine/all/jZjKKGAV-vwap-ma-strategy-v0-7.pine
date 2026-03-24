@@ -1,0 +1,26 @@
+//@version=6
+strategy('vwap-ma-strategy-v1', overlay = true)
+maSource = input(title = 'sma(source)', defval = close)
+maInterval = input.int(title = 'sma(interval)', minval = 0, maxval = 999, step = 1, defval = 7)
+ma = ta.sma(maSource, maInterval)
+if ta.crossover(ma, ta.vwap)
+    strategy.entry('buy', strategy.long)
+if ta.crossunder(ma, ta.vwap)
+    strategy.close('buy')
+plot(strategy.position_size)
+
+View in Pine Editor・10 lines
+Use on chart
+1
+7
+1
+4 581
+Sep 20, 2018
+This strategy was inspired by my Israeli fellow iAtiya.
+
+I love it because it's my first pine v3 script that actually works.
+
+Powerful with respect to it's simplicity.
+Apr 14, 2025
+Release Notes
+Customizable simple moving average crossover/crossunder volume weighted average trading strategy. Simply define source/interval of sma. Version update from 2nd to 6th.

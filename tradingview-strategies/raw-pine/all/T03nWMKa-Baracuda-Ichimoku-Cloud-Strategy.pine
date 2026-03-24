@@ -1,0 +1,23 @@
+//@version=3
+strategy("Baracuda Ichimoku Cloud Strategy", overlay=true)
+
+conversionPeriods = input(9, minval=1, title="Conversion Line Periods"),
+basePeriods = input(26, minval=1, title="Base Line Periods")
+
+donchian(len) => avg(lowest(len), highest(len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+
+long=crossover(conversionLine,baseLine)
+short=crossunder(conversionLine,baseLine)
+
+strategy.entry("long", strategy.long, when=long)
+strategy.entry("short", strategy.short, when=short)
+
+View in Pine Editor・16 lines
+Use on chart
+2
+6
+1 745
+test strategy

@@ -1,0 +1,76 @@
+//@version=6
+strategy("IU 4 Bar UP Strategy", overlay=true, initial_capital = 100000, slippage = 1, commission_value = 0.02)
+import TradingView/ta/8
+
+// _______________________________________ User Input ___________________________________________ \\
+supertrend_length = input.int(14, "SuperTrend ATR Period = ")
+supertrend_factor = input.float(1.00, "SuperTrend ATR Factor = ")
+
+// ______________________________________ Indicators _____________________________________________ \\
+[supertrend, direction] = ta.supertrend(supertrend_factor, supertrend_length)
+
+// ______________________________________ Long Entry and Exit ____________________________________ \\
+
+// -------- Long Condtions --------- \\
+bullish_bar   = close > open 
+four_bull_bar = bullish_bar and bullish_bar[1] and bullish_bar[2] and bullish_bar[3]
+long_cond     = four_bull_bar  and close > supertrend and strategy.position_size == 0 and barstate.isconfirmed
+
+// -------- Long Entry ------------- \\
+if long_cond 
+    strategy.entry("long", strategy.long, comment = "Long Entry", alert_message = "Long Entry tiggered")
+// -------- Long Exit -------------- \\
+if strategy.position_size > 0 and close < supertrend 
+    strategy.close("long", "Long Close", alert_message = "Close the long Trade")
+
+// _______________________________________ Plotting SuperTrend __________________________________ \\
+plot(supertrend, "supertrend", direction < 0 ? color.green : color.red, 2)
+
+// _______________________________________ bgcolor while we are in a trade _________________________\\
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90): na)
+
+View in Pine Editor・33 lines
+Use on chart
+4
+8
+7
+2
+6 246
+IU 4 Bar UP Strategy
+
+The IU 4 Bar UP Strategy is a trend-following strategy designed to identify and execute long trades during strong bullish momentum, combined with confirmation from the SuperTrend indicator. This strategy is suitable for traders aiming to capitalize on sustained upward market movements.
+
+Features:
+1. SuperTrend Confirmation: Incorporates the SuperTrend indicator as a dynamic support/resistance line to filter trades in the direction of the trend.
+2. 4 Consecutive Bullish Bars: Detects a series of 4 bullish candles as a signal for strong upward momentum, ensuring robust trade setups.
+3. Dynamic Alerts: Sends alerts for trade entries and exits to keep traders informed.
+4. Visual Enhancements:
+- Plots the SuperTrend indicator on the chart.
+- Changes the background color while a trade is active for easy visualization.
+
+Inputs:
+- SuperTrend ATR Period: The period used to calculate the Average True Range (ATR) for the SuperTrend indicator.
+- SuperTrend ATR Factor: The multiplier for the ATR in the SuperTrend calculation.
+
+Entry Conditions:
+A long entry is triggered when:
+1. The last 4 consecutive candles are bullish (closing prices are higher than opening prices).
+2. The current price is above the SuperTrend line.
+3. The strategy is not already in a position.
+4. The bar is confirmed (not a partially formed bar).
+
+When all these conditions are met, the strategy enters a long position and provides an alert:
+"Long Entry triggered"
+
+Exit Conditions:
+The strategy exits the long position when:
+1. The closing price drops below the SuperTrend line.
+2. An alert is generated: "Close the long Trade"
+
+Visualization:
+- The SuperTrend line is plotted, dynamically colored:
+- Green when the trend is bullish.
+- Red when the trend is bearish.
+- The background color turns semi-transparent green while a trade is active, indicating a long position.
+
+Do use proper risk management while using this strategy.

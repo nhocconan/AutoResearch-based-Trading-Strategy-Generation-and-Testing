@@ -1,0 +1,725 @@
+//@version=6
+strategy("Double&Triple Pattern[TS_Indie]" , overlay=true, max_labels_count=500 , max_lines_count = 500 ,max_boxes_count = 500, max_bars_back = 5000 , margin_long=0, margin_short=0 , initial_capital = 100000 )
+
+Entry_Position = "====== Entry Condition ====== "
+
+// === Input Parameters ===
+rr_ratio = input.float(2, "Risk Reward Ratio", step=0.1 , inline="0.1" , group = Entry_Position )
+length_atr = input.int(title="Stop loss ATR", defval=14, minval=1 , inline="0.2" , group = Entry_Position )
+x_ATR = input.float( 0 , "X", step=0.1 , inline="0.2" , group = Entry_Position )
+B_long = input.bool( true ,"Entry Longㅤㅤ" , inline="0.3", group = Entry_Position)
+S_short = input.bool( true ,"Entry Short", inline="0.3", group = Entry_Position)
+
+fibo_entry = input.float(0, "Fibo Entry Zone", step= 1 , inline="0.5" , group = Entry_Position )
+Sl_change = input.bool(true, "Change SL" , inline="0.5" , group = Entry_Position )
+
+stxt1 = input.string("Swing 1", "✅ [ Fibo1 ]", inline ="0.6", group = Entry_Position )
+Swing1_more = input.float(55, "Min", step= 1 , inline="1" , group = Entry_Position )
+Swing1_less = input.float(75, "Max", step= 1 , inline="1" , group = Entry_Position )
+
+use_Swing2 = input.bool( true ,"[ Fibo2 ]" , inline="2", group = Entry_Position)
+stxt2 = input.string("Swing 2", "", inline ="2", group = Entry_Position )
+Swing2_more = input.float(50, "Min", step= 1 , inline="2.1" , group = Entry_Position )
+Swing2_less = input.float(75, "Max", step= 1 , inline="2.1" , group = Entry_Position )
+
+use_Swing3 = input.bool( true ,"[ Fibo3 ]" , inline="2.5", group = Entry_Position)
+stxt3 = input.string("Swing 3", "", inline ="2.5", group = Entry_Position )
+Swing3_more = input.float(65, "Min", step= 1 , inline="3" , group = Entry_Position )
+Swing3_less = input.float(110, "Max", step= 1 , inline="3" , group = Entry_Position )
+
+use_size = input.bool( false ," [ Control Size Swing : xATR]" , inline="4", group = Entry_Position)
+Size_candle_more = input.float(0, "Min", step= 1 , inline="5" , group = Entry_Position )
+Size_candle_less = input.float(3, "Max", step= 1 , inline="5" , group = Entry_Position )
+
+
+//====== Time Filter ======
+Time_Filter = "====== Time Filter ======"
+s_date = input.time(timestamp("01 Jan 1970"),"Start" , inline="1" , group = Time_Filter )
+en_date = input.time(timestamp("01 Jan 2500"), "End " , inline="2" , group = Time_Filter )
+
+con_date = time >= s_date and time <= en_date
+//======== session ======== 
+_session(sess) =>
+    not na(time(timeframe.period, sess, "UTC+0" ))
+
+s_New_York = input.bool( false ,"New York" , inline = "3" , group = Time_Filter )
+t_New = input.session( '1300-2200', "" , inline = "3" , group = Time_Filter )
+Session_1 = _session(t_New) , cf_ses1 = s_New_York ? Session_1 : false
+
+s_London = input.bool( false ,"London" , inline = "4" , group = Time_Filter )
+t_Lon = input.session( '0700-1600' , "" , inline = "4" , group = Time_Filter )
+Session_2 = _session(t_Lon) , cf_ses2 = s_London ? Session_2 : false
+
+s_Tokyo = input.bool( false ,"Tokyo" , inline = "5" , group = Time_Filter )
+t_Tokyo = input.session( '0000-0900' , "" , inline = "5" , group = Time_Filter )
+Session_3 = _session(t_Tokyo) , cf_ses3 = s_Tokyo ? Session_3 : false
+
+s_Sydney = input.bool( false ,"Sydney" , inline = "6" , group = Time_Filter )
+t_Syd = input.session( '2100-0600' , "" , inline = "6" , group = Time_Filter )
+Session_4 = _session(t_Syd) , cf_ses4 = s_Sydney ? Session_4 : false
+
+ses_check = s_New_York or s_London or s_Tokyo or s_Sydney
+time_con = cf_ses1 or cf_ses2 or cf_ses3 or cf_ses4
+con_time = ses_check ? time_con : true
+
+//======== Table ======== 
+position(select) =>
+    switch select
+        "bottom_right"  => position.bottom_right
+        "bottom_center" => position.bottom_center
+        "bottom_left"   => position.bottom_left
+        "top_center"    => position.top_center
+        "top_left"      => position.top_left
+        "top_right"     => position.top_right
+        "mid_center"    => position.middle_center
+        "mid_left"      => position.middle_left
+        "mid_right"     => position.middle_right
+
+result_group = "====== Trading Result Table ======"
+Show_result = input.bool( true ,"Show Result" , inline = "1" , group = result_group ,tooltip = "The Profit Factor here is calculated using the formula:\n\(Number of Wins x Risk-Reward Ratio) / Number of Losses\n\This formula is based on the assumption that the risk per losing trade is fixed — for example, every losing trade costs exactly 1% of the account.\n\Because of this assumption, the calculated Profit Factor will not match TradingView’s result, since TradingView uses:\n\Gross Profit / Gross Loss\n\And in actual TradingView trades, the loss amount of each trade is not always equal, because the system doesn’t enforce a fixed-risk rule for every losing trade. " )
+select_position = input.string("bottom_right", "", options = ["bottom_right", "bottom_center", "bottom_left", "top_center", "top_left" , "top_right" , "mid_center" , "mid_left" , "mid_right" ], group = result_group  , inline="1" , display = display.data_window)
+Factor_up = input.float( 1.3 ,"Profit Factor > " , step=0.1 , inline = "2" , group = result_group )
+Factor_up_color = input(title = "   " , defval = #a5d6a7  , inline = "2" , group = result_group)
+Factor_donw = input.float( 1 ,"Profit Factor < " , step=0.1 , inline = "3" , group = result_group )
+Factor_donw_color = input(title = "   " , defval = #faa1a4  , inline = "3" , group = result_group)
+
+display_group = "====== Display ======"
+show_line = input.bool(true,'Line', inline="1" , group = display_group)
+sw_line_style = input.string('⎯⎯⎯', '' , options = ['⎯⎯⎯', '----', '····'] , inline = '1' , group = display_group)
+Color_sw = input(title = " " , defval = #f700ff  , inline = "1" , group = display_group)
+
+text_line2_col = input(title = "Text" , defval = #ffffff  , inline = "1.5" , group = display_group)
+
+Color_Mark_Swing_i1 = input(#ffee58, 'Swing' , inline="1.5", group = display_group)
+Color_Mark_Swing_i2 = input(#00bcd4, '/ ' , inline="1.5", group = display_group)
+
+show_CF_fibo = input.bool(true,'Box Confirm Fibo', inline="3" , group = display_group)
+Size_fibo = input.string('Small', '', options = ['Tiny', 'Small', 'Normal'] , inline="3" , group= display_group)
+col_cf_con1 = input(title = "Fibo Buy" , defval = color.rgb(187, 217, 251, 70) , inline = "4" , group = display_group)
+col_cf_con2 = input(title = "Fibo Sell" , defval = color.rgb(225, 190, 231, 70) , inline = "4" , group = display_group)
+var In_Size_fibo = Size_fibo == 'Tiny' ? size.tiny : Size_fibo == 'Small' ? size.small : size.normal 
+
+show_CF_line = input.bool(true,'Confirm Line', inline="5" , group = display_group)
+Size_CF_line = input.string('Normal', '', options = ['Small', 'Normal', 'Large'] , inline="5" , group= display_group)
+var In_Size_CF_line = Size_CF_line == 'Large' ? size.large : Size_CF_line == 'Small' ? size.small : size.normal 
+Color_tesst_1 = input(title = "Break" , defval = #00aaff , inline = "6" , group = display_group)
+Color_tesst_2 = input(title = "Cancel" , defval = #ffee58 , inline = "6" , group = display_group)
+
+show_CF_candle = input.bool(true,'Control Size Swing', inline="7" , group = display_group)
+Size_CF_candle = input.string('Small', '', options = ['Small', 'Normal', 'Large'] , inline="7" , group= display_group)
+var In_Size_CF_candle = Size_CF_candle == 'Large' ? size.large : Size_CF_candle == 'Small' ? size.small : size.normal 
+Color_candle_txt = input(title = "Text" , defval = #000000 , inline = "8" , group = display_group)
+Color_candle_1 = input(title = "Max" , defval = #00aaff , inline = "8" , group = display_group)
+Color_candle_2 = input(title = "Min" , defval = #ffee58 , inline = "8" , group = display_group)
+
+
+TRANSP = #ffffff00
+
+get_line_style(style) =>
+    out = switch style
+        '⎯⎯⎯'  => line.style_solid
+        '----' => line.style_dashed
+        '····' => line.style_dotted
+
+var float big_high = na , var float big_low = na , var int Bar_big_high = 0 , var int Bar_big_low = 0
+var float s_high = na , var float s_low = na , var int Bar_s_high = 0 , var int Bar_s_low = 0
+
+var bool Structure_Trend = false
+bool Change_up = false , bool Change_down = false
+
+var H_bar_ary = array.new_int(0,na)  , var L_bar_ary = array.new_int(0,na)
+var High_ary = array.new_float(0,na)  , var Low_ary = array.new_float(0,na) 
+
+value_array_unshift(array, new_value_to_add) =>
+    if array.size(array) > 10
+        array.remove(array,10)
+    array.unshift(array, new_value_to_add)
+
+//first trend
+if na(s_high) and barstate.isconfirmed
+    if close > open
+        Structure_Trend := true
+    s_high := high
+    s_low := low
+
+// Direction dwon
+if not Structure_Trend and not na(s_high) and barstate.isconfirmed
+    //trend change up
+    if close > s_high
+        if low <= s_low 
+            big_low := low , Bar_big_low := bar_index 
+        if low > s_low 
+            big_low := s_low , Bar_big_low := Bar_s_low
+
+        value_array_unshift(Low_ary , big_low) , value_array_unshift(L_bar_ary , Bar_big_low)
+
+        Structure_Trend := true , Change_up := true
+        s_high := high , s_low := low , Bar_s_high := bar_index , Bar_s_low := bar_index 
+
+    if not Change_up and low <= s_low 
+        s_high := high , s_low := low , Bar_s_high := bar_index , Bar_s_low := bar_index 
+
+// Direction up
+if Structure_Trend and not na(s_high) and barstate.isconfirmed
+    //trend change down
+    if close < s_low
+        if high >= s_high
+            big_high := high , Bar_big_high := bar_index
+        if high < s_high
+            big_high := s_high , Bar_big_high := Bar_s_high
+
+        value_array_unshift(High_ary , big_high) , value_array_unshift(H_bar_ary , Bar_big_high)
+
+        Structure_Trend := false , Change_down := true
+        s_high := high , s_low := low , Bar_s_high := bar_index , Bar_s_low := bar_index 
+
+    if not Change_down and high >= s_high 
+        s_high := high , s_low := low , Bar_s_high := bar_index , Bar_s_low := bar_index 
+
+var line sm_line = na , var line sm_line2 = na
+var big_line = array.new_line(7,na)
+
+add_array_unshift(array, new_value_to_add) =>
+    line.delete(array.get(array, 6))
+    array.remove(array,6)
+    array.unshift(array, new_value_to_add)
+
+if show_line
+    if Change_up
+        add_array_unshift(big_line,line.new( Bar_big_high[1] , big_high[1] , Bar_big_low , big_low  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style)))
+    if Change_down
+        add_array_unshift(big_line,line.new( Bar_big_high , big_high , Bar_big_low[1] , big_low[1]  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style)))
+
+    line.delete(sm_line[1]) ,  line.delete(sm_line2[1])
+    bb_bar = Structure_Trend ? Bar_big_low : Bar_big_high  ,    bb_price = Structure_Trend ? big_low : big_high
+    cc_bar = Structure_Trend ? Bar_s_high : Bar_s_low      ,    cc_price = Structure_Trend ? s_high : s_low
+    sm_line := line.new(  bb_bar  , bb_price , cc_bar , cc_price  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+    sm_line2 := line.new( cc_bar , cc_price , bar_index , close ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+
+//===================================================
+atr_sl = ta.ema(ta.tr(true), length_atr)
+
+var int c_order_buy = 0 , var int c_order_sell = 0
+var float stop_loss_long = 0 , var float stop_loss_short = 0
+var float take_profit_long = 0 , var float take_profit_short = 0
+var float open_long = 0 , var float open_short = 0
+var int time_buy = 0 , var int time_sell = 0
+
+bool cencel_buy = false , bool cencel_sell = false
+bool im_buy_signal = false , bool im_sell_signal = false
+bool buy_signal = false , bool sell_signal = false
+var bool pending_buy = false , var bool pending_sell = false
+
+var float Fibo_1 = na , var float Fibo_2 = na , var float Fibo_3 = na
+var bool cf_con_buy = false , var bool cf_con_sell = false 
+bar_plus1 = 1 , bar_plus = 2
+
+//Condition Buy
+var float sl_b = na , var float entry_b = na , var float sl2_b = na
+var int bar_sl_b = 0 , var int bar_entry_b = 0 , var int bar_sl2_b = 0
+var int bar_last_b = 0 , var float last_b = na
+
+if strategy.position_size > 0
+    pending_buy := false
+if strategy.closedtrades > strategy.closedtrades[1] and pending_buy and barstate.isconfirmed
+    im_buy_signal := true , pending_buy := false
+if pending_buy and con_time[1] and not con_time and barstate.isconfirmed
+    strategy.cancel("Long "+str.tostring(c_order_buy))
+    pending_buy := false , cencel_buy := true 
+
+if Change_up and array.size(High_ary) > 4
+    H_0 = array.get(High_ary,0) , H_1 = array.get(High_ary,1) , H_2 = array.get(High_ary,2)
+    L_0 = array.get(Low_ary,0) , L_1 = array.get(Low_ary,1) , L_2 = array.get(Low_ary,2) , L_3 = array.get(Low_ary,3)  , L_4 = array.get(Low_ary,4) 
+    bar_H_0 = array.get(H_bar_ary,0) , bar_H_1 = array.get(H_bar_ary,1) , bar_H_2 = array.get(H_bar_ary,2)
+    bar_L_0 = array.get(L_bar_ary,0) , bar_L_1 = array.get(L_bar_ary,1) , bar_L_2 = array.get(L_bar_ary,2)
+
+    Fibo1_more = H_0-(Swing1_more/100)*(H_0-L_1) , Fibo1_less = H_0-(Swing1_less/100)*(H_0-L_1)
+    Fibo2_more = H_0-(Swing2_more/100)*(H_0-L_1) , Fibo2_less = H_0-(Swing2_less/100)*(H_0-L_1)
+    Fibo3_more = L_1+(Swing3_more/100)*(H_0-L_1) , Fibo3_less = L_1+(Swing3_less/100)*(H_0-L_1)
+    Price_more = (Size_candle_more * atr_sl) + L_1 , Price_less = (Size_candle_less * atr_sl) + L_1
+
+    cf_buy1 = L_0 <= Fibo1_more and L_0 >= Fibo1_less
+    cf_buy2 = use_Swing2 ? L_2 <= Fibo2_more and L_2 >= Fibo2_less : true
+    cf_buy3 = use_Swing3 ? H_1 >= Fibo3_more and H_1 <= Fibo3_less : true
+    cf_buy4 = use_size ? H_0 > Price_more and H_0 < Price_less : true
+
+    if cf_buy1 and cf_buy2 and cf_buy3 and cf_buy4
+        if cf_con_sell 
+            cf_con_sell := false
+        if pending_sell
+            strategy.cancel("Short "+str.tostring(c_order_sell))
+            pending_sell := false , cencel_sell := true
+        if pending_buy
+            strategy.cancel("Long "+str.tostring(c_order_buy))
+            pending_buy := false , cencel_buy := true
+        if  B_long and strategy.position_size == 0 
+            cf_con_buy := true
+            sl_b := L_0 < L_1 ? L_0 : L_1  , bar_sl_b :=  L_0 < L_1 ? bar_L_0 : bar_L_1
+            sl2_b := L_0 < L_1 ? L_1 : L_0 , bar_sl2_b := L_0 < L_1 ? bar_L_1 : bar_L_0
+            last_b :=  L_0 , bar_last_b := bar_L_0
+            entry_b := H_0 , bar_entry_b := bar_H_0
+
+        if B_long
+            if show_CF_fibo
+                lbl_swing1_a = label.new( bar_L_0+bar_plus , Fibo1_more , "Fibo"+str.tostring(Swing1_more) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                lbl_swing1_b = label.new( bar_L_0+bar_plus , Fibo1_less , "Fibo"+str.tostring(Swing1_less) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                lbl_swing1_c = label.new( bar_L_0 , L_0 , stxt1 , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_up, size = In_Size_fibo)
+                box_cfbuy1_his = box.new(xloc = xloc.bar_index , left = bar_L_0-bar_plus1 , top = Fibo1_more, right = bar_L_0+bar_plus1  , bottom = Fibo1_less , border_color = col_cf_con1 ,bgcolor = col_cf_con1)
+            if use_Swing2
+                i_Mark_2 = label.new(bar_L_2, L_2 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i1,size = size.small)
+                if show_CF_fibo
+                    lbl_swing2_a = label.new( bar_L_2+bar_plus , Fibo2_more , "Fibo"+str.tostring(Swing2_more) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                    lbl_swing2_b = label.new( bar_L_2+bar_plus , Fibo2_less , "Fibo"+str.tostring(Swing2_less) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                    lbl_swing2_c = label.new( bar_L_2 , L_2 , stxt2 , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_up, size = In_Size_fibo)
+                    box_cfbuy2_his = box.new(xloc = xloc.bar_index , left = bar_L_2-bar_plus1 , top = Fibo2_more, right = bar_L_2+bar_plus1  , bottom = Fibo2_less , border_color = col_cf_con1 ,bgcolor = col_cf_con1)
+            if use_Swing3
+                i_Mark_3 = label.new(bar_H_1, H_1 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i1,size = size.small)
+                if show_CF_fibo
+                    lbl_swing3_a = label.new( bar_H_1+bar_plus , Fibo3_more , "Fibo"+str.tostring(Swing3_more) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                    lbl_swing3_b = label.new( bar_H_1+bar_plus , Fibo3_less , "Fibo"+str.tostring(Swing3_less) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                    lbl_swing3_c = label.new( bar_H_1 , H_1 , stxt3 , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_down, size = In_Size_fibo)
+                    box_cfbuy3_his = box.new(xloc = xloc.bar_index , left = bar_H_1-bar_plus1 , top = Fibo3_more, right = bar_H_1+bar_plus1  , bottom = Fibo3_less , border_color = col_cf_con1 ,bgcolor = col_cf_con1)
+                
+            line_1 = line.new(  bar_L_0  , L_0 , bar_H_0 , H_0  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            line_2 = line.new(  bar_L_1  , L_1 , bar_H_0 , H_0  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            line_3 = line.new(  bar_L_1  , L_1 , bar_H_1 , H_1  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            line_4 = line.new(  bar_L_2  , L_2 , bar_H_1 , H_1  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            line_5 = line.new(  bar_L_2  , L_2 , bar_H_2 , H_2  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            i_Mark_1 = label.new(bar_L_0, L_0 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i1,size = size.small)
+            i_Mark_4 = label.new(bar_H_0, H_0 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i2,size = size.normal)
+            i_Mark_5 = label.new(bar_L_1, L_1 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i2,size = size.normal)
+            lbl_swing_A = label.new( bar_L_1 , L_1 , "Swing A" , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_up, size = In_Size_fibo)
+            lbl_swing_B = label.new( bar_H_0 , H_0 , "Swing B" , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_down, size = In_Size_fibo)
+
+            if use_size and show_CF_candle
+                line_size_1 = line.new(  bar_L_1 , Price_more , bar_H_0 , Price_more  ,xloc = xloc.bar_index , color = Color_candle_2 , style = get_line_style(sw_line_style))
+                line_size_2 = line.new(  bar_L_1  , Price_less , bar_H_0 , Price_less  ,xloc = xloc.bar_index , color = Color_candle_1 , style = get_line_style(sw_line_style))
+                lbl_size_a = label.new( (bar_L_1+bar_H_0)/2 , Price_more , "Min" , xloc = xloc.bar_index , color = Color_candle_2, textcolor = Color_candle_txt, style = label.style_label_center, size = In_Size_CF_candle)
+                lbl_size_b = label.new( (bar_L_1+bar_H_0)/2 , Price_less , "Max" , xloc = xloc.bar_index , color = Color_candle_1, textcolor = Color_candle_txt, style = label.style_label_center, size = In_Size_CF_candle)
+
+Line_draw_buy = false , var wait_b_line = false
+if cf_con_buy and B_long and close >= entry_b and barstate.isconfirmed and strategy.position_size == 0
+    cf_con_buy := false , Line_draw_buy := true , wait_b_line := true
+    if con_time and con_date
+        buy_signal := true
+
+if cf_con_buy and B_long and close <= sl_b and barstate.isconfirmed and strategy.position_size == 0
+    cf_con_buy := false , Line_draw_buy := true
+    line_last = line.new(  Bar_big_high  , big_high , bar_last_b , last_b ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+
+if wait_b_line and Change_down and barstate.isconfirmed
+    line_last = line.new(  Bar_big_high  , big_high , bar_last_b , last_b  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+    wait_b_line := false
+
+var line lineB_to_CF  = na  , var line lineB_to_cancel  = na 
+var label lblB_to_CF = na , var label lblB_to_cancel = na
+
+if cf_con_buy and show_CF_line and barstate.isconfirmed
+    line.delete(lineB_to_CF[1]) , line.delete(lineB_to_cancel[1]) , label.delete(lblB_to_CF[1]) , label.delete(lblB_to_cancel[1])
+    lineB_to_CF := line.new(  bar_entry_b  , entry_b , bar_index , entry_b  ,xloc = xloc.bar_index , color = Color_tesst_1 , style = line.style_dashed )
+    lineB_to_cancel := line.new( bar_sl_b , sl_b , bar_index , sl_b ,xloc = xloc.bar_index , color = Color_tesst_2 , style = line.style_dashed )
+    lblB_to_CF := label.new(bar_index, entry_b , "Break to confitm" ,xloc = xloc.bar_index, color = TRANSP, textcolor = Color_tesst_1, style = label.style_label_down, size = In_Size_CF_line)
+    lblB_to_cancel := label.new(bar_index, sl_b , "Cancel Line",xloc = xloc.bar_index, color = TRANSP, textcolor = Color_tesst_2, style = label.style_label_up, size = In_Size_CF_line)
+if Line_draw_buy and show_CF_line and barstate.isconfirmed
+    line.delete(lineB_to_CF[1]) , line.delete(lineB_to_cancel[1]) , label.delete(lblB_to_CF[1]) , label.delete(lblB_to_cancel[1])
+    lineB_CF = line.new(  bar_entry_b  , entry_b , bar_index , entry_b  ,xloc = xloc.bar_index , color = Color_tesst_1 , style = line.style_dashed )
+    lineB_cancel = line.new( bar_sl_b , sl_b , bar_index , sl_b ,xloc = xloc.bar_index , color = Color_tesst_2 , style = line.style_dashed )
+    lblB_cf = label.new(bar_index, entry_b , "Break to confitm" ,xloc = xloc.bar_index, color = #ffffff00, textcolor = Color_tesst_1, style = label.style_label_down, size = In_Size_CF_line)
+    lblB_cancel = label.new(bar_index, sl_b , "Cancel Line" ,xloc = xloc.bar_index, color = #ffffff00, textcolor = Color_tesst_2, style = label.style_label_up, size = In_Size_CF_line)
+
+//Condition Sell
+var float sl_s = na , var float entry_s = na , var float sl2_s = na
+var int bar_sl_s = 0 , var int bar_entry_s = 0 , var int bar_sl2_s = 0
+var float last_s = na , var int bar_last_s = 0
+
+if strategy.position_size < 0 
+    pending_sell := false
+if strategy.closedtrades > strategy.closedtrades[1] and pending_sell  and barstate.isconfirmed
+    im_sell_signal := true , pending_sell := false
+if pending_sell and con_time[1] and not con_time and barstate.isconfirmed
+    strategy.cancel("Short "+str.tostring(c_order_sell))
+    pending_sell := false , cencel_sell := true
+
+if Change_down and array.size(Low_ary) > 4 
+    H_0 = array.get(High_ary,0) , H_1 = array.get(High_ary,1) , H_2 = array.get(High_ary,2) , H_3 = array.get(High_ary,3) , H_4 = array.get(High_ary,4)
+    L_0 = array.get(Low_ary,0) , L_1 = array.get(Low_ary,1) , L_2 = array.get(Low_ary,2)
+    bar_H_0 = array.get(H_bar_ary,0) , bar_H_1 = array.get(H_bar_ary,1) , bar_H_2 = array.get(H_bar_ary,2)
+    bar_L_0 = array.get(L_bar_ary,0) , bar_L_1 = array.get(L_bar_ary,1) , bar_L_2 = array.get(L_bar_ary,2)
+
+    Fibo1_more = L_0+(Swing1_more/100)*(H_1-L_0) , Fibo1_less = L_0+(Swing1_less/100)*(H_1-L_0)
+    Fibo2_more = L_0+(Swing2_more/100)*(H_1-L_0) , Fibo2_less = L_0+(Swing2_less/100)*(H_1-L_0)
+    Fibo3_more = H_1-(Swing3_more/100)*(H_1-L_0) , Fibo3_less = H_1-(Swing3_less/100)*(H_1-L_0)
+    Price_more = H_1 - (Size_candle_more * atr_sl)  , Price_less = H_1 - (Size_candle_less * atr_sl)
+
+    cf_sell1 = H_0 >= Fibo1_more and H_0 <= Fibo1_less
+    cf_sell2 = use_Swing2 ? H_2 >= Fibo2_more and H_2 <= Fibo2_less : true
+    cf_sell3 = use_Swing3 ? L_1 <= Fibo3_more and L_1 >= Fibo3_less : true
+    cf_sell4 = use_size ? L_0 <= Price_more and L_0 >= Price_less : true
+
+    if cf_sell1 and cf_sell2 and cf_sell3 and cf_sell4
+        if cf_con_buy 
+            cf_con_buy := false
+        if pending_buy
+            strategy.cancel("Long "+str.tostring(c_order_buy))
+            pending_buy := false , cencel_buy := true
+        if pending_sell
+            strategy.cancel("Short "+str.tostring(c_order_sell))
+            pending_sell := false , cencel_sell := true
+        if S_short and strategy.position_size == 0
+            cf_con_sell := true 
+            sl_s := H_0 > H_1 ? H_0 : H_1  , bar_sl_s := H_0 > H_1 ? bar_H_0 : bar_H_1
+            sl2_s := H_0 > H_1 ? H_1 : H_0 , bar_sl2_s := H_0 > H_1 ? bar_H_1 : bar_H_0
+            last_s := H_0 , bar_last_s := bar_H_0
+            entry_s := L_0   , bar_entry_s := bar_L_0
+
+        if S_short
+            if show_CF_fibo
+                lbl_swing1_a = label.new( bar_H_0+bar_plus , Fibo1_more , "Fibo"+str.tostring(Swing1_more) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                lbl_swing1_b = label.new( bar_H_0+bar_plus , Fibo1_less , "Fibo"+str.tostring(Swing1_less) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                lbl_swing1_c = label.new( bar_H_0 , H_0 , stxt1 , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_down, size = In_Size_fibo)
+                box_cfbuy1_his = box.new(xloc = xloc.bar_index , left = bar_H_0-bar_plus1 , top = Fibo1_more, right = bar_H_0+bar_plus1  , bottom = Fibo1_less , border_color = col_cf_con2 ,bgcolor = col_cf_con2)
+            if use_Swing2
+                i_Mark_2 = label.new(bar_H_2, H_2 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i1,size = size.small)
+                if show_CF_fibo
+                    lbl_swing2_a = label.new( bar_H_2+bar_plus , Fibo2_more , "Fibo"+str.tostring(Swing2_more) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                    lbl_swing2_b = label.new( bar_H_2+bar_plus , Fibo2_less , "Fibo"+str.tostring(Swing2_less) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                    lbl_swing2_c = label.new( bar_H_2 , H_2 , stxt2 , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_down, size = In_Size_fibo)
+                    box_cfbuy2_his = box.new(xloc = xloc.bar_index , left = bar_H_2-bar_plus1 , top = Fibo2_more, right = bar_H_2+bar_plus1  , bottom = Fibo2_less , border_color = col_cf_con2 ,bgcolor = col_cf_con2)
+            if use_Swing3
+                i_Mark_3 = label.new(bar_L_1, L_1 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i1,size = size.small)
+                if show_CF_fibo
+                    lbl_swing3_a = label.new( bar_L_1+bar_plus , Fibo3_more , "Fibo"+str.tostring(Swing3_more) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                    lbl_swing3_b = label.new( bar_L_1+bar_plus , Fibo3_less , "Fibo"+str.tostring(Swing3_less) , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+                    lbl_swing3_c = label.new( bar_L_1 , L_1 , stxt3 , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_up, size = In_Size_fibo)
+                    box_cfbuy3_his = box.new(xloc = xloc.bar_index , left = bar_L_1-bar_plus1 , top = Fibo3_more, right = bar_L_1+bar_plus1  , bottom = Fibo3_less , border_color = col_cf_con2 ,bgcolor = col_cf_con2)
+                
+            line_1 = line.new(  bar_H_0  , H_0 , bar_L_0 , L_0  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            line_2 = line.new(  bar_H_1  , H_1 , bar_L_0 , L_0  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            line_3 = line.new(  bar_H_1  , H_1 , bar_L_1 , L_1  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            line_4 = line.new(  bar_H_2  , H_2 , bar_L_1 , L_1  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            line_5 = line.new(  bar_H_2  , H_2 , bar_L_2 , L_2  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+            
+            i_Mark_1 = label.new(bar_H_0, H_0 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i1,size = size.small)
+            i_Mark_4 = label.new(bar_L_0, L_0 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i2,size = size.normal)
+            i_Mark_5 = label.new(bar_H_1, H_1 ,xloc = xloc.bar_index, text = "●",color = TRANSP, style = label.style_label_center,textcolor = Color_Mark_Swing_i2,size = size.normal)
+
+            lbl_swing_A = label.new( bar_H_1 , H_1 , "Swing A" , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_down, size = In_Size_fibo)
+            lbl_swing_B = label.new( bar_L_0 , L_0 , "Swing B" , xloc = xloc.bar_index , color = TRANSP, textcolor = text_line2_col, style = label.style_label_up, size = In_Size_fibo)
+
+            if use_size and show_CF_candle
+                line_size_1 = line.new(  bar_H_1 , Price_more , bar_L_0 , Price_more  ,xloc = xloc.bar_index , color = Color_candle_2 , style = get_line_style(sw_line_style))
+                line_size_2 = line.new(  bar_H_1 , Price_less , bar_L_0 , Price_less  ,xloc = xloc.bar_index , color = Color_candle_1 , style = get_line_style(sw_line_style))
+                lbl_size_a = label.new( (bar_H_1+bar_L_0)/2 , Price_more , "Min", xloc = xloc.bar_index , color = Color_candle_2, textcolor = Color_candle_txt, style = label.style_label_center, size = In_Size_CF_candle)
+                lbl_size_b = label.new( (bar_H_1+bar_L_0)/2 , Price_less , "Max", xloc = xloc.bar_index , color = Color_candle_1, textcolor = Color_candle_txt, style = label.style_label_center, size = In_Size_CF_candle)
+
+
+Line_draw_sell = false , var wait_s_line = false
+if cf_con_sell and S_short and close <= entry_s and barstate.isconfirmed and strategy.position_size == 0
+    cf_con_sell := false , Line_draw_sell := true , wait_s_line := true
+    if con_time and con_date
+        sell_signal := true
+
+if cf_con_sell and S_short and close >= sl_s and barstate.isconfirmed and strategy.position_size == 0
+    cf_con_sell := false , Line_draw_sell := true
+    line_last = line.new(  Bar_big_low  , big_low , bar_last_s, last_s ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+
+if wait_s_line and Change_up and barstate.isconfirmed
+    line_last = line.new(  Bar_big_low  , big_low , bar_last_s, last_s  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+    wait_s_line := false
+
+var line lineS_to_CF  = na  , var line lineS_to_cancel  = na 
+var label lblS_to_CF = na , var label lblS_to_cancel = na
+if cf_con_sell and show_CF_line and barstate.isconfirmed
+    line.delete(lineS_to_CF[1]) , line.delete(lineS_to_cancel[1]) , label.delete(lblS_to_CF[1]) , label.delete(lblS_to_cancel[1])
+    lineS_to_CF := line.new(  bar_entry_s  , entry_s , bar_index , entry_s  ,xloc = xloc.bar_index , color = Color_tesst_1 , style = line.style_dashed )
+    lineS_to_cancel := line.new( bar_sl_s , sl_s , bar_index , sl_s ,xloc = xloc.bar_index , color = Color_tesst_2 , style = line.style_dashed )
+    lblS_to_CF := label.new(bar_index, entry_s , "Break to confitm" ,xloc = xloc.bar_index, color = TRANSP, textcolor = Color_tesst_1, style = label.style_label_up, size = In_Size_CF_line)
+    lblS_to_cancel := label.new(bar_index, sl_s , "Cancel Line",xloc = xloc.bar_index, color = TRANSP, textcolor = Color_tesst_2, style = label.style_label_down, size = In_Size_CF_line)
+if Line_draw_sell and show_CF_line and barstate.isconfirmed
+    line.delete(lineS_to_CF[1]) , line.delete(lineS_to_cancel[1]) , label.delete(lblS_to_CF[1]) , label.delete(lblS_to_cancel[1])
+    lineS_CF = line.new(  bar_entry_s  , entry_s , bar_index , entry_s  ,xloc = xloc.bar_index , color = Color_tesst_1 , style = line.style_dashed )
+    lineS_cancel = line.new( bar_sl_s , sl_s , bar_index , sl_s ,xloc = xloc.bar_index , color = Color_tesst_2 , style = line.style_dashed )
+    lblS_cf = label.new(bar_index, entry_s , "Break to confitm" ,xloc = xloc.bar_index, color = TRANSP, textcolor = Color_tesst_1, style = label.style_label_up, size = In_Size_CF_line)
+    lblS_cancel = label.new(bar_index, sl_s , "Cancel Line" ,xloc = xloc.bar_index, color = TRANSP, textcolor = Color_tesst_2, style = label.style_label_down, size = In_Size_CF_line)
+
+// === Position Size ===
+risk_pips = atr_sl * x_ATR
+value_remove2(va1 , va2 , size) =>
+    array.remove(va1,size) , array.remove(va2,size)
+var tp_buy = array.new_float(0,na) , var sl_buy = array.new_float(0,na)  
+var tp_sell = array.new_float(0,na) , var sl_sell = array.new_float(0,na)  
+
+var int Loss_Buy = 0 , var int Win_Buy = 0 , var float sl_trade_buy = na , var float tp_trade_buy = na
+var int Loss_Sell = 0 , var int Win_Sell = 0 , var float sl_trade_sell = na , var float tp_trade_sell = na
+
+if cencel_buy and array.size(tp_buy) > 0
+    tp_trade_buy := na , sl_trade_buy := na
+    for i = array.size(tp_buy)-1 to 0
+        value_remove2( tp_buy , sl_buy , i)
+if cencel_sell and array.size(tp_sell) > 0
+    tp_trade_sell := na , sl_trade_sell := na
+    for i = array.size(tp_sell)-1 to 0
+        value_remove2( tp_sell , sl_sell , i)
+    
+// === Long Entry ===
+if buy_signal and con_time and con_date and barstate.isconfirmed
+    sl_cal_long = Sl_change ? sl2_b : sl_b
+    open_long := entry_b-math.abs((fibo_entry / 100)*(entry_b-sl_cal_long))
+    stop_loss_long := sl_cal_long - risk_pips
+    take_profit_long := open_long + (open_long - stop_loss_long)*rr_ratio
+    c_order_buy += 1 
+    cs_buy = str.tostring(c_order_buy)
+    strategy.entry("Long "+cs_buy, strategy.long , na , limit = open_long )
+    strategy.exit("Long Exit "+cs_buy , "Long "+cs_buy , stop = stop_loss_long , limit = take_profit_long , comment_profit = "Long(Tp) "+cs_buy ,comment_loss = "Long(SL) "+cs_buy )
+    p_entry = "\n\nEntry price = "+str.tostring( open_long , format.mintick)
+    p_sl = "\n\nStop loss = "+str.tostring(stop_loss_long, format.mintick)
+    p_tp = "\n\nTarget profit = "+str.tostring(take_profit_long, format.mintick)
+    alert("Long_"+p_entry+p_sl+p_tp, alert.freq_all)
+    pending_buy := true  , time_buy := bar_index
+    array.unshift(tp_buy, take_profit_long) , array.unshift(sl_buy,stop_loss_long)
+
+// === Short Entry ===
+if sell_signal and con_time and con_date and barstate.isconfirmed
+    sl_cal_short = Sl_change ? sl2_s : sl_s
+    open_short := entry_s+((fibo_entry / 100) *(sl_cal_short-entry_s))
+    stop_loss_short := sl_cal_short + risk_pips
+    take_profit_short := open_short - (stop_loss_short - open_short)*rr_ratio
+    c_order_sell += 1
+    cs_sell = str.tostring(c_order_sell)
+    strategy.entry("Short "+cs_sell, strategy.short , na , limit = open_short  )
+    strategy.exit("Short Exit "+cs_sell ,"Short "+cs_sell , stop = stop_loss_short , limit = take_profit_short , comment_profit = "Short(Tp) "+cs_sell ,comment_loss = "Short(SL) "+cs_sell )
+    p_entry = "\n\nEntry price = "+str.tostring( open_short , format.mintick)
+    p_sl = "\n\nStop loss = "+str.tostring(stop_loss_short, format.mintick)
+    p_tp = "\n\nTarget profit = "+str.tostring(take_profit_short, format.mintick)
+    alert("Short_"+p_entry+p_sl+p_tp, alert.freq_all)
+    pending_sell := true  , time_sell := bar_index
+    array.unshift(tp_sell, take_profit_short) , array.unshift(sl_sell,stop_loss_short)
+
+//show pending
+n_bar = 5
+col_1 = color.rgb(8, 153, 129, 80), col_2 = color.rgb(242, 54, 70, 80) 
+
+box box_entrybuy_1_his = na , box box_entrybuy_2_his = na
+box box_entrysell_1_his = na , box box_entrysell_2_his = na
+label lbl_entry_his = na , label lbl_tp_his = na , label lbl_sl_his = na
+
+var label lbl_entry_t = na , var label lbl_tp_t = na , var label lbl_sl_t = na
+var box box_entry_t1 = na , var box box_entry_t2 = na 
+
+//show Buy
+if strategy.position_size > 0 or im_buy_signal and barstate.isconfirmed
+    box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box.delete(box_entrybuy_1_his[1]) , box.delete(box_entrybuy_2_his[1]) , label.delete(lbl_entry_his[1]) , label.delete(lbl_tp_his[1]) , label.delete(lbl_sl_his[1])
+    box_entrybuy_1_his := box.new(xloc = xloc.bar_index ,left = time_buy , top = take_profit_long, right = bar_index+n_bar , bottom = open_long , border_color = col_1 ,bgcolor = col_1)
+    box_entrybuy_2_his := box.new(xloc = xloc.bar_index ,left = time_buy , top = open_long, right = bar_index+n_bar , bottom = stop_loss_long , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_his := label.new(bar_index+n_bar, open_long , str.tostring(open_long,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_his := label.new(bar_index+n_bar, take_profit_long , str.tostring(take_profit_long,format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_his := label.new(bar_index+n_bar, stop_loss_long , str.tostring(stop_loss_long,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+if cencel_buy and barstate.isconfirmed
+    box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box.delete(box_entrybuy_1_his[1]) , box.delete(box_entrybuy_2_his[1]) , label.delete(lbl_entry_his[1]) , label.delete(lbl_tp_his[1]) , label.delete(lbl_sl_his[1])
+    box_entrybuy_1_his := box.new(xloc = xloc.bar_index ,left = time_buy[1] , top = take_profit_long[1] , right = time_buy[1]+n_bar , bottom = open_long[1] , border_color = col_1 ,bgcolor = col_1)
+    box_entrybuy_2_his := box.new(xloc = xloc.bar_index ,left = time_buy[1] , top = open_long[1] , right = time_buy[1]+n_bar , bottom = stop_loss_long[1] , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_his := label.new(time_buy[1]+n_bar, open_long[1] , str.tostring(open_long[1],format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_his := label.new(time_buy[1]+n_bar, take_profit_long[1] , str.tostring(take_profit_long[1],format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_his := label.new(time_buy[1]+n_bar, stop_loss_long[1] , str.tostring(stop_loss_long[1],format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+
+//show sell
+if strategy.position_size < 0 or im_sell_signal and barstate.isconfirmed
+    box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box.delete(box_entrysell_1_his[1]) , box.delete(box_entrysell_2_his[1]) , label.delete(lbl_entry_his[1]) , label.delete(lbl_tp_his[1]) , label.delete(lbl_sl_his[1])
+    box_entrysell_1_his := box.new(xloc = xloc.bar_index , left = time_sell , top = take_profit_short, right = bar_index+n_bar  , bottom = open_short , border_color = col_1 ,bgcolor = col_1)
+    box_entrysell_2_his := box.new(xloc = xloc.bar_index , left = time_sell , top = open_short, right = bar_index+n_bar  , bottom = stop_loss_short , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_his := label.new(bar_index+n_bar , open_short , str.tostring(open_short,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_his := label.new(bar_index+n_bar , take_profit_short , str.tostring(take_profit_short,format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_his := label.new(bar_index+n_bar , stop_loss_short , str.tostring(stop_loss_short,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+if cencel_sell and barstate.isconfirmed
+    box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box.delete(box_entrysell_1_his[1]) , box.delete(box_entrysell_2_his[1]) , label.delete(lbl_entry_his[1]) , label.delete(lbl_tp_his[1]) , label.delete(lbl_sl_his[1])
+    box_entrysell_1_his := box.new(xloc = xloc.bar_index , left = time_sell[1] , top = take_profit_short[1], right = time_sell[1]+n_bar  , bottom = open_short[1] , border_color = col_1 ,bgcolor = col_1)
+    box_entrysell_2_his := box.new(xloc = xloc.bar_index , left = time_sell[1] , top = open_short[1], right = time_sell[1]+n_bar  , bottom = stop_loss_short[1] , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_his := label.new(time_sell[1]+n_bar , open_short[1] , str.tostring(open_short[1],format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_his := label.new(time_sell[1]+n_bar , take_profit_short[1] , str.tostring(take_profit_short[1],format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_his := label.new(time_sell[1]+n_bar , stop_loss_short[1] , str.tostring(stop_loss_short[1],format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+
+if buy_signal and barstate.isconfirmed
+    box.delete(box_entry_t1[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box_entry_t1 := box.new(xloc = xloc.bar_index ,left = time_buy , top = take_profit_long, right = bar_index+n_bar , bottom = open_long , border_color = col_1 ,bgcolor = col_1)
+    box_entry_t2 := box.new(xloc = xloc.bar_index ,left = time_buy , top = open_long, right = bar_index+n_bar , bottom = stop_loss_long , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_t := label.new(bar_index+n_bar, open_long , str.tostring(open_long,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_t := label.new(bar_index+n_bar, take_profit_long , str.tostring(take_profit_long,format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_t := label.new(bar_index+n_bar, stop_loss_long , str.tostring(stop_loss_long,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+if sell_signal and barstate.isconfirmed
+    box.delete(box_entrysell_1_his[1]) , box.delete(box_entry_t2[1]) , label.delete(lbl_entry_t[1]) , label.delete(lbl_tp_t[1]) , label.delete(lbl_sl_t[1])
+    box_entry_t1 := box.new(xloc = xloc.bar_index , left = time_sell , top = take_profit_short, right = bar_index+n_bar  , bottom = open_short , border_color = col_1 ,bgcolor = col_1)
+    box_entry_t2 := box.new(xloc = xloc.bar_index , left = time_sell , top = open_short, right = bar_index+n_bar  , bottom = stop_loss_short , border_color = col_2 ,bgcolor = col_2)
+    lbl_entry_t := label.new(bar_index+n_bar , open_short , str.tostring(open_short,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_tp_t := label.new(bar_index+n_bar , take_profit_short , str.tostring(take_profit_short,format.mintick),xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+    lbl_sl_t := label.new(bar_index+n_bar , stop_loss_short , str.tostring(stop_loss_short,format.mintick) ,xloc = xloc.bar_index, color = TRANSP, textcolor = text_line2_col, style = label.style_label_center, size = In_Size_fibo)
+
+
+if Show_result and barstate.isconfirmed
+    //Check SL buy
+    if array.size(sl_buy) > 0 and not na(array.get(sl_buy,0))
+        sl_trade_buy := array.get(sl_buy,0)
+    if low <= sl_trade_buy and ( strategy.position_size[1] > 0 or im_buy_signal) and array.size(sl_buy) > 0
+        sl_trade_buy := na , tp_trade_buy := na
+        for i = array.size(sl_buy)-1 to 0
+            if low <= array.get(sl_buy,i) and not na(array.get(sl_buy,i))
+                Loss_Buy += 1
+                value_remove2( tp_buy , sl_buy , i)
+    //check TP buy
+    if array.size(tp_buy) > 0 and not na(array.get(tp_buy,0))
+        tp_trade_buy := array.get(tp_buy,0)
+    if high >= tp_trade_buy and ( strategy.position_size[1] > 0 or im_buy_signal) and array.size(tp_buy) > 0
+        tp_trade_buy := na , sl_trade_buy := na
+        for i = array.size(tp_buy)-1 to 0
+            if high >= array.get(tp_buy,i) and not na(array.get(tp_buy,i))
+                Win_Buy += 1 
+                value_remove2( tp_buy , sl_buy , i)
+
+    //Check SL Sell
+    if array.size(sl_sell) > 0 and not na(array.get(sl_sell,0))
+        sl_trade_sell := array.get(sl_sell,0)
+    if high >= sl_trade_sell and ( strategy.position_size[1] < 0 or im_sell_signal) and array.size(sl_sell) > 0
+        sl_trade_sell := na , tp_trade_sell := na
+        for i = array.size(sl_sell)-1 to 0
+            if high >= array.get(sl_sell,i) and not na(array.get(sl_sell,i))
+                Loss_Sell += 1
+                value_remove2( tp_sell , sl_sell , i)
+    //check TP Sell
+    if array.size(tp_sell) > 0 and not na(array.get(tp_sell,0))
+        tp_trade_sell := array.get(tp_sell,0)
+    if low <= tp_trade_sell and ( strategy.position_size[1] < 0 or im_sell_signal) and array.size(tp_sell) > 0
+        tp_trade_sell := na , sl_trade_sell := na
+        for i = array.size(tp_sell)-1 to 0
+            if low <= array.get(tp_sell,i) and not na(array.get(tp_sell,i))
+                Win_Sell += 1 
+                value_remove2( tp_sell , sl_sell , i)
+
+// === Plotting ===
+bgcolor(s_New_York and cf_ses1 ? color.rgb(255, 251, 0, 92) : na ,title = "New York")
+bgcolor(s_London and cf_ses2 ? color.rgb(255, 0, 255, 92) : na ,title = "London")
+bgcolor(s_Tokyo and cf_ses3? color.rgb(111, 255, 82, 92) : na ,title = "Tokyo")
+bgcolor(s_Sydney and cf_ses4? color.rgb(82, 122, 255, 92) : na ,title = "Sydney")
+
+Location_session = ((9*60*60) / timeframe.in_seconds(timeframe.period)) / 2 
+Lbl_New_York = not cf_ses1 and cf_ses1 != cf_ses1[1] and s_New_York and t_New == '1300-2200' and timeframe.in_seconds(timeframe.period) <= 32400
+plotshape( Lbl_New_York , "Session New York", shape.labeldown, location.bottom, na , offset = -Location_session  , text = "New York", textcolor = #fffb00, size = size.tiny, display = display.all - display.status_line, editable = false)
+Lbl_London = not cf_ses2 and cf_ses2 != cf_ses2[1] and s_London and t_Lon == '0700-1600' and timeframe.in_seconds(timeframe.period) <= 32400
+plotshape( Lbl_London , "Session London", shape.labeldown, location.bottom, na , offset = -Location_session  , text = "London", textcolor = #ff00ff , size = size.tiny, display = display.all - display.status_line, editable = false)
+Lbl_Tokyo = not cf_ses3 and cf_ses3 != cf_ses3[1] and s_Tokyo and t_Tokyo == '0000-0900' and timeframe.in_seconds(timeframe.period) <= 32400
+plotshape( Lbl_Tokyo , "Session Tokyo", shape.labeldown, location.bottom, na , offset = -Location_session  , text = "Tokyo", textcolor = #6fff52 , size = size.tiny, display = display.all - display.status_line, editable = false)
+Lbl_Sydney = not cf_ses4 and cf_ses4 != cf_ses4[1] and s_Sydney and t_Syd == '2100-0600' and timeframe.in_seconds(timeframe.period) <= 32400
+plotshape( Lbl_Sydney , "Session Sydney", shape.labeldown, location.bottom, na , offset = -Location_session  , text = "Sydney", textcolor = #527aff , size = size.tiny, display = display.all - display.status_line, editable = false)
+
+var table Balane_status = table.new( position(select_position) , 6 , 6 , border_width = 1)
+
+Total_all = Win_Buy + Loss_Buy + Win_Sell + Loss_Sell
+if Show_result and (Total_all > Total_all[1]) and barstate.isconfirmed
+    Long_all = Win_Buy + Loss_Buy , Short_all = Win_Sell + Loss_Sell
+    Total_win = Win_Buy + Win_Sell , Total_loss = Loss_Buy + Loss_Sell
+    Factor_all = (Total_win*rr_ratio)/Total_loss
+    Factor_buy = (Win_Buy*rr_ratio)/Loss_Buy
+    Factor_sell = (Win_Sell*rr_ratio)/Loss_Sell
+    txt1_1 = str.tostring(Total_all,format.volume)
+    txt1_2 = str.tostring(Long_all,format.volume)
+    txt1_3 = str.tostring(Short_all,format.volume)
+    txt2_1 = str.tostring(Total_win,format.volume)
+    txt3_1 = str.tostring(Total_loss,format.volume)
+    txt4_1 = str.tostring((Total_win/Total_all)*100,format.percent)
+    txt5_1 = str.format("{0,number,#.##}", Factor_all )
+
+    txt2_2 = str.tostring(Win_Buy,format.volume)
+    txt3_2 = str.tostring(Loss_Buy,format.volume)
+    txt4_2 = str.tostring((Win_Buy/Long_all)*100,format.percent)
+    txt5_2 = str.format("{0,number,#.##}", Factor_buy )
+
+    txt2_3 = str.tostring(Win_Sell,format.volume)
+    txt3_3 = str.tostring(Loss_Sell,format.volume)
+    txt4_3 = str.tostring((Win_Sell/Short_all)*100,format.percent)
+    txt5_3 = str.format("{0,number,#.##}", Factor_sell)
+
+    Factor_all_color = Factor_all > Factor_up ? Factor_up_color : Factor_all < Factor_donw ? Factor_donw_color : color.white 
+    Factor_buy_color = Factor_buy > Factor_up ? Factor_up_color : Factor_buy < Factor_donw ? Factor_donw_color : color.white 
+    Factor_sell_color = Factor_sell > Factor_up ? Factor_up_color : Factor_sell < Factor_donw ? Factor_donw_color : color.white 
+
+    table.cell(Balane_status , 1 , 1 , txt1_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 2 , 1 , txt2_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 3 , 1 , txt3_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 4 , 1 , txt4_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 5 , 1 , txt5_1 , bgcolor = color.black , text_color = Factor_all_color )
+
+    table.cell(Balane_status , 1 , 2 , txt1_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 2 , 2 , txt2_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 3 , 2 , txt3_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 4 , 2 , txt4_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 5 , 2 , txt5_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    
+    table.cell(Balane_status , 1 , 3 , txt1_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 2 , 3 , txt2_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 3 , 3 , txt3_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 4 , 3 , txt4_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 5 , 3 , txt5_3 , bgcolor = color.black , text_color = Factor_sell_color )
+
+    table.cell(Balane_status , 0 , 1 , "Total" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 0 , 2 , "Long" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 0 , 3 , "Short" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 1 , 0 , "All" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 2 , 0 , "Win" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 3 , 0 , "Loss" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 4 , 0 , "Winrate" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 5 , 0 , "Profit\n\Factor" , bgcolor = color.black , text_color = color.white )
+
+View in Pine Editor・675 lines
+Use on chart
+1.7 K
+2
+20 449
+📌 Description – Double & Triple Pattern Indicator
+The Double & Triple Pattern Indicator is developed to help traders systematically and clearly identify Double Top, Double Bottom, Triple Top, and Triple Bottom chart patterns.
+
+⚙️ Core Logic & Working Mechanism
+The Double & Triple Pattern Indicator is built on the concept of price swing formation, based on the logic of Trend Entry_0 [TS_Indie], which focuses on structured market analysis and price action behavior.
+
+The indicator detects three main swing points (Swing 1, Swing 2, and Swing 3). A Fibonacci Box is then created using Swing A and Swing B as reference points to define the swing detection zone.
+
+When all three swings remain inside the defined Fibonacci Box, the structure is considered a valid Price Action setup.
+The indicator then plots key lines on the chart:
+➩ Break Line – used to confirm the signal (confirmation)
+➩ Cancel Line – used to invalidate the price action if price moves against the conditions
+➛ When price breaks the Break Line, the structure is confirmed and a Pending Order is placed at Swing B, with the Stop Loss set at Swing 1.
+➛ If price breaks the Cancel Line first, the price action structure is immediately invalidated.
+
+⚙️Fibonacci Entry Zone & Change SL Settings
+➩ When Fibo Entry Zone is set to 0, the Pending Order is placed directly at Swing B.
+➩ When the value is greater than 0, the Pending Order is calculated using Fibonacci levels drawn from Swing B to the Stop Loss level.
+➩ Change SL allows switching the Stop Loss reference between Swing 1 and Swing A.
+
+
+⚙️Min & Max Control for Swing Size : xATR
+When enabling Control Size Swing : xATR, the indicator filters Swing B based on the defined Min and Max range.
+This allows traders to selectively test larger or smaller swing-based price actions, depending on their trading strategy.
+
+
+⭐ Pending Order Cancellation Conditions
+A Pending Order will be canceled under the following conditions:
+1.A new Price Action signal appears on either the Buy or Sell side.
+2.When Time Session is enabled, the Pending Order is canceled once price exits the selected session.
+
+🕹 Order Management Rule
+When there is an active open position, the indicator restricts the creation of new Pending Orders to prevent overlapping positions.
+
+💡 Double Pattern Example
+
+
+💡 Triple Pattern Example
+
+
+⚠️ Disclaimer
+This indicator is designed for technical analysis purposes only and does not constitute investment advice.
+Users should apply proper risk management and make decisions at their own discretion.
+
+🥂 Community Sharing
+If you find parameter settings that work well or produce strong statistical results, feel free to share them with the community so we can improve and develop this indicator together.
+

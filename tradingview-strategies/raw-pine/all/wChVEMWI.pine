@@ -1,0 +1,47 @@
+//@version=5
+strategy("HARSI RSI Shadow SHORT Strategy M1",
+     overlay = false,
+     pyramiding = 0,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     initial_capital = 10000,
+     calc_on_every_tick = true)
+
+// ===== INPUT =====
+rsiLen = input.int(7, "RSI Length")
+tpPerc = input.float(0.2, "Take Profit (%)", step = 0.01) / 100
+
+// ===== RSI SHADOW (HARSI STYLE) =====
+rsi_shadow = ta.rsi(ohlc4, rsiLen) - 50
+
+// ===== STATE MEMORY =====
+var bool crossedPlus30 = false
+
+// RSI cắt xuống +30 → ghi nhớ
+if ta.crossunder(rsi_shadow, 30)
+    crossedPlus30 := true
+
+// RSI cắt xuống +20 và trước đó đã cắt +30
+sellSignal = crossedPlus30 and ta.crossunder(rsi_shadow, 20)
+
+// ===== ENTRY =====
+if sellSignal
+    strategy.entry("SELL", strategy.short)
+    crossedPlus30 := false   // reset tránh vào lệnh liên tục
+
+// ===== TAKE PROFIT 0.2% =====
+if strategy.position_size < 0
+    tpPrice = strategy.position_avg_price * (1 - tpPerc)
+    strategy.exit("TP", "SELL", limit = tpPrice)
+
+// ===== VISUAL =====
+hline(0, "Zero", color=color.orange)
+hline(20, "+20", color=color.gray)
+hline(30, "+30", color=color.gray)
+plot(rsi_shadow, title="RSI Shadow", color=color.red)
+
+View in Pine Editor・41 lines
+Use on chart
+3
+437
+ban khi hasr cat 20 30, kha la an toan phu hop trader bot dca okx

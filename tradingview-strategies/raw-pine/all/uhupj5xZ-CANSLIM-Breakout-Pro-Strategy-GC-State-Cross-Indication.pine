@@ -1,0 +1,171 @@
+//@version=6
+strategy("CANSLIM Breakout Pro (Strategy) - GC State+Cross Indication", overlay=true,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent, commission_value=0.02,
+     process_orders_on_close=true)
+
+// ===== Inputs =====
+useMarketGate   = input.bool(true, "Use Market Gate (NIFTY) - Golden Cross STATE")
+idxSymbol       = input.symbol("NSE:NIFTY", "Market Index Symbol")
+
+useSectorGate   = input.bool(false, "Use Sector Gate (manual) - Golden Cross STATE")
+sectorSymbol    = input.symbol("NSE:NIFTY_PHARMA", "Sector Index Symbol (select manually)")
+
+fastLen         = input.int(50, "Fast MA length", minval=5, maxval=200)
+slowLen         = input.int(200, "Slow MA length", minval=20, maxval=400)
+
+baseLen         = input.int(30, "Pivot lookback (bars)", minval=10, maxval=150)
+buyRangePct     = input.float(5.0, "Max buy range above pivot (%)", minval=0.5, maxval=15.0)
+volMult         = input.float(1.4, "Volume >= x * Vol SMA(50)", minval=1.0, step=0.1)
+
+hardSLpct        = input.float(7.0,  "Hard SL (%) from entry", minval=1.0, maxval=20.0)
+trailActivatePct = input.float(8.0,  "Trail activates after profit (%)", minval=1.0, maxval=50.0)
+trailFromTopPct  = input.float(11.0, "Trail (%) from highest close since entry", minval=1.0, maxval=30.0)
+targetPct        = input.float(20.0, "Target (%)", minval=5.0, maxval=100.0)
+
+showGateMarks   = input.bool(true, "Show Golden Cross marks (Market/Sector)")
+showDashboard   = input.bool(true, "Show dashboard")
+
+// ===== Market data (fallback-safe) =====
+idxClose = request.security(idxSymbol, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off, ignore_invalid_symbol=true)
+idxValid = not na(idxClose)
+idxFast  = ta.sma(idxClose, fastLen)
+idxSlow  = ta.sma(idxClose, slowLen)
+
+mState = idxValid and idxFast > idxSlow
+mCross = idxValid and ta.crossover(idxFast, idxSlow)
+
+// Market gate uses STATE (as you asked)
+marketOK = (not useMarketGate) or (not idxValid) or mState
+
+// ===== Sector data (fallback-safe) =====
+secClose = request.security(sectorSymbol, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off, ignore_invalid_symbol=true)
+secValid = not na(secClose)
+secFast  = ta.sma(secClose, fastLen)
+secSlow  = ta.sma(secClose, slowLen)
+
+sState = secValid and secFast > secSlow
+sCross = secValid and ta.crossover(secFast, secSlow)
+
+// Sector gate uses STATE (when enabled)
+sectorOK = (not useSectorGate) or (not secValid) or sState
+
+gateOK = marketOK and sectorOK
+
+// ===== Pivot + entry filters =====
+pivot  = ta.highest(high[1], baseLen)
+buyMax = pivot * (1 + buyRangePct/100.0)
+
+closeAbovePivot = close > pivot
+inBuyRange      = close <= buyMax
+
+volSma50 = ta.sma(volume, 50)
+volOK    = volume >= volSma50 * volMult
+
+entrySignal = gateOK and closeAbovePivot and inBuyRange and volOK
+
+// ===== Entry =====
+if entrySignal and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+
+// ===== Exits =====
+inPos   = strategy.position_size > 0
+entryPx = strategy.position_avg_price
+
+hardSL = inPos ? entryPx * (1 - hardSLpct/100.0) : na
+tgt    = inPos ? entryPx * (1 + targetPct/100.0) : na
+actPx  = inPos ? entryPx * (1 + trailActivatePct/100.0) : na
+
+var float hiClose = na
+if not inPos
+    hiClose := na
+else
+    hiClose := na(hiClose) ? close : math.max(hiClose, close)
+
+trailActive = inPos and close >= actPx
+trailSL     = inPos ? hiClose * (1 - trailFromTopPct/100.0) : na
+
+hardSLHit  = inPos and close <= hardSL
+trailSLHit = inPos and trailActive and close <= trailSL
+targetHit  = inPos and close >= tgt
+
+if hardSLHit
+    strategy.close("L", comment="Hard SL")
+if trailSLHit
+    strategy.close("L", comment="Trail SL")
+if targetHit
+    strategy.close("L", comment="Target")
+
+// ===== Plots =====
+plot(pivot, "Pivot", color=color.new(color.orange, 0), linewidth=2)
+plot(inPos ? entryPx : na, "Entry Avg", color=color.new(color.blue, 0), linewidth=2, style=plot.style_linebr)
+plot(inPos ? hardSL : na, "Hard SL", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(inPos ? tgt : na, "Target", color=color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+plot(inPos and trailActive ? trailSL : na, "Trailing SL", color=color.new(color.fuchsia, 0), linewidth=2, style=plot.style_linebr)
+
+// Entry marker
+plotshape(entrySignal, title="Entry signal", style=shape.triangleup, location=location.belowbar,
+     color=color.new(color.lime, 0), size=size.tiny, text="BUY")
+
+// ===== Golden cross indications (markers) =====
+plotshape(showGateMarks and mCross, title="Market Golden Cross", style=shape.circle,
+     location=location.top, color=color.new(color.yellow, 0), size=size.tiny, text="M×")
+
+plotshape(showGateMarks and sCross and useSectorGate, title="Sector Golden Cross", style=shape.circle,
+     location=location.top, color=color.new(color.aqua, 0), size=size.tiny, text="S×")
+
+// Background tint when in STATE (optional visual cue)
+bgcolor(showGateMarks and useMarketGate and mState ? color.new(color.yellow, 92) : na)
+bgcolor(showGateMarks and useSectorGate and sState ? color.new(color.aqua, 94) : na)
+
+// ===== Alerts =====
+alertcondition(entrySignal, title="ENTRY", message="CANSLIM ENTRY: Breakout + Vol + BuyRange + GoldenCross STATE gates OK")
+alertcondition(hardSLHit, title="EXIT HardSL", message="CANSLIM EXIT: Hard SL hit")
+alertcondition(trailSLHit, title="EXIT TrailSL", message="CANSLIM EXIT: Trailing SL hit")
+alertcondition(targetHit, title="EXIT Target", message="CANSLIM EXIT: Target hit")
+
+// ===== Dashboard =====
+if showDashboard and barstate.islast
+    var table t = table.new(position.top_right, 2, 8, frame_width=1, border_width=1)
+
+    table.cell(t, 0, 0, "Gates", bgcolor=color.black, text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 0, syminfo.ticker, bgcolor=color.black, text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 1, "Market valid", bgcolor=color.new(color.gray, 85), text_color=color.black, text_size=size.small)
+    table.cell(t, 1, 1, idxValid ? "YES" : "NO", bgcolor=idxValid ? color.new(color.green, 80) : color.new(color.red, 80), text_color=color.black, text_size=size.small)
+
+    table.cell(t, 0, 2, "M State (50>200)", bgcolor=color.new(color.gray, 85), text_color=color.black, text_size=size.small)
+    table.cell(t, 1, 2, mState ? "ON" : "OFF", bgcolor=mState ? color.new(color.green, 80) : color.new(color.red, 85), text_color=color.black, text_size=size.small)
+
+    table.cell(t, 0, 3, "M Cross (today)", bgcolor=color.new(color.gray, 85), text_color=color.black, text_size=size.small)
+    table.cell(t, 1, 3, mCross ? "YES" : "NO", bgcolor=mCross ? color.new(color.yellow, 70) : color.new(color.gray, 90), text_color=color.black, text_size=size.small)
+
+    table.cell(t, 0, 4, "Sector gate", bgcolor=color.new(color.gray, 85), text_color=color.black, text_size=size.small)
+    table.cell(t, 1, 4, useSectorGate ? "ON" : "OFF", bgcolor=useSectorGate ? color.new(color.aqua, 80) : color.new(color.gray, 90), text_color=color.black, text_size=size.small)
+
+    table.cell(t, 0, 5, "S State (50>200)", bgcolor=color.new(color.gray, 85), text_color=color.black, text_size=size.small)
+    table.cell(t, 1, 5, sState ? "ON" : "OFF", bgcolor=sState ? color.new(color.green, 80) : color.new(color.red, 85), text_color=color.black, text_size=size.small)
+
+    table.cell(t, 0, 6, "S Cross (today)", bgcolor=color.new(color.gray, 85), text_color=color.black, text_size=size.small)
+    table.cell(t, 1, 6, sCross ? "YES" : "NO", bgcolor=sCross ? color.new(color.aqua, 65) : color.new(color.gray, 90), text_color=color.black, text_size=size.small)
+
+    table.cell(t, 0, 7, "Gate OK?", bgcolor=color.new(color.gray, 85), text_color=color.black, text_size=size.small)
+    table.cell(t, 1, 7, gateOK ? "YES" : "NO", bgcolor=gateOK ? color.new(color.green, 75) : color.new(color.red, 75), text_color=color.black, text_size=size.small)
+
+View in Pine Editor・153 lines
+Use on chart
+7
+409
+strong stocks को तब buy करना जब वो base से breakout करें (pivot के ऊपर close) और breakout को volume support करे, लेकिन entry को “too extended” होने से रोकना।
+Market gate (NIFTY): 50SMA > 200SMA ⇒ market bullish (trades allowed).
+Sector gate (optional): जिस sector index को आप manually select करोगे, उसमें भी 50SMA > 200SMA होना चाहिए; वरना entries block होंगी। और “Cross indication” सिर्फ info है: जिस दिन 50SMA पहली बार 200SMA के ऊपर cross करता है, वो marker दिखता है।
+Setup + Entry rules (stock पर)
+Entry तभी होगा जब ये चारों conditions साथ में true हों:
+Pivot breakout: stock का close pivot के ऊपर हो (pivot = पिछले base Len bars का highest high; current bar excluded).
+Buy range: close, pivot से max +5% के अंदर हो (chasing रोकने के लिए).
+Volume confirmation: volume ≥ 1.4 × 50‑day average volume (institutional demand confirm).
+Gates OK: market bullish (और sector gate ON हो तो sector भी bullish)
+Stop-loss (SL) rules
+Hard SL: entry (avg fill) से −7% पर exit; ये important sell rule माना जाता है।
+Trailing SL: जब price entry से +8% ऊपर पहुँच जाए, तब “trail active” हो जाता है; फिर highest close since entry से −11% पर exit (winner को room देते हुए profit protect).
+4 weeks/20 trading days में target नहीं मिला तो exit

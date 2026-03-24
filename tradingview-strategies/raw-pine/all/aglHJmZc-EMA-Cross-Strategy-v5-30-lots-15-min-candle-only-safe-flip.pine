@@ -1,0 +1,117 @@
+//@version=5
+strategy("EMA Cross Strategy v5 (30 lots) - safe flip",
+     overlay = true,
+     calc_on_every_tick = true,
+     initial_capital = 10000)
+
+// INPUTS
+emaFast = input.int(title="Fast EMA", defval=10, minval=1)
+emaSlow = input.int(title="Slow EMA", defval=20, minval=1)
+tradeDirection = input.string(title="Trade Direction", defval="Both", options=["Long","Short","Both"])
+
+// CALCS
+fastEMA = ta.ema(close, emaFast)
+slowEMA = ta.ema(close, emaSlow)
+
+plot(fastEMA, color=color.orange, linewidth=2)
+plot(slowEMA, color=color.blue, linewidth=2)
+
+// SIGNALS
+longOK  = (tradeDirection == "Long") or (tradeDirection == "Both")
+shortOK = (tradeDirection == "Short") or (tradeDirection == "Both")
+
+longSignal  = ta.crossover(fastEMA, slowEMA)
+shortSignal = ta.crossunder(fastEMA, slowEMA)
+
+// SAFE ORDER LOGIC (no doubling)
+qty = 30
+
+if longSignal and longOK
+    // If currently short, close first and then enter long
+    if strategy.position_size < 0
+        strategy.close("short")
+        strategy.entry("long", strategy.long, qty=qty)
+    // If currently flat, enter long
+    else if strategy.position_size == 0
+        strategy.entry("long", strategy.long, qty=qty)
+    // If already long, do nothing (prevents doubling)
+
+if shortSignal and shortOK
+    // If currently long, close first and then enter short
+    if strategy.position_size > 0
+        strategy.close("long")
+        strategy.entry("short", strategy.short, qty=qty)
+    // If currently flat, enter short
+    else if strategy.position_size == 0
+        strategy.entry("short", strategy.short, qty=qty)
+    // If already short, do nothing
+
+// EXIT ON OPPOSITE handled above by close()
+alertcondition(longSignal, title="LONG Signal", message="LONG")
+alertcondition(shortSignal, title="SHORT Signal", message="SHORT")
+
+View in Pine Editor・51 lines
+Use on chart
+6
+7
+1
+1 656
+🚀 EMA Cross Strategy v5 (30 Lots) (15 min candle only)— Safe Flip Edition
+Fully Automated | Fast | Reliable | Battle-tested
+
+Welcome to a clean, powerful, and automation-friendly EMA crossover system.
+This strategy is built for traders who want consistent trend-based entries without the risk of unwanted pyramiding or doubled positions.
+
+🔥 How It Works
+
+This strategy uses a fast EMA (10) crossing a slow EMA (20) to detect trend shifts:
+
+Bullish Crossover → LONG (30 lots)
+
+Bearish Crossover → SHORT (30 lots)
+
+Every opposite signal safely flips the position by first closing the current trade, then opening a fresh position of exactly 30 lots.
+
+No doubling.
+No runaway position size.
+No surprises.
+
+Just clean, mechanical trend-following.
+
+📈 Why This Strategy Stands Out
+
+Unlike basic EMA crossbots, this version:
+
+✔ Prevents unintended pyramiding
+✔ Never over-allocates capital
+✔ Works perfectly with webhook-based automation
+✔ Produces stable, systematic entries
+✔ Executes directional flips with precision
+
+🔍 Backtest Highlights (1-Year)
+
+(Backtests will vary by instrument/timeframe)
+
+1,500+ trades executed
+
+Profit factor above 1.27
+
+Strong trend performance
+
+Balanced long/short behavior
+
+No margin calls
+
+Consistent trade execution
+
+This strategy thrives in trending markets and maintains strict discipline even in choppy conditions.
+
+⚙️ Automation Ready
+
+Designed for automated execution via webhook and API setups on supported platforms.
+Just connect, run, and let the bot follow the rules without hesitation.
+
+No emotions.
+No overtrading.
+No fear or greed.
+Pure logic.

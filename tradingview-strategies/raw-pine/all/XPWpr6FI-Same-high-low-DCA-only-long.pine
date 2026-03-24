@@ -1,0 +1,11 @@
+//@version=5
+##root(root_metainfo,rm_0,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_1,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_2,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_4,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_5,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_6,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_7,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_8,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_9,plot.style_linebr,cb__plot_style__integer,plot,style)

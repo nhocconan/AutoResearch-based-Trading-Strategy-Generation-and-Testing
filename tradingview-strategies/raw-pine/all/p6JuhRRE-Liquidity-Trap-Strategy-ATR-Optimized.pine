@@ -1,0 +1,236 @@
+//@version=5
+strategy("Liquidity Trap Strategy - ATR Optimized", overlay=true, 
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10, calc_on_every_tick=false)
+
+// ───────────── INPUTS ─────────────
+atrLen          = input.int(14, "ATR Length")
+atrMultiplier   = input.float(1.5, "ATR Multiplier for SL", step=0.1)
+riskReward      = input.float(2.0, "Risk-Reward Ratio", step=0.1)
+
+// ───────────── DAILY HIGH / LOW ─────────────
+var line pdhLine = na
+var line pdlLine = na
+
+prevDayHigh = request.security(syminfo.tickerid, "D", high[1])
+prevDayLow  = request.security(syminfo.tickerid, "D", low[1])
+
+var bool tradedToday = false
+
+// Draw anchored lines each day
+if dayofweek != dayofweek[1]
+    tradedToday := false
+    line.delete(pdhLine)
+    line.delete(pdlLine)
+    pdhLine := line.new(bar_index[1], prevDayHigh, bar_index, prevDayHigh, color=color.green, width=2, extend=extend.right)
+    pdlLine := line.new(bar_index[1], prevDayLow, bar_index, prevDayLow, color=color.red, width=2, extend=extend.right)
+else
+    line.set_xy2(pdhLine, bar_index, prevDayHigh)
+    line.set_xy2(pdlLine, bar_index, prevDayLow)
+
+// ───────────── TRAP LOGIC ─────────────
+breaksAbovePDH = high > prevDayHigh
+reversesBelowPDH = close < prevDayHigh
+buyerTrap = breaksAbovePDH and reversesBelowPDH and not tradedToday
+
+breaksBelowPDL = low < prevDayLow
+reversesAbovePDL = close > prevDayLow
+sellerTrap = breaksBelowPDL and reversesAbovePDL and not tradedToday
+
+// ───────────── ATR CALCULATION ─────────────
+atr = ta.atr(atrLen)
+
+// ───────────── STRATEGY EXECUTION ─────────────
+if buyerTrap
+    shortSL = math.max(high + atr * atrMultiplier, high)  // SL beyond trap candle or ATR
+    shortTP = close - (shortSL - close) * riskReward
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+    label.new(bar_index, high, "Short", color=color.red, style=label.style_label_down, textcolor=color.white, size=size.small)
+    tradedToday := true
+
+if sellerTrap
+    longSL = math.min(low - atr * atrMultiplier, low)    // SL beyond trap candle or ATR
+    longTP = close + (close - longSL) * riskReward
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+    label.new(bar_index, low, "Long", color=color.green, style=label.style_label_up, textcolor=color.white, size=size.small)
+    tradedToday := true
+
+// Optional: close opposite position if opposite trap occurs
+if strategy.position_size > 0 and buyerTrap
+    strategy.close("Long")
+if strategy.position_size < 0 and sellerTrap
+    strategy.close("Short")
+
+View in Pine Editor・63 lines
+Use on chart
+2
+8
+1 105
+Liquidity Trap Strategy – Optimized Version
+1. Overview
+
+The Liquidity Trap Strategy is a high-probability price action trading system designed to exploit “trapped buyers or sellers” around key levels from the previous trading day.
+
+Markets: Works on any market (Forex, Crypto, Futures, Indices, Stocks)
+
+Timeframes: Designed for 15-minute (15m) and 1-hour (1H) charts
+
+Trading Style: “Hunter” style — trades may not happen every day, but setups are high-probability
+
+Trade Frequency: Only first trade per day is taken for simplicity and high quality
+
+2. Key Components
+a) Daily Levels
+
+Previous Day High (PDH) and Previous Day Low (PDL) are automatically calculated using the prior day’s bar.
+
+These are drawn as anchored horizontal lines, extending to the current day.
+
+PDH/PDL act as key support/resistance zones — areas where liquidity is often trapped.
+
+b) Trap Concept
+
+The strategy is based on the “liquidity trap” principle:
+
+Buyer Trap (Short Entry):
+
+Price breaks above the previous day high (PDH) → buyers think price will continue higher.
+
+Price reverses immediately below PDH, trapping aggressive buyers above the key level.
+
+This creates selling pressure, giving an opportunity to enter short.
+
+Seller Trap (Long Entry):
+
+Price breaks below the previous day low (PDL) → sellers think price will continue lower.
+
+Price reverses immediately above PDL, trapping aggressive sellers below the key level.
+
+This creates buying pressure, giving an opportunity to enter long.
+
+The key idea: trapped traders cause the market to move in the opposite direction of the breakout, creating high-probability moves.
+
+c) Trade Execution Logic
+
+Buyer Trap / Short Entry:
+
+Condition: high > PDH AND close < PDH AND no trade taken yet today
+
+Entry: Short at the close of the trap candle
+
+Stop Loss: ATR-based above the trap candle high to avoid minor wick stops
+
+Take Profit: 2:1 Risk-to-Reward ratio
+
+Seller Trap / Long Entry:
+
+Condition: low < PDL AND close > PDL AND no trade taken yet today
+
+Entry: Long at the close of the trap candle
+
+Stop Loss: ATR-based below the trap candle low
+
+Take Profit: 2:1 Risk-to-Reward ratio
+
+Only the first trap trade of the day is allowed to avoid overtrading.
+
+d) Risk Management
+
+Stop-Loss (SL):
+
+ATR-based to account for market volatility
+
+Ensures the trade survives minor wick sweeps without being stopped out prematurely
+
+Take-Profit (TP):
+
+Fixed 2:1 R:R relative to SL
+
+Ensures each winning trade outweighs potential losses
+
+Trade Frequency:
+
+Only first trade per day is allowed, making it highly selective and reducing noise
+
+3. Visual Features
+
+PDH/PDL Lines: Anchored to previous day, extend into current day, color-coded:
+
+PDH → Green
+
+PDL → Red
+
+Trade Labels: Placed on the trap candle:
+
+Short → Red label “Short”
+
+Long → Green label “Long”
+
+The visual markers make it easy to identify exactly where the trap occurred and the trade was triggered.
+
+4. How the Strategy Works – Step by Step
+
+Example for Short (Buyer Trap):
+
+Market opens, PDH/PDL from yesterday are drawn.
+
+Price spikes above PDH → some buyers enter expecting breakout continuation.
+
+Price immediately closes back below PDH, trapping buyers.
+
+The strategy enters short at the close of the reversal candle.
+
+SL: placed above the trap candle using ATR to give room
+
+TP: calculated as 2x the risk (distance from entry to SL)
+
+Trade executes — first trade of the day. Any further trap signals today are ignored.
+
+Example for Long (Seller Trap):
+
+Price drops below PDL → some sellers enter.
+
+Price immediately closes back above PDL, trapping sellers.
+
+Strategy enters long at the close of the reversal candle.
+
+SL: below trap candle using ATR
+
+TP: 2:1 R:R
+
+Trade executes — only first trade of the day.
+
+5. Why This Strategy Works
+
+Exploits liquidity zones: Markets often hunt stops above PDH or below PDL.
+
+High-probability reversals: Trapped traders create strong counter moves.
+
+ATR SL: avoids being stopped by minor market noise or wick spikes.
+
+Selective trading: Only first trade per day → reduces overtrading and noise.
+
+Clear visual markers: Makes manual observation and confirmation easy.
+
+6. Key Tips for Traders
+
+Best on high-volume instruments like Forex majors, indices, or crypto pairs with decent liquidity.
+
+Works well on 15m and 1H charts — 15m allows quicker signals, 1H filters noise.
+
+Avoid trading around major news releases — traps can behave differently during high volatility events.
+
+Always backtest and use the ATR SL — never reduce SL too much, otherwise stops will trigger before the real move.
+
+✅ Summary:
+
+The Liquidity Trap Strategy identifies trapped buyers/sellers using previous day highs/lows.
+
+It uses ATR-adapted stops and 2:1 R:R TP.
+
+Only first trade per day is executed, reducing false signals.
+
+Anchored PDH/PDL lines and labels make trade opportunities clear.
+
+This system is low-frequency, high-probability, focusing on trading smart rather than frequently.

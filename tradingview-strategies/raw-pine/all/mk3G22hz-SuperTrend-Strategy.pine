@@ -1,0 +1,68 @@
+//@version=4
+//EU ESCREVI ISSO TUDO, PARA FICAR BEM CLARO
+
+strategy("SuperTrend Strategy", overlay=true)
+
+
+//AQUI OS INPUTS PARA A SUPERTREND
+length = input(title="ATR Period", type=input.integer, defval=7)
+mult = input(title="ATR Multiplier", type=input.float, step=0.1, defval=7)
+showLabels = input(title="Show Buy/Sell Labels ?", type=input.bool, defval=true)
+
+//AQUI O CALCULO DO ATR STOPS
+atr = mult * atr(length)
+
+
+
+//AQUI A TRANSFORMAÇÃO DO ATR STOPS EM SUPERTREND
+//-
+//A LÓGICA PARA LONGSTOP
+longStop = hl2 - atr
+longStopPrev = nz(longStop[1], longStop)
+longStop := close[1] > longStopPrev ? max(longStop, longStopPrev) : longStop
+
+//A LÓGICA PARA SELLSTOP
+shortStop = hl2 + atr
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop := close[1] < shortStopPrev ? min(shortStop, shortStopPrev) : shortStop
+
+
+//DIREÇÃO DO INDICADOR
+dir = 1
+dir := nz(dir[1], dir)
+dir := dir == -1 and close > shortStopPrev ? 1 : 
+   dir == 1 and close < longStopPrev ? -1 : dir
+
+
+//DEFININDO AS CORES DAS LINHAS DA SUPERTREND
+longColor = color.lime
+shortColor = color.red
+
+
+//PLOTANDO NO GRÁFICO A SUPERTREND E A ESTRATÉGIA
+plot(dir == 1 ? longStop : na, title="Long Stop", style=plot.style_linebr, linewidth=3, color=longColor)
+buySignal = dir == 1 and dir[1] == -1
+plot(dir == 1 ? na : shortStop, title="Short Stop", style=plot.style_linebr, linewidth=3, color=shortColor)
+sellSignal = dir == -1 and dir[1] == 1
+
+//DEFININDO AS FUNÇÕES DE COMPRA E VENDA
+strategy.entry("long", strategy.long, when = buySignal)
+strategy.entry("short", strategy.short, when = sellSignal)
+
+View in Pine Editor・50 lines
+Use on chart
+5
+7
+3
+13
+12 878
+This is almost the same strategy that Alex Orekhov (everget) sells to unnoticed newbies... The only thing he added was a tool that analyses the better performance of the indicator, that is the difference from his script, and i dont have it here, what i have is what is freely distributed in many communities... But as i follow him for more than 1 year i saw that theese configs. In more than 95% of the time range betweern 7.2-6.8 with the most common settings the 7-7
+
+So i made a description of each part of the code that i WRITED and is free and i am just using the configs that are public in Alex Orekhov (everget) profile. If it is public the configs he use in his charts and he is not the owner of the code right? Also the code is very easy to find in google in the MQL5 community or in a lot of videos in youtube.
+
+He charges $10 for a 4 day trial (LOL) and $100 for this shit.
+
+Here is a strategy that has a correlation with 95% of the time of the Profitable Strategy that he sells.
+
+
+

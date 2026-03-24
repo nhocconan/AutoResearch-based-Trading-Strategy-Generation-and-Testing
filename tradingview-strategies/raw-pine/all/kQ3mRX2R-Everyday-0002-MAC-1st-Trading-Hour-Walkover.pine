@@ -1,0 +1,86 @@
+//@version=2
+strategy("MAC 1st Trading Hour Walkover", overlay=true)
+
+// Setting up timeperiod for testing
+startPeriodYear = input(2014, "Backtest Start Year")
+startPeriodMonth = input(1, "Backtest Start Month")
+startPeriodDay = input(2, "Backtest Start Day")
+testPeriodStart = timestamp(startPeriodYear, startPeriodMonth, startPeriodDay, 0, 0)
+
+stopPeriodYear = input(2015, "Backtest Stop Year")
+stopPeriodMonth = input(12, "Backtest Stop Month")
+stopPeriodDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(stopPeriodYear, stopPeriodMonth, stopPeriodDay, 0, 0)
+
+// Moving Averages
+ema14 = ema(close, 14)
+ema28 = ema(close, 28)
+sma56 = sma(close, 56)
+
+// Plot
+plot(ema14, title="ema14", linewidth=2, color=green)
+plot(ema28, title="ema28", linewidth=2, color=red)
+plot(sma56, title="sma56", linewidth=3, color=blue)
+
+// Strategy
+goLong = cross(ema14, sma56) and ema14 > ema28
+goShort = cross(ema14, sma56) and ema14 < ema28
+
+// Strategy.When to enter
+if time >= testPeriodStart
+    if time <= testPeriodStop
+        strategy.entry("Go Long", strategy.long, 1.0, when=goLong)
+        strategy.entry("Go Short", strategy.short, 1.0, when=goShort)
+
+// Strategy.When to take profit 
+if time >= testPeriodStart 
+    if time <= testPeriodStop 
+        strategy.exit("Close Long", "Go Long", profit=2000) 
+        strategy.exit("Close Short", "Go Short", profit=2000) 
+
+// Strategy.When to stop out 
+// Some studies show that 70% of the days high low happen in the first hour 
+// of trading. To avoid having that volatility fire our loss stop we 
+// ignore price action in the morning, but allow stops to fire in the afternoon. 
+if time("60", "1000-1600") 
+    strategy.exit("Close Long", "Go Long", loss=500) 
+    strategy.exit("Close Short", "Go Short", loss=500)
+
+View in Pine Editor・47 lines
+Use on chart
+2
+2
+9
+5 942
+This is the second strategy for my Everyday project.
+Like I wrote the last time - my goal is to create a new strategy everyday
+for the rest of 2016 and post it here on TradingView.
+
+I'm a complete beginner so this is my way of learning about coding strategies.
+I'll give myself between 15 minutes and 2 hours to complete each creation.
+
+This is basically a repetition of the first strategy I wrote - a Moving Average Crossover,
+but I added a tiny thing.
+
+I read that "Statistics have proven that the daily high or low is established within the first hour of trading on more than 70% of the time."
+(source: )
+
+My first Moving Average Crossover strategy, tested on VOLVB daily, got stoped out by the volatility
+and because of this missed one nice bull run and a very nice bear run.
+
+So I added this single line: if time("60", "1000-1600") regarding when to take exits:
+if time("60", "1000-1600")
+strategy.exit("Close Long", "Long", profit=2000, loss=500)
+strategy.exit("Close Short", "Short", profit=2000, loss=500)
+
+Sweden is UTC+2 so I guess UTC 1000 equals 12.00 in Stockholm. Not sure if this is correct, actually.
+Anyway, I hope this means the strategy will only take exits based on price action which occur in the afternoon, when there is a higher probability of a lower volatility.
+
+When I ran the new modified strategy on the same VOLVB daily it didn't get stoped out so easily.
+On the other hand I'll have to test this on various stocks .
+Reading and learning about how to properly test strategies is on my todo list - all tips on youtube videos or blogs
+to read on this topic is very welcome!
+
+Like I said the last time, I'm posting these strategies hoping to learn from the community - so any feedback, advice, or corrections is very much welcome and appreciated!
+/pbergden
+

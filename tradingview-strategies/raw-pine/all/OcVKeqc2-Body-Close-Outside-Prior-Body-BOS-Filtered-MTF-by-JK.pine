@@ -1,0 +1,172 @@
+//@version=6
+strategy('Body Close Outside Prior Body - BOS Filtered (MTF)', overlay = true, pyramiding = 0, process_orders_on_close = true, max_lines_count = 500, max_labels_count = 500)
+
+// ===== 1. RISK SETTINGS =====
+grpRisk = 'Risk Management'
+slSource     = input.string('Wick', 'Stop Loss Source', options=['Body', 'Wick'], group=grpRisk)
+riskDollars  = input.float(200.0, 'Cash Risk per Trade ($)', minval = 1.0, group = grpRisk)
+maxContracts = input.int(10, 'Max Contracts', minval = 1, group = grpRisk)
+rrMultiple   = input.float(2.0, 'Risk:Reward Ratio', minval = 0.1, step = 0.1, group = grpRisk)
+
+// ===== 2. MARKET STRUCTURE (BOS) =====
+grpBOS = 'Market Structure'
+useBOSFilter = input.bool(true, 'Filter by BOS Direction?', group=grpBOS)
+bosTF        = input.timeframe('15', 'BOS Timeframe', group=grpBOS, tooltip="The timeframe used to calculate pivots and structure breaks.")
+pivotLen     = input.int(5, 'Pivot Lookback', minval=2, group=grpBOS)
+
+// ===== 3. LIMITS & FILTERS =====
+grpLimit = 'Daily Limits & Cooldown'
+maxProfitUSD = input.float(1000.0, 'Max Daily Profit Target ($)', group = grpLimit)
+maxLossUSD   = input.float(1000.0, 'Max Daily Loss Limit ($)', group = grpLimit)
+maxLossStreak = input.int(3, 'Max Losing Trades In A Row', group = grpLimit)
+waitBars     = input.int(5, 'Candles to Wait After Exit', group = grpLimit)
+
+grpTime = 'Session Filter'
+useTimer = input.bool(true, 'Use Session Filter?', group = grpTime)
+sessTime = input.session('0845-1000', 'Trade Window', group = grpTime)
+
+// ===== TRACKING VARIABLES =====
+var float dayStartEquity = strategy.equity
+var int consecutiveLosses = 0 
+var int lastExitBar = -9999
+var float tEntry = na
+var int tStartBar = na
+var int tDir = 0
+
+// Market Structure State Tracking
+var float lastHigh = na
+var float lastLow = na
+var int marketDir = 0 
+
+if bool(ta.change(time('D')))
+    dayStartEquity := strategy.equity
+    consecutiveLosses := 0 
+
+// ======================================================
+// MULTI-TIMEFRAME BOS DETECTION
+// ======================================================
+// Get OHLC and Pivots from the chosen Timeframe
+[mtfHigh, mtfLow, mtfClose, mtfPH, mtfPL] = request.security(syminfo.tickerid, bosTF, [high, low, close, ta.pivothigh(high, pivotLen, pivotLen), ta.pivotlow(low, pivotLen, pivotLen)], lookahead=barmerge.lookahead_on)
+
+if not na(mtfPH)
+    lastHigh := mtfPH
+if not na(mtfPL)
+    lastLow := mtfPL
+
+// Check for Break of Structure on the MTF Close
+if ta.crossover(mtfClose, lastHigh)
+    marketDir := 1
+    label.new(bar_index, high, "BOS ↗ (" + bosTF + ")", color=color.green, textcolor=color.white, style=label.style_label_down, size=size.tiny)
+    lastHigh := na 
+
+if ta.crossunder(mtfClose, lastLow)
+    marketDir := -1
+    label.new(bar_index, low, "BOS ↘ (" + bosTF + ")", color=color.red, textcolor=color.white, style=label.style_label_up, size=size.tiny)
+    lastLow := na
+
+// ======================================================
+// TRADE PERMISSIONS
+// ======================================================
+currentDailyPnL = strategy.equity - dayStartEquity
+isFlat = strategy.position_size == 0
+cooldownOk = bar_index - lastExitBar >= waitBars
+profitLimitHit = currentDailyPnL >= maxProfitUSD
+lossLimitHit = currentDailyPnL <= -maxLossUSD
+streakLimitHit = consecutiveLosses >= maxLossStreak 
+
+canTrade = isFlat and cooldownOk and not profitLimitHit and not lossLimitHit and not streakLimitHit
+
+// ===== PATTERN LOGIC + BOS FILTER =====
+inSession = not useTimer or not na(time(timeframe.period, sessTime))
+pOpen = open[1], pClose = close[1]
+sOpen = open, sClose = close
+pBodyHigh = math.max(pOpen, pClose), pBodyLow = math.min(pOpen, pClose)
+
+dirLongOk  = not useBOSFilter or marketDir == 1
+dirShortOk = not useBOSFilter or marketDir == -1
+
+longSignal  = canTrade and inSession and dirLongOk and pClose < pOpen and sClose > sOpen and sClose > pBodyHigh
+shortSignal = canTrade and inSession and dirShortOk and pClose > pOpen and sClose < sOpen and sClose < pBodyLow
+
+// ======================================================
+// EXECUTION
+// ======================================================
+if longSignal or shortSignal
+    tEntry := sClose
+    tStartBar := bar_index
+    tDir = longSignal ? 1 : -1
+
+    float tSL = slSource == 'Wick' ? (longSignal ? math.min(low, low[1]) : math.max(high, high[1])) : sOpen
+    float riskVal = math.abs(tEntry - tSL)
+    float tTP = longSignal ? tEntry + riskVal * rrMultiple : tEntry - riskVal * rrMultiple
+
+    float riskPerQty = riskVal * syminfo.pointvalue
+    int qty = riskPerQty > 0 ? math.min(math.floor(riskDollars / riskPerQty), maxContracts) : 0
+
+    if qty > 0
+        strategy.entry('Trade', longSignal ? strategy.long : strategy.short, qty = qty)
+        strategy.exit('Exit', 'Trade', stop = tSL, limit = tTP)
+
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    lastExitBar := bar_index
+    bool isWin = (tDir == 1 and close > tEntry) or (tDir == -1 and close < tEntry)
+    if isWin
+        consecutiveLosses := 0 
+    else
+        consecutiveLosses += 1 
+
+// Dashboard
+var table perfTable = table.new(position.top_right, 2, 4, bgcolor = color.new(color.black, 70), border_width = 1)
+if barstate.islast
+    table.cell(perfTable, 0, 0, 'Trend (' + bosTF + '):', text_color = color.white)
+    table.cell(perfTable, 1, 0, marketDir == 1 ? 'BULLISH' : marketDir == -1 ? 'BEARISH' : 'NEUTRAL', text_color = marketDir == 1 ? color.green : marketDir == -1 ? color.red : color.gray)
+    table.cell(perfTable, 0, 1, 'Daily P&L:', text_color = color.white)
+    table.cell(perfTable, 1, 1, str.tostring(currentDailyPnL, '#.##'), text_color = currentDailyPnL >= 0 ? color.green : color.red)
+    table.cell(perfTable, 0, 2, 'Loss Streak:', text_color = color.white)
+    table.cell(perfTable, 1, 2, str.tostring(consecutiveLosses) + ' / ' + str.tostring(maxLossStreak), text_color = consecutiveLosses < maxLossStreak ? color.green : color.red)
+
+View in Pine Editor・126 lines
+Use on chart
+1
+1
+405
+Strategy: MTF Market Structure & Body Breakout (BOS Filtered)
+Overview
+This Pine Script strategy identifies high-probability trade entries by combining Price Action Engulfing/Breakout patterns with Multi-Timeframe Market Structure (BOS). It is designed for traders who want to follow the "Path of Least Resistance" by ensuring entries on a lower timeframe align with the trend of a higher timeframe.
+
+Key Features
+Multi-Timeframe (MTF) Filter: Automatically detects Break of Structure (BOS) on a higher timeframe (e.g., 15m) using Pivot Highs/Lows to determine the overall market bias.
+
+Body-Close Logic: Unlike standard engulfing patterns, this entry triggers specifically when a candle body closes entirely outside the price action of the prior candle's body, signaling strong momentum.
+
+Dynamic Risk Management: * Calculates position size automatically based on a fixed dollar amount ($200 by default) per trade.
+
+Adjustable Stop Loss source (Wick-based for safety or Body-based for tighter entries).
+
+Institutional Safeguards: * Daily Loss/Profit Limits: Stops trading once a specific dollar target or loss threshold is hit for the day.
+
+Loss Streak Protection: Automatically halts trading after a user-defined number of consecutive losses to prevent revenge trading.
+
+Post-Trade Cooldown: Forces a "wait period" (candle count) after an exit before a new entry can be taken.
+
+Session Filtering: Restricts trading to specific hours (e.g., NYSE Open) to avoid low-liquidity chop.
+
+Technical Logic
+Market Bias: The script tracks PivotHigh and PivotLow on the BOS Timeframe. A close above the last Pivot High sets a Bullish bias; a close below the last Pivot Low sets a Bearish bias.
+
+The Entry:
+
+Long: Market Bias is Bullish + Prior candle was Bearish + Current candle is Bullish + Current Close is higher than the prior candle's Body High.
+
+Short: Market Bias is Bearish + Prior candle was Bullish + Current candle is Bearish + Current Close is lower than the prior candle's Body Low.
+
+Exit Strategy: Uses a fixed Risk:Reward ratio (Default 1:2). The Stop Loss is dynamically placed at the recent swing (wick) or the candle open.
+
+Visual Dashboard
+The strategy includes a real-time HUD (Heads-Up Display) in the top-right corner of the chart, tracking:
+
+Current Trend Direction (MTF)
+
+Current Daily P&L (USD)
+
+Current Loss Streak vs. Maximum allowed.

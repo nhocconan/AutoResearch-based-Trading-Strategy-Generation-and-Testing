@@ -1,0 +1,38 @@
+//@version=5
+strategy("TPS - FX Trade", overlay=true)
+
+laggingSpan2Periods = input.int(52, minval=1, title="Lead Look Back")
+displacement = input.int(26, minval=1, title="Displacement")
+
+pozyonu = input.bool(false,title="Sadece Long Yönlü Poz Aç")
+
+// Stop Loss ve Kar Al Seviye Girişleri
+TPLong = input.int(10000, minval = 30, title ="Long Kar Al Puanı", step=10)
+SLLong = input.int(7500, minval = 30, title ="Long Zarar Durdur Puanı", step=10)
+TPShort = input.int(20000, minval = 30, title ="Short Kar Al Puanı", step=10)
+SLShort = input.int(7500, minval = 30, title ="Short Zarar Durdur Puanı", step=10)
+
+
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+leadLine = donchian(laggingSpan2Periods)
+plot(leadLine, offset = displacement - 1, color=#EF9A9A,title="Lead2 Çizgisi")
+
+buycross = ta.crossover(close,leadLine[displacement-1]) 
+sellcross = ta.crossover(leadLine[displacement-1],close)
+
+
+if (buycross) and (pozyonu == true) or buycross 
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", profit=TPLong, loss=SLLong)
+if (sellcross) and pozyonu == false
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", profit=TPShort, loss=SLShort)
+
+View in Pine Editor・32 lines
+Use on chart
+6
+9
+3 767
+I based my strategy on the Lagging Span 2 line in the Ichimoku Cloud. I actually designed the strategy for the DAX Germany index 3 Minutes period, but you can use it on any instrument you want. I would like to point out some points that you should pay attention to when optimizing the strategy for the instrument you want to use.
+
+Position Take Profit and Stop Loss levels are tick calculations. These values ​​will differ for each instrument. If you are trading in Forex, the values ​​you will write here should be starting from the numbers after the comma in the instrument value. For example, if you want to take profit at "200" points in DAX, you must write "20000" in the Long or Short Take Profit Score field, this applies to the Stop Loss Points, but if you want to take profit or stop loss at 200 points in UKOIL, you must write "200" in the entry part.

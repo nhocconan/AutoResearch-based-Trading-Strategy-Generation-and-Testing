@@ -1,0 +1,368 @@
+//@version=6
+strategy("System 0530 - Stoch RSI Strategy v13 SL-Priority TP-Reversal", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=false, process_orders_on_close=true)
+
+// --- Original Indicator Input Parameters ---
+g_stoch = "Stochastic RSI Parameters"
+rsi_len = input.int(14, "RSI Period", minval=1, group=g_stoch)
+stoch_rsi_len = input.int(14, "Stochastic of RSI Period (K Period for Stoch)", minval=1, group=g_stoch)
+stoch_k_smooth = input.int(3, "Stochastic %K Smoothing (D Period for Stoch)", minval=1, group=g_stoch)
+stoch_d_smooth = input.int(3, "Stochastic %D Smoothing (Smoothing for final D)", minval=1, group=g_stoch)
+
+g_signal = "Signal Trigger and Confirmation Parameters"
+stoch_5min_k_long_trigger = input.float(40.0, "5-min Stoch K Long Trigger Level (K must be ≤ this value)", minval=0, maxval=100, step=0.1, group=g_signal, tooltip="On the 5-minute chart, when the K line crosses above the D line, the K value at that time must be less than or equal to this setting to initiate a long signal wait.")
+stoch_5min_k_short_trigger = input.float(70.0, "5-min Stoch K Short Trigger Level (K must be ≥ this value)", minval=0, maxval=100, step=0.1, group=g_signal, tooltip="On the 5-minute chart, when the K line crosses below the D line, the K value at that time must be greater than or equal to this setting to initiate a short signal wait.")
+stoch_15min_long_entry_level = input.int(50, "15-min Stoch K Long Confirmation Threshold (K must be below this value)", minval=0, maxval=100, group=g_signal, tooltip="On the 15-minute chart, for final long confirmation, the 15-minute K line value must be below this setting.")
+stoch_15min_short_entry_level = input.int(70, "15-min Stoch K Short Confirmation Threshold (K must be above this value)", minval=0, maxval=100, group=g_signal, tooltip="On the 15-minute chart, for final short confirmation, the 15-minute K line value must be above this setting.")
+wait_window_5min_bars = input.int(7, "Number of 5-min bars to wait for 15-min signal", minval=1, group=g_signal, tooltip="After a 5-minute signal is issued, wait for 15-minute signal confirmation within the next N 5-minute bars.")
+
+g_repeat_filter = "Duplicate Signal Filtering Settings"
+use_signal_cooldown_filter = input.bool(true, title="Enable Duplicate Signal Filter", group=g_repeat_filter, tooltip="Filters out duplicate signals in the same direction within a short period.")
+min_bars_between_signals = input.int(12, title="Minimum Bars Between Same-Direction Signals", minval=1, group=g_repeat_filter, tooltip="After a signal is issued, at least this many bars must pass before another signal in the same direction can be issued.")
+
+// --- Take Profit Parameters ---
+g_tp_params = "Take Profit Parameters"
+extreme_long_tp_level = input.float(95.0, "Extreme Long TP Level (Stoch K >)", minval=50, maxval=100, step=0.1, group=g_tp_params, tooltip="Direct TP for longs if 5-min OR 15-min Stoch K exceeds this.")
+extreme_short_tp_level = input.float(5.0, "Extreme Short TP Level (Stoch K <)", minval=0, maxval=50, step=0.1, group=g_tp_params, tooltip="Direct TP for shorts if 5-min OR 15-min Stoch K is below this.")
+
+// --- Strategy Specific Input Parameters ---
+g_strategy = "Strategy Parameters"
+leverage_multiplier = input.float(1.0, "Leverage Multiplier (Affects theoretical position size only)", minval=1.0, step=0.1, group=g_strategy, tooltip="Note: TradingView strategies do not directly simulate margin account liquidation. This leverage is used to calculate theoretical position size. Actual leverage effects must be realized with a broker that supports leverage.")
+
+// --- Function: Calculate Stochastic RSI ---
+getStochasticRSI(src, rsiLen, stochLen, kSmooth, dSmooth) =>
+    rsi_val = ta.rsi(src, rsiLen)
+    stoch_rsi_k_raw = ta.stoch(rsi_val, rsi_val, rsi_val, stochLen) // Stoch of RSI
+    stoch_rsi_k = ta.sma(stoch_rsi_k_raw, kSmooth)
+    stoch_rsi_d = ta.sma(stoch_rsi_k, dSmooth)
+    [stoch_rsi_k, stoch_rsi_d]
+
+// --- Helper Function to get only K-series for Stochastic RSI (RE-ADDED for 15-min prev K) ---
+getStochKSeriesOnly(src, rsiLen, stochLen, kSmooth, dSmooth) =>
+    rsi_val = ta.rsi(src, rsiLen)
+    stoch_rsi_k_raw = ta.stoch(rsi_val, rsi_val, rsi_val, stochLen)
+    stoch_rsi_k = ta.sma(stoch_rsi_k_raw, kSmooth)
+    stoch_rsi_k // Return only the K series
+
+// --- Time Series Data Fetching and Stochastic RSI Calculation ---
+[stoch_k_15min_val, stoch_d_15min_val] = request.security(syminfo.tickerid, "15", getStochasticRSI(close, rsi_len, stoch_rsi_len, stoch_k_smooth, stoch_d_smooth), lookahead=barmerge.lookahead_off)
+// RE-ADDED: K value of the PREVIOUS 15-minute bar's Stochastic RSI
+stoch_k_15min_prev_tf_bar = request.security(syminfo.tickerid, "15", nz(getStochKSeriesOnly(close, rsi_len, stoch_rsi_len, stoch_k_smooth, stoch_d_smooth)[1]), lookahead=barmerge.lookahead_off)
+[stoch_k_5min_val, stoch_d_5min_val] = getStochasticRSI(close, rsi_len, stoch_rsi_len, stoch_k_smooth, stoch_d_smooth)
+
+// --- Signal Logic State Variables ---
+var bool waiting_for_15m_long_confirm = false
+var bool waiting_for_15m_short_confirm = false
+var int bars_elapsed_in_wait_state = 0
+var int last_long_signal_bar_idx = -min_bars_between_signals 
+var int last_short_signal_bar_idx = -min_bars_between_signals
+
+// --- Variables to store SL reference points from ENTRY bar ---
+var float entry_bar_low_for_sl = na
+var float entry_bar_high_for_sl = na
+
+// --- Take Profit Logic State Variables ---
+var bool first_tp_long_taken = false
+var bool first_tp_short_taken = false
+// RE-ADDED: State variables for pending TP confirmation on 15-min reversal
+var bool pending_long_tp_on_15m_reversal = false
+var bool pending_short_tp_on_15m_reversal = false
+
+// --- Detect 5-minute Stochastic RSI crossover events for ENTRY ---
+bool stoch_5min_crossed_up_prev_bar = ta.crossover(stoch_k_5min_val[1], stoch_d_5min_val[1])
+bool stoch_5min_crossed_down_prev_bar = ta.crossunder(stoch_k_5min_val[1], stoch_d_5min_val[1])
+bool condition_5min_k_level_for_long_trigger = stoch_k_5min_val[1] <= stoch_5min_k_long_trigger
+bool condition_5min_k_level_for_short_trigger = stoch_k_5min_val[1] >= stoch_5min_k_short_trigger
+
+// --- Specific 5-minute Stochastic RSI crossover for Take Profit (current bar) ---
+bool stoch_5min_k_cross_under_d_tp = ta.crossunder(stoch_k_5min_val, stoch_d_5min_val) // For Long TP trigger
+bool stoch_5min_k_cross_over_d_tp  = ta.crossover(stoch_k_5min_val, stoch_d_5min_val)  // For Short TP trigger
+
+// --- RE-ADDED: 15-minute Reversal Confirmation for Take Profit ---
+bool confirm_15m_reversal_for_long_tp = stoch_k_15min_val < stoch_k_15min_prev_tf_bar
+bool confirm_15m_reversal_for_short_tp = stoch_k_15min_val > stoch_k_15min_prev_tf_bar
+
+// --- Manage waiting state and tolerance period for ENTRY ---
+if (strategy.position_size == 0)
+    if (stoch_5min_crossed_up_prev_bar and condition_5min_k_level_for_long_trigger)
+        can_trigger_new_long = not use_signal_cooldown_filter or (bar_index - last_long_signal_bar_idx >= min_bars_between_signals)
+        if (can_trigger_new_long)
+            waiting_for_15m_long_confirm := true
+            waiting_for_15m_short_confirm := false 
+            bars_elapsed_in_wait_state := 1
+    else if (stoch_5min_crossed_down_prev_bar and condition_5min_k_level_for_short_trigger)
+        can_trigger_new_short = not use_signal_cooldown_filter or (bar_index - last_short_signal_bar_idx >= min_bars_between_signals)
+        if (can_trigger_new_short)
+            waiting_for_15m_short_confirm := true
+            waiting_for_15m_long_confirm := false 
+            bars_elapsed_in_wait_state := 1
+    else if (waiting_for_15m_long_confirm or waiting_for_15m_short_confirm)
+        bars_elapsed_in_wait_state += 1
+    
+    if (bars_elapsed_in_wait_state > wait_window_5min_bars)
+        waiting_for_15m_long_confirm := false
+        waiting_for_15m_short_confirm := false
+        bars_elapsed_in_wait_state := 0 
+else 
+    waiting_for_15m_long_confirm := false
+    waiting_for_15m_short_confirm := false
+    bars_elapsed_in_wait_state := 0
+
+// --- 15-minute Stochastic RSI confirmation conditions for ENTRY (Strict Crossover) ---
+bool confirm_15min_long_stoch_kd_cond = stoch_k_15min_val > stoch_d_15min_val // K must be strictly greater than D
+bool confirm_15min_short_stoch_kd_cond = stoch_k_15min_val < stoch_d_15min_val // K must be strictly less than D
+bool filter_15min_stoch_level_long = stoch_k_15min_val < stoch_15min_long_entry_level
+bool filter_15min_stoch_level_short = stoch_k_15min_val > stoch_15min_short_entry_level
+
+// --- Main Signal Determination (for strategy logic) ---
+entry_long_signal = false
+entry_short_signal = false
+
+if (strategy.position_size == 0) 
+    if (waiting_for_15m_long_confirm and bars_elapsed_in_wait_state <= wait_window_5min_bars)
+        if (confirm_15min_long_stoch_kd_cond and filter_15min_stoch_level_long)
+            can_confirm_new_long = not use_signal_cooldown_filter or (bar_index - last_long_signal_bar_idx >= min_bars_between_signals)
+            if (can_confirm_new_long)
+                entry_long_signal := true
+    if (waiting_for_15m_short_confirm and bars_elapsed_in_wait_state <= wait_window_5min_bars)
+        if (confirm_15min_short_stoch_kd_cond and filter_15min_stoch_level_short)
+            can_confirm_new_short = not use_signal_cooldown_filter or (bar_index - last_short_signal_bar_idx >= min_bars_between_signals)
+            if (can_confirm_new_short)
+                entry_short_signal := true
+
+// --- Strategy Execution Logic ---
+// Reset SL ref and TP flags if position just closed
+if (strategy.position_size == 0 and strategy.position_size[1] != 0) 
+    first_tp_long_taken := false
+    first_tp_short_taken := false
+    entry_bar_low_for_sl := na 
+    entry_bar_high_for_sl := na 
+    pending_long_tp_on_15m_reversal := false // Reset pending TP flag
+    pending_short_tp_on_15m_reversal := false // Reset pending TP flag
+
+if (entry_long_signal) 
+    strategy.entry("LE", strategy.long, comment="Long Entry")
+    last_long_signal_bar_idx := bar_index 
+    waiting_for_15m_long_confirm := false 
+    bars_elapsed_in_wait_state := 0
+    first_tp_long_taken := false 
+    entry_bar_low_for_sl := low 
+    entry_bar_high_for_sl := na 
+    pending_long_tp_on_15m_reversal := false // Reset for new trade
+    pending_short_tp_on_15m_reversal := false    
+
+if (entry_short_signal) 
+    strategy.entry("SE", strategy.short, comment="Short Entry")
+    last_short_signal_bar_idx := bar_index 
+    waiting_for_15m_short_confirm := false 
+    bars_elapsed_in_wait_state := 0
+    first_tp_short_taken := false  
+    entry_bar_high_for_sl := high 
+    entry_bar_low_for_sl := na    
+    pending_short_tp_on_15m_reversal := false // Reset for new trade
+    pending_long_tp_on_15m_reversal := false
+
+// --- Stop Loss Logic (PRIORITY 1) ---
+// Check and execute SL first. If SL triggers, position size becomes 0, preventing TP logic below from executing on the same bar.
+bool sl_triggered_this_bar = false
+if (strategy.position_size > 0) // If in a long trade
+    if (not na(entry_bar_low_for_sl) and close < entry_bar_low_for_sl)
+        strategy.close(id="LE", comment="SL Long")
+        sl_triggered_this_bar := true
+        pending_long_tp_on_15m_reversal := false // Ensure pending TP is cancelled if SL hits
+
+if (strategy.position_size < 0) // If in a short trade
+    if (not na(entry_bar_high_for_sl) and close > entry_bar_high_for_sl)
+        strategy.close(id="SE", comment="SL Short")
+        sl_triggered_this_bar := true
+        pending_short_tp_on_15m_reversal := false // Ensure pending TP is cancelled if SL hits
+
+// --- Take Profit Logic (PRIORITY 2 - only if SL did not trigger on this bar) ---
+if (not sl_triggered_this_bar) // Only proceed with TP if SL hasn't already closed the position on this bar
+    if (strategy.position_size > 0) // --- LONG TP LOGIC ---
+        extreme_long_tp_condition = stoch_k_5min_val > extreme_long_tp_level or stoch_k_15min_val > extreme_long_tp_level
+        if (extreme_long_tp_condition)
+            if (not first_tp_long_taken)
+                strategy.close(id="LE", comment="TP1 Long", qty_percent=50)
+                first_tp_long_taken := true
+            else 
+                strategy.close(id="LE", comment="TP2 Long")
+            pending_long_tp_on_15m_reversal := false // Reset pending state as this TP takes precedence
+        else 
+            // Conditional TP logic (5-min trigger + 15-min reversal)
+            if (stoch_5min_k_cross_under_d_tp and not pending_long_tp_on_15m_reversal) // Set pending state
+                pending_long_tp_on_15m_reversal := true
+        
+            if (pending_long_tp_on_15m_reversal and confirm_15m_reversal_for_long_tp) // Check for confirmation
+                if (not first_tp_long_taken)
+                    strategy.close(id="LE", comment="TP1 Long", qty_percent=50)
+                    first_tp_long_taken := true
+                else 
+                    strategy.close(id="LE", comment="TP2 Long")
+                pending_long_tp_on_15m_reversal := false // Reset after TP
+
+    if (strategy.position_size < 0) // --- SHORT TP LOGIC ---
+        extreme_short_tp_condition = stoch_k_5min_val < extreme_short_tp_level or stoch_k_15min_val < extreme_short_tp_level
+        if (extreme_short_tp_condition)
+            if (not first_tp_short_taken)
+                strategy.close(id="SE", comment="TP1 Short", qty_percent=50)
+                first_tp_short_taken := true
+            else 
+                strategy.close(id="SE", comment="TP2 Short")
+            pending_short_tp_on_15m_reversal := false // Reset pending state
+        else
+            // Conditional TP logic (5-min trigger + 15-min reversal)
+            if (stoch_5min_k_cross_over_d_tp and not pending_short_tp_on_15m_reversal) // Set pending state
+                pending_short_tp_on_15m_reversal := true
+
+            if (pending_short_tp_on_15m_reversal and confirm_15m_reversal_for_short_tp) // Check for confirmation
+                if (not first_tp_short_taken)
+                    strategy.close(id="SE", comment="TP1 Short", qty_percent=50)
+                    first_tp_short_taken := true
+                else 
+                    strategy.close(id="SE", comment="TP2 Short")
+                pending_short_tp_on_15m_reversal := false // Reset after TP
+
+// --- Plotting for Debugging/Visualization (Optional) ---
+// var line longSL_line = na
+// var line shortSL_line = na
+
+// if (strategy.position_size > 0 and not na(entry_bar_low_for_sl) and (na(longSL_line) or line.get_y1(longSL_line) != entry_bar_low_for_sl)) 
+//     if not na(longSL_line)
+//         line.delete(longSL_line)
+//     longSL_line := line.new(bar_index, entry_bar_low_for_sl, bar_index + 1, entry_bar_low_for_sl, color=color.red, style=line.style_dashed, width=1, extend=extend.right)
+// else if (strategy.position_size == 0 and not na(longSL_line))
+//     line.delete(longSL_line)
+//     longSL_line := na 
+
+// if (strategy.position_size < 0 and not na(entry_bar_high_for_sl) and (na(shortSL_line) or line.get_y1(shortSL_line) != entry_bar_high_for_sl))
+//     if not na(shortSL_line)
+//         line.delete(shortSL_line)
+//     shortSL_line := line.new(bar_index, entry_bar_high_for_sl, bar_index + 1, entry_bar_high_for_sl, color=color.green, style=line.style_dashed, width=1, extend=extend.right)
+// else if (strategy.position_size == 0 and not na(shortSL_line))
+//     line.delete(shortSL_line)
+//     shortSL_line := na
+
+View in Pine Editor・246 lines
+Use on chart
+5
+7
+2 230
+Jun 3, 2025
+Strategy Description: System 0530 - Multi-Timeframe Stochastic RSI with ATR Filter
+Overview:
+This strategy, "System 0530," is designed to identify trading opportunities by leveraging the Stochastic RSI indicator across two different timeframes: a shorter timeframe for initial signal triggers (assumed to be the chart's current timeframe, e.g., 5-minute) and a longer timeframe (15-minute) for signal confirmation. It incorporates an ATR (Average True Range) filter to help ensure trades are taken during periods of adequate market volatility and includes a cooldown mechanism to prevent rapid, successive signals in the same direction. Trade exits are primarily handled by reversing signals.
+
+How It Works:
+
+1. Signal Initiation (e.g., 5-Minute Timeframe):
+
+Long Signal Wait: A potential long entry is considered when the 5-minute Stochastic RSI %K line crosses above its %D line, AND the %K value at the time of the cross is at or below a user-defined oversold level (default: 30).
+Short Signal Wait: A potential short entry is considered when the 5-minute Stochastic RSI %K line crosses below its %D line, AND the %K value at the time of the cross is at or above a user-defined overbought level (default: 70). When these conditions are met, the strategy enters a "waiting state" for confirmation from the 15-minute timeframe.
+2. Signal Confirmation (15-Minute Timeframe):
+
+Once in a waiting state, the strategy looks for confirmation on the 15-minute Stochastic RSI within a user-defined number of 5-minute bars (wait_window_5min_bars, default: 5 bars).
+Long Confirmation:
+The 15-minute Stochastic RSI %K must be greater than or equal to its %D line.
+The 15-minute Stochastic RSI %K value must be below a user-defined threshold (stoch_15min_long_entry_level, default: 40).
+Short Confirmation:
+The 15-minute Stochastic RSI %K must be less than or equal to its %D line.
+The 15-minute Stochastic RSI %K value must be above a user-defined threshold (stoch_15min_short_entry_level, default: 60).
+3. Filters:
+
+ATR Volatility Filter: If enabled, trades are only confirmed if the current ATR value (converted to ticks) is above a user-defined minimum threshold (min_atr_value_ticks). This helps to avoid taking signals during periods of very low market volatility. If the ATR condition is not met, the strategy continues to wait for the condition to be met within the confirmation window, provided other conditions still hold.
+Signal Cooldown Filter: If enabled, after a signal is generated, the strategy will wait for a minimum number of bars (min_bars_between_signals) before allowing another signal in the same direction. This aims to reduce overtrading.
+4. Entry and Exit Logic:
+
+Entry: A strategy.entry() order is placed when all trigger, confirmation, and filter conditions are met.
+Exit: This strategy primarily uses reversing signals for exits. For example, if a long position is open, a confirmed short signal will close the long position and open a new short position. There are no explicit take profit or stop loss orders programmed into this version of the script.
+Key User-Adjustable Parameters:
+
+Stochastic RSI Parameters: RSI Length, Stochastic RSI Length, %K Smoothing, %D Smoothing.
+Signal Trigger & Confirmation:
+5-minute %K trigger levels for long and short.
+15-minute %K confirmation thresholds for long and short.
+Wait window (in 5-minute bars) for 15-minute confirmation.
+Filters:
+Enable/disable and configure the Signal Cooldown filter (minimum bars between signals).
+Enable/disable and configure the ATR Volatility filter (ATR period, minimum ATR value in ticks).
+Strategy Parameters:
+Leverage Multiplier (Note: This primarily affects theoretical position sizing for backtesting calculations in TradingView and does not simulate actual leveraged trading risks).
+Recommendations for Users:
+
+Thorough Backtesting: Test this strategy extensively on historical data for the instruments and timeframes you intend to trade.
+Parameter Optimization: Experiment with different parameter settings to find what works best for your trading style and chosen markets. The default values are starting points and may not be optimal for all conditions.
+Understand the Logic: Ensure you understand how each component (Stochastic RSI on different timeframes, ATR filter, cooldown) interacts to generate signals.
+Risk Management: Since this version does not include explicit stop-loss orders, ensure you have a clear risk management plan in place if trading this strategy live. You might consider manually adding stop-loss orders through your broker or using TradingView's separate strategy order settings for stop-loss if applicable.
+Disclaimer:
+This strategy description is for informational purposes only and does not constitute financial advice. Past performance is not indicative of future results. Trading involves significant risk of loss. Always do your own research and understand the risks before trading.
+Jun 4, 2025
+Release Notes
+Strategy Overview: System 0530 - Stochastic RSI Multi-Timeframe
+This TradingView Pine Script outlines a strategy primarily based on the Stochastic RSI (Stoch RSI) indicator, employing a multi-timeframe approach for signal generation and confirmation. It is designed to operate on a 5-minute chart, referencing 15-minute data for higher-level context.
+
+Core Mechanics:
+
+Primary Indicator: Stochastic RSI, used to identify overbought/oversold conditions and potential momentum shifts.
+
+Timeframes:
+
+5-minute chart: For initial signal triggers and primary execution.
+
+15-minute chart: For signal confirmation and certain take-profit conditions.
+
+Entry Logic:
+
+5-Minute Initial Trigger:
+
+Long: 5-minute Stoch RSI K-line crosses above its D-line, AND the K-value at the time of the cross is below a specified stoch_5min_k_long_trigger level.
+
+Short: 5-minute Stoch RSI K-line crosses below its D-line, AND the K-value at the time of the cross is above a specified stoch_5min_k_short_trigger level.
+
+15-Minute Confirmation:
+
+After a 5-minute trigger, the strategy waits for a configurable number of 5-minute bars (wait_window_5min_bars) for confirmation from the 15-minute timeframe.
+
+Long Confirmation: 15-minute Stoch RSI K-line must be strictly greater than its D-line, AND the 15-minute K-value must be below stoch_15min_long_entry_level.
+
+Short Confirmation: 15-minute Stoch RSI K-line must be strictly less than its D-line, AND the 15-minute K-value must be above stoch_15min_short_entry_level.
+
+Position Lock: No new entry signals are generated if the strategy already holds an open position.
+
+Duplicate Signal Filter: A cooldown period, defined by min_bars_between_signals, must pass before another signal in the same direction can be considered.
+
+Exit Logic:
+
+Stop-Loss (SL):
+
+The SL is set based on the low (for longs) or high (for shorts) of the 5-minute bar on which the trade was entered.
+
+The position is closed if a subsequent 5-minute bar's closing price moves beyond this SL level.
+
+SL checks are prioritized over Take-Profit checks.
+
+Take-Profit (TP) - Two-Stage Mechanism:
+
+TP1 (Closes 50% of the position):
+
+Priority A (Extreme K Levels): If the 5-minute Stoch K OR 15-minute Stoch K value exceeds extreme_long_tp_level (for longs) or drops below extreme_short_tp_level (for shorts).
+
+Priority B (Conditional 5-min Cross + 15-min K-Reversal): If Extreme K conditions are not met, TP1 is triggered if:
+
+A 5-minute Stoch RSI K/D crossover occurs (K crosses below D for longs; K crosses above D for shorts - using strict ta.crossunder/ta.crossover).
+
+AND this 5-minute crossover is confirmed by a 15-minute Stoch K-value "reversal" (current 15m K < previous 15m K for longs; current 15m K > previous 15m K for shorts).
+
+TP2 (Closes remaining 50% of the position):
+
+This stage is active only after TP1 has been taken.
+
+If the 5-minute Stoch K OR 15-minute Stoch K value reaches the same extreme_long_tp_level or extreme_short_tp_level again, a waiting period begins, defined by tp2_extreme_k_wait_bars (number of 5-minute bars).
+
+If the extreme K condition persists after this waiting period, TP2 is executed.
+
+If the extreme K condition disappears during the waiting period, the TP2 attempt for that instance is cancelled.
+
+If tp2_extreme_k_wait_bars is set to 0, TP2 will trigger immediately upon the extreme K condition being met after TP1.
+
+Note on Fine-Tuning (as per user context):
+This strategy has been specifically fine-tuned for SPY. As with any trading system, its performance can vary across different instruments and market conditions. The user notes that to potentially maximize profits, especially in trending scenarios where the current "Extreme K" based TP2 might exit prematurely, it is advisable to explore and integrate other indicators or alternative take-profit methodologies. Dynamic approaches like ATR (Average True Range) trailing stops or trend-following exit signals could be considered for managing the second portion of the position.

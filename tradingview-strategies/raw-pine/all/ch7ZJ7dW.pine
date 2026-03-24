@@ -1,0 +1,98 @@
+//@version=5
+strategy("Larry Conners SMTP Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// --- Inputs ---
+// Corrected the input type declaration by removing 'type='
+tickSize = input.float(0.01, title="Tick Size (e.g., 1/8 for stocks)")
+
+// --- Calculate conditions ---
+// 1. Today the market must make a 10-period low
+low10 = ta.lowest(low, 10)
+is10PeriodLow = low == low10
+
+// 2. Today's range must be the largest of the past 10 bars
+rangeToday = high - low
+maxRange10 = ta.highest(high - low, 10)
+isLargestRange = rangeToday == maxRange10
+
+// 3. Today's close must be in the top 25 percent of today's range
+rangePercent = (close - low) / rangeToday
+isCloseInTop25 = rangePercent >= 0.75
+
+// Combine all buy conditions
+buyCondition = is10PeriodLow and isLargestRange and isCloseInTop25
+
+// --- Buy Entry (on the next day) ---
+var float buyPrice = na
+var bool orderPending = false
+var float stopLoss = na  // Initialize stopLoss at the top level to avoid 'Undeclared identifier' errors
+
+if (buyCondition and strategy.position_size == 0)
+    buyPrice := high + tickSize
+    stopLoss := low
+    orderPending := true
+
+// Condition to place buy order the next day or the day after
+if orderPending and ta.barssince(buyCondition) <= 2
+    strategy.entry("Buy", strategy.long, stop=buyPrice)
+    orderPending := false
+
+// --- Stop-Loss and Trailing Stop ---
+if (strategy.position_size > 0)
+    stopLoss := math.max(stopLoss, low) // Move stop to higher lows (manual trailing)
+    strategy.exit("Exit", from_entry="Buy", stop=stopLoss)
+
+// --- Plotting ---
+// Highlight buy conditions
+bgcolor(buyCondition ? color.new(color.green, 50) : na)
+//plotshape(series=buyCondition, location=location.belowbar, color=color.green, style=shape.labelup, text="Buy Setup")
+
+// Plot Stop-Loss level for visualization
+//plot(strategy.position_size > 0 ? stopLoss : na, color=color.red, linewidth=2, title="Stop-Loss Level")
+
+View in Pine Editor・51 lines
+Use on chart
+4
+6
+2 515
+The Spent Market Trading Pattern is a strategy developed by Larry Connors, typically used for short-term mean reversion trading. This strategy takes advantage of the exhaustion in market momentum by entering trades when the market is perceived as "spent" after extended trends or extreme moves, expecting a short-term reversal. Connors uses indicators like RSI (Relative Strength Index) and price action patterns to identify these opportunities.
+
+Key Elements of the Strategy:
+
+Overbought/Oversold Conditions: The strategy looks for extreme overbought or oversold conditions, often indicated by low RSI values (below 30 for oversold and above 70 for overbought).
+
+Mean Reversion: Connors believed that markets, especially in short-term scenarios, tend to revert to the mean after periods of strong momentum. The "spent" market is assumed to have expended its energy, making a reversal likely.
+
+Entry Signals:
+
+In an uptrend, a stock or market index making a significant number of consecutive up days (e.g., 5-7 consecutive days with higher closes) indicates overbought conditions.
+
+In a downtrend, a similar number of consecutive down days indicates oversold conditions.
+
+Reversal Anticipation: Once an extreme in price movement is identified (such as consecutive gains or losses), the strategy places trades anticipating a reversion to the mean, which is usually the 5-day or 10-day moving average.
+
+Exit Points: Trades are exited when prices move back toward their mean or when the extreme conditions dissipate, usually based on RSI or moving average thresholds.
+
+Why the Strategy Works:
+
+Human Psychology: The strategy capitalizes on the fact that markets, in the short term, often behave irrationally due to the emotions of traders—fear and greed lead to overextended moves.
+
+Mean Reversion Tendency: Financial markets often exhibit mean-reverting behavior, where prices temporarily deviate from their historical norms but eventually return. Short-term exhaustion after a strong rally or sell-off offers opportunities for quick profits.
+
+Overextended Moves: Markets that rise or fall too quickly tend to become overextended, as buyers or sellers get exhausted, making reversals more probable. Connors’ approach identifies these moments when the market is "spent" and ripe for a reversal.
+
+Risks of the Spent Market Trading Pattern Strategy:
+
+Trend Continuation: One of the key risks is that the market may not revert as expected and instead continues in the same direction. In trending markets, mean-reversion strategies can suffer because strong trends can last longer than anticipated.
+
+False Signals: The strategy relies heavily on technical indicators like RSI, which can produce false signals in volatile or choppy markets. There can be times when a market appears "spent" but continues in its current direction.
+
+Market Timing: Mean reversion strategies often require precise market timing. If the entry or exit points are mistimed, it can lead to losses, especially in short-term trades where small price movements can significantly impact profitability.
+
+High Transaction Costs: This strategy requires frequent trades, which can lead to higher transaction costs, especially in markets with wide bid-ask spreads or high commissions.
+
+Conclusion:
+
+Larry Connors’ Spent Market Trading Pattern strategy is built on the principle of mean reversion, leveraging the concept that markets tend to revert to a mean after extreme moves. While effective in certain conditions, such as range-bound markets, it carries risks—especially during strong trends—where price momentum may not reverse as quickly as expected.
+
+For a more in-depth explanation, Larry Connors’ books such as "Short-Term Trading Strategies That Work" provide a comprehensive guide to this and other strategies .

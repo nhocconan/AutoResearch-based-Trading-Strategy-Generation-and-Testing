@@ -1,0 +1,93 @@
+//@version=5
+strategy("Range Trading SOL/USD", overlay=true, pyramiding=3)
+
+//English: Use this Strategy on the 1H Chart on Solana, only use it when the Market is Ranging! 
+//German: Dieser Version der Strategie ist für den 1H chart auf Solana optimiert.
+
+
+//Settings:
+//100.000USD, 10% Margin, 15.000USD Position Size, 1H Chart on solana, 1 Year Test-time, 0.025% provision
+//offsetlong=7, offsetshort=5
+//Max. Loss = 7USD (avg. Prize diff.), lookback=72h
+
+// Lookback Period
+length = input.int(72, "Lookback")
+
+// VAH / VAL approximation
+high1 = ta.highest(high[12], length)
+low1 = ta.lowest(low[12], length)
+
+// Graphik
+plot(high1, color=color.red, title="VAH")
+plot(low1, color=color.green, title="VAL")
+
+// Settings for absolute high/low
+offsetlong = input.float(9, "offsetlong")
+offsetshort = input.float(12, "offsetshort")
+
+// Calculation of absoluten highs/lows
+float absHigh = high1 + offsetlong
+float absLow = low1 - offsetshort
+
+// Graphik
+plot(absHigh, color=color.rgb(221, 23, 195), title="absHigh")
+plot(absLow, color=color.rgb(18, 57, 233), title="absLow")
+
+// Entry conditions
+shortCondition = ta.crossunder(close, high1)
+longCondition = ta.crossover(close, low1)
+// Entry execution
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+// Exit conditions
+if high > high1
+    strategy.close("Long")
+
+if low < low1
+    strategy.close("Short")
+
+
+// Risk Managment 
+if high > absHigh
+    strategy.close("Short")
+
+if low < absLow
+    strategy.close("Long")
+
+// Risk Managment if code fails
+maxLoss = input.float(7, "Max Verlust pro Trade")
+
+currentLoss = strategy.position_size > 0 ? strategy.position_avg_price - close : close - strategy.position_avg_price
+
+if currentLoss > maxLoss
+    strategy.close_all()
+
+View in Pine Editor・67 lines
+Use on chart
+9
+343
+Only apply if the marked is in a Range on the Daily chart, apply it on the hour chart
+Release Notes
+Recommended Usage
+
+Check the Daily chart and confirm that the market is moving sideways.
+
+Switch to the 1-hour timeframe.
+
+Apply the strategy to BTC or SOL.
+
+Monitor performance and adjust parameters such as the percentage offsets if needed.
+Release Notes
+This strategy has been specifically optimized for Solana (SOL) on the 1H chart. This Stategy prioritizes Risk Managment over all, so you can use it on a fundet Account.
+
+For the best results, it is recommended not to modify the code and simply use the settings defined at the top of the script. (Look at the Code under Settings:)
+
+The parameters included there were carefully selected during the optimization process, and changing them may significantly affect the performance of the indicator.
+
+If this indicator helps you generate profits, it would be greatly appreciated if you consider giving something back as a way of supporting the work behind it. Your support helps to continue developing and improving tools like this.
+Release Notes
+Name change for spezification

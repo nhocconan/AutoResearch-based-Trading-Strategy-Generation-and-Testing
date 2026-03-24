@@ -1,0 +1,98 @@
+//@version=5
+strategy("Strategy Gaussian Anomaly Derivative", overlay=false)
+import TradingView/ta/5
+
+//SETUP BOX
+//Signal Setup
+ma = input(true,"SMA instead of EMA on Close - H-L Comparative Signal", group="==========Indicator Signal Setup==========")
+maInput = input(3, "MA Period", group="==========Indicator Signal Setup==========")
+rthC= input(1.0, "Threathold Coefficient Ratio", tooltip = ("Used as trading and color trigger"), group="==========Indicator Signal Setup==========")
+dmaInput  = input(2, "Derivative MA Period", group="==========Indicator Signal Setup==========")
+dthC= input(1.0, "Threathold Coefficient Derivative", tooltip = ("Used as trading and color trigger"), group="==========Indicator Signal Setup==========")
+
+//Strategy Setup
+tradtrigger = input(true, "Trade trigger on Derivative signal", tooltip = ("Plotted as histogram"), group="==========Trading Strategy Setup==========")
+sh = input(true,"Short", group="==========Trading Strategy Setup==========")
+lg = input(true,"Long", group="==========Trading Strategy Setup==========")
+br = input(600,"Bar Index Start", group="==========Trading Strategy Setup==========")
+
+//CALCULATION
+//  1. Closetrend is the Basis Signal
+closetrend = ma==true ? ta.sma(length = maInput, source = 1-(high+low)/(2*close)):ta.ema(length = maInput, source = 1-(high+low)/(2*close))
+    //Threathold for indicator
+th =ta.sma(closetrend>0?closetrend:0, last_bar_index/3)*rthC
+plot(closetrend/ta.allTimeHigh(closetrend)*100, color = closetrend>0 ? closetrend>th? color.rgb(6, 18, 237) : color.rgb(19, 14, 98)  : closetrend <-th? color.rgb(151, 4, 237) : color.rgb(61, 7, 86) , style=plot.style_area, linewidth = 1)
+
+//  2. Basis Signal Derivative
+dv = ta.ema(closetrend-closetrend[1],dmaInput)
+    //Threathold for signal derivative
+th2=ta.sma(dv>0?dv:0, last_bar_index/3)*dthC
+plot(dv/ta.allTimeHigh(dv)*100, color = dv>0 ? dv>th2? color.rgb(15, 213, 18) : color.rgb(9, 105, 11)  : dv <-th2? color.rgb(210, 12, 12) : color.rgb(107, 12, 12) , style=plot.style_histogram, linewidth = 4)
+
+//STRATEGY
+//Strategy Order Selection
+if tradtrigger==true
+    if  bar_index> last_bar_index - br
+        if dv > th2
+            if lg==true
+                strategy.entry("buy", strategy.long)
+            if sh==true
+                strategy.close("sell")
+        if dv < -th2
+            if lg==true
+                strategy.close("buy")   
+            if sh==true
+                strategy.entry("sell", strategy.short)
+
+if tradtrigger==false
+    if  bar_index> last_bar_index - br
+        if closetrend > th
+            if lg==true
+                strategy.entry("buy", strategy.long)
+            if sh==true
+                strategy.close("sell")
+        if closetrend < -th
+            if lg==true
+                strategy.close("buy")   
+            if sh==true
+                strategy.entry("sell", strategy.short)
+/////////////////////////////////////END/////////////////////////////////////
+
+View in Pine Editor・59 lines
+Use on chart
+1
+8
+7
+5
+6 807
+Concept behind this Strategy :
+
+Considering a normal "buy/sell" situation, an asset would be bought in average at the median price following a Gaussian like concept. A higher or lower average trend would significate that the current perceived value is respectively higher or lower than the current median price, which mean that the buyers are evaluating the price underpriced or overpriced.
+
+This behaviour would be even more relevent depending on its derivative evolution.
+
+Therefore, this Strategy setup is based on this Gaussian like concept anomaly of average close positionning compare to high-low average derivative, such as the derivative of the following ploted basic signal : 1-(high+low)/(2*close).
+
+This Strategy can actually be used like a trend change and continuation strength indicator aswell.
+
+In the Setup Signal part :
+
+You can define the filtering of the basis signal "1-(high+low)/(2*close)" on EMA or SMA as you wish.
+
+You can define the corresponding period and the threathold as a mutiply of the average 1/3 of all time value of the basis signal.
+
+You can define the SMA filtering period of the Derivative signal and the corresponding threathold on the same mutiply of the average 1/3 of all time value of the derivative.
+
+
+
+In the Setup Strategy part :
+
+You can set up your strategy assesment based on Long and/or Short. You can also define the considered period.
+
+
+
+The most successful tuned strategies I did were based on the derivative indicator with periods on the basis signal and the derivative under 30, can be 1 to 3 of te derivative and 7 to 21 for the basis signal. The threathold depends on the asset volatility aswell, 1 is usually the most efficient but 0 to 10 can be relevent depending on the situation I met. You can find an example of tuning for this strategy based on Kering's case hereafter.
+
+I hoping that you will enjoy using this Strategy, don't hesitate to comment, to question, to correct or complete it ! I would be very curious about similar famous approaches that would have already been made.
+
+Thank to you !

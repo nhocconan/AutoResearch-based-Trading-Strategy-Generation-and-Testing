@@ -1,0 +1,111 @@
+//@version=6
+strategy("Valentini Pro Scalper [Dashboard]", overlay=true, initial_capital=10000, currency=currency.USD, calc_on_every_tick=true, process_orders_on_close=true)
+
+// ==========================================
+// 🔹 PROFESSIONAL INPUTS
+// ==========================================
+grp_mom     = "Momentum Settings"
+lookback    = input.int(40, "Range/Rotation Lookback", group=grp_mom)
+vol_mult    = input.float(2.2, "Aggression (Vol Multiplier)", step=0.1, group=grp_mom)
+
+grp_risk    = "Risk Management (Capitalist Mode)"
+sl_ticks    = input.int(10, "Initial Stop Loss (Ticks)", group=grp_risk)
+tp_ticks    = input.int(40, "Take Profit (Ticks)", group=grp_risk)
+scale_ticks = input.int(12, "Scale-In Trigger (Ticks)", group=grp_risk)
+
+// ==========================================
+// 🔹 ANALYTICS & DATA CALCULATIONS
+// ==========================================
+// Aggression: Is Volume significantly higher than the 50-period average?
+float avg_vol = ta.sma(volume, 50)
+bool is_aggressive = volume > (avg_vol * vol_mult)
+
+// Narrative: Has price broken out of the recent "Auction Range"?
+bool long_breakout  = ta.crossover(close, ta.highest(high[1], lookback))
+bool short_breakout = ta.crossunder(close, ta.lowest(low[1], lookback))
+
+// VWAP Filter (Trade with the trend of the session)
+float vwap_val = ta.vwap
+
+// ==========================================
+// 🔹 EXECUTION LOGIC (SMART ROUTING)
+// ==========================================
+// ENTRY: Use STOP orders to let momentum pull us in (Fabio's style)
+if (long_breakout and is_aggressive and strategy.position_size == 0 and close > vwap_val)
+    strategy.entry("Long_Init", strategy.long, stop = high + syminfo.mintick, comment="🚀 Momentum")
+
+if (short_breakout and is_aggressive and strategy.position_size == 0 and close < vwap_val)
+    strategy.entry("Short_Init", strategy.short, stop = low - syminfo.mintick, comment="🚀 Momentum")
+
+// ==========================================
+// 🔹 RISK MANAGEMENT ENGINE (SCALE & PROTECT)
+// ==========================================
+// Variables to track trade state
+var bool is_risk_free = false
+float entry_p = strategy.position_size != 0 ? strategy.opentrades.entry_price(0) : na
+
+if (strategy.position_size > 0)
+    // 1. Check for Scale-In Opportunity (Adding to winners)
+    if (high >= entry_p + (scale_ticks * syminfo.mintick))
+        strategy.entry("Long_Scale", strategy.long, comment="💰 Max Profit")
+        is_risk_free := true // Flag dashboard
+    
+    // 2. Dynamic Stop Loss Logic
+    // If we scaled in, Stop is at Entry (Break Even). If not, it's the initial risk.
+    float dynamic_sl = is_risk_free ? entry_p : (entry_p - (sl_ticks * syminfo.mintick))
+    
+    // 3. Exits
+    strategy.exit("Exit_L1", from_entry="Long_Init", stop=dynamic_sl, limit=entry_p + (tp_ticks * syminfo.mintick))
+    strategy.exit("Exit_L2", from_entry="Long_Scale", stop=dynamic_sl, limit=entry_p + (tp_ticks * syminfo.mintick))
+
+if (strategy.position_size < 0)
+    // 1. Check for Scale-In Opportunity
+    if (low <= entry_p - (scale_ticks * syminfo.mintick))
+        strategy.entry("Short_Scale", strategy.short, comment="💰 Max Profit")
+        is_risk_free := true
+    
+    // 2. Dynamic Stop Loss Logic
+    float dynamic_sl_s = is_risk_free ? entry_p : (entry_p + (sl_ticks * syminfo.mintick))
+    
+    // 3. Exits
+    strategy.exit("Exit_S1", from_entry="Short_Init", stop=dynamic_sl_s, limit=entry_p - (tp_ticks * syminfo.mintick))
+    strategy.exit("Exit_S2", from_entry="Short_Scale", stop=dynamic_sl_s, limit=entry_p - (tp_ticks * syminfo.mintick))
+
+// Reset Risk Free flag when flat
+if (strategy.position_size == 0)
+    is_risk_free := false
+
+// ==========================================
+// 🔹 PRO DASHBOARD (TABLE)
+// ==========================================
+var table dash = table.new(position.top_right, 2, 4, bgcolor = color.new(color.black, 50), border_width = 1)
+if barstate.islast
+    // Header
+    table.cell(dash, 0, 0, "VALENTINI PRO", text_color = color.white, bgcolor=color.blue)
+    table.cell(dash, 1, 0, "STATUS", text_color = color.white, bgcolor=color.blue)
+    
+    // Position Status
+    table.cell(dash, 0, 1, "Position", text_color = color.white)
+    table.cell(dash, 1, 1, str.tostring(strategy.position_size), text_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.white)
+    
+    // P&L
+    float pnl = strategy.openprofit
+    table.cell(dash, 0, 2, "Open P&L", text_color = color.white)
+    table.cell(dash, 1, 2, str.tostring(pnl, format.mintick), text_color = pnl > 0 ? color.green : pnl < 0 ? color.red : color.gray)
+    
+    // Risk Free Status
+    table.cell(dash, 0, 3, "Mode", text_color = color.white)
+    table.cell(dash, 1, 3, is_risk_free ? "RISK FREE" : "RISK ON", text_color = is_risk_free ? color.lime : color.orange, bgcolor=is_risk_free ? color.new(color.green, 80) : color.new(color.red, 80))
+
+// ==========================================
+// 🔹 VISUALS
+// ==========================================
+plot(vwap_val, "Session VWAP", color=color.new(color.yellow, 50))
+plotshape(is_aggressive and (long_breakout or short_breakout), style=shape.diamond, color=color.white, size=size.tiny, title="Aggression Signal")
+
+View in Pine Editor・104 lines
+Use on chart
+7
+9
+4 322
+Gemini 3.0 pro's take on Fabio Valentini's world #1 strategy scalp 12/19/2025

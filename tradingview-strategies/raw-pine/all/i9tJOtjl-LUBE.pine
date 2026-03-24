@@ -1,0 +1,92 @@
+//@version=4
+//made for 30m chart with BTCUSD or other cryptocurrency
+strategy("LUBE",overlay=false )
+friction=0.0
+barsback=input(500,"bars back to measure friction",step=100)
+flevel=input(50,"0-100 friction level to stop trade",step=2)
+tlevel=input(-10,"pic lower than 0 to number selected above to initiate trade",step=2)
+fl=flevel/100
+tl=tlevel/100
+
+for i = 1 to barsback
+    friction := if high[i] >= close and low[i] <= close 
+        friction+(1+barsback)/(i+barsback)
+    else
+        friction
+
+range=input(100,"bars back to measure lowest friction",step=10)
+lowf = lowest(friction,range)
+highf = highest(friction,range)
+midf = (lowf*(1-fl)+highf*fl)
+lowf2 = (lowf*(1-tl)+highf*tl)
+plot(friction)
+m=plot(midf[5],color=color.red)
+l=plot(lowf2[5],color=color.white)
+h=plot(highf[5],color=color.white)
+fill(l,h,color.white)
+
+src = input(title="Source", type=input.source, defval=close)
+
+//FIR Filter
+_fir(src) =>
+    (4 * src + 3 * nz(src[1]) + 2 * nz(src[2]) + nz(src[3])) / 10
+
+fir = _fir(src)
+
+trend =  fir > fir[1]? 1:-1
+
+//bgcolor(trend==1?color.lime:color.red,transp=50)
+
+long=friction<lowf2[5] and trend == 1
+short=friction<lowf2[5] and trend == -1
+end=friction > midf[5]
+
+keeplong=0
+keeplong:=long?1:nz(keeplong[1])
+keeplong:=short or end?0:keeplong
+
+keepshort=0
+keepshort:=short?1:nz(keepshort[1])
+keepshort:=long or end?0:keepshort
+
+bgcolor(keeplong==1?color.lime:keepshort==1?color.red:na,transp=50)
+
+leverage=input(2,"leverage",step=.5)
+enableshort=input(true,"enable shorts?")
+
+barcount=0
+barcount:=nz(barcount[1])+1
+
+contracts=min(max(.000001,(strategy.equity/close)*leverage),1000000000)
+strategy.entry("Long",strategy.long,when=long and barcount>20, qty=contracts)
+
+strategy.close("Long",when=short or end )
+
+strategy.entry("Short",strategy.short,when=short and enableshort==true and barcount>20, qty=contracts)
+
+strategy.close("Short",when=(long or end) and enableshort==true)
+
+alertcondition(keeplong==1 and keeplong[1]==0,"LONG")
+alertcondition(keepshort==1 and keepshort[1]==0,"SHORT")
+alertcondition((keeplong[1]==1 or keepshort[1]==1) and (keeplong==0 and keepshort==0),"CLOSE TRADE")
+
+View in Pine Editor・71 lines
+Use on chart
+1.7 K
+26
+20 991
+This is a chart meant for 30m BTCUSD but could be used for many other assets, and there are inputs to play with.
+
+I decided on the strange title "LUBE" because I was measuring how many of the previous 500 bars had the current price level already been in. I wanted to discover when the price was in a new zone or an area that it hadn't spent much time in recently... the LUBE zone.
+
+Think of the blue line as showing you the current level friction. If the blue line is high, price is quagmired and not moving quickly. Price could trend sideways for a while before breaking out. A high blue line is a high traffic zone for trading. When the blue line dips low, it's encountering a price zone the asset has not been observed in recently, and this could mean price could break out and move more freely and quickly when it does. We get a trade entry signal if the blue line dips below the bottom white line. The bottom white line is currently set to -10. Think about the lowest the blue line has been recently as 0, and the highest as 100. It is set by default (for BTCUSD 30m chart) to -10 meaning the blue line has to dip a little (-10%) below the lowest it has experienced recently to initiate a trade. This is the LUBE zone. The bottom white line shows that level. Again this is a level lower than the lowest amount of friction experienced in price action for the last 100 bars, but offset by 5 bars showing where that level was at 5 bars ago. We want to dip below that to initiate a trade.
+
+The direction to trade in is determined by a very quick moving weighted moving average (variable name is "fir") to see if the recent trend is up or down. To end a trade, an arbitrary number between 0 and 100 is picked telling us when we are experiencing enough friction again to end the trade. I have it preset to 50 (think of it as 50/100 or half way between the white bars. At a 50% friction level it's time to get out of the trade.
+
+Some shortcomings are missing the bulk of big moves, and experiencing whipsaws where price action zips up and then comes straight back down. Overall the backtest looks sweet enough to use on 2x leverage, experiencing a 17.78% max drawdown at the time of publishing. I wouldn't push the leverage any higher.
+
+To get alerts change the word "strategy" to "study" and delete lines 60-67.
+
+Bot traders using alerts: beware the alert conditions. If a trade goes directly from long to short (which happens rarely), without closing a trade first, it might not act properly. If you use bots to trade, for "LONG" please close any old trades first before putting in instructions to open a leveraged long. To go "SHORT" please remember to close any old trade first as well, and things *should* work out just fine.
+
+Good luck, have fun, and feel free to mess up and butcher this code to your own liking. I'm not responsible if anything bad that happens to you if you use this trading system, or for any bugs you may encounter.

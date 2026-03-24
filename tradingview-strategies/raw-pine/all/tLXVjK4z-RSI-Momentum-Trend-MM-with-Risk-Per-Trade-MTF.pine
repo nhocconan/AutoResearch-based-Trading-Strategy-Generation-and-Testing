@@ -1,0 +1,221 @@
+//@version=5
+strategy("RSI Momentum Trend MM with Risk Per Trade [MTF]", overlay=true, initial_capital=1000000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ** ---> Inputs ------------- {
+var bool positive        = false
+var bool negative        = false
+string RSI_group         = "RSI Settings"
+string visual            = "Visuals" 
+
+string higher_tf         = input.timeframe("60", "Higher Timeframe", group = RSI_group) 
+int Len2                 = input.int(14,"RSI Length",inline = "rsi",group = RSI_group)
+int pmom                 = input.int(65,"Positive Above",inline = "rsi1",group =RSI_group )
+int nmom                 = input.int(32,"Negative Below",inline = "rsi1",group =RSI_group )
+bool showlabels          = input.bool(true,"Show Momentum Labels",inline = "001",group =visual )
+color p                  = input.color(color.rgb(76, 175, 79, 62),"Positive Color",inline = "001",group =visual )
+color n                  = input.color(color.rgb(255, 82, 82, 66),"Negative Color",inline = "001",group =visual )
+bool filleshow           = input.bool(true,"Show Trend Highlighter",inline = "002",group =visual )
+color bull               = input.color(color.rgb(76, 175, 79, 62),"Bull Color",inline = "002",group =visual )
+color bear               = input.color(color.rgb(255, 82, 82, 66),"Bear Color",inline = "002",group =visual )
+//------------------- }
+
+// ** ---> Backtest Period Inputs ------------- {
+string period_group = "Backtest Period Settings"
+startDate = input.time(timestamp("01 Jan 2022 00:00 +0000"), "Start Date", group = period_group)
+endDate   = input.time(timestamp("31 Dec 2099 23:59 +0000"), "End Date", group = period_group)
+bool inDateRange = time >= startDate and time <= endDate
+//------------------- }
+
+// ** ---> MTF Calculations ------------- {
+float rsi_htf = request.security(syminfo.tickerid, higher_tf, ta.rsi(close, Len2), barmerge.gaps_off, barmerge.lookahead_off)
+float ema_change_htf = request.security(syminfo.tickerid, higher_tf, ta.change(ta.ema(close, 5)), barmerge.gaps_off, barmerge.lookahead_off)
+//------------------- }
+
+// ** ---> Money Management Inputs ------------- {
+string mm_group = "Money Management"
+string sizing_mode = input.string("Risk per Trade", "Position Sizing Mode", options=["Risk per Trade", "Full Equity"], group = mm_group)
+risk_per_trade = input.float(1.0, "Risk per Trade (%)", minval=0.01, maxval=100.0, group=mm_group, tooltip="Only applies if 'Position Sizing Mode' is set to 'Risk per Trade'.")
+
+string sl_tp_mode = input.string("ATR", "SL/TP Calculation Mode", options=["Percentage (%)", "ATR", "Trend Reversal (Pos/Neg)"], group=mm_group)
+float stop_loss_pct = input.float(5.0, "Stop Loss (%)", minval=0.01, maxval=100.0, group=mm_group)
+float take_profit_pct = input.float(5.0, "Take Profit (%)", minval=0.01, maxval=100.0, group=mm_group)
+int atr_length = input.int(14, "ATR Length", group=mm_group)
+float stop_loss_atr = input.float(1.5, "Stop Loss ATR Multiplier", group=mm_group)
+float take_profit_atr = input.float(2.0, "Take Profit ATR Multiplier", group=mm_group)
+float atr_value = ta.atr(atr_length)
+max_risk = risk_per_trade / 100 * strategy.equity
+//------------------- }
+
+// Input for trade direction
+tradeDirection = input.string("both", title="Trade Direction", options=["long", "short", "both"])
+
+// ** ---> Momentums (using MTF data) ------------- {
+p_mom = rsi_htf[1] < pmom and rsi_htf > pmom and rsi_htf > nmom and ema_change_htf > 0
+n_mom = rsi_htf < nmom and ema_change_htf < 0
+if p_mom
+    positive:= true
+    negative:= false
+if n_mom
+    positive:= false
+    negative:= true    
+//------------------- }
+
+// ** ---> Visuals and Plots ------------- {
+a = plot(filleshow ? ta.ema(high,5) : na,display = display.none,editable = false)
+b = plot(filleshow ? ta.ema(low,10) : na,style = plot.style_stepline,color = color.red,display = display.none,editable = false)
+fill(a,b,color = positive ? bull :bear ,editable = false)
+pcondition = positive and not positive[1]
+ncondition2 = negative and not negative[1]
+plotshape(showlabels ? pcondition: na , title="Positive Signal",style=shape.labelup, color=p, location= location.belowbar , size=size.tiny,text= "Positive",textcolor = color.white)
+plotshape(showlabels ? ncondition2: na , title="Negative Signal",style=shape.labeldown, color=n, location= location.abovebar , size=size.tiny,text = "Negative",textcolor = color.white)
+alertcondition(pcondition,"Positive Trend")
+alertcondition(ncondition2,"Negative Trend")
+import X4815162342/X48_LibaryStrategyStatus/2 as fuLi 
+show_Net = input.bool(true,'Show Net', inline = 'Lnet')
+position_ = input.string('bottom_center','Position', options = ['top_right','middle_right','bottom_right','top_center','middle_center','bottom_center','middle_left','bottom_left'] , inline = 'Lnet')
+size_i = input.string('auto','size', options = ['auto','tiny','small','normal'] , inline = 'Lnet') 
+color_Net = input.color(color.blue,"" , inline = 'Lnet')
+fuLi.NetProfit_Show(show_Net , position_ , size_i,  color_Net )
+//------------------- }
+
+// ** ---> Strategy Logic ------------- {
+buyCondition = positive and not positive[1] 
+sellCondition = negative and not negative[1] 
+
+calculate_risk_based_size(entry_price, stop_loss_price) =>
+    risk_amount = max_risk
+    price_diff = entry_price - stop_loss_price
+    if price_diff != 0
+        risk_amount / math.abs(price_diff)
+    else
+        0 
+
+// --- Logic for SL/TP by Price (% or ATR) ---
+if sl_tp_mode == "Percentage (%)" or sl_tp_mode == "ATR"
+    var float sl_price = na
+    var float tp_price = na
+    float position_size = 0
+    
+    if (tradeDirection == "long" or tradeDirection == "both") and buyCondition and strategy.position_size == 0 and inDateRange
+        entry_price = close
+        if sl_tp_mode == "Percentage (%)"
+            sl_price := entry_price * (1 - stop_loss_pct / 100)
+            tp_price := entry_price * (1 + take_profit_pct / 100)
+        else // ATR Mode
+            sl_price := entry_price - (atr_value * stop_loss_atr)
+            tp_price := entry_price + (atr_value * take_profit_atr)
+        
+        position_size := sizing_mode == "Risk per Trade" ? calculate_risk_based_size(entry_price, sl_price) : strategy.equity / entry_price
+        if position_size > 0
+            strategy.entry("Buy", strategy.long, qty=position_size)
+            strategy.exit("Exit Buy", "Buy", stop=sl_price, limit=tp_price)
+
+    if (tradeDirection == "short" or tradeDirection == "both") and sellCondition and strategy.position_size == 0 and inDateRange
+        entry_price = close
+        if sl_tp_mode == "Percentage (%)"
+            sl_price := entry_price * (1 + stop_loss_pct / 100)
+            tp_price := entry_price * (1 - take_profit_pct / 100)
+        else // ATR Mode
+            sl_price := entry_price + (atr_value * stop_loss_atr)
+            tp_price := entry_price - (atr_value * take_profit_atr)
+
+        position_size := sizing_mode == "Risk per Trade" ? calculate_risk_based_size(entry_price, sl_price) : strategy.equity / entry_price
+        if position_size > 0
+            strategy.entry("Sell", strategy.short, qty=position_size)
+            strategy.exit("Exit Sell", "Sell", stop=sl_price, limit=tp_price)
+
+// --- Logic for SL/TP by Trend Reversal ---
+else if sl_tp_mode == "Trend Reversal (Pos/Neg)"
+    float position_size = 0
+    
+    // --- Entry ---
+    if (tradeDirection == "long" or tradeDirection == "both") and buyCondition and strategy.position_size == 0 and inDateRange
+        entry_price = close
+        if sizing_mode == "Risk per Trade"
+            virtual_sl = entry_price - (atr_value * stop_loss_atr) // Use ATR for risk calc
+            position_size := calculate_risk_based_size(entry_price, virtual_sl)
+        else // Full Equity
+            position_size := strategy.equity / entry_price
+        if position_size > 0
+            strategy.entry("Buy", strategy.long, qty=position_size)
+
+    if (tradeDirection == "short" or tradeDirection == "both") and sellCondition and strategy.position_size == 0 and inDateRange
+        entry_price = close
+        if sizing_mode == "Risk per Trade"
+            virtual_sl = entry_price + (atr_value * stop_loss_atr) // Use ATR for risk calc
+            position_size := calculate_risk_based_size(entry_price, virtual_sl)
+        else // Full Equity
+            position_size := strategy.equity / entry_price
+        if position_size > 0
+            strategy.entry("Sell", strategy.short, qty=position_size)
+
+    // --- Exit ---
+    if sellCondition and strategy.position_size > 0
+        strategy.close("Buy", comment="Trend Reversal Exit")
+    if buyCondition and strategy.position_size < 0
+        strategy.close("Sell", comment="Trend Reversal Exit")
+//------------------- }
+
+View in Pine Editor・179 lines
+Use on chart
+3
+0
+1 422
+This is a comprehensive and highly customizable trend-following strategy based on RSI momentum. The core logic identifies strong directional moves when the RSI crosses user-defined thresholds, combined with an EMA trend confirmation. It is designed for traders who want granular control over their strategy's parameters, from signal generation to risk management and exit logic.
+
+This script evolves a simple concept into a powerful backtesting tool, allowing you to test various money management and trade management theories across different timeframes.
+
+Key Features
+
+- RSI Momentum Signals: Uses RSI crosses above a "Positive" level or below a "Negative" level to generate trend signals. An EMA filter ensures entries align with the immediate trend.
+
+- Multi-Timeframe (MTF) Analysis: The core RSI and EMA signals can be calculated on a higher timeframe (e.g., using 4H signals to trade on a 1H chart) to align trades with the larger trend. This feature helps to reduce noise and improve signal quality.
+
+Advanced Money Management
+
+- Risk per Trade %: Calculate position size based on a fixed percentage of equity you want to risk per trade.
+
+- Full Equity: A more aggressive option to open each position with 100% of the available strategy equity.
+
+Flexible Exit Logic: Choose from three distinct exit strategies to match your trading style
+
+- Percentage (%) Based: Set a fixed Stop Loss and Take Profit as a percentage of the entry price.
+
+- ATR Multiplier: Base your Stop Loss and Take Profit on the Average True Range (ATR), making your exits adaptive to market volatility.
+
+- Trend Reversal: A true trend-following mode. A long position is held until an opposite "Negative" signal appears, and a short position is held until a "Positive" signal appears. This allows you to "let your winners run."
+
+Backtest Date Range Filter: Easily configure a start and end date to backtest the strategy's performance during specific market periods (e.g., bull markets, bear markets, or high-volatility periods).
+
+How to Use
+
+RSI Settings
+
+- Higher Timeframe: Set the timeframe for signal calculation. This must be higher than your chart's timeframe.
+
+- RSI Length, Positive above, Negative below: Configure the core parameters for the RSI signals.
+
+Money Management
+
+Position Sizing Mode
+
+- Choose "Risk per Trade" to use the Risk per Trade (%) input for precise risk control.
+
+- Choose "Full Equity" to use 100% of your capital for each trade.
+
+- Risk per Trade (%): Define the percentage of your equity to risk on a single trade (only works with the corresponding sizing mode).
+
+SL/TP Calculation Mode
+
+Select your preferred exit method from the dropdown. The strategy will automatically use the relevant inputs (e.g., % values, ATR Multiplier values, or the trend reversal logic).
+
+Backtest Period Settings
+
+Use the Start Date and End Date inputs to isolate a specific period for your backtest analysis.
+
+License & Disclaimer
+© waranyu.trkm — MIT License.
+
+This script is for educational purposes only and should not be considered financial advice. Trading involves significant risk, and past performance is not indicative of future results. Always conduct your own research and risk assessment before making any trading decisions.
+
+

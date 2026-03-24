@@ -1,0 +1,789 @@
+//@version=6
+strategy("CryptoFlux Dynamo: Velocity Scalping Strategy", "CFX Dyno", overlay=true, calc_on_every_tick=true, calc_on_order_fills=true, pyramiding=1, initial_capital=100000, commission_value=0.04, slippage=1, max_labels_count=500, max_lines_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CryptoFlux Dynamo • Configuration Architecture
+// ─────────────────────────────────────────────────────────────────────────────
+string groupCore      = "CryptoFlux Dynamo • Core Controls"
+string groupOpt       = "Optimization Constants"
+string groupRegime    = "Regime Intelligence"
+string groupSignal    = "Signal Pathways"
+string groupRisk      = "Risk Architecture"
+string groupDisplay   = "Visualization & Diagnostics"
+
+bool   enableShorts        = input.bool(true, "Enable Short Structure", group=groupCore)
+bool   useSessionFilter    = input.bool(false, "Restrict to Session Window", group=groupCore)
+string sessionWindow       = input.session("0000-2359:1234567", "Execution Session", group=groupCore,
+     tooltip="Default keeps the engine live during the 24/7 crypto cycle.")
+bool   allowReEntries      = input.bool(true, "Allow Same-Bar Re-Entry", group=groupCore)
+
+// Optimization constants tuned for crypto-native momentum signatures
+int    macdFastLen         = input.int(8,  "MACD Fast Length",   group=groupOpt, minval=1)
+int    macdSlowLen         = input.int(21, "MACD Slow Length",   group=groupOpt, minval=2)
+int    macdSignalLen       = input.int(5,  "MACD Signal Length", group=groupOpt, minval=1)
+int    emaFastLen          = input.int(8,  "EMA Fast",            group=groupOpt, minval=1)
+int    emaMidLen           = input.int(21, "EMA Mid",             group=groupOpt, minval=2)
+int    emaSlowLen          = input.int(34, "EMA Slow",            group=groupOpt, minval=3)
+int    emaSlopeLen         = input.int(8,  "EMA Slope Lookback",  group=groupOpt, minval=2)
+int    structureLookback   = input.int(9,  "Structure Break Window", group=groupOpt, minval=2)
+
+// Volatility regime intelligence
+int    atrLen              = input.int(21, "ATR Length", group=groupRegime, minval=5)
+int    volatilitySmooth    = input.int(13, "Volatility Soothing", group=groupRegime, minval=1)
+float  atrLowThreshold     = input.float(0.8, "Low Vol Regime Threshold (% ATR)", group=groupRegime, step=0.05)
+float  atrHighThreshold    = input.float(1.6, "High Vol Regime Threshold (% ATR)", group=groupRegime, step=0.05)
+int    cycleLen            = input.int(55, "Cycle Bias Length", group=groupRegime, minval=10)
+float  cycleThreshold      = input.float(0.15, "Cycle Bias Threshold (%)", group=groupRegime, step=0.01,
+     tooltip="Positive values demand bullish cycle confirmation, negatives capture bearish bias.")
+string dominanceSymbol     = input.symbol("CRYPTOCAP:BTC.D", "BTC Dominance Feed", group=groupRegime)
+bool   useDominanceFilter  = input.bool(true, "BTC Dominance Confirmation", group=groupRegime,
+     tooltip="Filters longs when BTC dominance is rising sharply (risk-off) and vice versa.")
+
+// Signal pathway configuration
+int    volumeLookback      = input.int(34, "Volume Baseline Length", group=groupSignal, minval=5)
+float  volumeImpulseMult   = input.float(1.15, "Volume Impulse Multiplier", group=groupSignal, step=0.05)
+float  volumeZThreshold    = input.float(0.5, "Volume Z-Score Threshold", group=groupSignal, step=0.1)
+int    histSmoothLen       = input.int(5,  "MACD Histogram Smoothing", group=groupSignal, minval=1)
+float  histSensitivity     = input.float(1.15, "MACD Histogram Sensitivity", group=groupSignal, step=0.05,
+     tooltip="Higher values demand stronger momentum divergence before firing entries.")
+int    rsiLen              = input.int(21, "RSI Length", group=groupSignal, minval=2)
+float  rsiTrigger          = input.float(55, "RSI Momentum Trigger", group=groupSignal, minval=0, maxval=100, step=0.5)
+int    mfiLen              = input.int(21, "MFI Length", group=groupSignal, minval=2)
+float  mfiTrigger          = input.float(55, "MFI Momentum Trigger", group=groupSignal, minval=0, maxval=100, step=0.5)
+int    squeezeLen          = input.int(20, "Squeeze Length", group=groupSignal, minval=5)
+float  squeezeMult         = input.float(1.5, "Bollinger Multiplier", group=groupSignal, step=0.1)
+float  kcMult              = input.float(1.8, "Keltner Multiplier", group=groupSignal, step=0.1)
+float  squeezeReleaseGate  = input.float(1.0, "Squeeze Release Momentum Gate", group=groupSignal, step=0.1)
+int    pullbackDepth       = input.int(7,  "Micro Pullback Depth", group=groupSignal, minval=2)
+int    minSignalStrength   = input.int(55, "Minimum Composite Signal Strength", group=groupSignal, minval=0, maxval=100)
+
+// Risk architecture tuned for crypto microstructure
+float  riskPerTradePct     = input.float(0.65, "Risk Allocation per Trade (%)", group=groupRisk, minval=0.1, maxval=5, step=0.05)
+float  maxExposurePct      = input.float(12.0, "Max Exposure (% of Equity)", group=groupRisk, minval=0.5, maxval=50, step=0.5)
+float  baseRiskReward      = input.float(1.8, "Base Risk/Reward Anchor", group=groupRisk, minval=0.5, maxval=5, step=0.1)
+float  stopMultLow         = input.float(1.05, "Stop Multiplier • Low Regime", group=groupRisk, step=0.05)
+float  stopMultMed         = input.float(1.55, "Stop Multiplier • Medium Regime", group=groupRisk, step=0.05)
+float  stopMultHigh        = input.float(2.1,  "Stop Multiplier • High Regime", group=groupRisk, step=0.05)
+float  tpMultLow           = input.float(1.6,  "Take Profit Multiplier • Low Regime", group=groupRisk, step=0.1)
+float  tpMultMed           = input.float(2.05, "Take Profit Multiplier • Medium Regime", group=groupRisk, step=0.1)
+float  tpMultHigh          = input.float(2.8,  "Take Profit Multiplier • High Regime", group=groupRisk, step=0.1)
+bool   adaptiveTrail       = input.bool(true, "Adaptive Trailing Engine", group=groupRisk)
+float  trailOffsetBase     = input.float(0.9, "Trailing Offset Multiplier", group=groupRisk, step=0.05)
+float  qtyGranularity      = input.float(0.001, "Quantity Granularity", group=groupRisk, step=0.001, minval=0.0001)
+float  killSwitchDrawdown  = input.float(6.5, "Kill Switch Drawdown (%)", group=groupRisk, step=0.5,
+     tooltip="Disables new entries once max drawdown exceeds the specified percentage.")
+
+// Display options
+bool   showDashboard       = input.bool(true, "Display CryptoFlux Dashboard", group=groupDisplay)
+bool   showSignalLabels    = input.bool(true, "Plot Signal Labels", group=groupDisplay)
+color  ribbonColorBull     = input.color(color.rgb(0, 218, 187), "Bull Ribbon Color", group=groupDisplay)
+color  ribbonColorBear     = input.color(color.rgb(255, 92, 151), "Bear Ribbon Color", group=groupDisplay)
+color  barColorBull        = input.color(color.rgb(0, 255, 195), "Bull Bar Accent", group=groupDisplay)
+color  barColorBear        = input.color(color.rgb(255, 97, 136), "Bear Bar Accent", group=groupDisplay)
+color  barColorNeutral     = input.color(color.rgb(120, 126, 255), "Neutral Bar Accent", group=groupDisplay)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper Functions
+// ─────────────────────────────────────────────────────────────────────────────
+calcQty(stopDistance) =>
+    riskCapital = strategy.equity * (riskPerTradePct / 100.0)
+    qtyRaw = stopDistance > 0 ? riskCapital / stopDistance : 0.0
+    maxQty = strategy.equity * (maxExposurePct / 100.0) / close
+    qtyCapped = math.min(qtyRaw, maxQty)
+    qtyRounded = qtyGranularity > 0 ? math.round(qtyCapped / qtyGranularity) * qtyGranularity : qtyCapped
+    math.max(qtyRounded, 0.0)
+
+clamp01(value) => 
+    math.max(0.0, math.min(1.0, value))
+
+normalize(value, minValue, maxValue) =>
+    maxValue == minValue ? 0.0 : clamp01((value - minValue) / (maxValue - minValue))
+
+calcMFI(len) =>
+    length = math.max(len, 1)
+    typical = (high + low + close) / 3.0
+    typicalPrev = nz(typical[1], typical)
+    moneyFlow = typical * volume
+    positiveFlow = typical > typicalPrev ? moneyFlow : 0.0
+    negativeFlow = typical < typicalPrev ? moneyFlow : 0.0
+    posAvg = ta.sma(positiveFlow, length)
+    negAvg = ta.sma(negativeFlow, length)
+    negAvg == 0.0 ? 100.0 : 100.0 - (100.0 / (1.0 + posAvg / negAvg))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core Indicator Engine
+// ─────────────────────────────────────────────────────────────────────────────
+float emaFast = ta.ema(close, emaFastLen)
+float emaMid  = ta.ema(close, emaMidLen)
+float emaSlow = ta.ema(close, emaSlowLen)
+
+bool  ribbonBull = emaFast > emaMid and emaMid > emaSlow
+bool  ribbonBear = emaFast < emaMid and emaMid < emaSlow
+float emaSlope   = emaSlopeLen > 0 ? (emaMid - emaMid[emaSlopeLen]) / emaSlopeLen : 0.0
+float emaSlopeNorm = math.atan(emaSlope) * 180.0 / math.pi
+
+float atrRaw   = ta.atr(atrLen)
+float atrValue = ta.ema(atrRaw, volatilitySmooth)
+float atrPct   = close == 0 ? 0 : atrValue / close * 100
+int   regime   = atrPct < atrLowThreshold ? 0 : atrPct < atrHighThreshold ? 1 : 2
+string regimeName = regime == 0 ? "Compression" : regime == 1 ? "Expansion" : "Velocity"
+
+float stopMultiplier = regime == 0 ? stopMultLow : regime == 1 ? stopMultMed : stopMultHigh
+float tpMultiplier   = regime == 0 ? tpMultLow  : regime == 1 ? tpMultMed  : tpMultHigh
+float regimeRRBonus  = regime == 0 ? 0.9 : regime == 1 ? 1.0 : 1.15
+
+float stopDistance   = atrValue * stopMultiplier
+float targetDistance = atrValue * tpMultiplier * baseRiskReward * regimeRRBonus
+
+float trailOffset    = atrValue * trailOffsetBase * (regime == 2 ? 0.8 : regime == 0 ? 1.1 : 1.0)
+
+[macdLine, macdSignal, macdHistRaw] = ta.macd(close, macdFastLen, macdSlowLen, macdSignalLen)
+float histSmooth = ta.ema(macdHistRaw, histSmoothLen)
+float histBaseline = ta.ema(math.abs(macdHistRaw), histSmoothLen * 2)
+float histAdaptive = histBaseline * histSensitivity
+
+float rsiValue = ta.rsi(close, rsiLen)
+float mfiValue = calcMFI(mfiLen)
+
+float volMA     = ta.sma(volume, volumeLookback)
+float volStdev  = ta.stdev(volume, volumeLookback)
+float volumeZ   = volStdev == 0 ? 0 : (volume - volMA) / volStdev
+bool  volumeImpulse = volume > volMA * volumeImpulseMult or volumeZ > volumeZThreshold
+
+float cycleBasis = ta.ema(close, cycleLen)
+float cycleOsc   = cycleBasis == 0 ? 0 : (close - cycleBasis) / cycleBasis * 100
+bool  cycleBull  = cycleOsc > cycleThreshold
+bool  cycleBear  = cycleOsc < -cycleThreshold
+
+float domSeries  = request.security(dominanceSymbol, timeframe.period, close, lookahead=barmerge.lookahead_off)
+float domSlope   = ta.sma(ta.change(domSeries), 5)
+bool  dominanceNeutral = math.abs(domSlope) < 0.12
+bool  dominanceRiskOff = domSlope > 0.12
+bool  dominanceRiskOn  = domSlope < -0.12
+
+bool  dominanceGateLong  = not useDominanceFilter or dominanceRiskOn or dominanceNeutral
+bool  dominanceGateShort = not useDominanceFilter or dominanceRiskOff or dominanceNeutral
+
+// Squeeze analytics
+float bbBasis = ta.sma(close, squeezeLen)
+float bbDev   = squeezeMult * ta.stdev(close, squeezeLen)
+float bbUpper = bbBasis + bbDev
+float bbLower = bbBasis - bbDev
+float kcBasis = ta.ema(close, squeezeLen)
+float kcRange = ta.atr(squeezeLen) * kcMult
+float kcUpper = kcBasis + kcRange
+float kcLower = kcBasis - kcRange
+bool  squeezeOn = (bbUpper - bbLower) < (kcUpper - kcLower)
+bool  squeezeRelease = not squeezeOn and squeezeOn[1]
+bool  squeezeLong  = squeezeRelease and close > bbUpper[1] and histSmooth > 0 and math.abs(histSmooth) > histAdaptive * squeezeReleaseGate
+bool  squeezeShort = squeezeRelease and close < bbLower[1] and histSmooth < 0 and math.abs(histSmooth) > histAdaptive * squeezeReleaseGate
+
+// Micro pullback logic for sub-5m responsiveness
+float lowestPullbackSeries = ta.lowest(low, pullbackDepth)
+float highestPullbackSeries = ta.highest(high, pullbackDepth)
+float structureHighSeries = ta.highest(high, structureLookback)
+float structureLowSeries = ta.lowest(low, structureLookback)
+
+bool microPullbackLong  = ribbonBull and close <= emaFast and close > emaMid and lowestPullbackSeries[1] == low[1]
+bool microPullbackShort = ribbonBear and close >= emaFast and close < emaMid and highestPullbackSeries[1] == high[1]
+
+// Structure break momentum logic
+bool structureBreakLong  = ribbonBull and close > structureHighSeries[1]
+bool structureBreakShort = ribbonBear and close < structureLowSeries[1]
+
+bool momentumQualifiedLong  = histSmooth > histAdaptive and macdLine > macdSignal and rsiValue > rsiTrigger and mfiValue > mfiTrigger
+bool momentumQualifiedShort = histSmooth < -histAdaptive and macdLine < macdSignal and rsiValue < (100 - rsiTrigger) and mfiValue < (100 - mfiTrigger)
+
+// Composite signal pathways
+bool pathTrendLong   = ribbonBull and emaSlopeNorm > 0 and structureBreakLong
+bool pathTrendShort  = ribbonBear and emaSlopeNorm < 0 and structureBreakShort
+bool pathMomentumLong  = momentumQualifiedLong and volumeImpulse
+bool pathMomentumShort = momentumQualifiedShort and volumeImpulse
+bool pathSqueezeLong   = squeezeLong
+bool pathSqueezeShort  = squeezeShort
+bool pathPullbackLong  = microPullbackLong and histSmooth > 0 and volumeImpulse
+bool pathPullbackShort = microPullbackShort and histSmooth < 0 and volumeImpulse
+
+float strengthLong = 0.0
+strengthLong += pathTrendLong   ? 30 : 0
+strengthLong += pathMomentumLong? 30 : 0
+strengthLong += pathSqueezeLong ? 25 : 0
+strengthLong += pathPullbackLong? 15 : 0
+strengthLong += volumeImpulse   ? 5  : -5
+strengthLong += regime == 2 ? 5 : regime == 0 ? -2 : 0
+strengthLong += cycleBull ? 5 : -5
+float longStrength = math.min(math.max(strengthLong, 0), 100)
+
+float strengthShort = 0.0
+strengthShort += pathTrendShort   ? 30 : 0
+strengthShort += pathMomentumShort? 30 : 0
+strengthShort += pathSqueezeShort ? 25 : 0
+strengthShort += pathPullbackShort? 15 : 0
+strengthShort += volumeImpulse    ? 5  : -5
+strengthShort += regime == 2 ? 5 : regime == 0 ? -2 : 0
+strengthShort += cycleBear ? 5 : -5
+float shortStrength = math.min(math.max(strengthShort, 0), 100)
+
+bool sessionActive = not useSessionFilter or not na(time(timeframe.period, sessionWindow))
+bool killSwitchActive = strategy.max_drawdown_percent >= killSwitchDrawdown
+
+bool longSignal  = sessionActive and not killSwitchActive and dominanceGateLong and cycleBull and volumeImpulse and longStrength >= minSignalStrength
+bool shortSignal = sessionActive and not killSwitchActive and dominanceGateShort and cycleBear and volumeImpulse and shortStrength >= minSignalStrength
+
+// Prevent conflict when both signals fire simultaneously
+if longSignal and shortSignal
+    longSignal := histSmooth > 0
+    shortSignal := not longSignal
+
+// Risk managed position sizing
+float longQty  = calcQty(stopDistance)
+float shortQty = calcQty(stopDistance)
+
+// Entry & Exit orchestration
+if longSignal and longQty > 0
+    if strategy.position_size < 0
+        strategy.close("CFD Short", comment="Trend Flip")
+    if allowReEntries or strategy.position_size <= 0
+        strategy.entry("CFD Long", strategy.long, qty=longQty, comment=regimeName)
+
+if shortSignal and enableShorts and shortQty > 0
+    if strategy.position_size > 0
+        strategy.close("CFD Long", comment="Trend Flip")
+    if allowReEntries or strategy.position_size >= 0
+        strategy.entry("CFD Short", strategy.short, qty=shortQty, comment=regimeName)
+
+float avgPrice = strategy.position_avg_price
+float longStopPrice  = avgPrice - stopDistance
+float longTakePrice  = avgPrice + targetDistance
+float shortStopPrice = avgPrice + stopDistance
+float shortTakePrice = avgPrice - targetDistance
+
+if strategy.position_size > 0
+    strategy.exit("CFD Long Exit", from_entry="CFD Long", stop=longStopPrice, limit=longTakePrice)
+    if adaptiveTrail
+        float trailStop = close - trailOffset
+        if trailStop > longStopPrice
+            strategy.exit("CFD Long Trail", from_entry="CFD Long", stop=trailStop)
+
+if strategy.position_size < 0
+    strategy.exit("CFD Short Exit", from_entry="CFD Short", stop=shortStopPrice, limit=shortTakePrice)
+    if adaptiveTrail
+        float trailStop = close + trailOffset
+        if trailStop < shortStopPrice
+            strategy.exit("CFD Short Trail", from_entry="CFD Short", stop=trailStop)
+
+// Safety net: close on momentum reversal
+bool longExitMomentum  = strategy.position_size > 0 and (macdHistRaw < 0 or not ribbonBull)
+bool shortExitMomentum = strategy.position_size < 0 and (macdHistRaw > 0 or not ribbonBear)
+
+if longExitMomentum
+    strategy.close("CFD Long", comment="Momentum Fade")
+if shortExitMomentum
+    strategy.close("CFD Short", comment="Momentum Fade")
+
+// Visualization Layer
+plot(emaFast, "EMA 8", color=color.new(ribbonColorBull, 0), linewidth=2)
+plot(emaMid,  "EMA 21", color=color.new(color.rgb(220, 220, 255), 45), linewidth=1)
+plot(emaSlow, "EMA 34", color=color.new(ribbonColorBear, 0), linewidth=2)
+
+color compressionColor = color.new(color.rgb(64, 74, 167), 90)
+color expansionColor   = color.new(color.rgb(111, 56, 193), 86)
+color velocityColor    = color.new(color.rgb(255, 83, 155), 82)
+bgcolor(regime == 2 ? velocityColor : regime == 1 ? expansionColor : compressionColor, title="Volatility Regime Backdrop")
+
+float biasDelta = longStrength - shortStrength
+float biasMagnitude = math.min(math.abs(biasDelta), 60)
+int dynamicTransparency = int(65 - math.round(biasMagnitude))
+color activeBarColor = biasDelta > 10 ? color.new(barColorBull, dynamicTransparency) :
+     biasDelta < -10 ? color.new(barColorBear, dynamicTransparency) :
+     color.new(barColorNeutral, 75)
+barcolor(activeBarColor, title="CryptoFlux Bar Accent")
+
+plot(longStrength, "Long Signal Strength", color=color.new(barColorBull, 0), display=display.data_window)
+plot(shortStrength, "Short Signal Strength", color=color.new(barColorBear, 0), display=display.data_window)
+plot(atrPct, "ATR %", color=color.new(color.rgb(255, 230, 120), 0), display=display.data_window)
+
+plotshape(showSignalLabels and longSignal, title="Long Signal", style=shape.triangleup, color=color.new(barColorBull, 0), size=size.tiny, location=location.belowbar, text="CFD Long")
+plotshape(showSignalLabels and shortSignal and enableShorts, title="Short Signal", style=shape.triangledown, color=color.new(barColorBear, 0), size=size.tiny, location=location.abovebar, text="CFD Short")
+plotshape(showSignalLabels and killSwitchActive, title="Kill Switch", style=shape.cross, color=color.new(color.gray, 0), size=size.small, location=location.top, text="Kill Switch")
+
+// Dashboard telemetry
+var table dash = na
+if showDashboard
+    if na(dash)
+        dash := table.new(position.top_right, 4, 9, border_width=1, border_color=color.new(color.silver, 30))
+    if barstate.islast
+        color regimeColor = regime == 2 ? color.new(color.rgb(255, 83, 155), 55) : regime == 1 ? color.new(color.rgb(111, 56, 193), 50) : color.new(color.rgb(64, 74, 167), 50)
+        table.cell(dash, 0, 0, "CryptoFlux Dynamo", text_color=color.white, bgcolor=color.new(color.rgb(12, 16, 40), 10), text_size=size.large)
+        table.cell(dash, 1, 0, "Regime", text_color=color.white, bgcolor=regimeColor)
+        table.cell(dash, 2, 0, regimeName, text_color=color.white, bgcolor=regimeColor)
+        table.cell(dash, 3, 0, "ATR% " + str.tostring(atrPct, format.mintick), text_color=color.white, bgcolor=regimeColor)
+
+        table.cell(dash, 0, 1, "Long Strength", text_color=color.new(color.lime, 0))
+        table.cell(dash, 1, 1, str.tostring(longStrength, format.mintick), text_color=color.new(color.lime, 0))
+        table.cell(dash, 2, 1, "Short Strength", text_color=color.new(color.red, 0))
+        table.cell(dash, 3, 1, str.tostring(shortStrength, format.mintick), text_color=color.new(color.red, 0))
+
+        table.cell(dash, 0, 2, "Cycle Osc", text_color=color.white)
+        table.cell(dash, 1, 2, str.tostring(cycleOsc, format.mintick), text_color=color.white)
+        table.cell(dash, 2, 2, "Dominance Δ", text_color=color.white)
+        table.cell(dash, 3, 2, str.tostring(domSlope, format.mintick), text_color=color.white)
+
+        table.cell(dash, 0, 3, "Position", text_color=color.white)
+        table.cell(dash, 1, 3, strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat", text_color=color.white)
+        table.cell(dash, 2, 3, "Avg Price", text_color=color.white)
+        table.cell(dash, 3, 3, str.tostring(avgPrice, format.price), text_color=color.white)
+
+        table.cell(dash, 0, 4, "Stop", text_color=color.white)
+        table.cell(dash, 1, 4, str.tostring(strategy.position_size > 0 ? longStopPrice : strategy.position_size < 0 ? shortStopPrice : na, format.price), text_color=color.white)
+        table.cell(dash, 2, 4, "Target", text_color=color.white)
+        table.cell(dash, 3, 4, str.tostring(strategy.position_size > 0 ? longTakePrice : strategy.position_size < 0 ? shortTakePrice : na, format.price), text_color=color.white)
+
+        table.cell(dash, 0, 5, "RR", text_color=color.white)
+        table.cell(dash, 1, 5, str.tostring(baseRiskReward * regimeRRBonus, format.mintick), text_color=color.white)
+        table.cell(dash, 2, 5, "ATR", text_color=color.white)
+        table.cell(dash, 3, 5, str.tostring(atrValue, format.price), text_color=color.white)
+
+        table.cell(dash, 0, 6, "Kill Switch", text_color=color.white)
+        table.cell(dash, 1, 6, killSwitchActive ? "ACTIVE" : "Standby", text_color=killSwitchActive ? color.new(color.red, 0) : color.new(color.lime, 0))
+        table.cell(dash, 2, 6, "DD%", text_color=color.white)
+        table.cell(dash, 3, 6, str.tostring(strategy.max_drawdown_percent, format.mintick), text_color=color.white)
+
+        table.cell(dash, 0, 7, "Volume Z", text_color=color.white)
+        table.cell(dash, 1, 7, str.tostring(volumeZ, format.mintick), text_color=color.white)
+        table.cell(dash, 2, 7, "Impulse", text_color=color.white)
+        table.cell(dash, 3, 7, volumeImpulse ? "Yes" : "No", text_color=volumeImpulse ? color.new(color.lime, 0) : color.new(color.gray, 0))
+
+        table.cell(dash, 0, 8, "Dominance", text_color=color.white)
+        table.cell(dash, 1, 8, dominanceGateLong ? "Long OK" : "Filtered", text_color=dominanceGateLong ? color.new(color.lime, 0) : color.new(color.orange, 0))
+        table.cell(dash, 2, 8, dominanceGateShort ? "Short OK" : "Filtered", text_color=dominanceGateShort ? color.new(color.red, 0) : color.new(color.orange, 0))
+
+View in Pine Editor・359 lines
+Use on chart
+3
+8
+1 604
+CryptoFlux Dynamo: Velocity Scalping Strategy
+
+WHAT THIS STRATEGY IS
+
+CryptoFlux Dynamo is an open-source Pine Script v6 strategy designed for momentum-based scalping on cryptocurrency perpetual futures. It combines multiple technical analysis methods into a unified system that adapts its behavior based on current market volatility conditions.
+
+This script is published open-source so you can read, understand, and modify the complete logic. The description below explains everything the strategy does so that traders who cannot read Pine Script can fully understand how it works before using it.
+
+HOW THIS STRATEGY IS ORIGINAL AND WHY THE INDICATORS ARE COMBINED
+
+This strategy uses well-known indicators (MACD, EMA, RSI, MFI, Bollinger Bands, Keltner Channels, ATR). The originality is not in the individual indicators themselves, but in the specific way they are integrated into a regime-adaptive system. Here is the detailed justification for why these components are combined and how they work together:
+
+The Problem Being Solved:
+Standard indicator-based strategies use fixed thresholds. For example, a typical MACD strategy might enter when the histogram crosses above zero. However, in cryptocurrency markets, volatility changes dramatically throughout the day and week. A MACD crossover during a low-volatility consolidation period has very different implications than the same crossover during a high-volatility trending period. Using the same entry thresholds and stop distances in both conditions leads to either:
+
+Too many false signals during consolidation (if thresholds are loose)
+
+Missing valid opportunities during expansion (if thresholds are tight)
+
+Stops that are too tight during volatility spikes (causing premature exits)
+
+Stops that are too wide during compression (giving back profits)
+
+
+
+The Solution Approach:
+This strategy first classifies the current volatility regime using normalized ATR (ATR as a percentage of price), then dynamically adjusts ALL other parameters based on that classification. This creates a context-aware system rather than a static threshold comparison.
+
+How Each Component Contributes to the System:
+
+
+ATR-Based Regime Classification (The Foundation)
+The strategy calculates ATR over 21 periods, smooths it with a 13-period EMA to reduce noise from wicks, then divides by price to get a normalized percentage. This ATR% is classified into three regimes:
+- Compression (ATR% < 0.8%): Market is consolidating, breakouts are more likely but false signals are common
+- Expansion (ATR% 0.8% - 1.6%): Normal trending conditions
+- Velocity (ATR% > 1.6%): High volatility, larger moves but also larger adverse excursions
+
+This regime classification then controls stop distances, profit targets, trailing stop offsets, and signal strength requirements. The regime acts as a "meta-parameter" that tunes the entire system.
+
+
+EMA Ribbon (8/21/34) - Trend Structure Detection
+The three EMAs establish trend direction and structure. When EMA 8 > EMA 21 > EMA 34, the trend structure is bullish. The slope of the middle EMA (21) is calculated over 8 bars and converted to degrees using arctangent. This slope measurement quantifies trend strength, not just direction.
+
+Why these specific periods? The 8/21/34 sequence follows Fibonacci-like spacing and provides good separation on 5-minute cryptocurrency charts. The fast EMA (8) responds to immediate price action, the mid EMA (21) represents the short-term trend, and the slow EMA (34) acts as a trend filter.
+
+The EMA ribbon works with the regime classification: during compression regimes, the strategy requires stronger ribbon alignment before entry because false breakouts are more common.
+
+
+MACD (8/21/5) - Momentum Measurement
+The MACD uses faster parameters (8/21/5) than the standard (12/26/9) because cryptocurrency markets move faster than traditional markets. The histogram is smoothed with a 5-period EMA to reduce noise.
+
+The key innovation is the adaptive histogram baseline. Instead of using a fixed threshold, the strategy calculates a rolling baseline from the smoothed absolute histogram value, then multiplies by a sensitivity factor (1.15). This means the threshold for "significant momentum" automatically adjusts based on recent momentum levels.
+
+The MACD works with the regime classification: during velocity regimes, the histogram baseline is effectively higher because recent momentum has been stronger, preventing entries on relatively weak momentum.
+
+
+RSI (21 period) and MFI (21 period) - Independent Momentum Confirmation
+RSI measures momentum using price changes only. MFI (Money Flow Index) measures momentum using price AND volume. By requiring both to confirm, the strategy filters out price moves that lack volume support.
+
+The 21-period length is longer than typical (14) to reduce noise on 5-minute charts. The trigger threshold (55 for longs, 45 for shorts) is slightly offset from 50 to require momentum in the trade direction, not just neutral readings.
+
+These indicators work together: a signal requires RSI > 55 AND MFI > 55 for longs. This dual confirmation reduces false signals from price manipulation or low-volume moves.
+
+
+Bollinger Bands (1.5 mult) and Keltner Channels (1.8 mult) - Squeeze Detection
+When Bollinger Bands contract inside Keltner Channels, volatility is compressing and a breakout is likely. This is the "squeeze" condition. When the bands expand back outside the channels, the squeeze "releases."
+
+The strategy uses a 1.5 multiplier for Bollinger Bands (tighter than standard 2.0) and 1.8 for Keltner Channels. These values were chosen to identify meaningful squeezes on 5-minute cryptocurrency charts without triggering too frequently.
+
+The squeeze detection works with the regime classification: squeeze releases during compression regimes receive additional signal strength points because breakouts from consolidation are more significant.
+
+
+Volume Impulse Detection - Institutional Participation Filter
+The strategy calculates a volume baseline (34-period SMA) and standard deviation. A "volume impulse" is detected when current volume exceeds the baseline by 1.15x OR when the volume z-score exceeds 0.5.
+
+This filter ensures entries occur when there is meaningful market participation, not during low-volume periods where price moves are less reliable.
+
+Volume impulse is required for all entries and adds points to the composite signal strength score.
+
+
+Cycle Oscillator - Trend Alignment Filter
+The strategy calculates a 55-period EMA as a cycle basis, then measures price deviation from this basis as a percentage. When price is more than 0.15% above the cycle basis, the cycle is bullish. When more than 0.15% below, the cycle is bearish.
+
+This filter prevents counter-trend entries. Long signals require bullish cycle alignment; short signals require bearish cycle alignment.
+
+
+BTC Dominance Filter (Optional) - Market Regime Filter
+The strategy can optionally use BTC.D (Bitcoin Dominance) as a market regime filter. When BTC dominance is rising (slope > 0.12), the market is in "risk-off" mode and long entries on altcoins are filtered. When dominance is falling (slope < -0.12), short entries are filtered.
+
+This filter is optional because the BTC.D data feed may lag during low-liquidity periods.
+
+
+
+How The Components Work Together (The Mashup Justification):
+
+The strategy uses a composite scoring system where each signal pathway contributes points:
+
+
+Trend Break pathway (30 points): Requires EMA ribbon alignment + positive slope + price breaks above recent structure high
+
+Momentum Surge pathway (30 points): Requires MACD histogram > adaptive baseline + MACD line > signal + RSI > 55 + MFI > 55 + volume impulse
+
+Squeeze Release pathway (25 points): Requires BB inside KC (squeeze) then release + momentum bias + histogram confirmation
+
+Micro Pullback pathway (15 points): Requires shallow retracement to fast EMA within established trend + histogram confirmation + volume impulse
+
+
+
+Additional modifiers:
+
++5 points if volume impulse is present, -5 if absent
+
++5 points in velocity regime, -2 in compression regime
+
++5 points if cycle is aligned, -5 if counter-trend
+
+
+
+A trade only executes when the composite score reaches the minimum threshold (default 55) AND all filters agree (session, cycle bias, BTC dominance if enabled).
+
+This scoring system is the core innovation: instead of requiring ALL conditions to be true (which would generate very few signals) or ANY condition to be true (which would generate too many false signals), the strategy requires ENOUGH conditions to be true, with different conditions contributing different weights based on their reliability.
+
+HOW THE STRATEGY CALCULATES ENTRIES AND EXITS
+
+Entry Logic:
+1. Calculate current volatility regime from ATR%
+2. Calculate all indicator values (MACD, EMA, RSI, MFI, squeeze, volume)
+3. Evaluate each signal pathway and sum points
+4. Check all filters (session, cycle, dominance, kill switch)
+5. If composite score >= 55 AND all filters pass, generate entry signal
+6. Calculate position size based on risk per trade and regime-adjusted stop distance
+7. Execute entry with regime name as comment
+
+Position Sizing Formula:
+
+Pine Script®
+RiskCapital = Equity * (0.65 / 100)
+StopDistance = ATR * StopMultiplier(regime)
+RawQuantity = RiskCapital / StopDistance
+MaxQuantity = Equity * (12 / 100) / Price
+Quantity = min(RawQuantity, MaxQuantity)
+Quantity = round(Quantity / 0.001) * 0.001
+
+Expand 1 line
+
+
+This ensures each trade risks approximately 0.65% of equity regardless of volatility, while capping total exposure at 12% of equity.
+
+Stop Loss Calculation:
+Stop distance is ATR multiplied by a regime-specific multiplier:
+
+Compression regime: 1.05x ATR (tighter stops because moves are smaller)
+
+Expansion regime: 1.55x ATR (standard stops)
+
+Velocity regime: 2.1x ATR (wider stops to avoid premature exits during volatility)
+
+
+
+Take Profit Calculation:
+Target distance is ATR multiplied by regime-specific multiplier and base risk/reward:
+
+Compression regime: 1.6x ATR * 1.8 base R:R * 0.9 regime bonus = approximately 2.6x ATR
+
+Expansion regime: 2.05x ATR * 1.8 base R:R * 1.0 regime bonus = approximately 3.7x ATR
+
+Velocity regime: 2.8x ATR * 1.8 base R:R * 1.15 regime bonus = approximately 5.8x ATR
+
+
+
+Trailing Stop Logic:
+When adaptive trailing is enabled, the strategy calculates a trailing offset based on ATR and regime:
+
+Compression regime: 1.1x base offset (looser trailing to avoid noise)
+
+Expansion regime: 1.0x base offset (standard)
+
+Velocity regime: 0.8x base offset (tighter trailing to lock in profits during fast moves)
+
+
+
+The trailing stop only activates when it would be tighter than the initial stop.
+
+Momentum Fail-Safe Exits:
+The strategy closes positions early if momentum reverses:
+
+Long positions close if MACD histogram turns negative OR EMA ribbon structure breaks (fast EMA crosses below mid EMA)
+
+Short positions close if MACD histogram turns positive OR EMA ribbon structure breaks
+
+
+
+This prevents holding through momentum reversals even if stop loss hasn't been hit.
+
+Kill Switch:
+If maximum drawdown exceeds 6.5%, the strategy disables new entries until manually reset. This prevents continued trading during adverse conditions.
+
+HOW TO USE THIS STRATEGY
+
+Step 1: Apply to Chart
+
+Use a 5-minute chart of a high-liquidity cryptocurrency perpetual (BTC/USDT, ETH/USDT recommended)
+
+Ensure at least 200 bars of history are loaded for indicator stabilization
+
+Use standard candlestick charts only (not Heikin Ashi, Renko, or other non-standard types)
+
+
+
+Step 2: Understand the Visual Elements
+
+EMA Ribbon: Three lines (8/21/34 periods) showing trend structure. Bullish when stacked upward, bearish when stacked downward.
+
+Background Color: Shows current volatility regime
+- Indigo/dark blue = Compression (low volatility)
+- Purple = Expansion (normal volatility)
+- Magenta/pink = Velocity (high volatility)
+
+Bar Colors: Reflect signal strength divergence. Brighter colors indicate stronger directional bias.
+
+Triangle Markers: Entry signals. Up triangles below bars = long entry. Down triangles above bars = short entry.
+
+Dashboard (top-right): Real-time display of regime, ATR%, signal strengths, position status, stops, targets, and risk metrics.
+
+
+
+Step 3: Interpret the Dashboard
+
+Regime: Current volatility classification (Compression/Expansion/Velocity)
+
+ATR%: Normalized volatility as percentage of price
+
+Long/Short Strength: Current composite signal scores (0-100)
+
+Cycle Osc: Price deviation from 55-period EMA as percentage
+
+Dominance: BTC.D slope and filter status
+
+Position: Current position direction or "Flat"
+
+Stop/Target: Current stop loss and take profit levels
+
+Kill Switch: Status of drawdown protection
+
+Volume Z: Current volume z-score
+
+Impulse: Whether volume impulse condition is met
+
+
+
+Step 4: Adjust Parameters for Your Needs
+
+For more conservative trading: Increase "Minimum Composite Signal Strength" to 65 or higher
+
+For more aggressive trading: Decrease to 50 (but expect more false signals)
+
+For higher timeframes (15m+): Increase "Structure Break Window" to 12-15, increase "RSI Momentum Trigger" to 58
+
+For lower liquidity pairs: Increase "Volume Impulse Multiplier" to 1.3, increase slippage in strategy properties
+
+To disable short selling: Uncheck "Enable Short Structure"
+
+To disable BTC dominance filter: Uncheck "BTC Dominance Confirmation"
+
+
+
+STRATEGY PROPERTIES (BACKTEST SETTINGS)
+
+These are the exact settings used in the strategy's Properties dialog box. You must use these same settings when evaluating the backtest results shown in the publication:
+
+Initial Capital: $100,000
+Justification: This amount is higher than typical retail accounts. I chose this value to demonstrate percentage-based returns that scale proportionally. The strategy uses percentage-based position sizing (0.65% risk per trade), so a $10,000 account would see the same percentage returns with 10x smaller position sizes. The absolute dollar amounts in the backtest should be interpreted as percentages of capital.
+
+Commission: 0.04% (commission_value = 0.04)
+Justification: This reflects typical perpetual futures exchange fees. Major exchanges charge between 0.02% (maker) and 0.075% (taker). The 0.04% value is a reasonable middle estimate. If your exchange charges different fees, adjust this value accordingly. Higher fees will reduce net profitability.
+
+Slippage: 1 tick
+Justification: This is conservative for liquid pairs like BTC/USDT on major exchanges during normal conditions. For less liquid altcoins or during high volatility, actual slippage may be higher. If you trade less liquid pairs, increase this value to 2-3 ticks for more realistic results.
+
+Pyramiding: 1
+Justification: No position stacking. The strategy holds only one position at a time. This simplifies risk management and prevents overexposure.
+
+calc_on_every_tick: true
+Justification: The strategy evaluates on every price update, not just bar close. This is necessary for scalping timeframes where waiting for bar close would miss opportunities. Note that this setting means backtest results may differ slightly from bar-close-only evaluation.
+
+calc_on_order_fills: true
+Justification: The strategy recalculates immediately after order fills for faster response to position changes.
+
+RISK PER TRADE JUSTIFICATION
+
+The default risk per trade is 0.65% of equity. This is well within the TradingView guideline that "risking more than 5-10% on a trade is not typically considered viable."
+
+With the 12% maximum exposure cap, even if the strategy takes multiple consecutive losses, the total risk remains manageable. The kill switch at 6.5% drawdown provides additional protection by halting new entries during adverse conditions.
+
+The position sizing formula ensures that stop distance (which varies by regime) is accounted for, so actual risk per trade remains approximately 0.65% regardless of volatility conditions.
+
+SAMPLE SIZE CONSIDERATIONS
+
+For statistically meaningful backtest results, you should select a dataset that generates at least 100 trades. On 5-minute BTC/USDT charts, this typically requires:
+
+2-3 months of data during normal market conditions
+
+1-2 months during high-volatility periods
+
+3-4 months during low-volatility consolidation periods
+
+
+
+The strategy's selectivity (requiring 55+ composite score plus all filters) means it generates fewer signals than less filtered approaches. If your backtest shows fewer than 100 trades, extend the date range or reduce the minimum signal strength threshold.
+
+Fewer than 100 trades produces statistically unreliable results. Win rate, profit factor, and other metrics can vary significantly with small sample sizes.
+
+STRATEGY DESIGN COMPROMISES AND LIMITATIONS
+
+Every strategy involves trade-offs. Here are the compromises made in this design and the limitations you should understand:
+
+Selectivity vs. Opportunity Trade-off
+The 55-point minimum threshold filters many potential trades. This reduces false signals but also misses valid setups that don't meet all criteria. Lowering the threshold increases trade frequency but decreases win rate. There is no "correct" threshold; it depends on your preference for fewer higher-quality signals vs. more signals with lower individual quality.
+
+Regime Classification Lag
+The ATR-based regime detection uses historical data (21 periods + 13-period smoothing). It cannot predict sudden volatility spikes. During flash crashes or black swan events, the strategy may be classified in the wrong regime for several bars before the classification updates. This is an inherent limitation of any lagging indicator.
+
+Indicator Parameter Sensitivity
+The default parameters (MACD 8/21/5, EMA 8/21/34, RSI 21, etc.) are tuned for BTC/ETH perpetuals on 5-minute charts during 2024 market conditions. Different assets, timeframes, or market regimes may require different parameters. There is no guarantee that parameters optimized on historical data will perform similarly in the future.
+
+BTC Dominance Filter Limitations
+The CRYPTOCAP:BTC.D data feed may lag during low-liquidity periods or weekends. The dominance slope calculation uses a 5-bar SMA, adding additional delay. If you notice the filter behaving unexpectedly, consider disabling it.
+
+Backtest vs. Live Execution Differences
+TradingView backtesting does not replicate actual broker execution. Key differences:
+
+Backtests assume perfect fills at calculated prices; real execution involves order book depth, latency, and partial fills
+
+The calc_on_every_tick setting improves backtest realism but still cannot capture sub-bar price action or order book dynamics
+
+Commission and slippage settings are estimates; actual costs vary by exchange, time of day, and market conditions
+
+Funding rates on perpetual futures are not modeled in backtests and can significantly impact profitability over time
+
+Exchange-specific limitations (position limits, liquidation mechanics, order types) are not modeled
+
+
+
+Market Condition Dependencies
+This strategy is designed for trending and breakout conditions. During extended sideways consolidation with no clear direction, the strategy may generate few signals or experience whipsaws. No strategy performs well in all market conditions.
+
+Cryptocurrency-Specific Risks
+Cryptocurrency markets operate 24/7 without session boundaries. This means:
+
+No natural "overnight" risk reduction
+
+Volatility can spike at any time
+
+Liquidity varies significantly by time of day
+
+Exchange outages or issues can occur at any time
+
+
+
+WHAT THIS STRATEGY DOES NOT DO
+
+To be straightforward about limitations:
+
+This strategy does not guarantee profits. Past backtest performance does not indicate future results.
+
+This strategy does not predict the future. It reacts to current conditions based on historical patterns.
+
+This strategy does not account for funding rates, which can significantly impact perpetual futures profitability.
+
+This strategy does not model exchange-specific execution issues (partial fills, requotes, outages).
+
+This strategy does not adapt to fundamental news events or black swan scenarios.
+
+This strategy is not optimized for all market conditions. It may underperform during extended consolidation.
+
+
+
+IMPORTANT RISK WARNINGS
+
+Past performance does not guarantee future results. The backtest results shown reflect specific historical market conditions and parameter settings. Markets change constantly, and strategies that performed well historically may underperform or lose money in the future. A single backtest run does not constitute proof of future profitability.
+
+Trading involves substantial risk of loss. Cryptocurrency derivatives are highly volatile instruments. You can lose your entire investment. Only trade with capital you can afford to lose completely.
+
+This is not financial advice. This strategy is provided for educational and informational purposes only. It does not constitute investment advice, trading recommendations, or any form of financial guidance. The author is not a licensed financial advisor.
+
+You are responsible for your own decisions. Before using this strategy with real capital:
+
+Thoroughly understand the code and logic by reading the open-source implementation
+
+Forward test with paper trading or very small positions for an extended period
+
+Verify that commission, slippage, and execution assumptions match your actual trading environment
+
+Understand that live results will differ from backtest results
+
+Consider consulting with a qualified financial advisor
+
+
+
+No guarantees or warranties. This strategy is provided "as is" without any guarantees of profitability, accuracy, or suitability for any purpose. The author is not responsible for any losses incurred from using this strategy.
+
+OPEN-SOURCE CODE STRUCTURE
+
+The strategy code is organized into these sections for readability:
+
+
+Configuration Architecture: Input parameters organized into logical groups (Core Controls, Optimization Constants, Regime Intelligence, Signal Pathways, Risk Architecture, Visualization)
+
+Helper Functions: calcQty() for position sizing, clamp01() and normalize() for value normalization, calcMFI() for Money Flow Index calculation
+
+Core Indicator Engine: EMA ribbon, ATR and regime classification, MACD with adaptive baseline, RSI, MFI, volume analytics, cycle oscillator, BTC dominance filter, squeeze detection
+
+Signal Pathway Logic: Trend break, momentum surge, squeeze release, micro pullback pathways with composite scoring
+
+Entry/Exit Orchestration: Signal filtering, position sizing, entry execution, stop/target calculation, trailing stop logic, momentum fail-safe exits
+
+Visualization Layer: EMA plots, regime background, bar coloring, signal labels, dashboard table
+
+
+
+You can read and modify any part of the code. Understanding the logic before deployment is strongly recommended.
+
+- Made with passion by officialjackofalltrades
+

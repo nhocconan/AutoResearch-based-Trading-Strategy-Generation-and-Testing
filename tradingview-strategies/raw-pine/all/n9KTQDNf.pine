@@ -1,0 +1,65 @@
+//@version=5
+strategy("Çoklu Onay Stratejisi (AL-SAT)", overlay=true)
+
+// --- GÖSTERGELERİN HESAPLANMASI ---
+// MA 50
+ma_length = 50
+ma50 = ta.sma(close, ma_length)
+
+// RSI
+rsi_length = 14
+rsi = ta.rsi(close, rsi_length)
+
+// DMI Göstergesi
+dmi_length = 14
+[plus_di, minus_di, adx] = ta.dmi(dmi_length, dmi_length)
+
+// ATR (Volatilite)
+atr_length = 14
+atr_value = ta.atr(atr_length)
+// ATR'nin ortalaması
+atr_sma = ta.sma(atr_value, 20)
+
+// Hacim Ortalaması
+vol_ma_length = 20
+volume_ma = ta.sma(volume, vol_ma_length)
+
+// --- SİNYAL KOŞULLARI ---
+// Yeni Alım Koşulu: Fiyat MA 50'nin %5'ine kadar altında
+// Diğer koşullar aynı kaldı
+buy_condition = (close > ma50 * 0.95) and (rsi > 40 and rsi <71) and (plus_di > minus_di) and (volume > volume_ma * 1.5) and (atr_value < atr_sma)
+
+// Satım için bu 5 koşuldan en az biri gerçekleşmeli
+// Yeni Satım Koşulu: Fiyat MA 50'nin %5'ten daha fazla altında veya diğer koşullar bozulduysa
+sell_condition = (close <= ma50 * 0.95) or (rsi < 40) or (plus_di < minus_di) or (volume < volume_ma * 0.5) or (atr_value > atr_sma)
+
+// --- İŞLEM YÜRÜTME VE GÖRSELLEŞTİRME ---
+// Alım sinyali
+if buy_condition
+    strategy.entry("ALIM", strategy.long)
+
+// Satım sinyali
+if sell_condition
+    strategy.close("ALIM", comment="SATIM")
+
+// MA 50 çizgisini grafiğe ekle
+plot(ma50, title="MA 50", color=color.blue, linewidth=2)
+
+// Alım ve satım sinyallerini görselleştirme
+plotshape(series=buy_condition ? close : na, title="AL", location=location.belowbar, color=color.rgb(65, 172, 100), style=shape.triangleup, size=size.small)
+plotshape(series=sell_condition ? close : na, title="SAT", location=location.abovebar, color=color.rgb(255, 69, 58), style=shape.triangledown, size=size.small)
+
+View in Pine Editor・50 lines
+Use on chart
+1
+6
+842
+Sep 6, 2025
+"VOLUME, MA50, RSI, DMI, ATR
+
+5 conditions, all turning positive at the same time gives a buy signal; one of them turning negative gives a sell signal. This should be evaluated with weekly data. Not financial advice."
+Sep 7, 2025
+Release Notes
+"VOLUME, MA50, RSI, DMI, ATR
+
+5 conditions, all turning positive at the same time gives a buy signal; one of them turning negative gives a sell signal. This should be evaluated with weekly data. Not financial advice."

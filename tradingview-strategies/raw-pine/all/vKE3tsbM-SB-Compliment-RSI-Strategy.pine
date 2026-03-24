@@ -1,0 +1,90 @@
+//@version=3
+strategy("SB_Compliment_RSI Strategy", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100.0, pyramiding = 0)
+/////////////////////
+//@version=3
+//study(title="SB_Compliment_Relative Strength Index", shorttitle="RSI")
+//src = close, len = input(14, minval=1, title="Length")
+//up = rma(max(change(src), 0), len)
+//down = rma(-min(change(src), 0), len)
+//rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+//plot(rsi, color=purple)
+//plot(100-rsi, color=orange)
+//band1 = hline(70)
+//band0 = hline(30)
+//fill(band1, band0, color=purple, transp=90)
+////////////////
+length = input( 14 )
+overSold = input( 30 )
+overBought = input( 70 )
+price = close
+
+vrsi = rsi(price, length)
+opp_vrsi= 100-vrsi
+prev_rsi_low=input(0.0)
+prev_rsi_low:=nz(prev_rsi_low[1])
+if(prev_rsi_low==0)
+    prev_rsi_low:=51
+
+prev_rsi_high=input(0.0)
+prev_rsi_high:=nz(prev_rsi_high[1])
+
+if(prev_rsi_high==0)
+    prev_rsi_high:=51
+
+switch=input(0)
+switch:=nz(switch[1])
+
+
+if (not na(vrsi))
+    if (crossover(vrsi, overSold))// and switch==0)
+        if((100-prev_rsi_high)<=vrsi)
+            strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+            prev_rsi_high:=0
+        prev_rsi_low:=vrsi
+        switch:=1
+    if (crossunder(vrsi, overBought))// and switch==1)
+        if((100-prev_rsi_low)>=vrsi)
+            strategy.entry("RsiSE", strategy.short, comment="RsiSE")
+            prev_rsi_low:=100
+        //switch:=0
+        prev_rsi_high:=vrsi
+
+View in Pine Editor・50 lines
+Use on chart
+7
+6
+2 254
+The strategy modifies the original rsi strategy with the addition of compliment si (i.e. 100-rsi).
+
+Strategy Idea: Previous rsi high and low value is recorded when the rsi crosses overBought(70) and OverSold(30) values.
+Now when the rsi crosses above the overSold range, the rsi is matched with the compliment of previous high rsi value. If the compliment i.e.(100-prev_rsi_high) is less than or equal to rsi then long position is taken.
+For short position, when the rsi crosses below the overBought range, the rsi is matched with the compliment of previous low rsi value. If compliment i.e.(100-prev_rsi_low) is greater than or equal to rsi.
+
+
+Below s the code for the indicator present in the chart.
+
+//version=3
+study(title="SB_Compliment_Relative Strength Index", shorttitle="RSI")
+src = close, len = input(14, minval=1, title="Length")
+up = rma(max(change(src), 0), len)
+down = rma(-min(change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+plot(rsi, color=purple)
+plot(100-rsi, color=orange)
+band1 = hline(70)
+band0 = hline(30)
+fill(band1, band0, color=purple, transp=90)
+
+
+The code also has switch code also which means it will enter the overBrought or overSold block one after the other.
+Future modifications: Currently the value of rsi tracked is the one in which it crosses the overSold or OverBought range and not the highest/lowest value when the value is above/below OverBought/OverSold range.
+
+Comment the perfect combination of indicators for it and will try to incorporate those indicators into it in the next version.
+
+Message if you think of any modifications/ enhancements/ any opportunities. :)
+
+Donations/Tips... :) -
+
+BTC: 1BjswGcRR6c23pka7qh5t5k56j46cuyyy2
+ETH: 0x64fed71c9d6c931639c7ba4671aeb6b05e6b3781
+LTC: LKT2ykQ8QSzzfTDB6Tnsf12xwYPjgq95h4

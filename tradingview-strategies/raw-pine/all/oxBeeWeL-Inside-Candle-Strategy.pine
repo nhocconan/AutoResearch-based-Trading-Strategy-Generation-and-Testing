@@ -1,0 +1,88 @@
+//@version=5
+strategy("Inside Candle Strategy", overlay=true, margin_long=100, margin_short=100, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+tf = input.timeframe("1D", "Timeframe", group = "Settings")
+tp = input.float(2.00, "RR Ratio", minval = 0.5, maxval = 5, group = "Settings")
+mainp = input.bool(true, "Show Moving Average", group = "Settings")
+lnt = input.int(100, "Average Length", group = "Settings")
+upcolor = input.color(#2962ff, "First color", group = "Visual")
+dncolor = input.color(#e91e63, "Second color", group = "Visual")
+width = input.int(2, "Line width", minval = 1, maxval = 5, group = "Visual")
+
+inside1 = high < high[1] and low > low[1]
+inside = request.security(syminfo.tickerid, tf, inside1)
+high1 = request.security(syminfo.tickerid, tf, high)
+low1 = request.security(syminfo.tickerid, tf, low)
+mid1 = request.security(syminfo.tickerid, tf, hl2)
+
+if inside and timeframe.change(tf)
+    line.new(time, high1, time + timeframe.in_seconds(tf) * 1000, high1, xloc=xloc.bar_time, color=upcolor, width=width)
+    line.new(time, low1, time + timeframe.in_seconds(tf) * 1000, low1, xloc=xloc.bar_time, color=dncolor, width=width)
+    line.new(time, mid1, time + timeframe.in_seconds(tf) * 1000, mid1, xloc=xloc.bar_time, color=color.new(color.gray, 10), width=1, style = line.style_dotted)
+
+ma = ta.sma(close, lnt)
+bbw = ta.stdev(close, lnt)
+ma2 = if ma > ma[1]
+    ma + bbw
+else
+    ma - bbw
+grad = color.from_gradient(bbw, ta.lowest(bbw, lnt*2), ta.highest(bbw, lnt*2), color.new(color.gray, 100), color.new(color.gray, 50))
+
+p1 = plot(mainp == true ? ma : na, "Moving Average", close > ma ? upcolor : dncolor)
+p2 = plot(mainp == true ? ma2 : na, "Moving Volatility", close > ma ? color.new(upcolor, 75) : color.new(dncolor, 75))
+fill(p1, p2, grad)
+
+longCondition = close > high1 and time < ta.valuewhen(inside and timeframe.change(tf), time + timeframe.in_seconds(tf) * 1000, 0)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Close long", "Long", qty_percent = 100, stop = low1, limit = close+(close-low1)*tp)
+
+shortCondition = close < low1 and time < ta.valuewhen(inside and timeframe.change(tf), time + timeframe.in_seconds(tf) * 1000, 0)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Close short", "Short", qty_percent = 100, stop = high1, limit = close-(high1-close)*tp)
+
+View in Pine Editor・46 lines
+Use on chart
+3
+1
+6
+2
+9 106
+Introduction
+
+The Inside Candle Breakout Strategy leverages the concept of inside candles as a primary signal for potential breakouts. Unlike common trend-following or scalping strategies, this method focuses on the volatility squeeze indicated by inside candles and aims to capture the momentum that follows these periods of consolidation. The strategy's originality lies in its specific integration of timeframes for signal detection and its application across diverse market conditions without relying on conventional trend indicators.
+
+Strategy Description and Mechanics
+
+Inside Candle Identification: At the heart of this strategy is the detection of inside candles, defined as candles fully contained within the range of the preceding candle. This pattern signifies a temporary balance between buyers and sellers, often preceding significant price movements. The strategy scans for these candles within a user-specified timeframe in the input section of the settings of the strategy, allowing for tailored signal generation based on individual trading preferences.
+Entry Points and Market Entries: Upon identifying an inside candle and only once this candle closes, the strategy prepares to enter a trade in the direction of the breakout. Trades are executed in the timeframe selected on the chart, ensuring that entry points are aligned with real-time market movements. This process highlights the strategy's adaptability, making it suitable for various trading styles, from day trading to swing trading.
+Overlay Indicator for Enhanced Market Analysis: Accompanying the breakout signals is an overlay indicator comprising two moving averages and a volatility cloud. This feature serves as a secondary tool for market analysis, offering insights into the prevailing market trend and volatility levels. While it doesn't influence the entry or exit signals directly, it provides traders with additional context for refining their decisions, enhancing the strategy's utility. This assistance tool is composed by one moving average and a second line which is calculated adding or subtracting the historical volatility of the asset on the moving average, depending on his momentum.
+
+Strategy Results and Commitment to Realism
+
+Backtesting Protocol: In our commitment to transparency and realism, backtesting results are derived from a dataset that ensures a sufficient number of trades (over 100) to validate the strategy's effectiveness. This approach underscores our dedication to providing traders with reliable and actionable insights.
+Risk Management and Trade Sizing: Recognizing the importance of sustainable trading practices, the strategy incorporates strict risk management guidelines. Trades are sized to ensure that only a small percentage of equity is risked on a single trade, adhering to widely accepted risk tolerance levels. The initial account size for this script is set to 10000$.
+Strategy Defaults and Justification: The default properties of the strategy, including the risk-reward ratio, average length for moving averages, and other parameters, are carefully chosen based on extensive testing and analysis. These settings represent a balanced approach, aiming to optimize the strategy's performance across a variety of market conditions.
+
+Strategy Components:
+- Inside Candles: An inside candle occurs when a candle's high and low are completely contained within the high and low of the previous candle. This pattern indicates a period of consolidation or indecision in the market, often preceding a significant price movement. The strategy detects inside candles based on the user-selected timeframe, allowing traders to capture potential breakouts.
+
+Indicator Overlays:
+- Moving Average: A simple moving average (SMA) is calculated over a user-defined length (`Average Length`), providing a dynamic baseline to gauge the market's direction. The strategy offers an option (`Show Moving Average`) to display or hide this moving average on the chart, giving traders control over the visual complexity.
+- Volatility Measurement: Alongside the moving average, the strategy assesses market volatility using the standard deviation of the closing prices over the same period defined by the `Average Length`. The moving average is adjusted upwards or downwards by this volatility measure, creating a dynamic channel that reflects the current market conditions.
+- Color Gradients for Volatility: The strategy uses a color gradient to fill the area between the moving average and its volatility-adjusted counterpart. This gradient visually represents the volatility level, transitioning from gray (low volatility) to a lighter shade (higher volatility), aiding in the assessment of market sentiment and volatility.
+
+Trading Entries:
+- Long Entry: A long position is triggered when the closing price exceeds the high of an inside candle, indicating potential bullish momentum. The strategy places a stop-loss at the low of the inside candle and sets a take-profit level based on the predefined risk-reward ratio (`RR Ratio`).
+- Short Entry: Conversely, a short position is initiated when the closing price falls below the low of an inside candle, suggesting bearish pressure. A stop-loss is set at the high of the inside candle, with the take-profit level adjusted according to the risk-reward ratio.
+
+Customization Settings:
+- Timeframe: Traders can select the desired timeframe for inside candle detection, tailoring the strategy to fit various trading styles and time horizons.
+- RR Ratio: The risk-reward ratio is adjustable, allowing traders to manage the potential risk and return of each trade according to their risk tolerance.
+- Average Length: This setting determines the period over which the moving average and volatility are calculated, affecting the sensitivity of the strategy to price movements.
+- Visual Settings: Users can customize the appearance of the strategy on their charts, including the colors of the moving average and volatility lines, as well as the line width, enhancing chart readability and personal preference adherence.
+
+Disclaimer
+
+Trading involves significant risk, and it is crucial for traders to conduct their own due diligence before engaging with any strategy. The Inside Candle Breakout Strategy is presented for informational purposes only and does not constitute financial advice.

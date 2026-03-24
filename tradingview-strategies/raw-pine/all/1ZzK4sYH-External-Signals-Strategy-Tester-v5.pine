@@ -1,0 +1,631 @@
+//@version=6
+strategy("External Signals Strategy Tester v8", overlay = true,
+         default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// ═════════════ Date filter ═════════════════════════════════════════════════
+startDate = input.time(timestamp("2024-11-01 00:00"), "Start Date", group="Date Range")
+endDate   = input.time(timestamp("2025-03-31 23:59"), "End Date",   group="Date Range")
+inDateRange = time >= startDate and time <= endDate
+
+// ═════════════ External / Line‑cross signals ═══════════════════════════════
+longSignal  = input.source(close, "Buy Signal")
+shortSignal = input.source(close, "Sell Signal")
+
+l_cross_enable = input.bool(false,"LONG LINE CROSS",  group="Long Line Cross")
+l_cross_src    = input.source(hl2,"Line Source",      group="Long Line Cross")
+l_cross_dir    = input.string("Below→Above","Dir",    options=["Below→Above","Above→Below"], group="Long Line Cross")
+
+s_cross_enable = input.bool(false,"SHORT LINE CROSS", group="Short Line Cross")
+s_cross_src    = input.source(hl2,"Line Source",      group="Short Line Cross")
+s_cross_dir    = input.string("Above→Below","Dir",    options=["Below→Above","Above→Below"], group="Short Line Cross")
+
+// ═════════════ Trade settings & %‑risk ═════════════════════════════════════
+enableLong  = input.bool(true,"Enable Long",  group="Trade Settings")
+enableShort = input.bool(true,"Enable Short", group="Trade Settings")
+closeOnReverse  = input.bool(true,"Close on Opposite", group="Trade Settings")
+reversePosition = input.bool(false,"Reverse on Opposite",group="Trade Settings")
+
+useTP = input.bool(true,"Use % TP", group="Risk %")
+takeProfitPerc = input.float(2.0,"TP %", step=0.1, group="Risk %")
+useSL = input.bool(true,"Use % SL", group="Risk %")
+stopLossPerc   = input.float(1.0,"SL %", step=0.1, group="Risk %")
+useBE = input.bool(true,"Use % BE", group="Risk %")
+breakevenPerc  = input.float(1.0,"BE %", step=0.1, group="Risk %")
+
+// ═════════════ Fibonacci Bollinger Bands (visual & math) ═══════════════════
+showFBB = input.bool(false,"FIBO LEVELS ENABLE",group="Fibo Bands")
+fbb_length = input.int(200,"FBB Length", minval=1, group="Fibo Bands")
+fbb_src    = input.source(hlc3,"FBB Source", group="Fibo Bands")
+fbb_mult   = input.float(3.0,"FBB Mult", minval=0.001, group="Fibo Bands")
+fbb_basis_type  = input.string("VWMA","FBB Basis",
+                   options=["VWMA","HMA","SMA","EMA","DEMA","TEMA"],group="Fibo Bands")
+fbb_view_mode   = input.string("Full","FBB View",
+                   options=["Full","Cloud","Extremes"], group="Fibo Bands")
+fbb_smooth_type = input.string("None","Smooth",
+                   options=["None","SMA","EMA","DEMA","HMA"], group="Fibo Bands")
+fbb_smooth_len  = input.int(50,"Smooth Len",minval=1, group="Fibo Bands")
+
+fbb_dema(s,l)=>2*ta.ema(s,l)-ta.ema(ta.ema(s,l),l)
+fbb_tema(s,l)=>3*(ta.ema(s,l)-ta.ema(ta.ema(s,l),l))+ta.ema(ta.ema(ta.ema(s,l),l),l)
+raw_basis=switch fbb_basis_type
+    "VWMA"=>ta.vwma(fbb_src,fbb_length)
+    "HMA" =>ta.hma (fbb_src,fbb_length)
+    "SMA" =>ta.sma (fbb_src,fbb_length)
+    "EMA" =>ta.ema (fbb_src,fbb_length)
+    "DEMA"=>fbb_dema(fbb_src,fbb_length)
+    =>       fbb_tema(fbb_src,fbb_length)
+basis=switch fbb_smooth_type
+    "None"=>raw_basis
+    "SMA" =>ta.sma (raw_basis,fbb_smooth_len)
+    "EMA" =>ta.ema (raw_basis,fbb_smooth_len)
+    "DEMA"=>fbb_dema(raw_basis,fbb_smooth_len)
+    =>       ta.hma (raw_basis,fbb_smooth_len)
+
+dev=fbb_mult*ta.atr(fbb_length)
+past_dev=nz(dev[fbb_length],dev)
+dyn=math.max(dev/math.max(past_dev,0.001),0.5)
+band(c,up)=>up?basis+c*dev*dyn:basis-c*dev*dyn
+u1=band(0.236,true), l1=band(0.236,false)
+u2=band(0.382,true), l2=band(0.382,false)
+u3=band(0.5 ,true), l3=band(0.5 ,false)
+u4=band(0.618,true), l4=band(0.618,false)
+u5=band(0.764,true), l5=band(0.764,false)
+u6=band(1.0 ,true), l6=band(1.0 ,false)
+plot(showFBB?basis:na,"Basis",color=color.fuchsia,linewidth=2)
+plot(showFBB?u1:na,"u1"), plot(showFBB?u2:na,"u2"), plot(showFBB?u3:na,"u3")
+plot(showFBB?u4:na,"u4"), plot(showFBB?u5:na,"u5"), plot(showFBB?u6:na,"u6")
+plot(showFBB?l1:na,"l1"), plot(showFBB?l2:na,"l2"), plot(showFBB?l3:na,"l3")
+plot(showFBB?l4:na,"l4"), plot(showFBB?l5:na,"l5"), plot(showFBB?l6:na,"l6")
+
+// helper: explicit Upper / Lower + level → price
+fbbPrice(level, side)=>
+    bool upper = side=="Upper"
+    switch level
+        "Basis"=>basis
+        "0.236"=>upper?u1:l1
+        "0.382"=>upper?u2:l2
+        "0.5"  =>upper?u3:l3
+        "0.618"=>upper?u4:l4
+        "0.764"=>upper?u5:l5
+        =>         upper?u6:l6   // "1.0"
+// helper 2: single‑string selector → price  (замена str.starts_with)
+// ───────────────────────────────────────────────────────────────────────────
+fbbPriceSel(sel)=>
+    // первая буква = 'U' ? → Upper, иначе Lower
+    bool   up  = str.substring(sel, 0, 1) == "U"
+    string lvl = str.replace(str.replace(sel, "U-", ""), "L-", "")
+    fbbPrice(lvl, up ? "Upper" : "Lower")
+
+
+// ═══════════ LONG – SL + TP1‑TP3 inputs (side & level) ═════════════════════
+l_sl_enable     = input.bool(false, "Enable LONG SL",  group="FBB LONG SL")
+l_sl_sideSel    = input.string("Lower", "SL Side", options = ["Upper","Lower"], group="FBB LONG SL")
+l_sl_level      = input.string("0.382", "SL Level",  options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"], group = "FBB LONG SL")
+l_sl_trail      = input.bool(false, "Trail SL",        group="FBB LONG SL")
+l_sl_trailSide  = input.string("Lower", "Trail Side", options = ["Upper","Lower"], group="FBB LONG SL")
+l_sl_trailLvl   = input.string("0.382", "Trail Level", options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"], group = "FBB LONG SL")
+
+l_tp1_enable    = input.bool(false, "Enable LONG TP1", group="FBB LONG TP1")
+l_tp1_side      = input.string("Upper", "TP1 Side",                    options = ["Upper","Lower"],        group="FBB LONG TP1")
+l_tp1_level     = input.string("0.618", "TP1 Level",                    options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"],                    group = "FBB LONG TP1")
+l_tp1_qty       = input.float(33, "TP1 % Qty", minval=1, maxval=100, group="FBB LONG TP1")
+l_tp1_trail     = input.bool(false, "Trail TP1",       group="FBB LONG TP1")
+l_tp1_trailSel  = input.string("U-0.618", "Trail Line",                    options = ["U-Basis","U-0.236","U-0.382","U-0.5","U-0.618","U-0.764","U-1.0",        "L-Basis","L-0.236","L-0.382","L-0.5","L-0.618","L-0.764","L-1.0"],                    group = "FBB LONG TP1")
+
+l_tp2_enable    = input.bool(false, "Enable LONG TP2", group="FBB LONG TP2")
+l_tp2_side      = input.string("Upper", "TP2 Side",                    options = ["Upper","Lower"],        group="FBB LONG TP2")
+l_tp2_level     = input.string("0.764", "TP2 Level",                    options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"],                    group = "FBB LONG TP2")
+l_tp2_qty       = input.float(33, "TP2 % Qty", minval=1, maxval=100, group="FBB LONG TP2")
+//l_tp2_trail     = input.bool(false, "Trail TP2",       group="FBB LONG TP2")
+//l_tp2_trailSel  = input.string("U-0.764", "Trail Line",                    options = ["U-Basis","U-0.236","U-0.382","U-0.5","U-0.618","U-0.764","U-1.0",                               "L-Basis","L-0.236","L-0.382","L-0.5","L-0.618","L-0.764","L-1.0"],                    group = "FBB LONG TP2")
+
+l_tp3_enable    = input.bool(false, "Enable LONG TP3", group="FBB LONG TP3")
+l_tp3_side      = input.string("Upper", "TP3 Side",                    options = ["Upper","Lower"],        group="FBB LONG TP3")
+l_tp3_level     = input.string("1.0", "TP3 Level",                    options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"],                    group = "FBB LONG TP3")
+l_tp3_qty       = input.float(34, "TP3 % Qty", minval=1, maxval=100, group="FBB LONG TP3")
+//l_tp3_trail     = input.bool(false, "Trail TP3",       group="FBB LONG TP3")
+//l_tp3_trailSel  = input.string("U-1.0", "Trail Line",                    options = ["U-Basis","U-0.236","U-0.382","U-0.5","U-0.618","U-0.764","U-1.0",                               "L-Basis","L-0.236","L-0.382","L-0.5","L-0.618","L-0.764","L-1.0"],                    group = "FBB LONG TP3")
+
+// ═══════════ SHORT – SL + TP1‑TP3 inputs (side & level) ════════════════════
+s_sl_enable     = input.bool(false, "Enable SHORT SL", group="FBB SHORT SL")
+s_sl_sideSel    = input.string("Upper", "SL Side",                    options = ["Upper","Lower"],        group="FBB SHORT SL")
+s_sl_level      = input.string("0.382", "SL Level",                    options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"],                    group = "FBB SHORT SL")
+s_sl_trail      = input.bool(false, "Trail SL",        group="FBB SHORT SL")
+s_sl_trailSide  = input.string("Upper", "Trail Side",                    options = ["Upper","Lower"],        group="FBB SHORT SL")
+s_sl_trailLvl   = input.string("0.382", "Trail Level",                    options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"],                    group = "FBB SHORT SL")
+
+s_tp1_enable    = input.bool(false, "Enable SHORT TP1", group="FBB SHORT TP1")
+s_tp1_side      = input.string("Lower", "TP1 Side",                    options = ["Upper","Lower"],         group="FBB SHORT TP1")
+s_tp1_level     = input.string("0.618", "TP1 Level",                    options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"],                    group = "FBB SHORT TP1")
+s_tp1_qty       = input.float(33, "TP1 % Qty", minval=1, maxval=100, group="FBB SHORT TP1")
+s_tp1_trail     = input.bool(false, "Trail TP1",        group="FBB SHORT TP1")
+s_tp1_trailSel  = input.string("L-0.618", "Trail Line",                    options = ["U-Basis","U-0.236","U-0.382","U-0.5","U-0.618","U-0.764","U-1.0",                               "L-Basis","L-0.236","L-0.382","L-0.5","L-0.618","L-0.764","L-1.0"],                    group = "FBB SHORT TP1")
+
+s_tp2_enable    = input.bool(false, "Enable SHORT TP2", group="FBB SHORT TP2")
+s_tp2_side      = input.string("Lower", "TP2 Side",                    options = ["Upper","Lower"],         group="FBB SHORT TP2")
+s_tp2_level     = input.string("0.764", "TP2 Level",                    options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"],                    group = "FBB SHORT TP2")
+s_tp2_qty       = input.float(33, "TP2 % Qty", minval=1, maxval=100, group="FBB SHORT TP2")
+//s_tp2_trail     = input.bool(false, "Trail TP2",        group="FBB SHORT TP2")
+//s_tp2_trailSel  = input.string("L-0.764", "Trail Line",                    options = ["U-Basis","U-0.236","U-0.382","U-0.5","U-0.618","U-0.764","U-1.0",                               "L-Basis","L-0.236","L-0.382","L-0.5","L-0.618","L-0.764","L-1.0"],                    group = "FBB SHORT TP2")
+
+s_tp3_enable    = input.bool(false, "Enable SHORT TP3", group="FBB SHORT TP3")
+s_tp3_side      = input.string("Lower", "TP3 Side",                    options = ["Upper","Lower"],         group="FBB SHORT TP3")
+s_tp3_level     = input.string("1.0", "TP3 Level",                    options = ["Basis","0.236","0.382","0.5","0.618","0.764","1.0"],                    group = "FBB SHORT TP3")
+s_tp3_qty       = input.float(34, "TP3 % Qty", minval=1, maxval=100, group="FBB SHORT TP3")
+//s_tp3_trail     = input.bool(false, "Trail TP3",        group="FBB SHORT TP3")
+//s_tp3_trailSel  = input.string("L-1.0", "Trail Line",                    options = ["U-Basis","U-0.236","U-0.382","U-0.5","U-0.618","U-0.764","U-1.0",                               "L-Basis","L-0.236","L-0.382","L-0.5","L-0.618","L-0.764","L-1.0"],                    group = "FBB SHORT TP3")
+
+// ═══════════ Runtime flags & price holders ═════════════════════════════════
+var bool l_slActive=false, s_slActive=false
+var bool l_tp1Active=false,l_tp2Active=false,l_tp3Active=false
+var bool s_tp1Active=false,s_tp2Active=false,s_tp3Active=false
+
+var float l_slPrice  = na
+var float s_slPrice  = na
+var float l_tp1Price = na
+var float l_tp2Price = na
+var float l_tp3Price = na
+var float s_tp1Price = na
+var float s_tp2Price = na
+var float s_tp3Price = na
+
+var float prevPos = 0.0
+var int   prevClosed = 0
+
+var int  barsInPos = 0        // сколько баров мы держим текущую позицию
+var bool posJustOpened = false
+var string curEntryID = ""
+
+// ═════════ Entry conditions (signal OR line‑cross) ═════════════════════════
+bool extLongSig  = ta.crossover(longSignal,0)
+bool extShortSig = ta.crossover(shortSignal,0)
+
+bool l_crossSig = l_cross_enable and ((l_cross_dir=="Below→Above"? ta.crossover(close,l_cross_src)
+                                                                  : ta.crossunder(close,l_cross_src)))
+bool s_crossSig = s_cross_enable and ((s_cross_dir=="Below→Above"? ta.crossover(close,s_cross_src)
+                                                                  : ta.crossunder(close,s_cross_src)))
+
+longCondition  = extLongSig  or l_crossSig
+shortCondition = extShortSig or s_crossSig
+
+// ═════════ Entry / reversal execution ══════════════════════════════════════
+var bool reverseDone=false
+reverseDone := false
+if inDateRange
+    if reversePosition and strategy.position_size<0 and longCondition and enableLong
+        strategy.close("Short")
+        strategy.entry("Long", strategy.long)
+        reverseDone := true
+    if reversePosition and strategy.position_size>0 and shortCondition and enableShort
+        strategy.close("Long")
+        strategy.entry("Short", strategy.short)
+        reverseDone := true
+    if not reversePosition and closeOnReverse
+        if strategy.position_size>0 and shortCondition
+            strategy.close("Long")
+        if strategy.position_size<0 and longCondition
+            strategy.close("Short")
+    if strategy.position_size==0 and not reverseDone
+        if enableLong  and longCondition
+            strategy.entry("Long", strategy.long)
+        if enableShort and shortCondition
+            strategy.entry("Short", strategy.short)
+// ═════════ Position management: activate module & set prices ═══════════════
+if strategy.position_size == 0
+    // ── сброс всех флагов и цен
+    l_slActive  := false
+    s_slActive  := false
+    l_tp1Active := false
+    l_tp2Active := false
+    l_tp3Active := false
+    s_tp1Active := false
+    s_tp2Active := false
+    s_tp3Active := false
+
+    l_slPrice  := na
+    s_slPrice  := na
+    l_tp1Price := na
+    l_tp2Price := na
+    l_tp3Price := na
+    s_tp1Price := na
+    s_tp2Price := na
+    s_tp3Price := na
+    barsInPos := 0
+    prevPos := 0.0
+
+else  // ────────────────── позиция ОТКРЫТА ────────────────────────────────
+    bool   isLong  = strategy.position_size > 0
+    string entryID = isLong ? "Long" : "Short"
+
+    // ── первая свеча после входа → активируем нужные блоки
+    if prevPos == 0.0
+        // — включаем нужные флаги —
+        if isLong
+            l_slActive  := l_sl_enable
+            l_tp1Active := l_tp1_enable
+            l_tp2Active := l_tp2_enable
+            l_tp3Active := l_tp3_enable
+
+            s_slActive  := false
+            s_tp1Active := false
+            s_tp2Active := false
+            s_tp3Active := false
+        else
+            s_slActive  := s_sl_enable
+            s_tp1Active := s_tp1_enable
+            s_tp2Active := s_tp2_enable
+            s_tp3Active := s_tp3_enable
+
+            l_slActive  := false
+            l_tp1Active := false
+            l_tp2Active := false
+            l_tp3Active := false
+
+        // — фиксируем состояние на момент входа —
+        prevClosed  := strategy.closedtrades   // "долгов" по старым трейдам нет
+        barsInPos   := 1                       // позиция «молодая»
+        curEntryID  := entryID                 // запоминаем ID для де‑активации
+    else
+        barsInPos += 1
+
+    prevPos := strategy.position_size
+
+    // ───── LONG module ─────────────────────────────────────────────────────
+    if isLong
+        // SL
+        if l_slActive
+            if na(l_slPrice)
+                l_slPrice := fbbPrice(l_sl_level, l_sl_sideSel)
+            if l_sl_trail
+                l_slPrice := fbbPrice(l_sl_trailLvl, l_sl_trailSide)
+            strategy.exit("SL", from_entry = entryID, stop = l_slPrice, qty_percent = 100)
+
+        // TP1
+        if l_tp1Active
+            l_tp1Price := l_tp1_trail ? fbbPriceSel(l_tp1_trailSel) :
+                         na(l_tp1Price) ? fbbPrice(l_tp1_level, l_tp1_side) : l_tp1Price
+            strategy.exit("TP1", from_entry = entryID, limit = l_tp1Price,
+                          qty_percent = math.min(l_tp1_qty,100))
+
+        // TP2  (фиксированный)
+        if l_tp2Active
+            if na(l_tp2Price)                      // присваиваем лишь однажды
+                l_tp2Price := fbbPrice(l_tp2_level, l_tp2_side)
+            strategy.exit("TP2", from_entry = entryID, limit = l_tp2Price,
+                          qty_percent = math.min(l_tp2_qty, 100))
+
+        // TP3  (фиксированный)
+        if l_tp3Active
+            if na(l_tp3Price)                      // присваиваем лишь однажды
+                l_tp3Price := fbbPrice(l_tp3_level, l_tp3_side)
+            strategy.exit("TP3", from_entry = entryID, limit = l_tp3Price,
+                          qty_percent = math.min(l_tp3_qty, 100))
+
+    // ───── SHORT module ────────────────────────────────────────────────────
+    if not isLong
+        // SL
+        if s_slActive
+            if na(s_slPrice)
+                s_slPrice := fbbPrice(s_sl_level, s_sl_sideSel)
+            if s_sl_trail
+                s_slPrice := fbbPrice(s_sl_trailLvl, s_sl_trailSide)
+            strategy.exit("SL", from_entry = entryID, stop = s_slPrice, qty_percent = 100)
+
+        // TP1
+        if s_tp1Active
+            s_tp1Price := s_tp1_trail ? fbbPriceSel(s_tp1_trailSel) :
+                         na(s_tp1Price) ? fbbPrice(s_tp1_level, s_tp1_side) : s_tp1Price
+            strategy.exit("TP1", from_entry = entryID, limit = s_tp1Price,
+                          qty_percent = math.min(s_tp1_qty,100))
+
+        // TP2  (фиксированный)
+        if s_tp2Active
+            if na(s_tp2Price)                      // присваиваем лишь однажды
+                s_tp2Price := fbbPrice(s_tp2_level, s_tp2_side)
+            strategy.exit("TP2", from_entry = entryID, limit = s_tp2Price,
+                          qty_percent = math.min(s_tp2_qty, 100))
+
+        // TP3  (фиксированный)
+        if s_tp3Active
+            if na(s_tp3Price)                      // присваиваем лишь однажды
+                s_tp3Price := fbbPrice(s_tp3_level, s_tp3_side)
+            strategy.exit("TP3", from_entry = entryID, limit = s_tp3Price,
+                          qty_percent = math.min(s_tp3_qty, 100))
+// ═════════ De‑activate flags after exit ════════════════════════════════════
+int closedNow = strategy.closedtrades
+if closedNow > prevClosed
+    // проверяем, что закрылась именно ТЕКУЩАЯ позиция
+    string exitEntryID = strategy.closedtrades.entry_id(closedNow - 1)
+    if exitEntryID == curEntryID
+        string lastID = strategy.closedtrades.exit_id(closedNow - 1)
+
+        if lastID == "SL"
+            l_slActive := false
+            s_slActive := false
+            l_tp1Active := false
+            l_tp2Active := false
+            l_tp3Active := false
+            s_tp1Active := false
+            s_tp2Active := false
+            s_tp3Active := false
+
+        if lastID == "TP1"
+            l_tp1Active := false
+            s_tp1Active := false
+
+        if lastID == "TP2"
+            l_tp2Active := false
+            s_tp2Active := false
+
+        if lastID == "TP3"
+            l_tp3Active := false
+            s_tp3Active := false
+
+    prevClosed := closedNow
+
+// ═════════ Classic %‑Risk block ════════════════════════════════════════════
+if strategy.position_size!=0
+    float entryPrice = strategy.position_avg_price
+    float prc = (close-entryPrice)/entryPrice*100*(strategy.position_size<0?-1:1)
+    if useTP and takeProfitPerc>0 and prc>=takeProfitPerc
+        strategy.close_all(comment="TP%")
+    if useSL and stopLossPerc>0 and prc<=-stopLossPerc
+        strategy.close_all(comment="SL%")
+    if useBE and breakevenPerc>0 and prc>=breakevenPerc
+        strategy.exit(strategy.position_size>0?"BE Long":"BE Short",
+                      from_entry=strategy.position_size>0?"Long":"Short",
+                      stop=entryPrice)
+
+// ═════════ Plot entry arrows ═══════════════════════════════════════════════
+plotshape(longCondition  and inDateRange, title="Buy",  location=location.belowbar,
+          color=color.green, style=shape.triangleup,   size=size.small)
+plotshape(shortCondition and inDateRange, title="Sell", location=location.abovebar,
+          color=color.red,   style=shape.triangledown, size=size.small)
+
+View in Pine Editor・384 lines
+Use on chart
+3
+2
+7
+5 831
+May 2, 2025
+External Signals Strategy Tester v5 – User Guide (English)
+1. Purpose
+This Pine Script strategy is a universal back‑tester that lets you plug in any external buy/sell series (for example, another indicator, webhook feed, or higher‑time‑frame condition) and evaluate a rich set of money‑management rules around it – with a single click on/off workflow for every module.
+
+2. Core Workflow
+Feed signals
+
+Buy Signal / Sell Signal inputs accept any series (price, boolean, output of request.security(), etc.).
+
+A crossover above 0 is treated as “signal fired”.
+
+Date filter
+
+Start Date / End Date restricts the test window so you can exclude unwanted history.
+
+Trade engine
+
+Optional Long / Short enable toggles.
+
+Choose whether opposite signals simply close the trade or reverse it (flip direction in one transaction).
+
+Risk modules – all opt‑in via check‑boxes
+
+Classic % block – fixed % Take‑Profit / Stop‑Loss / Break‑Even.
+
+Fibonacci Bollinger Bands (FBB) module
+
+Draws dynamic VWMA/HMA/SMA/EMA/DEMA/TEMA mid‑line with ATR‑scaled Fibonacci envelopes.
+
+Every line can be used for stops, trailing, or multi‑target exits.
+
+Separate LONG and SHORT sub‑modules
+
+Each has its own SL plus three Take‑Profits (TP1‑TP3).
+
+Per TP you set line, position‑percentage to close, and an optional trailing flag.
+
+Executed TP/SLs deactivate themselves so they cannot refire.
+
+Trailing behaviour
+
+If Trail is checked, the selected line is re‑evaluated once per bar; the order is amended via strategy.exit().
+
+3. Inputs Overview
+Group Parameter Notes
+Trade Settings Enable Long / Enable Short Master switches
+Close on Opposite / Reverse Position How to react to a counter‑signal
+Risk % Use TP / SL / BE + their % Traditional fixed‑distance management
+Fibo Bands FIBO LEVELS ENABLE + visual style/length Turn indicator overlay on/off
+FBB LONG SL / TP1‑TP3 Enable, Line, %, Trail Rules applied only while a long is open
+FBB SHORT SL / TP1‑TP3 Enable, Line, %, Trail Rules applied only while a short is open
+
+Line choices: Basis, 0.236, 0.382, 0.5, 0.618, 0.764, 1.0 – long rules use lower bands, short rules use upper bands automatically.
+
+4. Algorithm Details
+Position open
+
+On the very first bar after entry, the script checks the direction and activates the corresponding LONG or SHORT module, deactivating the other.
+
+Order management loop (every bar)
+
+FBB Stop‑Loss: placed/updated at chosen band; if trailing, follows the new value.
+
+TP1‑TP3: each active target updates its limit price to the selected band (or holds static if trailing is off).
+
+The classic % block runs in parallel; its exits have priority because they call strategy.close_all().
+
+Exit handling
+
+When any strategy.exit() fires, the script reads exit_id and flips the *_Active flag so that order will not be recreated.
+
+A Stop‑Loss (SL) also disables all remaining TPs for that leg.
+
+5. Typical Use Cases
+Scenario Suggested Setup
+Scalping longs into VWAP‐reversion Enable LONG TP1 @ 0.382 (30 %), TP2 @ 0.618 (40 %), SL @ 0.236 + trailing
+Fade shorts during news spikes Enable SHORT SL @ 1.0 (no trail) and SHORT TP1,2,3 on consecutive lowers with small size‑outs
+Classic trend‑follow Use only classic % TP/SL block and disable FBB modules
+
+6. Hints & Tips
+Signal quality matters – this script manages exits, it does not generate entries.
+
+Keep TV time zone in mind when picking start/end dates.
+
+For portfolio‑style testing allocate smaller default_qty_value than 100 % or use strategy.percent_of_equity sizing.
+
+You can combine FBB exits with fixed‑% ones for layered management.
+
+7. Limitations / Safety
+No pyramiding; the script holds max one position at a time.
+
+All calculations are bar‑close; intra‑bar touches may differ from real‑time execution.
+
+The indicator overlay is optional, so you can run visual‑clean tests by unchecking FIBO LEVELS ENABLE.
+May 3, 2025
+Release Notes
+External Signals Strategy Tester v5
+A modular, click‑to‑configure strategy back‑tester for TradingView
+
+1. Purpose
+This script turns any external signal or custom line crossover into a fully featured trading system with:
+
+Direction filters (enable Long / Short separately).
+
+Automatic or manual Stop‑Loss + 3 Take‑Profits (each with optional trailing).
+
+Dynamic exits driven by Fibonacci Bollinger Bands (FBB).
+
+Classic fixed‑percent TP / SL / Break‑Even block.
+
+Independent LONG and SHORT money‑management modules.
+
+All options are exposed as intuitive check‑boxes and dropdowns—no code edits required.
+
+2. How entries work
+Mode Description Where to enable
+External series Choose Buy Signal / Sell Signal – any series (indicator plot, security(), etc.). A crossover above 0 triggers the entry. Top‑level inputs
+Line‑cross trigger Select Line Source (any plot/price) and crossing direction. Long Line Cross & Short Line Cross groups
+Both mechanisms are combined with OR logic—either one can open a trade.
+
+3. Exit arsenal
+Each side (long/short) has its own module:
+
+Element Options
+Stop‑Loss ✓ Enable · Side (Upper/Lower) · Level (Basis … 1.0) · ✓ Trail with separate side/level
+TP1‑TP3 same controls + % Qty to close
+Band side logic Upper selects the band above Basis, Lower the one below. Exactly matches visible lines.
+Trailing If checked, price re‑locks to the chosen band each bar; if off, price is fixed at entry.
+Self‑deactivation When a TP fires its flag flips off so it cannot execute again. An SL cancels remaining TPs.
+
+Classic % block (TP %, SL %, BE %) runs in parallel and, if triggered, uses strategy.close_all().
+
+4. Fibonacci Bollinger Bands overlay
+ATR‑scaled envelopes around a configurable base line (VWMA / HMA / SMA / EMA / DEMA / TEMA).
+
+Levels: Basis, 0.236 … 1.0.
+
+View modes: Full (all lines), Cloud, Extremes.
+
+Completely optional—uncheck FIBO LEVELS ENABLE to hide visuals while using their prices internally.
+
+5. Input groups quick map
+Group Key fields
+Date Range Start / End timestamp
+Buy / Sell Signal External series for entry
+Long / Short Line Cross ✓ Enable · Line Source · Direction
+Trade Settings Enable Long / Short · Close‑on‑Opposite · Reverse Position
+Risk % Use % TP / SL / BE + their percentages
+Fibo Bands Visual toggle & styling
+FBB LONG / SHORT SL Enable · Side · Level · Trailing options
+FBB LONG / SHORT TP1‑TP3 ditto + % Qty
+
+6. Typical set‑ups
+Scenario Suggested inputs
+Intraday trend follow Long Line Cross: price Below→Above VWAP; Long SL Lower 0.382 (trail); TP1‑3 on Upper bands; disable Short module.
+Mean‑reversion scalps External Buy/Sell from RSI divergence; both modules active; SL on opposite 1.0 band, no trailing; TP1 Upper/Lower 0.382 only.
+Classic fixed % Disable all FBB groups, keep Risk % block on.
+
+7. Execution details & limitations
+One position at a time – no scaling in (except partial exits via TP1‑3).
+
+Calculations are end‑of‑bar; intra‑bar touches aren’t simulated.
+
+Trailing updates once per bar – not tick‑by‑tick.
+
+Strategy quantity defaults to 100 % equity; adjust Position Size or switch sizing mode as needed.
+
+8. Changelog
+v7
+
+Added explicit Upper / Lower band selection for every SL / TP.
+
+Fixed/Trailing price logic—levels captured at entry, only updated when Trail is on.
+
+Retained all v6 features (generic line‑cross entry, separate long/short modules).
+
+Earlier versions: v6 (line‑cross entry), v5 (dual long/short modules), v4 (multi‑TP with trailing), v1‑3 initial builds.
+
+9. Usage
+Load script on any symbol / timeframe.
+
+Open settings ⚙️.
+
+Toggle the modules you need, pick band sides/levels, hit OK.
+
+Scroll the chart or run strategy tester to inspect performance.
+May 4, 2025
+Release Notes
+External Signals Strategy Tester v7
+A back‑testing engine that manages positions opened by your own entry signals and closes them on dynamically‑calculated Fibonacci Bollinger Band levels.
+It is designed for strategy prototyping: you connect any indicator / alert to generate a buy‑ or sell‑pulse, then let this script handle position size, SL/TP logic and performance statistics.
+
+▸ How it Enters Trades
+External pulses
+Buy Signal / Sell Signal inputs accept any series:
+1 (or true) on the bar → long / short entry next bar open.
+
+Optional line‑cross
+Enable Long Line Cross or Short Line Cross to enter when close crosses a custom source line (MA, VWAP, etc.).
+
+Date range filter – back‑test only the period you need.
+
+▸ Fibonacci Bollinger Bands (FBB)
+Combines a selectable basis (VWMA, HMA, SMA, EMA, DEMA, TEMA) with ATR‑scaled deviation.
+
+Seven Fibonacci levels per side (0.236 … 1.0) are plotted; you can pick any of them for SL/TP.
+
+View modes: Full / Cloud / Extremes to keep the chart clean.
+
+▸ Position Management
+Component Setting Behaviour
+Stop‑Loss Side + Level (+ optional trailing) Updates each bar if Trail SL is on
+TP1 (Trail‑enabled) Side + Level (+ optional trailing line) Trails every bar when enabled
+TP2 / TP3 (Fixed) Side + Level Price is fixed on the first bar after entry
+Close on Opposite / Reverse on Opposite — Either exit or flip the position on an opposite pulse
+Classic %‑Risk block TP %, SL %, BE % Percent‑based kill‑switches that work in parallel to FBB exits
+
+▸ Quick‑Start
+Add your entry indicator to the same chart and pipe its boolean/binary output into Buy Signal / Sell Signal (or just paste a security‑call series).
+
+Choose position side(s) (Enable Long / Enable Short).
+
+Pick FBB levels for SL, TP1‑3.
+
+Turn Trail TP1 on if you want it to follow another FBB line; leave TP2/TP3 as simple targets.
+
+Press “Add to Chart” – the script will plot entries, exits, and a full TradingView Strategy Report.
+
+▸ Tips & Notes
+Works on any symbol / timeframe; no repaint – all calculations use historical data only.
+
+If your entry signal fires inside the disabled Date Range, nothing happens.
+
+Sum of TP quantities should be ≤ 100 %.
+
+Trailing uses limit‑orders; if your market’s syminfo.mintick is large, TP1 may update in visible steps.
+
+The script itself does not generate entries – that is left to your indicators or the optional line‑cross.
+
+Happy testing and fine‑tuning!

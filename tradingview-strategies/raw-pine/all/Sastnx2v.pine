@@ -1,0 +1,189 @@
+//@version=6
+strategy("顺序三连穿越：2/3先入 + 3/3加仓（仅低波动过滤）", overlay=true, initial_capital=100000,
+     commission_type=strategy.commission.percent, commission_value=0.05,
+     pyramiding=1, calc_on_order_fills=true, calc_on_every_tick=false,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ===== 参数 =====
+len5  = input.int(5,  "MA5",  minval=1)
+len10 = input.int(10, "MA10", minval=1)
+len30 = input.int(30, "MA30", minval=1)
+len60 = input.int(60, "MA60", minval=1)
+maSrc = input.source(close, "均线价格源")
+maType= input.string("SMA", "均线类型", options=["SMA","EMA","WMA","RMA"])
+
+useShort        = input.bool(true,  "启用大死叉做空(含2/3先入)")
+useIntrabarExit = input.bool(true,  "触及MA30当根平仓")
+seqMaxBars      = input.int(200, "三穿最大跨度(超时重置)", minval=5)
+cooldownBars    = input.int(15,  "平仓后冷却期", minval=0)
+
+// —— 仅低波动过滤 ——
+bbLen   = input.int(20, "BW长度", minval=5)
+bbMult  = input.float(2.0, "BW倍数", step=0.1)
+bwFloor = input.float(0.015, "带宽下限(仅过滤过小波动)", step=0.001)
+useBW   = input.bool(true, "启用低波动过滤")
+
+// —— 3/3是否加仓 ——
+addOnFull = input.bool(true, "3/3确认时加一笔")
+addQtyPct = input.float(100, "加仓占权益%", step=1.0, minval=1, maxval=100)
+
+// ===== 均线 =====
+ma(_src, _len) =>
+    (maType == "EMA" ? ta.ema(_src, _len) :
+     maType == "WMA" ? ta.wma(_src, _len) :
+     maType == "RMA" ? ta.rma(_src, _len) :
+     ta.sma(_src, _len))
+
+ma5  = ma(maSrc, len5)
+ma10 = ma(maSrc, len10)
+ma30 = ma(maSrc, len30)
+ma60 = ma(maSrc, len60)
+
+// ===== 带宽（仅过滤过小波动） =====
+basis = ta.sma(close, bbLen)
+dev   = bbMult * ta.stdev(close, bbLen)
+upper = basis + dev
+lower = basis - dev
+bw    = basis != 0 ? (upper - lower) / basis : 0.0
+vol_ok = (not useBW) or (bw >= bwFloor)
+
+// ===== 多头状态机 =====
+var int  stL      = 0
+var int  stL_bar0 = na
+stL_prev = stL
+
+advL1 = stL == 0 and ta.crossover(ma5, ma10)
+advL2 = stL == 1 and ta.crossover(ma5, ma30)
+advL3 = stL == 2 and ta.crossover(ma5, ma60)
+
+if advL1
+    stL := 1
+    stL_bar0 := bar_index
+else if advL2
+    stL := 2
+else if advL3
+    stL := 3
+
+if stL >= 3 and ta.crossunder(ma5, ma60)
+    stL := 2
+if stL >= 2 and ta.crossunder(ma5, ma30)
+    stL := math.min(stL, 1)
+if stL >= 1 and ta.crossunder(ma5, ma10)
+    stL := 0
+    stL_bar0 := na
+
+if stL > 0 and not na(stL_bar0) and (bar_index - stL_bar0 > seqMaxBars)
+    stL := 0
+    stL_bar0 := na
+
+long_early_raw = (stL_prev == 1 and stL == 2)   // 5↑10 与 5↑30 完成
+long_full_raw  = (stL_prev == 2 and stL == 3)   // 追加 5↑60
+
+// ===== 空头状态机（对称） =====
+var int  stS      = 0
+var int  stS_bar0 = na
+stS_prev = stS
+
+advS1 = stS == 0 and ta.crossunder(ma5, ma10)
+advS2 = stS == 1 and ta.crossunder(ma5, ma30)
+advS3 = stS == 2 and ta.crossunder(ma5, ma60)
+
+if advS1
+    stS := 1
+    stS_bar0 := bar_index
+else if advS2
+    stS := 2
+else if advS3
+    stS := 3
+
+if stS >= 3 and ta.crossover(ma5, ma60)
+    stS := 2
+if stS >= 2 and ta.crossover(ma5, ma30)
+    stS := math.min(stS, 1)
+if stS >= 1 and ta.crossover(ma5, ma10)
+    stS := 0
+    stS_bar0 := na
+
+if stS > 0 and not na(stS_bar0) and (bar_index - stS_bar0 > seqMaxBars)
+    stS := 0
+    stS_bar0 := na
+
+short_early_raw = (stS_prev == 1 and stS == 2)
+short_full_raw  = (stS_prev == 2 and stS == 3)
+
+// ===== 冷静期与同根重入控制（先平后开） =====
+var int  coolUntil     = na
+var bool closedThisBar = false
+
+closedThisBar := false
+if strategy.position_size > 0 and (useIntrabarExit ? close <= ma30 : close[1] <= ma30[1])
+    strategy.close_all(comment="触及MA30平多")
+    coolUntil     := bar_index + cooldownBars
+    closedThisBar := true
+
+if strategy.position_size < 0 and (useIntrabarExit ? close >= ma30 : close[1] >= ma30[1])
+    strategy.close_all(comment="触及MA30平空")
+    coolUntil     := bar_index + cooldownBars
+    closedThisBar := true
+
+canEnter = (na(coolUntil) or bar_index > coolUntil) and not closedThisBar
+
+// ===== 最终信号（仅低波动过滤 + 冷静期） =====
+long_early = long_early_raw and vol_ok and canEnter
+long_full  = long_full_raw  and vol_ok and canEnter
+short_early= useShort and short_early_raw and vol_ok and canEnter
+short_full = useShort and short_full_raw  and vol_ok and canEnter
+
+// ===== 执行：多头 =====
+if long_early and strategy.position_size <= 0
+    strategy.entry("LONG", strategy.long)
+
+if long_full
+    if strategy.position_size <= 0
+        strategy.entry("LONG", strategy.long)
+    else if addOnFull
+        strategy.entry("LONG+", strategy.long, qty=addQtyPct)
+
+// ===== 执行：空头 =====
+if short_early and strategy.position_size >= 0
+    strategy.entry("SHORT", strategy.short)
+
+if short_full
+    if strategy.position_size >= 0
+        strategy.entry("SHORT", strategy.short)
+    else if addOnFull
+        strategy.entry("SHORT+", strategy.short, qty=addQtyPct)
+
+// ===== 提醒 =====
+alertcondition(long_early, "多头2/3先入", "MA5 依次上穿 MA10 与 MA30")
+alertcondition(long_full,  "多头3/3确认", "MA5 上穿 MA60（可加仓）")
+alertcondition(short_early,"空头2/3先入", "MA5 依次下穿 MA10 与 MA30")
+alertcondition(short_full, "空头3/3确认", "MA5 下穿 MA60（可加仓）")
+alertcondition(close <= ma30, "平多", "收盘≤MA30")
+alertcondition(close >= ma30, "平空", "收盘≥MA30")
+
+View in Pine Editor・163 lines
+Use on chart
+2
+4
+1 203
+策略描述（中文）
+
+本策略基于 顺序三连穿越 原则：当 MA5 依次上穿 MA10、MA30、MA60 时，触发趋势做多信号；反之依次下穿时触发做空信号。
+在完成 2/3 穿越时即可先行入场，完成 3/3 穿越时可选择加仓确认。
+为减少震荡磨损，策略引入了布林带带宽过滤：当市场波动率过低时禁止入场。同时设有 冷静期，避免刚出场后立即反复进场。
+该系统适用于趋势性较强或弱趋势行情，能够较好地捕捉单边走势，但在长时间震荡行情中仍可能遭遇利润侵蚀。
+
+Strategy Description (English)
+
+This strategy is built on the Sequential Triple Crossover principle:
+
+When the 5-period moving average (MA5) sequentially crosses above MA10, MA30, and MA60, a bullish entry is triggered.
+
+Conversely, when MA5 sequentially crosses below MA10, MA30, and MA60, a bearish entry is triggered.
+
+An early entry is allowed once 2 out of 3 crossovers are completed, while the final crossover (3/3) can optionally serve as a confirmation add-on position.
+
+To mitigate losses in choppy conditions, the system uses a Bollinger Bandwidth filter that blocks entries when volatility is too low. A cooldown period is also implemented to avoid immediate re-entries after closing a trade.
+
+This setup performs well in trending or weak-trend environments, capturing directional moves effectively, but may still suffer from profit erosion during prolonged sideways markets.

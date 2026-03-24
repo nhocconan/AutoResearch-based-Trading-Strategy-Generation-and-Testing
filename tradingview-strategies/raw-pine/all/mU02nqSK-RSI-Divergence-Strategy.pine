@@ -1,0 +1,235 @@
+//@version=6
+strategy(title="RSI Divergence Strategy", shorttitle="RSI Divergence Strategy", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1, slippage=0, initial_capital=100000, currency=currency.USD, process_orders_on_close=false)
+
+// RSI Settings
+rsiLengthInput = input.int(14, minval=1, title="RSI Length", group="RSI Settings")
+rsiSourceInput = input.source(close, "Source", group="RSI Settings")
+calculateDivergence = input.bool(true, title="Calculate Divergence", group="RSI Settings", tooltip="Required for divergence signals")
+
+// Added RSI Level Inputs
+longEntryLevel = input.float(35.0, "Long Entry RSI", minval=0, maxval=100, step=0.1, group="RSI Levels")
+shortEntryLevel = input.float(76.0, "Short Entry RSI", minval=0, maxval=100, step=0.1, group="RSI Levels")
+longExitLevel = input.float(80.0, "Long Exit RSI", minval=0, maxval=100, step=0.1, group="RSI Levels")
+shortExitLevel = input.float(54.1, "Short Exit RSI", minval=0, maxval=100, step=0.1, group="RSI Levels")
+
+// RSI Calculation
+change = ta.change(rsiSourceInput)
+up = ta.rma(math.max(change, 0), rsiLengthInput)
+down = ta.rma(-math.min(change, 0), rsiLengthInput)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+// Divergence Parameters
+lookbackRight = 5
+lookbackLeft = 5
+rangeUpper = 60
+rangeLower = 5
+
+_inRange(bool cond) =>
+    bars = ta.barssince(cond)
+    rangeLower <= bars and bars <= rangeUpper
+
+var bool plFound = false
+var bool phFound = false
+var bool bullCond = false
+var bool bearCond = false
+
+// Global variables to store _inRange results
+var bool inRangePlFound = false
+var bool inRangePhFound = false
+
+rsiLBR = rsi[lookbackRight]
+
+// Update _inRange results on every bar
+inRangePlFound := _inRange(plFound[1])
+inRangePhFound := _inRange(phFound[1])
+
+if calculateDivergence
+    // Regular Bullish Divergence
+    plFound := not na(ta.pivotlow(rsi, lookbackLeft, lookbackRight))
+    rsiHL = rsiLBR > ta.valuewhen(plFound, rsiLBR, 1) and inRangePlFound
+    lowLBR = low[lookbackRight]
+    priceLL = lowLBR < ta.valuewhen(plFound, lowLBR, 1)
+    bullCond := priceLL and rsiHL and plFound
+
+    // Regular Bearish Divergence
+    phFound := not na(ta.pivothigh(rsi, lookbackLeft, lookbackRight))
+    rsiLH = rsiLBR < ta.valuewhen(phFound, rsiLBR, 1) and inRangePhFound
+    highLBR = high[lookbackRight]
+    priceHH = highLBR > ta.valuewhen(phFound, highLBR, 1)
+    bearCond := priceHH and rsiLH and phFound
+
+// Strategy Entries with customizable RSI levels
+if bullCond and rsi < longEntryLevel
+    strategy.entry("Long", strategy.long)
+
+if bearCond and rsi > shortEntryLevel
+    strategy.entry("Short", strategy.short)
+
+// Strategy Exits with customizable RSI levels
+if rsi >= longExitLevel
+    strategy.close("Long")
+    
+if rsi <= shortExitLevel
+    strategy.close("Short")
+
+// ———————— Visualizations ———————— //
+// Plot RSI line
+rsiColor = rsi > 70 ? color.new(#ff5252, 0) : rsi < 30 ? color.new(#4bf335, 0) : color.new(#b8b8b8, 0)
+plot(rsi, title="RSI", color=rsiColor, linewidth=2, style=plot.style_line)
+
+// Plot horizontal levels
+hline(longEntryLevel, "Long Entry", color=color.new(#4bf335, 0), linestyle=hline.style_solid)
+hline(shortEntryLevel, "Short Entry", color=color.new(#ed1404, 0), linestyle=hline.style_solid)
+hline(longExitLevel, "Long Exit", color=color.new(#4bf335, 0), linestyle=hline.style_dashed)
+hline(shortExitLevel, "Short Exit", color=color.new(#ed1404, 0), linestyle=hline.style_dashed)
+
+// Plot traditional levels
+ob = 70
+os = 30
+hline(ob, "Overbought", color=color.new(#ff5252, 70), linestyle=hline.style_dotted)
+hline(os, "Oversold", color=color.new(#4bf335, 70), linestyle=hline.style_dotted)
+
+// Background colors
+bgcolor(rsi >= ob ? color.new(#ff5252, 90) : na)
+bgcolor(rsi <= os ? color.new(#4bf335, 90) : na)
+bgcolor(rsi > os and rsi < ob ? color.new(#424242, 95) : na)
+
+// ———————— DIVERGENCE VISUALS ———————— //
+// Position labels below RSI for bullish, above for bearish
+bullLabelY = math.max(0, rsi[lookbackRight] - 15)  // Position below RSI line
+bearLabelY = math.min(100, rsi[lookbackRight] + 15) // Position above RSI line
+
+// CORRECTED: Pass y-coordinate as first argument for absolute positioning
+plotshape(bullCond ? bullLabelY : na, title="Bullish Divergence", text="BULL", style=shape.labelup, 
+     location=location.absolute, color=color.new(#4bf335, 50), textcolor=color.white, 
+     size=size.tiny, offset=-lookbackRight)
+
+plotshape(bearCond ? bearLabelY : na, title="Bearish Divergence", text="BEAR", style=shape.labeldown, 
+     location=location.absolute, color=color.new(#ed1404, 50), textcolor=color.white, 
+     size=size.tiny, offset=-lookbackRight)
+
+// Draw divergence lines
+var line lastBullLine = na
+var line lastBearLine = na
+
+if bullCond
+    // Get previous pivot low point
+    prevLowIndex = ta.valuewhen(plFound, bar_index, 1)
+    prevLowValue = ta.valuewhen(plFound, rsi[lookbackRight], 1)
+    
+    // Draw line between previous pivot and current pivot
+    if not na(prevLowIndex)
+        lastBullLine := line.new(
+             x1=prevLowIndex, y1=prevLowValue,
+             x2=bar_index - lookbackRight, y2=rsi[lookbackRight],
+             color=color.new(#4bf335, 70), width=1, style=line.style_dotted)
+        line.delete(lastBullLine[1])
+
+if bearCond
+    // Get previous pivot high point
+    prevHighIndex = ta.valuewhen(phFound, bar_index, 1)
+    prevHighValue = ta.valuewhen(phFound, rsi[lookbackRight], 1)
+    
+    // Draw line between previous pivot and current pivot
+    if not na(prevHighIndex)
+        lastBearLine := line.new(
+             x1=prevHighIndex, y1=prevHighValue,
+             x2=bar_index - lookbackRight, y2=rsi[lookbackRight],
+             color=color.new(#ed1404, 70), width=1, style=line.style_dotted)
+        line.delete(lastBearLine[1])
+
+View in Pine Editor・139 lines
+Use on chart
+6
+0
+6
+9 269
+Overview
+
+The RSI Divergence Strategy Indicator is a trading tool that uses the RSI and divergences created to generate high-probability buy and sell signals.
+I have provided the best formula of numbers to use for BTC on a 30 minute timeframe.
+
+You can change where on RSI you enter and exit both long or short trades. This way you can experiment on different tokens using different entry/exit points. Can use on multiple timeframes.
+
+This strategy is designed to open and close long or short trades based on the levels you provide it. You can then check on the RSI where the best levels are for each token you want to trade and amend it as required to generate a profitable strategy.
+
+
+How It Works
+
+The RSI Divergence Strategy Indicator uses bear and bull divergences in conjuction with a level you have input on the RSI.
+
+RSI for Overbought/Oversold:
+• Input variables for entry and exit levels and when the entry levels combine with a bear or bull divergence signal, a trade is alerted.
+
+RSI Divergence:
+• Buy and sell signals are confirmed when the RSI creates bearish or bullish divergences and these divergences are in the same area as your levels you input for entry to short or long.
+
+
+After 7 years of experience and testing I have calculated the exact numbers required and produced a formula to calculate the exact input variables for a 30 minute Bitcoin chart.
+
+
+Key Features
+
+1️⃣ Divergence Identification – Ensures trades are taken only when a bull or bear divergence has formed.
+2️⃣ Overbought/Oversold Input Filtering – Set up your own variables on the RSI for different markets after identifying patterns on the RSI in relation to a bearish or bullish divergence.
+3️⃣ Works on any chart – Suitable for all markets and timeframes once you input the correct variables for entry and exit levels.
+
+
+How to Use
+
+🟢 Basic Trading:
+• Use on any timeframe.
+• Enter trade only when alert has fired off. Close when it says to exit.
+• Change entry and exit levels in the properties of the strategy indicator.
+• Make entry and exit levels coincide with bearish or bullish divergences on the RSI.
+
+Check the strategy tester to see backtesting so you know if the indicator is profitable or not for that market and timeframe as each crypto token is different and so is the timeframe you choose.
+
+📢 Webhook Automation:
+• Set up TradingView Alerts to auto-execute trades via Webhook-compatible platforms.
+
+Key additions for divergence visualization:
+
+Divergence Arrows:
+Bullish divergence: Green label with white 'bull ' text
+Bearish divergence: Red label with white 'bear' text
+Positioned at the pivot point
+
+Divergence Lines:
+Connects consecutive RSI pivot points
+Automatically drawn between consecutive pivot points
+
+Enhanced RSI Coloring:
+Overbought zone: Red
+Oversold zone: Green
+Neutral zone: Gray
+
+The visualization helps you instantly spot:
+Where divergences are forming on the RSI
+The pattern of higher lows (bullish) or lower highs (bearish)
+Contextual coloring of RSI relative to standard levels
+
+All divergence markers appear at the correct historical pivot points, making it easy to visually confirm divergence patterns as they develop.
+
+Strategy levels and background zones also shown to help visual look.
+
+Why This Combination?
+
+This indicator is just a simple RSI tool.
+It is designed to filter out weak trades and only execute trades that have:
+
+✅ RSI Divergence
+✅ Overbought or Oversold Conditions
+
+It does not calculate downtrends or bear markets so care is recommended taking long trades during these times.
+
+Why It’s Worth Using?
+
+📈 Open Source – Free to use and learn from.
+📉 Long or Short Term Trading Style – Entry/Exit parameters options are designed for both short or long term trades allowing you to experiment until you find a profitable strategy for that market you want to trade.
+📢 Seamless Webhook Automation – Execute trades automatically with TradingView alerts.
+
+
+💲 Ready to trade smarter?
+✅ Add the RSI Divergence Strategy Indicator to your TradingView chart.
+

@@ -1,0 +1,35 @@
+//@version=2
+////////////////////////////////////////////////////////////
+//  Copyright by HPotter v1.0 16/02/2017
+//  H-L Range strategy
+////////////////////////////////////////////////////////////
+strategy(title="H-L Range strategy", shorttitle="HL")
+Length = input(10, minval=1)
+reverse = input(true, title="Trade reverse")
+hline(0, color=gray, linestyle=dashed)
+xH = high - close
+xL = low - close
+xC = close - open
+xSMA_H = sma(xH, Length)
+xSMA_L = sma(xL, Length)
+pos = iff(xC > xSMA_H, 1,
+         iff(xC < xSMA_L, -1, nz(pos[1], 0))) 
+possig = iff(reverse and pos == 1, -1,
+          iff(reverse and pos == -1, 1, pos))       
+if (possig == 1) 
+    strategy.entry("Long", strategy.long)
+if (possig == -1)
+    strategy.entry("Short", strategy.short)               
+barcolor(possig == -1 ? red: possig == 1 ? green : blue )
+plot(xH, color=green, style = histogram)
+plot(xL, color=red, style = histogram)
+plot(xSMA_H, color=blue)
+plot(xSMA_L, color=blue)
+
+View in Pine Editor・27 lines
+Use on chart
+8
+5
+5
+3 322
+H-L Range Strategy

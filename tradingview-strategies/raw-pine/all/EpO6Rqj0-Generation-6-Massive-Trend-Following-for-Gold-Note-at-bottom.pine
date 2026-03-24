@@ -1,0 +1,32 @@
+//@version=2
+strategy("Generation 6", overlay=true, commission_value = 0.02, initial_capital = 10000, pyramiding = 1)
+
+// Initial Trend Establishment Trades
+
+longcondition = sma(close, 15) > sma(close, 60) and crossover(sma(close, 20), ema(close, 60)) and close > sma(close, 600)
+shortcondition = sma(close, 15) < sma(close, 60) and crossunder(sma(close, 20), ema(close, 60)) and close < sma(close, 600)
+
+strategy.entry("buy", strategy.long, 1, when = longcondition)
+strategy.entry("sell", strategy.short, 1, when = shortcondition)
+
+View in Pine Editor・10 lines
+Use on chart
+3
+4
+0
+8
+10 225
+Making this one an open script for you people.
+
+Commission_value = 0.02 is the same as a 50 pip gold spread.
+
+Start capital $10,000.
+
+1.00 lots = 1 contract on this.
+
+Trend establishment with the 600 period moving average, trend continuation with the crossover/crossunder.
+
+This strategy is great for finding trends on XAUUSD.
+
+Side note: if anyone knows MQL4 coding language for MT4, please let me know, I would like to see the results of this strategy over a period of several years rather than the several months of data that Tradingview Provides. Please PM me, I want to see how profitable this code is over a long period of time. Thank you, and enjoy.
+

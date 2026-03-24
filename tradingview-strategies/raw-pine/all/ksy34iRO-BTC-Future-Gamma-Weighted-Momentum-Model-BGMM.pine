@@ -1,0 +1,93 @@
+//@version=6
+strategy("BTC Future Gamma-Weighted Momentum Model (BGMM)", shorttitle="BGMM", overlay=true, 
+         default_qty_type=strategy.cash, default_qty_value=50000, 
+         slippage=1, commission_value=0.01)
+
+// Inputs
+length = input.int(60, "Length for GWAP Calculation")
+gamma_factor = input.float(0.75, "Gamma Weight Factor", minval=0.5, maxval=1.5, step=0.01)
+
+// Helper Functions
+var float cumulative_weighted_price = na
+var float cumulative_weight = na
+
+price = (high + low + close) / 3  // Typical price as a baseline
+
+gamma_weights = array.new_float(length, 0.0)
+price_series = array.new_float(length, na)
+
+// Populate Arrays for Calculation
+if bar_index >= length
+    for i = 0 to length - 1
+        weighted_gamma = math.pow(gamma_factor, i)
+        array.set(gamma_weights, i, weighted_gamma)
+        array.set(price_series, i, close[i])
+
+// Compute GWAP
+weighted_sum = 0.0
+weight_total = 0.0
+for i = 0 to length - 1
+    w = array.get(gamma_weights, i)
+    p = array.get(price_series, i)
+    weighted_sum := weighted_sum + p * w
+    weight_total := weight_total + w
+
+GWAP = weight_total != 0 ? weighted_sum / weight_total : na
+
+plot(GWAP, color=color.red, title="Gamma Weighted Average Price")
+
+// Conditions for Trade Signals
+long_condition = close > GWAP and close[1] > close[2] and close[2] > close[3]
+short_condition = close < GWAP and close[1] < close[2] and close[2] < close[3]
+
+// Strategy Logic
+if long_condition
+    strategy.entry("Long", strategy.long)
+
+if short_condition
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・48 lines
+Use on chart
+7
+3
+2 631
+The BTC Future Gamma-Weighted Momentum Model (BGMM) is a quantitative trading strategy that utilizes the Gamma-weighted average price (GWAP) in conjunction with a momentum-based approach to predict price movements in the Bitcoin futures market. The model combines the concept of weighted price movements with trend identification, where the Gamma factor amplifies the weight assigned to recent prices. It leverages the idea that historical price trends and weighting mechanisms can be utilized to forecast future price behavior.
+
+Theoretical Background:
+
+1. Momentum in Financial Markets:
+
+Momentum is a well-established concept in financial market theory, referring to the tendency of assets to continue moving in the same direction after initiating a trend. Any observed market return over a given time period is likely to continue in the same direction, a phenomenon known as the “momentum effect.” Deviations from a mean or trend provide potential trading opportunities, particularly in highly volatile assets like Bitcoin.
+Numerous empirical studies have demonstrated that momentum strategies, based on price movements, especially those correlating long-term and short-term trends, can yield significant returns (Jegadeesh & Titman, 1993). Given Bitcoin’s volatile nature, it is an ideal candidate for momentum-based strategies.
+
+2. Gamma-Weighted Price Strategies:
+
+Gamma weighting is an advanced method of applying weights to price data, where past price movements are weighted by a Gamma factor. This weighting allows for the reinforcement or reduction of the influence of historical prices based on an exponential function. The Gamma factor (ranging from 0.5 to 1.5) controls how much emphasis is placed on recent data: a value closer to 1 applies an even weighting across periods, while a value closer to 0 diminishes the influence of past prices.
+
+Gamma-based models are used in financial analysis and modeling to enhance a model’s adaptability to changing market dynamics. This weighting mechanism is particularly advantageous in volatile markets such as Bitcoin futures, as it facilitates quick adaptation to changing market conditions (Black-Scholes, 1973).
+
+Strategy Mechanism:
+
+The BTC Future Gamma-Weighted Momentum Model (BGMM) utilizes an adaptive weighting strategy, where the Bitcoin futures prices are weighted according to the Gamma factor to calculate the Gamma-Weighted Average Price (GWAP). The GWAP is derived as a weighted average of prices over a specific number of periods, with more weight assigned to recent periods. The calculated GWAP serves as a reference value, and trading decisions are based on whether the current market price is above or below this level.
+
+1. Long Position Conditions:
+A long position is initiated when the Bitcoin price is above the GWAP and a positive price movement is observed over the last three periods. This indicates that an upward trend is in place, and the market is likely to continue in the direction of the momentum.
+
+2. Short Position Conditions:
+A short position is initiated when the Bitcoin price is below the GWAP and a negative price movement is observed over the last three periods. This suggests that a downtrend is occurring, and a continuation of the negative price movement is expected.
+
+Backtesting and Application to Bitcoin Futures:
+
+The model has been tested exclusively on the Bitcoin futures market due to Bitcoin’s high volatility and strong trend behavior. These characteristics make the market particularly suitable for momentum strategies, as strong upward or downward movements are often followed by persistent trends that can be captured by a momentum-based approach.
+
+Backtests of the BGMM on the Bitcoin futures market indicate that the model achieves above-average returns during periods of strong momentum, especially when the Gamma factor is optimized to suit the specific dynamics of the Bitcoin market. The high volatility of Bitcoin, combined with adaptive weighting, allows the model to respond quickly to price changes and maximize trading opportunities.
+
+Scientific Citations and Sources:
+
+• Jegadeesh, N., & Titman, S. (1993). Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency. The Journal of Finance, 48(1), 65–91.
+
+• Black, F., & Scholes, M. (1973). The Pricing of Options and Corporate Liabilities. Journal of Political Economy, 81(3), 637–654.
+
+• Fama, E. F., & French, K. R. (1992). The Cross-Section of Expected Stock Returns. The Journal of Finance, 47(2), 427–465.
+

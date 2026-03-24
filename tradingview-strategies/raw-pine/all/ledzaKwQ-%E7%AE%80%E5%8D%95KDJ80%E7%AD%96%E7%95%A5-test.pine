@@ -1,0 +1,51 @@
+//@version=6
+
+strategy("简单KDJ80策略", overlay=true, margin_long=100, margin_short=100)
+
+// 第一部分：计算KDJ指标和RSI指标
+
+length = input(30, title="period")
+signal = input(3, title="signal")
+hi = ta.highest(high, length)
+lo = ta.lowest(low , length)
+k = 100*((close-lo)/(hi-lo))
+pK = ta.rma(k, signal)
+pD = ta.rma(pK, signal)
+pJ = 3*pK-2*pD
+plot((pK+pD)/2, color=color.orange, linewidth=1, title="KD")
+plot(pJ, color=color.white, linewidth=1, title="J")
+
+
+rsi_length = input(14, title="RSI")
+rsi = ta.rsi(close, rsi_length)
+rsi_color = rsi >= 90 or rsi <= 10 ? color.white:color.gray
+plot(rsi, color=rsi_color, linewidth=2, style=plot.style_circles, title="RSI")
+
+hline(80, "OB", color=color.red)
+hline(20, "OS", color=color.green)
+hline(50, "Mid", color=color.gray)
+
+// 第二部分：定义交易条件
+// 进场条件：K线上穿80 (金叉)
+enterLong = ta.crossover(k, 80)
+
+// 出场条件：K线下穿80 (死叉)
+exitLong = ta.crossunder(k, 80)
+
+// 第三部分：执行交易策略
+// 当进场条件满足时，开仓（做多）
+if (enterLong)
+    strategy.entry("Buy", strategy.long)
+
+// 当出场条件满足时，平掉所有多仓
+if (exitLong)
+    strategy.close("Buy")
+
+View in Pine Editor・45 lines
+Use on chart
+1
+5
+1 057
+It's only a test of sth big.
+
+Next step will be adding complex strategy with bollinger band and keltner channel.

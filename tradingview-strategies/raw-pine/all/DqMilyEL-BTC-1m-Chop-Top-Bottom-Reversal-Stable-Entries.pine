@@ -1,0 +1,264 @@
+//@version=5
+strategy("BTC 1m Chop Top/Bottom Reversal (Stable Entries + Trend Band)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, calc_on_order_fills=true, calc_on_every_tick=true, pyramiding=7, commission_type=strategy.commission.percent, commission_value=0.06, process_orders_on_close=true)
+
+// === INPUTS ===
+emaLen = input.int(25, "EMA Period")
+atrlength = input.int(80, "ATR Length")
+atrMultiplier = input.float(5.5, "ATR Deviation Multiplier")
+rsiLength = input.int(16, "RSI Length")
+rsiOverbought = input.int(67, "RSI Overbought")
+rsiOversold = input.int(22, "RSI Oversold")
+macdFast = input.int(11, "MACD Fast")
+macdSlow = input.int(22, "MACD Slow")
+macdSignal = input.int(3, "MACD Signal")
+// Volume spike inputs
+volLookback = input.int(16, "Volume MA Length")
+volSpikeMult = input.float(1.5, "Sell Spike Multiplier")
+
+// === CALCULATIONS ===
+// Volume spike detection
+volMA = ta.sma(volume, volLookback)
+sellSpike = (volume > volMA * volSpikeMult) and (close < open)
+
+ema = ta.ema(close, emaLen)
+atr = ta.atr(atrlength)
+upperBand = ema + atrMultiplier * atr
+lowerBand = ema - atrMultiplier * atr
+rsi = ta.rsi(close, rsiLength)
+[macdLine, macdSignalLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+// === ENTRY LOGIC ===
+shortSetup = high > upperBand and rsi > rsiOverbought and macdHist < macdHist[1] and macdHist[1] > 0 and close < open
+longSetup = low < lowerBand and rsi < rsiOversold and macdHist > macdHist[1] and macdHist[1] < 0 and close > open
+
+shortConfirmed = shortSetup and not shortSetup[1]
+longConfirmed = longSetup and not longSetup[1] and not sellSpike
+
+if shortConfirmed
+    strategy.entry("Short", strategy.short)
+if longConfirmed
+    strategy.entry("Long", strategy.long)
+
+// === EXITS ===
+shortTP = close * 0.9925
+shortSL = close * 1.004
+strategy.exit("Short Exit", from_entry="Short", limit=shortTP, stop=shortSL)
+
+longTP = close * 1.0075
+longSL = close * 0.996
+strategy.exit("Long Exit", from_entry="Long", limit=longTP, stop=longSL)
+
+// === TREND STRENGTH ZONE (Broader Smoothing) ===
+trendScore = (macdHist - macdHist[1]) + (rsi - 50) / 25
+trendBasis = ta.ema(trendScore, 30)  // Increased smoothing period from 10 to 30
+bullishZone = trendBasis > 0.3       // Slightly lowered sensitivity thresholds
+bearishZone = trendBasis < -0.3
+neutralZone = not bullishZone and not bearishZone
+
+trendColor = bullishZone ? color.new(color.green, 80) : bearishZone ? color.new(color.red, 80) : color.new(color.gray, 85)
+bgcolor(trendColor, title="Trend Strength Zone")
+
+// === VISUALS ===
+plot(ema, title="EMA", color=color.orange)
+plot(upperBand, title="Upper ATR Band", color=color.red)
+plot(lowerBand, title="Lower ATR Band", color=color.green)
+plotshape(shortConfirmed ? true : na, title="Short Entry", location=location.abovebar, style=shape.triangledown, color=color.red)
+plotshape(longConfirmed ? true : na, title="Long Entry", location=location.belowbar, style=shape.triangleup, color=color.green)
+
+View in Pine Editor・68 lines
+Use on chart
+6
+9
+1
+2 160
+Aug 2, 2025
+Strategy Description: BTC 5m Chop Top/Bottom Reversal (Stable Entries)
+This strategy is engineered to capture precise reversal points during Bitcoin’s choppy or sideways price action on the 5-minute timeframe. It identifies short-term tops and bottoms using a confluence of volatility bands, momentum indicators, and price structure, optimized for high-probability scalping and intraday reversals.
+
+Core Logic:
+
+Volatility Filter: Uses an EMA with ATR bands to define overextended price zones.
+
+Momentum Divergence: Confirms reversals using RSI and MACD histogram shifts.
+
+Price Action Filter: Requires candle confirmation in the direction of the trade.
+
+Locked Signal Logic: Prevents repaints and disappearing trades by confirming signals only once per bar.
+
+Trade Parameters:
+
+Short Entry: Above upper band + overbought RSI + weakening MACD + bearish candle
+
+Long Entry: Below lower band + oversold RSI + strengthening MACD + bullish candle
+
+Take Profit: ±0.75%
+
+Stop Loss: ±0.4%
+
+This setup is tuned for traders using tight risk control and leverage, where execution precision and minimal drawdown tolerance are critical.
+Aug 3, 2025
+Release Notes
+Purpose: Identify high-confidence short-term reversal points during consolidation or choppy markets, with minimal repainting and clear visual cues.
+
+⚙️ How It Works
+🔹 Reversal Detection
+The strategy uses a combination of:
+
+ATR bands around an EMA (34) to define overextended price zones
+
+RSI (12) to detect overbought (>70) and oversold (<30) conditions
+
+MACD Histogram for short-term momentum flips
+
+🔽 Long Signal (Bottom Entry)
+Triggered when:
+
+Price dips below Lower ATR Band
+
+RSI is oversold
+
+MACD Histogram starts rising (bullish momentum)
+
+Candle closes green (bullish body)
+
+🔼 Short Signal (Top Entry)
+Triggered when:
+
+Price exceeds Upper ATR Band
+
+RSI is overbought
+
+MACD Histogram starts falling (bearish momentum)
+
+Candle closes red (bearish body)
+
+Both signals require confirmation on a fresh bar to reduce noise and false entries.
+
+🎯 Exit Conditions
+Long TP: +0.75%
+
+Long SL: –0.4%
+
+Short TP: –0.75%
+
+Short SL: +0.4%
+
+These tight risk/reward levels are tuned for 30x leverage, giving potential for fast scalps with limited downside.
+
+🟦 Trend Strength Zone (Context Filter)
+A trend score is calculated using MACD momentum and RSI deviation from neutral:
+
+Green background = Bullish strength (avoid shorting)
+
+Red background = Bearish strength (avoid longing)
+
+Gray background = Neutral / choppy (ideal for this strategy)
+
+This helps you avoid entering against strong trend momentum and focus on true chop conditions.
+
+📈 How to Use
+Best Timeframes: 1m–5m (optimized for scalping BTC chop zones)
+
+Ideal Market: Sideways/consolidation
+
+Entry Strategy:
+
+Watch for green triangle (long) or red triangle (short)
+
+Confirm background is gray (neutral)
+
+Exit Strategy:
+
+Strategy automatically closes trades at the TP/SL levels
+
+Monitor volatility—can adjust ATR multiplier or RSI thresholds to suit market speed
+Aug 3, 2025
+Release Notes
+Purpose: Identify high-confidence short-term reversal points during consolidation or choppy markets, with minimal repainting and clear visual cues.
+
+⚙️ How It Works
+🔹 Reversal Detection
+The strategy uses a combination of:
+
+ATR bands around an EMA (34) to define overextended price zones
+
+RSI (12) to detect overbought (>70) and oversold (<30) conditions
+
+MACD Histogram for short-term momentum flips
+
+🔽 Long Signal (Bottom Entry)
+Triggered when:
+
+Price dips below Lower ATR Band
+
+RSI is oversold
+
+MACD Histogram starts rising (bullish momentum)
+
+Candle closes green (bullish body)
+
+🔼 Short Signal (Top Entry)
+Triggered when:
+
+Price exceeds Upper ATR Band
+
+RSI is overbought
+
+MACD Histogram starts falling (bearish momentum)
+
+Candle closes red (bearish body)
+
+Both signals require confirmation on a fresh bar to reduce noise and false entries.
+
+🎯 Exit Conditions
+Long TP: +0.75%
+
+Long SL: –0.4%
+
+Short TP: –0.75%
+
+Short SL: +0.4%
+
+These tight risk/reward levels are tuned for 30x leverage, giving potential for fast scalps with limited downside.
+
+🟦 Trend Strength Zone (Context Filter)
+A trend score is calculated using MACD momentum and RSI deviation from neutral:
+
+Green background = Bullish strength (avoid shorting)
+
+Red background = Bearish strength (avoid longing)
+
+Gray background = Neutral / choppy (ideal for this strategy)
+
+This helps you avoid entering against strong trend momentum and focus on true chop conditions.
+
+📈 How to Use
+Best Timeframes: 1m–5m (optimized for scalping BTC chop zones)
+
+Ideal Market: Sideways/consolidation
+
+Entry Strategy:
+
+Watch for green triangle (long) or red triangle (short)
+
+Confirm background is gray (neutral)
+
+Exit Strategy:
+
+Strategy automatically closes trades at the TP/SL levels
+
+Monitor volatility—can adjust ATR multiplier or RSI thresholds to suit market speed
+Aug 5, 2025
+Release Notes
+Updated values and order conditions. Pyramiding orders, fill on bar close, and comission set to typical market orders of 0.06%
+
+
+Drastically improved drawdown, profitability and profit factor. Enjoy.
+
+Tips appreciated. Made this script after I zeroed.
+
+BTC Address: 3LnyrKTRyeTwW2t567wa1HhcRduc1ysqy4
+SOL address: Eoa1H1XDjE47WK14ZQebHApKXckpJCP7fTj8ixbMyEJ7
+Sep 26, 2025
+Release Notes
+Updated settings for current market data. Script must be tuned throughout time as historical data changes

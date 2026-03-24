@@ -1,0 +1,51 @@
+//@version=3
+strategy("Schaff Trend Cycle Strategy", shorttitle="STC Backtest", overlay=true)
+
+fastLength = input(title="MACD Fast Length", type=integer, defval=23)
+slowLength = input(title="MACD Slow Length", type=integer, defval=50)
+cycleLength = input(title="Cycle Length", type=integer, defval=10)
+d1Length = input(title="1st %D Length", type=integer, defval=3)
+d2Length = input(title="2nd %D Length", type=integer, defval=3)
+src = input(title="Source", type=source, defval=close)
+highlightBreakouts = input(title="Highlight Breakouts ?", type=bool, defval=true)
+
+macd = ema(src, fastLength) - ema(src, slowLength)
+k = nz(fixnan(stoch(macd, macd, macd, cycleLength)))
+d = ema(k, d1Length)
+kd = nz(fixnan(stoch(d, d, d, cycleLength)))
+
+stc = ema(kd, d2Length)
+stc :=     stc > 100 ? 100 : stc < 0 ? 0 : stc
+
+upper = input(75, defval=75)
+lower = input(25, defval=25)
+
+long =  crossover(stc, lower) ? lower : na
+short = crossunder(stc, upper) ? upper : na
+
+long_filt = long and not short
+short_filt = short and not long
+
+prev = 0
+prev := long_filt ? 1 : short_filt ? -1 : prev[1]
+
+long_final = long_filt and prev[1] == -1
+short_final = short_filt and prev[1] == 1
+
+//alertcondition(long_final, "Long", message="Long")
+//alertcondition(short_final,"Short", message="Short")
+
+//plotshape(long_final, style=shape.arrowup, text="Long", color=green, location=location.belowbar)
+//plotshape(short_final, style=shape.arrowdown, text="Short", color=red, location=location.abovebar)
+
+strategy.entry("long", strategy.long, when = long )
+strategy.entry("short", strategy.short, when = short)
+
+View in Pine Editor・42 lines
+Use on chart
+1
+8
+7
+6
+10 383
+Schaff Trend Cycle Strategy for XBTUSD 15m Backtest

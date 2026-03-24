@@ -1,0 +1,96 @@
+//@version=4
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+// Bollinger Bands Strategy with Intraday Intensity Index
+// by SparkyFlary
+
+//For Educational Purposes
+//Results can differ on different markets and can fail at any time. Profit is not guaranteed.
+strategy(title="Bollinger Bands Strategy with Intraday Intensity Index", shorttitle="Bollinger Bands Strategy", overlay=true)
+
+BBlength = input(20, title="Bollinger Bands length")
+BBtype = input("EMA", title="Bollinger Bands and Standard deviation type", type=input.string, options=["EMA", "SMA"])
+BBprice = input(close, title="source")
+timeStop = input(20, title="Time-based stop length")
+BBmult = input(2.0, title="Bollinger Bands Standard Deviation")
+withIII = input(false, title="with Intraday Intensity Index?")
+IIIlength = input(21, title="Intraday Intensity Index length")
+positionMode = input("Both long and short", options=["Both long and short", "Long only", "Short only"])
+earlyExit = input(false)
+
+//function for choosing moving averages
+f_ma(type_, src_, len_) =>
+    float result = 0
+    if type_ == "SMA"
+        result := sma(src_, len_)
+    if type_ == "EMA"
+        result := ema(src_, len_)
+    result
+
+//Intraday Intensity Index
+k1 = (2 * close - high - low) * volume
+k2 = high != low ? high - low : 1
+i = k1 / k2
+iSum = sum(i, IIIlength)
+
+//standard deviation with exponential option
+StdDev_(type_, src_, len_) =>
+    mean = 0.0
+    sumSqr = 0.0
+    variance = 0.0
+
+    if len_ > 0
+        mean := f_ma( type_, src_, len_ )
+        sumSqr := 0
+        for counter = 0 to len_ - 1
+            sumSqr := sumSqr + pow( src_[counter] - mean, 2 )
+        variance := sumSqr / len_
+        stdDev = sqrt( variance )
+    else
+        stdDev = -1
+
+//Bollinger Bands
+BBdev = BBmult * StdDev_(BBtype, BBprice, BBlength)
+BBbasis = f_ma(BBtype, BBprice, BBlength)
+BBupper = BBbasis + BBdev
+BBlower = BBbasis - BBdev
+
+plot(BBupper, title="Bollinger Bands Upper Line")
+plot(BBlower, title="Bollinger Bands Lower Line")
+plot(BBbasis, title="Bollinger Bands Mid line", color=color.maroon)
+
+//Strategy
+buy = close[1]<BBlower[1] and close>BBlower and (withIII ? iSum>0 : 1)
+sell = close>BBbasis or (earlyExit?strategy.openprofit>0:0) or barssince(buy)>timeStop
+short = close[1]>BBupper[1] and close<BBupper and (withIII ? iSum<0 : 1)
+cover = close<BBbasis or (earlyExit?strategy.openprofit>0:0) or barssince(short)>timeStop
+
+if positionMode=="Long only"
+    strategy.entry(id="enter long", long=true, when=buy)
+    strategy.close(id="enter long", comment="exit long", when=sell)
+else if positionMode=="Short only"
+    strategy.entry(id="enter short", long=false, when=short)
+    strategy.close(id="enter short", comment="exit short", when=cover)
+else
+    strategy.entry(id="enter long", long=true, when=buy)
+    strategy.close(id="enter long", comment="exit long", when=sell)
+    strategy.entry(id="enter short", long=false, when=short)
+    strategy.close(id="enter short", comment="exit short", when=cover)
+
+View in Pine Editor・78 lines
+Use on chart
+3
+5
+8
+2
+14 243
+Oct 6, 2020
+For Educational Purposes. Results can differ on different markets and can fail at any time. Profit is not guaranteed.
+
+This only works in a few markets and in certain situations. Changing the settings can give better or worse results for other markets.
+This is a mean reversion strategy based on Bollinger Bands and the Intraday Intensity Index (a volume indicator). John Bollinger mentions that the Intraday Intensity Index can be used with Bollinger Bands and is one of the top indicators he recommends in his book. It seems he prefers it over the other volume indicators that he compares to for some reason. III looks a lot like Chaikin Money Flow but without the denominator in that calculation. On the default settings of the BBs, the III helps give off better entry signals. John Bollinger however is vague on how to use the BBs and it's hard to say if one should enter when it is below/above the bands or when the price crosses them. I find that with many indicators and strategies it's best to wait for a confirmation of some sort, in this case by waiting for some crossover of a band. Like most mean reversion strategies, the exit is very loose if using BBs alone. Usually the plan to exit is when the price finally reverts back to the mean or in this case the middle band. This can potentially lead to huge drawdowns and/or losses. Mean reversion strategies can have high win/loss ratios but can still end up unprofitable because of the huge losses that can occur. These drawdowns/losses that mean reversion strategies suffer from can potentially eat away at a large chunk of all that was previously made or perhaps up to all of it in the worst cases, can occur weeks or perhaps up to months after being profitable trading such a strategy, and will take a while and several trades to make it all back or keep a profitable track record. It is important to have a stop loss, trailing stop, or some sort of stop plan with these types of strategies. For this one, in addition to exiting the trade when price reverts to the middle band, I included a time-based stop plan that exits with a gain or with a loss to avoid potentially large losses, and to exit after only a few periods after taking the trade if in profit instead of waiting for the price to revert back to the mean.
+Jan 23, 2021
+Release Notes
+Apparently the exponential moving average can be applied to the standard deviation formula too and likely it's not enough to just change the midline alone. I added the option to use a simple moving average when the midline is SMA and exponential moving average when the midline is EMA and to correspond with the standard deviation formula.
+
+I changed the default from SMA to EMA because it seems more accurate. I turned off intraday intensity index by default, and extended the time stop length to better reflect returning to the mean in the backtest.

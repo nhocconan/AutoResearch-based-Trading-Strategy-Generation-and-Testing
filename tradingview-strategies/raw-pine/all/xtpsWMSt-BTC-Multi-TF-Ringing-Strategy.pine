@@ -1,0 +1,125 @@
+//@version=5
+strategy("BTC Multi-TF Ringing Strategy", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// -------------------- INPUTS --------------------
+smoothLen = input.int(5, "EMA Smooth Length")
+impulseATR = input.float(0.9, "Impulse ATR Threshold")
+decayFactor = input.float(0.45, "Oscillation Decay Factor")
+tpFactor = input.float(0.8, "Take Profit %")
+partialProfitPct = input.float(30, "Partial Profit %")
+partialProfitGain = input.float(5, "Partial Profit Gain %")
+slATRMult = input.float(1.1, "Stop ATR Multiplier")
+maxSwings = input.int(2, "Max Swings")
+maxEntriesPerImpulse = input.int(4, "Max Entries Per Impulse")
+
+// -------------------- TIMEFRAMES --------------------
+primaryTF = input.timeframe("60", "Primary Impulse TF")   // 1H
+entryTF = input.timeframe("3", "Entry TF")               // 3-min pullbacks
+trendTF = input.timeframe("240", "Trend TF")             // 4H EMA for trend
+
+htfEMA_len = input.int(50, "Trend EMA Length")
+pullbackFactor = input.float(0.15, "Pullback Fraction LTF")  
+
+// -------------------- GLOBAL REQUESTS --------------------
+closePrimary = request.security(syminfo.tickerid, primaryTF, close)
+highPrimary = request.security(syminfo.tickerid, primaryTF, high)
+lowPrimary = request.security(syminfo.tickerid, primaryTF, low)
+emaPrimary = request.security(syminfo.tickerid, primaryTF, ta.ema(close, smoothLen))
+atrPrimary = request.security(syminfo.tickerid, primaryTF, ta.atr(14))
+atrPrimaryAvg = request.security(syminfo.tickerid, primaryTF, ta.sma(ta.atr(14), 20))
+
+closeEntry = request.security(syminfo.tickerid, entryTF, close)
+atrEntry = request.security(syminfo.tickerid, entryTF, ta.atr(14))
+
+emaTrend = request.security(syminfo.tickerid, trendTF, ta.ema(close, htfEMA_len))
+
+// -------------------- IMPULSE & OSCILLATION --------------------
+d1 = emaPrimary - emaPrimary[1]
+impulseRaw = math.abs(d1)/atrPrimary > impulseATR
+strongImpulse = impulseRaw and (atrPrimary > 0.8 * atrPrimaryAvg)
+
+impulseHigh = strongImpulse ? highPrimary : na
+impulseLow = strongImpulse ? lowPrimary : na
+
+oscAmp = (impulseHigh - impulseLow) * decayFactor
+
+uptrend = close > emaTrend * 0.995
+downtrend = close < emaTrend * 1.005
+
+pullbackLong = closeEntry < math.min(impulseLow + oscAmp * pullbackFactor, emaPrimary)
+pullbackShort = closeEntry > math.max(impulseHigh - oscAmp * pullbackFactor, emaPrimary)
+
+// -------------------- ENTRIES PER IMPULSE --------------------
+var int entriesPerImpulse = 0
+if strongImpulse and barstate.isfirst
+    entriesPerImpulse := 0
+
+longCond = strongImpulse and pullbackLong and uptrend and entriesPerImpulse < maxEntriesPerImpulse
+shortCond = strongImpulse and pullbackShort and downtrend and entriesPerImpulse < maxEntriesPerImpulse
+
+// -------------------- ATR-BASED STOPS & TARGETS --------------------
+stopLong = closeEntry - slATRMult * atrEntry
+stopShort = closeEntry + slATRMult * atrEntry
+
+var float swingTargetLong = na
+var float swingTargetShort = na
+
+if strongImpulse
+    swingTargetLong := closeEntry + tpFactor * oscAmp * (atrPrimary / atrPrimaryAvg)
+    swingTargetShort := closeEntry - tpFactor * oscAmp * (atrPrimary / atrPrimaryAvg)
+
+// -------------------- EXECUTE TRADES --------------------
+if longCond
+    strategy.entry("Long", strategy.long)
+    entriesPerImpulse += 1
+    strategy.exit("LongPartial", from_entry="Long", qty_percent=partialProfitPct, limit=closeEntry * (1 + partialProfitGain/100))
+    for i = 1 to maxSwings
+        decay = math.pow(decayFactor, i)
+        strategy.exit("LongTP"+str.tostring(i), from_entry="Long", stop=stopLong, limit=closeEntry + oscAmp*decay)
+
+if shortCond
+    strategy.entry("Short", strategy.short)
+    entriesPerImpulse += 1
+    strategy.exit("ShortPartial", from_entry="Short", qty_percent=partialProfitPct, limit=closeEntry * (1 - partialProfitGain/100))
+    for i = 1 to maxSwings
+        decay = math.pow(decayFactor, i)
+        strategy.exit("ShortTP"+str.tostring(i), from_entry="Short", stop=stopShort, limit=closeEntry - oscAmp*decay)
+
+// -------------------- HEATMAP --------------------
+impulseStrength = math.min(math.abs(d1)/atrPrimary, 2)
+bgcolor(longCond ? color.new(color.green, 80 - 40*impulseStrength) : na)
+bgcolor(shortCond ? color.new(color.red, 80 - 40*impulseStrength) : na)
+
+View in Pine Editor・93 lines
+Use on chart
+4
+218
+Primary Impulse TF: 1H
+
+Detect large step-response impulses.
+
+Entry TF: 3-min
+
+Look for micro pullbacks against the impulse for precise entries.
+
+Trend Filter: 4H EMA slope
+
+Ensures alignment with major trend.
+
+ATR-Adaptive Targets & Stops
+
+Partial profit 30% at 5% gain
+
+Remaining position rides decaying multi-swing targets scaled by volatility
+
+Dynamic Filter for Oscillation Shape
+
+Only take impulses where the oscillation amplitude > min threshold
+
+Rejects weak/noisy impulses to maintain win rate
+
+Entries Per Impulse: Up to 4
+
+More entries during valid step-response swings

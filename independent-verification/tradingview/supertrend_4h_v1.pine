@@ -1,0 +1,80 @@
+//@version=6
+strategy(
+    "supertrend_4h_v1 [Independent Conversion]",
+    overlay = true,
+    initial_capital = 10000,
+    pyramiding = 0,
+    calc_on_every_tick = false,
+    process_orders_on_close = false,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.05,
+    default_qty_type = strategy.fixed,
+    default_qty_value = 0,
+    margin_long = 100,
+    margin_short = 100
+)
+
+float sizePct = input.float(35.0, "Position Size %", minval = 0.0, maxval = 100.0, step = 0.5)
+int atrPeriod = input.int(10, "ATR Period", minval = 1)
+float multiplier = input.float(3.0, "ATR Multiplier", minval = 0.1, step = 0.1)
+
+if barstate.isfirst and timeframe.period != "240"
+    runtime.error("Use this script on a 4h chart. It is a direct conversion of supertrend_4h_v1.")
+
+f_round_qty(_qty) =>
+    float step = syminfo.mincontract > 0 ? syminfo.mincontract : 0.000001
+    float rounded = math.floor(_qty / step) * step
+    rounded >= step ? rounded : step
+
+float tr = bar_index == 0 ? high - low : math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+float atr = ta.sma(tr, atrPeriod)
+float hl2 = (high + low) / 2.0
+float upperBand = hl2 + multiplier * atr
+float lowerBand = hl2 - multiplier * atr
+
+var float supertrend = na
+var int trendDirection = 0
+
+if na(atr)
+    supertrend := na
+    trendDirection := 0
+else if bar_index == atrPeriod
+    supertrend := upperBand
+    trendDirection := -1
+else if bar_index > atrPeriod
+    float prevSupertrend = nz(supertrend[1], upperBand)
+    int prevTrend = int(nz(trendDirection[1], -1))
+    if prevTrend == 1
+        if close > prevSupertrend
+            supertrend := math.max(lowerBand, prevSupertrend)
+            trendDirection := 1
+        else
+            supertrend := upperBand
+            trendDirection := -1
+    else
+        if close < prevSupertrend
+            supertrend := math.min(upperBand, prevSupertrend)
+            trendDirection := -1
+        else
+            supertrend := lowerBand
+            trendDirection := 1
+
+float targetSignal = trendDirection == 1 ? sizePct / 100.0 : trendDirection == -1 ? -(sizePct / 100.0) : 0.0
+float prevSignal = nz(targetSignal[1], 0.0)
+bool signalChanged = barstate.isconfirmed and not na(atr) and math.abs(targetSignal - prevSignal) > 0.000001
+float rawQty = close > 0 ? (strategy.equity * math.abs(targetSignal)) / close : 0.0
+float entryQty = f_round_qty(rawQty)
+
+if signalChanged
+    if prevSignal > 0
+        strategy.close("Long", comment = "Trend Flip")
+    if prevSignal < 0
+        strategy.close("Short", comment = "Trend Flip")
+    if targetSignal > 0
+        strategy.entry("Long", strategy.long, qty = entryQty, comment = "Long Entry")
+    if targetSignal < 0
+        strategy.entry("Short", strategy.short, qty = entryQty, comment = "Short Entry")
+
+plot(supertrend, "Supertrend", color = trendDirection == 1 ? color.lime : color.red, linewidth = 2)
+plotchar(trendDirection == 1, "Long Bias", "L", location.top, color = color.lime)
+plotchar(trendDirection == -1, "Short Bias", "S", location.bottom, color = color.red)

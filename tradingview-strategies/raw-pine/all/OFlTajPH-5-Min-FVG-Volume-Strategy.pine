@@ -1,0 +1,64 @@
+//@version=5
+strategy("5-Min FVG + Volume Strategy", overlay=true, 
+     margin_long=100, margin_short=100, initial_capital=100000)
+//----------------------------------------------------
+// Inputs
+//----------------------------------------------------
+bullVolMin  = input.float(5e6, "Min Volume for Bullish FVG (5M)", minval=0)
+bearVolMin  = input.float(4e6, "Min Volume for Bearish FVG (4M)", minval=0)
+exitAfter   = input.int(5, "Exit After N Bars", minval=1)
+
+//----------------------------------------------------
+// Detect Fair Value Gaps
+// Bullish FVG → low[1] > high[2]
+// Bearish FVG → high[1] < low[2]
+//----------------------------------------------------
+bullFVG = low[1] > high[2]
+bearFVG = high[1] < low[2]
+
+//----------------------------------------------------
+// Entry Conditions
+//----------------------------------------------------
+bullCondition = bullFVG and volume > bullVolMin and close > open
+bearCondition = bearFVG and volume > bearVolMin and close < open
+
+//----------------------------------------------------
+// Entry & Exit Logic
+//----------------------------------------------------
+var int entryBar = na
+
+if (bullCondition)
+    strategy.entry("Bullish FVG", strategy.long)
+    entryBar := bar_index
+
+if (bearCondition)
+    strategy.entry("Bearish FVG", strategy.short)
+    entryBar := bar_index
+
+// Exit after N bars
+if not na(entryBar) and (bar_index - entryBar >= exitAfter)
+    strategy.close_all()
+    entryBar := na
+
+//----------------------------------------------------
+// Visual Aids
+//----------------------------------------------------
+plotshape(bullCondition, title="Bullish FVG", color=color.new(color.green, 0),
+     style=shape.triangleup, location=location.belowbar, size=size.small)
+
+plotshape(bearCondition, title="Bearish FVG", color=color.new(color.red, 0),
+     style=shape.triangledown, location=location.abovebar, size=size.small)
+
+// Draw FVG boxes (left, top, right, bottom)
+if bullFVG
+    box.new(bar_index[2], high[2], bar_index, low[1], bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 0))
+
+if bearFVG
+    box.new(bar_index[2], high[1], bar_index, low[2], bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 0))
+
+View in Pine Editor・60 lines
+Use on chart
+1
+1
+1 083
+comvination of fair value gap with volume more then 5 miliion

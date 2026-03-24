@@ -1,0 +1,69 @@
+//@version=6
+strategy("Engulfing Candlestick Strategy", overlay=true)
+
+// Input parameters
+bull_color = input.color(color.new(color.green, 0), title="Bullish Engulfing Highlight")
+bear_color = input.color(color.new(color.red, 0), title="Bearish Engulfing Highlight")
+hold_periods = input.int(17, title="Hold Periods", minval=1)  // How many bars to hold the position
+
+// Input for selecting the pattern (Bullish or Bearish Engulfing)
+pattern_type = input.string("Bullish Engulfing", title="Engulfing Pattern", options=["Bullish Engulfing", "Bearish Engulfing"])
+
+// Input for selecting the trade type (Long or Short)
+trade_type = input.string("Long", title="Trade Type", options=["Long", "Short"])
+
+// Conditions for Bullish Engulfing
+bullish_engulfing = close > open and open < close[1] and close > open[1] and open[1] > close[1]
+
+// Conditions for Bearish Engulfing
+bearish_engulfing = close < open and open > close[1] and close < open[1] and open[1] < close[1]
+
+// Declare the entry condition variable
+var bool entry_condition = false  // Set initial value to 'false'
+
+// Entry logic based on selected pattern and trade type
+if pattern_type == "Bullish Engulfing"
+    entry_condition := bullish_engulfing
+else
+    entry_condition := bearish_engulfing
+
+// Execute the entry based on the selected trade type
+if entry_condition
+    if trade_type == "Long"
+        strategy.entry("Long", strategy.long)
+    else
+        strategy.entry("Short", strategy.short)
+
+// Close position after specified number of bars
+if strategy.position_size != 0 and bar_index - strategy.opentrades.entry_bar_index(0) >= hold_periods
+    strategy.close("Long")
+    strategy.close("Short")
+
+// Highlight Bullish Engulfing Candles (Background Color)
+bgcolor(bullish_engulfing and pattern_type == "Bullish Engulfing" ? color.new(bull_color, 80) : na, title="Bullish Engulfing Background")
+// Highlight Bearish Engulfing Candles (Background Color)
+bgcolor(bearish_engulfing and pattern_type == "Bearish Engulfing" ? color.new(bear_color, 80) : na, title="Bearish Engulfing Background")
+
+View in Pine Editor・45 lines
+Use on chart
+5
+1
+1 762
+Ever wondered whether the Bullish or Bearish Engulfing pattern works or has statistical significance? This script is for you. It works across all markets and timeframes.
+
+The Engulfing Candlestick Pattern is a widely used technical analysis pattern that traders use to predict potential price reversals. It consists of two candles: a small candle followed by a larger one that "engulfs" the previous candle. This pattern is considered bullish when it occurs in a downtrend (bullish engulfing) and bearish when it occurs in an uptrend (bearish engulfing).
+Statistical Significance of the Engulfing Pattern:
+
+While many traders rely on candlestick patterns for making decisions, research on the statistical significance of these patterns has produced mixed results. A study by Dimitrios K. Koutoupis and K. M. Koutoupis (2014), titled "Testing the Effectiveness of Candlestick Chart Patterns in Forex Markets," indicates that candlestick patterns, including the engulfing pattern, can provide some predictive power, but their success largely depends on the market conditions and timeframe used. The researchers concluded that while some candlestick patterns can be useful, traders must combine them with other indicators or market knowledge to improve their predictive accuracy.
+
+Another study by Brock, Lakonishok, and LeBaron (1992), "Simple Technical Trading Rules and the Stochastic Properties of Stock Returns," explores the profitability of technical indicators, including candlestick patterns, and finds that simple trading rules, such as those based on moving averages or candlestick patterns, can occasionally outperform a random walk in certain market conditions.
+
+However, Jorion (1997), in his work "The Risk of Speculation: The Case of Technical Analysis," warns that the reliability of candlestick patterns, including the engulfing patterns, can vary significantly across different markets and periods. Therefore, it's important to use these patterns as part of a broader trading strategy that includes other risk management techniques and technical indicators.
+
+Application Across Markets:
+
+This script applies to all markets (e.g., stocks, commodities, forex) and timeframes, making it a versatile tool for traders seeking to explore the statistical effectiveness of the bullish and bearish engulfing patterns in their own trading.
+
+Conclusion:
+
+This script allows you to backtest and visualize the effectiveness of the Bullish and Bearish Engulfing patterns across any market and timeframe. While the statistical significance of these patterns may vary, the script provides a clear framework for evaluating their performance in real-time trading conditions. Always remember to combine such patterns with other risk management strategies and indicators to enhance their predictive power.

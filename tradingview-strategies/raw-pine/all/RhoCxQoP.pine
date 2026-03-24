@@ -1,0 +1,871 @@
+//@version=6
+strategy("Pro Scalper v9.0 [MTF Dashboard | Premium]",
+     overlay                = true,
+     initial_capital         = 10000,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     commission_type         = strategy.commission.cash_per_order,
+     commission_value        = 0.5,
+     slippage                = 2,
+     calc_on_every_tick      = false,
+     process_orders_on_close = false,
+     max_bars_back           = 500,
+     pyramiding              = 0)
+
+// ── COULEURS THEME ────────────────────────────────────────────────────────────
+// Palette sombre pro inspirée Bloomberg Terminal
+C_BG_DARK     = color.rgb(8, 12, 21)
+C_BG_PANEL    = color.rgb(13, 17, 28)
+C_BG_ROW      = color.rgb(18, 24, 38)
+C_BG_HEADER   = color.rgb(22, 30, 48)
+C_BG_ACCENT   = color.rgb(30, 40, 65)
+C_BORDER      = color.rgb(40, 52, 78)
+C_BORDER_LT   = color.rgb(55, 70, 100)
+
+C_BULL        = color.rgb(0, 230, 118)
+C_BULL_DIM    = color.rgb(0, 180, 90)
+C_BULL_BG     = color.rgb(0, 230, 118, 88)
+C_BEAR        = color.rgb(255, 23, 68)
+C_BEAR_DIM    = color.rgb(200, 20, 55)
+C_BEAR_BG     = color.rgb(255, 23, 68, 88)
+C_WARN        = color.rgb(255, 152, 0)
+C_WARN_DIM    = color.rgb(200, 120, 0)
+C_INFO        = color.rgb(41, 121, 255)
+C_INFO_DIM    = color.rgb(30, 90, 200)
+C_GOLD        = color.rgb(255, 215, 0)
+C_CYAN        = color.rgb(0, 188, 212)
+C_PURPLE      = color.rgb(156, 39, 176)
+C_TEXT        = color.rgb(200, 210, 230)
+C_TEXT_DIM    = color.rgb(120, 135, 160)
+C_TEXT_MUTED  = color.rgb(80, 90, 110)
+C_WHITE       = color.rgb(240, 245, 255)
+
+// ── SOURCES ANTI-REPAINT ──────────────────────────────────────────────────────
+srcClose = close[1]
+srcOpen  = open[1]
+srcHigh  = high[1]
+srcLow   = low[1]
+srcVol   = volume[1]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+grp_vis       = "══ 🎨 AFFICHAGE ══"
+i_showSignals = input.bool(true,  "Signaux BUY/SELL",       group=grp_vis)
+i_showZones   = input.bool(true,  "Zones SL/TP colorées",   group=grp_vis)
+i_showLabels  = input.bool(true,  "Labels prix & RR",       group=grp_vis)
+i_showScore   = input.bool(true,  "Heatmap Score",          group=grp_vis)
+i_showDash    = input.bool(true,  "Dashboard MTF",          group=grp_vis)
+i_showMetrics = input.bool(true,  "Métriques actives",      group=grp_vis)
+i_showEMAs    = input.bool(true,  "EMAs sur chart",         group=grp_vis)
+i_showBG      = input.bool(true,  "Background sessions",    group=grp_vis)
+i_maxLabels   = input.int(50,     "Max labels affichés",    minval=10, maxval=200, group=grp_vis)
+
+grp_mm        = "══ 💰 MONEY MANAGEMENT ══"
+i_accountSize = input.float(10000, "Capital ($)",       minval=100,  step=100,   group=grp_mm)
+i_riskPct     = input.float(1.0,   "Risque/trade (%)", minval=0.1,  maxval=5.0, step=0.1, group=grp_mm)
+i_maxDDPct    = input.float(8.0,   "Max Drawdown (%)", minval=1.0,  maxval=30.0, step=0.5, group=grp_mm)
+i_maxTrades   = input.int(3,       "Max trades/jour",  minval=1,    maxval=20,  group=grp_mm)
+i_pipValue    = input.float(10.0,  "Valeur pip ($)",   minval=0.01, maxval=1000, step=0.01, group=grp_mm)
+
+grp_sl        = "══ 🎯 SL / TP ══"
+i_swingLen    = input.int(8,     "Swing lookback",      minval=3,  maxval=30,  group=grp_sl)
+i_slPad       = input.float(0.2, "SL padding (xATR)",   minval=0.1, maxval=1.0, step=0.1, group=grp_sl)
+i_tp1RR       = input.float(1.0, "TP1 R:R",             minval=0.5, maxval=2.0, step=0.1, group=grp_sl)
+i_tp2RR       = input.float(2.0, "TP2 R:R",             minval=1.0, maxval=4.0, step=0.1, group=grp_sl)
+i_tp3RR       = input.float(3.0, "TP3 R:R OBJECTIF",    minval=2.0, maxval=8.0, step=0.1, group=grp_sl)
+i_tp1Pct      = input.int(50,    "% ferme TP1",          minval=20, maxval=60,  group=grp_sl)
+i_tp2Pct      = input.int(25,    "% ferme TP2",          minval=10, maxval=40,  group=grp_sl)
+
+grp_f         = "══ ⚡ FILTRES ══"
+i_emaFast     = input.int(9,   "EMA Rapide",   minval=3,   maxval=50,  group=grp_f)
+i_emaMid      = input.int(21,  "EMA Mediane",  minval=10,  maxval=100, group=grp_f)
+i_emaSlow     = input.int(50,  "EMA Lente",    minval=20,  maxval=200, group=grp_f)
+i_emaTrend    = input.int(200, "EMA Tendance", minval=100, maxval=400, group=grp_f)
+i_adxLen      = input.int(14,  "ADX Periode",  minval=5,   maxval=50,  group=grp_f)
+i_adxMin      = input.float(20,"ADX Min",      minval=15,  maxval=40,  step=1, group=grp_f)
+i_rsiLen      = input.int(14,  "RSI Periode",  minval=5,   maxval=30,  group=grp_f)
+i_minScore    = input.int(5,   "Score min (0-7)", minval=3, maxval=7,  group=grp_f,
+     tooltip="5/7 = standard | 6/7 = conservateur | 4/7 = agressif")
+
+grp_ses       = "══ 🕐 SESSIONS ══"
+i_useSes      = input.bool(true, "Filtrer sessions", group=grp_ses)
+i_londonStart = input.int(7,  "London Start (UTC)", group=grp_ses)
+i_londonEnd   = input.int(12, "London End (UTC)",   group=grp_ses)
+i_nyStart     = input.int(13, "NY Start (UTC)",     group=grp_ses)
+i_nyEnd       = input.int(17, "NY End (UTC)",       group=grp_ses)
+
+grp_trail     = "══ 📐 TRAILING ══"
+i_useTrail    = input.bool(true,  "Trailing après TP1", group=grp_trail)
+i_trailATR    = input.float(1.2,  "Trail (xATR)",       minval=0.5, maxval=3.0, step=0.1, group=grp_trail)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INDICATEURS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ATR
+atrVal        = ta.atr(14)[1]
+atrMA         = ta.sma(ta.atr(14), 50)[1]
+volNotDead    = atrVal > atrMA * 0.5
+volNotExtreme = atrVal < atrMA * 3.5
+
+// EMAs
+emaFast_raw  = ta.ema(close, i_emaFast)
+emaMid_raw   = ta.ema(close, i_emaMid)
+emaSlow_raw  = ta.ema(close, i_emaSlow)
+emaTrend_raw = ta.ema(close, i_emaTrend)
+
+emaFast  = emaFast_raw[1]
+emaMid   = emaMid_raw[1]
+emaSlow  = emaSlow_raw[1]
+emaTrend = emaTrend_raw[1]
+
+bullStructure = emaFast > emaMid and emaMid > emaSlow and emaSlow > emaTrend
+bearStructure = emaFast < emaMid and emaMid < emaSlow and emaSlow < emaTrend
+bullTrend     = srcClose > emaTrend
+bearTrend     = srcClose < emaTrend
+
+// Pullback EMA21
+ema21Touch_bull = srcLow  <= emaMid * 1.002 and srcClose > emaMid
+ema21Touch_bear = srcHigh >= emaMid * 0.998 and srcClose < emaMid
+nearEMA21       = math.abs(srcClose - emaMid) < atrVal * 1.2
+
+// ADX
+upMove      = high[1] - high[2]
+downMove    = low[2]  - low[1]
+plusDM      = upMove > downMove and upMove > 0 ? upMove : 0.0
+minusDM     = downMove > upMove and downMove > 0 ? downMove : 0.0
+trSmooth    = ta.atr(i_adxLen)
+emaPlusDM   = ta.ema(plusDM, i_adxLen)
+emaMinusDM  = ta.ema(minusDM, i_adxLen)
+plusDI_raw  = trSmooth > 0 ? 100 * emaPlusDM / trSmooth : 0.0
+minusDI_raw = trSmooth > 0 ? 100 * emaMinusDM / trSmooth : 0.0
+diSum       = plusDI_raw + minusDI_raw
+dx_raw      = diSum > 0 ? math.abs(plusDI_raw - minusDI_raw) / diSum * 100 : 0.0
+adxVal      = ta.ema(dx_raw, i_adxLen)[1]
+plusDI      = plusDI_raw[1]
+minusDI     = minusDI_raw[1]
+adxTrending = adxVal >= i_adxMin
+adxBullDir  = plusDI > minusDI
+adxBearDir  = minusDI > plusDI
+adxStrong   = adxVal >= 25
+
+// RSI
+rsiVal     = ta.rsi(close, i_rsiLen)[1]
+rsiPrev    = ta.rsi(close, i_rsiLen)[2]
+rsiRising  = rsiVal > rsiPrev
+rsiFalling = rsiVal < rsiPrev
+rsiBullOk  = rsiVal >= 45 and rsiVal <= 65
+rsiBearOk  = rsiVal >= 35 and rsiVal <= 55
+
+// MACD
+[macdLine_raw, signalLine_raw, histLine_raw] = ta.macd(close, 12, 26, 9)
+macdLine     = macdLine_raw[1]
+sigLine      = signalLine_raw[1]
+histLine     = histLine_raw[1]
+histPrev     = histLine_raw[2]
+macdBull     = macdLine > sigLine
+macdBear     = macdLine < sigLine
+histPositive = histLine > 0 and histLine > histPrev
+histNegative = histLine < 0 and histLine < histPrev
+
+// Chandeliers
+candleSize   = math.abs(srcClose - srcOpen)
+candleRange  = srcHigh - srcLow
+upperWick    = srcHigh - math.max(srcClose, srcOpen)
+lowerWick    = math.min(srcClose, srcOpen) - srcLow
+bodyPct      = candleRange > 0 ? candleSize / candleRange : 0.0
+
+bullCandle   = srcClose > srcOpen and bodyPct > 0.5 and srcClose > (srcLow + candleRange * 0.6)
+bearCandle   = srcClose < srcOpen and bodyPct > 0.5 and srcClose < (srcHigh - candleRange * 0.6)
+hammer       = lowerWick >= candleSize * 2.0 and upperWick <= candleSize * 0.5 and candleRange > atrVal * 0.4
+shootingStar = upperWick >= candleSize * 2.0 and lowerWick <= candleSize * 0.5 and candleRange > atrVal * 0.4
+prevBodyHigh = math.max(close[2], open[2])
+prevBodyLow  = math.min(close[2], open[2])
+bullEngulf   = srcClose > srcOpen and srcClose > prevBodyHigh and srcOpen < prevBodyLow
+bearEngulf   = srcClose < srcOpen and srcClose < prevBodyLow  and srcOpen > prevBodyHigh
+
+bullPA = bullCandle or hammer or bullEngulf
+bearPA = bearCandle or shootingStar or bearEngulf
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MULTI-TIMEFRAME DATA
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Fonction MTF : close, EMA50, EMA200, RSI, ATR pour chaque TF
+f_mtf(_tf) =>
+    _close  = request.security(syminfo.tickerid, _tf, close[1],  lookahead=barmerge.lookahead_off)
+    _ema50  = request.security(syminfo.tickerid, _tf, ta.ema(close, 50)[1],  lookahead=barmerge.lookahead_off)
+    _ema200 = request.security(syminfo.tickerid, _tf, ta.ema(close, 200)[1], lookahead=barmerge.lookahead_off)
+    _rsi    = request.security(syminfo.tickerid, _tf, ta.rsi(close, 14)[1],  lookahead=barmerge.lookahead_off)
+    _atr    = request.security(syminfo.tickerid, _tf, ta.atr(14)[1],         lookahead=barmerge.lookahead_off)
+    [_mL, _mS, _mH] = ta.macd(close, 12, 26, 9)
+    _hist   = request.security(syminfo.tickerid, _tf, _mH[1], lookahead=barmerge.lookahead_off)
+    [_close, _ema50, _ema200, _rsi, _atr, _hist]
+
+// M15
+[m15_close, m15_ema50, m15_ema200, m15_rsi, m15_atr, m15_macdH] = f_mtf("15")
+// H1
+[h1_close, h1_ema50, h1_ema200, h1_rsi, h1_atr, h1_macdH]   = f_mtf("60")
+// H4
+[h4_close, h4_ema50, h4_ema200, h4_rsi, h4_atr, h4_macdH]   = f_mtf("240")
+// D1
+[d1_close, d1_ema50, d1_ema200, d1_rsi, d1_atr, d1_macdH]   = f_mtf("D")
+
+// HTF pour conditions
+htfBull = h1_close > h1_ema50 and h1_ema50 > h1_ema200
+htfBear = h1_close < h1_ema50 and h1_ema50 < h1_ema200
+
+// Squeeze
+bbBasis  = ta.sma(close, 20)
+bbDev    = ta.stdev(close, 20)
+bbUpper  = bbBasis + 2.0 * bbDev
+bbLower  = bbBasis - 2.0 * bbDev
+kcBasis  = ta.ema(close, 20)
+kcRange  = ta.atr(20)
+kcUpper  = kcBasis + 1.5 * kcRange
+kcLower  = kcBasis - 1.5 * kcRange
+squeezeOff = bbUpper[1] > kcUpper[1] and bbLower[1] < kcLower[1]
+
+// Volume
+volSMA = ta.sma(volume, 20)[1]
+volOk  = srcVol > volSMA * 0.9
+volHigh = srcVol > volSMA * 1.5
+
+// Session
+prevHour  = hour(time[1], "UTC")
+inLondon  = prevHour >= i_londonStart and prevHour < i_londonEnd
+inNewYork = prevHour >= i_nyStart     and prevHour < i_nyEnd
+inAsia    = prevHour >= 0 and prevHour < 7
+sessionOk = i_useSes ? (inLondon or inNewYork) : true
+sessionName = inLondon ? "LONDON" : inNewYork ? "NEW YORK" : inAsia ? "ASIA" : "OFF"
+
+// Swing SL
+swingLow  = ta.lowest(low,  i_swingLen)[1]
+swingHigh = ta.highest(high, i_swingLen)[1]
+slPadding = atrVal * i_slPad
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCORE DE CONFLUENCE 0-7
+// ═══════════════════════════════════════════════════════════════════════════════
+
+c1_bull = bullStructure
+c2_bull = htfBull
+c3_bull = adxTrending and adxBullDir
+c4_bull = rsiBullOk and rsiRising
+c5_bull = macdBull and histPositive
+c6_bull = bullPA
+c7_bull = squeezeOff and volOk
+
+c1_bear = bearStructure
+c2_bear = htfBear
+c3_bear = adxTrending and adxBearDir
+c4_bear = rsiBearOk and rsiFalling
+c5_bear = macdBear and histNegative
+c6_bear = bearPA
+c7_bear = squeezeOff and volOk
+
+longScore = (c1_bull ? 1 : 0) + (c2_bull ? 1 : 0) + (c3_bull ? 1 : 0) +
+     (c4_bull ? 1 : 0) + (c5_bull ? 1 : 0) + (c6_bull ? 1 : 0) + (c7_bull ? 1 : 0)
+
+shortScore = (c1_bear ? 1 : 0) + (c2_bear ? 1 : 0) + (c3_bear ? 1 : 0) +
+     (c4_bear ? 1 : 0) + (c5_bear ? 1 : 0) + (c6_bear ? 1 : 0) + (c7_bear ? 1 : 0)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONTRÔLES OPÉRATIONNELS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var int lastEntryBar = 0
+cooldownOk = bar_index - lastEntryBar > 8
+
+var int dailyTrades  = 0
+var int lastTradeDay = 0
+if dayofmonth(time) != lastTradeDay
+    dailyTrades  := 0
+    lastTradeDay := dayofmonth(time)
+
+ddFromStart      = i_accountSize - strategy.equity
+ddPctFromStart   = i_accountSize > 0 ? (ddFromStart / i_accountSize) * 100 : 0.0
+ddCircuitBreaker = ddPctFromStart < i_maxDDPct
+riskAmount       = i_accountSize * (i_riskPct / 100)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONDITIONS D'ENTRÉE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+longSignal = longScore >= i_minScore and bullTrend
+     and (ema21Touch_bull or nearEMA21) and srcClose > emaMid
+
+shortSignal = shortScore >= i_minScore and bearTrend
+     and (ema21Touch_bear or nearEMA21) and srcClose < emaMid
+
+longCondition = longSignal and sessionOk and volNotDead and volNotExtreme
+     and cooldownOk and dailyTrades < i_maxTrades
+     and ddCircuitBreaker and strategy.position_size == 0
+
+shortCondition = shortSignal and sessionOk and volNotDead and volNotExtreme
+     and cooldownOk and dailyTrades < i_maxTrades
+     and ddCircuitBreaker and strategy.position_size == 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VARIABLES POSITION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var float entryPrice   = na
+var float slPrice      = na
+var float tp1Price     = na
+var float tp2Price     = na
+var float tp3Price     = na
+var bool  tp1Hit       = false
+var int   tradeDir     = 0
+var float tradePosSize = na
+var float tradeLossSL  = na
+var float tradeGainTP1 = na
+var float tradeGainTP2 = na
+var float tradeGainTP3 = na
+var float tradeSLdist  = na
+var int   entryScore   = 0
+var string entryType   = ""
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    tradeDir := 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXECUTION LONG
+// ═══════════════════════════════════════════════════════════════════════════════
+
+if longCondition
+    entryPrice   := close
+    rawSL        = swingLow - slPadding
+    slPrice      := math.max(close - atrVal * 2.5, math.min(close - atrVal * 0.5, rawSL))
+    tradeSLdist  := close - slPrice
+    tp1Price     := close + tradeSLdist * i_tp1RR
+    tp2Price     := close + tradeSLdist * i_tp2RR
+    tp3Price     := close + tradeSLdist * i_tp3RR
+    tp1Hit       := false
+    tradeDir     := 1
+    entryScore   := longScore
+    entryType    := bullEngulf ? "ENGULF" : hammer ? "HAMMER" : bullCandle ? "BULL" : "SETUP"
+    lastEntryBar := bar_index
+    dailyTrades  := dailyTrades + 1
+    tradeLossSL  := riskAmount
+    tradeGainTP1 := riskAmount * i_tp1RR
+    tradeGainTP2 := riskAmount * i_tp2RR
+    tradeGainTP3 := riskAmount * i_tp3RR
+    tradePosSize := tradeSLdist > 0 and i_pipValue > 0 ? math.floor((riskAmount / (tradeSLdist * i_pipValue)) * 100) / 100 : 0.01
+    qty = math.max(1, math.round(tradePosSize))
+    strategy.entry("Long", strategy.long, qty=qty, comment="▲ BUY " + str.tostring(longScore) + "/7")
+    strategy.exit("TP1_L", "Long", qty_percent=i_tp1Pct, limit=tp1Price, stop=slPrice)
+    strategy.exit("TP2_L", "Long", qty_percent=i_tp2Pct, limit=tp2Price, stop=slPrice)
+    strategy.exit("TP3_L", "Long",                        limit=tp3Price, stop=slPrice)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXECUTION SHORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+if shortCondition
+    entryPrice   := close
+    rawSL        = swingHigh + slPadding
+    slPrice      := math.min(close + atrVal * 2.5, math.max(close + atrVal * 0.5, rawSL))
+    tradeSLdist  := slPrice - close
+    tp1Price     := close - tradeSLdist * i_tp1RR
+    tp2Price     := close - tradeSLdist * i_tp2RR
+    tp3Price     := close - tradeSLdist * i_tp3RR
+    tp1Hit       := false
+    tradeDir     := -1
+    entryScore   := shortScore
+    entryType    := bearEngulf ? "ENGULF" : shootingStar ? "SHOOT★" : bearCandle ? "BEAR" : "SETUP"
+    lastEntryBar := bar_index
+    dailyTrades  := dailyTrades + 1
+    tradeLossSL  := riskAmount
+    tradeGainTP1 := riskAmount * i_tp1RR
+    tradeGainTP2 := riskAmount * i_tp2RR
+    tradeGainTP3 := riskAmount * i_tp3RR
+    tradePosSize := tradeSLdist > 0 and i_pipValue > 0 ? math.floor((riskAmount / (tradeSLdist * i_pipValue)) * 100) / 100 : 0.01
+    qty = math.max(1, math.round(tradePosSize))
+    strategy.entry("Short", strategy.short, qty=qty, comment="▼ SELL " + str.tostring(shortScore) + "/7")
+    strategy.exit("TP1_S", "Short", qty_percent=i_tp1Pct, limit=tp1Price, stop=slPrice)
+    strategy.exit("TP2_S", "Short", qty_percent=i_tp2Pct, limit=tp2Price, stop=slPrice)
+    strategy.exit("TP3_S", "Short",                        limit=tp3Price, stop=slPrice)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRAILING STOP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+if i_useTrail and strategy.position_size > 0
+    if high >= tp1Price and not tp1Hit
+        tp1Hit := true
+    if tp1Hit
+        newSL = close - atrVal * i_trailATR
+        if newSL > slPrice
+            slPrice := newSL
+            strategy.exit("Trail_L", "Long", stop=slPrice)
+
+if i_useTrail and strategy.position_size < 0
+    if low <= tp1Price and not tp1Hit
+        tp1Hit := true
+    if tp1Hit
+        newSL = close + atrVal * i_trailATR
+        if newSL < slPrice
+            slPrice := newSL
+            strategy.exit("Trail_S", "Short", stop=slPrice)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRACKING STATS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var int   totalTrades    = 0
+var int   winTrades      = 0
+var int   lossTrades     = 0
+var float grossProfit    = 0.0
+var float grossLoss      = 0.0
+var float peakEquity     = 0.0
+var float maxDrawdownPct = 0.0
+var int   maxConsecWins  = 0
+var int   maxConsecLoss  = 0
+var int   consecWins     = 0
+var int   consecLoss     = 0
+var float bestTrade      = 0.0
+var float worstTrade     = 0.0
+var int   longWins       = 0
+var int   longLosses     = 0
+var int   shortWins      = 0
+var int   shortLosses    = 0
+var float prevNetProfit  = 0.0
+
+tradeClosed    = strategy.closedtrades != strategy.closedtrades[1]
+newTradeProfit = strategy.netprofit - prevNetProfit
+
+if tradeClosed
+    totalTrades := totalTrades + 1
+    tradeP = newTradeProfit
+    if tradeP > 0
+        winTrades   := winTrades + 1
+        grossProfit := grossProfit + tradeP
+        consecWins  := consecWins + 1
+        consecLoss  := 0
+        if consecWins > maxConsecWins
+            maxConsecWins := consecWins
+    else
+        lossTrades  := lossTrades + 1
+        grossLoss   := grossLoss + math.abs(tradeP)
+        consecLoss  := consecLoss + 1
+        consecWins  := 0
+        if consecLoss > maxConsecLoss
+            maxConsecLoss := consecLoss
+    if tradeP > bestTrade
+        bestTrade := tradeP
+    if tradeP < worstTrade
+        worstTrade := tradeP
+    lastIdx = strategy.closedtrades - 1
+    if lastIdx >= 0
+        eP = strategy.closedtrades.entry_price(lastIdx)
+        xP = strategy.closedtrades.exit_price(lastIdx)
+        if tradeP > 0
+            if xP > eP
+                longWins := longWins + 1
+            else
+                shortWins := shortWins + 1
+        else
+            if xP < eP
+                longLosses := longLosses + 1
+            else
+                shortLosses := shortLosses + 1
+    prevNetProfit := strategy.netprofit
+
+currentEquity = strategy.equity
+if currentEquity > peakEquity
+    peakEquity := currentEquity
+currentDDPct = peakEquity > 0 ? ((peakEquity - currentEquity) / peakEquity) * 100 : 0.0
+if currentDDPct > maxDrawdownPct
+    maxDrawdownPct := currentDDPct
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🎨 VISUEL — EMAs avec gradient
+// ═══════════════════════════════════════════════════════════════════════════════
+
+p_ema9   = plot(i_showEMAs ? emaFast_raw  : na, "EMA 9",   color=color.new(C_CYAN, 30),   linewidth=1)
+p_ema21  = plot(i_showEMAs ? emaMid_raw   : na, "EMA 21",  color=color.new(C_WARN, 20),   linewidth=2)
+p_ema50  = plot(i_showEMAs ? emaSlow_raw  : na, "EMA 50",  color=color.new(C_BEAR, 30),   linewidth=2)
+p_ema200 = plot(i_showEMAs ? emaTrend_raw : na, "EMA 200", color=color.new(C_PURPLE, 30), linewidth=3)
+
+// Zone trend entre EMA50 et EMA200
+fill(p_ema50, p_ema200,
+     color = bullTrend ? color.new(C_BULL, 92) : bearTrend ? color.new(C_BEAR, 92) : color.new(C_TEXT_MUTED, 96))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🎨 SIGNAUX — PREMIUM avec infos intégrées
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Flèches principales
+plotshape(longCondition  and i_showSignals, "BUY",  shape.triangleup,
+     location.belowbar, color.new(C_BULL, 0), size=size.normal)
+plotshape(shortCondition and i_showSignals, "SELL", shape.triangledown,
+     location.abovebar, color.new(C_BEAR, 0), size=size.normal)
+
+// Labels détaillés avec score + type + RR
+if longCondition and i_showSignals
+    lbl = label.new(bar_index, srcLow - atrVal * 0.8,
+         "▲ BUY " + str.tostring(longScore) + "/7\n" + entryType + " | RR 1:" + str.tostring(i_tp3RR, "#.#"),
+         xloc.bar_index, yloc.price,
+         color=color.new(C_BULL, 5), style=label.style_label_up,
+         textcolor=C_BG_DARK, size=size.small)
+
+if shortCondition and i_showSignals
+    lbl = label.new(bar_index, srcHigh + atrVal * 0.8,
+         "▼ SELL " + str.tostring(shortScore) + "/7\n" + entryType + " | RR 1:" + str.tostring(i_tp3RR, "#.#"),
+         xloc.bar_index, yloc.price,
+         color=color.new(C_BEAR, 5), style=label.style_label_down,
+         textcolor=C_WHITE, size=size.small)
+
+// Background session
+bgCol = inLondon ? color.new(C_INFO, 96) : inNewYork ? color.new(C_PURPLE, 96) : na
+bgcolor(i_showBG and i_useSes ? bgCol : na)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🎨 ZONES SL / TP — Lignes + Fill
+// ═══════════════════════════════════════════════════════════════════════════════
+
+inPos     = strategy.position_size != 0
+entryLine = plot(inPos ? entryPrice : na, "Entry", color=color.new(C_GOLD, 0),      style=plot.style_linebr, linewidth=2)
+slLine    = plot(inPos ? slPrice    : na, "SL",    color=color.new(C_BEAR, 0),      style=plot.style_linebr, linewidth=2)
+tp1Line   = plot(inPos ? tp1Price   : na, "TP1",   color=color.new(C_BULL_DIM, 40), style=plot.style_linebr, linewidth=1)
+tp2Line   = plot(inPos ? tp2Price   : na, "TP2",   color=color.new(C_BULL, 20),     style=plot.style_linebr, linewidth=2)
+tp3Line   = plot(inPos ? tp3Price   : na, "TP3",   color=color.new(C_CYAN, 0),      style=plot.style_linebr, linewidth=3)
+
+fill(entryLine, slLine,  color = inPos and i_showZones ? color.new(C_BEAR, 85) : na)
+fill(entryLine, tp1Line, color = inPos and i_showZones ? color.new(C_BULL, 90) : na)
+fill(tp1Line,   tp2Line, color = inPos and i_showZones ? color.new(C_BULL, 93) : na)
+fill(tp2Line,   tp3Line, color = inPos and i_showZones ? color.new(C_CYAN, 94) : na)
+
+// Labels flottants sur les niveaux
+if inPos and i_showLabels and barstate.islast
+    lx = bar_index + 3
+    label.new(lx, entryPrice,
+         " ● ENTRY " + (tradeDir == 1 ? "LONG" : "SHORT") + "  " + str.tostring(entryPrice, "#.##") + "  [" + str.tostring(entryScore) + "/7]",
+         xloc.bar_index, yloc.price, color.new(C_GOLD, 5), label.style_label_left, C_BG_DARK, size.small)
+    label.new(lx, slPrice,
+         " ✖ SL  " + str.tostring(slPrice, "#.##") + "  −$" + str.tostring(tradeLossSL, "#.#"),
+         xloc.bar_index, yloc.price, color.new(C_BEAR, 5), label.style_label_left, C_WHITE, size.small)
+    label.new(lx, tp1Price,
+         " ◎ TP1 1:" + str.tostring(i_tp1RR, "#.#") + "  " + str.tostring(tp1Price, "#.##") + "  +$" + str.tostring(tradeGainTP1, "#.#") + " [" + str.tostring(i_tp1Pct) + "%]",
+         xloc.bar_index, yloc.price, color.new(C_BULL_DIM, 10), label.style_label_left, C_WHITE, size.small)
+    label.new(lx, tp2Price,
+         " ◉ TP2 1:" + str.tostring(i_tp2RR, "#.#") + "  " + str.tostring(tp2Price, "#.##") + "  +$" + str.tostring(tradeGainTP2, "#.#") + " [" + str.tostring(i_tp2Pct) + "%]",
+         xloc.bar_index, yloc.price, color.new(C_BULL, 10), label.style_label_left, C_WHITE, size.small)
+    label.new(lx, tp3Price,
+         " ★ TP3 1:" + str.tostring(i_tp3RR, "#.#") + "  " + str.tostring(tp3Price, "#.##") + "  +$" + str.tostring(tradeGainTP3, "#.#") + " [OBJECTIF]",
+         xloc.bar_index, yloc.price, color.new(C_CYAN, 5), label.style_label_left, C_BG_DARK, size.small)
+
+    // Label trailing
+    if tp1Hit and i_useTrail
+        label.new(lx, slPrice,
+             " 🔒 TRAIL ACTIF",
+             xloc.bar_index, yloc.price, color.new(C_WARN, 5), label.style_label_left, C_BG_DARK, size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📊 HEATMAP SCORE — Panneau secondaire
+// ═══════════════════════════════════════════════════════════════════════════════
+
+scoreDisplay = longSignal ? longScore : shortSignal ? shortScore : 0
+scoreColor   = scoreDisplay >= 7 ? color.new(C_CYAN, 0) :
+               scoreDisplay >= 6 ? color.new(C_BULL, 0) :
+               scoreDisplay >= 5 ? color.new(C_WARN, 0) :
+               scoreDisplay >= 4 ? color.new(C_WARN_DIM, 30) :
+               color.new(C_TEXT_MUTED, 60)
+plot(i_showScore ? scoreDisplay : na, "Score", color=scoreColor, style=plot.style_columns, linewidth=2)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📋 DASHBOARD MTF PREMIUM — Position bottom_right
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helpers dashboard (scope global obligatoire en Pine)
+f_trendIcon(_c, _e50, _e200) =>
+    _c > _e50 and _e50 > _e200 ? "▲" : _c < _e50 and _e50 < _e200 ? "▼" : "◆"
+f_trendColor(_c, _e50, _e200) =>
+    _c > _e50 and _e50 > _e200 ? C_BULL : _c < _e50 and _e50 < _e200 ? C_BEAR : C_WARN
+f_rsiIcon(_r) =>
+    _r > 70 ? "⬆ OB" : _r < 30 ? "⬇ OS" : _r > 55 ? "↗" : _r < 45 ? "↘" : "→"
+f_rsiColor(_r) =>
+    _r > 65 ? C_BEAR : _r < 35 ? C_BULL : C_TEXT
+f_macdIcon(_h) =>
+    _h > 0 ? "+" : "−"
+f_macdColor(_h) =>
+    _h > 0 ? C_BULL : C_BEAR
+
+if barstate.islast and i_showDash
+
+    var table dash = table.new(position.bottom_right, 8, 24,
+         bgcolor=C_BG_DARK, border_color=C_BORDER, border_width=1,
+         frame_color=C_INFO, frame_width=2)
+
+    // ═══ HEADER ═══
+    table.cell(dash, 0, 0, "  ⚡ PRO SCALPER v9.0  ", bgcolor=C_BG_HEADER, text_color=C_INFO, text_size=size.small)
+    table.merge_cells(dash, 0, 0, 7, 0)
+    table.cell(dash, 0, 1, syminfo.ticker + " | " + timeframe.period + " | " + sessionName,
+         bgcolor=C_BG_ACCENT, text_color=C_GOLD, text_size=size.tiny)
+    table.merge_cells(dash, 0, 1, 7, 1)
+
+    // ═══ MTF TREND MATRIX ═══
+    table.cell(dash, 0, 2, " MULTI-TIMEFRAME ", bgcolor=C_BG_HEADER, text_color=C_CYAN, text_size=size.tiny)
+    table.merge_cells(dash, 0, 2, 7, 2)
+
+    // En-têtes colonnes
+    headers = array.from("TF", "TREND", "RSI", "MACD", "VOL")
+    for i = 0 to 4
+        table.cell(dash, i, 3, array.get(headers, i), bgcolor=C_BG_ACCENT, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 5, 3, "", bgcolor=C_BG_ACCENT)
+    table.cell(dash, 6, 3, "", bgcolor=C_BG_ACCENT)
+    table.cell(dash, 7, 3, "", bgcolor=C_BG_ACCENT)
+
+    // M15
+    table.cell(dash, 0, 4, "M15",  bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 1, 4, f_trendIcon(m15_close, m15_ema50, m15_ema200),
+         bgcolor=C_BG_PANEL, text_color=f_trendColor(m15_close, m15_ema50, m15_ema200), text_size=size.tiny)
+    table.cell(dash, 2, 4, str.tostring(m15_rsi, "#") + " " + f_rsiIcon(m15_rsi),
+         bgcolor=C_BG_PANEL, text_color=f_rsiColor(m15_rsi), text_size=size.tiny)
+    table.cell(dash, 3, 4, f_macdIcon(m15_macdH),
+         bgcolor=C_BG_PANEL, text_color=f_macdColor(m15_macdH), text_size=size.tiny)
+    table.cell(dash, 4, 4, volHigh ? "HIGH" : volOk ? "OK" : "LOW",
+         bgcolor=C_BG_PANEL, text_color=volHigh ? C_BULL : volOk ? C_TEXT : C_BEAR_DIM, text_size=size.tiny)
+    for i = 5 to 7
+        table.cell(dash, i, 4, "", bgcolor=C_BG_PANEL)
+
+    // H1
+    table.cell(dash, 0, 5, "H1",   bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 1, 5, f_trendIcon(h1_close, h1_ema50, h1_ema200),
+         bgcolor=C_BG_ROW, text_color=f_trendColor(h1_close, h1_ema50, h1_ema200), text_size=size.tiny)
+    table.cell(dash, 2, 5, str.tostring(h1_rsi, "#") + " " + f_rsiIcon(h1_rsi),
+         bgcolor=C_BG_ROW, text_color=f_rsiColor(h1_rsi), text_size=size.tiny)
+    table.cell(dash, 3, 5, f_macdIcon(h1_macdH),
+         bgcolor=C_BG_ROW, text_color=f_macdColor(h1_macdH), text_size=size.tiny)
+    table.cell(dash, 4, 5, "", bgcolor=C_BG_ROW)
+    for i = 5 to 7
+        table.cell(dash, i, 5, "", bgcolor=C_BG_ROW)
+
+    // H4
+    table.cell(dash, 0, 6, "H4",   bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 1, 6, f_trendIcon(h4_close, h4_ema50, h4_ema200),
+         bgcolor=C_BG_PANEL, text_color=f_trendColor(h4_close, h4_ema50, h4_ema200), text_size=size.tiny)
+    table.cell(dash, 2, 6, str.tostring(h4_rsi, "#") + " " + f_rsiIcon(h4_rsi),
+         bgcolor=C_BG_PANEL, text_color=f_rsiColor(h4_rsi), text_size=size.tiny)
+    table.cell(dash, 3, 6, f_macdIcon(h4_macdH),
+         bgcolor=C_BG_PANEL, text_color=f_macdColor(h4_macdH), text_size=size.tiny)
+    table.cell(dash, 4, 6, "", bgcolor=C_BG_PANEL)
+    for i = 5 to 7
+        table.cell(dash, i, 6, "", bgcolor=C_BG_PANEL)
+
+    // D1
+    table.cell(dash, 0, 7, "D1",   bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 1, 7, f_trendIcon(d1_close, d1_ema50, d1_ema200),
+         bgcolor=C_BG_ROW, text_color=f_trendColor(d1_close, d1_ema50, d1_ema200), text_size=size.tiny)
+    table.cell(dash, 2, 7, str.tostring(d1_rsi, "#") + " " + f_rsiIcon(d1_rsi),
+         bgcolor=C_BG_ROW, text_color=f_rsiColor(d1_rsi), text_size=size.tiny)
+    table.cell(dash, 3, 7, f_macdIcon(d1_macdH),
+         bgcolor=C_BG_ROW, text_color=f_macdColor(d1_macdH), text_size=size.tiny)
+    table.cell(dash, 4, 7, "", bgcolor=C_BG_ROW)
+    for i = 5 to 7
+        table.cell(dash, i, 7, "", bgcolor=C_BG_ROW)
+
+    // ═══ CONFLUENCE HEATMAP ═══
+    table.cell(dash, 0, 8, " CONFLUENCE ", bgcolor=C_BG_HEADER, text_color=C_GOLD, text_size=size.tiny)
+    table.merge_cells(dash, 0, 8, 7, 8)
+
+    // Labels confluence
+    confNames  = array.from("EMA Struct", "HTF H1", "ADX", "RSI", "MACD", "Candle", "Squeeze")
+    confBull   = array.from(c1_bull, c2_bull, c3_bull, c4_bull, c5_bull, c6_bull, c7_bull)
+    confBear   = array.from(c1_bear, c2_bear, c3_bear, c4_bear, c5_bear, c6_bear, c7_bear)
+
+    for i = 0 to 6
+        row = 9 + (i < 4 ? 0 : 1)
+        col = i < 4 ? i * 2 : (i - 4) * 2
+        bVal = array.get(confBull, i)
+        sVal = array.get(confBear, i)
+        icon = bVal ? "●" : sVal ? "●" : "○"
+        clr  = bVal ? C_BULL : sVal ? C_BEAR : C_TEXT_MUTED
+        bgr  = i % 2 == 0 ? C_BG_PANEL : C_BG_ROW
+        table.cell(dash, col, row, array.get(confNames, i), bgcolor=bgr, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, col + 1, row, icon, bgcolor=bgr, text_color=clr, text_size=size.tiny)
+
+    // Score row
+    table.cell(dash, 6, 10, "", bgcolor=C_BG_PANEL)
+    table.cell(dash, 7, 10, "", bgcolor=C_BG_PANEL)
+
+    curScore = longSignal ? longScore : shortSignal ? shortScore : 0
+    scCol    = curScore >= 6 ? C_BULL : curScore >= 5 ? C_WARN : curScore >= 4 ? C_WARN_DIM : C_BEAR
+    scBg     = curScore >= i_minScore ? color.new(scCol, 85) : C_BG_ACCENT
+    table.cell(dash, 0, 11, " SCORE ", bgcolor=scBg, text_color=C_TEXT, text_size=size.tiny)
+    table.cell(dash, 1, 11, str.tostring(curScore) + " / 7", bgcolor=scBg, text_color=scCol, text_size=size.small)
+    table.cell(dash, 2, 11, curScore >= i_minScore ? "✓ READY" : "✗ WAIT",
+         bgcolor=scBg, text_color=curScore >= i_minScore ? C_BULL : C_BEAR, text_size=size.tiny)
+    for i = 3 to 7
+        table.cell(dash, i, 11, "", bgcolor=scBg)
+
+    // ═══ SEPARATEUR ═══
+    for i = 0 to 7
+        table.cell(dash, i, 12, "", bgcolor=C_BORDER)
+
+    // ═══ POSITION ACTIVE ═══
+    table.cell(dash, 0, 13, " POSITION ", bgcolor=C_BG_HEADER, text_color=C_INFO, text_size=size.tiny)
+    table.merge_cells(dash, 0, 13, 7, 13)
+
+    dirT = tradeDir == 1 ? "▲ LONG" : tradeDir == -1 ? "▼ SHORT" : "— FLAT"
+    dirC = tradeDir == 1 ? C_BULL : tradeDir == -1 ? C_BEAR : C_TEXT_MUTED
+    openPL = strategy.openprofit
+    plCol  = openPL >= 0 ? C_BULL : C_BEAR
+
+    table.cell(dash, 0, 14, "Dir",   bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 1, 14, dirT,    bgcolor=C_BG_PANEL, text_color=dirC, text_size=size.tiny)
+    table.cell(dash, 2, 14, "Entry", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 3, 14, inPos ? str.tostring(entryPrice, "#.##") : "---",
+         bgcolor=C_BG_PANEL, text_color=C_GOLD, text_size=size.tiny)
+    table.cell(dash, 4, 14, "P&L",   bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 5, 14, inPos ? (openPL >= 0 ? "+" : "") + str.tostring(openPL, "#.#") + "$" : "---",
+         bgcolor=C_BG_PANEL, text_color=plCol, text_size=size.tiny)
+    table.cell(dash, 6, 14, "Size",  bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 7, 14, inPos ? str.tostring(tradePosSize, "#.##") : "---",
+         bgcolor=C_BG_PANEL, text_color=C_WARN, text_size=size.tiny)
+
+    table.cell(dash, 0, 15, "SL",    bgcolor=C_BG_ROW, text_color=C_BEAR_DIM, text_size=size.tiny)
+    table.cell(dash, 1, 15, inPos ? str.tostring(slPrice, "#.##") : "---",
+         bgcolor=C_BG_ROW, text_color=C_BEAR, text_size=size.tiny)
+    table.cell(dash, 2, 15, "TP1",   bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 3, 15, inPos ? str.tostring(tp1Price, "#.##") : "---",
+         bgcolor=C_BG_ROW, text_color=C_BULL_DIM, text_size=size.tiny)
+    table.cell(dash, 4, 15, "TP2",   bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 5, 15, inPos ? str.tostring(tp2Price, "#.##") : "---",
+         bgcolor=C_BG_ROW, text_color=C_BULL, text_size=size.tiny)
+    table.cell(dash, 6, 15, "TP3",   bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 7, 15, inPos ? str.tostring(tp3Price, "#.##") : "---",
+         bgcolor=C_BG_ROW, text_color=C_CYAN, text_size=size.tiny)
+
+    table.cell(dash, 0, 16, "Risk $", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 1, 16, "$" + str.tostring(riskAmount, "#.#") + " (" + str.tostring(i_riskPct, "#.#") + "%)",
+         bgcolor=C_BG_PANEL, text_color=C_WARN, text_size=size.tiny)
+    table.cell(dash, 2, 16, "Trailing", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 3, 16, tp1Hit ? "🔒 ACTIF" : "EN ATTENTE",
+         bgcolor=C_BG_PANEL, text_color=tp1Hit ? C_BULL : C_TEXT_MUTED, text_size=size.tiny)
+    table.cell(dash, 4, 16, "Trades/j", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 5, 16, str.tostring(dailyTrades) + "/" + str.tostring(i_maxTrades),
+         bgcolor=C_BG_PANEL, text_color=dailyTrades < i_maxTrades ? C_BULL : C_BEAR, text_size=size.tiny)
+    table.cell(dash, 6, 16, "ATR",    bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+    table.cell(dash, 7, 16, str.tostring(atrVal, "#.##"),
+         bgcolor=C_BG_PANEL, text_color=C_TEXT, text_size=size.tiny)
+
+    // ═══ SEPARATEUR ═══
+    for i = 0 to 7
+        table.cell(dash, i, 17, "", bgcolor=C_BORDER)
+
+    // ═══ MÉTRIQUES ACTIVES ═══
+    if i_showMetrics
+        table.cell(dash, 0, 18, " 📊 PERFORMANCE ", bgcolor=C_BG_HEADER, text_color=C_GOLD, text_size=size.tiny)
+        table.merge_cells(dash, 0, 18, 7, 18)
+
+        netP   = strategy.netprofit
+        netPct = strategy.initial_capital > 0 ? (netP / strategy.initial_capital) * 100 : 0.0
+        wr     = totalTrades > 0 ? (winTrades * 1.0 / totalTrades) * 100 : 0.0
+        pf     = grossLoss > 0 ? grossProfit / grossLoss : 0.0
+        avgW   = winTrades  > 0 ? grossProfit / winTrades  : 0.0
+        avgL   = lossTrades > 0 ? grossLoss   / lossTrades : 0.0
+        aRR    = avgL > 0 ? avgW / avgL : 0.0
+        expect = totalTrades > 0 ? netP / totalTrades : 0.0
+
+        // Ligne 1: Net P&L | WinRate | Profit Factor | Trades
+        table.cell(dash, 0, 19, "Net P&L", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 1, 19, (netP >= 0 ? "+" : "") + str.tostring(netP, "#.#") + "$",
+             bgcolor=C_BG_PANEL, text_color=netP >= 0 ? C_BULL : C_BEAR, text_size=size.tiny)
+        table.cell(dash, 2, 19, "Win Rate", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 3, 19, str.tostring(wr, "#.1") + "%",
+             bgcolor=C_BG_PANEL, text_color=wr >= 60 ? C_BULL : wr >= 50 ? C_WARN : C_BEAR, text_size=size.tiny)
+        table.cell(dash, 4, 19, "PF", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 5, 19, str.tostring(pf, "#.##"),
+             bgcolor=C_BG_PANEL, text_color=pf >= 1.5 ? C_BULL : pf >= 1.0 ? C_WARN : C_BEAR, text_size=size.tiny)
+        table.cell(dash, 6, 19, "Trades", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 7, 19, str.tostring(totalTrades),
+             bgcolor=C_BG_PANEL, text_color=C_TEXT, text_size=size.tiny)
+
+        // Ligne 2: R:R réel | Espérance | Max DD | Streak
+        table.cell(dash, 0, 20, "R:R réel", bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 1, 20, "1:" + str.tostring(aRR, "#.##"),
+             bgcolor=C_BG_ROW, text_color=aRR >= 2.0 ? C_BULL : aRR >= 1.5 ? C_WARN : C_BEAR, text_size=size.tiny)
+        table.cell(dash, 2, 20, "Espérance", bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 3, 20, str.tostring(expect, "#.#") + "$/t",
+             bgcolor=C_BG_ROW, text_color=expect > 0 ? C_BULL : C_BEAR, text_size=size.tiny)
+        table.cell(dash, 4, 20, "Max DD", bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 5, 20, str.tostring(maxDrawdownPct, "#.1") + "%",
+             bgcolor=C_BG_ROW, text_color=maxDrawdownPct < 10 ? C_BULL : maxDrawdownPct < 20 ? C_WARN : C_BEAR, text_size=size.tiny)
+        table.cell(dash, 6, 20, "Streak", bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+        streakTxt = consecWins > 0 ? "W" + str.tostring(consecWins) : consecLoss > 0 ? "L" + str.tostring(consecLoss) : "---"
+        streakCol = consecWins > 0 ? C_BULL : consecLoss > 0 ? C_BEAR : C_TEXT_MUTED
+        table.cell(dash, 7, 20, streakTxt, bgcolor=C_BG_ROW, text_color=streakCol, text_size=size.tiny)
+
+        // Ligne 3: Long WR | Short WR | Best | Worst
+        totalLg = longWins + longLosses
+        lgWR    = totalLg > 0 ? (longWins * 1.0 / totalLg) * 100 : 0.0
+        totalSh = shortWins + shortLosses
+        shWR    = totalSh > 0 ? (shortWins * 1.0 / totalSh) * 100 : 0.0
+
+        table.cell(dash, 0, 21, "Long WR", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 1, 21, str.tostring(lgWR, "#.1") + "% (" + str.tostring(longWins) + "W)",
+             bgcolor=C_BG_PANEL, text_color=lgWR >= 55 ? C_BULL : C_WARN, text_size=size.tiny)
+        table.cell(dash, 2, 21, "Short WR", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 3, 21, str.tostring(shWR, "#.1") + "% (" + str.tostring(shortWins) + "W)",
+             bgcolor=C_BG_PANEL, text_color=shWR >= 55 ? C_BULL : C_WARN, text_size=size.tiny)
+        table.cell(dash, 4, 21, "Best $", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 5, 21, "+" + str.tostring(bestTrade, "#.#"),
+             bgcolor=C_BG_PANEL, text_color=C_BULL, text_size=size.tiny)
+        table.cell(dash, 6, 21, "Worst $", bgcolor=C_BG_PANEL, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 7, 21, str.tostring(worstTrade, "#.#"),
+             bgcolor=C_BG_PANEL, text_color=C_BEAR, text_size=size.tiny)
+
+        // Ligne 4: Consec max
+        table.cell(dash, 0, 22, "Max W streak", bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 1, 22, str.tostring(maxConsecWins),
+             bgcolor=C_BG_ROW, text_color=C_BULL, text_size=size.tiny)
+        table.cell(dash, 2, 22, "Max L streak", bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 3, 22, str.tostring(maxConsecLoss),
+             bgcolor=C_BG_ROW, text_color=C_BEAR, text_size=size.tiny)
+        table.cell(dash, 4, 22, "DD circuit", bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 5, 22, ddCircuitBreaker ? "OK" : "STOP",
+             bgcolor=C_BG_ROW, text_color=ddCircuitBreaker ? C_BULL : C_BEAR, text_size=size.tiny)
+        table.cell(dash, 6, 22, "ADX",     bgcolor=C_BG_ROW, text_color=C_TEXT_DIM, text_size=size.tiny)
+        table.cell(dash, 7, 22, str.tostring(adxVal, "#.0") + (adxStrong ? " ★" : ""),
+             bgcolor=C_BG_ROW, text_color=adxTrending ? C_BULL : C_WARN, text_size=size.tiny)
+
+        // Footer
+        table.cell(dash, 0, 23, "  v9.0 | Anti-Repaint | " + str.tostring(year) + "  ",
+             bgcolor=C_BG_ACCENT, text_color=C_TEXT_MUTED, text_size=size.tiny)
+        table.merge_cells(dash, 0, 23, 7, 23)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔔 ALERTES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(longCondition,                      title="▲ BUY v9.0",        message="⚡ SCALPER v9.0 | BUY | {{ticker}} @ {{close}}")
+alertcondition(shortCondition,                     title="▼ SELL v9.0",       message="⚡ SCALPER v9.0 | SELL | {{ticker}} @ {{close}}")
+alertcondition(not ddCircuitBreaker,               title="🛑 DD MAX",         message="⚡ SCALPER v9.0 | DRAWDOWN MAX | STOP TRADING")
+alertcondition(longCondition  and longScore  >= 7, title="🔥 BUY PARFAIT",   message="⚡ SCALPER v9.0 | BUY PARFAIT 7/7 | {{ticker}} @ {{close}}")
+alertcondition(shortCondition and shortScore >= 7, title="🔥 SELL PARFAIT",  message="⚡ SCALPER v9.0 | SELL PARFAIT 7/7 | {{ticker}} @ {{close}}")
+alertcondition(longCondition  and longScore  >= 6, title="⭐ BUY STRONG 6+", message="⚡ SCALPER v9.0 | BUY FORT 6+/7 | {{ticker}} @ {{close}}")
+alertcondition(shortCondition and shortScore >= 6, title="⭐ SELL STRONG 6+",message="⚡ SCALPER v9.0 | SELL FORT 6+/7 | {{ticker}} @ {{close}}")
+
+View in Pine Editor・869 lines
+Use on chart
+4
+3
+1 985
+. Trading Philosophy: "Total Confluence"
+The strategy does not rely on a single indicator but on a confluence score (0 to 7). For a BUY or SELL signal to be generated, several conditions must align simultaneously:
+
+Trend Structure: Alignment of the EMAs (9, 21, 50, 200).
+
+Higher Timeframe (HTF) Trend: Analysis of the H1 timeframe to ensure trading in the direction of the major flow.
+
+Trend Strength: Use of the ADX indicator to avoid "flat" or ranging markets.
+
+Momentum: RSI (between 45-65 for buys) and MACD (positive and rising histogram).
+
+Price Action: Detection of specific candlestick patterns (Engulfing, Hammers, Shooting Stars).
+
+Volatility & Volume: Squeeze filter (Bollinger vs. Keltner) and volume exceeding its average.

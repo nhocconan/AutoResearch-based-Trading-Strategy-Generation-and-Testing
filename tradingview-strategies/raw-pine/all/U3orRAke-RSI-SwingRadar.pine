@@ -1,0 +1,112 @@
+//@version=6
+strategy("RSI SwingRadar", overlay = true, 
+     calc_on_order_fills = true,      // Recalculate on order fills to handle intra-bar fills
+     currency = currency.USDT,        // Use USDT as the account currency
+     initial_capital = 10000,         // Starting capital for backtest
+     default_qty_type = strategy.percent_of_equity,  
+     default_qty_value = 100,         // Risk 100% of equity per trade
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value = 0.01)         // Commission per contract
+
+
+
+// ── Inputs ─────────────────────────────────────────────────────────────────────
+
+rr = input.float(4, 'Risk:Reward')                      // Reward:risk ratio
+atrMulti = input.float(0.5, 'Atr Multiplier', tooltip = 'Stop Loss is calculated based on ATR value so the larger you set your ATR Multiplier, the larger your stop is going to be.')  
+rsiOversold = input.int(35, 'RSI Oversold')              // Threshold for oversold
+rsiOverbought = input.int(65, 'RSI Overbought')          // Threshold for overbought
+
+
+
+// ── Indicator Calculations ────────────────────────────────────────────────────
+
+rsi = ta.rsi(close, 14)        // 14-period RSI
+rsiMA = ta.sma(rsi, 14)        // 14-period simple MA of RSI
+atr = ta.atr(14)               // 14-period Average True Range
+
+
+
+// ── Entry Conditions ──────────────────────────────────────────────────────────
+
+buyCondition = ta.crossover(rsi, rsiMA) and rsi[1] < rsiOversold  
+// Trigger long when RSI crosses above its MA AND previous RSI was below oversold
+
+
+
+// ── Trade Variables ───────────────────────────────────────────────────────────
+
+var float TradeStop   = na      // Will hold dynamic stop-loss price
+var float TradeTarget = na      // Will hold dynamic take-profit price
+
+
+
+// ── Entry Logic ──────────────────────────────────────────────────────────────
+
+if buyCondition and barstate.isconfirmed and strategy.position_size == 0
+    // Calculate stop: ATR distance below the low
+    TradeStop := low - atr * atrMulti
+    // Distance from entry to stop
+    tradeStopSize = close - TradeStop
+    // Calculate target: entry plus R:R multiple of stop distance
+    TradeTarget := close + tradeStopSize * rr
+    // Enter long trade
+    strategy.entry('Long', strategy.long)
+
+
+
+// ── Exit Logic ────────────────────────────────────────────────────────────────
+
+strategy.exit('Exit', from_entry = 'Long', stop = TradeStop, limit = TradeTarget)
+// Exits the 'Long' trade on either the stop-loss or take-profit price
+
+
+
+// ── Visuals ───────────────────────────────────────────────────────────────────
+
+fill(plot(strategy.position_size != 0 ? TradeStop : na, 'Stop Loss', color=color.red, style = plot.style_linebr), 
+     plot(strategy.position_size != 0 ? strategy.position_avg_price : na, 'Entry Price', color=color.white, style = plot.style_linebr), 
+     color.new(color.red, 85)
+     )
+
+fill(plot(strategy.position_size != 0 ? strategy.position_avg_price : na, 'Entry Price', color=color.white, style = plot.style_linebr),
+     plot(strategy.position_size != 0 ? TradeTarget : na, 'Take Profit', color=color.green, style=plot.style_linebr),
+     color.new(color.green, 85))
+
+View in Pine Editor・77 lines
+Use on chart
+7
+1
+2 197
+🧠 Strategy Overview
+
+This long-only strategy combines RSI/MA crossovers with ATR-based risk management, designed for cleaner entries during potential bounce phases — especially tuned for assets like XMR/USDT.
+
+🔍 Core Logic:
+
+- RSI Crossover: Entry occurs when the 14-period RSI crosses above its 14-period SMA, signaling a potential shift in momentum.
+- Oversold Filter: The RSI must have been below a user-defined oversold threshold (default: 35) on the previous candle, filtering for bounce setups after a pullback.
+- ATR-Based Stop/Target: Stop-loss is placed below the low by a user-adjustable ATR multiplier (default: 0.5×). Take-profit is calculated with a Risk:Reward multiplier (default: 4×).
+
+These elements work in tandem — RSI crossovers give momentum confirmation, oversold filtering adds context, and ATR-based exits adapt to volatility, creating a compact yet responsive strategy.
+
+📉 Visuals:
+
+- Dynamic Bands: The chart displays the active stop-loss, entry price, and take-profit as colored bands for easy visual tracking.
+- Clean Overlay: Designed with simplicity — only confirmed setups are shown, keeping noise low.
+
+✅ Suggested Use:
+
+- Works best on XMR/USDT or similarly trending assets.
+- Best suited for pullback entries during broader uptrends.
+- Adjustable for different volatility conditions and asset behaviors.
+
+⚠️ Disclaimer
+- This strategy is for educational and research purposes only.
+- It does not guarantee profitability in any market.
+- Always backtest, forward-test, and understand your own risk tolerance before using any
+strategy in a live environment.
+- Past performance is not indicative of future results.
+- This script is not financial advice.
+
+

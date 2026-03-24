@@ -1,0 +1,262 @@
+//@version=5
+strategy(title='Dual Chain Strategy', shorttitle='DualChain', overlay=true, initial_capital=1000, default_qty_type=strategy.cash, default_qty_value=1000)
+
+// User inputs for enabling/disabling chains
+enableChain1 = input.bool(true, title='Enable Chain 1')
+enableChain2 = input.bool(true, title='Enable Chain 2')
+
+// User inputs for the first chain
+len1 = input.int(10, minval=1, title='Length Chain 1 EMA', group="Chain 1")
+src1 = input(close, title='Source Chain 1', group="Chain 1")
+tf1_entry = input.timeframe("W", title='Chain 1 Entry Timeframe', group="Chain 1")
+tf1_exit = input.timeframe("D", title='Chain 1 Exit Timeframe', group="Chain 1")
+
+// Weekly timeframe EMA for Chain 1
+entryEMA1 = request.security(syminfo.tickerid, tf1_entry, ta.ema(src1, len1))
+
+// Daily timeframe EMA for Chain 1
+exitEMA1 = request.security(syminfo.tickerid, tf1_exit, ta.ema(src1, len1))
+
+// User inputs for the second chain
+len2 = input.int(9, minval=1, title='Length Chain 2 EMA', group="Chain 2")
+src2 = input(close, title='Source Chain 2', group="Chain 2")
+tf2_entry = input.timeframe("720", title='Chain 2 Entry Timeframe (12H)', group="Chain 2")  // 12 hours
+tf2_exit = input.timeframe("540", title='Chain 2 Exit Timeframe (9H)', group="Chain 2")    // 9 hours
+
+// Entry timeframe EMA for Chain 2
+entryEMA2 = request.security(syminfo.tickerid, tf2_entry, ta.ema(src2, len2))
+
+// Exit timeframe EMA for Chain 2
+exitEMA2 = request.security(syminfo.tickerid, tf2_exit, ta.ema(src2, len2))
+
+// Plotting Chain 1 EMAs
+plot(enableChain1 ? entryEMA1 : na, title='Chain 1 Entry EMA', color=color.new(color.blue, 0))
+plot(enableChain1 ? exitEMA1 : na, title='Chain 1 Exit EMA', color=color.new(color.yellow, 0))
+
+// Plotting Chain 2 EMAs
+plot(enableChain2 ? entryEMA2 : na, title='Chain 2 Entry EMA', color=color.new(color.green, 0))
+plot(enableChain2 ? exitEMA2 : na, title='Chain 2 Exit EMA', color=color.new(color.red, 0))
+
+// Backtesting period
+startDate = input.time(timestamp('2015-07-27'), title="StartDate")
+finishDate = input.time(timestamp('2026-01-01'), title="FinishDate")
+time_cond = time >= startDate and time <= finishDate
+
+// Entry Condition (Chain 1)
+bullishChain1 = enableChain1 and ta.crossover(src1, entryEMA1)
+bearishChain1 = enableChain1 and ta.crossunder(src1, entryEMA1)
+
+// Exit Condition (Chain 1)
+exitLongChain1 = enableChain1 and ta.crossunder(src1, exitEMA1)
+exitShortChain1 = enableChain1 and ta.crossover(src1, exitEMA1)
+
+// Entry Condition (Chain 2)
+bullishChain2 = enableChain2 and ta.crossover(src2, entryEMA2)
+bearishChain2 = enableChain2 and ta.crossunder(src2, entryEMA2)
+
+// Exit Condition (Chain 2)
+exitLongChain2 = enableChain2 and ta.crossunder(src2, exitEMA2)
+exitShortChain2 = enableChain2 and ta.crossover(src2, exitEMA2)
+
+// Debugging: Plot entry signals for Chain 1
+plotshape(bullishChain1, color=color.new(color.green, 0), style=shape.labelup, text='BUY C1', location=location.belowbar)
+plotshape(bearishChain1, color=color.new(color.red, 0), style=shape.labeldown, text='SELL C1', location=location.abovebar)
+
+// Debugging: Plot entry signals for Chain 2
+plotshape(bullishChain2, color=color.new(color.green, 0), style=shape.labelup, text='BUY C2', location=location.belowbar)
+plotshape(bearishChain2, color=color.new(color.red, 0), style=shape.labeldown, text='SELL C2', location=location.abovebar)
+
+// Trade Execution for Chain 1
+if bullishChain1 and time_cond
+    strategy.entry('BUY_Chain_1', strategy.long)
+
+if bearishChain1 and time_cond
+    strategy.entry('SELL_Chain_1', strategy.short)
+
+// Exit trades based on daily conditions for Chain 1
+if exitLongChain1 and strategy.opentrades > 0
+    strategy.close(id='BUY_Chain_1', when=exitLongChain1)
+
+if exitShortChain1 and strategy.opentrades > 0
+    strategy.close(id='SELL_Chain_1', when=exitShortChain1)
+
+// Trade Execution for Chain 2
+if bullishChain2 and time_cond
+    strategy.entry('BUY_Chain_2', strategy.long)
+
+if bearishChain2 and time_cond
+    strategy.entry('SELL_Chain_2', strategy.short)
+
+// Exit trades based on daily conditions for Chain 2
+if exitLongChain2 and strategy.opentrades > 0
+    strategy.close(id='BUY_Chain_2', when=exitLongChain2)
+
+if exitShortChain2 and strategy.opentrades > 0
+    strategy.close(id='SELL_Chain_2', when=exitShortChain2)
+
+// Close all positions outside the backtesting period
+if not time_cond
+    strategy.close_all()
+
+View in Pine Editor・99 lines
+Use on chart
+1
+2
+5
+7
+2 637
+Dual Chain Strategy - Technical Overview
+
+How It Works:
+
+The Dual Chain Strategy is a unique approach to trading that utilizes Exponential Moving Averages (EMAs) across different timeframes, creating two distinct "chains" of trading signals. These chains can work independently or together, capturing both long-term trends and short-term price movements.
+
+Chain 1 (Longer-Term Focus):
+
+Entry Signal: The entry signal for Chain 1 is generated when the closing price crosses above the EMA calculated on a weekly timeframe. This suggests the start of a bullish trend and prompts a long position.
+
+bullishChain1 = enableChain1 and ta.crossover(src1, entryEMA1)
+
+Exit Signal: The exit signal is triggered when the closing price crosses below the EMA on a daily timeframe, indicating a potential bearish reversal.
+
+exitLongChain1 = enableChain1 and ta.crossunder(src1, exitEMA1)
+
+Parameters: Chain 1's EMA length is set to 10 periods by default, with the flexibility for user adjustment to match various trading scenarios.
+
+Chain 2 (Shorter-Term Focus):
+
+Entry Signal: Chain 2 generates an entry signal when the closing price crosses above the EMA on a 12-hour timeframe. This setup is designed to capture quicker, shorter-term movements.
+
+bullishChain2 = enableChain2 and ta.crossover(src2, entryEMA2)
+
+Exit Signal: The exit signal occurs when the closing price falls below the EMA on a 9-hour timeframe, indicating the end of the shorter-term trend.
+
+exitLongChain2 = enableChain2 and ta.crossunder(src2, exitEMA2)
+
+Parameters: Chain 2's EMA length is set to 9 periods by default, and can be customized to better align with specific market conditions or trading strategies.
+
+Key Features:
+
+Dual EMA Chains: The strategy's originality shines through its dual-chain configuration, allowing traders to monitor and react to both long-term and short-term market trends. This approach is particularly powerful as it combines the strengths of trend-following with the agility of momentum trading.
+
+Timeframe Flexibility: Users can modify the timeframes for both chains, ensuring the strategy can be tailored to different market conditions and individual trading styles. This flexibility makes it versatile for various assets and trading environments.
+
+Independent Trade Logic: Each chain operates independently, with its own set of entry and exit rules. This allows for simultaneous or separate execution of trades based on the signals from either or both chains, providing a robust trading system that can handle different market phases.
+
+Backtesting Period: The strategy includes a configurable backtesting period, enabling thorough performance assessment over a historical range. This feature is crucial for understanding how the strategy would have performed under different market conditions.
+
+time_cond = time >= startDate and time <= finishDate
+
+What It Does:
+
+The Dual Chain Strategy offers traders a distinctive trading tool that merges two separate EMA-based systems into one cohesive framework. By integrating both long-term and short-term perspectives, the strategy enhances the ability to adapt to changing market conditions. The originality of this script lies in its innovative dual-chain design, providing traders with a unique edge by allowing them to capitalize on both significant trends and smaller, faster price movements.
+
+Whether you aim to capture extended market trends or take advantage of more immediate price action, the Dual Chain Strategy provides a comprehensive solution with a high degree of customization and strategic depth. Its flexibility and originality make it a valuable tool for traders seeking to refine their approach to market analysis and execution.
+
+How to Use the Dual Chain Strategy
+
+Step 1: Access the Strategy
+
+Add the Script: Start by adding the Dual Chain Strategy to your TradingView chart. You can do this by searching for the script by name or using the link provided.
+
+Select the Asset: Apply the strategy to your preferred trading pair or asset, such as #BTCUSD, to see how it performs.
+
+Step 2: Configure the Settings
+
+Enable/Disable Chains:
+
+The strategy is designed with two independent chains. You can choose to enable or disable each chain depending on your trading style and the market conditions.
+
+
+enableChain1 = input.bool(true, title='Enable Chain 1')
+enableChain2 = input.bool(true, title='Enable Chain 2')
+
+
+By default, both chains are enabled. If you prefer to focus only on longer-term trends, you might disable Chain 2, or vice versa if you prefer shorter-term trades.
+
+Set EMA Lengths:
+
+Adjust the EMA lengths for each chain to match your trading preferences.
+
+Chain 1: The default EMA length is 10 periods. This chain uses a weekly timeframe for entry signals and a daily timeframe for exits.
+
+
+len1 = input.int(10, minval=1, title='Length Chain 1 EMA', group="Chain 1")
+
+Chain 2: The default EMA length is 9 periods. This chain uses a 12-hour timeframe for entries and a 9-hour timeframe for exits.
+
+
+len2 = input.int(9, minval=1, title='Length Chain 2 EMA', group="Chain 2")
+
+Customize Timeframes:
+
+You can customize the timeframes used for entry and exit signals for both chains.
+
+Chain 1:
+Entry Timeframe: Weekly
+Exit Timeframe: Daily
+
+tf1_entry = input.timeframe("W", title='Chain 1 Entry Timeframe', group="Chain 1")
+tf1_exit = input.timeframe("D", title='Chain 1 Exit Timeframe', group="Chain 1")
+
+Chain 2:
+Entry Timeframe: 12 Hours
+Exit Timeframe: 9 Hours
+
+tf2_entry = input.timeframe("720", title='Chain 2 Entry Timeframe (12H)', group="Chain 2")
+tf2_exit = input.timeframe("540", title='Chain 2 Exit Timeframe (9H)', group="Chain 2")
+
+Set the Backtesting Period:
+
+Define the period over which you want to backtest the strategy. This allows you to see how the strategy would have performed historically.
+
+startDate = input.time(timestamp('2015-07-27'), title="StartDate")
+finishDate = input.time(timestamp('2026-01-01'), title="FinishDate")
+
+Step 3: Analyze the Signals
+
+Understand the Entry and Exit Signals:
+
+Buy Signals: When the price crosses above the entry EMA, the strategy generates a buy signal.
+
+bullishChain1 = enableChain1 and ta.crossover(src1, entryEMA1)
+
+Sell Signals: When the price crosses below the exit EMA, the strategy generates a sell signal.
+
+bearishChain2 = enableChain2 and ta.crossunder(src2, entryEMA2)
+
+Review the Visual Indicators:
+
+The strategy plots buy and sell signals on the chart with labels for easy identification:
+
+BUY C1/C2 for buy signals from Chain 1 and Chain 2.
+SELL C1/C2 for sell signals from Chain 1 and Chain 2.
+
+This visual aid helps you quickly understand when and why trades are being executed.
+
+Step 4: Optimize the Strategy
+
+Backtest Results:
+
+Review the strategy’s performance over the backtesting period. Look at key metrics like net profit, drawdown, and trade statistics to evaluate its effectiveness.
+Adjust the EMA lengths, timeframes, and other settings to see how changes affect the strategy’s performance.
+
+Customize for Live Trading:
+
+Once satisfied with the backtest results, you can apply the strategy settings to live trading. Remember to continuously monitor and adjust as needed based on market conditions.
+
+Step 5: Implement Risk Management
+
+Use Realistic Position Sizing:
+
+Keep your risk exposure per trade within a comfortable range, typically between 1-2% of your trading capital.
+
+Set Alerts:
+
+Set up alerts for buy and sell signals, so you don’t miss trading opportunities.
+Paper Trade First:
+
+Consider running the strategy in a paper trading account to understand its behavior in real market conditions before committing real capital.
+
+This dual-layered approach offers a distinct advantage: it enables the strategy to adapt to varying market conditions by capturing both broad trends and immediate price action without one chain's activity impacting the other's decision-making process. The independence of these chains in executing transactions adds a level of sophistication and flexibility that is rarely seen in more conventional trading systems, making the Dual Chain Strategy not just unique, but a powerful tool for traders seeking to navigate complex market environments.
+

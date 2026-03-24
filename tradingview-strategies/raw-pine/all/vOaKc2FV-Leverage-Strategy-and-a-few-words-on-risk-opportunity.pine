@@ -1,0 +1,10 @@
+//@version=4
+extend_long_terms=##input(defval=false,type='INPUT_BOOL',##id='in_12')
+##root(root_metainfo,rm_0,extend_long_terms)
+##root(root_metainfo,rm_1,extend_long_terms)
+##root(root_metainfo,rm_2,extend_long_terms)
+##root(root_metainfo,rm_3,extend_long_terms)
+##root(root_metainfo,rm_4,extend_long_terms)
+##root(root_metainfo,rm_5,extend_long_terms)
+##root(root_metainfo,rm_6,extend_long_terms)
+##root(root_metainfo,rm_7,extend_long_terms)

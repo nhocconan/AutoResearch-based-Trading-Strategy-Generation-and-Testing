@@ -1,0 +1,92 @@
+//@version=5
+strategy("RSI + Stochastic + WMA Strategy", overlay=true)
+
+// === INPUTS === //
+rsiLength = input.int(14, "RSI Length")
+stochK = input.int(14, "Stochastic %K")
+stochD = input.int(3, "Stochastic %D")
+wmaLength = input.int(21, "WMA Length")
+
+// === INDICATORS === //
+rsi = ta.rsi(close, rsiLength)
+wma = ta.wma(close, wmaLength)
+
+k = ta.stoch(close, high, low, stochK)
+d = ta.sma(k, stochD)
+
+// === CONDITIONS === //
+rsiOverbought = rsi > 70
+rsiOversold = rsi < 30
+stochCrossUp = ta.crossover(k, d)
+stochCrossDown = ta.crossunder(k, d)
+priceAboveWMA = close > wma
+priceBelowWMA = close < wma
+
+longCondition = rsiOversold and stochCrossUp and priceAboveWMA
+shortCondition = rsiOverbought and stochCrossDown and priceBelowWMA
+
+// === STRATEGY ENTRIES === //
+if (longCondition)
+    strategy.entry("LONG", strategy.long)
+
+if (shortCondition)
+    strategy.entry("SHORT", strategy.short)
+
+// === PLOT ELEMENTS FOR VISUAL AID === //
+plot(wma, title="WMA", color=color.orange, linewidth=2)
+hline(70, "Overbought", color=color.red)
+hline(30, "Oversold", color=color.green)
+
+View in Pine Editor・38 lines
+Use on chart
+2
+0
+1 323
+This script is designed for TradingView and serves as a trading strategy (not just a visual indicator). It's intended for backtesting, strategy optimization, or live trading signal generation using a combination of popular technical indicators.
+
+📊 Indicators Used in the Strategy:
+Indicator Description
+RSI (Relative Strength Index) Measures momentum; identifies overbought (>70) or oversold (<30) conditions.
+Stochastic Oscillator (%K & %D) Detects momentum reversal points via crossovers. Useful for timing entries.
+WMA (Weighted Moving Average) Identifies the trend direction (used as a trend filter).
+📈 Trading Logic / Strategy Rules:
+📌 Long Entry Condition (Buy Signal):
+All 3 conditions must be true:
+
+RSI is Oversold → RSI < 30
+Stochastic Crossover Upward → %K crosses above %D
+Price is above WMA → Confirms uptrend direction
+👉 Interpretation: Market was oversold, momentum is turning up, and price confirms uptrend — bullish entry.
+
+📌 Short Entry Condition (Sell Signal):
+All 3 conditions must be true:
+
+RSI is Overbought → RSI > 70
+Stochastic Crossover Downward → %K crosses below %D
+Price is below WMA → Confirms downtrend direction
+👉 Interpretation: Market is overbought, momentum is turning down, and price confirms downtrend — bearish entry.
+
+🔄 Strategy Execution (Backtesting Logic):
+The script uses:
+
+pinescript
+Copy
+Edit
+strategy.entry("LONG", strategy.long)
+strategy.entry("SHORT", strategy.short)
+These are Pine Script functions to place buy and sell orders automatically when the above conditions are met. This allows you to:
+
+Backtest the strategy
+Measure win/loss ratio, drawdown, and profitability
+Optimize indicator settings using TradingView Strategy Tester
+📊 Visual Aids (Charts):
+Plots WMA Line: Orange line for trend direction
+Overbought/Oversold Zones: Horizontal lines at 70 (red) and 30 (green) for RSI visualization
+⚡ Strategy Type Summary:
+Category Setting
+Strategy Type Momentum Reversal + Trend Filter
+Timeframe Flexible (Works best on 1H, 4H, Daily)
+Trading Style Swing/Intraday
+Risk Profile Medium to High (due to momentum triggers)
+Uses Leverage Possible (adjust risk accordingly)
+

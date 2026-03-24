@@ -1,0 +1,172 @@
+//@version=5
+strategy("Script_Algo - Fibo Correction Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// Author: Script_Algo
+// License: MIT
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+
+// === Parameters ===
+atr_length          = input.int(14, "ATR Length")
+atr_multiplier      = input.float(5, "ATR Multiplier")
+fib_level           = input.float(0.618, "Fibonacci Level", step=0.01)
+trend_filter_length = input.int(20, "Trend Filter Length")
+min_body_size       = input.float(0.0005, "Min Body Size")
+
+// === Indicator calculations ===
+atr          = ta.atr(atr_length)
+ema_fast     = ta.ema(close, 9)
+ema_slow     = ta.ema(close, 21)
+trend_filter = ta.sma(close, trend_filter_length)
+
+// === Candle pattern detection ===
+green_candle = close > open
+red_candle   = close < open
+body_size    = math.abs(close - open)
+upper_shadow = high - math.max(open, close)
+lower_shadow = math.min(open, close) - low
+
+// Condition for a valid green candle (no large upper shadow)
+valid_green_candle = green_candle and 
+                     body_size >= min_body_size and 
+                     upper_shadow <= body_size * 0.3
+
+// Condition for a valid red candle (no large lower shadow)
+valid_red_candle = red_candle and 
+                   body_size >= min_body_size and 
+                   lower_shadow <= body_size * 0.3
+
+// === Fibonacci levels calculation ===
+prev_high         = high[1]
+prev_low          = low[1]
+fib_retrace_long  = prev_high - (prev_high - prev_low) * fib_level
+fib_retrace_short = prev_low + (prev_high - prev_low) * fib_level
+
+// === Entry conditions ===
+long_condition = valid_green_candle[1] and 
+                 low <= fib_retrace_long and 
+                 close > fib_retrace_long and
+                 close > trend_filter and 
+                 strategy.position_size == 0
+
+short_condition = valid_red_candle[1] and 
+                  high >= fib_retrace_short and 
+                  close < fib_retrace_short and
+                  close < trend_filter and 
+                  strategy.position_size == 0
+
+// === Stop loss and take profit ===
+stop_loss   = atr * atr_multiplier
+take_profit = atr * atr_multiplier
+
+// === Orders execution ===
+if long_condition
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=close - stop_loss, limit=close + take_profit)
+
+if short_condition
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=close + stop_loss, limit=close - take_profit)
+
+// === Visualization ===
+plot(fib_retrace_long, color=color.green, style=plot.style_circles, linewidth=2)
+plot(fib_retrace_short, color=color.red, style=plot.style_circles, linewidth=2)
+plot(trend_filter, color=color.blue, title="Trend Filter")
+
+View in Pine Editor・79 lines
+Use on chart
+1
+5
+3
+2
+2 782
+🔹 Core Concept
+The strategy is built on combining Fibonacci retracement levels, candlestick pattern confirmation, and trend filtering for trade selection. It performs well on the 1-hour timeframe across many cryptocurrency pairs. Particularly on LINKUSDT over the past year and a half, despite the not very optimal 1:1 risk/reward ratio.
+
+The logic is simple: after a strong impulse move, the price often retraces to key Fibonacci levels (specifically, the 61.8% level). If a confirming candlestick (pattern) appears at this moment, the strategy looks for an entry in the direction of the main trend.
+
+🔹 Indicators Used in the Strategy
+ATR (Average True Range) — Used to calculate the stop-loss and take-profit levels.
+
+EMA (9 and 21) — Additional moving averages for assessing the direction of movement (not directly used in entry conditions, but the logic can be expanded to include them).
+
+SMA (Trend Filter, 20 by default) — The trend direction filter. Trades are only opened in its direction.
+
+Fibonacci Levels — The 61.8% retracement level is calculated based on the high and low of the previous candle.
+
+🔹 Entry Conditions
+🟢 Long (Buy):
+
+Previous Candle:
+
+Must be green (close higher than open).
+
+Must have a body not smaller than a specified minimum.
+
+The upper wick must not exceed 30% of the body size.
+
+→ This filters out "weak" or "indecisive" candles.
+
+Current Candle:
+
+Price touches or breaches the Fibonacci 61.8% retracement level from the previous range.
+
+Closes above this level.
+
+Closes above the Trend Filter (SMA) line.
+
+A position is opened only if there are no other open trades at the moment.
+
+🔴 Short (Sell):
+
+Previous Candle:
+
+Must be red (close lower than open).
+
+Must have a body not smaller than a specified minimum.
+
+The lower wick must not exceed 30% of the body size.
+
+Current Candle:
+
+Price touches or breaches the Fibonacci 61.8% retracement level from the previous range.
+
+Closes below this level.
+
+Closes below the Trend Filter (SMA) line.
+
+A trade is opened only if there are no other open positions.
+
+🔹 Risk Management
+Stop-Loss = ATR × multiplier (default is 5).
+
+Take-Profit = ATR × the same multiplier.
+
+Thus, the default risk/reward ratio is 1:1, but it can be easily adjusted by changing the coefficient. Although, strangely enough, this ratio has shown the best results on some assets on the 1-hour timeframe.
+
+🔹 Chart Visualization
+Fibonacci level for Long — Green line with circles.
+
+Fibonacci level for Short — Red line with circles.
+
+Trend Filter line (SMA) — Blue.
+
+🔹 Strengths of the Strategy
+✅ Utilizes a proven market pattern — retracement to the 61.8% level.
+✅ Further filters entries using trend and candlestick patterns.
+✅ Simple, transparent logic that is easy to expand (e.g., adding other Fib levels, an EMA filter, etc.).
+
+🔹 Limitations
+⚠️ Performs better in trending markets; can generate false signals during ranging (sideways) conditions.
+⚠️ The fixed 1:1 risk/reward ratio is not always optimal and could be refined.
+⚠️ Performance depends on the selected timeframe and ATR parameters.
+
+📌 Summary:
+The strategy seeks corrective entries in the direction of the trend, confirmed by candlestick patterns. It is versatile and can be applied to forex pairs, cryptocurrencies, and stocks.
+
+⚠️ Not financial advice. Pay close attention to risk management to avoid blowing your account. The strategy is not repainting — I have personally verified it through real testing — but it may not necessarily replicate the same results in the future, as the market is constantly changing. Test it, profit, and good luck to everyone!

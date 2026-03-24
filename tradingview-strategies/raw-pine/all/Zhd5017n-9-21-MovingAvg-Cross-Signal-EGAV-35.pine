@@ -1,0 +1,29 @@
+//@version=2
+strategy("MovingAvg Cross", overlay=true)
+length = input(9)
+lenght = input(21)
+confirmBars = input(5)
+price = open
+
+ma = ema(price, length)
+bcond = price > ma
+bcount = bcond ? nz(bcount[1]) + 1 : 0
+
+if (bcount == confirmBars)
+    strategy.entry("MACrossLE", strategy.long, comment="Buy")
+
+scond = price < ma
+scount = scond ? nz(scount[1]) + 1 : 0
+
+if (scount == confirmBars)
+    strategy.entry("MACrossSE", strategy.short, comment="Short")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・21 lines
+Use on chart
+1
+6
+4
+6 144
+Simple buy/sell signal with 9 & 21 ema cross over/under, works better in Daily Charts

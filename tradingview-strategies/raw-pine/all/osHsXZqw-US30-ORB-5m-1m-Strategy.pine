@@ -1,0 +1,70 @@
+//@version=5
+strategy("US30 ORB 5m / 1m Strategy", overlay=true, margin_long=100, margin_short=100, process_orders_on_close=true)
+
+// ─────────────────────────────────────────────
+// Ticker restriction (only run on US30)
+// ─────────────────────────────────────────────
+if syminfo.ticker != "US30"
+    runtime.error("This strategy is only allowed on US30")
+
+// ─────────────────────────────────────────────
+// User Inputs
+// ─────────────────────────────────────────────
+orbSession     = input.session("0930-0935", "ORB Session (first 5m candle)") // Example: NYSE open
+takeProfitPts  = input.int(10, "Take Profit (points)", minval=1)
+stopLossBuffer = input.int(0, "Stop Loss Buffer (points)", minval=0)
+
+// ─────────────────────────────────────────────
+// Detect 5m ORB using security()
+// ─────────────────────────────────────────────
+var float orbHigh = na
+var float orbLow  = na
+var bool  orbSet  = false
+
+// Request 5m OHLC
+f_high = request.security(syminfo.tickerid, "5", high)
+f_low  = request.security(syminfo.tickerid, "5", low)
+
+inSession = not na(time(timeframe.period, orbSession))
+
+if inSession and not orbSet
+    orbHigh := f_high
+    orbLow  := f_low
+    orbSet  := true
+
+// Reset each new day
+if ta.change(time("1D"))
+    orbHigh := na
+    orbLow  := na
+    orbSet  := false
+
+// ─────────────────────────────────────────────
+// Entry & Exit Logic (on 1m chart)
+// ─────────────────────────────────────────────
+longCondition  = orbSet and ta.crossover(close, orbHigh)
+shortCondition = orbSet and ta.crossunder(close, orbLow)
+
+if longCondition
+    longSL = orbLow - stopLossBuffer
+    longTP = close + takeProfitPts
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+if shortCondition
+    shortSL = orbHigh + stopLossBuffer
+    shortTP = close - takeProfitPts
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// ─────────────────────────────────────────────
+// Plot ORB levels
+// ─────────────────────────────────────────────
+plot(orbHigh, "ORB High", color=color.green, linewidth=2, style=plot.style_linebr)
+plot(orbLow,  "ORB Low",  color=color.red, linewidth=2, style=plot.style_linebr)
+
+View in Pine Editor・66 lines
+Use on chart
+2
+6
+1 133
+This is Open range breakout strategy, its tested with Us30 only. You cant optimize or try. it seems profitable

@@ -1,0 +1,78 @@
+//@version=6
+strategy("4-EMA Trend & Pullback Strategy [BTCUSDT]", shorttitle="4-EMA DayTrade", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_value=0.04)
+
+// =========================================================================
+// 1. Inputs (參數設置)
+// =========================================================================
+len7   = input.int(7,   title="EMA 7 (Fast Trigger)", group="EMA Settings")
+len21  = input.int(21,  title="EMA 21 (Slow Trigger)", group="EMA Settings")
+len50  = input.int(50,  title="EMA 50 (Trend & Dynamic Stop)", group="EMA Settings")
+len200 = input.int(200, title="EMA 200 (Macro Trend)", group="EMA Settings")
+
+// =========================================================================
+// 2. Calculations (計算 EMA)
+// =========================================================================
+ema7   = ta.ema(close, len7)
+ema21  = ta.ema(close, len21)
+ema50  = ta.ema(close, len50)
+ema200 = ta.ema(close, len200)
+
+// =========================================================================
+// 3. Visuals (圖表繪製)
+// =========================================================================
+plot(ema7,   color=color.new(color.blue, 0),   title="EMA 7",   linewidth=1)
+plot(ema21,  color=color.new(color.orange, 0), title="EMA 21",  linewidth=2)
+plot(ema50,  color=color.new(color.green, 0),  title="EMA 50",  linewidth=2)
+plot(ema200, color=color.new(color.red, 0),    title="EMA 200", linewidth=3)
+
+// =========================================================================
+// 4. Logic & Filters (交易邏輯與趨勢過濾)
+// =========================================================================
+// 宏觀趨勢判定：50 EMA 必須在 200 EMA 之上(多頭) 或 之下(空頭)
+bullish_macro = ema50 > ema200
+bearish_macro = ema50 < ema200
+
+// 進場信號：回調後的 7/21 EMA 交叉
+long_trigger  = ta.crossover(ema7, ema21)
+short_trigger = ta.crossunder(ema7, ema21)
+
+// 出場信號：
+// 1. 7/21 EMA 反向交叉 (動能衰退)
+// 2. 價格收盤跌破/突破 50 EMA (趨勢失效，嚴格止損)
+long_exit  = ta.crossunder(ema7, ema21) or close < ema50
+short_exit = ta.crossover(ema7, ema21)  or close > ema50
+
+// =========================================================================
+// 5. Strategy Execution & Alerts (策略執行與警報)
+// =========================================================================
+// 做多邏輯
+if bullish_macro and long_trigger
+    strategy.entry("Long", strategy.long, comment="Buy")
+    alert("🟢 [LONG ENTRY] BTCUSDT: 7 EMA crossed above 21 EMA. Trend is Bullish.", alert.freq_once_per_bar_close)
+
+if strategy.position_size > 0 and long_exit
+    strategy.close("Long", comment="Exit Long")
+    alert("🔴 [LONG EXIT] BTCUSDT: Momentum shifted or 50 EMA broken.", alert.freq_once_per_bar_close)
+
+// 做空邏輯
+if bearish_macro and short_trigger
+    strategy.entry("Short", strategy.short, comment="Sell")
+    alert("🔴 [SHORT ENTRY] BTCUSDT: 7 EMA crossed below 21 EMA. Trend is Bearish.", alert.freq_once_per_bar_close)
+
+if strategy.position_size < 0 and short_exit
+    strategy.close("Short", comment="Exit Short")
+    alert("🟢 [SHORT EXIT] BTCUSDT: Momentum shifted or 50 EMA broken.", alert.freq_once_per_bar_close)
+
+// =========================================================================
+// 6. Background Highlights (背景高亮輔助視覺)
+// =========================================================================
+perfect_bull = ema7 > ema21 and ema21 > ema50 and ema50 > ema200
+perfect_bear = ema7 < ema21 and ema21 < ema50 and ema50 < ema200
+bgcolor(perfect_bull ? color.new(color.green, 90) : perfect_bear ? color.new(color.red, 90) : na)
+
+View in Pine Editor・71 lines
+Use on chart
+1
+148
+4-EMA Trend & Pullback Strategy
+Base on EMA Cross 7 21 50 200 close

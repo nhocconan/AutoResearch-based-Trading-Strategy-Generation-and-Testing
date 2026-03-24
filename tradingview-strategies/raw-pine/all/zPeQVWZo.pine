@@ -1,0 +1,597 @@
+//@version=5
+strategy("TJR asia session sweep", "Us30 CsFenix", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// Input settings
+show_asian = input.bool(true, "Show Asian Session", group="Visual Settings")
+show_london = input.bool(true, "Show London Session", group="Visual Settings")
+show_swing_points = input.bool(true, "Show Asian Swing Points", group="Visual Settings")
+show_market_structure = input.bool(true, "Show Market Structure", group="Visual Settings")
+show_bos = input.bool(true, "Show Break of Structure", group="Visual Settings")
+
+// Session Time Settings
+asian_start_hour_input = input.int(22, "Asian Session Start Hour", minval=0, maxval=23, group="Session Times")
+asian_end_hour_input = input.int(3, "Asian Session End Hour", minval=0, maxval=23, group="Session Times")
+london_start_hour_input = input.int(3, "London Session Start Hour", minval=0, maxval=23, group="Session Times")
+london_end_hour_input = input.int(8, "London Session End Hour", minval=0, maxval=23, group="Session Times")
+session_timezone = input.string("America/New_York", "Session Timezone", options=["America/New_York", "UTC-4", "UTC", "GMT"], group="Session Times")
+
+// Risk Management Settings
+use_atr_sl = input.bool(false, "Use ATR Multiplier for Stop Loss", group="Risk Management")
+atr_length = input.int(14, "ATR Length", minval=1, maxval=50, group="Risk Management")
+atr_multiplier = input.float(2.0, "ATR Multiplier for Stop Loss", minval=0.5, maxval=10.0, group="Risk Management")
+force_london_close = input.bool(true, "Force Close at London Session End", group="Risk Management")
+cutoff_minutes = input.int(60, "Minutes Before Session End to Stop New Trades", minval=0, maxval=300, group="Risk Management")
+
+// Position Sizing Settings
+position_sizing_method = input.string("USD Risk", "Position Sizing Method", options=["USD Risk", "Fixed Contracts"], group="Position Sizing")
+usd_risk_per_trade = input.float(100.0, "USD Risk Per Trade", minval=1.0, maxval=10000.0, group="Position Sizing")
+fixed_contracts = input.float(1.0, "Fixed Number of Contracts", minval=0.01, maxval=1000.0, step=0.01, group="Position Sizing")
+// Color settings
+asian_color = input.color(color.red, "Asian Session Color")
+london_color = input.color(color.blue, "London Session Color")
+swing_high_color = input.color(color.orange, "Swing High Color")
+swing_low_color = input.color(color.lime, "Swing Low Color")
+bullish_structure_color = input.color(color.green, "Bullish Structure Color")
+bearish_structure_color = input.color(color.red, "Bearish Structure Color")
+bos_color = input.color(color.orange, "Break of Structure Color")
+
+// Line settings
+line_width = input.int(2, "Line Width", minval=1, maxval=5)
+
+// ATR calculation for stop loss
+atr = ta.atr(atr_length)
+
+// Position size calculation function
+calculate_position_size(entry_price, stop_loss_price) =>
+    var float position_size = na
+    if position_sizing_method == "Fixed Contracts"
+        position_size := fixed_contracts
+    else // USD Risk method
+        stop_distance = math.abs(entry_price - stop_loss_price)
+        if stop_distance > 0
+            // Calculate position size based on USD risk per trade
+            // For forex: position_size = risk_amount / (stop_distance * point_value)
+            // For most forex pairs, point value = 1 (since we're dealing with price differences directly)
+            position_size := usd_risk_per_trade / stop_distance
+        else
+            position_size := fixed_contracts // Fallback to fixed contracts if stop distance is 0
+    position_size
+
+// Session time definitions (using input variables)
+asian_start_hour = asian_start_hour_input
+asian_end_hour = asian_end_hour_input
+london_start_hour = london_start_hour_input
+london_end_hour = london_end_hour_input
+
+// Get current hour using selected timezone
+current_hour = hour(time, session_timezone)
+
+// Previous hour for transition detection
+prev_hour = hour(time[1], session_timezone)
+
+// Session transition detection
+asian_start = current_hour == asian_start_hour and prev_hour != asian_start_hour
+asian_end = current_hour == asian_end_hour and prev_hour != asian_end_hour
+london_start = current_hour == london_start_hour and prev_hour != london_start_hour  
+london_end = current_hour == london_end_hour and prev_hour != london_end_hour
+
+// Session activity detection
+asian_active = (current_hour >= asian_start_hour) or (current_hour < asian_end_hour)
+london_active = (current_hour >= london_start_hour) and (current_hour < london_end_hour)
+
+// Session boxes - keep previous sessions visible
+var box asian_session_box = na
+var box london_session_box = na
+
+// Create Asian session box
+if show_asian and asian_start
+    // Create new box at session start (previous box remains visible)
+    asian_session_box := box.new(bar_index, high, bar_index + 1, low, 
+                                 border_color=asian_color, bgcolor=color.new(asian_color, 90), 
+                                 border_width=2, border_style=line.style_solid)
+
+// Pre-calculate session highs and lows for consistency
+asian_session_length = asian_active and not na(asian_session_box) ? bar_index - box.get_left(asian_session_box) + 1 : 1
+current_asian_high = ta.highest(high, asian_session_length)
+current_asian_low = ta.lowest(low, asian_session_length)
+
+// Update Asian session box continuously during session
+if show_asian and asian_active and not na(asian_session_box)
+    box.set_right(asian_session_box, bar_index)
+    // Update box to contain session highs and lows
+    box.set_top(asian_session_box, current_asian_high)
+    box.set_bottom(asian_session_box, current_asian_low)
+
+// Create London session box
+if show_london and london_start
+    // Create new box at session start (previous box remains visible)
+    london_session_box := box.new(bar_index, high, bar_index + 1, low, 
+                                  border_color=london_color, bgcolor=color.new(london_color, 90), 
+                                  border_width=2, border_style=line.style_solid)
+
+// Pre-calculate London session highs and lows for consistency
+london_session_length = london_active and not na(london_session_box) ? bar_index - box.get_left(london_session_box) + 1 : 1
+current_london_high = ta.highest(high, london_session_length)
+current_london_low = ta.lowest(low, london_session_length)
+
+// Update London session box continuously during session
+if show_london and london_active and not na(london_session_box)
+    box.set_right(london_session_box, bar_index)
+    // Update box to contain session highs and lows
+    box.set_top(london_session_box, current_london_high)
+    box.set_bottom(london_session_box, current_london_low)
+
+
+
+// Asian Session Swing Points Detection
+var float asian_session_high = na
+var float asian_session_low = na
+var int asian_high_bar = na
+var int asian_low_bar = na
+
+// Asian Session Absolute High/Low for TP levels
+var float asian_absolute_high = na
+var float asian_absolute_low = na
+var line asian_high_line = na
+var line asian_low_line = na
+var label asian_high_label = na
+var label asian_low_label = na
+var bool high_broken = false
+var bool low_broken = false
+
+// London Session High/Low tracking for stop loss
+var float london_session_high = na
+var float london_session_low = na
+
+// Market structure tracking variables
+var string breakout_direction = na  // "bullish" or "bearish"
+var float last_hh_level = na  // Last Higher High level
+var float last_hl_level = na  // Last Higher Low level
+var float last_ll_level = na  // Last Lower Low level
+var float last_lh_level = na  // Last Lower High level
+var int structure_count = 0
+var string last_structure_type = na  // "HH", "HL", "LL", "LH"
+
+// Legacy variables for compatibility
+var float last_swing_high = na
+var float last_swing_low = na
+var int last_high_bar = na
+var int last_low_bar = na
+
+// Market structure state tracking
+var float pending_high = na
+var float pending_low = na
+var int pending_high_bar = na
+var int pending_low_bar = na
+var bool waiting_for_confirmation = false
+
+// Break of Structure tracking variables
+var float most_recent_hl = na
+var float most_recent_lh = na
+var int most_recent_hl_bar = na
+var int most_recent_lh_bar = na
+var bool bos_detected = false
+
+// Trading variables
+var bool trade_taken = false
+
+// Trade visualization boxes (based on Casper strategy approach)
+var box current_profit_box = na
+var box current_sl_box = na
+
+
+
+// Update swing points during Asian session
+if asian_active and show_swing_points
+    // Always track absolute high/low for both TP levels and breakout detection
+    if na(asian_absolute_high) or high > asian_absolute_high
+        asian_absolute_high := high
+    
+    if na(asian_absolute_low) or low < asian_absolute_low
+        asian_absolute_low := low
+    
+    // Use absolute high/low for breakout levels (simplified logic)
+    if na(asian_session_high) or high > asian_session_high
+        asian_session_high := high
+        asian_high_bar := bar_index
+    
+    if na(asian_session_low) or low < asian_session_low
+        asian_session_low := low
+        asian_low_bar := bar_index
+
+// Track London session high/low for stop loss levels
+if london_active
+    if na(london_session_high) or high > london_session_high
+        london_session_high := high
+    
+    if na(london_session_low) or low < london_session_low
+        london_session_low := low
+
+// Draw initial lines when Asian session ends
+if asian_end and show_swing_points
+    if not na(asian_session_high) and not na(asian_high_bar)
+        // Draw extending line for high
+        asian_high_line := line.new(asian_high_bar, asian_session_high, bar_index + 200, asian_session_high, 
+                                   color=swing_high_color, width=2, style=line.style_dashed, extend=extend.right)
+        asian_high_label := label.new(bar_index + 5, asian_session_high, "Asian High: " + str.tostring(asian_session_high, "#.####"), style=label.style_label_left, color=swing_high_color, textcolor=color.white, size=size.small)
+    
+    if not na(asian_session_low) and not na(asian_low_bar)
+        // Draw extending line for low
+        asian_low_line := line.new(asian_low_bar, asian_session_low, bar_index + 200, asian_session_low, 
+                                  color=swing_low_color, width=2, style=line.style_dashed, extend=extend.right)
+        asian_low_label := label.new(bar_index + 5, asian_session_low, "Asian Low: " + str.tostring(asian_session_low, "#.####"), style=label.style_label_left, color=swing_low_color, textcolor=color.white, size=size.small)
+    
+    // Reset break flags for new session
+    high_broken := false
+    low_broken := false
+
+// Check for breakouts during London session
+if london_active and show_swing_points and not na(asian_session_high) and not na(asian_session_low)
+    // Check if Asian high is broken
+    if not high_broken and not low_broken and high > asian_session_high
+        high_broken := true
+        // Update high line to end at break point
+        if not na(asian_high_line)
+            line.set_x2(asian_high_line, bar_index)
+            line.set_extend(asian_high_line, extend.none)
+        // Remove the low line (first break wins)
+        if not na(asian_low_line)
+            line.delete(asian_low_line)
+        if not na(asian_low_label)
+            label.delete(asian_low_label)
+        // Add break marker
+        label.new(bar_index, asian_session_high * 1.001, "HIGH BREAK!", 
+                  style=label.style_label_down, color=color.red, textcolor=color.white, size=size.normal)
+        // Set breakout direction and initialize structure tracking
+        breakout_direction := "bullish"
+        last_swing_high := asian_session_high
+        last_swing_low := asian_session_low
+        last_high_bar := bar_index
+        structure_count := 0
+    
+    // Check if Asian low is broken
+    if not low_broken and not high_broken and low < asian_session_low
+        low_broken := true
+        // Update low line to end at break point
+        if not na(asian_low_line)
+            line.set_x2(asian_low_line, bar_index)
+            line.set_extend(asian_low_line, extend.none)
+        // Remove the high line (first break wins)
+        if not na(asian_high_line)
+            line.delete(asian_high_line)
+        if not na(asian_high_label)
+            label.delete(asian_high_label)
+        // Add break marker
+        label.new(bar_index, asian_session_low * 0.999, "LOW BREAK!", 
+                  style=label.style_label_up, color=color.red, textcolor=color.white, size=size.normal)
+        // Set breakout direction and initialize structure tracking
+        breakout_direction := "bearish"
+        last_swing_high := asian_session_high
+        last_swing_low := asian_session_low
+        last_low_bar := bar_index
+        structure_count := 0
+
+// Stop extending lines when London session ends (if not already broken)
+if london_end and show_swing_points
+    if not high_broken and not na(asian_high_line)
+        line.set_x2(asian_high_line, bar_index)
+        line.set_extend(asian_high_line, extend.none)
+    
+    if not low_broken and not na(asian_low_line)
+        line.set_x2(asian_low_line, bar_index)
+        line.set_extend(asian_low_line, extend.none)
+
+// Force close all trades at London session end (if enabled)
+if london_end and force_london_close
+    if strategy.position_size != 0
+        // Extend boxes immediately before session close to prevent timing issues
+        if not na(current_profit_box)
+            // Ensure minimum 8 bars width or extend to current bar, whichever is longer
+            box_left = box.get_left(current_profit_box)
+            min_right = box_left + 8
+            final_right = math.max(min_right, bar_index)
+            box.set_right(current_profit_box, final_right)
+            current_profit_box := na  // Clear reference after extending
+        if not na(current_sl_box)
+            // Ensure minimum 8 bars width or extend to current bar, whichever is longer
+            box_left = box.get_left(current_sl_box)
+            min_right = box_left + 8
+            final_right = math.max(min_right, bar_index)
+            box.set_right(current_sl_box, final_right)
+            current_sl_box := na  // Clear reference after extending
+        
+        strategy.close_all(comment="London Close")
+        trade_taken := false  // Reset trade flag for next session
+
+// Market structure detection after breakout (only during London session and before first BoS)
+if show_market_structure and not na(breakout_direction) and london_active and not bos_detected
+    
+    // Bullish structure tracking (HH, HL alternating)
+    if breakout_direction == "bullish"
+        // Check for Higher High pattern: Bullish candle followed by bearish candle
+        pattern_high = math.max(high[1], high)
+        prev_hh = na(last_hh_level) ? last_swing_high : last_hh_level
+        
+        // HH Detection: Only if we expect HH next (no last structure or last was HL)
+        if (na(last_structure_type) or last_structure_type == "HL") and close[1] > open[1] and close < open and pattern_high > prev_hh and close[1] > prev_hh
+            // Check consolidation
+            is_too_close = not na(last_high_bar) and (bar_index - last_high_bar) <= 4
+            
+            should_create_hh = true
+            if is_too_close and structure_count > 0 and pattern_high <= last_hh_level
+                should_create_hh := false
+            
+            if should_create_hh
+                structure_count := structure_count + 1
+                label.new(bar_index - 1, high[1] + (high[1] * 0.0003), "HH" + str.tostring(structure_count), 
+                          style=label.style_none, color=color.new(color.white, 100), 
+                          textcolor=color.white, size=size.small)
+                last_hh_level := pattern_high
+                last_swing_high := pattern_high
+                last_high_bar := bar_index
+                last_structure_type := "HH"
+        
+        // HL Detection: Only if we expect HL next (last was HH)
+        pattern_low = math.min(low[1], low)
+        prev_hl = na(last_hl_level) ? last_swing_low : last_hl_level
+        
+        if last_structure_type == "HH" and close[1] < open[1] and close > open and pattern_low > prev_hl and close[1] > prev_hl
+            // Check consolidation
+            is_too_close = not na(last_low_bar) and (bar_index - last_low_bar) <= 4
+            
+            should_create_hl = true
+            if is_too_close and pattern_low <= last_hl_level
+                should_create_hl := false
+            
+            if should_create_hl
+                structure_count := structure_count + 1
+                label.new(bar_index - 1, low[1] - (low[1] * 0.0003), "HL" + str.tostring(structure_count), 
+                          style=label.style_none, color=color.new(color.white, 100), 
+                          textcolor=color.white, size=size.small)
+                last_hl_level := pattern_low
+                most_recent_hl := pattern_low  // Update most recent HL for BoS detection
+                most_recent_hl_bar := bar_index - 1  // Store HL bar position
+                last_low_bar := bar_index
+                last_structure_type := "HL"
+    
+    // Bearish structure tracking (LL, LH alternating)
+    if breakout_direction == "bearish"
+        // Check for Lower Low pattern: Bearish candle followed by bullish candle
+        pattern_low = math.min(low[1], low)
+        prev_ll = na(last_ll_level) ? last_swing_low : last_ll_level
+        
+        // LL Detection: Only if we expect LL next (no last structure or last was LH)
+        if (na(last_structure_type) or last_structure_type == "LH") and close[1] < open[1] and close > open and pattern_low < prev_ll and close[1] < prev_ll
+            // Check consolidation
+            is_too_close = not na(last_low_bar) and (bar_index - last_low_bar) <= 4
+            
+            should_create_ll = true
+            if is_too_close and structure_count > 0 and pattern_low >= last_ll_level
+                should_create_ll := false
+            
+            if should_create_ll
+                structure_count := structure_count + 1
+                label.new(bar_index - 1, low[1] - (low[1] * 0.0003), "LL" + str.tostring(structure_count), 
+                          style=label.style_none, color=color.new(color.white, 100), 
+                          textcolor=color.white, size=size.small)
+                last_ll_level := pattern_low
+                last_swing_low := pattern_low
+                last_low_bar := bar_index
+                last_structure_type := "LL"
+        
+        // LH Detection: Only if we expect LH next (last was LL)
+        pattern_high = math.max(high[1], high)
+        prev_lh = na(last_lh_level) ? last_swing_high : last_lh_level
+        
+        if last_structure_type == "LL" and close[1] > open[1] and close < open and pattern_high < prev_lh and close[1] < prev_lh
+            // Check consolidation
+            is_too_close = not na(last_high_bar) and (bar_index - last_high_bar) <= 4
+            
+            should_create_lh = true
+            if is_too_close and pattern_high >= last_lh_level
+                should_create_lh := false
+            
+            if should_create_lh
+                structure_count := structure_count + 1
+                label.new(bar_index - 1, high[1] + (high[1] * 0.0003), "LH" + str.tostring(structure_count), 
+                          style=label.style_none, color=color.new(color.white, 100), 
+                          textcolor=color.white, size=size.small)
+                last_lh_level := pattern_high
+                most_recent_lh := pattern_high  // Update most recent LH for BoS detection
+                most_recent_lh_bar := bar_index - 1  // Store LH bar position
+                last_high_bar := bar_index
+                last_structure_type := "LH"
+
+// Check if we're within the cutoff period before London session end
+current_minute = minute(time, session_timezone)
+london_end_time_minutes = london_end_hour * 60  // Convert London end hour to minutes
+current_time_minutes = current_hour * 60 + current_minute  // Current time in minutes
+
+// Calculate minutes remaining in London session
+london_session_minutes_remaining = london_end_time_minutes - current_time_minutes
+// Handle day rollover case (e.g., if london_end is 8:00 (480 min) and current is 23:30 (1410 min))
+if london_session_minutes_remaining < 0
+    london_session_minutes_remaining := london_session_minutes_remaining + (24 * 60)  // Add 24 hours in minutes
+
+// Only allow trades if more than cutoff_minutes remaining in London session
+allow_new_trades = london_session_minutes_remaining > cutoff_minutes
+
+// Break of Structure (BoS) Detection and Trading Logic - Only first BoS per London session and outside cutoff period
+if show_bos and london_active and show_market_structure and not bos_detected and not trade_taken and allow_new_trades
+    // Bullish BoS: Price closes below the most recent HL (after bullish breakout) - SELL SIGNAL
+    if breakout_direction == "bullish" and not na(most_recent_hl) and not na(most_recent_hl_bar)
+        // Check minimum distance requirement (at least 4 candles between BoS and HL)
+        if close < most_recent_hl and (bar_index - most_recent_hl_bar) >= 4
+            // Draw dotted line from HL position to BoS point
+            line.new(most_recent_hl_bar, most_recent_hl, bar_index, most_recent_hl, 
+                     color=bos_color, width=2, style=line.style_dotted, extend=extend.none)
+            // Calculate center position for BoS label
+            center_bar = math.round((most_recent_hl_bar + bar_index) / 2)
+            // Draw BoS label below the line for HL break
+            label.new(center_bar, most_recent_hl - (most_recent_hl * 0.0005), "BoS", 
+                      style=label.style_none, color=color.new(color.white, 100), 
+                      textcolor=bos_color, size=size.normal)
+            
+            // SELL ENTRY
+            if not na(london_session_high) and not na(asian_absolute_low)
+                // Calculate stop loss based on settings
+                stop_loss_level = use_atr_sl ? close + (atr * atr_multiplier) : london_session_high
+                take_profit_level = asian_absolute_low
+                entry_price = close
+                
+                // Calculate position size based on user settings
+                position_size = calculate_position_size(entry_price, stop_loss_level)
+                
+                strategy.entry("SELL", strategy.short, qty=position_size, comment="BoS Sell")
+                strategy.exit("SELL EXIT", "SELL", stop=stop_loss_level, limit=take_profit_level, comment="SL/TP")
+                
+                // Create trade visualization boxes (TradingView style) - minimum 8 bars width
+                // Blue profit zone box (from entry to take profit)
+                current_profit_box := box.new(left=bar_index, top=take_profit_level, right=bar_index + 8, bottom=entry_price, 
+                                              bgcolor=color.new(color.blue, 70), border_width=0)
+                
+                // Red stop loss zone box (from entry to stop loss)
+                current_sl_box := box.new(left=bar_index, top=entry_price, right=bar_index + 8, bottom=stop_loss_level, 
+                                         bgcolor=color.new(color.red, 70), border_width=0)
+                
+                trade_taken := true
+            
+            bos_detected := true  // Mark BoS as detected for this session
+    
+    // Bearish BoS: Price closes above the most recent LH (after bearish breakout) - BUY SIGNAL
+    if breakout_direction == "bearish" and not na(most_recent_lh) and not na(most_recent_lh_bar)
+        // Check minimum distance requirement (at least 4 candles between BoS and LH)
+        if close > most_recent_lh and (bar_index - most_recent_lh_bar) >= 4
+            // Draw dotted line from LH position to BoS point
+            line.new(most_recent_lh_bar, most_recent_lh, bar_index, most_recent_lh, 
+                     color=bos_color, width=1, style=line.style_dotted, extend=extend.none)
+            // Calculate center position for BoS label
+            center_bar = math.round((most_recent_lh_bar + bar_index) / 2)
+            // Draw BoS label above the line for LH break
+            label.new(center_bar, most_recent_lh + (most_recent_lh * 0.0005), "BoS", 
+                      style=label.style_none, color=color.new(color.white, 100), 
+                      textcolor=bos_color, size=size.normal)
+            
+            // BUY ENTRY
+            if not na(london_session_low) and not na(asian_absolute_high)
+                // Calculate stop loss based on settings
+                stop_loss_level = use_atr_sl ? close - (atr * atr_multiplier) : london_session_low
+                take_profit_level = asian_absolute_high
+                entry_price = close
+                
+                // Calculate position size based on user settings
+                position_size = calculate_position_size(entry_price, stop_loss_level)
+                
+                strategy.entry("BUY", strategy.long, qty=position_size, comment="BoS Buy")
+                strategy.exit("BUY EXIT", "BUY", stop=stop_loss_level, limit=take_profit_level, comment="SL/TP")
+                
+                // Create trade visualization boxes (TradingView style) - minimum 8 bars width
+                // Blue profit zone box (from entry to take profit)
+                current_profit_box := box.new(left=bar_index, top=entry_price, right=bar_index + 8, bottom=take_profit_level, 
+                                              bgcolor=color.new(color.blue, 70), border_width=0)
+                
+                // Red stop loss zone box (from entry to stop loss)
+                current_sl_box := box.new(left=bar_index, top=stop_loss_level, right=bar_index + 8, bottom=entry_price, 
+                                         bgcolor=color.new(color.red, 70), border_width=0)
+                
+                trade_taken := true
+            
+            bos_detected := true  // Mark BoS as detected for this session
+
+// Position close detection for extending boxes (based on Casper strategy)
+if barstate.isconfirmed and strategy.position_size == 0 and strategy.position_size[1] != 0
+    // Extend trade visualization boxes to exact exit point when position closes
+    if not na(current_profit_box)
+        // Ensure minimum 8 bars width or extend to current bar, whichever is longer
+        box_left = box.get_left(current_profit_box)
+        min_right = box_left + 8
+        final_right = math.max(min_right, bar_index)
+        box.set_right(current_profit_box, final_right)
+        current_profit_box := na  // Clear reference after extending
+    if not na(current_sl_box)
+        // Ensure minimum 8 bars width or extend to current bar, whichever is longer
+        box_left = box.get_left(current_sl_box)
+        min_right = box_left + 8
+        final_right = math.max(min_right, bar_index)
+        box.set_right(current_sl_box, final_right)
+        current_sl_box := na  // Clear reference after extending
+
+// Backup safety check - extend boxes if position is closed but boxes still active
+if not na(current_profit_box) and strategy.position_size == 0
+    box_left = box.get_left(current_profit_box)
+    min_right = box_left + 8
+    final_right = math.max(min_right, bar_index)
+    box.set_right(current_profit_box, final_right)
+    current_profit_box := na
+if not na(current_sl_box) and strategy.position_size == 0
+    box_left = box.get_left(current_sl_box)
+    min_right = box_left + 8
+    final_right = math.max(min_right, bar_index)
+    box.set_right(current_sl_box, final_right)
+    current_sl_box := na
+
+// Reset everything when new Asian session starts
+if asian_start and show_swing_points
+    asian_session_high := na
+    asian_session_low := na
+    asian_high_bar := na
+    asian_low_bar := na
+    // Reset absolute levels
+    asian_absolute_high := na
+    asian_absolute_low := na
+    asian_high_line := na
+    asian_low_line := na
+    asian_high_label := na
+    asian_low_label := na
+    high_broken := false
+    low_broken := false
+    // Reset London session levels
+    london_session_high := na
+    london_session_low := na
+    // Reset market structure tracking
+    breakout_direction := na
+    last_hh_level := na
+    last_hl_level := na
+    last_ll_level := na
+    last_lh_level := na
+    last_swing_high := na
+    last_swing_low := na
+    last_high_bar := na
+    last_low_bar := na
+    structure_count := 0
+    last_structure_type := na
+    pending_high := na
+    pending_low := na
+    pending_high_bar := na
+    pending_low_bar := na
+    waiting_for_confirmation := false
+    // Reset BoS tracking
+    most_recent_hl := na
+    most_recent_lh := na
+    most_recent_hl_bar := na
+    most_recent_lh_bar := na
+    bos_detected := false
+    // Reset trading
+    trade_taken := false
+    // Reset current trade boxes
+    current_profit_box := na
+    current_sl_box := na
+
+// Debug info (optional)
+show_debug = input.bool(false, "Show Debug Info")
+if show_debug
+    var table debug_table = table.new(position.top_right, 2, 3, bgcolor=color.white, border_width=1)
+    if barstate.islast
+        table.cell(debug_table, 0, 0, "Current Hour:", text_color=color.black)
+        table.cell(debug_table, 1, 0, str.tostring(current_hour), text_color=color.black)
+        table.cell(debug_table, 0, 1, "Asian Active:", text_color=color.black)
+        table.cell(debug_table, 1, 1, str.tostring((current_hour >= asian_start_hour) or (current_hour < asian_end_hour)), text_color=color.black)
+        table.cell(debug_table, 0, 2, "London Active:", text_color=color.black)
+        table.cell(debug_table, 1, 2, str.tostring((current_hour >= london_start_hour) and (current_hour < london_end_hour)), text_color=color.black)
+
+View in Pine Editor・590 lines
+Use on chart
+6
+0
+2 626
+The price unbalances the Asia and Frankfurt range and if there is a structural change it highlights a possible entry with a stop and target level.

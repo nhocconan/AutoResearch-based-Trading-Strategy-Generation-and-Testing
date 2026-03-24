@@ -1,0 +1,66 @@
+//@version=3
+//Cryptocurrency Trading Tools by XMAXPRO
+//ATA
+//Test 1.0v Date  : 10.11.2018
+//
+
+strategy("MTF+MA", overlay=false, shorttitle="MTF-MA", overlay = true,default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type=strategy.commission.percent,commission_value=0.1,initial_capital=100000)
+src = input(title= "Source", type=source, defval=close)
+fast = input(title="Input For Fast MA", type=integer, defval=21)
+slow = input(title="Input For Slow MA",type=integer,defval=34)
+//MTF source
+long = input(title="LONGTERM", type=resolution, defval="D")
+mid = input(title="MIDTERM", type=resolution, defval="180")
+short = input(title="SHORTTERM", type=resolution, defval="15")
+//MTF Grafikleri
+ln = security(ticker, long, src)
+md = security(ticker, mid, src)
+sh = security(ticker, short, src)
+//0
+lnma = ema(ln,fast) - ema(ln,slow)
+mdma = ema(sh,fast) - ema(md,slow)
+shma = ema(sh,fast) - ema(sh,slow)
+
+plot(lnma,color=green,linewidth=3)
+plot(mdma,color=blue,linewidth=3)
+plot(shma,color=red,linewidth=3)
+plot(0,color=white,linewidth=3)
+
+longCond = lnma>0 and mdma>0  and shma>0
+shortCond= lnma<0  and mdma<0  and shma <0 
+
+
+
+monthfrom =input(8)
+monthuntil =input(12)
+dayfrom=input(1)
+dayuntil=input(31)
+yearfrom=input(2018)
+yearuntil=input(2020)
+
+if (  longCond    and  month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth <= dayuntil and year <= yearuntil and year>=yearfrom) 
+    strategy.entry("LONG", strategy.long, stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="LONG")
+    
+else
+    strategy.cancel(id="LONG")
+    
+
+
+
+if ( shortCond   and month>=monthfrom and month <=monthuntil and dayofmonth>=dayfrom and dayofmonth <= dayuntil  and year<=yearuntil and year>=yearfrom ) 
+
+    strategy.entry("SHORT", strategy.short,stop=close, oca_name="TREND", oca_type=strategy.oca.cancel, comment="SHORT")
+else
+    strategy.cancel(id="SHORT")
+
+View in Pine Editor・54 lines
+Use on chart
+5
+3
+1
+2 872
+There is a youtube channel which ı follow, He shared an educational video and ı want to share it with you.
+
+You can also follow it in Youtube , its name is "Xmaxpro - Kriptocu"
+
+You can see how to develop a multi-time-frame trading strategy and test this MA strategy.

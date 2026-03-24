@@ -1,0 +1,200 @@
+//@version=6
+strategy("Opening-Range Breakout", 
+     overlay=true, 
+     initial_capital = 1000000,
+     default_qty_type=strategy.fixed, 
+     default_qty_value=1,
+     process_orders_on_close=true, 
+     commission_type=strategy.commission.cash_per_contract, 
+     commission_value=2.88,
+     margin_long = 0,
+     margin_short = 0)
+
+// ————— Inputs & Timezone —————
+zone        = "America/New_York"
+orStart     = input.session("0930-1015", "Opening-Range Window", group="Opening Range")
+rtdStart    = input.session("0930-1545", "Regular Trading Day", group="Opening Range")
+
+minRangePct = input.float(0.35, "Min. OR Width (%)", step=0.05, tooltip="As % of close", group="Filters")
+
+rr          = input.float(1.1, "Reward/Risk Ratio", step = 0.1, group = "Risk")
+retrace     = input.int(50, "Max OR Retracement %", group = "Risk")/100
+
+oneTrade    = input.bool(false, "One Trade Per Day", group = "Additional Settings")
+reverse     = input.bool(true, "Reverse on Stop Loss", group = "Additional Settings")
+
+// ————— Detect New Day & Reset OR —————
+var float OR_high   = na
+var float OR_low    = na
+var bool tradeTaken = false
+var int tradeCount  = -1
+
+// ————— Build Opening Range —————
+inOR    = not na(time(timeframe.period, orStart, zone))
+inRTD   = not na(time(timeframe.period, rtdStart, zone))
+
+newDay = inRTD[1] and not inRTD
+if newDay
+    OR_high     := na
+    OR_low      := na
+    tradeTaken  := false
+
+if not inOR[1] and inOR
+    OR_high := high
+    OR_low  := low
+
+if inOR
+    OR_high := math.max(OR_high, high)
+    OR_low  := math.min(OR_low,  low)
+
+// ————— Compute Range & Filter —————
+OR_range       = OR_high - OR_low
+rangeFilter    = OR_range >= (minRangePct/100) * close
+
+// ————— Entry Conditions —————
+// Only after the OR window closes, and if rangeFilter is true
+enteredOR   = inOR[1] and not inOR  // true on first bar after 10:30
+longCond    = enteredOR and rangeFilter
+shortCond   = enteredOR and rangeFilter
+
+inTrade = strategy.position_size != 0
+
+// ————— Orders & Exits —————
+if longCond and (oneTrade ? not tradeTaken : true)
+    strategy.entry("Long", strategy.long, stop = OR_high)
+    tradeTaken := true
+    loss = (OR_high - OR_low)*retrace/syminfo.mintick
+    profit = loss * rr
+    strategy.exit("Long Exit", from_entry="Long", loss = loss, profit = profit)
+
+if shortCond and (oneTrade ? not tradeTaken : true)
+    strategy.entry("Short", strategy.short, stop = OR_low)
+    tradeTaken := true
+    loss = (OR_high - OR_low)*retrace/syminfo.mintick
+    profit = loss * rr
+    strategy.exit("Short Exit", from_entry="Short", loss = loss, profit = profit)
+
+if not inTrade[1] and inTrade
+    tradeCount += 1
+
+if reverse and inTrade[1] and not inTrade and strategy.closedtrades.profit(tradeCount) < 0 and inRTD
+    if strategy.closedtrades.size(tradeCount) > 0
+        strategy.entry("Short", strategy.short)
+    if strategy.closedtrades.size(tradeCount) < 0
+        strategy.entry("Long", strategy.long)
+
+
+// ————— End-of-Day Flatting —————
+if not inRTD
+    strategy.close_all("Session Exit")
+
+plot(OR_high, color = color.green, style = plot.style_steplinebr)
+plot(OR_low, color = color.red, style = plot.style_steplinebr)
+
+View in Pine Editor・92 lines
+Use on chart
+7
+9
+2
+2 583
+Note: Default trading date range looks mediocre. Set date range to "Entire History" to see full effect of the strategy. 50.91% profitable trades, 1.178 profit factor, steady profits and limited drawdown. Total P&L: $154,141.18, Max Drawdown: $18,624.36. High R^2
+
+█ Overview
+
+The Opening-Range Breakout strategy is a mechanical, session‑based day‑trading system designed to capture the initial burst of directional momentum immediately following the market open. It defines a user‑configurable “opening range” window, measures its high and low boundaries, then places breakout stop orders at those levels once the range closes. Built‑in filters on minimum range width, reward‑to‑risk ratios, and optional reversal logic help refine entries and manage risk dynamically.
+
+
+█ How It Works
+
+Opening‑Range Formation
+
+Between 9:30–10:15 AM ET (configurable), the script tracks the highest high and lowest low to form the day’s opening range box.
+
+On the first bar after the range window closes, the range high (OR_high) and low (OR_low) are “locked in.”
+
+Range‑Width Filter
+
+To avoid false breakouts in low‑volatility mornings, the range must be at least X% of the current price (default 0.35%).
+
+If the measured opening-range width < minimum threshold, no orders are placed that day.
+
+Entry & Order Placement
+
+Long: a stop‑buy order at the opening‑range high.
+
+Short: a stop‑sell order at the opening‑range low.
+
+Only one side can trigger (or both if reverse logic is enabled after a losing trade).
+
+Risk Management
+
+Once triggered, each trade uses an ATR‑style stop-loss defined as a percentage retracement of the range (default 50% of range width).
+
+Profit target is set at a configurable Reward/Risk Ratio (default 1.1×).
+
+Optional: Reverse on Stop‑Loss – if the initial breakout loses, immediately reverse into the opposite side on the same day.
+
+Session Exit
+
+Any open positions are closed at the end of the regular trading day (default 3:45 PM ET window end, with hard flat at session close).
+
+Visual cues are provided via green (range high) and red (range low) step‑line plots directly on the chart, allowing you to see the range box and breakout triggers in real time.
+
+
+█ Why It Works
+
+Early Momentum Capture: The first 15 – 60 minutes of trading encapsulate overnight news digestion and institutional order flow, creating a well‑defined volatility “range.”
+
+Mechanical Discipline: Clear, rule‑based entries and exits remove emotional guesswork, ensuring consistency.
+
+Volatility Filtering: By requiring a minimum range width, the system avoids choppy, low‑range days where false breakouts are common.
+
+Dynamic Sizing: Stops and targets scale with the opening range, adapting automatically to each day’s volatility environment.
+
+█ How to Use
+
+Set Your Instruments & Timeframe
+
+-Apply to any futures contract on a 1‑ to 5‑minute chart.
+
+-Ensure chart timezone is set to America/New_York.
+
+Configure Inputs
+
+-Opening‑Range Window: e.g. “0930-1015” for a 45‑minute range.
+
+-Min. OR Width (%): e.g. 0.35 for 0.35% of current price.
+
+-Reward/Risk Ratio: e.g. 1.1 for a modest profit target above your stop.
+
+-Max OR Retracement %: e.g. 50 to set stop at 50% of range width.
+
+-One Trade Per Day: toggle to limit to a single breakout.
+
+-Reverse on Stop Loss: toggle to flip direction after a losing breakout.
+
+Monitor the Chart
+
+-Watch the green and red range boundaries form during the session open.
+
+-Orders will automatically submit on the first bar after the range window closes, conditioned on your filters.
+
+Review & Adjust
+
+-Backtest across multiple months to validate performance on your preferred contract.
+
+-Tweak range duration, minimum width, and R/R multiple to fit your risk tolerance and desired win‑rate vs. expectancy balance.
+
+█ Settings Reference
+
+Input Defaults
+Opening‑Range Window - Time window to form OR (HHMM-HHMM) - 0930–1015
+Regular Trading Day - Full session for EOD flat (HHMM-HHMM) - 0930–1545
+Min. OR Width (%) - Minimum OR size as % of close to trigger orders - 0.35
+Reward/Risk Ratio - Profit target multiple of stop‑loss distance - 1.1
+Max OR Retracement (%) - % of OR width to use as stop‑loss distance - 50
+One Trade Per Day - Limit to a single breakout order per day - false
+Reverse on Stop Loss - Reverse direction immediately after a losing trade - true
+
+Disclaimer
+This strategy description and any accompanying code are provided for educational purposes only and do not constitute financial advice or a solicitation to trade. Futures trading involves substantial risk, including possible loss of capital. Past performance is not indicative of future results. Traders should assess their own risk tolerance and conduct thorough backtesting and forward-testing before committing real capital.

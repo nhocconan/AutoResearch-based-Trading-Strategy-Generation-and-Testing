@@ -1,0 +1,407 @@
+//@version=5
+strategy("Multi-Step FlexiMA - Strategy [presentTrading]",shorttitle = "Multi-Step FlexiMA-VT - Strategy [presentTrading]", overlay = false, precision=3, commission_value= 0.1, commission_type=strategy.commission.percent, slippage= 1, currency=currency.USD, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, initial_capital= 10000)
+
+// Trading settings
+tradeDirection = input.string("Both", title="Trade Direction", options=["Long", "Short", "Both"])
+
+// Input parameters
+indicatorSource = input.source(hlc3, title="Indicator Source")
+indicatorLength = input.int(10, minval = 2, title="Indicator Length")
+startingFactor = input.float(1.0, title="Starting Factor", minval = 0)
+incrementFactor_1 = input.float(2.0, minval = 0, step = .10, title="Increment Factor")
+normalizeMethod = input.string('None', options = ['None', 'Max-Min', 'Absolute Sum'], title="Normalization Method")
+
+// Multi-Step Take Profit Inputs
+tp_level1 = input.float(title="Take Profit Level 1 (%)", defval=2.0)
+tp_level2 = input.float(title="Take Profit Level 2 (%)", defval=8.0)
+tp_level3 = input.float(title="Take Profit Level 3 (%)", defval=18.0)
+
+tp_percent1 = input.float(title="Take Profit Percent 1 (%)", defval=30.0)
+tp_percent2 = input.float(title="Take Profit Percent 2 (%)", defval=20.0)
+tp_percent3 = input.float(title="Take Profit Percent 3 (%)", defval=15.0)
+
+var float longEntryTime = na
+var float shortEntryTime = na
+var bool recentlyExitedLong = false
+var bool recentlyExitedShort = false
+
+
+// This function normalizes an array of deviations according to the specified normalization method.
+normalize(diffs, den, normMethod) =>
+    // Initialize an array to hold the normalized deviations.
+    normalizedDiffs = array.new_float(0)
+    // Loop through each deviation value to apply normalization.
+    for val in diffs
+        // Determine the normalization value based on the chosen method.
+        normValue = switch normMethod
+            // "Max-Min" normalization scales the deviation based on the range of the array values.
+            "Max-Min" => (val - array.min(diffs)) / array.range(diffs)
+            // "Absolute Sum" normalization scales the deviation based on the sum of absolute values.
+            "Absolute Sum" => val / den
+            // Default case, no normalization is applied, so the value remains as is.
+            => val
+        // Add the normalized value to the array.
+        array.push(normalizedDiffs, normValue)
+    // Return the array of normalized values.
+    normalizedDiffs
+
+// This function calculates the standard deviation of an array of values.
+customStdev(values) =>
+    // Calculate the mean (average) of the values.
+    mean = array.sum(values) / array.size(values)
+    // Initialize an array to hold the squared differences from the mean.
+    squareDiffs = array.new_float(0)
+    // Loop through each value to calculate the squared difference from the mean.
+    for val in values
+        // Push the squared difference to the array.
+        array.push(squareDiffs, math.pow(val - mean, 2))
+    // Calculate the variance as the average of the squared differences.
+    variance = array.sum(squareDiffs) / (array.size(values) - 1)
+    // Return the square root of the variance, which is the standard deviation.
+    math.sqrt(variance)
+
+
+// This function calculates an oscillator based on a moving average (MA) where the length of the MA varies.
+// Each iteration applies a different length to the MA calculation by modifying the length factor.
+variableLengthMAOscillator(source, length, startFactor, incFactor, normMethod) =>
+    diffs = array.new_float(0)  // Array to store the deviations of the source from the MA.
+    den = 0.0  // A variable to accumulate the sum of absolute deviations, used for normalization.
+    factor = startFactor  // The starting factor for the MA length variation.
+
+    // Loop to calculate the MA and deviations for different lengths.
+    for i = 0 to 19
+        maLength = math.round(length * factor)  // Adjust the MA length by the current factor.
+        maValue = ta.sma(source, maLength)  // Calculate the Simple Moving Average (SMA) for the given length.
+        deviation = source - maValue  // Compute the deviation from the MA.
+        array.push(diffs, deviation)  // Store the deviation in the array.
+        den += math.abs(deviation)  // Add the absolute deviation to the denominator for normalization.
+        factor += incFactor  // Increment the factor for the next MA length adjustment.
+
+    // Normalize the deviations array using the chosen method and calculate the median and standard deviation.
+    normalizedDiffs = normalize(diffs, den, normMethod)
+    medianValue = array.median(normalizedDiffs)  // Find the median of the normalized deviations.
+    stdevValue = customStdev(normalizedDiffs)  // Calculate the standard deviation of the normalized deviations.
+    [medianValue, stdevValue, diffs, den]  // Return the median, standard deviation, and other variables for further use.
+
+// Calculate the Variable Length MA Oscillator
+// Access the SuperTrend Polyfactor Oscillator values
+[medianValue, stdevValue,diffs,den] = variableLengthMAOscillator(indicatorSource, indicatorLength, startingFactor, incrementFactor_1, normalizeMethod)
+
+//Style
+mesh = input(true, inline = 'mesh', group = 'Style')
+upCss = input.color(color.new(#089981, 90), '', inline = 'mesh', group = 'Style')
+dnCss = input.color(color.new(#f23645, 90), '', inline = 'mesh', group = 'Style')
+
+//-----------------------------------------------------------------------------}
+//Plots
+//-----------------------------------------------------------------------------{
+// This function normalizes an array of deviations according to the specified normalization method.
+
+norm(value, diffs, den)=>
+    normalizeMethod = switch normalizeMethod
+        'Max-Min' => (value - diffs.min()) / diffs.range()
+        'Absolute Sum' => value / den
+        => value
+
+norm(array.get(diffs, 0),diffs,den)
+
+// Plot each individual deviation using the array.get function
+plot(mesh ? norm(array.get(diffs, 0),diffs,den) : na, "Deviation 1", color=array.get(diffs, 0) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 1),diffs,den) : na, "Deviation 2", color=array.get(diffs, 1) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 2),diffs,den) : na, "Deviation 3", color=array.get(diffs, 2) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 3),diffs,den) : na, "Deviation 4", color=array.get(diffs, 3) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 4),diffs,den) : na, "Deviation 5", color=array.get(diffs, 4) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 5),diffs,den) : na, "Deviation 6", color=array.get(diffs, 5) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 6),diffs,den) : na, "Deviation 7", color=array.get(diffs, 6) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 7),diffs,den) : na, "Deviation 8", color=array.get(diffs, 7) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 8),diffs,den) : na, "Deviation 9", color=array.get(diffs, 8) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 9),diffs,den) : na, "Deviation 10", color=array.get(diffs, 9) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 10),diffs,den) : na, "Deviation 11", color=array.get(diffs, 10) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 11),diffs,den) : na, "Deviation 12", color=array.get(diffs, 11) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 12),diffs,den) : na, "Deviation 13", color=array.get(diffs, 12) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 13),diffs,den) : na, "Deviation 14", color=array.get(diffs, 13) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 14),diffs,den) : na, "Deviation 15", color=array.get(diffs, 14) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 15),diffs,den) : na, "Deviation 16", color=array.get(diffs, 15) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 16),diffs,den) : na, "Deviation 17", color=array.get(diffs, 16) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 17),diffs,den) : na, "Deviation 18", color=array.get(diffs, 17) > 0 ? upCss : dnCss, style=plot.style_histogram)
+plot(mesh ? norm(array.get(diffs, 18),diffs,den) : na, "Deviation 19", color=array.get(diffs, 18) > 0 ? upCss : dnCss, style=plot.style_histogram)
+
+//Median
+plot(medianValue, 'Median', medianValue > (normalizeMethod == 'Max-Min' ? .5 : 0) ? #90bff9 : #ffcc80)
+
+//Stdev Area
+up = plot(stdevValue, color = na, editable = false)
+dn = plot(-stdevValue, color = na, editable = false)
+fill(up, dn, color.new(#90bff9, 80), title = 'Stdev Area')
+
+//-----------------------------------------------------------------------------}
+
+
+type bar
+    float o = na
+    float h = na
+    float l = na
+    float c = na
+
+type supertrend
+    float s = na
+    int   d = na
+
+method src(bar b, simple string src) =>
+    float x = switch src
+        'oc2'   => math.avg(b.o, b.c          )
+        'hl2'   => math.avg(b.h, b.l          )
+        'hlc3'  => math.avg(b.h, b.l, b.c     )
+        'ohlc4' => math.avg(b.o, b.h, b.l, b.c)
+        'hlcc4' => math.avg(b.h, b.l, b.c, b.c)
+
+    x
+
+method atr(bar b, simple int len) =>
+    float tr = 
+         na(b.h[1]) ? 
+         b.h - b.l  : 
+         math.max(
+             math.max(
+                 b.h - b.l, 
+                 math.abs(b.h - b.c[1])), 
+             math.abs    (b.l - b.c[1]))
+
+    len == 1 ? tr : ta.rma(tr, len)
+
+method st(bar b, simple float factor, simple int len) =>
+    float atr = b.atr( len )
+    float up  = b.src('hl2') + factor * atr
+    up       := up < nz(up[1]) or b.c[1] > nz(up[1]) ? up : nz(up[1])
+    float dn  = b.src('hl2') - factor * atr
+    dn       := dn > nz(dn[1]) or b.c[1] < nz(dn[1]) ? dn : nz(dn[1])
+    
+    float st  = na
+    int   dir = na
+    dir := switch
+        na(atr[1])         => 1
+        st[1] == nz(up[1]) => dir := b.c > up ? -1 : +1
+        =>                    dir := b.c < dn ? +1 : -1
+    st  :=                    dir == -1       ? dn : up
+    
+    supertrend.new(st, dir)
+
+
+var string tp = 'Choose an indicator source of which to base the SuperTrend on.'
+var string g1 = "SuperTrend Settings", var string gu = "UI Options"
+src  = medianValue
+len  = input.int   (10       , "Length"            ,             inline = '1', group = g1)
+mlt  = input.float (15.       , "Factor"            , 1, 20, 0.5, inline = '1', group = g1)
+clbl = input.bool  (true    , "Contrarian Signals",                           group = gu)
+colu = input.color (#008cff, "Bull Color"        ,                           group = gu)
+cold = input.color (#ff4800, "Bear Color"        ,                           group = gu)
+
+
+bar        b  = bar.new(
+       nz(src[1])               ,
+       math.max(nz(src[1]), src),
+       math.min(nz(src[1]), src),
+       src                      )
+float      tr = b  .atr(     len)
+supertrend st = b  .st (mlt, len)
+
+
+color cst = switch st.d
+    +1 => cold
+    -1 => colu
+    
+t = plot(st.d > 0 ? st.s : na, 'Bear ST'  , cst           , 1, plot.style_linebr)
+d = plot(st.d < 0 ? st.s : na, 'Bull ST'  , cst           , 1, plot.style_linebr)
+i = plot(st.d                , 'Direction', display =          display.none     )
+c = plot(b.src('oc2')        , 'Filler'   , display =          display.none     )
+
+fill(t, c, color.new(cold, 90))
+fill(d, c, color.new(colu, 90))
+
+bool scon = clbl and math.sign(ta.change(st.d)) ==  1 ? true : false
+bool bcon = clbl and math.sign(ta.change(st.d)) == -1 ? true : false
+
+plotshape(scon ? st.s + tr / 3 : na, 'Sell Signal', shape.labeldown, location.absolute, color.new(cold, 60), 0, '𝓢', chart.fg_color)
+plotshape(bcon ? st.s - tr / 3 : na, 'Buy Signal' , shape.labelup  , location.absolute, color.new(colu, 60), 0, '𝓑', chart.fg_color)
+
+
+// Entry conditions
+enterLongCondition = st.d < 0 and medianValue > 0
+enterShortCondition = st.d > 0 and medianValue < 0
+
+// Check trade direction choice before executing trade entries.
+if (enterLongCondition and (tradeDirection == "Long" or tradeDirection == "Both") and strategy.equity > 0)
+    if (strategy.position_size < 0)  // If there is an open short position, close it before entering long.
+        strategy.close("Short Position")
+    strategy.entry("Long Position", strategy.long)
+    longEntryTime = time
+    recentlyExitedLong := false
+    recentlyExitedShort := false
+
+if (enterShortCondition and (tradeDirection == "Short" or tradeDirection == "Both") and strategy.equity > 0)
+    if (strategy.position_size > 0)  // If there is an open long position, close it before entering short.
+        strategy.close("Long Position")
+    strategy.entry("Short Position", strategy.short)
+    shortEntryTime = time
+    recentlyExitedShort := false
+    recentlyExitedLong := false
+
+
+
+// Calculate the take-profit prices based on the average entry price
+tp_price1_long = strategy.position_avg_price * (1 + tp_level1 / 100)
+tp_price2_long = strategy.position_avg_price * (1 + tp_level2 / 100)
+tp_price3_long = strategy.position_avg_price * (1 + tp_level3 / 100)
+
+tp_price1_short = strategy.position_avg_price * (1 - tp_level1 / 100)
+tp_price2_short = strategy.position_avg_price * (1 - tp_level2 / 100)
+tp_price3_short = strategy.position_avg_price * (1 - tp_level3 / 100)
+
+// Exit portions of the position at each take-profit level
+if strategy.position_size > 0
+    strategy.exit("Take Profit 1", from_entry="Long Position", qty_percent=tp_percent1, limit=tp_price1_long)
+    strategy.exit("Take Profit 2", from_entry="Long Position", qty_percent=tp_percent2, limit=tp_price2_long)
+    strategy.exit("Take Profit 3", from_entry="Long Position", qty_percent=tp_percent3, limit=tp_price3_long)
+
+if strategy.position_size < 0
+    strategy.exit("Take Profit 1", from_entry="Short Position", qty_percent=tp_percent1, limit=tp_price1_short)
+    strategy.exit("Take Profit 2", from_entry="Short Position", qty_percent=tp_percent2, limit=tp_price2_short)
+    strategy.exit("Take Profit 3", from_entry="Short Position", qty_percent=tp_percent3, limit=tp_price3_short)
+
+View in Pine Editor・277 lines
+Use on chart
+7
+6
+6
+5
+9 934
+It's time to come back! hope I can not to be busy for a while.
+
+█ Introduction and How It Is Different
+
+The FlexiMA Variance Tracker is a unique trading strategy that calculates a series of deviations between the price (or another indicator source) and a variable-length moving average (MA). Unlike traditional strategies that use fixed-length moving averages, the length of the MA in this system varies within a defined range. The length changes dynamically based on a starting factor and an increment factor, creating a more adaptive approach to market conditions.
+
+This strategy integrates Multi-Step Take Profit (TP) levels, allowing for partial exits at predefined price increments. It enables traders to secure profits at different stages of a trend, making it ideal for volatile markets where taking full profits at once might lead to missed opportunities if the trend continues.
+
+BTCUSD 6hr Performance
+
+
+
+█ Strategy, How It Works: Detailed Explanation
+
+🔶 FlexiMA Concept
+
+The FlexiMA (Flexible Moving Average) is at the heart of this strategy. Unlike traditional MA-based strategies where the MA length is fixed (e.g., a 50-period SMA), the FlexiMA varies its length with each iteration. This is done using a **starting factor** and an **increment factor**.
+
+The formula for the moving average length at each iteration \(i\) is:
+`MA_length_i = indicator_length * (starting_factor + i * increment_factor)`
+Where:
+- `indicator_length` is the user-defined base length.
+- `starting_factor` is the initial multiplier of the base length.
+- `increment_factor` increases the multiplier in each iteration.
+
+Each iteration applies a **simple moving average** (SMA) to the chosen **indicator source** (e.g., HLC3) with a different length based on the above formula. The deviation between the current price and the moving average is then calculated as follows:
+
+`deviation_i = price_current - MA_i`
+These deviations are normalized using one of the following methods:
+
+- **Max-Min normalization**:
+`normalized_i = (deviation_i - min(deviations)) / range(deviations)`
+
+- **Absolute Sum normalization**:
+`normalized_i = deviation_i / sum(|deviation_i|)`
+
+The **median** and **standard deviation (stdev)** of the normalized deviations are then calculated as follows:
+`median = median(normalized deviations)`
+
+For the standard deviation:
+`stdev = sqrt((1/(N-1)) * sum((normalized_i - mean)^2))`
+
+These values are plotted to provide a clear indication of how the price is deviating from its variable-length moving averages.
+
+For more detail:
+https://www.tradingview.com/script/R9qM6XrY-FlexiMA-Variance-Tracker-Strategy-presentTrading/
+
+🔶 Multi-Step Take Profit
+
+This strategy uses a multi-step take profit system, allowing for exits at different stages of a trade based on the percentage of price movement. Three take-profit levels are defined:
+- Take Profit Level 1 (TP1): A small, quick profit level (e.g., 2%).
+- Take Profit Level 2 (TP2): A medium-level profit target (e.g., 8%).
+- Take Profit Level 3 (TP3): A larger, more ambitious target (e.g., 18%).
+
+At each level, a corresponding percentage of the trade is exited:
+- TP Percent 1: E.g., 30% of the position.
+- TP Percent 2: E.g., 20% of the position.
+- TP Percent 3: E.g., 15% of the position.
+
+This approach ensures that profits are locked in progressively, reducing the risk of market reversals wiping out potential gains.
+
+Local
+
+
+
+🔶 Trade Entry and Exit Conditions
+
+The entry and exit signals are determined by the interaction between the **SuperTrend Polyfactor Oscillator** and the **median** value of the normalized deviations:
+- Long entry: The SuperTrend turns bearish, and the median value of the deviations is positive.
+- Short entry: The SuperTrend turns bullish, and the median value is negative.
+
+Similarly, trades are exited when the SuperTrend flips direction.
+
+* The SuperTrend Toolkit is made by EliCobra
+
+█ Trade Direction
+
+The strategy allows users to specify the desired trade direction:
+- Long: Only long positions will be taken.
+- Short: Only short positions will be taken.
+- Both: Both long and short positions are allowed based on the conditions.
+
+This flexibility allows the strategy to adapt to different market conditions and trading styles, whether you're looking to buy low and sell high, or sell high and buy low.
+
+█ Usage
+
+This strategy can be applied across various asset classes, including stocks, cryptocurrencies, and forex. The primary use case is to take advantage of market volatility by using a flexible moving average and multiple take-profit levels to capture profits incrementally as the market moves in your favor.
+
+How to Use:
+1. Configure the Inputs: Start by adjusting the **Indicator Length**, **Starting Factor**, and **Increment Factor** to suit your chosen asset. The defaults work well for most markets, but fine-tuning them can improve performance.
+2. Set the Take Profit Levels: Adjust the three **TP levels** and their corresponding **percentages** based on your risk tolerance and the expected volatility of the market.
+3. Monitor the Strategy: The SuperTrend and the FlexiMA variance tracker will provide entry and exit signals, automatically managing the positions and taking profits at the pre-set levels.
+
+█ Default Settings
+
+The default settings for the strategy are configured to provide a balanced approach that works across different market conditions:
+
+Indicator Length (10):
+This controls the base length for the moving average. A lower length makes the moving average more responsive to price changes, while a higher length smooths out fluctuations, making the strategy less sensitive to short-term price movements.
+
+Starting Factor (1.0):
+This determines the initial multiplier applied to the moving average length. A higher starting factor will increase the average length, making it slower to react to price changes.
+
+Increment Factor (1.0):
+This increases the moving average length in each iteration. A larger increment factor creates a wider range of moving average lengths, allowing the strategy to track both short-term and long-term trends simultaneously.
+
+Normalization Method ('None'):
+Three methods of normalization can be applied to the deviations:
+- None: No normalization applied, using raw deviations.
+- Max-Min: Normalizes based on the range between the maximum and minimum deviations.
+- Absolute Sum: Normalizes based on the total sum of absolute deviations.
+
+Take Profit Levels:
+- TP1 (2%): A quick exit to capture small price movements.
+- TP2 (8%): A medium-term profit target for stronger trends.
+- TP3 (18%): A long-term target for strong price moves.
+
+Take Profit Percentages:
+- TP Percent 1 (30%): Exits 30% of the position at TP1.
+- TP Percent 2 (20%): Exits 20% of the position at TP2.
+- TP Percent 3 (15%): Exits 15% of the position at TP3.
+
+Effect of Variables on Performance:
+- Short Indicator Lengths: More responsive to price changes but prone to false signals.
+- Higher Starting Factor: Slows down the response, useful for longer-term trend following.
+- Higher Increment Factor: Widens the variability in moving average lengths, making the strategy adapt to both short-term and long-term price trends.
+- Aggressive Take Profit Levels: Allows for quick profit-taking in volatile markets but may exit positions prematurely in strong trends.
+
+The default configuration offers a moderate balance between short-term responsiveness and long-term trend capturing, suitable for most traders. However, users can adjust these variables to optimize performance based on market conditions and personal preferences.
+

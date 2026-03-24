@@ -1,0 +1,308 @@
+//@version=6
+strategy("Liquidity+FVG+OB Strategy (v6)", shorttitle="LiqFVG_OB_strat", overlay=true,
+         default_qty_type = strategy.fixed, default_qty_value = 1, pyramiding=1)
+
+// ===================== INPUTS =====================
+show_liquidity      = input.bool(true,  "Show Liquidity Levels")
+liquidity_lookback  = input.int(100,  "Liquidity lookback (bars)", minval=5)
+
+show_fvg            = input.bool(true,  "Show Fair Value Gaps (FVG)")
+fvg_min_atr_factor  = input.float(0.1,  "FVG min ATR factor", step=0.01)
+fvg_lifetime_bars   = input.int(200,   "FVG lifetime (bars)", minval=1)
+
+show_ob             = input.bool(true,  "Show Order Blocks (OB)")
+ob_bullish_color    = input.color(color.new(color.green, 85), "Bullish OB Color")
+ob_bearish_color    = input.color(color.new(color.red, 85), "Bearish OB Color")
+ob_lifetime_bars    = input.int(200,   "OB lifetime (bars)", minval=1)
+ob_width_bars       = input.int(10,    "OB width in bars (how many bars the OB rectangle spans from its origin)", minval=1)
+
+max_liq_display     = input.int(10, "Max liquidity lines to display", minval=1)
+max_fvg_display     = input.int(20, "Max FVG boxes to display", minval=1)
+max_ob_display      = input.int(20, "Max OB boxes to display", minval=1)
+
+// ============== Strategy-specific inputs ==============
+use_ob_confirm     = input.bool(true, "Require OB confirmation for entries")
+ob_confirm_window  = input.int(12, "OB confirmation window (bars)", minval=1)
+
+entry_size         = input.int(1, "Fixed position size (contracts/units)", minval=1)
+stop_atr_mult      = input.float(1.5, "Stop loss (ATR multiples)", step=0.1)
+tp_atr_mult        = input.float(3.0, "Take profit (ATR multiples)", step=0.1)
+allow_long         = input.bool(true, "Allow Longs")
+allow_short        = input.bool(true, "Allow Shorts")
+
+// ===================== PERSISTENT DATA ARRAYS =====================
+// Liquidity points
+var float[] high_liq_prices = array.new_float()
+var int[]   high_liq_bars   = array.new_int()
+var float[] low_liq_prices  = array.new_float()
+var int[]   low_liq_bars    = array.new_int()
+
+// FVGs
+var float[] fvg_highs = array.new_float()
+var float[] fvg_lows  = array.new_float()
+var int[]   fvg_bars  = array.new_int()
+var bool[]  fvg_is_bull = array.new_bool()
+
+// OBs
+var float[] ob_highs = array.new_float()
+var float[] ob_lows  = array.new_float()
+var int[]   ob_bars  = array.new_int()
+var bool[]  ob_is_bull = array.new_bool()
+
+// Drawn objects (we will delete/redraw on last bar to ensure layering)
+var line[] drawn_lines = array.new_line()
+var box[]  drawn_boxes = array.new_box()
+var label[] drawn_labels = array.new_label()
+
+// ===================== HELPERS (safe reverse-iteration using while) =====================
+f_trim_old_entries(_bars_array, _prices_array, _lifetime) =>
+    if array.size(_bars_array) > 0
+        thr = bar_index - _lifetime
+        idx = array.size(_bars_array) - 1
+        while idx >= 0
+            b = array.get(_bars_array, idx)
+            if b < thr
+                array.remove(_bars_array, idx)
+                array.remove(_prices_array, idx)
+            idx := idx - 1
+
+f_trim_old_fvg(_bars, _highs, _lows, _is_bull, _lifetime) =>
+    if array.size(_bars) > 0
+        thr = bar_index - _lifetime
+        idxf = array.size(_bars) - 1
+        while idxf >= 0
+            b = array.get(_bars, idxf)
+            if b < thr
+                array.remove(_bars, idxf)
+                array.remove(_highs, idxf)
+                array.remove(_lows, idxf)
+                array.remove(_is_bull, idxf)
+            idxf := idxf - 1
+
+f_trim_old_ob(_bars, _highs, _lows, _is_bull, _lifetime) =>
+    if array.size(_bars) > 0
+        thr = bar_index - _lifetime
+        idxo = array.size(_bars) - 1
+        while idxo >= 0
+            b = array.get(_bars, idxo)
+            if b < thr
+                array.remove(_bars, idxo)
+                array.remove(_highs, idxo)
+                array.remove(_lows, idxo)
+                array.remove(_is_bull, idxo)
+            idxo := idxo - 1
+
+// Delete previously drawn objects (to re-draw in controlled order)
+// Use while loops to iterate safely in reverse
+f_delete_drawn() =>
+    // delete lines
+    idx_ln = array.size(drawn_lines) - 1
+    while idx_ln >= 0
+        ln = array.get(drawn_lines, idx_ln)
+        if not na(ln)
+            line.delete(ln)
+        array.remove(drawn_lines, idx_ln)
+        idx_ln := idx_ln - 1
+    // delete boxes
+    idx_bx = array.size(drawn_boxes) - 1
+    while idx_bx >= 0
+        bx = array.get(drawn_boxes, idx_bx)
+        if not na(bx)
+            box.delete(bx)
+        array.remove(drawn_boxes, idx_bx)
+        idx_bx := idx_bx - 1
+    // delete labels
+    idx_lb = array.size(drawn_labels) - 1
+    while idx_lb >= 0
+        lb = array.get(drawn_labels, idx_lb)
+        if not na(lb)
+            label.delete(lb)
+        array.remove(drawn_labels, idx_lb)
+        idx_lb := idx_lb - 1
+
+// ===================== CONSTANT CALCULATIONS PER BAR =====================
+// Call highestbars/lowestbars every calculation for consistency
+hb_high_5 = ta.highestbars(high, 5)
+lb_low_5  = ta.lowestbars(low, 5)
+
+atr14 = ta.atr(14)
+smaVol20 = ta.sma(volume, 20)
+
+// ===================== DETECTION LOGIC (run on confirmed bar) =====================
+if barstate.isconfirmed
+    // -- Liquidity --
+    if hb_high_5 == 0
+        array.push(high_liq_prices, high)
+        array.push(high_liq_bars, bar_index)
+    if lb_low_5 == 0
+        array.push(low_liq_prices, low)
+        array.push(low_liq_bars, bar_index)
+    f_trim_old_entries(high_liq_bars, high_liq_prices, liquidity_lookback)
+    f_trim_old_entries(low_liq_bars, low_liq_prices, liquidity_lookback)
+
+    // -- FVG --
+    if low > high[1] and math.abs(low - high[1]) > atr14 * fvg_min_atr_factor
+        array.push(fvg_highs, low)
+        array.push(fvg_lows, high[1])
+        array.push(fvg_bars, bar_index)
+        array.push(fvg_is_bull, true)
+    if high < low[1] and math.abs(low[1] - high) > atr14 * fvg_min_atr_factor
+        array.push(fvg_highs, low[1])
+        array.push(fvg_lows, high)
+        array.push(fvg_bars, bar_index)
+        array.push(fvg_is_bull, false)
+    f_trim_old_fvg(fvg_bars, fvg_highs, fvg_lows, fvg_is_bull, fvg_lifetime_bars)
+
+    // -- OB detection --
+    if close > open and (close - open) > atr14 * 0.5 and volume > smaVol20
+        array.push(ob_highs, high)
+        array.push(ob_lows, low)
+        array.push(ob_bars, bar_index)
+        array.push(ob_is_bull, true)
+    if close < open and (open - close) > atr14 * 0.5 and volume > smaVol20
+        array.push(ob_highs, high)
+        array.push(ob_lows, low)
+        array.push(ob_bars, bar_index)
+        array.push(ob_is_bull, false)
+    f_trim_old_ob(ob_bars, ob_highs, ob_lows, ob_is_bull, ob_lifetime_bars)
+
+// ===================== DRAWING (only on last realtime bar) =====================
+if barstate.islast
+    f_delete_drawn()
+
+    // Draw Liquidity lines
+    if show_liquidity
+        limH = math.min(max_liq_display, array.size(high_liq_prices))
+        for li = 0 to limH - 1
+            p = array.get(high_liq_prices, li)
+            b = array.get(high_liq_bars, li)
+            ln = line.new(x1=b, y1=p, x2=bar_index, y2=p, xloc=xloc.bar_index,
+                          color=color.new(color.blue, 50), width=2, style=line.style_dashed)
+            array.push(drawn_lines, ln)
+            lb1 = label.new(x=bar_index, y=p, text="Liquidity H", xloc=xloc.bar_index,
+                           style=label.style_label_left, color=color.blue, textcolor=color.white, size=size.tiny)
+            array.push(drawn_labels, lb1)
+
+        limL = math.min(max_liq_display, array.size(low_liq_prices))
+        for lj = 0 to limL - 1
+            p = array.get(low_liq_prices, lj)
+            b = array.get(low_liq_bars, lj)
+            ln2 = line.new(x1=b, y1=p, x2=bar_index, y2=p, xloc=xloc.bar_index,
+                          color=color.new(color.purple, 50), width=2, style=line.style_dashed)
+            array.push(drawn_lines, ln2)
+            lb2 = label.new(x=bar_index, y=p, text="Liquidity L", xloc=xloc.bar_index,
+                           style=label.style_label_left, color=color.purple, textcolor=color.white, size=size.tiny)
+            array.push(drawn_labels, lb2)
+
+    // Draw FVG boxes
+    if show_fvg
+        limF = math.min(max_fvg_display, array.size(fvg_highs))
+        for lf = 0 to limF - 1
+            fvg_h = array.get(fvg_highs, lf)
+            fvg_l = array.get(fvg_lows, lf)
+            fvg_b = array.get(fvg_bars, lf)
+            bullish = array.get(fvg_is_bull, lf)
+            bgc = bullish ? color.new(color.green, 90) : color.new(color.red, 90)
+            bxF = box.new(left=fvg_b, top=fvg_h, right=bar_index, bottom=fvg_l, xloc=xloc.bar_index,
+                         bgcolor=bgc, border_color=color.new(color.gray, 0))
+            array.push(drawn_boxes, bxF)
+            mid = (fvg_h + fvg_l) / 2
+            lbF = label.new(x=bar_index, y=mid, text=bullish ? "Bull FVG" : "Bear FVG",
+                           color=bullish ? color.green : color.red, textcolor=color.white, size=size.small, xloc=xloc.bar_index)
+            array.push(drawn_labels, lbF)
+
+    // Draw OB boxes
+    if show_ob
+        limO = math.min(max_ob_display, array.size(ob_highs))
+        for lo = 0 to limO - 1
+            ob_h = array.get(ob_highs, lo)
+            ob_l = array.get(ob_lows, lo)
+            ob_b = array.get(ob_bars, lo)
+            isbull = array.get(ob_is_bull, lo)
+            color_ob = isbull ? ob_bullish_color : ob_bearish_color
+            left = ob_b
+            right = ob_b + math.max(1, ob_width_bars) - 1
+            if right > bar_index
+                right := bar_index
+            bxO = box.new(left=left, top=ob_h, right=right, bottom=ob_l, xloc=xloc.bar_index,
+                         bgcolor=color_ob, border_color=color.new(color.gray, 30))
+            array.push(drawn_boxes, bxO)
+            center_bar = left + math.floor((right - left) / 2)
+            lbO = label.new(x=center_bar, y=(ob_h + ob_l) / 2, text= isbull ? "Bull OB" : "Bear OB",
+                           color= isbull ? color.green : color.red, textcolor=color.white, size=size.small, xloc=xloc.bar_index)
+            array.push(drawn_labels, lbO)
+
+// ===================== SIGNALS & STRATEGY RULES =====================
+// latest FVG direction
+latest_fvg_is_bull = array.size(fvg_is_bull) > 0 ? array.get(fvg_is_bull, array.size(fvg_is_bull) - 1) : false
+bullish_fvg_alert = array.size(fvg_is_bull) > 0 and latest_fvg_is_bull
+bearish_fvg_alert = array.size(fvg_is_bull) > 0 and not latest_fvg_is_bull
+
+// helper: check if there's an OB of given polarity within the last `ob_confirm_window` bars
+f_ob_recent(polarity_bull) =>
+    found = false
+    ii = array.size(ob_bars) - 1
+    while ii >= 0
+        b = array.get(ob_bars, ii)
+        if b >= bar_index - ob_confirm_window and array.get(ob_is_bull, ii) == polarity_bull
+            found := true
+            break
+        ii := ii - 1
+    found
+
+// Entry conditions (on confirmed bar)
+if barstate.isconfirmed
+    long_condition = allow_long and bullish_fvg_alert and (not use_ob_confirm or f_ob_recent(true)) and strategy.position_size == 0
+    short_condition = allow_short and bearish_fvg_alert and (not use_ob_confirm or f_ob_recent(false)) and strategy.position_size == 0
+
+    if long_condition
+        // place market entry long
+        strategy.entry("Long", strategy.long, qty=entry_size)
+
+        // compute stop and tp prices
+        stopPrice = close - stop_atr_mult * atr14
+        tpPrice   = close + tp_atr_mult * atr14
+        // attach exit
+        strategy.exit("Exit Long", from_entry="Long", stop=stopPrice, limit=tpPrice)
+
+    if short_condition
+        strategy.entry("Short", strategy.short, qty=entry_size)
+        stopPriceS = close + stop_atr_mult * atr14
+        tpPriceS   = close - tp_atr_mult * atr14
+        strategy.exit("Exit Short", from_entry="Short", stop=stopPriceS, limit=tpPriceS)
+
+// ===================== ALERTS =====================
+alertcondition(bullish_fvg_alert, title="Bullish FVG detected", message="Bullish FVG detected on {{ticker}}")
+alertcondition(bearish_fvg_alert, title="Bearish FVG detected", message="Bearish FVG detected on {{ticker}}")
+
+// ===================== INFO TABLE =====================
+var table info_table = table.new(position.top_right, 2, 4, bgcolor=color.new(color.gray, 90))
+if barstate.islast
+    table.cell(info_table, 0, 0, "Liquidity Levels:", text_color=color.white)
+    table.cell(info_table, 1, 0, str.tostring(array.size(high_liq_prices) + array.size(low_liq_prices)), text_color=color.blue)
+    table.cell(info_table, 0, 1, "FVG Count:", text_color=color.white)
+    table.cell(info_table, 1, 1, str.tostring(array.size(fvg_highs)), text_color=color.green)
+    table.cell(info_table, 0, 2, "OB Count:", text_color=color.white)
+    table.cell(info_table, 1, 2, str.tostring(array.size(ob_highs)), text_color=color.orange)
+    table.cell(info_table, 0, 3, "Latest Signal:", text_color=color.white)
+    latest_signal = bullish_fvg_alert ? "Bullish FVG" : bearish_fvg_alert ? "Bearish FVG" : "None"
+    table.cell(info_table, 1, 3, latest_signal, text_color=bullish_fvg_alert ? color.green : bearish_fvg_alert ? color.red : color.gray)
+
+View in Pine Editor・292 lines
+Use on chart
+6
+3
+2 511
+How the strategy works (summary)
+
+Entry Long when a Bullish FVG is detected (optionally requires a recent Bullish OB).
+
+Entry Short when a Bearish FVG is detected (optionally requires a recent Bearish OB).
+
+Stop Loss and Take Profit are placed using ATR multiples (configurable).
+
+Position sizing is fixed contract/lot size (configurable).
+
+You can require OB confirmation (within ob_confirm_window bars).
+
+Alerts still exist and visuals are preserved.

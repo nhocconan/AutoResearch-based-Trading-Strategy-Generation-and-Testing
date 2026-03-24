@@ -1,0 +1,136 @@
+//@version=5
+strategy(title="DON-SS-TREND-V1.2", overlay=true,default_qty_type = strategy.percent_of_equity,default_qty_value=100,initial_capital=1000,pyramiding=0,commission_value=0.01)//@version=5
+length = input.int(42, minval=1, title = "Donchian Lenght")
+lower = ta.lowest(length)
+upper = ta.highest(length)
+basis = math.avg(upper, lower)
+
+updiff = upper - close
+downdiff = lower - close
+dontrend = -(updiff + downdiff)   
+//plot(dontrend, "DON-SS", color=color.green,linewidth = 3)
+//zerox =ta.valuewhen(ta.cross(dontrend,0),close,0)
+//plot(zerox, "ZEROTH", color=color.black,linewidth = 3)
+
+xupx = ta.highest(dontrend,length) 
+xdownx = ta.lowest(dontrend,length) 
+inversedragup = xupx[1]  
+inversedragdown = xdownx[1]  
+inversedragon = (inversedragup+inversedragdown)/2
+//plot(close+inversedragon, "Inverse-Drag", color=color.blue,style = plot.style_line,linewidth = 3)
+
+emalengthslow = input.int(5, minval=1,title = "Slow EMA")
+emax = ta.ema(dontrend,emalengthslow)
+//plot(emax, "EMA-SLOW", color=color.black)
+
+emalengthfast = input.int(45, minval=1,title = "Fast EMA")
+emin = ta.ema(dontrend,emalengthfast)
+//plot(emin, "EMA-FAST", color=color.black)
+
+EMAlengthTRF = input.int(200, minval=1,title = "EMA Filter")
+ematrf = ta.ema(close,EMAlengthTRF)
+/////////////////////// MACD FILTER ////////////////
+fast_length = input(title="Fast Length-MACD", defval=5)
+slow_length = input(title="Slow Length-MACD", defval=45)
+src = input(title="Source", defval=close)
+signal_length = input.int(title="Signal Smoothing",  minval = 1, maxval = 50, defval = 5)
+sma_source = input.string(title="Oscillator MA Type",  defval="EMA", options=["SMA", "EMA"])
+sma_signal = input.string(title="Signal Line MA Type", defval="EMA", options=["SMA", "EMA"])
+// Calculating
+fast_ma = sma_source == "SMA" ? ta.sma(src, fast_length) : ta.ema(src, fast_length)
+slow_ma = sma_source == "SMA" ? ta.sma(src, slow_length) : ta.ema(src, slow_length)
+macd = fast_ma - slow_ma
+signal = sma_signal == "SMA" ? ta.sma(macd, signal_length) : ta.ema(macd, signal_length)
+hist = macd - signal
+
+
+/////////////////////// STRATEGY ////////////////
+ShortConditionx = (ta.crossunder(emax,emin) and close<ematrf) or ta.crossunder(close,ematrf) and macd<signal
+longConditionx = (ta.crossover(emax,emin) and close>ematrf) or ta.crossover(close,ematrf) and macd>signal
+
+tp1 = input.int(5, minval=1,title = "TP-1")
+tp2 = input.int(10, minval=1,title = "TP-2")
+tp3 = input.int(15, minval=1,title = "TP-3")
+
+ematp = ta.ema(close,5)
+sellzerox =ta.valuewhen(ShortConditionx,close,0)
+plot(sellzerox, "SELL-ZEROTH", color=color.black,linewidth = 3)
+TPTAKA1S = sellzerox*(1-tp1/100)
+plot(TPTAKA1S, "SELL-TP1", color=color.red,linewidth = 1)
+TPTAKA2S = sellzerox*(1-tp2/100)
+plot(TPTAKA2S, "SELL-TP2", color=color.red,linewidth = 1)
+TPTAKA3S = sellzerox*(1-tp3/100)
+plot(TPTAKA3S, "SELL-TP3", color=color.red,linewidth = 1)
+
+buyzerox =ta.valuewhen(longConditionx,close,0)
+plot(buyzerox, "BUY-ZEROTH", color=color.blue,linewidth = 3)
+TPTAKA1B = buyzerox*(1+tp1/100)
+plot(TPTAKA1B, "BUY-TP1", color=color.red,linewidth = 1)
+TPTAKA2B = buyzerox*(1+tp2/100)
+plot(TPTAKA2B, "BUY-TP2", color=color.red,linewidth = 1)
+TPTAKA3B = buyzerox*(1+tp3/100)
+plot(TPTAKA3B, "BUY-TP3", color=color.red,linewidth = 1)
+
+/////////////////////// TAKE PROFIT SECTION ////////////////
+BUYTP = ta.crossunder(dontrend,inversedragon) or ta.crossunder(ematp,TPTAKA1B) or ta.crossunder(ematp,TPTAKA2B) or ta.crossunder(ematp,TPTAKA3B) 
+SELLTP = ta.crossover(dontrend,inversedragon) or ta.crossover(ematp,TPTAKA1S) or ta.crossover(ematp,TPTAKA2S) or ta.crossover(ematp,TPTAKA3S)
+
+// Check for Long Entry
+longCondition = (ta.crossover(emax,emin) and close>ematrf) or ta.crossover(close,ematrf)
+if longCondition
+    strategy.entry('Long', strategy.long, comment = "ENTER-LONG")
+
+buyclose = ta.crossunder(emax,emin) or ta.crossunder(close,ematrf) or ShortConditionx==true or ta.crossunder(dontrend,0)  
+// Exit condition 
+strategy.close('Long', when=buyclose or BUYTP==true, comment = "EXIT-LONG")
+
+// Check for Short Entry
+ShortCondition = (ta.crossunder(emax,emin) and close<ematrf) or ta.crossunder(close,ematrf)
+if ShortCondition
+    strategy.entry('Short', strategy.short, comment = "ENTER-SHORT")
+
+sellclose = ta.crossover(emax,emin) or ta.crossover(close,ematrf) or longConditionx==true  or ta.crossover(dontrend,0)
+// Exit condition 
+strategy.close('Short', when=sellclose or SELLTP==true, comment = "EXIT-SHORT")
+///// END OF STRATEGY ///////////
+
+View in Pine Editor・95 lines
+Use on chart
+1
+5
+5
+5 006
+Mar 5, 2023
+The Donchian Trend strategy is a trend-following approach that uses the Donchian Channels indicator to identify potential entry and exit points in a security. The Donchian Channels are formed by taking the highest high and the lowest low prices over a specified period and plotting them as upper and lower channels around the current price. The width of the channels indicates the level of volatility in the market.
+
+In this strategy, the Donchian Channels are used as a trend filter to determine the direction of the market. When the price is above the upper channel, it suggests an uptrend, and when the price is below the lower channel, it indicates a downtrend. The length of the Donchian Channels is a key parameter in the strategy, as it determines the look-back period for identifying the high and low prices.
+
+Additional Logic: To further refine the entry and exit signals, The script uses two moving averages, a fast one (MA5) and a slow one (MA45), to identify trends and generate trading signals. When the fast moving average crosses above the slow moving average, a buy signal is generated, indicating that the market is trending upwards. Conversely, when the fast moving average crosses below the slow moving average, a sell signal is generated, indicating that the market is trending downwards.
+
+Evaluation: The script was backtested on historical price data for the [Insert your chosen trading pair here] pair. The backtest results showed that the script was able to generate a net profit of [Insert your backtest net profit here], with a profit factor of [Insert your backtest profit factor here] and a Sharpe ratio of [Insert your backtest Sharpe ratio here]. The script also includes metrics such as the number of winning and losing trades, the average trade, and the largest winning and losing trades.
+The strategy is evaluated based on its net profit, gross profit, gross loss, max run-up, max drawdown, buy & hold return, Sharpe ratio, Sortino ratio, and profit factor. The parameters used in the backtest include a Donchian Channel length of 42, which corresponds to a weekly time with divide of 4h time frame, and a short-term MA of 5 and a long-term MA of 45 for more accurate entry and exit signals.
+
+Disclaimer: This script is for educational and research purposes only and should not be used for trading with real money without further testing and validation. Past performance is not indicative of future results.
+Mar 6, 2023
+Release Notes
+There are some coding upgrades on the script.
+Feel free to use it, thank you in advance guys.
+Mar 6, 2023
+Release Notes
+In oder to increase the profit % the ema filter was added in strategy, if you have any applicable sugestions to decrease the drawdown feel free to write us guys, thank you in advance.
+Mar 6, 2023
+Release Notes
+Some minor adjustments was made.
+Mar 8, 2023
+Release Notes
+Price based trailing stop loss was ( similar to donchian base line ) added on the strategy in order to increase profitability and decrease the dragdown.
+Hope you are enjoying the results guys :D There are lots of thing needs to be improved we are aware of it and we appreciate if you write us your comments, thank you in advance.
+Mar 9, 2023
+Release Notes
+Some codes was updated and macd was added as a trend filter too , look for results ...
+Mar 9, 2023
+Release Notes
+Hello guys,
+The strategy is refined for visual understanding we also added a three limited take profit sections.
+Hop you enjoy it and dont forget to like & share , we are also appreciate if you buy us a coffe or beer either way we dont say no to donations :D
+

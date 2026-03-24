@@ -1,0 +1,59 @@
+//@version=6
+strategy("EMA Wick A+ Retest Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+emaLen      = input.int(21, "EMA Length")
+atrLen      = input.int(21, "ATR Length")
+rrTarget    = input.float(1.5, "Risk:Reward Target", step=0.1)
+useRSI      = input.bool(true, "Use RSI > 50?")
+useAPlus    = input.bool(true, "Use A+ Wick Retest?")
+minWickPerc = input.int(50, "Min Wick % of Candle", minval=1, maxval=100)
+
+// === CORE INDICATORS ===
+ema21   = ta.ema(close, emaLen)
+atr     = ta.atr(atrLen)
+rsi     = ta.rsi(close, 14)
+
+// === CANDLE STRUCTURE ===
+bodySize = math.abs(close - open)
+lowerWick = math.min(open, close) - low
+wickPerc = (lowerWick / (high - low + 1e-5)) * 100
+
+// === CONDITIONS ===
+isBull = close > open
+wickTouch = low <= ema21 and close > ema21
+rsiValid = not useRSI or rsi > 50
+aPlusValid = not useAPlus or (wickPerc >= minWickPerc)
+
+buySignal = isBull and wickTouch and rsiValid and aPlusValid
+
+// === RISK CALC ===
+entry = close
+sl = entry - atr
+tp = entry + atr * rrTarget
+
+// === EXECUTION ===
+if buySignal
+    strategy.entry("Buy A+", strategy.long)
+    strategy.exit("TP/SL", from_entry="Buy A+", stop=sl, limit=tp)
+
+// === PLOT ===
+plot(ema21, title="EMA 21", color=color.orange)
+plotshape(buySignal, title="Buy A+", location=location.belowbar, style=shape.labelup, color=color.green, text="Buy")
+
+View in Pine Editor・42 lines
+Use on chart
+1
+3
+735
+The EMA Wick A+ Retest Strategy is a precision pullback system built for high-probability trend entries. It uses a combination of:
+EMA 21 dynamic trend filtering
+ATR-based stop-loss and reward targeting (1:1.5 RR)
+Wick retest logic, where the lower wick must touch the EMA and represent at least 50% of the candle's range
+Optional filter: RSI > 50 for bullish momentum confirmation
+This strategy is designed to capture institutional-style entries after a clean pullback in an uptrend.
+✅ Clean signals
+✅ High risk-to-reward setups
+✅ Built for swing trading or intraday with strong trend bias
+Ideal for Forex, Crypto, and Indices.
+Use responsibly. Backtest before live trading.

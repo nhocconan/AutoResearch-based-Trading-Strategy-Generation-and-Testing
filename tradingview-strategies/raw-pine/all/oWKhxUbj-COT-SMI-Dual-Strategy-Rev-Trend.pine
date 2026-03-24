@@ -1,0 +1,830 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// Forex COT + SMI Strategy - Dual Mode (Reversal & Trend Following)
+// ═══════════════════════════════════════════════════════════════════════════
+// This strategy combines:
+// 1. COT (Commitment of Traders) positioning analysis
+// 2. Stochastic Momentum Index (SMI) momentum confirmation
+// 
+// ═══════════════════════════════════════════════════════════════════════════
+// MODE 1: REVERSAL (Contrarian - Fade the Crowd)
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC:
+// • BUY: COT Index < 20% (speculators extremely short) + SMI crosses above oversold
+// • SELL: COT Index > 80% (speculators extremely long) + SMI crosses below overbought
+// • Logic: When everyone is positioned one way, market likely to reverse
+//
+// COT Filter ON: Requires extreme COT levels for entry (safer, fewer trades)
+// COT Filter OFF: Takes all SMI crossovers (more trades, less selective)
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// MODE 2: TREND FOLLOWING (Follow Momentum)
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC:
+// • BUY: SMI crosses above oversold (momentum turning bullish)
+// • SELL: SMI crosses below overbought (momentum turning bearish)
+//
+// COT Filter ON: Only trades when COT positioning confirms direction
+//   - Buy only if COT Index > 50 (majority positioned long = bullish)
+//   - Sell only if COT Index < 50 (majority positioned short = bearish)
+//   - Visual: Green background = bullish zone, Red background = bearish zone
+// COT Filter OFF: Takes all SMI crossovers (pure momentum)
+//
+// NOTE: Background colors mean DIFFERENT things in each mode:
+//   REVERSAL: Green = extreme short (contrarian buy), Red = extreme long (contrarian sell)
+//   TREND: Green = bullish positioning (trend buy), Red = bearish positioning (trend sell)
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// EXIT LOGIC (Same for Both Modes):
+// ═══════════════════════════════════════════════════════════════════════════
+// Exit Long: SMI crosses below overbought (40) OR hits TP/SL
+// Exit Short: SMI crosses above oversold (-40) OR hits TP/SL
+//
+// "Close Position on SMI Exit Signal":
+// • TRUE: Exits on SMI crossover (dynamic, responsive)
+// • FALSE: Only uses TP/SL for exits (lets trades run)
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// RECOMMENDED SETTINGS:
+// ═══════════════════════════════════════════════════════════════════════════
+// Reversal Mode:
+// • Timeframe: Weekly or Daily
+// • Trader Category: Noncommercial Positions
+// • COT Filter: ON (requires extremes)
+// • COT Thresholds: 80/20 or 85/15
+// • Best for: Range-bound markets, major reversals
+//
+// Trend Following Mode:
+// • Timeframe: Daily or 4H
+// • Trader Category: Commercial Positions (follow smart money)
+// • COT Filter: ON (confirms trend)
+// • Best for: Trending markets
+//
+// Both Modes:
+// • ATR TP: 2.0 | ATR SL: 1.0 (Risk:Reward = 1:2)
+// • Commission: 0.1% | Slippage: 3 pips
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// BACKTESTING TIPS:
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. Test BOTH modes on same timeframe to compare
+// 2. Test with COT Filter ON vs OFF to measure its value
+// 3. Reversal mode typically has lower win rate but bigger winners
+// 4. Trend following typically has higher win rate but more whipsaws
+// 5. Try different trader categories for each mode
+// 6. Optimize SMI levels separately for each mode
+//
+// QUICK SETTINGS COMPARISON GUIDE:
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST 1: Reversal with COT Filter
+//   Mode: Reversal | COT Filter: ON | Category: Noncommercial
+//   → Classic contrarian: fade the speculators at extremes
+//
+// TEST 2: Reversal without COT Filter  
+//   Mode: Reversal | COT Filter: OFF
+//   → Pure SMI reversals, no COT requirement (more trades)
+//
+// TEST 3: Trend with COT Filter
+//   Mode: Trend Following | COT Filter: ON | Category: Commercial
+//   → Follow momentum when smart money agrees
+//
+// TEST 4: Trend without COT Filter
+//   Mode: Trend Following | COT Filter: OFF
+//   → Pure momentum trading, no positioning filter
+// ═══════════════════════════════════════════════════════════════════════════
+
+strategy("COT + SMI Dual Strategy (Rev/Trend)", overlay=false, precision=0,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=3)
+
+// Import TradingView's official COT library (v3 has convertRootToCOTCode)
+import TradingView/LibraryCOT/3 as COT
+
+// ========================
+// INPUT SETTINGS
+// ========================
+
+// ========================
+// STRATEGY MODE
+// ========================
+
+strategyMode = input.string("Reversal", "Strategy Mode", 
+     options=["Reversal", "Trend Following"],
+     tooltip="Reversal: Fade extremes (buy at COT extreme short)\nTrend Following: Follow momentum (buy on SMI uptrend)",
+     group="Strategy Mode")
+
+useCOTFilter = input.bool(true, "Use COT Filter", 
+     group="Strategy Mode",
+     tooltip="Reversal Mode: Requires COT extremes for entry\nTrend Following: Uses COT to confirm trend direction\nDisable to trade pure SMI signals")
+
+// Display mode selection
+displayMode = input.string("COT Index", "Display Mode", 
+     options=["Positions", "COT Index", "Both"],
+     tooltip="Positions: Raw long/short/net values\nCOT Index: Stochastic 0-100 (extreme levels)\nBoth: Show both",
+     group="Display")
+
+// COT Report Type
+reportType = input.string("Legacy", "COT Report Type", 
+     options=["Legacy", "Disaggregated", "Financial"], 
+     tooltip="Legacy: Traditional COT report\nDisaggregated: More detailed breakdown\nFinancial: Financial futures breakdown",
+     group="Data Source")
+
+// Trader category selection - varies by report type
+// Legacy: Noncommercial, Commercial, Total Reportable, Nonreportable
+// Disaggregated: Producer Merchant, Swap, Managed Money, Other Reportable  
+// Financial: Dealer, Asset Manager, Leveraged Funds, Other Reportable
+metricName = input.string("Noncommercial Positions", "Trader Category", 
+     options=[
+         "Noncommercial Positions", 
+         "Commercial Positions", 
+         "Total Reportable Positions", 
+         "Nonreportable Positions",
+         "Producer Merchant Positions",
+         "Swap Positions",
+         "Managed Money Positions",
+         "Dealer Positions",
+         "Asset Manager Positions",
+         "Leveraged Funds Positions",
+         "Other Reportable Positions"
+     ],
+     tooltip="Select category based on report type:\nLegacy: Noncommercial/Commercial\nDisaggregated: Managed Money/Producer Merchant/Swap\nFinancial: Leveraged Funds/Dealer/Asset Manager",
+     group="Data Source")
+
+// Position type
+metricType = input.string("All", "Position Type", 
+     options=["All", "Old", "Other"], 
+     tooltip="All: All positions\nOld: Positions from previous report\nOther: Spreading positions",
+     group="Data Source")
+
+// Display options
+showNet = input.bool(true, "Show Net Positions", group="Display")
+showLong = input.bool(false, "Show Long Positions", group="Display")
+showShort = input.bool(false, "Show Short Positions", group="Display")
+
+// Moving average
+maLength = input.int(10, "Moving Average Length", minval=1, group="Display")
+showMA = input.bool(true, "Show Moving Average", group="Display")
+
+// COT Index (Stochastic) settings
+showIndex = input.bool(true, "Show COT Index (Stochastic)", group="COT Index")
+indexLength = input.int(52, "Index Lookback Period (weeks)", minval=10, group="COT Index")
+upperThreshold = input.int(80, "Overbought Level", minval=50, maxval=100, group="COT Index")
+lowerThreshold = input.int(20, "Oversold Level", minval=0, maxval=50, group="COT Index")
+showThresholds = input.bool(true, "Show Threshold Lines", group="COT Index")
+
+// Stochastic Momentum Index settings
+showSMI = input.bool(true, "Show Stochastic Momentum Index", group="Stochastic")
+smi_k_length = input.int(10, "Percent K Length", minval=1, group="Stochastic")
+smi_d_length = input.int(3, "Percent D Length", minval=1, group="Stochastic")
+smi_ema_length = input.int(10, "EMA Signal Length", minval=1, group="Stochastic")
+smi_smooth = input.int(5, "Smoothing Period", minval=1, group="Stochastic")
+smi_ob = input.float(40, "Overbought", minval=-100, maxval=100, group="Stochastic")
+smi_os = input.float(-40, "Oversold", minval=-100, maxval=100, group="Stochastic")
+
+// Signal Arrows
+showArrows = input.bool(true, "Show Signal Arrows", group="Signals")
+arrowOffset = input.int(5, "Arrow Offset", minval=0, maxval=20, group="Signals",
+     tooltip="Distance of arrows from COT Index line")
+
+// ========================
+// STRATEGY SETTINGS
+// ========================
+
+// Take Profit / Stop Loss
+useTPSL = input.bool(true, "Use TP/SL", group="Strategy")
+useATR = input.bool(true, "Use ATR-based TP/SL", group="Strategy")
+
+// ATR Settings
+atrLength = input.int(14, "ATR Length", minval=1, group="Strategy")
+atrMultiplierTP = input.float(2.0, "ATR Multiplier for TP", minval=0.1, step=0.1, group="Strategy")
+atrMultiplierSL = input.float(1.0, "ATR Multiplier for SL", minval=0.1, step=0.1, group="Strategy")
+
+// Fixed TP/SL (used when ATR is disabled)
+fixedTPPercent = input.float(2.0, "Fixed TP %", minval=0.1, step=0.1, group="Strategy")
+fixedSLPercent = input.float(1.0, "Fixed SL %", minval=0.1, step=0.1, group="Strategy")
+
+// Position Management
+allowLong = input.bool(true, "Allow Long Positions", group="Strategy")
+allowShort = input.bool(true, "Allow Short Positions", group="Strategy")
+exitOnOpposite = input.bool(true, "Close Position on SMI Exit Signal", group="Strategy",
+     tooltip="When enabled, exits positions when SMI crosses back (regardless of COT status)\nWhen disabled, only uses TP/SL for exits")
+
+// Position Sizing
+useDynamicSizing = input.bool(false, "Use Risk-Based Position Sizing", group="Strategy")
+riskPercentage = input.float(1.0, "Risk Per Trade %", minval=0.1, maxval=10, step=0.1, group="Strategy",
+     tooltip="Percentage of equity to risk per trade (only when using risk-based sizing)")
+
+// ========================
+// GET COT DATA
+// ========================
+
+// Get CFTC code using Auto mode (tries Root -> Base Currency -> Currency)
+cftcCode = COT.convertRootToCOTCode("Auto")
+
+// Request Long positions
+longPositions = COT.requestCommitmentOfTraders(
+     COTType = reportType,
+     CFTCCode = cftcCode,
+     includeOptions = false,
+     metricName = metricName,
+     metricDirection = "Long",
+     metricType = metricType
+ )
+
+// Request Short positions  
+shortPositions = COT.requestCommitmentOfTraders(
+     COTType = reportType,
+     CFTCCode = cftcCode,
+     includeOptions = false,
+     metricName = metricName,
+     metricDirection = "Short",
+     metricType = metricType
+ )
+
+// Calculate net positions
+netPositions = longPositions - shortPositions
+
+// Calculate moving average
+netMA = ta.sma(netPositions, maLength)
+
+// ========================
+// COT INDEX (STOCHASTIC)
+// ========================
+
+// Calculate COT Index for each position type
+// Index = (Current - Min) / (Max - Min) * 100
+// This shows where current positioning is relative to the lookback period
+
+calcCOTIndex(value, length) =>
+    highest = ta.highest(value, length)
+    lowest = ta.lowest(value, length)
+    ranger = highest - lowest
+    index = ranger != 0 ? ((value - lowest) / ranger) * 100 : 50
+    index
+
+longIndex = calcCOTIndex(longPositions, indexLength)
+shortIndex = calcCOTIndex(shortPositions, indexLength)
+netIndex = calcCOTIndex(netPositions, indexLength)
+
+// ========================
+// STOCHASTIC MOMENTUM INDEX
+// ========================
+
+// Range Calculation
+ll = ta.lowest(low, smi_k_length)
+hh = ta.highest(high, smi_k_length)
+diff = hh - ll
+rdiff = close - (hh+ll)/2
+
+avgrel = ta.ema(rdiff, smi_d_length)
+avgdiff = ta.ema(diff, smi_d_length)
+
+// SMI calculations
+SMI = avgdiff != 0 ? (avgrel/(avgdiff/2)*100) : 0.0
+
+// Apply smoothing to SMI
+SMI_smoothed = ta.sma(SMI, smi_smooth)
+emasignal = ta.ema(SMI_smoothed, smi_ema_length)
+
+// ========================
+// SIGNAL DETECTION
+// ========================
+
+// COT extreme conditions (for reversal mode)
+cotExtremeShort = netIndex < lowerThreshold  // Green background - buy signal in reversal
+cotExtremeLong = netIndex > upperThreshold   // Red background - sell signal in reversal
+
+// COT trend filter (for trend-following mode)
+// Option 1: Use net position direction (basic trend)
+cotBullishBias = netPositions > 0  // Traders are net long
+cotBearishBias = netPositions < 0  // Traders are net short
+
+// Option 2: Use COT Index above/below midpoint (stronger filter)
+// This aligns better with background colors for visual clarity
+cotBullishTrend = netIndex > 50  // COT Index in upper half = bullish positioning
+cotBearishTrend = netIndex < 50  // COT Index in lower half = bearish positioning
+
+// Stochastic crossovers
+smiCrossAboveOversold = ta.crossover(SMI_smoothed, smi_os)
+smiCrossBelowOverbought = ta.crossunder(SMI_smoothed, smi_ob)
+
+// Track if we've already shown an arrow in current extreme zone (reversal mode only)
+var bool greenArrowShown = false
+var bool redArrowShown = false
+
+// Reset arrow flags when we exit extreme zones (reversal mode)
+if netIndex > lowerThreshold + 5  // Exit oversold with small buffer
+    greenArrowShown := false
+if netIndex < upperThreshold - 5   // Exit overbought with small buffer
+    redArrowShown := false
+
+// ========================
+// GENERATE SIGNALS BASED ON MODE
+// ========================
+
+bool buySignal = false
+bool sellSignal = false
+
+if strategyMode == "Reversal"
+    // REVERSAL MODE: Buy at extremes when crowd is wrong
+    if useCOTFilter
+        // Requires COT extremes
+        buySignal := showArrows and cotExtremeShort and smiCrossAboveOversold and not greenArrowShown
+        sellSignal := showArrows and cotExtremeLong and smiCrossBelowOverbought and not redArrowShown
+    else
+        // Pure SMI signals, no COT filter
+        buySignal := showArrows and smiCrossAboveOversold and not greenArrowShown
+        sellSignal := showArrows and smiCrossBelowOverbought and not redArrowShown
+        // Still use arrow tracking to prevent multiple signals
+        if netIndex > lowerThreshold + 5
+            greenArrowShown := false
+        if netIndex < upperThreshold - 5
+            redArrowShown := false
+
+else if strategyMode == "Trend Following"
+    // TREND FOLLOWING MODE: Follow momentum
+    if useCOTFilter
+        // Use COT Index to confirm trend direction (aligns with background colors)
+        // Buy when momentum up AND COT positioning is bullish (Index > 50)
+        // Sell when momentum down AND COT positioning is bearish (Index < 50)
+        buySignal := showArrows and smiCrossAboveOversold and cotBullishTrend
+        sellSignal := showArrows and smiCrossBelowOverbought and cotBearishTrend
+    else
+        // Pure SMI momentum signals
+        buySignal := showArrows and smiCrossAboveOversold
+        sellSignal := showArrows and smiCrossBelowOverbought
+
+// Update arrow tracking for reversal mode
+if strategyMode == "Reversal"
+    if buySignal
+        greenArrowShown := true
+    if sellSignal
+        redArrowShown := true
+
+// Exit signals (SMI only, no COT check)
+// These trigger regardless of COT status - purely based on momentum
+exitLongSignal = smiCrossBelowOverbought  // Exit long when SMI crosses below overbought
+exitShortSignal = smiCrossAboveOversold   // Exit short when SMI crosses above oversold
+
+// ========================
+// ATR CALCULATION
+// ========================
+
+atrValue = ta.atr(atrLength)
+
+// ========================
+// STRATEGY EXECUTION
+// ========================
+
+// Calculate TP and SL levels
+var float longTP = na
+var float longSL = na
+var float shortTP = na
+var float shortSL = na
+var float positionSize = na
+float riskAmount = 0.0
+float slDistance = 0.0
+
+if buySignal and allowLong
+    if useATR
+        longTP := close + (atrValue * atrMultiplierTP)
+        longSL := close - (atrValue * atrMultiplierSL)
+    else
+        longTP := close * (1 + fixedTPPercent / 100)
+        longSL := close * (1 - fixedSLPercent / 100)
+    
+    // Calculate position size based on risk
+    if useDynamicSizing
+        riskAmount := strategy.equity * (riskPercentage / 100)
+        slDistance := close - longSL
+        positionSize := riskAmount / slDistance
+    else
+        positionSize := na  // Use default strategy settings
+
+if sellSignal and allowShort
+    if useATR
+        shortTP := close - (atrValue * atrMultiplierTP)
+        shortSL := close + (atrValue * atrMultiplierSL)
+    else
+        shortTP := close * (1 - fixedTPPercent / 100)
+        shortSL := close * (1 + fixedSLPercent / 100)
+    
+    // Calculate position size based on risk
+    if useDynamicSizing
+        riskAmount := strategy.equity * (riskPercentage / 100)
+        slDistance := shortSL - close
+        positionSize := riskAmount / slDistance
+    else
+        positionSize := na  // Use default strategy settings
+
+// Entry conditions
+// When exitOnOpposite is true, don't reverse positions (stay flat after exit)
+longCondition = buySignal and allowLong and not (exitOnOpposite and strategy.position_size < 0)
+shortCondition = sellSignal and allowShort and not (exitOnOpposite and strategy.position_size > 0)
+
+// Exit on opposite signal (SMI crossover only, no COT check)
+exitLongOnSignal = exitOnOpposite and exitLongSignal and strategy.position_size > 0
+exitShortOnSignal = exitOnOpposite and exitShortSignal and strategy.position_size < 0
+
+// Close positions first if needed
+if exitLongOnSignal
+    strategy.close("Long", comment="SMI Exit Signal")
+    
+if exitShortOnSignal
+    strategy.close("Short", comment="SMI Exit Signal")
+
+// Execute trades
+if longCondition
+    if strategy.position_size < 0 and not exitOnOpposite  // Only reverse if exitOnOpposite is false
+        strategy.close("Short", comment="Reverse to Long")
+    if useTPSL
+        if useDynamicSizing
+            strategy.entry("Long", strategy.long, qty=positionSize, comment="COT+SMI Long")
+        else
+            strategy.entry("Long", strategy.long, comment="COT+SMI Long")
+        strategy.exit("Long Exit", "Long", limit=longTP, stop=longSL, comment="TP/SL")
+    else
+        if useDynamicSizing
+            strategy.entry("Long", strategy.long, qty=positionSize, comment="COT+SMI Long")
+        else
+            strategy.entry("Long", strategy.long, comment="COT+SMI Long")
+
+if shortCondition
+    if strategy.position_size > 0 and not exitOnOpposite  // Only reverse if exitOnOpposite is false
+        strategy.close("Long", comment="Reverse to Short")
+    if useTPSL
+        if useDynamicSizing
+            strategy.entry("Short", strategy.short, qty=positionSize, comment="COT+SMI Short")
+        else
+            strategy.entry("Short", strategy.short, comment="COT+SMI Short")
+        strategy.exit("Short Exit", "Short", limit=shortTP, stop=shortSL, comment="TP/SL")
+    else
+        if useDynamicSizing
+            strategy.entry("Short", strategy.short, qty=positionSize, comment="COT+SMI Short")
+        else
+            strategy.entry("Short", strategy.short, comment="COT+SMI Short")
+
+// ========================
+// PLOTTING
+// ========================
+
+// Choose what to display: raw positions or COT Index
+showPositions = displayMode == "Positions" or displayMode == "Both"
+
+netPlot = plot(showPositions and showNet ? netPositions : na, "Net Positions", 
+     color=color.new(color.blue, 0), linewidth=2)
+
+maPlot = plot(showPositions and showMA and showNet ? netMA : na, "MA", 
+     color=color.new(color.orange, 0), linewidth=1)
+
+longPlot = plot(showPositions and showLong ? longPositions : na, "Long Positions", 
+     color=color.new(color.green, 0), linewidth=1)
+
+shortPlot = plot(showPositions and showShort ? shortPositions : na, "Short Positions", 
+     color=color.new(color.red, 0), linewidth=1)
+
+// Fill between long and short
+fill(longPlot, shortPlot, color=color.new(color.purple, 90))
+
+// Zero line for positions
+hline(0, "Zero Line", color=showPositions ? color.gray : na, linestyle=hline.style_dashed)
+
+// ========================
+// COT INDEX PLOTS
+// ========================
+
+showIndexPlots = displayMode == "COT Index" or displayMode == "Both"
+
+// Net Index (main line)
+netIndexColor = netIndex > upperThreshold ? color.new(color.red, 0) :                 netIndex < lowerThreshold ? color.new(color.green, 0) :                 color.new(color.blue, 0)
+
+plot(showIndexPlots and showIndex ? netIndex : na, "Net COT Index", 
+     color=netIndexColor, linewidth=2, style=plot.style_line)
+
+// Long and Short indices (optional)
+plot(showIndexPlots and showIndex and showLong ? longIndex : na, "Long Index", 
+     color=color.new(color.green, 30), linewidth=1)
+
+plot(showIndexPlots and showIndex and showShort ? shortIndex : na, "Short Index", 
+     color=color.new(color.red, 30), linewidth=1)
+
+// Threshold lines for COT Index
+hline(upperThreshold, "Overbought", 
+      color=showIndexPlots and showIndex and showThresholds ? color.new(color.red, 50) : na, 
+      linestyle=hline.style_dashed)
+hline(lowerThreshold, "Oversold", 
+      color=showIndexPlots and showIndex and showThresholds ? color.new(color.green, 50) : na, 
+      linestyle=hline.style_dashed)
+hline(50, "Neutral", 
+      color=showIndexPlots and showIndex and showThresholds ? color.new(color.gray, 70) : na, 
+      linestyle=hline.style_dotted)
+
+// ========================
+// STOCHASTIC MOMENTUM INDEX PLOTS
+// ========================
+
+// Plot SMI when enabled
+plot(showSMI ? SMI_smoothed : na, "Stochastic", color=color.new(color.black, 0), linewidth=1)
+plot(showSMI ? emasignal : na, "EMA Signal", color=color.new(color.orange, 0), linewidth=1)
+
+// SMI overbought/oversold levels
+hline(smi_ob, "SMI Overbought", color=showSMI ? color.new(color.gray, 50) : na, linestyle=hline.style_dotted)
+hline(smi_os, "SMI Oversold", color=showSMI ? color.new(color.gray, 50) : na, linestyle=hline.style_dotted)
+
+// Fill SMI overbought/oversold zones
+level_obsmi = SMI_smoothed > smi_ob ? SMI_smoothed : smi_ob
+level_ossmi = SMI_smoothed < smi_os ? SMI_smoothed : smi_os
+
+p1 = plot(showSMI ? smi_ob : na, display=display.none)
+p2 = plot(showSMI ? level_obsmi : na, display=display.none)
+p3 = plot(showSMI ? smi_os : na, display=display.none)
+p4 = plot(showSMI ? level_ossmi : na, display=display.none)
+
+fill(p1, p2, color=color.new(color.red, 80), title='SMI OverBought')
+fill(p3, p4, color=color.new(color.green, 80), title='SMI OverSold')
+
+// ========================
+// SIGNAL ARROWS
+// ========================
+
+// Calculate arrow positions on COT Index line
+arrowBuyY = netIndex - arrowOffset
+arrowSellY = netIndex + arrowOffset
+
+// Reversal mode arrows
+reversalBuy = buySignal and strategyMode == "Reversal"
+reversalSell = sellSignal and strategyMode == "Reversal"
+
+plotshape(reversalBuy ? arrowBuyY : na, "Reversal Buy", 
+          style=shape.triangleup, location=location.absolute, 
+          color=color.new(color.green, 0), size=size.normal,
+          text="REV BUY")
+
+plotshape(reversalSell ? arrowSellY : na, "Reversal Sell", 
+          style=shape.triangledown, location=location.absolute, 
+          color=color.new(color.red, 0), size=size.normal,
+          text="REV SELL")
+
+// Trend following mode arrows
+trendBuy = buySignal and strategyMode == "Trend Following"
+trendSell = sellSignal and strategyMode == "Trend Following"
+
+plotshape(trendBuy ? arrowBuyY : na, "Trend Buy", 
+          style=shape.triangleup, location=location.absolute, 
+          color=color.new(color.lime, 0), size=size.normal,
+          text="TREND BUY")
+
+plotshape(trendSell ? arrowSellY : na, "Trend Sell", 
+          style=shape.triangledown, location=location.absolute, 
+          color=color.new(color.maroon, 0), size=size.normal,
+          text="TREND SELL")
+
+// Mark SMI exit signals (small crosses)
+plotshape(exitLongSignal and strategy.position_size > 0 ? netIndex : na, 
+          "Exit Long Signal", 
+          style=shape.xcross, location=location.absolute, 
+          color=color.new(color.orange, 0), size=size.tiny,
+          text="X")
+
+plotshape(exitShortSignal and strategy.position_size < 0 ? netIndex : na, 
+          "Exit Short Signal", 
+          style=shape.xcross, location=location.absolute, 
+          color=color.new(color.blue, 0), size=size.tiny,
+          text="X")
+
+// ========================
+// TP/SL VISUALIZATION
+// ========================
+
+// Plot TP/SL levels when in position
+inLongPosition = strategy.position_size > 0
+inShortPosition = strategy.position_size < 0
+
+// Plot current TP/SL levels as reference lines
+plot(inLongPosition and useTPSL ? longTP : na, "Long TP", 
+     color=color.new(color.green, 0), linewidth=1, style=plot.style_cross)
+plot(inLongPosition and useTPSL ? longSL : na, "Long SL", 
+     color=color.new(color.red, 0), linewidth=1, style=plot.style_cross)
+plot(inShortPosition and useTPSL ? shortTP : na, "Short TP", 
+     color=color.new(color.green, 0), linewidth=1, style=plot.style_cross)
+plot(inShortPosition and useTPSL ? shortSL : na, "Short SL", 
+     color=color.new(color.red, 0), linewidth=1, style=plot.style_cross)
+
+// ========================
+// TABLE DISPLAY
+// ========================
+
+// Create a table to display current values
+var table infoTable = table.new(position.top_right, 2, 15, 
+     bgcolor=color.new(color.black, 85), 
+     frame_color=color.gray, 
+     frame_width=1)
+
+if barstate.islast
+    // Header
+    string modeText = strategyMode == "Reversal" ? "REV" : "TREND"
+    string filterText = useCOTFilter ? " + COT" : ""
+    
+    table.cell(infoTable, 0, 0, modeText + " Strategy", 
+         text_color=color.white, text_size=size.normal, 
+         bgcolor=color.new(color.blue, 70))
+    table.cell(infoTable, 1, 0, syminfo.root + filterText, 
+         text_color=color.white, text_size=size.normal, 
+         bgcolor=color.new(color.blue, 70))
+    
+    // Report type
+    table.cell(infoTable, 0, 1, "Report", 
+         text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 1, reportType, 
+         text_color=color.white, text_size=size.tiny)
+    
+    // Trader category
+    string categoryShort = metricName == "Noncommercial Positions" ? "Non-Comm" :                    metricName == "Commercial Positions" ? "Comm" :                    metricName == "Managed Money Positions" ? "Mgd Money" :                    metricName == "Leveraged Funds Positions" ? "Lev Funds" :                    "Other"
+    table.cell(infoTable, 0, 2, "Category", 
+         text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, categoryShort, 
+         text_color=color.white, text_size=size.tiny)
+    
+    // Long positions
+    table.cell(infoTable, 0, 3, "Long", 
+         text_color=color.green, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(longPositions, format.volume), 
+         text_color=color.white, text_size=size.small)
+    
+    // Short positions
+    table.cell(infoTable, 0, 4, "Short", 
+         text_color=color.red, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(shortPositions, format.volume), 
+         text_color=color.white, text_size=size.small)
+    
+    // Net positions
+    netColor = netPositions > 0 ? color.green : color.red
+    table.cell(infoTable, 0, 5, "Net", 
+         text_color=netColor, text_size=size.small, 
+         bgcolor=color.new(netColor, 90))
+    table.cell(infoTable, 1, 5, str.tostring(netPositions, format.volume), 
+         text_color=color.white, text_size=size.small, 
+         bgcolor=color.new(netColor, 90))
+    
+    // Moving average
+    table.cell(infoTable, 0, 6, str.tostring(maLength) + "-Period MA", 
+         text_color=color.orange, text_size=size.small)
+    table.cell(infoTable, 1, 6, str.tostring(netMA, format.volume), 
+         text_color=color.white, text_size=size.small)
+    
+    // Divider
+    table.cell(infoTable, 0, 7, "─────────", 
+         text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, "─────────", 
+         text_color=color.gray, text_size=size.tiny)
+    
+    // COT Index
+    if showIndex
+        indexColor = netIndex > upperThreshold ? color.red : 
+                     netIndex < lowerThreshold ? color.green : color.gray
+        indexStatus = netIndex > upperThreshold ? " (Extreme Long)" : 
+                      netIndex < lowerThreshold ? " (Extreme Short)" : ""
+        
+        table.cell(infoTable, 0, 8, "COT Index", 
+             text_color=indexColor, text_size=size.small)
+        table.cell(infoTable, 1, 8, str.tostring(netIndex, "#.0") + "%" + indexStatus, 
+             text_color=color.white, text_size=size.small,
+             bgcolor=color.new(indexColor, 90))
+    
+    // SMI Value
+    if showSMI
+        table.cell(infoTable, 0, 9, "SMI", 
+             text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 9, str.tostring(SMI_smoothed, "#.0"), 
+             text_color=color.white, text_size=size.small)
+    
+    // Divider
+    table.cell(infoTable, 0, 10, "─────────", 
+         text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 10, "─────────", 
+         text_color=color.gray, text_size=size.tiny)
+    
+    // Signal Status
+    signalColor = buySignal ? color.green : sellSignal ? color.red : color.gray
+    signalText = buySignal ? "BUY" : sellSignal ? "SELL" : "No Signal"
+    
+    table.cell(infoTable, 0, 11, "Signal", 
+         text_color=signalColor, text_size=size.normal,
+         bgcolor=color.new(signalColor, 85))
+    table.cell(infoTable, 1, 11, signalText, 
+         text_color=color.white, text_size=size.normal,
+         bgcolor=color.new(signalColor, 85))
+    
+    // Divider
+    table.cell(infoTable, 0, 12, "─────────", 
+         text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 12, "─────────", 
+         text_color=color.gray, text_size=size.tiny)
+    
+    // Position Status
+    posColor = inLongPosition ? color.green : inShortPosition ? color.red : color.gray
+    posText = inLongPosition ? "LONG" : inShortPosition ? "SHORT" : "No Position"
+    
+    table.cell(infoTable, 0, 13, "Position", 
+         text_color=posColor, text_size=size.small)
+    table.cell(infoTable, 1, 13, posText, 
+         text_color=color.white, text_size=size.small,
+         bgcolor=color.new(posColor, 90))
+    
+    // P&L
+    plColor = strategy.openprofit > 0 ? color.green : 
+              strategy.openprofit < 0 ? color.red : color.gray
+    
+    table.cell(infoTable, 0, 14, "Open P&L", 
+         text_color=plColor, text_size=size.small)
+    table.cell(infoTable, 1, 14, str.tostring(strategy.openprofit, "#.##") + " (" + 
+         str.tostring(strategy.openprofit / strategy.equity * 100, "#.##") + "%)", 
+         text_color=color.white, text_size=size.small,
+         bgcolor=color.new(plColor, 90))
+
+// ========================
+// ALERTS
+// ========================
+
+// Alert when net position crosses moving average
+bullishCross = ta.crossover(netPositions, netMA)
+bearishCross = ta.crossunder(netPositions, netMA)
+
+if bullishCross
+    alert("COT Net Position crossed above MA for " + syminfo.root, alert.freq_once_per_bar)
+
+if bearishCross
+    alert("COT Net Position crossed below MA for " + syminfo.root, alert.freq_once_per_bar)
+
+// COT Index extreme alerts
+indexExtremeLong = ta.crossover(netIndex, upperThreshold)
+indexExtremeShort = ta.crossunder(netIndex, lowerThreshold)
+
+if showIndex and indexExtremeLong
+    alert("COT Index reached EXTREME LONG level (" + str.tostring(upperThreshold) + "%) for " + syminfo.root + " - Potential reversal", alert.freq_once_per_bar)
+
+if showIndex and indexExtremeShort
+    alert("COT Index reached EXTREME SHORT level (" + str.tostring(lowerThreshold) + "%) for " + syminfo.root + " - Potential reversal", alert.freq_once_per_bar)
+
+// Buy/Sell signal alerts
+var string alertMsg = ""
+string modePrefix = ""
+string cotInfo = ""
+
+if buySignal
+    modePrefix := strategyMode == "Reversal" ? "🟢 REVERSAL BUY" : "🟢 TREND BUY"
+    cotInfo := useCOTFilter ? 
+              (strategyMode == "Reversal" ? " (COT extreme short)" : " (COT bullish Index>" + str.tostring(netIndex, "#") + "%)") : 
+              " (no COT filter)"
+    
+    alertMsg := modePrefix + ": SMI crossed above oversold" + cotInfo + " on " + syminfo.root
+    if useTPSL and useATR
+        alertMsg := alertMsg + "\nTP: " + str.tostring(longTP, "#.#####") + " | SL: " + str.tostring(longSL, "#.#####")
+    alert(alertMsg, alert.freq_once_per_bar)
+
+if sellSignal
+    modePrefix := strategyMode == "Reversal" ? "🔴 REVERSAL SELL" : "🔴 TREND SELL"
+    cotInfo := useCOTFilter ? 
+              (strategyMode == "Reversal" ? " (COT extreme long)" : " (COT bearish Index<" + str.tostring(netIndex, "#") + "%)") : 
+              " (no COT filter)"
+    
+    alertMsg := modePrefix + ": SMI crossed below overbought" + cotInfo + " on " + syminfo.root
+    if useTPSL and useATR
+        alertMsg := alertMsg + "\nTP: " + str.tostring(shortTP, "#.#####") + " | SL: " + str.tostring(shortSL, "#.#####")
+    alert(alertMsg, alert.freq_once_per_bar)
+
+// Background color based on mode
+color bgColor = na
+
+if strategyMode == "Reversal"
+    // Reversal mode: Green = extreme short (buy zone), Red = extreme long (sell zone)
+    bgColor := displayMode == "Positions" ? 
+              (netPositions > netMA ? color.new(color.green, 95) : color.new(color.red, 95)) :
+              displayMode == "COT Index" ?
+              (netIndex > upperThreshold ? color.new(color.red, 90) :  // Extreme long = bearish signal
+               netIndex < lowerThreshold ? color.new(color.green, 90) :  // Extreme short = bullish signal
+               na) :
+              na
+else if strategyMode == "Trend Following"
+    // Trend mode: Green = bullish positioning (COT > 50), Red = bearish positioning (COT < 50)
+    bgColor := displayMode == "COT Index" ?
+              (netIndex > 50 ? color.new(color.green, 90) :  // Bullish positioning
+               netIndex < 50 ? color.new(color.red, 90) :     // Bearish positioning
+               na) :
+              na
+
+bgcolor(bgColor)
+
+View in Pine Editor・820 lines
+Use on chart
+2
+6
+5
+4 321
+I use this script to test whether stochastic COT report filtering for trade direction makes a difference or not for forex.
+
+It seems it does! Feel free to test and comment. I am always happy to see to be proven wrong.

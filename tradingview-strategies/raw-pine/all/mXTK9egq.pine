@@ -1,0 +1,502 @@
+//@version=6
+strategy("EMA and Dow Theory Strategies V3", overlay=true, initial_capital = 16600, commission_type=strategy.commission.percent, commission_value=0.055, margin_long = 0.001, margin_short = 0.001, precision = 4, default_qty_type=strategy.percent_of_equity, default_qty_value=3)
+import TradingView/ta/7
+
+// =====================
+// ✅ パラメーター（5個に絞った）
+// =====================
+emaLen       = input.int(50,   "EMA期間",              group="[ SETTINGS ]")
+// EMAの傾きでトレンド方向を判断。大きいほど長期トレンドを見る（推奨: 30〜100）
+
+atrFactor    = input.float(4.0, "ATR倍率（TP距離）",   group="[ SETTINGS ]", step=0.1)
+// TP1=ATR×1倍、TP2=ATR×2倍、TP3=ATR×3倍の基準となる倍率
+
+stopLoss     = input.float(-6.0, "損切り(%)",           group="[ SETTINGS ]", step=0.5)
+// エントリーからこの%を超えたら損切り
+
+adxThreshold = input.float(18.0, "ADXしきい値",         group="[ SETTINGS ]", step=0.5)
+// これ以下のADXは横ばい相場と判断してエントリーしない（推奨: 18〜25）
+
+swingLen     = input.int(4,    "スイング検出期間",       group="[ SETTINGS ]", minval=1)
+// ダウ理論のスイング高値・安値を検出する感度（大きいほど大きいスイングのみ反応）
+
+// =====================
+// EMA計算（1本）
+// =====================
+ema = ta.ema(close, emaLen)
+
+// 傾き判断：今のEMA > 前のEMAなら上昇トレンド
+emaUp   = ema > ema[1]
+emaDown = ema < ema[1]
+
+// =====================
+// ADX（期間14固定）
+// =====================
+[_, _, adxValue] = ta.dmi(14, 14)
+isTrending = adxValue > adxThreshold
+
+// =====================
+// スイング検出
+// =====================
+isSwingHigh = high[swingLen] == ta.highest(high, swingLen * 2 + 1)
+isSwingLow  = low[swingLen]  == ta.lowest(low,  swingLen * 2 + 1)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+lastSwingHigh := isSwingHigh ? high[swingLen] : lastSwingHigh
+lastSwingLow  := isSwingLow  ? low[swingLen]  : lastSwingLow
+
+// =====================
+// ダウ理論トレンド判定
+// =====================
+var int trend = 0
+if not na(lastSwingHigh) and close > lastSwingHigh and trend != 1
+    trend := 1
+if not na(lastSwingLow)  and close < lastSwingLow  and trend != -1
+    trend := -1
+
+// =====================
+// エントリー条件
+// EMA傾き ＋ ダウ理論トレンド ＋ ADX
+// =====================
+goLong  = emaUp   and trend == 1  and isTrending
+goShort = emaDown and trend == -1 and isTrending
+
+// =====================
+// ATR / TP計算
+// =====================
+atr = ta.atr(50) * atrFactor
+
+var float tp1  = na
+var float tp2  = na
+var float tp3  = na
+var float tp11 = na
+var float tp22 = na
+var float tp33 = na
+var float entr = na
+
+// =====================
+// PnL計算
+// =====================
+var float PnL = 0.
+LastTriggeredPrice = strategy.opentrades.entry_price(strategy.opentrades - 1)
+if strategy.position_size > 0.0 and LastTriggeredPrice != 0.0
+    PnL := ((close - LastTriggeredPrice) / LastTriggeredPrice) * 100.0
+else if strategy.position_size < 0.0 and LastTriggeredPrice != 0.0
+    PnL := ((LastTriggeredPrice - close) / LastTriggeredPrice) * 100.0
+
+var float TruePnL = na
+var float Equity_AtStartTrade = na
+TruePnL := na(Equity_AtStartTrade) ? na : ((strategy.equity / Equity_AtStartTrade) - 1.0) * 100.0
+
+// =====================
+// 損切り
+// =====================
+if PnL < stopLoss and strategy.position_size > 0.
+    strategy.close("Long", "SL Long")
+    alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"3"}', alert.freq_once_per_bar)
+
+if PnL < stopLoss and strategy.position_size < 0.
+    strategy.close("Short", "SL Short")
+    alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"3"}', alert.freq_once_per_bar)
+
+// =====================
+// トレンド反転クローズ
+// =====================
+if trend == 1 and strategy.position_size < 0
+    strategy.close("Short", "trendChange→Long")
+    alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"3"}', alert.freq_once_per_bar)
+
+if trend == -1 and strategy.position_size > 0
+    strategy.close("Long", "trendChange→Short")
+    alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"3"}', alert.freq_once_per_bar)
+
+// =====================
+// ロングエントリー
+// =====================
+if strategy.position_size <= 0. and goLong
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Exit Short→Long")
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"3"}', alert.freq_once_per_bar)
+
+    if strategy.position_size == 0
+        Equity_AtStartTrade := strategy.equity
+        strategy.entry("Long", strategy.long)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":false,"HalfExit":false, "Vertion":"3","Stop":'+str.tostring(0)+'}', alert.freq_once_per_bar_close)
+        tp1  := close + atr
+        tp2  := close + atr * 2
+        tp3  := close + atr * 3
+        tp11 := na
+        tp22 := na
+        tp33 := na
+        entr := close
+
+// =====================
+// ショートエントリー
+// =====================
+if strategy.position_size >= 0. and goShort
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Exit Long→Short")
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"3"}', alert.freq_once_per_bar)
+
+    if strategy.position_size == 0
+        Equity_AtStartTrade := strategy.equity
+        strategy.entry("Short", strategy.short)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":false,"HalfExit":false, "Vertion":"3","Stop":'+str.tostring(0)+'}', alert.freq_once_per_bar_close)
+        tp11 := close - atr
+        tp22 := close - atr * 2
+        tp33 := close - atr * 3
+        tp1  := na
+        tp2  := na
+        tp3  := na
+        entr := close
+
+// =====================
+// TP処理
+// =====================
+if strategy.position_size > 0
+    if high > tp1
+        strategy.close('Long', 'Long TP1', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP1"}', alert.freq_once_per_bar)
+        tp1 := na
+    if high > tp2
+        strategy.close('Long', 'Long TP2', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP2"}', alert.freq_once_per_bar)
+        tp2 := na
+    if high > tp3
+        strategy.close('Long', 'Long TP3', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP3"}', alert.freq_once_per_bar)
+        tp3  := na
+        entr := na
+
+if strategy.position_size < 0
+    if low < tp11
+        strategy.close('Short', 'Short TP1', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP1"}', alert.freq_once_per_bar)
+        tp11 := na
+    if low < tp22
+        strategy.close('Short', 'Short TP2', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP2"}', alert.freq_once_per_bar)
+        tp22 := na
+    if low < tp33
+        strategy.close('Short', 'Short TP3', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP3"}', alert.freq_once_per_bar)
+        tp33 := na
+        entr := na
+
+// =====================
+// 描画
+// =====================
+
+// スイングライン
+plot(trend == -1 ? lastSwingHigh : na, "スイングハイ", color.red,   1, plot.style_linebr)
+plot(trend ==  1 ? lastSwingLow  : na, "スイングロー", color.green, 1, plot.style_linebr)
+
+// グラデーションゾーン
+barPrice = close
+sh_base = trend == -1 ? lastSwingHigh : na
+sh_s1   = trend == -1 ? sh_base - (sh_base - barPrice) * 0.2 : na
+sh_s2   = trend == -1 ? sh_base - (sh_base - barPrice) * 0.4 : na
+sh_s3   = trend == -1 ? sh_base - (sh_base - barPrice) * 0.6 : na
+sh_s4   = trend == -1 ? sh_base - (sh_base - barPrice) * 0.8 : na
+sh_end  = trend == -1 ? barPrice : na
+sh_p0 = plot(sh_base, display=display.none)
+sh_p1 = plot(sh_s1,   display=display.none)
+sh_p2 = plot(sh_s2,   display=display.none)
+sh_p3 = plot(sh_s3,   display=display.none)
+sh_p4 = plot(sh_s4,   display=display.none)
+sh_p5 = plot(sh_end,  display=display.none)
+fill(sh_p0, sh_p1, color.new(color.red, 20))
+fill(sh_p1, sh_p2, color.new(color.red, 40))
+fill(sh_p2, sh_p3, color.new(color.red, 60))
+fill(sh_p3, sh_p4, color.new(color.red, 80))
+fill(sh_p4, sh_p5, color.new(color.red, 90))
+
+sl_base = trend ==  1 ? lastSwingLow : na
+sl_s1   = trend ==  1 ? sl_base + (barPrice - sl_base) * 0.2 : na
+sl_s2   = trend ==  1 ? sl_base + (barPrice - sl_base) * 0.4 : na
+sl_s3   = trend ==  1 ? sl_base + (barPrice - sl_base) * 0.6 : na
+sl_s4   = trend ==  1 ? sl_base + (barPrice - sl_base) * 0.8 : na
+sl_end  = trend ==  1 ? barPrice : na
+sl_p0 = plot(sl_base, display=display.none)
+sl_p1 = plot(sl_s1,   display=display.none)
+sl_p2 = plot(sl_s2,   display=display.none)
+sl_p3 = plot(sl_s3,   display=display.none)
+sl_p4 = plot(sl_s4,   display=display.none)
+sl_p5 = plot(sl_end,  display=display.none)
+fill(sl_p0, sl_p1, color.new(color.green, 20))
+fill(sl_p1, sl_p2, color.new(color.green, 40))
+fill(sl_p2, sl_p3, color.new(color.green, 60))
+fill(sl_p3, sl_p4, color.new(color.green, 80))
+fill(sl_p4, sl_p5, color.new(color.green, 90))
+
+// EMAライン（傾きで色変化）
+emaColor = emaUp ? color.lime : color.red
+plot(ema, "EMA", color=emaColor, linewidth=2)
+
+// TPライン
+tpCol = strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? #e42c2c : na
+plot(tp1,  "TP1 Long",  style=plot.style_linebr, color=tpCol)
+plot(tp2,  "TP2 Long",  style=plot.style_linebr, color=tpCol)
+p3  = plot(tp3,  "TP3 Long",  style=plot.style_linebr, color=tpCol)
+plot(tp11, "TP1 Short", style=plot.style_linebr, color=tpCol)
+plot(tp22, "TP2 Short", style=plot.style_linebr, color=tpCol)
+p33 = plot(tp33, "TP3 Short", style=plot.style_linebr, color=tpCol)
+pe  = plot(entr != entr[1] ? na : entr, "Enter", color=chart.fg_color, style=plot.style_linebr)
+fill(pe, p3,  color.new(tpCol, 90))
+fill(pe, p33, color.new(tpCol, 90))
+
+// 横ばいゾーン背景
+bgcolor(not isTrending ? color.new(color.gray, 88) : na, title="横ばいゾーン(ADX低)")
+
+// ポジション背景
+lowestClose = ta.lowest(close, 10)
+_css      = strategy.position_size == 0.0 ? color.white  :strategy.position_size >  0.0 ? color.yellow :strategy.position_size <  0.0 ? color.purple : na
+plotBottom = strategy.position_size == 0.0 ? lowestClose : LastTriggeredPrice
+_plot0 = plot(plotBottom, color=na)
+_plot1 = plot(close,      color=na)
+fill(_plot0, _plot1, color.new(_css, 70))
+
+// 上位足スイング（参考表示）
+htfSwingHigh = request.security(syminfo.tickerid, "240", ta.pivothigh(high, swingLen, swingLen))
+htfSwingLow  = request.security(syminfo.tickerid, "240", ta.pivotlow(low,  swingLen, swingLen))
+var float lastHTFSwingHigh = na
+var float lastHTFSwingLow  = na
+lastHTFSwingHigh := na(htfSwingHigh) ? lastHTFSwingHigh : htfSwingHigh
+lastHTFSwingLow  := na(htfSwingLow)  ? lastHTFSwingLow  : htfSwingLow
+htfClose = request.security(syminfo.tickerid, "240", close)
+var int htfTrend = 0
+if not na(lastHTFSwingHigh) and htfClose > lastHTFSwingHigh and htfTrend != 1
+    htfTrend := 1
+if not na(lastHTFSwingLow)  and htfClose < lastHTFSwingLow  and htfTrend != -1
+    htfTrend := -1
+plot(htfTrend == -1 ? lastHTFSwingHigh : na, "上位足スイングハイ", color.fuchsia, 2, plot.style_linebr)
+plot(htfTrend ==  1 ? lastHTFSwingLow  : na, "上位足スイングロー", color.aqua,    2, plot.style_linebr)
+
+// デバッグ
+plotchar(strategy.equity, "資産残高",  "", location.top, color=color.white)
+plotchar(adxValue,         "ADX値",     "", location.top, color=color.orange)
+plotchar(ema,              "EMA",       "", location.top, color=color.lime)
+colorPnL = PnL > 0.0 ? color.green : color.red
+plotchar(PnL,     "PnL",     "", location.top, color=colorPnL)
+plotchar(TruePnL, "TruePnL", "", location.top, color=color.aqua)
+
+// 直近トレードラベル
+rangeR    = high - low
+avgRangeR = ta.sma(rangeR, 20)
+var float TruePnLToDisplay = PnL
+if strategy.closedtrades > 0
+    lastTradeIndex     = strategy.closedtrades - 1
+    lastTradeProfit    = strategy.closedtrades.profit_percent(lastTradeIndex)
+    lastTradeEntryBar  = strategy.closedtrades.exit_bar_index(lastTradeIndex)
+    lastTradeDirection = strategy.closedtrades.size(lastTradeIndex)
+    if lastTradeEntryBar == bar_index
+        tradeColor   = TruePnLToDisplay > 0 ? color.green : color.red
+        uscitaFinale = strategy.position_size == 0. or
+             lastTradeDirection > 0.0 and strategy.position_size < 0. or
+             lastTradeDirection < 0.0 and strategy.position_size > 0.
+        _size      = size.normal
+        Perc_PL    = str.tostring(math.round(PnL[1], 1)) + '%'
+        text_color = color.black
+        if uscitaFinale
+            _size      := size.large
+            Perc_PL    := str.tostring(math.round(TruePnLToDisplay, 1)) + '%\n(' + str.tostring(math.round(lastTradeProfit, 1)) + '%)'
+            text_color := color.white
+        label.new(x=bar_index, y=high + avgRangeR * 5, text=Perc_PL,
+             color=tradeColor, textcolor=text_color,
+             style=label.style_label_down, size=_size)
+    else
+        TruePnLToDisplay := TruePnL
+
+View in Pine Editor・309 lines
+Use on chart
+3
+5
+872
+Overview
+EMA and Dow Theory Strategies V3 is a major refinement of V2, focused on three goals: reducing overfitting, filtering out range-bound markets, and simplifying the parameter set from 13 inputs down to just 5.
+The core logic remains the same — combining Dow Theory swing structure with EMA trend direction — but V3 replaces the dual-EMA crossover system and OTHERS.D correlation filter with a single EMA slope judgment and an ADX-based range filter. The result is a cleaner, more robust strategy that performs more consistently across different assets and timeframes.
+
+What Changed from V2
+Removed:
+
+
+Fast EMA / Slow EMA crossover → replaced by single EMA slope direction
+
+Index Fast EMA / Index Slow EMA (OTHERS.D correlation) → removed entirely
+
+RSI filter (overbought/oversold) → removed (was not functioning effectively)
+
+Scale adjustment parameter → removed
+
+
+
+Added:
+
+
+ADX filter (period fixed at 14) → skips entries during sideways/ranging markets
+
+Single EMA slope judgment → trend direction determined by whether EMA is rising or falling
+
+
+
+Result: Parameters reduced from 13 → 5
+
+Parameters & Recommended Ranges
+EMA Period | Default: 50 | Range: 30–100
+Shorter for high-volatility assets, longer for stable ones.
+ATR Multiplier | Default: 4.0 | Range: 2.5–6.0
+Controls TP distance. Higher = wider targets.
+Stop Loss (%) | Default: -6.0 | Range: -4 to -10
+Wider for volatile assets, tighter for BTC/ETH.
+ADX Threshold | Default: 18.0 | Range: 15–28
+Higher = stricter range filter, fewer but higher-quality trades.
+Swing Detection Period | Default: 4 | Range: 2–14
+Smaller = more sensitive to swing highs/lows.
+
+Recommended Settings by Asset Type
+Meme coins (DOGE, SHIB, etc.)
+EMA: 44–55 / ATR: 3.5–5.0 / SL: -6 to -8% / ADX: 18–22 / Swing: 3–5
+Major assets (BTC, ETH)
+EMA: 55–80 / ATR: 2.5–4.0 / SL: -4 to -6% / ADX: 20–25 / Swing: 5–10
+Mid-cap alts (SOL, SUI, etc.)
+EMA: 35–55 / ATR: 4.0–5.5 / SL: -5 to -7% / ADX: 18–23 / Swing: 4–7
+Small-cap alts
+EMA: 30–50 / ATR: 4.5–6.0 / SL: -7 to -10% / ADX: 18–22 / Swing: 3–5
+
+Recommended Settings by Timeframe
+1–5 min: ADX threshold 15–20 (ADX tends to be lower on short timeframes)
+15 min – 1 hour: ADX threshold 18–23
+2–4 hour: ADX threshold 20–25
+
+Entry Conditions
+Long: EMA slope rising AND Dow Theory trend up AND ADX > threshold
+Short: EMA slope falling AND Dow Theory trend down AND ADX > threshold
+
+Exit Conditions
+
+
+TP1: +ATR×1 → close 30%
+
+TP2: +ATR×2 → close 30%
+
+TP3: +ATR×3 → close 30%
+
+Stop Loss: fixed % from entry price → full close
+
+Trend reversal: Dow Theory swing flip → full close
+
+
+
+
+Visual Features
+
+
+EMA line: green when rising, red when falling
+
+Gray background: ADX below threshold (range-bound zone — no entries)
+
+Gradient zones: distance from price to swing high/low
+
+4H reference: higher timeframe swing levels displayed
+
+
+
+
+This strategy is designed for trend-following on crypto assets, primarily on the 1H–4H timeframe. Always backtest on your target asset before live trading. Past performance does not guarantee future results.
+
+
+🇯🇵 日本語
+EMA and Dow Theory Strategies V3
+
+概要
+EMA and Dow Theory Strategies V3 は、V2を大幅に改良したバージョンです。主な改善点は3つ——過学習リスクの低減、横ばい相場のフィルタリング、そしてパラメーター数を13個から5個へのスリム化です。
+コアロジックはV2から引き継いでいます。ダウ理論のスイング構造とEMAのトレンド方向を組み合わせてエントリーを判断します。ただしV3では、デュアルEMAクロスとOTHERS.D相関フィルターを廃止し、1本のEMA傾きとADXによるレンジフィルターに置き換えました。結果として、より汎用性が高く、異なる銘柄・時間足でも安定して機能する設計になっています。
+
+V2からの主な変更点
+削除したもの：
+
+
+Fast EMA / Slow EMA クロス → EMA1本の傾き判断に統合
+
+Index Fast EMA / Index Slow EMA（OTHERS.D相関）→ 完全削除
+
+RSIフィルター（過熱・売られすぎ判定）→ 削除（実質機能していなかったため）
+
+スケール調整パラメーター → 削除
+
+
+
+追加したもの：
+
+
+ADXフィルター（期間14固定）→ 横ばい相場でのエントリーをスキップ
+
+EMA傾き判断 → EMAが上向きか下向きかでトレンド方向を判定
+
+
+
+結果：パラメーター数を 13個 → 5個 に削減
+
+パラメーターと推奨設定範囲
+EMA期間 | デフォルト: 50 | 推奨範囲: 30〜100
+ボラが高い銘柄は短め、安定銘柄は長め。
+ATR倍率 | デフォルト: 4.0 | 推奨範囲: 2.5〜6.0
+TP距離の基準。大きいほど利確ラインが遠くなる。
+損切り(%) | デフォルト: -6.0 | 推奨範囲: -4〜-10
+ボラが高い銘柄は広め、BTC/ETHはタイトでOK。
+ADXしきい値 | デフォルト: 18.0 | 推奨範囲: 15〜28
+高いほどレンジ除外が厳しく、トレード数が減り精度が上がる。
+スイング検出期間 | デフォルト: 4 | 推奨範囲: 2〜14
+小さいほどスイング高値・安値への感度が高くなる。
+
+銘柄タイプ別おすすめ設定
+ミーム系（DOGE・SHIBなど）
+EMA: 44〜55 / ATR倍率: 3.5〜5.0 / 損切り: -6〜-8% / ADX: 18〜22 / スイング: 3〜5
+主要銘柄（BTC・ETH）
+EMA: 55〜80 / ATR倍率: 2.5〜4.0 / 損切り: -4〜-6% / ADX: 20〜25 / スイング: 5〜10
+中堅アルト（SOL・SUIなど）
+EMA: 35〜55 / ATR倍率: 4.0〜5.5 / 損切り: -5〜-7% / ADX: 18〜23 / スイング: 4〜7
+小型アルト
+EMA: 30〜50 / ATR倍率: 4.5〜6.0 / 損切り: -7〜-10% / ADX: 18〜22 / スイング: 3〜5
+
+時間足別おすすめ設定
+1〜5分足：ADXしきい値 15〜20（短期足はADXが低めになる傾向）
+15分〜1時間足：ADXしきい値 18〜23
+2〜4時間足：ADXしきい値 20〜25
+
+エントリー条件
+ロング：EMAが上向き AND ダウ理論トレンドが上昇 AND ADX > しきい値
+ショート：EMAが下向き AND ダウ理論トレンドが下降 AND ADX > しきい値
+
+イグジット条件
+
+
+TP1：エントリーから +ATR×1 → 30%決済
+
+TP2：エントリーから +ATR×2 → 30%決済
+
+TP3：エントリーから +ATR×3 → 30%決済
+
+損切り：設定%を超えたら全決済
+
+トレンド反転：ダウ理論のスイングが逆転したら決済
+
+
+
+
+チャートの見方
+
+
+EMAライン：上向きのとき緑、下向きのとき赤に色が変わります
+
+グレー背景：ADXがしきい値を下回っている横ばいゾーン（このゾーンではエントリーしません）
+
+グラデーションゾーン：現在値からスイング高値・安値までの距離を視覚化
+
+上位足表示：4時間足のスイングレベルを参考表示
+
+
+
+
+このストラテジーは主に1時間〜4時間足の暗号資産トレンドフォローを想定して設計されています。実運用の前に必ずご自身の対象銘柄・時間足でバックテストを行ってください。過去の結果は将来の利益を保証するものではありません。

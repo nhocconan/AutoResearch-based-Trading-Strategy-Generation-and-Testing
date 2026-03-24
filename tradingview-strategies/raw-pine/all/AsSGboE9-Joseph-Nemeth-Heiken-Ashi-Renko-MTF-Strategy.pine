@@ -1,0 +1,66 @@
+//@version=4
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+// Joseph Nemeth Heiken Ashi Renko MTF Strategy
+// by SparkyFlary
+
+//For Educational Purposes
+//Results can differ on different markets and can fail at any time. Profit is not guaranteed.
+strategy(title="Joseph Nemeth Heiken Ashi Renko MTF Strategy", shorttitle="Nemeth Strategy", overlay=true)
+
+res1 = input("60", title="Middle time frame")
+res2 = input("D", title="Higher time frame")
+renkoSize = input(1.0, title="Renko size")
+renkoType = input("ATR", title="Renko type", options=["ATR", "Traditional"])
+//withRecovery = input(false, title="with trade recovery?")
+
+//renko
+renko_tickerid = renko(syminfo.tickerid, renkoType, renkoSize)
+renko_close = security(renko_tickerid, timeframe.period, close)
+renko_open = security(renko_tickerid, timeframe.period, open)
+renkoGreen = renko_close>renko_open
+renkoRed = renko_close<renko_open
+
+//heiken ashi
+ha_id = heikinashi(syminfo.tickerid)
+
+//middle time frame
+haopen1 = security(ha_id, resolution=res1, expression=open)
+haclose1 = security(ha_id, resolution=res1, expression=close)
+green1 = haclose1 > haopen1
+red1 = haclose1 < haopen1
+ema1 = security(syminfo.tickerid, resolution=res1, expression=ema(close, 20))
+slopeUp1 = ema1 > ema1[1]
+slopeDown1 = ema1 < ema1[1]
+
+//higher time frame
+haopen2 = security(ha_id, resolution=res2, expression=open)
+haclose2 = security(ha_id, resolution=res2, expression=close)
+green2 = haclose2 > haopen2
+red2 = haclose2 < haopen2
+
+//Strategy
+buy = green1 and green2 and slopeUp1 and renkoGreen //and abs(strategy.position_size[1])==0
+sell = red1 or red2 or slopeDown1 or renkoRed //and (strategy.openprofit>0)
+short = red1 and red2 and slopeDown1 and renkoRed //and abs(strategy.position_size[1])==0
+cover = green1 or green2 or slopeUp1 or renkoGreen //and (strategy.openprofit>0) 
+
+strategy.entry(id="enter long", long=true, when=buy)
+strategy.close(id="enter long", comment="exit long", when=sell)
+strategy.entry(id="enter short", long=false, when=short)
+strategy.close(id="enter short", comment="exit short", when=cover)
+View in Pine Editor・51 lines
+Use on chart
+1
+9
+4
+13
+14 185
+For Educational Purposes. Results can differ on different markets and can fail at any time. Profit is not guaranteed. This only works in a few markets and in certain situations. Changing the settings can give better or worse results for other markets.
+
+Nemeth is a forex trader that came up with a multi-time frame heiken ashi based strategy that he showed to an older audience crowd on a speaking event video. He seems to boast about his strategy having high success results and makes an astonishing claim that looking at heiken ashi bars instead of regular candlestick bar charts can show the direction of the trend better and simpler than many other slower non-price based indicators. He says pretty much every indicator is about the same and the most important indicator is price itself. He is pessimistic about the markets and seems to think it is rigged and there is a sort of cabal that created rules to favor themselves, such as the inability of traders to hedge in one broker account, and that to win you have to take advantage of the statistics involved in the game. He believes fundamentals, chart patterns such as cup and handle and head and shoulders, and fibonacci numbers don't matter, only price matters. The foundation of his trading strategy is based around heiken ashi bars because they show a statistical pattern that can supposedly be taken advantage of by them repeating around seventy or so percent of the time, and then combines this idea with others based on the lower time frames involved.
+
+The first step he uses is to identify the trend direction in the higher time frame(daily or 4 hourly) using the color of the heiken ashi bar itself. If it is green then take only long position after the bar completes, if it is red then take only short position. Next, on a lower time frame(1 hour or 30 minutes) look for the slope of the 20 exponential moving average to be sloping upward if going long or the slope of the ema to be sloping downward if going short(the price being above the moving average can work too if it's too hard to visualize the slope). Then look for the last heiken ashi bar, similarly to the first step, if it is green take long position, if it is red take short position. Finally the entry indicator itself will decide the entry on the lowest time frame. Nemeth recommends using MACD or CCI or possibly combine the two indicators on a 5 min or 15 min or so time frame if one does not have access to renko or range bars. If renko bars are available, then he recommends a 5 or 10 tick bar for the size(although I'm not sure if it's really possible to remove the time frame from renko bars or if 5 or 10 ticks is universal enough for everything). The idea is that renko bars paint a bar when there is price movement and it's important to have movement in the market, plus it's a simple indicator to use visually. The exit strategy is when the renko or the lowest time frame indicator used gives off an exit signal or if the above conditions of the higher time frames are not being met(he was a bit vague on this). Enter trades with only one-fifth of your capital because the other fifths will be used in case the trades go against you by applying a hedging technique he calls "zero zone recovery". He is somewhat vague about the full workings(perhaps because he uses his own software to automate his strategy) but the idea is that the second fifth will be used to hedge a trade that isn't going well after following the above, and the other fifths will be used to enter on another entry condition or if the other hedges fail also. Supposedly this helps the trader always come out with a profit in a sort of bushido-like trading tactic of never accepting defeat. Some critics argue that this is simply a ploy by software automation to boost their trade wins or to sell their product. The other argument against this strategy is that trading while the heiken ashi bar has not completed yet can jack up the backtest results, but when it comes to trading in real time, the strategy can end up repainting, so who knows if Nemeth isn't involving repainting or not, however he does mention the trades are upon completion of the bar(it came from an audience member's question). Lastly, the 3 time frames in ascending or descending fashion seem to be spaced out by about factors of 4 if you want to trade other time frames other than 5/15min,30min/1hour, or 4hour/daily(he mentioned the higher time frame should be atleast a dozen times higher than the lower time frame).
+
+Personally I have not had luck getting the seventy+ percent accuracy that he talks about, whether in forex or other things. I made the default on renko bars to an ATR size 1 setting because it looks like the most universal option if the traditional mode box size is too hard to guess, and I made it so that you can switch between ATR and Traditional mode just in case. I don't think the strategy repaints because I think TV set a default on the multi-time frame aspects of their code to not re-paint, but I could be wrong so you might want to watch out for that. The zero zone recovery technique is included in the code but I commented it out and/or remove it because TV does not let you apply hedging properly, as far as I know. If you do use a proper hedging strategy with this, you'll find a very interesting bushido type of trading style involved with the Japanese bars that can boost profits and win rates of around possibly atleast seventy percent on every trade but unfortunately I was not able to test this part out properly because of the limitation on hedging here, and who knows if the hedging part isn't just a plot to sell his product. If his strategy does involve the repainting feature of the heiken ashi bars then it's possible he might have been preaching fools-gold but it's hard to say because he did mention it is upon completion of the bars. If you find out if this strategy works or doesn't work or find out a good setting that I somehow didn't catch, please feel free to let me know, will gladly appreciate it. We are all here to make some money!
+

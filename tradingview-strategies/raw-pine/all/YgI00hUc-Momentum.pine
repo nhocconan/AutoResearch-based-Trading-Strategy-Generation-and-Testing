@@ -1,0 +1,58 @@
+//@version=3
+//Idea from following Article:
+//https://alphaarchitect.com/2018/12/07/trend-following-on-steroids/
+//Take two Assets in your Universe and calculate the average return over the last, last 3, 6, 12 months and weigh them.
+//Trade on original asset.
+
+strategy(title="Momentum", shorttitle="Momentum", default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+time_frame = input("M")
+stock1 = input(defval="BND",title="Universe Asset 1")
+stock2 = input(defval="VWO",title="Universe Asset 2")
+w1 = input(65, title="Weight of 1 Months Return Average")
+w3 = input(15, title="Weight of 3 Months Return Average")
+w6 = input(10, title="Weight of 6 Months Return Average")
+w12 = input(10, title="Weight of 12 Months Return Average")
+
+today(s)=>security(s,time_frame,close)
+hist(s, lb) =>security(s, time_frame, close[lb])
+
+log1s1 = log(today(stock1)/hist(stock1, 1))*100
+log3s1 = log(today(stock1)/hist(stock1, 3))*100
+log6s1 = log(today(stock1)/hist(stock1, 6))*100
+log12s1 = log(today(stock1)/hist(stock1, 12))*100
+
+log1s2 = log(today(stock2)/hist(stock2, 1))*100
+log3s2 = log(today(stock2)/hist(stock2, 3))*100
+log6s2 = log(today(stock2)/hist(stock2, 6))*100
+log12s2 = log(today(stock2)/hist(stock2, 12))*100
+
+s1 = log1s1*w1 + log3s1*w3 + log6s1*w6 + log12s1*w12
+s2 = log1s2*w1 + log3s2*w3 + log6s2*w6 + log12s2*w12
+
+longCond = ((s1 > 0) and (s1 > 0))
+shortCond = ((s2 < 0) and (s2 < 0))
+
+if longCond
+    strategy.entry('long', strategy.long)
+if shortCond
+    //strategy.entry('short', strategy.short)
+    strategy.close('long')
+
+plot(s1, color=red)
+plot(s2, color=green)
+
+View in Pine Editor・43 lines
+Use on chart
+5
+0
+4
+1 342
+Idea from the following Article:
+                                                                                                                                                                                                                      
+                                                                                                                                                                                                                      
+                                                                                                                                                                                                                      
+                                                                                                                                                                                                                      
+                                                                                                                                                                                                                      
+                                                                                                                                                                                                                      
+.

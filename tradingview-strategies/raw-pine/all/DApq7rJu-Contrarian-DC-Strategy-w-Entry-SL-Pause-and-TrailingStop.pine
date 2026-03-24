@@ -1,0 +1,105 @@
+//@version=4
+strategy("Contrarian Donchian Channel Strategy - Touch Entry with Post-SL Pause and Trailing Stop", overlay=true, default_qty_value=0.01, default_qty_type=strategy.percent_of_equity)
+
+// Inputs
+length = input(20, minval=1, title="Donchian Channel Length")
+riskRewardRatio = input(1.7, title="Risk/Reward Ratio")
+stopLossPercent = input(0.3, title="Stop Loss (%)") / 100
+pauseCandles = input(3, minval=1, title="Pause After SL (Candles)")
+
+// Donchian Channel Calculation
+upper = highest(high, length)
+lower = lowest(low, length)
+
+// Plotting Donchian Channel
+plot(upper, color=color.red, title="Upper Band")
+plot(lower, color=color.green, title="Lower Band")
+
+// Tracking Stop Loss Hits and Pause
+var longSLHitBar = 0
+var shortSLHitBar = 0
+var int lastTradeDirection = 0 // 1 for long, -1 for short, 0 for none
+
+// Update SL Hit Bars
+if (strategy.position_size[1] > 0 and strategy.position_size == 0)
+    if (close[1] < strategy.position_avg_price[1])
+        longSLHitBar := bar_index
+        lastTradeDirection := 1
+
+if (strategy.position_size[1] < 0 and strategy.position_size == 0)
+    if (close[1] > strategy.position_avg_price[1])
+        shortSLHitBar := bar_index
+        lastTradeDirection := -1
+
+// Entry Conditions - Trigger on touch
+longCondition = (low <= lower) and (bar_index - longSLHitBar > pauseCandles or lastTradeDirection != 1)
+shortCondition = (high >= upper) and (bar_index - shortSLHitBar > pauseCandles or lastTradeDirection != -1)
+
+// Trade Execution
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// Stop Loss and Take Profit Calculation
+longStopLoss = strategy.position_avg_price * (1 - stopLossPercent)
+shortStopLoss = strategy.position_avg_price * (1 + stopLossPercent)
+takeProfit = strategy.position_avg_price * (1 + stopLossPercent * riskRewardRatio)
+
+// Applying Stop Loss based on Position Type
+stopLoss = strategy.position_size > 0 ? longStopLoss : shortStopLoss
+
+// Setting Stop Loss and Take Profit for each trade
+strategy.exit("SL_TP_Long", "Long", stop=stopLoss, limit=takeProfit)
+strategy.exit("SL_TP_Short", "Short", stop=stopLoss, limit=takeProfit)
+
+// New Conditions for Taking Profit
+// Close Long Position if Price Hits Upper Band
+if (strategy.position_size > 0 and high >= upper)
+    strategy.close("Long")
+
+// Close Short Position if Price Hits Lower Band
+if (strategy.position_size < 0 and low <= lower)
+    strategy.close("Short")
+
+View in Pine Editor・63 lines
+Use on chart
+1
+8
+4
+1
+6 851
+Dec 13, 2023
+Donchian Channel Setup:
+
+The strategy uses a tool called the Donchian Channel. Imagine this as two lines (bands) on a chart that show the highest and lowest prices over a certain number of past trading days (default is 20 days).
+There's also a centerline, which is the average of these two bands.
+Entry Conditions for Trades:
+
+Buying (Going Long): The strategy considers buying when the price touches or falls below the lower band of the Donchian Channel. However, this only happens if there has been a pause after a previous losing trade. This pause is a number of candles where no new trades are taken.
+Selling (Going Short): Similarly, the strategy considers selling when price reaches or exceeds the upper band of the Donchian Channel. Again, this is subject to a pause after a losing trade.
+
+Stop Loss and Take Profit:
+
+Each trade has a "Stop Loss" and "Take Profit" set. The Stop Loss is a preset price level where the trade will close to prevent further losses if the market moves against your position. The Take Profit does the same but locks in profit if the market moves in your favor.
+The Stop Loss is set based on a percentage of the price at which you entered the trade.
+The Take Profit is determined by the Risk/Reward Ratio. This ratio helps balance how much you're willing to risk versus the potential reward.
+Trailing Stop Loss:
+
+When a trade is profitable, the strategy should involve a "Trailing Stop Loss." This means the Stop Loss level moves (or trails) the price movement to lock in profits as the market moves in your favor.
+For a buy trade, if the price moves above the centerline of the Donchian Channel, the Trailing Stop Loss should be adjusted in the middle between the entry price and the centerline. Viceversa for a sell trade, it should be adjusted in the same way if the price goes below the centerline.
+
+IMPORTANT: There's no allert for the trailing stop at the moment.
+
+Post-Stop Loss Pause:
+
+If a trade hits the Stop Loss (i.e., it's a losing trade), the strategy takes a break before opening another trade in the same direction. This pause helps to avoid entering another trade immediately in a potentially unfavorable market.
+In summary, this strategy is designed to make trades based on the Donchian Channel, with specific rules for when to enter and exit trades, and mechanisms to manage risk and protect profits. It's contrarian because it tends to buy when the price is low and sell when the price is high, which is opposite to what many traders might do.
+Dec 13, 2023
+Release Notes
+I've changed the way we are positioning stop losses and take profits in both cases, in both cases we will close our position in profit when the price is equal to the centerline and we'll then calculate the stop loss accordingly in order to open a position that have a risk/reward rate of 2.2
+Dec 14, 2023
+Release Notes
+This updated script includes new conditions for taking profit: closing a long position when the price hits the upper band and closing a short position when the price hits the lower band. These additional conditions aim to capture profits by anticipating a potential reversal or slowdown in price movement after reaching the extremes of the Donchian Channel.
+
+Also i fixed a logic error in my previous code when setting stoploss. This revised code adjusts the stop loss placement for long and short positions correctly. For long positions, the stop loss is set below the average entry price, while for short positions, it's set above. Additionally, the trailing stop loss logic is updated to adjust the stop loss based on the position type and the current price in relation to the middle Donchian Channel.

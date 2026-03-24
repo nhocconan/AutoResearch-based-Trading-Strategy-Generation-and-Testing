@@ -1,0 +1,53 @@
+//@version=5
+strategy("Bollinger Bands Strategy with alerts (incl. pending orders) via TradingConnector to Forex", overlay=true, default_qty_value=1000)
+source = close
+length = input.int(20, minval=1)
+mult = input.float(2.0, minval=0.001, maxval=50)
+basis = ta.sma(source, length)
+dev = mult * ta.stdev(source, length)
+upper = basis + dev
+lower = basis - dev
+buyEntry = ta.crossover(source, lower)
+sellEntry = ta.crossunder(source, upper)
+if (ta.crossover(source, lower))
+    strategy.entry("BBandLE", strategy.long, stop=lower, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandLE")
+    alert(message='long price='+str.tostring(lower), freq=alert.freq_once_per_bar_close)
+else
+    strategy.cancel(id="BBandLE")
+    alert(message='cancel long', freq=alert.freq_once_per_bar_close)
+if (ta.crossunder(source, upper))
+    strategy.entry("BBandSE", strategy.short, stop=upper, oca_name="BollingerBands", oca_type=strategy.oca.cancel, comment="BBandSE")
+    alert(message='short price='+str.tostring(upper), freq=alert.freq_once_per_bar_close)
+else
+    strategy.cancel(id="BBandSE")
+    alert(message='cancel short', freq=alert.freq_once_per_bar_close)
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+//Lines of code added to the original built-in script: 14, 17, 20 and 23 only.
+//They trigger alerts ready to be executed on real markets through TradingConnector
+//available for Forex, indices, crypto, stocks - anything your broker offers for trading via MetaTrader4/5
+
+View in Pine Editor・28 lines
+Use on chart
+8
+7
+3
+1
+31 580
+Software part of algotrading is simpler than you think. TradingView is a great place to do this actually. To present it, I'm publishing each of the default strategies you can find in Pinescript editor's "built-in" list with slight modification - I'm only adding 2 lines of code, which will trigger alerts, ready to be forwarded to your broker via TradingConnector and instantly executed there. Alerts added in this script: 14, 17, 20 and 23.
+
+SCRIPT INCLUDES PENDING ORDERS AND ALERTS! Alert will be sent to MetaTrader when order is triggered, but not yet filled. That means if market conditions change and order does not get filled, it needs to be cancelled as well, and there are alerts for that in the script as well.
+
+How it works:
+1. TradingView alert fires.
+2. TradingConnector catches it and forwards to MetaTrader4/5 you got from your broker.
+3. Trade gets executed inside MetaTrader within 1 second of fired alert.
+
+When configuring alert, make sure to select "alert() function calls only" in CreateAlert popup. One alert per ticker is required.
+Adding stop-loss, take-profit, trailing-stop, break-even or executing pending orders is also possible. These topics have been covered in other example posts.
+
+This routing works for Forex, indices, stocks, crypto - anything your broker offers via their MetaTrader4 or 5.
+
+Disclaimer: This concept is presented for educational purposes only. Profitable results of trading this strategy are not guaranteed even if the backtest suggests so. By no means this post can be considered a trading advice. You trade at your own risk.
+
+If you are thinking to execute this particular strategy, make sure to find the instrument, settings and timeframe which you like most. You can do this by your own research only.

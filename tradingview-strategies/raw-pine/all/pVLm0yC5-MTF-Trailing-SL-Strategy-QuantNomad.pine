@@ -1,0 +1,130 @@
+//@version=4
+strategy(title="MTF Trailing SL Strategy [QuantNomad]", shorttitle = "MTF TrailingSL [QN]", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+////////////
+// Inputs //
+
+atr_length = input(14,    title = "ATR Length")
+atr_mult   = input(2,     title = "ATR Mult",    type = input.float)
+
+tf2 = input('120', title = "TF2", type = input.string)
+tf3 = input('180', title = "TF3", type = input.string)
+tf4 = input('240', title = "TF4", type = input.string)
+
+// BACKTESTING RANGE
+// From Date Inputs
+fromDay   = input(defval = 1,    title = "From Day",   minval = 1, maxval = 31)
+fromMonth = input(defval = 1,    title = "From Month", minval = 1, maxval = 12)
+fromYear  = input(defval = 2016, title = "From Year",  minval = 1970)
+ 
+// To Date Inputs
+toDay   = input(defval = 1,    title = "To Day",   minval = 1, maxval = 31)
+toMonth = input(defval = 1,    title = "To Month", minval = 1, maxval = 12)
+toYear  = input(defval = 2100, title = "To Year",  minval = 1970)
+ 
+// Calculate start/end date and time condition
+startDate  = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+finishDate = timestamp(toYear,   toMonth,   toDay,   00, 00)
+
+time_cond = time >= startDate and time <= finishDate
+
+//////////////////
+// CALCULATIONS //
+
+
+tsl() => 
+    // SL values
+    sl_val = atr_mult * atr(atr_length)
+     
+    // Init Variables
+    pos         = 0
+    trailing_sl = 0.0
+    
+    // Signals
+    long_signal  = nz(pos[1]) !=  1 and high > nz(trailing_sl[1])
+    short_signal = nz(pos[1]) != -1 and low  < nz(trailing_sl[1]) 
+    
+    // Calculate SL
+    trailing_sl := short_signal     ? high + sl_val : 
+                   long_signal      ? low  - sl_val : 
+                   nz(pos[1]) ==  1 ? max(low  - sl_val, nz(trailing_sl[1])) :  
+                   nz(pos[1]) == -1 ? min(high + sl_val, nz(trailing_sl[1])) : 
+                   nz(trailing_sl[1])
+                   
+    // Position var               
+    pos := long_signal  ? 1 : short_signal ? -1 : nz(pos[1]) 
+    trailing_sl
+    
+    
+trailing_sl1 = tsl()
+trailing_sl2 = security(syminfo.tickerid, tf2, tsl()[1], lookahead = barmerge.lookahead_on)
+trailing_sl3 = security(syminfo.tickerid, tf3, tsl()[1], lookahead = barmerge.lookahead_on)
+trailing_sl4 = security(syminfo.tickerid, tf4, tsl()[1], lookahead = barmerge.lookahead_on)
+
+
+pos1 = 0
+pos1 := low <= trailing_sl1 ? -1 : high >= trailing_sl1 ? 1 : nz(pos1[1])
+
+pos2 = 0
+pos2 := low <= trailing_sl2 ? -1 : high >= trailing_sl2 ? 1 : nz(pos2[1])
+
+pos3 = 0
+pos3 := low <= trailing_sl3 ? -1 : high >= trailing_sl3 ? 1 : nz(pos3[1])
+
+pos4 = 0
+pos4 := low <= trailing_sl4 ? -1 : high >= trailing_sl4 ? 1 : nz(pos4[1])
+
+total_pos = pos1 + pos2 + pos3 + pos4
+
+//////////////
+// PLOTINGS //
+
+plot(trailing_sl1, linewidth = 2 , color = pos1 == 1 ? color.green : color.red, title = "TSL TF1")
+plot(trailing_sl2, linewidth = 2 , color = pos2 == 1 ? color.green : color.red, title = "TSL TF2", transp = 25)
+plot(trailing_sl3, linewidth = 2 , color = pos3 == 1 ? color.green : color.red, title = "TSL TF3", transp = 50)
+plot(trailing_sl4, linewidth = 2 , color = pos4 == 1 ? color.green : color.red, title = "TSL TF4", transp = 75)
+
+//////////////
+// STRATEGY //
+
+//strategy.entry("long",  true,  stop = trailing_sl1)
+//strategy.entry("short", false, stop = trailing_sl1)
+
+strategy.entry("long",    true, when = total_pos ==  4 and time_cond)
+strategy.entry("short",  false, when = total_pos == -4 and time_cond)
+
+strategy.close("long",  when = total_pos <= 0)
+strategy.close("short", when = total_pos >= 0)
+
+if (not time_cond)
+    strategy.close_all()
+
+View in Pine Editor・100 lines
+Use on chart
+8
+6
+1
+45
+18 868
+Mar 25, 2020
+This is a Multi-Timeframe version of my Trailing SL Strategy.
+Few weeks ago I published Trailing SL Strategy. There I used only basic Trailing SL to enter positions.
+It worked pretty well so I tried to work on it a bit. I thought what if you can use the same ATR TSL on different timeframes and combine them into one signal.
+In this strategy you can use only ATR stops and choose 3 other higher timeframes in addition to your current timeframe.
+You'll see Trailing SL plotted on the chart form all these timeframes.
+
+Entry Long position if all 4 time-frames agree on long signal.
+Exit Long positions when at least 2 time-frames disagree on long signal.
+
+Entry to Short position if all 4 time-frames agree on Short signal.
+Exit from Short positions when at least 2 time-frames disagree on Short signal.
+
+Here is the link to my basic Trailing SL Strategy:
+
+
+Mar 25, 2020
+Release Notes
+Fixed backtesting range
+Apr 15, 2020
+Release Notes
+Updated the way I get the data from Higher Timeframe

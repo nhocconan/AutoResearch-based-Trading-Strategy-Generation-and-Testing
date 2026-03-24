@@ -1,0 +1,450 @@
+//@version=6
+strategy("Trend Forge", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, initial_capital = 10000, pyramiding = 0, process_orders_on_close = false, calc_on_every_tick = false, margin_long = 0 , margin_short = 0)
+//===========================================================================================================[SECTION 1]
+// { indicators & Values } //
+//========================//
+
+// User inputs
+Trend_1         = input.string(title = "Trend Type", options=["RSI", "WT", "CCI", "EMA", "SMA"], defval = "EMA", tooltip = "Select the first indicator for your Strategy", group = "First Trend") 
+Trend1_Length   = input.int(defval = 21,title = "Trend Length", minval=1, maxval=500, group = "First Trend")
+
+Trend_2         = input.string(title = "Trend 2", options=["RSI", "WT", "CCI", "EMA", "SMA"], defval = "EMA", tooltip = "Select the second indicator for your Strategy", group = "Second Trend")
+Trend2_Length   = input.int(defval = 55,title = "Trend Length", minval=1, maxval=500, group = "Second Trend")
+
+Trend_3         = input.string(title = "Trend 3", options=["RSI", "WT", "CCI", "EMA", "SMA"], defval = "SMA", tooltip = "Select the third indicator for your Strategy", group = "Third Trend")
+Trend3_Length   = input.int(defval = 89,title = "Trend Length", minval=1, maxval=500, group = "Third Trend")
+
+Multiplier          = input.float(2.5, "Average True Range Stop Loss Multiplier ", group = "Stop Loss Calculation & Display")
+LongDisplay         = input(true, "Display Long Position Entry , Stops , and Exit values on the chart ", group = "Bracket Order Value Appearance")
+ShortDisplay        = input(false, "Display Short Position Entry , Stops , and Exit values on the chart ", group = "Bracket Order Value Appearance")
+ValueSize           = input(true, "Large Size for Position values ", group = "Bracket Order Value Appearance")
+LongSignaltoOrder   = input(true, "Display a Zone that visualizes the delay between Long Entry Signal generation and order execution ", group = "Signal to Order Appearance")
+ShortSignaltoOrder  = input(false,"Display a Zone that visualizes the delay between Short Entry Signal generation and order execution ", group = "Signal to Order Appearance")
+ShortStoplosszone   = input(false, "Display Stop Loss Zones for Short Positions ", group = "Stop Loss Calculation & Display")
+Shorttrendzone      = input(false, "Display Short Position Trend Zone ", group = "Bracket Order Zone Appearance")
+LongStoplosszone    = input(true, "Display Stop Loss Zones for Long Positions ", group = "Stop Loss Calculation & Display")
+Longtrendzone       = input(true, "Display Long Position Trend Zone ", group = "Bracket Order Zone Appearance")
+
+ShortTrades         = input(false, "Enable Strategy to take Short Positions", group = "Execution Logic")
+LongTrades          = input(true, "Enable Strategy to take Long Positions", group = "Execution Logic")
+// Calculate all indicators on every bar (fixes consistency warnings)
+ema1 = ta.ema(close, Trend1_Length)
+sma1 = ta.sma(close, Trend1_Length)
+rsi1 = ta.rsi(close, Trend1_Length)
+cci1 = ta.cci(close, Trend1_Length)
+ap1 = hlc3
+esa1 = ta.ema(ap1, Trend1_Length)
+d1 = ta.ema(math.abs(ap1 - esa1), Trend1_Length)
+ci1 = (ap1 - esa1) / (0.015 * d1)
+wt1 = ta.ema(ci1, Trend1_Length)
+
+ema2 = ta.ema(close, Trend2_Length)
+sma2 = ta.sma(close, Trend2_Length)
+rsi2 = ta.rsi(close, Trend2_Length)
+cci2 = ta.cci(close, Trend2_Length)
+ap2 = hlc3
+esa2 = ta.ema(ap2, Trend2_Length)
+d2 = ta.ema(math.abs(ap2 - esa2), Trend2_Length)
+ci2 = (ap2 - esa2) / (0.015 * d2)
+wt2 = ta.ema(ci2, Trend2_Length)
+
+ema3 = ta.ema(close, Trend3_Length)
+sma3 = ta.sma(close, Trend3_Length)
+rsi3 = ta.rsi(close, Trend3_Length)
+cci3 = ta.cci(close, Trend3_Length)
+ap3 = hlc3
+esa3 = ta.ema(ap3, Trend3_Length)
+d3 = ta.ema(math.abs(ap3 - esa3), Trend3_Length)
+ci3 = (ap3 - esa3) / (0.015 * d3)
+wt3 = ta.ema(ci3, Trend3_Length)
+
+// Now select which one to use based on user input
+float ma21 = Trend_1 == "EMA" ? ema1 : Trend_1 == "SMA" ? sma1 : Trend_1 == "RSI" ? rsi1 : Trend_1 == "CCI" ? cci1 : wt1
+float ma55 = Trend_2 == "EMA" ? ema2 : Trend_2 == "SMA" ? sma2 : Trend_2 == "RSI" ? rsi2 : Trend_2 == "CCI" ? cci2 : wt2
+float ma89 = Trend_3 == "EMA" ? ema3 : Trend_3 == "SMA" ? sma3 : Trend_3 == "RSI" ? rsi3 : Trend_3 == "CCI" ? cci3 : wt3
+
+float ama = (ma21+ma55+ma89)/3
+float AC = 0
+
+//===========================================================================================================[SECTION 3]
+
+float atrvalue    = ta.atr(20)
+float SLDistance  = atrvalue * Multiplier
+//  { Stop Loss Calculator }
+
+float BULL = 0
+if (ma21<close and ma55<=close and ma89<=close) and barstate.isconfirmed
+    BULL  := 1
+//  { Bullish State Detection }
+
+float BEAR = 0
+if (ma21>close and ma55>close and ma89>close) and barstate.isconfirmed
+    BEAR  := 1
+//  { Bearish State Detection }
+
+float lowest_ma = ma89
+if (ma21<=ma55 and ma21<=ma89) and barstate.isconfirmed
+    lowest_ma :=  ma21
+if (ma55<=ma21 and ma55<=ma89) and barstate.isconfirmed
+    lowest_ma :=  ma55
+//  { Comparator for finding lowest Trend }
+
+float highest_ma = ma89
+if (ma21>=ma55 and ma21>=ma89) and barstate.isconfirmed
+    highest_ma :=  ma21
+if (ma55>=ma21 and ma55>=ma89) and barstate.isconfirmed
+    highest_ma :=  ma55
+//  { Comparator for finding highest Trend }
+
+float LONG_STOP_LOSS    =  na //|| { Sets Calculated Stop Loss for Long Positions }
+float SHORT_STOP_LOSS   =  na //|| { Sets Calculated Stop Loss for Short Positions }
+float LONG_ENTRY        =  na //|| { Sets Entry Point for Long Positions }
+float SHORT_ENTRY       =  na //|| { Sets Entry Point for Short Positions }
+
+if (BULL==1 and BULL[1]==0) and barstate.isconfirmed
+    LONG_ENTRY      :=                                  highest_ma
+    LONG_STOP_LOSS  :=                                  (highest_ma - SLDistance)
+//  { Position Placement Logic for Longs }
+
+if (BEAR==1 and BEAR[1]==0) and barstate.isconfirmed
+    SHORT_ENTRY     :=                                  lowest_ma
+    SHORT_STOP_LOSS :=                                  (lowest_ma + SLDistance)
+//  { Position Placement Logic for Shorts }
+
+lsl          =  ta.sma(LONG_STOP_LOSS,1)  // { Stores The Most recent Long Stop Loss value when BULL==1 }
+ssl          =  ta.sma(SHORT_STOP_LOSS,1) // { Stores The Most recent Short Stop Loss value when BEAR==1 }
+lep          =  ta.sma(LONG_ENTRY,1)      // { Stores The Most recent Long Entry value when BULL==1 }
+sep          =  ta.sma(SHORT_ENTRY,1)     // { Stores The Most recent Short Entry value when BEAR==1 }
+
+
+float longe  =  na  // { Plots lep's value on the chart during an active Bull state }
+float lstopl =  na  // { Plots lsl's value on the chart during an active Bull state }
+float shorte =  na  // { Plots seps's value on the chart during an active Bear state }
+float sstopl =  na // { Plots ssl's value on the chart during an active Bear state }
+
+if (BULL==1) and barstate.isconfirmed
+    lstopl        :=                    lsl
+    longe         :=                    lep
+//
+if (BEAR==1) and barstate.isconfirmed
+    sstopl        :=                    ssl
+    shorte        :=                    sep
+//
+if (close>ama) and barstate.isconfirmed
+    AC            :=                    1
+//
+
+if (close<ama) and barstate.isconfirmed
+    AC            :=                   -1
+
+//===========================================================================================================[SECTION 4]
+
+//! Stoploss Zones
+botdemand=plot(
+ lstopl,
+ "Long Stop Loss",
+ color= LongStoplosszone==true ? color.gray : na,
+ style=plot.style_linebr)
+//
+topsupply=plot(
+ sstopl,
+ "Short Stop Loss",
+ color= ShortStoplosszone==true ? color.gray : na,
+ style=plot.style_linebr)
+//
+topdemand=plot(
+ longe,
+ "Long Entry",color= Longtrendzone==true ? color.white : na,
+ style=plot.style_linebr)
+//
+botsupply=plot(
+ shorte,
+ "Short Entry",color= Shorttrendzone==true ? color.white : na,
+ style=plot.style_linebr)
+//
+fill(
+ botdemand,
+ topdemand,
+ title="Long Stop Loss Zone",
+ color= LongStoplosszone==true ? color.rgb(240, 15, 26, 86) : na)
+//
+fill(
+ topsupply,
+ botsupply,
+ title="Short Stop Loss Zone",
+ color= ShortStoplosszone==true ? color.rgb(240, 15, 26, 86) : na)
+//
+FA=plot(
+ ama,
+ "Average Trend Average = (trend 1 + trend 2 + trend 3)/3",
+ color=ama<=close?color.blue:color.red,
+ style=plot.style_linebr,
+ editable=true, display=display.none)
+//
+FHL=plot(
+ hl2,
+ "Order Block Outline",
+ editable=false, display= display.none)
+//
+plot(
+ ma21,
+ "Trend 1",
+ color=color.new(ma21<=close?color.blue:color.red, 60), display=display.none)
+//
+plot(
+ ma55,
+ "Trend 2",
+ color=color.new(ma55<=close?color.blue:color.red, 60), display=display.none)
+//
+plot(
+ ma89,
+ "Trend 3",
+ color=color.new(ma89<=close?color.blue:color.red, 60), display=display.none)
+//
+fill(
+ topdemand, 
+ FHL, 
+ color = Longtrendzone==true ? (BULL==1 ? color.rgb(111, 223, 115, 79) : color.new(#f8f8f8, 18)) : na, 
+ title = "Long Position Trend Area")
+fill(
+ botsupply, 
+ FHL, 
+ color = Shorttrendzone==true ? (BEAR==1 ? color.rgb(111, 223, 115, 79) : color.new(#f8f8f8, 18)) : na, 
+ title = "Short Position Trend Area")
+//===========================================================================================================[SECTION 5]
+//! bools
+bool long_entry_alert   = (BULL==1 and BULL[1]==0) and barstate.isconfirmed
+bool long_exit_alert    = (BULL==0 and BULL[1]==1) and barstate.isconfirmed
+bool short_entry_alert  = (BEAR==1 and BEAR[1]==0) and barstate.isconfirmed
+bool short_exit_alert   = (BEAR==0 and BEAR[1]==1) and barstate.isconfirmed
+//===========================================================================================================[SECTION 6]
+// { Strategy Entry / Exit Logic } //
+//================================//
+
+// --- Long Entry: use the long_entry_alert bool to trigger entry, ATR-based stop loss ---
+if long_entry_alert and LongTrades  
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long SL", from_entry = "Long", stop = lsl)
+
+// --- Short Entry: use the short_entry_alert bool to trigger entry, ATR-based stop loss ---
+if short_entry_alert and ShortTrades
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short SL", from_entry = "Short", stop = ssl)
+
+// --- Exits: close positions when the bull/bear state ends ---
+if long_exit_alert and LongTrades
+    strategy.close("Long", comment = "Long Exit")
+
+if short_exit_alert and ShortTrades
+    strategy.close("Short", comment = "Short Exit")
+
+//===========================================================================================================[SECTION 7]
+// { Signal to Order fill zones } //
+//===============================//
+
+//! Longs
+float edemand = na
+if (BULL==1 and BULL[1]==1 and BULL[2]==0)
+    edemand := open
+
+var float filler = na
+if (edemand==open)
+    filler := edemand
+
+if (BULL==0)
+    filler := na
+
+zoneline=plot(filler, "Long Position Fill line", color = color.rgb(72, 255, 0, 80), style = plot.style_linebr)
+fill(topdemand,zoneline, color = LongSignaltoOrder==true ? color.rgb(115, 255, 0, 90) : na, title = "Long Position Fill zone")
+
+//! Shorts
+float esupply = na
+if (BEAR==1 and BEAR[1]==1 and BEAR[2]==0)
+    esupply := open
+
+var float filler2 = na
+if (esupply==open)
+    filler2 := esupply
+
+if (BEAR==0)
+    filler2 := na
+
+zoneline2=plot(filler2, "Short Position FIll line", color = color.rgb(72, 255, 0, 80), style = plot.style_linebr)
+fill(botsupply,zoneline2, color = ShortSignaltoOrder==true ? color.rgb(115, 255, 0, 90) : na, title = "Short Position Fill zone")
+//===========================================================================================================[SECTION 8]
+// { Table Logic } //
+//================//
+
+Dashboard = table.new(
+ position = position.top_right,
+ columns = 2,
+ rows = 4, 
+ frame_color = color.white,
+ frame_width = 2 , 
+ border_color = color.rgb(33, 31, 31),
+ bgcolor = color.rgb(74, 74, 77))
+
+table.cell(Dashboard, column = 0, row = 0, text = "Trend Types", text_color = color.orange, text_font_family = font.family_monospace )
+table.cell(Dashboard, column = 0, row = 1, text = str.tostring(Trend_1), text_color = color.white)
+table.cell(Dashboard, column = 0, row = 2, text = str.tostring(Trend_2), text_color = color.white)
+table.cell(Dashboard, column = 0, row = 3, text = str.tostring(Trend_3), text_color = color.white)
+
+table.cell(Dashboard, column = 1, row = 0, text = "Settings", text_color = color.aqua, text_font_family = font.family_monospace)
+table.cell(Dashboard, column = 1, row = 1, text = LongDisplay == true ? "Displaying Long Entrys , Exits , and Stop Values" : "Long Entrys , Exits , and Stop Values are hidden ", text_color = LongDisplay == true ? color.green : color.red)
+table.cell(Dashboard, column = 1, row = 2, text = ShortDisplay == true ? "Displaying Short Entrys, Exits, and Stop Values" : "Short Entrys , Exits, and Stop Values are hidden", text_color = ShortDisplay == true ? color.green : color.red)
+table.cell(Dashboard, column = 1, row = 3, text = "Your ATR value for Stop Loss Calculations is " + str.tostring(Multiplier), text_color = color.white)
+//===========================================================================================================[SECTION 9]
+//! Long Entry & Stop Loss Price Display
+if (long_entry_alert and LongDisplay==true)
+    label.new(
+         bar_index,
+         lstopl,
+         str.tostring(lstopl, format.mintick), 
+         style=label.style_text_outline, 
+         color=color.new(#000000, 15), 
+         textcolor=color.new(#ffb011, 0), 
+         size= ValueSize==true ? size.normal : size.tiny)
+    label.new(
+         bar_index, 
+         longe, 
+         str.tostring(longe, format.mintick), 
+         style=label.style_text_outline,
+         color=color.new(#000000, 15), 
+         textcolor=color.green, 
+         size= ValueSize==true ? size.normal : size.tiny)
+//! Short Entry & Stop Loss Price Display
+if (short_entry_alert and ShortDisplay==true)
+    label.new(
+         bar_index, 
+         sstopl, 
+         str.tostring(sstopl, format.mintick), 
+         style=label.style_text_outline, 
+         color=color.new(#000000, 15), 
+         textcolor=color.new(#ffb011, 0), 
+         size= ValueSize==true ? size.normal : size.tiny)
+    label.new(
+         bar_index, 
+         shorte, 
+         str.tostring(shorte, format.mintick), 
+         style=label.style_text_outline, 
+         color=color.new(#000000, 15), 
+         textcolor=color.green, 
+         size= ValueSize==true ? size.normal : size.tiny)
+//! Long Exit Price Display
+if (long_exit_alert and LongDisplay==true)
+    label.new(
+         bar_index, 
+         close,
+         str.tostring(close),
+         style=label.style_text_outline,
+         color=color.new(#000000, 15),
+         textcolor= color.new(#13d8ff, 0),
+         size= ValueSize==true ? size.normal : size.tiny)
+//! Short Exit Price Display 
+if (short_exit_alert and ShortDisplay==true)
+    label.new(
+         bar_index,
+         close,
+         str.tostring(close),
+         style=label.style_text_outline,
+         color=color.new(#000000, 15),
+         textcolor= color.new(#13d8ff, 0),
+         size= ValueSize==true ? size.normal : size.tiny)
+//==========================================================================================================[SECTION 10]
+
+View in Pine Editor・356 lines
+Use on chart
+9
+7
+1 729
+
+Trend Forge is a fully configurable multi-trend strategy that lets you mix and match three independent trend indicators to define bullish and bearish market states. When all three trends align above price, the strategy enters long; when all three align below, it enters short. Every position is protected by an ATR-based stop loss, and trades close automatically when the trend alignment breaks down.
+
+This script was converted from the original Bear & Bull Builder indicator I published into a back testable strategy with real entries, exits, and stop loss orders. It gives you access to TradingView's full Strategy Tester including equity curves, trade lists, and performance metrics.
+
+How It Works
+Trend Selection:
+You choose three trend indicators independently, each with its own type and length:
+
+- Trend 1 (default: EMA 21) — fast trend
+- Trend 2 (default: EMA 55) — medium trend
+-Trend 3 (default: SMA 89) — slow trend
+
+Each trend slot supports five indicator types: EMA, SMA, RSI, CCI, and WaveTrend (WT). This gives you complete freedom to build a trend-following system tailored to your instrument and timeframe.
+
+Entry Logic
+
+Long Entry: Triggered on the first confirmed bar where price closes above all three trend values. The strategy enters long at market and simultaneously places an ATR-based stop loss order.
+
+Short Entry: Triggered on the first confirmed bar where price closes below all three trend values. The strategy enters short at market with an ATR-based stop loss.
+
+Stop Loss Calculation
+
+The stop loss distance is calculated as:
+
+`Stop Loss Distance = ATR(20) × Multiplier`
+
+- For longs, the stop is placed below the highest of the three trend values at entry.
+- For shorts, the stop is placed above the lowest of the three trend values at entry.
+
+The ATR multiplier is user-adjustable (default: 2.5), letting you widen or tighten risk per trade based on volatility.
+
+Exit Logic
+
+Positions close via market order when the trend alignment condition that triggered the entry is no longer met — i.e., when price crosses back through one or more of the trend lines. If the stop loss is hit first, the strategy exits at the stop price instead.
+
+---
+
+Visual Features
+
+All of the original indicator's visual overlays are preserved:
+
+-Stop Loss Zones — shaded red regions between the entry level and the ATR stop loss, shown for longs and/or shorts (toggle on/off).
+- Trend Zones — green-shaded areas that highlight when a bullish or bearish state is active.
+- Signal-to-Order Fill Zones — a green zone that visualizes the one-bar delay between signal generation (bar close confirmation) and order execution (next bar open).
+- Entry, Stop, and Exit Labels — price labels printed on the chart at entry, stop loss, and exit points with color coding (green = entry, orange = stop, cyan = exit). Toggleable for longs and shorts independently.
+---
+
+Settings Reference
+
+| Group | Setting | Default | Description |
+|-------|---------|---------|-------------|
+| First Trend** | Trend Type | EMA | Indicator type for Trend 1 |
+| First Trend** | Trend Length | 21 | Lookback period for Trend 1 |
+| Second Trend | Trend 2 | EMA | Indicator type for Trend 2 |
+| Second Trend | Trend Length | 55 | Lookback period for Trend 2 |
+| Third Trend | Trend 3 | SMA | Indicator type for Trend 3 |
+| Third Trend| Trend Length | 89 | Lookback period for Trend 3 |
+| Stop Loss | ATR Multiplier | 2.5 | Multiplied by ATR(20) to set stop distance |
+| Display | Long/Short Labels | Long on | Show entry, stop, and exit price labels |
+| Display| Stop Loss Zones | Long on | Shade the region between entry and stop |
+| Display | Trend Zones | Long on | Shade active bull/bear trend areas |
+| Display | Signal-to-Order Zones | Long on | Show the fill delay visualization |
+
+---
+
+Strategy Properties
+
+| Property | Value |
+|----------|-------|
+| Default Qty Type | 100% of equity |
+| Initial Capital | 10,000 |
+| Pyramiding | 0 (no stacking) |
+| Order Fill | Next bar open |
+| Bar Confirmation | Orders only on confirmed bars |
+
+---
+
+Usage Tips
+
+- Start with the default EMA 21 / EMA 55 / SMA 89 combination and adjust from there.
+- Pair faster trend lengths for scalping on lower timeframes, or slower lengths for swing trading on daily/weekly charts.
+- Increase the ATR multiplier on volatile instruments to avoid premature stop outs; decrease it on stable instruments for tighter risk control.
+- Use the Strategy Tester tab to compare different trend type and length combinations across your chosen symbol and timeframe.
+- The WaveTrend and CCI options can provide earlier signals in ranging markets but may generate more whipsaws — backtest before committing.
+
+---
+Disclaimer
+
+This strategy is provided for educational and backtesting purposes only. Past performance does not guarantee future results. Always validate with out-of-sample data and proper risk management before trading live capital.
+

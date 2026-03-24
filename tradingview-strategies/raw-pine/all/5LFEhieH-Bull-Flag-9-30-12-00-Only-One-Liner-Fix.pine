@@ -1,0 +1,261 @@
+//@version=6
+strategy(title="Small Cap Bull Flag Pattern Trader", shorttitle="BullFlag_1L", overlay=true)
+
+// Inputs
+impulseATRMultiplier = input.float(2.0, "Impulse: Min Candle Range in ATR"), impulseVolumeMultiplier = input.float(1.5, "Impulse: Vol vs. Avg"), avgVolLen = input.int(20, "Vol SMA Len"), atrLen = input.int(14, "ATR Len"), maxPullbackPct = input.float(50.0, "Max Pullback (%)"), maxPullbackBars = input.int(5, "Max Pullback Bars"), breakoutVolumeMult = input.float(1.0, "Breakout Vol vs. Avg"), rrRatio = input.float(2.0, "R:R Target")
+
+// Session active if bar's time is within 09:30-12:00
+bool sessActive = not na(time(timeframe.period, "0930-1200")) 
+
+// Indicators
+volAvg = ta.sma(volume, avgVolLen), atrVal = ta.atr(atrLen), candleRange = high - low, isImpulseBar = close > open and candleRange >= impulseATRMultiplier * atrVal and volume >= impulseVolumeMultiplier * volAvg
+
+// State vars (type safe)
+var bool inFlag = false
+var float flagImpulseHigh = 0.0, flagImpulseLow = 0.0, pullbackLow = 0.0
+var int pullbackBars = 0
+
+// Detect new impulse (only if session is active)
+if barstate.isnew and isImpulseBar and sessActive
+    inFlag := true, flagImpulseHigh := high, flagImpulseLow := low, pullbackLow := low, pullbackBars := 0
+
+// Track pullback & breakout logic, only if session active
+if inFlag and sessActive
+    pullbackBars += 1
+    pullbackLow := math.min(pullbackLow, low)
+    retracementPct = (flagImpulseHigh - pullbackLow) / (flagImpulseHigh - flagImpulseLow) * 100
+    inFlag := retracementPct > maxPullbackPct or pullbackBars > maxPullbackBars ? false : inFlag
+    newHigh = high > high[1]
+    breakoutVolOk = volume >= breakoutVolumeMult * volAvg
+
+    if newHigh and breakoutVolOk
+        strategy.entry("Long Flag Breakout", strategy.long)
+        stopLevel = pullbackLow
+        approximateEntry = close
+        risk = approximateEntry - stopLevel
+        target = approximateEntry + rrRatio * risk
+        strategy.exit("Exit BullFlag", "Long Flag Breakout", stop=stopLevel, limit=target)
+        inFlag := false
+
+// Plots
+plotshape(isImpulseBar, style=shape.triangleup, color=color.new(color.lime, 0), size=size.tiny, title="Impulse Bar")
+plot(inFlag ? flagImpulseHigh : na, color=color.yellow, style=plot.style_line, linewidth=2, title="Impulse High")
+plot(inFlag ? pullbackLow : na, color=color.teal, style=plot.style_line, linewidth=2, title="Pullback Low")
+
+View in Pine Editor・43 lines
+Use on chart
+1
+4
+7
+4 422
+Mar 15, 2025
+🚀 Bull Flag Breakout Strategy | Intraday Momentum (9:30-12:00) 🔥📈
+
+💡 Designed for Intraday Traders who love momentum breakouts and want to automate Bull Flag setups with volume confirmation! This strategy detects strong bullish moves, measures pullbacks, and triggers trades when the first candle makes a new high—ensuring maximum momentum.
+
+⸻
+
+🏆 Why This Strategy?
+
+✅ Bull Flag Pattern Automation – No need to manually spot pullbacks! 🎯
+✅ Smart Volume Confirmation – Only enter trades when breakout volume is strong! 📊
+✅ Morning Session Focused (9:30 - 12:00 EST) – Trade when momentum is at its peak! ⏰
+✅ Customizable ATR & Risk Settings – Adjust pullback %, stop-loss, and take-profit! 🛠️
+✅ Backtest-Friendly – See how the strategy performs over time! 🔍
+
+⸻
+
+🎯 How It Works
+
+📌 Step 1: Detects a Bullish Impulse Bar
+🔹 Large green candle 🚀
+🔹 Candle range > ATR multiplier
+🔹 Volume > Average volume threshold
+
+📌 Step 2: Confirms a Valid Pullback
+🔸 Pullback must stay within % range of the impulse move 📉
+🔸 If the pullback is too deep or takes too long, the setup is ignored ⛔
+
+📌 Step 3: First Candle to Make a New High 📈
+🔹 When a candle breaks the previous high and volume confirms, go long! 💰
+🔹 Stop-Loss set at pullback low
+🔹 Take-Profit at Risk:Reward (R:R) Target 🎯
+
+⸻
+
+🔥 Best For
+
+💎 Scalpers & Day Traders – Capture short-term breakout momentum! ⚡
+📊 Backtesters – Optimize ATR, volume, and pullback rules for best performance! 🧪
+⏳ Morning Momentum Traders – Focus on 9:30-12:00 AM EST for higher probability setups!
+
+⸻
+
+🚨 Important Notes
+
+🔹 This strategy is not financial advice! 📜
+🔹 Always backtest & paper trade before using real money! 📉📈
+🔹 Volatility varies – Customize settings based on your trading style! 🔧
+
+🚀 Like this script? Give it a try & let us know how it works for you! 🔥👊
+
+⸻
+Mar 15, 2025
+Release Notes
+🚀 Bull Flag Breakout Strategy | Intraday Momentum (9:30-12:00) 🔥📈
+
+💡 Designed for Intraday Traders who love momentum breakouts and want to automate Bull Flag setups with volume confirmation! This strategy detects strong bullish moves, measures pullbacks, and triggers trades when the first candle makes a new high—ensuring maximum momentum.
+
+⸻
+
+🏆 Why This Strategy?
+
+✅ Bull Flag Pattern Automation – No need to manually spot pullbacks! 🎯
+✅ Smart Volume Confirmation – Only enter trades when breakout volume is strong! 📊
+✅ Morning Session Focused (9:30 - 12:00 EST) – Trade when momentum is at its peak! ⏰
+✅ Customizable ATR & Risk Settings – Adjust pullback %, stop-loss, and take-profit! 🛠️
+✅ Backtest-Friendly – See how the strategy performs over time! 🔍
+
+⸻
+
+🎯 How It Works
+
+📌 Step 1: Detects a Bullish Impulse Bar
+🔹 Large green candle 🚀
+🔹 Candle range > ATR multiplier
+🔹 Volume > Average volume threshold
+
+📌 Step 2: Confirms a Valid Pullback
+🔸 Pullback must stay within % range of the impulse move 📉
+🔸 If the pullback is too deep or takes too long, the setup is ignored ⛔
+
+📌 Step 3: First Candle to Make a New High 📈
+🔹 When a candle breaks the previous high and volume confirms, go long! 💰
+🔹 Stop-Loss set at pullback low
+🔹 Take-Profit at Risk:Reward (R:R) Target 🎯
+
+⸻
+
+🔥 Best For
+
+💎 Scalpers & Day Traders – Capture short-term breakout momentum! ⚡
+📊 Backtesters – Optimize ATR, volume, and pullback rules for best performance! 🧪
+⏳ Morning Momentum Traders – Focus on 9:30-12:00 AM EST for higher probability setups!
+
+⸻
+
+🚨 Important Notes
+
+🔹 This strategy is not financial advice! 📜
+🔹 Always backtest & paper trade before using real money! 📉📈
+🔹 Volatility varies – Customize settings based on your trading style! 🔧
+
+🚀 Like this script? Give it a try & let us know how it works for you! 🔥👊
+
+⸻
+Mar 15, 2025
+Release Notes
+🚀 Bull Flag Breakout Strategy | Intraday Momentum 🔥📈
+
+💡 Designed for Intraday Traders who love momentum breakouts and want to automate Bull Flag setups with volume confirmation! This strategy detects strong bullish moves, measures pullbacks, and triggers trades when the first candle makes a new high—ensuring maximum momentum.
+
+⸻
+
+🏆 Why This Strategy?
+
+✅ Bull Flag Pattern Automation – No need to manually spot pullbacks! 🎯
+✅ Smart Volume Confirmation – Only enter trades when breakout volume is strong! 📊
+✅ Morning Session Focused (9:30 - 12:00 EST) – Trade when momentum is at its peak! ⏰
+✅ Customizable ATR & Risk Settings – Adjust pullback %, stop-loss, and take-profit! 🛠️
+✅ Backtest-Friendly – See how the strategy performs over time! 🔍
+
+⸻
+
+🎯 How It Works
+
+📌 Step 1: Detects a Bullish Impulse Bar
+🔹 Large green candle 🚀
+🔹 Candle range > ATR multiplier
+🔹 Volume > Average volume threshold
+
+📌 Step 2: Confirms a Valid Pullback
+🔸 Pullback must stay within % range of the impulse move 📉
+🔸 If the pullback is too deep or takes too long, the setup is ignored ⛔
+
+📌 Step 3: First Candle to Make a New High 📈
+🔹 When a candle breaks the previous high and volume confirms, go long! 💰
+🔹 Stop-Loss set at pullback low
+🔹 Take-Profit at Risk:Reward (R:R) Target 🎯
+
+⸻
+
+🔥 Best For
+
+💎 Scalpers & Day Traders – Capture short-term breakout momentum! ⚡
+📊 Backtesters – Optimize ATR, volume, and pullback rules for best performance! 🧪
+⏳ Morning Momentum Traders – Focus on 9:30-12:00 AM EST for higher probability setups!
+
+⸻
+
+🚨 Important Notes
+
+🔹 This strategy is not financial advice! 📜
+🔹 Always backtest & paper trade before using real money! 📉📈
+🔹 Volatility varies – Customize settings based on your trading style! 🔧
+
+🚀 Like this script? Give it a try & let us know how it works for you! 🔥👊
+
+⸻
+9 hours ago
+Release Notes
+🚀 Bull Flag Breakout Strategy | Intraday Momentum (9:30-12:00) 🔥📈
+
+💡 Designed for Intraday Traders who love momentum breakouts and want to automate Bull Flag setups with volume confirmation! This strategy detects strong bullish moves, measures pullbacks, and triggers trades when the first candle makes a new high—ensuring maximum momentum.
+
+⸻
+
+🏆 Why This Strategy?
+
+✅ Bull Flag Pattern Automation – No need to manually spot pullbacks! 🎯
+✅ Smart Volume Confirmation – Only enter trades when breakout volume is strong! 📊
+✅ Morning Session Focused (9:30 - 12:00 EST) – Trade when momentum is at its peak! ⏰
+✅ Customizable ATR & Risk Settings – Adjust pullback %, stop-loss, and take-profit! 🛠️
+✅ Backtest-Friendly – See how the strategy performs over time! 🔍
+
+⸻
+
+🎯 How It Works
+
+📌 Step 1: Detects a Bullish Impulse Bar
+🔹 Large green candle 🚀
+🔹 Candle range > ATR multiplier
+🔹 Volume > Average volume threshold
+
+📌 Step 2: Confirms a Valid Pullback
+🔸 Pullback must stay within % range of the impulse move 📉
+🔸 If the pullback is too deep or takes too long, the setup is ignored ⛔
+
+📌 Step 3: First Candle to Make a New High 📈
+🔹 When a candle breaks the previous high and volume confirms, go long! 💰
+🔹 Stop-Loss set at pullback low
+🔹 Take-Profit at Risk:Reward (R:R) Target 🎯
+
+⸻
+
+🔥 Best For
+
+💎 Scalpers & Day Traders – Capture short-term breakout momentum! ⚡
+📊 Backtesters – Optimize ATR, volume, and pullback rules for best performance! 🧪
+⏳ Morning Momentum Traders – Focus on 9:30-12:00 AM EST for higher probability setups!
+
+⸻
+
+🚨 Important Notes
+
+🔹 This strategy is not financial advice! 📜
+🔹 Always backtest & paper trade before using real money! 📉📈
+🔹 Volatility varies – Customize settings based on your trading style! 🔧
+
+🚀 Like this script? Give it a try & let us know how it works for you! 🔥👊
+
+⸻

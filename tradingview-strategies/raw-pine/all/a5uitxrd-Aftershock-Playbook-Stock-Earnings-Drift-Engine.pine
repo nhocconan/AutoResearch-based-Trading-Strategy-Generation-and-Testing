@@ -1,0 +1,229 @@
+//@version=5
+//════════════════════════════════════════════════════
+//  Post-Earnings Drift · v7-refactor
+//  - Comments + tooltips
+//  - Dynamic 45-day hold period
+//    @Author      exlux
+//════════════════════════════════════════════════════
+
+//////////////////// 0 · STRATEGY /////////////////////
+strategy(title             = "Aftershock Playbook: Stock Earnings Drift Engine",
+         overlay           = true,
+         default_qty_type  = strategy.percent_of_equity,
+         default_qty_value = 100, margin_long=0, margin_short=0)
+
+//////////////////// 1 · USER INPUTS //////////////////
+//— Surprise thresholds
+thPos = input.float( 0.0 , title = "Positive surprise ≥ (%)",
+                     tooltip = "Minimum EPS surprise (in %) required for a bullish drift entry.")
+thNeg = input.float(0.0 , title = "Negative surprise ≤ (%)",
+                     tooltip = "Maximum (negative) EPS surprise (in %) required for a bearish drift entry.")
+
+//— ATR stop-loss
+atrMult = input.float(2.0 , title = "ATR stop ×",
+                      tooltip = "Protective stop = ATR × this multiplier (only active for shorts in this version).")
+atrLen  = input.int  (14  , title = "ATR length",
+                      tooltip = "Look-back length for ATR calculation.")
+
+//— Behaviour toggles
+reverseTrade = input.bool(false, title = "Reverse signals?",
+                          tooltip = "Flip long/short polarity (useful for quick mean-reversion testing).")
+time_exit    = input.bool(false, title = "Time Risk Management",
+                          tooltip = "If enabled, a hard exit triggers after 45 calendar days in the trade.")
+
+//////////////////// 2 · CONSTANTS ////////////////////
+HOLD_DAYS  = input(200, title="Bar to Hold")
+barSeconds = timeframe.in_seconds(timeframe.period)    // Bar duration in seconds
+holdBars   = HOLD_DAYS//int(math.round(HOLD_DAYS * 24 * 60 * 60 / barSeconds))
+// e.g. on a 15-min chart: 3 888 000 s ÷ 900 s ≈ 4 320 bars
+
+showTable  = true                                      // Diagnostics table toggle
+
+//////////////////// 3 · EARNINGS DATA ////////////////
+epsAct = request.earnings(syminfo.tickerid, earnings.actual,
+                          gaps = barmerge.gaps_on,
+                          lookahead = barmerge.lookahead_off)
+epsEst = request.earnings(syminfo.tickerid, earnings.estimate,
+                          gaps = barmerge.gaps_on,
+                          lookahead = barmerge.lookahead_off)
+
+isER    = not na(epsAct) and na(epsAct[1])             // True only on the release bar
+surpPct = (epsAct - epsEst) / epsEst * 100             // EPS surprise in %
+
+//////////////////// 4 · STATE VARS ///////////////////
+var bool waitNextER      = false   // Raised after a losing exit
+var bool reenteredFlag   = false   // Blocks multiple auto-re-entries
+var float lastEquity     = strategy.equity
+var int   lastDir        = 0       // +1 long · −1 short · 0 none
+var bool  reenterNext    = false   // Queued after each winning exit
+var bool  skipPnL        = false   // Ignore PnL if trade was force-closed
+
+string longIdConst  = reverseTrade ? "short" : "long"
+string shortIdConst = reverseTrade ? "long"  : "short"
+
+//////////////////// 5 · HOUSE-KEEPING ///////////////
+if isER
+    waitNextER    := false
+    reenteredFlag := false
+
+// Flatten any open trade immediately before a new earnings bar
+if isER and strategy.position_size != 0
+    strategy.close_all(comment = "Reset for new ER")
+    skipPnL := true
+
+//////////////////// 6 · ENTRY ENGINE ////////////////
+bool longCond  = isER and surpPct >= thPos and not waitNextER
+bool shortCond = isER and surpPct <= thNeg and not waitNextER
+
+dirLong  = reverseTrade ? strategy.short : strategy.long
+dirShort = reverseTrade ? strategy.long  : strategy.short
+
+if longCond
+    strategy.entry(longIdConst , dirLong)
+    lastDir        :=  1
+    lastEquity     := strategy.equity
+    reenteredFlag  := false
+
+if shortCond
+    strategy.entry(shortIdConst, dirShort)
+    lastDir        := -1
+    lastEquity     := strategy.equity
+    reenteredFlag  := false
+
+//////////////////// 7 · ATR STOP (SHORT ONLY) ///////
+atr = ta.atr(atrLen)
+
+// Long stop intentionally disabled (matches previous behaviour)
+// if strategy.position_size > 0
+//     strategy.exit("L-Stop", from_entry = longIdConst,
+//                   stop = strategy.position_avg_price - atrMult * atr)
+
+if strategy.position_size < 0
+    strategy.exit("S-Stop", from_entry = shortIdConst,
+                  stop = strategy.position_avg_price + atrMult * atr)
+
+//////////////////// 8 · TIME STOP ///////////////////
+if strategy.position_size != 0 and time_exit
+    entBar = strategy.opentrades.entry_bar_index(strategy.opentrades - 1)
+    if bar_index >= entBar + holdBars or isER
+        strategy.close_all(comment = "Time exit")
+
+//////////////////// 9 · WIN / LOSS HANDLER //////////
+bool tradeClosed = strategy.closedtrades > 0 and
+                   strategy.position_size == 0 and
+                   strategy.position_size[1] != 0
+
+if tradeClosed and not skipPnL
+    reenteredFlag := false                           // Unlock auto-re-entry
+
+    idx = strategy.closedtrades - 1
+    pnl = strategy.closedtrades.profit(idx)
+
+    if pnl > 0
+        reenterNext := true                          // Queue a fresh re-entry
+    else
+        waitNextER  := true                          // Block until next earnings
+
+    lastEquity := strategy.equity
+
+if skipPnL
+    skipPnL := false
+
+//////////////////// 10 · ONE-BAR RE-ENTRY ///////////
+if reenterNext and strategy.position_size == 0 and lastDir != 0
+    string reId = lastDir == 1 ? longIdConst : shortIdConst
+    dir        = lastDir == 1 ? strategy.long : strategy.short
+
+    strategy.entry(reId, dir)
+
+    lastEquity    := strategy.equity
+    reenterNext   := false
+    reenteredFlag := true                            // Prevent same-bar loop
+
+//////////////////// 11 · DIAGNOSTICS TABLE //////////
+if showTable
+    var table t = table.new(position.top_right, 2, 3,                            frame_width = 1,                            bgcolor     = color.new(color.black, 85))
+
+    float lastAct  = ta.valuewhen(isER, epsAct , 0)
+    float lastEst  = ta.valuewhen(isER, epsEst , 0)
+    float lastSurp = ta.valuewhen(isER, surpPct, 0)
+
+    if close > 0
+        table.cell(t, 0, 0, "EPS Actual")
+        table.cell(t, 1, 0, str.tostring(lastAct , format.mintick),
+                   text_color = lastAct >= 0 ? color.green : color.red)
+
+        table.cell(t, 0, 1, "EPS Estimate")
+        table.cell(t, 1, 1, str.tostring(lastEst , format.mintick),
+                   text_color = lastEst >= 0 ? color.green : color.red)
+
+        table.cell(t, 0, 2, "Surprise %")
+        table.cell(t, 1, 2, str.tostring(lastSurp, "#.##"),
+                   text_color = lastSurp >= 0 ? color.green : color.red)
+
+//////////////////// 12 · VISUAL MARKER //////////////
+plotshape(isER, style = shape.triangledown, location = location.top,
+          color = color.yellow, size = size.tiny, title = "Earnings bar")
+
+View in Pine Editor・166 lines
+Use on chart
+7
+8
+2
+2 074
+Strategy type
+Event-driven post-earnings momentum engine (long/short) built for single-stock charts or ADRs that publish quarterly results.
+
+What it does
+Detects the exact earnings bar (request.earnings, lookahead_off).
+Scores the surprise and launches a position on that candle’s close.
+Tracks PnL: if the first leg closes green, the engine automatically re-enters on the very next bar, milking residual drift.
+Blocks mid-cycle trades after a loss until the next earnings release—keeping the risk contained to one cycle.
+Think of it as a sniper that fires on the earnings pop, reloads once if the shot lands, then goes silent until the next report.
+
+Core signal inputs
+Component Default Purpose
+EPS Surprise % +0 % / –5 % Minimum positive / negative shock to trigger longs/shorts.
+Reverse signals? Off Quick flip for mean-reversion experiments.
+Time Risk Mgt. Off Optional hard exit after 45 calendar days (auto-scaled to any TF).
+
+Risk engine
+ATR-based stop (ATR × 2 by default, editable).
+Bar time stop (15-min → Daily: Have to select the bar value ).
+No pyramiding beyond the built-in “double-tap”.
+All positions sized as % of equity via Strategy Properties.
+
+Visual aids
+Yellow triangle marks the earnings bar.
+Diagnostics table (top-right) shows last Actual, Estimate, and Surprise %.
+Status-line tool-tips on every input.
+
+Default inputs
+Setting Value
+Positive surprise ≥ 0 %
+Negative surprise ≤ –5 %
+ATR stop × 2
+ATR length 50
+Hold horizon 350 ( 1h timeframe chart bars)
+
+Back-test properties
+Initial capital  10 000
+Order size    5 % of equity
+Pyramiding    1 (internal re-entry only)
+Commission   0.03 %
+Slippage     5 ticks
+Fills      Bar magnifier ✔ · On bar close ✔ · Standard OHLC ✔
+
+How to use
+Add the script to any earnings-driven stock (AAPL, MSFT, TSLA…).
+Turn on Time Risk Management if you want stricter risk management
+Back-test different ATR multipliers to fit the stock’s volatility.
+Sync commission & slippage with your broker before forward-testing.
+
+Important notes
+Works on every timeframe from 15 min to 1 D. Sweet spot around 30min/1h
+All request.earnings() & request.security() calls use lookahead_off—zero repaint.
+The “double-tap” re-entry occurs once per winning cycle to avoid drift-chasing loops.
+Historical stats ≠ future performance. Size positions responsibly.
+
+

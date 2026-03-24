@@ -1,0 +1,50 @@
+//@version=3
+strategy("QuantNomad - Pivot Reversal Strategy - XBTUSD - 1h", overlay=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 50)
+
+leftBars  = input(4)
+rightBars = input(4)
+
+swh = pivothigh(leftBars, rightBars)
+swl = pivotlow(leftBars, rightBars)
+
+swh_cond = not na(swh)
+
+hprice = 0.0
+hprice := swh_cond ? swh : hprice[1]
+
+le = false
+le := swh_cond ? true : (le[1] and high > hprice ? false : le[1])
+
+if (le)
+    strategy.entry("PivRevLE", strategy.long, comment="PivRevLE", stop=hprice + syminfo.mintick)
+
+swl_cond = not na(swl)
+
+lprice = 0.0
+lprice := swl_cond ? swl : lprice[1]
+
+
+se = false
+se := swl_cond ? true : (se[1] and low < lprice ? false : se[1])
+
+if (se)
+    strategy.entry("PivRevSE", strategy.short, comment="PivRevSE", stop=lprice - syminfo.mintick)
+
+View in Pine Editor・31 lines
+Use on chart
+7
+1
+4
+11
+19 997
+Jun 2, 2019
+Pivot reversal strategy almost always works pretty good for crypto.
+Here is setup with 4 left, 4 right bars for pivot points for XBTUSD 1h chart.
+It shows a pretty nice performance of 350% with only 10% dd, Sharpe is 1.16.
+If you're interested in using this strategy in my scripts you can find alerts for it and a version with added backtesting range.
+
+And remember:
+Past performance does not guarantee future results.
+Oct 14, 2020
+Release Notes
+Cleaning the code

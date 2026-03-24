@@ -1,0 +1,47 @@
+//@version=5
+strategy("MA Crossover with Fractals and Pullbacks", overlay=true)
+
+// Define strategy parameters
+fast_ma_length = input(12, title="Fast MA Length")
+slow_ma_length = input(26, title="Slow MA Length")
+regime_ma_length = input(200, title="Regime MA Length")
+fractal_length = input(5, title="Fractal Length")
+
+// Calculate moving averages
+fast_ma = ta.sma(close, fast_ma_length)
+slow_ma = ta.sma(close, slow_ma_length)
+regime_ma = ta.sma(close, regime_ma_length)
+
+// Detect fractals
+fractal_high = ta.highest(high, fractal_length)
+fractal_low = ta.lowest(low, fractal_length)
+bullish_fractal = close[fractal_length] < close and close[fractal_length] == fractal_high[fractal_length]
+bearish_fractal = close[fractal_length] > close and close[fractal_length] == fractal_low[fractal_length]
+
+// Buy and sell conditions
+buy_condition = ta.crossover(fast_ma, slow_ma) and close > regime_ma and bullish_fractal
+sell_condition = ta.crossunder(fast_ma, slow_ma) and close < regime_ma and bearish_fractal
+
+// Plot moving averages
+plot(fast_ma, color=color.blue, title="Fast MA")
+plot(slow_ma, color=color.red, title="Slow MA")
+plot(regime_ma, color=color.green, title="Regime MA")
+
+// Strategy entry and exit
+strategy.entry("Buy", strategy.long, when=buy_condition)
+strategy.entry("Sell", strategy.short, when=sell_condition)
+
+// Exit rules
+strategy.exit("Exit Buy", "Buy", loss=close * 0.02) // 2% stop loss for buy
+strategy.exit("Exit Sell", "Sell", loss=close * 0.02) // 2% stop loss for sell
+View in Pine Editor・36 lines
+Use on chart
+1
+3
+2
+4 259
+Feb 5, 2023
+Hello my friend! I'm uploading the code for your strategy. I have included a feature in the settings menu called "Entry Direction" that you can use to isolate only longs, only shorts or have both directions at the same time for the backtesting. I have set the strategy to only open 1 position at a time, it will not open a new position unless the previous position is closed. If you want to remove that just let me know. The green/red triangles that you will see plotting on the chart are the potential entry signals, you can turn them off from the style panel in the settings menu. In the inputs tab besides the strategy settings you also have all the relevant parameters for the three indicators used.
+Mar 19, 2024
+Release Notes
+Define optimization ranges for the input parameters (fast_ma_length, slow_ma_length, regime_ma_length, fractal_length). For example, you can set ranges like fast_ma_length = input(10, minval=5, maxval=20, title="Fast MA Length")

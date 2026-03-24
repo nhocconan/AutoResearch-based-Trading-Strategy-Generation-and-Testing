@@ -1,0 +1,58 @@
+//@version=5
+strategy(title='Based RSI (BullDozz)', overlay=false, pyramiding=0, currency=currency.USD, default_qty_type=strategy.percent_of_equity, initial_capital=1000, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.01)
+
+length = input.int(title='Length', defval=20, minval=0)
+
+bband(length, mult) =>
+    ta.sma(close, length) + mult * ta.stdev(close, length)
+
+keltner(length, mult) =>
+    ta.ema(close, length) + mult * ta.ema(ta.tr, length)
+
+e1 = (ta.highest(high, length) + ta.lowest(low, length)) / 2 + ta.sma(close, length)
+osc = ta.linreg(close - e1 / 2, length, 0)
+diff = bband(length, 2) - keltner(length, 1)
+
+osc_color = osc[1] < osc[0] ? (osc[0] >= 0 ? color.lime : color.maroon) : (osc[0] >= 0 ? color.green : color.red)
+mid_color = diff >= 0 ? color.white : color.black
+
+len = input.int(14, minval=1, title='Length', group='RSI')
+src = input.source(close, 'Source', group='RSI')
+rsi = ta.rsi(src, len)
+
+tpGroup = 'Take Profit'
+useTP = input.bool(false, title='╔══════   Enable   ══════╗', group=tpGroup)
+TPPercent = input.float(1.2, step=0.1, title='Percent', group=tpGroup) * 0.01
+
+longTP = strategy.position_avg_price * (1 + TPPercent)
+shortTP = strategy.position_avg_price * (1 - TPPercent)
+
+// Strategy
+var buySignal = osc < 0 and osc[1] < osc[0] and osc[2] < osc[0] and ta.crossover(rsi, 30)
+var sellSignal = osc > 0 and osc[1] > osc[0] and osc[2] > osc[0] and ta.crossunder(rsi, 70)
+
+if (buySignal)
+    strategy.entry('Long', strategy.long)
+    strategy.exit('Exit', 'Long', stop=longTP)
+
+if (sellSignal)
+    strategy.entry('Short', strategy.short)
+    strategy.exit('Exit', 'Short', stop=shortTP)
+
+plot(osc, color=osc_color, style=plot.style_histogram, linewidth=1)
+plot(0, color=mid_color, style=plot.style_histogram, linewidth=1)
+
+View in Pine Editor・43 lines
+Use on chart
+3
+9
+1 961
+Installation: To use this script, open TradingView and create a new Pine Script strategy. You can paste the code provided into the Pine Script editor.
+
+Customizable Inputs: The script includes various input parameters that you can customize to fit your trading preferences. These parameters are defined using the input function and include values like length, TPPercent, and others. You can adjust these values based on your trading strategy.
+
+Strategy Signals: The script generates buy and sell signals based on the conditions specified in the buySignal and sellSignal variables. These signals are derived from the analysis of the oscillator (osc) and the Relative Strength Index (rsi). When a buy signal occurs, the script enters a long position, and when a sell signal occurs, it enters a short position.
+
+Take Profit: The script includes a take profit feature (useTP) that allows you to enable or disable take profit orders. When enabled, it calculates take profit levels based on the specified percent (TPPercent) and attaches them to the open positions.
+
+Plotting: The script also visualizes the oscillator (osc) and a midline (0) on the chart using histogram-style bars. The colors of these bars change based on the oscillator's direction.

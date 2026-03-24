@@ -1,0 +1,10 @@
+//@version=5
+##root(root_metainfo,rm_0,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_1,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_2,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_3,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_4,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_5,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_6,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_7,plot.style_linebr,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_8,plot.style_linebr,cb__plot_style__integer,plot,style)

@@ -1,0 +1,35 @@
+//@version=2
+strategy("MACD+STOCHASTIC", overlay=true)
+
+//MACD
+len1=input(8)
+len2=input(24)
+src=close
+ema1=ema(src,len1)
+ema2=ema(src,len2)
+div=ema1-ema2
+long_macd=div>div[1]
+short_macd=div<div[1]
+
+//STOC
+smoothK=input(1, minval=1), smoothD=input(3, minval=1)
+len_stoc=input(7)
+k=sma(stoch(src, high, low, len_stoc), smoothK)
+d=sma(k, smoothD)
+long_stoc=d<25 and d>d[1]
+short_stoc=d>75 and d<d[1]
+
+if (long_macd and long_stoc)
+    strategy.entry("LONG", strategy.long)
+
+if (short_macd and short_stoc)
+    strategy.entry("SHORT", strategy.short)
+
+View in Pine Editor・26 lines
+Use on chart
+6
+3
+8
+3
+21 719
+A simple strategy that use MACD and STOCHASTIC to give buy/sell signal. Use fractals to put stop loss

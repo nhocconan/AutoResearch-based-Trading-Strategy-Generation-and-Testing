@@ -1,0 +1,4 @@
+//@version=5
+##root(root_metainfo,rm_0,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_1,plot.style_line,cb__plot_style__integer,plot,style)
+##root(root_metainfo,rm_2,plot.style_cross,cb__plot_style__integer,plot,style)

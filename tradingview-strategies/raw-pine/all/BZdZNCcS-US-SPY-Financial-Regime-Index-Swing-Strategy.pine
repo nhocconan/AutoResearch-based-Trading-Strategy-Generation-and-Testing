@@ -1,0 +1,372 @@
+//@version=6
+//==============================================================
+// US/SPX Regime Swing Strategy 
+// Author: exlux
+// Notes: non repaint, global plots only
+// Credits: Bloomberg Financial Conditions Index (Proxy) by EdgeTools from where I got the inspiration idea
+//          https://www.tradingview.com/v/EktpAXcq/ original indicator idea
+//          https://www.tradingview.com/u/EdgeTools/  original author
+//==============================================================
+strategy("US/SPX — Financial Regime Index Swing Strategy", overlay=false,
+     initial_capital=100000, pyramiding=0,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.05,
+     slippage=5, process_orders_on_close=true, precision=2, margin_long = 0, margin_short=0)
+
+//============================= CONFIG =============================
+grp_base = "Setup"
+grp_norm = "Normalization"
+grp_wt   = "Weighting"
+grp_sig  = "Signals"
+grp_conf = "Confirm"
+grp_view = "View"
+grp_sym  = "Symbols"
+
+// Calc TF
+calc_tf    = input.timeframe("D",  "Calc timeframe", group=grp_base, tooltip="Daily recommended for macro regimes")
+lookback   = input.int(252,        "Lookback", 50, 1500, group=grp_base)
+smooth_len = input.int(10,         "EMA smoothing", 1, 200, group=grp_base)
+
+// Normalization
+use_winsor = input.bool(true, "Winsorize z at ±3", group=grp_norm)
+ret_len    = input.int(63,   "Return window for equities", 5, 260, group=grp_norm)
+
+// Weighting
+wt_len     = input.int(90, "Weight lookback", 20, 520, group=grp_wt)
+wt_mode    = input.string("InvVol", "Weight mode", options=["Equal","InvVol"], group=grp_wt)
+gamma      = input.float(0.5, "InvVol exponent", 0.1, 3.0, step=0.1, group=grp_wt)
+
+// Signals  defaults match screenshots
+side_mode  = input.string("Both", "Trade side", options=["Long","Short","Both"], group=grp_sig)
+thr_up     = input.float(0.05, "Entry threshold long", step=0.05, group=grp_sig)
+thr_dn     = input.float(0.0,  "Entry threshold short", step=0.05, group=grp_sig)
+exit_up    = input.float(1.3,  "Exit line long", step=0.05, group=grp_sig)
+exit_dn    = input.float(-0.5, "Exit line short", step=0.05, group=grp_sig)
+slope_len  = input.int(1, "Slope lookback bars", 1, 20, group=grp_sig)
+// Named replacements for the two anonymous inline inputs from your draft
+bfci_floor_long   = input.float(1.2,  "Always long floor  bfci ≥", step=0.05, group=grp_sig)
+bfci_short_close  = input.float(-0.75,"Force short exit when bfci <", step=0.05, group=grp_sig)
+
+// Confirmation
+use_price_filter = input.bool(true, "Use price trend filter", group=grp_conf)
+ma_len           = input.int(50,   "Price SMA length", 50, 400, group=grp_conf)
+
+// View
+use_glow   = input.bool(true, "Glow line", group=grp_view)
+show_table = input.bool(true, "Show component table", group=grp_view)
+
+// Symbols  defaults match screenshots
+sym_spy  = input.symbol("BATS:SPY",        "US Equity", group=grp_sym)
+sym_acwi = input.symbol("BATS:ACWI",       "Global Equity", group=grp_sym)
+sym_hyg  = input.symbol("BATS:HYG",        "High Yield", group=grp_sym)
+sym_lqd  = input.symbol("BATS:LQD",        "Investment Grade", group=grp_sym)
+sym_vix  = input.symbol("CBOE_DLY:VIX",    "VIX", group=grp_sym)
+sym_dxy  = input.symbol("TVC:DXY",         "DXY", group=grp_sym)
+sym_u2y  = input.symbol("TVC:US02Y",       "US 2Y Yield", group=grp_sym)
+sym_u10y = input.symbol("TVC:US10Y",       "US 10Y Yield", group=grp_sym)
+sym_bil  = input.symbol("BATS:BIL",        "TBill ETF", group=grp_sym)
+
+//============================= HELPERS ============================
+//** security wrapper */
+sec(sym) =>
+    request.security(sym, calc_tf == "" ? timeframe.period : calc_tf, close,
+         gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+
+//** z score of a series */
+zscore(src, len) =>
+    m = ta.sma(src, len)
+    s = ta.stdev(src, len)
+    z = s == 0.0 ? 0.0 : (src - m) / s
+    nz(z)
+
+//** return based z score */
+z_ret(src, win, len) =>
+    r = math.log(src / src[win])
+    zscore(r, len)
+
+//** clamp helper */
+clamp(x, lim) => math.max(-lim, math.min(lim, x))
+opt_winsor(z) => use_winsor ? clamp(z, 3.0) : z
+
+//** inverse volatility weight */
+inv_vol_weight(z, len) =>
+    s = ta.stdev(z, len)
+    w = s == 0.0 ? 0.0 : 1.0 / math.pow(s, gamma)
+    w
+
+nz0(x) => na(x) ? 0.0 : x
+
+//============================= DATA ===============================
+spy   = sec(sym_spy)
+acwi  = sec(sym_acwi)
+hyg   = sec(sym_hyg)
+lqd   = sec(sym_lqd)
+vix   = sec(sym_vix)
+dxy   = sec(sym_dxy)
+u2y   = sec(sym_u2y)
+u10y  = sec(sym_u10y)
+bil   = sec(sym_bil)
+
+//============================= COMPONENTS =========================
+eq_us_z   = opt_winsor(z_ret(spy,  ret_len, lookback))
+eq_glb_z  = opt_winsor(z_ret(acwi, ret_len, lookback))
+cs_ratio  = lqd / hyg
+cs_z      = opt_winsor(-zscore(cs_ratio, lookback))
+rates2y_z = opt_winsor(-zscore(u2y, lookback))
+slope     = u10y - u2y
+slope_z   = opt_winsor(zscore(slope, lookback))
+usd_z     = opt_winsor(-zscore(dxy, lookback))
+vol_z     = opt_winsor(-zscore(vix, lookback))
+liq_ratio = bil / spy
+liq_z     = opt_winsor(-zscore(liq_ratio, lookback))
+
+//============================= WEIGHTING ==========================
+var float w_eq_us=0.0, w_eq_glb=0.0, w_cs=0.0, w_r2y=0.0, w_slope=0.0, w_usd=0.0, w_vol=0.0, w_liq=0.0
+if wt_mode == "Equal"
+    w_eq_us := 1.0, w_eq_glb := 1.0, w_cs := 1.0, w_r2y := 1.0, w_slope := 1.0, w_usd := 1.0, w_vol := 1.0, w_liq := 1.0
+else
+    w_eq_us := inv_vol_weight(eq_us_z, wt_len)
+    w_eq_glb:= inv_vol_weight(eq_glb_z, wt_len)
+    w_cs    := inv_vol_weight(cs_z,     wt_len)
+    w_r2y   := inv_vol_weight(rates2y_z,wt_len)
+    w_slope := inv_vol_weight(slope_z,  wt_len)
+    w_usd   := inv_vol_weight(usd_z,    wt_len)
+    w_vol   := inv_vol_weight(vol_z,    wt_len)
+    w_liq   := inv_vol_weight(liq_z,    wt_len)
+
+w_sum = nz0(w_eq_us)+nz0(w_eq_glb)+nz0(w_cs)+nz0(w_r2y)+nz0(w_slope)+nz0(w_usd)+nz0(w_vol)+nz0(w_liq)
+norm  = w_sum == 0 ? 0.0 : 1.0 / w_sum
+w_eq_us *= norm, w_eq_glb *= norm, w_cs *= norm, w_r2y *= norm, w_slope *= norm, w_usd *= norm, w_vol *= norm, w_liq *= norm
+
+// Composite
+raw  = (w_eq_us*eq_us_z) + (w_eq_glb*eq_glb_z) + (w_cs*cs_z) + (w_r2y*rates2y_z) + (w_slope*slope_z) + (w_usd*usd_z) + (w_vol*vol_z) + (w_liq*liq_z)
+bfci = ta.ema(raw, smooth_len)
+
+//============================= SIGNALS ============================
+slope_pos = bfci - bfci[slope_len] > 0
+slope_neg = bfci - bfci[slope_len] < 0
+price_ma  = ta.sma(close, ma_len)
+price_ok_long  = not use_price_filter or close > price_ma
+price_ok_short = not use_price_filter or close < price_ma
+
+// logic preserved
+long_sig   = (ta.crossover(bfci, thr_up)  and slope_pos and price_ok_long) or bfci >= bfci_floor_long
+short_sig  =  ta.crossunder(bfci, thr_dn) and slope_neg and price_ok_short
+exit_long  =  ta.crossunder(bfci, exit_up) or short_sig
+exit_short =  ta.crossover(bfci,  exit_dn) or long_sig
+
+// Orders identical flow
+if (side_mode == "Long" or side_mode == "Both") and long_sig
+    strategy.close("SHORT")
+    strategy.close("LONG")
+    strategy.entry("LONG", strategy.long)
+
+if (side_mode == "Long" or side_mode == "Both") and exit_long
+    strategy.close("LONG")
+
+if (side_mode == "Short" or side_mode == "Both") and short_sig
+    strategy.close("LONG")
+    strategy.close("SHORT")
+    strategy.entry("SHORT", strategy.short)
+
+if ((side_mode == "Short" or side_mode == "Both") and exit_short) or bfci < bfci_short_close
+    strategy.close("SHORT")
+
+//============================= PLOTTING ===========================
+neutral_color = color.new(#2196F3, 0)
+bull_color    = color.new(#4CAF50, 0)
+bear_color    = color.new(#FF5252, 0)
+
+fci_color = bfci >= 1.0 ? bull_color :            bfci <= -1.0 ? bear_color :            bfci > 0 ? color.from_gradient(bfci, 0, 1, neutral_color, bull_color) :                       color.from_gradient(bfci, -1, 0, bear_color, neutral_color)
+
+bg_neutral = color.new(#2196F3, 90)
+bg_bull    = color.new(#4CAF50, 75)
+bg_bear    = color.new(#FF5252, 75)
+
+bg_color = bfci >= 1.0 ?
+           color.from_gradient(math.min(bfci, 2), 1, 2, bg_bull, color.new(#4CAF50, 85)) :
+           bfci <= -1.0 ?
+           color.from_gradient(math.max(bfci, -2), -2, -1, color.new(#FF5252, 85), bg_bear) :
+           bfci > 0 ?
+           color.from_gradient(bfci, 0, 1, bg_neutral, bg_bull) :
+           color.from_gradient(bfci, -1, 0, bg_bear, bg_neutral)
+
+bgcolor(bg_color)
+hline(0,  "Neutral", color=color.gray, linestyle=hline.style_dashed)
+hline(1,  "Loose",   color=color.green, linestyle=hline.style_dotted)
+hline(-1, "Tight",   color=color.red,   linestyle=hline.style_dotted)
+
+plot(bfci, "BFCI", color=fci_color, linewidth=2)
+plot(use_glow ? bfci : na, "Glow Inner", color=color.new(fci_color, 75), linewidth=4)
+plot(use_glow ? bfci : na, "Glow Outer", color=color.new(fci_color, 90), linewidth=6)
+
+// Markers
+plotshape(long_sig,  title="Long Entry",  style=shape.triangleup,   location=location.bottom, color=color.lime,   text="L")
+plotshape(exit_long, title="Long Exit",   style=shape.xcross,       location=location.bottom, color=color.yellow, text="LX")
+plotshape(short_sig, title="Short Entry", style=shape.triangledown, location=location.top,    color=color.red,    text="S")
+plotshape(exit_short,title="Short Exit",  style=shape.xcross,       location=location.top,    color=color.orange, text="SX")
+
+//============================= TABLE ==============================
+if show_table 
+    var table t = table.new(position.top_right, 3, 10, frame_color=color.gray, frame_width=1, border_width=1, bgcolor=color.new(color.black, 85))
+    // table.clear(t)
+    table.cell(t, 0, 0, "Component", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 0, "Z",         text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 0, "Weight",    text_color=color.white, text_size=size.small)
+    c_names = array.from("EQ US","EQ GLB","CREDIT","RATES2Y","SLOPE","USD","VOL","LIQ")
+    c_vals  = array.from(eq_us_z, eq_glb_z, cs_z, rates2y_z, slope_z, usd_z, vol_z, liq_z)
+    w_arr   = array.from(w_eq_us, w_eq_glb, w_cs, w_r2y, w_slope, w_usd, w_vol, w_liq)
+    for i = 0 to array.size(c_names)-1
+        nm = array.get(c_names, i)
+        z  = array.get(c_vals,  i)
+        w  = array.get(w_arr,   i)
+        row = i + 1
+        table.cell(t, 0, row, nm, text_color=color.white, text_size=size.small)
+        table.cell(t, 1, row, str.tostring(z, "#.##"), text_color = z >= 0 ? color.lime : color.red, text_size=size.small)
+        table.cell(t, 2, row, str.tostring(w*100, "#.0")+"%", text_color=color.silver, text_size=size.small)
+    table.cell(t, 0, 9, "Composite", text_color=color.white, text_size=size.small)
+    table.merge_cells(t, 0, 9, 1, 9)
+    table.cell(t, 2, 9, str.tostring(bfci, "#.##"), text_color=color.yellow, text_size=size.small)
+
+//============================= ALERTS =============================
+alertcondition(long_sig,   title="Long",       message="Long signal")
+alertcondition(short_sig,  title="Short",      message="Short signal")
+alertcondition(exit_long,  title="Long Exit",  message="Long exit")
+alertcondition(exit_short, title="Short Exit", message="Short exit")
+
+View in Pine Editor・235 lines
+Use on chart
+4
+3
+1 474
+Credits: concept inspired by EdgeTools Bloomberg Financial Conditions Index (Proxy)
+
+
+Improvements: eight component basket, inverse volatility weights, winsorization option( statistical technique used to limit the influence of outliers in a dataset by replacing extreme values with less extreme ones, rather than removing them entirely), slope and price gates, exit guards, table and gradients.
+
+Summary in one paragraph
+A macro regime swing strategy for index ETFs, futures, FX majors, and large cap equities on daily calculation with optional lower time execution. It acts only when a composite Financial Conditions proxy plus slope and an optional price filter align. Originality comes from an eight component macro basket with inverse volatility weights and winsorized return z scores that produce a portable yardstick.
+
+Scope and intent
+Markets: SPY and peers, ES futures, ACWI, liquid FX majors, BTC, large cap equities.
+Timeframes: calculation daily by default, trade on any chart.
+Default demo: SPY on Daily.
+Purpose: convert broad financial conditions into clear swing bias and exits.
+
+
+Originality and usefulness
+
+Unique fusion: return z scores for eight liquid proxies with inverse volatility weighting and optional winsorization, then slope and price gates.
+Failure mode addressed: false starts in chop and early shorts during easy liquidity.
+Testability: all knobs are inputs and the table shows components and weights.
+Portable yardstick: z scores center at zero so thresholds transfer across symbols.
+
+
+Method overview in plain language
+Base measures
+Return basis: natural log return over a configurable window, standardized to a z score. Winsorization optional to cap extremes.
+
+Components
+EQ US and EQ GLB measure equity tone.
+CREDIT uses LQD over HYG. Higher credit quality outperformance is risk off so sign is flipped after z score.
+RATES2Y uses two year yield, sign flipped.
+SLOPE uses ten minus two year yield spread.
+USD uses DXY, sign flipped.
+VOL uses VIX, sign flipped.
+LIQ uses BIL over SPY, sign flipped.
+Each component is smoothed by the composite EMA.
+
+Fusion rule
+Weighted sum where weights are equal or inverse volatility with exponent gamma, normalized to percent so they sum to one.
+
+Signal rule
+Long when composite crosses up the long threshold and its slope is positive and price is above the SMA filter, or when composite is above the configured always long floor.
+
+Short when composite crosses down the short threshold and its slope is negative and price is below the SMA filter.
+
+Long exit on cross down of the long exit line or on a fresh short signal.
+
+Short exit on cross up of the short exit line or on a fresh long signal, or when composite falls below the force short exit guard.
+
+
+What you will see on the chart
+
+Markers on suggestion bars: L for long, S for short, LX and SX for exits.
+Reference lines at zero and soft regime bands at plus one and minus one.
+Optional background gradient by regime intensity.
+Compact table with component z, weight percent, and composite readout.
+Table fields and quick reading guide
+Component: EQ US, EQ GLB, CREDIT, RATES2Y, SLOPE, USD, VOL, LIQ.
+Z: current standardized value, green for positive risk tone where applicable.
+Weight: contribution percent after normalization.
+Composite: current index value.
+Reading tip: a broadly green Z column with slope positive often precedes better long context.
+
+Inputs with guidance
+Setup
+
+Calc timeframe: default Daily. Leave blank to inherit chart.
+Lookback: 50 to 1500. Larger length stabilizes regimes and delays turns.
+EMA smoothing: 1 to 200. Higher smooths noise and delays signals.
+Normalization
+Winsorize z at ±3: caps extremes to reduce one off shocks.
+Return window for equities: 5 to 260. Shorter reacts faster.
+
+Weighting
+Weight lookback: 20 to 520.
+Weight mode: Equal or InvVol.
+InvVol exponent gamma: 0.1 to 3. Higher compresses noisy components more.
+
+Signals
+Trade side: Long Short or Both.
+Entry threshold long and short: portable z thresholds.
+Exit line long and short: soft exits that give back less.
+Slope lookback bars: 1 to 20.
+
+Always long floor bfci ≥ X: macro easy mode keep long.
+Force short exit when bfci < Y: macro stress guard.
+
+Confirm
+Use price trend filter and Price SMA length.
+
+View
+Glow line and Show component table.
+
+Symbols
+SPY ACWI HYG LQD VIX DXY US02Y US10Y BIL are defaults and can be changed.
+
+
+Realism and responsible publication
+
+No performance claims. Past is not future.
+Shapes can move intrabar and settle on close.
+Execution is on standard candles only.
+
+Honest limitations and failure modes
+
+Major economic releases and illiquid sessions can break assumptions.
+Very quiet regimes reduce contrast. Use longer windows or higher thresholds.
+Component proxies are ETFs and indexes and cannot match a proprietary FCI exactly.
+
+
+Strategy notice
+Orders are simulated on standard candles. All security calls use lookahead off. Nonstandard chart types are not supported for strategies.
+
+Entries and exits
+
+Long rule: bfci cross above long threshold with positive slope and optional price filter OR bfci above the always long floor.
+
+Short rule: bfci cross below short threshold with negative slope and optional price filter.
+
+Exit rules: long exit on bfci cross below long exit or on a short signal. Short exit on bfci cross above short exit or on a long signal or on force close guard.
+
+Position sizing
+Percent of equity by default. Keep target risk per trade low. One percent is a sensible starting point. For this example we used 3% of the total capital
+
+Commisions
+We used a 0.05% comission and 5 tick slippage
+
+
+Legal
+Education and research only. Not investment advice. Test in simulation first. Use realistic costs.
+

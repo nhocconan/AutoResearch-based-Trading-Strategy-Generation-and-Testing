@@ -1,0 +1,243 @@
+//@version=5
+// ==================================================
+// Strategy : Double EMA + RSI (20)
+// Author   : The Blessed Trader Ph.
+// Version  : v1.0
+// ==================================================
+strategy("The Blessed Trader Ph. | Double EMA + RSI (20) Strategy v1.0", overlay=true, initial_capital=10000, calc_on_every_tick=false)
+
+// === Inputs ===
+emaLength  = input.int(20, "EMA Length")
+rsiLength  = input.int(20, "RSI Length")
+rsiLevel   = input.int(50, "RSI Level")
+
+atrLength = input.int(14, "ATR Length")
+slMult    = input.float(1.5, "Stop Loss ATR Multiplier")
+tpMult    = input.float(3.0, "Take Profit ATR Multiplier")
+
+// === Calculations ===
+emaHigh = ta.ema(high, emaLength)
+emaLow  = ta.ema(low, emaLength)
+rsiVal  = ta.rsi(close, rsiLength)
+atrVal  = ta.atr(atrLength)
+
+// === Plot EMAs ===
+plot(emaHigh, title="EMA 20 High", color=color.green, linewidth=2)
+plot(emaLow, title="EMA 20 Low", color=color.red, linewidth=2)
+
+// === Conditions (Bar Close Confirmed) ===
+buyCondition  = close > emaHigh and rsiVal > rsiLevel and barstate.isconfirmed
+sellCondition = close < emaLow and rsiVal < rsiLevel and barstate.isconfirmed
+
+// === Entry ===
+if buyCondition
+    strategy.entry("Buy", strategy.long)
+
+// === Stop Loss & Take Profit ===
+if strategy.position_size > 0
+    stopLoss   = strategy.position_avg_price - atrVal * slMult
+    takeProfit = strategy.position_avg_price + atrVal * tpMult
+    strategy.exit("Exit Buy", "Buy", stop=stopLoss, limit=takeProfit)
+
+// === Exit on Opposite Signal ===
+if sellCondition
+    strategy.close("Buy")
+
+// === Alerts ===
+alertcondition(buyCondition, title="BUY Alert", message="BUY Signal: EMA High Break + RSI > 50")
+alertcondition(sellCondition, title="SELL Alert", message="SELL Signal: EMA Low Break + RSI < 50")
+
+// === Watermark (FAIL-SAFE VERSION) ===
+var table wm = table.new(position.bottom_right, 1, 1)
+if barstate.islast
+    table.cell(wm, 0, 0, "The Blessed Trader Ph.\nDouble EMA + RSI (20)\nv1.0", text_color=color.gray, text_size=size.large)
+
+View in Pine Editor・53 lines
+Use on chart
+2
+5
+1 005
+📊 The Blessed Trader Ph.
+Double EMA + RSI (20) Strategy — v1.0
+1️⃣ Strategy Overview
+
+This is a trend-following breakout strategy designed to:
+
+Catch strong directional moves
+
+Filter out weak trades using momentum confirmation
+
+Control risk with ATR-based stop-loss and take-profit
+
+It works best in trending markets such as:
+
+Crypto (BTC, ETH, altcoins)
+
+Forex (major & minor pairs)
+
+Indices (NAS100, US30, SPX)
+
+2️⃣ Indicators Used
+🔹 Double EMA Channel
+
+EMA 20 High → Dynamic resistance
+
+EMA 20 Low → Dynamic support
+
+These two EMAs create a price channel:
+
+Break above → bullish strength
+
+Break below → bearish weakness
+
+Unlike a single EMA on close, using High & Low EMAs helps:
+
+Reduce fake breakouts
+
+Confirm real price expansion
+
+🔹 RSI (20)
+
+Measures momentum strength
+
+RSI > 50 → bullish momentum
+
+RSI < 50 → bearish momentum
+
+RSI is used only as a filter, not as an overbought/oversold signal.
+
+🔹 ATR (14)
+
+Measures market volatility
+
+Used to calculate:
+
+Stop Loss (1.5 × ATR)
+
+Take Profit (3.0 × ATR)
+
+This makes the strategy:
+
+Adaptive to any market
+
+Effective across timeframes
+
+3️⃣ Trade Rules (Very Important)
+✅ BUY (LONG) Conditions
+
+A buy trade is opened only when all conditions are met:
+
+Price closes above EMA 20 High
+
+RSI (20) is above 50
+
+Candle is confirmed (bar close)
+
+➡️ This means:
+
+“Price has broken resistance with strong momentum.”
+
+❌ SELL / EXIT Conditions
+
+The long trade is closed when:
+
+Price closes below EMA 20 Low
+
+RSI (20) is below 50
+
+➡️ This signals:
+
+“Trend strength is weakening or reversing.”
+
+🛑 Stop Loss & 🎯 Take Profit
+
+Stop Loss = Entry − (ATR × 1.5)
+
+Take Profit = Entry + (ATR × 3.0)
+
+Risk–Reward ≈ 1 : 2
+
+This protects capital and lets winners run.
+
+4️⃣ Why This Strategy Works
+
+✔ Trades with the trend
+✔ Avoids ranging markets
+✔ Uses confirmation, not prediction
+✔ Non-repainting (bar close only)
+✔ Works on any timeframe
+
+5️⃣ 🔥 Why Heikin Ashi Candles Improve Results
+What are Heikin Ashi candles?
+
+Heikin Ashi candles smooth price action by averaging price data instead of using raw OHLC values.
+
+Benefits for THIS strategy:
+✅ 1. Cleaner Trend Detection
+
+Fewer false EMA breakouts
+
+Smoother closes above EMA High
+
+Stronger continuation signals
+
+✅ 2. Reduced Whipsaws
+
+RSI stays more stable
+
+Fewer fake buy signals during consolidation
+
+✅ 3. Better Trade Holding
+
+Keeps you in trends longer
+
+Avoids early exits caused by noise
+
+6️⃣ How to Use Heikin Ashi with This Strategy
+On TradingView:
+
+Open your chart
+
+Click Candles
+
+Select Heikin Ashi
+
+Apply the strategy
+
+📌 Important Tip
+
+EMAs & RSI will now be calculated using Heikin Ashi data
+
+This is ideal for trend-following, not scalping ranges
+
+7️⃣ Best Settings & Recommendations
+⏱ Timeframes
+
+5m / 15m → Crypto & Forex intraday
+
+1H / 4H → Swing trading
+
+Daily → Position trading
+
+📈 Market Conditions
+
+Best in strong trends
+
+Avoid low-volatility ranges
+
+🎯 Pro Tip
+
+Combine with:
+
+Higher-timeframe trend bias
+
+Session filter (London / New York)
+
+Volume confirmation
+
+8️⃣ Final Advice from
+🙏 The Blessed Trader Ph.
+
+“This strategy doesn’t predict — it confirms.
+Be patient. Wait for clean Heikin Ashi closes.
+Trade less, but trade better.”

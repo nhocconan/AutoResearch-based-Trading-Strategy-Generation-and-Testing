@@ -1,0 +1,9 @@
+//@version=5
+OverBought_StochRSI=##input(defval=80,type='INPUT_INTEGER',##id='in_9')
+OverSold_StochRSI=##input(defval=34,type='INPUT_INTEGER',##id='in_10')
+##root(root_metainfo,rm_0,OverBought_StochRSI,input__float)
+##root(root_metainfo,rm_1,OverSold_StochRSI,input__float)
+##var_3=##input(defval=#0000FF,type='INPUT_COLOR',##id='in_22')
+##var_4=##input(defval=#FF0000,type='INPUT_COLOR',##id='in_23')
+##root(root_metainfo,bgcolor_0_0,##var_3,input__color)
+##root(root_metainfo,bgcolor_0_1,##var_4,input__color)

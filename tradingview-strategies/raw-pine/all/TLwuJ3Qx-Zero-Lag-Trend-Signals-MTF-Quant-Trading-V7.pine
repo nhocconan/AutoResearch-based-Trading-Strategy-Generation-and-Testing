@@ -1,0 +1,833 @@
+//@version=6
+// V5.6, ATR Trailing Stop Loss is working for long/short trades with the multiplier working
+// v6.0 Zlema trend confirmation and floating table
+
+strategy(title="Zero Lag Trend Signals (MTF) [Quant Trading] V7", shorttitle="0️⃣Zero Lag Signals V7", overlay=true, 
+     commission_type=strategy.commission.percent, 
+     commission_value=0.1, 
+     slippage=3, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=100, 
+     initial_capital=1000, 
+     margin_long=0, 
+     margin_short=0)
+
+// === INPUT PARAMETERS ===
+
+// 📌 1️⃣ Main Calculations
+length = input.int(70, title="Length", minval=70, maxval=7000)
+mult   = input.float(1.2, "Band Multiplier", group="Main Calculations")
+
+// === 📊 Trade Data Toggles ===
+showFloatingTable = input.bool(false, "Show Floating Stats Table?", group="Trade Data")
+showTradeLog      = input.bool(false, "Show Trade Log Labels on Chart?", group="Trade Data")
+enableCSVExport = input.bool(false, "Enable CSV Export", group="Trade Data")
+
+// 📌 ZLEMA Trend Confirmation for Entries
+useZlemaTrendConfirm = input.bool(false, "Use ZLEMA Trend Confirmation for entry?", group="Entry Conditions")
+reEnterOnLongTrend = input.bool(false, "Re-Enter on Long Trend continuation", group="Entry Conditions")
+
+// 📌 2️⃣ Short Trades
+allowShortTrades = input.bool(false, "Allow Short Trades?", group="Short Trades")
+
+// 📌 Performance Settings
+useProfitTarget  = input.bool(false, "Use Profit Target?", group="Performance Settings")
+profitTargetRR   = input.float(2.0, "Profit Target (Risk-Reward Ratio)", group="Performance Settings")
+
+
+// 📌 4️⃣ Dynamic TP/SL (Each Setting with Its Parameters Directly Below)
+useATRStopTP    = input.bool(false, "Use ATR-Based Stop-Loss & Take-Profit?", group="Dynamic TP/SL")
+atrLength       = input.int(14, "ATR Length", group="Dynamic TP/SL")
+atrMultiplier   = input.float(1.5, "Stop-Loss ATR Multiplier", group="Dynamic TP/SL")
+profitATRMultiplier = input.float(2.5, "Profit Target ATR Multiplier", group="Dynamic TP/SL")
+
+useTrailingStop = input.bool(false, "Use ATR Trailing Stop?", group="Dynamic TP/SL")
+trailStopMultiplier = input.float(1.5, "Trailing Stop ATR Multiplier", group="Dynamic TP/SL")
+
+useBreakEven    = input.bool(false, "Use Break-Even Stop-Loss?", group="Dynamic TP/SL")
+breakEvenRR     = input.float(1.5, "Move SL to Break-Even After RR", group="Dynamic TP/SL")
+
+useTrendExit    = input.bool(false, "Use Trend-Based Take Profit (EMA Exit)?", group="Dynamic TP/SL")
+emaExitLength   = input.int(9, "EMA Exit Length", group="Dynamic TP/SL")
+
+// 📌 Debug Options
+showZlemaDebug = input.bool(false, "Show ZLEMA Trend Debug?", group="Debug")
+
+
+// === DATE FILTERS FOR BACKTESTING ===
+startDate = input.time(defval=timestamp("2018-01-01T00:00:00"), title="Start Date")
+endDate   = input.time(defval=timestamp("2069-12-31T23:59:59"), title="End Date")
+
+// ============================================================
+// === 1️⃣ CALCULATIONS (Indicators, Trend, ATR, Stop/TP) ===
+// ============================================================
+src        = close
+lag        = math.floor((length - 1) / 2)
+zlema      = ta.ema(src + (src - src[lag]), length)
+volatility = ta.highest(ta.atr(length), length * 3) * mult
+
+var trend  = 0
+if ta.crossover(close, zlema + volatility)
+    trend := 1
+if ta.crossunder(close, zlema - volatility)
+    trend := -1
+
+atrValue = ta.atr(atrLength)
+emaExit  = ta.ema(close, emaExitLength)
+
+var float stopLossLongLevel = na
+var float profitTargetLongLevel = na
+var float stopLossShortLevel = na
+var float profitTargetShortLevel = na
+
+var int lastEntryBarIndex = na
+var float lastEntryPrice = na
+
+// ✅ Corrected ZLEMA DownTrend Logic: Ensure ZLEMA has decreased for 5 consecutive bars
+// ✅ ZLEMA Increasing for 5 Bars → Bullish Trend (Green Triangle Up at the Bottom)
+zlemaUpTrend = zlema > zlema[1] and zlema[1] > zlema[2] and zlema[2] > zlema[3] and zlema[3] > zlema[4]
+
+// ✅ ZLEMA Decreasing for 5 Bars → Bearish Trend (Red Triangle Down at the Top)
+zlemaDownTrend = zlema < zlema[1] and zlema[1] < zlema[2] and zlema[2] < zlema[3] and zlema[3] < zlema[4]
+
+if ta.crossover(trend, 0) // Long Entry
+    stopLossLongLevel := useATRStopTP ? close - (atrValue * atrMultiplier) : zlema - volatility
+    profitTargetLongLevel := useProfitTarget ? (close + ((close - stopLossLongLevel) * profitTargetRR)) : na
+
+if ta.crossunder(trend, 0) // Short Entry
+    stopLossShortLevel := useATRStopTP ? close + (atrValue * atrMultiplier) : zlema + volatility
+    profitTargetShortLevel := useProfitTarget ? (close - ((stopLossShortLevel - close) * profitTargetRR)) : na
+
+// ATR-Based Stop-Loss Levels for Trade Exits
+var float atrStopLossLong = na
+var float atrStopLossShort = na
+
+if useATRStopTP
+    if strategy.position_size > 0  // Long Position
+        atrStopLossLong := na(atrStopLossLong) or strategy.position_size[1] == 0 ? close - (atrValue * atrMultiplier) : math.max(nz(atrStopLossLong[1]), close - (atrValue * atrMultiplier))  // Prevents SL from decreasing
+
+    if strategy.position_size < 0  // Short Position
+        atrStopLossShort := na(atrStopLossShort) or strategy.position_size[1] == 0 ? close + (atrValue * atrMultiplier) : math.min(nz(atrStopLossShort[1]), close + (atrValue * atrMultiplier))  // Prevents SL from increasing
+
+// ATR-Based Take-Profit Levels
+var float atrTakeProfitLong = na
+var float atrTakeProfitShort = na
+
+if useATRStopTP
+    if strategy.position_size > 0  // Long Position
+        atrTakeProfitLong := strategy.position_avg_price + (atrValue * profitATRMultiplier)  // Dynamic TP Based on ATR
+
+    if strategy.position_size < 0  // Short Position
+        atrTakeProfitShort := strategy.position_avg_price - (atrValue * profitATRMultiplier)  // Dynamic TP Based on ATR
+
+
+// ATR Trailing Stop Levels for Trade Exits and Visualization
+var float trailStopLongLine = na
+var float trailStopShortLine = na
+
+if useTrailingStop
+    if strategy.position_size > 0  // Long Position
+        trailStopLongLine := na(trailStopLongLine) or strategy.position_size[1] == 0 ? close - (atrValue * trailStopMultiplier) : 
+                               math.max(nz(trailStopLongLine[1]), close - (atrValue * trailStopMultiplier))
+
+    if strategy.position_size < 0  // Short Position
+        trailStopShortLine := na(trailStopShortLine) or strategy.position_size[1] == 0 ? close + (atrValue * trailStopMultiplier) : 
+                               math.min(nz(trailStopShortLine[1]), close + (atrValue * trailStopMultiplier))
+
+// ============================================================
+// === 2️⃣ ENTRY & EXIT LOGIC (Conditions for Trading) ===
+// ============================================================
+inDateRange = (time >= startDate) and (time <= endDate)
+
+// ✅ Entry Conditions for Long Trades
+longCondition = ta.crossover(trend, 0) and close > zlema + volatility and inDateRange
+canEnterLong = strategy.position_size == 0 or strategy.position_size[1] < 0  // Allows long entry right after short exit
+
+if useZlemaTrendConfirm
+    longCondition := longCondition and zlemaUpTrend  // Ensure ZLEMA Uptrend is true for long entries
+
+// 🔥 Enforce that `longCondition` CANNOT be true if `zlemaUpTrend` is false
+if useZlemaTrendConfirm and not zlemaUpTrend
+    longCondition := false
+
+// ✅ Entry Conditions for Short Trades
+shortCondition = allowShortTrades and ta.crossunder(trend, 0) and close < zlema - volatility and inDateRange
+canEnterShort = strategy.position_size == 0 or strategy.position_size[1] > 0  // Allows short entry right after long exit
+
+if useZlemaTrendConfirm
+    shortCondition := shortCondition and zlemaDownTrend  // Ensure ZLEMA Downtrend is true for short entries
+
+// ✅ Long Re-Entry Condition: ZLEMA is green, position is flat, price closed below and now above ZLEMA
+reEntryLongCondition = reEnterOnLongTrend and
+     trend == 1 and
+     trend[1] == 1 and  // ✅ Previous bar must also be in bullish trend (prevents triggering on trend change)
+     strategy.position_size == 0 and
+     close[1] < zlema[1] and
+     close > zlema and
+     inDateRange
+
+
+// ✅ Debugging: Display `longCondition` and `zlemaUpTrend` values only if the checkbox is checked
+if showZlemaDebug and ta.crossover(trend, 0)
+    label.new(x=bar_index, y=low, 
+              text="LongCondition: " + str.tostring(longCondition) + 
+                   "\nZLEMA UpTrend: " + str.tostring(zlemaUpTrend),
+              color=color.white, textcolor=color.black, size=size.small, style=label.style_label_down)
+
+
+
+// ============================================================
+// === 3️⃣ TRADE EXECUTIONS (Entries, ATR SL/TP, Trailing Stop, Trend Exit) ===
+// ============================================================
+
+// 📌 Entry Conditions
+if (canEnterLong and longCondition) or reEntryLongCondition
+    lastEntryBarIndex := bar_index
+    lastEntryPrice := close
+    
+    // 🛠️ Reset all SL/TP levels on Long Entry or Re-Entry
+    if reEntryLongCondition
+        // Trend-Based SL/TP
+        stopLossLongLevel := useATRStopTP ? na : zlema - volatility
+        profitTargetLongLevel := useProfitTarget and not useATRStopTP ? (close + ((close - stopLossLongLevel) * profitTargetRR)) : na
+
+        // ATR-Based SL/TP
+        atrStopLossLong := useATRStopTP ? close - (atrValue * atrMultiplier) : na
+        atrTakeProfitLong := useATRStopTP ? close + (atrValue * profitATRMultiplier) : na
+
+        // Trailing Stop
+        trailStopLongLine := useTrailingStop ? close - (atrValue * trailStopMultiplier) : na
+
+    strategy.entry(id="Long", direction=strategy.long, comment=reEntryLongCondition ? "Re-Entry Long" : "Bullish Trend Change")
+
+
+if canEnterShort and shortCondition
+    lastEntryBarIndex := bar_index
+    lastEntryPrice := close
+    strategy.entry(id="Short", direction=strategy.short, comment="Bearish Trend Change")
+
+
+// 📌 ATR-Based Stop-Loss Exits (Ensures SL Always Triggers Correctly)
+if useATRStopTP and strategy.position_size > 0
+    if low <= atrStopLossLong
+        strategy.close("Long", comment="ATR SL Hit - Long")
+
+if useATRStopTP and strategy.position_size < 0
+    if high >= atrStopLossShort
+        strategy.close("Short", comment="ATR SL Hit - Short")
+
+// 📌 ATR-Based Stop-Loss & Take-Profit Exits (Ensures TP Always Executes)
+if useATRStopTP and strategy.position_size > 0 and high >= atrTakeProfitLong
+    strategy.close("Long", comment="ATR TP Hit - Long")
+
+if useATRStopTP and strategy.position_size < 0 and low <= atrTakeProfitShort
+    strategy.close("Short", comment="ATR TP Hit - Short")
+
+
+// 📌 Profit Target Exits (Ensures TP Always Executes Independently)
+if useProfitTarget and strategy.position_size > 0 and high >= profitTargetLongLevel
+    strategy.close("Long", comment="Profit Target Hit - Long")
+
+if useProfitTarget and strategy.position_size < 0 and low <= profitTargetShortLevel
+    strategy.close("Short", comment="Profit Target Hit - Short")
+
+// 📌 Stop-Loss for Profit Target Trades (Ensures Stop-Loss Works with TP)
+if useProfitTarget and strategy.position_size > 0 and low <= stopLossLongLevel
+    strategy.close("Long", comment="Stop-Loss Hit - Long")
+
+if useProfitTarget and strategy.position_size < 0 and high >= stopLossShortLevel
+    strategy.close("Short", comment="Stop-Loss Hit - Short")
+
+// 📌 ATR Trailing Stop Loss (Ensures It Works Alongside Other Exits)
+if useTrailingStop and strategy.position_size > 0 and low <= trailStopLongLine
+    strategy.close("Long", comment="Trailing Stop Hit - Long")
+
+if useTrailingStop and strategy.position_size < 0 and high >= trailStopShortLine
+    strategy.close("Short", comment="Trailing Stop Hit - Short")
+
+// 📌 Trend-Based Exit (Closes Position When Trend Reverses)
+if strategy.position_size > 0 and ta.crossunder(trend, 0)
+    strategy.close("Long", comment="Trend Change to Bearish")
+
+if strategy.position_size < 0 and ta.crossover(trend, 0)
+    strategy.close("Short", comment="Trend Change to Bullish")
+
+// 📌 Break-Even Stop-Loss (Adjusts Stop to Entry Price at Set Risk-Reward Ratio)
+if useBreakEven and strategy.position_size > 0 and high >= strategy.position_avg_price + (strategy.position_avg_price - atrStopLossLong) * breakEvenRR
+    atrStopLossLong := strategy.position_avg_price
+
+if useBreakEven and strategy.position_size < 0 and low <= strategy.position_avg_price - (atrStopLossShort - strategy.position_avg_price) * breakEvenRR
+    atrStopLossShort := strategy.position_avg_price
+
+// 📌 EMA Exit (Closes Position if Price Crosses EMA)
+if useTrendExit and strategy.position_size > 0 and low < emaExit
+    strategy.close("Long", comment="Exit on EMA")
+
+if useTrendExit and strategy.position_size < 0 and high > emaExit
+    strategy.close("Short", comment="Exit on EMA")
+
+
+
+// ============================================================
+// === 4️⃣ VISUALIZATIONS (Trend Shading, Stop-Loss, TP, ATR TS) ===
+// ============================================================
+
+// 🟢🔴 Restore Bullish/Bearish Trend Shading
+zlemaColor = trend == 1 ? color.new(#00ffbb, 70) : color.new(#ff1100, 70)
+m = plot(series=zlema, title="Zero Lag Basis", linewidth=2, color=zlemaColor)
+
+upper = plot(zlema + volatility, style=plot.style_linebr, color=color.new(#ff1100, 90), title="Upper Deviation Band")
+lower = plot(zlema - volatility, style=plot.style_linebr, color=color.new(#00ffbb, 90), title="Lower Deviation Band")
+
+fill(plot1=m, plot2=upper, color=(trend == -1 ? color.new(#ff1100, 80) : na), title="Bearish Fill")
+fill(plot1=m, plot2=lower, color=(trend == 1 ? color.new(#00ffbb, 80) : na), title="Bullish Fill")
+
+// ✅ Plot a lime green TriangleUp at the bottom when ZLEMA has been going UP for 5 bars
+plotshape(series=zlemaUpTrend ? low - ta.atr(5) * 0.5 : na, 
+          location=location.bottom, style=shape.triangleup, 
+          color=color.lime, title="ZLEMA Uptrend Detected")
+
+// ✅ Plot a red TriangleDown at the top when ZLEMA has been going DOWN for 5 bars
+plotshape(series=zlemaDownTrend ? high + ta.atr(5) * 0.5 : na, 
+          location=location.top, style=shape.triangledown, 
+          color=color.red, title="ZLEMA Downtrend Detected")
+
+// 🔴 Default Stop-Loss Lines (Red) - Only Show If ATR SL/TP Is Not Used
+plot(series=(not useATRStopTP and strategy.position_size > 0) ? stopLossLongLevel : na, 
+     style=plot.style_linebr, color=color.red, linewidth=2, title="Trend Stop-Loss - Long")
+
+plot(series=(not useATRStopTP and strategy.position_size < 0) ? stopLossShortLevel : na, 
+     style=plot.style_linebr, color=color.red, linewidth=2, title="Trend Stop-Loss - Short")
+
+// 🟠 ATR Trailing Stop Loss Line (Thin Orange Line) - Only Draw When Checkbox is Checked
+plot(series=(useTrailingStop and strategy.position_size > 0) ? trailStopLongLine : na, 
+     style=plot.style_linebr, color=color.new(color.orange, 70), linewidth=1, title="ATR Trailing Stop - Long")
+
+plot(series=(useTrailingStop and strategy.position_size < 0) ? trailStopShortLine : na, 
+     style=plot.style_linebr, color=color.new(color.orange, 70), linewidth=1, title="ATR Trailing Stop - Short")
+
+// ✅ ATR-Based Stop-Loss Visualization (Ensures Line Stays Until Trade Closes)
+plot(series=(useATRStopTP and strategy.position_size > 0) ? atrStopLossLong : na, 
+     style=plot.style_linebr, color=color.new(color.red, 50), linewidth=2, title="ATR-Based Stop-Loss - Long")
+
+plot(series=(useATRStopTP and strategy.position_size < 0) ? atrStopLossShort : na, 
+     style=plot.style_linebr, color=color.new(color.red, 50), linewidth=2, title="ATR-Based Stop-Loss - Short")
+
+// ✅ ATR-Based Take-Profit Visualization (Ensures Line Stays Until Trade Closes)
+plot(series=(useATRStopTP and strategy.position_size > 0) ? atrTakeProfitLong : na, 
+     style=plot.style_linebr, color=color.new(color.green, 50), linewidth=2, title="ATR-Based Take-Profit - Long")
+
+plot(series=(useATRStopTP and strategy.position_size < 0) ? atrTakeProfitShort : na, 
+     style=plot.style_linebr, color=color.new(color.green, 50), linewidth=2, title="ATR-Based Take-Profit - Short")
+
+// ✅ Standard Profit Target Visualization (Only Active if ATR SL/TP is NOT Used)
+plot(series=(useProfitTarget and not useATRStopTP and strategy.position_size > 0) ? profitTargetLongLevel : na, 
+     style=plot.style_linebr, color=color.green, linewidth=2, title="Profit Target - Long")
+
+plot(series=(useProfitTarget and not useATRStopTP and strategy.position_size < 0) ? profitTargetShortLevel : na, 
+     style=plot.style_linebr, color=color.green, linewidth=2, title="Profit Target - Short")
+
+// === 📋 FLOATING TABLE: STRATEGY PERFORMANCE & SETTINGS ===
+
+// === Track first and last trade times ===
+var int firstTradeTime = na
+var int lastTradeTime = na
+
+if strategy.opentrades > 0 and na(firstTradeTime)
+    firstTradeTime := time
+
+if strategy.closedtrades > 0
+    lastTradeTime := time
+
+// === Format trade date strings safely ===
+firstDateStr = "N/A"
+lastDateStr  = "N/A"
+
+if not na(firstTradeTime)
+    firstDateStr := str.tostring(month(firstTradeTime)) + "/" + str.tostring(dayofmonth(firstTradeTime)) + "/" + str.tostring(year(firstTradeTime) % 100)
+
+if not na(lastTradeTime)
+    lastDateStr := str.tostring(month(lastTradeTime)) + "/" + str.tostring(dayofmonth(lastTradeTime)) + "/" + str.tostring(year(lastTradeTime) % 100)
+
+// === Stats Calculations ===
+tradeCount     = strategy.closedtrades
+winningTrades  = strategy.wintrades
+winRate        = tradeCount > 0 ? (winningTrades / tradeCount) * 100 : na
+winRateStr     = na(winRate) ? "N/A" : str.tostring(winRate, "#.##") + "%"
+
+goa = strategy.netprofit / strategy.initial_capital * 100
+goaStr = str.tostring(goa, "#.##") + "%"
+goaColor = goa >= 0 ? color.lime : color.red
+
+netPnL = strategy.netprofit
+netPnLStr = "$" + str.tostring(netPnL, "#.##")
+
+maxDrawdown = strategy.max_drawdown / strategy.initial_capital * 100
+drawdownStr = str.tostring(maxDrawdown, "#.##") + "%"
+
+// === Create Table ===
+if showFloatingTable and bar_index == ta.highest(bar_index, 1)
+    var settingsTable = table.new(position=position.top_right, columns=2, rows=11, frame_color=color.gray, border_color=color.black)
+
+    // 📊 Performance Stats
+    table.cell(settingsTable, 0, 0, "Trades", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 0, firstDateStr + " → " + lastDateStr, text_color=color.white, text_size=size.small)
+
+    table.cell(settingsTable, 0, 1, "# Trades", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 1, str.tostring(tradeCount), text_color=color.white, text_size=size.small)
+
+    table.cell(settingsTable, 0, 2, "Win %", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 2, winRateStr, text_color=color.white, text_size=size.small)
+
+    table.cell(settingsTable, 0, 3, "GOA", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 3, goaStr, text_color=goaColor, text_size=size.small)
+
+    table.cell(settingsTable, 0, 4, "Net PnL", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 4, netPnLStr, text_color=color.white, text_size=size.small)
+
+    table.cell(settingsTable, 0, 5, "Max Drawdown", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 5, drawdownStr, text_color=color.white, text_size=size.small)
+
+    // ⚙️ Strategy Settings
+    table.cell(settingsTable, 0, 6, "Length", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 6, str.tostring(length), text_color=color.white, text_size=size.small)
+
+    table.cell(settingsTable, 0, 7, "Use ZLEMA Confirm", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 7, useZlemaTrendConfirm ? "✅" : "❌", text_color=color.white, text_size=size.small)
+
+    table.cell(settingsTable, 0, 8, "Allow Short Trades", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 8, allowShortTrades ? "✅" : "❌", text_color=color.white, text_size=size.small)
+
+    table.cell(settingsTable, 0, 9, "Use Profit Target", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 9, useProfitTarget ? "✅" : "❌", text_color=color.white, text_size=size.small)
+
+    table.cell(settingsTable, 0, 10, "Profit Target RR", text_color=color.white, text_size=size.small)
+    table.cell(settingsTable, 1, 10, str.tostring(profitTargetRR), text_color=color.white, text_size=size.small)
+
+// === 📋 TRADE LOGGING LABEL WITH COLOR, DURATION, EXPORT ===
+if showTradeLog and strategy.closedtrades > strategy.closedtrades[1]
+    entryPrice = lastEntryPrice
+    exitPrice   = close
+    pnlDollars  = strategy.netprofit - strategy.netprofit[1]
+    pnlText     = pnlDollars >= 0 ? "+" + str.tostring(pnlDollars, "#.##") : str.tostring(pnlDollars, "#.##")
+
+    // 🕒 Duration in bars between entry and current bar
+    barDuration = bar_index - lastEntryBarIndex
+
+
+    // 🧠 Exit Reason
+    string exitReason = ""
+    if useTrailingStop and (low <= trailStopLongLine or high >= trailStopShortLine)
+        exitReason := "Trailing SL"
+    else if useProfitTarget and (high >= profitTargetLongLevel or low <= profitTargetShortLevel)
+        exitReason := "TP"
+    else if useATRStopTP and (low <= atrStopLossLong or high >= atrStopLossShort)
+        exitReason := "ATR SL"
+    else if ta.cross(trend, 0)
+        exitReason := "Trend Change"
+    else
+        exitReason := "Manual/Other"
+
+    // ✅ Label Color: Green for Win, Red for Loss
+    labelColor = pnlDollars >= 0 ? color.lime : color.red
+    labelOffset = input.float(0.5, "Trade Label Vertical Offset", minval=0.0, maxval=50, group="Trade Data")
+
+    label.new(x=bar_index, y=close + labelOffset, 
+         text="Trade Closed\nEntry: " + str.tostring(entryPrice, "#.##") +
+              "\nExit: " + str.tostring(exitPrice, "#.##") +
+              "\nPnL: $" + pnlText +
+              "\nBars: " + str.tostring(barDuration) +
+              "\nExit: " + exitReason,
+         style=label.style_label_down, 
+         size=size.small,
+         color=color.new(labelColor, 0), 
+         textcolor=color.black)
+
+// === 📤 ADDITIONAL EXPORT FIELDS FOR CSV ===
+exportEntryPrice = (enableCSVExport and showTradeLog and strategy.closedtrades > strategy.closedtrades[1]) ? lastEntryPrice : na
+exportExitPrice  = (enableCSVExport and showTradeLog and strategy.closedtrades > strategy.closedtrades[1]) ? close : na
+exportBarsHeld   = (enableCSVExport and showTradeLog and strategy.closedtrades > strategy.closedtrades[1]) ? bar_index - lastEntryBarIndex : na
+
+// Encode exit reason numerically for CSV (labels don't export)
+exportExitCode = (enableCSVExport and showTradeLog and strategy.closedtrades > strategy.closedtrades[1]) ?
+     useTrailingStop and (low <= trailStopLongLine or high >= trailStopShortLine) ? 1 :
+     useProfitTarget and (high >= profitTargetLongLevel or low <= profitTargetShortLevel) ? 2 :
+     useATRStopTP and (low <= atrStopLossLong or high >= atrStopLossShort) ? 3 :
+     ta.cross(trend, 0) ? 4 : 0 : na
+
+// 💡 Legend:
+// 1 = Trailing SL
+// 2 = Profit Target
+// 3 = ATR Stop Loss
+// 4 = Trend Change
+// 0 = Manual/Other
+
+plot(exportEntryPrice, title="Entry Price (Export)", display=display.data_window, color=color.gray)
+plot(exportExitPrice,  title="Exit Price (Export)",  display=display.data_window, color=color.gray)
+plot(exportBarsHeld,   title="Bars Held (Export)",   display=display.data_window, color=color.gray)
+plot(exportExitCode,   title="Exit Reason Code (Export)", display=display.data_window, color=color.gray)
+
+View in Pine Editor・468 lines
+Use on chart
+2
+0
+1
+1
+5 152
+Overview
+The Zero Lag Trend Signals (MTF) V7 is a comprehensive trend-following strategy that combines Zero Lag Exponential Moving Average (ZLEMA) with volatility-based bands to identify high-probability trade entries and exits. This strategy is designed to reduce lag inherent in traditional moving averages while incorporating dynamic risk management through ATR-based stops and multiple exit mechanisms.
+
+This is a longer term horizon strategy that takes limited trades. It is not a high frequency trading and therefore will also have limited data and not > 100 trades.
+
+How It Works
+
+Core Signal Generation:
+
+The strategy uses a Zero Lag EMA (ZLEMA) calculated by applying an EMA to price data that has been adjusted for lag:
+
+Calculate lag period: floor((length - 1) / 2)
+
+Apply lag correction: src + (src - src[lag])
+
+Calculate ZLEMA: EMA of lag-corrected price
+
+
+
+Volatility bands are created using the highest ATR over a lookback period multiplied by a band multiplier. These bands are added to and subtracted from the ZLEMA line to create upper and lower boundaries.
+
+Trend Detection:
+
+The strategy maintains a trend variable that switches between bullish (1) and bearish (-1):
+
+Long Signal: Triggers when price crosses above ZLEMA + volatility band
+
+Short Signal: Triggers when price crosses below ZLEMA - volatility band
+
+
+
+Optional ZLEMA Trend Confirmation:
+
+When enabled, this filter requires ZLEMA to show directional momentum before entry:
+
+Bullish Confirmation: ZLEMA must increase for 4 consecutive bars
+
+Bearish Confirmation: ZLEMA must decrease for 4 consecutive bars
+
+
+
+This additional filter helps avoid false signals in choppy or ranging markets.
+
+Risk Management Features:
+
+The strategy includes multiple stop-loss and take-profit mechanisms:
+
+
+Volatility-Based Stops: Default stop-loss is placed at ZLEMA ± volatility band
+
+ATR-Based Stops: Dynamic stop-loss calculated as entry price ± (ATR × multiplier)
+
+ATR Trailing Stop: Ratcheting stop-loss that follows price but never moves against position
+
+Risk-Reward Profit Target: Take-profit level set as a multiple of stop distance
+
+Break-Even Stop: Moves stop to entry price after reaching specified R:R ratio
+
+Trend-Based Exit: Closes position when price crosses EMA in opposite direction
+
+
+
+Performance Tracking:
+
+The strategy includes optional features for monitoring and analyzing trades:
+
+Floating Statistics Table: Displays key metrics including win rate, GOA (Gain on Account), net P&L, and max drawdown
+
+Trade Log Labels: Shows entry/exit prices, P&L, bars held, and exit reason for each closed trade
+
+CSV Export Fields: Outputs trade data for external analysis
+
+
+
+Default Strategy Settings
+
+Commission & Slippage:
+
+Commission: 0.1% per trade
+
+Slippage: 3 ticks
+
+Initial Capital: $1,000
+
+Position Size: 100% of equity per trade
+
+
+
+Main Calculation Parameters:
+
+Length: 70 (range: 70-7000) - Controls ZLEMA calculation period
+
+Band Multiplier: 1.2 - Adjusts width of volatility bands
+
+
+
+Entry Conditions (All Disabled by Default):
+
+Use ZLEMA Trend Confirmation: OFF - Requires ZLEMA directional momentum
+
+Re-Enter on Long Trend: OFF - Allows multiple entries during sustained trends
+
+
+
+Short Trades:
+
+Allow Short Trades: OFF - Strategy is long-only by default
+
+
+
+Performance Settings (All Disabled by Default):
+
+Use Profit Target: OFF
+
+Profit Target Risk-Reward Ratio: 2.0 (when enabled)
+
+
+
+Dynamic TP/SL (All Disabled by Default):
+
+Use ATR-Based Stop-Loss & Take-Profit: OFF
+
+ATR Length: 14
+
+Stop-Loss ATR Multiplier: 1.5
+
+Profit Target ATR Multiplier: 2.5
+
+Use ATR Trailing Stop: OFF
+
+Trailing Stop ATR Multiplier: 1.5
+
+Use Break-Even Stop-Loss: OFF
+
+Move SL to Break-Even After RR: 1.5
+
+Use Trend-Based Take Profit: OFF
+
+EMA Exit Length: 9
+
+
+
+Trade Data Display (All Disabled by Default):
+
+Show Floating Stats Table: OFF
+
+Show Trade Log Labels: OFF
+
+Enable CSV Export: OFF
+
+Trade Label Vertical Offset: 0.5
+
+
+
+Backtesting Date Range:
+
+Start Date: January 1, 2018
+
+End Date: December 31, 2069
+
+
+
+Important Usage Notes
+
+
+Default Configuration: The strategy operates in its most basic form with default settings - using only ZLEMA crossovers with volatility bands and volatility-based stop-losses. All advanced features must be manually enabled.
+
+
+Stop-Loss Priority: If multiple stop-loss methods are enabled simultaneously, the strategy will use whichever condition is hit first. ATR-based stops override volatility-based stops when enabled.
+
+
+Long-Only by Default: Short trading is disabled by default. Enable "Allow Short Trades" to trade both directions.
+
+
+Performance Monitoring: Enable the floating stats table and trade log labels to visualize strategy performance during backtesting.
+
+
+Exit Mechanisms: The strategy can exit trades through multiple methods: stop-loss hit, take-profit reached, trend reversal, or trailing stop activation. The trade log identifies which exit method was used.
+
+
+Re-Entry Logic: When "Re-Enter on Long Trend" is enabled with ZLEMA trend confirmation, the strategy can take multiple long positions during extended uptrends as long as all entry conditions remain valid.
+
+
+Capital Efficiency: Default setting uses 100% of equity per trade. Adjust "default_qty_value" to manage position sizing based on risk tolerance.
+
+
+Realistic Backtesting: Strategy includes commission (0.1%) and slippage (3 ticks) to provide realistic performance expectations. These values should be adjusted based on your broker and market conditions.
+
+
+
+Recommended Use Cases
+
+
+Trending Markets: Best suited for markets with clear directional moves where trend-following strategies excel
+
+Medium to Long-Term Trading: The default length of 70 makes this strategy more appropriate for swing trading rather than scalping
+
+Risk-Conscious Traders: Multiple stop-loss options allow traders to customize risk management to their comfort level
+
+Backtesting & Optimization: Comprehensive performance tracking features make this strategy ideal for testing different parameter combinations
+
+
+
+Limitations & Considerations
+
+
+Like all trend-following strategies, performance may suffer in choppy or ranging markets
+
+Default 100% position sizing means full capital exposure per trade - consider reducing for conservative risk management
+
+Higher length values (70+) reduce signal frequency but may improve signal quality
+
+Multiple simultaneous risk management features may create conflicting exit signals
+
+Past performance shown in backtests does not guarantee future results
+
+
+
+Customization Tips
+
+For more aggressive trading:
+
+Reduce length parameter (minimum 70)
+
+Decrease band multiplier for tighter bands
+
+Enable short trades
+
+Use lower profit target R:R ratios
+
+
+
+For more conservative trading:
+
+Increase length parameter
+
+Enable ZLEMA trend confirmation
+
+Use wider ATR stop-loss multipliers
+
+Enable break-even stop-loss
+
+Reduce position size from 100% default
+
+
+
+For optimal choppy market performance:
+
+Enable ZLEMA trend confirmation
+
+Increase band multiplier
+
+Use tighter profit targets
+
+Avoid re-entry on trend continuation
+
+
+
+Visual Elements
+
+The strategy plots several elements on the chart:
+
+ZLEMA line (color-coded by trend direction)
+
+Upper and lower volatility bands
+
+Long entry markers (green triangles)
+
+Short entry markers (red triangles, when enabled)
+
+Stop-loss levels (when positions are open)
+
+Take-profit levels (when enabled and positions are open)
+
+Trailing stop lines (when enabled and positions are open)
+
+Optional ZLEMA trend markers (triangles at highs/lows)
+
+Optional trade log labels showing complete trade information
+
+
+
+Exit Reason Codes (for CSV Export)
+
+When CSV export is enabled, exit reasons are coded as:
+
+0 = Manual/Other
+
+1 = Trailing Stop-Loss
+
+2 = Profit Target
+
+3 = ATR Stop-Loss
+
+4 = Trend Change
+
+
+
+Conclusion
+
+Zero Lag Trend Signals V7 provides a robust framework for trend-following with extensive customization options. The strategy balances simplicity in its core logic with sophisticated risk management features, making it suitable for both beginner and advanced traders. By reducing moving average lag while incorporating volatility-based signals, it aims to capture trends earlier while managing risk through multiple configurable exit mechanisms.
+
+The modular design allows traders to start with basic trend-following and progressively add complexity through ZLEMA confirmation, multiple stop-loss methods, and advanced exit strategies. Comprehensive performance tracking and export capabilities make this strategy an excellent tool for systematic testing and optimization.
+
+Note: This strategy is provided for educational and backtesting purposes. All trading involves risk. Past performance does not guarantee future results. Always test thoroughly with paper trading before risking real capital, and adjust position sizing and risk parameters according to your risk tolerance and account size.
+
+================================================================================
+TAGS:
+================================================================================
+trend following, ZLEMA, zero lag, volatility bands, ATR stops, risk management, swing trading, momentum, trend confirmation, backtesting
+
+================================================================================
+CATEGORY:
+================================================================================
+Strategies
+
+================================================================================
+CHART SETUP RECOMMENDATIONS:
+================================================================================
+
+For optimal visualization when publishing:
+
+Use a clean chart with no other indicators overlaid
+
+Select a timeframe that shows multiple trade signals (4H or Daily recommended)
+
+Choose a trending asset (crypto, forex major pairs, or trending stocks work well)
+
+Show at least 6-12 months of data to demonstrate strategy across different market conditions
+
+Enable the floating stats table to display key performance metrics
+
+Ensure all indicator lines (ZLEMA, bands, stops) are clearly visible
+
+Use the default chart type (candlesticks) - avoid Heikin Ashi, Renko, etc.
+
+Make sure symbol information and timeframe are clearly visible
+
+
+
+================================================================================
+COMPLIANCE NOTES:
+================================================================================
+
+✅ Open-source publication with complete code visibility
+✅ English-only title and description
+✅ Detailed explanation of methodology and calculations
+✅ Realistic commission (0.1%) and slippage (3 ticks) included
+✅ All default parameters clearly documented
+✅ Performance limitations and risks disclosed
+✅ No unrealistic claims about performance
+✅ No guaranteed results promised
+✅ Appropriate for public library (original trend-following implementation with ZLEMA)
+✅ Educational disclaimers included
+✅ All features explained in detail
+
+================================================================================

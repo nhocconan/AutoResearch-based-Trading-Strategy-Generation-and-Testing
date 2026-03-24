@@ -1,0 +1,93 @@
+//@version=5
+//
+strategy(title="STR-TREND", overlay=true,default_qty_type = strategy.percent_of_equity,default_qty_value=100,initial_capital=1000,pyramiding=0,commission_value=0.01)
+
+emax = ta.ema(close,1)
+plot(emax,title="X-EMA",color=color.black,linewidth=2)
+
+XDX = input.string(title="TIMELINE", defval="M")
+xdaily = request.security(syminfo.tickerid, XDX, open,barmerge.gaps_off, barmerge.lookahead_on)
+length = input.int(21, minval=1)
+lower = ta.lowest(xdaily,length)
+upper = ta.highest(xdaily,length)
+XXX = close>upper?lower:upper
+plot(XXX,title="STR-X",color=color.red,linewidth=4)
+
+TAKEPROFIT1 = input.int(15,title="Take Profit 1%", minval=1)
+SELLTAKEPROFIT1 = XXX * (1-(TAKEPROFIT1/100))
+BUYTAKEPROFIT1 = XXX * (1+(TAKEPROFIT1/100))
+TAKEPROFITX1 = close<XXX?SELLTAKEPROFIT1:BUYTAKEPROFIT1
+plot(TAKEPROFITX1,title="TAKE PROFIT-1",color=color.black,linewidth=1)
+
+TAKEPROFIT2 = input.int(20,title="Take Profit 2%", minval=1)
+SELLTAKEPROFIT2 = XXX * (1-(TAKEPROFIT2/100))
+BUYTAKEPROFIT2 = XXX * (1+(TAKEPROFIT2/100))
+TAKEPROFITX2 = close<XXX?SELLTAKEPROFIT2:BUYTAKEPROFIT2
+plot(TAKEPROFITX2,title="TAKE PROFIT-2",color=color.black,linewidth=1)
+
+TAKEPROFIT3 = input.int(25,title="Take Profit 3%", minval=1)
+SELLTAKEPROFIT3 = XXX * (1-(TAKEPROFIT3/100))
+BUYTAKEPROFIT3 = XXX * (1+(TAKEPROFIT3/100))
+TAKEPROFITX3 = close<XXX?SELLTAKEPROFIT3:BUYTAKEPROFIT3
+plot(TAKEPROFITX3,title="TAKE PROFIT-3",color=color.black,linewidth=1)
+
+//////////////STRATEGY ///////////////////
+
+buystat= ta.crossover(close,XXX) 
+sellstat = ta.crossunder(close,XXX) 
+
+plotshape(buystat==true, title='long', text='BUY', textcolor=color.new(color.white, 0), style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), size=size.tiny) 
+plotshape(sellstat==true, title='short', text='SELL', textcolor=color.new(color.white, 0), style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny) 
+
+//////////////STRATEGY ///////////////////
+
+strategy.entry("LONG", strategy.long, when = buystat==true, comment="")
+strategy.exit("BUY TP-1", "LONG", qty_percent = 25 ,limit = BUYTAKEPROFIT1)
+strategy.exit("BUY TP-2", "LONG", qty_percent = 25 ,limit = BUYTAKEPROFIT2)
+strategy.exit("BUY TP-3", "LONG", qty_percent = 25 ,limit = BUYTAKEPROFIT3)
+strategy.close("LONG", when = sellstat==true, comment="")
+
+strategy.entry("SHORT", strategy.short, when = sellstat==true, comment="")
+strategy.exit("SELL TP-1", "SHORT", qty_percent = 25 ,limit = SELLTAKEPROFIT1)
+strategy.exit("SELL TP-2", "SHORT", qty_percent = 25 ,limit = SELLTAKEPROFIT2)
+strategy.exit("SELL TP-3", "SHORT", qty_percent = 25 ,limit = SELLTAKEPROFIT3)
+strategy.close("SHORT", when = buystat==true , comment="")
+
+View in Pine Editor・54 lines
+Use on chart
+1
+6
+0
+6
+4 746
+May 19, 2022
+Hello everyone,
+We are proud to present you our "Straight Trend" Strategy.
+Strategy is use a specified timeline's opening price as reference and draw a line between the current price and trend line.
+Trend line is smoothed with last X times of highest and lowest values ( Donchian Methodology) in order to create less noise and fake alerts , therefore creates a channel of current prices time based opening price.
+The timeline can be adjusted according to your specifications in the settings.
+------
+Why opening price ?
+We are traders ,no matter what we do ,we always make a benchmark at the end of a day , week or at the end of a specified time line.
+Example :
+X commodity's price increased %15 in last days or Y commodity's price dropped %30 in last 2 weeks etc. etc.
+Thats why the opening price have a hidden and much more important role in our trading sessions.
+------
+After the channel is created we remove the unnecessary lines from our output by filtering the direction with closing price.
+IF the closing price is higher than Chanel reference price and direction goes upward the script gives you a BUY signal.
+The same methodology is applied for SELL operations.
+
+When to Take Profit?
+We put a setting for profit percentage in scripts setting you can adjust the ratio as your choices.
+
+When to Stop Loss or change direction of the trade?
+The Straight Trends previously mentioned channel's inverse line was set as STOP LOSS and direction changer in the strategy with "STR-X" Marker.
+Note : Strategy is much more effective with heikin-ashi bars due methodology of heikin ashi and with this bars it creates less signals with more accuracy, use at your own discretion.
+Please don't hesitate to write us if you need support or assistance, we also appreciate your feedbacks.
+Please be advised that this strategy is published with Educational Purposes and it is not a investment advice.
+Thank you in advance.
+May 21, 2022
+Release Notes
+The Take Profit Section is expanded according to one of our followers request.
+TP-1st Section = %25 ,TP-2nd Section = %25 ,TP-3th Section = %25 and on trend reversal last %25 of commodity will be sold according to new logic.
+Good luck and good hunts guys.

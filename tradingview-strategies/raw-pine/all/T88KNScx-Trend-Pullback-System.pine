@@ -1,0 +1,384 @@
+//@version=6
+strategy("Trend Pullback System", overlay=true, fill_orders_on_standard_ohlc = true)
+
+longCondition = ta.crossover(ta.sma(close, 14), ta.sma(close, 28))
+if (longCondition)
+    strategy.entry("Long Entry", strategy.long)
+
+shortCondition = ta.crossunder(ta.sma(close, 14), ta.sma(close, 28))
+if (shortCondition)
+    strategy.entry("Short Entry", strategy.short)
+
+//----------------------------------------------------
+// INPUTS
+//----------------------------------------------------
+smaShortLen = input.int(6, "Short MA Length (trend accel)")
+smaLongLen = input.int(14, "Long MA Length (trend base)")
+hullLen = input.int(20, "Hull MA Length (secondary trend ref)")
+swingLen = input.int(5, "Swing lookback length (diamonds pivots)")
+pullbackSupportBars = input.int(3, "Bars since support allowed for entry")
+allowLongs = input.bool(true, "Enable Long Trades")
+allowShorts = input.bool(true, "Enable Short Trades")
+trailWithDiamonds = input.bool(true, "Trail stop using diamonds after entry if trend persists")
+smiLenK = input.int(14, "SMI Length K")
+smiLenD = input.int(5, "SMI Length D")
+smiLenSig = input.int(3, "SMI Signal Length")
+
+//----------------------------------------------------
+// CORE MAs / TREND
+//----------------------------------------------------
+smaShort = ta.sma(close, smaShortLen)
+smaLong = ta.sma(close, smaLongLen)
+
+// Hull MA (basic Hull calc: WMA(2*WMA(price, n/2)-WMA(price,n), sqrt(n)))
+wmaf = ta.wma(close, math.round(hullLen * 0.5))
+wmas = ta.wma(close, hullLen)
+hullMA = ta.wma(2.0 * wmaf - wmas, math.round(math.sqrt(hullLen)))
+
+// slope of long MA
+longSlopeUp = smaLong > smaLong[1]
+longSlopeDown = smaLong < smaLong[1]
+
+// major trend states
+upTrend = (close > smaLong) and (smaShort > smaLong) and longSlopeUp
+downTrend = (close < smaLong) and (smaShort < smaLong) and longSlopeDown
+
+//----------------------------------------------------
+// PIVOTS (Diamonds)
+//----------------------------------------------------
+isSwingLow = low == ta.lowest(low, swingLen)
+isSwingHigh = high == ta.highest(high, swingLen)
+
+// diamonds per method logic
+greenDiamond = upTrend and isSwingLow // bullish support / long add / TP shorts
+redDiamond = downTrend and isSwingHigh // bearish resistance / short add / TP longs
+
+//----------------------------------------------------
+// BUY / SELL ZONES
+//----------------------------------------------------
+// BUY Zone (longSetup)
+recentGreenSupport = ta.barssince(greenDiamond) <= pullbackSupportBars
+regainMA = ta.crossover(close, smaShort) or (close > smaShort)
+longSetup = recentGreenSupport and (upTrend or (close > smaLong and longSlopeUp)) and regainMA
+
+// SELL Zone (shortSetup)
+recentRedResist = ta.barssince(redDiamond) <= pullbackSupportBars
+loseMA = ta.crossunder(close, smaShort) or (close < smaShort)
+shortSetup = recentRedResist and (downTrend or (close < smaLong and longSlopeDown)) and loseMA
+
+// Weak setups (yellow "W")
+weakLong = isSwingLow and (not upTrend) and (close > smaLong)
+weakShort = isSwingHigh and (not downTrend) and (close < smaLong)
+
+//----------------------------------------------------
+// STOPS & TARGETS (persistent vars)
+//----------------------------------------------------
+var float longStop = na
+var float longTarget = na
+var float shortStop = na
+var float shortTarget = na
+
+// When long setup appears: initialize stop/target
+if longSetup
+    longStop := ta.lowest(low, pullbackSupportBars + 1)
+    longTarget := ta.highest(high, pullbackSupportBars + 1)
+
+// When short setup appears: initialize stop/target
+if shortSetup
+    shortStop := ta.highest(high, pullbackSupportBars + 1)
+    shortTarget := ta.lowest(low, pullbackSupportBars + 1)
+
+//----------------------------------------------------
+// TRAILING STOP LOGIC (flat, no nested if chains)
+//----------------------------------------------------
+var bool canTrailLong = false
+var bool canTrailShort = false
+
+// recompute trail conditions every bar
+canTrailLong := trailWithDiamonds and (strategy.position_size > 0) and greenDiamond and upTrend and (not shortSetup) and (not na(longStop)) and (low > longStop)
+canTrailShort := trailWithDiamonds and (strategy.position_size < 0) and redDiamond and downTrend and (not longSetup) and (not na(shortStop)) and (high < shortStop)
+
+// apply trail adjustments
+if canTrailLong
+    longStop := low
+
+if canTrailShort
+    shortStop := high
+
+//----------------------------------------------------
+// ENTRY ORDERS
+//----------------------------------------------------
+if allowLongs and longSetup
+    strategy.entry("TKT Long", strategy.long, comment="BUY Zone")
+
+if allowShorts and shortSetup
+    strategy.entry("TKT Short", strategy.short, comment="SELL Zone")
+
+//----------------------------------------------------
+// EXIT ORDERS
+//----------------------------------------------------
+useStopLong = na(longStop) ? low : longStop
+useTargetLong = na(longTarget) ? high : longTarget
+useStopShort = na(shortStop) ? high : shortStop
+useTargetShort = na(shortTarget) ? low : shortTarget
+
+strategy.exit("TRT Long Exit", from_entry="TRT Long", stop=useStopLong, limit=useTargetLong)
+strategy.exit("TRT Short Exit", from_entry="TRT Short", stop=useStopShort, limit=useTargetShort)
+
+//----------------------------------------------------
+// EXIT WARNING MARKER (stop sign)
+//----------------------------------------------------
+exitWarnLong = (strategy.position_size > 0) and shortSetup
+exitWarnShort = (strategy.position_size < 0) and longSetup
+exitWarn = exitWarnLong or exitWarnShort
+
+//----------------------------------------------------
+// REFERENCE LEVELS (weekly / monthly / yearly closes)
+//----------------------------------------------------
+lastWeekClose = request.security(syminfo.tickerid, "1W", close[1])
+lastMonthClose = request.security(syminfo.tickerid, "1M", close[1])
+lastYearClose = request.security(syminfo.tickerid, "12M", close[1])
+
+// FIX: Color names accessed using the `color.` namespace or hex for colors like brown.
+plot(lastWeekClose, title="Last Week Close", color=color.new(#996633, 40), style=plot.style_linebr, linewidth=1)
+plot(lastMonthClose, title="Last Month Close", color=color.new(color.blue, 60), style=plot.style_linebr, linewidth=1)
+plot(lastYearClose, title="Last Year Close", color=color.new(color.aqua, 60), style=plot.style_linebr, linewidth=1)
+
+//----------------------------------------------------
+// BAR COLORING (trend bars)
+//----------------------------------------------------
+bullBar = upTrend
+bearBar = downTrend
+barColor = bullBar ? color.new(color.lime, 0) : bearBar ? color.new(color.red, 0) : color.new(color.black, 0)
+//bgcolor(barColor)
+
+//----------------------------------------------------
+// VISUAL MARKERS ON PRICE
+//----------------------------------------------------
+// Moving averages
+plot(smaLong, title="SMA Long", color=color.new(color.black, 0), linewidth=2)
+plot(smaShort, title="SMA Short", color=color.new(color.teal, 0), linewidth=2)
+plot(hullMA, title="Hull MA", color=color.new(color.blue, 0), linewidth=2, style=plot.style_line)
+// Diamonds (support/resistance)
+plotshape(greenDiamond, title="Green Diamond (Support / Long Re-entry or TP for Shorts)", style=shape.diamond, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="♦")
+plotshape(redDiamond, title="Red Diamond (Resistance / Short Re-entry or TP for Longs)", style=shape.diamond, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, text="♦")
+ 
+// BUY / SELL Zone arrows
+plotshape(longSetup, title="BUY Zone Arrow (Long Setup/Entry/Take Profit Short)", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime,0), size=size.small, text="BUY")
+plotshape(shortSetup, title="SELL Zone Arrow (Short Setup/Entry/Take Profit Long)", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,0), size=size.small, text="SELL")
+
+// Weak setups in yellow
+plotshape(weakLong, title="Weak Long Setup", style=shape.triangleup, location=location.belowbar, color=color.new(color.yellow,0), size=size.tiny, text="W")
+plotshape(weakShort, title="Weak Short Setup", style=shape.triangledown, location=location.abovebar, color=color.new(color.yellow,0), size=size.tiny, text="W")
+
+// EXIT warning marker ("stop sign")
+plotshape(exitWarn, title="Stop Sign / Exit Warning", style=shape.labeldown, location=location.abovebar, color=color.new(color.orange,0), textcolor=color.black, text="EXIT", size=size.tiny)
+
+//----------------------------------------------------
+// MOMENTUM PANEL (SMI-style, hidden by default)
+//----------------------------------------------------
+// inline calc instead of custom function to avoid return/result issues
+ll = ta.lowest(close, smiLenK)
+hh = ta.highest(close, smiLenK)
+mid = (hh + ll) * 0.5
+diff = close - mid
+rng = hh - ll
+diffSmooth = ta.ema(ta.ema(diff, smiLenD), smiLenSig)
+rngSmooth = ta.ema(ta.ema(rng, smiLenD), smiLenSig) / 2.0
+smiVal = rngSmooth != 0 ? (diffSmooth / rngSmooth) * 100.0 : 0.0
+smiSig = ta.ema(smiVal, smiLenSig)
+smiOB = 40.0
+smiOS = -40.0
+smiColor = smiVal > smiSig ? color.lime : color.red
+
+// FIX: Named arguments for color, linewidth, and display are explicitly used.
+plot(smiVal, title="SMI / Momentum", color=smiColor, linewidth=2, display=display.none)
+plot(smiSig, title="SMI Signal", color=color.new(color.gray,0), linewidth=1, display=display.none)
+
+// FIX: Named arguments for hline color and display are explicitly used.
+hline(smiOB, title="SMI Overbought-ish", color=color.new(color.red,70), display=display.none)
+hline(smiOS, title="SMI Oversold-ish", color=color.new(color.lime,70), display=display.none)
+hline(0, title="Midline", color=color.new(color.gray,80), display=display.none)
+
+//----------------------------------------------------
+// ALERTS
+//----------------------------------------------------
+alertcondition(longSetup, title="TRT Long Setup", message="Target Rich Trades: BUY Zone long setup triggered")
+alertcondition(shortSetup, title="TRT Short Setup", message="Target Rich Trades: SELL Zone short setup triggered")
+alertcondition(exitWarn, title="TRT Exit Warning", message="Target Rich Trades: Opposite signal against open position (Stop Sign)")
+
+View in Pine Editor・211 lines
+Use on chart
+2
+1
+5
+4 207
+```{"variant":"standard","id":"36492","title":"Trend Pullback System Description"}
+Trend Pullback System is a price-action trend continuation model that looks to enter on pullbacks, not breakouts. It’s designed to find high-quality long/short entries inside an already established trend, place the stop at meaningful structure, trail that stop as structure evolves, and warn you when the trade thesis is no longer valid.
+
+Developed by: Mohammed Bedaiwi
+
+---------------------------------
+HOW IT WORKS
+---------------------------------
+
+1. Trend Detection
+• The strategy defines overall bias using moving averages.
+• Bullish environment (“uptrend”): price above the slower MA, fast MA above slow MA, and the slow MA is sloping up.
+• Bearish environment (“downtrend”): price below the slower MA, fast MA below slow MA, and the slow MA is sloping down.
+This prevents trading against chop and focuses on continuation moves in the dominant direction.
+
+2. Pullback + Re-entry Logic
+• The script waits for price to pull back into structure (support in an uptrend, resistance in a downtrend), and then push back in the direction of the main trend.
+• That “push back” is the setup trigger. We don’t chase the first breakout candle — we buy/sell the retest + resume.
+
+3. Structural Levels (“Diamonds”)
+• Green diamond (below bar): bullish pivot low formed while the trend is bullish. This marks defended support.
+- Use it as a re-entry zone for longs.
+- Use it to trail a stop higher when you’re already long.
+- Shorts can take profit here because buyers stepped in.
+• Red diamond (above bar): bearish pivot high formed while the trend is bearish. This marks defended resistance.
+- Use it as a re-entry zone for shorts.
+- Use it to trail a stop lower when you’re already short.
+- Longs can take profit here because sellers stepped in.
+
+4. Entry Signals
+• BUY arrow (green triangle up under the candle, text like “BUY” / “BUY Zone”):
+- LongSetup is true.
+- Trend is bullish or turning bullish.
+- Price just bounced off recent defended support (green diamond) and reclaimed short-term momentum.
+Meaning: enter long here or cover/exit shorts.
+• SELL arrow (red triangle down above the candle):
+- ShortSetup is true.
+- Trend is bearish or turning bearish.
+- Price just rolled down from defended resistance (red diamond) and lost short-term momentum.
+Meaning: enter short here or take profit on longs.
+These are the primary trade entries. They are meant to be actionable.
+
+5. Weak Setups (“W” in yellow)
+• Yellow triangle with “W”:
+- A possible long/short idea is trying to form, BUT the higher-timeframe confirmation is not fully there yet.
+- Think of it as early pressure / early caution, not a full signal.
+• You usually watch these areas rather than jumping in immediately.
+
+6. Exit Warning (orange “EXIT” label above a bar)
+• The strategy will raise an EXIT marker when you’re in a trade and the *opposite* side just produced a confirmed setup.
+- You’re short and a valid longSetup appears → EXIT.
+- You’re long and a valid shortSetup appears → EXIT.
+• This is basically: “Close or reduce — the other side just took control.”
+• It’s not just a trailing stop hit; it’s a regime flip warning.
+
+7. Stop, Target, and Trailing
+• On every new setup, the script records:
+- Initial stop: recent swing beyond the defended level (below support for longs, above resistance for shorts).
+- Initial target: recent opposing swing.
+• While you’re in position, if new confirming diamonds print in your favor, the stop can trail toward the new defended level.
+• This creates structure-based risk management (not just fixed % or ATR).
+
+8. Reference Levels
+• The strategy also plots prior higher-timeframe closes (last week’s close, last month’s close, last year’s close). These can behave as magnets or stall points.
+• They’re helpful for take-profit timing and for reading “are we trading above or below last month’s close?”
+
+9. Momentum Panel (hidden by default)
+• Internally, the script calculates an SMI-style momentum oscillator with overbought/oversold zones.
+• This is optional visual confirmation and does not drive the core entry/exit logic.
+
+---------------------------------
+WHAT A TRADE LOOKS LIKE IN REAL PRICE ACTION
+---------------------------------
+
+Early warning
+• Yellow W + red diamonds + red down arrows = “This is getting weak. Short setups are here.”
+• You may also see something like “My Short Entry Id.” That’s where the short side actually engages.
+
+Bearish follow-through, then exhaustion
+• Price bleeds down.
+• Then the orange EXIT appears.
+→ Translation: “If you’re still short, close it. Buyers are stepping in hard. Risk of reversal is now high.”
+
+Regime flip
+• Right after EXIT, multiple green BUY arrows fire together (“BUY”, “BUYZone”).
+• That’s the true long trigger.
+→ This is where you either enter long or flip from short to long.
+
+Expansion leg
+• After that flip, price rips up for multiple candles / days / weeks.
+• While it runs:
+- Green diamonds appear under pullbacks → “dip buy zones / trail stop up here.”
+- More BUY arrows show on minor pullbacks → continuation long / scale adds.
+
+Distribution / topping
+• Later, you start seeing new yellow W triangles again near local highs. That’s your “careful, this might be topping” warning.
+• You finally get a hard red candle, and green diamonds stop stacking.
+→ That’s where you tighten risk, scale out, or assume the move is mature.
+
+In plain terms, the model is doing the following for you:
+• It puts you short during weakness.
+• It tells you when to get OUT of the short.
+• It flips you long right as control changes.
+• It gives you a structure-based trail the whole way up.
+• It warns you again when momentum at the top starts cracking.
+
+That is exactly how the logic was designed.
+
+---------------------------------
+QUICK INTERPRETATION CHEAT SHEET
+---------------------------------
+
+🔻 Red triangle + “Short Entry” near a red diamond
+→ Short entry zone (or take profit on a long).
+
+🟥 Red diamond above bar
+→ Sellers defended here. Treat it as resistance. Good place to trail short stops just above that level. Avoid chasing longs straight into it.
+
+🟨 Yellow W
+→ Attention only. Early pressure / possible turn. Not fully confirmed.
+
+🟧 EXIT (orange label)
+→ The opposite side just printed a real setup. Close the old idea (cover shorts if you’re short, exit longs if you’re long). Thesis invalid.
+
+🟩 Burst of green BUY triangles after EXIT
+→ Long entry. Also a “cover shorts now” alert. This is the core money entry in bullish reversals.
+
+💎 Green diamond below bar
+→ Bulls defended that level. Good for trailing your long stop up, and good “buy the dip in trend” locations.
+
+📈 Blue / teal MAs stacked and rising
+→ Confirmed bullish structure. You’re in trend continuation mode, so dips are opportunities, not automatic exits.
+
+---------------------------------
+COLOR / SHAPE KEY
+---------------------------------
+• Green triangle up (“BUY”, “BUY Zone”):
+Long entry / cover shorts / continuation long trigger.
+• Red triangle down:
+Short entry / take profit on longs / continuation short trigger.
+• Orange “EXIT” label:
+Opposite side just fired a real setup. The previous trade thesis is now invalid.
+• Green diamond below price:
+Bullish defended support in an uptrend. Use for dip buys, trailing stops on longs, and objective cover zones for shorts.
+• Red diamond above price:
+Bearish defended resistance in a downtrend. Use for re-entry shorts, trailing stops on shorts, and objective scale-out zones for longs.
+• Yellow “W”:
+Weak / early potential setup. Watch it, don’t blindly trust it.
+• Moving average bands (fast MA, slow MA, Hull MA):
+When stacked and rising, bullish control. When stacked and falling, bearish control.
+
+---------------------------------
+INTENT
+---------------------------------
+This system is built to:
+• Trade with momentum, not against it.
+• Enter on pullbacks into proven structure, not chase stretched breakouts.
+• Automate stop/target logic around actual defended swing levels.
+• Warn you when the other side takes over so you don’t give back gains.
+
+Typical usage:
+1. In an uptrend, wait for price to pull back, print a green diamond (support proved), then take the first BUY arrow that fires.
+2. In a downtrend, wait for a bounce into resistance, print a red diamond (sellers proved), then take the first SELL arrow that fires.
+3. Respect EXIT when it appears — that’s the model saying “this trade is done.”
+
+---------------------------------
+DISCLAIMER
+---------------------------------
+This script is for educational and research purposes only. It is not financial advice, investment advice, or a recommendation to buy or sell any security, cryptoasset, or derivative. Markets carry risk. Past performance does not guarantee future results. You are fully responsible for your own decisions, position sizing, risk management, and compliance with all applicable laws and regulations.

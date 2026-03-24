@@ -1,0 +1,74 @@
+//@version=2
+strategy("Alpha strategy", overlay=true)
+
+//by NIKLAUS
+//USE ON DAILY TIMEFRAME TO DETECT MOMO STOCKS & ETFs AND TRADE THEM
+//examples to try this on: GER30, NAS100, JPN225, AAPL, IBB, TSLA, etc.
+
+//This Strategy goes long when Sharpe Ratio is > 1 and Alpha against the S&P500 is generated. It exits when conditions break away.
+//Strategy can be adapted to run intraday, it however needs different (lower) trigger levels
+//------------------------------------------------------------------------------------------------------------------------------------
+//Alpha is a measure of the active return on an investment, the performance of that investment compared to a suitable market index. 
+//An alpha of 1% means the investment's return on investment over a selected period of time was 1% better than the market during that same period, 
+//an alpha of -1 means the investment underperformed the market. 
+//Alpha is one of the five key measures in modern portfolio theory: alpha, beta, standard deviation, R-squared and the Sharpe ratio.
+
+
+//sharpe by rashad
+src = ohlc4, len = input(90, title = "Sharpe Time Frame (252 = year)")
+dividend_yield = input(0.0000, minval = 0.00001, title = "Dividend Yield? 0.01=1%, USE 12 M TTM!!!")
+pc = ((src - src[len])/src) + (dividend_yield*(len/252))
+std = stdev(src,len)
+stdaspercent = std/src
+riskfreerate = input(0.0004, minval = 0.0001, title = "risk free rate (3 month treasury yield), enter as decimal")
+sharpe = (pc - riskfreerate)/stdaspercent
+signal = sma(sharpe,len)
+calc = sharpe - signal
+
+//alpha
+sym = "SPX500", res=period, sourc = close, length = input(title="Beta Lookback",defval=300, minval=1)
+ovr = security(sym, res, sourc)
+
+
+ret = ((close - close[1])/close)
+retb = ((ovr - ovr[1])/ovr)
+
+secd = stdev(ret, length), mktd = stdev(retb, length)
+Beta = correlation(ret, retb, length) * secd / mktd
+
+y = input(title="Alpha Period", type=integer, defval=90, minval=1, maxval=1000)
+ret2 = ((close - close[y])/close)
+retb2 = ((ovr - ovr[y])/ovr)
+
+alpha = ret2 - retb2*Beta
+//plot(alpha, color=green, style=area, transp=40)
+
+
+//sr filter
+j = input(title="sr len", type=integer, defval=27, minval=1, maxval=1000)
+z = (close - close[j])/close
+sd3 = stdev(z,j)
+sr=(z/sum(sd3,j))
+
+
+
+smatrig = input(title="sma lenght for triggers", type=integer, defval=45, minval=1, maxval=1000) 
+bgcolor (sma(sharpe,smatrig) > 1 and sma(alpha,smatrig) > 0 ? green : red, transp=70)
+alphatrig = input(title="Alpha trigger Level, % in decimals,shorterTF=lower", type=float, defval=0.03, minval=0, maxval=10)    
+o = input(title="sr trigger", type=float, defval=0.03, minval=0, maxval=10) 
+
+if (close > open) and (sma(sharpe,smatrig) > 1) and (sma(alpha,smatrig) > alphatrig) and (sr > o)
+    strategy.entry("Alpha", strategy.long)
+strategy.close("Alpha", when = (sma(sharpe,smatrig) < 1) or (sma(alpha,smatrig) < 0))
+
+View in Pine Editor・62 lines
+Use on chart
+2
+5
+0
+3
+9 901
+USE ON DAILY TIMEFRAME TO DETECT MOMO STOCKS & ETFs AND TRADE THEM
+This Strategy goes long when Sharpe Ratio is > 1 and Alpha against the S&P500 is generated. It exits when conditions break away. Strategy can be adapted to run intraday, it however needs different (lower) trigger levels.
+
+examples to try this on: GER30, NAS100, JPN225, AAPL, IBB, TSLA, etc.

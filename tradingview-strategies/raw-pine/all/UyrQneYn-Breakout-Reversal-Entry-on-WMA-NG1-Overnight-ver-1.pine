@@ -1,0 +1,80 @@
+//@version=3
+strategy(title="WMA Breakout",overlay=true, initial_capital=25000, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=3.02)
+len = input(20, minval=1, title="Length")
+src = input(close, title="Source")
+out = wma(src, len)
+price_drop = input(.003, "When price drops (In Ticks) Enter Long", step=.001)
+price_climb = input(.003, "When price climbs (In Ticks) Enter Short", step=.001)
+trail = input(true, "Trailing Stop(checked), Market stop(unchecked)")
+stop = input(10, "Stop (in ticks)", step=1)
+limit = input(5, "Limit Out", step=1)
+//size = input(1, "Limit Position Size (pyramiding)", minval=1)
+timec = input(true, "Limit Time of Day (Buying Side)")
+
+
+//Time Session
+sess = input("1600-0500", "Start/Stop trades (Est time)", type=session)
+t = time(period, sess)
+//plots
+plot(wma(src,len))
+z = if low+price_drop<out
+    (out-low)
+plotarrow(z, colorup=red)
+
+a = if high-price_climb>out
+    (high-out)
+plotarrow(a, colorup=lime)
+av=wma(src,len)
+
+//Orders
+if(timec)
+    strategy.entry("Enterlong", long=true, when=z and t>1)
+else
+    strategy.entry("Enterlong", long=true, when=z)
+if(trail)
+    strategy.exit("Exit","Enterlong", profit=limit, trail_points = 0, trail_offset = stop )
+else
+    strategy.exit("Exit","Enterlong", profit=limit, loss = stop )
+    
+if(timec)
+    strategy.entry("Entershort", long=false, when=a and t>1)
+else
+    strategy.entry("Entershort", long=false, when=a)
+if(trail)
+    strategy.exit("Exit","Entershort", profit=limit, trail_points = 0, trail_offset = stop )
+else
+    strategy.exit("Exit","Entershort", profit=limit, loss = stop )
+
+View in Pine Editor・46 lines
+Use on chart
+2
+4
+7
+1
+15 631
+This script is for learning purposes only
+
+This strategy will plot arrows when price breaks so far above/below WMA. The strategy will enter when the price breaks away from WMA. All entries are reversals. Users can set WMA length and source; also the distance of the price away from WMA to enter. Adjustable bracket orders are placed for exit, with trailing stop or market stop choice. Last, users can set the time of day they want to enter a trade.
+
+My Preference: I am testing this strategy on NG1! over night on 1 minute candle. with .003 on price drop/climb, I get entries almost every night. Also 10 tick stop and 5 tick profit seems backward to most, but with a high win/loss ratio, it performs quite well. Trailing stops generally help out as well.
+
+INPUTS:
+Length - The is the WMA length
+Source - WMA source (High, Low, Open, Close...)
+When Price Drops - This is the distance in ticks when the price drops away from WMA, an arrow is plotted, and reversal entry order is placed
+When Price Climbs - Same as price drop, just in the opposite direction
+Trailing Stop check box - Check if you want to place a trailing stop so many tick away from entry. Unchecked is Market (hard) stop so many ticks from entry.
+Stop - Number of ticks away from entry a the stop or trailing stop is set (for NG 1 tick = $0.001)
+Limit Out - Number of ticks away from entry a limit order is placed to take profits
+Limit Time of day check box - check to use the time of day to limit what time of day order entry will occur.
+Start/Stop Trades (Est Time) - First box is when the strategy will be allowed to start buying and stop is when the strategy will stop being allowed to buy. Sell orders continue until a stop or limit triggers an exit. These times are Eastern time zone
+
+PROPERTIES:
+Pyramiding - This feature will allow multiple entries to occur. If set to 1, the strategy should only trade 1 contract at a time. If set to 2, the strategy will enter a second order if entry requirements are met. This allows you to be holding 2 contracts. Basically on a good day, it will multiply your earnings, on a bad day, you'll just lose more. For testing, I keep this on 1.
+
+
+TIPS:
+
+- If you want to go long only, set "When Price Climbs" to an impossible number, like 10,000. It's not possible for NG to move $10 is a matter of minutes so it will not enter the market with a short order. Also keep in mind you can set different requirements for going long vs going short. If you think there is more pull on the market in a particular direction.
+
+

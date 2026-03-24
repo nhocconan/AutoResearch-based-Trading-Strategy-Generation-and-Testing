@@ -1,0 +1,43 @@
+//@version=2
+strategy(title="Simple Relative Strength Index", shorttitle="Simple RSI + Buy Sell")
+src = close, len = input(14, minval=1, title="Length")
+up = sma(max(change(src), 0), len)
+down = sma(-min(change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+plot(rsi, color=red)
+
+lowerrsi=input(15, title="RSI Lower Band", type=integer)
+upperrsi=input(85, title="RSI Upper Band", type=integer)
+
+
+band1 = hline(upperrsi)
+band0 = hline(lowerrsi)
+fill(band1, band0, color=blue, transp=90)
+
+take_Profit=input(15, title="Take Profit", type=integer)
+close_Overbought = input(true, "Close at overbought levels", type=bool)
+
+if rsi<=lowerrsi
+    strategy.entry("BuyOS", strategy.long)
+if close_Overbought == true
+    if rsi>=upperrsi and strategy.position_size>=1
+        strategy.close("BuyOS")
+
+View in Pine Editor・24 lines
+Use on chart
+4
+3
+3 011
+Created this script to simply let us predict buy and sell for RSI 15 and 85 (configurable).
+
+It is best use for ETH and monthly chart.
+
+Good for people who can not stay for daily trade and only able to trade few times a month.
+The earning is quite lucrative while ETH is on up trend. However, this will not work when ETH on side way.
+
+This only work when ETH is excited!!!
+
+
+Happy sharing..
+
+Credit to anonymous-es that i used their codes.

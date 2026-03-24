@@ -1,0 +1,78 @@
+//@version=5
+strategy("Nifty Options MACD + EMA Strategy with SL/TP", overlay=true)
+
+// MACD parameters
+fastLength = 12
+slowLength = 26
+signalLength = 9
+
+// Calculate MACD
+[macdLine, signalLine, _] = ta.macd(close, fastLength, slowLength, signalLength)
+
+// Calculate EMAs
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+ema100 = ta.ema(close, 100)
+ema200 = ta.ema(close, 200)
+
+// Minimum difference threshold for EMA gaps
+minDiff = 0.2  // Adjust based on price scale
+
+// Conditions for EMA sequence with minimum difference
+emaSeqCondition = (ema20 > ema50) and (ema50 > ema100) and (ema100 > ema200) and 
+                  ((ema20 - ema50) > minDiff) and ((ema50 - ema100) > minDiff) and ((ema100 - ema200) > minDiff)
+
+// Buy condition 1: MACD crosses zero line upwards
+buyCondition1 = ta.crossover(macdLine, 0)
+
+// Buy condition 2: EMA sequence condition is true
+buyCondition2 = emaSeqCondition
+
+// Overall buy signal
+buySignal = buyCondition1 or buyCondition2
+
+// Sell condition: MACD line crosses below signal line
+sellSignal = ta.crossunder(macdLine, signalLine)
+
+// Parameters for stop loss and take profit (percent)
+stopLossPercent = input.float(10.0, "Stop Loss %", step=0.1)  // Updated default 10%
+takeProfitPercent = input.float(20.0, "Take Profit %", step=0.1)  // Updated default 20%
+
+// Calculate stop loss and take profit prices
+stopLossPrice = strategy.position_avg_price * (1 - stopLossPercent / 100)
+takeProfitPrice = strategy.position_avg_price * (1 + takeProfitPercent / 100)
+
+// Execute trades with stop loss and take profit
+if (buySignal and strategy.position_size == 0)
+    strategy.entry("Long", strategy.long)
+
+if (strategy.position_size > 0)
+    strategy.exit("Exit Long", from_entry="Long", stop=stopLossPrice, limit=takeProfitPrice)
+
+if (sellSignal)
+    strategy.close("Long")
+
+// Plot MACD and signal line for reference
+plot(macdLine, color=color.blue, title="MACD Line")
+plot(signalLine, color=color.orange, title="Signal Line")
+
+// Plot EMAs for visual reference
+plot(ema20, color=color.yellow, title="EMA 20")
+plot(ema50, color=color.red, title="EMA 50")
+plot(ema100, color=color.purple, title="EMA 100")
+plot(ema200, color=color.green, title="EMA 200")
+if (buySignal)
+    alert("BUY", alert.freq_once_per_bar_close)
+
+if (sellSignal)
+    alert("SELL", alert.freq_once_per_bar_close)
+
+View in Pine Editor・68 lines
+Use on chart
+1
+4
+1
+920
+ashok trial 15 nov 1845h
+
+I have created this strategy to convert my chart pattern and MACD, EMA observations to tradeable logic.

@@ -1,0 +1,222 @@
+//@version=6
+strategy('PG DMean & Price Sync ver 9.4 - Consolidated', 
+     overlay = true, 
+     initial_capital = 1000000, 
+     default_qty_type = strategy.percent_of_equity, 
+     default_qty_value = 85, 
+     pyramiding = 0)
+
+LIME_COLOR  = #8BC34A
+RED_COLOR   = #FF0000
+BLACK_COLOR = #000000
+TEAL_COLOR  = #008080
+
+// --- Transparent Color Utility ---
+transparent(c, a) =>
+    color.new(c, a)
+
+// --- Dynamic MA Source Selector ---
+ma_source(src_opt) =>
+    switch src_opt
+        'Open'   => open
+        'High'   => high
+        'Low'    => low
+        'HL2'    => hl2
+        'HLC3'   => hlc3
+        'OHLC4'  => ohlc4
+        => close
+
+// --- Flexible MA Calculator ---
+flex_ma(src, len, typ) =>
+    ma = float(na)
+    switch typ
+        'SMA'  => ma := ta.sma(src, len)
+        'EMA'  => ma := ta.ema(src, len)
+        'WMA'  => ma := ta.wma(src, len)
+        'RMA'  => ma := ta.rma(src, len)
+        'HMA'  => ma := ta.hma(src, len)
+        'VWMA' => ma := ta.vwma(src, len)
+        'DEMA' => ma := 2 * ta.ema(src, len) - ta.ema(ta.ema(src, len), len)
+        'TEMA' => 
+            ema1 = ta.ema(src, len)
+            ema2 = ta.ema(ema1, len)
+            ema3 = ta.ema(ema2, len)
+            ma := 3 * ema1 - 3 * ema2 + ema3
+        'TMA'  => 
+            half_len = math.round(len / 2) + 1
+            ma := ta.sma(ta.sma(src, half_len), half_len)
+        'SSMA' => ma := ta.rma(src, len)
+    ma
+
+// --- Inputs ---
+dmean_len        = input.int(50, 'Base MA Period', minval = 1, group = 'DMean')
+dmean_sig_len    = input.int(20, 'Signal MA Period', minval = 1, group = 'DMean')
+dmean_ma_type    = input.string('EMA', 'MA Type', options = ['SMA', 'EMA', 'WMA', 'RMA', 'HMA', 'VWMA', 'DEMA', 'TEMA', 'TMA', 'SSMA'], group = 'DMean')
+dmean_dead_zone  = input.float(0.1, 'DMean Crossover Threshold (%)', minval = 0.0, step = 0.01, group = 'DMean', tooltip = 'DMean must cross signal + this threshold for long, or signal - this threshold for short.')
+
+// --- Filter settings ---
+use_filter      = input.bool(true, 'Enable Filter', group = 'Filter')
+filter_len      = input.int(50, 'Filter Period', minval = 1, group = 'Filter')
+filt_src_opt    = input.string('Close', 'Source', options = ['Close', 'Open', 'High', 'Low', 'HL2', 'HLC3', 'OHLC4'], group = 'Filter')
+filter_sd_mult  = input.float(1.0, 'Filter SD Multiplier', minval = 0.1, step = 0.1, group = 'Filter')
+
+// --- Stop Loss Inputs (Updated for both long and short) ---
+longSL_pct  = input.float(1.0, 'Long Hard SL (%)', minval = 0.1, step = 0.1, group = 'Stop Loss') / 100
+shortSL_pct = input.float(1.0, 'Short Hard SL (%)', minval = 0.1, step = 0.1, group = 'Stop Loss') / 100
+
+// Date Range
+start_date = input.time(timestamp('01 Jan 2024 00:00 UTC'), 'Start Date')
+end_date   = input.time(timestamp('31 Dec 2025 23:59 UTC'), 'End Date')
+in_range   = time >= start_date and time <= end_date
+
+// --- Calculations ---
+price_ma     = flex_ma(close, dmean_len, dmean_ma_type)
+dmean_val    = (close - price_ma) / close * 100
+dmean_signal = flex_ma(dmean_val, dmean_sig_len, dmean_ma_type)
+
+// Standard Deviation filter
+filt_src   = ma_source(filt_src_opt)
+filter_basis = ta.sma(filt_src, filter_len)
+dev        = ta.stdev(filt_src, filter_len)
+sd_plus_1  = filter_basis + dev * filter_sd_mult
+sd_minus_1 = filter_basis - dev * filter_sd_mult
+
+// --- Conditions ---
+long_cond_dmean  = dmean_val > dmean_signal + dmean_dead_zone and dmean_val[1] <= dmean_signal[1] + dmean_dead_zone
+short_cond_dmean = dmean_val < dmean_signal - dmean_dead_zone and dmean_val[1] >= dmean_signal[1] - dmean_dead_zone
+
+long_filter_cond  = use_filter ? filt_src > sd_minus_1 : true
+short_filter_cond = use_filter ? filt_src < sd_plus_1  : true
+
+long_entry  = long_cond_dmean  and long_filter_cond  and in_range
+short_entry = short_cond_dmean and short_filter_cond and in_range
+
+exit_long_dmean  = ta.crossunder(dmean_val, dmean_signal)
+exit_short_dmean = ta.crossover(dmean_val, dmean_signal)
+
+// --- Hard Stop-Loss Price Tracking ---
+var float long_entry_price  = na
+var float short_entry_price = na
+
+if long_entry
+    long_entry_price  := close
+    short_entry_price := na
+else if short_entry
+    short_entry_price := close
+    long_entry_price  := na
+
+// Calculate SL prices
+long_sl_price  = strategy.position_size > 0 and not na(long_entry_price)  ? long_entry_price  * (1 - longSL_pct)  : na
+short_sl_price = strategy.position_size < 0 and not na(short_entry_price) ? short_entry_price * (1 + shortSL_pct) : na
+
+// SL Trigger conditions
+trigger_long_sl  = strategy.position_size > 0 and close < long_sl_price
+trigger_short_sl = strategy.position_size < 0 and close > short_sl_price
+
+// --- <<< CONSOLIDATED TRADE LOGIC BLOCK >>> ---
+if in_range
+    // 1. --- Exit Logic (Highest Priority) ---
+    // Hard Stop Loss
+    if trigger_long_sl
+        strategy.close('Long', comment = 'Hard SL Long')
+    else if trigger_short_sl
+        strategy.close('Short', comment = 'Hard SL Short')
+    // DMean Crossover Exit
+    else if exit_long_dmean and strategy.position_size > 0
+        strategy.close('Long', comment = 'DMean Xunder')
+    else if exit_short_dmean and strategy.position_size < 0
+        strategy.close('Short', comment = 'DMean Xover')
+    // 2. --- Entry Logic ---
+    else if long_entry
+        strategy.entry('Long', strategy.long)
+    else if short_entry
+        strategy.entry('Short', strategy.short)
+// --- End of Consolidated Block ---
+
+// --- Plotting ---
+plot(dmean_val,      title = 'DMean', color = color.orange, linewidth = 2)
+plot(dmean_signal,   title = 'DMean MA', color = color.blue, linewidth = 2)
+plot(dmean_signal + dmean_dead_zone, 'DMean Upper Threshold', color = color.new(color.gray, 50), style = plot.style_line, linewidth = 1)
+plot(dmean_signal - dmean_dead_zone, 'DMean Lower Threshold', color = color.new(color.gray, 50), style = plot.style_line, linewidth = 1)
+hline(2,   'Upper Bound', color = color.gray, linestyle = hline.style_dashed)
+hline(-2,  'Lower Bound', color = color.gray, linestyle = hline.style_dashed)
+
+p_basis = plot(use_filter ? filter_basis : na,     'Filter Basis',      color = color.new(TEAL_COLOR, 20), linewidth = 2)
+p_upper = plot(use_filter ? sd_plus_1 : na,        'Filter Upper SD',   color = color.new(TEAL_COLOR, 70))
+p_lower = plot(use_filter ? sd_minus_1 : na,       'Filter Lower SD',   color = color.new(TEAL_COLOR, 70))
+fill(p_upper, p_lower, color = color.new(TEAL_COLOR, 90), title = 'SD Channel')
+
+// Plot Buy/Sell & SL markers
+plotshape(long_entry,  title = 'Buy',        location = location.belowbar, color = color.lime, style = shape.triangleup)
+plotshape(short_entry, title = 'Sell',       location = location.abovebar, color = color.red, style = shape.triangledown)
+plotshape(exit_long_dmean and strategy.position_size > 0 and not trigger_long_sl,  title = 'Exit Long',  location = location.abovebar, color = color.fuchsia, style = shape.xcross)
+plotshape(exit_short_dmean and strategy.position_size < 0 and not trigger_short_sl, title = 'Exit Short', location = location.belowbar, color = color.aqua,    style = shape.xcross)
+plotshape(trigger_long_sl,        title = 'Hard SL Long',  location = location.belowbar, color = BLACK_COLOR, style = shape.triangledown)
+plotshape(trigger_short_sl,       title = 'Hard SL Short', location = location.abovebar, color = BLACK_COLOR, style = shape.triangledown)
+
+plot(strategy.position_size > 0 ? long_sl_price  : na, title = 'Long SL Line',  color = BLACK_COLOR, style = plot.style_linebr, linewidth = 2)
+plot(strategy.position_size < 0 ? short_sl_price : na, title = 'Short SL Line', color = BLACK_COLOR, style = plot.style_linebr, linewidth = 2)
+
+// --- Background coloring ---
+bg_color = color(na)
+if dmean_val > dmean_signal and long_filter_cond
+    bg_color := transparent(LIME_COLOR, 85)
+else if dmean_val < dmean_signal and short_filter_cond
+    bg_color := transparent(RED_COLOR, 85)
+bgcolor(bg_color)
+
+// --- Performance Dashboard Table ---
+var table perf_table = table.new(position.bottom_right, 2, 3, bgcolor = color.new(color.gray, 80), border_width = 1)
+
+if barstate.islast
+    // Find the first bar of the date range to get the starting price
+    first_bar_index = ta.barssince(in_range and not in_range[1])
+    start_price = close[first_bar_index]
+
+    // Calculate Buy & Hold performance for the selected range
+    bh_perf = (close - start_price) / start_price * 100
+
+    // Get Strategy Performance
+    strategy_perf = (strategy.equity / strategy.initial_capital - 1) * 100
+
+    // Populate Table
+    // Headers
+    table.cell(perf_table, 0, 0, 'Metric',    text_color = color.white, bgcolor = color.black)
+    table.cell(perf_table, 1, 0, 'Return %',  text_color = color.white, bgcolor = color.black)
+    // Buy & Hold Row
+    table.cell(perf_table, 0, 1, 'Buy & Hold', text_color = color.white)
+    table.cell(perf_table, 1, 1, str.tostring(bh_perf, '0.00'),   text_color = bh_perf >= 0 ? LIME_COLOR : RED_COLOR)
+    // Strategy Row
+    table.cell(perf_table, 0, 2, 'Strategy', text_color = color.white)
+    table.cell(perf_table, 1, 2, str.tostring(strategy_perf, '0.00'), text_color = strategy_perf >= 0 ? LIME_COLOR : RED_COLOR)
+
+View in Pine Editor・194 lines
+Use on chart
+5
+8
+2
+1 347
+PG DMean & Price Sync Strategy (SD Filter)
+
+This strategy combines the momentum-oscillator properties of the Detrended Mean (DMean) with a Standard Deviation (SD) Price Filter for confirming trend direction, aiming to isolate high-conviction trades while actively managing risk.
+
+🔑 Core Logic
+DMean Momentum Signal: The strategy's primary engine is the DMean, which measures the percentage difference between the current closing price and a longer-term Moving Average (price_ma). It is then smoothed by a DMean Signal line (MA of the DMean).
+
+Entry Signal: A trade is triggered when the DMean line crosses above (for Long) or below (for Short) its Signal Line, but it must clear a user-defined Dead Zone Threshold to confirm momentum commitment.
+
+SD Filter Confirmation (Price Sync): A Standard Deviation Channel, based on a separate user-defined price source and period, is used to filter trades.
+
+Long Filter: Allows Long entries only when the price is trading above the lower SD band, suggesting the current price action is stronger than the recent average volatility to the downside.
+
+Short Filter: Allows Short entries only when the price is currently below the Filter Basis (SMA), confirming a bearish stance within the SD channel.
+
+🛡️ Risk & Exit Management
+Primary Exit: All trades are exited by reverse DMean Crossover/Crossunder, meaning the position is closed when the DMean momentum reverses against the open trade (e.g., DMean crosses under the Signal to exit a Long).
+
+Hard Stop Loss (Short Trades): A mandatory percentage-based Hard Stop Loss is implemented only for short positions to protect against sudden upward price spikes, closing the trade if the loss exceeds the set percentage. (Note: This version does not include a Hard SL for Long trades).
+
+📊 Performance Dashboard
+A custom Performance Dashboard Table is displayed at the bottom right of the chart to provide real-time, at-a-glance comparison of the strategy's equity performance versus a simple Buy & Hold over the selected backtesting date range.
+
+

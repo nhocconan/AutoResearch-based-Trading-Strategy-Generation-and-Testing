@@ -1,0 +1,959 @@
+//@version=6
+strategy("EMA and Dow Theory Strategies V4.1", overlay=true, initial_capital = 16600, commission_type=strategy.commission.percent, commission_value=0.055, margin_long = 0.001, margin_short = 0.001, precision = 4, default_qty_type=strategy.percent_of_equity, default_qty_value=3)
+import TradingView/ta/7
+
+// =====================
+// 🌐 言語設定 / Language
+// =====================
+langJP = input.bool(true, "日本語表示 / Japanese", group="[ LANGUAGE ]",
+     tooltip="ON = 日本語\nOFF = English")
+
+// =====================
+// ✅ 基本設定 / Settings
+// =====================
+emaLen       = input.int(58,    "EMA Period (EMA期間)",                      group="[ SETTINGS ]")
+atrFactor    = input.float(3.8, "ATR Factor - TP Distance (ATR倍率・TP距離)", group="[ SETTINGS ]", step=0.1)
+stopLoss     = input.float(-5.0,"Stop Loss % (損切り%)",                      group="[ SETTINGS ]", step=0.5)
+adxThreshold = input.float(20.5,"ADX Threshold (ADXしきい値)",                group="[ SETTINGS ]", step=0.5)
+swingLen     = input.int(13,    "Swing Length (スイング検出期間)",              group="[ SETTINGS ]", minval=1)
+
+// =====================
+// ✅ ブレークイーブンストップ / Break Even Stop
+// =====================
+beEnabled = input.bool(true,  "Enable BE Stop (BEストップを有効にする)", group="[ BREAK EVEN STOP ]")
+beThresh  = input.float(9.0,  "BE Trigger % (BE発動しきい値%)",         group="[ BREAK EVEN STOP ]", step=0.5, minval=0.5,
+     tooltip="EN: Move stop to break-even when profit reaches this %.\nRecommended: 6.0-9.0%\n\nJP: 含み益がこの%に達したら損切りラインを建値に移動する。\n推奨: 6.0〜9.0%")
+
+var float BE_BUFFER = 0.1
+
+// =====================
+// ✅ 表示設定 / Display
+// =====================
+showEma       = input.bool(true,  "EMA Line (EMAライン)",                        group="[ DISPLAY ]")
+showDowZone   = input.bool(true,  "Dow Zone / ダウゾーン",                         group="[ DISPLAY ]")
+showSwingLine = input.bool(true,  "Swing Line / スイングライン",                   group="[ DISPLAY ]")
+showTP        = input.bool(true,  "TP Lines / TPライン",                           group="[ DISPLAY ]")
+showBE        = input.bool(true,  "BE Stop Line / BEストップライン",               group="[ DISPLAY ]")
+showHTF       = input.bool(true,  "Higher TF Swing / 上位足スイング",              group="[ DISPLAY ]")
+showLabels    = input.bool(true,  "Trade Labels / トレードラベル",                 group="[ DISPLAY ]")
+showBG        = input.bool(true,  "Background / 背景色",                           group="[ DISPLAY ]")
+showTable     = input.bool(true,  "Status Table / ステータステーブル",             group="[ DISPLAY ]")
+tablePos      = input.string("Top Right / 右上", "Table Position / テーブル位置",
+     group="[ DISPLAY ]",
+     options=["Top Right / 右上", "Top Left / 左上", "Bottom Right / 右下", "Bottom Left / 左下"])
+
+// =====================
+// EMA計算
+// =====================
+ema = ta.ema(close, emaLen)
+emaUp   = ema > ema[1]
+emaDown = ema < ema[1]
+
+// =====================
+// ADX
+// =====================
+[_, _, adxValue] = ta.dmi(14, 14)
+isTrending = adxValue > adxThreshold
+
+// =====================
+// スイング検出
+// =====================
+isSwingHigh = high[swingLen] == ta.highest(high, swingLen * 2 + 1)
+isSwingLow  = low[swingLen]  == ta.lowest(low,  swingLen * 2 + 1)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+lastSwingHigh := isSwingHigh ? high[swingLen] : lastSwingHigh
+lastSwingLow  := isSwingLow  ? low[swingLen]  : lastSwingLow
+
+// =====================
+// ダウ理論トレンド判定
+// =====================
+var int trend = 0
+if not na(lastSwingHigh) and close > lastSwingHigh and trend != 1
+    trend := 1
+if not na(lastSwingLow)  and close < lastSwingLow  and trend != -1
+    trend := -1
+
+// =====================
+// エントリー条件
+// =====================
+goLong  = emaUp   and trend == 1  and isTrending
+goShort = emaDown and trend == -1 and isTrending
+
+// =====================
+// ATR / TP計算
+// =====================
+atr = ta.atr(50) * atrFactor
+
+var float tp1  = na
+var float tp2  = na
+var float tp3  = na
+var float tp11 = na
+var float tp22 = na
+var float tp33 = na
+var float entr = na
+
+// =====================
+// ブレークイーブン管理変数
+// =====================
+var bool  beActivated = false
+var float bePrice     = na
+
+// =====================
+// PnL計算
+// =====================
+var float PnL = 0.
+LastTriggeredPrice = strategy.opentrades.entry_price(strategy.opentrades - 1)
+if strategy.position_size > 0.0 and LastTriggeredPrice != 0.0
+    PnL := ((close - LastTriggeredPrice) / LastTriggeredPrice) * 100.0
+else if strategy.position_size < 0.0 and LastTriggeredPrice != 0.0
+    PnL := ((LastTriggeredPrice - close) / LastTriggeredPrice) * 100.0
+
+var float TruePnL = na
+var float Equity_AtStartTrade = na
+TruePnL := na(Equity_AtStartTrade) ? na : ((strategy.equity / Equity_AtStartTrade) - 1.0) * 100.0
+
+// =====================
+// BEストップ発動チェック
+// =====================
+if beEnabled and strategy.position_size != 0.0 and not beActivated
+    if strategy.position_size > 0.0 and PnL >= beThresh
+        beActivated := true
+        bePrice     := LastTriggeredPrice * (1 + BE_BUFFER / 100)
+    else if strategy.position_size < 0.0 and PnL >= beThresh
+        beActivated := true
+        bePrice     := LastTriggeredPrice * (1 - BE_BUFFER / 100)
+
+// =====================
+// 損切り（通常SL）
+// =====================
+if PnL < stopLoss and strategy.position_size > 0.
+    strategy.close("Long", "SL Long")
+    beActivated := false
+    bePrice     := na
+    alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"7"}', alert.freq_once_per_bar)
+
+if PnL < stopLoss and strategy.position_size < 0.
+    strategy.close("Short", "SL Short")
+    beActivated := false
+    bePrice     := na
+    alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"7"}', alert.freq_once_per_bar)
+
+// =====================
+// BEストップ
+// =====================
+if beEnabled and beActivated and not na(bePrice)
+    if strategy.position_size > 0.0 and low <= bePrice
+        strategy.close("Long", "BE Long")
+        beActivated := false
+        bePrice     := na
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"7"}', alert.freq_once_per_bar)
+    else if strategy.position_size < 0.0 and high >= bePrice
+        strategy.close("Short", "BE Short")
+        beActivated := false
+        bePrice     := na
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"7"}', alert.freq_once_per_bar)
+
+// =====================
+// トレンド反転クローズ
+// =====================
+if trend == 1 and strategy.position_size < 0
+    strategy.close("Short", "trendChange→Long")
+    beActivated := false
+    bePrice     := na
+    alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"7"}', alert.freq_once_per_bar)
+
+if trend == -1 and strategy.position_size > 0
+    strategy.close("Long", "trendChange→Short")
+    beActivated := false
+    bePrice     := na
+    alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"7"}', alert.freq_once_per_bar)
+
+// =====================
+// ロングエントリー
+// =====================
+if strategy.position_size <= 0. and goLong
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Exit Short→Long")
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"7"}', alert.freq_once_per_bar)
+    if strategy.position_size == 0
+        Equity_AtStartTrade := strategy.equity
+        beActivated         := false
+        bePrice             := na
+        strategy.entry("Long", strategy.long)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":false,"HalfExit":false, "Vertion":"7","Stop":'+str.tostring(0)+'}', alert.freq_once_per_bar_close)
+        tp1  := close + atr
+        tp2  := close + atr * 2
+        tp3  := close + atr * 3
+        tp11 := na
+        tp22 := na
+        tp33 := na
+        entr := close
+
+// =====================
+// ショートエントリー
+// =====================
+if strategy.position_size >= 0. and goShort
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Exit Long→Short")
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"HalfExit":false, "Vertion":"7"}', alert.freq_once_per_bar)
+    if strategy.position_size == 0
+        Equity_AtStartTrade := strategy.equity
+        beActivated         := false
+        bePrice             := na
+        strategy.entry("Short", strategy.short)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":false,"HalfExit":false, "Vertion":"7","Stop":'+str.tostring(0)+'}', alert.freq_once_per_bar_close)
+        tp11 := close - atr
+        tp22 := close - atr * 2
+        tp33 := close - atr * 3
+        tp1  := na
+        tp2  := na
+        tp3  := na
+        entr := close
+
+// =====================
+// TP処理
+// =====================
+if strategy.position_size > 0
+    if high > tp1
+        strategy.close('Long', 'Long TP1', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP1"}', alert.freq_once_per_bar)
+        tp1 := na
+    if high > tp2
+        strategy.close('Long', 'Long TP2', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP2"}', alert.freq_once_per_bar)
+        tp2 := na
+    if high > tp3
+        strategy.close('Long', 'Long TP3', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Buy","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP3"}', alert.freq_once_per_bar)
+        tp3  := na
+        entr := na
+
+if strategy.position_size < 0
+    if low < tp11
+        strategy.close('Short', 'Short TP1', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP1"}', alert.freq_once_per_bar)
+        tp11 := na
+    if low < tp22
+        strategy.close('Short', 'Short TP2', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP2"}', alert.freq_once_per_bar)
+        tp22 := na
+    if low < tp33
+        strategy.close('Short', 'Short TP3', qty_percent=30)
+        alert('{"Symbol":"' + syminfo.ticker + '","Side":"Sell","Price":' + str.tostring(close) + ',"Exit":true,"halfExit":true, "vertion":"TP3"}', alert.freq_once_per_bar)
+        tp33 := na
+        entr := na
+
+
+// =====================================================================
+// 🎨 描画 — Ultra Premium Visual Design
+// =====================================================================
+
+// -----------------------------------------------
+// カラーパレット
+// -----------------------------------------------
+C_BULL     = #00e5c3   // ネオンティール（強気）
+C_BEAR     = #ff4d6d   // ネオンレッド（弱気）
+C_BE_COL   = #ffd600   // BEライン：ゴールド
+C_ENTRY    = #90a4ae   // エントリーライン：ブルーグレー
+C_HTF_BULL = #00bcd4   // 上位足強気：シアン
+C_HTF_BEAR = #e91e63   // 上位足弱気：ピンク
+C_FLAT_BG  = #1a237e   // 横ばい背景：ディープネイビー
+
+barPrice = close
+
+// -----------------------------------------------
+// 1. ダウゾーン — 4層グラデーション
+// スイングライン→現在価格を濃淡4段階で塗る（背景として最初に描画）
+// -----------------------------------------------
+// ベアゾーン（スイング高値 → 現在価格）
+sh_b  = trend == -1 ? lastSwingHigh : na
+sh_q1 = trend == -1 ? lastSwingHigh - (lastSwingHigh - barPrice) * 0.22 : na
+sh_q2 = trend == -1 ? lastSwingHigh - (lastSwingHigh - barPrice) * 0.50 : na
+sh_q3 = trend == -1 ? lastSwingHigh - (lastSwingHigh - barPrice) * 0.78 : na
+sh_e  = trend == -1 ? barPrice : na
+
+p_shb  = plot(showDowZone ? sh_b  : na, display=display.none)
+p_shq1 = plot(showDowZone ? sh_q1 : na, display=display.none)
+p_shq2 = plot(showDowZone ? sh_q2 : na, display=display.none)
+p_shq3 = plot(showDowZone ? sh_q3 : na, display=display.none)
+p_she  = plot(showDowZone ? sh_e  : na, display=display.none)
+fill(p_shb,  p_shq1, color.new(C_BEAR, 55))
+fill(p_shq1, p_shq2, color.new(C_BEAR, 72))
+fill(p_shq2, p_shq3, color.new(C_BEAR, 83))
+fill(p_shq3, p_she,  color.new(C_BEAR, 91))
+
+// ブルゾーン（スイング安値 → 現在価格）
+sl_b  = trend ==  1 ? lastSwingLow : na
+sl_q1 = trend ==  1 ? lastSwingLow + (barPrice - lastSwingLow) * 0.22 : na
+sl_q2 = trend ==  1 ? lastSwingLow + (barPrice - lastSwingLow) * 0.50 : na
+sl_q3 = trend ==  1 ? lastSwingLow + (barPrice - lastSwingLow) * 0.78 : na
+sl_e  = trend ==  1 ? barPrice : na
+
+p_slb  = plot(showDowZone ? sl_b  : na, display=display.none)
+p_slq1 = plot(showDowZone ? sl_q1 : na, display=display.none)
+p_slq2 = plot(showDowZone ? sl_q2 : na, display=display.none)
+p_slq3 = plot(showDowZone ? sl_q3 : na, display=display.none)
+p_sle  = plot(showDowZone ? sl_e  : na, display=display.none)
+fill(p_slb,  p_slq1, color.new(C_BULL, 55))
+fill(p_slq1, p_slq2, color.new(C_BULL, 72))
+fill(p_slq2, p_slq3, color.new(C_BULL, 83))
+fill(p_slq3, p_sle,  color.new(C_BULL, 91))
+
+// -----------------------------------------------
+// 2. スイングライン — グロー付き2重線
+// -----------------------------------------------
+plot(showSwingLine and trend == -1 ? lastSwingHigh : na,
+     "Resist Glow", color=color.new(C_BEAR, 50), linewidth=5, style=plot.style_linebr)
+plot(showSwingLine and trend == -1 ? lastSwingHigh : na,
+     "Resist Core", color=color.new(C_BEAR,  0), linewidth=1, style=plot.style_linebr)
+
+plot(showSwingLine and trend ==  1 ? lastSwingLow : na,
+     "Support Glow", color=color.new(C_BULL, 50), linewidth=5, style=plot.style_linebr)
+plot(showSwingLine and trend ==  1 ? lastSwingLow : na,
+     "Support Core", color=color.new(C_BULL,  0), linewidth=1, style=plot.style_linebr)
+
+// -----------------------------------------------
+// 3. EMA — 5層グロー（強烈なネオン感）
+// -----------------------------------------------
+emaC5 = emaUp ? color.new(C_BULL, 90) : color.new(C_BEAR, 90)
+emaC4 = emaUp ? color.new(C_BULL, 75) : color.new(C_BEAR, 75)
+emaC3 = emaUp ? color.new(C_BULL, 55) : color.new(C_BEAR, 55)
+emaC2 = emaUp ? color.new(C_BULL, 25) : color.new(C_BEAR, 25)
+emaC1 = emaUp ? color.new(C_BULL,  0) : color.new(C_BEAR,  0)
+plot(ema, "EMA G5", color = showEma ? emaC5 : na, linewidth=20)
+plot(ema, "EMA G4", color = showEma ? emaC4 : na, linewidth=12)
+plot(ema, "EMA G3", color = showEma ? emaC3 : na, linewidth=7)
+plot(ema, "EMA G2", color = showEma ? emaC2 : na, linewidth=3)
+plot(ema, "EMA G1", color = showEma ? emaC1 : na, linewidth=1)
+
+// -----------------------------------------------
+// 4. TPライン — グロー付き2重線 + エントリー時ラベル
+// ポジション保有中のみ表示（ポジションなし→強制naで線をつながせない）
+// -----------------------------------------------
+// エントリーライン
+plot(showTP ? (entr != entr[1] ? na : entr) : na,
+     "Entry", color=color.new(C_ENTRY, 40), linewidth=1, style=plot.style_linebr)
+
+// ポジションなし時はnaを強制して線をつながせない
+tp1_plot  = showTP and strategy.position_size > 0 ? tp1  : na
+tp2_plot  = showTP and strategy.position_size > 0 ? tp2  : na
+tp3_plot  = showTP and strategy.position_size > 0 ? tp3  : na
+tp11_plot = showTP and strategy.position_size < 0 ? tp11 : na
+tp22_plot = showTP and strategy.position_size < 0 ? tp22 : na
+tp33_plot = showTP and strategy.position_size < 0 ? tp33 : na
+
+// ロング TP：グロー（太）+ コア（細）
+plot(tp1_plot,  "TP1 G",  color=color.new(C_BULL, 80), linewidth=4, style=plot.style_linebr)
+plot(tp1_plot,  "TP1 C",  color=color.new(C_BULL, 45), linewidth=1, style=plot.style_linebr)
+plot(tp2_plot,  "TP2 G",  color=color.new(C_BULL, 65), linewidth=4, style=plot.style_linebr)
+plot(tp2_plot,  "TP2 C",  color=color.new(C_BULL, 20), linewidth=1, style=plot.style_linebr)
+plot(tp3_plot,  "TP3 G",  color=color.new(C_BULL, 40), linewidth=5, style=plot.style_linebr)
+plot(tp3_plot,  "TP3 C",  color=color.new(C_BULL,  0), linewidth=2, style=plot.style_linebr)
+
+// ショート TP
+plot(tp11_plot, "TP1S G", color=color.new(C_BEAR, 80), linewidth=4, style=plot.style_linebr)
+plot(tp11_plot, "TP1S C", color=color.new(C_BEAR, 45), linewidth=1, style=plot.style_linebr)
+plot(tp22_plot, "TP2S G", color=color.new(C_BEAR, 65), linewidth=4, style=plot.style_linebr)
+plot(tp22_plot, "TP2S C", color=color.new(C_BEAR, 20), linewidth=1, style=plot.style_linebr)
+plot(tp33_plot, "TP3S G", color=color.new(C_BEAR, 40), linewidth=5, style=plot.style_linebr)
+plot(tp33_plot, "TP3S C", color=color.new(C_BEAR,  0), linewidth=2, style=plot.style_linebr)
+
+// TP ラベル（エントリー直後の1バーのみ）
+isLongEntry  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+isShortEntry = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if showTP and isLongEntry and not na(tp1)
+    label.new(bar_index, tp1, "TP1", color=color.new(C_BULL, 35), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+    label.new(bar_index, tp2, "TP2", color=color.new(C_BULL, 20), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+    label.new(bar_index, tp3, "TP3", color=color.new(C_BULL,  0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+if showTP and isShortEntry and not na(tp11)
+    label.new(bar_index, tp11, "TP1", color=color.new(C_BEAR, 35), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+    label.new(bar_index, tp22, "TP2", color=color.new(C_BEAR, 20), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+    label.new(bar_index, tp33, "TP3", color=color.new(C_BEAR,  0), textcolor=color.white, style=label.style_label_left, size=size.tiny)
+
+// -----------------------------------------------
+// 5. BEストップライン — ゴールドグロー3層
+// -----------------------------------------------
+bePricePlot = showBE and beActivated and strategy.position_size != 0 ? bePrice : na
+plot(bePricePlot, "BE G2", color=color.new(C_BE_COL, 72), linewidth=7, style=plot.style_linebr)
+plot(bePricePlot, "BE G1", color=color.new(C_BE_COL, 40), linewidth=3, style=plot.style_linebr)
+plot(bePricePlot, "BE C",  color=color.new(C_BE_COL,  0), linewidth=1, style=plot.style_linebr)
+
+beJustActivated = beActivated and not beActivated[1]
+if showBE and beJustActivated and not na(bePrice)
+    label.new(bar_index, bePrice, "◆ BE",
+         color=color.new(C_BE_COL, 5),
+         textcolor=#000000,
+         style=label.style_label_right,
+         size=size.small)
+
+// -----------------------------------------------
+// 6. 上位足スイング
+// [1] + lookahead_off で確定済みバーのみ参照し再描画を防止
+// -----------------------------------------------
+htfSwingHigh = request.security(syminfo.tickerid, "240",
+     ta.pivothigh(high, swingLen, swingLen)[1],
+     lookahead=barmerge.lookahead_off)
+htfSwingLow  = request.security(syminfo.tickerid, "240",
+     ta.pivotlow(low,  swingLen, swingLen)[1],
+     lookahead=barmerge.lookahead_off)
+
+var float lastHTFSwingHigh = na
+var float lastHTFSwingLow  = na
+lastHTFSwingHigh := na(htfSwingHigh) ? lastHTFSwingHigh : htfSwingHigh
+lastHTFSwingLow  := na(htfSwingLow)  ? lastHTFSwingLow  : htfSwingLow
+
+htfClose = request.security(syminfo.tickerid, "240",
+     close[1],
+     lookahead=barmerge.lookahead_off)
+
+var int htfTrend = 0
+if not na(lastHTFSwingHigh) and htfClose > lastHTFSwingHigh and htfTrend != 1
+    htfTrend := 1
+if not na(lastHTFSwingLow)  and htfClose < lastHTFSwingLow  and htfTrend != -1
+    htfTrend := -1
+
+plot(showHTF and htfTrend == -1 ? lastHTFSwingHigh : na,
+     "HTF Res", color=color.new(C_HTF_BEAR, 50), linewidth=1, style=plot.style_linebr)
+plot(showHTF and htfTrend ==  1 ? lastHTFSwingLow  : na,
+     "HTF Sup", color=color.new(C_HTF_BULL, 50), linewidth=1, style=plot.style_linebr)
+
+// -----------------------------------------------
+// 7. 背景色
+// -----------------------------------------------
+bgcolor(showBG and not isTrending ? color.new(C_FLAT_BG, 93) : na, title="横ばいゾーン")
+bgcolor(beActivated               ? color.new(C_BE_COL,  96) : na, title="BEストップ発動中")
+
+// -----------------------------------------------
+// 8. トレードラベル — 完全決済のみ表示
+// -----------------------------------------------
+rangeR    = high - low
+avgRangeR = ta.sma(rangeR, 20)
+var float TruePnLToDisplay = PnL
+
+if strategy.closedtrades > 0
+    lastTradeIndex     = strategy.closedtrades - 1
+    lastTradeEntryBar  = strategy.closedtrades.exit_bar_index(lastTradeIndex)
+    lastTradeDirection = strategy.closedtrades.size(lastTradeIndex)
+
+    if lastTradeEntryBar == bar_index
+        uscitaFinale = strategy.position_size == 0. or
+             lastTradeDirection > 0.0 and strategy.position_size < 0. or
+             lastTradeDirection < 0.0 and strategy.position_size > 0.
+
+        if uscitaFinale and showLabels
+            isWin      = TruePnLToDisplay > 0
+            labelCol   = isWin ? color.new(C_BULL, 10) : color.new(C_BEAR, 10)
+            labelY     = isWin ? high + avgRangeR * 3.0 : low - avgRangeR * 3.0
+            labelStyle = isWin ? label.style_label_down : label.style_label_up
+            labelText  = (isWin ? "▲ +" : "▼ ") + str.tostring(math.round(TruePnLToDisplay, 1)) + "%"
+            label.new(
+                 x=bar_index, y=labelY,
+                 text=labelText,
+                 color=labelCol,
+                 textcolor=color.white,
+                 style=labelStyle,
+                 size=size.normal)
+    else
+        TruePnLToDisplay := TruePnL
+
+// -----------------------------------------------
+// 9. ステータステーブル / Status Table
+// -----------------------------------------------
+// 9. ステータステーブル / Status Table
+// -----------------------------------------------
+tPos = tablePos == "Top Right / 右上"    ? position.top_right    :
+       tablePos == "Top Left / 左上"     ? position.top_left     :
+       tablePos == "Bottom Right / 右下" ? position.bottom_right :
+                                           position.bottom_left
+
+var table t = na
+if showTable
+    if na(t)
+        t := table.new(tPos, 2, 6,
+             bgcolor      = color.new(#0a0e1a, 15),
+             border_color = color.new(#ffffff, 80),
+             border_width = 1,
+             frame_color  = color.new(#ffffff, 70),
+             frame_width  = 1)
+
+    C_ON  = color.new(#00e5c3,  0)
+    C_OFF = color.new(#ff4d6d,  0)
+    C_NEU = color.new(#ffffff, 40)
+    C_BG  = color.new(#0a0e1a, 30)
+
+    table.cell(t, 0, 0, langJP ? "条件"  : "Condition", text_color=color.new(#ffffff, 20), text_size=size.small, bgcolor=color.new(#1a1f35, 10), text_halign=text.align_center)
+    table.cell(t, 1, 0, langJP ? "状態"  : "Status",    text_color=color.new(#ffffff, 20), text_size=size.small, bgcolor=color.new(#1a1f35, 10), text_halign=text.align_center)
+
+    emaStatus      = emaUp ? (langJP ? "▲ 上昇" : "▲ Rising") : (langJP ? "▼ 下降" : "▼ Falling")
+    emaStatusColor = emaUp ? C_ON : C_OFF
+    table.cell(t, 0, 1, langJP ? "EMA方向"  : "EMA",    text_color=C_NEU,         text_size=size.small, bgcolor=C_BG)
+    table.cell(t, 1, 1, emaStatus,                       text_color=emaStatusColor, text_size=size.small, bgcolor=C_BG, text_halign=text.align_center)
+
+    dowStatus      = trend == 1 ? (langJP ? "▲ ブル" : "▲ Bull") : trend == -1 ? (langJP ? "▼ ベア" : "▼ Bear") : (langJP ? "─ 中立" : "─ Neutral")
+    dowStatusColor = trend == 1 ? C_ON : trend == -1 ? C_OFF : C_NEU
+    table.cell(t, 0, 2, langJP ? "ダウ理論" : "Dow Theory", text_color=C_NEU,         text_size=size.small, bgcolor=C_BG)
+    table.cell(t, 1, 2, dowStatus,                           text_color=dowStatusColor, text_size=size.small, bgcolor=C_BG, text_halign=text.align_center)
+
+    adxVal         = str.tostring(math.round(adxValue, 1))
+    adxStatus      = isTrending ? "● " + adxVal + (langJP ? "  強" : "  Strong") : "○ " + adxVal + (langJP ? "  弱" : "  Weak")
+    adxStatusColor = isTrending ? C_ON : C_OFF
+    table.cell(t, 0, 3, "ADX",     text_color=C_NEU,          text_size=size.small, bgcolor=C_BG)
+    table.cell(t, 1, 3, adxStatus, text_color=adxStatusColor,  text_size=size.small, bgcolor=C_BG, text_halign=text.align_center)
+
+    longOK  = emaUp   and trend == 1  and isTrending
+    shortOK = emaDown and trend == -1 and isTrending
+
+    var string posStatus = ""
+    var color  posColor  = color.gray
+    var color  posBG     = color.gray
+    if strategy.position_size > 0
+        posStatus := langJP ? "▲ ロング中"   : "▲ Long"
+        posColor  := C_ON
+        posBG     := color.new(#00e5c3, 75)
+    else if strategy.position_size < 0
+        posStatus := langJP ? "▼ ショート中" : "▼ Short"
+        posColor  := C_OFF
+        posBG     := color.new(#ff4d6d, 75)
+    else if longOK
+        posStatus := langJP ? "▲ ロング可"   : "▲ Long Ready"
+        posColor  := C_ON
+        posBG     := color.new(#00e5c3, 88)
+    else if shortOK
+        posStatus := langJP ? "▼ ショート可" : "▼ Short Ready"
+        posColor  := C_OFF
+        posBG     := color.new(#ff4d6d, 88)
+    else
+        posStatus := langJP ? "─ 待機中"    : "─ Waiting"
+        posColor  := C_NEU
+        posBG     := C_BG
+
+    table.cell(t, 0, 4, langJP ? "ポジション" : "Position", text_color=C_NEU,    text_size=size.small, bgcolor=posBG)
+    table.cell(t, 1, 4, posStatus,                           text_color=posColor, text_size=size.small, bgcolor=posBG, text_halign=text.align_center)
+
+    var string beStatus     = ""
+    var color  beStatusColor = color.gray
+    if not beEnabled
+        beStatus      := langJP ? "─ 無効"   : "─ Off"
+        beStatusColor := C_NEU
+    else if beActivated
+        beStatus      := langJP ? "◆ 発動中" : "◆ Active"
+        beStatusColor := color.new(#ffd600, 0)
+    else
+        beStatus      := langJP ? "○ 待機"   : "○ Standby"
+        beStatusColor := C_NEU
+
+    table.cell(t, 0, 5, langJP ? "BEストップ" : "BE Stop", text_color=C_NEU,         text_size=size.small, bgcolor=C_BG)
+    table.cell(t, 1, 5, beStatus,                           text_color=beStatusColor,  text_size=size.small, bgcolor=C_BG, text_halign=text.align_center)
+
+View in Pine Editor・548 lines
+Use on chart
+2
+1
+1
+630
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Overview
+
+EMA and Dow Theory Strategies V4 is a refinement of V3, focused on one core problem: protecting profits on trades that moved in your favor but reversed before reaching the take-profit levels.
+
+The entry logic is unchanged from V3 — EMA slope direction, Dow Theory swing structure, and ADX trend filter. V4 adds a Break Even Stop mechanism that automatically moves the stop-loss to the entry price once floating profit reaches a defined threshold. This single addition meaningfully improves the risk-adjusted performance without sacrificing the strategy's core edge.
+
+The visual interface has also been fully redesigned — gradient Dow Theory zones, a neon EMA glow effect, minimal trade labels, and a real-time status table showing all entry conditions at a glance.
+
+
+──────────────────────────────
+What Changed from V3
+
+Added:
+- Break Even Stop (BE Stop) — When floating profit reaches the BE Trigger % threshold, the stop-loss automatically moves to entry price (+ 0.1% buffer for fees). Trades that previously resulted in a loss after being in profit now exit at breakeven instead.
+- Real-time Status Table — Displays EMA direction, Dow Theory trend, ADX value, position status, and BE state. Supports Japanese / English toggle.
+- Per-element display toggles — Each visual element can be shown or hidden independently via checkboxes.
+- Higher TF swing repainting fix — Rebuilt using lookahead_off and confirmed pivot bars to reduce repainting. Note: the higher timeframe swing lines have always been display-only and were never used in entry conditions, so this change does not affect strategy logic.
+- Bilingual support — Full Japanese / English language toggle.
+
+Redesigned:
+- EMA line now uses a 3-layer glow effect (neon teal / neon red)
+- Dow Theory gradient zones simplified from 5 layers to 2 layers
+- TP lines changed to semi-transparent lines (TP1 faint → TP3 visible)
+- Trade labels now show only final exit results
+- Higher TF swing lines thinned and made semi-transparent as reference-only
+
+
+──────────────────────────────
+Parameters & Recommended Ranges
+
+EMA Period — Default: 58 — Range: 30–100
+Shorter for high-volatility assets, longer for stable ones.
+
+ATR Factor — Default: 3.8 — Range: 2.5–6.0
+Controls TP distance. Higher = wider targets.
+
+Stop Loss (%) — Default: -5.0 — Range: -4 to -10
+Wider for volatile assets, tighter for BTC/ETH.
+
+ADX Threshold — Default: 20.5 — Range: 15–28
+Higher = stricter range filter, fewer but higher-quality trades.
+
+Swing Length — Default: 13 — Range: 2–20
+Larger = less sensitive to minor swings.
+
+BE Trigger (%) — Default: 9.0 — Range: 3.0–15.0
+Set below TP1 distance for protection before TP1 is reached.
+
+
+──────────────────────────────
+Recommended Settings by Asset Type
+
+Meme coins (DOGE, SHIB, etc.)
+EMA: 44–58 / ATR: 3.5–5.0 / SL: -5 to -8% / ADX: 18–22 / Swing: 10–15 / BE: 7–10%
+
+Major assets (BTC, ETH)
+EMA: 55–80 / ATR: 2.5–4.0 / SL: -4 to -6% / ADX: 20–25 / Swing: 8–15 / BE: 5–8%
+
+Mid-cap alts (SOL, SUI, etc.)
+EMA: 35–55 / ATR: 4.0–5.5 / SL: -5 to -7% / ADX: 18–23 / Swing: 8–15 / BE: 6–10%
+
+Small-cap alts
+EMA: 30–50 / ATR: 4.5–6.0 / SL: -7 to -10% / ADX: 18–22 / Swing: 5–12 / BE: 8–12%
+
+
+──────────────────────────────
+Recommended Settings by Timeframe
+
+1–5 min: ADX threshold 15–20
+15 min – 1 hour: ADX threshold 18–23
+2–4 hour: ADX threshold 20–25 (default settings optimized for 2H)
+
+
+──────────────────────────────
+Entry Conditions
+
+Long: EMA slope rising AND Dow Theory trend up AND ADX > threshold
+Short: EMA slope falling AND Dow Theory trend down AND ADX > threshold
+
+
+──────────────────────────────
+Exit Conditions
+
+TP1: Entry + ATR x Factor x 1 → close 30%
+TP2: Entry + ATR x Factor x 2 → close 30%
+TP3: Entry + ATR x Factor x 3 → close 30%
+Stop Loss: Fixed % from entry → full close
+Break Even Stop: Triggered once profit >= BE Trigger % → full close at entry price
+Trend Reversal: Dow Theory swing flip → full close
+
+
+──────────────────────────────
+Visual Features
+
+EMA line: 3-layer neon glow — teal when rising, red when falling
+Dow Theory zones: 2-layer gradient from swing high/low to current price
+Swing lines: Horizontal support/resistance at current swing high/low
+TP lines: Semi-transparent lines, TP1 faint to TP3 visible
+BE Stop line: Gold line shown when BE is active
+Higher TF swing: Thin reference lines from the 4H timeframe
+Gray background: ADX below threshold (range-bound zone, no entries)
+Status Table: Real-time display of all entry conditions and current state
+
+
+This strategy is designed for trend-following on crypto assets, primarily on the 1H–4H timeframe. Default settings are optimized for DOGE on the 2H chart. Always backtest on your target asset before live trading. Past performance does not guarantee future results.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+概要
+
+EMA and Dow Theory Strategies V4 は、V3をベースに改良したバージョンです。解決した課題は一つ——含み益が出ていたにもかかわらず、TP到達前に相場が反転して損失になるトレードを減らすことです。
+
+エントリーロジックはV3から変わっていません。EMAの傾き、ダウ理論のスイング構造、ADXトレンドフィルターの3条件です。V4ではこれにブレークイーブンストップを追加しました。含み益が設定したしきい値%に達すると、損切りラインが自動的にエントリー価格に移動します。このシンプルな追加一つで、ストラテジーの本質的なエッジを損なわずにリスク調整後のパフォーマンスが改善されています。
+
+また、チャートの視覚表現も全面的に刷新しました。ダウ理論ゾーンのグラデーション、EMAのネオングロー効果、すっきりしたトレードラベル、そしてエントリー条件をひと目で確認できるステータステーブルを追加しています。
+
+
+──────────────────────────────
+V3からの主な変更点
+
+追加したもの：
+- ブレークイーブンストップ（BE Stop） — 含み益がBE発動しきい値%に達すると、損切りラインがエントリー価格（+手数料分0.1%バッファ）に自動移動。以前は「プラスになったのに最終的にマイナス」で終わっていたトレードがブレークイーブン撤退になります。
+- ステータステーブル — EMA方向・ダウ理論トレンド・ADX値・ポジション状態・BEの状態をリアルタイムで一覧表示。日本語・英語の切り替えに対応。
+- 描画要素の個別ON/OFF — 各表示要素をチェックボックスで個別に切り替え可能。
+- 上位足スイングラインの再描画修正 — lookahead_off と確定済みピボットバーを使用して再描画を低減。なお、上位足スイングラインはもともとエントリー条件には使用しておらず、あくまで参考表示のみです。この修正はストラテジーのロジックに影響しません。
+- 日英バイリンガル対応 — ステータステーブルと表示ラベルの日本語・英語切り替えに対応。
+
+刷新したもの：
+- EMAラインが3層グロー効果（ネオンティール / ネオンレッド）に
+- ダウ理論グラデーションゾーンを5層→2層に簡略化
+- TPラインを半透明ラインに変更（TP1が最も薄く、TP3が最も濃い）
+- トレードラベルは最終決済時のみ表示（部分利確のラベルは非表示）
+- 上位足スイングラインを細く・半透明にして参考表示に
+
+
+──────────────────────────────
+パラメーターと推奨設定範囲
+
+EMA期間 — デフォルト: 58 — 推奨範囲: 30〜100
+ボラが高い銘柄は短め、安定銘柄は長め。
+
+ATR倍率 — デフォルト: 3.8 — 推奨範囲: 2.5〜6.0
+TP距離の基準。大きいほど利確ラインが遠くなる。
+
+損切り(%) — デフォルト: -5.0 — 推奨範囲: -4〜-10
+ボラが高い銘柄は広め、BTC/ETHはタイトでOK。
+
+ADXしきい値 — デフォルト: 20.5 — 推奨範囲: 15〜28
+高いほどレンジ除外が厳しく、トレード数が減り精度が上がる。
+
+スイング検出期間 — デフォルト: 13 — 推奨範囲: 2〜20
+大きいほど小さなスイングに反応しにくくなる。
+
+BE発動しきい値(%) — デフォルト: 9.0 — 推奨範囲: 3.0〜15.0
+TP1到達距離より低めに設定すると、TP1到達前に元本を守れる。
+
+
+──────────────────────────────
+銘柄タイプ別おすすめ設定
+
+ミーム系（DOGE・SHIBなど）
+EMA: 44〜58 / ATR倍率: 3.5〜5.0 / 損切り: -5〜-8% / ADX: 18〜22 / スイング: 10〜15 / BE: 7〜10%
+
+主要銘柄（BTC・ETH）
+EMA: 55〜80 / ATR倍率: 2.5〜4.0 / 損切り: -4〜-6% / ADX: 20〜25 / スイング: 8〜15 / BE: 5〜8%
+
+中堅アルト（SOL・SUIなど）
+EMA: 35〜55 / ATR倍率: 4.0〜5.5 / 損切り: -5〜-7% / ADX: 18〜23 / スイング: 8〜15 / BE: 6〜10%
+
+小型アルト
+EMA: 30〜50 / ATR倍率: 4.5〜6.0 / 損切り: -7〜-10% / ADX: 18〜22 / スイング: 5〜12 / BE: 8〜12%
+
+
+──────────────────────────────
+時間足別おすすめ設定
+
+1〜5分足: ADXしきい値 15〜20
+15分〜1時間足: ADXしきい値 18〜23
+2〜4時間足: ADXしきい値 20〜25（デフォルト設定は2時間足向けに最適化）
+
+
+──────────────────────────────
+エントリー条件
+
+ロング: EMAが上向き AND ダウ理論トレンドが上昇 AND ADX > しきい値
+ショート: EMAが下向き AND ダウ理論トレンドが下降 AND ADX > しきい値
+
+
+──────────────────────────────
+イグジット条件
+
+TP1: エントリーから +ATR×倍率×1 → 30%決済
+TP2: エントリーから +ATR×倍率×2 → 30%決済
+TP3: エントリーから +ATR×倍率×3 → 30%決済
+損切り: 設定%を超えたら全決済
+BEストップ: 含み益がBE発動しきい値%以上になると自動発動 → エントリー価格で全決済
+トレンド反転: ダウ理論のスイングが逆転したら全決済
+
+
+──────────────────────────────
+チャートの見方
+
+EMAライン: 3層グローエフェクト。上向きのときネオンティール、下向きのときネオンレッド
+ダウ理論ゾーン: スイング高値・安値から現在価格までの2層グラデーション
+スイングライン: 現在のサポート・レジスタンス水平線
+TPライン: 半透明ライン。TP1が最も薄く、TP3が最も濃い
+BEストップライン: BE発動中にゴールドのラインで表示
+上位足スイング: 4時間足のスイングレベルを参考表示（細い半透明ライン）
+グレー背景: ADXがしきい値以下の横ばいゾーン（このゾーンではエントリーしません）
+ステータステーブル: 全エントリー条件と現在の状態をリアルタイム表示
+
+
+このストラテジーは主に1時間〜4時間足の暗号資産トレンドフォローを想定して設計されています。デフォルト設定はDOGEの2時間足で最適化されています。実運用の前に必ずご自身の対象銘柄・時間足でバックテストを行ってください。過去の結果は将来の利益を保証するものではありません。
+Release Notes
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Overview
+
+EMA and Dow Theory Strategies V4.1 is a visual and stability update to V4. The entry logic, exit logic, and all parameters are completely unchanged — backtest results are identical to V4.
+
+──────────────────────────────
+What Changed from V4
+
+Visual enhancements:
+- EMA line upgraded from 3-layer to 5-layer glow effect for a stronger neon appearance
+- Dow Theory gradient zones upgraded from 2 layers to 4 layers — smoother depth from swing level to current price
+- Swing lines upgraded to dual-line style with glow (thick glow + thin core)
+- TP lines upgraded to dual-line style with glow, plus TP1/TP2/TP3 labels shown at entry
+- BE Stop line upgraded to 3-layer gold glow
+- Trade labels enlarged for better visibility
+
+Bug fixes:
+- TP lines no longer connect across separate trades — lines now display only while a position is open
+- Fixed "insufficient data" error on non-crypto assets (forex, stocks, etc.) caused by uninitialized variables in the status table. The root cause was using inline ternary chains without var declarations; these have been rewritten as if/else blocks with proper initialization.
+
+──────────────────────────────
+Parameters & Recommended Ranges
+
+EMA Period — Default: 58 — Range: 30–100
+Shorter for high-volatility assets, longer for stable ones.
+
+ATR Factor — Default: 3.8 — Range: 2.5–6.0
+Controls TP distance. Higher = wider targets.
+
+Stop Loss (%) — Default: -5.0 — Range: -4 to -10
+Wider for volatile assets, tighter for BTC/ETH.
+
+ADX Threshold — Default: 20.5 — Range: 15–28
+Higher = stricter range filter, fewer but higher-quality trades.
+
+Swing Length — Default: 13 — Range: 2–20
+Larger = less sensitive to minor swings.
+
+BE Trigger (%) — Default: 9.0 — Range: 3.0–15.0
+Set below TP1 distance for protection before TP1 is reached.
+
+──────────────────────────────
+Recommended Settings by Asset Type
+
+Meme coins (DOGE, SHIB, etc.)
+EMA: 44–58 / ATR: 3.5–5.0 / SL: -5 to -8% / ADX: 18–22 / Swing: 10–15 / BE: 7–10%
+
+Major assets (BTC, ETH)
+EMA: 55–80 / ATR: 2.5–4.0 / SL: -4 to -6% / ADX: 20–25 / Swing: 8–15 / BE: 5–8%
+
+Mid-cap alts (SOL, SUI, etc.)
+EMA: 35–55 / ATR: 4.0–5.5 / SL: -5 to -7% / ADX: 18–23 / Swing: 8–15 / BE: 6–10%
+
+Small-cap alts
+EMA: 30–50 / ATR: 4.5–6.0 / SL: -7 to -10% / ADX: 18–22 / Swing: 5–12 / BE: 8–12%
+
+──────────────────────────────
+Recommended Settings by Timeframe
+
+1–5 min: ADX threshold 15–20
+15 min – 1 hour: ADX threshold 18–23
+2–4 hour: ADX threshold 20–25 (default settings optimized for 2H)
+
+──────────────────────────────
+Entry Conditions
+
+Long: EMA slope rising AND Dow Theory trend up AND ADX > threshold
+Short: EMA slope falling AND Dow Theory trend down AND ADX > threshold
+
+──────────────────────────────
+Exit Conditions
+
+TP1: Entry + ATR x Factor x 1 → close 30%
+TP2: Entry + ATR x Factor x 2 → close 30%
+TP3: Entry + ATR x Factor x 3 → close 30%
+Stop Loss: Fixed % from entry → full close
+Break Even Stop: Triggered once profit >= BE Trigger % → full close at entry price
+Trend Reversal: Dow Theory swing flip → full close
+
+──────────────────────────────
+Visual Features
+
+EMA line: 5-layer neon glow — teal when rising, red when falling
+Dow Theory zones: 4-layer gradient from swing high/low to current price
+Swing lines: Dual-line with glow — thick glow + thin core
+TP lines: Dual-line with glow, TP1 faint to TP3 vivid, labels shown at entry
+BE Stop line: 3-layer gold glow shown when BE is active
+Higher TF swing: Thin reference lines from the 4H timeframe
+Background: Deep navy when ADX below threshold (range-bound zone, no entries)
+Status Table: Real-time display of all entry conditions and current state
+
+
+This strategy is designed for trend-following on crypto assets, primarily on the 1H–4H timeframe. Default settings are optimized for DOGE on the 2H chart. Always backtest on your target asset before live trading. Past performance does not guarantee future results.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+概要
+
+EMA and Dow Theory Strategies V4.1 は、V4のビジュアル強化とバグ修正版です。エントリー・イグジットのロジックおよびパラメーターは一切変更していません。バックテスト結果はV4と同一です。
+
+──────────────────────────────
+V4からの変更点
+
+ビジュアル強化：
+- EMAラインのグロー効果を3層→5層に強化。より鮮明なネオン表現に
+- ダウ理論グラデーションゾーンを2層→4層に強化。スイングラインから現在価格にかけて滑らかなグラデーションに
+- スイングラインをグロー付き2重線に変更（太いグロー＋細いコア）
+- TPラインをグロー付き2重線に変更。エントリー時にTP1/TP2/TP3のラベルを表示
+- BEストップラインを3層ゴールドグローに強化
+- トレードラベルを拡大して視認性を向上
+
+バグ修正：
+- 複数トレードのTPラインがつながって表示される問題を修正。ポジション保有中のみ表示するように変更
+- 為替・株など暗号資産以外の銘柄で「データが不足していて表示できません」エラーが出る問題を修正。ステータステーブル内の変数初期化処理を改善（三項演算子チェーン→var宣言付きif/else構文に書き換え）
+
+──────────────────────────────
+パラメーターと推奨設定範囲
+
+EMA期間 — デフォルト: 58 — 推奨範囲: 30〜100
+ボラが高い銘柄は短め、安定銘柄は長め。
+
+ATR倍率 — デフォルト: 3.8 — 推奨範囲: 2.5〜6.0
+TP距離の基準。大きいほど利確ラインが遠くなる。
+
+損切り(%) — デフォルト: -5.0 — 推奨範囲: -4〜-10
+ボラが高い銘柄は広め、BTC/ETHはタイトでOK。
+
+ADXしきい値 — デフォルト: 20.5 — 推奨範囲: 15〜28
+高いほどレンジ除外が厳しく、トレード数が減り精度が上がる。
+
+スイング検出期間 — デフォルト: 13 — 推奨範囲: 2〜20
+大きいほど小さなスイングに反応しにくくなる。
+
+BE発動しきい値(%) — デフォルト: 9.0 — 推奨範囲: 3.0〜15.0
+TP1到達距離より低めに設定すると、TP1到達前に元本を守れる。
+
+──────────────────────────────
+銘柄タイプ別おすすめ設定
+
+ミーム系（DOGE・SHIBなど）
+EMA: 44〜58 / ATR倍率: 3.5〜5.0 / 損切り: -5〜-8% / ADX: 18〜22 / スイング: 10〜15 / BE: 7〜10%
+
+主要銘柄（BTC・ETH）
+EMA: 55〜80 / ATR倍率: 2.5〜4.0 / 損切り: -4〜-6% / ADX: 20〜25 / スイング: 8〜15 / BE: 5〜8%
+
+中堅アルト（SOL・SUIなど）
+EMA: 35〜55 / ATR倍率: 4.0〜5.5 / 損切り: -5〜-7% / ADX: 18〜23 / スイング: 8〜15 / BE: 6〜10%
+
+小型アルト
+EMA: 30〜50 / ATR倍率: 4.5〜6.0 / 損切り: -7〜-10% / ADX: 18〜22 / スイング: 5〜12 / BE: 8〜12%
+
+──────────────────────────────
+時間足別おすすめ設定
+
+1〜5分足: ADXしきい値 15〜20
+15分〜1時間足: ADXしきい値 18〜23
+2〜4時間足: ADXしきい値 20〜25（デフォルト設定は2時間足向けに最適化）
+
+──────────────────────────────
+エントリー条件
+
+ロング: EMAが上向き AND ダウ理論トレンドが上昇 AND ADX > しきい値
+ショート: EMAが下向き AND ダウ理論トレンドが下降 AND ADX > しきい値
+
+──────────────────────────────
+イグジット条件
+
+TP1: エントリーから +ATR×倍率×1 → 30%決済
+TP2: エントリーから +ATR×倍率×2 → 30%決済
+TP3: エントリーから +ATR×倍率×3 → 30%決済
+損切り: 設定%を超えたら全決済
+BEストップ: 含み益がBE発動しきい値%以上になると自動発動 → エントリー価格で全決済
+トレンド反転: ダウ理論のスイングが逆転したら全決済
+
+──────────────────────────────
+チャートの見方
+
+EMAライン: 5層グローエフェクト。上向きのときネオンティール、下向きのときネオンレッド
+ダウ理論ゾーン: スイング高値・安値から現在価格までの4層グラデーション
+スイングライン: グロー付き2重線。現在のサポート・レジスタンス水平線
+TPライン: グロー付き2重線。エントリー時にTP1/TP2/TP3ラベルを表示
+BEストップライン: BE発動中に3層ゴールドグローで表示
+上位足スイング: 4時間足のスイングレベルを参考表示（細い半透明ライン）
+ディープネイビー背景: ADXがしきい値以下の横ばいゾーン（このゾーンではエントリーしません）
+ステータステーブル: 全エントリー条件と現在の状態をリアルタイム表示
+
+
+このストラテジーは主に1時間〜4時間足の暗号資産トレンドフォローを想定して設計されています。デフォルト設定はDOGEの2時間足で最適化されています。実運用の前に必ずご自身の対象銘柄・時間足でバックテストを行ってください。過去の結果は将来の利益を保証するものではありません。

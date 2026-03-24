@@ -1,0 +1,17 @@
+//@version=5
+strategy("DaveStrat")
+if bar_index < 10000
+    goindicator  = ta.change(ta.sma(ta.sma(close,25),3))
+    dropindicator = ta.change(ta.sma(ta.sma(close,100),3))
+    strategy.entry("buy", strategy.long, 10, when=((goindicator)-dropindicator) > 0.0)
+    if ta.sma(close,3)-ta.sma(close,25)<0
+        strategy.entry("sell", strategy.short, 10, when=dropindicator-goindicator > 0)
+plot(ta.change(ta.sma(ta.sma(close,25),3)),"50madeltasmooth", color.green)
+plot(ta.change(ta.sma(ta.sma(close,100),3)),"100madeltasmooth", color.red)
+
+View in Pine Editor・12 lines
+Use on chart
+3
+6
+2 250
+This script attempts to guess inflection points in cryptocurrency asset prices using change in two simple moving averages on the daily timescale.

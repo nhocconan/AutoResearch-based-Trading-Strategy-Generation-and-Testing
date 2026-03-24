@@ -1,0 +1,179 @@
+//@version=3
+strategy("QuantCat Mom Finder Strateg (1H)", overlay=true)
+
+//Series to sum the amount of crosses in EMA for sideways trend/noise filtering
+//can change EMA lengths, can change to SMA's/WMA's e.t.c
+
+lookback_value = 60
+minMA = 20
+midMA = 40
+maxMA = 60
+
+ema25_crossover = (crossover(close, ema(close, minMA))) == true ? 1 : 0
+ema25_crossover_sum = sum(ema25_crossover, lookback_value) ///potentially change lookback value to alter results
+
+ema50_crossover = (crossover(close, ema(close, midMA))) == true ? 1 : 0
+ema50_crossover_sum = sum(ema50_crossover, lookback_value) ///potentially change lookback value to alter results
+
+ema75_crossover = (crossover(close, ema(close, maxMA))) == true ? 1 : 0
+ema75_crossover_sum = sum(ema75_crossover, lookback_value) ///potentially change lookback value to alter results
+
+ema25_crossunder = (crossunder(close, ema(close, minMA))) == true ? 1 : 0
+ema25_crossunder_sum = sum(ema25_crossunder, lookback_value) ///potentially change lookback value to alter results
+
+ema50_crossunder = (crossunder(close, ema(close, midMA))) == true ? 1 : 0
+ema50_crossunder_sum = sum(ema50_crossunder, lookback_value) ///potentially change lookback value to alter results
+
+ema75_crossunder = (crossunder(close, ema(close, maxMA))) == true ? 1 : 0
+ema75_crossunder_sum = sum(ema75_crossunder, lookback_value) ///potentially change lookback value to alter results4
+
+
+//Boolean series declaration
+//can change amount of times crossed over the EMA verification to stop sideways trend filtering (3)
+
+maxNoCross=2
+
+macdmidlinebull=-0.5
+macdmidlinebear=0.5
+[macdLine, signalLine, histLine] = macd(close, 12, 26, 9)
+
+//---------------
+//Series Creation
+
+bullishMacd = (macdLine > signalLine) and (macdLine > macdmidlinebull) ? true : false
+
+bearishMacd = (macdLine < signalLine) and (macdLine < macdmidlinebear) ? true : false
+
+bullRsiMin = 50 //53 initial values
+bullRsiMax = 60 //61
+bearRsiMin = 40 //39
+bearRsiMax = 50 //47
+
+basicBullCross25bool = ((ema25_crossover_sum < ema50_crossover_sum) 
+     and (ema25_crossover_sum < ema75_crossover_sum) 
+     and (ema25_crossover_sum < maxNoCross) 
+     and crossover(close, ema(close, minMA)) and (rsi(close, 14) > bullRsiMin)
+     and (rsi(close, 14) < bullRsiMax) and (bullishMacd == true)) ? true : false
+  
+basicBullCross50bool = ((ema50_crossover_sum < ema25_crossover_sum) 
+     and (ema50_crossover_sum < ema75_crossover_sum) 
+     and (ema50_crossover_sum < maxNoCross) 
+     and crossover(close, ema(close, midMA)) and (rsi(close, 14) > bullRsiMin)
+     and (basicBullCross25bool == false) 
+     and (rsi(close, 14) < bullRsiMax) and (bullishMacd == true)) ? true : false
+  
+basicBullCross75bool = ((ema75_crossover_sum < ema25_crossover_sum) 
+     and (ema75_crossover_sum < ema50_crossover_sum) 
+     and (ema75_crossover_sum < maxNoCross) 
+     and crossover(close, ema(close, maxMA)) and (rsi(close, 14) > bullRsiMin)
+     and (basicBullCross25bool == false) and (basicBullCross50bool == false)
+     and (rsi(close, 14) < bullRsiMax) and (bullishMacd == true)) ? true : false
+     
+basicBearCross25bool = ((ema25_crossunder_sum < ema50_crossunder_sum) 
+     and (ema25_crossunder_sum < ema75_crossunder_sum) 
+     and (ema25_crossunder_sum < maxNoCross) 
+     and crossunder(close, ema(close, minMA)) and (rsi(close, 14) <bearRsiMax)
+     and (rsi(close, 14) > bearRsiMin) and (bearishMacd == true)) ? true : false
+  
+basicBearCross50bool = ((ema50_crossunder_sum < ema25_crossunder_sum) 
+     and (ema50_crossunder_sum < ema75_crossover_sum) 
+     and (ema50_crossunder_sum < maxNoCross) 
+     and crossunder(close, ema(close, midMA)) and (rsi(close, 14) < bearRsiMax)
+     and (basicBearCross25bool == false) 
+     and (rsi(close, 14) > bearRsiMin) and (bearishMacd == true)) ? true : false
+  
+basicBearCross75bool = ((ema75_crossunder_sum < ema25_crossunder_sum) 
+     and (ema75_crossunder_sum < ema50_crossunder_sum) 
+     and (ema75_crossunder_sum < maxNoCross) 
+     and crossunder(close, ema(close, maxMA)) and (rsi(close, 14) < bearRsiMax)
+     and (basicBearCross25bool == false) and (basicBearCross50bool == false)
+     and (rsi(close, 14) > bearRsiMin) and (bearishMacd == true)) ? true : false
+
+//STRATEGY
+//can change lookback input on ATR
+
+atrLkb = input(14, minval=1, title='ATR Stop Period')
+atrRes = input("D", type=resolution, title='ATR Resolution')
+atr = security(tickerid, atrRes, atr(atrLkb))
+
+
+longCondition = (basicBullCross25bool or basicBullCross50bool or basicBullCross75bool) == true
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = (basicBearCross25bool or basicBearCross50bool or basicBearCross75bool) == true
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    
+   
+// Calc ATR Stops
+// can change atr multiplier to affect stop distance/tp distance, and change "close" to ema values- could try ema 50
+
+stopMult = 0.6 //0.6 is optimal
+
+longStop = na
+longStop :=  shortCondition ? na : longCondition and strategy.position_size <=0 ? close - (atr * stopMult) : longStop[1] 
+shortStop = na
+shortStop := longCondition ? na : shortCondition and strategy.position_size >=0 ? close + (atr * stopMult) : shortStop[1]
+
+//Calc ATR Target
+
+targetMult = 2.2 //2.2 is optimal for crypto x/btc pairs
+
+longTarget = na
+longTarget :=  shortCondition ? na : longCondition and strategy.position_size <=0 ? close + (atr*targetMult) : longTarget[1]
+shortTarget = na
+shortTarget := longCondition ? na : shortCondition and strategy.position_size >=0 ? close - (atr*targetMult) : shortTarget[1]
+
+// Place the exits
+
+strategy.exit("Long ATR Stop", "Long", stop=longStop, limit=longTarget)
+strategy.exit("Short ATR Stop", "Short", stop=shortStop, limit=shortTarget)
+
+//Bar color series
+
+longColour = longCondition ? lime : na
+shortColour = shortCondition ? red : na
+    
+// Plot the stoplosses and targets
+
+plot(longStop, style=linebr, color=red, linewidth=2,     title='Long ATR Stop')
+plot(shortStop, style=linebr, color=red, linewidth=2,  title='Short ATR Stop')
+plot(longTarget, style=linebr, linewidth=2, color=lime,  title='Long ATR Target')
+plot(shortTarget, linewidth=2, style=linebr, color=lime,  title='Long ATR Target')
+
+barcolor(color=longColour)
+barcolor(color=shortColour)
+
+alertcondition(((basicBullCross25bool or basicBullCross50bool or basicBullCross75bool)==true), title='Long Entry', message='Bullish Momentum Change!')
+alertcondition(((basicBearCross25bool or basicBearCross50bool or basicBearCross75bool)==true), title='Short Entry', message='Bearish Momentum Change!')
+
+View in Pine Editor・149 lines
+Use on chart
+2
+9
+1
+2
+7 405
+QuantCat Momentum Finder Strategy
+
+This strategy is designed to be used on the 1 hour time frame, on all x/btc pairs.
+
+The beautiful thing is it plots the take profit, and stoploss for you for each entry- where I would say use the stoploss for sure and feel with water with how the price action is looking when in profit.
+
+In this strategy, I actually implemented my own trading style into building the strategy. Having to replicate my own trading strategy into an algorithm, I can't make it exactly perfect to how I would trade, but what I can do is try and program the parameters that give it the absolute best chance of making a big move with a small drawdown- which replicates part of my momentum trading style. Here I am using RSI, MACD, EMA and trend filtering values to find moments where there has been a momentum change to play the rest of the move. It only picks the best entries.
+
+There is always a 3-4 R/R move on average with with these trades, meaning 1 in 4 only need to hit to be a break even trader- where most of these strategies have about 35% hit rate.
+
+The stoploss is so crucial to minimise any damage from huge unexpected candles, the strategies can just be used for entries as well, you don't have to stick to the exact formula- of the long and short system, but this by itself is profitable.
+
+The system nets positive results on
+-ETH/BTC
+-LTC/BTC
+-XRP/BTC
+-ADA/BTC
+-NEO/BTC etc.
+
+We also have a free 15M strategy available too.
+
+You can join our discord server to get live alerts for the strategy as well as speak to our devs! Link in signature below!!!

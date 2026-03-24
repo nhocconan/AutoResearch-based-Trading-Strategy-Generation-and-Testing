@@ -1,0 +1,154 @@
+//@version=6
+strategy(title="Turtle System 1 (20/10) — N-Based with Pyramiding + 2N Enforcement",
+     overlay=true,
+     initial_capital=100000,
+     pyramiding=4,
+     default_qty_type=strategy.fixed,
+     default_qty_value=0)
+
+// ─────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────
+entryLen    = input.int(20,  "Entry Breakout Length")
+exitLen     = input.int(10,  "Exit Breakout Length")
+atrLen      = input.int(20,  "ATR Length (N)")
+riskPct     = input.float(2.0, "Risk % per Trade", step=0.1)
+maxUnits    = input.int(4,   "Max Units", minval=1, maxval=4)
+addStepMult = input.float(0.5, "Add Interval (×N)")
+roundQty    = input.bool(true, "Round Position Size")
+
+// ─────────────────────────────────────
+// INDICATORS
+// ─────────────────────────────────────
+N = ta.atr(atrLen)
+
+high20 = ta.highest(high, entryLen)
+low20  = ta.lowest(low,  entryLen)
+high10 = ta.highest(high, exitLen)
+low10  = ta.lowest(low,  exitLen)
+
+// ─────────────────────────────────────
+// POSITION SIZING (Turtle)
+// ─────────────────────────────────────
+riskDollars = strategy.equity * (riskPct / 100.0)
+stopDist    = 2.0 * N
+rawQty      = stopDist != 0 ? (riskDollars / stopDist) : 0.0
+unitQty     = roundQty ? math.max(1, math.floor(rawQty)) : rawQty
+
+// ─────────────────────────────────────
+// SIGNALS
+// ─────────────────────────────────────
+longEntry  = close > high20[1]
+shortEntry = close < low20[1]
+longExit   = close < low10[1]
+shortExit  = close > high10[1]
+
+// ─────────────────────────────────────
+// STATE VARIABLES (LOCKED AT UNIT1 ENTRY)
+// ─────────────────────────────────────
+var float unit1Entry    = na   // price of Unit 1
+var float unit1N        = na   // ATR(N) locked at Unit1 entry
+var float lockedStop    = na   // locked 2N stop (entry ± 2N)
+var float nextAddPrice  = na
+var int   units         = 0    // count of units currently added (1..maxUnits)
+
+// Reset state when flat (no position)
+if strategy.position_size == 0
+    unit1Entry   := na
+    unit1N       := na
+    lockedStop   := na
+    nextAddPrice := na
+    units        := 0
+
+// ─────────────────────────────────────
+// INITIAL ENTRY (UNIT 1) — lock N and stop
+// ─────────────────────────────────────
+if strategy.position_size == 0
+    if longEntry and (unitQty > 0)
+        strategy.entry("Long 1", strategy.long, qty=unitQty)
+        unit1Entry   := close
+        unit1N       := N
+        lockedStop   := unit1Entry - 2.0 * unit1N
+        nextAddPrice := unit1Entry + addStepMult * unit1N
+        units        := 1
+    if shortEntry and (unitQty > 0)
+        strategy.entry("Short 1", strategy.short, qty=unitQty)
+        unit1Entry   := close
+        unit1N       := N
+        lockedStop   := unit1Entry + 2.0 * unit1N
+        nextAddPrice := unit1Entry - addStepMult * unit1N
+        units        := 1
+
+// ─────────────────────────────────────
+// ENFORCE HARD 2N STOP (works intrabar using high/low)
+// ─────────────────────────────────────
+if strategy.position_size > 0 and not na(lockedStop)
+    // for longs, if low <= lockedStop, stop hit
+    if low <= lockedStop
+        strategy.close_all(comment="2N Stop Hit - Long")
+
+if strategy.position_size < 0 and not na(lockedStop)
+    // for shorts, if high >= lockedStop, stop hit
+    if high >= lockedStop
+        strategy.close_all(comment="2N Stop Hit - Short")
+
+// ─────────────────────────────────────
+// MANAGE LONG POSITION (adds and exit)
+// ─────────────────────────────────────
+if strategy.position_size > 0
+    // Exit on 10-day low breakout OR locked stop (stop already checked above)
+    if longExit
+        strategy.close_all(comment="Exit Long (10d)")
+    else if units < maxUnits and not na(nextAddPrice) and close >= nextAddPrice
+        units += 1
+        // constant IDs required
+        if units == 2
+            strategy.entry("Long 2", strategy.long, qty=unitQty)
+        else if units == 3
+            strategy.entry("Long 3", strategy.long, qty=unitQty)
+        else if units == 4
+            strategy.entry("Long 4", strategy.long, qty=unitQty)
+        nextAddPrice := nextAddPrice + addStepMult * unit1N
+
+// ─────────────────────────────────────
+// MANAGE SHORT POSITION (adds and exit)
+// ─────────────────────────────────────
+if strategy.position_size < 0
+    // Exit on 10-day high breakout OR locked stop (stop already checked above)
+    if shortExit
+        strategy.close_all(comment="Exit Short (10d)")
+    else if units < maxUnits and not na(nextAddPrice) and close <= nextAddPrice
+        units += 1
+        if units == 2
+            strategy.entry("Short 2", strategy.short, qty=unitQty)
+        else if units == 3
+            strategy.entry("Short 3", strategy.short, qty=unitQty)
+        else if units == 4
+            strategy.entry("Short 4", strategy.short, qty=unitQty)
+        nextAddPrice := nextAddPrice - addStepMult * unit1N
+
+// ─────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────
+plot(lockedStop, title="Turtle Locked 2N Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(high20, title="20-Day High", color=color.new(color.green, 30))
+plot(low20,  title="20-Day Low",  color=color.new(color.red, 30))
+plot(high10, title="10-Day High (Exit)", color=color.new(color.green, 70))
+plot(low10,  title="10-Day Low (Exit)",  color=color.new(color.red, 70))
+
+View in Pine Editor・137 lines
+Use on chart
+2
+8
+1
+849
+Turtle Trader system is a famous trend-following trading methodology created by Richard Dennis and his partner William Eckhardt in the early 1980s.
+
+The backstory is almost as interesting as the system itself:
+Dennis believed trading success was a skill that could be taught, while Eckhardt thought it was more about innate talent.
+To settle the debate, they recruited a group of ordinary people — with little to no trading experience — and trained them in a simple rules-based strategy. These students became known as the "Turtles".
+The system focused on trading breakouts in futures markets (commodities, currencies, bonds, stock indices) with strict risk management.
+
+System 1 (Short-Term)
+Entry: Buy when price breaks above the 20-day high. Sell short when price breaks below the 20-day low.
+Exit: Opposite 10-day breakout (i.e., sell long positions if price breaks below the 10-day low).

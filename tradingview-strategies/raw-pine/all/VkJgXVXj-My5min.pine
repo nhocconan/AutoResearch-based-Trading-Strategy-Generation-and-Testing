@@ -1,0 +1,27 @@
+//@version=2
+strategy ("My5min")
+
+a = sma(close, 200)
+b = sma(close, 10)
+
+long = cross(a, b) and a < b
+short = cross(a, b) and a > b
+
+strategy.entry("long", strategy.long, when=long)
+strategy.entry("short", strategy.short, when=short)
+
+View in Pine Editor・11 lines
+Use on chart
+6
+9
+5
+2 323
+1. Follow the instructions for entry and exit exactly as above. Don’t second guess, or assume/presume anything.
+
+2. Avoid entering the trade when the price is temporarily above /below 10 day MA, but the price candle hasn’t fully formed yet. Enter the trade only after the price candle closes above/below the 10 day MA.
+
+3. Exit the trade immediately when the price candle closes above/below 10 day MA in the direction opposite to the trade. Don’t remain in the trade wishing it to turn in your favor.
+
+4. Never ever trade in the opposite direction of the market. i.e. don’t buy when the price is below 200 day MA and sell when the price is above 200 day MA.
+
+5. Take profits when limit is reached. Don’t be greedy and keep on increasing the target. Remember- A bird in hand is worth two in the bush.

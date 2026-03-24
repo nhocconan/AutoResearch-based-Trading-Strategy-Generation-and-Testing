@@ -1,0 +1,149 @@
+//@version=5
+strategy("The Engulfing Liquidity Signal with Adjustable Trailing Stop", overlay=true)
+
+// BUYING VOLUME AND SELLING VOLUME //
+buyVolume = high == low ? 0 : volume * (close - low) / (high - low)
+sellVolume = -(high == low ? 0 : volume * (high - close) / (high - low))
+netVolume = buyVolume + sellVolume
+
+b = netVolume > 0 ? netVolume : 0
+length1=input(2,"BuyMaMult")
+BL=input(22,"BuyMaLength")
+mab = length1*ta.sma(b, BL)
+
+s = netVolume < 0 ? netVolume : 0
+length=input(2,"SellMaMult")
+SL=input(22,"SellMaLength")
+mas = length*ta.sma(s, SL)
+
+cum=math.sum(netVolume,10)
+
+long=netVolume>mab and netVolume[1]<0 and netVolume[2]<0 and netVolume>-(netVolume[1])and netVolume[1]>netVolume[2]
+short=netVolume<mas and netVolume[1]>0 and netVolume[2]>0 and -netVolume>(netVolume[1])and netVolume[1]<netVolume[2]
+
+LongC=close>open and close[1]<open[1] and close>high[1] and netVolume>mab and netVolume>-netVolume[1] and netVolume[1]<0 
+ShortC=close<open and close[1]>open[1] and close<low[1] and netVolume<mas and netVolume<-netVolume[1] and netVolume[1]>0 
+
+alertcondition(LongC,"Buy")
+alertcondition(ShortC,"Sell")
+
+// Levels of Fibonacci on Buy Signal
+lowestLow = ta.lowest(low, 50) // Lowest low for previous 50 bars, modify as needed
+
+// Fibonacci Levels from Buy Signal
+var float fibRetrace1 = na
+var float fibRetrace2 = na
+var float fibRetrace3 = na
+var float fibRetrace4 = na
+var float fibExt1 = na
+var float fibExt2 = na
+var float fibExt3 = na
+
+// Store Fibonacci levels when a Buy signal occurs
+if LongC
+    fibRetrace1 := lowestLow + (close - lowestLow) * 0.236
+    fibRetrace2 := lowestLow + (close - lowestLow) * 0.382
+    fibRetrace3 := lowestLow + (close - lowestLow) * 0.618
+    fibRetrace4 := lowestLow + (close - lowestLow) * 0.786
+    fibExt1 := lowestLow + (close - lowestLow) * 1.0
+    fibExt2 := lowestLow + (close - lowestLow) * 1.618
+    fibExt3 := lowestLow + (close - lowestLow) * 2.618
+
+// Trailing Stop Logic: Track the highest price since the trade started
+var float highestSinceEntry = na
+
+// Allow the user to adjust the trailing stop percentage through the settings
+trail_percentage = input.float(0.3, "Trailing Stop Percentage", minval=0.1, maxval=1.0, step=0.01)  // Default 30%
+
+// Trailing stop distance (adjust based on your strategy)
+trail_offset = (close - lowestLow) * trail_percentage  // User-defined percentage for trailing stop
+
+// Buy Logic and Execution with Trailing Stop
+if LongC
+    strategy.entry("Buy", strategy.long)
+    highestSinceEntry := high  // Track the highest point since entry
+    
+    // Calculate the dynamic trailing stop price: stop level follows the highest price
+    trailStopLevel = highestSinceEntry - trail_offset
+    
+    // Set Exit Conditions (only trailing stop, no fixed take profit)
+    strategy.exit("Trailing Stop", "Buy", stop=trailStopLevel)  // Trailing Stop only, no fixed take profit
+
+// Update the highest price reached during the trade
+if (strategy.opentrades > 0)
+    highestSinceEntry := math.max(highestSinceEntry, high)  // Update the highest price reached during the trade
+
+// Close the position when a Sell Signal (ShortC) is triggered
+if ShortC
+    strategy.close("Buy", comment="Sell Signal")  // Close the Buy position on Sell Signal
+
+// Plot Fibonacci Levels (These will be plotted only on Buy Signal, but not used for take profit)
+if LongC
+    line.new(bar_index[1], fibRetrace1, bar_index, fibRetrace1, color=color.green, width=1, style=line.style_dashed)
+    line.new(bar_index[1], fibRetrace2, bar_index, fibRetrace2, color=color.green, width=1, style=line.style_dashed)
+    line.new(bar_index[1], fibRetrace3, bar_index, fibRetrace3, color=color.green, width=1, style=line.style_dashed)
+    line.new(bar_index[1], fibRetrace4, bar_index, fibRetrace4, color=color.green, width=1, style=line.style_dashed)
+    line.new(bar_index[1], fibExt1, bar_index, fibExt1, color=color.red, width=1, style=line.style_dashed)
+    line.new(bar_index[1], fibExt2, bar_index, fibExt2, color=color.red, width=1, style=line.style_dashed)
+    line.new(bar_index[1], fibExt3, bar_index, fibExt3, color=color.red, width=1, style=line.style_dashed)
+
+View in Pine Editor・88 lines
+Use on chart
+2
+1
+1 042
+Engulfing Liquidity Signal with Adjustable Trailing Stop
+
+This strategy is designed to enter long trades based on the Engulfing Liquidity Signal combined with a Trailing Stop. The strategy uses custom volume analysis and price action to detect potential market opportunities. The Trailing Stop is adjustable, allowing traders to customize the distance at which the stop will trail the price.
+
+Key Features:
+
+Engulfing Liquidity Signal: The strategy enters a trade when the market shows signs of strong liquidity and price action, typically when there is a strong reversal signal (bullish engulfing) accompanied by higher volume.
+
+Trailing Stop: A dynamic exit strategy that locks in profits by trailing the stop level behind the highest price achieved since the trade entry. This prevents the position from being closed prematurely while still protecting profits if the market reverses.
+
+Customizable Trailing Stop: Users can adjust the trailing stop percentage via the settings. This allows for greater flexibility in how closely the stop will trail the price.
+
+No Fixed Take Profit: The strategy uses only the trailing stop, ensuring that profits are maximized based on price action without a fixed profit target.
+
+How the Strategy Works:
+
+Buy Signal (LongC):
+
+The strategy triggers a buy signal when a bullish engulfing pattern occurs, and the liquidity conditions align (i.e., the volume is increasing and price action shows signs of a potential reversal).
+
+The strategy enters a long position when the signal conditions are met.
+
+Trailing Stop Logic:
+
+Once the trade is initiated, a trailing stop is applied. The stop level follows the highest price achieved since entry, trailing the price based on a user-defined percentage.
+
+The stop level adjusts upward as the price increases, locking in profits. If the price reverses and hits the trailing stop, the trade is closed.
+
+The trailing stop is dynamic, meaning it moves only in the direction of profit, but it will not move lower once it has been set.
+
+Sell Signal (ShortC):
+
+The position will also be closed if a sell signal (ShortC) is generated. This ensures that the strategy exits the trade when a potential reversal is detected in the market.
+
+No Fixed Take Profit:
+
+The strategy does not use a fixed take profit level. Instead, the profit is managed entirely by the trailing stop, which ensures that positions remain open as long as the market is moving in favor of the trade, allowing the position to capture the maximum possible profit.
+
+Settings:
+
+Trailing Stop Percentage: The user can adjust the trailing stop distance by setting a percentage value between 10% and 100%. This controls how tightly or loosely the trailing stop will follow the price.
+
+Benefits:
+
+Maximized Profits: By using a trailing stop, the strategy aims to capture as much profit as possible without prematurely exiting trades.
+
+Customizable: The adjustable trailing stop allows traders to tailor the strategy to their risk tolerance and market conditions.
+
+Simple & Effective: The strategy is straightforward, relying on price action and volume signals, making it easy to understand and implement.
+
+Ideal Use Case:
+
+This strategy is suitable for traders who prefer to let their profits run and manage risk with a trailing stop. It is particularly useful in trending markets where the price continues to move in one direction for an extended period. By using a trailing stop, the strategy allows you to stay in the market and capture large moves while protecting profits.
+
+This strategy provides an excellent combination of automated trade management with a Trailing Stop and Engulfing Liquidity Signal, making it a solid choice for traders seeking to automate their trades with customizable risk management.

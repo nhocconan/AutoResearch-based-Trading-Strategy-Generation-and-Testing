@@ -1,0 +1,4 @@
+//@version=5
+##var_3=##input(defval=true,type='INPUT_BOOL',##id='in_4')
+bool useSuperTrend=####bool(##var_3)
+##root(root_metainfo,rm_0,(useSuperTrend?display.pane:display.none),cb__input__plot_display__integer,plot,display)

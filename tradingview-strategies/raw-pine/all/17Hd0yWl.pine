@@ -1,0 +1,11 @@
+//@version=5
+fibLevelInput1=##input(defval=0.0,type='INPUT_FLOAT',##id='in_6')
+fibLevelInput5=##input(defval=0.0,type='INPUT_FLOAT',##id='in_13')
+fibLevelInput15=##input(defval=0.0,type='INPUT_FLOAT',##id='in_20')
+fibLevelInput60=##input(defval=0.0,type='INPUT_FLOAT',##id='in_27')
+fibLevelInput240=##input(defval=0.0,type='INPUT_FLOAT',##id='in_34')
+##root(root_metainfo,rm_0,fibLevelInput1,input__float)
+##root(root_metainfo,rm_1,fibLevelInput5,input__float)
+##root(root_metainfo,rm_2,fibLevelInput15,input__float)
+##root(root_metainfo,rm_3,fibLevelInput60,input__float)
+##root(root_metainfo,rm_4,fibLevelInput240,input__float)

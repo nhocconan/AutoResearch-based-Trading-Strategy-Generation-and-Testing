@@ -1,0 +1,99 @@
+//@version=5
+strategy("9 EMA First Full Candle Entry + EMA Cross Exit (Strategy)",
+     overlay=true,
+     pyramiding=0,
+     process_orders_on_close=true)
+
+// === Inputs
+emaLen = input.int(9, "EMA Length", minval=1)
+
+// === EMA
+ema9 = ta.ema(close, emaLen)
+
+// === "Fully above / fully below" definitions
+fullyAbove = low > ema9
+fullyBelow = high < ema9
+
+// === Only take the FIRST qualifying candle while flat
+flat = strategy.position_size == 0
+
+entryLong  = flat and fullyAbove
+entryShort = flat and fullyBelow
+
+// === Exits (after entry)
+// Long exits when price crosses DOWN through EMA
+exitLong  = strategy.position_size > 0 and ta.crossunder(close, ema9)
+// Short exits when price crosses UP through EMA
+exitShort = strategy.position_size < 0 and ta.crossover(close, ema9)
+
+// === Orders
+if entryLong
+    strategy.entry("L", strategy.long)
+
+if entryShort
+    strategy.entry("S", strategy.short)
+
+if exitLong
+    strategy.close("L")
+
+if exitShort
+    strategy.close("S")
+
+// === Visuals (exactly what you described)
+// 1) Highlight ONLY the entry candle yellow
+barcolor((entryLong or entryShort) ? color.yellow : na)
+
+// 2) Plot EMA: normal orange, but turn it yellow ONLY on the exit bar
+emaColor = (exitLong or exitShort) ? color.yellow : color.orange
+plot(ema9, "9 EMA", color=emaColor, linewidth=2)
+
+View in Pine Editor・51 lines
+Use on chart
+4
+488
+This strategy is designed to create a simple, mechanical trading system using only the 9 EMA on the 5-minute chart.
+
+Entry Logic
+A trade is entered on the first candle that closes completely on one side of the 9 EMA:
+
+Long entry: the candle’s low is above the 9 EMA
+
+Short entry: the candle’s high is below the 9 EMA
+
+Only the first qualifying candle is used, preventing repeated entries during the same move.
+
+Exit Logic
+Once in a trade, the position is closed when price crosses back through the 9 EMA:
+
+Long exits when price crosses below the EMA
+
+Short exits when price crosses above the EMA
+
+On the exit candle, the 9 EMA is highlighted yellow to clearly mark the exit point.
+
+Visual Cues
+
+Entry candle is colored yellow
+
+EMA is normally orange and turns yellow on the exit candle only
+
+No background shading, labels, or extra indicators
+
+Purpose
+This strategy is built to minimize decisions by:
+
+Using a single timeframe (5-minute)
+
+Using a single indicator (9 EMA)
+
+Defining objective entry and exit rules
+
+Designed for:
+
+SPY and other highly liquid ETFs
+
+Intraday trend continuation
+
+Clean, rules-based execution with minimal discretion
+
+Best performance is typically seen during strong trend periods and reduced during sideways or low-volatility conditions.

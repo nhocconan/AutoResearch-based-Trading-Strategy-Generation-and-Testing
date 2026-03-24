@@ -1,0 +1,49 @@
+//@version=3
+strategy("Juiced Ichimoku Strat", overlay=true)
+
+USE_TRADESESSION = input(title='Use Trading Session?', type=bool, defval=true)
+trade_session = input(title='Trade Session:', type=string, defval='0800-1600', confirm=false)
+istradingsession = not USE_TRADESESSION ? false : not na(time('1', trade_session))
+bgcolor(istradingsession?gray:na)
+
+varLo = input(title="Fast (Conversion) Line", type=integer, defval=9, minval=1, maxval=99999)
+varHi = input(title="Slow (Base) Line", type=integer, defval=26, minval=1, maxval=99999)
+emafreq = input(title="Ema on price frequency", type=integer, defval=2, minval=1, maxval=99999)
+
+a = lowest(varLo)
+b = highest(varLo)
+c = (a + b ) / 2
+
+d = lowest(varHi)
+e = highest(varHi)
+f = (d + e) / 2
+
+//g = ((c + f) / 2)[varHi]
+//h = ((highest(varHi * 2) + lowest(varHi * 2)) / 2)[varHi]
+
+z = ema(close, emafreq)
+
+bgcolor(z > c and z > f ? green : z < c and z < f ? red : yellow, transp=70)
+plot(z, title="ema on Price", color=black)
+plot(c, title="Fast (Conversion) Line", color=green)
+plot(f, title="Slow (Base) Line", color=red)
+
+long = z > c and z > f and (USE_TRADESESSION ? istradingsession : true)
+short = z < c and z < f and (USE_TRADESESSION ? istradingsession : true)
+//exit = z < c and z > f or z > c and z < f
+
+closelong = z < c and z > f or z > c and z < f and (USE_TRADESESSION ? istradingsession : true)
+if (closelong)
+    strategy.close("Long")
+closeshort = z < c and z > f or z > c and z < f and (USE_TRADESESSION ? istradingsession : true)
+if (closeshort)
+    strategy.close("Short")
+strategy.entry("long", strategy.long, when=long)
+strategy.entry("short", strategy.short, when=short)
+
+View in Pine Editor・42 lines
+Use on chart
+5
+9
+2 607
+I saw this indicator and thought I'd try to make it into a script. I can't get an exit when the EMA is between signal lines so it's a long/short strategy until I can figure that part out.

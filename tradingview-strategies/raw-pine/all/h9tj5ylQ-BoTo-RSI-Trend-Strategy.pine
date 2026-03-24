@@ -1,0 +1,39 @@
+//@version=3
+strategy("[BoTo] RSI Trend Strategy", shorttitle = "[BoTo] RSI Trend", default_qty_type = strategy.percent_of_equity, default_qty_value = 100, pyramiding = 0)
+length = input(7, title = 'RSI Length')
+rsi = rsi(close, length)
+plot(rsi, color = black, title = 'RSI')
+plot(50, color = gray, title = '50%')
+color = rsi < 50 ? gray : na
+bgcolor(color)
+if rsi > 50
+    strategy.entry('Up', strategy.long)
+if rsi < 50
+    strategy.entry('Dn', strategy.short)
+
+View in Pine Editor・12 lines
+Use on chart
+7
+3
+2 706
+Open source code.
+
+It is very old trade strategy. It is older than you :) Uses the RSI indicator. The RSI indicator has described Welles Wilder in the book in 1978. And all this is still profitable!
+
+Additional articles
+
+1. en.wikipedia.org/wiki/J._Welles_Wilder_Jr.
+
+2. en.wikipedia.org/wiki/Relative_strength_index
+
+3. tradingview.com/wiki/Relative_Strength_Index_(RSI)
+
+How it works
+
+Step 1. The user chooses length for RSI
+
+Step 2. If RSI is more than 50, then it is a uptrend and the long position opens. It is necessary to close a short position if it is opened earlier.
+
+Step 3. If RSI is less than 50, that is a downtrend and the short position opens. It is necessary to close a long position if it is opened earlier.
+
+Well is suitable for the market of cryptocurrencies. Well length from 3 to 7 approaches. Don't use length 14 because for cryptocurrencies it is too much. Cryptocurrencies it is very volatile market. You can also use the RSI indicator which is built in on TradingView.com.

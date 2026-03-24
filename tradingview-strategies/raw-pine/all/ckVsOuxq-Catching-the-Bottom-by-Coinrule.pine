@@ -1,0 +1,79 @@
+//@version=5
+strategy("V3 - Catching the Bottom",
+         overlay=true,
+         initial_capital=1000,
+         process_orders_on_close=true,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=30,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1)
+
+showDate = input(defval=true, title='Show Date Range')
+timePeriod = time >= timestamp(syminfo.timezone, 2022, 4, 1, 0, 0)
+notInTrade = strategy.position_size <= 0
+
+//==================================Buy Conditions============================================
+
+//RSI
+length = input(14)
+vrsi = ta.rsi(close, length)
+
+buyCondition1 = vrsi < 40
+
+//RSI decrease
+decrease = 3
+buyCondition2 = (vrsi < vrsi[1] - decrease)
+//sellCondition1 = request.security(syminfo.tickerid, "15", buyCondition2)
+
+//EMAs 
+fastEMA = ta.sma(close, 50)
+slowEMA = ta.sma(close, 100)
+buyCondition3 = ta.crossunder(fastEMA, slowEMA)
+//buyCondition2 = request.security(syminfo.tickerid, "15", buyCondition3)
+
+if(buyCondition1 and buyCondition2 and buyCondition3 and timePeriod)
+    strategy.entry(id='Long', direction = strategy.long)
+
+//==================================Sell Conditions============================================
+
+sellCondition1 = vrsi > 65
+
+EMA9 = ta.sma(close, 9)
+EMA50 = ta.sma(close, 50)
+sellCondition2 = ta.crossover(EMA9, EMA50)
+
+if(sellCondition1 and sellCondition2 and timePeriod)
+    strategy.close(id='Long')
+
+//Best on: ETH 5mins (7.59%), BNB 5mins (5.42%), MATIC 30mins (15.61%), XRP 45mins (10.14%) ---> EMA
+//Best on: MATIC 2h (16.09%), XRP 15m (5.25%), SOL 15m (4.28%), AVAX 5m (3.19%)
+
+View in Pine Editor・52 lines
+Use on chart
+4
+7
+1
+10 800
+This script utilises the RSI and EMA indicators to enter and close the trade.
+
+The relative strength index (RSI) is a momentum indicator used in technical analysis. RSI measures the speed and magnitude of a security's recent price changes to evaluate overvalued or undervalued conditions in the price of that security. The RSI is displayed as an oscillator (a line graph) on a scale of zero to 100. The RSI can do more than point to overbought and oversold securities. It can also indicate securities that may be primed for a trend reversal or corrective pullback in price. It can signal when to buy and sell. Traditionally, an RSI reading of 70 or above indicates an overbought situation. A reading of 30 or below indicates an oversold condition.
+
+An exponential moving average (EMA) is a type of moving average (MA) that places a greater weight and significance on the most recent data points. The exponential moving average is also referred to as the exponentially weighted moving average. An exponentially weighted moving average reacts more significantly to recent price changes than a simple moving average simple moving average (SMA), which applies an equal weight to all observations in the period.
+
+The strategy enters and exits the trade based on the following conditions.
+
+ENTRY
+RSI has a decrease of 3.
+RSI <40.
+EMA100 has crossed above the EMA50.
+
+EXIT
+RSI is greater than 65.
+EMA9 has crossed above EMA50.
+
+This strategy is back tested from 1 April 2022 to simulate how the strategy would work in a bear market and provides good returns.
+
+Pairs that produce very strong results include ETH on the 5m timeframe, BNB on 5m timeframe, XRP on the 45m timeframe, MATIC on the 30m timeframe and MATIC on the 2H timeframe.
+
+The strategy assumes each order is using 30% of the available coins to make the results more realistic and to simulate you only ran this strategy on 30% of your holdings. A trading fee of 0.1% is also taken into account and is aligned to the base fee applied on Binance.
+

@@ -1,0 +1,186 @@
+//@version=6
+strategy("TEMA OBOS Strategy Pakun", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === Input Settings ===
+length = input.int(25, title="TEMA Length", minval=1)
+showEma = input.bool(true, title="Show EMA?", inline="display")
+Colorcandels = input.bool(false, title="Barcolor?", inline="display")  // Default is off
+Temaout = input.bool(false, title="Show TEMA Output?", inline="display")
+
+// === User-configurable TP / SL Settings ===
+tpMultiplier = input.float(5, title="Take Profit (TP) Multiplier")  // Multiplier for ATR to set TP
+slMultiplier = input.float(2, title="Stop Loss (SL) Multiplier")     // Multiplier for ATR to set SL
+
+// === OBOS Indicator Settings ===
+obosLength = input.int(85, title="OBOS Length")
+
+// === TEMA Calculation ===
+ema1 = ta.ema(close, length)
+ema2 = ta.ema(ema1, length)
+ema3 = ta.ema(ema2, length)
+ema4 = ta.ema(ema2, length * 2)
+temaOut = 3 * (ema1 - ema2) + ema3
+
+Distance = ema4 - ema3
+colorEMA = Distance < Distance[1] and Distance <= 0 ? color.rgb(0, 183, 255) :
+           Distance > Distance[1] and Distance >= 0 ? color.rgb(255, 122, 12) :
+           Distance < Distance[1] ? color.rgb(189, 202, 111) :
+           Distance > Distance[1] ? color.rgb(125, 213, 224) :
+           color.rgb(138, 138, 138)
+
+// === OBOS Calculation ===
+ys1 = (high + low + close * 2) / 4
+rk3 = ta.ema(ys1, obosLength)
+rk4 = ta.stdev(ys1, obosLength)
+rk5 = (ys1 - rk3) * 100 / rk4
+rk6 = ta.ema(rk5, obosLength)
+up = ta.ema(rk6, obosLength)
+down = ta.ema(up, obosLength)
+
+Oo = up < down ? up : down
+Hh = Oo
+Ll = up < down ? down : up
+Cc = Ll
+barcolor2 = Oo[1] < Oo and Cc < Cc[1] ? color.blue : up > down ? color.green : color.red
+
+// === Entry Conditions ===
+// Long Entry (Buy)
+longCondition = ta.crossover(ema3, ema4) and up > down
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+// Short Entry (Sell)
+shortCondition = ta.crossunder(ema3, ema4) and up < down
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+// === TP & SL Settings ===
+atr = ta.atr(14)
+
+// Apply user-defined TP / SL
+takeProfit = atr * tpMultiplier
+stopLoss = atr * slMultiplier
+
+strategy.exit("TP/SL Long", from_entry="Long", limit=close + takeProfit, stop=close - stopLoss)
+strategy.exit("TP/SL Short", from_entry="Short", limit=close - takeProfit, stop=close + stopLoss)
+
+// === Chart Plotting ===
+plot(Temaout ? temaOut : na, "TEMA", color=colorEMA, linewidth=3)
+plot(showEma ? ema3 : na, "EMA3", color=colorEMA, linewidth=2)
+plot(showEma ? ema4 : na, "EMA4", color=colorEMA, linewidth=2)
+
+// Default hidden plot for candle color (if enabled)
+plot(Colorcandels ? Oo : na, title="PlotCandle Placeholder", display=display.none)
+
+View in Pine Editor・76 lines
+Use on chart
+6
+2
+2 349
+TEMA OBOS Strategy
+
+Overview
+This strategy combines a trend-following approach using the Triple Exponential Moving Average (TEMA) with Overbought/Oversold (OBOS) indicator filtering.
+By utilizing TEMA crossovers to determine trend direction and OBOS as a filter, it aims to improve entry precision.
+
+This strategy can be applied to markets such as Forex, Stocks, and Crypto, and is particularly designed for mid-term timeframes (5-minute to 1-hour charts).
+
+Strategy Objectives
+Identify trend direction using TEMA
+Use OBOS to filter out overbought/oversold conditions
+Implement ATR-based dynamic risk management
+
+Key Features
+1. Trend Analysis Using TEMA
+Uses crossover of short-term EMA (ema3) and long-term EMA (ema4) to determine entries.
+ema4 acts as the primary trend filter.
+2. Overbought/Oversold (OBOS) Filtering
+Long Entry Condition: up > down (bullish trend confirmed)
+Short Entry Condition: up < down (bearish trend confirmed)
+Reduces unnecessary trades by filtering extreme market conditions.
+3. ATR-Based Take Profit (TP) & Stop Loss (SL)
+Adjustable ATR multiplier for TP/SL
+Default settings:
+TP = ATR × 5
+SL = ATR × 2
+Fully customizable risk parameters.
+4. Customizable Parameters
+TEMA Length (for trend calculation)
+OBOS Length (for overbought/oversold detection)
+Take Profit Multiplier
+Stop Loss Multiplier
+EMA Display (Enable/Disable TEMA lines)
+Bar Color Change (Enable/Disable candle coloring)
+
+Trading Rules
+Long Entry (Buy Entry)
+ema3 crosses above ema4 (Golden Cross)
+OBOS indicator confirms up > down (bullish trend)
+Execute a buy position
+Short Entry (Sell Entry)
+ema3 crosses below ema4 (Death Cross)
+OBOS indicator confirms up < down (bearish trend)
+Execute a sell position
+Take Profit (TP)
+Entry Price + (ATR × TP Multiplier) (Default: 5)
+Stop Loss (SL)
+Entry Price - (ATR × SL Multiplier) (Default: 2)
+
+TP/SL settings are fully customizable to fine-tune risk management.
+
+Risk Management Parameters
+This strategy emphasizes proper position sizing and risk control to balance risk and return.
+
+Trading Parameters & Considerations
+Initial Account Balance: $7,000 (adjustable)
+Base Currency: USD
+Order Size: 10,000 USD
+Pyramiding: 1
+Trading Fees: $0.94 per trade
+Long Position Margin: 50%
+Short Position Margin: 50%
+Total Trades (M5 Timeframe): 128
+
+Deep Test Results (2024/11/01 - 2025/02/24)BTCUSD-5M
+
+Total P&L：+1638.20USD
+Max equity drawdown：694.78USD
+Total trades：128
+Profitable trades:44.53
+Profit factor:1.45
+These settings aim to protect capital while maintaining a balanced risk-reward approach.
+
+Visual Support
+TEMA Lines (Three EMAs)
+Trend direction is indicated by color changes (Blue/Orange)
+ema3 (short-term) and ema4 (long-term) crossover signals potential entries
+OBOS Histogram
+Green → Strong buying pressure
+Red → Strong selling pressure
+Blue → Possible trend reversal
+Entry & Exit Markers
+Blue Arrow → Long Entry Signal
+Red Arrow → Short Entry Signal
+Take Profit / Stop Loss levels displayed
+
+Strategy Improvements & Uniqueness
+This strategy is based on indicators developed by "l_lonthoff" and "jdmonto0", but has been significantly optimized for better entry accuracy, visual clarity, and risk management.
+
+Enhanced Trend Identification with TEMA
+Detects early trend reversals using ema3 & ema4 crossover
+Reduces market noise for a smoother trend-following approach
+Improved OBOS Filtering
+Prevents excessive trading
+Reduces unnecessary risk exposure
+Dynamic Risk Management with ATR-Based TP/SL
+Not a fixed value → TP/SL adjusts to market volatility
+Fully customizable ATR multiplier settings
+(Default: TP = ATR × 5, SL = ATR × 2)
+
+Summary
+The TEMA + OBOS Strategy is a simple yet powerful trading method that integrates trend analysis and oscillators.
+
+TEMA for trend identification
+OBOS for noise reduction & overbought/oversold filtering
+ATR-based TP/SL settings for dynamic risk management
+Before using this strategy, ensure thorough backtesting and demo trading to fine-tune parameters according to your trading style.

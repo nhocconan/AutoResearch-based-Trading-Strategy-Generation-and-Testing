@@ -1,0 +1,8 @@
+//@version=4
+LineColor=##input(defval=#2196F3,type='INPUT_COLOR',##id='in_6')
+##root(root_metainfo,rm_0,'shape_label_down',input__string,plotshape,style)
+##root(root_metainfo,rm_1,'AboveBar',input__string,plotshape,location)
+##root(root_metainfo,rm_2,'shape_label_up',input__string,plotshape,style)
+##root(root_metainfo,rm_3,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_4,0,const__integer,plot,display)
+##root(root_metainfo,rm_ic_0,LineColor,input__color)

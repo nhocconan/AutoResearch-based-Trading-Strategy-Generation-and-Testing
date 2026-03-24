@@ -1,0 +1,102 @@
+//@version=5
+strategy("EMA 10/20/50 Alignment Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === Inputs ===
+startTime = input.time(timestamp("2023-05-17 00:00"), title="Start Time")
+endTime   = input.time(timestamp("2025-05-17 00:00"), title="End Time")
+
+// === EMAs ===
+ema10 = ta.ema(close, 10)
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+
+inDateRange = (time >= startTime and time <= endTime)
+
+// === Entry/Exit Conditions ===
+bullishStack = ema10 > ema20 and ema20 > ema50
+bearishStack = ema10 < ema20 and ema20 < ema50
+
+if inDateRange
+    if bullishStack
+        strategy.entry("Long", strategy.long)
+    else if bearishStack
+        strategy.close("Long")
+
+// === Plot EMAs ===
+plot(ema10, color=color.orange, title="EMA 10")
+plot(ema20, color=color.teal, title="EMA 20")
+plot(ema50, color=color.purple, title="EMA 50")
+
+View in Pine Editor・28 lines
+Use on chart
+5
+3
+1
+2 107
+May 18, 2025
+### 📘 **Strategy Name**
+
+**EMA 10/20/50 Trend Alignment Strategy**
+
+---
+
+### 📝 **Description (for Publishing)**
+
+This strategy uses the alignment of Exponential Moving Averages (EMAs) to identify strong bullish trends. It enters a long position when the short-term EMA is above the mid-term EMA, which is above the long-term EMA — a classic sign of trend strength.
+
+#### 🔹 Entry Criteria:
+
+* **EMA10 > EMA20 > EMA50**: A bullish alignment that signals momentum in an upward direction.
+* The strategy enters a **long position** when this alignment occurs.
+
+#### 🔹 Exit Criteria:
+
+* The long position is closed when the EMA alignment breaks (i.e., the trend weakens or reverses).
+
+#### 🔹 Additional Features:
+
+* Includes a **date range filter**, allowing you to backtest the strategy over a specific period.
+* Uses **100% of available capital** for each trade (position size auto-scales with account balance).
+* No short positions, stop loss, or take profit are applied — this is a trend-following strategy meant to ride bullish moves.
+
+---
+
+### ✅ Best For:
+
+* Traders looking for a **simple, trend-based entry system**
+* Testing price momentum strategies during specific market regimes
+* Visualizing EMA stacking patterns in historical data
+May 18, 2025
+Release Notes
+### 📘 **Strategy Name**
+
+**EMA 10/20/50 Trend Alignment Strategy**
+
+---
+
+### 📝 **Description (for Publishing)**
+
+This strategy uses the alignment of Exponential Moving Averages (EMAs) to identify strong bullish trends. It enters a long position when the short-term EMA is above the mid-term EMA, which is above the long-term EMA — a classic sign of trend strength.
+
+#### 🔹 Entry Criteria:
+
+* **EMA10 > EMA20 > EMA50**: A bullish alignment that signals momentum in an upward direction.
+* The strategy enters a **long position** when this alignment occurs.
+
+#### 🔹 Exit Criteria:
+
+* The long position is closed when the EMA alignment breaks (i.e., the trend weakens or reverses).
+
+#### 🔹 Additional Features:
+
+* Includes a **date range filter**, allowing you to backtest the strategy over a specific period.
+* Uses **100% of available capital** for each trade (position size auto-scales with account balance).
+* No short positions, stop loss, or take profit are applied — this is a trend-following strategy meant to ride bullish moves.
+
+---
+
+### ✅ Best For:
+
+* Traders looking for a **simple, trend-based entry system**
+* Testing price momentum strategies during specific market regimes
+* Visualizing EMA stacking patterns in historical data

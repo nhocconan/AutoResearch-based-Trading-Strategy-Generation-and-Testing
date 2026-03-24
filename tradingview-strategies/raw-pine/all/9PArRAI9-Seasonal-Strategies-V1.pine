@@ -1,0 +1,223 @@
+//@version=6
+// Seasonal Strategies V1 (PUBLIC) — baseline version WITHOUT on-chart season table
+// cot-trader.com
+
+strategy("Seasonal Strategies V1", overlay=true,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=10000,
+     commission_type=strategy.commission.cash_per_contract, commission_value=3,
+     pyramiding=0, margin_long=0, margin_short=0)
+
+isInSeason(startMMDD, endMMDD) =>
+    mmdd = month * 100 + dayofmonth
+    if startMMDD <= endMMDD
+        mmdd >= startMMDD and mmdd <= endMMDD
+    else
+        mmdd >= startMMDD or mmdd <= endMMDD
+
+var int[] longZones  = array.new_int()
+var int[] shortZones = array.new_int()
+
+if bar_index == 0
+    asset = syminfo.root
+
+    // ── Original set
+    if asset == "CC"
+        array.push(longZones, 129),  array.push(longZones, 421)
+        array.push(longZones, 814),  array.push(longZones, 914)
+        array.push(longZones, 1006), array.push(longZones, 1213)
+
+    if asset == "CL"
+        array.push(longZones, 426),  array.push(longZones, 702)
+        array.push(longZones, 101),  array.push(longZones, 304)
+        array.push(longZones, 820),  array.push(longZones, 1009)
+        array.push(longZones, 1208), array.push(longZones, 1228)
+
+    if asset == "CT"
+        array.push(longZones, 1001), array.push(longZones, 1229)
+        array.push(longZones, 101),  array.push(longZones, 223)
+        array.push(shortZones, 608), array.push(shortZones, 628)
+
+    if asset == "GC"
+        array.push(longZones, 117),  array.push(longZones, 415)
+        array.push(longZones, 719),  array.push(longZones, 828)
+
+    if asset == "GF"
+        array.push(longZones, 1208), array.push(longZones, 1228)
+        array.push(longZones, 315),  array.push(longZones, 604)
+
+    if asset == "HG"
+        array.push(longZones, 102),  array.push(longZones, 304)
+        array.push(longZones, 926),  array.push(longZones, 1225)
+
+    if asset == "KC"
+        array.push(longZones, 1028), array.push(longZones, 1215)
+        array.push(longZones, 110),  array.push(longZones, 222)
+        array.push(longZones, 329),  array.push(longZones, 605)
+
+    if asset == "NG"
+        array.push(longZones, 322),  array.push(longZones, 610)
+        array.push(longZones, 210),  array.push(longZones, 303)
+        array.push(longZones, 921),  array.push(longZones, 1125)
+
+    if asset == "OJ"
+        array.push(longZones, 411),  array.push(longZones, 607)
+        array.push(longZones, 628),  array.push(longZones, 911)
+        array.push(longZones, 924),  array.push(longZones, 1123)
+
+    if asset == "PA"
+        array.push(longZones, 718),  array.push(longZones, 1009)
+        array.push(longZones, 102),  array.push(longZones, 305)
+
+    if asset == "PL"
+        array.push(longZones, 322),  array.push(longZones, 418)
+        array.push(longZones, 1004), array.push(longZones, 1104)
+
+    if asset == "RB"
+        array.push(longZones, 107),  array.push(longZones, 304)
+        array.push(longZones, 1205), array.push(longZones, 1225)
+        array.push(longZones, 422),  array.push(longZones, 517)
+
+    if asset == "ZS"
+        array.push(longZones, 101),  array.push(longZones, 303)
+        array.push(longZones, 930),  array.push(longZones, 1226)
+
+    if asset == "SB"
+        array.push(longZones, 503),  array.push(longZones, 608)
+        array.push(longZones, 820),  array.push(longZones, 1115)
+
+    if asset == "SI"
+        array.push(longZones, 108),  array.push(longZones, 221)
+        array.push(longZones, 321),  array.push(longZones, 601)
+        array.push(longZones, 929),  array.push(longZones, 1024)
+        array.push(longZones, 1128), array.push(longZones, 1226)
+
+    if asset == "ZW"
+        array.push(longZones, 401),  array.push(longZones, 607)
+        array.push(longZones, 902),  array.push(longZones, 1016)
+
+    if asset == "ZC"
+        array.push(shortZones, 711), array.push(shortZones, 908)
+
+    // ── Auto-added set (as in your script)
+    if asset == "LBR"
+        array.push(longZones, 119),  array.push(longZones, 215)
+        array.push(longZones, 402),  array.push(longZones, 509)
+        array.push(longZones, 612),  array.push(longZones, 702)
+        array.push(longZones, 928),  array.push(longZones, 1225)
+
+    if asset == "LE"
+        array.push(longZones, 501),  array.push(longZones, 608)
+        array.push(longZones, 710),  array.push(longZones, 803)
+        array.push(longZones, 905),  array.push(longZones, 1102)
+
+    if asset == "HE"
+        array.push(longZones, 227),  array.push(longZones, 526)
+        array.push(longZones, 1108), array.push(longZones, 1130)
+
+    if asset == "ZC"
+        array.push(longZones, 107),  array.push(longZones, 212)
+        array.push(longZones, 227),  array.push(longZones, 527)
+        array.push(longZones, 831),  array.push(longZones, 1022)
+
+    if asset == "ZL"
+        array.push(longZones, 625),  array.push(longZones, 808)
+        array.push(longZones, 914),  array.push(longZones, 1110)
+
+    if asset == "ZM"
+        array.push(longZones, 901),  array.push(longZones, 1121)
+
+    if asset == "ZR"
+        array.push(longZones, 102),  array.push(longZones, 128)
+        array.push(longZones, 309),  array.push(longZones, 603)
+        array.push(longZones, 810),  array.push(longZones, 917)
+        array.push(longZones, 1029), array.push(longZones, 1129)
+
+zoneColorLong  = color.new(color.green, 85)
+zoneColorShort = color.new(color.red, 85)
+
+longActive  = false
+shortActive = false
+
+if array.size(longZones) > 0
+    for i = 0 to array.size(longZones) / 2 - 1
+        s = array.get(longZones, i * 2)
+        e = array.get(longZones, i * 2 + 1)
+        if isInSeason(s, e)
+            longActive := true
+
+if array.size(shortZones) > 0
+    for i = 0 to array.size(shortZones) / 2 - 1
+        s = array.get(shortZones, i * 2)
+        e = array.get(shortZones, i * 2 + 1)
+        if isInSeason(s, e)
+            shortActive := true
+
+var bool lastLong  = false
+var bool lastShort = false
+
+if not lastLong and longActive and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+if lastLong and not longActive and strategy.position_size > 0 and strategy.opentrades.entry_id(0) == "Long"
+    strategy.close("Long")
+
+if not lastShort and shortActive and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+
+if lastShort and not shortActive and strategy.position_size < 0 and strategy.opentrades.entry_id(0) == "Short"
+    strategy.close("Short")
+
+lastLong  := longActive
+lastShort := shortActive
+
+bgcolor(longActive ? zoneColorLong : na)
+bgcolor(shortActive ? zoneColorShort : na)
+
+View in Pine Editor・175 lines
+Use on chart
+3
+2
+981
+Seasonal Strategies V1 is a rule-based futures seasonality framework built around predefined calendar windows per asset.
+
+The strategy automatically detects the current symbol and activates long or short trading phases strictly based on historically observed seasonal tendencies. All entries and exits are fully time-based — no indicators, no predictions, no discretionary input.
+
+Key Features
+
+Asset-specific seasonal windows (MMDD-based)
+
+Automatic long and short activation
+
+Fully time-based entries and exits
+
+One position at a time (no pyramiding)
+
+Clean chart visualization using subtle background shading
+
+No indicators, no filters, no curve fitting
+
+
+Philosophy:
+This strategy is designed as a structural trading tool, not a forecasting model.
+It focuses on when a market historically shows seasonal tendencies — not why or how far price might move.
+
+Seasonal Strategies V1 intentionally keeps the chart clean and minimal, making it suitable as a baseline framework for research, portfolio-style seasonal approaches, or further extensions in later versions.
+
+Intended Use:
+
+Futures and commodity markets
+
+Seasonality research and testing
+
+Systematic, calendar-driven strategies
+
+Educational and analytical purposes
+
+
+
+Disclaimer
+
+This script is provided for educational and research purposes only.
+Past seasonal tendencies do not guarantee future performance.
+Risk management, position sizing, and portfolio decisions are the responsibility of the user.

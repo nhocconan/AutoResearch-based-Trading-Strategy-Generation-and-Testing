@@ -1,0 +1,28 @@
+//@version=4
+strategy("均衡交易量指标系统", overlay=true)
+//strategy.risk.allow_entry_in(strategy.direction.long)
+period = input(60,'')
+OBVlocal = 0.0
+
+if close > close[1]
+    OBVlocal := nz(OBVlocal[1]) + volume
+else
+    if close < close[1]
+        OBVlocal := nz(OBVlocal[1]) - volume
+    else
+        OBVlocal := nz(OBVlocal[1])
+
+MAOBV = sma(OBVlocal,period)
+
+if MAOBV > MAOBV[1]
+    strategy.entry("Long", strategy.long, when=strategy.position_size <= 0)
+else
+    if MAOBV < MAOBV[1]
+        strategy.entry("Short", strategy.short, when=strategy.position_size > 0)
+
+View in Pine Editor・24 lines
+Use on chart
+8
+3
+5 031
+OBV Trend

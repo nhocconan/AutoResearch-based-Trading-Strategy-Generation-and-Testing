@@ -1,0 +1,140 @@
+//@version=5
+indicator(title='Moving Average Cross', shorttitle='Moving Average Cross', overlay=true, precision=6, max_labels_count=500, max_lines_count=500)
+
+type_ma1 = input.string(title='MA1 type', defval='SMA', options=['RMA', 'SMA', 'EMA'])
+length_ma1 = input(10, title='[ALL but VWAP] MA1 length')
+
+type_ma2 = input.string(title='MA2 type', defval='SMA', options=['RMA', 'SMA', 'EMA'])
+length_ma2 = input(100, title='[ALL but VWAP] MA2 length')
+
+// MA
+f_ma(smoothing, src, length) =>
+    rma_1 = ta.rma(src, length)
+    sma_1 = ta.sma(src, length)
+    ema_1 = ta.ema(src, length)
+    iff_1 = smoothing == 'EMA' ? ema_1 : src
+    iff_2 = smoothing == 'SMA' ? sma_1 : iff_1
+    smoothing == 'RMA' ? rma_1 : iff_2
+
+MA1 = f_ma(type_ma1, close, length_ma1)
+MA2 = f_ma(type_ma2, close, length_ma2)
+
+// buy and sell conditions
+buy = ta.crossover(MA1, MA2)
+sell = ta.crossunder(MA1, MA2)
+
+plot(MA1, color=color.new(color.green, 0), title='Plot MA1', linewidth=3)
+plot(MA2, color=color.new(color.red, 0), title='Plot MA2', linewidth=3)
+
+plotshape(buy, title='LONG SIGNAL', style=shape.circle, location=location.belowbar, color=color.new(color.green, 0), size=size.normal)
+plotshape(sell, title='SHORT SIGNAL', style=shape.circle, location=location.abovebar, color=color.new(color.red, 0), size=size.normal)
+
+/////////////////////////// SIGNAL FOR STRATEGY /////////////////////////
+
+Signal = buy ? 1 : sell ? -1 : 0
+plot(Signal, title='🔌Connector🔌', display = display.data_window)
+
+Expand 30 lines
+
+
+Basically, I identified my buy, sell conditions in the code and added this at the bottom of my indicator code
+
+
+Pine Script®
+Signal = buy ? 1 : sell ? -1 : 0
+plot(Signal, title="🔌Connector🔌", transp=100)
+
+
+
+Important Notes
+
+🔥 The Strategy Template expects the value to be exactly 1 for the bullish signal, and -1 for the bearish signal
+
+Now you can connect your indicator to the Strategy Template using the method below or that one
+
+Step 2: Connect the connector
+
+1) Add your updated indicator to a TradingView chart
+2) Add the Strategy Template as well to the SAME chart
+3) Open the Strategy Template settings and in the Data Source field select your 🔌Connector🔌 (which comes from your indicator)
+
+From then, you should start seeing the signals and plenty of other stuff on your chart
+
+🔥 Note that whenever you'll update your indicator values, the strategy statistics and visual on your chart will update in real-time
+
+Settings
+
+- Color Candles: Color the candles based on the trade state ( bullish , bearish , neutral)
+- Close positions at market at the end of each session: useful for everything but cryptocurrencies
+- Session time ranges: Take the signals from a starting time to an ending time
+- Close Direction: Choose to close only the longs, shorts, or both
+- Date Filter: Take the signals from a starting date to an ending date
+- Set the maximum losing streak length with an input
+- Set the maximum winning streak length with an input
+- Set the maximum consecutive days with a loss
+- Set the maximum drawdown (in % of strategy equity)
+- Set the maximum intraday loss in percentage
+- Limit the number of trades per day
+- Limit the number of trades per week
+- Stop-loss: None or Percentage or Trailing Stop Percentage or ATR - I'll add shortly multiple options for the trailing stop loss
+- Take-Profit: None or Percentage or ATR - I'll add also a trailing take profit
+- Risk-Reward based on ATR multiple for the Stop-Loss and Take-Profit
+
+Special Thanks
+
+Special thanks to @JosKodify as I borrowed a few risk management snippets from his website: kodify.net/tradingview-programming-articles/
+
+
+Best
+Dave
+Feb 10, 2023
+Release Notes
+Version 2
+Fixed an issue with the TP1 logic and position sizes
+Feb 18, 2023
+Release Notes
+- Added the alerts txt fields for the custom close long/short events
+Feb 18, 2023
+Release Notes
+Version 3
+
+- Added a table displaying the opened trades data - works even with multiple opened trades
+- the table is fully customisable: colors, location, text size, and much more....
+- Added a sample script commented at the beginning of the script
+Feb 23, 2023
+Release Notes
+Version 5
+Fixed an issue with the TPs when pyramiding > 1 is enabled
+It was recalculating the TPs for every new pyramiding signal
+It's common usage that the TPs and SL are calculated at the first signal of the trend
+Feb 24, 2023
+Release Notes
+Version 5.1
+
+Fixed an issue with the SL and TPs (again)
+Now it works as expected
+Feb 26, 2023
+Release Notes
+Version 5.2
+
+Added the ability to create alerts using the "alert() function call only mode" which aren't based on the backtest orders fills but on my custom conditions
+Sometimes, the backtest fills the orders too late, especially during very quick price action events
+
+Example: imgur.com/a/NiH0MeT
+Feb 27, 2023
+Release Notes
+Version 6
+
+- Added a Stop-Loss to Breakeven logic
+- Added a custom optional exit logic closing closing the opened trade(s) after X bars
+Mar 1, 2023
+Release Notes
+Fixed and Improved the trailing SL logic
+Mar 24, 2023
+Release Notes
+Version 7
+
+Removed the TP2 logic as it prevented the exit SL/TP1 orders to get executed in real-time
+May 16, 2023
+Release Notes
+- Fixed the SL to Breakeven logic

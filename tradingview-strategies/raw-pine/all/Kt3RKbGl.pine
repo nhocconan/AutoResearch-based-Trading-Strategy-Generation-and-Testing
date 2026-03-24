@@ -1,0 +1,161 @@
+//@version=6
+strategy("LANZ Strategy 3.0 [Backtest]", overlay=true, default_qty_type=strategy.cash, default_qty_value=100)
+
+// === INPUT DE CONFIGURACIÓN ===
+fiboVersion = input.string("Optimized", title="Fibonacci Version", options=["Original", "Optimized"])
+
+// === RANGO ASIÁTICO (18:00–01:15 NY) ===
+var float refHigh = na
+var float refLow = na
+var int x = na
+rangeSession = not na(time(timeframe.period, "1800-0115"))
+newSession = rangeSession and not rangeSession[1]
+
+refHigh := newSession ? high : rangeSession ? math.max(high, refHigh) : refHigh
+refLow  := newSession ? low  : rangeSession ? math.min(low, refLow)  : refLow
+x := newSession ? time : x
+
+// === FRANJAS HORARIAS ===
+decisionWindow = not na(time(timeframe.period, "0115-0215"))
+entryWindow    = not na(time(timeframe.period, "0115-0800"))
+expireWindow   = not na(time(timeframe.period, "0800-0801"))
+
+// === VARIABLES DE CONTROL ===
+var float entryPrice = na
+var float tp = na
+var float sl = na
+var bool directionDefined = false
+var bool isBuy = false
+var bool tradeExecuted = false
+var bool tradeExpired = false
+var bool orderSent = false
+var bool fallbackTriggered = false
+
+// === REINICIO EN NUEVA SESIÓN ===
+if newSession
+    entryPrice := na
+    tp := na
+    sl := na
+    directionDefined := false
+    isBuy := false
+    tradeExecuted := false
+    tradeExpired := false
+    orderSent := false
+    fallbackTriggered := false
+
+// === DEFINICIÓN DE DIRECCIÓN Y NIVELES (ENTRE 01:15–02:15) ===
+if decisionWindow and not directionDefined
+    fiboRange = refHigh - refLow
+    asiaMid = (refHigh + refLow) / 2
+    isBuy := close < asiaMid
+    entryPrice := isBuy ? refLow : refHigh
+    tp := fiboVersion == "Original" ? (isBuy ? refLow + 2.25 * fiboRange : refHigh - 2.25 * fiboRange) : (isBuy ? refLow + 1.95 * fiboRange : refHigh - 1.95 * fiboRange)
+    sl := fiboVersion == "Original" ? (isBuy ? refLow - 0.75 * fiboRange : refHigh + 0.75 * fiboRange) : (isBuy ? refLow - 0.65 * fiboRange : refHigh + 0.65 * fiboRange)
+    directionDefined := true
+
+// === ENVÍO DE ORDEN ===
+canSendOrder = directionDefined and entryWindow and not tradeExecuted and not orderSent and not tradeExpired
+
+if canSendOrder
+    if isBuy
+        strategy.entry("Buy", strategy.long, limit=entryPrice)
+        strategy.exit("Buy Exit", from_entry="Buy", limit=tp, stop=sl)
+    else
+        strategy.entry("Sell", strategy.short, limit=entryPrice)
+        strategy.exit("Sell Exit", from_entry="Sell", limit=tp, stop=sl)
+    orderSent := true
+
+// === DETECCIÓN DE EJECUCIÓN ===
+if not tradeExecuted
+    tradeExecuted := strategy.position_size != 0
+
+// === FALLO DE ORDEN ORIGINAL A LAS 02:15 NY ===
+fallbackTime = (hour == 2 and minute == 15)
+if fallbackTime and not tradeExecuted and not fallbackTriggered and orderSent
+    // Cancelar orden anterior para permitir reenvío
+    strategy.cancel("Buy")
+    strategy.cancel("Sell")
+
+    asiaMid = (refHigh + refLow) / 2
+    currentBuy = close[1] < asiaMid  // ✅ vela de las 02:00
+
+    if currentBuy == isBuy
+        label.new(bar_index, high, "✅", style=label.style_label_down, color=color.rgb(143, 0, 148), textcolor=color.white)
+        orderSent := false
+    else
+        fiboRange = refHigh - refLow
+        isBuy := not isBuy
+        entryPrice := isBuy ? refLow : refHigh
+        tp := fiboVersion == "Original" ? (isBuy ? refLow + 2.25 * fiboRange : refHigh - 2.25 * fiboRange) : (isBuy ? refLow + 1.95 * fiboRange : refHigh - 1.95 * fiboRange)
+        sl := fiboVersion == "Original" ? (isBuy ? refLow - 0.75 * fiboRange : refHigh + 0.75 * fiboRange) : (isBuy ? refLow - 0.65 * fiboRange : refHigh + 0.65 * fiboRange)
+        label.new(bar_index, high, "🔄", style=label.style_label_down, color=color.rgb(255, 166, 0), textcolor=color.white)
+        orderSent := false
+    directionDefined := true
+    fallbackTriggered := true
+
+// === CANCELACIÓN AL LLEGAR A LAS 08:00 NY SI NO SE EJECUTÓ ===
+if expireWindow and not tradeExecuted and not tradeExpired
+    strategy.cancel("Buy")
+    strategy.cancel("Sell")
+    tradeExpired := true
+
+// === CIERRE MANUAL A LAS 15:45 NY ===
+if (hour == 15 and minute == 45) and tradeExecuted
+    strategy.close("Buy")
+    strategy.close("Sell")
+
+View in Pine Editor・105 lines
+Use on chart
+1
+6
+1
+3 131
+🔷 LANZ Strategy 3.0 [Backtest] — Asian Range Fibonacci Scalping Strategy
+
+LANZ Strategy 3.0 [Backtest] is a precision-engineered backtesting tool tailored for intraday traders who rely on the Asian session range to determine directional bias. This strategy implements dynamic Fibonacci projections and strict time-window validation to simulate a clean and disciplined trading environment.
+
+🧠 Core Components:
+
+
+Asian Range Bias Definition: Direction is established between 01:15–02:15 a.m. NY time based on the candle’s close in relation to the midpoint of the Asian session range (18:00–01:15 NY).
+
+Limit Order Execution: Only one trade is placed daily, using a limit order at the Asian range high (for sells) or low (for buys), between 01:15–08:00 a.m. NY.
+
+Fibonacci-Based TP/SL:
+
+Original Mode: TP = 2.25x range, SL = 0.75x range.
+
+Optimized Mode: TP = 1.95x range, SL = 0.65x range.
+
+No Trade After 08:00 NY: If the limit order is not executed before 08:00 a.m. NY, it is canceled.
+
+Fallback Logic at 02:15 NY: If the market direction misaligns with the setup at 02:15 a.m., the system re-evaluates and can re-issue the order.
+
+End-of-Day Closure: All positions are closed at 15:45 NY if still open.
+
+
+
+📊 Backtest-Ready Design:
+
+
+Entries and exits are executed using strategy.entry() and strategy.exit() functions.
+
+Position size is fixed via capital risk allocation ($100 per trade by default).
+
+Only one position can be active at a time, ensuring controlled risk.
+
+
+
+📝 Notes:
+
+
+This strategy is ideal for assets sensitive to the Asian/London session overlap, such as Forex pairs and indices.
+
+Easily switch between Fibonacci versions using a single dropdown input.
+
+Fully deterministic: all entries are based on pre-defined conditions and time constraints.
+
+
+
+👤 Credits:
+Strategy developed by rau_u_lanz using Pine Script v6. Built for traders who favor clean sessions, directional clarity, and consistent execution using time-based logic and Fibonacci projections.

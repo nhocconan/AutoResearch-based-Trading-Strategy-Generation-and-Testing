@@ -1,0 +1,356 @@
+//@version=6
+strategy(title = 'Keltner Channel Based Grid', shorttitle = 'KC Grid', overlay = true, pyramiding = 20, initial_capital = 100000, calc_on_every_tick = true)
+
+// Strategy time range
+startDate = input.time(title = 'Date', defval = timestamp('2020-01-01T00:00:00'))
+endDate = input.time(title = 'Date', defval = timestamp('2026-01-01T00:00:00'))
+
+inTime = time > startDate and time < endDate
+
+// Inputs
+NumGrid = input(12, 'Number of Grids')
+length = input.int(10, minval = 1)
+kcRateMult = input(1.33, 'Grid Coefficient')
+src = input(close, title = 'Source')
+exp = input(true, 'Use Exponential MA')
+BandsStyle = input.string('Average True Range', options = ['Average True Range', 'True Range', 'Range'], title = 'Bands Style')
+
+// Moving average calculation
+esma(source, length) =>
+    s = ta.sma(source, length)
+    e = ta.ema(source, length)
+    exp ? e : s
+
+ma = esma(src, length)
+rangema = BandsStyle == 'True Range' ? ta.tr(true) : BandsStyle == 'Average True Range' ? ta.atr(length) : ta.rma(high - low, length)
+bandWidth = rangema * kcRateMult
+upper = ma + bandWidth
+lower = ma - bandWidth
+
+// Plotting
+u = plot(upper, color = #2962FF, title = 'Upper')
+plot(ma, color = #2962FF, title = 'Basis')
+l = plot(lower, color = #2962FF, title = 'Lower')
+fill(u, l, color = color.rgb(33, 150, 243, 95), title = 'Background')
+
+// Position adjustment logic
+changePosTo(x) =>
+    if strategy.position_size < x
+        strategy.order('buy', strategy.long, math.round(x - strategy.position_size, 2))
+    if strategy.position_size > x
+        strategy.order('sell', strategy.short, math.round(strategy.position_size - x, 2))
+
+maxMount = strategy.initial_capital / close
+
+kcRate = (close - ma) / bandWidth
+targetPosition = kcRate * maxMount * -1
+
+if targetPosition > maxMount
+    targetPosition := maxMount
+    targetPosition
+if targetPosition < -maxMount
+    targetPosition := -maxMount
+    targetPosition
+
+diff = math.abs(targetPosition - strategy.position_size)
+if diff >= maxMount / NumGrid and inTime
+    changePosTo(targetPosition)
+
+// Debugging plots (hidden)
+plot(strategy.position_size, 'Pos', color.fuchsia, display = display.none)
+plot(kcRate, 'kcRate', color.lime, display = display.none)
+plot(targetPosition, 'targetPosition', color.maroon, display = display.none)
+
+View in Pine Editor・62 lines
+Use on chart
+5
+8
+1 589
+# KC Grid Strategy - Keltner Channel Based Grid Trading System
+
+## Strategy Overview
+
+KC Grid Strategy is an innovative grid trading system that combines the power of Keltner Channels with dynamic position sizing to create a mean-reversion trading approach. This strategy automatically adjusts position sizes based on price deviation from the Keltner Channel center line, implementing a systematic grid-based approach that capitalizes on market volatility and price oscillations.
+
+## Core Principles
+
+### Keltner Channel Foundation
+The strategy builds upon the Keltner Channel indicator, which consists of:
+- **Center Line**: Moving average (EMA or SMA) of the price
+- **Upper Band**: Center line + (ATR/TR/Range × Multiplier)
+- **Lower Band**: Center line - (ATR/TR/Range × Multiplier)
+
+### Grid Trading Logic
+The strategy implements a sophisticated grid system where:
+1. **Position Direction**: Inversely correlated to price position within the channel
+- When price is above center line → Short positions
+- When price is below center line → Long positions
+2. **Position Size**: Proportional to distance from center line
+- Greater deviation = Larger position size
+3. **Grid Activation**: Positions are adjusted only when the difference exceeds a predefined grid threshold
+
+### Mathematical Foundation
+The core calculation uses the KC Rate formula:
+```
+kcRate = (close - ma) / bandWidth
+targetPosition = kcRate × maxAmount × (-1)
+```
+
+This creates a mean-reversion system where positions increase as price moves further from the mean, expecting eventual return to equilibrium.
+
+## Parameter Guide
+
+### Time Range Settings
+- **Start Date**: Beginning of strategy execution period
+- **End Date**: End of strategy execution period
+
+### Core Parameters
+1. **Number of Grids (NumGrid)**: Default 12
+- Controls grid sensitivity and position adjustment frequency
+- Higher values = More frequent but smaller adjustments
+- Lower values = Less frequent but larger adjustments
+
+2. **Length**: Default 10
+- Period for moving average and volatility calculations
+- Shorter periods = More responsive to recent price action
+- Longer periods = Smoother, less noisy signals
+
+3. **Grid Coefficient (kcRateMult)**: Default 1.33
+- Multiplier for channel width calculation
+- Higher values = Wider channels, less frequent trades
+- Lower values = Narrower channels, more frequent trades
+
+4. **Source**: Default Close
+- Price source for calculations (Close, Open, High, Low, etc.)
+- Close price typically provides most reliable signals
+
+5. **Use Exponential MA**: Default True
+- True = Uses EMA (more responsive to recent prices)
+- False = Uses SMA (equal weight to all periods)
+
+6. **Bands Style**: Default "Average True Range"
+- **Average True Range**: Smoothed volatility measure (recommended)
+- **True Range**: Current bar's volatility only
+- **Range**: Simple high-low difference
+
+## How to Use
+
+### Setup Instructions
+1. **Apply to Chart**: Add the strategy to your desired timeframe and instrument
+2. **Configure Parameters**: Adjust settings based on market characteristics:
+- Volatile markets: Increase Grid Coefficient, reduce Number of Grids
+- Stable markets: Decrease Grid Coefficient, increase Number of Grids
+3. **Set Time Range**: Define your backtesting or live trading period
+4. **Monitor Performance**: Watch strategy performance metrics and adjust as needed
+
+### Optimal Market Conditions
+- **Range-bound markets**: Strategy performs best in sideways trending markets
+- **High volatility**: Benefits from frequent price oscillations around the mean
+- **Liquid instruments**: Ensures efficient order execution and minimal slippage
+
+### Position Management
+The strategy automatically:
+- Calculates optimal position sizes based on account equity
+- Adjusts positions incrementally as price moves through grid levels
+- Maintains risk control through maximum position limits
+- Executes trades only during specified time periods
+
+## Risk Warnings
+
+### ⚠️ Important Risk Considerations
+
+1. **Trending Market Risk**:
+- Strategy may underperform or generate losses in strong trending markets
+- Mean-reversion assumption may fail during sustained directional moves
+- Consider market regime analysis before deployment
+
+2. **Leverage and Position Size Risk**:
+- Strategy uses pyramiding (up to 20 positions)
+- Large positions may accumulate during extended moves
+- Monitor account equity and margin requirements closely
+
+3. **Volatility Risk**:
+- Sudden volatility spikes may trigger multiple rapid position adjustments
+- Consider volatility filters during high-impact news events
+- Backtest across different volatility regimes
+
+4. **Execution Risk**:
+- Strategy calculates on every tick (calc_on_every_tick = true)
+- May generate frequent orders in volatile conditions
+- Ensure adequate execution infrastructure and consider transaction costs
+
+5. **Parameter Sensitivity**:
+- Performance highly dependent on parameter optimization
+- Over-optimization may lead to curve-fitting
+- Regular parameter review and adjustment may be necessary
+
+## Suitable Scenarios
+
+### Ideal Market Conditions
+- **Sideways/Range-bound markets**: Primary use case
+- **Mean-reverting instruments**: Forex pairs, some commodities
+- **Stable volatility environments**: Consistent ATR patterns
+- **Liquid markets**: Major currency pairs, popular stocks/indices
+
+
+
+## Important Notes
+
+### Strategy Limitations
+1. **No Stop Loss**: Strategy relies on mean reversion without traditional stop losses
+2. **Capital Requirements**: Requires sufficient capital for grid-based position sizing
+3. **Market Regime Dependency**: Performance varies significantly across different market conditions
+
+
+
+## Disclaimer
+
+This strategy is provided for educational and research purposes only. Past performance does not guarantee future results. Trading involves substantial risk of loss and is not suitable for all investors. Users should thoroughly test the strategy and understand its mechanics before risking real capital. The author assumes no responsibility for trading losses incurred through the use of this strategy.
+
+---
+
+# KC网格策略 - 基于肯特纳通道的网格交易系统
+
+## 策略概述
+
+KC网格策略是一个创新的网格交易系统，它将肯特纳通道的力量与动态仓位调整相结合，创建了一个均值回归交易方法。该策略根据价格偏离肯特纳通道中心线的程度自动调整仓位大小，实施系统化的网格方法，利用市场波动和价格振荡获利。
+
+## 核心原理
+
+### 肯特纳通道基础
+该策略建立在肯特纳通道指标之上，包含：
+- **中心线**: 价格的移动平均线（EMA或SMA）
+- **上轨**: 中心线 + (ATR/TR/Range × 乘数)
+- **下轨**: 中心线 - (ATR/TR/Range × 乘数)
+
+### 网格交易逻辑
+该策略实施复杂的网格系统：
+1. **仓位方向**: 与价格在通道中的位置呈反向关系
+- 当价格高于中心线时 → 空头仓位
+- 当价格低于中心线时 → 多头仓位
+2. **仓位大小**: 与距离中心线的距离成正比
+- 偏离越大 = 仓位越大
+3. **网格激活**: 只有当差异超过预定义的网格阈值时才调整仓位
+
+### 数学基础
+核心计算使用KC比率公式：
+```
+kcRate = (close - ma) / bandWidth
+targetPosition = kcRate × maxAmount × (-1)
+```
+
+这创建了一个均值回归系统，当价格偏离均值越远时仓位越大，期望最终回归均衡。
+
+## 参数说明
+
+### 时间范围设置
+- **开始日期**: 策略执行期间的开始时间
+- **结束日期**: 策略执行期间的结束时间
+
+### 核心参数
+1. **网格数量 (NumGrid)**: 默认12
+- 控制网格敏感度和仓位调整频率
+- 较高值 = 更频繁但较小的调整
+- 较低值 = 较少频繁但较大的调整
+
+2. **长度**: 默认10
+- 移动平均线和波动率计算的周期
+- 较短周期 = 对近期价格行为更敏感
+- 较长周期 = 更平滑，噪音更少的信号
+
+3. **网格系数 (kcRateMult)**: 默认1.33
+- 通道宽度计算的乘数
+- 较高值 = 更宽的通道，较少频繁的交易
+- 较低值 = 更窄的通道，更频繁的交易
+
+4. **数据源**: 默认收盘价
+- 计算的价格来源（收盘价、开盘价、最高价、最低价等）
+- 收盘价通常提供最可靠的信号
+
+5. **使用指数移动平均**: 默认True
+- True = 使用EMA（对近期价格更敏感）
+- False = 使用SMA（对所有周期等权重）
+
+6. **通道样式**: 默认"平均真实范围"
+- **平均真实范围**: 平滑的波动率测量（推荐）
+- **真实范围**: 仅当前K线的波动率
+- **范围**: 简单的高低价差
+
+## 使用方法
+
+### 设置说明
+1. **应用到图表**: 将策略添加到您所需的时间框架和交易品种
+2. **配置参数**: 根据市场特征调整设置：
+- 波动市场：增加网格系数，减少网格数量
+- 稳定市场：减少网格系数，增加网格数量
+3. **设置时间范围**: 定义您的回测或实盘交易期间
+4. **监控表现**: 观察策略表现指标并根据需要调整
+
+### 最佳市场条件
+- **区间震荡市场**: 策略在横盘趋势市场中表现最佳
+- **高波动性**: 受益于围绕均值的频繁价格振荡
+- **流动性强的品种**: 确保高效的订单执行和最小滑点
+
+### 仓位管理
+策略自动：
+- 根据账户权益计算最优仓位大小
+- 随着价格在网格水平移动逐步调整仓位
+- 通过最大仓位限制维持风险控制
+- 仅在指定时间段内执行交易
+
+## 风险警示
+
+### ⚠️ 重要风险考虑
+
+1. **趋势市场风险**:
+- 策略在强趋势市场中可能表现不佳或产生损失
+- 在持续方向性移动期间均值回归假设可能失效
+- 部署前考虑市场制度分析
+
+2. **杠杆和仓位大小风险**:
+- 策略使用金字塔加仓（最多20个仓位）
+- 在延长移动期间可能积累大仓位
+- 密切监控账户权益和保证金要求
+
+3. **波动性风险**:
+- 突然的波动性激增可能触发多次快速仓位调整
+- 在高影响新闻事件期间考虑波动性过滤器
+- 在不同波动性制度下进行回测
+
+4. **执行风险**:
+- 策略在每个tick上计算（calc_on_every_tick = true）
+- 在波动条件下可能产生频繁订单
+- 确保充足的执行基础设施并考虑交易成本
+
+5. **参数敏感性**:
+- 表现高度依赖于参数优化
+- 过度优化可能导致曲线拟合
+- 可能需要定期参数审查和调整
+
+## 适用场景
+
+### 理想市场条件
+- **横盘/区间震荡市场**: 主要用例
+- **均值回归品种**: 外汇对，某些商品
+- **稳定波动性环境**: 一致的ATR模式
+- **流动性市场**: 主要货币对，热门股票/指数
+
+
+## 注意事项
+
+### 策略限制
+1. **无止损**: 策略依赖均值回归而无传统止损
+2. **资金要求**: 需要充足资金进行基于网格的仓位调整
+3. **市场制度依赖性**: 在不同市场条件下表现差异显著
+
+
+## 免责声明
+
+该策略仅供教育和研究目的。过往表现不保证未来结果。交易涉及重大损失风险，并非适合所有投资者。用户应在投入真实资金前彻底测试策略并理解其机制。作者对使用此策略产生的交易损失不承担任何责任。
+
+---
+
+**Strategy Version**: Pine Script v6
+**Author**: Signal2Trade
+**Last Updated**: 2025-8-9
+**License**: Open Source (Mozilla Public License 2.0)

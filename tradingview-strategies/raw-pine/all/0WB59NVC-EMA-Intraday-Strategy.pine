@@ -1,0 +1,27 @@
+//@version=2
+strategy("Eli Strategy", overlay=true)
+fastLength = input(110)
+slowLength = input(40)
+price = close
+
+emafast = ema(price, fastLength)
+emaslow = ema(price, slowLength)
+
+
+if (crossover(emafast, emaslow))
+    strategy.entry("EMA2CrossLE", strategy.long,10000, comment="long")
+    strategy.exit("Exit Long", from_entry = "EMA2CrossLE", loss = 500, comment= "Rshort")
+
+if (crossunder(emafast, emaslow))
+    strategy.entry("EMA2CrossSE", strategy.short, 10000, comment="short")
+    strategy.exit("Exit short", from_entry = "EMA2CrossSE", loss = 500, comment= "RLong")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・19 lines
+Use on chart
+1
+4
+6
+6 118
+Here is a EMA intraday strategy. very profitable on the GBPAUD 1M charts if you are watching very closely, working on coding a indicator for it

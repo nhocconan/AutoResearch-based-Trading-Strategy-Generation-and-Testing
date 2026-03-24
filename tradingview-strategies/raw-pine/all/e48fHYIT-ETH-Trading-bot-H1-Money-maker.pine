@@ -1,0 +1,267 @@
+//@version=6
+strategy("ETH SMC - SMOOTH RISK", 
+         overlay=true,
+         initial_capital=8.3,
+         default_qty_type=strategy.fixed,
+         default_qty_value=1,
+         pyramiding=0,
+         commission_type=strategy.commission.percent,
+         commission_value=0.055,
+         currency=currency.USD,
+         process_orders_on_close=true,
+         calc_on_every_tick=false)
+
+// ==================== INPUTS ====================
+pivotLen = input.int(6, "Pivot Length", minval=1)
+atrLen = input.int(14, "ATR Length", minval=1)
+slMultiplier = input.float(1.5, "SL Multiplier (x ATR)", minval=0.1, step=0.1)
+rrRatio = input.float(3.2, "Risk:Reward Ratio", minval=0.5, step=0.1)
+
+// ==================== SMOOTH DYNAMIC RISK ====================
+baseRisk = input.float(5, "Starting Risk %", minval=1, step=0.5)
+minRisk = input.float(2, "Minimum Risk %", minval=0.5, step=0.5)
+maxRisk = input.float(10, "Maximum Risk %", minval=5, step=0.5)
+adjustmentRate = input.float(10, "Adjustment Rate % (per trade)", minval=5, step=5)
+
+useFVG = input.bool(true, "Use Fair Value Gaps")
+fvgLookback = input.int(10, "FVG Lookback Bars", minval=3, maxval=50)
+
+// Track current risk (smooth adjustment)
+var float currentRisk = baseRisk
+
+// Update risk based on last trade result (gradual)
+var float lastEquity = strategy.initial_capital
+
+// ==================== ATR & EMA50 ====================
+float atr = ta.atr(atrLen)
+float slDistance = slMultiplier * atr
+ema50 = ta.ema(close, 50)
+
+// Calculate risk dollars based on current smooth risk
+float fixedRiskDollars = (strategy.equity * currentRisk) / 100
+
+// ==================== ORDER BLOCK ====================
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float bullOB = na
+var float bearOB = na
+
+if not na(pl)
+    bullOB := low[pivotLen]
+if not na(ph)
+    bearOB := high[pivotLen]
+
+// ==================== FVG ====================
+bool bullishFVG = low > high[2]
+bool bearishFVG = high < low[2]
+
+var float bullFVG_top = na
+var float bullFVG_bottom = na
+var float bearFVG_top = na
+var float bearFVG_bottom = na
+var int bullFVG_bar = 0
+var int bearFVG_bar = 0
+
+if bullishFVG
+    bullFVG_top := low
+    bullFVG_bottom := high[2]
+    bullFVG_bar := bar_index
+
+if bearishFVG
+    bearFVG_top := low[2]
+    bearFVG_bottom := high
+    bearFVG_bar := bar_index
+
+bool bullFVG_valid = not na(bullFVG_bottom) and (bar_index - bullFVG_bar) <= fvgLookback
+bool bearFVG_valid = not na(bearFVG_top) and (bar_index - bearFVG_bar) <= fvgLookback
+
+// ==================== ENTRY SIGNALS ====================
+bool obLongCondition = not na(bullOB) and low < bullOB and close > bullOB
+bool obShortCondition = not na(bearOB) and high > bearOB and close < bearOB
+
+bool fvgLongCondition = false
+bool fvgShortCondition = false
+
+if useFVG
+    fvgLongCondition := bullFVG_valid and low <= bullFVG_top and close > bullFVG_bottom and close > open and close > ema50
+    fvgShortCondition := bearFVG_valid and high >= bearFVG_bottom and close < bearFVG_top and close < open and close < ema50
+
+bool longCondition = obLongCondition or fvgLongCondition
+bool shortCondition = obShortCondition or fvgShortCondition
+
+bool strongBullishCandle = close > open and (close - open) > atr * 0.35
+bool strongBearishCandle = close < open and (open - close) > atr * 0.35
+
+longCondition := longCondition and strongBullishCandle
+shortCondition := shortCondition and strongBearishCandle
+
+// ==================== PREVENT MULTIPLE ENTRIES ====================
+var bool inPosition = false
+var int lastEntryBar = 0
+var int lastExitBar = 0
+
+if strategy.position_size != 0
+    inPosition := true
+else
+    if inPosition
+        lastExitBar := bar_index
+        // Smooth risk adjustment based on last trade
+        if strategy.closedtrades > 0
+            float lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+            if lastProfit > 0
+                // Win: gradually increase risk by adjustmentRate%
+                currentRisk := currentRisk * (1 + adjustmentRate / 100)
+                if currentRisk > maxRisk
+                    currentRisk := maxRisk
+            else
+                // Loss: gradually decrease risk by adjustmentRate%
+                currentRisk := currentRisk * (1 - adjustmentRate / 100)
+                if currentRisk < minRisk
+                    currentRisk := minRisk
+    inPosition := false
+
+int cooldownBars = 0
+bool cooldownPassed = bar_index > lastExitBar + cooldownBars
+
+canEnterLong = longCondition and not inPosition and cooldownPassed and bar_index > lastEntryBar
+canEnterShort = shortCondition and not inPosition and cooldownPassed and bar_index > lastEntryBar
+
+// ==================== POSITION SIZING ====================
+float positionSize = na
+
+if canEnterLong or canEnterShort
+    positionSize := fixedRiskDollars / slDistance
+    
+    minSize = 0.001
+    maxSize = (strategy.equity * 0.95) / close
+    
+    if positionSize < minSize
+        positionSize := minSize
+    if positionSize > maxSize
+        positionSize := maxSize
+
+// ==================== ENTRY + שמירת מקור ====================
+var string entrySource = na
+var float entryZoneLevel = na
+
+if canEnterLong and not na(positionSize)
+    entrySource := obLongCondition ? "OB" : "FVG"
+    entryZoneLevel := obLongCondition ? bullOB : bullFVG_bottom
+    strategy.entry("Long", strategy.long, qty=positionSize, comment=entrySource + " Long")
+    lastEntryBar := bar_index
+
+if canEnterShort and not na(positionSize)
+    entrySource := obShortCondition ? "OB" : "FVG"
+    entryZoneLevel := obShortCondition ? bearOB : bearFVG_top
+    strategy.entry("Short", strategy.short, qty=positionSize, comment=entrySource + " Short")
+    lastEntryBar := bar_index
+
+// ==================== EXIT + BREAKEVEN ====================
+float currentSL = na
+float takeProfit = na
+
+if strategy.position_size > 0
+    float entryPrice = strategy.position_avg_price
+    float initialSL = entryPrice - slDistance
+    takeProfit := entryPrice + (slDistance * rrRatio)
+    
+    trailActivation = slDistance * rrRatio * 0.3
+    trailOffset = slDistance * 0.2
+    
+    float beLevel = entrySource == "OB" ? bullOB : bullFVG_bottom
+    bool reached1R = close >= entryPrice + slDistance
+    currentSL := reached1R ? math.max(initialSL, beLevel - syminfo.mintick * 20) : initialSL
+    
+    strategy.exit("Exit Long", "Long", stop=currentSL, limit=takeProfit, trail_price=entryPrice + trailActivation, trail_offset=trailOffset)
+
+if strategy.position_size < 0
+    float entryPrice = strategy.position_avg_price
+    float initialSL = entryPrice + slDistance
+    takeProfit := entryPrice - (slDistance * rrRatio)
+    
+    trailActivation = slDistance * rrRatio * 0.3
+    trailOffset = slDistance * 0.2
+    
+    float beLevel = entrySource == "OB" ? bearOB : bearFVG_top
+    bool reached1R = close <= entryPrice - slDistance
+    currentSL := reached1R ? math.min(initialSL, beLevel + syminfo.mintick * 20) : initialSL
+    
+    strategy.exit("Exit Short", "Short", stop=currentSL, limit=takeProfit, trail_price=entryPrice - trailActivation, trail_offset=trailOffset)
+
+// ==================== VISUALIZATION ====================
+plot(bullOB, "Bull OB", color=color.new(color.green, 0), linewidth=2, style=plot.style_circles, offset=-pivotLen)
+plot(bearOB, "Bear OB", color=color.new(color.red, 0), linewidth=2, style=plot.style_circles, offset=-pivotLen)
+
+bgcolor(useFVG and bullFVG_valid and low <= bullFVG_top and low >= bullFVG_bottom ? color.new(color.green, 90) : na)
+bgcolor(useFVG and bearFVG_valid and high >= bearFVG_bottom and high <= bearFVG_top ? color.new(color.red, 90) : na)
+
+plotshape(canEnterLong and obLongCondition, "OB Long", shape.triangleup, location.belowbar, color.green, size=size.small, text="OB")
+plotshape(canEnterLong and fvgLongCondition, "FVG Long", shape.triangleup, location.belowbar, color.lime, size=size.small, text="FVG")
+plotshape(canEnterShort and obShortCondition, "OB Short", shape.triangledown, location.abovebar, color.red, size=size.small, text="OB")
+plotshape(canEnterShort and fvgShortCondition, "FVG Short", shape.triangledown, location.abovebar, color.orange, size=size.small, text="FVG")
+
+var line slLine = na
+var line tpLine = na
+var line entryLine = na
+
+if strategy.position_size != 0
+    line.delete(slLine)
+    line.delete(tpLine)
+    line.delete(entryLine)
+    
+    float entryPrice = strategy.position_avg_price
+    
+    slLine := line.new(bar_index, currentSL, bar_index + 30, currentSL, color=color.red, width=2, style=line.style_dashed)
+    tpLine := line.new(bar_index, takeProfit, bar_index + 30, takeProfit, color=color.green, width=2, style=line.style_dashed)
+    entryLine := line.new(bar_index, entryPrice, bar_index + 30, entryPrice, color=color.blue, width=1)
+
+// ==================== TABLES ====================
+var table infoTable = table.new(position.top_right, 2, 11, border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "📊 OB + FVG STRATEGY", text_color=color.white, bgcolor=color.purple, text_size=size.normal)
+    table.cell(infoTable, 1, 0, "", bgcolor=color.purple)
+    table.cell(infoTable, 0, 1, "Equity", text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 1, 1, "$" + str.tostring(math.round(strategy.equity, 2)), text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 0, 2, "Fixed Risk $", text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 1, 2, "$" + str.tostring(math.round(fixedRiskDollars, 2)), text_color=color.yellow, bgcolor=color.navy)
+    table.cell(infoTable, 0, 3, "Risk %", text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 1, 3, str.tostring(math.round(currentRisk, 2)) + "%", text_color=color.orange, bgcolor=color.navy)
+    table.cell(infoTable, 0, 4, "Entry Types", text_color=color.white, bgcolor=color.navy)
+    string entryTypes = "OB" + (useFVG ? " + FVG" : "")
+    table.cell(infoTable, 1, 4, entryTypes, text_color=color.lime, bgcolor=color.navy)
+    table.cell(infoTable, 0, 5, "ATR", text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 1, 5, "$" + str.tostring(math.round(atr, 2)), text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 0, 6, "SL Distance", text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 1, 6, "$" + str.tostring(math.round(slDistance, 2)), text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 0, 7, "R:R Ratio", text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 1, 7, str.tostring(rrRatio) + ":1", text_color=color.lime, bgcolor=color.navy)
+    table.cell(infoTable, 0, 8, "Position", text_color=color.white, bgcolor=color.navy)
+    string posText = strategy.position_size == 0 ? "None" : str.tostring(math.abs(strategy.position_size), "#.####") + " ETH"
+    table.cell(infoTable, 1, 8, posText, text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 0, 9, "Position $", text_color=color.white, bgcolor=color.navy)
+    float posValue = math.abs(strategy.position_size) * close
+    table.cell(infoTable, 1, 9, "$" + str.tostring(math.round(posValue, 2)), text_color=color.white, bgcolor=color.navy)
+    table.cell(infoTable, 0, 10, "Status", text_color=color.white, bgcolor=color.maroon)
+    color statusColor = inPosition ? color.red : color.lime
+    string statusText = inPosition ? "IN TRADE ⚠" : "READY ✓"
+    table.cell(infoTable, 1, 10, statusText, text_color=statusColor, bgcolor=color.maroon, text_size=size.normal)
+
+var table riskTable = table.new(position.bottom_left, 1, 3, border_width=2)
+
+if barstate.islast and strategy.position_size != 0
+    float actualRisk = math.abs(strategy.position_size) * slDistance
+    float riskRatio = actualRisk / fixedRiskDollars
+    table.cell(riskTable, 0, 0, "⚠ CURRENT RISK", text_color=color.white, bgcolor=color.maroon, text_size=size.normal)
+    color riskColor = (riskRatio >= 0.9 and riskRatio <= 1.1) ? color.lime : color.red
+    table.cell(riskTable, 0, 1, "$" + str.tostring(math.round(actualRisk, 2)), text_color=riskColor, bgcolor=color.black, text_size=size.large)
+    string qualityText = riskRatio >= 0.9 and riskRatio <= 1.1 ? "✓ PERFECT" : (riskRatio < 0.9 ? "⚠ TOO LOW" : "⚠ TOO HIGH")
+    table.cell(riskTable, 0, 2, qualityText, text_color=riskColor, bgcolor=color.black, text_size=size.small)
+
+View in Pine Editor・260 lines
+Use on chart
+9
+5
+1 845
+i dont know what i did but it is looking good ; make sure you arent in a trade before you start the bot

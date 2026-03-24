@@ -1,0 +1,135 @@
+//@version=4
+
+strategy(title="MACD Strategy", shorttitle="MACD Strategy [PUBLIC]", overlay=true, initial_capital=10000, currency='USD', 
+   default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04)
+// == /MAIN INPUT  ==
+
+/////////////////////////////////////
+//*STRATEGY LOGIC                 *//
+/////////////////////////////////////
+
+// == MACD ==
+fastLength = input(12, title="Fast Length")
+slowlength = input(26, title="Slow Length")
+MACDLength = input(9, title="MACD Length")
+
+MACD = ema(close, fastLength) - ema(close, slowlength)
+aMACD = ema(MACD, MACDLength)
+delta = MACD - aMACD
+
+// Calc breakouts
+buySignal        = crossover(delta, 0)
+shortSignal      = crossunder(delta,0)
+// == /MACD ==
+
+//////////////////////////
+//* STRATEGY COMPONENT *//
+//////////////////////////
+
+// === BACKTEST RANGE ===
+From_Year   = input(defval = 2017, title = "BACKTEST: From Year")
+From_Month  = input(defval = 1, title = "BACKTEST: From Month", minval = 1, maxval = 12)
+From_Day    = input(defval = 1, title = "BACKTEST: From Day", minval = 1, maxval = 31)
+To_Year     = input(defval = 9999, title = "BACKTEST: To Year")
+To_Month    = input(defval = 1, title = "BACKTEST: To Month", minval = 1, maxval = 12)
+To_Day      = input(defval = 1, title = "BACKTEST: To Day", minval = 1, maxval = 31)
+Start       = timestamp(From_Year, From_Month, From_Day, 00, 00)  // backtest start window
+Finish      = timestamp(To_Year, To_Month, To_Day, 23, 59)        // backtest finish window
+
+testPeriod() =>
+    time >= Start and time <= Finish ? true : false
+// === /BACKTEST RANGE ===
+
+// === STRATEGY ===
+// Make input option to configure trade direction
+tradeDirection = input(title="Trade Direction", defval="Both", options=["Long", "Short", "Both"]) 
+
+// Translate input into trading conditions
+longOK  = (tradeDirection == "Long") or (tradeDirection == "Both")
+shortOK = (tradeDirection == "Short") or (tradeDirection == "Both")
+
+// == STRATEGY ENTRIES/EXITS ==
+longCondition = longOK and buySignal and testPeriod()
+shortcondition = shortOK and shortSignal and testPeriod()
+
+// === STRATEGY - LONG POSITION EXECUTION ===
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+// === STRATEGY - SHORT POSITION EXECUTION ===
+if shortcondition
+    strategy.entry("Short", strategy.short)
+// === /STRATEGY ===
+//EOF
+
+View in Pine Editor・66 lines
+Use on chart
+2
+1
+5
+2
+5 176
+Aug 24, 2020
+This is a strategy based on MACD Oscillator . Instead of using just the normal crossovers, we use trend filters, trailing stop loss and take profit targets. This strategy was developed for crypto, forex and stocks on daily timeframe but feel free to experiment on 15 minutes or higher using heikin ashi or normal candles
+
+In this strategy you have a choice of:
+
+Trend Filters:
+- Average Directional Index ( ADX ) – buy when price is trend is up and sell when trend is down.
+- Moving Average (MA) – buy when price close above the defined moving average and sell when price close below moving average
+- Parabolic SAR – buy when SAR is above price is above price and sell when SAR is below price.
+- All - Use ADX , MA and SAR as filters
+
+For MA Filter , you can use the “TF MA Type” and "TF MA Period" parameter to select Simple or Exponential Moving Average and length.
+
+Stop Loss:
+- Average True Range (ATR) – ATR % stop as trailing stop loss.
+- Parabolic SAR ( SAR ) – Parabolic SAR adapted as trailing stop loss.
+
+For ATR , you can use the “ATR Trailing Stop Multiplier” parameter to set an initial offset for trailing stop loss.
+
+Take Profit Target:
+- Average True Range (ATR) – ATR % stop as trailing stop loss.
+- Standard % – Percent as target profit
+
+For ATR , you can use the “ATR Take Profit Multiplier” parameter to set an initial offset for trailing stop loss.
+
+Additional feature include:
+- Regular and Hidden Divergence display and alerts
+
+STRATEGY ONLY:
+- Set back test date range
+- Set trade direction - Long, Short or Both
+- Use timed exit - Select method and bars
+- Method 1: Exit after specified number of bars.
+- Method 2: Exit after specified number of bars, ONLY if position is currently profitable.
+- Method 3: Exit after specified number of bars, ONLY if position is currently losing.
+
+TradingView Links:
+Alerts:
+
+MACD:
+
+
+How to use:
+1. Apply the script by browsing through Indicators --> Invite-Only scripts and select the indicator
+2. Once loaded, click the gear (settings) button to select/adjust the parameters based on your preference.
+3. Wait for the next BUY or SELL signal to enter the trade!
+
+Disclaimer:
+The indicator and signals generated do not constitute investment advice; are provided solely for informational purposes and therefore is not an offer to buy or sell a security; are not warranted to be correct, complete or accurate; and are subject to change without notice.
+Aug 24, 2020
+Release Notes
+Updated Script
+Aug 24, 2020
+Release Notes
+Script Update
+Aug 24, 2020
+Release Notes
+Final Update
+Aug 24, 2020
+Release Notes
+The original comment in the script is not valid as those are applicable to our invite only script MACD++ Strategy. If you are interested on those features, you may check it out.
+Aug 26, 2020
+Release Notes
+Name Change

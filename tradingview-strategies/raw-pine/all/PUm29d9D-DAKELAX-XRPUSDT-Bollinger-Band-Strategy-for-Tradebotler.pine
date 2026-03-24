@@ -1,0 +1,82 @@
+//@version=3
+//study(title="Tradebotler DAKELAX Binance:XRPUSDT Study-strategy", overlay=true)
+strategy(title="Tradebotler DAKELAX Binance:XRPUSDT Strategy", overlay=true)
+
+buyAmount = input(20, minval=1)
+
+// SMA20
+len2 = input(20, minval=1)
+src2 = input(close)
+out2 = sma(src2, len2)
+
+// BB contraction value (medium tight)
+contraction_value = 1.3
+// BB contraction value (very tight)
+contraction_value2 = 0.1
+
+// 2xSTDEV BB calculation
+dev = stdev(src2, len2)
+upper_BB = out2  + 1.5*dev
+lower_BB = out2  - 2.2*dev
+x1 = plot(upper_BB, color=blue, linewidth = 2)
+x2 = plot(lower_BB, color=blue, linewidth = 2)
+
+contraction = (upper_BB-lower_BB)/out2
+
+//fills the BBands according to the contraction value (threshold)
+
+// Calculate values
+fastMA  = ema(close, 7)
+slowMA  = ema(close, 18)
+
+// Determine alert setups
+crossUp   = crossover(fastMA, slowMA)
+crossDown = crossunder(fastMA, slowMA)
+
+buySignal   = (crossUp or crossUp[1]) and (low > slowMA)
+shortSignal = (crossDown or crossDown[1]) and (high < slowMA)
+
+// Highlight alerts on the chart
+bgColour =
+     (buySignal and barstate.isrealtime) ? green :
+     (shortSignal and barstate.isrealtime) ? red :
+     na
+
+signalBuy = (buySignal ) ? true : false
+signalSell = (shortSignal ) ? true : false
+
+test = true
+
+test := not test[1]
+
+closesBelowLowerBB = close < lower_BB
+closesAboveUpperBB = close > upper_BB
+
+tmptext = "blah"
+
+// Plot values
+plot(series=fastMA, color=teal)
+plot(series=slowMA, color=orange)
+
+plot(out2, color=black, linewidth = 1)
+fill(x1, x2, color = contraction > contraction_value ? black : contraction < contraction_value2 ? yellow: red)
+
+isInRed = contraction < contraction_value and contraction >= contraction_value2
+isInYellow = contraction < contraction_value and contraction < contraction_value2
+
+if ( closesBelowLowerBB )
+    strategy.order('Buy', strategy.long, buyAmount)
+
+if ( closesAboveUpperBB )
+    strategy.close_all()
+
+View in Pine Editor・71 lines
+Use on chart
+9
+8
+5 665
+DAKELAX-XRPUSDT is a Tradebotler strategy designed to run on XRPUSDT for binance, it's a simple reverse to mean strategy and when backtested on may-aug 2019 on H1 timeframe it performs pretty well in backtest as well as running live.
+
+In order to get started install the Tradebotler extension and connect the strategy with Binance or other crypto exchanges of your choice such as Kraken, Bitstamp, Bitmex, Bittrex, Polyneux etc, etc.
+
+

@@ -1,0 +1,58 @@
+//@version=3
+strategy(title="Buy The Dip", shorttitle="BTFD", overlay=true)
+dipness = input(title="Dipness",defval=2)
+smoothness = input(title="Smoothing",defval=10,minval=0)
+lookforward = input(title="Exit After This Many Bars", defval=20)
+
+thedip = low - (atr(20) * dipness)
+thedipsma = sma(thedip,smoothness)
+
+buyCondition = crossunder(low,thedipsma)
+
+if (buyCondition)
+    strategy.entry("long", strategy.long)
+    
+strategy.close("long",when=buyCondition[lookforward]) 
+
+plot(thedipsma)
+
+View in Pine Editor・17 lines
+Use on chart
+3
+7
+4
+7
+12 293
+Jan 28, 2019
+Buying the dip has become a meme in crypto, but does it actually work?
+
+Using this script you can find out.
+The dip is defined here as the average true range multiplied by a number of your choosing (dipness input) and subtracted from the low.
+When price crosses under the dip level, a long is initiated. The long is then closed using a timestop (default value 20 bars), no fancy exits here.
+
+A general rule for buying the dip should be to be more passive in a bull market and aggressive in a bear market.
+Same goes for all counter trend trading.
+
+Heres a few other examples of dip buying statistics using the H4 timeframe:
+
+50% profitable, 1.692 Profit Factor
+$BINANCE:PIVXBTC
+
+
+
+56.52% profitable, 1.254 Profit Factor
+$BINANCE:KMDBTC
+
+
+
+27.27% Profitable, 0.257 Profit Factor... yikes!
+$BINANCE:BTSBTC
+
+
+
+73.33% Profitable, 13.627 Profit Factor... o.O
+$BINANCE:MANABTC
+
+May 28, 2019
+Release Notes
+Had accidentally hard coded the forward looking number.

@@ -1,0 +1,112 @@
+//@version=6
+strategy("LR Candles V2.1", shorttitle="LR V2", overlay=true,
+     pyramiding=0,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=2,
+     commission_type=strategy.commission.percent,
+     commission_value=0.055,
+     initial_capital=10000)
+
+// ──────────────────────────────────────────────────────────────
+// Inputs
+// ──────────────────────────────────────────────────────────────
+SL  = input.int(5,  "Signal length")
+sma_signal  = input.bool(true, "Use SMA for signal (else EMA)")
+L_use      = input.bool(true, "Use LR candles")
+LR_length   = input.int(11, "LR Length")
+length_ema     = input.int(30, "EMA Length")
+labelsize__0 = input.int(2, 'Label size', minval = 1, maxval = 5, group = 'Labels')
+labelsize = switch labelsize__0
+    1 => size.tiny
+    2 => size.small
+    3 => size.normal
+    4 => size.large
+    5 => size.huge
+    6 => size.auto
+
+// ──────────────────────────────────────────────────────────────
+// Linear Regression Candles
+// ──────────────────────────────────────────────────────────────
+var float Aopen  = na
+var float Ahigh  = na
+var float Alow   = na
+var float Aclose = na
+
+if L_use
+    Aopen  := ta.linreg(open,  LR_length, 0)
+    Ahigh  := ta.linreg(high,  LR_length, 0)
+    Alow   := ta.linreg(low,   LR_length, 0)
+    Aclose := ta.linreg(close, LR_length, 0)
+else
+    Aopen  := open
+    Ahigh  := high
+    Alow   := low
+    Aclose := close
+
+// ──────────────────────────────────────────────────────────────
+// Signal line
+// ──────────────────────────────────────────────────────────────
+signal2 = sma_signal ? ta.sma(Aclose, SL) : ta.ema(Aclose, SL)
+
+// ──────────────────────────────────────────────────────────────
+// EMA plot
+// ──────────────────────────────────────────────────────────────
+ema_value = ta.ema(close,length_ema)
+
+// ──────────────────────────────────────────────────────────────
+// Plots
+// ──────────────────────────────────────────────────────────────
+plot(ema_value, "EMA", color=color.new(#2196F3, 0), linewidth=1)
+plot(signal2,    "Signal", color=color.new(#FFD700, 0), linewidth=1)
+
+
+// ──────────────────────────────────────────────────────────────
+// Entry conditions
+// ──────────────────────────────────────────────────────────────
+// We use ta.vwma(close, 1), which is equivalent to close (since the weighted volume of 1 bar is the close itself).
+vwma1 = ta.vwma(close, 1)  // = close
+
+// 1. We create Boolean variables (series) that indicate WHERE to paint.
+longSignal  = ta.crossover(vwma1, signal2)
+shortSignal = ta.crossunder(vwma1, signal2)
+
+// 2. We execute the orders
+if longSignal
+    strategy.entry("Long", strategy.long)
+    strategy.close("Short", comment="Close Short")
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+    strategy.close("Long", comment="Close Long")
+
+// 3. We draw the shapes OUTSIDE the if statements (in the global scope).
+
+if longSignal
+    label.new(bar_index, low, text = "▲", color = #12ad1793,textcolor= color.white, style = label.style_label_up,size = labelsize ,yloc = yloc.belowbar)
+
+if shortSignal
+    label.new(bar_index, high,text  = "▼",color = #9c0404a7,textcolor  = color.white, style  = label.style_label_down, size  = labelsize ,yloc = yloc.abovebar)
+
+View in Pine Editor・91 lines
+Use on chart
+1
+7
+3
+3 102
+IMPORTANT: Use this strategy only with Heikin Ashi candles; otherwise, the results will be negative.
+
+The use of this strategy is solely and exclusively under the responsibility of the operator.
+
+To perform testing correctly and as close to market reality as possible, we suggest setting the strategy preferences as follows:
+
+Slippage = 3
+Using bar magnifico = Enabled
+Commission = Completed
+
+Detail: It is important to include at least 1,000 trades in the test. This provides a certain robustness in the historical analysis of a strategy. Values lower than this may alter the expected results when trading in real life.
+
+Tip:
+
+Play around with different time frames and calibrations on the strategic indicator. Examples include unchecking Ling-Reg, unchecking EMA, or using both in combination. Look for the best probability and results for a specific asset.
+
+The strategy usually performs well on time frames longer than 1 hour; this is what has been observed.

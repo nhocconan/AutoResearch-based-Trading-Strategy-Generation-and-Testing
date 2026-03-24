@@ -1,0 +1,92 @@
+//@version=5
+strategy("EMA + MACD + RSI Crypto Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+/// === INPUTS === ///
+emaFastLen = input.int(50, title="Fast EMA")
+emaSlowLen = input.int(200, title="Slow EMA")
+rsiLen     = input.int(14, title="RSI Length")
+rsiBuyLvl  = input.int(45, title="Min RSI for Buy")
+rsiSellLvl = input.int(55, title="Max RSI for Sell")
+
+/// === INDICATORS === ///
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+[macdLine, signalLine, _] = ta.macd(close, 12, 26, 9)
+rsi = ta.rsi(close, rsiLen)
+
+/// === CONDITIONS === ///
+isBullish = emaFast > emaSlow
+isBearish = emaFast < emaSlow
+
+macdBullish = ta.crossover(macdLine, signalLine)
+macdBearish = ta.crossunder(macdLine, signalLine)
+
+rsiBullish = rsi > rsiBuyLvl and rsi < 70
+rsiBearish = rsi < rsiSellLvl and rsi > 30
+
+buySignal  = isBullish and macdBullish and rsiBullish
+sellSignal = isBearish and macdBearish and rsiBearish
+
+/// === STRATEGY EXECUTION === ///
+if (buySignal)
+    strategy.entry("BUY", strategy.long)
+    
+if (sellSignal)
+    strategy.entry("SELL", strategy.short)
+
+/// === PLOT SIGNALS === ///
+plotshape(buySignal, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(sellSignal, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+/// === ALERTS === ///
+alertcondition(buySignal, title="Buy Alert", message="Buy Signal Triggered")
+alertcondition(sellSignal, title="Sell Alert", message="Sell Signal Triggered")
+
+View in Pine Editor・44 lines
+Use on chart
+1
+2
+795
+Title: EMA + MACD + RSI Crypto Strategy [With SL/TP]
+
+Overview:
+This is a trend-following and momentum-based crypto trading strategy built for 1H, 4H, and 1D timeframes, combining three proven indicators:
+
+EMA 50 & EMA 200 Crossover – identifies long-term trend direction.
+
+MACD Crossover (12, 26, 9) – confirms momentum shift.
+
+RSI Filter (14) – avoids overbought/oversold traps and refines entries.
+
+Buy Entry Conditions:
+
+EMA 50 > EMA 200 (Golden Cross)
+
+MACD line crosses above signal line
+
+RSI is between 45 and 70
+
+Sell Entry Conditions:
+
+EMA 50 < EMA 200 (Death Cross)
+
+MACD line crosses below signal line
+
+RSI is between 30 and 55
+
+Risk Management:
+
+Configurable Take Profit and Stop Loss percentages via inputs.
+
+Default: 3% TP, 1.5% SL (adjustable based on timeframe and asset volatility).
+
+Best For:
+
+Intraday trades on 1H (BTC, ETH, SOL)
+
+Swing trades on 4H
+
+Position entries on 1D (top 50 altcoins)
+
+This script includes visual Buy/Sell signals, alert conditions, and customizable SL/TP logic — making it a clean, actionable, and reliable strategy for crypto traders.

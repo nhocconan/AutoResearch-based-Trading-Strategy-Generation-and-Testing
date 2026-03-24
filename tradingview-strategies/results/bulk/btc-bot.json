@@ -1,0 +1,11 @@
+{
+  "chart_url": "https://www.tradingview.com/script/DPBeZbMP-BTC-bot/",
+  "name": "BTC bot",
+  "pine_file": "raw-pine/bulk/DPBeZbMP-BTC-bot.pine",
+  "classification": "unsupported",
+  "timeframe": "15m",
+  "strategy_name": "btc-bot",
+  "reason": "Pine script uses security() with lookahead=true, which introduces repainting and lookahead bias.",
+  "adaptations": [],
+  "python_code": ""
+}

@@ -1,0 +1,203 @@
+//@version=6
+// VWAP Reversal Strategy V1
+// by COT-Trader.com (https://cot-trader.com)
+// Educational use only. Not financial advice.
+
+strategy("VWAP Reversal Strategy V1", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=10000, currency=currency.USD, margin_long=0, margin_short=0, calc_on_order_fills=true, calc_on_every_tick=true)
+
+// === INPUTS (Default settings aligned to COT-Trader.com baseline) ===
+useTimeFilter     = input.bool(false, title="Trade only within session filter")
+
+volumeSpikeFac    = input.float(1.2,  title="Volume Spike Factor (x Avg)")
+wickRatio         = input.float(1.3,  title="Min Wick/Body Ratio for Rejection")
+
+takeProfitATR     = input.float(10.0, title="Take Profit (x ATR)")
+stopLossATR       = input.float(1.0,  title="Initial Stop Loss (x ATR)")
+atrLength         = input.int(14,     title="ATR Length")
+
+maxTradesPerDay   = input.int(2,      title="Max Trades per Day")
+allowShorts       = input.bool(false, title="Enable Short Setups")
+
+showStrategyVWAP  = input.bool(true,  title="Show Strategy VWAP Line")
+
+// Bias & Distance
+useH1VwapBias     = input.bool(true,  title="Enable H1 VWAP Bias Filter")
+minDistATR        = input.float(0.2,  title="Min Distance to VWAP (x ATR; 0=off)", minval=0.0)
+
+// Filter toggles
+requireRejection  = input.bool(false, title="Require Rejection Wick")
+requireVolSpike   = input.bool(false, title="Require Volume Spike")
+requireDist       = input.bool(true,  title="Require Minimum Distance")
+
+// Timing & Debug
+breakoutBarsMax   = input.int(10,     title="Max Bars Since Breakout", minval=1)
+showDebug         = input.bool(false, title="Show Debug Markers")
+sessionStr        = input.session("1330-2000", title="Session (UTC, Symbol Timezone)")
+
+// === VWAP (Daily) ===
+vwap = ta.vwap
+
+// === Higher TF Bias (H1 VWAP) ===
+vwapH1    = request.security(syminfo.tickerid, "60", ta.vwap)
+biasLong  = not useH1VwapBias or (not na(vwapH1) and close > vwapH1)
+biasShort = not useH1VwapBias or (not na(vwapH1) and close < vwapH1)
+
+// === Risk metrics ===
+atr    = ta.atr(atrLength)
+initSL = stopLossATR * atr
+TPdist = takeProfitATR * atr
+
+// === Session filter ===
+sess      = time(timeframe.period, sessionStr)
+inSession = not useTimeFilter or not na(sess)
+
+// === Trades/Day guard ===
+var int tradesToday = 0
+newDay = ta.change(time("D")) != 0
+if (newDay)
+    tradesToday := 0
+
+// === Volume & rejection helpers ===
+avgVol     = ta.sma(volume, 20)
+volSpike   = (not na(avgVol)) and (volume >= avgVol * volumeSpikeFac)
+
+bodySize   = math.abs(close - open)
+lowerWick  = math.min(open, close) - low
+upperWick  = high - math.max(open, close)
+
+hasBullRej = not na(lowerWick) and lowerWick > bodySize * wickRatio
+hasBearRej = not na(upperWick) and upperWick > bodySize * wickRatio
+
+// === Breakout & Retest Logic ===
+coUp   = ta.crossover(close, vwap)
+coDown = ta.crossunder(close, vwap)
+
+bsUp   = ta.barssince(coUp)
+bsDown = ta.barssince(coDown)
+
+validUp   = not na(bsUp)   and bsUp   <= breakoutBarsMax
+validDown = not na(bsDown) and bsDown <= breakoutBarsMax
+
+touchedSinceUp   = validUp   and (ta.lowest(low,   math.max(1, bsUp + 1))   <= vwap)
+touchedSinceDown = validDown and (ta.highest(high, math.max(1, bsDown + 1)) >= vwap)
+
+closeConfLong  = close > vwap and close > open
+closeConfShort = close < vwap and close < open
+
+longBase  = validUp   and touchedSinceUp   and closeConfLong
+shortBase = validDown and touchedSinceDown and closeConfShort
+
+// === Optional filters ===
+condRejLong  = (not requireRejection) or hasBullRej
+condVolLong  = (not requireVolSpike)  or volSpike
+condDist     = (not requireDist)      or (math.abs(close - vwap) > (minDistATR * atr))
+
+condRejShort = (not requireRejection) or hasBearRej
+condVolShort = (not requireVolSpike)  or volSpike
+
+longEntry  = longBase and condRejLong and condVolLong and condDist and biasLong
+shortEntry = allowShorts and shortBase and condRejShort and condVolShort and condDist and biasShort
+
+// === Can trade? ===
+canTrade = inSession and tradesToday < maxTradesPerDay and strategy.position_size == 0
+
+// === Entries ===
+if (canTrade and longEntry)
+    strategy.entry("Long", strategy.long)
+    tradesToday += 1
+
+if (canTrade and shortEntry)
+    strategy.entry("Short", strategy.short)
+    tradesToday += 1
+
+// === Exits ===
+if (strategy.position_size > 0)
+    longStop = strategy.position_avg_price - initSL
+    longTP   = strategy.position_avg_price + TPdist
+    strategy.exit("Exit Long", from_entry="Long", stop=longStop, limit=longTP)
+
+if (strategy.position_size < 0)
+    shortStop = strategy.position_avg_price + initSL
+    shortTP   = strategy.position_avg_price - TPdist
+    strategy.exit("Exit Short", from_entry="Short", stop=shortStop, limit=shortTP)
+
+// === Plots ===
+plot(showStrategyVWAP ? vwap : na, title="VWAP (Daily)", color=color.orange, linewidth=2)
+plot(showStrategyVWAP and useH1VwapBias ? vwapH1 : na, title="VWAP H1 (Bias)", color=color.new(color.blue, 0), linewidth=1)
+
+// === Debug markers (minimal by default) ===
+plotshape(showDebug and longEntry,  title="ENTRY Long",  location=location.belowbar, color=color.new(color.green,0), style=shape.triangleup,   size=size.small)
+plotshape(showDebug and shortEntry, title="ENTRY Short", location=location.abovebar, color=color.new(color.red,0),   style=shape.triangledown, size=size.small)
+
+View in Pine Editor・130 lines
+Use on chart
+4
+4
+2
+1 348
+🔹 VWAP Reversal Strategy V1
+
+by COT-Trader.com
+
+The VWAP Reversal Strategy V1 is a selective intraday framework designed to capture structured pullbacks to VWAP after a confirmed breakout.
+It focuses on quality over frequency and integrates volatility, confirmation and optional higher timeframe bias filtering.
+
+This strategy is part of the systematic trading research published at
+👉 cot-trader.com
+
+
+📌 Core Concept
+
+Markets frequently break above or below VWAP (fair value), only to retest it before continuation.
+
+This strategy trades that sequence:
+
+Long Setup
+
+Price breaks above VWAP
+
+A retest of VWAP occurs within a defined number of bars
+
+A bullish confirmation candle forms
+
+Optional filters align
+
+Entry at confirmation
+
+Short Setup
+Mirrored logic below VWAP (can be disabled).
+
+📊 Built-In Filters
+
+To increase selectivity, the following filters can be enabled:
+
+• Rejection wick confirmation
+• Volume spike confirmation
+• Minimum ATR-based distance from VWAP
+• Optional H1 VWAP directional bias
+
+All filters are configurable.
+
+⚙ Risk Management
+
+The strategy uses:
+
+• ATR-based Stop Loss
+• ATR-based Take Profit
+• Maximum trades per day limit
+• Optional session filter
+
+The goal is consistency and controlled exposure rather than high trade frequency.
+
+🧠 Intended Use
+
+Designed for intraday timeframes (typically 15–30 minutes).
+Works best in structured, liquid markets.
+
+Extensive debug markers can be enabled for research purposes.
+
+⚠ Disclaimer
+
+This script is published for educational and research purposes only.
+It does not constitute financial advice.
+Always test strategies in simulation before using real capital.

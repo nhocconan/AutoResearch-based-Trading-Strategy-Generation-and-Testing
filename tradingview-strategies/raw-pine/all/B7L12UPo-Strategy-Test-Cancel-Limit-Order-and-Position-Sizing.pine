@@ -1,0 +1,118 @@
+//@version=4
+strategy("Strategy Test - Cancel Limit Order and Position Sizing", overlay=true, precision=7)
+ 
+/////////////////
+// Backtest Period Selection
+ 
+testStartYear = input(2020, "Backtest Start Year",minval=1980)
+testStartMonth = input(2, "Backtest Start Month",minval=1,maxval=12)
+testStartDay = input(1, "Backtest Start Day",minval=1,maxval=31)
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+ 
+testStopYear = input(2020, "Backtest Stop Year",minval=1980)
+testStopMonth = input(12, "Backtest Stop Month",minval=1,maxval=12)
+testStopDay = input(31, "Backtest Stop Day",minval=1,maxval=31)
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+ 
+testPeriod() => time >= testPeriodStart and time <= testPeriodStop ? true : false
+ 
+//////////////
+// Inside Bar
+bull_inside_bar = close>open and high<high[1] and low>low[1] ? 1 : 0
+
+// Set Levels
+bull_inside_bar_sl = valuewhen(bull_inside_bar, low[1], 0) - (1*syminfo.mintick)
+bull_breakout_price = valuewhen(bull_inside_bar, high, 0) + (1*syminfo.mintick)
+
+entry_buy = 0.0
+entry_buy := change(bull_inside_bar) and bull_inside_bar==1 ? high : entry_buy[1]
+
+inside_bar_dist = entry_buy - bull_inside_bar_sl
+inside_bar_be = entry_buy + (inside_bar_dist * 1)
+inside_bar_tgt = entry_buy + (inside_bar_dist * 2)
+
+///////////////////
+// Position Sizing 
+//////////////////
+// For each trade setup that fires in this scenario we want to set our total loss amount in USD, so every trade that loses is lets say $1 and the 2:1 target would be $2 in this example. 
+// The math logic for this take the risk amount and divide by the stop percentage, take that number and divide by leverage amount chosen. Stop percentage is a variable below if questions on that. 
+// The statement above was not accurate in my testing. 
+//
+// Would be used if risking based on percentage of a portfolio. Leaving code snippets here in case that's the direction someone wants to go. 
+// xbt_price = security("BITMEX:XBTUSD", "D", close)
+// account_size_xbt = input(1, "Account Size (XBT)", type=input.float)
+// account_size_usd = (account_size_xbt * xbt_price)
+// percentage_risk = input(0.01, "Personal Risk Percent - Default is 1%", type=input.float)
+// personal_risk = (account_size_usd * percentage_risk)
+// position_size_usd = (personal_risk) / risk_percent
+// leverage_req = position_size_usd / account_size_usd
+
+// Will want to hard code leverage as 1x, 5x, 10x etc and dont need it to automagically be set as is above. If you're doing 100x you are gnarly haha. 
+leverage_amount = input(title="Leverage Amount Desired", type=input.integer, defval=10, options=[1, 2, 3, 5, 10, 25, 50, 100])
+risk_amount = input(title="Risk Total Per Trade in USD", type=input.integer, defval=1, minval=1, step=1)
+exch_fees = input(title="Exchange Fees", type=input.float, defval=0.00075)
+
+// The following math didn't produce the exact results I was after. This is the information using the long/short tool would give us if doing manually. 
+// stop_percent = inside_bar_dist / (entry_buy)
+// pos_size_no_lev = risk_amount / stop_percent
+// pos_size_with_lev = pos_size_no_lev / leverage_amount 
+
+// Trying a different approach to get each trade to be $1 plus fees as the loss. Still using leverage and risk amount inputs above. 
+stop_percent = 0.0
+stop_percent := change(bull_inside_bar) and bull_inside_bar==1 ? inside_bar_dist / (entry_buy) : stop_percent[1]
+
+pos_size = risk_amount / inside_bar_dist
+exch_loss = (pos_size * entry_buy * exch_fees) * 2
+
+risk_t = (inside_bar_dist * pos_size) + exch_loss
+target_p = ((inside_bar_tgt - entry_buy) * pos_size) - exch_loss
+actual_rr = target_p / risk_t
+
+//////////////
+// Strategy Section
+
+if testPeriod()
+    strategy.entry(id="Long", long=true, qty=100, limit=9320.00, when=bull_inside_bar)
+    strategy.cancel(id="Long", when = low < 9310)
+// as a test swap the price to be above the limit or below to see the cancel in play.
+ 
+//////////////
+// Plot Section
+plotchar(bull_inside_bar, title="bull_inside_bar", char="🐂", location=location.belowbar, offset=-0, color=color.green, transp=25)
+plot(bull_inside_bar_sl, title="bull_inside_bar_sl", transp=100)
+plot(entry_buy, title="entry_buy", transp=100)
+plot(inside_bar_dist, title="inside_bar_dist", transp=100)
+plot(inside_bar_tgt, title="inside_bar_tgt", transp=100)
+
+plot(stop_percent, title="stop_percent", transp=100)
+plot(pos_size, title="pos_size", transp=100)
+plot(exch_loss, title="exch_loss", transp=100)
+plot(risk_t, title="risk_t", transp=100)
+plot(target_p, title="target_p", transp=100)
+plot(actual_rr, title="actual_rr", transp=100)
+
+// plot(pos_size_no_lev, title="pos_size_no_lev", transp=100)
+// plot(pos_size_with_lev, title="pos_size_with_lev", transp=100)
+
+// Hidden Plots // For Data Window Eyes Only // 
+// plot(longCondition==true?1:0, title="Long Condition", transp=100)
+// plot(xbt_price, title="XBT Price", transp=100)
+// plot(account_size_usd, title="Account Size USD", transp=100)
+// plot(risk_percent, title="risk_percent", transp=100)
+// plot(position_size_usd, title="position_size_usd", transp=100)
+// plot(leverage_req, title="leverage_req", transp=100)
+
+// END //
+
+View in Pine Editor・111 lines
+Use on chart
+2
+4
+5
+5
+12 464
+Feb 6, 2020
+While working thru another project had the need to troubleshoot the canceling of a limit order syntax/process as well as work thru the code and logic to automagically set the position sizing based off two user inputs (Amount to Risk in USD and Leverage to Use) and the potential entry and stop levels for an inside bar candle pattern in this scenario. Once we find the distance between the entry and stop level we can figure out the stop percentage amount which matches up with what a user would see manually drawing using the long or short tool in tradingview. Once we have the user inputs and levels we can get an amount to be used in later qty= type of places in zeeee pine script....
+Feb 7, 2020
+Release Notes
+The previous code didn't meet my specific trade setup requirements but left that information commented out in case it applies and is helpful to someone else down the road. Will be testing this new approach and see how it ends up going. This is by no means a finished product but the various code snippets should be of help to others looking for ways to approach this risk management question.

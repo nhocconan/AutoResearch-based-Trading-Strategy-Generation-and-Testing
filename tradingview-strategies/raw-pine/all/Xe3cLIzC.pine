@@ -1,0 +1,368 @@
+//@version=5
+// Title: EMA Trend Pro [Hedging, Fixed Risk, Trend Dashboard]
+strategy("EMA Trend Pro [Dashboard]", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.05, max_boxes_count=50, max_labels_count=200, pyramiding=20)
+
+// ==========================================
+// 1. Inputs (參數設定)
+// ==========================================
+
+// Group: Indicator Settings
+grp_ind   = "Indicator Settings"
+adxMin    = input.int(20, "ADX Threshold", minval=1, group=grp_ind)
+emaFast   = input.int(7, "EMA Fast", group=grp_ind)
+emaMed    = input.int(14, "EMA Medium", group=grp_ind)
+emaSlow   = input.int(21, "EMA Slow", group=grp_ind)
+emaTrend  = input.int(144, "EMA Trend (Base)", group=grp_ind)
+emaLong   = input.int(200, "EMA Trend (Long)", group=grp_ind)
+
+// --- Dashboard Settings (儀表板設定) ---
+grp_dash  = "Trend Dashboard Settings"
+showTable = input.bool(true, "Show Dashboard Table?", group=grp_dash)
+trendLen  = input.int(200, "Trend EMA Length for Table", group=grp_dash, tooltip="The EMA length used to determine 1H/4H trend in the table.")
+
+// Group: Strategy & Risk Management
+grp_strat = "Strategy & Risk"
+atrMultSL = input.float(1.8, "Stop Loss ATR Multiplier", step=0.1, group=grp_strat)
+feePct    = input.float(0.05, "Taker Fee % (Est.)", step=0.01, group=grp_strat)
+riskType  = input.string("Percent", "Risk Type", options=["Fixed Amount", "Percent"], group=grp_strat)
+riskVal   = input.float(1.0, "Risk Value", step=0.1, group=grp_strat)
+
+// Group: Backtest Period
+grp_time  = "Backtest Period"
+useDate   = input.bool(true, "Use Date Filter", group=grp_time)
+startYear = input.int(2025, "Start Year", group=grp_time)
+startMonth= input.int(10, "Start Month", group=grp_time)
+startDate = input.int(1, "Start Day", group=grp_time)
+endYear   = input.int(2025, "End Year", group=grp_time)
+endMonth  = input.int(11, "End Month", group=grp_time)
+endDate   = input.int(30, "End Day", group=grp_time)
+
+// ==========================================
+// 2. Calculations (指標計算)
+// ==========================================
+
+inDateRange = not useDate or (time >= timestamp(syminfo.timezone, startYear, startMonth, startDate, 0, 0) and time <= timestamp(syminfo.timezone, endYear, endMonth, endDate, 23, 59))
+
+// Indicators (Current Chart)
+ema7   = ta.ema(close, emaFast)
+ema14  = ta.ema(close, emaMed)
+ema21  = ta.ema(close, emaSlow)
+ema144 = ta.ema(close, emaTrend)
+ema200 = ta.ema(close, emaLong)
+atr20  = ta.atr(20)
+[diPlus, diMinus, adx14] = ta.dmi(14, 14)
+
+volOK  = volume > ta.sma(volume, 20) * 1.1
+
+// --- Table Data Calculation (不影響進場邏輯，僅供顯示) ---
+// 定義趨勢判斷函數：收盤價 > EMA = 多頭
+// --- Table Data Calculation ---
+
+// 定義趨勢判斷函數：結合 SuperTrend 與 ADX
+// 回傳值: 1=多頭, -1=空頭, 0=盤整
+get_trend_robust() =>
+    // 1. 計算 SuperTrend (使用標準參數 3, 10)
+    [stValue, direction] = ta.supertrend(3.0, 10) 
+    // direction: -1=多, 1=空
+    
+    // 2. 計算 ADX (判斷盤整用)
+    [diP, diM, adxVal] = ta.dmi(14, 14)
+    
+    // 3. 綜合判斷
+    if adxVal < 20
+        0 // ADX 太低，定義為盤整
+    else if direction == -1
+        1 // 有動能且 SuperTrend 看多
+    else
+        -1 // 有動能且 SuperTrend 看空
+
+// 使用 request.security 抓取 1H 與 4H 的狀態
+trend1h_state = request.security(syminfo.tickerid, "60", get_trend_robust(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+trend4h_state = request.security(syminfo.tickerid, "240", get_trend_robust(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+// Trend Conditions (Original)
+bullTrend = ema7 > ema14 and ema14 > ema21
+bearTrend = ema7 < ema14 and ema14 < ema21
+
+// Entry Signals (Original Strict Logic - UNTOUCHED)
+// 保持您原始提供的邏輯
+longCond  = (ta.crossover(ema7,ema144) or ta.crossover(ema14,ema144)) and ema7>ema14 and ema14>ema21 and diPlus > diMinus and adx14 > adxMin
+shortCond = (ta.crossunder(ema7,ema144) or ta.crossunder(ema14,ema144)) and ema7<ema14 and ema14<ema21 and diMinus > diPlus  and adx14 > adxMin
+
+// Plotting EMAs
+plot(ema7, color=color.red, title="EMA 7")
+plot(ema14, color=color.orange, title="EMA 14")
+plot(ema21, color=color.yellow, title="EMA 21")
+plot(ema144, color=color.blue, linewidth=2, title="EMA 144")
+// 注意：這裡不畫 EMA 200 或 大時區 EMA，保持畫面乾淨
+
+// ==========================================
+// 3. State Variables
+// ==========================================
+
+var bool  inLong       = false
+var float entryPrice_L = na
+var float slDist_L     = na
+var float entryQty_L   = na
+var float currentSL_L  = na
+
+var bool  inShort      = false
+var float entryPrice_S = na
+var float slDist_S     = na
+var float entryQty_S   = na
+var float currentSL_S  = na
+
+var box[] boxes = array.new_box()
+float roundTripFee = (feePct / 100) * 2.0
+
+// ==========================================
+// 4. Custom Functions
+// ==========================================
+
+calc_qty(sl_distance) =>
+    float risk_amt = 0.0
+    if sl_distance == 0
+        0.0
+    else
+        if riskType == "Percent"
+            risk_amt := strategy.equity * (riskVal / 100)
+        else
+            risk_amt := riskVal
+        risk_amt / sl_distance
+
+draw_trade(e_price, tp3_price, sl_price, is_long) =>
+    color c_box = color.new(#00E676, 80)
+    color c_sl  = color.new(color.red, 80)
+    box btp = box.new(bar_index, math.max(e_price, tp3_price), bar_index+20, math.min(e_price, tp3_price), bgcolor=c_box, border_width=1)
+    array.push(boxes, btp)
+    box bsl = box.new(bar_index, math.max(e_price, sl_price), bar_index+20, math.min(e_price, sl_price), bgcolor=c_sl, border_width=1)
+    array.push(boxes, bsl)
+    if array.size(boxes) > 40
+        box.delete(array.shift(boxes))
+
+// ==========================================
+// 5. Strategy Execution
+// ==========================================
+
+if longCond and not inLong and inDateRange
+    float dist_L = atr20 * atrMultSL
+    float qty_L  = calc_qty(dist_L)
+    if qty_L > 0
+        inLong       := true
+        entryPrice_L := close
+        slDist_L     := dist_L
+        entryQty_L   := qty_L
+        currentSL_L  := entryPrice_L - slDist_L
+        strategy.entry("Long", strategy.long, qty=entryQty_L)
+        draw_trade(close, close + 3 * dist_L, currentSL_L, true)
+
+if shortCond and not inShort and inDateRange
+    float dist_S = atr20 * atrMultSL
+    float qty_S  = calc_qty(dist_S)
+    if qty_S > 0
+        inShort      := true
+        entryPrice_S := close
+        slDist_S     := dist_S
+        entryQty_S   := qty_S
+        currentSL_S  := entryPrice_S + slDist_S
+        strategy.entry("Short", strategy.short, qty=entryQty_S)
+        draw_trade(close, close - 3 * dist_S, currentSL_S, false)
+
+// ==========================================
+// 6. Exits & Management
+// ==========================================
+
+if inLong
+    float longTP1 = entryPrice_L + slDist_L
+    float longTP2 = entryPrice_L + slDist_L * 2
+    float longTP3 = entryPrice_L + slDist_L * 3
+    float longBreakeven = entryPrice_L * (1 + roundTripFee)
+    
+    if high >= longTP1
+        currentSL_L := longBreakeven 
+    
+    strategy.exit("L_TP1", "Long", qty=entryQty_L * 0.3, limit=longTP1, stop=currentSL_L)
+    strategy.exit("L_TP2", "Long", qty=entryQty_L * 0.5, limit=longTP2, stop=currentSL_L)
+    strategy.exit("L_TP3", "Long", limit=longTP3, stop=currentSL_L)
+
+    if not inDateRange
+        strategy.close("Long", comment="End Backtest")
+        inLong := false
+    else if high >= longTP3 or low <= currentSL_L
+        inLong := false
+
+if inShort
+    float shortTP1 = entryPrice_S - slDist_S
+    float shortTP2 = entryPrice_S - slDist_S * 2
+    float shortTP3 = entryPrice_S - slDist_S * 3
+    float shortBreakeven = entryPrice_S * (1 - roundTripFee)
+    
+    if low <= shortTP1
+        currentSL_S := shortBreakeven
+        
+    strategy.exit("S_TP1", "Short", qty=entryQty_S * 0.3, limit=shortTP1, stop=currentSL_S)
+    strategy.exit("S_TP2", "Short", qty=entryQty_S * 0.5, limit=shortTP2, stop=currentSL_S)
+    strategy.exit("S_TP3", "Short", limit=shortTP3, stop=currentSL_S)
+
+    if not inDateRange
+        strategy.close("Short", comment="End Backtest")
+        inShort := false
+    else if low <= shortTP3 or high >= currentSL_S
+        inShort := false
+
+// ==========================================
+// 7. Dashboard Table (NEW)
+// ==========================================
+
+// 建立 4行 2列 的表格
+var table dash = table.new(position.bottom_right, 2, 6, bgcolor = color.new(color.black, 40), border_width = 1)
+
+if showTable
+    // --- Header ---
+    table.cell(dash, 0, 0, "Strategy Monitor", text_color=color.white, bgcolor=color.new(color.blue, 60))
+    table.cell(dash, 1, 0, "State", text_color=color.white, bgcolor=color.new(color.blue, 60))
+
+    // --- 1H Trend Row ---
+    string t1_txt = "N/A"
+    color  t1_col = color.gray
+    
+    if trend1h_state == 0
+        t1_txt := "Ranging (Flat)"
+        t1_col := color.gray
+    else if trend1h_state == 1
+        t1_txt := "BULL (Long)"
+        t1_col := color.green
+    else
+        t1_txt := "BEAR (Short)"
+        t1_col := color.red
+
+    table.cell(dash, 0, 1, "1H Trend (ST+ADX)", text_color=color.white)
+    table.cell(dash, 1, 1, t1_txt, text_color=color.white, bgcolor=t1_col)
+
+    // --- 4H Trend Row ---
+    string t4_txt = "N/A"
+    color  t4_col = color.gray
+    
+    if trend4h_state == 0
+        t4_txt := "Ranging (Flat)"
+        t4_col := color.gray
+    else if trend4h_state == 1
+        t4_txt := "BULL (Long)"
+        t4_col := color.green
+    else
+        t4_txt := "BEAR (Short)"
+        t4_col := color.red
+
+    table.cell(dash, 0, 2, "4H Trend (ST+ADX)", text_color=color.white)
+    table.cell(dash, 1, 2, t4_txt, text_color=color.white, bgcolor=t4_col)
+
+View in Pine Editor・257 lines
+Use on chart
+1
+2
+845
+Nov 24, 2025
+[English]
+
+This strategy is a comprehensive trend-following system designed to capture significant market movements while strictly managing risk. It combines multiple Exponential Moving Averages (EMAs) for trend identification, ADX for trend strength filtering, and Volume confirmation to reduce false signals.
+
+Key Features:
+
+Hedging Mode Compatible: The script is designed to handle Long and Short positions independently. This is ideal for markets where trends can reverse quickly or for traders who prefer hedging logic (requires hedging=true in strategy settings).
+
+Professional Risk Management: Unlike standard strategies that use fixed contract sizes, this script calculates Position Size based on Risk. You can define a fixed risk per trade (e.g., 1% of equity or $100 fixed risk). The script automatically adjusts the lot size based on the Stop Loss distance (ATR).
+
+Multi-Stage Take Profit: The strategy scales out positions at 3 different levels (TP1, TP2, TP3) to lock in profits while letting the remaining position ride the trend.
+
+Strategy Logic:
+
+Trend Identification:
+
+Long Entry: EMA 7 > EMA 14 > EMA 21 > EMA 144 (Bullish Alignment).
+
+Short Entry: EMA 7 < EMA 14 < EMA 21 < EMA 144 (Bearish Alignment).
+
+Filters:
+
+ADX Filter: Entries are only taken if ADX (14) > Threshold (default 20) to ensure the market is trending, avoiding chopping ranging markets.
+
+Volume Filter: Current volume must exceed the 20-period SMA volume by 10% to confirm momentum.
+
+Exits & Trade Management:
+
+Stop Loss: Dynamic SL based on ATR (e.g., 1.8x ATR).
+
+Breakeven: Once TP1 is hit, the Stop Loss is automatically moved to Breakeven to protect capital.
+
+Take Profits:
+
+TP1: 1x Risk Distance (30% pos)
+
+TP2: 2x Risk Distance (50% pos)
+
+TP3: 3x Risk Distance (Remaining pos)
+
+Settings Guide:
+
+Risk Type: Choose between "Percent" (of equity) or "Fixed Amount" (USD).
+
+Risk Value: Input your desired risk (e.g., 1.0 for 1% risk).
+
+Fee %: Set your exchange's Taker fee (e.g., 0.05 or 0.06) for accurate backtesting.
+
+ADX Threshold: Adjust to filter out noise (Higher = Stricter trend requirement).
+
+Disclaimer: This script is for educational and backtesting purposes only. Past performance does not guarantee future results. Please use proper risk management.
+Nov 28, 2025
+Release Notes
+[English]
+
+This strategy is a comprehensive trend-following system designed to capture significant market movements while strictly managing risk. It combines multiple Exponential Moving Averages (EMAs) for trend identification, ADX for trend strength filtering, and Volume confirmation to reduce false signals.
+
+Key Features:
+
+Hedging Mode Compatible: The script is designed to handle Long and Short positions independently. This is ideal for markets where trends can reverse quickly or for traders who prefer hedging logic (requires hedging=true in strategy settings).
+
+Professional Risk Management: Unlike standard strategies that use fixed contract sizes, this script calculates Position Size based on Risk. You can define a fixed risk per trade (e.g., 1% of equity or $100 fixed risk). The script automatically adjusts the lot size based on the Stop Loss distance (ATR).
+
+Multi-Stage Take Profit: The strategy scales out positions at 3 different levels (TP1, TP2, TP3) to lock in profits while letting the remaining position ride the trend.
+
+Strategy Logic:
+
+Trend Identification:
+
+Long Entry: EMA 7 > EMA 14 > EMA 21 > EMA 144 (Bullish Alignment).
+
+Short Entry: EMA 7 < EMA 14 < EMA 21 < EMA 144 (Bearish Alignment).
+
+Filters:
+
+ADX Filter: Entries are only taken if ADX (14) > Threshold (default 20) to ensure the market is trending, avoiding chopping ranging markets.
+
+Volume Filter: Current volume must exceed the 20-period SMA volume by 10% to confirm momentum.
+
+Exits & Trade Management:
+
+Stop Loss: Dynamic SL based on ATR (e.g., 1.8x ATR).
+
+Breakeven: Once TP1 is hit, the Stop Loss is automatically moved to Breakeven to protect capital.
+
+Take Profits:
+
+TP1: 1x Risk Distance (30% pos)
+
+TP2: 2x Risk Distance (50% pos)
+
+TP3: 3x Risk Distance (Remaining pos)
+
+Settings Guide:
+
+Risk Type: Choose between "Percent" (of equity) or "Fixed Amount" (USD).
+
+Risk Value: Input your desired risk (e.g., 1.0 for 1% risk).
+
+Fee %: Set your exchange's Taker fee (e.g., 0.05 or 0.06) for accurate backtesting.
+
+ADX Threshold: Adjust to filter out noise (Higher = Stricter trend requirement).
+
+Disclaimer: This script is for educational and backtesting purposes only. Past performance does not guarantee future results. Please use proper risk management.

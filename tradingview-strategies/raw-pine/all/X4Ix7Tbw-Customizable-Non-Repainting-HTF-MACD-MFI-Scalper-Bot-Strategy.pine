@@ -1,0 +1,5 @@
+//@version=4
+lower=##input(defval=12,type='INPUT_INTEGER',##id='in_11')
+upper=##input(defval=80,type='INPUT_INTEGER',##id='in_12')
+##root(root_metainfo,rm_0,upper,input__float)
+##root(root_metainfo,rm_1,lower,input__float)

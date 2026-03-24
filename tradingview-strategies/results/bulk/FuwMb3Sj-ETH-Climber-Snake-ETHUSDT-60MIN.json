@@ -1,0 +1,13 @@
+{
+  "slug": "FuwMb3Sj-ETH-Climber-Snake-ETHUSDT-60MIN",
+  "chart_url": "https://www.tradingview.com/script/FuwMb3Sj-ETH-Climber-Snake-ETHUSDT-60MIN/",
+  "name": "ETH Climber Snake [ETHUSDT 60MIN]",
+  "pine_file": "raw-pine/bulk/FuwMb3Sj-ETH-Climber-Snake-ETHUSDT-60MIN.pine",
+  "classification": "unsupported",
+  "strategy_name": "FuwMb3Sj-ETH-Climber-Snake-ETHUSDT-60MIN",
+  "timeframe": "6h",
+  "reason": "uses higher-timeframe lookahead_on",
+  "adaptations": [],
+  "queue_rank": 49,
+  "updated_at": "2026-03-22T05:41:22.415572+00:00"
+}

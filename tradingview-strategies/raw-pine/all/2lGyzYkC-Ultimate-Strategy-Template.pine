@@ -1,0 +1,169 @@
+//@version=4
+study(title='Moving Average Cross', shorttitle='Moving Average Cross', overlay=true, precision=6, max_labels_count=500, max_lines_count=500)
+
+type_ma1 = input(title="MA1 type", defval="SMA", options=["RMA", "SMA", "EMA"])
+length_ma1 = input(10, title = "  [ALL but VWAP] MA1 length", type=input.integer)
+type_ma2 = input(title="MA2 type", defval="SMA", options=["RMA", "SMA", "EMA"])
+length_ma2 = input(100, title = "  [ALL but VWAP] MA2 length", type=input.integer)
+
+// MA
+f_ma(smoothing, src, length) =>
+    iff(smoothing == "RMA",     rma(src, length), 
+     iff(smoothing == "SMA",    sma(src, length),
+     iff(smoothing == "EMA",    ema(src, length), src)))
+
+MA1 = f_ma(type_ma1, close, length_ma1)
+MA2 = f_ma(type_ma2, close, length_ma2)
+
+// buy and sell conditions
+buy        =  crossover(MA1, MA2)
+sell       =  crossunder(MA1, MA2)
+
+plot(MA1, color=color_ma1, title="Plot MA1", linewidth=3)
+plot(MA2, color=color_ma2, title="Plot MA2", linewidth=3)
+
+plotshape(buy, title='LONG SIGNAL', style=shape.circle, location=location.belowbar, color=color_ma1, size=size.normal)
+plotshape(sell, title='SHORT SIGNAL', style=shape.circle, location=location.abovebar, color=color_ma2, size=size.normal)
+
+/////////////////////////// SIGNAL FOR STRATEGY /////////////////////////
+
+Signal = buy ? 1 : sell ? -1 : 0
+plot(Signal, title="🔌Connector🔌", transp=100)
+
+Expand 26 lines
+
+
+Basically, I identified my buy, sell conditions in the code and added this at the bottom of my indicator code
+
+
+Pine Script®
+Signal = buy ? 1 : sell ? -1 : 0
+plot(Signal, title="🔌Connector🔌", transp=100)
+
+
+
+Important Notes
+
+🔥 The Strategy Template expects the value to be exactly 1 for the bullish signal, and -1 for the bearish signal
+
+Now you can connect your indicator to the Strategy Template using the method below or that one
+
+Step 2: Connect the connector
+
+1) Add your updated indicator to a TradingView chart
+2) Add the Strategy Template as well to the SAME chart
+3) Open the Strategy Template settings and in the Data Source field select your 🔌Connector🔌 (which comes from your indicator)
+
+From then, you should start seeing the signals and plenty of other stuff on your chart
+
+🔥 Note that whenever you'll update your indicator values, the strategy statistics and visual on your chart will update in real-time
+
+Settings
+
+- Color Candles: Color the candles based on the trade state (bullish, bearish, neutral)
+- Close positions at market at the end of each session: useful for everything but cryptocurrencies
+- Session time ranges: Take the signals from a starting time to an ending time
+- Close Direction: Choose to close only the longs, shorts, or both
+- Date Filter: Take the signals from a starting date to an ending date
+- Set the maximum losing streak length with an input
+- Set the maximum winning streak length with an input
+- Set the maximum consecutive days with a loss
+- Set the maximum drawdown (in % of strategy equity)
+- Set the maximum intraday loss in percentage
+- Limit the number of trades per day
+- Limit the number of trades per week
+- Stop-loss: None or Percentage or Trailing Stop Percentage or ATR
+- Take-Profit: None or Percentage or ATR
+- Risk-Reward based on ATR multiple for the Stop-Loss and Take-Profit
+
+This script is open-source so feel free to use it, and optimize it as you want
+
+Alerts
+
+Maybe you didn't know it but alerts are available on strategy scripts.
+
+I added them in this template - that's cool because:
+
+- if you don't know how to code, now you can connect your indicator and get alerts
+- you have now a cool template showing you how to create alerts for strategy scripts
+
+Source: tradingview.com/blog/en/strategy-alerts-are-live-now-18770/
+
+I hope you'll like it, use it, optimize it and most importantly....make some optimizations to your indicators thanks to this Strategy template
+
+Special Thanks
+
+Special thanks to @JosKodify as I borrowed a few risk management snippets from his website: kodify.net/tradingview-programming-articles/
+
+
+Additional features
+
+I thought of plenty of extra filters that I'll add later on this week on this strategy template
+
+Best
+Dave
+Feb 10, 2021
+Release Notes
+V2.0
+Added the trade direction feature
+
+You can now:
+
+- open only the longs or shorts or both
+- close only the longs or shorts or both
+Feb 16, 2021
+Release Notes
+- Added the close on opposite mode
+When only longs or shorts are selected, close on opposite forces the closing of the trades based on the opposite signal
+It's recommended to select it if your backtest is unidirectional without exits (TP, SL, etc...)
+Mar 1, 2021
+Release Notes
+- Added two fields for strategy.exit and strategy.entry functions
+
+1) comment (string) An optional parameter. Additional notes on the order. Replaces the {{strategy.order.comment}} placeholder when it is used in the "Create Alert" dialog box's "Message" field.
+
+2) alert_message (string) An optional parameter which replaces the {{strategy.order.alert_message}} placeholder when it is used in the "Create Alert" dialog box's "Message" field.
+
+Both placeholders in alerts to make the strategy compatible with automated trading bots (3commas, ProfitView, Gunbot, etc.)
+Mar 7, 2021
+Release Notes
+- Added the custom close signal (lines 117 to 119)
+Now you can also send a custom close based on your indicator.
+
+Use Case
+
+Your connected indicator already contains signals to exit based on hard exit/indicator and you want to use those signals in the strategy template to exit the opened trades.
+
+How to use it?
+
+Option enabled only if you use the Use Custom Close from the Strategy Template
+
+Use the values:
+
+
+1 for a Long Entry
+
+-1 for a Short Entry
+
+2 for a Close Long Exit
+
+-2 for a Close Short Exit
+
+
+
+In your connected indicator, update your external connector like this
+
+
+Pine Script®
+Signal = buy ? 1 : sell ? -1 : exit_buy ? 2 : exit_sell ? -2 : 0
+plot(Signal, title="🔌Connector🔌", transp=100)
+
+May 3, 2021
+Release Notes
+- Added a TP2 option where you can close X% of your position at TP1 and the strategy will close the rest at TP2 (.... or at Stop-Loss)
+- Refactored a bit the user inputs to group them by theme
+Nov 22, 2022
+Release Notes
+I published an updated more advanced version (click on the link or image below to access it)
+
+

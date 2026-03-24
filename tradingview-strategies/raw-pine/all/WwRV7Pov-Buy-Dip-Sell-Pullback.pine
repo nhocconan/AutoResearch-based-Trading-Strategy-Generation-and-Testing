@@ -1,0 +1,275 @@
+//@version=6
+strategy(title="Buy-Dip / Sell-Pullback (Loosened v6)", overlay=true, pyramiding=1, calc_on_every_tick=false, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// ─── Inputs ────────────────────────────────────────────────────────────────────
+rsiLen       = input.int(20,  "RSI Length")
+rsiBullMin   = input.float(48, "RSI Bull Min (was 50)")
+rsiBearMax   = input.float(52, "RSI Bear Max (was 50)")
+
+stochKLen    = input.int(55,  "%K Length")
+stochKSmooth = input.int(34,  "%K Smoothing")
+stochDSmooth = input.int(21,  "%D Smoothing")
+stochEdge    = input.float(0.5, "Stoch Edge (K-D), 0 = loosest")
+
+atrLen       = input.int(5,   "ATR Length (SL/TP)")
+stLen        = input.int(10,  "Supertrend ATR Length")
+stMult       = input.float(2, "Supertrend Multiplier")
+
+bbLen        = input.int(20,  "BB Length")
+bbMult       = input.float(2, "BB Multiplier")
+
+trMult       = input.float(0.8, "Gap Filter TR × (was 0.5)")
+slMult       = input.float(1.1, "SL = ATR ×")
+tpMult       = input.float(2.2, "TP = ATR ×")
+
+stBufMult    = input.float(0.45, "ST Buffer = ATR × (was 0.30)")
+showMarkers  = input.bool(true, "Show Markers")
+
+// ─── Indicators ───────────────────────────────────────────────────────────────
+rsi = ta.rsi(close, rsiLen)
+
+ll  = ta.lowest(low, stochKLen)
+hh  = ta.highest(high, stochKLen)
+den = math.max(hh - ll, syminfo.mintick)
+rawK = 100 * (close - ll) / den
+k = ta.sma(rawK, stochKSmooth)
+d = ta.sma(k, stochDSmooth)
+
+atr = ta.atr(atrLen)
+
+[stLine, stDirF] = ta.supertrend(stMult, stLen)
+stUp = stDirF > 0
+
+basis = ta.sma(close, bbLen)
+upperBB = basis + bbMult * ta.stdev(close, bbLen)
+lowerBB = basis - bbMult * ta.stdev(close, bbLen)
+
+trToday = ta.tr(true)
+
+// ─── Loosened Gates ────────────────────────────────────────────────────────────
+// 1) RSI loosened
+rsiBull = rsi >= rsiBullMin
+rsiBear = rsi <= rsiBearMax
+
+// 2) Stoch loosened with adjustable edge
+stochBull = k >= d + stochEdge
+stochBear = k <= d - stochEdge
+
+// 3) Supertrend direction still required (keeps “trend only” integrity)
+trendBull = stUp
+trendBear = not stUp
+
+// 4) Close vs Supertrend buffered (loosened default buffer)
+stBuffer = stBufMult * atr
+closeOkLong  = close >= (stLine - stBuffer)
+closeOkShort = close <= (stLine + stBuffer)
+
+// 5) Replace rare “ST vs BB mid” with simpler “close vs BB basis”
+bbOkLong  = close >= basis
+bbOkShort = close <= basis
+
+// ─── Final EOD Setups ─────────────────────────────────────────────────────────
+bullSetup = rsiBull and stochBull and trendBull and closeOkLong and bbOkLong
+bearSetup = rsiBear and stochBear and trendBear and closeOkShort and bbOkShort
+
+// ─── Gap filter modeled via LIMIT (robust in TV backtests) ─────────────────────
+longLimit  = close + trMult * trToday
+shortLimit = close - trMult * trToday
+
+if bullSetup and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, limit=longLimit)
+
+if bearSetup and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, limit=shortLimit)
+
+// ─── Detect fills ─────────────────────────────────────────────────────────────
+newLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+// Freeze ATR at entry (use prior bar ATR)
+var float atrEntry = na
+if newLong or newShort
+    atrEntry := atr[1]
+
+// ─── Exits ────────────────────────────────────────────────────────────────────
+if strategy.position_size > 0
+    ep = strategy.position_avg_price
+    strategy.exit("Exit Long", "Long", stop=ep - slMult * atrEntry, limit=ep + tpMult * atrEntry)
+
+if strategy.position_size < 0
+    ep = strategy.position_avg_price
+    strategy.exit("Exit Short", "Short", stop=ep + slMult * atrEntry, limit=ep - tpMult * atrEntry)
+
+// ─── Markers ───────────────────────────────────────────────────────────────────
+plotshape(showMarkers and bullSetup, title="Bull Setup", style=shape.labelup, location=location.belowbar, color=color.yellow, text="SET↑")
+plotshape(showMarkers and bearSetup, title="Bear Setup", style=shape.labeldown, location=location.abovebar, color=color.orange, text="SET↓")
+plotshape(showMarkers and newLong,   title="BUY", style=shape.triangleup, location=location.belowbar, color=color.green, text="BUY")
+plotshape(showMarkers and newShort,  title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red, text="SELL")
+
+View in Pine Editor・107 lines
+Use on chart
+2
+8
+955
+Buy the Dip / Sell the Pullback – Trend-Following Strategy (EOD → Next Day Execution)
+Overview
+
+This is a trend-following futures strategy designed to participate in pullbacks within established trends, not to predict reversals.
+It works on End-of-Day (EOD) confirmation and executes trades on the next trading session, making it suitable for positional and swing traders.
+
+The strategy combines momentum, trend direction, volatility, and price location to filter for high-quality setups while avoiding overtrading.
+
+🔍 Core Philosophy
+
+Trade only in the direction of the prevailing trend
+
+Buy dips in uptrends
+
+Sell pullbacks in downtrends
+
+Avoid chasing price after extended gaps
+
+Use volatility-adjusted risk management (ATR-based SL & targets)
+
+📊 Indicators Used
+
+RSI (20)
+
+Measures underlying momentum strength
+
+Stochastic Oscillator (55, 34, 21)
+
+Confirms pullback exhaustion within a trend
+
+Supertrend (10, 2)
+
+Defines primary trend direction
+
+Bollinger Bands (20, 2)
+
+Provides structural trend bias
+
+ATR (5)
+
+Used for:
+
+Entry gap filter
+
+Stop-loss
+
+Profit target
+
+Supertrend buffer
+
+✅ Long (Buy) Setup – Evaluated at EOD
+
+A long setup is generated when all of the following conditions are satisfied at the close of the trading day:
+
+RSI(20) is above the bullish threshold (default: 48)
+
+Stochastic %K is above %D (confirming pullback momentum)
+
+Supertrend direction is bullish
+
+Price is near or above Supertrend, allowing a volatility-adjusted buffer (ATR-based)
+
+Price is above the Bollinger Band middle line
+
+This combination ensures:
+
+The market is trending up
+
+Momentum supports continuation
+
+The pullback is controlled, not a breakdown
+
+❌ Short (Sell) Setup – Evaluated at EOD
+
+A short setup is generated when:
+
+RSI(20) is below the bearish threshold (default: 52)
+
+Stochastic %K is below %D
+
+Supertrend direction is bearish
+
+Price is near or below Supertrend, with an ATR buffer
+
+Price is below the Bollinger Band middle line
+
+This filters for pullbacks within sustained downtrends.
+
+⏰ Trade Execution Logic (Next Day Rule)
+
+Once a setup is confirmed at EOD, a trade is attempted on the next trading session
+
+To avoid chasing gaps:
+
+Long trades are allowed only if price does not move more than a defined multiple of the previous day’s True Range
+
+Short trades follow the same logic in reverse
+
+This is implemented via limit orders, ensuring realistic backtesting and execution behavior
+
+🛑 Risk Management
+
+All exits are volatility-adjusted using ATR:
+
+Stop-Loss:
+
+1.1 × ATR(5) from entry price
+
+Target:
+
+2.2 × ATR(5) from entry price
+
+This results in a risk–reward ratio of approximately 1:2
+
+ATR is frozen at entry to avoid forward-looking bias.
+
+🧠 Why This Strategy Works
+
+Avoids low-quality trades during consolidation
+
+Participates only when trend + momentum align
+
+Prevents emotional gap-chasing
+
+Adapts automatically to changing volatility
+
+Suitable for index futures and liquid stocks
+
+📌 Recommended Usage
+
+Timeframe: Daily
+
+Instruments:
+
+Index Futures (e.g. NIFTY, BANKNIFTY)
+
+Highly liquid stocks
+
+Market Type: Trending markets
+
+Not ideal for: Sideways or low-volatility environments
+
+⚙️ Customization Tips
+
+You can control trade frequency and aggressiveness by adjusting:
+
+RSI thresholds
+
+Supertrend buffer (ATR multiple)
+
+Gap filter multiplier
+
+Stochastic edge parameter
+
+Looser settings → more trades
+Stricter settings → higher selectivity
+
+⚠️ Disclaimer
+
+This strategy is for educational and research purposes only.
+Backtest results do not guarantee future performance.
+Always validate with paper trading before deploying real capital.

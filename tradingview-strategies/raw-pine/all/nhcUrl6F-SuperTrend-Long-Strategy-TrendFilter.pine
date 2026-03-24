@@ -1,0 +1,108 @@
+//@version=4
+strategy("SuperTrend Long Strategy", overlay=true, initial_capital=50000, currency=currency.USD, default_qty_type=strategy.cash, default_qty_value=50000)
+
+Periods = input(title="ATR Period", type=input.integer, defval=10)
+src = input(hl2, title="Source")
+Multiplier = input(title="ATR Multiplier", type=input.float, step=0.1, defval=3.0)
+changeATR = input(title="Change ATR Calculation Method ?", type=input.bool, defval=true)
+showsignals = input(title="Show Buy/Sell Signals ?", type=input.bool, defval=false)
+highlighting = input(title="Highlighter On/Off ?", type=input.bool, defval=true)
+barcoloring = input(title="Bar Coloring On/Off ?", type=input.bool, defval=true)
+
+atr2 = sma(tr, Periods)
+atr = changeATR ? atr(Periods) : atr2
+
+up = src - (Multiplier * atr)
+up1 = nz(up[1], up)
+up := close[1] > up1 ? max(up, up1) : up
+
+dn = src + (Multiplier * atr)
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? min(dn, dn1) : dn
+
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// Moving Average as Trend Filter
+periodes_ma = input(title="Moving Average Period", type=input.integer, defval=20)
+src_ma = input(title="Moving Average Source", type=input.source, defval=close)
+ma = sma(src_ma, periodes_ma)
+
+upPlot = plot(trend == 1 ? up : na, title="Up Trend", style=plot.style_linebr, linewidth=2, color=color.green)
+buySignal = trend == 1 and trend[1] == -1 and close > ma
+plotshape(buySignal ? up : na, title="UpTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.green, 0))
+plotshape(buySignal and showsignals ? up : na, title="Buy", text="Buy", location=location.absolute, style=shape.labelup, size=size.tiny, color=color.new(color.green, 0))
+
+dnPlot = plot(trend == 1 ? na : dn, title="Down Trend", style=plot.style_linebr, linewidth=2, color=color.red)
+sellSignal = trend == -1 and trend[1] == 1 and close < ma
+plotshape(sellSignal ? dn : na, title="DownTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.red, 0))
+plotshape(sellSignal and showsignals ? dn : na, title="Sell", text="Sell", location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(color.red, 0))
+
+mPlot = plot(ohlc4, title="", style=plot.style_circles, linewidth=0)
+longFillColor = highlighting ? (trend == 1 ? color.new(color.green, 70) : color.white) : color.white
+shortFillColor = highlighting ? (trend == -1 ? color.new(color.red, 70) : color.white) : color.white
+fill(mPlot, upPlot, title="UpTrend Highlighter", color=longFillColor)
+fill(mPlot, dnPlot, title="DownTrend Highlighter", color=shortFillColor)
+
+FromMonth = input(defval = 9, title = "From Month", minval = 1, maxval = 12)
+FromDay   = input(defval = 1, title = "From Day", minval = 1, maxval = 31)
+FromYear  = input(defval = 2018, title = "From Year", minval = 999)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1, maxval = 12)
+ToDay     = input(defval = 1, title = "To Day", minval = 1, maxval = 31)
+ToYear    = input(defval = 9999, title = "To Year", minval = 999)
+
+start     = timestamp(FromYear, FromMonth, FromDay, 00, 00)  
+finish    = timestamp(ToYear, ToMonth, ToDay, 23, 59)       
+
+window()  => time >= start and time <= finish ? true : false
+
+longCondition = buySignal
+if (longCondition)
+    strategy.entry("BUY", strategy.long, when = window())
+
+shortCondition = sellSignal
+if (shortCondition)
+    strategy.close("BUY")
+    strategy.entry("SELL", strategy.short, when = window())
+
+buy1 = barssince(buySignal)
+sell1 = barssince(sellSignal)
+color1 = buy1[1] < sell1[1] ? color.green : buy1[1] > sell1[1] ? color.red : na
+barcolor(barcoloring ? color1 : na)
+View in Pine Editor・72 lines
+Use on chart
+3
+9
+7
+10 145
+This strategy aims to identify long (buy) opportunities in the market using the SuperTrend indicator. It utilizes the Average True Range (ATR) and a multiplier to determine the dynamic support levels for entering long positions. This presentation will provide an overview of the strategy's components, explain its usage, and highlight that it focuses on long trades.
+
+Components of the Strategy:
+1. ATR Period: This input determines the period used for calculating the Average True Range (ATR). A higher value may result in smoother trend lines but may lag behind recent price changes.
+2. Source (src): This input determines the price source used for calculations, with "hl2" (the average of high and low prices) set as the default.
+3. ATR Multiplier: This input specifies the multiplier applied to the ATR value to determine the distance of the support levels from the source.
+4. Change ATR Calculation Method: This input allows toggling between two methods of ATR calculation: the default method using atr() or a simple moving average (SMA) of ATR values (sma(tr, Periods)).
+5. Show Buy/Sell Signals: This input enables or disables the display of buy and sell signals on the chart.
+6. Highlighter On/Off: This input controls whether highlighting of up and down trends is displayed on the chart.
+7. Bar Coloring On/Off: This input determines whether the bars on the chart are colored based on the trend direction.
+8. The "SuperTrend Long STRATEGY" has been enhanced by incorporating a trend filter. A moving average is used as the filter to confirm the prevailing trend before executing trades. This addition effectively reduces false signals and improves the strategy's reliability, all while maintaining its original name.
+
+Strategy Logic:
+1. The strategy calculates the upper (up) and lower (dn) trend lines based on the ATR value and the chosen multiplier.
+2. The trend variable keeps track of the current trend, with 1 indicating an uptrend and -1 indicating a downtrend.
+3. Buy and sell signals are generated based on the change in trend direction.
+4. The strategy includes an optional highlighting feature that colors the chart background based on the current trend.
+5. Additionally, the bar coloring feature colors the bars based on the direction of the last trend change.
+
+Usage:
+1. ATR Period and ATR Multiplier can be adjusted based on the desired sensitivity and risk tolerance.
+2. Buy and sell signals can be displayed using the Show Buy/Sell Signals input, providing clear indications of entry and exit points.
+3. The Highlighter On/Off input allows users to visually identify the prevailing trend by coloring the chart background.
+4. The Bar Coloring On/Off input offers a quick visual reference for the most recent trend change.
+
+Long Strategy:
+The SuperTrend Long Strategy is specifically designed to identify long (buy) opportunities. It generates buy signals when the current trend changes from a downtrend to an uptrend, indicating a potential entry point for long positions. The strategy aims to capture upward price movements and maximize profits during bullish market conditions.
+
+The SuperTrend Long Strategy provides traders with a systematic approach to identifying long trade opportunities. By leveraging the SuperTrend indicator and dynamic support levels, this strategy aims to generate buy signals in uptrending markets. Traders can customize the inputs and utilize the visual features to adapt the strategy to their specific trading preferences.
+The modification adds a trend filter to the "SuperTrend Long STRATEGY" to improve its effectiveness. The trend filter uses a moving average to confirm the prevailing trend before taking trades. This addition helps filter out false signals and enhances the strategy's reliability without changing its name.

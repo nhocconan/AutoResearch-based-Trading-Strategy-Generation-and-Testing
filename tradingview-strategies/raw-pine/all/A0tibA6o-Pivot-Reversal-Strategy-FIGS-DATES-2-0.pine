@@ -1,0 +1,65 @@
+//@version=4
+strategy("Pivot Reversal Strategy - FIGS & DATES 2.0", overlay=true, pyramiding=0, initial_capital=10000, currency="USD", default_qty_type=strategy.percent_of_equity, default_qty_value=100.0, commission_value=0.075)
+
+leftBars = input(4)
+rightBars = input(2)
+
+// backtesting date range
+from_day = input(defval=1, title="From Day", minval=1, maxval=31)
+from_month = input(defval=1, title="From Month", minval=1, maxval=12)
+from_year = input(defval=2018, title="From Year", minval=1900)
+
+to_day = input(defval=1, title="To Day", minval=1, maxval=31)
+to_month = input(defval=1, title="To Month", minval=1, maxval=12)
+to_year = input(defval=9999, title="To Year", minval=1900)
+
+time_cond = time > timestamp(from_year, from_month, from_day, 00, 00) and 
+   time < timestamp(to_year, to_month, to_day, 23, 59)
+
+swh = pivothigh(leftBars, rightBars)
+swl = pivotlow(leftBars, rightBars)
+
+middle = (swh+swl)/2
+
+swh_cond = not na(swh)
+
+
+
+hprice = 0.0
+hprice := swh_cond ? swh : hprice[1]
+
+le = false
+le := swh_cond ? true : le[1] and high > hprice ? false : le[1]
+
+if le and time_cond
+    strategy.entry("LONG", strategy.long, comment="LONG", stop=hprice + syminfo.mintick)
+
+swl_cond = not na(swl)
+
+lprice = 0.0
+lprice := swl_cond ? swl : lprice[1]
+
+
+se = false
+se := swl_cond ? true : se[1] and low < lprice ? false : se[1]
+
+if se and time_cond
+    strategy.entry("SHORT", strategy.short, comment="SHORT", stop=lprice - syminfo.mintick)
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・49 lines
+Use on chart
+3
+4
+8
+9
+9 337
+Simple Pivot Reversal Strategy with some adding settings.
+
+Date Range: To test over specific market conditions.
+Initial Capitol: $10K - This is a more realistic representation of funds used this strategy (for me anyway). The default of $100K can give different results (usually better) than when using a smaller balance.
+Order Size: 100% Equity - These trend following strategies typically used this way, going all in each direction.
+Commission: .075% - It's always disheartening to think you've found a ridiculously good setting, and then realize you forgot to add the commission.
+
+All of these settings can be changed, but it's easier for me (and more fool proof) to have them set as default.

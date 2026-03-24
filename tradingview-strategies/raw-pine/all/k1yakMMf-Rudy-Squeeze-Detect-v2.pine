@@ -1,0 +1,86 @@
+//@version=6
+// Rudy v2 - Volatility Breakout Detector
+// Proprietary squeeze detection for high-beta equities
+// Apply to: GME, AMC, SOFI, RIVN, LCID, COIN, MARA, RIOT, PLTR
+strategy("Rudy Squeeze Detect v2", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=20, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// --- Parameters ---
+int p_short = input.int(21, "Short MA Period")
+int p_mid = input.int(50, "Mid MA Period")
+int p_rsi = input.int(14, "RSI Period")
+int p_rsi_max = input.int(80, "RSI Maximum")
+int p_vol_avg = input.int(20, "Volume Average Bars")
+int p_bb = input.int(20, "BB Period")
+int p_min = input.int(3, "Min Signal Score")
+float p_trail = input.float(4.0, "Trail Pct") / 100
+float p_off = input.float(0.5, "Offset Pct") / 100
+
+// --- Calculations ---
+float shortMA = ta.ema(close, p_short)
+float midMA = ta.ema(close, p_mid)
+float rsiVal = ta.rsi(close, p_rsi)
+float volAvg = ta.sma(volume, p_vol_avg)
+float volRatio = volume / volAvg
+float dayGap = (close - close[1]) / close[1] * 100
+[bbM, bbU, bbL] = ta.bb(close, p_bb, 2)
+float bbW = (bbU - bbL) / bbM * 100
+float mom5 = (close - close[5]) / close[5] * 100
+
+// --- Scoring ---
+var int sig = 0
+sig := 0
+sig += volRatio > 1.5 ? 2 : (volRatio > 1.2 ? 1 : 0)
+sig += dayGap > 3.0 ? 2 : (dayGap > 1.0 ? 1 : 0)
+sig += shortMA > midMA ? 1 : 0
+sig += close > shortMA ? 1 : 0
+sig += bbW < 5.0 ? 1 : 0
+sig += mom5 > 2.0 ? 1 : 0
+
+// --- Conditions ---
+bool priceOK = close > shortMA
+bool rsiOK = rsiVal < p_rsi_max
+bool squeezeBuy = priceOK and rsiOK and sig >= p_min
+bool squeezeFade = close < shortMA and mom5 < -3.0
+
+// --- Execution ---
+if squeezeBuy and strategy.position_size == 0
+    strategy.entry("SQ_Long", strategy.long)
+
+if strategy.position_size > 0
+    float tPts = close * p_trail / syminfo.mintick
+    float tOff = close * p_off / syminfo.mintick
+    strategy.exit("SQ_Trail", "SQ_Long", trail_points=tPts, trail_offset=tOff)
+
+if squeezeFade and strategy.position_size > 0
+    strategy.close("SQ_Long", comment="Fade Out")
+
+// --- Visuals ---
+plot(shortMA, "Short MA", color.new(#2196F3, 0), 2)
+plot(midMA, "Mid MA", color.new(#9C27B0, 30))
+barcolor(volRatio > 1.5 ? color.new(#00E676, 0) : na)
+bgcolor(squeezeBuy ? color.new(#4CAF50, 92) : na)
+plotshape(squeezeBuy and strategy.position_size == 0, "Squeeze", shape.labelup, location.belowbar, color.new(#00E676, 0), size=size.tiny)
+plotshape(squeezeFade and strategy.position_size > 0, "Fade", shape.labeldown, location.abovebar, color.new(#F44336, 0), size=size.tiny)
+
+// --- Dashboard ---
+var table dash = table.new(position.top_right, 2, 4, bgcolor=color.new(#000000, 80))
+if barstate.islast
+    table.cell(dash, 0, 0, "Score", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, str.tostring(sig), text_color=sig >= p_min ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 1, "Vol", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(volRatio, "#.#") + "x", text_color=volRatio > 1.5 ? color.lime : color.gray, text_size=size.small)
+    table.cell(dash, 0, 2, "BB", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(bbW, "#.#") + "%", text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 3, "Mom5d", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(mom5, "#.#") + "%", text_color=mom5 > 0 ? color.lime : color.red, text_size=size.small)
+
+View in Pine Editor・75 lines
+Use on chart
+2
+261
+Rudy Squeeze Detect v2 — Volatility Breakout Detector for high-beta equities. Identifies squeeze setups using volume
+surge, price gaps, Bollinger Band compression, and 5-day momentum. Scores each signal (minimum 3) with weighted
+factors: volume ratio, gap percentage, EMA alignment, and momentum. Exits via trailing stop or momentum fade (price
+below short MA with negative 5-day momentum). Designed for: GME, AMC, SOFI, RIVN, LCID, COIN, MARA, RIOT, PLTR.
+
+

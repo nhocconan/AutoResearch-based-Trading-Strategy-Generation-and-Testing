@@ -1,0 +1,76 @@
+//@version=4
+strategy(
+     title="Simple Moving Average Cross",
+     overlay=true,
+     initial_capital=5000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=2,
+     commission_type=strategy.commission.percent,
+     commission_value=0.075,
+     pyramiding=0
+     )
+
+sma_top_input = input(title="SMA Top", type=input.integer, defval=20)
+sma_mid_input = input(title="SMA Mid", type=input.integer, defval=50)
+sma_low_input = input(title="SMA Low", type=input.integer, defval=200)
+
+bars_long = input(title="Long: After trigger, how many bars to wait?", type=input.integer, defval=5)
+bars_short = input(title="Short: After trigger, how many bars to wait?", type=input.integer, defval=5)
+
+sma_top = sma(close, sma_top_input)
+sma_mid = sma(close, sma_mid_input)
+sma_low = sma(close, sma_low_input)
+
+long = sma_top > sma_mid and sma_mid > sma_low
+short = sma_top < sma_mid and sma_mid < sma_low
+
+long_condition = long and long[bars_long] and not long[bars_long + 1]
+short_condition = short and short[bars_short] and not short[bars_short + 1]
+
+close_long = sma_top < sma_mid and sma_mid < sma_low and not long[bars_long + 1]
+close_short = sma_top > sma_mid and sma_mid > sma_low and not short[bars_short + 1]
+
+plot(sma_top, title="SMA Top", color=#95f252, linewidth=2)
+plot(sma_mid, title="SMA Mid", color=#FF1493, linewidth=2)
+plot(sma_low, title="SMA Low", color=#6a0dad, linewidth=2)
+
+strategy.entry("LongPosition", strategy.long, when = long_condition)
+strategy.entry("ShortPosition", strategy.short, when = short_condition)
+    
+strategy.close("LongPosition", when = close_long)
+strategy.close("ShortPosition", when = close_short)
+
+View in Pine Editor・43 lines
+Use on chart
+8
+6
+1
+3 819
+Sep 17, 2020
+The script uses 3 simple moving averages that you can define (SMA Top, SMA Mid, SMA Long).
+
+Once the SMA Top is above the SMA Mid and the SMA Mid is above the SMA Top a long position is entered.
+
+Once the SMA Top is below the SMA Mid and the SMA Mid is below the SMA Top a short position is entered.
+
+You may define how long before these positions are entered by adjusting the bars in the Inputs section.
+
+A setting of 0 will enter a position as soon as the conditions are met,
+whereas a setting of 5 will wait 5 bars after the conditions are met before entering the positions.
+Sep 22, 2020
+Release Notes
+UPDATING DESCRIPTION / TYPOS
+
+The script uses 3 simple moving averages that you can define ( SMA Top, SMA Mid, SMA Low).
+
+Once the SMA Top is above the SMA Mid and the SMA Mid is above the SMA Low a long position is entered.
+
+Once the SMA Top is below the SMA Mid and the SMA Mid is below the SMA Low a short position is entered.
+
+You may define how long before these positions are entered by adjusting the bars in the Inputs section.
+
+A setting of 0 will enter a position as soon as the conditions are met,
+whereas a setting of 5 will wait 5 bars after the conditions are met before entering the positions.
+Sep 22, 2020
+Release Notes
+Updated the when to close the position as it was improperly set.

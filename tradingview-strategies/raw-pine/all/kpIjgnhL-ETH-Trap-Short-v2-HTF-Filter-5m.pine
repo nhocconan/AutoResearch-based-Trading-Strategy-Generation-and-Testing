@@ -1,0 +1,90 @@
+//@version=5
+strategy("ETH Trap Short v2 (HTF Filter) — 5m", shorttitle="ETH Trap Short v2", overlay=true, pyramiding=0, initial_capital=10000, process_orders_on_close=true, calc_on_order_fills=true, calc_on_every_tick=false)
+
+// =====================
+// Inputs
+// =====================
+lookbackHigh      = input.int(12, "Trap Lookback (bars)", minval=2)
+useSessionFilter  = input.bool(true, "Use Session Filter")
+tradeSession      = input.session("1330-2100", "Session (Exchange Time)")  // exchange-time session window
+
+useHtfFilter      = input.bool(true, "Use HTF Trend Filter (1H EMA200 slope down)")
+htfTf             = input.timeframe("60", "HTF Timeframe")
+htfEmaLen          = input.int(200, "HTF EMA Length", minval=20)
+
+useStops          = input.bool(true, "Use SL/TP")
+slPct             = input.float(0.40, "Stop Loss (%)", step=0.05) / 100.0
+tpPct             = input.float(0.60, "Take Profit (%)", step=0.05) / 100.0
+
+timeStopBars      = input.int(0, "Time Stop (bars, 0=off)", minval=0)
+
+// Optional: avoid dead chop
+useAtrFilter      = input.bool(false, "Use ATR Filter (avoid dead chop)")
+atrLen            = input.int(14, "ATR Length", minval=1)
+atrMinPct         = input.float(0.10, "Min ATR as % of Price", step=0.01) / 100.0
+
+// =====================
+// Session filter
+// =====================
+inSession = (not useSessionFilter) or (not na(time(timeframe.period, tradeSession)))
+
+// =====================
+// HTF filter: EMA200 slope down on higher timeframe
+// =====================
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen))
+htfTrendDown = htfEma < htfEma[1]
+htfOk = (not useHtfFilter) or htfTrendDown
+
+// =====================
+// ATR filter (optional)
+// =====================
+atr = ta.atr(atrLen)
+atrOk = (not useAtrFilter) or (atr / close >= atrMinPct)
+
+// =====================
+// Trap definition (failed breakout above recent high)
+// Use high[1] history for the reference level to avoid using current bar in the level.
+// =====================
+refHigh = ta.highest(high[1], lookbackHigh)
+
+// "Trap" = price wicks above refHigh but closes back below it
+trapShort = (high > refHigh) and (close < refHigh)
+
+// =====================
+// Entry condition
+// =====================
+shortCondition = inSession and htfOk and atrOk and trapShort
+
+if shortCondition
+    strategy.entry("S", strategy.short, alert_message="SELL")
+
+// =====================
+// Exits: SL/TP
+// =====================
+if useStops and strategy.position_size < 0
+    entryPrice = strategy.position_avg_price
+    stopPrice  = entryPrice * (1.0 + slPct)
+    limitPrice = entryPrice * (1.0 - tpPct)
+    strategy.exit("S-exit", from_entry="S", stop=stopPrice, limit=limitPrice, alert_message="CLOSE")
+
+// Optional time stop
+if timeStopBars > 0 and strategy.position_size < 0
+    barsInTrade = bar_index - strategy.opentrades.entry_bar_index(0)
+    if barsInTrade >= timeStopBars
+        strategy.close("S", alert_message="CLOSE")
+
+// =====================
+// Visual helpers
+// =====================
+plot(refHigh, "Ref High (Trap Level)", color=color.new(color.orange, 0), linewidth=1)
+plot(useHtfFilter ? htfEma : na, "HTF EMA200", color=color.new(color.aqua, 0), linewidth=2)
+plotshape(shortCondition, title="Trap Short", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0), text="S")
+
+View in Pine Editor・81 lines
+Use on chart
+1
+4
+560
+ETH 5-minute trap short strategy with higher-timeframe (1H EMA200 slope) regime filter.
+Includes session filter and fixed SL/TP.
+For testing and development only.

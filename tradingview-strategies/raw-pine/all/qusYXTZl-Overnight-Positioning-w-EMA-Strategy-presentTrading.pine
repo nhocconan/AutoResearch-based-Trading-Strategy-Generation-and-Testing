@@ -1,0 +1,212 @@
+//@version=5
+strategy("Overnight Positioning with EMA Confirmation - Strategy [presentTrading]", overlay=true, precision=3, commission_value=0.02, commission_type=strategy.commission.percent, slippage=1, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000)
+
+// Input parameters
+entryMinutesBeforeClose = input.int(20, title="Minutes Before Close to Enter", minval=1)
+exitMinutesAfterOpen = input.int(20, title="Minutes After Open to Exit", minval=1)
+emaLength = input.int(100, title="EMA Length", minval=1)
+emaTimeframe = input.timeframe("240", title="EMA Timeframe")
+useEMA = input.bool(true, title="Use EMA Filter")
+
+// Market Selection Input
+marketSelection = input.string("US", title="Select Market", options=["US", "Asia", "Europe"])
+
+// Timezone for each market
+marketTimezone = marketSelection == "US" ? "America/New_York" :
+                 marketSelection == "Asia" ? "Asia/Tokyo" :
+                 "Europe/London"  // Default to London for Europe
+
+// Market Open and Close Times for each market
+var int marketOpenHour = na
+var int marketOpenMinute = na
+var int marketCloseHour = na
+var int marketCloseMinute = na
+
+if marketSelection == "US"
+    marketOpenHour := 9
+    marketOpenMinute := 30
+    marketCloseHour := 16
+    marketCloseMinute := 0
+else if marketSelection == "Asia"
+    marketOpenHour := 9
+    marketOpenMinute := 0
+    marketCloseHour := 15
+    marketCloseMinute := 0
+else if marketSelection == "Europe"
+    marketOpenHour := 8
+    marketOpenMinute := 0
+    marketCloseHour := 16
+    marketCloseMinute := 30
+
+// 3commas Bot Settings
+emailToken = input.string('', title='Email Token', group='3commas Bot Settings')
+long_bot_id = input.string('', title='Long Bot ID', group='3commas Bot Settings')
+usePairAdjust = input.bool(false, title='Use this pair in PERP', group='3commas Bot Settings')
+selectedExchange = input.string("Binance", title="Select Exchange", group='3commas Bot Settings', options=["Binance", "OKX", "Gate.io", "Bitget"])
+
+// Determine the trading pair based on settings
+var pairString = ""
+if usePairAdjust
+    pairString := str.tostring(syminfo.currency) + "_" + str.tostring(syminfo.basecurrency) + (selectedExchange == "OKX" ? "-SWAP" : "") 
+else
+    pairString := str.tostring(syminfo.currency) + "_" + str.tostring(syminfo.basecurrency)
+
+// Function to check if it's a trading day (excluding weekends)
+isTradingDay(t) =>
+    dayOfWeek = dayofweek(t, marketTimezone)
+    dayOfWeek >= dayofweek.monday and dayOfWeek <= dayofweek.friday
+
+// Function to get the timestamp for market open and close times
+getMarketTimes(t) =>
+    y = year(t, marketTimezone)
+    m = month(t, marketTimezone)
+    d = dayofmonth(t, marketTimezone)
+    marketOpenTime = timestamp(marketTimezone, y, m, d, marketOpenHour, marketOpenMinute, 0)
+    marketCloseTime = timestamp(marketTimezone, y, m, d, marketCloseHour, marketCloseMinute, 0)
+    [marketOpenTime, marketCloseTime]
+
+// Get the current time in the market's timezone
+currentTime = time
+
+// Calculate market times
+[marketOpenTime, marketCloseTime] = getMarketTimes(currentTime)
+
+// Calculate entry and exit times
+entryTime = marketCloseTime - entryMinutesBeforeClose * 60 * 1000
+exitTime = marketOpenTime + exitMinutesAfterOpen * 60 * 1000
+
+// Get EMA data from the specified timeframe
+emaValue = request.security(syminfo.tickerid, emaTimeframe, ta.ema(close, emaLength))
+
+// Entry condition with optional EMA filter
+longCondition = close > emaValue or not useEMA
+
+// Functions to create JSON strings
+getEnterJson() =>
+    '{"message_type": "bot", "bot_id": "' + long_bot_id + '", "email_token": "' + emailToken + '", "delay_seconds": 0, "pair": "' + pairString + '"}'
+
+getExitJson() =>
+    '{"action": "close_at_market_price", "message_type": "bot", "bot_id": "' + long_bot_id + '", "email_token": "' + emailToken + '", "delay_seconds": 0, "pair": "' + pairString + '"}'
+
+// Entry Signal
+entrySignal = isTradingDay(currentTime) and currentTime >= entryTime and currentTime < marketCloseTime and dayofweek(currentTime, marketTimezone) != dayofweek.friday
+
+// Exit Signal
+exitSignal = isTradingDay(currentTime) and currentTime >= exitTime and currentTime < marketCloseTime
+
+// Entry Logic
+if entrySignal and strategy.position_size == 0 and longCondition
+    strategy.entry("Long", strategy.long, alert_message=getEnterJson())
+
+// Exit Logic
+if exitSignal and strategy.position_size > 0
+    strategy.close("Long", alert_message=getExitJson())
+
+// Force Close Logic on Friday before market close
+isFriday = dayofweek(currentTime, marketTimezone) == dayofweek.friday
+if isFriday and currentTime >= marketCloseTime - 5 * 60 * 1000 and strategy.position_size > 0  // Close 5 minutes before market close on Friday
+    strategy.close("Long", comment="Force close on Friday before market close", alert_message=getExitJson())
+
+// Plotting entry and exit points
+plotshape(entrySignal and strategy.position_size == 0 and longCondition, title="Entry", text="Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(exitSignal and strategy.position_size > 0, title="Exit", text="Exit", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+
+// Plot EMA for reference
+plot(useEMA ? emaValue : na, title="EMA", color=color.blue)
+
+View in Pine Editor・125 lines
+Use on chart
+9
+4
+1
+3 447
+I've recently started researching Market Timing strategies, and it’s proving to be quite an interesting area of study. The idea of predicting optimal times to enter and exit the market, based on historical data and various indicators, brings a dynamic edge to trading. Additionally, it is integrated with the 3commas bot for automated trade execution.
+
+I'm still working on it. Welcome to share your point of view.
+
+
+
+█ Introduction and How it is Different
+
+The "Overnight Positioning with EMA " is designed to capitalize on market inefficiencies during the overnight trading period. This strategy takes a position shortly before the market closes and exits shortly after it opens the following day. What sets this strategy apart is the integration of an optional Exponential Moving Average (EMA) filter, which ensures that trades are aligned with the underlying trend. The strategy provides flexibility by allowing users to select between different global market sessions, such as the US, Asia, and Europe.
+
+It is integrated with the 3commas bot for automated trade execution and has a built-in mechanism to avoid holding positions over the weekend by force-closing positions on Fridays before the market closes.
+
+BTCUSD 20 mins Performance
+
+
+
+█ Strategy, How it Works: Detailed Explanation
+
+The core logic of this strategy is simple: enter trades before market close and exit them after market open, taking advantage of potential price movements during the overnight period. Here’s how it works in more detail:
+
+🔶 Market Timing
+The strategy determines the local market open and close times based on the selected market (US, Asia, Europe) and adjusts entry and exit points accordingly. The entry is triggered a specific number of minutes before market close, and the exit is triggered a specific number of minutes after market open.
+
+🔶 EMA Filter
+The strategy includes an optional EMA filter to help ensure that trades are taken in the direction of the prevailing trend. The EMA is calculated over a user-defined timeframe and length. The entry is only allowed if the closing price is above the EMA (for long positions), which helps to filter out trades that might go against the trend.
+
+The EMA formula:
+```
+EMA(t) = [Close(t) * (2 / (n + 1))] + [EMA(t-1) * (1 - (2 / (n + 1)))]
+```
+Where:
+- EMA(t) is the current EMA value
+- Close(t) is the current closing price
+- n is the length of the EMA
+- EMA(t-1) is the previous period's EMA value
+
+🔶 Entry Logic
+The strategy monitors the market time in the selected timezone. Once the current time reaches the defined entry period (e.g., 20 minutes before market close), and the EMA condition is satisfied, a long position is entered.
+
+- Entry time calculation:
+```
+entryTime = marketCloseTime - entryMinutesBeforeClose * 60 * 1000
+```
+
+🔶 Exit Logic
+Exits are triggered based on a specified time after the market opens. The strategy checks if the current time is within the defined exit period (e.g., 20 minutes after market open) and closes any open long positions.
+
+- Exit time calculation:
+
+exitTime = marketOpenTime + exitMinutesAfterOpen * 60 * 1000
+
+
+🔶 Force Close on Fridays
+To avoid the risk of holding positions over the weekend, the strategy force-closes any open positions 5 minutes before the market close on Fridays.
+
+- Force close logic:
+isFriday = (dayofweek(currentTime, marketTimezone) == dayofweek.friday)
+
+
+█ Trade Direction
+
+This strategy is designed exclusively for long trades. It enters a long position before market close and exits the position after market open. There is no shorting involved in this strategy, and it focuses on capturing upward momentum during the overnight session.
+
+█ Usage
+
+This strategy is suitable for traders who want to take advantage of price movements that occur during the overnight period without holding positions for extended periods. It automates entry and exit times, ensuring that trades are placed at the appropriate times based on the market session selected by the user. The 3commas bot integration also allows for automated execution, making it ideal for traders who wish to set it and forget it. The strategy is flexible enough to work across various global markets, depending on the trader's preference.
+
+█ Default Settings
+1. entryMinutesBeforeClose (Default = 20 minutes):
+This setting determines how many minutes before the market close the strategy will enter a long position. A shorter duration could mean missing out on potential movements, while a longer duration could expose the position to greater price fluctuations before the market closes.
+
+2. exitMinutesAfterOpen (Default = 20 minutes):
+This setting controls how many minutes after the market opens the position will be exited. A shorter exit time minimizes exposure to market volatility at the open, while a longer exit time could capture more of the overnight price movement.
+
+3. emaLength (Default = 100):
+The length of the EMA affects how the strategy filters trades. A shorter EMA (e.g., 50) reacts more quickly to price changes, allowing more frequent entries, while a longer EMA (e.g., 200) smooths out price action and only allows entries when there is a stronger underlying trend.
+
+The effect of using a longer EMA (e.g., 200) would be:
+```
+EMA(t) = [Close(t) * (2 / (200 + 1))] + [EMA(t-1) * (1 - (2 / (200 + 1)))]
+```
+
+4. emaTimeframe (Default = 240):
+This is the timeframe used for calculating the EMA. A higher timeframe (e.g., 360) would base entries on longer-term trends, while a shorter timeframe (e.g., 60) would respond more quickly to price movements, potentially allowing more frequent trades.
+
+5. useEMA (Default = true):
+This toggle enables or disables the EMA filter. When enabled, trades are only taken when the price is above the EMA. Disabling the EMA allows the strategy to enter trades without any trend validation, which could increase the number of trades but also increase risk.
+
+6. Market Selection (Default = US):
+This setting determines which global market's open and close times the strategy will use. The selection of the market affects the timing of entries and exits and should be chosen based on the user's preference or geographic focus.

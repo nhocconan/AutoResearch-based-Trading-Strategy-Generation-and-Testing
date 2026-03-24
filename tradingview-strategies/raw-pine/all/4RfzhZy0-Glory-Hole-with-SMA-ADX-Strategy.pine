@@ -1,0 +1,52 @@
+//@version=2
+strategy("Glory Hole with SMA + ADX", overlay=true)
+len = input(20, minval=1, title="SMA")
+src = input(close, title="Source")
+ADXlevel = input(30, minval=1, title="ADX Tradelevel")
+out = sma(src, len)
+
+//adx
+adxlen = input(14, title="ADX Smoothing")
+dilen = input(14, title="DI Length")
+dirmov(len) =>
+    up = change(high)
+    down = -change(low)
+    truerange = rma(tr, len)
+    plus = fixnan(100 * rma(up > down and up > 0 ? up : 0, len) / truerange)
+    minus = fixnan(100 * rma(down > up and down > 0 ? down : 0, len) / truerange)
+    [plus, minus]
+
+adx(dilen, adxlen) => 
+    [plus, minus] = dirmov(dilen)
+    sum = plus + minus
+    adx = 100 * rma(abs(plus - minus) / (sum == 0 ? 1 : sum), adxlen)
+
+sig = adx(dilen, adxlen)
+
+plot(out, title="SMA", color=blue)
+
+bullish = ((out<close) and (out<open) and (out>low) and (sig>ADXlevel))
+bearish = ((out>close) and (out>open) and (out<high) and (sig>ADXlevel))
+
+
+if (bullish)
+    strategy.entry("Buy", strategy.long)
+
+if (bearish)
+    strategy.entry("Sell", strategy.short)
+
+View in Pine Editor・36 lines
+Use on chart
+2
+3
+1
+6
+7 708
+Here you get a script with the rules for "Glory Hole"-Strategy from Linda Raschke.
+
+In Addition, I choose the SMA - not the EMA for this script.
+
+MY RECOMMONDATION:
+If you get a trade Signal, then set an sell- oder buy-order on the high or low. If the next bar doesn't touch into the trade, then delete your order.
+
+Have fun and good look.

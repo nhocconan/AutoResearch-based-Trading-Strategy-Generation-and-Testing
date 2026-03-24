@@ -1,0 +1,93 @@
+//@version=5
+strategy("EMA 19/91 Cross + Candle Confirm + 91 Trend Filter", overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent, commission_value=0.0,
+     calc_on_every_tick=false, process_orders_on_close=true,
+     pyramiding=0)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+fastLen   = input.int(19, "Fast EMA (Entry)", minval=1)
+slowLen   = input.int(91, "Slow EMA (Trend)", minval=1)
+
+useATRExits = input.bool(true, "Use ATR Stop/Target")
+atrLen      = input.int(14, "ATR Length", minval=1)
+atrStopMult = input.float(1.5, "Stop ATR Mult", step=0.1)
+atrTPMult   = input.float(2.0, "Target ATR Mult", step=0.1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Webhook JSON (sent via strategy order alert_message)
+// IMPORTANT: This only works when your TradingView alert message is:
+// {{strategy.order.alert_message}}
+// and the alert type is "Order fills …"
+// ─────────────────────────────────────────────────────────────────────────────
+jsonBuy        = "{\"username\":\"stillo\",\"api_key\":\"7f72e12b50cee6d7\",\"broker\":\"metatrader\",\"account_type\":\"real\",\"symbol\":\"{{ticker}}\",\"action\":\"buy\",\"size\":\"{{strategy.order.contracts}}\",\"execution_mode\":\"mt_native\"}"
+jsonSell       = "{\"username\":\"stillo\",\"api_key\":\"7f72e12b50cee6d7\",\"broker\":\"metatrader\",\"account_type\":\"real\",\"symbol\":\"{{ticker}}\",\"action\":\"sell\",\"size\":\"{{strategy.order.contracts}}\",\"execution_mode\":\"mt_native\"}"
+jsonCloseLong  = "{\"username\":\"stillo\",\"api_key\":\"7f72e12b50cee6d7\",\"broker\":\"metatrader\",\"account_type\":\"real\",\"symbol\":\"{{ticker}}\",\"action\":\"close_long\",\"size\":\"{{strategy.order.contracts}}\",\"execution_mode\":\"mt_native\"}"
+jsonCloseShort = "{\"username\":\"stillo\",\"api_key\":\"7f72e12b50cee6d7\",\"broker\":\"metatrader\",\"account_type\":\"real\",\"symbol\":\"{{ticker}}\",\"action\":\"close_short\",\"size\":\"{{strategy.order.contracts}}\",\"execution_mode\":\"mt_native\"}"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EMAs
+// ─────────────────────────────────────────────────────────────────────────────
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+plot(emaFast, "EMA Fast", linewidth=2)
+plot(emaSlow, "EMA Slow (Trend)", linewidth=2)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conditions
+// ─────────────────────────────────────────────────────────────────────────────
+barConfirmed = barstate.isconfirmed
+
+candleUp   = close > close[1]
+candleDown = close < close[1]
+
+trendLong  = emaFast > emaSlow
+trendShort = emaFast < emaSlow
+
+crossUp   = ta.crossover(emaFast, emaSlow)
+crossDown = ta.crossunder(emaFast, emaSlow)
+
+longEntry  = barConfirmed and crossUp and trendLong and candleUp
+shortEntry = barConfirmed and crossDown and trendShort and candleDown
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entries + reversal-safe close messages
+// ─────────────────────────────────────────────────────────────────────────────
+if longEntry
+    if strategy.position_size < 0
+        strategy.close("Short", alert_message=jsonCloseShort)
+    strategy.entry("Long", strategy.long, alert_message=jsonBuy)
+
+if shortEntry
+    if strategy.position_size > 0
+        strategy.close("Long", alert_message=jsonCloseLong)
+    strategy.entry("Short", strategy.short, alert_message=jsonSell)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Optional Exits (ATR-based) + close messages
+// ─────────────────────────────────────────────────────────────────────────────
+atr = ta.atr(atrLen)
+
+if useATRExits
+    longStop  = strategy.position_avg_price - atrStopMult * atr
+    longLimit = strategy.position_avg_price + atrTPMult   * atr
+    strategy.exit("Long Exit", from_entry="Long", stop=longStop, limit=longLimit, alert_message=jsonCloseLong)
+
+    shortStop  = strategy.position_avg_price + atrStopMult * atr
+    shortLimit = strategy.position_avg_price - atrTPMult   * atr
+    strategy.exit("Short Exit", from_entry="Short", stop=shortStop, limit=shortLimit, alert_message=jsonCloseShort)
+
+// Visual signals
+plotshape(longEntry,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, text="L")
+plotshape(shortEntry, title="Short Signal", style=shape.triangledown, location=location.abovebar, size=size.tiny, text="S")
+if barstate.isconfirmed
+    alert("PING", alert.freq_once_per_bar_close)
+
+View in Pine Editor・87 lines
+Use on chart
+1
+381
+Simple Average Strategy Gives signal to buy and sell u wukll get another warning no doubt but i cannot add alert untill it is published

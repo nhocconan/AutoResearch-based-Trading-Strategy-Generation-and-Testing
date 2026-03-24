@@ -1,0 +1,128 @@
+//@version=5
+strategy("Shock Gap Bot [Original + RSI + Levels]", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, process_orders_on_close=true)
+
+// ==========================================
+// 1. INPUTS & SETTINGS
+// ==========================================
+// Gap Settings (Lowered default to 0.3% so you get trades!)
+min_gap_pct   = input.float(0.3, "Min Gap %", step=0.1)
+max_gap_pct   = input.float(10.0, "Max Gap %", step=0.5)
+
+// RSI Filter (Toggle this OFF if you still see no trades)
+use_rsi       = input.bool(true, "Use RSI Filter?")
+rsi_len       = input.int(14, "RSI Length")
+rsi_ob        = input.int(70, "RSI Overbought (Shorts)")
+rsi_os        = input.int(30, "RSI Oversold (Longs)")
+
+// Entry & Risk Management
+entry_buffer  = input.float(0.02, "Entry Buffer ($)")
+sl_buffer     = input.float(0.01, "Stop Loss Buffer ($)")
+trail_pct     = input.float(1.5, "Trailing Stop %")
+
+// Timezone (Fixed for UK)
+ny_timezone   = "America/New_York"
+
+// ==========================================
+// 2. DAILY LEVELS (VISUAL ONLY)
+// ==========================================
+// We fetch these levels to DRAW them, but we don't force the bot to use them as blockers.
+d_high  = request.security(syminfo.tickerid, "D", high[1])
+d_low   = request.security(syminfo.tickerid, "D", low[1])
+d_close = request.security(syminfo.tickerid, "D", close[1])
+d_rsi   = request.security(syminfo.tickerid, "D", ta.rsi(close, rsi_len)[1])
+
+// PLOT RESISTANCE & SUPPORT
+plot(d_high, "Yesterday's High (Resist)", color=color.new(color.red, 30), linewidth=2)
+plot(d_low, "Yesterday's Low (Support)", color=color.new(color.green, 30), linewidth=2)
+
+// ==========================================
+// 3. CAPTURE THE OPEN (NY TIME)
+// ==========================================
+is_ny_open = time(timeframe.period, "0930-0935", ny_timezone) 
+is_session = time(timeframe.period, "0930-1600", ny_timezone)
+
+var float orb_high = na
+var float orb_low  = na
+var float orb_open = na
+
+// Reset triggers daily
+if ta.change(time("D", ny_timezone))
+    orb_high := na
+    orb_low  := na
+    orb_open := na
+
+// Capture First Candle Range
+if is_ny_open
+    orb_high := high
+    orb_low  := low
+    orb_open := open
+
+// Calculate Gap %
+gap_pct = ((orb_open - d_close) / d_close) * 100
+
+// ==========================================
+// 4. STRATEGY LOGIC
+// ==========================================
+// 1. Gap Size Check
+valid_size_up   = gap_pct >= min_gap_pct and gap_pct <= max_gap_pct
+valid_size_down = gap_pct <= -min_gap_pct and gap_pct >= -max_gap_pct
+
+// 2. RSI Check (If enabled)
+rsi_ok_long  = use_rsi ? (d_rsi < rsi_os) : true
+rsi_ok_short = use_rsi ? (d_rsi > rsi_ob) : true
+
+// Combine Logic (Notice we removed the "Shock Mode" strictness to get more trades)
+setup_long  = valid_size_up and rsi_ok_long
+setup_short = valid_size_down and rsi_ok_short
+
+// ==========================================
+// 5. EXECUTION
+// ==========================================
+if is_session and not is_ny_open
+    
+    // LONG TRADES
+    if setup_long and strategy.position_size == 0
+        entry_price = orb_high + entry_buffer
+        stop_price  = orb_low - sl_buffer
+        
+        strategy.entry("Long Gap", strategy.long, stop=entry_price)
+        strategy.exit("Exit Long", "Long Gap", stop=stop_price, trail_points=close * (trail_pct/100) / syminfo.mintick)
+
+    // SHORT TRADES
+    if setup_short and strategy.position_size == 0
+        entry_price = orb_low - entry_buffer
+        stop_price  = orb_high + sl_buffer
+        
+        strategy.entry("Short Gap", strategy.short, stop=entry_price)
+        strategy.exit("Exit Short", "Short Gap", stop=stop_price, trail_points=close * (trail_pct/100) / syminfo.mintick)
+
+// Close at 15:55 NY Time
+if time(timeframe.period, "1555-1600", ny_timezone)
+    strategy.close_all(comment="EOD")
+
+// ==========================================
+// 6. VISUAL TRIGGERS
+// ==========================================
+// Show the specific Trigger Levels (Entry Points)
+plot(orb_high, "Entry High", color=color.green, style=plot.style_circles)
+plot(orb_low, "Entry Low", color=color.red, style=plot.style_circles)
+
+View in Pine Editor・108 lines
+Use on chart
+1
+3
+465
+Feb 1
+Shock Gap bot this to provide entry for pre market stocks , so you can get the bounce back
+Feb 1
+Release Notes
+update timezone issue
+Feb 1
+Release Notes
+added RSI details
+Shorts: The bot checks yesterday's Daily RSI. If it was above 70 (Overbought), it confirms the stock is extended. If the stock then "Gaps Down" today, the bot treats this as a high-probability reversal and allows the trade.
+
+Longs: It checks if yesterday's Daily RSI was below 30 (Oversold). If the stock then "Gaps Up" today, it signals a "snap back" rally.
+Feb 1
+Release Notes
+gone back to old school

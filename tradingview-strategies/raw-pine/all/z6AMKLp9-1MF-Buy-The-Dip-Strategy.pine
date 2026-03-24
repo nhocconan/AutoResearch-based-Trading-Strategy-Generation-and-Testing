@@ -1,0 +1,118 @@
+//@version=6
+strategy("1MF Buy The Dip - Levels", overlay = true, calc_on_every_tick = true)
+
+var int days = input.int(21, "Bars Back")
+var int discount1Perc = input.int(10, "First Discount Percentage")
+var int discount2Perc = input.int(25, "Second Discount Percentage")
+var int discount3Perc = input.int(50, "Third Discount Percentage")
+var int discount4Perc = input.int(70, "Fourth Discount Percentage")
+var bool showExtendedLines = input.bool(true, "Show Extended Lines")
+var float level1Shares = input.float(1, "Initial Shades @ Level 1")
+var float level2Shares = input.float(1, "Initial Shades @ Level 2")
+var float level3Shares = input.float(2, "Initial Shades @ Level 3")
+var float level4Shares = input.float(2, "Initial Shades @ Level 4")
+var bool useShares = input.bool(true, "Use Shares, otherwise use the strategy properties for size")
+
+var float previousHigh = 0
+var float currentDrop = 0
+var float discount = 0
+var string discountText = ""
+
+previousHigh := ta.highest(high, days)
+currentDrop := previousHigh - close
+discount := currentDrop / previousHigh * 100
+discountText := str.tostring(discount, "#.00") + "% Discount"
+
+var float discountLevel1 = 0
+var float discountLevel2 = 0
+var float discountLevel3 = 0
+var float discountLevel4 = 0
+var line discountLine1 = na
+var line discountLine2 = na
+var line discountLine3 = na
+var line discountLine4 = na
+
+discountLevel1 := previousHigh - (previousHigh * discount1Perc / 100)
+discountLevel2 := previousHigh - (previousHigh * discount2Perc / 100)
+discountLevel3 := previousHigh - (previousHigh * discount3Perc / 100)
+discountLevel4 := previousHigh - (previousHigh * discount4Perc / 100)
+
+var label discountInfo = label.new(na, na, text="", style=label.style_none, textcolor=color.black, size=size.large)
+
+plot(previousHigh, title="Previous High", color=color.black, linewidth=2)
+plot(discount, title="Discount %", color=color.black, display=display.status_line)
+plot(discountLevel1, title="Discount 1", linewidth=2, color=color.blue)
+plot(discountLevel2, title="Discount 2", linewidth=2, color=color.green)
+plot(discountLevel3, title="Discount 3", linewidth=2, color=color.lime)
+plot(discountLevel4, title="Discount 4", linewidth=2, color=color.orange)
+
+if barstate.islast and discount > 0
+    label.set_xy(discountInfo, bar_index + 10, close)
+    label.set_text(discountInfo, discountText)
+    line.delete(discountLine1)
+    line.delete(discountLine2)
+    line.delete(discountLine3)
+    line.delete(discountLine4)
+    if showExtendedLines
+        line.new(x1=bar_index[1], x2=bar_index, y1=discountLevel1, y2=discountLevel1, color=color.blue, extend=extend.right, width=2)
+        line.new(x1=bar_index[1], x2=bar_index, y1=discountLevel2, y2=discountLevel2, color=color.green, extend=extend.right, width=2)
+        line.new(x1=bar_index[1], x2=bar_index, y1=discountLevel3, y2=discountLevel3, color=color.lime, extend=extend.right, width=2)
+        line.new(x1=bar_index[1], x2=bar_index, y1=discountLevel4, y2=discountLevel4, color=color.orange, extend=extend.right, width=2)
+
+var float tp = na
+var bool ordersPlaced = false
+
+// Reset when position is fully closed
+if strategy.position_size == 0 and ordersPlaced
+    strategy.cancel_all()
+    ordersPlaced := false
+    tp := na
+
+// Place all 4 limit orders once when price first reaches Level 1
+if close <= discountLevel1 and not ordersPlaced
+    tp := previousHigh
+
+    if useShares
+        strategy.order("L1", strategy.long, limit=discountLevel1, qty = level1Shares)
+        strategy.order("L2", strategy.long, limit=discountLevel2, qty = level2Shares)
+        strategy.order("L3", strategy.long, limit=discountLevel3, qty = level3Shares)
+        strategy.order("L4", strategy.long, limit=discountLevel4, qty = level4Shares)
+
+    else
+        strategy.order("L1", strategy.long, limit=discountLevel1)
+        strategy.order("L2", strategy.long, limit=discountLevel2)
+        strategy.order("L3", strategy.long, limit=discountLevel3)
+        strategy.order("L4", strategy.long, limit=discountLevel4)
+
+
+    ordersPlaced := true
+
+// Exit all positions at previous high
+if strategy.position_size > 0
+    strategy.exit("TP", limit=tp)
+
+View in Pine Editor・95 lines
+Use on chart
+1
+2
+458
+This is the indicator "1MF Buy The Dip - Levels" but made a strategy so you can backtest the usage on each levels.
+
+There are 2 ways to enter:
+BY QUANTITY
+If Use Shares option is enabled, the amount of shares to open on each level will come from the values above. If it's disabled, then it will use whatever settings you did on the Properties Tab.
+
+The strategy works the following way:
+10% discount - a position is open, targeting the previous high
+25% discount - another position is open to price average, targeting the same highs.
+50% discount & %70% discount, other positions will be opened, targeting the same highs.
+
+The volume of these positions will depend on the Shares Levels you defined (if Use Shares option is enabled), otherwise, on whatever settings you have setup on the Properties tab (percentage, amount, or shares itself).
+
+It's a Buy the Dip and hold, so there's no stop loss as its expected to be an investing strategy instead of a trading strategy.
+
+The look back bars amount is defaulted on 21, which represents 21 days on the daily timeframe (1-month = 30 days high), and from it will start calculating the discount down.
+
+You can play with those numbers to see which one is the best efficient for each stock historically.
+
+Any question, leave it below.

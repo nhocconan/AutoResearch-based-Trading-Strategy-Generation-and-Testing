@@ -1,0 +1,199 @@
+//@version=6
+strategy("Supertrend AT v1.0", overlay=true, fill_orders_on_standard_ohlc = true,
+ commission_value = 0.05, commission_type = strategy.commission.percent,
+ default_qty_type = strategy.percent_of_equity, default_qty_value = 100,
+ process_orders_on_close = true,
+ margin_long = 0.1, margin_short = 0.1,
+ pyramiding = 1)
+import TradingView/ta/10
+
+//input
+start_time = input.time(timestamp("2000-01-01 09:00 +09:00"), title = "START", group = "Auto Trade Setting", display = display.none)
+end_time = input.time(timestamp("2099-12-31 09:00 +09:00"), title = "END", group = "Auto Trade Setting", display = display.none)
+commission_value = input.float(0.05, title = "commission(%)", group = "Auto Trade Setting", tooltip = "Please enter the same commission in the properties tab.\n속성탭에 커미션도 동일하게 입력해주세요.", display = display.none)/100
+round = input.int(4, title = "market decimal place", group = "Auto Trade Setting", tooltip = "If the minimum trading unit of the exchange is '0.0001', it is 4, and if it is '0.001', it is 3.\n거래소의 최소 거래 단위가 '0.0001'이면 4이고, '0.001'이면 3입니다.", display = display.none)
+RPT = input.float(2, title = "RPT(%)", group = "Auto Trade Setting", tooltip = "Risk per transaction, reduction ratio to total capital to bear losses in one transaction\n거래당 위험, 1회 거래시 손해를 감수할 전체 자본에 대한 감소 비율")/100
+RR = input.float(3, title = "RR", group = "Auto Trade Setting", step = 0.1, tooltip = "Profit and Loss ratio, the ratio of profits to losses\n손익비, 손해금에 대한 익절금의 비율")
+Long = input.bool(true, title = "LONG POSITION /", group = "Auto Trade Setting", inline = "1")
+Short = input.bool(false, title = "SHORT POSITION", group = "Auto Trade Setting", inline = "1")
+
+supertrend_factor = input.float(3, title = "Factor", display = display.none, group = "Supertrend", inline = "1")
+supertrend_length = input.int(10, title = "Length", display = display.none, group = "Supertrend", inline = "1")
+
+show_readme = input.bool(false, title = "Show Guide", group = "ETC..", inline = "readme")
+guide_language = input.string("English", title = "", options = ["English","한국어"], group = "ETC..", inline = "readme", display = display.none)
+English = guide_language == "English"
+
+//variable
+var float long_stop = na
+var float short_stop = na
+
+var float entry_price = na
+var float stop_price = na
+var float target_prcie = na
+
+//indicator
+[supertrend, dir] = ta.supertrend(supertrend_factor, supertrend_length)
+
+if dir > 0
+    if na(long_stop)
+        long_stop := low
+    else if low < long_stop
+        long_stop := low
+else
+    long_stop := na
+
+if dir < 0
+    if na(short_stop)
+        short_stop := high
+    else if high > short_stop
+        short_stop := high
+else
+    short_stop := na
+
+//strategy
+if time >= start_time and time < end_time
+    if strategy.opentrades == 0
+        stop_price := na
+        target_prcie := na
+        entry_price := na
+
+    if dir < 0 and dir[1] > 0 and strategy.opentrades == 0 and Long
+        qty = math.round((strategy.equity * RPT) / ((close - long_stop[1]) + (close + long_stop[1]) * commission_value), round)
+        limit = (strategy.equity * RPT * RR / qty + close * (1 + commission_value)) / (1 - commission_value)
+        stop_price := long_stop[1]
+        target_prcie := limit
+        entry_price := close
+        strategy.entry("Long", strategy.long, comment = English ? "LONG Entry" : "롱 진입", qty = qty)
+        strategy.exit("Long_Exit", "Long", limit = limit, stop = long_stop[1], comment_profit = English ? "LONG Profit" : "롱 익절", comment_loss = English ? "LONG Loss" : "롱 손절")
+
+
+    if dir > 0 and dir[1] < 0 and strategy.opentrades == 0 and Short
+        qty = math.round(strategy.equity * RPT / ((short_stop[1] - close) + (close + short_stop[1]) * commission_value), round)
+        limit = (close * (1 - commission_value) - strategy.equity * RPT * RR / qty) / (1 + commission_value)
+        stop_price := short_stop[1]
+        target_prcie := limit
+        entry_price := close
+        strategy.entry("Short", strategy.short, qty = qty, comment = English ? "SHORT Entry" : "숏 진입")
+        strategy.exit("Short_Exit","Short", limit = limit, stop = short_stop[1], comment_profit = English ? "SHORT Profit" : "숏 익절", comment_loss = English ? "SHORT Loss" : "숏 손절")
+
+if time >= end_time and time[1] < end_time
+    alert("Auto Trade Termination", freq = alert.freq_once_per_bar)
+
+//plot
+plot(dir > 0 ? supertrend : na, color = color.rgb(255, 0, 0), style = plot.style_linebr, display = display.pane, linewidth = 2, title = "Down trend")
+plot(dir < 0 ? supertrend : na, color = color.rgb(0, 255, 0), style = plot.style_linebr, display = display.pane, linewidth = 2, title = 'Up trend')
+
+plot(entry_price, title = "Entry Price", color = color.yellow, style = plot.style_steplinebr)
+plot(target_prcie, title = "Target Price", color = color.green, style = plot.style_steplinebr)
+plot(stop_price, title = "Stop Price", color = color.red, style = plot.style_steplinebr)
+
+//label
+var label target_label = label.new(na, na, English ? "Target Price" : "목표가", style = label.style_label_left, color = color.rgb(0,0,0,100), size = size.small, textcolor = color.green)
+var label entry_label = label.new(na, na, English ? "Entry Price" : "진입가", style = label.style_label_left, color = color.rgb(0,0,0,100), size = size.small, textcolor = color.yellow)
+var label stop_label = label.new(na, na, English ? "Stop Price" : "손절가", style = label.style_label_left, color = color.rgb(0,0,0,100), size = size.small, textcolor = color.red)
+
+label.set_xy(target_label, bar_index, target_prcie)
+label.set_xy(entry_label, bar_index, entry_price)
+label.set_xy(stop_label, bar_index, stop_price)
+
+//table
+var table info = table.new(position = position.bottom_right, columns = 2, rows = 2, frame_width = 2, border_width = 2)
+table.cell(info, 0, 0, text = English ? "Current Open Profit" : "현재 포지션 이익", text_color = chart.fg_color, text_halign = text.align_right)
+table.cell(info, 1, 0, text = str.tostring(math.round(strategy.openprofit, 4)), text_color = strategy.openprofit > 0 ? color.green : color.red, text_halign = text.align_left)
+table.cell(info, 0, 1, text = English ? "Current Equity" : "현재 자본가치", text_color = chart.fg_color, text_halign = text.align_right)
+table.cell(info, 1, 1, text = str.tostring(math.round(strategy.equity, 4)), text_color = chart.fg_color, text_halign = text.align_left)
+
+if show_readme
+    var table readme = table.new(position = position.middle_right, columns = 1, rows = 10, bgcolor = color.white, border_width = 2, border_color = color.black)
+
+    text_readme = English ? "Guide" : "설명서"
+
+    text_terminology_1 = English ? "📘Term\n\n" : "📘용어\n\n"
+    text_terminology_2 = English ? "RPT : Risk per transaction, reduction ratio to total capital to bear losses in one transaction\n" : "RPT : 거래당 위험, 1회 거래시 손해를 감수할 전체 자본에 대한 감소 비율\n"
+    text_terminology_3 = English ? "RR : Profit and Loss ratio, the ratio of profits to losses" : "RR : 손익비, 손해금에 대한 익절금의 비율"
+
+    text_strategy_1 = English ? "📕Strategy Overview\n\n" : "📕전략 개요\n\n"
+    text_strategy_2 = English ? "This strategy is an entry strategy in the event of a trend shift based on the 'Supertrend' auxiliary indicator.\n" : "이 전략은 'Supertrend' 보조지표를 기반으로 한 추세 전환 시 진입 전략입니다.\n"
+    text_strategy_3 = English ? "  ● Entering LONG position when Supertrend Turns From Downward To Upward\n" : "  ● Supertrend가 하락추세에서 상승추세로 전환될 때 LONG 포지션 진입\n"
+    text_strategy_4 = English ? "  ● Entering Short Position When Supertrend Turns From Upward To Downward\n" : "  ● Supertrend가 상승추세에서 하락추세으로 전환될 때 숏 포지션 진입\n"
+    text_strategy_5 = English ? "Losses and profits are set according to the specified profit and loss ratio and the stop level based on the previous Supertrend." : "손절과 익절은 지정된 손익비 및 직전 Supertrend 기준 스탑 레벨에 따라 설정됩니다."
+    
+    //text_readme_4 = "\n◆ "
+    text_readme_1 = English ? "📗Read!\n\n" : "📗읽어보세요!\n\n"
+    text_readme_2 = English ? "◆ The entry quantity is calculated to be equal to the total asset * risk per transaction in the event of a loss (including transaction fees)\n" : "◆ 진입 수량은 손절시 전체 자산 * 거래당 위험만큼의 손해가 되도록 계산됩니다.(거래 수수료 포함하여 계산)\n"
+    text_readme_3 = English ? "◆ The target price is calculated based on the actual loss and profit/loss ratio (including transaction fees), not on the price difference" : "◆ 목표가는 가격 차이가 아닌, 실제 손해금와 실제 수익금의 손익비에 맞추어 계산됩니다.(거래수수료포함)"
+    text_readme_4 = English ? "\n◆ Please set it up well because it includes calculations considering exchange fees! (Check input tab, properties tab)" : "\n◆ 거래소 수수료를 고려한 계산이 포함되어 있기때문에 설정을 잘해주세요!(인풋탭, 속성탭 확인)"
+    text_readme_5 = English ? "\n◆ In automatic transactions, you need to accurately match the number of decimal places on the exchange to operate normally." : "\n◆ 자동매매시에는 거래소 소수점 자리수를 정확히 맞춰주셔야 정상 작동합니다."
+    text_readme_6 = English ? "\n     └ If the signal quantity is less than the minimum unit of the exchange, the exchange recognizes it as an error." : "\n    └ 시그널 수량이 거래소 최소단위보다 작은 경우 거래소에서 오류로 인식합니다."
+
+    table.cell(readme, 0, 0, text = text_readme, text_color = color.rgb(0, 0, 0), text_halign = text.align_center, text_valign = text.align_center, text_formatting = text.format_bold)
+    table.cell(readme, 0, 1, text = text_terminology_1+text_terminology_2+text_terminology_3, text_color = color.rgb(0, 0, 0), text_halign = text.align_left)
+    table.cell(readme, 0, 2, text = text_strategy_1+text_strategy_2+text_strategy_3+text_strategy_4+text_strategy_5, text_color = color.rgb(0, 0, 0), text_halign = text.align_left)
+    table.cell(readme, 0, 3, text = text_readme_1+text_readme_2+text_readme_3+text_readme_4+text_readme_5+text_readme_6, text_color = color.rgb(0, 0, 0), text_halign = text.align_left)
+
+//Long
+//(진입가 - 손절가) * 수량 + (진입가 + 손절가) * 수수료 * 수량 = 자산 * RPT
+//((진입가 - 손절가) + (진입가 + 손절가) * 수수료) * 수량 = 자산 * RPT
+//수량 = 자산 * RPT / ((진입가 - 손절가) + (진입가 + 손절가) * 수수료)
+
+//(익절가 - 진입가) * 수량 - (익절가 + 진입가) * 수수료 * 수량 = 자산 * RPT * RR
+//익절가 - 진입가 - 익절가 * 수수료 - 진입가 * 수수료 = 자산 * RPT * RR / 수량
+//익절가 * (1 - 수수료) - 진입가 * (1 + 수수료) = 자산 * RPT * RR / 수량
+//익절가 = (자산 * RPT * RR / 수량 + 진입가 * (1 + 수수료)) / (1 - 수수료)
+
+
+//Short
+//(손절가 - 진입가) * 수량 + (진입가 + 손절가) * 수수료 * 수량 = 자산 * RPT
+//((손절가 - 진입가) + (진입가 + 손절가) * 수수료) * 수량 = 자산 * RPT
+//수량 = 자산 * RPT / ((손절가 - 진입가) + (진입가 + 손절가) * 수수료)
+
+//(진입가 - 익절가) * 수량 - (진입가 + 익절가) * 수수료 * 수량 = 자산 * RPT * RR
+//진입가 - 익절가 - 진입가 * 수수료 - 익절가 * 수수료 = 자산 * RPT * RR / 수량
+//진입가 * (1-수수료) - 익절가*(1 + 수수료) = 자산 * RPT * RR / 수량
+//진입가 * (1-수수료) - 자산 * RPT * RR / 수량 = 익절가*(1 + 수수료)
+//익절가 = (진입가 * (1-수수료) - 자산 * RPT * RR / 수량) / (1 + 수수료)
+
+View in Pine Editor・158 lines
+Use on chart
+2
+3
+1 257
+### Overview
+"Supertrend AT v1.0" is an automated trading strategy based on the Supertrend indicator, designed to detect trend reversals and execute entries accordingly. This script supports both **long and short** positions and includes customizable risk management features such as **RPT (Risk Per Trade)** and **RR (Risk/Reward ratio)**.
+
+### Key Features
+- 📈 **Supertrend-based Entry Logic**:
+- Enters a **long position** when the Supertrend flips from red to green (downtrend → uptrend).
+- Enters a **short position** when the Supertrend flips from green to red (uptrend → downtrend).
+- 💰 **Auto-Calculated Position Sizing**:
+- Quantity is automatically calculated to ensure that loss per trade (including commission) matches the specified risk percentage (RPT).
+- 🎯 **Take-Profit and Stop-Loss**:
+- Both targets are dynamically computed using the RR ratio and account for commission fees.
+- 📊 **Visual Elements**:
+- Entry, stop, and target prices are plotted on the chart.
+- Real-time PnL and account equity are shown in a dashboard.
+- Optional on-screen README guide explains the strategy and key terms.
+
+### Inputs
+- **RPT (%)**: Risk per transaction (based on account equity).
+- **RR**: Reward-to-risk ratio.
+- **Commission (%)**: Used in all calculations (must match the Properties tab).
+- **Supertrend Settings**: Adjustable factor and length.
+- **Market Decimal Places**: For accurate quantity rounding according to exchange rules.
+- **Time Filter**: Set start and end time for trading logic activation.
+
+### Risk Management Logic
+This strategy calculates trade size and targets using a formula that considers both the price distance between entry and stop-loss and the effect of commission fees. This ensures:
+- Consistent risk across trades
+- Realistic take-profit levels
+- Exchange-compliant order quantities
+
+### Notes
+- ⚠️ Be sure to set the **correct commission rate** and **decimal precision** for your exchange.
+- ⚠️ If trade quantity is smaller than your exchange’s minimum unit, orders may be rejected.
+- 🔧 For strategy to behave as intended in automation, double-check both **input tab** and **Properties tab** settings.
+
+### Disclaimer
+This strategy is for educational and research purposes only. It does not constitute financial advice. Always test on paper before using in a live environment.
+

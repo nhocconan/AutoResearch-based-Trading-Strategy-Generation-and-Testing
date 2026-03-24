@@ -1,0 +1,27 @@
+//@version=3
+strategy(title="Moving Average Mean Reversion Strategy", shorttitle="MA-MR", overlay=true)
+len = input(20, minval=1, title="Length")
+src = input(close, title="Source")
+out = sma(src, len)
+// plot(out*1.1, color=green, title="MA")
+// plot(out*0.9, color=green, title="MA")
+// plot(out, color=blue, title="MA")
+// plot(close, color=red, title="Close")
+
+upper_bound = out * 1.1
+lower_bound = out * 0.9
+
+if crossunder(close, lower_bound)
+    strategy.entry("buy", strategy.long, comment="MR-LE")
+
+if crossover(close, upper_bound)
+    strategy.entry("sell", strategy.short, comment="MR-SE")
+
+View in Pine Editor・18 lines
+Use on chart
+3
+4
+7
+4
+10 046
+A basic mean-reversion strategy. Shorts when the close is 10% above the MA, and goes long when it's 10% below the MA.

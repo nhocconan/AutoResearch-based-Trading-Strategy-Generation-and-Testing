@@ -1,0 +1,225 @@
+//@version=5
+strategy('Market Open Impulse [LuciTech]',
+ overlay=true,
+ max_bars_back=500,
+ max_lines_count=3,
+ initial_capital=100000,
+ default_qty_type=strategy.percent_of_equity,
+ default_qty_value=100)
+ 
+//---strategy---
+//ToolTips
+sltip = 'Defines the stop-loss length based on candles. 0 means 1 candle, 1 means 2 candles, and so on.'
+betip = 'Enter the R multiple at which the stop loss moves to breakeven. 0 means breakeven is disabled.'
+rrtip = 'The risk-reward ratio determines the relationship between potential reward and risk. For example, 3 means risking 1 unit to gain 3 units.'
+risk_percent_tip = 'The percentage of your equity that you are willing to risk per trade.'
+sl_type_tip = 'Choose the stop-loss calculation type: ATR-based or Candle-based.'
+ATRlength_tip = 'The number of periods used to calculate the Average True Range (ATR).'
+smoothing_tip = 'Choose the smoothing method for ATR: RMA, SMA, EMA, or WMA.'
+ATRlines_tip = 'Enable or disable plotting of ATR-based stop-loss lines.'
+fillcolour_tip = 'Select the background color to visually indicate the active time filter range on the chart.'
+impulse_tip = 'Minimum ATR multiple required for candle to be considered impulsive.'
+
+//Time filter inputs
+start_hour = input.int(defval=14, title='Market Open Hour (24h)', minval=0, maxval=23, group = 'Time Filter')
+start_minute = input.int(defval=30, title='Market Open Minute', minval=0, maxval=59, group = 'Time Filter')
+showFill = input.bool(defval=false, title="Fill Background", inline = 'colour1', group = 'Time Filter')
+fillColor = input.color(color.rgb(192, 192, 192, 90), title='', inline = 'colour1', group = 'Time Filter')
+
+//Strategy Inputs
+impulse_multiplier = input.float(1.5, title="Impulse ATR Multiple", minval=0.5, maxval=5.0, step=0.1, tooltip=impulse_tip, group = 'Strategy Settings')
+show_impulse_candles = input.bool(true, title="Highlight Impulse Candles", group = 'Strategy Settings')
+
+//Risk Management Inputs
+risk_percent = input.float(1, title="Risk %", minval=0.1, maxval=100, group = 'Risk Management', tooltip=risk_percent_tip) / 100
+Risk_reward = input.float(defval=3, title='Risk:Reward', minval=1, maxval=10, step=0.1, tooltip=rrtip, group = 'Risk Management')
+breakeven = input.float(2.0, title="Breakeven at R", minval=0.0, step=0.1, tooltip=betip, group = 'Risk Management')
+sl_type = input.string("Candle", title="Stop Loss Type", options=["ATR", "Candle"], tooltip=sl_type_tip, group = 'Risk Management')
+SL_length = input(0, title='Candle Length', tooltip=sltip, group = 'Risk Management')
+ATRlength = input.int(title='ATR length', defval=14, minval=1, tooltip=ATRlength_tip, group = 'Risk Management')
+smoothing = input.string(title='ATR Smoothing/ATR Lines', defval='SMA', options=['RMA', 'SMA', 'EMA', 'WMA'], tooltip=smoothing_tip, group = 'Risk Management')
+ATRlines = input(false, 'Show ATR Lines', tooltip=ATRlines_tip, group = 'Risk Management')
+ATRMulti = input.float(0.5, 'ATR Multi', step=0.1, group = 'Risk Management')
+
+//Position Colour Inputs
+entrypricecolour = input.color(color.rgb(244, 244, 244, 75), title = 'Entry/SL/TP', group = 'Position colours', inline = 'peb')
+stoplosscolour = input.color(color.rgb(255, 0, 0, 75), title = '',group = 'Position colours' ,inline = 'peb')
+takeprofitcolour = input.color(color.rgb(0, 255, 0, 75), title = '',group = 'Position colours' ,inline = 'peb')
+impulse_candle_color = input.color(color.rgb(128, 0, 128, 70), title = 'Impulse Candle', group = 'Position colours')
+
+//ATR SL
+ma_function(source, ATRlength) =>
+    if smoothing == 'RMA'
+        ta.rma(source, ATRlength)
+    else
+        if smoothing == 'SMA'
+            ta.sma(source, ATRlength)
+        else
+            if smoothing == 'EMA'
+                ta.ema(source, ATRlength)
+            else
+                ta.wma(source, ATRlength)
+
+a = ma_function(ta.tr(true), ATRlength) * ATRMulti
+x = ma_function(ta.tr(true), ATRlength) * ATRMulti + high
+x2 = low - ma_function(ta.tr(true), ATRlength) * ATRMulti
+p1 = plot(ATRlines ? x : na, title='ATR Short Stop Loss', color=stoplosscolour, trackprice=ATRlines)
+p2 = plot(ATRlines ? x2 : na, title='ATR Long Stop Loss', color=takeprofitcolour, trackprice=ATRlines)
+
+// Time filter function for market open at 2:30 PM UK time
+is_market_open_candle() =>
+    current_hour = hour(time, 'Europe/London')
+    current_minute = minute(time, 'Europe/London')
+    current_hour == start_hour and current_minute == start_minute
+
+inTimeRange = is_market_open_candle()
+var color bgColor = na
+bgColor := showFill and inTimeRange ? fillColor : na
+bgcolor(bgColor)
+
+//---Calculations---
+
+// Calculate ATR for impulse detection
+atr_value = ma_function(ta.tr(true), ATRlength)
+
+// Check if current candle is impulsive
+candle_range = high - low
+is_impulsive_candle = candle_range >= (atr_value * impulse_multiplier)
+
+// Check if candle closed above/below significant levels
+// For bullish impulse: candle closes above its midpoint and is impulsive
+// For bearish impulse: candle closes below its midpoint and is impulsive
+candle_midpoint = (high + low) / 2
+bullish_impulse = close > candle_midpoint and is_impulsive_candle and close > open
+bearish_impulse = close < candle_midpoint and is_impulsive_candle and close < open
+
+// Strategy conditions - only trigger at market open time
+longCondition = inTimeRange and bullish_impulse
+shortCondition = inTimeRange and bearish_impulse
+
+// Highlight impulse candles
+barcolor(show_impulse_candles and is_impulsive_candle and inTimeRange ? impulse_candle_color : na)
+
+//---strategy---
+var float stop_level = na
+var float target_level = na
+var float entry_price = na
+var float initial_stop = na
+var bool moved_to_breakeven = false
+
+calculate_position_size(stop_distance) =>
+    if stop_distance > 0
+        risk_amount = strategy.equity * risk_percent
+        position_size = risk_amount / stop_distance
+        math.floor(position_size / syminfo.mintick) * syminfo.mintick  // Ensure valid position size
+    else
+        na
+
+if strategy.position_size == 0
+    // Reset breakeven flag when entering new trades
+    moved_to_breakeven := false
+
+    // Long entry logic
+    if longCondition
+        // Stop loss at the bottom of the impulse candle
+        stop_level := sl_type == "ATR" ? x2 : low
+        initial_stop := stop_level  // Store initial stop level for breakeven calculations
+        // Calculate distance between entry and stop for position sizing
+        stop_distance = close - stop_level
+        // Calculate take profit level based on risk:reward ratio
+        target_level := close + (Risk_reward * stop_distance)
+        // Calculate position size based on risk parameters
+        position_size = calculate_position_size(stop_distance)
+        
+        // Enter long position if position size is valid
+        if not na(position_size) and position_size > 0
+            strategy.entry("Long", strategy.long, qty=position_size)
+            // Place stop loss and take profit orders
+            strategy.exit("Exit Long", "Long", stop=stop_level, limit=target_level)
+            entry_price := close  // Store entry price for breakeven calculations
+    
+    // Short entry logic
+    if shortCondition
+        // Stop loss at the top of the impulse candle
+        stop_level := sl_type == "ATR" ? x : high
+        initial_stop := stop_level  // Store initial stop level for breakeven calculations
+        // Calculate distance between entry and stop for position sizing
+        stop_distance = stop_level - close
+        // Calculate take profit level based on risk:reward ratio
+        target_level := close - (Risk_reward * stop_distance)
+        // Calculate position size based on risk parameters
+        position_size = calculate_position_size(stop_distance)
+        
+        // Enter short position if position size is valid
+        if not na(position_size) and position_size > 0
+            strategy.entry("Short", strategy.short, qty=position_size)
+            // Place stop loss and take profit orders
+            strategy.exit("Exit Short", "Short", stop=stop_level, limit=target_level)
+            entry_price := close  // Store entry price for breakeven calculations
+
+// Breakeven logic - moves stop loss to entry price when profit threshold is reached
+if breakeven > 0 and strategy.position_size != 0
+    // Calculate initial risk in points/pips
+    initial_risk = math.abs(entry_price - initial_stop)
+
+    // Long position breakeven logic
+    if strategy.position_size > 0  // Long position
+        // Calculate current unrealized profit
+        current_profit = high - entry_price
+        // Check if profit threshold reached and breakeven not already moved
+        if current_profit >= (breakeven * initial_risk) and not moved_to_breakeven
+            moved_to_breakeven := true
+            strategy.cancel("Exit Long")  // Cancel existing exit order
+            stop_level := entry_price     // Set new stop at entry price
+            // Place new exit order with breakeven stop
+            strategy.exit("Exit Long", "Long", stop=entry_price, limit=target_level)
+    
+    // Short position breakeven logic
+    if strategy.position_size < 0  // Short position
+        // Calculate current unrealized profit
+        current_profit = entry_price - low
+        // Check if profit threshold reached and breakeven not already moved
+        if current_profit >= (breakeven * initial_risk) and not moved_to_breakeven
+            moved_to_breakeven := true
+            strategy.cancel("Exit Short")  // Cancel existing exit order
+            stop_level := entry_price     // Set new stop at entry price
+            // Place new exit order with breakeven stop
+            strategy.exit("Exit Short", "Short", stop=entry_price, limit=target_level)
+
+// Plotting Entry, SL, and TP lines
+plot(strategy.position_size != 0 ? entry_price : na, title="Entry Price", color=entrypricecolour, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? stop_level : na, title="Stop Loss", color=stoplosscolour, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? target_level : na, title="Take Profit", color=takeprofitcolour, style=plot.style_linebr)
+
+// Fill between Entry and SL
+plot_entry = plot(strategy.position_size != 0 ? entry_price : na, "Entry for SL Fill", display=display.none)
+plot_sl = plot(strategy.position_size != 0 ? stop_level : na, "SL for Fill", display=display.none)
+fill(plot_entry, plot_sl, color = strategy.position_size != 0 ? stoplosscolour : na)
+
+// Fill between Entry and TP
+plot_entry_tp = plot(strategy.position_size != 0 ? entry_price : na, "Entry for TP Fill", display=display.none)
+plot_tp = plot(strategy.position_size != 0 ? target_level : na, "TP for Fill", display=display.none)
+fill(plot_entry_tp, plot_tp, color = strategy.position_size != 0 ? takeprofitcolour : na)
+
+// Plot ATR reference lines for impulse detection
+plot(atr_value * impulse_multiplier, title="Impulse ATR Threshold", color=color.yellow, style=plot.style_line, display=display.data_window)
+
+View in Pine Editor・205 lines
+Use on chart
+1
+8
+6
+3 522
+Market Open Impulse Strategy [LuciTech]
+The Market Open Impulse Strategy is designed to capture significant price movements that occur at market open (2:30 PM UK time). This strategy identifies impulsive candles with high volatility and enters trades based on the direction and strength of the initial market reaction.
+
+How It Works:
+The strategy activates exclusively at 2:30 PM UK time during market open sessions. It uses ATR-based volatility filtering to identify impulsive candles that exceed a configurable multiplier (default 1.5x ATR). Long entries are triggered when an impulsive candle closes above its midpoint and above the opening price, while short entries occur when an impulsive candle closes below its midpoint and below the opening price.
+Risk management is handled through precise stop loss placement at the opposite extreme of the impulse candle (high for short positions, low for long positions). Take profit levels are calculated using a configurable risk-reward ratio with a default setting of 3:1. Position sizing is automatically calculated based on the percentage risk per trade, and an optional breakeven feature can move the stop loss to the entry price at specified profit levels.
+The strategy incorporates time-based filtering to ensure trades only occur during the specified market open window. Visual indicators highlight qualifying impulsive candles and plot all entry and exit levels for clear trade management. The system offers flexible risk management with customizable risk percentage, risk-reward ratios, and breakeven settings, along with multiple stop loss calculation methods including both ATR-based and candle-based options.
+
+Key Parameters:
+Market open timing is fully configurable through hour and minute settings for strategy activation. The impulse ATR multiple sets the minimum volatility threshold required for trade qualification, with visual highlighting available for qualifying setups. Risk management parameters include the percentage of account equity to risk per trade, target profit multiples relative to initial risk, and the profit level threshold for breakeven stop loss adjustment. Users can choose between ATR-based or candle-based stop loss calculation methods and adjust technical parameters for volatility calculation including ATR length and smoothing methods.
+
+Applications:
+This strategy is particularly effective for trading market open volatility and momentum, capturing institutional order flow during key timing windows, executing short-term swing trades on significant price impulses, and trading markets with predictable opening patterns and consistent volatility characteristics.

@@ -1,0 +1,317 @@
+//@version=5
+strategy("EMA + VWAP Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+emaFastLen = input.int(9, "Fast EMA Length", minval=1)
+emaSlowLen = input.int(21, "Slow EMA Length (Trend Filter)", minval=1)
+vwapFlatThreshold = input.float(0.01, "VWAP Flat Threshold (%)", minval=0.0001, step=0.0001, tooltip="If VWAP slope is below this %, consider it flat")
+vwapLookback = input.int(5, "VWAP Slope Lookback", minval=2, tooltip="Bars to calculate VWAP slope")
+
+// Trading Days Filter
+tradeWeekdaysOnly = input.bool(true, "Trade Weekdays Only (Mon-Fri)", tooltip="Disable trading on Saturday and Sunday")
+
+// Risk Management
+slType = input.string("ATR", "Stop Loss Type", options=["ATR", "Swing Low/High", "Slow EMA", "Fixed %"])
+atrLength = input.int(14, "ATR Length", minval=1)
+atrMultiplier = input.float(1.5, "ATR Multiplier", minval=0.1, step=0.1)
+swingLookback = input.int(10, "Swing Lookback Period", minval=2)
+fixedSlPercent = input.float(1.0, "Fixed Stop Loss %", minval=0.1, step=0.1)
+rrRatio = input.float(2.0, "Risk:Reward Ratio", minval=0.5, step=0.5, tooltip="Take Profit will be R multiplied by this ratio")
+
+// === CALCULATIONS ===
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+vwapValue = ta.vwap(close)
+
+// ATR for stop loss
+atrValue = ta.atr(atrLength)
+
+// Swing points for stop loss
+swingLow = ta.lowest(low, swingLookback)
+swingHigh = ta.highest(high, swingLookback)
+
+// Calculate VWAP slope (percentage change)
+vwapSlope = ((vwapValue - vwapValue[vwapLookback]) / vwapValue[vwapLookback]) * 100
+vwapIsFlat = math.abs(vwapSlope) < vwapFlatThreshold
+
+// Day of week filter (1=Sunday, 2=Monday, ..., 7=Saturday)
+isWeekday = dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
+allowTrading = tradeWeekdaysOnly ? isWeekday : true
+
+// === STOP LOSS CALCULATION ===
+var float longSL = na
+var float shortSL = na
+
+calcLongSL(entryPrice) =>
+    sl = switch slType
+        "ATR" => entryPrice - (atrValue * atrMultiplier)
+        "Swing Low/High" => swingLow
+        "Slow EMA" => emaSlow
+        "Fixed %" => entryPrice * (1 - fixedSlPercent/100)
+    sl
+
+calcShortSL(entryPrice) =>
+    sl = switch slType
+        "ATR" => entryPrice + (atrValue * atrMultiplier)
+        "Swing Low/High" => swingHigh
+        "Slow EMA" => emaSlow
+        "Fixed %" => entryPrice * (1 + fixedSlPercent/100)
+    sl
+
+// === ENTRY CONDITIONS ===
+// Long: EMA9 crosses over VWAP, EMA9 > EMA21, VWAP sloping up, allowed trading day
+longCondition = ta.crossover(emaFast, vwapValue) and emaFast > emaSlow and vwapSlope > 0 and not vwapIsFlat and allowTrading
+
+// Short: EMA9 crosses under VWAP, EMA9 < EMA21, VWAP sloping down, allowed trading day
+shortCondition = ta.crossunder(emaFast, vwapValue) and emaFast < emaSlow and vwapSlope < 0 and not vwapIsFlat and allowTrading
+
+// === PLOTTING ===
+plot(emaFast, "Fast EMA", color=color.blue, linewidth=2)
+plot(emaSlow, "Slow EMA", color=color.orange, linewidth=2)
+plot(vwapValue, "VWAP", color=color.purple, linewidth=2)
+
+// Plot ATR bands to visualize stop loss placement
+showATRBands = input.bool(true, "Show ATR Bands", tooltip="Display ATR-based stop loss zones")
+atrUpper = close + (atrValue * atrMultiplier)
+atrLower = close - (atrValue * atrMultiplier)
+
+plot(showATRBands and slType == "ATR" ? atrUpper : na, "ATR Upper", color=color.new(color.red, 70), style=plot.style_circles, linewidth=1)
+plot(showATRBands and slType == "ATR" ? atrLower : na, "ATR Lower", color=color.new(color.green, 70), style=plot.style_circles, linewidth=1)
+
+// Plot actual stop loss levels when in position
+var float activeLongSL = na
+var float activeShortSL = na
+var float activeLongTP = na
+var float activeShortTP = na
+
+if strategy.position_size > 0
+    activeLongSL := longSL
+    activeLongTP := strategy.opentrades.entry_price(0) + ((strategy.opentrades.entry_price(0) - longSL) * rrRatio)
+else
+    activeLongSL := na
+    activeLongTP := na
+
+if strategy.position_size < 0
+    activeShortSL := shortSL
+    activeShortTP := strategy.opentrades.entry_price(0) - ((shortSL - strategy.opentrades.entry_price(0)) * rrRatio)
+else
+    activeShortSL := na
+    activeShortTP := na
+
+plot(activeLongSL, "Long Stop Loss", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(activeLongTP, "Long Take Profit", color=color.green, linewidth=2, style=plot.style_linebr)
+plot(activeShortSL, "Short Stop Loss", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(activeShortTP, "Short Take Profit", color=color.green, linewidth=2, style=plot.style_linebr)
+
+// Background color for trend
+bgcolor(emaFast > emaSlow ? color.new(color.green, 95) : color.new(color.red, 95))
+
+// Highlight weekends if filter is enabled
+bgcolor(tradeWeekdaysOnly and not isWeekday ? color.new(color.gray, 90) : na, title="Weekend")
+
+// Plot VWAP flat status
+plotshape(vwapIsFlat, "VWAP Flat", shape.diamond, location.top, color.gray, size=size.tiny)
+
+// === STRATEGY EXECUTION ===
+if longCondition
+    entryPrice = close
+    longSL := calcLongSL(entryPrice)
+    riskAmount = entryPrice - longSL
+    longTP = entryPrice + (riskAmount * rrRatio)
+    
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+if shortCondition
+    entryPrice = close
+    shortSL := calcShortSL(entryPrice)
+    riskAmount = shortSL - entryPrice
+    shortTP = entryPrice - (riskAmount * rrRatio)
+    
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// === ALERTS ===
+alertcondition(longCondition, "Long Signal", "EMA crossed over VWAP - Long Entry")
+alertcondition(shortCondition, "Short Signal", "EMA crossed under VWAP - Short Entry")
+
+View in Pine Editor・136 lines
+Use on chart
+5
+3
+1 657
+Jan 13
+# EMA + VWAP Crossover Strategy
+
+## Overview
+This is a trend-following intraday strategy that combines fast and slow EMAs with VWAP to identify high-probability entries. It's designed primarily for 5-15 minute charts and includes a smart filter to avoid trading when VWAP is ranging flat.
+
+## How It Works
+
+### Core Concept
+The strategy uses three main components working together:
+- **Fast EMA (9)** - Responds quickly to price changes and generates entry signals
+- **Slow EMA (21)** - Acts as a trend filter to keep you on the right side of the market
+- **VWAP** - Serves as a dynamic support/resistance level and the primary trigger for entries
+
+### Entry Rules
+
+**Long Entry:**
+- EMA 9 crosses above VWAP (bullish momentum)
+- EMA 9 is above EMA 21 (confirming uptrend)
+- VWAP has a clear directional slope (not flat/ranging)
+- Only during weekdays (Monday-Friday)
+
+**Short Entry:**
+- EMA 9 crosses below VWAP (bearish momentum)
+- EMA 9 is below EMA 21 (confirming downtrend)
+- VWAP has a clear directional slope (not flat/ranging)
+- Only during weekdays (Monday-Friday)
+
+### The VWAP Flat Filter
+One of the key features is the VWAP slope filter. When VWAP is moving sideways (flat), it indicates the market is likely consolidating or ranging. The strategy skips these periods because crossover signals tend to be less reliable in choppy conditions. You'll see small gray diamonds at the top of the chart when VWAP is considered flat.
+
+### Risk Management
+The strategy uses a proper risk-reward approach with multiple stop loss options:
+
+1. **ATR-Based (Recommended)** - Adapts to market volatility automatically. Default is 1.5x ATR(14), which gives your trades room to breathe while protecting capital.
+
+2. **Swing Low/High** - Places stops at recent price structure points for a more technical approach.
+
+3. **Slow EMA** - Uses the trend-defining EMA as your stop level, good for trend-following with wider stops.
+
+4. **Fixed Percentage** - Simple percentage-based stops if you prefer consistency.
+
+Take profits are automatically calculated based on your risk-reward ratio (default 2:1), meaning if you risk $100, you're aiming to make $200.
+
+### Weekday Trading Filter
+The strategy includes an option to trade only Monday through Friday. This is particularly useful for crypto markets where weekend liquidity can be thin and price action more erratic. You can toggle this on/off to test whether avoiding weekends improves your results.
+
+### Visual Features
+- **Color-coded background** - Green tint when EMA 9 is above EMA 21 (bullish bias), red tint when below (bearish bias)
+- **ATR bands** - Dotted lines showing where stops would be placed (when using ATR stops)
+- **Active trade levels** - Solid red line for your stop loss, green line for your take profit when you're in a position
+- **Weekend highlighting** - Gray background on Saturdays and Sundays when weekday filter is active
+
+## Best Practices
+
+**Timeframe:** Designed for 5-minute charts but can be adapted to other intraday timeframes.
+
+**Markets:** Works on any liquid market - stocks, forex, crypto, futures. Just make sure there's enough volume.
+
+**Position Sizing:** The strategy uses percentage of equity by default. Adjust based on your risk tolerance.
+
+**Backtesting Tips:**
+- Test with and without the weekday filter to see which performs better on your instrument
+- Try different ATR multipliers (1.0-2.5) to find the sweet spot between stop-outs and letting profits run
+- Experiment with risk-reward ratios (1.5R, 2R, 3R) to optimize for your win rate
+
+**What to Watch:**
+- Win rate vs. profit factor balance
+- How many trades are filtered out by the VWAP flat condition
+- Performance difference between weekdays and weekends
+- Whether the trend filter (EMA 21) is keeping you out of bad trades
+
+## Parameters You Can Adjust
+- Fast EMA length (default 9)
+- Slow EMA length (default 21)
+- VWAP flat threshold (default 0.01%)
+- Stop loss type and parameters
+- Risk-reward ratio
+- Weekday trading on/off
+- ATR length and multiplier
+
+## Disclaimer
+This strategy is for educational purposes. Past performance doesn't guarantee future results. Always test thoroughly on historical data and paper trade before risking real money. Use proper position sizing and never risk more than you can afford to lose.
+
+---
+
+*Built with Pine Script v5 for TradingView*
+Jan 14
+Release Notes
+# EMA + VWAP Crossover Strategy
+
+## Overview
+This is a trend-following intraday strategy that combines fast and slow EMAs with VWAP to identify high-probability entries. It's designed primarily for 5-15 minute charts and includes a smart filter to avoid trading when VWAP is ranging flat.
+
+## How It Works
+
+### Core Concept
+The strategy uses three main components working together:
+- **Fast EMA (9)** - Responds quickly to price changes and generates entry signals
+- **Slow EMA (21)** - Acts as a trend filter to keep you on the right side of the market
+- **VWAP** - Serves as a dynamic support/resistance level and the primary trigger for entries
+
+### Entry Rules
+
+**Long Entry:**
+- EMA 9 crosses above VWAP (bullish momentum)
+- EMA 9 is above EMA 21 (confirming uptrend)
+- VWAP has a clear directional slope (not flat/ranging)
+- Only during weekdays (Monday-Friday)
+
+**Short Entry:**
+- EMA 9 crosses below VWAP (bearish momentum)
+- EMA 9 is below EMA 21 (confirming downtrend)
+- VWAP has a clear directional slope (not flat/ranging)
+- Only during weekdays (Monday-Friday)
+
+### The VWAP Flat Filter
+One of the key features is the VWAP slope filter. When VWAP is moving sideways (flat), it indicates the market is likely consolidating or ranging. The strategy skips these periods because crossover signals tend to be less reliable in choppy conditions. You'll see small gray diamonds at the top of the chart when VWAP is considered flat.
+
+### Risk Management
+The strategy uses a proper risk-reward approach with multiple stop loss options:
+
+1. **ATR-Based (Recommended)** - Adapts to market volatility automatically. Default is 1.5x ATR(14), which gives your trades room to breathe while protecting capital.
+
+2. **Swing Low/High** - Places stops at recent price structure points for a more technical approach.
+
+3. **Slow EMA** - Uses the trend-defining EMA as your stop level, good for trend-following with wider stops.
+
+4. **Fixed Percentage** - Simple percentage-based stops if you prefer consistency.
+
+Take profits are automatically calculated based on your risk-reward ratio (default 2:1), meaning if you risk $100, you're aiming to make $200.
+
+### Weekday Trading Filter
+The strategy includes an option to trade only Monday through Friday. This is particularly useful for crypto markets where weekend liquidity can be thin and price action more erratic. You can toggle this on/off to test whether avoiding weekends improves your results.
+
+### Visual Features
+- **Color-coded background** - Green tint when EMA 9 is above EMA 21 (bullish bias), red tint when below (bearish bias)
+- **ATR bands** - Dotted lines showing where stops would be placed (when using ATR stops)
+- **Active trade levels** - Solid red line for your stop loss, green line for your take profit when you're in a position
+- **Weekend highlighting** - Gray background on Saturdays and Sundays when weekday filter is active
+
+## Best Practices
+
+**Timeframe:** Designed for 5-minute charts but can be adapted to other intraday timeframes.
+
+**Markets:** Works on any liquid market - stocks, forex, crypto, futures. Just make sure there's enough volume.
+
+**Position Sizing:** The strategy uses percentage of equity by default. Adjust based on your risk tolerance.
+
+**Backtesting Tips:**
+- Test with and without the weekday filter to see which performs better on your instrument
+- Try different ATR multipliers (1.0-2.5) to find the sweet spot between stop-outs and letting profits run
+- Experiment with risk-reward ratios (1.5R, 2R, 3R) to optimize for your win rate
+
+**What to Watch:**
+- Win rate vs. profit factor balance
+- How many trades are filtered out by the VWAP flat condition
+- Performance difference between weekdays and weekends
+- Whether the trend filter (EMA 21) is keeping you out of bad trades
+
+## Parameters You Can Adjust
+- Fast EMA length (default 9)
+- Slow EMA length (default 21)
+- VWAP flat threshold (default 0.01%)
+- Stop loss type and parameters
+- Risk-reward ratio
+- Weekday trading on/off
+- ATR length and multiplier
+
+## Disclaimer
+This strategy is for educational purposes. Past performance doesn't guarantee future results. Always test thoroughly on historical data and paper trade before risking real money. Use proper position sizing and never risk more than you can afford to lose.
+
+---
+
+*Built with Pine Script v5 for TradingView*

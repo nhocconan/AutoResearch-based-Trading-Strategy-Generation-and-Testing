@@ -1,0 +1,82 @@
+//@version=5
+strategy('Forex Midpoint Stratejisi For Nasdaq ', overlay=true)
+BPeriod = input(131, 'Başlangıç Period')
+kaydirma = input(14, 'Kaydırma Seviyesi')
+yuzdeseviyesi = input.float(0.0006, 'Yüzde Seviyesi', step=0.0001)
+len = input.int(44, minval=1, title="Length")
+src = input(close, title="Source")
+out = ta.sma(src, len)
+
+ma(source, length, type) =>
+    switch type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+typeMA = input.string(title = "Method", defval = "EMA", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group="Smoothing")
+smoothingLength = input.int(title = "Length", defval = 53, minval = 1, maxval = 100, group="Smoothing")
+smoothingLine = ma(out, smoothingLength, typeMA)
+//plot(smoothingLine, title="Smoothing Line", color=color.red, linewidth = 2)
+
+//zararDurdurmaYuzde = input.float(0.2, title='Zarar Durdurma %', step=0.01) / 100
+//karAlmaYuzde = input.float(0.5, title='Kar Alma %', step=0.01) / 100
+
+
+//MIDPOINT HESAPLA
+midpoint1 = ta.highest(high, BPeriod) + ta.lowest(low, BPeriod)
+midpoint2 = midpoint1 / 2
+midyuzdeseviyesi = midpoint2 * yuzdeseviyesi
+midtopdeger = midyuzdeseviyesi + midpoint2
+
+//GİRİŞ KOŞULLARI
+buycross = ta.crossover(smoothingLine, midtopdeger[kaydirma]) //? aort > ta.sma(close,50) : na
+sellcross = ta.crossover(midtopdeger[kaydirma], smoothingLine) // ? aort < ta.sma(close,50) : na
+
+//LONG GİRİŞ
+if (buycross)
+    strategy.entry("BUY", strategy.long)
+    //longKarAl = strategy.position_avg_price * (1 + karAlmaYuzde)
+    //longZararDurdur = strategy.position_avg_price * (1 - zararDurdurmaYuzde)
+    //strategy.exit("Long Exit","Long", stop=longZararDurdur)
+    
+   
+//SHORT GİRİŞ    
+if (sellcross)
+    strategy.entry("SELL", strategy.short)
+    //shortKarAl = strategy.position_avg_price * (1 - karAlmaYuzde)
+    //shortZararDurdur = strategy.position_avg_price * (1 + zararDurdurmaYuzde)
+    //strategy.exit("Short Exit","Short", stop=shortZararDurdur)
+   
+//plot(midtopdeger, offset=kaydirma, linewidth=2, color=color.blue)
+
+View in Pine Editor・54 lines
+Use on chart
+1
+0
+8
+4 351
+English Knowledge:
+Midpoint Strategy;
+The general calculation method is a strategy that helps determine direction by the intersection of a MA line and the value obtained by dividing the lowest and highest price in the specified length range.
+Başlangıç Periyodu: The data length of the Midpoint Line.
+Kaydırma Seviyesi: The number of steps forward or backward of the Midpoint Line.
+Yüzde Seviyesi: the amount of vertical scrolling.
+Uzunluk: The length of the MA line
+represents.
+This strategy is prepared for the Nasdaq 5-minute period. It needs to be optimized for use on other instruments.
+There are take profit and stop loss levels within the codes. Friends who want to use it can remove the invisibility from the relevant sections. Also, I removed the midpoint and the MA line so that it does not crowd the image, you can add it if you want.
+Thank you.
+
+Turkish Knowledge:
+Midpoint Stratejisi;
+Genel hesaplama yöntemi, belirlenen uzunluk aralığındaki en düşük ve en yüksek fiyatın ikiye bölümü ile elde edilen değer ve bir ortalama çizgisinin kesişimleriyle yön belirlemeye yardımcı bir stratejidir.
+Başlangıç Period: Midpoint Çizgisinin veri uzunluğunu.
+Kaydırma Seviyesi: Midpoint Çizgisinin ileri veya geri adım sayısını.
+Yüzde Seviyesi: dikey kaydırma miktarını.
+Uzunluk: Ortalama çizgisinin uzunluğunu
+temsil etmektedir.
+Bu strateji Nasdaq 5 dakikalık periot için hazırlanmıştır. Diğer enstrümanlarda kullanılması için optimize edilmesi gerekir.
+Kodların içinde Kar alma , zarar durdurma seviyeleri mevcuttur. Kullanmak isteyen arkadaşlar ilgili bölümlerden görünmezliği kaldırabilirler. ayrıca midpoint ve ortalama çizgisinide görüntü kalabalığı yapmaması için ben kaldırdım isterseniz siz ekleyebilirsiniz.
+Teşekkürler.

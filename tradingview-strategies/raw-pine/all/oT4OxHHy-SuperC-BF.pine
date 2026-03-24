@@ -1,0 +1,153 @@
+//@version=4
+strategy("SuperC BF 🚀", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075)
+
+/////////////// Time Frame ///////////////
+_0 = input(false,  "════════ Test Period ═══════")
+testStartYear = input(2017, "Backtest Start Year") 
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay, 0, 0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(31, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay, 0, 0)
+
+testPeriod() => time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+///////////// Super Trend /////////////
+_1 = input(false,  "═══════ Super Trend ═══════")
+Factor = input(title = "Super Trend", defval = 2, minval = 1, maxval = 100)
+ATR = input(title = "ATR", defval = 5, minval = 1, maxval = 100)
+
+Up = hl2 - (Factor * atr(ATR))
+Down = hl2 + (Factor * atr(ATR))
+
+TUp = 0.0
+TUp := close[1] > TUp[1] ? max(Up, TUp[1]) : Up
+TDown = 0.0
+TDown := close[1] < TDown[1] ? min(Down, TDown[1]) : Down
+
+Trend = 0.0
+Trend := close > TDown[1] ? 1 : close < TUp[1] ? -1 : nz(Trend[1], 1)
+
+Tsl1 = Trend == 1 ? TUp : TDown
+Tsl2 = Trend == 1 ? TDown : TUp
+
+t1 = sma(Tsl1, input(1))
+t2 = sma(Tsl2, input(3))
+
+///////////// MFI ///////////// 
+_2 = input(false,  "═════════ MFI ══════════")
+length = input(title="MFI Length", defval=20, minval=1, maxval=2000)
+src = hlc3
+upper = sum(volume * (change(src) <= 0 ? 0 : src), length) 
+lower = sum(volume * (change(src) >= 0 ? 0 : src), length)
+
+mf = rsi(upper, lower)
+x = (close / 100) * mf
+xColour = (x > x[1]) ? color.lime : (x<x[1]) ? color.red : color.gray
+plot(x, color=xColour, linewidth=2)
+
+///////////// Rate Of Change ///////////// 
+_3 = input(false,  "══════ Rate of Change ══════")
+source = close
+roclength = input(27, minval=1)
+pcntChange = input(7, minval=1)
+roc = 100 * (source - source[roclength]) / source[roclength]
+emaroc = ema(roc, roclength / 2)
+isMoving() => emaroc > (pcntChange / 2) or emaroc < (0 - (pcntChange / 2))
+
+/////////////// Strategy ///////////////
+long = t2 > t1 and mf > mf[1] and isMoving()
+short = t2 < t1 and mf < mf[1] and isMoving()
+
+last_long = 0.0
+last_short = 0.0
+last_long := long ? time : nz(last_long[1])
+last_short := short ? time : nz(last_short[1])
+
+long_signal = crossover(last_long, last_short)
+short_signal = crossover(last_short, last_long)
+
+last_open_long_signal = 0.0
+last_open_short_signal = 0.0
+last_open_long_signal := long_signal ? open : nz(last_open_long_signal[1])
+last_open_short_signal := short_signal ? open : nz(last_open_short_signal[1])
+
+last_long_signal = 0.0
+last_short_signal = 0.0
+last_long_signal := long_signal ? time : nz(last_long_signal[1])
+last_short_signal := short_signal ? time : nz(last_short_signal[1])
+
+in_long_signal = last_long_signal > last_short_signal
+in_short_signal = last_short_signal > last_long_signal
+
+last_high = 0.0
+last_low = 0.0
+last_high := not in_long_signal ? na : in_long_signal and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_short_signal ? na : in_short_signal and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+_4 = input(false,  "════════ Stop Loss ═══════")
+sl_inp = input(2.0, title='Stop Loss %') / 100
+
+since_longEntry = barssince(last_open_long_signal != last_open_long_signal[1]) 
+since_shortEntry = barssince(last_open_short_signal != last_open_short_signal[1]) 
+
+slLong = in_long_signal ? strategy.position_avg_price * (1 - sl_inp) : na
+slShort = strategy.position_avg_price * (1 + sl_inp)
+long_sl = in_long_signal ? slLong : na
+short_sl = in_short_signal ? slShort : na
+
+/////////////// Execution ///////////////
+if testPeriod()
+    strategy.entry("L",  strategy.long, when=long)
+    strategy.entry("S", strategy.short, when=short)
+    strategy.exit("L Ex", "L", stop=long_sl, when=since_longEntry > 0)
+    strategy.exit("S Ex", "S", stop=short_sl, when=since_shortEntry > 0)
+    
+/////////////// Plotting ///////////////
+linecolor = Trend == 1 ? color.lime : color.red
+P1 = plot(Tsl1, color = linecolor , linewidth = 1, title = "SuperTrend ATR 1")
+P2 = plot(t2, color = linecolor ,  linewidth = 1, title = "SuperTrend ATR 2")
+fillColour = (long) ? color.lime : (short) ? color.red : (in_short_signal) ? color.orange : (in_long_signal) ? color.yellow : na
+fill(P1, P2, color = fillColour, transp=70)
+
+bgcolor(isMoving() ? long ? color.green : short ? color.red : na : color.white, transp=80)
+bgcolor(long_signal ? color.lime : short_signal ? color.red : na, transp=30)
+
+View in Pine Editor・116 lines
+Use on chart
+8
+7
+2 774
+Based on some code from noro and kiasaki - thank you.
+
+A Super Trend is a trend over a long period of time. There are lots of existing scripts that generate signals based on the overall direction of an instrument. What if we combined this idea with a measure of Money Flow and added a filter to try to avoid choppy sideways action?
+
+I started with a super trend foundation and added an MFI calculation to account for volume flowing into and out of the asset. Then added a Rate of Change function to stay out of trades when there is not much up/down movement.
+
+INSTRUCTIONS
+
+Bright green background = go long
+
+Bright red background = go short
+
+
+
+COLOR OVERVIEW
+A white background means we don't trade
+A green background means we have a long condition
+A red background means we have a short condition
+
+The cloud is green when we have a long condition, red when we have a short condition.
+The cloud is yellow if we should be in a long already but the current candle is not satisfying all long conditions.
+The cloud is orange if we should be in a short already but the current candle is not satisfying all short conditions.
+
+The line at the bottom is MFI - this is green when the current candle is greater than the last, red when it is less than the last.
+
+SIGNAL GENERATION
+A long condition is when MFI > MFI[1] AND we are not in a choppy market AND when price is above the super trend.
+A short condition is when MFI < MFI[1] AND we are not in a choppy market AND when price is below the super trend.
+
+We use a fixed Stop Loss of 2% here on the daily timeframe for XBT/USD.
+If we get stopped out from a long and we still have the conditions for a long, we re-enter. Same for short.

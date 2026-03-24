@@ -1,0 +1,129 @@
+//@version=4
+strategy("Renko Bollinger Strategy", shorttitle="RBS", overlay=true)
+//
+//If you build Bollinger Bands from the values 
+//of Renko or Haken Ashi, then you can get an interesting strategy.
+//Default values for ticker MOEX:BR
+
+// --- GENERAL INPUT ---
+length = input(13, minval=1) 
+mult = input(1.2, minval=0.001, maxval=50, step=0.1)
+chart = input(defval="renko", title="Candles / Heikin Ashi / Renko", options=["candles", "heikin ashi", "renko"])
+renkoStyle = input(defval = "Traditional", title="Renko ATR / Traditional",options=["ATR", "Traditional"])
+renkoNum = input(defval = 0.1, title="Renko ATR length / Box size")
+
+// --- FILTERS INPUT ---
+confirmEnter = input(defval=true, title="Price movement confirmation")
+noEnterInp = input(defval=true, title="Do not reverse position if renko has not changed")
+outCannelInp = input(defval=true, title="Enter if out of channel")
+ATRFilter = input(defval=true, title="ATR filter")
+inpATR = input(defval=2, title="ATR length", minval = 1)
+ATRStop = input(defval=0.5, title="No trade, if ATR >", minval = 0, step = 0.1)
+volFilter = input(defval=true, title="Volatility filter")
+volLength = input(defval=3, title="Vol length", minval = 1)
+volStopInp = input(defval=0.12, title="No trade, if volatility <", minval = 0, step = 0.1)
+
+//--- Risk Management Input ---
+inpsl = input(defval = 11.0, title="Stop Loss", minval =0) 
+inptp = input(defval = 0, title="Take Profit", minval = 0) 
+inpbe = input(defval = 0, title="Move stop loss to breakeven after ... pips", minval = 0) 
+// If the zero value is set for stop loss or take profit, then the function is disabled
+sl = inpsl >0 ? inpsl : na 
+tp = inptp >0 ? inptp : na
+be = inpbe >0 ? inpbe : na
+
+//--- Session Input ---
+sess = input(defval = "1005-2330", title="Trading Session")
+t = time(timeframe.period, sess)
+sessionOpen = na(t) ? false : true
+
+// --- Charts ---
+haTicker = heikinashi(syminfo.tickerid) 
+renkoTicker = renko(syminfo.tickerid, renkoStyle, renkoNum) 
+source = chart == "heikin ashi" ? security(haTicker, timeframe.period, close, barmerge.lookahead_off) : chart == "renko" ? security(renkoTicker, timeframe.period, close, barmerge.lookahead_off) : close
+
+// --- Bollinger Bands ---
+basis = sma(source, length)
+dev = mult * stdev(source, length)
+upper = basis + dev
+lower = basis - dev
+
+// --- Opent trades ---
+long = strategy.opentrades>0 and  strategy.position_size>0 ? true : false
+short = strategy.position_size<0 and strategy.position_size>0 ? true : false
+
+// --- Strategy ---
+
+// -- Breakeven --
+// -- Breakeven --
+tick = syminfo.mintick*syminfo.pointvalue
+var b = 0.0
+con = strategy.position_size < 0 ? strategy.position_size*-1 : strategy.position_size
+b := strategy.openprofit/con*tick >= be ? 1.0 : strategy.opentrades == 0 ? 0 : b
+sl := b>0 ? -1 : sl
+
+// -- Filters
+//--Price movement confirmation--
+confirmBuy = confirmEnter ? close[0]>close[1]  and high[0]>high[1] and low[0]>low[1] : true
+confirmSell = confirmEnter ? close[0]<close[1] and high[0]<high[1] and low[0]<low[1] :true
+
+//--Volatility filter--
+volMin = lowest(low, volLength)
+volMax = highest(high, volLength)
+volStop = (volMax - volMin) < volStopInp and volFilter ? false : true
+
+//--Do not reverse position if renko has not changed--
+noEnter = source[0] == source[1] and noEnterInp and strategy.opentrades>0? false : true
+
+//--Enter if out of channel--
+outCannelLong = source[0] > upper and outCannelInp and strategy.opentrades==0? true : false
+outCannelShort = source[0] < lower and outCannelInp and strategy.opentrades==0? true : false
+
+//--ATR filter--
+ATRF=atr(inpATR)
+ATRT = ATRF>ATRStop and ATRFilter ? true : false
+
+//--Conditions--
+bBuy = cross(source, lower) 
+longCondition = (bBuy and confirmBuy and noEnter and not long and sessionOpen and not ATRT and  volStop) or (outCannelLong and confirmBuy and not ATRT and  volStop) 
+bSell = cross(source, upper)  
+shortCondition = (bSell and confirmSell and noEnter and not short and sessionOpen and not ATRT and  volStop) or (outCannelShort and confirmSell and not ATRT and volStop) 
+
+strategy.entry("Long", true, when = longCondition and sessionOpen)
+strategy.entry("Short", false, when = shortCondition and sessionOpen)
+strategy.close("Long", when = not sessionOpen)
+strategy.close("Short", when = not sessionOpen)
+strategy.exit("exit", from_entry = "Long", profit = tp, loss = sl)
+strategy.exit("exit", from_entry = "Short", profit = tp, loss = sl)
+
+// --- Plot ---
+plot(source, color=color.white)
+plotshape(ATRT, style=shape.triangledown, color=color.white)
+plotshape(not volStop, style=shape.triangledown, color=color.blue)
+p1=plot(upper, color=color.blue)
+p2=plot(lower, color=color.blue)
+fill(p1, p2, color = sl==-1 ? color.blue : strategy.opentrades == 0 ? color.silver : color.yellow, transp=70)
+
+View in Pine Editor・105 lines
+Use on chart
+1
+9
+9
+9 428
+Sep 18, 2019
+If you build Bollinger Bands from the values ​​of Renko or Haken Ashi, then you can get an interesting strategy.
+Sep 26, 2019
+Release Notes
+New filters, moving stop loss to breakeven and a new design: if a trade is open, the channel color changes to yellow, if the stop loss is transferred to breakeven, then the color changes to blue.
+Oct 16, 2019
+Release Notes
+bugs fixed
+Oct 23, 2019
+Release Notes
+bugs fixed
+Oct 24, 2019
+Release Notes
+bugs fixed
+Oct 25, 2019
+Release Notes
+bugs fixed

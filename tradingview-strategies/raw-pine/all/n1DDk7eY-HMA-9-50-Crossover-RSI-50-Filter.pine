@@ -1,0 +1,81 @@
+//@version=6
+strategy("HMA 9/50 Crossover + RSI 50 Filter", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// --- Inputs ---
+fastLen = input.int(9, "Fast HMA Length")
+slowLen = input.int(50, "Slow HMA Length")
+rsiLen  = input.int(14, "RSI Length")
+rsiThreshold = input.int(50, "RSI Momentum Level")
+
+// --- Calculations ---
+hmaFast = ta.hma(close, fastLen)
+hmaSlow = ta.hma(close, slowLen)
+rsiVal  = ta.rsi(close, rsiLen)
+
+// --- Colors & Plotting ---
+plot(hmaFast, color=color.aqua, linewidth=2, title="HMA 9")
+plot(hmaSlow, color=color.orange, linewidth=2, title="HMA 50")
+
+// Background highlights for RSI filter status
+bgCol = rsiVal > rsiThreshold ? color.new(color.green, 90) : color.new(color.red, 90)
+bgcolor(bgCol, title="RSI Trend Background")
+
+// --- Strategy Logic ---
+longCondition  = ta.crossover(hmaFast, hmaSlow) and rsiVal > rsiThreshold
+shortCondition = ta.crossunder(hmaFast, hmaSlow) and rsiVal < (100 - rsiThreshold)
+
+// --- Execution ---
+if (longCondition and strategy.position_size <= 0)
+    strategy.entry("Long", strategy.long, comment="HMA Cross + RSI > 50")
+
+if (shortCondition and strategy.position_size >= 0)
+    strategy.entry("Short", strategy.short, comment="HMA Cross + RSI < 50")
+
+// --- Optional: Visual Labels ---
+plotshape(longCondition, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Long Signal")
+plotshape(shortCondition, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Short Signal")
+
+View in Pine Editor・36 lines
+Use on chart
+2
+5
+1 002
+1. The Core Indicators
+
+HMA 9 (Fast): Acts as the primary trigger line. Its unique calculation minimizes lag compared to standard moving averages, allowing for faster entries.
+
+HMA 50 (Slow): Defines the medium-term trend direction and acts as the "anchor" for crossover signals.
+
+RSI 14: Serves as a "momentum gate." Instead of traditional overbought/oversold levels, we use the 50 midline to confirm that the directional strength supports the crossover.
+
+
+2. Entry Conditions
+
+Long Entry: Triggered when the HMA 9 crosses above the HMA 50 AND the RSI is greater than 50.
+
+Short Entry: Triggered when the HMA 9 crosses below the HMA 50 AND the RSI is less than 50.
+
+
+3. Execution & Reversal
+This strategy is currently configured as an Always-in-the-Market system.
+A "Long" position is automatically closed when a "Short" signal is triggered.
+To prevent "pyramiding" (buying multiple positions in one direction), the script checks the current position_size before opening new entries.
+
+How to Use
+Timeframe: Optimized for 3-minute (3m) candles but can be tuned for 1m to 15m scalping.
+Settings: Use the Inputs panel to adjust HMA lengths based on the volatility of your specific asset (e.g., shorter for stable stocks, longer for volatile crypto).
+
+Visuals:
+
+Aqua Line: HMA 9
+
+Orange Line: HMA 50
+
+Green Background: Bullish RSI Momentum (> 50)
+
+Red Background: Bearish RSI Momentum (< 50)
+
+
+Risk Disclosure
+Whipsaws: This strategy is likely to underperform in sideways markets.
+Backtesting: Past performance does not guarantee future results. Always test this strategy in the Strategy Tester with appropriate commission and slippage settings before live use.

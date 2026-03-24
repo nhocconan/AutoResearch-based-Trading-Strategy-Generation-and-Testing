@@ -1,0 +1,11 @@
+//@version=4
+longcol=##input(defval=#2157f333,type='INPUT_COLOR',##id='in_3')
+shortcol=##input(defval=#ff110033,type='INPUT_COLOR',##id='in_4')
+##root(root_metainfo,rm_0,'shape_label_up',input__string,plotshape,style)
+##root(root_metainfo,rm_1,'Top',input__string,plotshape,location)
+##root(root_metainfo,rm_2,'tiny',const__string,plotshape,size)
+##root(root_metainfo,rm_3,'shape_label_down',input__string,plotshape,style)
+##root(root_metainfo,rm_4,'Bottom',input__string,plotshape,location)
+##root(root_metainfo,rm_5,'tiny',const__string,plotshape,size)
+##root(root_metainfo,bgcolor_0_0,longcol,input__color)
+##root(root_metainfo,bgcolor_0_1,shortcol,input__color)

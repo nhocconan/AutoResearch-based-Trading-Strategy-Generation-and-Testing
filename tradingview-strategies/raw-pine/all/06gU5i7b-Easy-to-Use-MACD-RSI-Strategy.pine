@@ -1,0 +1,64 @@
+//@version=2
+strategy(title="MACD+RSI Strategy", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=5000, currency=currency.CAD)
+
+///// Only enter long positions /////
+strategy.risk.allow_entry_in(strategy.direction.long)
+
+///// Backtest Start Date /////
+startDate   = input(title="Start Date",  type=integer, defval=1,    minval=1,    maxval=31)
+startMonth  = input(title="Start Month", type=integer, defval=1,    minval=1,    maxval=12)
+startYear   = input(title="Start Year",  type=integer, defval=2016, minval=1800, maxval=2100)
+
+afterStartDate = (time >= timestamp(syminfo.timezone, startYear, startMonth, startDate, 0, 0))
+
+///// Create inputs /////
+// MACD Inputs ///
+fastLen = input(title="Fast Length", type=integer, defval=12)
+slowLen = input(title="Slow Length", type=integer, defval=26)
+sigLen  = input(title="Signal Length", type=integer, defval=9)
+
+// RSI Inputs //
+rsivalue = rsi(close, 14)
+
+///// Get MACD values /////
+[macdLine, signalLine, _] = macd(close, fastLen, slowLen, sigLen)
+
+///// Plot MACD values and line /////
+plot(series=macdLine, color=teal, linewidth=1)
+plot(series=signalLine, color=orange, linewidth=1)
+
+hline(price=0)
+
+///// Highlight Trades /////
+bgcolor(color=(crossover(macdLine, signalLine) and macdLine<0 and rsivalue<50) ? white : na, transp=50)
+bgcolor(color=(crossunder(macdLine, signalLine) and macdLine>0) ? white : na, transp=50)
+
+///// Submit orders /////
+if (afterStartDate and crossover(macdLine, signalLine) and macdLine<0 and rsivalue<50)
+    strategy.entry(id="BUY", long=true)
+if (afterStartDate and crossunder(macdLine, signalLine) and macdLine>0)
+    strategy.entry(id="SELL", long=false)
+
+View in Pine Editor・40 lines
+Use on chart
+1.8 K
+19
+59 596
+
+
+BEGINNERS REJOICE!
+
+Easy to use strategy test using MACD with RSI as a confirming indicator. The code is structured to make it easy to manipulate the variables to your choosing.
+
+EASY TO CHANGE CODE VARIABLES
+LINE 2 = Change the amount you invest every trade and the currency
+LINE 8/9/10 = Change the defval of each of these lines to backtest from a certain date
+LINE 16/17/18 = Change the MACD sensitivity by changing the defval on each line
+LINE 21 = Change the value after close toadjust the sensitivity of the RSI
+LINE 37/39 = Change/remove the < and > variables for macdLine and rsivalue after the crossover/crossunder to adjust your buying point further.
+
+As a beginner you may not feel comfortable with shorting stocks, therefore LINE 5 was added to only allows long positions.
+
+Funny how a simple indicator can return such a high profitability. Couple this with some trend/exit strategies and you'll have something really special!
+
+

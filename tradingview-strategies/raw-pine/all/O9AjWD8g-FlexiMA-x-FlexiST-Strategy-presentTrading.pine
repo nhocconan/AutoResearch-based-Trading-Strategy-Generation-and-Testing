@@ -1,0 +1,9 @@
+//@version=5
+upCss_MA=##input(defval=#08998119,type='INPUT_COLOR',##id='in_12')
+dnCss_MA=##input(defval=#f2364519,type='INPUT_COLOR',##id='in_13')
+upCss_ST=##input(defval=#08998119,type='INPUT_COLOR',##id='in_15')
+dnCss_ST=##input(defval=#f2364519,type='INPUT_COLOR',##id='in_16')
+##root(root_metainfo,plot_0_0,upCss_MA,input__color)
+##root(root_metainfo,plot_0_1,dnCss_MA,input__color)
+##root(root_metainfo,plot_12_0,upCss_ST,input__color)
+##root(root_metainfo,rm_ic_0,dnCss_ST,input__color)

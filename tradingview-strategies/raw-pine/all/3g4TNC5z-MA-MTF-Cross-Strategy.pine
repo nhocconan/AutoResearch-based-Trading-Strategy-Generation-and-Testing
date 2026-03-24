@@ -1,0 +1,13 @@
+//@version=5
+zigzag1Color=##input(defval=#00897B,type='INPUT_COLOR',##id='in_4')
+zigzag2Color=##input(defval=#808000,type='INPUT_COLOR',##id='in_7')
+zigzag3Color=##input(defval=#00E676,type='INPUT_COLOR',##id='in_10')
+zigzag4Color=##input(defval=#E040FB,type='INPUT_COLOR',##id='in_13')
+bullishColor=##input(defval=#4CAF50,type='INPUT_COLOR',##id='in_30')
+bearishColor=##input(defval=#FF5252,type='INPUT_COLOR',##id='in_31')
+##root(root_metainfo,rm_ic_0,zigzag1Color,input__color)
+##root(root_metainfo,rm_ic_1,zigzag2Color,input__color)
+##root(root_metainfo,rm_ic_2,zigzag3Color,input__color)
+##root(root_metainfo,rm_ic_3,zigzag4Color,input__color)
+##root(root_metainfo,rm_ic_4,bullishColor,input__color)
+##root(root_metainfo,rm_ic_5,bearishColor,input__color)

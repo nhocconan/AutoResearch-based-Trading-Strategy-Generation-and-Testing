@@ -1,0 +1,11 @@
+//@version=4
+clinetype=##input(defval='Previous-Period MR Prediction',type='INPUT_STRING',##id='in_15')
+##root(root_metainfo,rm_0,((clinetype=='Previous-Period MR Prediction')?100:20),input__integer)
+##root(root_metainfo,rm_1,((clinetype=='MR')?100:20),input__integer)
+##root(root_metainfo,rm_2,((clinetype!='Ribbon')?100:20),input__integer)
+##root(root_metainfo,rm_3,'AboveBar',input__string,plotshape,location)
+##root(root_metainfo,rm_4,'shape_triangle_up',input__string,plotshape,style)
+##root(root_metainfo,rm_5,'tiny',const__string,plotshape,size)
+##root(root_metainfo,rm_6,'BelowBar',input__string,plotshape,location)
+##root(root_metainfo,rm_7,'shape_triangle_down',input__string,plotshape,style)
+##root(root_metainfo,rm_8,'tiny',const__string,plotshape,size)

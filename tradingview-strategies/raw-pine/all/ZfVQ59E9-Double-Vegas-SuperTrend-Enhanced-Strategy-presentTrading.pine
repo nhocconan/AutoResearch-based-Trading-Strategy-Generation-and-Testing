@@ -1,0 +1,297 @@
+//@version=5
+strategy("Double Vegas SuperTrend Enhanced - Strategy [presentTrading]", shorttitle="Double Vegas SuperTrend Enhanced - Strategy [presentTrading]", overlay=true, 
+ precision=3, commission_value= 0.1, commission_type=strategy.commission.percent, slippage= 1, currency=currency.USD, default_qty_type = strategy.percent_of_equity, 
+ default_qty_value = 10, initial_capital= 10000)
+
+
+// Input settings allow the user to customize the strategy's parameters.
+tradeDirectionChoice = input.string(title="Trade Direction", defval="Both", options=["Long", "Short", "Both"]) // Option to select the trading direction
+
+// Settings for the first Vegas SuperTrend
+atrPeriod1 = input(10, "ATR Period for SuperTrend 1") // Length of the ATR for volatility measurement
+vegasWindow1 = input(100, "Vegas Window Length 1") // Length of the moving average for the Vegas Channel
+superTrendMultiplier1 = input(5, "SuperTrend Multiplier Base 1") // Base multiplier for the SuperTrend calculation
+volatilityAdjustment1 = input.float(5, "Volatility Adjustment Factor 1") // Factor to adjust the SuperTrend sensitivity to the Vegas Channel width
+
+// Settings for the second Vegas SuperTrend
+atrPeriod2 = input(5, "ATR Period for SuperTrend 2") // Length of the ATR for volatility measurement
+vegasWindow2 = input(200, "Vegas Window Length 2") // Length of the moving average for the Vegas Channel
+superTrendMultiplier2 = input(7, "SuperTrend Multiplier Base 2") // Base multiplier for the SuperTrend calculation
+volatilityAdjustment2 = input.float(7, "Volatility Adjustment Factor 2") // Factor to adjust the SuperTrend sensitivity to the Vegas Channel width
+
+// Settings for Hold Days and TPSL Conditions
+useHoldDays = input.bool(true, title="Use Hold Days")
+holdDays = input.int(5, title="Hold Days", minval=1, maxval=60, step=1)
+TPSLCondition = input.string("None", "TPSL Condition", options=["TP", "SL", "Both", "None"])
+takeProfitPerc = input(30.0, title="Take Profit (%)")
+stopLossPerc = input(20.0, title="Stop Loss (%)")
+
+// Calculate the first Vegas Channel using a simple moving average and standard deviation.
+vegasMovingAverage1 = ta.sma(close, vegasWindow1)
+vegasChannelStdDev1 = ta.stdev(close, vegasWindow1)
+vegasChannelUpper1 = vegasMovingAverage1 + vegasChannelStdDev1
+vegasChannelLower1 = vegasMovingAverage1 - vegasChannelStdDev1
+
+// Adjust the first SuperTrend multiplier based on the width of the Vegas Channel.
+channelVolatilityWidth1 = vegasChannelUpper1 - vegasChannelLower1
+adjustedMultiplier1 = superTrendMultiplier1 + volatilityAdjustment1 * (channelVolatilityWidth1 / vegasMovingAverage1)
+
+// Calculate the first SuperTrend indicator values.
+averageTrueRange1 = ta.atr(atrPeriod1)
+superTrendUpper1 = hlc3 - (adjustedMultiplier1 * averageTrueRange1)
+superTrendLower1 = hlc3 + (adjustedMultiplier1 * averageTrueRange1)
+var float superTrendPrevUpper1 = na
+var float superTrendPrevLower1 = na
+var int marketTrend1 = 1
+
+// Update SuperTrend values and determine the current trend direction for the first SuperTrend.
+superTrendPrevUpper1 := nz(superTrendPrevUpper1[1], superTrendUpper1)
+superTrendPrevLower1 := nz(superTrendPrevLower1[1], superTrendLower1)
+marketTrend1 := close > superTrendPrevLower1 ? 1 : close < superTrendPrevUpper1 ? -1 : nz(marketTrend1[1], 1)
+superTrendUpper1 := marketTrend1 == 1 ? math.max(superTrendUpper1, superTrendPrevUpper1) : superTrendUpper1
+superTrendLower1 := marketTrend1 == -1 ? math.min(superTrendLower1, superTrendPrevLower1) : superTrendLower1
+superTrendPrevUpper1 := superTrendUpper1
+superTrendPrevLower1 := superTrendLower1
+
+// Calculate the second Vegas Channel using a simple moving average and standard deviation.
+vegasMovingAverage2 = ta.sma(close, vegasWindow2)
+vegasChannelStdDev2 = ta.stdev(close, vegasWindow2)
+vegasChannelUpper2 = vegasMovingAverage2 + vegasChannelStdDev2
+vegasChannelLower2 = vegasMovingAverage2 - vegasChannelStdDev2
+
+// Adjust the second SuperTrend multiplier based on the width of the Vegas Channel.
+channelVolatilityWidth2 = vegasChannelUpper2 - vegasChannelLower2
+adjustedMultiplier2 = superTrendMultiplier2 + volatilityAdjustment2 * (channelVolatilityWidth2 / vegasMovingAverage2)
+
+// Calculate the second SuperTrend indicator values.
+averageTrueRange2 = ta.atr(atrPeriod2)
+superTrendUpper2 = hlc3 - (adjustedMultiplier2 * averageTrueRange2)
+superTrendLower2 = hlc3 + (adjustedMultiplier2 * averageTrueRange2)
+var float superTrendPrevUpper2 = na
+var float superTrendPrevLower2 = na
+var int marketTrend2 = 1
+
+// Update SuperTrend values and determine the current trend direction for the second SuperTrend.
+superTrendPrevUpper2 := nz(superTrendPrevUpper2[1], superTrendUpper2)
+superTrendPrevLower2 := nz(superTrendPrevLower2[1], superTrendLower2)
+marketTrend2 := close > superTrendPrevLower2 ? 1 : close < superTrendPrevUpper2 ? -1 : nz(marketTrend2[1], 1)
+superTrendUpper2 := marketTrend2 == 1 ? math.max(superTrendUpper2, superTrendPrevUpper2) : superTrendUpper2
+superTrendLower2 := marketTrend2 == -1 ? math.min(superTrendLower2, superTrendPrevLower2) : superTrendLower2
+superTrendPrevUpper2 := superTrendUpper2
+superTrendPrevLower2 := superTrendLower2
+
+// Enhanced Visualization
+// Plot the SuperTrend and Vegas Channel for visual analysis for both lengths.
+plot(marketTrend1 == 1 ? superTrendUpper1 : na, "SuperTrend Upper 1", color=color.green, linewidth=2)
+plot(marketTrend1 == -1 ? superTrendLower1 : na, "SuperTrend Lower 1", color=color.red, linewidth=2)
+
+plot(marketTrend2 == 1 ? superTrendUpper2 : na, "SuperTrend Upper 2", color=color.rgb(31, 119, 130), linewidth=2)
+plot(marketTrend2 == -1 ? superTrendLower2 : na, "SuperTrend Lower 2", color=color.rgb(120, 42, 26), linewidth=2)
+
+// Detect trend direction changes and plot entry/exit signals for both lengths.
+trendShiftToBullish1 = marketTrend1 == 1 and marketTrend1[1] == -1
+trendShiftToBearish1 = marketTrend1 == -1 and marketTrend1[1] == 1
+
+trendShiftToBullish2 = marketTrend2 == 1 and marketTrend2[1] == -1
+trendShiftToBearish2 = marketTrend2 == -1 and marketTrend2[1] == 1
+
+// Define conditions for entering long or short positions, and execute trades based on these conditions for both lengths.
+enterLongCondition1 = marketTrend1 == 1
+enterShortCondition1 = marketTrend1 == -1
+
+enterLongCondition2 = marketTrend2 == 1
+enterShortCondition2 = marketTrend2 == -1
+
+// Entry conditions: Both conditions must be met for a trade to be executed.
+enterLongCondition = enterLongCondition1 and enterLongCondition2 and not na(superTrendPrevUpper1[1]) and not na(superTrendPrevUpper2[1])
+enterShortCondition = enterShortCondition1 and enterShortCondition2 and not na(superTrendPrevLower1[1]) and not na(superTrendPrevLower2[1])
+
+// Variables to track entry times
+var float longEntryTime = na
+var float shortEntryTime = na
+
+// Variables to track whether we have recently exited a trade to prevent re-entry in the same trend
+var bool recentlyExitedLong = false
+var bool recentlyExitedShort = false
+
+// Check trade direction choice before executing trade entries.
+if (enterLongCondition and (tradeDirectionChoice == "Long" or tradeDirectionChoice == "Both"))
+    if (strategy.position_size < 0)
+        strategy.close("Short Position")
+    strategy.entry("Long Position", strategy.long)
+    longEntryTime := time
+    recentlyExitedLong := false
+    recentlyExitedShort := false
+
+if (enterShortCondition and (tradeDirectionChoice == "Short" or tradeDirectionChoice == "Both"))
+    if (strategy.position_size > 0)
+        strategy.close("Long Position")
+    strategy.entry("Short Position", strategy.short)
+    shortEntryTime := time
+    recentlyExitedShort := false
+    recentlyExitedLong := false
+
+// Exit conditions: Either condition being met will trigger an exit.
+exitLongCondition = marketTrend1 == -1 or marketTrend2 == -1
+exitShortCondition = marketTrend1 == 1 or marketTrend2 == 1
+
+// Close positions based on exit conditions or hold days.
+if (useHoldDays and not na(longEntryTime) and (time >= longEntryTime + holdDays * 86400000) and strategy.position_size > 0)
+    strategy.close("Long Position")
+    longEntryTime := na
+    recentlyExitedLong := true
+
+if (useHoldDays and not na(shortEntryTime) and (time >= shortEntryTime + holdDays * 86400000) and strategy.position_size < 0)
+    strategy.close("Short Position")
+    shortEntryTime := na
+    recentlyExitedShort := true
+
+if (not useHoldDays and exitLongCondition and strategy.position_size > 0)
+    strategy.close("Long Position")
+    longEntryTime := na
+    recentlyExitedLong := true
+
+if (not useHoldDays and exitShortCondition and strategy.position_size < 0)
+    strategy.close("Short Position")
+    shortEntryTime := na
+    recentlyExitedShort := true
+
+// Reset recently exited flags on trend change to allow re-entry on a new trend
+if (trendShiftToBullish1 or trendShiftToBullish2)
+    recentlyExitedLong := false
+
+if (trendShiftToBearish1 or trendShiftToBearish2)
+    recentlyExitedShort := false
+
+// Conditional Profit and Loss Management
+if (TPSLCondition == "TP" or TPSLCondition == "Both") 
+    // Apply take profit conditions
+    strategy.exit("TakeProfit_Long", "Long Position", limit=close * (1 + takeProfitPerc / 100))
+    strategy.exit("TakeProfit_Short", "Short Position", limit=close * (1 - takeProfitPerc / 100))
+
+if (TPSLCondition == "SL" or TPSLCondition == "Both") 
+    // Apply stop loss conditions
+    strategy.exit("StopLoss_Long", "Long Position", stop=close * (1 - stopLossPerc / 100))
+    strategy.exit("StopLoss_Short", "Short Position", stop=close * (1 + stopLossPerc / 100))
+
+// Ensure that new entry signals can override the hold days condition
+if (enterLongCondition and (tradeDirectionChoice == "Long" or tradeDirectionChoice == "Both"))
+    if (strategy.position_size < 0)
+        strategy.close("Short Position")
+    strategy.entry("Long Position", strategy.long)
+    longEntryTime := time
+    recentlyExitedLong := false
+    recentlyExitedShort := false
+
+if (enterShortCondition and (tradeDirectionChoice == "Short" or tradeDirectionChoice == "Both"))
+    if (strategy.position_size > 0)
+        strategy.close("Long Position")
+    strategy.entry("Short Position", strategy.short)
+    shortEntryTime := time
+    recentlyExitedShort := false
+    recentlyExitedLong := false
+
+View in Pine Editor・199 lines
+Use on chart
+4
+5
+5
+4
+11 150
+Jun 1, 2024
+
+
+█ Introduction and How It Is Different
+
+The "Double Vegas SuperTrend Enhanced" strategy is a sophisticated trading system that combines two Vegas SuperTrend Enhanced. Very Powerful!
+Let's celebrate the joy of Children's Day on June 1st! Enjoyyy!
+
+BTCUSD LS performance
+
+
+
+The strategy aims to pinpoint market trends with greater accuracy and generate trades that align with the overall market direction.
+This approach differentiates itself by integrating volatility adjustments and leveraging the Vegas Channel's width to refine the SuperTrend calculations, resulting in a dynamic and responsive trading system.
+Additionally, the strategy incorporates customizable take-profit and stop-loss levels, providing traders with a robust framework for risk management.
+
+-> check Vegas SuperTrend Enhanced - Strategy [presentTrading]
+https://www.tradingview.com/script/ec57c7xL-Vegas-SuperTrend-Enhanced-Strategy-presentTrading/
+
+█ Strategy, How It Works: Detailed Explanation
+
+🔶 Vegas Channel and SuperTrend Calculations
+
+The strategy initiates by calculating the Vegas Channel, which is derived from a simple moving average (SMA) and the standard deviation (STD) of the closing prices over a specified window length. This channel helps in measuring market volatility and forms the basis for adjusting the SuperTrend indicator.
+
+Vegas Channel Calculation:
+- vegasMovingAverage = SMA(close, vegasWindow)
+- vegasChannelStdDev = STD(close, vegasWindow)
+- vegasChannelUpper = vegasMovingAverage + vegasChannelStdDev
+- vegasChannelLower = vegasMovingAverage - vegasChannelStdDev
+
+SuperTrend Multiplier Adjustment:
+- channelVolatilityWidth = vegasChannelUpper - vegasChannelLower
+- adjustedMultiplier = superTrendMultiplierBase + volatilityAdjustmentFactor * (channelVolatilityWidth / vegasMovingAverage)
+
+The adjusted multiplier enhances the SuperTrend's sensitivity to market volatility, making it more adaptable to changing market conditions.
+
+BTCUSD Local picture.
+
+
+
+🔶 Average True Range (ATR) and SuperTrend Values
+
+The ATR is computed over a specified period to measure market volatility. Using the ATR and the adjusted multiplier, the SuperTrend upper and lower levels are determined.
+
+ATR Calculation:
+- averageTrueRange = ATR(atrPeriod)
+
+**SuperTrend Calculation:**
+- superTrendUpper = hlc3 - (adjustedMultiplier * averageTrueRange)
+- superTrendLower = hlc3 + (adjustedMultiplier * averageTrueRange)
+
+The SuperTrend levels are continuously updated based on the previous values and the current market trend direction. The market trend is determined by comparing the closing prices with the SuperTrend levels.
+
+Trend Direction:
+- If close > superTrendLowerPrev, then marketTrend = 1 (bullish)
+- If close < superTrendUpperPrev, then marketTrend = -1 (bearish)
+
+🔶 Trade Entry and Exit Conditions
+
+The strategy generates trade signals based on the alignment of both SuperTrends. Trades are executed only when both SuperTrends indicate the same market direction.
+
+Entry Conditions:
+- Long Position: Both SuperTrends must signal a bullish trend.
+- Short Position: Both SuperTrends must signal a bearish trend.
+
+Exit Conditions:
+- Positions are exited if either SuperTrend reverses its trend direction.
+- Additional conditions include holding periods and configurable take-profit and stop-loss levels.
+
+█ Trade Direction
+
+The strategy allows traders to specify the desired trade direction through a customizable input setting. Options include:
+- Long: Only enter long positions.
+- Short: Only enter short positions.
+- Both: Enter both long and short positions based on the market conditions.
+
+█ Usage
+
+To utilize the "Double Vegas SuperTrend Enhanced" strategy, traders need to configure the input settings according to their trading preferences and market conditions. The strategy includes parameters for ATR periods, Vegas Channel window lengths, SuperTrend multipliers, volatility adjustment factors, and risk management settings such as hold days, take-profit, and stop-loss percentages.
+
+█ Default Settings
+
+The strategy comes with default settings that can be adjusted to fit individual trading styles:
+
+- trade Direction: Both (allows trading in both long and short directions for maximum flexibility).
+- ATR Periods: 10 for SuperTrend 1 and 5 for SuperTrend 2 (shorter ATR period results in more sensitivity to recent price movements).
+- Vegas Window Lengths: 100 for SuperTrend 1 and 200 for SuperTrend 2 (longer window length results in smoother moving averages and less sensitivity to short-term volatility).
+- SuperTrend Multipliers: 5 for SuperTrend 1 and 7 for SuperTrend 2 (higher multipliers lead to wider SuperTrend channels, reducing the frequency of trades).
+- Volatility Adjustment Factors: 5 for SuperTrend 1 and 7 for SuperTrend 2 (higher adjustment factors increase the responsiveness to changes in market volatility).
+- Hold Days: 5 (defines the minimum duration a position is held, ensuring trades are not exited prematurely).
+- Take Profit: 30% (sets the target profit level to lock in gains).
+- Stop Loss: 20% (sets the maximum acceptable loss level to mitigate risk).
+
+Jun 6, 2024
+Release Notes
+updated the first line.

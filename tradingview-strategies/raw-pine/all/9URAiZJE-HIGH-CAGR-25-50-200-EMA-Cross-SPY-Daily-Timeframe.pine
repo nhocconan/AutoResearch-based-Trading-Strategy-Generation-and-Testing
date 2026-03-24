@@ -1,0 +1,71 @@
+//@version=5
+strategy("50 / 200 EMA Cross — Filtered Long Only (Working)",
+     overlay = true,
+     initial_capital = 10000,
+     pyramiding = 0,
+     calc_on_every_tick = false)
+
+// === Backtest start ===
+startYear  = input.int(1900, "Start Year")
+startTime  = timestamp(startYear, 1, 1, 0, 0)
+allowTrade = time >= startTime
+
+// === Inputs ===
+fastLen = input.int(50, "Fast EMA")
+slowLen = input.int(200, "Slow EMA")
+smoothLen = input.int(1, "Extra Smoothing")
+
+confirmBars = input.int(70, "Bars Allowed After Cross")
+minSepPerc = input.float(0.35, "Min Separation %")
+minSlopePerc = input.float(0.0, "Min Slow Slope %")
+
+leverage = input.float(5, "Leverage", step = 0.1)
+stopPerc = input.float(10.0, "Hard Stop %")
+
+// === EMAs ===
+fast = ta.ema(ta.ema(close, fastLen), smoothLen)
+slow = ta.ema(ta.ema(close, slowLen), smoothLen)
+
+// === Cross detection ===
+bullCross = ta.crossover(fast, slow)
+bearCross = ta.crossunder(fast, slow)
+
+barsSinceCross = ta.barssince(bullCross)
+
+// === Filters ===
+sepPerc = math.abs(fast - slow) / slow * 100
+sepOk = sepPerc > minSepPerc
+
+slopePerc = (slow - slow[5]) / slow * 100
+slopeOk = slopePerc >= minSlopePerc
+
+// === Entry ===
+enterLong = allowTrade and barsSinceCross >= 0 and barsSinceCross <= confirmBars and fast > slow and sepOk and slopeOk
+exitLong  = allowTrade and bearCross
+
+// === Size ===
+equity = math.max(strategy.equity, 0)
+qty = equity > 0 ? (equity * leverage) / close : 0
+
+// === Orders ===
+if enterLong and strategy.position_size == 0 and qty > 0
+    strategy.entry("Long", strategy.long, qty = qty)
+
+// === Stop ===
+stopPrice = strategy.position_avg_price * (1 - stopPerc / 100)
+strategy.exit("Stop", from_entry = "Long", stop = stopPrice)
+
+// === Trend exit ===
+if exitLong
+    strategy.close("Long")
+
+// === Plot ===
+plot(fast, color=color.green, linewidth=2)
+plot(slow, color=color.red, linewidth=2)
+
+View in Pine Editor・64 lines
+Use on chart
+1
+2
+272
+NOTE: This strategy best works on SPY (S&P 500), on the Daily Timeframe. This is a strategy that has worked since 1960 and has returned a CAGR of 20%+. Over the past 30 years it has returned 25% CAGR, so pretty high. Although the one downside about this strategy is the max drawdown which is at 65% over the past 30 years so if you prefer a lower max drawdown then definitely lower the leverage down from 5x to 2-3x, please note your CAGR will also drop once you lower the leverage.

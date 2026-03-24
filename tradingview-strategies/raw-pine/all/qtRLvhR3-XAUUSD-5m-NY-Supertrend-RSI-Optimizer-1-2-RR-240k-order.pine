@@ -1,0 +1,91 @@
+//@version=6
+strategy("XAUUSD 5m — NY Supertrend+RSI Optimizer (1:2 RR) — $240k/order",
+     overlay=true, pyramiding=3, process_orders_on_close=true)
+
+// === Core inputs ===
+stMult      = input.float(2.0, "Supertrend ATR Multiplier", step=0.1, minval=0.5)
+stLen       = input.int(10, "Supertrend ATR Length", minval=1)
+rsiLen      = input.int(14, "RSI Length", minval=2)
+rsiUpper    = input.int(55, "RSI Long Cross Above", minval=40, maxval=60)
+rsiLower    = input.int(45, "RSI Short Cross Below", minval=40, maxval=60)
+rewardRisk  = input.float(2.0, "Reward/Risk (1:2=2)", step=0.1, minval=1)
+nyStart     = input.int(8,  "NY Start Hour (NY time)", minval=0, maxval=23)
+nyEnd       = input.int(17, "NY End Hour (NY time, excl.)", minval=1, maxval=24)
+flattenEnd  = input.bool(true, "Flatten at Session End")
+
+// === Order value (notional) ===
+orderValue  = input.float(240000, "Order Value (USD)", minval=1000, step=1000)
+
+// === Derived session flag ===
+nyHour   = hour(time, "America/New_York")
+inSession = nyHour >= nyStart and nyHour < nyEnd
+
+// === Indicators (only two) ===
+[stLine, stDir] = ta.supertrend(stMult, stLen)
+rsi = ta.rsi(close, rsiLen)
+
+upTrend  = stDir == 1
+dnTrend  = stDir == -1
+
+longSig  = inSession and upTrend  and ta.crossover(rsi, rsiUpper)
+shortSig = inSession and dnTrend  and ta.crossunder(rsi, rsiLower)
+
+// === Quantity sized by notional value ===
+// Use pointvalue so it works across CFDs/futures where one contract != 1 unit.
+contractValue = close * syminfo.pointvalue
+qtyD = contractValue > 0 ? orderValue / contractValue : 0.0
+
+// === Entries ===
+if longSig and strategy.position_size <= 0
+    strategy.entry("Long",  strategy.long,  qty=qtyD)
+if shortSig and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, qty=qtyD)
+
+// === 1:2 RR exits ===
+minDist = math.max(math.abs(close - stLine), syminfo.mintick * 10)
+
+if strategy.position_size > 0
+    riskD = math.max(math.abs(strategy.position_avg_price - stLine), minDist)
+    stopL = strategy.position_avg_price - riskD
+    takeL = strategy.position_avg_price + rewardRisk * riskD
+    strategy.exit("L TP/SL", from_entry="Long", stop=stopL, limit=takeL)
+
+if strategy.position_size < 0
+    riskD = math.max(math.abs(strategy.position_avg_price - stLine), minDist)
+    stopS = strategy.position_avg_price + riskD
+    takeS = strategy.position_avg_price - rewardRisk * riskD
+    strategy.exit("S TP/SL", from_entry="Short", stop=stopS, limit=takeS)
+
+if flattenEnd and not inSession and strategy.position_size != 0
+    strategy.close_all("NY Session End")
+
+// === Visuals ===
+plot(stLine, "Supertrend", color=color.new(color.yellow, 0), linewidth=2)
+bgcolor(inSession ? color.new(color.green, 92) : na)
+plotchar(longSig,  "Long",  "▲", location.belowbar, color=color.new(color.green, 0))
+plotchar(shortSig, "Short", "▼", location.abovebar, color=color.new(color.red, 0))
+
+View in Pine Editor・66 lines
+Use on chart
+1
+3
+6
+3 949
+This strategy is built for XAUUSD (Gold) on the 5-minute timeframe, focusing exclusively on the New York trading session (08:00–17:00 NY time) — the most volatile and liquid hours of the day.
+It combines a Supertrend trend filter with RSI momentum signals to identify high-probability entries, using a 1:2 risk–reward ratio for disciplined trade management.
+🧠 Strategy Logic:
+Buy Condition: RSI crosses above 55 while Supertrend indicates an uptrend
+Sell Condition: RSI crosses below 45 while Supertrend indicates a downtrend
+Session Filter: Trades only between 08:00 → 17:00 New York time
+Risk/Reward: 1:2 (Take-Profit = 2× Stop-Loss distance from Supertrend line)
+Position Size: $240,000 notional per order
+Auto-Exit: Closes all trades at NY session end
+⚡ Highlights:
+Targets NY session volatility
+Combines trend + momentum for cleaner entries
+Strict 1:2 RR for consistent outcomes
+Avoids overnight exposure
+⚠️ Disclaimer:
+This script is intended for educational and research purposes only.
+Past performance is not indicative of future results.
+Always forward-test on demo before using live capital.

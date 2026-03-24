@@ -1,0 +1,73 @@
+//@version=5
+strategy("VWAP Pullback + RSI Confirmation", overlay=true, margin_long=100, margin_short=100)
+
+// --- Inputs
+rsiLength  = input.int(14, "RSI Length")
+rsiOB      = input.int(70, "RSI Overbought")
+rsiOS      = input.int(30, "RSI Oversold")
+tolerance  = input.float(0.2, "VWAP Pullback Tolerance (%)") // seberapa dekat ke VWAP
+
+// --- VWAP
+vwapValue = ta.vwap
+
+// --- RSI
+rsi = ta.rsi(close, rsiLength)
+
+// --- Conditions
+nearVWAP = math.abs(close - vwapValue) / vwapValue < tolerance / 100
+
+longCondition  = close > vwapValue and nearVWAP and rsi > rsiOS
+shortCondition = close < vwapValue and nearVWAP and rsi < rsiOB
+
+// --- Strategy Execution
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+// --- Exit rules
+strategy.exit("Exit Long",  from_entry="Long", stop=vwapValue * 0.995, profit=vwapValue * 1.02)
+strategy.exit("Exit Short", from_entry="Short", stop=vwapValue * 1.005, profit=vwapValue * 0.98)
+
+// --- Alerts
+alertcondition(longCondition, title="Buy Signal", message="📈 BUY - Pullback to VWAP + RSI confirmation")
+alertcondition(shortCondition, title="Sell Signal", message="📉 SELL - Pullback to VWAP + RSI confirmation")
+
+// --- Plot
+plot(vwapValue, "VWAP", color=color.yellow, linewidth=2)
+plotshape(longCondition, title="Buy", style=shape.labelup, color=color.green, text="BUY")
+plotshape(shortCondition, title="Sell", style=shape.labeldown, color=color.red, text="SELL")
+
+View in Pine Editor・40 lines
+Use on chart
+3
+7
+1 939
+This strategy focuses on trend continuation entries. Instead of betting on reversions, it looks for opportunities when price pulls back to VWAP but the dominant trend remains intact.
+
+Trend Bias:
+
+Price above VWAP = bullish environment → look for BUY pullbacks.
+
+Price below VWAP = bearish environment → look for SELL pullbacks.
+
+Entry Logic:
+
+BUY: Price pulls back near VWAP, RSI stays above oversold (momentum intact).
+
+SELL: Price pulls back near VWAP, RSI stays below overbought (momentum intact).
+
+Exit Rule:
+
+Stop-loss just below/above VWAP.
+
+Take-profit at 1.5–2x risk (default script uses ~2%).
+
+Best Timeframes:
+
+15m–1H → good for intraday trend-following setups.
+
+Daily → captures stronger, longer trends.
+
+⚡ This strategy is powerful in trending markets because VWAP acts as a "magnet" for pullbacks, while RSI prevents overbought/oversold traps.

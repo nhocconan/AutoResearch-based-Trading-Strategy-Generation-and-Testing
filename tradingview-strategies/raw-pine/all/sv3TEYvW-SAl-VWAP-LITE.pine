@@ -1,0 +1,425 @@
+//@version=6
+strategy(
+    "SA Final VWAP — LITE (L/S, SMA3/8 Gate + Prior Wick Flip + RSI)",
+    overlay=true,
+    max_labels_count=50,
+    process_orders_on_close=true
+)
+
+//==================== Inputs ====================
+htfTF = input.timeframe("60", "HTF")
+midTF = input.timeframe("15", "MID")
+use80 = input.bool(true, "Strict Mode (HTF = MID)")
+
+tpUsd = input.float(55, "TP ($)")
+slUsd = input.float(40, "SL ($)")
+
+// Wick definition
+wickMinTicks = input.int(1, "Min Prior Wick (ticks)", minval=0)
+
+// RSI
+rsiLen  = input.int(14, "RSI Length")
+rsiBull = input.float(55, "RSI Bull >")
+rsiBear = input.float(45, "RSI Bear <")
+
+//==================== Helpers ====================
+mint    = syminfo.mintick
+tickVal = syminfo.pointvalue * syminfo.mintick
+usdToTicks(x) => math.max(1, int(math.round(x / tickVal)))
+
+// Prior wick sizes (in ticks)
+upWick(i)   => (high[i] - math.max(open[i], close[i])) / mint
+downWick(i) => (math.min(open[i], close[i]) - low[i]) / mint
+
+// Wick meaning
+priorBullWick = downWick(1) >= wickMinTicks   // bullish rejection
+priorBearWick = upWick(1)   >= wickMinTicks   // bearish rejection
+
+tpT = usdToTicks(tpUsd)
+slT = usdToTicks(slUsd)
+
+//==================== HTF / MID Direction ====================
+f_dir() =>
+    _h = (high + low + close) / 3.0
+    close > ta.vwap(_h) ? 1 : -1
+
+dirHTF = request.security(syminfo.tickerid, htfTF, f_dir(), barmerge.gaps_off, barmerge.lookahead_off)
+dirMID = request.security(syminfo.tickerid, midTF, f_dir(), barmerge.gaps_off, barmerge.lookahead_off)
+
+allowLong  = use80 ? (dirHTF == 1  and dirMID == 1)  : (dirHTF == 1)
+allowShort = use80 ? (dirHTF == -1 and dirMID == -1) : (dirHTF == -1)
+
+//==================== EXECUTION GATE (UPDATED SMA) ====================
+sma3 = ta.sma(close, 3)
+sma8 = ta.sma(close, 8)
+
+bullGate = (sma3 > sma8) and (close > sma8)
+bearGate = (sma3 < sma8) and (close < sma8)
+
+//==================== VWAP Context ====================
+vwap  = ta.vwap((high + low + close) / 3.0)
+above = close > vwap
+below = close < vwap
+
+//==================== RSI FILTER ====================
+rsiVal = ta.rsi(close, rsiLen)
+rsiLongOK  = rsiVal > rsiBull
+rsiShortOK = rsiVal < rsiBear
+
+//==================== FINAL SIGNALS ====================
+// Bull: SMA3>8 + above VWAP + prior BEAR wick + RSI>55
+// Bear: SMA3<8 + below VWAP + prior BULL wick + RSI<45
+longSig  = allowLong  and bullGate and above and priorBearWick and rsiLongOK
+shortSig = allowShort and bearGate and below and priorBullWick and rsiShortOK
+
+//==================== Visuals ====================
+barcolor(longSig ? color.green : shortSig ? color.red : color.gray)
+
+//==================== Entries ====================
+if longSig
+    strategy.entry("L", strategy.long)
+
+if shortSig
+    strategy.entry("S", strategy.short)
+
+//==================== Exits ====================
+strategy.exit("Lx", from_entry="L", profit=tpT, loss=slT)
+strategy.exit("Sx", from_entry="S", profit=tpT, loss=slT)
+
+View in Pine Editor・87 lines
+Use on chart
+1
+2
+649
+SA Final VWAP — LITE (Beginner Guide)
+
+This strategy is designed to only take trades when 3 layers agree:
+
+Market posture (HTF = 1H VWAP direction)
+
+Mid confirmation (MID = 15m VWAP direction)
+
+Execution entry (your chart timeframe signal: SMA trend + VWAP + wick flip + RSI)
+
+It’s built to avoid chop by requiring trend + location + momentum + a reversal wick trigger.
+
+1) What the script does (in plain English)
+
+A Long (green) signal happens only when ALL are true:
+
+✅ HTF VWAP is bullish (price above VWAP on 1H)
+✅ MID VWAP is bullish (price above VWAP on 15m)
+✅ Execution trend is bullish (SMA3 > SMA8 AND close > SMA8)
+✅ Price is above VWAP on your current chart
+✅ The prior candle had an upper wick (bearish rejection wick)
+✅ RSI is strong (RSI > 55 by default)
+
+A Short (red) signal happens only when ALL are true:
+
+✅ HTF VWAP is bearish (price below VWAP on 1H)
+✅ MID VWAP is bearish (price below VWAP on 15m)
+✅ Execution trend is bearish (SMA3 < SMA8 AND close < SMA8)
+✅ Price is below VWAP on your current chart
+✅ The prior candle had a lower wick (bullish rejection wick)
+✅ RSI is weak (RSI < 45 by default)
+
+If those aren’t met, candles stay gray = no trade / neutral.
+
+2) How to add it on TradingView (step-by-step)
+
+Open TradingView
+
+Click Pine Editor (bottom panel)
+
+Paste the full script
+
+Click Save
+
+Click Add to chart
+
+Go to Strategy Tester (bottom) to view results
+
+If you want alerts:
+
+You can still create alerts for strategy orders, but it works best if we convert it to an indicator version with alert conditions. (If you want, tell me and I’ll generate that version.)
+
+3) Best instruments to use it on
+
+This type of VWAP+trend+RSI filter works best on instruments with:
+
+High liquidity
+
+Clean trend behavior
+
+Tight spreads / stable fills
+
+Best:
+
+Index futures: NQ / ES
+
+Index ETFs: QQQ / SPY
+
+Very liquid mega caps: AAPL / MSFT / NVDA
+
+Avoid thin stocks or random low-volume names.
+
+4) Best timeframes to run it on (beginner safe)
+✅ Recommended execution timeframes (where entries trigger)
+
+1 minute (fast, best if you’re experienced)
+
+3 minute (balanced)
+
+5 minute (most beginner friendly)
+
+✅ Gate timeframes (already built in)
+
+HTF = 60 min
+
+MID = 15 min
+
+These should usually stay as-is.
+
+5) How to interpret the candle colors
+
+Green candle = A valid LONG signal fired on that bar
+
+Red candle = A valid SHORT signal fired on that bar
+
+Gray candle = No signal (do nothing)
+
+This is important: Gray is a feature, not a problem.
+Gray means the system is protecting you from chop.
+
+6) What “Strict Mode (HTF=MID)” really means
+
+When Strict Mode = ON:
+
+HTF and MID must agree exactly
+
+This reduces signals but improves quality
+
+When Strict Mode = OFF:
+
+HTF alone can allow direction
+
+More trades, more noise
+
+Beginner rule: keep Strict Mode ON.
+
+7) How to trade it (simple beginner rules)
+Long trade rules
+
+Wait for a green candle (signal candle)
+
+Enter at the close of the candle (or next candle open)
+
+Use your stop (your script currently uses TP+SL inside strategy)
+
+Short trade rules
+
+Wait for a red candle
+
+Enter at the close (or next candle open)
+
+Respect stop loss
+
+Most important discipline rule
+
+Do not take trades “because it’s close.”
+Take only when the candle is green/red.
+
+8) Why the wick rule is powerful
+
+This is a key “needle shifter.”
+
+Long requires prior bearish wick (upper wick):
+That shows sellers tried to push up resistance / reject price — and failed.
+If the market is still above VWAP + trend is up, that wick often marks a “dip-then-go” continuation.
+
+Short requires prior bullish wick (lower wick):
+Buyers tried to defend and push up — but got rejected.
+Under VWAP + downtrend + weak RSI, that wick often becomes the last pullback before continuation down.
+
+So the wick rule helps avoid entering mid-candle or late chase entries.
+
+9) How to avoid the 100-point reversal problem you mentioned
+
+Those big reversals usually come from one of these:
+
+(A) Taking signals inside chop
+
+Fix: keep Strict Mode ON, and keep RSI thresholds.
+
+(B) Trading directly into a major support/resistance zone
+
+Fix:
+
+Avoid entries right at prior day high/low, overnight high/low, or major swing points
+
+Don’t short directly into support; don’t long into resistance
+
+(C) News spikes
+
+Fix:
+
+Avoid trading major news windows (CPI, FOMC, Powell, NFP)
+
+VWAP systems can get steamrolled temporarily during high-impact releases
+
+10) Beginner settings I recommend (starting defaults)
+
+Keep these:
+
+Strict Mode = ✅ ON
+
+RSI Length = 14
+
+RSI Bull > 55
+
+RSI Bear < 45
+
+SMA = 3 & 8 (as you have now)
+
+HTF = 60m, MID = 15m
+
+If you want fewer trades but higher quality:
+
+RSI Bull > 58
+
+RSI Bear < 42
+
+wickMinTicks = 2 (filters tiny meaningless wicks)
+
+11) What you should NOT do (common beginner mistakes)
+
+❌ Don’t take trades when candles are gray
+❌ Don’t reverse immediately because the opposite color appears one candle later
+❌ Don’t use this as a prediction tool — it’s a confirmation tool
+❌ Don’t force trades in low volume periods (midday chop)
+
+12) Best “times of day” to trade it (for index products)
+
+For NQ/ES/QQQ/SPY, the cleanest VWAP trend behavior is usually:
+
+9:35–11:00 ET (best)
+
+1:30–3:30 ET (good)
+
+Avoid 11:30–1:15 ET (chop zone)
+
+
+Why You Should Monitor the Strategy Report (Very Important)
+
+This script is intentionally published as a strategy, not just an indicator.
+
+That is by design.
+
+The Strategy Tester Report is a core part of how this tool should be evaluated.
+
+When you open the Strategy Tester tab in TradingView, you gain insight into:
+
+Win rate consistency across timeframes
+
+Drawdown behavior during choppy vs trending conditions
+
+How often signals occur (selectivity matters)
+
+Performance differences between 1m, 3m, and 5m charts
+
+The value of the HTF + MID gating logic during high-risk periods
+
+⚠️ Do not judge this tool based on a handful of trades or one session.
+Its real value shows up when you observe:
+
+Fewer trades during chop
+
+Cleaner participation during directional sessions
+
+Reduced exposure during regime conflict
+
+This is exactly why the higher-timeframe VWAP posture and RSI/wick filters exist.
+
+🧠 How to Use the Strategy Report Effectively (Beginner Tip)
+
+To properly evaluate the system:
+
+Apply the strategy to one instrument (ex: NQ, ES, QQQ)
+
+Test one execution timeframe at a time (1m, 3m, or 5m)
+
+Keep HTF = 60m and MID = 15m fixed
+
+Review results over multiple days, not single sessions
+
+Pay attention to:
+
+Max drawdown
+
+Trade clustering
+
+Losing streak behavior (this matters more than win rate alone)
+
+This will give you a much more realistic understanding of what the system is designed to do.
+
+🔒 About This Script (Important Notice)
+
+This SA Final VWAP — LITE script is intentionally:
+
+Condensed
+
+Restricted
+
+Directionally gated
+
+Missing advanced logic layers
+
+It represents the last free public release of this VWAP-based framework.
+
+The full version includes additional proprietary components such as:
+
+Expanded regime classification
+
+Enhanced VWAP slope and acceptance logic
+
+Advanced no-trade zones
+
+Multi-setup prioritization
+
+Internal failure-state suppression
+
+Additional probabilistic filters not exposed here
+
+These components materially change behavior during difficult market conditions and are not included in this public script.
+
+📩 For Serious Users / Full Version Access
+
+If you find this indicator useful, insightful, or different from typical TradingView tools, you are encouraged to reach out directly.
+
+This script is meant to:
+
+Demonstrate the core logic
+
+Allow you to validate performance via the strategy report
+
+Help you decide whether the full framework is appropriate for your trading
+
+📬 For access to the complete version and additional attributes of the algorithm, contact the author directly.
+
+This separation is intentional to:
+
+Protect intellectual property
+
+Maintain system integrity
+
+Ensure serious users receive proper context and guidance
+
+🧭 Final Note
+
+This is not a prediction tool.
+It is a confirmation and participation framework designed to operate when probability, structure, and momentum align.
+
+Gray candles are protection.
+Green and red candles are permission.
+
+Use it with patience, discipline, and proper evaluation — and let the strategy report tell you the real story.

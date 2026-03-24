@@ -1,0 +1,445 @@
+//@version=5
+
+var table watermark = table.new(position.middle_center, 1, 1)
+
+table.cell(watermark, 0, 0,"Open-Source Version\nFor Advanced / Invite-Only Systems\nContact: TV: @maheshxlent, X:@Mahesh071117",text_color = color.new(color.white, 30),bgcolor    = color.new(color.black, 85),text_size  = size.normal)
+
+strategy("NIFTY Options Breakout Strategy",
+     overlay           = true,
+     initial_capital   = 25000,
+     default_qty_type  = strategy.fixed,
+     default_qty_value = 1,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.015)
+
+// === INPUTS ===
+boxLookback = input.int(10, title="Breakout Range Lookback Bars")
+
+// Hard SL/TP in % from entry price (for options)
+slPercent = input.float(15.0, title="Hard SL % from Entry", minval=0.0)   // -15%
+tpPercent = input.float(40.0, title="Hard TP % from Entry", minval=0.0)   // +40%
+
+showSymbolDebug    = input.bool(true,  "Highlight allowed symbols?")
+enableEODExit      = input.bool(true,  "Enable EOD Exit at 3:15 PM?")
+
+// EMA trend helpers
+useEMACrossFilter  = input.bool(false, "Use EMA Cross Filter (20>50 or 50>100)?")
+emaCrossLookback   = input.int(20,     "EMA Cross Lookback Bars", minval=1)
+
+// === AUTO BUFFER BY SYMBOL (BASE SETTINGS) ===
+useAutoBuffer   = input.bool(true, title="Auto Buffer % by Symbol?")
+manualBufferPct = input.float(0.05, title="Manual Buffer %", minval=0.0)
+
+// Symbol / description (current chart)
+tickerUpper = str.upper(syminfo.ticker)
+descUpper   = str.upper(syminfo.description)
+
+// Index checks
+isNifty     = str.contains(descUpper, "NIFTY 50") or str.contains(tickerUpper, "NIFTY")
+isBankNifty = str.contains(descUpper, "BANKNIFTY") or str.contains(tickerUpper, "BANKNIFTY")
+
+// Option type from description
+isCallDesc = str.contains(descUpper, "CALL")
+isPutDesc  = str.contains(descUpper, "PUT")
+
+// We want NIFTY 50 CALL or PUT options
+isNiftyOption  = isNifty and (isCallDesc or isPutDesc)
+canTradeSymbol = isNiftyOption
+
+// ----------------------------------------------------------------------
+// EXPIRY PARSING: START TRADING FROM 1ST OF (EXPIRY MONTH - 2)
+// ----------------------------------------------------------------------
+int expMonth = 0
+int expYear  = na
+
+string[] tokens = str.split(descUpper, " ")
+for i = 0 to array.size(tokens) - 1
+    tk = array.get(tokens, i)
+
+    if      tk == "JAN"
+        expMonth := 1
+    else if tk == "FEB"
+        expMonth := 2
+    else if tk == "MAR"
+        expMonth := 3
+    else if tk == "APR"
+        expMonth := 4
+    else if tk == "MAY"
+        expMonth := 5
+    else if tk == "JUN"
+        expMonth := 6
+    else if tk == "JUL"
+        expMonth := 7
+    else if tk == "AUG"
+        expMonth := 8
+    else if tk == "SEP"
+        expMonth := 9
+    else if tk == "OCT"
+        expMonth := 10
+    else if tk == "NOV"
+        expMonth := 11
+    else if tk == "DEC"
+        expMonth := 12
+
+    num = str.tonumber(tk)
+    if not na(num) and num >= 2000 and num <= 2100
+        expYear := int(num)
+
+// Compute "start trading from" month/year (2 months before expiry)
+int startMonth = na
+int startYear  = na
+
+if expMonth != 0 and not na(expYear)
+    if expMonth > 2
+        startMonth := expMonth - 2
+        startYear  := expYear
+    else
+        // JAN / FEB: shift to previous year
+        startMonth := expMonth + 10    // JAN -> 11, FEB -> 12 of previous year
+        startYear  := expYear - 1
+
+// Current bar date
+curY = year(time)
+curM = month(time)
+curD = dayofmonth(time)
+
+// Only trade on/after 1st of (startMonth/startYear); if parsing failed, allow trading
+expiryWindowOK =
+     na(startYear) ? true :
+     (curY > startYear or
+     (curY == startYear and curM > startMonth) or
+     (curY == startYear and curM == startMonth and curD >= 1))
+
+// Debug shading
+bgcolor(showSymbolDebug ? (canTradeSymbol ? color.new(color.green, 90) : na) : na)
+
+// ======================================================================
+// 5-MINUTE LOGIC WRAPPED IN FUNCTION
+// ======================================================================
+f_5mSignals() =>
+    tU = str.upper(syminfo.ticker)
+    dU = str.upper(syminfo.description)
+    isNifty_5     = str.contains(dU, "NIFTY 50") or str.contains(tU, "NIFTY")
+    isBankNifty_5 = str.contains(dU, "BANKNIFTY") or str.contains(tU, "BANKNIFTY")
+    isCall_5      = str.contains(dU, "CALL")
+    isPut_5       = str.contains(dU, "PUT")
+    isNiftyOpt_5  = isNifty_5 and (isCall_5 or isPut_5)
+    canTrade_5    = isNiftyOpt_5
+
+    bufferPercent_5 = useAutoBuffer
+         ? (isNiftyOpt_5 ? 5.0 : isBankNifty_5 ? 0.08 : isNifty_5 ? 0.05 : 0.05)
+         : manualBufferPct
+    bufferPoints_5  = close * bufferPercent_5 / 100.0
+
+    breakoutHigh_5 = ta.highest(high, boxLookback)
+    breakoutLow_5  = ta.lowest(low,  boxLookback)
+
+    ema10_5   = ta.ema(close, 10)
+    ema20_5   = ta.ema(close, 20)
+    ema50_5   = ta.ema(close, 50)
+    ema100_5  = ta.ema(close, 100)
+    ema200_5  = ta.ema(close, 200)
+
+    buyCond_5  = close >= (breakoutHigh_5 - bufferPoints_5) and close <= breakoutHigh_5
+    sellCond_5 = close <= (breakoutLow_5  + bufferPoints_5) and close >= breakoutLow_5
+
+    // === BASE EMA TREND FILTER ===
+    // Require price above 50 or 200 AND 50 EMA >= 100 EMA (no longs if 50 < 100)
+    buyFilter_5_base  = ((close > ema50_5) or (close > ema200_5)) and ema50_5 >= ema100_5
+    sellFilter_5      = (close < ema50_5) or (close < ema200_5)
+
+    // === OPTIONAL EMA CROSS FILTER (20>50 or 50>100) ===
+    cross_20_50  = ta.crossover(ema20_5, ema50_5)   // 20 crosses above 50
+    cross_50_100 = ta.crossover(ema50_5, ema100_5)  // 50 crosses above 100
+    anyBullCross = cross_20_50 or cross_50_100
+
+    barsSinceCross  = ta.barssince(anyBullCross)
+    recentBullCross = not na(barsSinceCross) and barsSinceCross <= emaCrossLookback
+
+    buyFilter_5 = useEMACrossFilter ? (buyFilter_5_base and recentBullCross) : buyFilter_5_base
+
+    h = hour(time)
+    m = minute(time)
+    timeOK_5 = (h > 9) and (h < 14 or (h == 14 and m <= 15))
+
+    rawBuy_5  = buyCond_5  and buyFilter_5  and timeOK_5 and canTrade_5 and barstate.isconfirmed
+    rawSell_5 = sellCond_5 and sellFilter_5 and timeOK_5 and canTrade_5 and barstate.isconfirmed
+
+    longEntry_5  = rawBuy_5  and close > ema50_5
+    shortEntry_5 = rawSell_5 and close < ema50_5
+
+    [longEntry_5, shortEntry_5, ema10_5, ema20_5, ema50_5, ema100_5, ema200_5, close]
+
+// ======================================================================
+// REQUEST 5-MINUTE SIGNALS ON ANY CHART (1m / 5m / 15m)
+// ======================================================================
+[longRaw5, shortRaw5, ema10_5, ema20_5, ema50_5, ema100_5, ema200_5, close_5] =
+     request.security(syminfo.tickerid, "5", f_5mSignals(), barmerge.gaps_on, barmerge.lookahead_off)
+
+// Plot 5m EMAs
+plot(ema10_5,   color=color.new(color.green,  0), title="5m EMA 10")
+plot(ema20_5,   color=color.new(color.blue,   0), title="5m EMA 20")
+plot(ema50_5,   color=color.new(color.yellow, 0), title="5m EMA 50")
+plot(ema100_5,  color=color.new(color.purple, 0), title="5m EMA 100")
+plot(ema200_5,  color=color.new(color.orange, 0), title="5m EMA 200")
+
+// Trend + bar count (higher-level check, still using 50 vs 200)
+isBullTrend = ema50_5 > ema200_5
+enoughBars  = bar_index > 200
+
+// ======================================================================
+// DAILY TRADE LIMIT & TIME
+// ======================================================================
+curHour  = hour(time)
+curMin   = minute(time)
+
+var int tradesToday = 0
+var int lastDay     = dayofmonth(time)
+
+if dayofmonth(time) != lastDay
+    tradesToday := 0
+    lastDay     := dayofmonth(time)
+
+maxTradesPerDay = 1
+canTradeToday   = tradesToday < maxTradesPerDay
+
+// EOD cutoff at 3:15 PM
+cutoffTime = (curHour > 15) or (curHour == 15 and curMin >= 15)
+
+// ======================================================================
+// FINAL ENTRY SIGNALS
+// ======================================================================
+newLong5       = longRaw5 and not longRaw5[1]
+isOptionTypeOK = isCallDesc or isPutDesc
+
+longEntrySignal  = newLong5
+     and strategy.position_size == 0
+     and canTradeToday
+     and enoughBars
+     and isBullTrend
+     and canTradeSymbol
+     and isOptionTypeOK
+     and expiryWindowOK
+
+plotshape(longEntrySignal,  title="5m BUY (CALL/PUT)",  style=shape.labelup,   location=location.belowbar,
+          color=color.new(color.green, 50), text="BUY",  textcolor=color.white, size=size.tiny)
+
+if longEntrySignal
+    strategy.entry("Long", strategy.long)
+    tradesToday += 1
+
+// ======================================================================
+// TRAILING + HARD SL/TP (ALL IN %)
+// ======================================================================
+var float maxProfitPct = 0.0   // highest profit % since entry
+var float minProfitPct = 0.0   // lowest profit % since entry
+
+// Exit condition flags to use for alerts
+exitTP_SL_Trail = false
+emaExitCond     = false
+eodExitCond     = enableEODExit and cutoffTime and strategy.position_size != 0
+
+if strategy.position_size > 0
+    entryPrice   = strategy.position_avg_price
+    curProfitPct = (close / entryPrice - 1.0) * 100.0
+
+    // update extremes
+    maxProfitPct := math.max(maxProfitPct, curProfitPct)
+    minProfitPct := math.min(minProfitPct, curProfitPct)
+
+    // --- HARD CONDITIONS ---
+    hardSL = curProfitPct <= -slPercent      // e.g. -15%
+    hardTP = curProfitPct >= tpPercent       // e.g. +40%
+
+    // --- TRAILING CONDITIONS (STEP LADDER) ---
+
+    // 1) Reached >= 35% (but < 40%), then fall to <= 30%
+    cond_35 = maxProfitPct >= 35.0 and maxProfitPct < 40.0 and curProfitPct <= 30.0
+
+    // 2) Reached >= 30% (but < 35%), then fall to <= 25%
+    cond_30 = maxProfitPct >= 30.0 and maxProfitPct < 35.0 and curProfitPct <= 25.0
+
+    // 3) Reached >= 25% (but < 30%), then fall to <= 20%
+    cond_25 = maxProfitPct >= 25.0 and maxProfitPct < 30.0 and curProfitPct <= 20.0
+
+    // 4) Reached >= 20% (but < 25%), then fall to <= 15%
+    cond_20 = maxProfitPct >= 20.0 and maxProfitPct < 25.0 and curProfitPct <= 15.0
+
+    // 5) Reached >= 15% (but < 20%), then fall to <= 10%
+    cond_15 = maxProfitPct >= 15.0 and maxProfitPct < 20.0 and curProfitPct <= 10.0
+
+    // 6) Reached >= 5% (but < 10%), then fall to <= 0%
+    cond_5  = maxProfitPct >= 5.0  and maxProfitPct < 10.0 and curProfitPct <= 0.0
+
+    // 7) Loss reached <= -10%, then recover to >= 0%
+    cond_loss = minProfitPct <= -10.0 and curProfitPct >= 0.0
+
+    // combined exit (will also drive alert)
+    exitTP_SL_Trail :=
+         hardSL or hardTP or
+         cond_35 or cond_30 or cond_25 or
+         cond_20 or cond_15 or cond_5 or
+         cond_loss
+
+    if exitTP_SL_Trail
+        strategy.close("Long", comment="TP/SL/Trail")
+else
+    // reset when flat
+    maxProfitPct := 0.0
+    minProfitPct := 0.0
+
+// === EMA50 REVERSAL EXIT (USING 5m EMA50 & CLOSE) ===
+emaExitCond := strategy.position_size > 0 and close_5 < ema50_5
+if emaExitCond
+    strategy.close("Long", comment="5m EMA50 Exit")
+
+// === OPTIONAL EOD EXIT at 3:15 PM ===
+if eodExitCond
+    strategy.close_all(comment="EOD_3_15")
+
+// ======================================================================
+// EXIT LABELS
+// ======================================================================
+plotshape(exitTP_SL_Trail,
+     title     = "Exit TP/SL/Trail",
+     style     = shape.labeldown,
+     location  = location.abovebar,
+     color     = color.new(color.red, 0),
+     text      = "TP/SL",
+     textcolor = color.white,
+     size      = size.tiny)
+
+plotshape(emaExitCond,
+     title     = "Exit EMA50",
+     style     = shape.labeldown,
+     location  = location.abovebar,
+     color     = color.new(color.orange, 0),
+     text      = "EMA",
+     textcolor = color.white,
+     size      = size.tiny)
+
+plotshape(eodExitCond,
+     title     = "Exit EOD 3:15",
+     style     = shape.labeldown,
+     location  = location.abovebar,
+     color     = color.new(color.blue, 0),
+     text      = "EOD",
+     textcolor = color.white,
+     size      = size.tiny)
+
+// ======================================================================
+// ALERTS
+// ======================================================================
+// Entry alert
+alertcondition(longEntrySignal,
+     title   = "5m BUY Entry (CALL/PUT)",
+     message = "BUY: 5m NIFTY OPTIONS Breakout Signal")
+
+// Exit alerts (TP/SL/Trailing block)
+alertcondition(exitTP_SL_Trail,
+     title   = "Long Exit TP/SL/Trail",
+     message = "EXIT LONG: TP/SL/Trailing condition hit on NIFTY OPTIONS")
+
+// Exit alert (EMA50 reversal)
+alertcondition(emaExitCond,
+     title   = "Long Exit EMA50",
+     message = "EXIT LONG: 5m EMA50 reversal on NIFTY OPTIONS")
+
+// Exit alert (EOD square-off)
+alertcondition(eodExitCond,
+     title   = "Long Exit EOD 3:15 PM",
+     message = "EXIT LONG: EOD square-off at 3:15 PM on NIFTY OPTIONS")
+
+View in Pine Editor・351 lines
+Use on chart
+2
+8
+1 050
+Nov 26, 2025
+This strategy trades NIFTY 50 Options (CALL & PUT) using 5-minute breakout logic, strict trend filters, expiry-based symbol validation, and a dynamic trailing-profit engine.
+
+1️⃣ Entry Logic
+
+Only trades NIFTY 50 options, filtered automatically by symbol.
+
+Trades only between 10:00 AM – 2:15 PM (5m bars).
+
+Breakout trigger:
+
+Price enters the buy breakout zone (high of last boxLookback bars ± buffer).
+
+Trend filter:
+
+Price must be above EMA50 or EMA200,
+
+AND EMA50 ≥ EMA100 (to avoid weak conditions).
+
+Optional strengthening:
+
+EMA20>EMA50 OR EMA50>EMA100 recent cross can be enforced.
+
+Higher-timeframe trend check:
+
+EMA50 > EMA200 (bullish regime only).
+
+Start trading options only after expiry–2 months (auto-parsed).
+
+2️⃣ One Trade Per Day
+
+Maximum 1 long trade per day.
+
+No shorting (long-only strategy).
+
+3️⃣ Risk Management — SL, TP & Trailing
+
+Includes three types of exits:
+
+🔹 A) Hard SL/TP
+
+Hard Stop-Loss: -15%
+
+Hard Take-Profit: +40%
+
+🔹 B) Step-Ladder Trailing Profit
+
+As the option price rises, trailing activates:
+
+Max Profit Reached Exit Trigger When Falls To
+≥ 35% ≤ 30%
+≥ 30% ≤ 25%
+≥ 25% ≤ 20%
+≥ 20% ≤ 15%
+≥ 15% ≤ 10%
+≥ 5% ≤ 0%
+🔹 C) Loss-Recovery Exit
+
+If loss reaches –10% but then recovers to 0%, exit at breakeven.
+
+4️⃣ Trend-Reversal Exit
+
+If price closes below 5m EMA50, the long is exited instantly.
+
+5️⃣ Optional Intraday Exit
+
+EOD square-off at 3:15 PM.
+
+6️⃣ Alerts for Automation
+
+The strategy provides alerts for:
+
+BUY entry
+
+TP/SL/Trailing exit
+
+EMA50 reversal exit
+
+EOD exit
+Jan 26
+Release Notes
+Updated WaterMark.
+
+This is an open-source reference implementation shared to demonstrate structure, discipline, and execution style.
+
+Advanced versions include additional filters, enhanced trade management, and protected logic, and are shared separately on an invite-only basis.
+
+If you’re interested in advanced systems, feel free to contact via the watermark details.

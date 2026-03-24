@@ -1,0 +1,383 @@
+//@version=5
+strategy("ORB Research Tool (5m OR Engine) | Break/Retest/15m | Filters | 1R | Flat 4:45",
+     overlay=true,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     process_orders_on_close=false)
+
+//====================
+// Inputs
+//====================
+string tz = "America/New_York"
+
+orMinutes   = input.int(15, "Opening Range Minutes", minval=5, step=5)
+qty         = input.int(4, "Qty", minval=1)
+
+// Entry modes
+use5mBreak  = input.bool(true,  "Entry: FIRST 5m close outside OR")
+use5mRetest = input.bool(false, "Entry: 5m retest AFTER breakout")
+use15mBreak = input.bool(false, "Entry: 15m close outside OR")
+
+retestBuffer = input.float(0.0, "Retest buffer (points)", minval=0.0, step=0.25)
+
+// Risk
+stopBuffer   = input.float(10.0, "Stop buffer past opposite side (points)", minval=0.25, step=0.25)
+
+// Filters
+useORSizeFilter = input.bool(false, "Filter: Skip if OR size > max points")
+maxORPoints     = input.float(50.0, "Max OR size (points)", minval=0.25, step=0.25)
+
+useVWAPFilter   = input.bool(false, "Filter: VWAP direction (long above / short below)")
+useDOWFilter    = input.bool(false, "Filter: Day of week")
+
+tradeMon = input.bool(true, "Trade Monday")
+tradeTue = input.bool(true, "Trade Tuesday")
+tradeWed = input.bool(true, "Trade Wednesday")
+tradeThu = input.bool(true, "Trade Thursday")
+tradeFri = input.bool(true, "Trade Friday")
+
+useMonthFilter = input.bool(false, "Filter: Months")
+tradeJan = input.bool(true,  "Jan")
+tradeFeb = input.bool(true,  "Feb")
+tradeMar = input.bool(true,  "Mar")
+tradeApr = input.bool(true,  "Apr")
+tradeMay = input.bool(true,  "May")
+tradeJun = input.bool(true,  "Jun")
+tradeJul = input.bool(true,  "Jul")
+tradeAug = input.bool(true,  "Aug")
+tradeSep = input.bool(true,  "Sep")
+tradeOct = input.bool(true,  "Oct")
+tradeNov = input.bool(true,  "Nov")
+tradeDec = input.bool(true,  "Dec")
+
+// Force flat
+forceFlatH = input.int(16, "Force flat hour (NY)", minval=0, maxval=23)
+forceFlatM = input.int(45, "Force flat minute (NY)", minval=0, maxval=59)
+
+// Optional monthly table
+showMonthTable = input.bool(false, "Show monthly performance table (net + trades)")
+
+//====================
+// NY time helpers (chart TF)
+//====================
+nyH = hour(time, tz)
+nyM = minute(time, tz)
+curMonth = month(time, tz)
+curDOW = dayofweek(time, tz)
+
+forceFlat = (nyH > forceFlatH) or (nyH == forceFlatH and nyM >= forceFlatM)
+
+//====================
+// Month / DOW allowed
+//====================
+monthAllowed =
+     (curMonth == 1  and tradeJan) or
+     (curMonth == 2  and tradeFeb) or
+     (curMonth == 3  and tradeMar) or
+     (curMonth == 4  and tradeApr) or
+     (curMonth == 5  and tradeMay) or
+     (curMonth == 6  and tradeJun) or
+     (curMonth == 7  and tradeJul) or
+     (curMonth == 8  and tradeAug) or
+     (curMonth == 9  and tradeSep) or
+     (curMonth == 10 and tradeOct) or
+     (curMonth == 11 and tradeNov) or
+     (curMonth == 12 and tradeDec)
+
+canTradeMonth = useMonthFilter ? monthAllowed : true
+
+dowAllowed =
+     (curDOW == dayofweek.monday    and tradeMon) or
+     (curDOW == dayofweek.tuesday   and tradeTue) or
+     (curDOW == dayofweek.wednesday and tradeWed) or
+     (curDOW == dayofweek.thursday  and tradeThu) or
+     (curDOW == dayofweek.friday    and tradeFri)
+
+canTradeDOW = useDOWFilter ? dowAllowed : true
+
+//====================
+// VWAP filter (chart TF session VWAP)
+//====================
+vwap = ta.vwap(hlc3)
+longVWAPok  = not useVWAPFilter or close > vwap
+shortVWAPok = not useVWAPFilter or close < vwap
+
+//====================
+// ORB engine computed on 5m (single-value returns to avoid syntax issues)
+//====================
+
+// OR High (5m)
+f_orHigh_5m(_orMinutes) =>
+    int h = hour(time, tz)
+    int m = minute(time, tz)
+    int y = year(time, tz)
+    int mo = month(time, tz)
+    int d = dayofmonth(time, tz)
+
+    int orStart = timestamp(tz, y, mo, d, 9, 30)
+    int orEnd   = orStart + _orMinutes * 60 * 1000
+
+    bool inOR = (time >= orStart) and (time < orEnd)
+    bool is930 = (h == 9 and m == 30)
+
+    var float orH = na
+    if is930
+        orH := na
+    if inOR
+        orH := na(orH) ? high : math.max(orH, high)
+    orH
+
+// OR Low (5m)
+f_orLow_5m(_orMinutes) =>
+    int h = hour(time, tz)
+    int m = minute(time, tz)
+    int y = year(time, tz)
+    int mo = month(time, tz)
+    int d = dayofmonth(time, tz)
+
+    int orStart = timestamp(tz, y, mo, d, 9, 30)
+    int orEnd   = orStart + _orMinutes * 60 * 1000
+
+    bool inOR = (time >= orStart) and (time < orEnd)
+    bool is930 = (h == 9 and m == 30)
+
+    var float orL = na
+    if is930
+        orL := na
+    if inOR
+        orL := na(orL) ? low : math.min(orL, low)
+    orL
+
+// OR Locked flag (5m)
+f_orLocked_5m(_orMinutes) =>
+    int y = year(time, tz)
+    int mo = month(time, tz)
+    int d = dayofmonth(time, tz)
+    int orStart = timestamp(tz, y, mo, d, 9, 30)
+    int orEnd   = orStart + _orMinutes * 60 * 1000
+    time >= orEnd
+
+// FIRST 5m close outside OR (5m) - Long signal (fires once/day)
+f_sigBreakL_5m(_orMinutes) =>
+    int h = hour(time, tz)
+    int m = minute(time, tz)
+
+    float orH = f_orHigh_5m(_orMinutes)
+    float orL = f_orLow_5m(_orMinutes)
+    bool locked = f_orLocked_5m(_orMinutes)
+
+    bool is930 = (h == 9 and m == 30)
+    var bool fired = false
+    if is930
+        fired := false
+
+    bool sig = locked and not fired and not na(orH) and close > orH
+    if sig
+        fired := true
+    sig
+
+// FIRST 5m close outside OR (5m) - Short signal (fires once/day)
+f_sigBreakS_5m(_orMinutes) =>
+    int h = hour(time, tz)
+    int m = minute(time, tz)
+
+    float orH = f_orHigh_5m(_orMinutes)
+    float orL = f_orLow_5m(_orMinutes)
+    bool locked = f_orLocked_5m(_orMinutes)
+
+    bool is930 = (h == 9 and m == 30)
+    var bool fired = false
+    if is930
+        fired := false
+
+    bool sig = locked and not fired and not na(orL) and close < orL
+    if sig
+        fired := true
+    sig
+
+// 5m Retest AFTER breakout (must break first, then retest) - Long
+f_sigRetestL_5m(_orMinutes, _buf) =>
+    int h = hour(time, tz)
+    int m = minute(time, tz)
+
+    float orH = f_orHigh_5m(_orMinutes)
+    bool locked = f_orLocked_5m(_orMinutes)
+    bool is930 = (h == 9 and m == 30)
+
+    var bool broke = false
+    var bool fired = false
+
+    if is930
+        broke := false
+        fired := false
+
+    // Break must happen first (a 5m close above ORH)
+    if locked and not na(orH) and close > orH
+        broke := true
+
+    // Retest signal: after break, price dips to ORH(+buf) and closes back >= ORH
+    bool sig = locked and broke and not fired and not na(orH) and low <= (orH + _buf) and close >= orH
+    if sig
+        fired := true
+    sig
+
+// 5m Retest AFTER breakout - Short
+f_sigRetestS_5m(_orMinutes, _buf) =>
+    int h = hour(time, tz)
+    int m = minute(time, tz)
+
+    float orL = f_orLow_5m(_orMinutes)
+    bool locked = f_orLocked_5m(_orMinutes)
+    bool is930 = (h == 9 and m == 30)
+
+    var bool broke = false
+    var bool fired = false
+
+    if is930
+        broke := false
+        fired := false
+
+    // Break must happen first (a 5m close below ORL)
+    if locked and not na(orL) and close < orL
+        broke := true
+
+    // Retest signal: after break, price pops to ORL(-buf) and closes back <= ORL
+    bool sig = locked and broke and not fired and not na(orL) and high >= (orL - _buf) and close <= orL
+    if sig
+        fired := true
+    sig
+
+// Pull OR + signals up to 15m chart (NO tuples; each call returns one value)
+orHigh5  = request.security(syminfo.tickerid, "5", f_orHigh_5m(orMinutes), barmerge.gaps_off, barmerge.lookahead_off)
+orLow5   = request.security(syminfo.tickerid, "5", f_orLow_5m(orMinutes),  barmerge.gaps_off, barmerge.lookahead_off)
+orLocked5 = request.security(syminfo.tickerid, "5", f_orLocked_5m(orMinutes), barmerge.gaps_off, barmerge.lookahead_off)
+
+sig5BreakL  = request.security(syminfo.tickerid, "5", f_sigBreakL_5m(orMinutes), barmerge.gaps_off, barmerge.lookahead_off)
+sig5BreakS  = request.security(syminfo.tickerid, "5", f_sigBreakS_5m(orMinutes), barmerge.gaps_off, barmerge.lookahead_off)
+sig5RetestL = request.security(syminfo.tickerid, "5", f_sigRetestL_5m(orMinutes, retestBuffer), barmerge.gaps_off, barmerge.lookahead_off)
+sig5RetestS = request.security(syminfo.tickerid, "5", f_sigRetestS_5m(orMinutes, retestBuffer), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Plot OR from 5m engine (stable)
+plot(orHigh5, "OR High", linewidth=2)
+plot(orLow5,  "OR Low",  linewidth=2)
+
+// 15m close outside OR (uses 5m OR levels)
+sig15BreakL = orLocked5 and not na(orHigh5) and close > orHigh5
+sig15BreakS = orLocked5 and not na(orLow5)  and close < orLow5
+
+// OR size filter
+orSize = (not na(orHigh5) and not na(orLow5)) ? (orHigh5 - orLow5) : na
+orSizeOK = not useORSizeFilter or (not na(orSize) and orSize <= maxORPoints)
+
+//====================
+// One trade per day (chart-level gate)
+//====================
+var bool tradeTaken = false
+is930_chart = (nyH == 9 and nyM == 30)
+if is930_chart
+    tradeTaken := false
+
+//====================
+// Entry logic
+//====================
+flat = strategy.position_size == 0
+
+filtersOK = (not forceFlat) and canTradeMonth and canTradeDOW and orSizeOK and longVWAPok and shortVWAPok  // VWAP handled per-side below
+
+valid = flat and not tradeTaken and not forceFlat and canTradeMonth and canTradeDOW and orSizeOK
+
+enterLong  = valid and longVWAPok  and ((use5mBreak and sig5BreakL) or (use5mRetest and sig5RetestL) or (use15mBreak and sig15BreakL))
+enterShort = valid and shortVWAPok and ((use5mBreak and sig5BreakS) or (use5mRetest and sig5RetestS) or (use15mBreak and sig15BreakS))
+
+if enterLong
+    strategy.entry("ORB Long", strategy.long, qty=qty)
+    tradeTaken := true
+
+if enterShort
+    strategy.entry("ORB Short", strategy.short, qty=qty)
+    tradeTaken := true
+
+//====================
+// Exits: Stop past opposite side; Target = 1R
+//====================
+if strategy.position_size > 0 and not na(orLow5)
+    entry = strategy.position_avg_price
+    stopPrice = orLow5 - stopBuffer
+    risk = entry - stopPrice
+    targetPrice = entry + risk
+    strategy.exit("L Exit", from_entry="ORB Long", stop=stopPrice, limit=targetPrice)
+
+if strategy.position_size < 0 and not na(orHigh5)
+    entry = strategy.position_avg_price
+    stopPrice = orHigh5 + stopBuffer
+    risk = stopPrice - entry
+    targetPrice = entry - risk
+    strategy.exit("S Exit", from_entry="ORB Short", stop=stopPrice, limit=targetPrice)
+
+//====================
+// Force flat
+//====================
+if forceFlat
+    strategy.close_all(comment="4:45 Flat")
+
+//====================
+// Monthly performance table (optional) — SAFE (no na assignments)
+//====================
+var table t = table.new(position.top_right, 3, 13, border_width=1)
+
+// Arrays hold 12 months (index 0=Jan ... 11=Dec)
+var float[] mProf = array.new_float(12, 0.0)
+var int[]   mTr   = array.new_int(12, 0)
+var bool[]  mHas  = array.new_bool(12, false)
+
+var bool  monthInit = false
+var int   lastMonth = 0
+var float monthStartNet = 0.0
+var int   monthStartTrades = 0
+
+if not monthInit
+    monthInit := true
+    lastMonth := curMonth
+    monthStartNet := strategy.netprofit
+    monthStartTrades := strategy.closedtrades
+
+// When month changes, store the completed month stats
+if curMonth != lastMonth
+    int idx = lastMonth - 1
+    float mProfit = strategy.netprofit - monthStartNet
+    int   mTrades = strategy.closedtrades - monthStartTrades
+
+    if idx >= 0 and idx < 12
+        array.set(mProf, idx, mProfit)
+        array.set(mTr,   idx, mTrades)
+        array.set(mHas,  idx, true)
+
+    // Reset for new month
+    lastMonth := curMonth
+    monthStartNet := strategy.netprofit
+    monthStartTrades := strategy.closedtrades
+
+// Render table on last bar
+if showMonthTable and barstate.islast
+    table.cell(t, 0, 0, "Month")
+    table.cell(t, 1, 0, "Net")
+    table.cell(t, 2, 0, "Trades")
+
+    string[] names = array.from("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+
+    for i = 0 to 11
+        string nm = array.get(names, i)
+        bool has = array.get(mHas, i)
+        float p = array.get(mProf, i)
+        int tr = array.get(mTr, i)
+
+        table.cell(t, 0, i+1, nm)
+        table.cell(t, 1, i+1, has ? str.tostring(p) : "—")
+        table.cell(t, 2, i+1, has ? str.tostring(tr) : "—")
+
+View in Pine Editor・376 lines
+Use on chart
+1
+5
+558
+Opening range breakout with day of the week and month filters 15 min close option and some fun tools to dig into

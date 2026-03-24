@@ -1,0 +1,46 @@
+//@version=5
+strategy("12M SMA Timing (HTF-safe, 100% equity)", overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.0,
+     calc_on_every_tick=false, process_orders_on_close=true, pyramiding=0)
+
+// === Monthly data (confirmed, no lookahead) ===
+mClose = request.security(syminfo.tickerid, "M", close,
+     lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+mSma12 = request.security(syminfo.tickerid, "M", ta.sma(close, 12),
+     lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+
+// Signals happen only on confirmed month close
+longSignal  = ta.crossover(mClose, mSma12)
+exitSignal  = ta.crossunder(mClose, mSma12)
+
+// === Orders ===
+// Enter long when monthly close crosses above 12M SMA
+if (longSignal)
+    strategy.entry("Long", strategy.long)
+
+// Exit when monthly close crosses below 12M SMA
+if (exitSignal)
+    strategy.close("Long")
+
+// Safety: stay flat if below SMA (in case of late loads)
+flatGuard = mClose < mSma12 and strategy.position_size > 0
+if (flatGuard)
+    strategy.close("Long")
+
+// === Plots ===
+plot(mSma12, title="SMA 12 (1M)", linewidth=2, color=color.orange)
+plotchar(longSignal, title="Buy (1M cross↑)", char="▲", location=location.bottom, size=size.tiny)
+plotchar(exitSignal, title="Sell (1M cross↓)", char="▼", location=location.top, size=size.tiny)
+
+// === Alerts ===
+alertcondition(longSignal, title="Buy signal (1M close > SMA12)", message="Buy: 1M close crossed above SMA12")
+alertcondition(exitSignal, title="Sell signal (1M close < SMA12)", message="Sell: 1M close crossed below SMA12")
+
+View in Pine Editor・39 lines
+Use on chart
+1
+4
+643
+Buy when S&P500 closes above 12M moving average. Sell when it closes below it. Monthly only.

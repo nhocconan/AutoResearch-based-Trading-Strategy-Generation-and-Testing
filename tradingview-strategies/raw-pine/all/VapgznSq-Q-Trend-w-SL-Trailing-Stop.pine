@@ -1,0 +1,172 @@
+//@version=5
+strategy("Q-Trend Strategy with SL and Trailing Stop + Date Range", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Date Range Filter
+useDateFilter  = input.bool(true, "Use Date Range Filter", group="Date Range")
+startTime      = input.time(timestamp("2024-01-01T00:00:00"), "Start Date", group="Date Range")
+endTime        = input.time(timestamp("2026-12-31T23:59:59"), "End Date", group="Date Range")
+closeAfterEnd  = input.bool(true, "Close positions after End Date?", group="Date Range",
+     tooltip="If enabled, any open position will be closed on/after the End Date.")
+
+// Allow entries only inside the date window
+inDateRange = not useDateFilter or (time >= startTime and time <= endTime)
+
+// Inputs
+src = input(close, "Source", group = "Main settings")
+p = input.int(200, "Trend period", group = "Main settings", minval = 1)
+atr_p = input.int(14, "ATR Period", group = "Main settings", minval = 1)
+mult = input.float(1.0, "ATR Multiplier", step = 0.1, group = "Main settings")
+mode = input.string("Type A", "Signal mode", options = ["Type A", "Type B"], group = "Mode")
+use_ema_smoother = input.string("No", "Smooth source with EMA?", options = ["Yes", "No"], group = "Source")
+src_ema_period = input.int(3, "EMA Smoother period", group = "Source")
+
+// Risk Management Inputs
+atr_mult_stop = input.float(2.0, "Stop Loss (ATR)", group="Risk Management")
+atr_mult_trail = input.float(1.0, "Trailing Stop (ATR)", group="Risk Management")
+
+// Source calculation
+src := use_ema_smoother == "Yes" ? ta.ema(src, src_ema_period) : src
+
+// Trend line and ATR
+h = ta.highest(src, p)
+l = ta.lowest(src, p)
+d = h - l
+
+m = (h + l) / 2
+m := bar_index > p ? m[1] : m
+
+atr = ta.atr(atr_p)[1]
+epsilon = mult * atr
+
+change_up = (mode == "Type B" ? ta.cross(src, m + epsilon) : ta.crossover(src, m + epsilon)) or src > m + epsilon
+change_down = (mode == "Type B" ? ta.cross(src, m - epsilon) : ta.crossunder(src, m - epsilon)) or src < m - epsilon
+
+sb = open < l + d / 8 and open >= l
+ss = open > h - d / 8 and open <= h
+strong_buy = sb or sb[1] or sb[2] or sb[3] or sb[4]
+strong_sell = ss or ss[1] or ss[2] or ss[3] or ss[4]
+
+m := (change_up or change_down) and m != m[1] ? m : change_up ? m + epsilon : change_down ? m - epsilon : nz(m[1], m)
+
+var string ls = ""
+ls := change_up ? "B" : change_down ? "S" : ls[1]
+
+// === STRATEGY LOGIC ===
+// Entries restricted by date range
+longCondition  = change_up and ls[1] != "B" and inDateRange
+shortCondition = change_down and ls[1] != "S" and inDateRange
+
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.close("Short")
+    strategy.exit("Exit Long", from_entry="Long", stop=atr * atr_mult_stop, trail_points=atr * atr_mult_trail, trail_offset=atr * atr_mult_trail)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.close("Long")
+    strategy.exit("Exit Short", from_entry="Short", stop=atr * atr_mult_stop, trail_points=atr * atr_mult_trail, trail_offset=atr * atr_mult_trail)
+
+// Optionally flatten after end date
+if useDateFilter and closeAfterEnd and time >= endTime and strategy.position_size != 0
+    strategy.close_all(comment="End Date Close")
+
+plot(m, title="Trend Line", color=ls == "B" ? color.green : color.red, linewidth=2)
+
+View in Pine Editor・74 lines
+Use on chart
+4
+5
+2
+616
+Q Trend Strategy
+
+Simple Q Trend Strategy mixed with a fixed SL and Trailing drawdown. Also using VIDYA Volumatic Indicator and Two Pole Oscillator for entry confirmation.
+
+Using The Indicator:
+-Some arrows and exit positions will pop up on the chart. You ONLY need to focus on the BLUE and RED arrows.
+-BLUE arrow is for LONG and RED arrow is for SHORT. Simple!
+- You can use it on most time frames but 15M,30M,1H timeframes work best. Try and get your entry as close as you can to the arrows and exit on the reversal.
+- If the delta volume is BELOW 20% you should just stay out of the market. Above 20% the trade has higher probability of being profitable.
+
+
+Feedback is appreciated. Enjoy
+
+Pinescript Code:
+
+//version=5
+strategy("Q-Trend Strategy with SL and Trailing Stop + Date Range", overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Date Range Filter
+useDateFilter = input.bool(true, "Use Date Range Filter", group="Date Range")
+startTime = input.time(timestamp("2024-01-01T00:00:00"), "Start Date", group="Date Range")
+endTime = input.time(timestamp("2026-12-31T23:59:59"), "End Date", group="Date Range")
+closeAfterEnd = input.bool(true, "Close positions after End Date?", group="Date Range",
+tooltip="If enabled, any open position will be closed on/after the End Date.")
+
+// Allow entries only inside the date window
+inDateRange = not useDateFilter or (time >= startTime and time <= endTime)
+
+// Inputs
+src = input(close, "Source", group = "Main settings")
+p = input.int(200, "Trend period", group = "Main settings", minval = 1)
+atr_p = input.int(14, "ATR Period", group = "Main settings", minval = 1)
+mult = input.float(1.0, "ATR Multiplier", step = 0.1, group = "Main settings")
+mode = input.string("Type A", "Signal mode", options = ["Type A", "Type B"], group = "Mode")
+use_ema_smoother = input.string("No", "Smooth source with EMA?", options = ["Yes", "No"], group = "Source")
+src_ema_period = input.int(3, "EMA Smoother period", group = "Source")
+
+// Risk Management Inputs
+atr_mult_stop = input.float(2.0, "Stop Loss (ATR)", group="Risk Management")
+atr_mult_trail = input.float(1.0, "Trailing Stop (ATR)", group="Risk Management")
+
+// Source calculation
+src := use_ema_smoother == "Yes" ? ta.ema(src, src_ema_period) : src
+
+// Trend line and ATR
+h = ta.highest(src, p)
+l = ta.lowest(src, p)
+d = h - l
+
+m = (h + l) / 2
+m := bar_index > p ? m[1] : m
+
+atr = ta.atr(atr_p)[1]
+epsilon = mult * atr
+
+change_up = (mode == "Type B" ? ta.cross(src, m + epsilon) : ta.crossover(src, m + epsilon)) or src > m + epsilon
+change_down = (mode == "Type B" ? ta.cross(src, m - epsilon) : ta.crossunder(src, m - epsilon)) or src < m - epsilon
+
+sb = open < l + d / 8 and open >= l
+ss = open > h - d / 8 and open <= h
+strong_buy = sb or sb[1] or sb[2] or sb[3] or sb[4]
+strong_sell = ss or ss[1] or ss[2] or ss[3] or ss[4]
+
+m := (change_up or change_down) and m != m[1] ? m : change_up ? m + epsilon : change_down ? m - epsilon : nz(m[1], m)
+
+var string ls = ""
+ls := change_up ? "B" : change_down ? "S" : ls[1]
+
+// === STRATEGY LOGIC ===
+// Entries restricted by date range
+longCondition = change_up and ls[1] != "B" and inDateRange
+shortCondition = change_down and ls[1] != "S" and inDateRange
+
+if (longCondition)
+strategy.entry("Long", strategy.long)
+strategy.close("Short")
+strategy.exit("Exit Long", from_entry="Long", stop=atr * atr_mult_stop, trail_points=atr * atr_mult_trail, trail_offset=atr * atr_mult_trail)
+
+if (shortCondition)
+strategy.entry("Short", strategy.short)
+strategy.close("Long")
+strategy.exit("Exit Short", from_entry="Short", stop=atr * atr_mult_stop, trail_points=atr * atr_mult_trail, trail_offset=atr * atr_mult_trail)
+
+// Optionally flatten after end date
+if useDateFilter and closeAfterEnd and time >= endTime and strategy.position_size != 0
+strategy.close_all(comment="End Date Close")
+
+plot(m, title="Trend Line", color=ls == "B" ? color.green : color.red, linewidth=2)
+
+

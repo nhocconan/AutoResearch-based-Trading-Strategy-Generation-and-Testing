@@ -1,0 +1,101 @@
+//@version=5
+import Cube_Lee/PerformanceTable/1 as PT
+
+strategy("RSI DCA Strategy",
+     initial_capital = 1000,
+     overlay = true,
+     default_qty_type = strategy.cash,
+     default_qty_value = 1000,
+     commission_value = 0.07,
+     pyramiding = 3)
+
+// === Inputs ===
+rsiPeriod       = input.int(14, "RSI Period")
+takeProfitPct   = input.float(8.0, title="Take Profit (%)", minval=0.1)
+stopLossPct     = input.float(5.0, title="Stop Loss (%)")
+capitalPerDCA   = input.float(500, title="Capital per DCA", minval=1)
+
+// === RSI Calculation ===
+rsi = ta.rsi(close, rsiPeriod)
+
+// === RSI < 30 Trigger Condition ===
+rsiTrigger = (rsi < 30) and (rsi[1] >= 30)
+
+// === Save Trigger Bar ===
+var int buyTriggerBar = na
+if (rsiTrigger)
+    buyTriggerBar := bar_index
+
+// === DCA Entries (3 Days) ===
+if not na(buyTriggerBar)
+    dcaDay = bar_index - buyTriggerBar
+    entryQty = capitalPerDCA / close // no leverage
+
+    if (dcaDay == 0)
+        strategy.entry("DCA Entry 1", strategy.long, qty=entryQty)
+    if (dcaDay == 1)
+        strategy.entry("DCA Entry 2", strategy.long, qty=entryQty)
+    if (dcaDay == 2)
+        strategy.entry("DCA Entry 3", strategy.long, qty=entryQty)
+
+// === Position State ===
+avgEntry   = strategy.position_avg_price
+inPosition = strategy.position_size > 0
+
+// === Take Profit / Stop Loss Levels ===
+takeProfitPrice = avgEntry * (1 + takeProfitPct / 100)
+stopLossPrice   = avgEntry * (1 - stopLossPct / 100)
+
+takeProfitCondition = inPosition and close >= takeProfitPrice
+stopLossCondition   = inPosition and close <= stopLossPrice
+
+// === Exit Conditions ===
+if takeProfitCondition
+    strategy.close_all(comment = "Take Profit Hit")
+else if stopLossCondition
+    strategy.close_all(comment = "Stop Loss Hit")
+
+// === Visualization ===
+plot(rsi, title="RSI", color=color.orange)
+hline(30, "RSI 30", color=color.red)
+plot(inPosition ? takeProfitPrice : na, title="Take Profit Line", color=color.green, style=plot.style_linebr)
+plot(inPosition ? stopLossPrice   : na, title="Stop Loss Line", color=color.red, style=plot.style_linebr)
+
+// === Monthly Performance Table ===
+showMonthlyTable = input.bool(true, "Show Monthly Table", tooltip = "Displays monthly returns table", group="Performance Table")
+if showMonthlyTable
+    PT.MonthlyTable()
+
+View in Pine Editor・69 lines
+Use on chart
+4
+0
+1 306
+This strategy combines RSI oversold signals with a Dollar-Cost Averaging (DCA) buying approach.
+
+Trigger:
+When the RSI (Relative Strength Index) crosses below 30, the strategy marks an oversold condition.
+
+DCA Entry:
+Once triggered, the strategy executes up to three consecutive daily entries (1 per day), splitting the predefined capital equally (configurable by user).
+
+Position Management:
+
+Take Profit at a configurable % above the average entry price.
+
+Stop Loss at a configurable % below the average entry price.
+
+Exit Conditions:
+The strategy automatically exits either on reaching Take Profit or Stop Loss.
+
+Visualization:
+
+RSI plotted with oversold line (30).
+
+Take Profit and Stop Loss lines displayed after entry.
+
+Performance Reporting:
+Includes an optional monthly performance table for evaluating results by month.
+
+Note:
+This strategy is for testing RSI-based mean reversion with staggered entries. It is not financial advice and should be optimized and validated for each market or timeframe before practical use.

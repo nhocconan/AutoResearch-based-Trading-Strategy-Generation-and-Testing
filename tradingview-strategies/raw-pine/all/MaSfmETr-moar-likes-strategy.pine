@@ -1,0 +1,26 @@
+//@version=2
+//like ANN strategy without tan
+strategy("Not Strategy", overlay=true)
+
+x0=security(tickerid, 'D', close[1])
+x1=security(tickerid, 'D', close)
+
+z=x0 < x1
+
+bgcolor(z ? green : red, transp=90)
+
+if (z)
+    strategy.entry("Long", strategy.long)
+
+if (not(z))
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・16 lines
+Use on chart
+1
+8
+2
+4
+3 474
+Logic from top ANN strategy. Base is future day close price.
+//only for fun

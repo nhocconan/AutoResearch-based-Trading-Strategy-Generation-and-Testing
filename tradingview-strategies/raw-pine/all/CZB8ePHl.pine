@@ -1,0 +1,344 @@
+//@version=6
+strategy(title="האסטרטגיה של מייקי", shorttitle="AutoEMA+", overlay=true,
+     initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.02,
+     calc_on_order_fills=true, calc_on_every_tick=false, pyramiding=0, process_orders_on_close=true)
+
+//================= INPUTS =================
+grpAuto = "Auto Selection"
+enableAutoSelect  = input.bool(true,  "Enable Auto Selection", group=grpAuto)
+manualLen         = input.int(20,     "Manual Length (5..25)", minval=1, group=grpAuto)
+minLen            = input.int(8,      "Min Length (5..25)",    minval=5, maxval=25, group=grpAuto)
+maxLen            = input.int(21,     "Max Length (5..25)",    minval=5, maxval=25, group=grpAuto)
+lookback          = input.int(80,     "Lookback Bars",         minval=30, maxval=500, group=grpAuto)
+minAboveRatio     = input.float(0.70, "Min % Time Above EMA",  minval=0.50, maxval=0.95, group=grpAuto)
+touchThreshold    = input.float(0.50, "Touch Threshold %",     minval=0.10, maxval=3.00, group=grpAuto)
+maxDistPct        = input.float(2.00, "Max Distance from EMA % (avg when above)", minval=0.50, maxval=5.00, group=grpAuto)
+updateFreq        = input.int(20,     "Update Every N Bars",   minval=5, maxval=200, group=grpAuto)
+minScoreDiff      = input.float(12.0, "Min Score Difference",  minval=1.0, maxval=50.0, group=grpAuto)
+minHoldBars       = input.int(40,     "Min Hold Bars",         minval=1, maxval=1000, group=grpAuto)
+
+grpFilters = "Simple Filters (Optional)"
+useHTFTrend   = input.bool(false, "Require HTF Uptrend", group=grpFilters)
+htf           = input.string("240", "HTF (e.g. 60/240/D)", group=grpFilters)
+minADX        = input.float(0.0,  "Min ADX (0=off)", minval=0.0, maxval=50.0, group=grpFilters)
+useVolumeFilter = input.bool(false, "Volume Filter", group=grpFilters)
+volMultiplier = input.float(1.2, "Volume Multiplier", minval=0.5, maxval=3.0, group=grpFilters)
+
+grpRisk = "Risk Management"
+cooldownBars = input.int(10, "Cooldown Bars After Exit", minval=0, maxval=500, group=grpRisk)
+
+grpDisp = "Display"
+showInfoLabel = input.bool(true, "Show Selected EMA Label", group=grpDisp)
+showSignals   = input.bool(true, "Show Entry Signals", group=grpDisp)
+
+//================= HELPERS =================
+clamp(val, minVal, maxVal) => math.max(minVal, math.min(maxVal, val))
+
+f_adx(len) =>
+    up     = ta.change(high)
+    down   = -ta.change(low)
+    plusDM = (up > down and up > 0)   ? up   : 0.0
+    minusDM= (down > up and down > 0) ? down : 0.0
+    tr     = ta.tr(true)
+    smTR   = ta.rma(tr, len)
+    smPDM  = ta.rma(plusDM, len)
+    smMDM  = ta.rma(minusDM, len)
+    pDI    = smTR == 0 ? 0.0 : 100.0 * smPDM / smTR
+    mDI    = smTR == 0 ? 0.0 : 100.0 * smMDM / smTR
+    dx     = (pDI + mDI == 0) ? 0.0 : 100.0 * math.abs(pDI - mDI) / (pDI + mDI)
+    ta.rma(dx, len)
+
+//================= SERIES / EMAs (5..25) =================
+src = close
+ema5  = ta.ema(src,5)
+ema6  = ta.ema(src,6)
+ema7  = ta.ema(src,7)
+ema8  = ta.ema(src,8)
+ema9  = ta.ema(src,9)
+ema10 = ta.ema(src,10)
+ema11 = ta.ema(src,11)
+ema12 = ta.ema(src,12)
+ema13 = ta.ema(src,13)
+ema14 = ta.ema(src,14)
+ema15 = ta.ema(src,15)
+ema16 = ta.ema(src,16)
+ema17 = ta.ema(src,17)
+ema18 = ta.ema(src,18)
+ema19 = ta.ema(src,19)
+ema20 = ta.ema(src,20)
+ema21 = ta.ema(src,21)
+ema22 = ta.ema(src,22)
+ema23 = ta.ema(src,23)
+ema24 = ta.ema(src,24)
+ema25 = ta.ema(src,25)
+
+var int[] lens = array.from(5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25)
+
+//================= STATE =================
+varip int   chosenLen      = na
+varip float chosenScore    = na
+varip int   lastScanBar    = na
+varip int   chosenSinceBar = na
+varip int   lastExitBar    = na
+
+//================= SCORING =================
+f_score_for_ema(_ema, _len) =>
+    if na(_ema)
+        na
+    else
+        float aboveCt = 0.0
+        float belowCt = 0.0
+        float touches = 0.0
+        float distSumWhenAbove = 0.0
+        float trendConsistency = 0.0
+        float priceRespect = 0.0
+        int validBars = 0
+        
+        for j = 1 to lookback by 1
+            c = close[j]
+            l = low[j] 
+            h = high[j]
+            e = _ema[j]
+            e_prev = _ema[j+1]
+            
+            if not na(e) and not na(e_prev) and not na(c) and c > 0
+                validBars += 1
+                th = touchThreshold * c / 100.0
+                
+                touchedEMA = (l <= e + th and h >= e - th) or (math.abs(c - e) <= th)
+                if touchedEMA
+                    touches += 1.0
+                    if c > e and low[j+1] <= e
+                        priceRespect += 1.0
+                
+                if c > e
+                    aboveCt += 1.0
+                    distSumWhenAbove += (c - e) / c * 100.0
+                else
+                    belowCt += 1.0
+                    
+                if e > e_prev
+                    trendConsistency += 1.0
+        
+        if validBars < lookback * 0.7
+            na
+        else
+            aboveRatio = aboveCt / validBars
+            avgDistWhenAbove = aboveCt > 0 ? distSumWhenAbove / aboveCt : 0.0
+            trendScore = trendConsistency / validBars
+            respectScore = touches > 0 ? priceRespect / touches : 0.0
+            
+            validCondition = (aboveRatio >= minAboveRatio) and (avgDistWhenAbove <= maxDistPct)
+            
+            if validCondition
+                baseScore = aboveRatio * 80.0
+                trendBonus = trendScore * 25.0
+                respectBonus = respectScore * 15.0
+                distPenalty = avgDistWhenAbove * 1.2
+                touchPenalty = (touches / validBars) * 8.0
+                lengthBonus = (_len >= 12 and _len <= 18) ? 5.0 : 0.0
+                
+                finalScore = baseScore + trendBonus + respectBonus + lengthBonus - distPenalty - touchPenalty
+                math.max(finalScore, 0.0)
+            else
+                na
+
+//================= SPARSE SCAN =================
+shouldScan = enableAutoSelect and bar_index > lookback and (na(lastScanBar) or bar_index - lastScanBar >= updateFreq)
+
+float candBestScore = na
+int   candBestLen   = na
+
+if shouldScan
+    actualMinLen = math.max(minLen, 5)
+    actualMaxLen = math.min(maxLen, 25)
+    
+    for i = 0 to array.size(lens) - 1
+        L = array.get(lens, i)
+        if L >= actualMinLen and L <= actualMaxLen
+            ema_to_test = switch L
+                5  => ema5
+                6  => ema6
+                7  => ema7
+                8  => ema8
+                9  => ema9
+                10 => ema10
+                11 => ema11
+                12 => ema12
+                13 => ema13
+                14 => ema14
+                15 => ema15
+                16 => ema16
+                17 => ema17
+                18 => ema18
+                19 => ema19
+                20 => ema20
+                21 => ema21
+                22 => ema22
+                23 => ema23
+                24 => ema24
+                25 => ema25
+                => na
+            
+            s = f_score_for_ema(ema_to_test, L)
+            
+            if not na(s) and s > 5.0
+                if na(candBestScore) or s > candBestScore
+                    candBestScore := s
+                    candBestLen := L
+
+    if not na(candBestLen)
+        currentScore = nz(chosenScore, 0.0)
+        shouldUpdate = na(chosenLen) or 
+                      (candBestScore > currentScore + minScoreDiff) or
+                      (bar_index - nz(chosenSinceBar, 0) >= minHoldBars and candBestScore > currentScore * 1.1)
+        
+        if shouldUpdate
+            chosenLen := candBestLen
+            chosenScore := candBestScore
+            chosenSinceBar := bar_index
+
+    lastScanBar := bar_index
+
+//================= ACTIVE EMA =================
+manualClamped = clamp(manualLen, 5, 25)
+selectedLen = enableAutoSelect ? nz(chosenLen, manualClamped) : manualClamped
+
+emaSel = switch selectedLen
+    5  => ema5
+    6  => ema6
+    7  => ema7
+    8  => ema8
+    9  => ema9
+    10 => ema10
+    11 => ema11
+    12 => ema12
+    13 => ema13
+    14 => ema14
+    15 => ema15
+    16 => ema16
+    17 => ema17
+    18 => ema18
+    19 => ema19
+    20 => ema20
+    21 => ema21
+    22 => ema22
+    23 => ema23
+    24 => ema24
+    25 => ema25
+    => ema20
+
+//================= ENTRY CONDITIONS =================
+longSignal = ta.crossover(close, emaSel)
+
+htfEMA200 = request.security(syminfo.tickerid, htf, ta.ema(close, 200))
+trendOk = not useHTFTrend or (close > htfEMA200)
+
+adx14 = f_adx(14)
+adxOk = minADX <= 0.0 or adx14 >= minADX
+
+avgVol = ta.sma(volume, 20)
+volumeOk = not useVolumeFilter or volume >= avgVol * volMultiplier
+
+cooldownOk = na(lastExitBar) or (bar_index - lastExitBar >= cooldownBars)
+
+enterOk = longSignal and trendOk and adxOk and volumeOk and cooldownOk and barstate.isconfirmed
+
+//================= SIMPLE ENTRY & EXIT =================
+// כניסה פשוטה
+if enterOk and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+// יציאה כשהנר מתחת לEMA
+currentCandleBelowEMA = high < emaSel and low < emaSel and close < emaSel
+previousCandleAboveEMA = high[1] >= emaSel[1] or close[1] >= emaSel[1]
+
+exitCondition = currentCandleBelowEMA and previousCandleAboveEMA
+if strategy.position_size > 0 and exitCondition and barstate.isconfirmed
+    strategy.close_all(comment="EMA Exit")
+
+// עדכון cooldown  
+if strategy.position_size[1] > 0 and strategy.position_size == 0
+    lastExitBar := bar_index
+
+//================= PLOTS =================
+plot(emaSel, title="Selected EMA", color=color.new(color.aqua, 0), linewidth=2, trackprice=true)
+plot(useHTFTrend ? htfEMA200 : na, title="HTF EMA200", color=color.new(color.orange, 50), linewidth=1)
+
+// רק התראות כניסה!
+plotshape(enterOk, title="Long Entry", location=location.belowbar, style=shape.triangleup, size=size.small, color=color.new(color.lime, 0))
+
+// Info label
+if showInfoLabel and barstate.islast
+    var label info = na
+    if not na(info)
+        label.delete(info)
+    modeTxt = enableAutoSelect ? "Auto" : "Manual"
+    scoreTxt = enableAutoSelect and not na(chosenScore) ? " (Score: " + str.tostring(chosenScore, "#.#") + ")" : ""
+    rangeTxt = enableAutoSelect ? " [" + str.tostring(minLen) + "-" + str.tostring(maxLen) + "]" : ""
+    txt = "EMA " + str.tostring(selectedLen) + " " + modeTxt + rangeTxt + scoreTxt
+    
+    info := label.new(bar_index, emaSel, txt, xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, textcolor=color.black, color=color.new(color.white, 15), size=size.small)
+
+//================= ALERTS =================
+alertcondition(enterOk, title="Long Entry", message="EMA Strategy LONG: {{ticker}} @ {{close}}")
+alertcondition(longSignal and not enterOk, title="Signal Filtered", message="EMA Strategy FILTERED: {{ticker}} @ {{close}}")
+View in Pine Editor・285 lines
+Use on chart
+1
+3
+664
+
+⚙️ Core Idea:
+
+A long-only EMA crossover strategy that automatically selects the optimal EMA length (5–25) based on historical performance using a custom scoring system.
+
+🎯 Entry Conditions:
+
+Price crosses above the selected EMA.
+
+(Optional) Price is above HTF EMA200 (higher timeframe trend).
+
+(Optional) ADX is above a minimum threshold.
+
+(Optional) Volume is above average × multiplier.
+
+A cooldown period has passed since the last exit.
+
+❌ Exit Condition:
+
+Price closes fully below the EMA (current candle: high, low, and close all below),
+
+and the previous candle was above or touched the EMA.
+
+🧠 Auto EMA Selection Logic:
+
+Scans EMAs in the range (e.g., 8–21) every N bars.
+
+Scores each EMA based on:
+
+Time price spent above the EMA
+
+Respect for EMA (touches)
+
+Trend consistency
+
+Distance from EMA (when above)
+
+Picks the EMA with the highest valid score, and updates only if it’s significantly better.
+
+🛡️ Risk Management:
+
+No pyramiding (1 position max).
+
+Cooldown period after exit.
+
+No hard stop loss or take profit.
+
+📊 Visuals & Alerts:
+
+Plots the selected EMA and optional HTF EMA200.
+
+Entry markers and info label on the chart.
+
+Alerts for valid entries and filtered signals.

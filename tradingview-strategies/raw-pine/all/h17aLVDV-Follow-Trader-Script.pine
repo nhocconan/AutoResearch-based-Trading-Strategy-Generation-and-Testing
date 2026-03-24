@@ -1,0 +1,111 @@
+//@version=5
+strategy("BU/BD + EMA Filter + Swing SL/TP (Entry/Exit Only)",
+     overlay=true,
+     pyramiding=0,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     calc_on_every_tick=true)
+
+// ───── Inputs ─────
+pivotLen    = input.int(5, "Swing Pivot Length", minval=1)
+useClose    = input.bool(true, "Use Close for Break (else High/Low)")
+confirmBars = input.int(0, "Confirm Bars After Break", minval=0, maxval=10)
+
+emaFastLen  = input.int(50, "EMA Fast")
+emaSlowLen  = input.int(200, "EMA Slow")
+
+useTP       = input.bool(true, "Use Take Profit")
+rr          = input.float(2.0, "Risk : Reward", minval=0.5, step=0.1)
+
+onlyOneSide = input.bool(true, "Close Opposite Trade")
+
+// ───── EMA (standard colors) ─────
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+trendUp = emaFast > emaSlow or close > emaFast
+trendDn = emaFast < emaSlow or close < emaFast
+
+plot(emaFast, "EMA Fast", color=color.orange, linewidth=2, force_overlay=true)
+plot(emaSlow, "EMA Slow", color=color.purple, linewidth=2, force_overlay=true)
+
+// ───── Swing High/Low ─────
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(ph)
+    lastSwingHigh := ph
+if not na(pl)
+    lastSwingLow := pl
+
+// ───── Break Logic (BU/BD) ─────
+srcUp   = useClose ? close : high
+srcDown = useClose ? close : low
+
+rawBU = not na(lastSwingHigh) and srcUp > lastSwingHigh
+rawBD = not na(lastSwingLow)  and srcDown < lastSwingLow
+
+// Trigger only once (first bar of break), with optional confirmation
+BU0 = rawBU and not rawBU[1]
+BD0 = rawBD and not rawBD[1]
+
+BU = confirmBars == 0 ? BU0 : (BU0[confirmBars] and ta.barssince(BU0) == confirmBars)
+BD = confirmBars == 0 ? BD0 : (BD0[confirmBars] and ta.barssince(BD0) == confirmBars)
+
+// ───── Entry Signals ─────
+longSignal  = BU and trendUp
+shortSignal = BD and trendDn
+
+// ───── Entries ─────
+if longSignal
+    if onlyOneSide and strategy.position_size < 0
+        strategy.close("SHORT")
+    strategy.entry("LONG", strategy.long)
+
+if shortSignal
+    if onlyOneSide and strategy.position_size > 0
+        strategy.close("LONG")
+    strategy.entry("SHORT", strategy.short)
+
+// ───── SL/TP (Swing based) ─────
+if strategy.position_size > 0 and not na(lastSwingLow)
+    longSL = lastSwingLow
+    risk   = strategy.position_avg_price - longSL
+    longTP = useTP and risk > 0 ? strategy.position_avg_price + risk * rr : na
+    strategy.exit("LONG EXIT", "LONG", stop=longSL, limit=longTP)
+
+if strategy.position_size < 0 and not na(lastSwingHigh)
+    shortSL = lastSwingHigh
+    risk    = shortSL - strategy.position_avg_price
+    shortTP = useTP and risk > 0 ? strategy.position_avg_price - risk * rr : na
+    strategy.exit("SHORT EXIT", "SHORT", stop=shortSL, limit=shortTP)
+
+// ───── Plot ONLY Entry/Exit (no spam) ─────
+enteredLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+enteredShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+exitedLong   = strategy.position_size == 0 and strategy.position_size[1] > 0
+exitedShort  = strategy.position_size == 0 and strategy.position_size[1] < 0
+
+plotshape(enteredLong,  title="LONG Entry",  style=shape.labelup,   location=location.belowbar, text="LONG",  color=color.lime, textcolor=color.black, force_overlay=true)
+plotshape(enteredShort, title="SHORT Entry", style=shape.labeldown, location=location.abovebar, text="SHORT", color=color.red,  textcolor=color.white, force_overlay=true)
+
+plotshape(exitedLong,   title="LONG Exit",   style=shape.xcross, location=location.abovebar, text="EXIT", color=color.new(color.lime, 0), textcolor=color.black, force_overlay=true)
+plotshape(exitedShort,  title="SHORT Exit",  style=shape.xcross, location=location.belowbar, text="EXIT", color=color.new(color.red, 0),  textcolor=color.white, force_overlay=true)
+
+// ───── Alerts (optional) ─────
+alertcondition(enteredLong,  "LONG Entry",  "Entered LONG")
+alertcondition(enteredShort, "SHORT Entry", "Entered SHORT")
+alertcondition(exitedLong,   "LONG Exit",   "Exited LONG")
+alertcondition(exitedShort,  "SHORT Exit",  "Exited SHORT")
+
+View in Pine Editor・102 lines
+Use on chart
+2
+6
+8
+1
+4 605
+BU/BD + EMA Filter + Swing SL/TP (Entry/Exit Only)

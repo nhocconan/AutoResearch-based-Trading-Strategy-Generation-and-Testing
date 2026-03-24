@@ -1,0 +1,8 @@
+//@version=5
+##root(root_metainfo,rm_0,display.data_window,cb__plot_display__integer,plot,display)
+##root(root_metainfo,rm_1,display.data_window,cb__plot_display__integer,plot,display)
+##root(root_metainfo,rm_2,display.data_window,cb__plot_display__integer,plot,display)
+##root(root_metainfo,rm_3,display.data_window,cb__plot_display__integer,plot,display)
+##root(root_metainfo,rm_4,display.data_window,cb__plot_display__integer,plot,display)
+##root(root_metainfo,rm_5,display.data_window,cb__plot_display__integer,plot,display)
+##root(root_metainfo,rm_6,display.data_window,cb__plot_display__integer,plot,display)

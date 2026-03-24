@@ -1,0 +1,77 @@
+//@version=5
+
+strategy("AlphaTrend Strategy", shorttitle='ATSt', overlay=true, format=format.price, precision=2, margin_long=100, margin_short=100)
+coeff = input.float(1, 'Multiplier', step=0.1)
+AP = input(14, 'Common Period')
+ATR = ta.sma(ta.tr, AP)
+src = input(close)
+showsignalsk = input(title='Show Signals?', defval=false)
+novolumedata = input(title='Change calculation (no volume data)?', defval=false)
+upT = low - ATR * coeff
+downT = high + ATR * coeff
+AlphaTrend = 0.0
+AlphaTrend := (novolumedata ? ta.rsi(src, AP) >= 50 : ta.mfi(hlc3, AP) >= 50) ? upT < nz(AlphaTrend[1]) ? nz(AlphaTrend[1]) : upT : downT > nz(AlphaTrend[1]) ? nz(AlphaTrend[1]) : downT
+
+color1 = AlphaTrend > AlphaTrend[2] ? #00E60F : AlphaTrend < AlphaTrend[2] ? #80000B : AlphaTrend[1] > AlphaTrend[3] ? #00E60F : #80000B
+k1 = plot(AlphaTrend, color=color.new(#0022FC, 0), linewidth=3)
+k2 = plot(AlphaTrend[2], color=color.new(#FC0400, 0), linewidth=3)
+
+fill(k1, k2, color=color1)
+
+buySignalk = ta.crossover(AlphaTrend, AlphaTrend[2])
+sellSignalk = ta.crossunder(AlphaTrend, AlphaTrend[2])
+
+
+K1 = ta.barssince(buySignalk)
+K2 = ta.barssince(sellSignalk)
+O1 = ta.barssince(buySignalk[1])
+O2 = ta.barssince(sellSignalk[1])
+
+plotshape(buySignalk and showsignalsk and O1 > K2 ? AlphaTrend[2] * 0.9999 : na, title='BUY', text='BUY', location=location.absolute, style=shape.labelup, size=size.tiny, color=color.new(#0022FC, 0), textcolor=color.new(color.white, 0))
+
+plotshape(sellSignalk and showsignalsk and O2 > K1 ? AlphaTrend[2] * 1.0001 : na, title='SELL', text='SELL', location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(color.maroon, 0), textcolor=color.new(color.white, 0))
+
+
+longCondition = buySignalk
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = sellSignalk
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+View in Pine Editor・44 lines
+Use on chart
+6.7 K
+33
+125 587
+Aug 8, 2022
+The strategy version of AlphaTrend indicator for backtesting and optimisation purposes for TradingView users:
+
+
+
+
+
+Screener / Explorer version and an English explantion video will be published soon...
+
+AlphaTrend's parameters are designed for daily and 4H charts, feel free to optimize on all time frames.
+
+Hope you all use Alphatrend in your profitable trades.
+
+Kıvanç
+Jan 9, 2023
+Release Notes
+Backtest parameters updated:
+-Backtested with default parameters (14/1) of AlphaTrend BTCUSDT daily Binance chart (with all available price data)
+-Backtested initial capital updated to 1000USD
+-Order size set as 1000USD
+-Commission is set to 0.1% same as this is a Binance chart so 0.1% is the default user level on that exchange
+-Slippage set to 100 ticks which could be meaningful
+-AlphaTrend is a trend following indicator so it's main purpose is to enter positions in trending markets and not to enter in sidewys vice versa. So It won't make too much trades (in this example with deafult values number of trades limited with 41 which would be more meaningful if it was near to 100)
+-Users can cahnge and optimize the parameters to get more efficiens results. I personally advise to choose smaller parameters in bigger time frames and smaller ones in big time frames.
+
+Hope you all use AlphaTrend on your profitable trades.
+Also personally thank all the community to make AlphaTrend one of the top 3 most popular scripts in the world in 2022:
+
+
+Kıvanç Özbilgiç

@@ -1,0 +1,533 @@
+//@version=6
+//@version=5
+strategy(
+     title="Swing Point Hedge Strategy", 
+     shorttitle="Swing Hedge Bot", 
+     overlay=true, 
+     initial_capital=10000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=50,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,
+     slippage=2,
+     pyramiding=2,
+     calc_on_every_tick=true,
+     max_bars_back=500
+ )
+
+// ========== INPUT PARAMETERS ==========
+// Swing Detection Settings
+swingLength = input.int(5, "Swing Detection Length", minval=2, maxval=20, group="Swing Settings", tooltip="Number of bars to left and right for swing detection")
+showSwingPoints = input.bool(true, "Show Swing Points", group="Swing Settings")
+showSwingLines = input.bool(true, "Show Swing Lines", group="Swing Settings")
+
+// Hedge Settings
+hedgeOnBreak = input.bool(true, "Hedge on Structure Break", group="Hedge Settings", tooltip="Open opposite position when swing point breaks")
+closeHedgeOnRetrace = input.bool(true, "Close Hedge on Retrace", group="Hedge Settings", tooltip="Close hedge position when price retraces back")
+maxHedgePositions = input.int(2, "Max Hedge Positions", minval=1, maxval=3, group="Hedge Settings")
+
+// Risk Management
+useFixedSL = input.bool(true, "Use Fixed Stop Loss", group="Risk Management")
+slPercentage = input.float(2.0, "Stop Loss %", minval=0.1, step=0.1, group="Risk Management")
+useTakeProfit = input.bool(true, "Use Take Profit", group="Risk Management")
+tpPercentage = input.float(3.0, "Take Profit %", minval=0.1, step=0.1, group="Risk Management")
+
+// Display
+showLabels = input.bool(true, "Show Trade Labels", group="Display")
+showZones = input.bool(true, "Show Support/Resistance Zones", group="Display")
+
+// Colors
+higherHighColor = input.color(color.new(color.green, 0), "Higher High Color", group="Colors")
+higherLowColor = input.color(color.new(color.lime, 0), "Higher Low Color", group="Colors")
+lowerHighColor = input.color(color.new(color.orange, 0), "Lower High Color", group="Colors")
+lowerLowColor = input.color(color.new(color.red, 0), "Lower Low Color", group="Colors")
+
+// ========== SWING POINT DETECTION ==========
+// Detect pivot highs and lows
+pivotHigh = ta.pivothigh(high, swingLength, swingLength)
+pivotLow = ta.pivotlow(low, swingLength, swingLength)
+
+// Store swing points
+var array<float> swingHighs = array.new<float>()
+var array<int> swingHighBars = array.new<int>()
+var array<float> swingLows = array.new<float>()
+var array<int> swingLowBars = array.new<int>()
+
+// Add new swing highs
+if not na(pivotHigh)
+    array.push(swingHighs, pivotHigh)
+    array.push(swingHighBars, bar_index[swingLength])
+    if array.size(swingHighs) > 10
+        array.shift(swingHighs)
+        array.shift(swingHighBars)
+
+// Add new swing lows
+if not na(pivotLow)
+    array.push(swingLows, pivotLow)
+    array.push(swingLowBars, bar_index[swingLength])
+    if array.size(swingLows) > 10
+        array.shift(swingLows)
+        array.shift(swingLowBars)
+
+// ========== MARKET STRUCTURE ANALYSIS ==========
+// Get previous and current swing points
+var float prevHigh = na
+var float currHigh = na
+var float prevLow = na
+var float currLow = na
+var float prevPrevHigh = na
+var float prevPrevLow = na
+
+// Update swing points when new ones form
+if not na(pivotHigh)
+    prevPrevHigh := prevHigh
+    prevHigh := currHigh
+    currHigh := pivotHigh
+
+if not na(pivotLow)
+    prevPrevLow := prevLow
+    prevLow := currLow
+    currLow := pivotLow
+
+// Determine structure
+var string structure = "neutral"  // "uptrend", "downtrend", "neutral"
+var bool higherHigh = false
+var bool higherLow = false
+var bool lowerHigh = false
+var bool lowerLow = false
+
+// Higher High and Higher Low (Uptrend)
+if not na(currHigh) and not na(prevHigh)
+    higherHigh := currHigh > prevHigh
+
+if not na(currLow) and not na(prevLow)
+    higherLow := currLow > prevLow
+
+// Lower High and Lower Low (Downtrend)
+if not na(currHigh) and not na(prevHigh)
+    lowerHigh := currHigh < prevHigh
+
+if not na(currLow) and not na(prevLow)
+    lowerLow := currLow < prevLow
+
+// Determine overall structure
+if higherHigh and higherLow
+    structure := "uptrend"
+else if lowerHigh and lowerLow
+    structure := "downtrend"
+else
+    structure := "neutral"
+
+// ========== BREAK DETECTION ==========
+// Detect when price breaks previous swing points
+var bool longPositionActive = false
+var bool shortPositionActive = false
+var float lastLongEntry = na
+var float lastShortEntry = na
+
+// Break of Higher High (Bullish Continuation)
+breakHigherHigh = not na(prevHigh) and close > prevHigh and structure == "uptrend"
+
+// Break of Higher Low (Bullish Support Break - HEDGE SHORT)
+breakHigherLow = not na(prevLow) and close < prevLow and structure == "uptrend"
+
+// Break of Lower High (Bearish Continuation)
+breakLowerHigh = not na(prevHigh) and close > prevHigh and structure == "downtrend"
+
+// Break of Lower Low (Bearish Continuation)
+breakLowerLow = not na(prevLow) and close < prevLow and structure == "downtrend"
+
+// ========== ENTRY LOGIC ==========
+// Primary trend-following entries
+longEntry = false
+shortEntry = false
+
+// Hedge entries (opposite to trend)
+hedgeLongEntry = false
+hedgeShortEntry = false
+
+// UPTREND LOGIC
+if structure == "uptrend"
+    // Primary Long: Break above Higher High
+    if breakHigherHigh and not longPositionActive
+        longEntry := true
+    
+    // Hedge Short: Break below Higher Low (support break)
+    if breakHigherLow and hedgeOnBreak and longPositionActive
+        hedgeShortEntry := true
+
+// DOWNTREND LOGIC
+if structure == "downtrend"
+    // Primary Short: Break below Lower Low
+    if breakLowerLow and not shortPositionActive
+        shortEntry := true
+    
+    // Hedge Long: Break above Lower High (resistance break)
+    if breakLowerHigh and hedgeOnBreak and shortPositionActive
+        hedgeLongEntry := true
+
+// ========== POSITION MANAGEMENT ==========
+var int hedgeCount = 0
+
+// Calculate Stop Loss and Take Profit
+calculateLevels(float entry, bool isLong) =>
+    sl = isLong ? entry * (1 - slPercentage / 100) : entry * (1 + slPercentage / 100)
+    tp = isLong ? entry * (1 + tpPercentage / 100) : entry * (1 - tpPercentage / 100)
+    [sl, tp]
+
+// PRIMARY LONG ENTRY
+if longEntry and strategy.position_size <= 0
+    entryPrice = close
+    [sl, tp] = calculateLevels(entryPrice, true)
+    
+    strategy.entry("Long Primary", strategy.long, qty=2)
+    if useFixedSL and useTakeProfit
+        strategy.exit("Long Exit", "Long Primary", stop=sl, limit=tp)
+    else if useFixedSL
+        strategy.exit("Long Exit", "Long Primary", stop=sl)
+    else if useTakeProfit
+        strategy.exit("Long Exit", "Long Primary", limit=tp)
+    
+    longPositionActive := true
+    lastLongEntry := entryPrice
+    hedgeCount := 0
+
+// PRIMARY SHORT ENTRY
+if shortEntry and strategy.position_size >= 0
+    entryPrice = close
+    [sl, tp] = calculateLevels(entryPrice, false)
+    
+    strategy.entry("Short Primary", strategy.short, qty=2)
+    if useFixedSL and useTakeProfit
+        strategy.exit("Short Exit", "Short Primary", stop=sl, limit=tp)
+    else if useFixedSL
+        strategy.exit("Short Exit", "Short Primary", stop=sl)
+    else if useTakeProfit
+        strategy.exit("Short Exit", "Short Primary", limit=tp)
+    
+    shortPositionActive := true
+    lastShortEntry := entryPrice
+    hedgeCount := 0
+
+// HEDGE SHORT ENTRY (When long position breaks support)
+if hedgeShortEntry and hedgeCount < maxHedgePositions
+    entryPrice = close
+    [sl, tp] = calculateLevels(entryPrice, false)
+    
+    hedgeName = "Hedge Short " + str.tostring(hedgeCount + 1)
+    strategy.entry(hedgeName, strategy.short, qty=1)
+    if useFixedSL
+        strategy.exit("Hedge Exit", hedgeName, stop=sl)
+    
+    hedgeCount += 1
+
+// HEDGE LONG ENTRY (When short position breaks resistance)
+if hedgeLongEntry and hedgeCount < maxHedgePositions
+    entryPrice = close
+    [sl, tp] = calculateLevels(entryPrice, true)
+    
+    hedgeName = "Hedge Long " + str.tostring(hedgeCount + 1)
+    strategy.entry(hedgeName, strategy.long, qty=1)
+    if useFixedSL
+        strategy.exit("Hedge Exit", hedgeName, stop=sl)
+    
+    hedgeCount += 1
+
+// Close hedges on retrace
+if closeHedgeOnRetrace
+    // Close short hedges if price retraces back above previous low
+    if structure == "uptrend" and not na(prevLow) and close > prevLow and hedgeCount > 0
+        for i = 1 to hedgeCount
+            strategy.close("Hedge Short " + str.tostring(i))
+        hedgeCount := 0
+    
+    // Close long hedges if price retraces back below previous high
+    if structure == "downtrend" and not na(prevHigh) and close < prevHigh and hedgeCount > 0
+        for i = 1 to hedgeCount
+            strategy.close("Hedge Long " + str.tostring(i))
+        hedgeCount := 0
+
+// Reset position flags when flat
+if strategy.position_size == 0
+    longPositionActive := false
+    shortPositionActive := false
+    hedgeCount := 0
+
+// ========== VISUAL ELEMENTS ==========
+// Plot swing points
+plotshape(showSwingPoints and not na(pivotHigh) ? pivotHigh : na, "Pivot High", shape.triangledown, location.abovebar, 
+         higherHigh ? higherHighColor : lowerHigh ? lowerHighColor : color.gray, size=size.small)
+plotshape(showSwingPoints and not na(pivotLow) ? pivotLow : na, "Pivot Low", shape.triangleup, location.belowbar, 
+         higherLow ? higherLowColor : lowerLow ? lowerLowColor : color.gray, size=size.small)
+
+// Draw swing lines
+if showSwingLines and array.size(swingHighs) >= 2
+    lastHigh = array.get(swingHighs, array.size(swingHighs) - 1)
+    lastHighBar = array.get(swingHighBars, array.size(swingHighBars) - 1)
+    prevHighVal = array.get(swingHighs, array.size(swingHighs) - 2)
+    prevHighBar = array.get(swingHighBars, array.size(swingHighBars) - 2)
+    
+    lineColor = lastHigh > prevHighVal ? higherHighColor : lowerHighColor
+    line.new(prevHighBar, prevHighVal, lastHighBar, lastHigh, color=lineColor, width=2)
+
+if showSwingLines and array.size(swingLows) >= 2
+    lastLow = array.get(swingLows, array.size(swingLows) - 1)
+    lastLowBar = array.get(swingLowBars, array.size(swingLowBars) - 1)
+    prevLowVal = array.get(swingLows, array.size(swingLows) - 2)
+    prevLowBar = array.get(swingLowBars, array.size(swingLowBars) - 2)
+    
+    lineColor = lastLow > prevLowVal ? higherLowColor : lowerLowColor
+    line.new(prevLowBar, prevLowVal, lastLowBar, lastLow, color=lineColor, width=2)
+
+// Draw support/resistance zones
+if showZones and not na(prevHigh)
+    box.new(bar_index - 50, prevHigh * 1.002, bar_index, prevHigh * 0.998, 
+           border_color=color.new(color.red, 70), bgcolor=color.new(color.red, 90), extend=extend.right)
+
+if showZones and not na(prevLow)
+    box.new(bar_index - 50, prevLow * 1.002, bar_index, prevLow * 0.998, 
+           border_color=color.new(color.green, 70), bgcolor=color.new(color.green, 90), extend=extend.right)
+
+// Plot entry signals
+plotshape(longEntry, "Long Entry", shape.triangleup, location.belowbar, color.green, size=size.normal)
+plotshape(shortEntry, "Short Entry", shape.triangledown, location.abovebar, color.red, size=size.normal)
+plotshape(hedgeShortEntry, "Hedge Short", shape.xcross, location.abovebar, color.orange, size=size.small)
+plotshape(hedgeLongEntry, "Hedge Long", shape.xcross, location.belowbar, color.aqua, size=size.small)
+
+// Labels
+if showLabels and longEntry
+    label.new(bar_index, low, "LONG PRIMARY HH Break", 
+             style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+if showLabels and shortEntry
+    label.new(bar_index, high, "SHORT PRIMARY LL Break", 
+             style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+if showLabels and hedgeShortEntry
+    label.new(bar_index, high, "HEDGE SHORT HL Break", 
+             style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.tiny)
+
+if showLabels and hedgeLongEntry
+    label.new(bar_index, low, "HEDGE LONG LH Break", 
+             style=label.style_label_up, color=color.aqua, textcolor=color.white, size=size.tiny)
+
+// ========== INFO TABLE ==========
+var table infoTable = table.new(position.top_right, 2, 10, border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "SWING HEDGE BOT", text_color=color.white, bgcolor=color.navy, text_size=size.normal)
+    table.merge_cells(infoTable, 0, 0, 1, 0)
+    
+    table.cell(infoTable, 0, 1, "Structure:", text_color=color.white, bgcolor=color.gray)
+    structText = structure == "uptrend" ? "UPTREND ↑" : structure == "downtrend" ? "DOWNTREND ↓" : "NEUTRAL"
+    structColor = structure == "uptrend" ? color.green : structure == "downtrend" ? color.red : color.gray
+    table.cell(infoTable, 1, 1, structText, text_color=color.white, bgcolor=structColor)
+    
+    table.cell(infoTable, 0, 2, "Prev High:", text_color=color.white, bgcolor=color.gray)
+    table.cell(infoTable, 1, 2, not na(prevHigh) ? str.tostring(prevHigh, "#.####") : "N/A", text_color=color.white, bgcolor=color.blue)
+    
+    table.cell(infoTable, 0, 3, "Prev Low:", text_color=color.white, bgcolor=color.gray)
+    table.cell(infoTable, 1, 3, not na(prevLow) ? str.tostring(prevLow, "#.####") : "N/A", text_color=color.white, bgcolor=color.blue)
+    
+    table.cell(infoTable, 0, 4, "Primary Pos:", text_color=color.white, bgcolor=color.gray)
+    primaryText = longPositionActive ? "LONG" : shortPositionActive ? "SHORT" : "NONE"
+    primaryColor = longPositionActive ? color.green : shortPositionActive ? color.red : color.gray
+    table.cell(infoTable, 1, 4, primaryText, text_color=color.white, bgcolor=primaryColor)
+    
+    table.cell(infoTable, 0, 5, "Hedge Count:", text_color=color.white, bgcolor=color.gray)
+    table.cell(infoTable, 1, 5, str.tostring(hedgeCount), text_color=color.white, bgcolor=color.orange)
+    
+    table.cell(infoTable, 0, 6, "Net Position:", text_color=color.white, bgcolor=color.gray)
+    netSize = strategy.position_size
+    netText = netSize > 0 ? "LONG " + str.tostring(netSize) : netSize < 0 ? "SHORT " + str.tostring(math.abs(netSize)) : "FLAT"
+    netColor = netSize > 0 ? color.green : netSize < 0 ? color.red : color.gray
+    table.cell(infoTable, 1, 6, netText, text_color=color.white, bgcolor=netColor)
+    
+    table.cell(infoTable, 0, 7, "Open P&L:", text_color=color.white, bgcolor=color.gray)
+    pnlColor = strategy.openprofit > 0 ? color.green : color.red
+    table.cell(infoTable, 1, 7, str.tostring(strategy.openprofit, "#.##"), text_color=color.white, bgcolor=pnlColor)
+    
+    table.cell(infoTable, 0, 8, "Total Trades:", text_color=color.white, bgcolor=color.gray)
+    table.cell(infoTable, 1, 8, str.tostring(strategy.closedtrades), text_color=color.white, bgcolor=color.blue)
+    
+    table.cell(infoTable, 0, 9, "Net Profit:", text_color=color.white, bgcolor=color.gray)
+    netProfitColor = strategy.netprofit > 0 ? color.green : color.red
+    table.cell(infoTable, 1, 9, str.tostring(strategy.netprofit, "#.##"), text_color=color.white, bgcolor=netProfitColor)
+
+// Background
+structBg = structure == "uptrend" ? color.new(color.green, 97) : structure == "downtrend" ? color.new(color.red, 97) : na
+bgcolor(structBg)
+
+// ========== ALERTS ==========
+if longEntry
+    alert("PRIMARY LONG: Higher High break on " + syminfo.ticker, alert.freq_once_per_bar)
+
+if shortEntry
+    alert("PRIMARY SHORT: Lower Low break on " + syminfo.ticker, alert.freq_once_per_bar)
+
+if hedgeShortEntry
+    alert("HEDGE SHORT: Higher Low break (support failure) on " + syminfo.ticker, alert.freq_once_per_bar)
+
+if hedgeLongEntry
+    alert("HEDGE LONG: Lower High break (resistance failure) on " + syminfo.ticker, alert.freq_once_per_bar)
+
+View in Pine Editor・375 lines
+Use on chart
+3
+3
+839
+🎯 Strategy Concept:
+This bot trades primary trend positions and automatically hedges when key support/resistance levels break, protecting your capital from reversals.
+📊 Market Structure Detection:
+Uptrend Structure:
+
+✅ Higher Highs (HH): Each swing high is higher than the previous
+✅ Higher Lows (HL): Each swing low is higher than the previous
+🟢 Green triangles and lines
+
+Downtrend Structure:
+
+✅ Lower Highs (LH): Each swing high is lower than the previous
+✅ Lower Lows (LL): Each swing low is lower than the previous
+🔴 Red/Orange triangles and lines
+
+💡 Trading Logic:
+Primary Positions (Trend Following):
+UPTREND:
+
+Long Entry: Price breaks above Higher High
+
+Opens 2x position size
+Follows the trend
+Green triangle marker
+
+
+
+DOWNTREND:
+
+Short Entry: Price breaks below Lower Low
+
+Opens 2x position size
+Follows the trend
+Red triangle marker
+
+
+
+Hedge Positions (Risk Protection):
+When LONG (Uptrend):
+
+Hedge Short: If price breaks below Higher Low (HL)
+
+Support broken = potential reversal
+Opens 1x SHORT position (hedge)
+Orange X marker
+Up to 2 hedge positions allowed
+
+
+
+When SHORT (Downtrend):
+
+Hedge Long: If price breaks above Lower High (LH)
+
+Resistance broken = potential reversal
+Opens 1x LONG position (hedge)
+Aqua X marker
+Up to 2 hedge positions allowed
+
+
+
+🛡️ How Hedging Works:
+Example Scenario:
+
+Bot opens LONG (2x size) on Higher High break
+Price pulls back and breaks Higher Low (support)
+Bot opens HEDGE SHORT (1x size) automatically
+Net Position: Still LONG 1x (2 - 1 = 1)
+Protection: If trend reverses, hedge minimizes loss
+If trend resumes: Close hedge, keep primary position
+
+📈 Risk Management:
+Stop Loss Options:
+
+Fixed percentage-based (2% default)
+Applied to all positions
+Protects capital from major moves
+
+Take Profit:
+
+Fixed percentage (3% default)
+Locks in profits automatically
+Optional toggle
+
+Position Sizing:
+
+Primary: 50% equity (2x with pyramiding)
+Hedge: 25% equity (1x)
+Max 2 hedge positions per primary
+
+🎨 Visual Features:
+Swing Point Markers:
+
+🔼 Triangles up: Swing lows (Green = HL, Red = LL)
+🔽 Triangles down: Swing highs (Green = HH, Orange = LH)
+Lines: Connect swing points showing structure
+
+Support/Resistance Zones:
+
+Red zones: Previous swing highs (resistance)
+Green zones: Previous swing lows (support)
+Automatically extend to right
+
+Entry Signals:
+
+🟢 Large green triangle: Primary long entry
+🔴 Large red triangle: Primary short entry
+🟠 Orange X: Hedge short entry
+🔵 Aqua X: Hedge long entry
+
+📊 Info Table Shows:
+
+Market Structure: Uptrend ↑ / Downtrend ↓ / Neutral
+Previous High/Low: Key levels being monitored
+Primary Position: Current trend position
+Hedge Count: How many hedges are active
+Net Position: Actual market exposure
+Open P&L: Real-time profit/loss
+Performance Stats: Total trades, net profit
+
+⚙️ Settings:
+Swing Detection:
+
+Length: 5 bars (adjustable 2-20)
+Smaller = more swings, more signals
+Larger = major swings only
+
+Hedge Options:
+
+Toggle hedge on/off
+Auto-close hedges on retrace
+Max number of hedges (1-3)
+
+Risk Settings:
+
+Stop loss percentage
+Take profit percentage
+Toggle each independently
+
+🎯 Use Cases:
+Best For:
+
+Volatile markets with false breaks
+Protecting trending positions
+Risk-averse traders
+Swing trading timeframes (15m - 4H)
+
+Strategy Benefits:
+
+✅ Automatic risk protection
+✅ Reduces drawdown
+✅ Captures reversals
+✅ No manual intervention needed
+✅ Clear visual feedback
+
+This is a sophisticated hedging bot that automatically protects your positions while keeping you in profitable trends! 🚀

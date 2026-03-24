@@ -1,0 +1,28 @@
+//@version=3
+strategy(title="MA Cross", overlay=true)
+
+stop_loss = input(50000, "Stop Loss")
+// take_profit = input(400000, "Take Profit")
+short_MA = input(50, "Short MA")
+long_MA = input(200, "Long MA")
+
+long = sma(close, long_MA)
+short = sma(close, short_MA)
+plot(short, color = red)
+plot(long, color = green)
+has_crossed = cross(short, long)
+plot(has_crossed ? short : na, style = cross, linewidth = 4)
+
+strategy.entry("buy", strategy.long, 1, when=(has_crossed == 1 and short > long))
+strategy.exit("close L", "buy", loss = stop_loss)
+
+strategy.entry("sell", strategy.short, 1, when=(has_crossed == 1 and long > short))
+strategy.exit("close S", "sell", loss = stop_loss)
+
+View in Pine Editor・20 lines
+Use on chart
+1
+6
+3
+6 919
+Buys when short-MA crosses above long-MA. Shorts when short-MA crosses below long-MA.

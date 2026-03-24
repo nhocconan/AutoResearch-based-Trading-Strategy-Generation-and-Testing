@@ -1,0 +1,585 @@
+//@version=6
+strategy(
+    "Casper SMC: 5m ORB + Retest",
+    overlay=true,
+    initial_capital=1000,
+    default_qty_type=strategy.fixed,
+    default_qty_value=1,
+    currency=currency.USD,
+    process_orders_on_close=true,
+    margin_long=1,
+    margin_short=1
+)
+
+// 🔹 SETTINGS
+grp_time     = "Time Settings"
+sessRange    = input.session("0930-0935", "Session Range", group=grp_time)
+entryCutoff  = input.string("14:30", "Entry Cutoff Time (HH:MM)", group=grp_time, tooltip="No new trades will be taken after this time (NY Time)")
+sessZone     = input.string("America/New_York", "Timezone", group=grp_time)
+
+grp_strat    = "Strategy Settings"
+lotSize      = input.float(0.05, "Fixed Lot Size", minval=0.01, step=0.01, group=grp_strat, tooltip="Fixed lot size for every trade")
+contractSize = input.float(100, "Contract Size (Units per Lot)", minval=1, group=grp_strat, tooltip="Standard Forex=100000, Gold=100, Crypto=1, Indices varies. Used for P/L calculation.")
+rrRatio      = input.float(2.0, "Risk Reward Ratio (R)", minval=0.1, group=grp_strat)
+usePartialTP = input.bool(false, "Enable Partial Take Profit", group=grp_strat)
+partialRR    = input.float(1.0, "Partial TP at R (e.g. 1.0)", minval=0.1, step=0.1, group=grp_strat)
+partialPct   = input.float(50.0, "Partial TP % (e.g. 50%)", minval=1, maxval=99, step=1, group=grp_strat)
+useTrailSL   = input.bool(false, "Move SL to ORB After TP1", group=grp_strat, tooltip="Requires 'Enable Partial Take Profit' to be ON. After TP1 is hit, moves SL to ORB High (Long) or ORB Low (Short) to protect the remaining position.")
+
+// useTrailSL is only meaningful when usePartialTP is active — enforce dependency in code.
+// (Pine Script does not support dynamic input visibility; the tooltip informs the user.)
+trailSLActive = usePartialTP and useTrailSL
+
+grp_retest   = "Retest Filters"
+minWickPct   = input.float(10.0, "Min Wick % (How deep into range)", minval=0, maxval=100, step=1, group=grp_retest, tooltip="N% means the wick must go at least N% toward the SL to be valid")
+maxWickPct   = input.float(95.0, "Max Wick % (Cannot touch SL)", minval=0, maxval=100, step=1, group=grp_retest, tooltip="N% means the wick cannot go deeper than N% toward the SL")
+
+grp_range    = "Range Size Filters"
+useMinRange  = input.bool(false, "Enable Min Range Filter (ATR-based)", group=grp_range, tooltip="Avoid trading if ORB range is too small")
+atrLength    = input.int(30, "ATR Length", minval=1, group=grp_range)
+minAtrMult   = input.float(1.5, "Min Range > ATR x Multiplier", minval=0.1, step=0.1, group=grp_range)
+
+grp_conf     = "Confluence Filters"
+useADX       = input.bool(false, "Enable ADX Filter", group=grp_conf, tooltip="Only take entries when ADX confirms trend strength. ADX < 20 = ranging/chop (skip). ADX > 25 = trend forming (take).")
+adxLen       = input.int(14,   "ADX Length",     minval=1, group=grp_conf)
+adxSmoothing = input.int(14,   "ADX Smoothing",  minval=1, group=grp_conf)
+adxThreshold = input.float(25.0, "Min ADX Value", minval=1, step=0.5, group=grp_conf, tooltip="Entries blocked when ADX is below this level. 25 = trend forming, 40 = strong trend.")
+useVWAP4H    = input.bool(false, "Enable 4H VWAP Filter", group=grp_conf, tooltip="Uses the 4-hour VWAP as a trend bias filter. Long entries only when price > 4H VWAP; Short entries only when price < 4H VWAP.")
+
+grp_display  = "Visuals"
+showLabels   = input.bool(true, "Show P/L Labels", group=grp_display)
+txtSize      = size.tiny
+
+// 🔹 HELPER FUNCTIONS
+// Format duration from milliseconds to minimalistic string (e.g., "45m", "2h 15m")
+formatDuration(ms) =>
+    seconds = ms / 1000
+    totalMinutes = int(seconds / 60)
+    hours   = int(totalMinutes / 60)
+    remMinutes = totalMinutes % 60
+    
+    string res = ""
+    if hours > 0
+        res := str.tostring(hours) + "h"
+        if remMinutes > 0
+            res := res + " " + str.tostring(remMinutes) + "m"
+        else
+            res := res // Just hours if minutes 0
+    else
+        res := str.tostring(totalMinutes) + "m"
+    res
+
+// 🔹 STATE VARIABLES
+var float orbHigh  = na
+var float orbLow   = na
+var float orbMid   = na
+var bool  rangeSet = false
+
+var bool hasConfirmedBreakout = false
+var int  breakoutDir = 0        // 1 = bull, -1 = bear
+var int  breakoutBarIndex = na
+var bool dailyTradeTaken = false
+var bool sessionCancelled = false
+var bool atrFilterSkipped = false
+var bool noEntryByCutoff  = false
+var bool tp1WasHit          = false
+var float activeTP2Price    = na  // Stores TP2 target price to re-issue exit after TP1
+var float activePartialPrice = na  // Stores TP1 target price for bar-by-bar check
+
+// Reset daily
+// Check if the day changed or if it's the start of a new session if using intraday sessions
+bool newSession = false
+t = time(timeframe.period, sessRange, sessZone)
+isORBCandle = not na(t)
+
+// Detect start of new session to reset variables
+// We use a change in day or simple logic if not strictly daily
+if dayofmonth != dayofmonth[1]
+    orbHigh := na
+    orbLow  := na
+    orbMid  := na
+    rangeSet := false
+    hasConfirmedBreakout := false
+    breakoutDir := 0
+    breakoutBarIndex := na
+    dailyTradeTaken := false
+    sessionCancelled := false 
+    atrFilterSkipped := false
+    noEntryByCutoff  := false
+    tp1WasHit          := false
+    activeTP2Price    := na
+    activePartialPrice := na
+
+// Capture ORB High/Low during the session
+if isORBCandle
+    if not rangeSet // First candle of session
+        orbHigh := high
+        orbLow  := low
+        orbMid  := math.avg(high, low)
+        rangeSet := true
+    else
+        orbHigh := math.max(orbHigh, high)
+        orbLow  := math.min(orbLow, low)
+        orbMid  := math.avg(orbHigh, orbLow)
+        
+    // Optionally visualize the "too small" condition during formation if desired, 
+    // but filter check happens at trade entry time usually or just held in state. 
+    // For simplicity, we check ATR at the moment of 'canTrade' decision (real-time bars).
+
+// Logic only after ORB forms
+// Allow trading only if within the allowable window defined by inputs
+// We construct a time range from session start to the cutoff time.
+
+// Helper to extract the start time string from a session string (e.g. "0930-0935" -> "0930")
+// Note: This simple string manipulation assumes the format "HHMM-HHMM"
+str_split(str, sep) =>
+    array.get(str.split(str, sep), 0)
+
+// Get start of ORB session (e.g. "0930-0935" -> "0930")
+start_time = str_split(sessRange, "-")
+// Get Cutoff time and remove colon if present (e.g. "16:30" -> "1630")
+end_time   = str.replace(entryCutoff, ":", "")
+
+// Construct the allowed trading window (e.g. "0930-1430")
+trade_window_str = start_time + "-" + end_time
+
+t_entry = time(timeframe.period, trade_window_str, sessZone)
+isWithinEntryWindow = not na(t_entry)
+
+// Calc ATR for filter
+atrVal = ta.atr(atrLength)
+
+// Calc ADX for confluence filter
+[diPlus, diMinus, adxValue] = ta.dmi(adxLen, adxSmoothing)
+
+// Calc 4H VWAP for confluence filter (anchored VWAP from the 4H chart)
+vwap4h = request.security(syminfo.tickerid, "240", ta.vwap)
+
+// Check if range is big enough (only matters if we use the filter)
+orbRangeHeight = orbHigh - orbLow
+isRangeBigEnough = not useMinRange or (orbRangeHeight > (atrVal * minAtrMult))
+
+// -- Visual: ATR Skip Label --
+if rangeSet and not isORBCandle and not atrFilterSkipped and useMinRange and not isRangeBigEnough
+    atrFilterSkipped := true
+    if showLabels
+        label.new(bar_index, orbHigh, "Skipped: Low Volatility\nRange < ATR*" + str.tostring(minAtrMult), style=label.style_label_down, color=color.orange, textcolor=color.white, size=txtSize)
+
+// Check for "No Entry" Timeout
+// If trade window has passed, we haven't taken a trade, haven't cancelled, haven't skipped via ATR
+// and we had a valid range waiting.
+trade_window_finish_t = time(timeframe.period, end_time, sessZone) // The minute the window closes
+isWindowJustClosed = not isWithinEntryWindow and isWithinEntryWindow[1]
+
+if isWindowJustClosed and rangeSet and not dailyTradeTaken and not sessionCancelled and not atrFilterSkipped and not noEntryByCutoff
+    noEntryByCutoff := true
+    if showLabels
+        label.new(bar_index, orbMid, "No Entry Found\n(Session Closed)", style=label.style_label_left, color=color.gray, textcolor=color.white, size=txtSize)
+
+// Confluence filter pass/fail (both are true when the filter is disabled)
+adxPass   = not useADX    or adxValue > adxThreshold
+vwapLong  = not useVWAP4H or close > vwap4h
+vwapShort = not useVWAP4H or close < vwap4h
+
+canTrade = rangeSet and not isORBCandle and not dailyTradeTaken and not sessionCancelled and isWithinEntryWindow and isRangeBigEnough and not atrFilterSkipped
+
+// 🔹 BREAKOUT & CANCELLATION LOGIC
+if canTrade
+    // 1. Check for Breakout
+    if not hasConfirmedBreakout
+        if close > orbHigh
+            hasConfirmedBreakout := true
+            breakoutDir := 1
+            breakoutBarIndex := bar_index
+        else if close < orbLow
+            hasConfirmedBreakout := true
+            breakoutDir := -1
+            breakoutBarIndex := bar_index
+
+    // 2. Check for Cancellation (Breakout Reversal)
+    // If we broke out Bullish  (1) but price drops below ORB Low  -> Cancel
+    // If we broke out Bearish (-1) but price rises above ORB High -> Cancel
+    else
+        if breakoutDir == 1 and close < orbLow
+            sessionCancelled := true
+            if showLabels
+                label.new(bar_index, low, "Session Cancelled\n(Reversal)", style=label.style_label_up, color=color.gray, textcolor=color.white, size=txtSize)
+        else if breakoutDir == -1 and close > orbHigh
+            sessionCancelled := true
+            if showLabels
+                label.new(bar_index, high, "Session Cancelled\n(Reversal)", style=label.style_label_down, color=color.gray, textcolor=color.white, size=txtSize)
+
+// 🔹 ENTRY LOGIC (WICK RETEST)
+if canTrade and hasConfirmedBreakout and not sessionCancelled and strategy.position_size == 0
+    
+    // We only look for retests AFTER the breakout candle
+    if bar_index > breakoutBarIndex
+
+        slPrice = orbMid
+        distToSL = breakoutDir == 1 ? (orbHigh - slPrice) : (slPrice - orbLow)
+        
+        // --- BULLISH SETUP ---
+        if breakoutDir == 1
+            // Identify wick depth into the range
+            // Wick must dip BELOW orbHigh
+            wickDepth = orbHigh - low
+            // Calculate % distance to SL
+            wickPct = distToSL > 0 ? (wickDepth / distToSL) * 100 : 0
+            
+            // Conditions
+            wickInRange    = wickPct >= minWickPct and wickPct <= maxWickPct
+            bodyOutside    = math.min(open, close) > orbHigh // Body stayed above ORB High
+            wickPierced    = low < orbHigh                   // Wick went inside
+            
+            if wickPierced and bodyOutside and wickInRange and adxPass and vwapLong
+                // Calculate targets
+                limitPrice = close
+                riskPerShare = close - slPrice
+                takeProfitPrice = close + (riskPerShare * rrRatio)
+                partialPrice    = close + (riskPerShare * partialRR)
+                
+                // Construct Label Text
+                lblText = "BUY NOW Lot " + str.tostring(lotSize)
+
+                strategy.entry("Long", strategy.long, qty=lotSize * contractSize, comment=lblText)
+                
+                if usePartialTP
+                    // Single exit covers SL + TP2. TP1 partial is handled bar-by-bar via strategy.close()
+                    // This ensures only ONE exit marker fires on SL (no split-sub-trade double markers)
+                    strategy.exit("TP/SL", "Long", limit=takeProfitPrice, stop=slPrice, comment_profit="TP2", comment_loss="SL")
+                    activeTP2Price    := takeProfitPrice
+                    activePartialPrice := partialPrice
+                else
+                    strategy.exit("TP/SL", "Long", stop=slPrice, limit=takeProfitPrice, comment_profit="TP", comment_loss="SL")
+                
+                dailyTradeTaken := true
+
+        // --- BEARISH SETUP ---
+        else if breakoutDir == -1
+            // Identify wick depth into the range
+            // Wick must poke ABOVE orbLow
+            wickDepth = high - orbLow
+            // Calculate % distance to SL
+            wickPct = distToSL > 0 ? (wickDepth / distToSL) * 100 : 0
+            
+            // Conditions
+            wickInRange    = wickPct >= minWickPct and wickPct <= maxWickPct
+            bodyOutside    = math.max(open, close) < orbLow // Body stayed below ORB Low
+            wickPierced    = high > orbLow                  // Wick went inside
+            
+            if wickPierced and bodyOutside and wickInRange and adxPass and vwapShort
+                // Calculate targets
+                limitPrice = close
+                riskPerShare = slPrice - close
+                takeProfitPrice = close - (riskPerShare * rrRatio)
+                partialPrice    = close - (riskPerShare * partialRR)
+                
+                // Construct Label Text
+                lblText = "SELL NOW Lot " + str.tostring(lotSize)
+
+                strategy.entry("Short", strategy.short, qty=lotSize * contractSize, comment=lblText)
+
+                if usePartialTP
+                    // Single exit covers SL + TP2. TP1 partial is handled bar-by-bar via strategy.close()
+                    strategy.exit("TP/SL", "Short", limit=takeProfitPrice, stop=slPrice, comment_profit="TP2", comment_loss="SL")
+                    activeTP2Price    := takeProfitPrice
+                    activePartialPrice := partialPrice
+                else
+                    strategy.exit("TP/SL", "Short", stop=slPrice, limit=takeProfitPrice, comment_profit="TP", comment_loss="SL")
+
+                dailyTradeTaken := true
+
+// 🔹 BAR-BY-BAR TP1 PARTIAL CLOSE CHECK
+// Fires strategy.close() for the partial portion when price reaches TP1 level.
+// Using strategy.close() instead of a second strategy.exit() means only ONE exit order
+// exists at any time → SL always fires as a single marker, never doubled.
+if usePartialTP and strategy.position_size != 0 and not tp1WasHit and not na(activePartialPrice)
+    bool tp1Hit = (breakoutDir == 1 and close >= activePartialPrice) or
+                  (breakoutDir == -1 and close <= activePartialPrice)
+    if tp1Hit
+        tp1WasHit := true
+        if breakoutDir == 1
+            strategy.close("Long", qty_percent=partialPct, comment="TP1")
+        else
+            strategy.close("Short", qty_percent=partialPct, comment="TP1")
+
+// 🔹 MOVE SL TO ORB ZONE AFTER TP1
+// Triggered on the exact bar tp1WasHit transitions from false → true.
+// Re-issues the single TP/SL exit with an updated stop at the ORB boundary.
+if trailSLActive and tp1WasHit and not tp1WasHit[1] and strategy.position_size != 0 and not na(activeTP2Price)
+    newSL = breakoutDir == 1 ? orbHigh : orbLow
+    if breakoutDir == 1
+        strategy.exit("TP/SL", "Long", limit=activeTP2Price, stop=newSL, comment_profit="TP2", comment_loss="SL (BE)")
+    else
+        strategy.exit("TP/SL", "Short", limit=activeTP2Price, stop=newSL, comment_profit="TP2", comment_loss="SL (BE)")
+    if showLabels
+        lbl    = breakoutDir == 1 ? "SL → ORB High" : "SL → ORB Low"
+        lStyle = breakoutDir == 1 ? label.style_label_up : label.style_label_down
+        lColor = breakoutDir == 1 ? color.new(#00E676, 20) : color.new(#FF1744, 20)
+        label.new(bar_index, newSL, lbl, style=lStyle, color=lColor, textcolor=color.white, size=txtSize)
+
+// 🔹 PLOTTING
+// Define "Brutal" Colors (Neon/High Contrast)
+col_bull = #00E676  // Neon Green
+col_bear = #FF1744  // Neon Red
+col_mid  = #FFFFFF  // White
+col_bg   = color.new(#089981, 85) // Deep Blue, high transparency
+
+// Logic to show lines only until 16:00 NY time
+isTradingHours = not na(time(timeframe.period, "0930-1600", sessZone))
+
+plot(rangeSet and isTradingHours ? orbHigh : na, "ORB High", color=col_bull, linewidth=2, style=plot.style_linebr)
+plot(rangeSet and isTradingHours ? orbLow  : na, "ORB Low",  color=col_bear,   linewidth=2, style=plot.style_linebr)
+plot(rangeSet and isTradingHours ? orbMid  : na, "ORB Mid",  color=col_mid,    linewidth=1, style=plot.style_linebr)
+plot(useVWAP4H and isTradingHours ? vwap4h : na, "4H VWAP",  color=color.new(#FF9800, 0), linewidth=1, style=plot.style_line)
+
+// 🔹 TRADE DURATION & RESULT DISPLAY
+if strategy.closedtrades > strategy.closedtrades[1] and showLabels
+    startIdx = strategy.closedtrades[1]
+    endIdx   = strategy.closedtrades - 1
+
+    // Check if ALL newly closed trades on this bar are SL hits
+    // (happens when SL fires before TP1 with partial TPs → 2 sub-trades both tagged "SL")
+    allSL = true
+    for i = startIdx to endIdx
+        if not str.contains(strategy.closedtrades.exit_comment(i), "SL")
+            allSL := false
+
+    if allSL and endIdx > startIdx
+        // Combine all SL sub-trades into a single label with total P/L
+        totalProfit = 0.0
+        for i = startIdx to endIdx
+            totalProfit += strategy.closedtrades.profit(i)
+        entryTime   = strategy.closedtrades.entry_time(startIdx)
+        exitTime    = strategy.closedtrades.exit_time(endIdx)
+        durationText = formatDuration(exitTime - entryTime)
+        exitPx      = strategy.closedtrades.exit_price(endIdx)
+        labelText   = "SL: ⏱ " + durationText + " $" + str.tostring(totalProfit, "#.00")
+        label.new(bar_index - 1, exitPx, labelText, color=color.new(#FF1744, 10), textcolor=color.white, style=label.style_label_right, size=size.small)
+
+    else
+        // Normal case: show a label for each closed trade individually
+        for i = startIdx to endIdx
+            entryTime   = strategy.closedtrades.entry_time(i)
+            exitTime    = strategy.closedtrades.exit_time(i)
+            durationText = formatDuration(exitTime - entryTime)
+            profit      = strategy.closedtrades.profit(i)
+            isWin       = profit > 0
+            resColor    = isWin ? #00c164 : #FF1744
+            labelText   = "⏱ " + durationText + " " + (isWin ? "+" : "") + "$" + str.tostring(profit, "#.00")
+            exitComment = strategy.closedtrades.exit_comment(i)
+            if str.contains(exitComment, "TP1")
+                labelText := "TP1: " + labelText
+            else if str.contains(exitComment, "TP2")
+                labelText := "TP2: " + labelText
+            else if str.contains(exitComment, "TP")
+                labelText := "TP: " + labelText
+            else if str.contains(exitComment, "SL")
+                labelText := "SL: " + labelText
+            exitPx = strategy.closedtrades.exit_price(i)
+            label.new(bar_index - 1, exitPx, labelText, color=color.new(resColor, 10), textcolor=color.white, style=label.style_label_right, size=size.small)
+
+View in Pine Editor・384 lines
+Use on chart
+2
+2
+1
+9
+3 893
+Feb 23
+Casper SMC: 5m ORB + Retest
+
+This strategy is an Opening Range Breakout (ORB) system combined with Smart Money Concept (SMC) style wick-retest entries.
+It is designed for 5-minute charts and trades only during the New York session.
+
+The goal is to trade confirmed breakouts followed by a controlled pullback, using fixed risk and realistic P/L calculations.
+────────────────────────────
+Core Logic
+
+Capture the Opening Range High, Low, and Mid
+
+Wait for a confirmed breakout above or below the range
+
+Look for a wick retest back into the range
+
+Enter only if the candle body stays outside the range
+
+Use fixed RR with automatic TP & SL
+
+
+────────────────────────────
+Session Rules
+
+Opening Range (ORB): 09:30 – 09:35 New York time
+
+Entries allowed only until the configured cutoff time
+
+Maximum of one trade per day
+If breakout fully reverses through the range, the session is cancelled
+
+
+────────────────────────────
+Entry Conditions
+
+Bullish Setup
+
+Candle closes above ORB High
+
+After breakout, a candle wicks back below ORB High
+
+Candle body remains fully above ORB High
+
+Wick depth must be within the user-defined percentage range
+
+
+
+Bearish Setup
+
+Candle closes below ORB Low
+
+After breakout, a candle wicks back above ORB Low
+
+Candle body remains fully below ORB Low
+
+Wick depth must be within the user-defined percentage range
+
+
+────────────────────────────
+Risk Management
+
+Stop Loss: ORB Midpoint
+
+Take Profit: Risk × RR Ratio
+
+Fixed lot size for every trade
+
+Automatic TP / SL handling
+
+
+────────────────────────────
+Realistic P/L Calculation
+
+Profit and loss values are calculated using lot size and contract size:
+
+
+Pine Script®
+Profit = (TP − Entry) × ContractSize × LotSize
+Loss   = (Entry − SL) × ContractSize × LotSize
+
+
+
+This allows accurate estimation for:
+
+Forex
+
+Gold (XAUUSD)
+
+Crypto
+
+Indices
+
+
+────────────────────────────
+Visual Features
+
+ORB High / Low / Mid plotted on chart
+
+Entry labels showing expected TP & SL in USD
+
+Trade duration label displayed after exit
+
+Session cancellation warnings
+
+
+────────────────────────────
+Recommended Usage
+
+Timeframe: 5 minutes
+
+Best session: New York
+
+Instruments: Forex, Gold, Indices, Crypto
+
+Always forward-test before live trading
+
+
+────────────────────────────
+Disclaimer
+
+This script is for educational and research purposes only.
+Past performance does not guarantee future results.
+Always manage risk and test thoroughly before trading real capital.
+Feb 25
+Release Notes
+New Feature: The Volatility "Gatekeeper"
+Based on community feedback, I have added an ATR Range Filter. This prevents the strategy from taking trades on low-volume, "choppy" days where the Opening Range is too small to be safe.
+
+How it works: If the height of the Opening Range is smaller than ATR x Multiplier, the day is skipped.
+Why use it: Small ranges often lead to "fakeouts" and stop hunts. This filter ensures you only trade when there is enough momentum to hit targets.
+Feb 25
+Release Notes
+some fixes
+Feb 26
+Release Notes
+🆕 Partial Take Profit System
+- Enable Partial TP — When enabled, the strategy splits the exit into two stages instead of one full exit.
+- TP1 (Partial Close) — Closes a configurable percentage of the position (e.g. 50%) at a configurable R level (e.g. 1.0R). Great for locking in profit early on volatile days.
+- TP2 (Final Close) — The remaining position rides toward the full target (e.g. 2.0R or 2.5R).
+- Correct P/L Accounting — All scenarios are handled correctly:
+
+Pine Script®
+Scenario 1 — Straight SL (no TP hit):
+  → Full position closes at SL in ONE trade
+  → No phantom TP labels. No double counting.
+
+Scenario 2 — TP1 hit, then SL:
+  → 50% closed at TP1 (profit)
+  → Remaining 50% closed at SL (small loss)
+  → Net result: reduced loss or breakeven
+
+Scenario 3 — Both TPs hit:
+  → 50% closed at TP1 (profit)
+  → 50% closed at TP2 (larger profit)
+  → Best case scenario
+
+Expand 8 lines
+
+
+🆕 Move SL to ORB After TP1
+- Dependency enforced in code — This option is only active when Enable Partial TP is also enabled. If Partial TP is off, this setting is automatically ignored regardless of the checkbox state.
+- How it works — After TP1 is hit, the Stop Loss of the remaining position is moved from orbMid to the ORB boundary:
+-- Long trade → SL moves to orbHigh (price must drop back below the breakout level to stop out)
+-- Short trade → SL moves to orbLow (price must rally back above the breakdown level to stop out)
+- Why use it — Protects the remaining position after a partial win. Worst case after TP1 is a small loss instead of a full loss.
+Mar 3
+Release Notes
+Update: Confluence Filters & Momentum Gating
+
+This update introduces a "disciplined" layer to the Casper ORB logic. We have added a new "Confluence Filters" settings group designed to filter out low-probability "noise" and prevent "chop suicide" during non-trending sessions.
+
+New Features:
+
+1. ADX Filter (Trend Strength)
+The Average Directional Index (ADX) measures the strength of a trend regardless of direction.
+
+* Logic: When enabled, entries are blocked if the ADX is below the threshold (Default: 25).
+* Benefit: Keeps you out of the market when price is just "drifting" sideways.
+
+2. 4H VWAP Filter (Institutional Bias)
+Uses a 4-Hour Volume Weighted Average Price as a medium-term "gravity" line.
+
+* Long Bias: Only permits Long entries when price is above the 4H VWAP.
+* Short Bias: Only permits Short entries when price is below the 4H VWAP.
+* Visuals: An orange line is plotted on the chart when this filter is active to show the current bias.
+
+[h2]Technical Logic Applied[/h2]
+We have introduced three new logic gates that must return true before an order is executed:
+
+* adxPass — Validates that momentum is sufficient.
+* vwapLong — Validates price is on the bullish side of the 4H volume average.
+* vwapShort — Validates price is on the bearish side of the 4H volume average.
+
+⚠️ Note on Settings:
+To maintain consistency with your existing backtests, both filters are OFF by default. You can enable them individually under the new "Confluence Filters" group in the script settings.
+
+Code changes: Expanded logic from 20 lines to 40 lines in the filtering block for casper-orb-dynamic.pine.

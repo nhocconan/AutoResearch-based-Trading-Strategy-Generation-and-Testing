@@ -1,0 +1,211 @@
+//@version=6
+strategy("Scalp Pro — BTC/XRP (Quality) | BUY/SELL + SL/TP", overlay=true,
+     initial_capital=10000,
+     commission_type=strategy.commission.percent, commission_value=0.04,
+     slippage=1, pyramiding=0,
+     calc_on_every_tick=false, process_orders_on_close=true)
+
+//──────────────────────────────────────────────────────────────────────────────
+// INPUTS
+//──────────────────────────────────────────────────────────────────────────────
+// HTF filter (robuste)
+useHTFFilter = input.bool(true,  "Filtre HTF (1H)", inline="htf")
+htfTF        = input.timeframe("60", "", inline="htf")
+
+// Trend / Flow
+emaFastLen = input.int(20, "EMA rapide", minval=1)
+emaSlowLen = input.int(50, "EMA lente",  minval=1)
+
+// Momentum
+rsiLen      = input.int(14, "RSI", minval=1)
+rsiLongMin  = input.int(55, "RSI min Long", minval=1, maxval=99)
+rsiShortMax = input.int(45, "RSI max Short", minval=1, maxval=99)
+
+// Regime filter (anti-chop)
+adxLen = input.int(14, "ADX length", minval=1)
+adxMin = input.float(20.0, "ADX min (trend only)", minval=1, step=0.5)
+
+// Volatility filter
+atrLen    = input.int(14, "ATR length", minval=1)
+minAtrPct = input.float(0.10, "Volatilité min (ATR% du prix)", minval=0.0, step=0.01)
+
+// Volume filter (qualité de bougie)
+useVolFilter = input.bool(true, "Filtre volume")
+volLen       = input.int(20, "Volume MA", minval=1)
+volMult      = input.float(1.10, "Volume > MA x", minval=0.5, step=0.05)
+
+// Session filter
+useSession   = input.bool(false, "Filtre session")
+tradeSession = input.session("0700-2100", "Session (exchange time)")
+
+// Entry style
+usePullback    = input.bool(true,  "Entrée proche VWAP")
+pullbackMaxPct = input.float(0.45, "Distance max au VWAP (%)", minval=0.0, step=0.05)
+
+// Cooldown (réduit le sur-trading)
+cooldownBars = input.int(10, "Cooldown après entrée (barres)", minval=0)
+
+// Risk / Exits
+atrStopMult  = input.float(1.6, "Stop = ATR x", minval=0.1, step=0.1)
+tp1_R        = input.float(1.0, "TP1 en R", minval=0.2, step=0.1)
+rr           = input.float(1.6, "TP2 en R", minval=0.2, step=0.1)
+tp1_pct      = input.float(50.0, "TP1 % position", minval=1, maxval=99, step=1)
+useBreakEven = input.bool(true, "Protection après TP1 (lock)")
+
+lockR = input.float(0.20, "Lock après TP1 (en R)", minval=0.0, step=0.05)
+
+useTimeExit  = input.bool(false, "Sortie temporelle (barres)")
+timeExitBars = input.int(20, "Barres max en trade", minval=1)
+
+//──────────────────────────────────────────────────────────────────────────────
+// FILTERS & CORE (LTF)
+//──────────────────────────────────────────────────────────────────────────────
+inSession = useSession ? not na(time(timeframe.period, tradeSession)) : true
+
+src   = hlc3
+vwap  = ta.vwap(src) // VWAP session (intraday)
+ema20 = ta.ema(close, emaFastLen)
+ema50 = ta.ema(close, emaSlowLen)
+rsi   = ta.rsi(close, rsiLen)
+atr   = ta.atr(atrLen)
+// ───── ADX manuel (100% compatible) ─────
+upMove   = high - high[1]
+downMove = low[1] - low
+
+plusDM  = (upMove > downMove and upMove > 0) ? upMove : 0
+minusDM = (downMove > upMove and downMove > 0) ? downMove : 0
+
+trur = ta.rma(ta.tr(true), adxLen)
+
+plusDI  = 100 * ta.rma(plusDM, adxLen) / trur
+minusDI = 100 * ta.rma(minusDM, adxLen) / trur
+
+dx  = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx = ta.rma(dx, adxLen)
+
+atrPct = (atr / close) * 100.0
+volaOk = atrPct >= minAtrPct
+
+trendOk = adx >= adxMin
+
+volMA = ta.sma(volume, volLen)
+volOk = useVolFilter ? (volume > volMA * volMult) : true
+
+bullRegime = close > vwap and ema20 > ema50
+bearRegime = close < vwap and ema20 < ema50
+
+distToVwapPct = math.abs((close - vwap) / vwap) * 100.0
+nearValue     = distToVwapPct <= pullbackMaxPct
+
+momLong  = rsi >= rsiLongMin
+momShort = rsi <= rsiShortMax
+
+// Trigger "clean" : on exige un CLOSE qui passe l’EMA20 (pas une mèche)
+trigLong  = close > ema20 and close[1] <= ema20[1]
+trigShort = close < ema20 and close[1] >= ema20[1]
+
+timingLong  = usePullback ? (nearValue and trigLong)  : trigLong
+timingShort = usePullback ? (nearValue and trigShort) : trigShort
+
+//──────────────────────────────────────────────────────────────────────────────
+// HTF FILTER (ROBUSTE)
+// - On évite VWAP en security (peut renvoyer na)
+// - Proxy "valeur" HTF : VWMA 20
+//──────────────────────────────────────────────────────────────────────────────
+htfClose = request.security(syminfo.tickerid, htfTF, close, barmerge.gaps_off, barmerge.lookahead_off)
+htfE20   = request.security(syminfo.tickerid, htfTF, ta.ema(close, emaFastLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfE50   = request.security(syminfo.tickerid, htfTF, ta.ema(close, emaSlowLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfVWMA  = request.security(syminfo.tickerid, htfTF, ta.vwma(close, 20), barmerge.gaps_off, barmerge.lookahead_off)
+
+htfBull = htfClose > htfVWMA and htfE20 > htfE50
+htfBear = htfClose < htfVWMA and htfE20 < htfE50
+
+htfOkLong  = useHTFFilter ? htfBull : true
+htfOkShort = useHTFFilter ? htfBear : true
+
+//──────────────────────────────────────────────────────────────────────────────
+// COOLDOWN (anti-hachoir)
+//──────────────────────────────────────────────────────────────────────────────
+var int cd = 0
+cd := math.max(cd - 1, 0)
+
+canEnter = strategy.position_size == 0 and cd == 0
+
+//──────────────────────────────────────────────────────────────────────────────
+// FINAL SIGNALS (QUALITÉ)
+//──────────────────────────────────────────────────────────────────────────────
+longSignal  = canEnter and inSession and volaOk and trendOk and volOk and htfOkLong  and bullRegime and momLong  and timingLong
+shortSignal = canEnter and inSession and volaOk and trendOk and volOk and htfOkShort and bearRegime and momShort and timingShort
+
+// AFFICHAGE BUY/SELL (toujours visible)
+plotshape(longSignal,  title="BUY",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, color=color.lime, text="BUY")
+plotshape(shortSignal, title="SELL", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.red,  text="SELL")
+
+// ENTRIES
+if longSignal
+    strategy.entry("BUY", strategy.long)
+    cd := cooldownBars
+
+if shortSignal
+    strategy.entry("SELL", strategy.short)
+    cd := cooldownBars
+
+//──────────────────────────────────────────────────────────────────────────────
+// SL/TP (TP1 + TP2 + lock après TP1)
+//──────────────────────────────────────────────────────────────────────────────
+posLong  = strategy.position_size > 0
+posShort = strategy.position_size < 0
+avg      = strategy.position_avg_price
+
+stopDist = atr * atrStopMult
+
+longSL  = avg - stopDist
+longTP1 = avg + stopDist * tp1_R
+longTP2 = avg + stopDist * rr
+
+shortSL  = avg + stopDist
+shortTP1 = avg - stopDist * tp1_R
+shortTP2 = avg - stopDist * rr
+
+// Suivi TP1 touché (par trade)
+var bool tp1Hit = false
+if strategy.position_size == 0
+    tp1Hit := false
+
+if posLong and not tp1Hit and high >= longTP1
+    tp1Hit := true
+if posShort and not tp1Hit and low <= shortTP1
+    tp1Hit := true
+
+// Lock après TP1 (pas un BE “bête”)
+longSL_active  = (useBreakEven and posLong  and tp1Hit) ? (avg + stopDist * lockR) : longSL
+shortSL_active = (useBreakEven and posShort and tp1Hit) ? (avg - stopDist * lockR) : shortSL
+
+// Exits split
+if posLong
+    strategy.exit("BUY_TP1", from_entry="BUY",  limit=longTP1,  stop=longSL_active,  qty_percent=tp1_pct)
+    strategy.exit("BUY_TP2", from_entry="BUY",  limit=longTP2,  stop=longSL_active,  qty_percent=100 - tp1_pct)
+
+if posShort
+    strategy.exit("SELL_TP1", from_entry="SELL", limit=shortTP1, stop=shortSL_active, qty_percent=tp1_pct)
+    strategy.exit("SELL_TP2", from_entry="SELL", limit=shortTP2, stop=shortSL_active, qty_percent=100 - tp1_pct)
+
+// Time exit option
+var int barsInTrade = 0
+if strategy.position_size != 0
+    barsInTrade += 1
+else
+    barsInTrade := 0
+
+if useTimeExit and strategy.position_size != 0 and barsInTrade >= timeExitBars
+    strategy.close_all(comment="Time exit")
+
+View in Pine Editor・201 lines
+Use on chart
+8
+529
+66% ON THE LAST 90 DAYS ON 15MN TIMEFRAME
+
+AMAZING bot, really helpful
+
+DM me for more details

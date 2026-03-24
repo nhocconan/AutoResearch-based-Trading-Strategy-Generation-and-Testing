@@ -1,0 +1,48 @@
+//@version=2
+strategy(shorttitle = "Gamma pips EMA Cross", title="MA Cross", overlay=true)
+s100sma = sma(close, 100)
+s200sma = sma(close, 200)
+s26ema = ema(close,26)
+s12ema = ema(close,12)
+
+plot(s100sma, color = green, linewidth = 5)
+plot(s200sma, color = blue, linewidth = 5)
+plot(s26ema, color = yellow, linewidth = 3)
+plot(s12ema, color = red, linewidth = 3)
+EMACross = plot(cross(s26ema, s12ema) ? s26ema : na, style = cross, linewidth = 5, color = red)
+SMACross = plot(cross(s100sma, s200sma) ? s200sma : na, style = cross, linewidth = 5, color = white)
+Alert = cross(s26ema, s12ema)
+alertcondition(Alert, title="EMA Crossing")
+
+//============ signal Generator ==================================//
+EMACrossover = crossover(s26ema, s12ema) //if yellow cross and is above red ->SELL
+EMACrossunder = crossunder(s26ema, s12ema) //if yellow cross and is below red ->BUY
+SMACrossover = crossover(s100sma, s200sma) //green crosses above blue ->Buy
+SMACrossunder = crossunder (s100sma, s200sma) //green crosses below below ->Sell
+price = close
+BuyCondition = (EMACrossunder) and (price >= s100sma)
+SellCondition = (EMACrossover) and (price <= s100sma)
+
+///---------Buy Signal-------------///
+if (BuyCondition)
+    strategy.order("BUY ema crossunder", strategy.long)
+
+ 
+///Short signal------//
+if(SellCondition)
+    strategy.order("SELL ema crossover", strategy.short)
+
+View in Pine Editor・33 lines
+Use on chart
+5
+3
+6
+6
+23 390
+Hello Traders and coders,
+
+Here is a fundamental version of a moving average cross trading strategy that works on 1H and 4H timeframes.
+
+It's very simple and would be well paired with proper technical analysis and risk management.
+
+I am looking to use this to alert me of potential setups. I could not get the alertcondition function to work properly. If anyone can help me with that please comment or message me.

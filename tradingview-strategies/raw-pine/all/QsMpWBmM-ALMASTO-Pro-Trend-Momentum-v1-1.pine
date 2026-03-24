@@ -1,0 +1,238 @@
+//@version=5
+strategy("ALMASTO – Pro Trend & Momentum (v1.1)",
+     overlay=true, calc_on_every_tick=true, initial_capital=10000,
+     commission_type=strategy.commission.percent, commission_value=0.01,
+     pyramiding=0, process_orders_on_close=true)
+
+//================= INPUTS =================
+tfHTF         = input.timeframe("240", "Higher TF for Trend (EMA200)")
+useSession    = input.bool(true, "Restrict by Sessions?")
+sessionStr    = input.session("0800-2200", "Trading Session (Exchange time)")
+
+// Trend filters
+lenEMAfast    = input.int(50,"EMA Fast",10,400)
+lenEMAslow    = input.int(200,"EMA Slow (trend)",50,600)
+lenEMAhtf     = input.int(200,"HTF EMA200",50,600)
+
+// Momentum filters
+useRSI        = input.bool(true,"RSI filter")
+rsiLen        = input.int(14,"RSI Length",5,50)
+rsiBuy        = input.int(52,"RSI min for Long",40,60)
+rsiSell       = input.int(48,"RSI max for Short",40,60)
+
+useMACD       = input.bool(true,"MACD filter")
+macdFast      = input.int(12,"MACD Fast",5,50)
+macdSlow      = input.int(26,"MACD Slow",10,100)
+macdSig       = input.int(9,"MACD Signal",3,30)
+
+useADX        = input.bool(true,"ADX trend strength")
+adxLen        = input.int(14,"ADX Length",5,40)
+adxMin        = input.int(18,"ADX Min",5,40)
+
+// Risk & exits
+riskPct       = input.float(1.0,"Risk per Trade % (of Equity)",0.1,3, step=0.1)
+atrLen        = input.int(14,"ATR Length",5,50)
+atrMultSL     = input.float(1.5,"ATR SL Multiplier",0.5,5,0.1)
+rrTP1         = input.float(1.0,"TP1 RR",0.5,3,0.1)
+rrTP2         = input.float(2.0,"TP2 RR",1.0,6,0.1)
+trailStartRR  = input.float(1.0,"Trail starts at RR",0.5,4,0.1)
+trailATRmult  = input.float(1.0,"ATR Trailing Mult",0.5,5,0.1)
+maxLots       = input.float(2.0,"Max Lots",0.01,5,0.01)
+
+// Filters extra
+useVWAP       = input.bool(true,"Price above/below Session VWAP")
+useWickFilter = input.bool(true,"Reject long if bearish long-wick & vice versa")
+
+//================= CALCS =================
+emaFast  = ta.ema(close, lenEMAfast)
+emaSlow  = ta.ema(close, lenEMAslow)
+emaHTF   = request.security(syminfo.tickerid, tfHTF, ta.ema(close, lenEMAhtf), barmerge.gaps_off, barmerge.lookahead_off)
+
+rsi      = ta.rsi(close, rsiLen)
+macd     = ta.ema(close, macdFast) - ta.ema(close, macdSlow)
+macdSigV = ta.ema(macd, macdSig)
+macdUp   = macd > macdSigV
+macdDn   = macd < macdSigV
+
+// ثابت وموثوق: DMI يعطينا ADX و +DI و -DI
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+
+
+// VWAP للجلسة (استخدم hlc3 كمصدر)
+hlc3Val = (high + low + close) / 3.0
+vwap    = ta.vwap(hlc3Val)
+
+atr      = ta.atr(atrLen)
+
+// جلسة التداول: true داخل الفترة المحددة
+inSess   = not useSession or not na(time(timeframe.period, sessionStr))
+
+// فلتر الذيول
+bodySize     = math.abs(close - open)
+bearLongWick = (high - math.max(close, open)) > bodySize * 1.2
+bullLongWick = (math.min(close, open) - low)   > bodySize * 1.2
+
+//================= CONDITIONS =================
+trendLong   = close > emaSlow and emaFast > emaSlow and close > emaHTF
+trendShort  = close < emaSlow and emaFast < emaSlow and close < emaHTF
+
+rsiOKlong   = not useRSI  or rsi >= rsiBuy
+rsiOKshort  = not useRSI  or rsi <= rsiSell
+
+macdOKlong  = not useMACD or macdUp
+macdOKshort = not useMACD or macdDn
+
+adxOK       = not useADX or adx >= adxMin
+
+vwapOKlong  = not useVWAP or close >= vwap
+vwapOKshort = not useVWAP or close <= vwap
+
+wickOKlong  = not useWickFilter or not bearLongWick
+wickOKshort = not useWickFilter or not bullLongWick
+
+longSignal  = inSess and trendLong  and rsiOKlong  and macdOKlong  and adxOK and vwapOKlong  and wickOKlong
+shortSignal = inSess and trendShort and rsiOKshort and macdOKshort and adxOK and vwapOKshort and wickOKshort
+
+//================= RISK / POSITION SIZING =================
+slDistLong  = atr * atrMultSL
+slDistShort = atr * atrMultSL
+
+equity      = strategy.equity
+riskMoney   = equity * riskPct/100
+
+// في الفوركس: 1 لوت = 100,000 وحدة
+lotSize     = syminfo.type == "forex" ? 100000.0 : 1.0
+qtyLongLots = math.min((riskMoney / slDistLong)  / lotSize, maxLots)
+qtyShortLots= math.min((riskMoney / slDistShort) / lotSize, maxLots)
+
+//================= ENTRIES & EXITS =================
+if (longSignal) and strategy.position_size <= 0
+    slPrice = close - slDistLong
+    tp1     = close + slDistLong*rrTP1
+    tp2     = close + slDistLong*rrTP2
+    strategy.entry("LONG", strategy.long, qty=qtyLongLots*lotSize)
+    strategy.exit("LX-TP1", from_entry="LONG", limit=tp1, stop=slPrice, qty_percent=50)
+    strategy.exit("LX-TP2", from_entry="LONG", limit=tp2, stop=slPrice)
+
+if (shortSignal) and strategy.position_size >= 0
+    slPrice = close + slDistShort
+    tp1     = close - slDistShort*rrTP1
+    tp2     = close - slDistShort*rrTP2
+    strategy.entry("SHORT", strategy.short, qty=qtyShortLots*lotSize)
+    strategy.exit("SX-TP1", from_entry="SHORT", limit=tp1, stop=slPrice, qty_percent=50)
+    strategy.exit("SX-TP2", from_entry="SHORT", limit=tp2, stop=slPrice)
+
+//================= BE / TRAILING =================
+var float bePrice = na
+inLong   = strategy.position_size > 0
+inShort  = strategy.position_size < 0
+avgPrice = strategy.position_avg_price
+
+rrNowLong  = inLong  ? (close - avgPrice) / slDistLong  : na
+rrNowShort = inShort ? (avgPrice - close) / slDistShort : na
+
+// نقل الستوب إلى بريك إيفن بعد TP1 (RR>=TP1)
+if inLong and rrNowLong >= rrTP1 and na(bePrice)
+    bePrice := avgPrice
+    strategy.exit("LX-BE", from_entry="LONG", stop=bePrice, qty_percent=100)
+
+if inShort and rrNowShort >= rrTP1 and na(bePrice)
+    bePrice := avgPrice
+    strategy.exit("SX-BE", from_entry="SHORT", stop=bePrice, qty_percent=100)
+
+// Trailing بعد RR معيّن
+if inLong and rrNowLong >= trailStartRR
+    trailStop = close - atr*trailATRmult
+    strategy.exit("LX-TR", from_entry="LONG", stop=trailStop)
+
+if inShort and rrNowShort >= trailStartRR
+    trailStop = close + atr*trailATRmult
+    strategy.exit("SX-TR", from_entry="SHORT", stop=trailStop)
+
+if not inLong and not inShort
+    bePrice := na
+
+//================= PLOTTING =================
+plot(emaFast, "EMA Fast", color=color.new(color.teal,0))
+plot(emaSlow, "EMA Slow", color=color.new(color.orange,0))
+plot(emaHTF,  "HTF EMA200", color=color.new(color.fuchsia,0))
+plot(vwap, "VWAP", color=color.new(color.blue,60))
+bgcolor(longSignal ? color.new(color.green, 92) : shortSignal ? color.new(color.red, 92) : na)
+
+//================= ALERTS =================
+alertcondition(longSignal,  title="KING LONG",  message="LONG {{ticker}} @ {{close}}")
+alertcondition(shortSignal, title="KING SHORT", message="SHORT {{ticker}} @ {{close}}")
+
+View in Pine Editor・164 lines
+Use on chart
+3
+9
+1
+1 182
+ALMASTO — Pro Trend & Momentum Strategy
+
+Description:
+This strategy is designed for precision trading in both Forex (FX) and Crypto markets.
+It combines multi-timeframe trend confirmation (EMA200), momentum filters (RSI, MACD, ADX), and ATR-based dynamic risk management.
+ALMASTO — Pro Trend & Momentum Strategy automatically manages take-profit levels, stop-loss, and breakeven adjustments once TP1 is reached — providing a structured and emotion-free trading approach.
+
+
+Optimal Use
+Works best on lower timeframes (5m–15m) with strong liquidity sessions.
+Optimized for pairs like EURUSD, XAUUSD, and BTCUSDT.
+Built for trend-following setups and momentum reversals with high volatility confirmation.
+
+Recommended Settings
+
+🔹 Forex – 5m
+EMA Fast = 34, EMA Slow = 200, HTF = 1H
+RSI (14): Long ≥ 55 / Short ≤ 45
+MACD (8 / 21 / 5), ADX Len 10 / Min 27
+ATR Len 7, Stop Loss = ATR × 2.1
+TP1 = 1.1 RR, TP2 = 2.3 RR
+Session = 07:00–11:00 & 12:30–16:00 (Exchange Time)
+Risk = 0.8% per trade
+
+🔹 Forex – 15m
+EMA Fast = 50, EMA Slow = 200, HTF = 4H
+RSI (14): Long ≥ 53 / Short ≤ 47
+MACD (12 / 26 / 9), ADX Min 24
+ATR Len 10, SL = ATR × 1.9
+TP1 = 1.2 RR, TP2 = 2.6 RR
+Risk = 1.0% per trade
+
+🔹 Crypto – 5m (BTC/USDT)
+EMA Fast = 34, EMA Slow = 200, HTF = 4H
+RSI (14): Long ≥ 56 / Short ≤ 44
+MACD (8 / 21 / 5), ADX Min 30
+ATR Len 7, SL = ATR × 2.2
+TP1 = 1.0 RR, TP2 = 2.5 RR
+Session = 00:00–06:00 & 12:00–22:00 (UTC)
+Risk = 0.5% per trade
+
+Core Features
+✅ Auto breakeven after TP1
+✅ Dual take-profit system (1:1 & 1:2 RR)
+✅ ATR-based stop & trailing logic
+✅ Filters for session time, volume, and volatility
+✅ Candle-body vs ATR size filter to avoid noise
+✅ Optional cooldown between trades
+
+Important Notes
+Use bar close confirmation only (barstate.isconfirmed) to avoid repainting on lower timeframes.
+Adjust commission (0.01–0.03%) and slippage (1–2 ticks) in Strategy Tester for realistic results.
+Avoid low-liquidity hours (after 21:00 UTC for FX / after midnight for crypto).
+Backtest using realistic broker data (e.g., BlackBull Markets / Bybit / Binance Futures).
+Best results occur during London & New York sessions with moderate volatility.
+⚠️ Disclaimer
+
+This script is for educational and research purposes only.
+It does not constitute financial advice.
+Use proper risk management and test thoroughly before using on live accounts.
+
+
+Developed by KING FX Labs
+Built and optimized by Yousef Almasto — combining advanced price-action logic, multi-timeframe EMA structure, and volatility-adaptive ATR management.
+Tested across Forex, Gold, and Crypto markets to ensure consistent performance and minimal drawdown.
+
+📈 “Precision Trading. Zero Emotion. Pure Momentum.”

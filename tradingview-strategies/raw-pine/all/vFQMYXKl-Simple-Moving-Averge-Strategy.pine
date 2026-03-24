@@ -1,0 +1,63 @@
+//@version=4
+strategy("Simple Moving Averge Strategy", overlay=true)
+
+ema50 = ema(close, 50)
+ema180 = ema(close,180)
+
+long = ema50> ema180
+short = ema50 < ema180
+
+plot(ema50, title="50", color=#00ffaa, linewidth=3)
+plot(ema180, title= "180", color=#FFc1cc, linewidth=3)
+
+start = timestamp(2021, 1, 1, 0, 0)
+end = timestamp(2021, 8, 1, 0, 0)
+
+strategy.entry("Long", strategy.long, 1000.0, when = long)
+strategy.entry("Short", strategy.short, 1000.0, when = short)
+
+strategy.close("Long", when = short)
+strategy.close("Short", when = long)
+
+View in Pine Editor・20 lines
+Use on chart
+1
+1
+6
+3 682
+Simple Vs. Exponential Moving Averages
+Formula for Exponential Moving Average (EMA)
+\begin{aligned} &\begin{aligned} EMA_{\text{Today}}=&\left(\text{Value}_{\text{Today}}\ast\left(\frac{\text{Smoothing}}{1+\text{Days}}\right)\right)\\ &+EMA_{\text{Yesterday}}\ast\left(1-\left(\frac{\text{Smoothing}}{1+\text{Days}}\right)\right)\end{aligned}\\ &\textbf{where:}\\ &EMA=\text{Exponential moving average} \end{aligned}
+​
+
+EMA
+Today
+​
+=
+​
+
+(Value
+Today
+​
+∗(
+1+Days
+Smoothing
+​
+))
++EMA
+Yesterday
+​
+∗(1−(
+1+Days
+Smoothing
+​
+))
+​
+
+where:
+EMA=Exponential moving average
+​
+
+﻿
+
+While there are many possible choices for the smoothing factor, the most common choice is:

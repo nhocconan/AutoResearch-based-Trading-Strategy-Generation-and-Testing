@@ -1,0 +1,79 @@
+//@version=4
+strategy(shorttitle='Moving Average Scalper (by Coinrule)',title='Moving Average Scalper', overlay=true, initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_type = strategy.percent_of_equity, default_qty_value = 30, commission_type=strategy.commission.percent, commission_value=0.1)
+
+//Backtest dates
+fromMonth = input(defval = 1,    title = "From Month",      type = input.integer, minval = 1, maxval = 12)
+fromDay   = input(defval = 10,    title = "From Day",        type = input.integer, minval = 1, maxval = 31)
+fromYear  = input(defval = 2019, title = "From Year",       type = input.integer, minval = 1970)
+thruMonth = input(defval = 1,    title = "Thru Month",      type = input.integer, minval = 1, maxval = 12)
+thruDay   = input(defval = 1,    title = "Thru Day",        type = input.integer, minval = 1, maxval = 31)
+thruYear  = input(defval = 2112, title = "Thru Year",       type = input.integer, minval = 1970)
+
+showDate  = input(defval = true, title = "Show Date Range", type = input.bool)
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+
+//MA inputs and calculations
+movingaverage_signal = sma(close, input(9))
+movingaverage_fast = sma(close, input(50))
+movingaverage_slow = sma(close, input(200))
+movingaverage_mid= sma(close, input(100))
+
+//Entry 
+bullish = crossover(movingaverage_signal, movingaverage_fast)
+
+strategy.entry(id="long", long = true, when = bullish and movingaverage_fast < movingaverage_mid and movingaverage_mid < movingaverage_slow and window())
+
+//Exit
+
+bearish = crossover(movingaverage_signal, movingaverage_slow)
+
+
+Stop_loss= ((input (2))/100)
+Take_profit= ((input (8))/100)
+
+longStopPrice  = strategy.position_avg_price * (1 - Stop_loss)
+longTakeProfit = strategy.position_avg_price * (1 + Take_profit)
+
+strategy.close("long", when = bearish)
+
+// close < longStopPrice or close > longTakeProfit and window())
+
+//PLOT
+plot(movingaverage_signal, color=color.black, linewidth=2 )
+plot(movingaverage_fast, color=color.orange, linewidth=2)
+plot(movingaverage_slow, color=color.purple, linewidth=2)
+plot(movingaverage_mid, color=color.blue, linewidth=2)
+
+View in Pine Editor・48 lines
+Use on chart
+1.1 K
+4
+26 519
+The main goal of a scalping strategy is to open and close trades frequently, profiting from small gains and limiting the downside risk.
+
+This strategy, on average, manages to close trades within one day, meaning that you are not exposed to the risk of holding that coin for long. In this way, market conditions affect much less the overall performance of the trading system.
+
+The setup of this strategy uses four moving averages combined with an unconventional approach. On one side, the strategy aims to catch assets trading in a downtrend but on the verge of a possible reversal. Then, the goal of the trading strategy is not to ride the eventual uptrend but to close the trade with minimal profit so that it can scan the market for a new opportunity again.
+
+ENTRY
+
+The buy order is placed on assets that most likely are about to have at least a short-term "relief rally." To capture this setup, the strategy buys when
+
+the MA9 crosses above the MA50
+the MA50 is lower than the MA100
+the MA100 is lower than the MA200
+
+EXIT
+
+The trading system closes the trade when the MA9 crosses above the MA200, which could be the first major resistance the asset faces before developing a more sustained uptrend.
+
+As a reminder, the goal of the strategy is not to catch the whole upside of the asset but has a more conservative approach. This allows keeping the risk of the strategy low.
+
+Pro tip: The 15-min time frame has proven to return the best results on average. The strategy can work well also in the 5-min time frame.
+
+
+The strategy assumes each order to trade 30% of the available capital and opens a trade at a time. A trading fee of 0.1% is taken into account.
+

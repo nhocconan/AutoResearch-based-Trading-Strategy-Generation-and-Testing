@@ -1,0 +1,13 @@
+//@version=5
+bullBoxColor=##input(defval=#00E67619,type='INPUT_COLOR',##id='in_22')
+bearBoxColor=##input(defval=#FF525219,type='INPUT_COLOR',##id='in_23')
+bullLabelColor=##input(defval=#00E676ff,type='INPUT_COLOR',##id='in_26')
+bearLabelColor=##input(defval=#FF5252ff,type='INPUT_COLOR',##id='in_27')
+bullBorderColor=##input(defval=#00E67600,type='INPUT_COLOR',##id='in_30')
+bearBorderColor=##input(defval=#FF525200,type='INPUT_COLOR',##id='in_31')
+##root(root_metainfo,rm_ic_0,bullBoxColor,input__color)
+##root(root_metainfo,rm_ic_1,bearBoxColor,input__color)
+##root(root_metainfo,rm_ic_2,bullLabelColor,input__color)
+##root(root_metainfo,rm_ic_3,bearLabelColor,input__color)
+##root(root_metainfo,rm_ic_4,bullBorderColor,input__color)
+##root(root_metainfo,rm_ic_5,bearBorderColor,input__color)

@@ -1,0 +1,114 @@
+//@version=5
+strategy('[blackcat] L1 MartinGale Scalping Strategy', overlay=true, pyramiding = 5)
+
+// Define input variables
+takeProfit = input(1.03, title='Take Profit')
+stopLoss = input(0.95, title='Stop Loss')
+inputTradingMode = input.string(defval='Long', options=['Long', 'Short', 'BiDir'], title='Trading Mode')
+
+//The purpose of this rule is to forbid short entries, only long etries will be placed. The rule affects the following function: 'entry'.
+strategy.risk.allow_entry_in(inputTradingMode == 'Long' ? strategy.direction.long : inputTradingMode == 'Short' ? strategy.direction.short : strategy.direction.all)
+
+// Define strategy logic
+entryPrice = 0.0
+stopPrice = 0.0
+takeProfitPrice = 0.0
+stopLossPrice = 0.0
+
+// Define SMA crossover and crossunder signals
+sma3 = ta.sma(close, 3)
+sma8 = ta.sma(close, 8)
+plot(sma3, color=color.yellow)
+plot(sma8, color=color.fuchsia)
+crossoverSignal = ta.crossover(sma3, sma8)
+crossunderSignal = ta.crossunder(sma3, sma8)
+crossoverState = sma3 > sma8
+crossunderState = sma3 < sma8
+
+if strategy.position_size == 0
+    if crossoverState
+        strategy.entry('Buy', strategy.long)
+        entryPrice := close
+        stopPrice := close - stopLoss * sma8[1]
+        takeProfitPrice := close + takeProfit * sma8[1]
+        stopLossPrice := stopPrice
+        stopLossPrice
+    if crossunderState
+        strategy.entry('Sell', strategy.short)
+        entryPrice := close
+        stopPrice := close + stopLoss *  sma8[1]
+        takeProfitPrice := close - takeProfit *  sma8[1]
+        stopLossPrice := stopPrice
+        stopLossPrice
+
+if strategy.position_size > 0
+    if (close > takeProfitPrice or close < stopLossPrice) and crossunderState
+        strategy.close('Buy')
+        entryPrice := 0.0
+        stopPrice := 0.0
+        takeProfitPrice := 0.0
+        stopLossPrice := 0.0
+        stopLossPrice
+    else
+        strategy.entry('Buy', strategy.long)
+        entryPrice := close
+        stopPrice := close - stopLoss *  sma8[1]
+        takeProfitPrice := close + takeProfit *  sma8[1]
+        stopLossPrice := stopPrice
+        stopLossPrice
+
+if strategy.position_size < 0
+    if (close > takeProfitPrice or close < stopLossPrice) and crossoverState
+        strategy.close('Sell')
+        entryPrice := 0.0
+        stopPrice := 0.0
+        takeProfitPrice := 0.0
+        stopLossPrice := 0.0
+        stopLossPrice
+    else
+        strategy.entry('Sell', strategy.short)
+        entryPrice := close
+        stopPrice := close + stopLoss *  sma8[1]
+        takeProfitPrice := close - takeProfit *  sma8[1]
+        stopLossPrice := stopPrice
+        stopLossPrice
+
+// Plot entry and exit points
+plotshape(strategy.position_size > 0 and crossoverSignal, 'Buy Entry', shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(strategy.position_size > 0 and (close >= takeProfitPrice or close <= stopLossPrice), 'Buy Exit', shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
+plotshape(strategy.position_size < 0 and crossunderSignal, 'Sell Entry', shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
+plotshape(strategy.position_size < 0 and (close >= takeProfitPrice or close <= stopLossPrice), 'Sell Exit', shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+
+View in Pine Editor・88 lines
+Use on chart
+3
+2
+9
+7 342
+**MartinGale Strategy** is a popular money management strategy used in trading. It is commonly applied in situations where the trader aims to recover from a losing streak by increasing the position size after each loss.
+
+In the MartinGale Strategy, after a losing trade, the trader doubles the position size for the next trade. This is done in the hopes that a winning trade will eventually occur, which will not only recover the previous losses but also generate a profit.
+
+The idea behind the MartinGale Strategy is to take advantage of the law of averages. By increasing the position size after each loss, the strategy assumes that eventually, a winning trade will occur, which will not only cover the previous losses but also generate a profit. This can be especially appealing for traders looking for a quick recovery from a losing streak.
+
+However, it is important to note that the MartinGale Strategy carries significant risks. If a trader experiences a prolonged losing streak or lacks sufficient capital, the strategy can lead to substantial losses. The strategy's reliance on the assumption of a winning trade can be dangerous, as there is no guarantee that a winning trade will occur within a certain timeframe.
+
+Traders considering implementing the MartinGale Strategy should carefully assess their risk tolerance and thoroughly understand the potential drawbacks. It is crucial to have a solid risk management plan in place to mitigate potential losses. Additionally, traders should be aware that the strategy may not be suitable for all market conditions and may require adjustments based on market volatility.
+
+In summary, the MartinGale Strategy is a money management strategy that involves increasing the position size after each loss in an attempt to recover from a losing streak. While it can offer the potential for quick recovery, it also comes with significant risks that traders should carefully consider before implementing it in their trading approach.
+
+The MartinGale Scalping Strategy is a trading strategy designed to generate profits through frequent trades. It utilizes a combination of moving average crossovers and crossunders to generate entry and exit signals. The strategy is implemented in TradingView's Pine Script language.
+
+The strategy begins by defining input variables such as take profit and stop loss levels, as well as the trading mode (long, short, or bidirectional). It then sets a rule to allow only long entries if the trading mode is set to "Long".
+
+The strategy logic is defined using SMA (Simple Moving Average) crossover and crossunder signals. It calculates a short-term SMA (SMA3) and a longer-term SMA (SMA8), and plots them on the chart. The crossoverSignal and crossunderSignal variables are used to track the occurrence of the crossover and crossunder events, while the crossoverState and crossunderState variables determine the state of the crossover and crossunder conditions.
+
+The strategy execution is based on the current position size. If the position size is zero (no open positions), the strategy checks for crossover and crossunder events. If a crossover event occurs and the trading mode allows long entries, a long position is entered. The entry price, stop price, take profit price, and stop loss price are calculated based on the current close price and the SMA8 value. Similarly, if a crossunder event occurs and the trading mode allows short entries, a short position is entered with the corresponding price calculations.
+
+If there is an existing long position and the current close price reaches either the take profit price or the stop loss price, and a crossunder event occurs, the long position is closed. The entry price, stop price, take profit price, and stop loss price are reset to zero.
+
+Likewise, if there is an existing short position and the current close price reaches either the take profit price or the stop loss price, and a crossover event occurs, the short position is closed and the price variables are reset.
+
+The strategy also plots entry and exit points on the chart using plotshape function. It displays a triangle pointing up for a buy entry, a triangle pointing down for a buy exit, a triangle pointing down for a sell entry, and a triangle pointing up for a sell exit.
+
+Overall, the MartinGale Scalping Strategy aims to capture small profits by taking advantage of short-term moving average crossovers and crossunders. It incorporates risk management through take profit and stop loss levels, and allows for different trading modes to accommodate different market conditions.

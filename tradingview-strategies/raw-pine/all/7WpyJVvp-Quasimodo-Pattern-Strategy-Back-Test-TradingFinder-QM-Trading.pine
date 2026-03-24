@@ -1,0 +1,546 @@
+//@version=5
+strategy("Quasimodo Pattern Strategy Back Test [TradingFinder] QM Trading", "QM Strategy TFlab" ,overlay = true ,
+ initial_capital = 1000 ,default_qty_type = strategy.cash , default_qty_value = 10000 ,max_bars_back = 5000 ,max_lines_count = 500 , max_labels_count = 500)
+
+
+PP = input.int(5 , 'Pivot Period')
+ATR = ta.atr(21)
+TPMode =  input.string('TP1' , 'Take Profit Mode', options = ['TP1', 'TP2', 'R/R'])
+SLMode =  input.string('Original' , 'Stop Loss Refine', options = ['Original' , 'ATR Refine'])
+RR = input.float(2.0 , 'Reward to Risk Ratio', minval = 0.25  )
+CSL = input.float(0.5 , 'Stop Loss ATR Adjustment Coefficient', minval = 0.25  )
+
+ELV = input.int(2 , 'Entry Level Validity', minval= 2 , maxval = 15 , tooltip = 'Determines how long the Entry level remains valid. The higher the level, the longer the entry level will remain valid. By default it is 2 and it can be set between 2 and 15.')
+
+var ArrayType = array.new_string()
+var ArrayValue = array.new_float()
+var ArrayIndex =  array.new_int()
+var Line = array.new_line()
+
+HighPivot = ta.pivothigh(PP,PP)
+LowPivot = ta.pivotlow(PP,PP)
+
+HighValue = ta.valuewhen(HighPivot ,high[PP], 0)
+LowValue = ta.valuewhen(LowPivot ,low[PP], 0)
+
+HighIndex = ta.valuewhen(HighPivot ,bar_index[PP], 0)
+LowIndex = ta.valuewhen(LowPivot ,bar_index[PP], 0)
+
+Correct_HighPivot = 0.0
+Correct_LowPivot =  0.0
+
+PASS = 0
+
+if HighPivot  and  LowPivot
+    if ArrayType.size() == 0
+        PASS := 1
+    else if ArrayType.size() >= 1
+        if ((ArrayType.get(ArrayType.size() - 1)) == "L" or
+             (ArrayType.get(ArrayType.size() - 1)) == "LL")
+            if LowPivot < ArrayValue.get(ArrayType.size() - 1)
+                array.remove(ArrayType,ArrayType.size() - 1)
+                array.remove(ArrayValue,ArrayValue.size() - 1)
+                array.remove(ArrayIndex,ArrayIndex.size() - 1) 
+                array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < LowValue ? "HL" : "LL" : "L")///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot :=  LowValue
+            else 
+                array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < HighValue ? "HH" : "LH" : "H" ) ///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+            Correct_HighPivot := HighValue  
+        else if (ArrayType.get(ArrayType.size() - 1)) == "H" or 
+             (ArrayType.get(ArrayType.size() - 1)) == "HH"
+            if HighPivot > ArrayValue.get(ArrayType.size() - 1)
+                array.remove(ArrayType,ArrayType.size() - 1)
+                array.remove(ArrayValue,ArrayValue.size() - 1)
+                array.remove(ArrayIndex,ArrayIndex.size() - 1)
+                array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < HighValue ? "HH" : "LH" : "H")///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue  
+            else 
+                array.push(ArrayType,ArrayType.size()>2?  ArrayValue.get(ArrayType.size() - 2) < LowValue ? "HL" : "LL" : "L")///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+            Correct_LowPivot :=  LowValue    
+        else if (ArrayType.get(ArrayType.size() - 1)) == "LH"
+            if HighPivot < ArrayValue.get(ArrayType.size() - 1)
+                array.push(ArrayType,ArrayType.size()>2?  ArrayValue.get(ArrayType.size() - 2) < LowValue ? "HL" : "LL" : "L")///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot :=  LowValue 
+            else if HighPivot > ArrayValue.get(ArrayType.size() - 1)
+                if close < ArrayValue.get(ArrayType.size() - 1)
+                    array.remove(ArrayType,ArrayType.size() - 1)
+                    array.remove(ArrayValue,ArrayValue.size() - 1)
+                    array.remove(ArrayIndex,ArrayIndex.size() - 1)
+                    array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < HighValue ? "HH" : "LH" : "H")///////////////////////////////Here
+                    array.push(ArrayValue, HighValue)
+                    array.push(ArrayIndex, HighIndex)
+                    Correct_HighPivot := HighValue  
+                else if close > ArrayValue.get(ArrayType.size() - 1)
+                    array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < LowValue ? "HL" : "LL" : "L")///////////////////////////////Here
+                    array.push(ArrayValue, LowValue)
+                    array.push(ArrayIndex, LowIndex)
+                    Correct_LowPivot :=  LowValue
+        else if (ArrayType.get(ArrayType.size() - 1)) == "HL"
+            if LowPivot > ArrayValue.get(ArrayType.size() - 1)
+                array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < HighValue ? "HH" : "LH" : "H" ) ///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue                       
+            else if LowPivot < ArrayValue.get(ArrayType.size() - 1)
+                if close > ArrayValue.get(ArrayType.size() - 1)
+                    array.remove(ArrayType,ArrayType.size() - 1)
+                    array.remove(ArrayValue,ArrayValue.size() - 1)
+                    array.remove(ArrayIndex,ArrayIndex.size() - 1) 
+                    array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < LowValue ? "HL" : "LL" : "L")///////////////////////////////Here
+                    array.push(ArrayValue, LowValue)
+                    array.push(ArrayIndex, LowIndex)
+                    Correct_LowPivot :=  LowValue
+                else if close < ArrayValue.get(ArrayType.size() - 1)
+                    array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < HighValue ? "HH" : "LH" : "H")///////////////////////////////Here
+                    array.push(ArrayValue, HighValue)
+                    array.push(ArrayIndex, HighIndex)
+                    Correct_HighPivot := HighValue                         
+else if  HighPivot 
+    if ArrayType.size() == 0
+        array.insert(ArrayType, 0, "H")
+        array.insert(ArrayValue, 0, HighValue)
+        array.insert(ArrayIndex, 0, HighIndex)
+        Correct_HighPivot := HighValue
+    else if ArrayType.size() >= 1
+        if ((ArrayType.get(ArrayType.size() - 1)) == "L" or
+             (ArrayType.get(ArrayType.size() - 1)) == "HL" or
+             (ArrayType.get(ArrayType.size() - 1)) == "LL")
+            if HighPivot > ArrayValue.get(ArrayType.size() - 1)
+                array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < HighValue ? "HH" : "LH" : "H" ) ///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue
+            else if  HighPivot < ArrayValue.get(ArrayType.size() - 1)
+                array.remove(ArrayType,ArrayType.size() - 1)
+                array.remove(ArrayValue,ArrayValue.size() - 1)
+                array.remove(ArrayIndex,ArrayIndex.size() - 1) 
+                array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < LowValue ? "HL" : "LL" : "L")///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot :=  LowValue                         
+        else if (ArrayType.get(ArrayType.size() - 1)) == "H" or 
+             (ArrayType.get(ArrayType.size() - 1)) == "HH" or 
+             (ArrayType.get(ArrayType.size() - 1)) == "LH"
+            if (ArrayValue.get(ArrayValue.size() - 1)) < HighValue
+                array.remove(ArrayType,ArrayType.size() - 1)
+                array.remove(ArrayValue,ArrayValue.size() - 1)
+                array.remove(ArrayIndex,ArrayIndex.size() - 1)
+                array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < HighValue ? "HH" : "LH" : "H")///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue               
+else if LowPivot 
+    if ArrayType.size() == 0
+        array.insert(ArrayType, 0, "L")
+        array.insert(ArrayValue, 0, LowValue)
+        array.insert(ArrayIndex, 0, LowIndex)
+        Correct_LowPivot :=  LowValue
+    else if ArrayType.size() >= 1
+        if (ArrayType.get(ArrayType.size() - 1)) == "H" or 
+             (ArrayType.get(ArrayType.size() - 1)) == "HH" or 
+             (ArrayType.get(ArrayType.size() - 1)) == "LH"
+            if LowPivot < ArrayValue.get(ArrayType.size() - 1)
+                array.push(ArrayType,ArrayType.size()>2?  ArrayValue.get(ArrayType.size() - 2) < LowValue ? "HL" : "LL" : "L")///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot :=  LowValue
+            else if LowPivot > ArrayValue.get(ArrayType.size() - 1)
+                array.remove(ArrayType,ArrayType.size() - 1)
+                array.remove(ArrayValue,ArrayValue.size() - 1)
+                array.remove(ArrayIndex,ArrayIndex.size() - 1)
+                array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < HighValue ? "HH" : "LH" : "H")///////////////////////////////Here
+                array.push(ArrayValue, HighValue)
+                array.push(ArrayIndex, HighIndex)
+                Correct_HighPivot := HighValue                        
+        else if (ArrayType.get(ArrayType.size() - 1)) == "L" or 
+             (ArrayType.get(ArrayType.size() - 1)) == "HL" or 
+             (ArrayType.get(ArrayType.size() - 1)) == "LL"
+            if (ArrayValue.get(ArrayValue.size() - 1)) > LowValue
+                array.remove(ArrayType,ArrayType.size() - 1)
+                array.remove(ArrayValue,ArrayValue.size() - 1)
+                array.remove(ArrayIndex,ArrayIndex.size() - 1) 
+                array.push(ArrayType,ArrayType.size()>2? ArrayValue.get(ArrayType.size() - 2) < LowValue ? "HL" : "LL" : "L")///////////////////////////////Here
+                array.push(ArrayValue, LowValue)
+                array.push(ArrayIndex, LowIndex)
+                Correct_LowPivot :=  LowValue
+
+
+QMDetector(TPMode, SLMode, RR, CSL)=>
+    //Bearish QM
+
+    var string TH1 = ""
+    var string TH2 = ""
+    var string TH3 = ""
+    var string TH4 = ""
+    var string TH5 = ""
+
+    var int IH = 0
+    var int IH1 = 0
+    var int IH2 = 0
+    var int IH3 = 0
+    var int IH4 = 0
+    var int IH5 = 0
+
+    var float VH1 = 0.0
+    var float VH2 = 0.0
+    var float VH3 = 0.0
+    var float VH4 = 0.0
+    var float VH5 = 0.0
+
+    var bool BearQM = false
+
+    //Bullish QM
+
+    var string TL1 = ""
+    var string TL2 = ""
+    var string TL3 = ""
+    var string TL4 = ""
+    var string TL5 = ""
+
+    var int IL = 0
+    var int IL1 = 0
+    var int IL2 = 0
+    var int IL3 = 0
+    var int IL4 = 0
+    var int IL5 = 0
+
+    var float VL1 = 0.0
+    var float VL2 = 0.0
+    var float VL3 = 0.0
+    var float VL4 = 0.0
+    var float VL5 = 0.0
+
+    var bool BullQM = false
+
+    //TP & SL Control
+    var string TPmode = TPMode
+    var string SLmode = SLMode
+    var float rr = RR
+    var float Csl = CSL 
+
+
+    if ArrayType.size() > 5 
+        TH1 := ArrayType.get(ArrayType.size() - 1)
+        TH2 :=  ArrayType.get(ArrayType.size() - 2)
+        TH3 :=  ArrayType.get(ArrayType.size() - 3)
+        TH4 :=  ArrayType.get(ArrayType.size() - 4)
+        TH5 :=  ArrayType.get(ArrayType.size() - 5)
+        IH  := ArrayIndex.get(ArrayType.size() - 1)
+
+        IH1 := ArrayIndex.get(ArrayType.size() - 1)
+        IH2 := ArrayIndex.get(ArrayType.size() - 2)
+        IH3 := ArrayIndex.get(ArrayType.size() - 3)
+        IH4 := ArrayIndex.get(ArrayType.size() - 4)
+        IH5 := ArrayIndex.get(ArrayType.size() - 5)
+
+        VH1 := ArrayValue.get(ArrayType.size() - 1)
+        VH2 := ArrayValue.get(ArrayType.size() - 2)
+        VH3 := ArrayValue.get(ArrayType.size() - 3)
+        VH4 := ArrayValue.get(ArrayType.size() - 4)
+        VH5 := ArrayValue.get(ArrayType.size() - 5)
+
+    if ArrayType.size() > 5 
+        TL1 := ArrayType.get(ArrayType.size() - 1)
+        TL2 := ArrayType.get(ArrayType.size() - 2)
+        TL3 := ArrayType.get(ArrayType.size() - 3)
+        TL4 := ArrayType.get(ArrayType.size() - 4)
+        TL5 := ArrayType.get(ArrayType.size() - 5)
+
+        IL  := ArrayIndex.get(ArrayType.size() - 1)
+        IL1 := ArrayIndex.get(ArrayType.size() - 1)
+        IL2 := ArrayIndex.get(ArrayType.size() - 2)
+        IL3 := ArrayIndex.get(ArrayType.size() - 3)
+        IL4 := ArrayIndex.get(ArrayType.size() - 4)
+        IL5 := ArrayIndex.get(ArrayType.size() - 5)
+
+        VL1 := ArrayValue.get(ArrayType.size() - 1)
+        VL2 := ArrayValue.get(ArrayType.size() - 2)
+        VL3 := ArrayValue.get(ArrayType.size() - 3)
+        VL4 := ArrayValue.get(ArrayType.size() - 4)
+        VL5 := ArrayValue.get(ArrayType.size() - 5)
+
+    //Bearish QM
+    var BearQM_Start = 0.0
+    var BearQM_End = 0.0
+    var BearQM_Index = 0.0
+    var CheckBe = 0
+    if TH1 == "LL" and  TH2 == "HH" and TH3 == "HL" and TH4 == "HH"  and VH5 < VH1 and IH == (bar_index - PP) and CheckBe == 0
+        BearQM := true
+        BearQM_Start := VH2
+        BearQM_End := VH1
+        BearQM_Index := IH
+        CheckBe := 1 
+    else
+        BearQM := false
+    if BearQM_Start != VH2
+        CheckBe := 0
+
+
+    //Bullish QM
+    var BullQM_Start = 0.0
+    var BullQM_End = 0.0
+    var BullQM_Index = 0
+    var CheckBu = 0
+    if  TL1 == "HH" and TL2 == "LL" and TL3 == "LH" and TL4 == "LL" and VL5 > VL1 and  IL == bar_index - PP and CheckBu == 0 
+        BullQM := true
+        BullQM_Start := VL2
+        BullQM_End := VL1
+        BullQM_Index := IL
+        CheckBu := 1
+    else
+        BullQM := false
+
+    if BullQM_Start != VL2
+        CheckBu := 0
+
+    var line BuLeg1 = na
+    var line BuLeg2 = na
+    var line BuLeg3 = na
+    var line BuLeg4 = na
+    var line BuLeg5 = na
+    var line BuEntryLine= na    
+    var line BuSLLine   = na
+    var line BuTP1Line  = na
+    var line BuTP2Line  = na
+    var label BuEntryLabel= na    
+    var label BuSLLabel   = na
+    var label BuTP1Label  = na
+    var label BuTP2Label  = na 
+    BuMove  = (IL2 - IL4) /2
+
+    var line BeLeg1 = na
+    var line BeLeg2 = na
+    var line BeLeg3 = na
+    var line BeLeg4 = na
+    var line BeLeg5 = na
+    var line BeEntryLine= na
+    var line BeSLLine   = na
+    var line BeTP1Line  = na
+    var line BeTP2Line  = na
+    var label BeEntryLabel= na
+    var label BeSLLabel   = na
+    var label BeTP1Label  = na
+    var label BeTP2Label  = na
+    BeMove  = (IH2 - IH4) /2
+ 
+    if BullQM
+        // BuMove := (IL2 - IL5) * 2 + 6
+        BuLeg1 := line.new(IL5 , VL5 , IL4 , VL4, color = #00a740f5 , width = 2)
+        BuLeg2 := line.new(IL4 , VL4 , IL3 , VL3, color = #00a740f5 , width = 2)
+        BuLeg3 := line.new(IL3 , VL3 , IL2 , VL2, color = #00a740f5 , width = 2)
+        BuLeg4 := line.new(IL2 , VL2 , IL1 , VL1, color = #00a740f5 , width = 2)
+        BuLeg5 := line.new(IL1 , VL1 , IL1 + BuMove-2 , VL4, color = #04d7fc , width = 2 , style = line.style_arrow_right)
+        BuEntryLine:= line.new(IL4 , VL4 , IL1 + BuMove , VL4, color = #534d4d , width = 1 , style = line.style_dotted)
+        BuSLLine   := line.new(IL2  , SLmode == 'Original' ? VL2 : VL2 - (ATR * Csl) , IL1 + BuMove , SLmode == 'Original' ? VL2 : VL2 - (ATR * Csl), color = #b40054, width = 1, style = line.style_dotted)
+        BuTP1Line  := line.new(IL3 , VL3 , IL1 + BuMove , VL3, color = #009e3d , width = 1, style = line.style_dotted)
+        BuTP2Line  := line.new(IL1 , VL1 , IL1 + BuMove , VL1, color = #009e3d , width = 1, style = line.style_dotted) 
+        BuEntryLabel:= label.new(IL1 + BuMove+1 , VL4 , 'Entry' , color = #b3b1b100 , style = label.style_text_outline ,textcolor = #b3b1b1)
+        BuSLLabel   := label.new(IL1 + BuMove+1 ,SLmode == 'Original' ? VL2 : VL2 - (ATR * Csl) , 'SL' , color = #b3b1b100 , style = label.style_text_outline ,textcolor = #b3b1b1)
+        BuTP1Label  := label.new(IL1 + BuMove+1 , VL3 , 'TP1' , color = #b3b1b100 , style = label.style_text_outline ,textcolor = #b3b1b1)
+        BuTP2Label  := label.new(IL1 + BuMove+1 , VL1 , 'TP2' , color = #b3b1b100 , style = label.style_text_outline ,textcolor = #b3b1b1)
+
+
+    if BearQM
+        BeLeg1 := line.new(IH5 , VH5 , IH4 , VH4, color = #b40054 , width = 2)
+        BeLeg2 := line.new(IH4 , VH4 , IH3 , VH3, color = #b40054 , width = 2)
+        BeLeg3 := line.new(IH3 , VH3 , IH2 , VH2, color = #b40054 , width = 2)
+        BeLeg4 := line.new(IH2 , VH2 , IH1 , VH1, color = #b40054 , width = 2)
+        BeLeg5 := line.new(IH1 , VH1 , IH1 + BeMove-2 , VH4, color = #fcad04 , width = 2 , style = line.style_arrow_right)
+        BeEntryLine:= line.new(IH4 , VH4 , IH1 + BeMove , VH4, color = #534d4d , width = 1 , style = line.style_dotted)
+        BeSLLine   := line.new(IH2  , SLmode == 'Original' ? VH2 : VH2 + (ATR * Csl) , IH1 + BeMove , SLmode == 'Original' ? VH2 : VH2 + (ATR * Csl), color = #b40054, width = 1, style = line.style_dotted)
+        BeTP1Line  := line.new(IH3 , VH3 , IH1 + BeMove , VH3, color = #009e3d , width = 1, style = line.style_dotted)
+        BeTP2Line  := line.new(IH1 , VH1 , IH1 + BeMove , VH1, color = #009e3d , width = 1, style = line.style_dotted) 
+        BeEntryLabel:= label.new(IH1 + BeMove+1 , VH4 , 'Entry' , color = #b3b1b100 , style = label.style_text_outline ,textcolor = #b3b1b1)
+        BeSLLabel   := label.new(IH1 + BeMove+1 , SLmode == 'Original' ? VH2 : VH2 + (ATR * Csl) , 'SL' , color = #b3b1b100 , style = label.style_text_outline,textcolor = #b3b1b1 )
+        BeTP1Label  := label.new(IH1 + BeMove+1 , VH3 , 'TP1' , color = #b3b1b100 , style = label.style_text_outline,textcolor = #b3b1b1 )
+        BeTP2Label  := label.new(IH1 + BeMove+1 , VH1 , 'TP2' , color = #b3b1b100 , style = label.style_text_outline,textcolor = #b3b1b1 )
+
+
+
+
+
+    //Strategy
+
+    //Short
+    var BeCheck = 0
+    if high >= BeEntryLine.get_y1() and high < BeSLLine.get_y1() and BeCheck == 0 and BearQM_Index + (BeMove * ELV) > bar_index
+        BeCheck := 1
+        strategy.entry('Sell' , strategy.short )
+    
+    if low <= (TPmode == 'TP1' ? BeTP1Line.get_y1() : TPmode == 'TP2' ?  BeTP2Line.get_y1() : strategy.position_avg_price - (BeSLLine.get_y1() - strategy.position_avg_price)*rr )
+        strategy.close('Sell' )
+    else if   high >= BeSLLine.get_y1()
+        strategy.close('Sell' )
+
+
+    if  line.get_y1(BeEntryLine)  !=  line.get_y1(BeEntryLine[1]) 
+        BeCheck := 0
+    
+    //Long
+    var BuCheck = 0
+    if low <= BuEntryLine.get_y1() and low > BuSLLine.get_y1() and BuCheck == 0 and BullQM_Index + (BuMove * ELV) > bar_index
+        strategy.entry('Buy' , strategy.long )
+        BuCheck := 1       
+
+    if high >= (TPmode == 'TP1' ? BuTP1Line.get_y1() :  TPmode == 'TP2' ? BuTP2Line.get_y1() : strategy.position_avg_price + (strategy.position_avg_price- BuSLLine.get_y1())*rr)  
+        strategy.close('Buy' )
+    else if low <= BuSLLine.get_y1() 
+        strategy.close('Buy'  )
+
+    if line.get_y1(BuEntryLine)  !=  line.get_y1(BuEntryLine[1]) 
+        BuCheck := 0
+
+
+QMDetector(TPMode, SLMode, RR, CSL)
+
+View in Pine Editor・406 lines
+Use on chart
+1.6 K
+18
+25 766
+🔵Introduction
+
+The QM pattern, also known as the Quasimodo pattern, is one of the popular patterns in price action, and it is often used by technical analysts. The QM pattern is used to identify trend reversals and provides a very good risk-to-reward ratio. One of the advantages of the QM pattern is its high frequency and visibility in charts.
+
+Additionally, due to its strength, it is highly profitable, and as mentioned, its risk-to-reward ratio is very good. The QM pattern is highly popular among traders in supply and demand, and traders also use this pattern.
+
+The Price Action QM pattern, like other Price Action patterns, has two types: Bullish QM and Bearish QM patterns. To identify this pattern, you need to be familiar with its types to recognize it.
+
+
+🔵Identifying the QM Pattern
+
+🟣Bullish QM
+
+In the bullish QM pattern, as you can see in the image below, an LL and HH are formed. As you can see, the neckline is marked as a dashed line. When the price reaches this range, it will start its upward movement.
+
+
+
+
+🟣Bearish QM
+
+The Price Action QM pattern also has a bearish pattern. As you can see in the image below, initially, an HH and LL are formed. The neckline in this image is the dashed line, and when the LL is formed, the price reaches this neckline. However, it cannot pass it, and the downward trend resumes.
+
+
+
+
+
+🔵How to Use
+
+The Quasimodo pattern is one of the clearest structures used to identify market reversals. It is built around the concept of a structural break followed by a pullback into an area of trapped liquidity. Instead of relying on lagging indicators, this pattern focuses purely on price action and how the market reacts after exhausting one side of liquidity. When understood correctly, it provides traders with precise entry points at the transition between trend phases.
+
+🟣Bullish Quasimodo
+
+A bullish Quasimodo forms after a clear downtrend when sellers start losing control. The market continues to make lower lows until a sudden higher high appears, signaling that buyers are entering with strength. Price then pulls back to retest the previous low, creating what is known as the Quasimodo low.
+
+
+
+
+This area often becomes the final trap for sellers before the market shifts upward. A visible rejection or displacement from this zone confirms bullish momentum. Traders usually place entries near this level, stops below the low, and targets at previous highs or the next resistance zone. Combining the setup with demand zones or Fair Value Gaps increases its accuracy.
+
+🟣Bearish Quasimodo
+
+A bearish Quasimodo forms near the top of an uptrend when buyers begin to lose strength. The market continues to make higher highs until a sudden lower low breaks the bullish structure, showing that selling pressure is entering the market. Price then retraces upward to retest the previous high, forming the Quasimodo high, where breakout buyers are often trapped.
+
+
+
+
+Once rejection appears at this level, it indicates a likely reversal. Traders can enter short near this area, with stop-losses placed above the high and targets near the next support or previous lows. The setup gains more reliability when aligned with supply zones, SMT divergence, or bearish Fair Value Gaps.
+
+
+🔵Setting
+
+Pivot Period: You can use this parameter to use your desired period to identify the QM pattern. By default, this parameter is set to the number 5.
+
+Take Profit Mode: You can choose your desired Take Profit in three ways. Based on the logic of the QM strategy, you can select two Take Profit levels, TP1 and TP2. You can also choose your take profit based on the Reward to Risk ratio. You must enter your desired R/R in the Reward to Risk Ratio parameter.
+
+
+
+
+
+
+
+
+
+
+
+Stop Loss Refine: The loss limit of the QM strategy is based on its logic on the Head pattern. You can refine it using the ATR Refine option to prevent Stop Hunt. You can enter your desired coefficient in the Stop Loss ATR Adjustment Coefficient parameter.
+
+
+
+
+
+
+
+Reward to Risk Ratio: If you set Take Profit Mode to R/R, you must enter your desired R/R here. For example, if your loss limit is 10 pips and you set R/R to 2, your take profit will be reached when the price is 20 pips away from your entry point.
+
+Stop Loss ATR Adjustment Coefficient: If you set Stop Loss Refine to ATR Refine, you must adjust your loss limit coefficient here. For example, if your buy position's loss limit is at the price of 1000, and your ATR is 10, if you set Stop Loss ATR Adjustment Coefficient to 2, your loss limit will be at the price of 980.
+
+Entry Level Validity: Determines how long the Entry level remains valid. The higher the level, the longer the entry level will remain valid. By default it is 2 and it can be set between 2 and 15.
+
+
+🔵Results
+
+The following examples show the backtest results of the Quasimodo (QM) strategy in action. Each image is based on specific settings for the symbol, timeframe, and input parameters, illustrating how the QM logic can generate signals under different market conditions. The detailed configuration for each backtest is also displayed on the image.
+
+⚠Important Note: Even with identical settings and the same symbol, results may vary slightly across different brokers due to data feed variations and pricing differences.
+
+
+Default Properties of Backtests:
+
+
+
+
+
+
+
+XAUUSD
+ | TimeFrame: 5min | Duration: 1 Year:
+
+
+
+
+
+BTCUSD
+ | TimeFrame: 5min | Duration: 1 Year:
+
+
+
+
+
+US30
+ | TimeFrame: 5min | Duration: 1 Year:
+
+
+
+
+
+QQQ
+ | TimeFrame: 5min | Duration: 5 Year:
+
+
+
+
+
+EURUSD
+ | TimeFrame: 5min | Duration: 5 Year:
+
+
+
+
+
+US500
+ | TimeFrame: 5min | Duration: 5 Year:
+
+
+
+

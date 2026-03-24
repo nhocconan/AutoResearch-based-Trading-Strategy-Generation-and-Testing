@@ -1,0 +1,143 @@
+//@version=6
+strategy("Fox Strategy", overlay=true, fill_orders_on_standard_ohlc = true, calc_on_every_tick = true, max_labels_count=500)
+
+
+show_rsi   = input.bool(true,  "RSI")
+show_macd  = input.bool(true,  "MACD")
+show_ema   = input.bool(true,  "EMA")
+show_bb    = input.bool(true,  "Bollinger Bands")
+show_supertrend = input.bool(true,  "Super Trend")
+
+cmp = close
+capital           = input.float(10000.0, "Total Capital (SAR)", group = "Capital Details")
+risk_percent      = input.float(1.0, "Risk per Trade (%)", step=0.1, group = "Capital Details")
+reward_ratio      = input.float(2.0, "Risk:Reward Ratio", step=0.1, group = "Capital Details")
+lookback_high_low = input.int(10, "Lookback Period for High/Low", minval=1, group = "Capital Details")
+min_stocks           = input.float(1.0, "Minimum Stocks", group = "Capital Details")
+
+atrPeriod = input(10, "ATR Length", group = "Super Trend")
+factor = input.float(3.0, "Factor", step = 0.01, group = "Super Trend")
+
+rsi_len       = input.int(14, "RSI length", group = "RSI")
+
+macd_fast     = input.int(12, "MACD fast", group = "MACD")
+macd_slow     = input.int(26, "MACD slow", group = "MACD")
+macd_smoothing  = input.int(9,  "MACD signal Smoothing", group = "MACD")
+ema_short_len = input.int(20, "EMA short", group = "Moving Averages")
+ema_long_len  = input.int(50, "EMA long", group = "Moving Averages")
+bb_len        = input.int(20, "BB length", group = "Bolinger Bands")
+bb_mult       = input.float(2.0, "BB multiplier", group = "Bolinger Bands")
+
+
+
+recentHigh  = ta.highest(high, lookback_high_low)
+recentLow   = ta.lowest(low, lookback_high_low)
+
+stop_loss    = recentLow
+take_profit  = cmp + (cmp - recentLow) * reward_ratio//recentHigh//cmp + (cmp - recentLow) * reward_ratio
+
+total_closed_profit = 0.0
+for i = 0 to strategy.closedtrades - 1
+    total_closed_profit += strategy.closedtrades.profit(i)
+
+open_profit = strategy.opentrades > 0 ? strategy.opentrades.profit(0) : 0.0
+new_capital = capital + total_closed_profit + open_profit
+
+
+risk_amount = new_capital * (risk_percent / 100.0)
+risk_per_unit  = math.abs(cmp - stop_loss)
+qty_raw  = risk_per_unit > 0 ? (risk_amount / risk_per_unit) : 0.0
+roundQty(q) =>
+    if min_stocks >= 1.0
+        math.max(math.round(q), 0)
+    else
+        step = min_stocks
+        rounded = math.round(q / step) * step
+        math.max(rounded, 0.0)
+
+qty  = roundQty(qty_raw)
+//qty = qty_raw
+
+
+float s_close = close
+s_high  = high 
+s_low   = low 
+
+rsi_val = show_rsi ? ta.rsi(close, rsi_len) : na
+
+[_, direction] = ta.supertrend(factor, atrPeriod)
+
+super_trend = show_supertrend ? direction : na
+
+macd_line = show_macd ? ta.ema(close, macd_fast) - ta.ema(close, macd_slow) : na
+macd_sig  = show_macd ? ta.ema(macd_line, macd_smoothing) : na
+macd_hist = show_macd ? macd_line - macd_sig : na
+
+ema_short = show_ema ? ta.ema(close, ema_short_len) : na
+ema_long  = show_ema ? ta.ema(close, ema_long_len) : na
+ema_diff  = show_ema ? ema_short - ema_long : na
+
+bb_basis = show_bb ? ta.sma(close, bb_len) : na
+bb_dev   = show_bb ? ta.stdev(close, bb_len) : na
+bb_upper = show_bb ? bb_basis + bb_mult * bb_dev : na
+bb_lower = show_bb ? bb_basis - bb_mult * bb_dev : na
+
+
+
+suptrnd_signal = show_supertrend and not na(super_trend) ? (super_trend <0 ? "BUY" : super_trend > 0 ? "SELL" : "NEUTRAL") : "OFF"
+rsi_signal  = show_rsi and not na(rsi_val) ? (rsi_val < 30 ? "BUY" : rsi_val > 70 ? "SELL" : "NEUTRAL") : "OFF"
+macd_signal = show_macd and not na(macd_hist) ? (macd_hist > 0 ? "BUY" : macd_hist < 0 ? "SELL" : "NEUTRAL") : "OFF"
+ema_signal  = show_ema and not na(ema_diff) ? (ema_diff > 0 ? "BUY" : ema_diff < 0 ? "SELL" : "NEUTRAL") : "OFF"
+bb_signal   = show_bb and not na(bb_basis) ? (s_close < bb_lower ? "BUY" : s_close > bb_upper ? "SELL" : "NEUTRAL") : "OFF"
+
+
+
+
+buyCount  = (rsi_signal == "BUY" ? 1 : 0) + (macd_signal == "BUY" ? 1 : 0) + (ema_signal == "BUY" ? 1 : 0) + (bb_signal == "BUY" ? 1 : 0) + (suptrnd_signal == "BUY" ? 1 : 0)
+sellCount = (rsi_signal == "SELL" ? 1 : 0) + (macd_signal == "SELL" ? 1 : 0) + (ema_signal == "SELL" ? 1 : 0) + (bb_signal == "SELL" ? 1 : 0)+ (suptrnd_signal == "SELL" ? 1 : 0)
+total_signal = buyCount > sellCount ? "BUY" : sellCount > buyCount ? "SELL" : "NEUTRAL"
+
+
+if(total_signal == "BUY") and (qty > 0)
+    strategy.entry("Buy", strategy.long, qty,comment = str.tostring(new_capital)  )
+    strategy.exit("Sell", from_entry="Buy", stop=stop_loss, limit=take_profit)
+
+plot(cmp, "CMP", color=color.new(color.blue, 0))
+plot(stop_loss, "Stop Loss", color=color.new(color.red, 0))
+plot(take_profit, "Take Profit", color=color.new(color.green, 0))
+
+if barstate.islast
+    current_profit = strategy.netprofit
+    total_with_profit = capital + current_profit
+    info_text = "Capital: " + str.tostring(capital, format.volume) + "\n" + "Total Capital: " + str.tostring(total_with_profit, format.volume) + "\n" + "Net Profit: " + str.tostring(current_profit, format.volume) + "\n" + "Risk %: " + str.tostring(risk_percent, format.percent) + "\n" + "Risk Amount: " + str.tostring(risk_amount, format.volume) + "\n" + "Qty Long: " + str.tostring(qty, format.volume) + "\n" + "SL: " + str.tostring(stop_loss, format.mintick) + "\n" + "TP: " + str.tostring(take_profit, format.mintick)
+ 
+
+alertTitle = "Trading Alert!" 
+currentPrice = str.tostring(s_close, format.mintick)
+alertDescription = "BUY Call @ CMP"
+discordJSON = '{"username": "TradingView Bot", "embeds":[{"title": "' + alertTitle + '","description": "' + alertDescription + '\\nCurrent Price: ' + currentPrice + '","color": 3066993}]}'
+
+if (total_signal == "BUY")
+    alert(discordJSON, alert.freq_once_per_bar_close)
+
+View in Pine Editor・121 lines
+Use on chart
+4
+545
+Risk-Managed Strategy is a complete algorithmic trading framework that blends multiple technical systems—RSI, MACD, EMA crossover, Bollinger Bands, and SuperTrend—into a unified signal engine.
+
+The script dynamically calculates position size based on capital, risk percentage, ATR-based stop loss, and reward-ratio targets.
+
+It features:
+-Multi-indicator signal voting (BUY / SELL / NEUTRAL)
+- Dynamic capital tracking across trades
+- Automatic position sizing based on risk amount
+- Auto-generated Stop Loss and Take Profit using recent highs/lows
+- On-chart SL, TP, and CMP plotting for clarity
+
+This strategy is designed for traders who want a professional, rule-based system that balances accuracy, risk control, and automation.
+
+
+Disclaimer:
+The information provided is for educational and informational purposes only. It does not constitute financial or investment advice. Trading and investing in stocks involves risk, including the possible loss of capital. Any decisions to buy, sell, or hold securities are the sole responsibility of the reader. Past performance is not indicative of future results. Always do your own research and, if necessary, consult with a licensed financial advisor before making investment decisions.
+

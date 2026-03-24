@@ -1,0 +1,65 @@
+//@version=6
+strategy('Grid TLong V1', overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 5, initial_capital = 1000, commission_value = 0.01, calc_on_every_tick = true)
+//Inputs
+percent = input.float(1.00, title = '(%) Grid:', minval = 0.1, step = 0.1)
+order = input.int(0, title = 'Orders: Market [0] Limit [1]', options = [0, 1])
+entry = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+//Functions
+fun1(close) =>
+    if order == 0
+        strategy.close_all()
+        strategy.entry('Long', strategy.long)
+    else if order == 1
+        strategy.exit('Exit Long', limit = close)
+        strategy.entry('Long', strategy.long, limit = close)
+fun2(close) =>
+    if order == 0
+        strategy.close_all()
+        strategy.entry('Short', strategy.short, qty = 0.0001)
+    else if order == 1
+        strategy.exit('Exit Long', limit = close)
+        strategy.entry('Short', strategy.short, qty = 0.0001, limit = close)
+fun3(close) =>
+    if order == 0
+        strategy.close_all()
+        strategy.entry('Short', strategy.short, qty = 0.0001)
+    else if order == 1
+        strategy.exit('Exit Short', limit = close)
+        strategy.entry('Short', strategy.short, qty = 0.0001, limit = close)
+fun4(close) =>
+    if order == 0
+        strategy.close_all()
+        strategy.entry('Long', strategy.long)
+    else if order == 1
+        strategy.exit('Exit Short', limit = close)
+        strategy.entry('Long', strategy.long, limit = close)
+//Script
+if strategy.position_size == 0
+    strategy.entry('Long', strategy.long)
+else if strategy.position_size > 0
+    if strategy.opentrades.profit_percent(strategy.opentrades - 1) >= percent
+        fun1(close)
+    else if strategy.opentrades.profit_percent(strategy.opentrades - 1) <= -percent
+        fun2(close)
+else if strategy.position_size < 0
+    if strategy.opentrades.profit_percent(strategy.opentrades - 1) >= percent
+        fun3(close)
+    else if strategy.opentrades.profit_percent(strategy.opentrades - 1) <= -percent
+        fun4(close)
+//Plot
+plot(entry, title = 'Close', color = color.gray, linewidth = 1, style = plot.style_circles)
+
+View in Pine Editor・52 lines
+Use on chart
+5
+4
+1 861
+The “Grid TLong V1” strategy is based on the classic Grid strategy, but in the mode of buying and selling in favor of the trend and only on Long. This allows to take advantage of large uptrend movements to maximize profits in bull markets. For this reason, excessively sideways or bearish markets may not be very conducive to this strategy.
+
+Like our Grid strategies in favor of the trend, you can enter and exit with the balance with controlled risk, as the distance between each grid functions as a natural and adaptable stop loss and take profit. What differentiates it from bidirectional strategies is that Short uses a minimum amount of follow-through, so that the percentage distance between the grids is maintained.
+
+In this version of the script the entries and exits can be chosen at market [0] or limit [1], and are based on the profit or loss of the current position, not on the percentage change in price.
+
+The user may also notice that the strategy setup is risk-controlled, because it risks 5% on each trade, has a fairly standard commission and modest initial capital, all in order to protect the strategy user from unrealistic results.
+
+As with all strategies, it is strongly recommended to optimize the parameters for the strategy to be effective for each asset and for each time frame.

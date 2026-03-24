@@ -1,0 +1,149 @@
+{
+  "started_at": "2026-03-22T06:32:02.191970+00:00",
+  "items": {
+    "https://www.tradingview.com/script/i3Uc79fF-Flawless-Victory-Strategy-15min-BTC-Machine-Learning-Strategy/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T06:32:12.985806+00:00",
+      "last_stage": "extract_error",
+      "last_error": "No Pine code extracted from page"
+    },
+    "https://www.tradingview.com/script/Bp053p4R-BTC-Candle-Correlation-Strategy/": {
+      "backtest_attempts": 3,
+      "updated_at": "2026-03-22T08:32:01.593393+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null,
+      "extract_attempts": 1
+    },
+    "https://www.tradingview.com/script/wmJ1ovZQ-EmperorBTC-s-VWAP-Strategy/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T06:32:41.387266+00:00",
+      "last_stage": "extract_error",
+      "last_error": "No Pine code extracted from page"
+    },
+    "https://www.tradingview.com/script/VQqkfWR5-BTC-and-ETH-Long-strategy-version-2/": {
+      "backtest_attempts": 2,
+      "updated_at": "2026-03-22T06:35:12.183190+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null,
+      "extract_attempts": 1
+    },
+    "https://www.tradingview.com/script/QzkRRL0T-BTC-3X-PAIR-HULL-MA/": {
+      "backtest_attempts": 2,
+      "updated_at": "2026-03-22T06:35:22.708721+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null,
+      "extract_attempts": 1
+    },
+    "https://www.tradingview.com/script/9tlkyuHL-ADX-for-BTC-PineIndicators/": {
+      "backtest_attempts": 2,
+      "updated_at": "2026-03-22T06:35:35.599433+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null,
+      "extract_attempts": 1,
+      "raw_file": "raw-pine/bulk/9tlkyuHL-ADX-for-BTC-PineIndicators.pine"
+    },
+    "https://www.tradingview.com/script/LDCIPS8i-BTC-Volatility-Band-Strategy/": {
+      "backtest_attempts": 2,
+      "updated_at": "2026-03-22T06:35:43.832573+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null,
+      "extract_attempts": 1
+    },
+    "https://www.tradingview.com/script/QCg8TTOv-My-ETH-BTC-5-min-Strategy/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T06:34:16.507935+00:00",
+      "last_stage": "extract_error",
+      "last_error": "Command '('agent-browser', '--session', 'tv-cont-91d879b46fff', 'open', 'https://www.tradingview.com/script/QCg8TTOv-My-ETH-BTC-5-min-Strategy/')' returned non-zero exit status 1."
+    },
+    "https://www.tradingview.com/script/MNyc30Ki-Kozlod-RSI-Strategy-1-minute-ETHUSD/": {
+      "backtest_attempts": 2,
+      "updated_at": "2026-03-22T08:21:17.211964+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null,
+      "extract_attempts": 1
+    },
+    "https://www.tradingview.com/script/r2LyZ0JA/": {
+      "backtest_attempts": 2,
+      "updated_at": "2026-03-22T08:28:09.017725+00:00",
+      "last_stage": "backtest_ok",
+      "last_error": null,
+      "extract_attempts": 1
+    },
+    "https://www.tradingview.com/script/u5WDBgoP-OCC-Trend-Combo-1-day-BTC-Moonflag/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T06:35:12.099727+00:00",
+      "last_stage": "extract_ok",
+      "raw_file": "raw-pine/bulk/u5WDBgoP-OCC-Trend-Combo-1-day-BTC-Moonflag.pine",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/siPv2aJb-BTC-30m-Script/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T06:35:35.381748+00:00",
+      "last_stage": "extract_error",
+      "last_error": "No Pine code extracted from page"
+    },
+    "https://www.tradingview.com/script/NJ9KR55k-Ultimate-Stochastics-Strategy-by-NHBprod-Use-to-Day-Trade-BTC/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:24:12.468340+00:00",
+      "last_stage": "backtest_ok",
+      "raw_file": "raw-pine/bulk/NJ9KR55k-Ultimate-Stochastics-Strategy-by-NHBprod-Use-to-Day-Trade-BTC.pine",
+      "last_error": null,
+      "classify_attempts": 1,
+      "python_file": "python-strategies/bulk/ultimate-stochastics-nhbprod.py",
+      "backtest_attempts": 1
+    },
+    "https://www.tradingview.com/script/AcsNIzBt-Ultimate-T3-Fibonacci-for-BTC-Scalping-Look-at-backtest-report/": {
+      "classify_attempts": 1,
+      "updated_at": "2026-03-22T08:21:00.115729+00:00",
+      "last_stage": "convert_ok",
+      "python_file": "python-strategies/bulk/ultimate-t3-fibonacci-btc-scalping.py",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/6WnXNmXD-CMARSI-result-on-BTCUSD-when-allin-every-moove/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:21:28.493427+00:00",
+      "last_stage": "extract_error",
+      "last_error": "No Pine code extracted from page"
+    },
+    "https://www.tradingview.com/script/QeOSspqw-btc-ishimoku/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:24:26.758720+00:00",
+      "last_stage": "extract_ok",
+      "raw_file": "raw-pine/bulk/QeOSspqw-btc-ishimoku.pine",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/Gyy3Q3tl-BTC-Daily-Strategy-BF/": {
+      "classify_attempts": 1,
+      "updated_at": "2026-03-22T08:28:08.927009+00:00",
+      "last_stage": "convert_ok",
+      "python_file": "python-strategies/bulk/btc-daily-strategy-bf.py",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/DSB0583M-WEEKLY-BTC-TRADING-SCRYPT/": {
+      "extract_attempts": 1,
+      "updated_at": "2026-03-22T08:28:18.536846+00:00",
+      "last_stage": "extract_ok",
+      "raw_file": "raw-pine/bulk/DSB0583M-WEEKLY-BTC-TRADING-SCRYPT.pine",
+      "last_error": null
+    },
+    "https://www.tradingview.com/script/bt8HJINE/": {
+      "classify_attempts": 1,
+      "updated_at": "2026-03-22T08:32:01.540330+00:00",
+      "last_stage": "convert_ok",
+      "python_file": "python-strategies/bulk/vinz-win-btc-1m.py",
+      "last_error": null
+    }
+  },
+  "last_seen_model": "qwen3.5-plus",
+  "summary": {
+    "queue_supported_timeframes": 603,
+    "extracted_ok": 6,
+    "extracted_error": 11,
+    "classified": 45,
+    "unsupported": 6,
+    "converted_import_ok": 39,
+    "backtested_strategy_files": 8,
+    "backtest_result_rows": 16,
+    "last_updated_at": "2026-03-22T08:32:01.596750+00:00"
+  }
+}

@@ -1,0 +1,972 @@
+//@version=6
+strategy('Range Trading Strategy', overlay = true, max_lines_count = 400, pyramiding = 1, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+// Range Detection Mode
+rangeMode = input.string('HTF', 'Range Detection Mode', options = ['HTF', 'Sessions'], group = 'Range Detection')
+
+// HTF Settings
+autoMode = input.bool(true, 'Auto HTF', tooltip = 'Automatically select HTF based on current chart timeframe', group = 'Range Detection')
+manualHTF = input.timeframe('D', 'Manual HTF', tooltip = 'Manual HTF selection (only used when Auto HTF is disabled)', group = 'Range Detection')
+showSpecialRanges = input.bool(true, 'Show Special Ranges', group = 'Range Detection')
+
+// Strategy Settings
+riskRewardRatio = input.float(2.0, 'Risk:Reward Ratio', minval = 0.5, step = 0.5, group = 'Strategy')
+showConfirmationLines = input.bool(true, 'Show Confirmation Lines', group = 'Strategy')
+stopLossOnly = input.bool(false, 'Stop Loss Only', tooltip = 'When enabled, trades only have stop loss (no take profit). Trades close on stop loss or when opposite signal confirms.', group = 'Strategy')
+reverseOnStopLoss = input.bool(false, 'Reverse on Stop Loss', tooltip = 'When enabled, hitting a stop loss opens an opposite trade with stop at the opposing pivot.', group = 'Strategy')
+useMaxBarDistance = input.bool(false, 'Max Bar Distance', group = 'Strategy')
+maxBarDistance = input.int(50, 'Max Bars', minval = 1, group = 'Strategy')
+
+// Get HTF Period function (from Composite Profile)
+getHTFPeriod() =>
+    switch timeframe.period
+        '1'   => '45'      // 1m → 45m
+        '3'   => '120'     // 3m → 2h
+        '5'   => '240'     // 5m → 4h
+        '10'  => '480'     // 10m → 8h
+        '15'  => '720'     // 15m → 12h
+        '30'  => '1D'      // 30m → 1D
+        '45'  => '2D'      // 45m → 2D
+        '60'  => '2D'      // 1h → 2D
+        '120' => '4D'      // 2h → 4D
+        '240' => '1W'      // 4h → 1W
+        '360' => '2W'      // 6h → 2W
+        '720' => '1M'      // 12h → 1M
+        '1D'  => '1M'      // 1D → 1M
+        '3D'  => '3M'      // 3D → 3M
+        '1W'  => '1Y'      // 1W → 1Y
+        '1M'  => '4Y'      // 1M → 4Y
+        '3M'  => '12Y'     // 3M → 12Y
+        => '1D'            // Default
+
+// Use auto or manual timeframe
+selectedHTF = autoMode ? getHTFPeriod() : manualHTF
+
+// ========================================
+// SESSION DETECTION (from CompositeProfile.pine)
+// ========================================
+tf = timeframe.period
+tz = input.string('America/New_York', 'Timezone', options = ['Africa/Abidjan', 'Africa/Accra', 'Africa/Algiers', 'Africa/Bissau', 'Africa/Cairo', 'Africa/Casablanca', 'Africa/Ceuta', 'Africa/El_Aaiun', 'Africa/Johannesburg', 'Africa/Juba', 'Africa/Khartoum', 'Africa/Lagos', 'Africa/Maputo', 'Africa/Monrovia', 'Africa/Nairobi', 'Africa/Ndjamena', 'Africa/Sao_Tome', 'Africa/Tripoli', 'Africa/Tunis', 'Africa/Windhoek', 'America/Adak', 'America/Anchorage', 'America/Araguaina', 'America/Argentina/Buenos_Aires', 'America/Argentina/Catamarca', 'America/Argentina/Cordoba', 'America/Argentina/Jujuy', 'America/Argentina/La_Rioja', 'America/Argentina/Mendoza', 'America/Argentina/Rio_Gallegos', 'America/Argentina/Salta', 'America/Argentina/San_Juan', 'America/Argentina/San_Luis', 'America/Argentina/Tucuman', 'America/Argentina/Ushuaia', 'America/Asuncion', 'America/Atikokan', 'America/Bahia', 'America/Bahia_Banderas', 'America/Barbados', 'America/Belem', 'America/Belize', 'America/Blanc-Sablon', 'America/Boa_Vista', 'America/Bogota', 'America/Boise', 'America/Cambridge_Bay', 'America/Campo_Grande', 'America/Cancun', 'America/Caracas', 'America/Cayenne', 'America/Chicago', 'America/Chihuahua', 'America/Ciudad_Juarez', 'America/Costa_Rica', 'America/Creston', 'America/Cuiaba', 'America/Curacao', 'America/Danmarkshavn', 'America/Dawson', 'America/Dawson_Creek', 'America/Denver', 'America/Detroit', 'America/Edmonton', 'America/Eirunepe', 'America/El_Salvador', 'America/Fort_Nelson', 'America/Fortaleza', 'America/Glace_Bay', 'America/Goose_Bay', 'America/Grand_Turk', 'America/Guatemala', 'America/Guayaquil', 'America/Guyana', 'America/Halifax', 'America/Havana', 'America/Hermosillo', 'America/Indiana/Indianapolis', 'America/Indiana/Knox', 'America/Indiana/Marengo', 'America/Indiana/Petersburg', 'America/Indiana/Tell_City', 'America/Indiana/Vevay', 'America/Indiana/Vincennes', 'America/Indiana/Winamac', 'America/Inuvik', 'America/Iqaluit', 'America/Jamaica', 'America/Juneau', 'America/Kentucky/Louisville', 'America/Kentucky/Monticello', 'America/La_Paz', 'America/Lima', 'America/Los_Angeles', 'America/Maceio', 'America/Managua', 'America/Manaus', 'America/Martinique', 'America/Matamoros', 'America/Mazatlan', 'America/Menominee', 'America/Merida', 'America/Metlakatla', 'America/Mexico_City', 'America/Miquelon', 'America/Moncton', 'America/Monterrey', 'America/Montevideo', 'America/Nassau', 'America/New_York', 'America/Nome', 'America/Noronha', 'America/North_Dakota/Beulah', 'America/North_Dakota/Center', 'America/North_Dakota/New_Salem', 'America/Nuuk', 'America/Ojinaga', 'America/Panama', 'America/Paramaribo', 'America/Phoenix', 'America/Port-au-Prince', 'America/Port_of_Spain', 'America/Porto_Velho', 'America/Puerto_Rico', 'America/Punta_Arenas', 'America/Rankin_Inlet', 'America/Recife', 'America/Regina', 'America/Resolute', 'America/Rio_Branco', 'America/Santarem', 'America/Santiago', 'America/Santo_Domingo', 'America/Sao_Paulo', 'America/Scoresbysund', 'America/Sitka', 'America/St_Johns', 'America/Swift_Current', 'America/Tegucigalpa', 'America/Thule', 'America/Tijuana', 'America/Toronto', 'America/Vancouver', 'America/Whitehorse', 'America/Winnipeg', 'America/Yakutat', 'America/Yellowknife', 'Antarctica/Casey', 'Antarctica/Davis', 'Antarctica/DumontDUrville', 'Antarctica/Macquarie', 'Antarctica/Mawson', 'Antarctica/Palmer', 'Antarctica/Rothera', 'Antarctica/Syowa', 'Antarctica/Troll', 'Antarctica/Vostok', 'Asia/Almaty', 'Asia/Amman', 'Asia/Anadyr', 'Asia/Aqtau', 'Asia/Aqtobe', 'Asia/Ashgabat', 'Asia/Atyrau', 'Asia/Baghdad', 'Asia/Baku', 'Asia/Bangkok', 'Asia/Barnaul', 'Asia/Beirut', 'Asia/Bishkek', 'Asia/Brunei', 'Asia/Chita', 'Asia/Choibalsan', 'Asia/Colombo', 'Asia/Damascus', 'Asia/Dhaka', 'Asia/Dili', 'Asia/Dubai', 'Asia/Dushanbe', 'Asia/Famagusta', 'Asia/Gaza', 'Asia/Hebron', 'Asia/Ho_Chi_Minh', 'Asia/Hong_Kong', 'Asia/Hovd', 'Asia/Irkutsk', 'Asia/Jakarta', 'Asia/Jayapura', 'Asia/Jerusalem', 'Asia/Kabul', 'Asia/Kamchatka', 'Asia/Karachi', 'Asia/Kathmandu', 'Asia/Khandyga', 'Asia/Kolkata', 'Asia/Krasnoyarsk', 'Asia/Kuala_Lumpur', 'Asia/Kuching', 'Asia/Macau', 'Asia/Magadan', 'Asia/Makassar', 'Asia/Manila', 'Asia/Nicosia', 'Asia/Novokuznetsk', 'Asia/Novosibirsk', 'Asia/Omsk', 'Asia/Oral', 'Asia/Pontianak', 'Asia/Pyongyang', 'Asia/Qatar', 'Asia/Qostanay', 'Asia/Qyzylorda', 'Asia/Riyadh', 'Asia/Sakhalin', 'Asia/Samarkand', 'Asia/Seoul', 'Asia/Shanghai', 'Asia/Singapore', 'Asia/Srednekolymsk', 'Asia/Taipei', 'Asia/Tashkent', 'Asia/Tbilisi', 'Asia/Tehran', 'Asia/Thimphu', 'Asia/Tokyo', 'Asia/Tomsk', 'Asia/Ulaanbaatar', 'Asia/Urumqi', 'Asia/Ust-Nera', 'Asia/Vladivostok', 'Asia/Yakutsk', 'Asia/Yangon', 'Asia/Yekaterinburg', 'Asia/Yerevan', 'Atlantic/Azores', 'Atlantic/Bermuda', 'Atlantic/Canary', 'Atlantic/Cape_Verde', 'Atlantic/Faroe', 'Atlantic/Madeira', 'Atlantic/Reykjavik', 'Atlantic/South_Georgia', 'Atlantic/Stanley', 'Australia/Adelaide', 'Australia/Brisbane', 'Australia/Broken_Hill', 'Australia/Darwin', 'Australia/Eucla', 'Australia/Hobart', 'Australia/Lindeman', 'Australia/Lord_Howe', 'Australia/Melbourne', 'Australia/Perth', 'Australia/Sydney', 'Europe/Amsterdam', 'Europe/Andorra', 'Europe/Astrakhan', 'Europe/Athens', 'Europe/Belgrade', 'Europe/Berlin', 'Europe/Bratislava', 'Europe/Brussels', 'Europe/Bucharest', 'Europe/Budapest', 'Europe/Busingen', 'Europe/Chisinau', 'Europe/Copenhagen', 'Europe/Dublin', 'Europe/Gibraltar', 'Europe/Guernsey', 'Europe/Helsinki', 'Europe/Isle_of_Man', 'Europe/Istanbul', 'Europe/Jersey', 'Europe/Kaliningrad', 'Europe/Kirov', 'Europe/Kyiv', 'Europe/Lisbon', 'Europe/Ljubljana', 'Europe/London', 'Europe/Luxembourg', 'Europe/Madrid', 'Europe/Malta', 'Europe/Mariehamn', 'Europe/Minsk', 'Europe/Monaco', 'Europe/Moscow', 'Europe/Oslo', 'Europe/Paris', 'Europe/Podgorica', 'Europe/Prague', 'Europe/Riga', 'Europe/Rome', 'Europe/Samara', 'Europe/San_Marino', 'Europe/Sarajevo', 'Europe/Saratov', 'Europe/Simferopol', 'Europe/Skopje', 'Europe/Sofia', 'Europe/Stockholm', 'Europe/Tallinn', 'Europe/Tirane', 'Europe/Ulyanovsk', 'Europe/Vaduz', 'Europe/Vatican', 'Europe/Vienna', 'Europe/Vilnius', 'Europe/Volgograd', 'Europe/Warsaw', 'Europe/Zagreb', 'Europe/Zurich', 'Indian/Chagos', 'Indian/Christmas', 'Indian/Cocos', 'Indian/Comoro', 'Indian/Kerguelen', 'Indian/Mahe', 'Indian/Maldives', 'Indian/Mauritius', 'Indian/Mayotte', 'Indian/Reunion', 'Pacific/Apia', 'Pacific/Auckland', 'Pacific/Bougainville', 'Pacific/Chatham', 'Pacific/Chuuk', 'Pacific/Easter', 'Pacific/Efate', 'Pacific/Fakaofo', 'Pacific/Fiji', 'Pacific/Funafuti', 'Pacific/Galapagos', 'Pacific/Gambier', 'Pacific/Guadalcanal', 'Pacific/Guam', 'Pacific/Honolulu', 'Pacific/Kanton', 'Pacific/Kiritimati', 'Pacific/Kosrae', 'Pacific/Kwajalein', 'Pacific/Majuro', 'Pacific/Marquesas', 'Pacific/Midway', 'Pacific/Nauru', 'Pacific/Niue', 'Pacific/Norfolk', 'Pacific/Noumea', 'Pacific/Pago_Pago', 'Pacific/Palau', 'Pacific/Pitcairn', 'Pacific/Pohnpei', 'Pacific/Port_Moresby', 'Pacific/Rarotonga', 'Pacific/Saipan', 'Pacific/Tahiti', 'Pacific/Tarawa', 'Pacific/Tongatapu', 'Pacific/Wake', 'Pacific/Wallis', 'UTC'])
+
+// Session definitions (HHMM-HHMM format in UTC)
+session1_str = input.string('0200-0500', 'Session 1', tooltip = 'Session 1: 00:00 - 06:00 (6 hours)', group = 'Session')
+session2_str = input.string('0700-1000', 'Session 2', tooltip = 'Session 2: 06:00 - 12:00 (6 hours)', group = 'Session')
+session3_str = input.string('2000-2000', 'Session 3', tooltip = 'Session 3: 12:00 - 20:00 (8 hours)', group = 'Session')
+session4_str = input.string('0000-0000', 'Session 4', tooltip = 'Session 4: 20:00 - 00:00 (4 hours, spans midnight)', group = 'Session')
+
+// Session detection using time() function
+is_session1 = math.sign(nz(time(tf, session1_str, tz)))
+is_session2 = math.sign(nz(time(tf, session2_str, tz)))
+is_session3 = math.sign(nz(time(tf, session3_str, tz)))
+is_session4 = math.sign(nz(time(tf, session4_str, tz)))
+
+// Get current session name
+getCurrentSession() =>
+    if is_session1 > 0
+        'Session 1'
+    else if is_session2 > 0
+        'Session 2'
+    else if is_session3 > 0
+        'Session 3'
+    else if is_session4 > 0
+        'Session 4'
+    else
+        'Off Hours'
+
+// Session tracking variables
+var string currentSession = na
+var float sessionHigh = na
+var float sessionLow = na
+var float sessionClose = na
+var float sessionHighPrev = na
+var float sessionLowPrev = na
+var float sessionClosePrev = na
+var bool newSession = false
+
+// Input parameters
+maxRangesToDisplay = input.int(10, 'Max Ranges to Display', minval = 1, maxval = 400)
+
+// Color settings
+rangeHighColor = input.color(color.blue, 'Range High Color')
+rangeLowColor = input.color(color.red, 'Range Low Color')
+mitigatedColor = input.color(color.gray, 'Mitigated Color')
+
+// Structure for ranges - track high and low mitigation separately
+type Range
+    float rangeHigh
+    float rangeLow
+    int highStartTime     // Time when the high was formed
+    int lowStartTime      // Time when the low was formed
+    bool highMitigated
+    bool lowMitigated
+    int highMitigationTime
+    int lowMitigationTime
+    bool isSpecial        // Flag to mark special ranges (only one extreme)
+    int creationBar       // Bar index where the range was created (for special ranges)
+
+// Pending Signal Structure
+type PendingSignal
+    string signalType       // "BEARISH" or "BULLISH"
+    float confirmationLevel // Pivot level that needs to be crossed
+    int creationBar         // Bar where signal was created
+    int pivotBarIndex       // Bar index where the pivot was formed
+    float mitigatedLevel    // Level that was mitigated to trigger the signal
+
+// Initialize arrays
+var ranges = array.new<Range>()
+var array<line> rangeLines = array.new_line()
+
+// Pivot tracking (always one high and one low)
+var float pivotHigh = na
+var float pivotLow = na
+var int pivotHighBar = na
+var int pivotLowBar = na
+var bool wasBullish = true  // Initialize to true to track changes
+
+// Pending signals (max one of each type)
+var PendingSignal pendingBearish = na
+var PendingSignal pendingBullish = na
+
+// Arrays to store pivot values for special range creation
+var storedPivotHighs = array.new<float>()
+var storedPivotLows = array.new<float>()
+
+// Stop loss tracking for reverse on stop loss
+var float longStopLoss = na
+var float shortStopLoss = na
+
+// Clear previous drawings
+while array.size(rangeLines) > 0
+    line.delete(array.pop(rangeLines))
+
+// ========================================
+// PIVOT CALCULATION
+// ========================================
+// Update pivots based on candle color changes
+bool isBullish = close > open
+bool isBearish = close < open
+
+// Bullish candle after bearish → new pivot low
+if isBullish and not wasBullish
+    pivotLow := math.min(low, low[1])
+    // Pivot bar is the actual bar where the low was formed
+    pivotLowBar := low < low[1] ? bar_index : bar_index - 1
+
+// Bearish candle after bullish → new pivot high
+if isBearish and wasBullish
+    pivotHigh := math.max(high, high[1])
+    // Pivot bar is the actual bar where the high was formed
+    pivotHighBar := high > high[1] ? bar_index : bar_index - 1
+
+// Update candle direction tracking
+if isBullish or isBearish
+    wasBullish := isBullish
+
+// ========================================
+// RANGE DETECTION DATA (HTF or Sessions)
+// ========================================
+float parentHigh = na
+float parentLow = na
+bool isValidRange = false
+bool newPeriod = false
+
+if rangeMode == 'HTF'
+    // Get HTF data
+    [htfHigh, htfLow, htfClose] = request.security(syminfo.tickerid, selectedHTF, [high, low, close], lookahead = barmerge.lookahead_off)
+    [htfHighPrev, htfLowPrev] = request.security(syminfo.tickerid, selectedHTF, [high[1], low[1]], lookahead = barmerge.lookahead_off)
+    
+    // Detect new HTF candle
+    newPeriod := timeframe.change(selectedHTF)
+    
+    // Check if HTF candle closes within previous HTF candle's range
+    if not na(htfHighPrev) and not na(htfLowPrev) and not na(htfClose)
+        parentHigh := htfHighPrev
+        parentLow := htfLowPrev
+        
+        // HTF candle closes within previous HTF candle's range
+        isValidRange := htfClose <= parentHigh and htfClose >= parentLow and newPeriod
+
+else if rangeMode == 'Sessions'
+    // Session-based range detection
+    string thisSession = getCurrentSession()
+    
+    // Detect new session
+    if na(currentSession)
+        // First session
+        currentSession := thisSession
+        newSession := false
+        sessionHigh := high
+        sessionLow := low
+        sessionClose := close
+    else if thisSession != currentSession and thisSession != 'Off Hours'
+        // New session started
+        // Store previous session data
+        sessionHighPrev := sessionHigh
+        sessionLowPrev := sessionLow
+        sessionClosePrev := sessionClose
+        
+        // Start new session
+        currentSession := thisSession
+        newSession := true
+        sessionHigh := high
+        sessionLow := low
+        sessionClose := close
+        
+        // Check if previous session close is within previous session's range
+        if not na(sessionHighPrev) and not na(sessionLowPrev) and not na(sessionClosePrev)
+            parentHigh := sessionHighPrev
+            parentLow := sessionLowPrev
+            
+            // Previous session closes within its range
+            isValidRange := sessionClosePrev <= parentHigh and sessionClosePrev >= parentLow
+    else
+        // Same session - update high/low
+        newSession := false
+        if high > sessionHigh
+            sessionHigh := high
+        if low < sessionLow
+            sessionLow := low
+        sessionClose := close
+
+// Create new range if valid
+if isValidRange
+    // Find the time when the range high was formed by looping backwards
+    int highStartTime = time
+    for i = 0 to 500  // Look back up to 500 bars
+        if bar_index - i < 0
+            break
+        if high[i] >= parentHigh
+            highStartTime := time[i]
+            break
+    
+    // Find the time when the range low was formed by looping backwards
+    int lowStartTime = time
+    for i = 0 to 500  // Look back up to 500 bars
+        if bar_index - i < 0
+            break
+        if low[i] <= parentLow
+            lowStartTime := time[i]
+            break
+    
+    newRange = Range.new()
+    newRange.rangeHigh := parentHigh
+    newRange.rangeLow := parentLow
+    newRange.highStartTime := highStartTime
+    newRange.lowStartTime := lowStartTime
+    newRange.isSpecial := false
+    newRange.creationBar := bar_index
+    
+    // Check if extremes are already mitigated at creation
+    newRange.highMitigated := high >= parentHigh
+    newRange.lowMitigated := low <= parentLow
+    newRange.highMitigationTime := newRange.highMitigated ? time : na
+    newRange.lowMitigationTime := newRange.lowMitigated ? time : na
+    
+    array.push(ranges, newRange)
+
+// Create special ranges from stored pivot values (runs on every bar)
+// Create ranges with stored pivot lows as rangeHigh
+if showSpecialRanges and array.size(storedPivotLows) > 0
+    for i = 0 to array.size(storedPivotLows) - 1
+        storedPivotLow = array.get(storedPivotLows, i)
+        
+        // Find the time when the pivot low was formed by looping backwards
+        int pivotLowStartTime = time
+        for j = 0 to 500  // Look back up to 500 bars
+            if bar_index - j < 0
+                break
+            if low[j] <= storedPivotLow
+                pivotLowStartTime := time[j]
+                break
+        
+        // Create special range with pivot low as rangeHigh
+        specialRange = Range.new()
+        specialRange.rangeHigh := storedPivotLow
+        specialRange.rangeLow := na  // No low extreme
+        specialRange.highStartTime := pivotLowStartTime
+        specialRange.lowStartTime := time
+        specialRange.highMitigated := false
+        specialRange.lowMitigated := true  // Always mitigated since it doesn't exist
+        specialRange.highMitigationTime := na
+        specialRange.lowMitigationTime := time
+        specialRange.isSpecial := true
+        specialRange.creationBar := bar_index
+        array.push(ranges, specialRange)
+    array.clear(storedPivotLows)
+
+// Create ranges with stored pivot highs as rangeLow
+if showSpecialRanges and array.size(storedPivotHighs) > 0
+    for i = 0 to array.size(storedPivotHighs) - 1
+        storedPivotHigh = array.get(storedPivotHighs, i)
+        
+        // Find the time when the pivot high was formed by looping backwards
+        int pivotHighStartTime = time
+        for j = 0 to 500  // Look back up to 500 bars
+            if bar_index - j < 0
+                break
+            if high[j] >= storedPivotHigh
+                pivotHighStartTime := time[j]
+                break
+        
+        // Create special range with pivot high as rangeLow
+        specialRange = Range.new()
+        specialRange.rangeHigh := na  // No high extreme
+        specialRange.rangeLow := storedPivotHigh
+        specialRange.highStartTime := time
+        specialRange.lowStartTime := pivotHighStartTime
+        specialRange.highMitigated := true  // Always mitigated since it doesn't exist
+        specialRange.lowMitigated := false
+        specialRange.highMitigationTime := time
+        specialRange.lowMitigationTime := na
+        specialRange.isSpecial := true
+        specialRange.creationBar := bar_index
+        array.push(ranges, specialRange)
+    array.clear(storedPivotHighs)
+
+// Check for range mitigation (any interaction with extreme)
+if array.size(ranges) > 0
+    for i = array.size(ranges) - 1 to 0
+        r = array.get(ranges, i)
+        
+        // Check high mitigation - any interaction at or above range high
+        if not r.highMitigated and high >= r.rangeHigh
+            r.highMitigated := true
+            r.highMitigationTime := time
+            
+            // For special ranges, if mitigated on creation bar or next bar, remove entirely
+            if r.isSpecial and (r.creationBar == bar_index or r.creationBar == bar_index - 1)
+                array.remove(ranges, i)
+                continue
+            
+            // Store pivot high if it's below the range high (for special range creation)
+            // Only store for non-special ranges to prevent endless cycling
+            if showSpecialRanges and not r.isSpecial and not na(pivotHigh) and pivotHigh < r.rangeHigh
+                array.push(storedPivotHighs, pivotHigh)
+            
+            // Create pending BEARISH signal (range high mitigated)
+            if not na(pivotLow) and not na(pivotLowBar)
+                // Create new pending bearish signal
+                pendingBearish := PendingSignal.new()
+                pendingBearish.signalType := "BEARISH"
+                pendingBearish.confirmationLevel := pivotLow
+                pendingBearish.creationBar := bar_index
+                pendingBearish.pivotBarIndex := pivotLowBar
+                pendingBearish.mitigatedLevel := r.rangeHigh
+        
+        // Check low mitigation - any interaction at or below range low
+        if not r.lowMitigated and low <= r.rangeLow
+            r.lowMitigated := true
+            r.lowMitigationTime := time
+            
+            // For special ranges, if mitigated on creation bar or next bar, remove entirely
+            if r.isSpecial and (r.creationBar == bar_index or r.creationBar == bar_index - 1)
+                array.remove(ranges, i)
+                continue
+            
+            // Store pivot low if it's above the range low (for special range creation)
+            // Only store for non-special ranges to prevent endless cycling
+            if showSpecialRanges and not r.isSpecial and not na(pivotLow) and pivotLow > r.rangeLow
+                array.push(storedPivotLows, pivotLow)
+            
+            // Create pending BULLISH signal (range low mitigated)
+            if not na(pivotHigh) and not na(pivotHighBar)
+                // Create new pending bullish signal
+                pendingBullish := PendingSignal.new()
+                pendingBullish.signalType := "BULLISH"
+                pendingBullish.confirmationLevel := pivotHigh
+                pendingBullish.creationBar := bar_index
+                pendingBullish.pivotBarIndex := pivotHighBar
+                pendingBullish.mitigatedLevel := r.rangeLow
+    
+    // Purge oldest ranges if we exceed the maximum limit
+    while array.size(ranges) > maxRangesToDisplay
+        array.shift(ranges)
+
+// Draw active ranges
+if array.size(ranges) > 0
+    for i = 0 to array.size(ranges) - 1
+        r = array.get(ranges, i)
+        
+        // Determine right edge time for high line
+        int highRightTime = r.highMitigated ? r.highMitigationTime : time
+        color highLineColor = r.highMitigated ? color.new(mitigatedColor, 50) : rangeHighColor
+        
+        // Determine right edge time for low line
+        int lowRightTime = r.lowMitigated ? r.lowMitigationTime : time
+        color lowLineColor = r.lowMitigated ? color.new(mitigatedColor, 50) : rangeLowColor
+        
+        // Draw range high line using time (starts from where high was formed)
+        array.push(rangeLines, line.new(r.highStartTime, r.rangeHigh, highRightTime, r.rangeHigh, color = highLineColor, width = 1, xloc = xloc.bar_time))
+        
+        // Draw range low line using time (starts from where low was formed)
+        array.push(rangeLines, line.new(r.lowStartTime, r.rangeLow, lowRightTime, r.rangeLow, color = lowLineColor, width = 1, xloc = xloc.bar_time))
+
+// ========================================
+// SIGNAL CONFIRMATION & STRATEGY
+// ========================================
+
+// Update pending signals if price re-interacts with mitigated level
+// Interaction defined as: high > level and low < level
+
+// Bearish Update
+if not na(pendingBearish) and not na(pendingBearish.mitigatedLevel)
+    if high > pendingBearish.mitigatedLevel and low < pendingBearish.mitigatedLevel
+        if not na(pivotLow) and not na(pivotLowBar)
+            if pivotLow < pendingBearish.mitigatedLevel
+                pendingBearish.confirmationLevel := pivotLow
+                pendingBearish.pivotBarIndex := pivotLowBar
+
+// Bullish Update
+if not na(pendingBullish) and not na(pendingBullish.mitigatedLevel)
+    if high > pendingBullish.mitigatedLevel and low < pendingBullish.mitigatedLevel
+        if not na(pivotHigh) and not na(pivotHighBar)
+            if pivotHigh > pendingBullish.mitigatedLevel
+                pendingBullish.confirmationLevel := pivotHigh
+                pendingBullish.pivotBarIndex := pivotHighBar
+
+// Check pending bearish signal confirmation
+if not na(pendingBearish)
+    // Bearish confirmed when price closes below confirmation level (pivot low)
+    if close < pendingBearish.confirmationLevel
+        // Check max bar distance
+        if not useMaxBarDistance or (bar_index - pendingBearish.pivotBarIndex <= maxBarDistance)
+            // Draw confirmation line from pivot low bar to current bar
+            if showConfirmationLines
+                line.new(pendingBearish.pivotBarIndex, pendingBearish.confirmationLevel, bar_index, pendingBearish.confirmationLevel, color = color.new(color.red, 0), width = 1, style = line.style_solid)
+            
+            // Calculate entry, stop, and target
+            float entryPrice = close
+            float stopPrice = pivotHigh  // Current pivot high at confirmation
+            float riskAmount = stopPrice - entryPrice
+            float targetPrice = entryPrice - (riskAmount * riskRewardRatio)
+            
+            // Close any long positions
+            if strategy.position_size > 0
+                strategy.close_all(comment = "Close Longs")
+                longStopLoss := na  // Clear stop loss tracking
+            
+            // Enter short
+            strategy.entry("Short", strategy.short, comment = "Range Bear")
+            shortStopLoss := stopPrice  // Track stop loss level
+            if stopLossOnly
+                strategy.exit("Short Exit", "Short", stop = stopPrice)
+            else
+                strategy.exit("Short Exit", "Short", stop = stopPrice, limit = targetPrice)
+            
+            // Clear pending signal
+            pendingBearish := na
+        else
+            // Signal invalid due to max bar distance
+            pendingBearish := na
+
+// Check pending bullish signal confirmation
+if not na(pendingBullish)
+    // Bullish confirmed when price closes above confirmation level (pivot high)
+    if close > pendingBullish.confirmationLevel
+        // Check max bar distance
+        if not useMaxBarDistance or (bar_index - pendingBullish.pivotBarIndex <= maxBarDistance)
+            // Draw confirmation line from pivot high bar to current bar
+            if showConfirmationLines
+                line.new(pendingBullish.pivotBarIndex, pendingBullish.confirmationLevel, bar_index, pendingBullish.confirmationLevel, color = color.new(color.green, 0), width = 1, style = line.style_solid)
+            
+            // Calculate entry, stop, and target
+            float entryPrice = close
+            float stopPrice = pivotLow  // Current pivot low at confirmation
+            float riskAmount = entryPrice - stopPrice
+            float targetPrice = entryPrice + (riskAmount * riskRewardRatio)
+            
+            // Close any short positions
+            if strategy.position_size < 0
+                strategy.close_all(comment = "Close Shorts")
+                shortStopLoss := na  // Clear stop loss tracking
+            
+            // Enter long
+            strategy.entry("Long", strategy.long, comment = "Range Bull")
+            longStopLoss := stopPrice  // Track stop loss level
+            if stopLossOnly
+                strategy.exit("Long Exit", "Long", stop = stopPrice)
+            else
+                strategy.exit("Long Exit", "Long", stop = stopPrice, limit = targetPrice)
+            
+            // Clear pending signal
+            pendingBullish := na
+        else
+            // Signal invalid due to max bar distance
+            pendingBullish := na
+
+// ========================================
+// REVERSE ON STOP LOSS
+// ========================================
+if reverseOnStopLoss
+    // Detect if long stop loss was hit
+    if strategy.position_size[1] > 0 and strategy.position_size <= 0 and not na(longStopLoss)
+        // Check if price touched the stop loss
+        if low <= longStopLoss
+            // Hit bullish stop loss - open short with stop at pivot high
+            if not na(pivotHigh)
+                float reverseEntryPrice = close
+                float reverseStopPrice = pivotHigh
+                float reverseRiskAmount = reverseStopPrice - reverseEntryPrice
+                float reverseTargetPrice = reverseEntryPrice - (reverseRiskAmount * riskRewardRatio)
+                
+                // Enter short
+                strategy.entry("Reverse Short", strategy.short, comment = "Reverse on Stop")
+                shortStopLoss := reverseStopPrice
+                if stopLossOnly
+                    strategy.exit("Reverse Short Exit", "Reverse Short", stop = reverseStopPrice)
+                else
+                    strategy.exit("Reverse Short Exit", "Reverse Short", stop = reverseStopPrice, limit = reverseTargetPrice)
+            
+            // Clear long stop loss tracking
+            longStopLoss := na
+    
+    // Detect if short stop loss was hit
+    if strategy.position_size[1] < 0 and strategy.position_size >= 0 and not na(shortStopLoss)
+        // Check if price touched the stop loss
+        if high >= shortStopLoss
+            // Hit bearish stop loss - open long with stop at pivot low
+            if not na(pivotLow)
+                float reverseEntryPrice = close
+                float reverseStopPrice = pivotLow
+                float reverseRiskAmount = reverseEntryPrice - reverseStopPrice
+                float reverseTargetPrice = reverseEntryPrice + (reverseRiskAmount * riskRewardRatio)
+                
+                // Enter long
+                strategy.entry("Reverse Long", strategy.long, comment = "Reverse on Stop")
+                longStopLoss := reverseStopPrice
+                if stopLossOnly
+                    strategy.exit("Reverse Long Exit", "Reverse Long", stop = reverseStopPrice)
+                else
+                    strategy.exit("Reverse Long Exit", "Reverse Long", stop = reverseStopPrice, limit = reverseTargetPrice)
+            
+            // Clear short stop loss tracking
+            shortStopLoss := na
+
+View in Pine Editor・543 lines
+Use on chart
+5
+4
+2
+2
+7 712
+Nov 9, 2025
+OVERVIEW
+The Range Trading Strategy is a systematic trading approach that identifies price ranges
+from higher timeframe candles or trading sessions, tracks pivot points, and generates
+trading signals when range extremes are mitigated and confirmed by pivot levels.
+
+CORE CONCEPT
+The strategy is based on the principle that when a candle (or session) closes within the
+range of the previous candle (or session), that previous candle becomes a "range" with
+identifiable high and low extremes. When price breaks through these extremes, it creates
+trading opportunities that are confirmed by pivot levels.
+
+RANGE DETECTION MODES
+1. HTF (Higher Timeframe) Mode:
+
+Automatically selects a higher timeframe based on the current chart timeframe
+
+Uses request.security() to fetch HTF candle data
+
+Range is created when an HTF candle closes within the previous HTF candle's range
+
+The previous HTF candle's high and low become the range extremes
+
+
+
+2. Sessions Mode:
+
+- Divides the trading day into 4 sessions (UTC):
+
+* Session 1: 00:00 - 06:00 (6 hours)
+
+* Session 2: 06:00 - 12:00 (6 hours)
+
+* Session 3: 12:00 - 20:00 (8 hours)
+
+* Session 4: 20:00 - 00:00 (4 hours, spans midnight)
+
+- Tracks high, low, and close for each session
+
+- Range is created when a session closes within the previous session's range
+
+- The previous session's high and low become the range extremes
+
+
+
+PIVOT DETECTION
+Pivots are detected based on candle color changes (bullish/bearish transitions):
+
+1. Pivot Low:
+
+Created when a bullish candle appears after a bearish candle
+
+Pivot low = minimum of the current candle's low and previous candle's low
+
+The pivot bar is the actual bar where the low was formed (current or previous bar)
+
+
+
+2. Pivot High:
+
+Created when a bearish candle appears after a bullish candle
+
+Pivot high = maximum of the current candle's high and previous candle's high
+
+The pivot bar is the actual bar where the high was formed (current or previous bar)
+
+
+
+IMPORTANT: There is always only ONE active pivot high and ONE active pivot low at any
+given time. When a new pivot is created, it replaces the previous one.
+
+RANGE CREATION
+A range is created when:
+
+(HTF Mode) An HTF candle closes within the previous HTF candle's range AND a new HTF
+
+candle has just started
+
+(Sessions Mode) A session closes within the previous session's range AND a new session
+
+has just started
+
+Or Range Can Be Created when the Extreme of Another Range Gets Mitigated and We Have a Pivot low Just Above the Range Low or Pivot High just Below the Range High
+
+
+
+Range Properties:
+
+rangeHigh: The high extreme of the range
+
+rangeLow: The low extreme of the range
+
+highStartTime: The timestamp when the range high was actually formed (found by looping
+
+backwards through bars)
+
+lowStartTime: The timestamp when the range low was actually formed (found by looping
+
+backwards through bars)
+
+highMitigated / lowMitigated: Flags tracking whether each extreme has been broken
+
+isSpecial: Flag indicating if this is a "special range" (see Special Ranges section)
+
+
+
+RANGE MITIGATION
+A range extreme is considered "mitigated" when price interacts with it:
+
+High is mitigated when: high >= rangeHigh (any interaction at or above the level)
+
+Low is mitigated when: low <= rangeLow (any interaction at or below the level)
+
+
+
+Mitigation can happen:
+
+At the moment of range creation (if price is already beyond the extreme)
+
+At any point after range creation when price touches the extreme
+
+
+
+SIGNAL GENERATION
+
+1. Pending Signals:
+When a range extreme is mitigated, a pending signal is created:
+
+a) BEARISH Pending Signal:
+
+- Triggered when: rangeHigh is mitigated
+
+- Confirmation Level: Current pivotLow
+
+- Signal is confirmed when: close < pivotLow
+
+- Stop Loss: Current pivotHigh (at time of confirmation)
+
+- Entry: Short position
+
+
+
+Signal Confirmation
+
+
+
+b) BULLISH Pending Signal:
+
+- Triggered when: rangeLow is mitigated
+
+- Confirmation Level: Current pivotHigh
+
+- Signal is confirmed when: close > pivotHigh
+
+- Stop Loss: Current pivotLow (at time of confirmation)
+
+- Entry: Long position
+
+
+
+IMPORTANT: There is only ever ONE pending bearish signal and ONE pending bullish signal
+at any given time. When a new pending signal is created, it replaces the previous one
+of the same type.
+
+2. Signal Confirmation:
+- Bearish: Confirmed when price closes below the pivot low (confirmation level)
+- Bullish: Confirmed when price closes above the pivot high (confirmation level)
+- Upon confirmation, a trade is entered immediately
+- The confirmation line is drawn from the pivot bar to the confirmation bar
+
+TRADE EXECUTION
+When a signal is confirmed:
+
+1. Position Management:
+
+- Any existing position in the opposite direction is closed first
+
+- Then the new position is entered
+
+
+
+2. Stop Loss:
+
+- Bearish (Short): Stop at pivotHigh
+
+- Bullish (Long): Stop at pivotLow
+
+
+
+
+3. Take Profit:
+- Calculated using Risk:Reward Ratio (default 2:1)
+
+- Risk = Distance from entry to stop loss
+
+- Target = Entry ± (Risk × R:R Ratio)
+
+- Can be disabled with "Stop Loss Only" toggle
+
+
+
+4. Trade Comments:
+
+- "Range Bear" for short trades
+
+- "Range Bull" for long trades
+
+
+
+SPECIAL RANGES
+Special ranges are created when:
+
+- A range high is mitigated AND the current pivotHigh is below the range high
+
+- A range low is mitigated AND the current pivotLow is above the range low
+
+
+
+
+In these cases:
+- The pivot value is stored in an array (storedPivotHighs or storedPivotLows)
+- A "special range" is created with only ONE extreme:
+* If pivotHigh < rangeHigh: Creates a range with rangeHigh = pivotLow, rangeLow = na
+* If pivotLow > rangeLow: Creates a range with rangeLow = pivotHigh, rangeHigh = na
+- Special ranges can generate signals just like normal ranges
+- If a special range is mitigated on the creation bar or the next bar, it is removed
+entirely without generating signals (prevents false signals)
+Special Ranges
+
+
+
+REVERSE ON STOP LOSS
+When enabled, if a stop loss is hit, the strategy automatically opens a trade in the
+opposite direction:
+
+1. Long Stop Loss Hit:
+
+
+- Detects when: position_size[1] > 0 AND position_size <= 0 AND low <= longStopLoss
+
+- Action: Opens a SHORT position
+
+- Stop Loss: Current pivotHigh
+
+- Trade Comment: "Reverse on Stop"
+
+
+
+2. Short Stop Loss Hit:
+
+- Detects when: position_size[1] < 0 AND position_size >= 0 AND high >= shortStopLoss
+
+- Action: Opens a LONG position
+
+- Stop Loss: Current pivotLow
+
+- Trade Comment: "Reverse on Stop"
+
+
+
+The reverse trade uses the same R:R ratio and respects the "Stop Loss Only" setting.
+
+VISUAL ELEMENTS
+
+1. Range Lines:
+
+- Drawn from the time when the extreme was formed to the mitigation point (or current
+
+time if not mitigated)
+
+- High lines: Blue (or mitigated color if mitigated)
+
+- Low lines: Red (or mitigated color if mitigated)
+
+- Style: SOLID
+
+- Width: 1
+
+
+
+2. Confirmation Lines:
+
+- Drawn when a signal is confirmed
+
+- Extends from the pivot bar to the confirmation bar
+
+- Bearish: Red, solid line
+
+- Bullish: Green, solid line
+
+- Width: 1
+
+- Can be toggled on/off
+
+
+
+STRATEGY SETTINGS
+
+1. Range Detection Mode:
+
+- HTF: Uses higher timeframe candles
+
+- Sessions: Uses trading session boundaries
+
+
+2. Auto HTF:
+
+- Automatically selects HTF based on current chart timeframe
+
+- Can be disabled to use manual HTF selection
+
+
+3. Risk:Reward Ratio:
+
+- Default: 2.0 (2:1)
+
+- Minimum: 0.5
+
+- Step: 0.5
+
+
+
+4. Stop Loss Only:
+
+- When enabled: Trades only have stop loss (no take profit)
+
+- Trades close on stop loss or when opposite signal confirms
+
+
+
+5. Reverse on Stop Loss:
+
+- When enabled: Hitting a stop loss opens opposite trade with stop at opposing pivot
+
+
+
+6. Max Ranges to Display:
+
+- Limits the number of ranges kept in memory
+
+- Oldest ranges are purged when limit is exceeded
+
+
+
+KEY FEATURES
+1. Dynamic Pivot Tracking:
+
+- Pivots update on every candle color change
+
+- Always maintains one high and one low pivot
+
+
+
+2. Range Lifecycle:
+
+- Ranges are created when price closes within previous range
+
+- Ranges are tracked until mitigated
+
+- Mitigation creates pending signals
+
+- Signals are confirmed by pivot levels
+
+
+
+3. Signal Priority:
+
+- Only one pending signal of each type at a time
+
+- New signals replace old ones
+
+- Confirmation happens on close of bar
+
+
+
+4. Position Management:
+
+- Closes opposite positions before entering new trades
+
+- Tracks stop loss levels for reverse functionality
+
+- Respects pyramiding = 1 (only one position per direction)
+
+
+
+5. Time-Based Drawing:
+
+- Uses time coordinates instead of bar indices for line drawing
+
+- Prevents "too far from current bar" errors
+
+- Lines can extend to any historical point
+
+
+
+
+USAGE NOTES
+
+- Best suited for trending and ranging markets
+
+- Works on any timeframe, but HTF mode adapts automatically
+
+- Sessions mode is ideal for intraday trading
+
+- Pivot detection requires clear candle color changes
+
+- Range detection requires price to close within previous range
+
+- Signals are generated on bar close, not intra-bar
+
+
+
+The strategy combines range identification, pivot tracking, and signal confirmation to
+create a systematic approach to trading breakouts and reversals based on price structure, past performance does not in any way predict future performance
+
+
+Jan 3
+Release Notes
+- Special Ranges Toggle
+- Confirmation Limit for CISD
+- Session Input

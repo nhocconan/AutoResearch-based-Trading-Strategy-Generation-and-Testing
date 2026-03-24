@@ -1,0 +1,29 @@
+//@version=2
+strategy("13 самураев", overlay=true, initial_capital=500000,default_qty_value=1060)
+PB=input(defval=1.6 , title="Порговое значение силы сигнала", minval=0.1, maxval=5, type=float)
+PROFIT=input(defval=2.6, title="Профит%", minval=0.1, maxval=10, type=float)
+PSMA=input(defval=5,title="Период SMA", minval=3,maxval=200)
+PCCI=input(defval=14, title="Период CCI", minval=5 , maxval=40)
+PPCL=input(defval=20, title="Период PC", minval=3, maxval=40)
+//Сигналы индикаторов на вход
+SSMA=close[0]>sma(close,PSMA)[0] ? 1.6 :0
+SCCI=(cci(close,PCCI)[1]<(-100) and cci(close,PCCI)[0]>(-100)) or (cci(close,PCCI)[2]<(-100) and cci(close,PCCI)[1]>(-100)) or (cci(close,PCCI)[3]<(-100) and cci(close,PCCI)[2]>(-100)) ? 1.6 :0
+CPCL=lowest(low, PPCL)[1]==low[1] and lowest(low, PPCL)[0]<low[0] ? 1.6 :0
+//Вычисление балла силы сигнала
+SSIGN=SSMA+SCCI+CPCL
+longCondition = SSIGN>PB
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+BALANCE=strategy.initial_capital+strategy.netprofit
+PROFIT_BALANCE=BALANCE*(PROFIT/100)
+strategy.close("Long",when=strategy.openprofit<(0-PROFIT_BALANCE))
+strategy.close("Long",when=strategy.openprofit>(PROFIT_BALANCE*3))
+plot(lowest(low,PPCL), color=yellow, linewidth=3)
+
+View in Pine Editor・22 lines
+Use on chart
+8
+1
+3 766
+It works with rebound from lowest and the bottom level (-100) CCI.

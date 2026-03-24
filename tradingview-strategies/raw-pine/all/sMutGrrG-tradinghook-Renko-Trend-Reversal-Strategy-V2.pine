@@ -1,0 +1,117 @@
+//@version=5
+strategy(title='[tradinghook] - Renko Trend Reversal Strategy', shorttitle='[tradinghook] - Renko TRS', overlay=true ,initial_capital = 100, commission_value = 0.05, default_qty_value = 5)
+
+// INPUTS
+renkoATRLength = input.int(10, minval=1, title='ATR Length')
+stopLossPct = input.float(3, title='Stop Loss Percentage', step=0.1)
+takeProfitPct = input.float(20, title='Take Profit Percentage', step=0.1)
+startDate = input.time(timestamp("01 July 2023 00:00"), title="Start Date")
+endDate = input.time(timestamp("31 Dec 2025 23:59"), title="End Date")
+enableShorts = input.bool(true, title="Enable Shorts")
+enableSignals = input.bool(true, title="Enable Buy/Sell Signals")
+
+var float stopLossPrice = na
+var float takeProfitPrice = na
+
+atr = ta.atr(renkoATRLength)
+
+// thanks to https://www.tradingview.com/script/2vKhpfVH-Renko-XZ/ for manually calculating renkoClose and renkoOpen in order to remove repaint
+getRenkoClose() =>
+    p1 = 0.0
+    p1 := close > nz(p1[1]) + atr ? nz(p1[1]) + atr : close < nz(p1[1]) - atr ? nz(p1[1]) - atr : nz(p1[1])
+    p1
+
+calculateRenkoOpen() =>
+    p3 = 0.0
+    p3 := open > nz(p3[1]) + atr ? nz(p3[1]) + atr : open < nz(p3[1]) - atr ? nz(p3[1]) - atr : nz(p3[1])
+    p3
+
+getRenkoOpen() =>
+    open_v = 0.0
+    Br_2 = calculateRenkoOpen()
+    open_v := calculateRenkoOpen() != calculateRenkoOpen()[1] ? Br_2[1] : nz(open_v[1])
+    open_v
+    
+// Calculate Renko open and close values
+renkoOpen = getRenkoOpen()
+renkoClose = getRenkoClose()
+
+// PLOTS
+plotOpen = plot(renkoOpen, title="Renko Open", color=color.new(color.green, 100), style=plot.style_linebr)
+plotClose = plot(renkoClose, title="Renko Close", color=color.new(color.red, 100), style=plot.style_linebr)
+fill(plotOpen, plotClose, title="Area Fill", color=renkoClose < renkoOpen ? color.new(color.red, 70) : color.new(color.green, 70))
+
+// SIGNALS
+if (enableSignals) 
+    isWithinTimeRange = time >= startDate and time <= endDate
+    buySignal = ta.crossunder(renkoOpen, renkoClose) and isWithinTimeRange
+    sellSignal = ta.crossover(renkoOpen, renkoClose) and isWithinTimeRange and enableShorts
+
+    if (buySignal)
+        stopLossPrice := renkoOpen * (1 - stopLossPct / 100)
+        takeProfitPrice := renkoOpen * (1 + takeProfitPct / 100)
+        strategy.entry("Long", strategy.long)
+        strategy.exit("ExitLong", "Long", stop = stopLossPrice, limit = takeProfitPrice, comment="SL: " + str.tostring(stopLossPrice) + ", TP: " + str.tostring(takeProfitPrice))
+    if (sellSignal)
+        stopLossPrice := renkoOpen * (1 + stopLossPct / 100)
+        takeProfitPrice := renkoOpen * (1 - takeProfitPct / 100)
+        strategy.entry("Short", strategy.short)
+        strategy.exit("ExitShort", "Short", stop = stopLossPrice, limit = takeProfitPrice, comment="SL: " + str.tostring(stopLossPrice) + ", TP: " + str.tostring(takeProfitPrice))
+
+View in Pine Editor・59 lines
+Use on chart
+2
+6
+1
+5
+8 536
+Aug 6, 2023
+Title: Renko Trend Reversal Strategy
+Short Title: - Renko TRS
+
+> Special thanks to
+for manually calculating `renkoClose` and `renkoOpen` values in order to remove the infamous repaint issue
+
+Description:
+
+The Renko Trend Reversal Strategy ( - Renko TRS) is a powerful and original trading approach designed to identify trend reversals in financial markets using Renko charts. Renko charts differ from traditional time-based charts, as they focus solely on price movements and ignore time, resulting in a clearer representation of market trends. This strategy leverages Renko charts in conjunction with the Average True Range (ATR) to capture trend reversals with high precision and effectiveness.
+
+Key Concepts:
+
+Renko Charts: Renko charts are unique chart types that only plot price movements beyond a predefined brick size, ignoring time and noise. By doing so, they provide a more straightforward depiction of market trends, eliminating insignificant price fluctuations and making it easier to spot trend reversals.
+
+Average True Range (ATR): The strategy utilizes the ATR indicator, which measures market volatility and provides valuable insights into potential price movements. By setting the brick size of the Renko chart based on the ATR, the strategy adapts to changing market conditions, ensuring optimal performance across various instruments and timeframes.
+
+How it Works:
+
+The Renko Trend Reversal Strategy is designed to identify trend reversal points and generate buy or sell signals based on the following principles:
+
+Renko Brick Generation: The strategy calculates the ATR over a user-defined period (ATR Length) and utilizes this value to determine the size of Renko bricks. Larger ATR values result in bigger bricks, capturing higher market volatility, while smaller ATR values create smaller bricks for calmer market conditions.
+
+Buy and Sell Signals: The strategy generates buy signals when the Renko chart's open price crosses below the close price, indicating a potential bullish trend reversal. Conversely, sell signals are generated when the open price crosses above the close price, suggesting a bearish trend reversal. These signals help traders identify potential entry points to capitalize on market movements.
+
+Stop Loss and Take Profit Management: To manage risk and protect profits, the strategy incorporates dynamic stop-loss and take-profit levels. The stop-loss level is calculated as a percentage of the Renko open price, ensuring a fixed risk amount for each trade. Similarly, the take-profit level is set as a percentage of the Renko open price to secure potential gains.
+
+How to Use:
+
+Inputs: Before using the strategy, traders can customize several parameters to suit their trading preferences. These inputs include the ATR Length, Stop Loss Percentage, Take Profit Percentage, Start Date, and End Date. Adjusting these settings allows users to optimize the strategy for different market conditions and risk tolerances.
+
+Chart Setup: Apply the - Renko TRS script to your desired financial instrument and timeframe on TradingView. The Renko chart will dynamically adjust its brick size based on the ATR Length parameter.
+
+Buy and Sell Signals: The strategy will generate green "Buy" labels below bullish reversal points and red "Sell" labels above bearish reversal points on the Renko chart. These labels indicate potential entry points for long and short trades, respectively.
+
+Risk Management: The strategy automatically calculates stop-loss and take-profit levels based on the user-defined percentages. Traders can ensure proper risk management by using these levels to protect their capital and secure profits.
+
+Backtesting and Optimization: Before implementing the strategy live, traders are encouraged to backtest it on historical data to assess its performance across various market conditions. Adjust the input parameters through optimization to find the most suitable settings for specific instruments and timeframes.
+
+Conclusion:
+
+The - Renko Trend Reversal Strategy is a unique and versatile tool for traders looking to identify trend reversals with greater accuracy. By combining Renko charts and the Average True Range (ATR) indicator, this strategy adapts to market dynamics and provides clear entry and exit signals. Traders can harness the power of Renko charts while effectively managing risk through stop-loss and take-profit levels. Before using the strategy in live trading, backtesting and optimization will help traders fine-tune the parameters for optimal performance. Start exploring trend reversals with the - Renko TRS and take your trading to the next level.
+
+(Note: This description is for illustrative purposes only and does not constitute financial advice. Traders are advised to thoroughly test the strategy and exercise sound risk management practices when trading in real markets.)
+Aug 6, 2023
+Release Notes
+Improve readability, and enhance the plotting so that it's easier to spot the trend.
+Aug 6, 2023
+Release Notes
+update the chart to show new area based plotting.

@@ -1,0 +1,66 @@
+//@version=6
+strategy('Turn of the Month Strategy on Steroids', overlay = true, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true)
+
+in_start_time = input.time(timestamp('1 Jan 2014'), title = 'Start Time', group = 'Time Settings')
+in_end_time = input.time(timestamp('1 Jan 2099'), title = 'End Time', group = 'Time Settings')
+in_window = time >= in_start_time and time <= in_end_time
+
+dayOfMonth = input.int(defval=25)
+
+longCondition = dayofmonth>=dayOfMonth and close < close[1] and close[1] < close[2]
+exitCondition = ta.rsi(close, 2) > 65
+
+if in_window and longCondition and strategy.position_size == 0
+    strategy.entry('long', strategy.long)
+if exitCondition
+    strategy.close_all()
+
+View in Pine Editor・16 lines
+Use on chart
+4
+1
+1 547
+█ STRATEGY DESCRIPTION
+The "Turn of the Month Strategy on Steroids" is a seasonal mean-reversion strategy designed to capitalize on price movements around the end of the month. It enters a long position when specific conditions are met and exits when the Relative Strength Index (RSI) indicates overbought conditions. This strategy is optimized for use on daily or higher timeframes.
+
+█ WHAT IS THE TURN OF THE MONTH EFFECT?
+The Turn of the Month effect refers to the observed tendency of stock prices to rise around the end of the month. This strategy leverages this phenomenon by entering long positions when the price shows signs of a reversal during this period.
+
+█ SIGNAL GENERATION
+1. LONG ENTRY
+A Buy Signal is triggered when:
+
+The current day of the month is greater than or equal to the specified `dayOfMonth` threshold (default is 25).
+
+The close price is lower than the previous day's close (`close < close[1]`).
+
+The previous day's close is also lower than the close two days ago (`close[1] < close[2]`).
+
+The signal occurs within the specified time window (between `Start Time` and `End Time`).
+
+There is no existing open position (`strategy.position_size == 0`).
+
+
+
+2. EXIT CONDITION
+
+A Sell Signal is generated when the 2-period RSI exceeds 65, indicating overbought conditions. This prompts the strategy to exit the position.
+
+
+
+█ ADDITIONAL SETTINGS
+
+Day of Month: The day of the month threshold for triggering a Buy Signal. Default is 25.
+
+Start Time and End Time: The time window during which the strategy is allowed to execute trades.
+
+
+
+█ PERFORMANCE OVERVIEW
+
+This strategy is designed to exploit seasonal price patterns around the end of the month.
+
+It performs best in markets where the Turn of the Month effect is pronounced.
+
+Backtesting results should be analyzed to optimize the `dayOfMonth` threshold and RSI parameters for specific instruments.
+

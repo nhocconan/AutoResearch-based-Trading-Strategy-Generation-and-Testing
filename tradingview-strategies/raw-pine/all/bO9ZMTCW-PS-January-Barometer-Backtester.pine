@@ -1,0 +1,87 @@
+//@version=5
+strategy("PS January Barometer Backtester", shorttitle = "PS JBB v1.0", overlay=true)
+
+// User options for additional criteria
+useSantaClausRally = input.bool(false, "Use Santa Claus Rally")
+useFirstFiveDays = input.bool(false, "Use First Five Days Indicator")
+
+// Function to detect if a new year has started
+isNewYear() =>
+    year != year[1]
+
+// Check if the current timeframe is monthly
+if timeframe.ismonthly
+    // Initialization of variables at the start of each year
+    var float januaryHigh = na
+    var float entryPrice = na
+    var float exitPrice = na
+    var bool tradeInitiated = false
+    var float firstFiveDaysReturn = na
+    var float santaClausRallyReturn = na
+
+    // Logic for additional criteria
+    if isNewYear()
+        januaryHigh := high
+        tradeInitiated := false
+        // Reset additional indicators
+        firstFiveDaysReturn := na
+        santaClausRallyReturn := na
+
+    // First Five Days Indicator Logic
+    if useFirstFiveDays and month == 1 and dayofmonth <= 5
+        // Calculate return for first five days
+        firstFiveDaysReturn := (close - open) / open
+
+    // Santa Claus Rally Logic
+    if useSantaClausRally and month == 12 and dayofmonth >= 25 or (month == 1 and dayofmonth <= 2)
+        // Calculate return for Santa Claus Rally period
+        santaClausRallyReturn := (close - open) / open
+
+    // Trade Entry Logic Modification
+    if not tradeInitiated and month >= 2 and month <= 6 and close > januaryHigh and (useFirstFiveDays ? firstFiveDaysReturn > 0 : true) and (useSantaClausRally ? santaClausRallyReturn > 0 : true)
+        entryPrice := close
+        tradeInitiated := true
+
+    // Logic for trade exit at the end of the year
+    if month == 12
+        exitPrice := close
+        tradeInitiated := false
+        // Calculating trade metrics
+        tradeReturn = (exitPrice - entryPrice) / entryPrice
+        strategy.close_all(when=tradeInitiated)
+
+    // Running the strategy
+    strategy.entry("Long", strategy.long, when=tradeInitiated)
+    strategy.close("Long", when=month == 12)
+
+else
+    if barstate.islast
+        // Display a warning if not on a monthly timeframe
+        label.new(bar_index, high, "This strategy only works on a monthly timeframe", style = label.style_label_down, color=color.red)
+
+View in Pine Editor・63 lines
+Use on chart
+1
+3
+6
+3 361
+PS January Barometer Backtester (PS JBB)
+
+The PS January Barometer Backtester (PS JBB) is a simple strategy designed to test the "January Effect" hypothesis in financial markets. This effect theorizes that stock market performance in January can predict the trend for the rest of the year. The script operates on a monthly timeframe, focusing on capturing and analyzing the price movements in January and their subsequent influence on the market until the end of each year.
+
+User Input:
+
+January Trifecta Selectors
+These are user-selectable options allowing traders to incorporate additional criteria into their market analysis.
+
+The Santa Claus Rally refers to a stock market increase typically seen in the last week of December through the first two trading days in January.
+The First Five Days Indicator assesses market performance during the initial five days of the year.
+
+
+Script Operation:
+
+The script automatically detects the start of each year, tracks January's high, and signals entry and exit points for trades based on the strategy's logic. It's an excellent tool for traders and investors looking to explore the January Effect's validity and its potential impact on their trading decisions.
+
+In essence, the "PS January Barometer Backtester" is designed to exploit specific seasonal market trends, particularly focusing on the early part of the year, by analyzing and acting upon defined market movements. This strategy is ideal for traders who focus on yearly cyclical patterns and seek to incorporate historical trends into their trading decisions.
+
+Note: This script is intended for educational and research purposes and should not be construed as financial advice. Always conduct your own due diligence before making trading/investment decisions.

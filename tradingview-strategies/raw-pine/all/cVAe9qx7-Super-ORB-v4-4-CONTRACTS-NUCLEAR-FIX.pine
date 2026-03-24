@@ -1,0 +1,65 @@
+//@version=5
+strategy("Super ORB v4 – 4 CONTRACTS – NUCLEAR FIX", overlay=true, default_qty_type=strategy.fixed, default_qty_value=4, commission_value=0, initial_capital=50000, calc_on_every_tick=true, calc_on_order_fills=true)
+
+// ——————— Regular hours only ———————
+in_session = time(timeframe.period, "0930-1600", "America/New_York")
+avoid_news = input.bool(false, "Avoid News Today")
+
+// ——————— 15-min ORB ———————
+is_new_day = ta.change(time("D"))
+var float orb_high = na
+var float orb_low  = na
+var int   orb_bar  = na
+
+if is_new_day and not avoid_news
+    orb_high := high
+    orb_low  := low
+    orb_bar  := bar_index
+    for i = 1 to 2
+        orb_high := math.max(orb_high, high[i])
+        orb_low  := math.min(orb_low,  low[i])
+
+if not na(orb_high) and bar_index >= orb_bar + 3
+    box.new(orb_bar, orb_high, bar_index + 20, orb_low, border_color=color.blue, bgcolor=color.new(color.blue,92))
+
+// ——————— Indicators ———————
+ema21  = ta.ema(close, 21)
+atr14  = ta.atr(14)
+stochK = ta.stoch(close, high, low, 14)
+rsi2   = ta.rsi(close, 2)
+
+plot(ema21, "21 EMA", color.orange, 2)
+plot(orb_high + 1.5*atr14, "Upper Band", color.green)
+plot(orb_low  - 1.5*atr14, "Lower Band", color.red)
+
+// ——————— Setups ———————
+long_setup  = high > orb_high and close > orb_high and low <= ema21 and close > ema21 and stochK < 20 and rsi2 < 30 and in_session and not avoid_news
+short_setup = low < orb_low and close < orb_low and high >= ema21 and close < ema21 and stochK > 80 and rsi2 > 70 and in_session and not avoid_news
+
+// ——————— NUCLEAR 4-CONTRACT ENTRIES (no qty_percent, no cache risk) ———————
+if long_setup and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=4)
+    strategy.exit("Long TP",  "Long", qty=2, limit=close + 150)   // $300 on first 2
+    strategy.exit("Long Rest","Long", qty=2, limit=close + 300)   // runner on last 2
+    strategy.exit("Long Stop","Long", qty=4, stop=orb_low - atr14)
+
+if short_setup and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=4)
+    strategy.exit("Short TP",  "Short", qty=2, limit=close - 150)
+    strategy.exit("Short Rest","Short", qty=2, limit=close - 300)
+    strategy.exit("Short Stop","Short", qty=4, stop=orb_high + atr14)
+
+// ——————— Visuals & Alerts ———————
+plotshape(long_setup,  "Long",  shape.triangleup,   location.belowbar, color.lime, size=size.large)
+plotshape(short_setup, "Short", shape.triangledown, location.abovebar, color.red,  size=size.large)
+bgcolor(long_setup ? color.new(color.lime,80) : short_setup ? color.new(color.red,80) : na)
+
+alertcondition(long_setup,  "LONG $300+", "SUPER ORB LONG – 4 contracts – Target $300+")
+alertcondition(short_setup, "SHORT $300+", "SUPER ORB SHORT – 4 contracts – Target $300+")
+
+View in Pine Editor・58 lines
+Use on chart
+3
+8
+978
+ORB hands off printer, this is to gauge how few trades can happen off the ORB while not trading after hours either. Should be in the 5% a month range 4 contracts, no more than 5 trades a month.

@@ -1,0 +1,48 @@
+//@version=4
+strategy("T3+SMA", overlay=true)
+
+//INPUTS
+smaLength=input(200,"SMA period")
+T3Length=input(7,"T3 Moving average period") 
+source=input(close,"Source")
+smaFilter=input(true,"Use sma only as filter?")
+vFactor = input(0.7,"T3 volume factor (between 0-1)",minval=0, maxval=1)
+exitT3 = input(true,"Use T3 for exit signal")
+
+t3_funct(src, length) =>
+    ema(src, length) * (1+vFactor) - ema(ema(src, length), length) * vFactor
+
+t3 = t3_funct(t3_funct(t3_funct(source, T3Length), T3Length), T3Length)
+
+plot(sma(close, smaLength),"SMA",color.orange)
+plot(t3,"T3",t3 > t3[1] ? color.green : color.red)
+
+longCondition = smaFilter?(t3 > t3[1] and close>sma(close, smaLength)) :crossover(t3, sma(close, smaLength))
+exitlong = t3 < t3[1] 
+
+if (longCondition)
+    strategy.entry("T3 Long", strategy.long)
+strategy.close("T3 Long", when=exitlong and exitT3)    
+
+shortCondition = smaFilter?(t3 < t3[1] and close<sma(close, smaLength)) :crossunder(t3, sma(close, smaLength))
+exitshort = t3 > t3[1] 
+
+if (shortCondition)
+    strategy.entry("T3 Short", strategy.short)
+strategy.close("T3 Short", when=exitshort and exitT3)
+
+View in Pine Editor・38 lines
+Use on chart
+3
+1
+7
+2
+9 941
+This source code is subject to the terms of the Mozilla Public License 2.0 at mozilla.org/MPL/2.0/
+
+© 03.freeman
+
+This strategy is based only on T3 moving average, but uses sma 200 as filter for enter long or short.
+The default settings considers a daily timeframe.
+The strategy is very simple: long if T3 increase, short if T3 decrease.
+Note that if you set volume factor to 0 you will have an exponential moving average, while if you set to 1 you'll get a DEMA.

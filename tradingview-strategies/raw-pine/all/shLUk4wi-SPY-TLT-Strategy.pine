@@ -1,0 +1,119 @@
+//@version=6
+strategy("SPY/TLT Strategy", overlay = false, precision = 4, initial_capital = 1000000, default_qty_value = 100, default_qty_type = strategy.percent_of_equity, process_orders_on_close = true, margin_long = 5, margin_short = 5, calc_on_every_tick = true)
+
+//#region INPUTS SECTION
+// ============================================
+// Time Settings
+// ============================================
+startTimeInput = input.time(timestamp("1 Jan 2014"), "Start Time", group="Time Settings")
+endTimeInput = input.time(timestamp("1 Jan 2099"), "End Time", group="Time Settings")
+isWithinTradingWindow = time >= startTimeInput and time <= endTimeInput
+
+// ============================================
+// TLT Ticker
+// ============================================
+tickerInput = input.string("TLT", "Instrument Symbol", group="Security Settings")
+
+// ============================================
+// SMA Settings
+// ============================================
+smaLengthInput = input.int(20, "SMA Length", minval=1, group="SMA Settings")
+//#endregion
+
+//#region INDICATOR CALCULATIONS
+// ============================================
+// Fetch TLT Data & SMA Calculation
+// ============================================
+tltClose = request.security(tickerInput, timeframe.period, close, lookahead=barmerge.lookahead_off)
+smaValue = ta.sma(tltClose, smaLengthInput)
+//#endregion
+
+//#region TRADING CONDITIONS
+// ============================================
+// Signal Generation
+// ============================================
+longCondition = ta.crossover(tltClose, smaValue) and isWithinTradingWindow
+exitCondition = ta.crossunder(tltClose, smaValue)
+//#endregion
+
+//#region STRATEGY EXECUTION
+// ============================================
+// Order Management
+// ============================================
+if longCondition
+    strategy.entry("Long", strategy.long)
+    
+if exitCondition
+    strategy.close_all()
+//#endregion
+
+//#region PLOTTING
+// ============================================
+// Visualizations
+// ============================================
+plot(tltClose, "TLT Price", color=color.white)
+plot(smaValue, "SMA", color=color.red)
+
+bgcolor(color.new(tltClose>smaValue ? color.green : color.red, 90))
+//#endregion
+
+View in Pine Editor・61 lines
+Use on chart
+1
+1
+3
+2 738
+█ STRATEGY OVERVIEW
+The "SPY/TLT Strategy" is a trend-following crossover strategy designed to trade the relationship between TLT and its Simple Moving Average (SMA). The default configuration uses TLT (iShares 20+ Year Treasury Bond ETF) with a 20-period SMA, entering long positions on bullish crossovers and exiting on bearish crossunders. **This strategy is NOT optimized and performs best in trending markets.**
+
+█ KEY FEATURES
+
+SMA Crossover System: Uses price/SMA relationship for signal generation (Default: 20-period)
+
+Dynamic Time Window: Configurable backtesting period (Default: 2014-2099)
+
+Equity-Based Position Sizing: Default 100% equity allocation per trade
+
+Real-Time Visual Feedback: Price/SMA plot with trend-state background coloring
+
+Event-Driven Execution: Processes orders at bar close for accurate backtesting
+
+
+
+█ SIGNAL GENERATION
+1. LONG ENTRY CONDITION
+
+TLT closing price crosses ABOVE SMA
+
+Occurs within specified time window
+
+Generates market order at next bar open
+
+
+
+2. EXIT CONDITION
+
+TLT closing price crosses BELOW SMA
+
+Closes all open positions immediately
+
+
+
+█ ADDITIONAL SETTINGS
+
+SMA Period: Simple Moving Average length (Default: 20)
+
+Start Time and End Time: The time window for trade execution (Default: 1 Jan 2014 - 1 Jan 2099)
+
+Security Symbol: Ticker for analysis (Default: TLT)
+
+
+
+█ PERFORMANCE OVERVIEW
+
+Ideal Market Conditions: Strong trending environments
+
+Potential Drawbacks: Whipsaws in range-bound markets
+
+Backtesting results should be analyzed to optimize the MA Period and EMA Filter settings for specific instruments
+

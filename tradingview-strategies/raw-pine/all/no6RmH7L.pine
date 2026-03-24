@@ -1,0 +1,147 @@
+//@version=5
+strategy("ORB Breakout Strategy (5min) - Only America Open, One Trade/Day, RR 2:1", overlay=true, 
+     initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, 
+     commission_type=strategy.commission.percent, commission_value=0)
+
+// ================== INPUTS ==================
+sessionString   = input.session("0930-1500", "American Session")
+ptsOffset       = input.float(5.0, "Stop Offset (Points)") 
+maxStopLossPts  = input.float(50.0, "Max Stop Loss (Points)") 
+rrRatio         = input.float(2.0, "Risk/Reward Ratio") 
+orbSession      = input.session("0930-1550", "ORB Session") 
+orbTimeframe    = input.timeframe("5", "ORB Candle Timeframe", options=["1","5","10","15","30","60"])
+ReversePos      = input.bool(false, "Enable Reverse Position")
+
+// ================== SESSION CONTROL ==================
+// Czy aktualna świeca jest w sesji amerykańskiej
+inSession = not na(time(orbTimeframe, orbSession, "America/New_York"))
+
+// Nowy dzień – reset parametrów
+newDay = ta.change(time("D")) != 0
+
+// Zmienne stanu
+var float orbHigh   = na
+var float orbLow    = na
+var bool  orbSet    = false
+var int   tradesToday = 0
+var bool  WasLong     = false
+var bool  WasShort    = false
+var bool  ReversedToday = false
+var bool  LastIsLoss  = false 
+var float lastEntryPrice = na
+var float entryPrice = close
+// Reset na nowy dzień
+if newDay
+    tradesToday := 0
+    orbSet := false
+    orbHigh := na
+    orbLow := na
+    WasLong := false
+    WasShort := false
+    ReversedToday := false
+    LastIsLoss := false
+    lastEntryPrice := na
+
+// Ustawienie ORB na pierwszej świecy w sesji
+if inSession and not inSession[1] and not orbSet
+    orbHigh := high
+    orbLow := low
+    orbSet := true
+
+// ================== SPRAWDZANIE OSTATNIEJ TRANSAKCJI ==================
+if strategy.closedtrades > 0 and strategy.closedtrades != strategy.closedtrades[1]
+    lastClosedTrade = strategy.closedtrades - 1
+    lastProfit = strategy.closedtrades.profit(lastClosedTrade)
+    LastIsLoss := lastProfit < 0
+
+// ================== WARUNKI TRADE ==================
+canTrade = orbSet and inSession and tradesToday < 1 and strategy.position_size == 0
+
+// Warunki wejścia
+longCondition = canTrade and close > orbHigh and not WasLong
+shortCondition = canTrade and close < orbLow and not WasShort
+
+// ================== LOGIKA LONG ==================
+if longCondition
+    entryPrice := close
+    lastEntryPrice := entryPrice
+    
+    // Obliczanie stop loss
+    stopPriceL = math.max(orbLow - ptsOffset, entryPrice - maxStopLossPts)
+    slPointsL = entryPrice - stopPriceL
+    targetPriceL = entryPrice + rrRatio * slPointsL
+    
+    strategy.entry("Long", strategy.long, comment="ORB Long")
+    strategy.exit("ExitLong", from_entry="Long", stop=stopPriceL, limit=targetPriceL)
+    
+    tradesToday += 1
+    WasLong := true
+
+// ================== LOGIKA SHORT ==================
+if shortCondition
+    entryPrice := close
+    lastEntryPrice := entryPrice
+    
+    // Obliczanie stop loss
+    stopPriceS = math.min(orbHigh + ptsOffset, entryPrice + maxStopLossPts)
+    slPointsS = stopPriceS - entryPrice
+    targetPriceS = entryPrice - rrRatio * slPointsS
+    
+    strategy.entry("Short", strategy.short, comment="ORB Short")
+    strategy.exit("ExitShort", from_entry="Short", stop=stopPriceS, limit=targetPriceS)
+    
+    tradesToday += 1
+    WasShort := true
+
+// ================= REVERSE TRADING =================
+canReverse = ReversePos and inSession and not ReversedToday and tradesToday < 2 and LastIsLoss and strategy.position_size == 0
+
+if canReverse and WasLong and not na(lastEntryPrice)
+    stopPriceRev = close + maxStopLossPts
+    targetPriceRev = close - rrRatio * maxStopLossPts
+    
+    strategy.entry("Reverse Short", strategy.short, comment="Reversed ORB Short")
+    strategy.exit("ExitReversedShort", from_entry="Reverse Short", stop=stopPriceRev, limit=targetPriceRev)
+    
+    tradesToday += 1
+    ReversedToday := true
+
+if canReverse and WasShort and not na(lastEntryPrice)
+    stopPriceRev = close - maxStopLossPts
+    targetPriceRev = close + rrRatio * maxStopLossPts
+    
+    strategy.entry("Reverse Long", strategy.long, comment="Reversed ORB Long")
+    strategy.exit("ExitReversedLong", from_entry="Reverse Long", stop=stopPriceRev, limit=targetPriceRev)
+    
+    tradesToday += 1
+    ReversedToday := true
+
+// ================== OUT OF SESSION CONTROL ==================
+if not inSession and strategy.position_size != 0
+    strategy.close_all()
+
+// ================== PLOTS ==================
+plot(orbSet ? orbHigh : na, title="ORB High", color=color.green, linewidth=2, style=plot.style_linebr)
+plot(orbSet ? orbLow : na, title="ORB Low", color=color.red, linewidth=2, style=plot.style_linebr)
+
+// Dodatkowe informacje na wykresie
+plotchar(longCondition, "Long Signal", "▲", location.belowbar, color.green, size=size.small)
+plotchar(shortCondition, "Short Signal", "▼", location.abovebar, color.red, size=size.small)
+
+View in Pine Editor・129 lines
+Use on chart
+1
+1
+3
+3 232
+ORB 1,5,15,30,60min with reversals, its my first strategy Im not 100% sure it works well. Im not a programmer nor a profitable trader.
+Max stoploss in points sets maximum fixed stoploss
+Stop offset sets additional points below/above signal bar
+RR Ratio is pretty self explanatory, it sets target based on stoploss
+American session is time when positions can be opened
+ORB SessionIs basically almost the same but when the time runs it closes all positions\
+ORB candle timeframe is the time which orb is measured
+Enable reverse position enables reversing positions on stoploss of first position, stoploss of reverse position is based on max stoploss and target is set by RR times max stoploss
+Im sharing this to share this with my friends, discuss some things and dont have to test it manually.
+I made it all myself and with help of AI
+Sorry for bad english

@@ -1,0 +1,76 @@
+//@version=5
+strategy("Hourly BIAS on BTCUSDT","Green Eagle",
+         overlay=true, 
+         initial_capital=10000,
+         default_qty_value=10,
+         default_qty_type=strategy.percent_of_equity, 
+         commission_type=strategy.commission.percent,
+         commission_value=0.075, 
+         slippage = 1, 
+         backtest_fill_limits_assumption = 1)
+
+// Day Filter
+day_filter = dayofweek == 1 or dayofweek == 2 or dayofweek == 4 or dayofweek == 6 ? true : false
+
+// Volatility Filter
+volatility_filter = ta.atr(2) <= ta.atr(14) ? true : false 
+
+// Entry and Close
+if hour==14 and day_filter and volatility_filter
+    strategy.entry("EL", strategy.long)
+if hour == 0
+    strategy.close("EL")
+
+View in Pine Editor・25 lines
+Use on chart
+2
+5
+9
+1
+12 572
+Jan 31, 2022
+Name: Hourly Bias on BTC in Bullish USA Session
+
+Category: Hourly Bias
+
+Operating mode: Spot, only long
+
+Trades duration: Intraday, 11 bars
+
+Timeframe: 1H
+
+Suggested usage: When the market is compressed, USA session has a bullish bias.
+
+Entry: enter Long at 15:00 on specific days of the week. There is a volatility filter based on ATR which identifies compression.
+
+Exit: exit at a pre-defined time at 01:00
+
+Usage:
+⁃ It can be useful to use alerts or webhooks to automate this strategy.
+⁃ This is a core system that can be improved in different ways (e.g. Stop-loss, take-profit, position sizing) or studying more the behaviour in the specific days of the week or short when is red.
+
+Configuration:
+- N/A
+
+Backtesting
+⁃ Exchange: BINANCE
+⁃ Pair: BTCUSDT
+⁃ Timeframe: 1H
+⁃ Fee 0.075%
+⁃ Slippage 2
+- Start : 2019-01-06
+
+We decided to release this free BTC strategy.
+How you or we can improve? Source code is open so share your ideas!
+Mar 6, 2023
+Release Notes
+Backtesting updated:
+⁃ Exchange: BINANCE
+⁃ Pair: ETHUSDT
+⁃ Timeframe: 1H
+⁃ Fee: 0.075%
+⁃ Slippage: 1
+- Initial Capital: 10000 USDT
+- Position sizing: 10% of Equity
+
+Updated code removing when

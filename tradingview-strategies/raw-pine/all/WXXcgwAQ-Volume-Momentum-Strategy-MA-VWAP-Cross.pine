@@ -1,0 +1,241 @@
+//@version=6
+strategy("Volume Momentum Strategy [MA/VWAP Cross]", overlay=true, initial_capital=50000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0, margin_long=0, margin_short=0, calc_on_order_fills=false, calc_on_every_tick=false)
+
+// ==========================================
+// --- INDICATOR INPUTS (From Original Script) ---
+// ==========================================
+group_cci   = "Volume CCI Settings"
+cciLength   = input.int(20, "CCI Length", group = group_cci)
+cciThresh   = input.int(100, "CCI Spike Threshold", group = group_cci)
+
+group_stoch = "Volume Stochastic Settings"
+stochLength = input.int(14, "Stoch Length", group = group_stoch)
+stochThresh = input.int(80, "Stoch Threshold", group = group_stoch)
+
+group_ma    = "Moving Average Settings"
+maType      = input.string("SMA", "MA Type", options = ["SMA", "EMA", "SMMA (RMA)", "WMA", "HULL"], group = group_ma)
+maLength    = input.int(50, "MA Length", minval = 1, group = group_ma)
+maSource    = input.source(close, "MA Source", group = group_ma)
+
+group_vwap  = "VWAP Settings"
+vwapSource  = input.source(hlc3, "VWAP Source", group = group_vwap, tooltip = "Standard Formula uses HLC3. Session based.")
+
+// ==========================================
+// --- STRATEGY INPUTS (From Template) ---
+// ==========================================
+
+// Time Controls
+time_group = " ═══════════════  TIME CONTROLS  ═══════════════ "
+trading_start_time = input.time(timestamp("1 Jan 2020 09:30"), title="Start Trading Time", group=time_group)
+trading_stop_time = input.time(timestamp("1 Jan 2020 15:30"), title="Stop Trading Time", group=time_group)
+close_all_time = input.time(timestamp("1 Jan 2020 15:45"), title="Close All Positions Time", group=time_group)
+
+// Trade Direction
+direction_group = " ═══════════════  TRADE DIRECTION  ═══════════════ "
+trade_direction = input.string("Both", title="Trade Direction", options=["Long", "Short", "Both"], group=direction_group)
+
+// Strategy Settings
+strategy_group = " ═══════════════  STRATEGY SETTINGS  ═══════════════ "
+enable_stop_loss = input.bool(true, title="Enable Stop Loss", group=strategy_group)
+sl_type = input.string("Percentage", title="Stop Loss Type", options=["Percentage", "Dollar Amount"], group=strategy_group)
+stop_loss_percent = input.float(2.0, title="Stop Loss %", minval=0.1, maxval=10.0, step=0.1, group=strategy_group)
+stop_loss_dollars = input.float(100.0, title="Stop Loss $", minval=1.0, maxval=5000.0, step=1.0, group=strategy_group)
+
+enable_take_profit = input.bool(true, title="Enable Take Profit", group=strategy_group)
+tp_type = input.string("Percentage", title="Take Profit Type", options=["Percentage", "Dollar Amount"], group=strategy_group)
+take_profit_percent = input.float(4.0, title="Take Profit %", minval=0.1, maxval=20.0, step=0.1, group=strategy_group)
+take_profit_dollars = input.float(200.0, title="Take Profit $", minval=1.0, maxval=10000.0, step=1.0, group=strategy_group)
+
+// ==========================================
+// --- INDICATOR CALCULATIONS ---
+// ==========================================
+
+// 1. Volume Calculations
+volCCI   = ta.cci(volume, cciLength)
+volStoch = ta.stoch(volume, volume, volume, stochLength)
+isVolumeSpike = (volCCI > cciThresh) and (volStoch > stochThresh)
+
+// 2. Moving Average Calculation
+float maValue = na
+if maType == "SMA"
+    maValue := ta.sma(maSource, maLength)
+else if maType == "EMA"
+    maValue := ta.ema(maSource, maLength)
+else if maType == "SMMA (RMA)"
+    maValue := ta.rma(maSource, maLength)
+else if maType == "WMA"
+    maValue := ta.wma(maSource, maLength)
+else if maType == "HULL"
+    maValue := ta.wma(2 * ta.wma(maSource, maLength / 2) - ta.wma(maSource, maLength), int(math.sqrt(maLength)))
+
+// 3. VWAP Calculation
+float vwapValue = ta.vwap(vwapSource)
+
+// 4. Crossing Signals (Raw)
+crossOver     = ta.crossover(maValue, vwapValue)
+crossUnder    = ta.crossunder(maValue, vwapValue)
+
+// ==========================================
+// --- STRATEGY HELPER FUNCTIONS ---
+// ==========================================
+
+// Function to check if we should close all positions (End of Day)
+should_close_all() =>
+    hour_now = hour(time)
+    minute_now = minute(time)
+    close_hour = hour(close_all_time)
+    close_minute = minute(close_all_time)
+    (hour_now == close_hour and minute_now >= close_minute) or hour_now > close_hour
+
+// Function to check if we can enter new trades
+can_enter_trade() =>
+    hour_now = hour(time)
+    minute_now = minute(time)
+    start_hour = hour(trading_start_time)
+    start_minute = minute(trading_start_time)
+    stop_hour = hour(trading_stop_time)
+    stop_minute = minute(trading_stop_time)
+    
+    time_ok = (hour_now > start_hour or (hour_now == start_hour and minute_now >= start_minute)) and
+              (hour_now < stop_hour or (hour_now == stop_hour and minute_now <= stop_minute))
+    time_ok
+
+// Function to check if long trades are allowed
+long_allowed() =>
+    trade_direction == "Long" or trade_direction == "Both"
+
+// Function to check if short trades are allowed
+short_allowed() =>
+    trade_direction == "Short" or trade_direction == "Both"
+
+// Risk Management Calculations
+get_long_stop_loss(entry_price) =>
+    if sl_type == "Percentage"
+        entry_price * (1 - stop_loss_percent / 100)
+    else
+        entry_price - stop_loss_dollars
+
+get_long_take_profit(entry_price) =>
+    if tp_type == "Percentage"
+        entry_price * (1 + take_profit_percent / 100)
+    else
+        entry_price + take_profit_dollars
+
+get_short_stop_loss(entry_price) =>
+    if sl_type == "Percentage"
+        entry_price * (1 + stop_loss_percent / 100)
+    else
+        entry_price + stop_loss_dollars
+
+get_short_take_profit(entry_price) =>
+    if tp_type == "Percentage"
+        entry_price * (1 - take_profit_percent / 100)
+    else
+        entry_price - take_profit_dollars
+
+// ==========================================
+// --- STRATEGY LOGIC ---
+// ==========================================
+
+// Mapping Indicator Signals to Strategy Conditions
+// NOTE: We only take signals if 'can_enter_trade()' is true, handled in the execution block.
+long_condition  = crossOver
+short_condition = crossUnder
+
+// Optional: Use Volume Spike as a filter? 
+// For now, Volume Spike is purely visual/alert based as per original script, 
+// but you could add "and isVolumeSpike" to the conditions above if desired.
+
+long_exit_condition = false // Placeholder: Currently exiting on TP/SL or Reverse Signal
+short_exit_condition = false
+
+// ==========================================
+// --- STRATEGY EXECUTION ---
+// ==========================================
+
+// Entry Logic
+if can_enter_trade() and long_allowed() and long_condition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    if enable_stop_loss or enable_take_profit
+        stop_level = enable_stop_loss ? get_long_stop_loss(close) : na
+        limit_level = enable_take_profit ? get_long_take_profit(close) : na
+        strategy.exit("Long SL/TP", "Long", stop=stop_level, limit=limit_level)
+
+if can_enter_trade() and short_allowed() and short_condition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    if enable_stop_loss or enable_take_profit
+        stop_level = enable_stop_loss ? get_short_stop_loss(close) : na
+        limit_level = enable_take_profit ? get_short_take_profit(close) : na
+        strategy.exit("Short SL/TP", "Short", stop=stop_level, limit=limit_level)
+
+// Exit Logic (Reverse signals or Manual conditions)
+// Note: strategy.entry automatically reverses positions if you are Long and a Short triggers (unless pyramiding is on)
+if strategy.position_size > 0 and long_exit_condition
+    strategy.close("Long", comment="Long Exit Signal")
+if strategy.position_size < 0 and short_exit_condition
+    strategy.close("Short", comment="Short Exit Signal")
+
+// Force close all positions at specified time
+if should_close_all() and strategy.position_size != 0
+    strategy.close_all(comment="Time Close")
+
+// ==========================================
+// --- PLOTTING (Visuals) ---
+// ==========================================
+
+barcolor(isVolumeSpike ? color.yellow : na, title = "Volume Spike Bar Color")
+plotshape(isVolumeSpike, style = shape.triangleup, location = location.belowbar, color = color.yellow, size = size.tiny, title = "Vol Spike Marker")
+
+plot(maValue, title = "Moving Average", color = color.new(color.blue, 0), linewidth = 2)
+plot(vwapValue, title = "VWAP", color = color.new(color.purple, 0), linewidth = 2)
+
+// We plot the 'valid' signals (inside time window) for visual confirmation
+validCrossOver  = crossOver and can_enter_trade()
+validCrossUnder = crossUnder and can_enter_trade()
+
+plotshape(validCrossOver, title = "MA Cross Over VWAP", style = shape.xcross, location = location.belowbar, color = color.green, size = size.small, text = "Bull Cross")
+plotshape(validCrossUnder, title = "MA Cross Under VWAP", style = shape.xcross, location = location.abovebar, color = color.red, size = size.small, text = "Bear Cross")
+
+View in Pine Editor・198 lines
+Use on chart
+1
+0
+751
+Deconstructing the Volume Momentum Strategy: An Analysis of MA-VWAP Cross Mechanics
+Introduction
+
+The "Volume Momentum Strategy [MA-VWAP Cross]" is a technical trading algorithm programmed in Pine Script v6 for the TradingView platform. At its core, the strategy is a trend-following system that utilizes the interaction between a specific Moving Average (MA) and the Volume Weighted Average Price (VWAP) to generate trade signals. While the primary execution logic relies on price crossovers, the strategy incorporates a sophisticated secondary layer of analysis using the Commodity Channel Index (CCI) and Stochastic Oscillator. Uniquely, these secondary indicators are applied to volume data rather than price, serving as a gauge for market participation and momentum intensity.
+
+The Core Engine: MA and VWAP Crossover
+The primary engine driving the strategy's buy and sell decisions is the crossover relationship between a user-defined Moving Average and the VWAP.
+1. The Anchor (VWAP): The strategy calculates the Volume Weighted Average Price based on the HLC3 (High, Low, Close divided by 3) source. VWAP serves as the dynamic benchmark for "fair value" throughout the trading session.
+2. The Trigger (Moving Average): The script allows for flexibility in defining the "fast" line, offering options such as Simple (SMA), Exponential (EMA), or Hull Moving Averages.
+3. The Signal:
+o A Long (Buy) signal is generated when the chosen MA crosses over the VWAP. This suggests that short-term price momentum is exceeding the average volume-weighted price of the session, indicating bullish sentiment.
+o A Short (Sell) signal is generated when the MA crosses under the VWAP, indicating bearish pressure where price is being pushed below the session's volume-weighted average.
+
+The Role of CCI and Stochastic: Analyzing Volume Momentum
+The prompt specifically inquires about how the CCI and Stochastic indicators fit into this process. In standard technical analysis, these oscillators are used to identify overbought or oversold price conditions. However, this strategy repurposes them to analyze Volume Momentum.
+
+1. The Calculation
+Instead of using close prices as the input source, the script passes volume data into both indicator functions:
+• Volume CCI: Calculated as ta.cci(volume, cciLength). This measures the deviation of current volume from its statistical average.
+• Volume Stochastic: Calculated as ta.stoch(volume, volume, volume, stochLength). This gauges the current volume relative to its recent range.
+2. The "Volume Spike" Condition
+The strategy combines these two indicators to define a specific market condition labeled isVolumeSpike. A volume spike is confirmed only when both conditions are met simultaneously:
+• The Volume CCI must be greater than a defined threshold (default: 100).
+• The Volume Stochastic must be greater than a defined threshold (default: 80).
+
+3. Integration into the Process
+It is critical to note how this script currently applies this "Volume Spike" logic:
+• Visual Confirmation: In the current version of the code, the isVolumeSpike boolean is used strictly for visual feedback. When a spike is detected, the script paints the specific price bar yellow and plots a small triangle marker below the bar.
+• Strategic Implication: While the code calculates these metrics, the variables long_condition and short_condition currently rely solely on the MA/VWAP crossover. The developer has left the volume logic as a visual overlay, noting in the comments that it serves as a "visual/alert" or a potential filter.
+• Potential Alpha: Conceptually, this setup implies that a trader should look for the MA/VWAP crossover to occur coincidentally with—or shortly after—a "Volume Spike" (yellow bar). This would confirm that the price move is backed by significant institutional participation (volume) rather than just retail noise.
+
+Risk Management and Time Constraints
+The strategy wraps these technical signals in a robust risk management framework. It includes hard-coded time windows (start/stop trading times) and a "Close All" function to prevent holding positions overnight. Furthermore, it employs both percentage-based and dollar-based Stop Loss and Take Profit mechanisms, ensuring that every entry—whether generated by a high-momentum crossover or a standard trend move—has a predefined exit plan.
+
+Conclusion
+The "Volume Momentum Strategy" is a hybrid system. It executes trades based on the reliable trend signal of MA crossing VWAP but informs the trader with advanced volume analytics. By processing volume through the CCI and Stochastic calculations, it provides a "heads-up" display regarding the intensity of market participation, allowing the trader to distinguish between low-volume drifts and high-volume breakout moves.
+
+

@@ -1,0 +1,77 @@
+//@version=6
+strategy("Crypto Strategy SUSDT 10 min", overlay=true)
+
+// EMA Parameters
+len = input.int(24, minval=1, title="EMA Length")
+src = input(close, title="Source")
+ema24 = ta.ema(src, len)
+
+// Stop Loss and Take Profit Parameters
+stopLossPercent = input.float(2.0, minval=0.1, title="Stop Loss (%)")  // Stop Loss as a percentage of loss
+takeProfitPercent = input.float(4.0, minval=0.1, title="Take Profit (%)")  // Take Profit as a percentage of profit
+
+// Long Entry Conditions
+longCondition = close > ema24 and open < ema24
+
+// Short Entry Conditions
+shortCondition = close < ema24 and open > ema24
+
+// Strategy Orders
+if (longCondition)
+    // Calculating SL and TP levels for LONG positions
+    longPrice = close  // Entry price for LONG position
+    stopLossLevel = longPrice * (1 - stopLossPercent / 100)  // Stop Loss as a percentage of entry price
+    takeProfitLevel = longPrice * (1 + takeProfitPercent / 100)  // Take Profit as a percentage of entry price
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", from_entry="Long", stop=stopLossLevel, limit=takeProfitLevel)
+
+if (shortCondition)
+    // Calculating SL and TP levels for SHORT positions
+    shortPrice = close  // Entry price for SHORT position
+    stopLossLevel = shortPrice * (1 + stopLossPercent / 100)  // Stop Loss as a percentage of entry price
+    takeProfitLevel = shortPrice * (1 - takeProfitPercent / 100)  // Take Profit as a percentage of entry price
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", from_entry="Short", stop=stopLossLevel, limit=takeProfitLevel)
+
+// EMA Plot
+plot(ema24, title="EMA 24", color=color.blue)
+
+View in Pine Editor・37 lines
+Use on chart
+4
+9
+1 800
+This strategy is designed to trade the **SUSDT** pair on a **10-minute time frame**, using a combination of an Exponential Moving Average (EMA) and percentage-based Stop Loss (SL) and Take Profit (TP) levels.
+
+### How the strategy works:
+
+1. **EMA Calculation**:
+- The strategy calculates a 24-period Exponential Moving Average (EMA) based on the closing price.
+- This EMA serves as the primary trend indicator.
+
+2. **Entry Conditions**:
+- **Long Position**: A long position is entered when the closing price is above the EMA and the opening price is below the EMA. This indicates a potential upward trend.
+- **Short Position**: A short position is entered when the closing price is below the EMA and the opening price is above the EMA. This indicates a potential downward trend.
+
+3. **Stop Loss and Take Profit**:
+- Both Stop Loss (SL) and Take Profit (TP) are calculated based on the entry price of the position.
+- **For Long Positions**:
+- Stop Loss is set as a percentage below the entry price.
+- Take Profit is set as a percentage above the entry price.
+- **For Short Positions**:
+- Stop Loss is set as a percentage above the entry price.
+- Take Profit is set as a percentage below the entry price.
+- The percentage values for SL and TP can be adjusted in the strategy's settings (default: SL = 2%, TP = 4%).
+
+4. **Exit Conditions**:
+- The position is closed automatically when either the Stop Loss or Take Profit level is reached.
+
+5. **Visualization**:
+- The 24-period EMA is plotted on the chart as a blue line, helping visualize the trend direction.
+
+### Key Features:
+- **Pair and Time Frame**: The strategy is optimized for the SUSDT pair on a 10-minute time frame.
+- **Customizable Parameters**: Users can adjust the Stop Loss and Take Profit percentages to suit their risk tolerance and trading style.
+- **Trend-Following Approach**: The strategy uses the EMA to identify and follow the current market trend.
+
+This strategy is simple yet effective for capturing trends while managing risk through predefined Stop Loss and Take Profit levels.

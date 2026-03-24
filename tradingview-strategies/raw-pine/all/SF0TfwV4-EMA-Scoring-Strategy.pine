@@ -1,0 +1,118 @@
+//@version=5
+strategy("EMA Scoring Strategy", overlay=true)
+
+// Input parameters for EMAs
+ema21 = ta.ema(close, 21)
+ema50 = ta.ema(close, 50)
+ema100 = ta.ema(close, 100)
+
+// Scoring System
+score = 0
+score := score + (close > ema21 ? 1 : -1)
+score := score + (close > ema50 ? 1 : -1)
+score := score + (close > ema100 ? 1 : -1)
+score := score + (ema21 > ema50 ? 1 : -1)
+score := score + (ema50 > ema100 ? 1 : -1)
+score := score + (ema21 > ema100 ? 1 : -1)
+
+// Background Color for Score 4 and Above
+bgColor = score >= 4 ? color.green : na
+bgcolor(bgColor, transp=80)
+
+// Plot EMAs
+plot(ema21, title="EMA 21", color=color.blue, linewidth=2)
+plot(ema50, title="EMA 50", color=color.green, linewidth=2)
+plot(ema100, title="EMA 100", color=color.red, linewidth=2)
+
+// Plot Score as Histogram (Only for Score 4 and Above)
+scoreToPlot = score >= 4 ? score : na
+plot(scoreToPlot, title="EMA Score", color=color.lime, style=plot.style_histogram, linewidth=3)
+
+// Buy Condition: Score Crosses Above 4
+buySignal = ta.crossover(score, 4)
+
+// Plot Buy Signal
+plotshape(series=buySignal, location=location.belowbar, color=color.green, style=shape.labelup, title="Buy Signal")
+
+// Alert for Buy Signal
+alertcondition(buySignal, title="Buy Alert", message="EMA Score is 4 or more! Bullish trend confirmed.")
+
+View in Pine Editor・38 lines
+Use on chart
+9
+1
+792
+## **📊 EMA Scoring Strategy for Trend Analysis**
+
+This strategy is designed to **identify bullish trends** based on multiple **Exponential Moving Averages (EMAs)**. It assigns a **score** based on how the price and EMAs interact, and highlights strong bullish conditions when the score reaches **4 or above**.
+
+---
+
+## **🔹 Strategy Logic**
+
+### 1️⃣ **Calculating EMAs**
+- **EMA 21** → Short-term trend
+- **EMA 50** → Mid-term trend
+- **EMA 100** → Long-term trend
+
+---
+
+### 2️⃣ **Scoring System**
+For each trading day, the strategy assigns **+1 or -1 points** based on the following conditions:
+
+| Condition | Score |
+|-----------|-------|
+| If **Price > EMA 21** | +1 |
+| If **Price > EMA 50** | +1 |
+| If **Price > EMA 100** | +1 |
+| If **EMA 21 > EMA 50** | +1 |
+| If **EMA 50 > EMA 100** | +1 |
+| If **EMA 21 > EMA 100** | +1 |
+| If **Price < EMA 21** | -1 |
+| If **Price < EMA 50** | -1 |
+| If **Price < EMA 100** | -1 |
+| If **EMA 21 < EMA 50** | -1 |
+| If **EMA 50 < EMA 100** | -1 |
+| If **EMA 21 < EMA 100** | -1 |
+
+---
+
+### 3️⃣ **Bullish Confirmation** (Score ≥ 4)
+- The **score is calculated every day**.
+- When the **score reaches 4 or above**, it confirms a strong **bullish trend**.
+- A **green background** is applied to highlight such days.
+- A **histogram** is plotted **only when the score is 4 or higher** to keep the chart clean.
+- A **buy signal** is generated when the score **crosses above 4**.
+
+---
+
+## **🔹 Visualization & Alerts**
+### ✅ **What You See on the Chart**
+1. **EMA Lines (21, 50, 100)** 📈
+2. **Green Background for Strong Bullish Days (Score ≥ 4)** ✅
+3. **Histogram Showing Score (Only for 4 and above)** 📊
+4. **Buy Signal When Score Crosses Above 4** 💰
+
+### 🔔 **Alerts**
+- **An alert is triggered** when the score crosses **above 4**, notifying the user about a bullish trend.
+
+---
+
+## **📌 How to Use This Strategy**
+1. **Identify Strong Bullish Trends:** When the score is **4 or above**, it suggests that price momentum is strong.
+2. **Enter Trades on Buy Signals:** When the score **crosses above 4**, it could be a good time to buy.
+3. **Stay in the Trade While Score is 4+:** The green background confirms a **strong uptrend**.
+4. **Exit When Score Drops Below 4:** This suggests weakening momentum.
+
+---
+
+## **🔹 Advantages of This Strategy**
+✅ **Simple & Objective** - Uses clear rules for trend confirmation
+✅ **Filters Out Noise** - Only highlights strong bullish conditions
+✅ **Works on Any Market** - Can be applied to stocks, indices, crypto, etc.
+✅ **Customizable** - You can tweak EMAs or score conditions as needed
+
+---
+
+## **🚀 Next Steps**
+Would you like me to add **stop-loss conditions**, **sell signals**, or any **extra confirmations like RSI or volume**? 😃

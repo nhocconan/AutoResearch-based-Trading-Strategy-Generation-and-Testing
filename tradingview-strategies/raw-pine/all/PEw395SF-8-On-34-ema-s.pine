@@ -1,0 +1,21 @@
+//@version=4
+strategy("My Strategy", overlay=true)
+
+longCondition = crossover(ema(close, 8), ema(close, 34))
+if (longCondition)
+    strategy.entry("Consider Long", strategy.long)
+
+shortCondition = crossunder(ema(close, 8), ema(close, 34))
+if (shortCondition)
+    strategy.entry("Consider Short", strategy.short)
+
+View in Pine Editor・10 lines
+Use on chart
+4
+9
+2 765
+Hi guy's
+this simple dude send nice message
+consider short/long when 8Ema Cross 34 Ema - If you learn this sutep and clear the false alarms (thats why it's - "consider") you can ride some waves
+
+Enjoy

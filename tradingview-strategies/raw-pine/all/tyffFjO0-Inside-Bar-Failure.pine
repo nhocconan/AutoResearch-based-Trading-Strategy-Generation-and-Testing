@@ -1,0 +1,28 @@
+//@version=3
+strategy("Inside Bar Failure", overlay=true)
+
+forward = input(defval=3, title="Look Forward")
+
+longCondition = if (high[2] > high[1] and low[2] < low[1] and low < low[1] and high < high[1] and close > low[1])
+    x = true
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+shortCondition = if (high[2] > high[1] and low[2] < low[1] and high > high[1] and low > low[1] and close < high[1])
+    y = true
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    
+if (longCondition[forward])
+    strategy.close("Long")
+if (shortCondition[forward])
+    strategy.close("Short")
+
+View in Pine Editor・19 lines
+Use on chart
+2
+5
+7
+1
+8 855
+You can check edge profitability by adjusting the forward looking input, eg. how profitable is this signal after X bars.

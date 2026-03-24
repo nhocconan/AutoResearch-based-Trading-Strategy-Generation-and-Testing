@@ -1,0 +1,842 @@
+//@version=6
+strategy("Triple Quad Frosty v4.5",
+     overlay=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=0,
+     pyramiding=4,
+     max_labels_count=500,
+     calc_on_every_tick=true)
+
+// ───────────────────────────── Inputs ─────────────────────────────
+enableBuy   = input.bool(true,  "Enable Long Signals")
+enableSell  = input.bool(true,  "Enable Short Signals")
+signalLogic = input.string("Single", "Signal Logic", options=["Single","Dual","AND","OR","BOTH","Triple","Any 2 of 3","Quad","Any 2 of 4","Any 3 of 4"])
+
+// ===================== Conditional A =====================
+enableConditional = input.bool(false, "Enable Conditional Filter A")
+condMode  = input.string("State (persistent)", "Conditional A Mode", options=["State (persistent)","Bar-by-bar"])
+condBuySrc  = input.source(close, "A BUY Signal Source (>0 = event/state)")
+condSellSrc = input.source(close, "A SELL Signal Source (>0 = event/state)")
+
+// ===================== Conditional B =====================
+enableConditional2 = input.bool(false, "Enable Conditional Filter B")
+condMode2 = input.string("State (persistent)", "Conditional B Mode", options=["State (persistent)","Bar-by-bar"])
+cond2BuySrc  = input.source(close, "B BUY Signal Source (>0 = event/state)")
+cond2SellSrc = input.source(close, "B SELL Signal Source (>0 = event/state)")
+
+// ===================== Conditional C =====================
+enableConditional3 = input.bool(false, "Enable Conditional Filter C")
+condMode3 = input.string("State (persistent)", "Conditional C Mode", options=["State (persistent)","Bar-by-bar"])
+cond3BuySrc  = input.source(close, "C BUY Signal Source (>0 = event/state)")
+cond3SellSrc = input.source(close, "C SELL Signal Source (>0 = event/state)")
+
+// How to combine A, B, C
+condCombineABC = input.string("AND (all must agree)", "Combine A, B & C", options=["AND (all must agree)","Any 2 of 3","OR (any may pass)"])
+
+// 4 sources per side
+buySignalSource1  = input.source(close, "Long Signal Source 1")
+buySignalSource2  = input.source(close, "Long Signal Source 2")
+buySignalSource3  = input.source(close, "Long Signal Source 3")
+buySignalSource4  = input.source(close, "Long Signal Source 4")
+sellSignalSource1 = input.source(close, "Short Signal Source 1")
+sellSignalSource2 = input.source(close, "Short Signal Source 2")
+sellSignalSource3 = input.source(close, "Short Signal Source 3")
+sellSignalSource4 = input.source(close, "Short Signal Source 4")
+
+entryMode = input.string("Aggregate (edge)", "Entry Mode", options=["Aggregate (edge)", "On edges (per-source)"])
+qtyPerLeg = input.float(1.0, "Contracts per leg", minval=0.0)
+blockOpposite = input.bool(true, "Block opposite entries while position is open")
+
+// Time/Day filters (EST)
+enableTimeFilter  = input.bool(false, "Only Trade Within Specific Timeframe?")
+tradingTimeString = input.string("0935-1200;1300-1600", "Trading Time String (EST HHMM-HHMM;...)")
+forceCloseMode    = input.string("None", "Force Trades to Close?", options=["None","Force at Window End","Force at Specific Time"])
+forceCloseHour    = input.int(16, "Force Closure Hour (EST)", minval=0, maxval=23)
+forceCloseMinute  = input.int(55, "Force Closure Minute", minval=0, maxval=59)
+
+enableDayFilter = input.bool(false, "Filter by day of week?")
+tradeMon = input.bool(true,  "Mon")
+tradeTue = input.bool(true,  "Tue")
+tradeWed = input.bool(true,  "Wed")
+tradeThu = input.bool(true,  "Thu")
+tradeFri = input.bool(true,  "Fri")
+tradeSat = input.bool(false, "Sat")
+tradeSun = input.bool(false, "Sun")
+
+enableTradeLimit = input.bool(false, "Enable Trade Count Limits?")
+maxTradesPerDay  = input.int(1, "Number of Trades Allowed", minval=1)
+
+// HMA anti-chop
+enableHmaFilters   = input.bool(false, "Enable HMA Slope/Distance Filter")
+hmaLen             = input.int(5,  "HMA Length")
+slopeLookback      = input.int(1,  "HMA Slope Lookback (bars)", minval=1)
+minSlopeBricks     = input.float(0.0, "Min HMA Slope (bricks)", minval=0.0)
+minDistBricks      = input.float(0.0, "Min Price Distance from HMA (bricks)", minval=0.0)
+
+// HTF trend filter
+enableHtfTrend = input.bool(true, "Enable HTF HMA Trend Filter")
+htfTf         = input.timeframe("1S", "HTF")
+htfHmaLen     = input.int(60, "HTF HMA Length")
+
+// Renko + TP/SL/trailing
+renkoBrickSize       = input.float(5.0, "Renko Brick Size (must match chart)", minval=0.1)
+initialSLBricks      = input.int(2, "Initial SL (bricks)", minval=1)
+trailStartBricks     = input.int(3, "Start Trailing After (bricks)", minval=1)
+trailDistanceBricks  = input.int(2, "Trailing Distance (bricks)", minval=1)
+useHLforTrail        = input.bool(true, "Use High/Low for Trailing (Renko-friendly)")
+
+enableStaticTP   = input.bool(false,  "Enable Static Take Profit")
+enableStaticSL   = input.bool(false,  "Enable Static Stop Loss (Overrides Trailing)")
+takeProfitBricks = input.int(5, "Take Profit (bricks)", minval=1)
+stopLossBricks   = input.int(3, "Stop Loss (bricks)", minval=1)
+
+// TP/SL labels
+showTPSLLabels = input.bool(true, "Show TP/SL Labels")
+showLongTPSLLabels  = input.bool(true,  "Show Long TP/SL Labels")
+showShortTPSLLabels = input.bool(true,  "Show Short TP/SL Labels")
+useCustomTPSLText   = input.bool(true,  "Use Custom TP/SL Text")
+tpLongText = input.string("Long TP",  "Long TP Text")
+tpShortText= input.string("Short TP", "Short TP Text")
+slLongText = input.string("Long SL",  "Long SL Text")
+slShortText= input.string("Short SL", "Short SL Text")
+
+// Aggregated labels (visual only)
+showAggregatedTradeLabels = input.bool(true, "Show Aggregated Entry/Exit Labels")
+
+// Programmatic aggregated alerts (alert())
+useProgrammaticAlerts = input.bool(false, "Send Aggregated Webhook Alerts (alert())")
+alertOncePerBarClose  = input.bool(false, "Alert once per bar close (else once per bar)")
+alertSpamKey = input.string("", "Alert spam-key")
+alertUserId  = input.string("", "Alert user_id")
+alertStrategyId       = input.int(0, "Alert strategy id")
+alertForwardTrade     = input.int(0, "Alert forward_trade")
+
+// Intrabar option
+fireIntrabarAlerts = input.bool(true, "Fire alerts intrabar (reduces delay, may repaint)")
+
+// Counters overlay
+showExitCounters = input.bool(true, "Show Exit Counters Table")
+countersDisplay  = input.string("Off", "Exit Counters Display", options=["Off","Corner Table","Floating Label"]) 
+
+// Reversal labeling
+showReversalLabels   = input.bool(true,  "Show Reversal TP/SL Labels")
+tagReversalSuffix    = input.bool(true,  "Append (R) to reversal labels")
+
+// TP/SL label customization colors
+tpLabelBgColor   = input.color(color.new(color.green, 0), "TP Label Background")
+tpLabelTextColor = input.color(color.white,               "TP Label Text")
+slLabelBgColor   = input.color(color.new(color.red, 0),   "SL Label Background")
+slLabelTextColor = input.color(color.white,               "SL Label Text")
+// Reversal colors
+revTpLabelBgColor   = input.color(color.new(color.teal,   0), "Reversal TP Label Background")
+revTpLabelTextColor = input.color(color.white,               "Reversal TP Label Text")
+revSlLabelBgColor   = input.color(color.new(color.orange, 0), "Reversal SL Label Background")
+revSlLabelTextColor = input.color(color.white,               "Reversal SL Label Text")
+
+labelPosOpt      = input.string("Above Bar", "TP/SL Label Position", options=["Above Bar","Below Bar","At Price"])
+labelStyleOpt    = input.string("Auto", "TP/SL Label Style", options=["Auto","Up","Down","Left","Right"])
+labelSizeOpt2    = input.string("Small", "TP/SL Label Size", options=["Tiny","Small","Normal","Large"])
+labelSize2       = labelSizeOpt2 == "Tiny" ? size.tiny : labelSizeOpt2 == "Small" ? size.small : labelSizeOpt2 == "Normal" ? size.normal : size.large
+
+// Guide Lines
+showGuideLines   = input.bool(true,  "Show Guide Lines (TP/Activation & SL)")
+showLiveTrail    = input.bool(true,  "Show Live Trailing Stop")
+guideUpperColor  = input.color(color.new(color.green, 0), "Guide Upper Color")
+guideLowerColor  = input.color(color.new(color.red,   0), "Guide Lower Color")
+guideTrailColor  = input.color(color.new(color.teal,  0), "Live Trailing Color")
+guideLineWidth   = input.int(1, "Guide Line Width", minval=1, maxval=5)
+
+// --- Block/Gate markers (inputs)
+showDayBlocked     = input.bool(true,  "Day Blocked")
+dayBlockedColor    = input.color(color.new(color.blue, 0), "Day Blocked Color")
+dayBlockedChar     = input.string("D", "Day Blocked Mark")
+dayBlockedPosOpt   = input.string("Top", "Day Blocked Position", options=["Top","Bottom"])
+
+showTimeBlocked    = input.bool(true,  "Time Blocked")
+timeBlockedColor   = input.color(color.new(color.blue, 0), "Time Blocked Color")
+timeBlockedChar    = input.string("T", "Time Blocked Mark")
+timeBlockedPosOpt  = input.string("Top", "Time Blocked Position", options=["Top","Bottom"])
+
+// ───────────────────────────── Helpers ─────────────────────────────
+aEdge(cond) =>
+    cond and not cond[1]
+
+iEdge(cond) =>
+    var bool prev = false
+    var int  lastBar = na
+    if bar_index != lastBar
+        lastBar := bar_index
+        prev := false
+    fired = cond and not prev
+    prev := cond
+    fired
+
+// Hybrid edge: fires on intrabar edge OR classic bar-close edge to avoid misses
+edgeHybrid(cond) =>
+    if fireIntrabarAlerts
+        iEdge(cond) or aEdge(cond)
+    else
+        aEdge(cond)
+
+// ─────────────────────── Time/Day window (EST) ───────────────────────
+// (v4.3 behavior restored)
+tz = "America/New_York"
+curHM  = hour(time, tz) * 100 + minute(time, tz)
+prevHM = hour(time[1], tz) * 100 + minute(time[1], tz)
+curDay  = dayofmonth(time, tz)
+prevDay = dayofmonth(time[1], tz)
+
+var int[] _winStart = array.new_int()
+var int[] _winEnd   = array.new_int()
+if barstate.isfirst
+    array.clear(_winStart)
+    array.clear(_winEnd)
+    if enableTimeFilter
+        parts = str.split(tradingTimeString, ";")
+        for i = 0 to array.size(parts) - 1
+            w = str.trim(array.get(parts, i))
+            if str.length(w) >= 9
+                s = int(str.tonumber(str.substring(w, 0, 4)))
+                e = int(str.tonumber(str.substring(w, 5, 9)))
+                if s <= e
+                    array.push(_winStart, s)
+                    array.push(_winEnd,   e)
+
+var bool inTradeWindow    = true
+var bool wasInTradeWindow = true
+if enableTimeFilter
+    inTradeWindow    := false
+    wasInTradeWindow := false
+    for i = 0 to array.size(_winStart) - 1
+        s = array.get(_winStart, i)
+        e = array.get(_winEnd,   i)
+        inTradeWindow    := inTradeWindow    or (curHM  >= s and curHM  <= e)
+        wasInTradeWindow := wasInTradeWindow or (prevHM >= s and prevHM <= e)
+
+timeOK = not enableTimeFilter or inTradeWindow
+crossedOutOfWindow = enableTimeFilter and wasInTradeWindow and not inTradeWindow
+fcHM = forceCloseHour * 100 + forceCloseMinute
+crossedSpecificTime = (forceCloseMode == "Force at Specific Time") and ((curDay != prevDay and curHM >= fcHM) or (curDay == prevDay and prevHM < fcHM and curHM >= fcHM))
+shouldForceClose = (forceCloseMode == "Force at Window End" and crossedOutOfWindow) or crossedSpecificTime
+
+// Day-of-week gate
+dow = dayofweek(time, tz)
+dayOKRaw = (dow == dayofweek.monday   and tradeMon) or
+           (dow == dayofweek.tuesday  and tradeTue) or
+           (dow == dayofweek.wednesday and tradeWed) or
+           (dow == dayofweek.thursday and tradeThu) or
+           (dow == dayofweek.friday   and tradeFri) or
+           (dow == dayofweek.saturday and tradeSat) or
+           (dow == dayofweek.sunday   and tradeSun)
+dayOK = not enableDayFilter or dayOKRaw
+
+// --- Gate markers (plots)  // PATCH: fixed typo isDayBlocked
+isTimeBlocked = enableTimeFilter and not inTradeWindow
+isDayBlocked  = enableDayFilter  and not dayOKRaw
+
+dayLoc  = dayBlockedPosOpt  == "Top" ? location.top : location.bottom
+timeLoc = timeBlockedPosOpt == "Top" ? location.top : location.bottom
+
+plotchar(showDayBlocked  and isDayBlocked,  title="Day Blocked",  char=dayBlockedChar,  location=dayLoc,  size=size.tiny, color=dayBlockedColor)
+plotchar(showTimeBlocked and isTimeBlocked, title="Time Blocked", char=timeBlockedChar, location=timeLoc, size=size.tiny, color=timeBlockedColor)
+// Daily trade limit
+yr  = year(time, tz)
+mon = month(time, tz)
+dom = dayofmonth(time, tz)
+today = timestamp(tz, yr, mon, dom)
+var int lastTradeDay = na
+var int dailyTradeCount = 0
+isNewDay = na(lastTradeDay) or (today != lastTradeDay)
+if isNewDay
+    lastTradeDay := today
+    dailyTradeCount := 0
+canTradeToday = not enableTradeLimit or dailyTradeCount < maxTradesPerDay or strategy.position_size != 0
+
+// ───────────────────── HMA / HTF filters ─────────────────────
+hma      = ta.hma(close, hmaLen)
+hmaSlope = hma - nz(hma[slopeLookback])
+hmaLongOK  = not enableHmaFilters or (close > hma and hmaSlope >  minSlopeBricks * renkoBrickSize and math.abs(close - hma) >= minDistBricks * renkoBrickSize)
+hmaShortOK = not enableHmaFilters or (close < hma and hmaSlope < -minSlopeBricks * renkoBrickSize and math.abs(close - hma) >= minDistBricks * renkoBrickSize)
+
+htfHma     = request.security(syminfo.tickerid, htfTf, ta.hma(close, htfHmaLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfLongOK  = not enableHtfTrend or close > htfHma
+htfShortOK = not enableHtfTrend or close < htfHma
+
+// ───────────────────── Conditional A/B/C ─────────────────────
+var int condState = 0
+condBullNow = (condBuySrc  > 0) and not (condSellSrc > 0)
+condBearNow = (condSellSrc > 0) and not (condBuySrc  > 0)
+if barstate.isfirst
+    condState := condBullNow ? 1 : condBearNow ? -1 : 0
+if enableConditional and condMode == "State (persistent)"
+    if aEdge(condBuySrc > 0)
+        condState := 1
+    if aEdge(condSellSrc > 0)
+        condState := -1
+condLongOK_A  = not enableConditional or (condMode == "Bar-by-bar" ? condBullNow : (condState == 1))
+condShortOK_A = not enableConditional or (condMode == "Bar-by-bar" ? condBearNow : (condState == -1))
+
+var int cond2State = 0
+cond2BullNow = (cond2BuySrc  > 0) and not (cond2SellSrc > 0)
+cond2BearNow = (cond2SellSrc > 0) and not (cond2BuySrc  > 0)
+if barstate.isfirst
+    cond2State := cond2BullNow ? 1 : cond2BearNow ? -1 : 0
+if enableConditional2 and condMode2 == "State (persistent)"
+    if aEdge(cond2BuySrc > 0)
+        cond2State := 1
+    if aEdge(cond2SellSrc > 0)
+        cond2State := -1
+condLongOK_B  = not enableConditional2 or (condMode2 == "Bar-by-bar" ? cond2BullNow : (cond2State == 1))
+condShortOK_B = not enableConditional2 or (condMode2 == "Bar-by-bar" ? cond2BearNow : (cond2State == -1))
+
+var int cond3State = 0
+cond3BullNow = (cond3BuySrc  > 0) and not (cond3SellSrc > 0)
+cond3BearNow = (cond3SellSrc > 0) and not (cond3BuySrc  > 0)
+if barstate.isfirst
+    cond3State := cond3BullNow ? 1 : cond3BearNow ? -1 : 0
+if enableConditional3 and condMode3 == "State (persistent)"
+    if aEdge(cond3BuySrc > 0)
+        cond3State := 1
+    if aEdge(cond3SellSrc > 0)
+        cond3State := -1
+condLongOK_C  = not enableConditional3 or (condMode3 == "Bar-by-bar" ? cond3BullNow : (cond3State == 1))
+condShortOK_C = not enableConditional3 or (condMode3 == "Bar-by-bar" ? cond3BearNow : (cond3State == -1))
+
+// Combine A/B/C
+countEnabled   = (enableConditional?1:0) + (enableConditional2?1:0) + (enableConditional3?1:0)
+longPassCount  = (enableConditional and condLongOK_A ? 1 : 0) + (enableConditional2 and condLongOK_B ? 1 : 0) + (enableConditional3 and condLongOK_C ? 1 : 0)
+shortPassCount = (enableConditional and condShortOK_A ? 1 : 0) + (enableConditional2 and condShortOK_B ? 1 : 0) + (enableConditional3 and condShortOK_C ? 1 : 0)
+
+longOK_AND  = (not enableConditional or condLongOK_A)  and (not enableConditional2 or condLongOK_B)  and (not enableConditional3 or condLongOK_C)
+shortOK_AND = (not enableConditional or condShortOK_A) and (not enableConditional2 or condShortOK_B) and (not enableConditional3 or condShortOK_C)
+
+b1_buy  = buySignalSource1  > 0
+b2_buy  = buySignalSource2  > 0
+b3_buy  = buySignalSource3  > 0
+b4_buy  = buySignalSource4  > 0
+b1_sell = sellSignalSource1 > 0
+b2_sell = sellSignalSource2 > 0
+b3_sell = sellSignalSource3 > 0
+b4_sell = sellSignalSource4 > 0
+
+buyVotes3  = (b1_buy?1:0) + (b2_buy?1:0) + (b3_buy?1:0)
+sellVotes3 = (b1_sell?1:0) + (b2_sell?1:0) + (b3_sell?1:0)
+buyVotes4  = buyVotes3  + (b4_buy?1:0)
+sellVotes4 = sellVotes3 + (b4_sell?1:0)
+
+longOK_OR  = countEnabled == 0 ? true :
+             ((enableConditional and condLongOK_A) or (enableConditional2 and condLongOK_B) or (enableConditional3 and condLongOK_C))
+shortOK_OR = countEnabled == 0 ? true :
+             ((enableConditional and condShortOK_A) or (enableConditional2 and condShortOK_B) or (enableConditional3 and condShortOK_C))
+req           = math.min(2, countEnabled)
+longOK_ANY2   = longPassCount  >= req
+shortOK_ANY2  = shortPassCount >= req
+conditionalLongOK  = condCombineABC == "AND (all must agree)" ? longOK_AND  : condCombineABC == "OR (any may pass)" ? longOK_OR  : longOK_ANY2
+conditionalShortOK = condCombineABC == "AND (all must agree)" ? shortOK_AND : condCombineABC == "OR (any may pass)" ? shortOK_OR : shortOK_ANY2
+
+buyCondition = switch signalLogic
+    "Single"      => b1_buy
+    "Dual"        => b1_buy and b2_buy
+    "AND"         => b1_buy and b2_buy
+    "OR"          => (b1_buy or b2_buy or b3_buy or b4_buy)
+    "BOTH"        => (b1_buy or b2_buy or b3_buy or b4_buy)
+    "Triple"      => b1_buy and b2_buy and b3_buy
+    "Any 2 of 3"  => buyVotes3 >= 2
+    "Quad"        => b1_buy and b2_buy and b3_buy and b4_buy
+    "Any 2 of 4"  => buyVotes4 >= 2
+    "Any 3 of 4"  => buyVotes4 >= 3
+    => false
+
+sellCondition = switch signalLogic
+    "Single"      => b1_sell
+    "Dual"        => b1_sell and b2_sell
+    "AND"         => b1_sell and b2_sell
+    "OR"          => (b1_sell or b2_sell or b3_sell or b4_sell)
+    "BOTH"        => (b1_sell or b2_sell or b3_sell or b4_sell)
+    "Triple"      => b1_sell and b2_sell and b3_sell
+    "Any 2 of 3"  => sellVotes3 >= 2
+    "Quad"        => b1_sell and b2_sell and b3_sell and b4_sell
+    "Any 2 of 4"  => sellVotes4 >= 2
+    "Any 3 of 4"  => sellVotes4 >= 3
+    => false
+
+buyEntryCondition  = buyCondition  and hmaLongOK  and htfLongOK  and conditionalLongOK
+sellEntryCondition = sellCondition and hmaShortOK and htfShortOK and conditionalShortOK
+
+// ───────────────────────── Position state ─────────────────────────
+var int   prevDir = 0
+var float prevAvgPrice = na
+var float prevPosSize = 0.0
+curDir             = strategy.position_size > 0 ? 1 : strategy.position_size < 0 ? -1 : 0
+openedThisBar       = (prevDir == 0 and curDir != 0)
+flippedThisBar      = (prevDir != 0 and curDir != 0 and curDir != prevDir)
+exitedToFlatThisBar = (prevDir != 0 and curDir == 0)
+prevDir := curDir
+prevAvgPrice := strategy.position_avg_price
+
+// ───────────────────────── Leg management ─────────────────────────
+var longLegOpen  = array.new_bool(4, false)
+var shortLegOpen = array.new_bool(4, false)
+legsOpenCount(arr) =>
+    c = 0
+    for i = 0 to 3
+        c += array.get(arr, i) ? 1 : 0
+    c
+resetLegs(arr) =>
+    for i = 0 to 3
+        array.set(arr, i, false)
+if exitedToFlatThisBar or flippedThisBar
+    resetLegs(longLegOpen)
+    resetLegs(shortLegOpen)
+
+// Per-bar counters
+var int entriesLongThisBar  = 0
+var int entriesShortThisBar = 0
+var int exitsLongThisBar    = 0
+var int exitsShortThisBar   = 0
+if barstate.isnew
+    entriesLongThisBar  := 0
+    entriesShortThisBar := 0
+    exitsLongThisBar    := 0
+    exitsShortThisBar   := 0
+
+// ─────────────────────────── Entries ───────────────────────────
+edgeBuy  = edgeHybrid(buyEntryCondition)
+edgeSell = edgeHybrid(sellEntryCondition)
+allowLong  = (not blockOpposite) or strategy.position_size >= 0
+allowShort = (not blockOpposite) or strategy.position_size <= 0
+edgeB1 = edgeHybrid(b1_buy)
+edgeB2 = edgeHybrid(b2_buy)
+edgeB3 = edgeHybrid(b3_buy)
+edgeB4 = edgeHybrid(b4_buy)
+edgeS1 = edgeHybrid(b1_sell)
+edgeS2 = edgeHybrid(b2_sell)
+edgeS3 = edgeHybrid(b3_sell)
+edgeS4 = edgeHybrid(b4_sell)
+
+openLegs(isLong, howMany) =>
+    _opened = 0
+    _n = howMany
+    arr = isLong ? longLegOpen : shortLegOpen
+    for i = 0 to 3
+        if _n <= 0
+            break
+        if not array.get(arr, i)
+            id = (isLong ? "ENTRY_LONG_" : "ENTRY_SHORT_") + str.tostring(i + 1)
+            strategy.entry(id, isLong ? strategy.long : strategy.short, qty=qtyPerLeg, comment=isLong ? "Entry Long" : "Entry Short")
+            array.set(arr, i, true)
+            _n -= 1
+            _opened += 1
+    _opened
+
+if enableBuy and edgeBuy and timeOK and dayOK and canTradeToday and allowLong
+    if entryMode == "Aggregate (edge)"
+        opened = openLegs(true, math.min(4, buyVotes4))
+        entriesLongThisBar += opened
+    else
+        if edgeB1 and hmaLongOK and htfLongOK and conditionalLongOK
+            entriesLongThisBar += openLegs(true, 1)
+        if edgeB2 and hmaLongOK and htfLongOK and conditionalLongOK
+            entriesLongThisBar += openLegs(true, 1)
+        if edgeB3 and hmaLongOK and htfLongOK and conditionalLongOK
+            entriesLongThisBar += openLegs(true, 1)
+        if edgeB4 and hmaLongOK and htfLongOK and conditionalLongOK
+            entriesLongThisBar += openLegs(true, 1)
+    if strategy.position_size == 0
+        dailyTradeCount += 1
+
+if enableSell and edgeSell and timeOK and dayOK and canTradeToday and allowShort
+    if entryMode == "Aggregate (edge)"
+        openedS = openLegs(false, math.min(4, sellVotes4))
+        entriesShortThisBar += openedS
+    else
+        if edgeS1 and hmaShortOK and htfShortOK and conditionalShortOK
+            entriesShortThisBar += openLegs(false, 1)
+        if edgeS2 and hmaShortOK and htfShortOK and conditionalShortOK
+            entriesShortThisBar += openLegs(false, 1)
+        if edgeS3 and hmaShortOK and htfShortOK and conditionalShortOK
+            entriesShortThisBar += openLegs(false, 1)
+        if edgeS4 and hmaShortOK and htfShortOK and conditionalShortOK
+            entriesShortThisBar += openLegs(false, 1)
+    if strategy.position_size == 0
+        dailyTradeCount += 1
+
+// Auto-increment while condition holds
+autoIncLegs = input.bool(true, "Auto-increment legs while condition holds")
+if autoIncLegs
+    if strategy.position_size > 0 and buyEntryCondition and timeOK and dayOK and allowLong
+        want = math.min(4, buyVotes4)
+        have = legsOpenCount(longLegOpen)
+        need = want - have
+        if need > 0
+            entriesLongThisBar += openLegs(true, need)
+    if strategy.position_size < 0 and sellEntryCondition and timeOK and dayOK and allowShort
+        wantS = math.min(4, sellVotes4)
+        haveS = legsOpenCount(shortLegOpen)
+        needS = wantS - haveS
+        if needS > 0
+            entriesShortThisBar += openLegs(false, needS)
+
+// ───────────────────── Extreme entry helpers (per side) ─────────────────────
+getExtremeEntryPrices() =>
+    float furthestLong  = na
+    float closestLong   = na
+    float furthestShort = na
+    float closestShort  = na
+    for i = 0 to strategy.opentrades - 1
+        id    = strategy.opentrades.entry_id(i)
+        price = strategy.opentrades.entry_price(i)
+        if str.startswith(id, "ENTRY_LONG_")
+            furthestLong := na(furthestLong) ? price : math.min(furthestLong, price)
+            closestLong  := na(closestLong)  ? price : math.max(closestLong,  price)
+        if str.startswith(id, "ENTRY_SHORT_")
+            furthestShort := na(furthestShort) ? price : math.max(furthestShort, price)
+            closestShort  := na(closestShort)  ? price : math.min(closestShort,  price)
+    fl = na(furthestLong)  ? strategy.position_avg_price : furthestLong
+    cl = na(closestLong)   ? strategy.position_avg_price : closestLong
+    fs = na(furthestShort) ? strategy.position_avg_price : furthestShort
+    cs = na(closestShort)  ? strategy.position_avg_price : closestShort
+    [fl, cl, fs, cs]
+
+// ───────────────────── Exits & Trailing ─────────────────────
+var float entryForTrail = na
+var float entryForInit  = na
+var float trailStop     = na
+var int   bricksMoved   = 0
+var float peakPrice     = na
+var float troughPrice   = na
+
+var float lastStopL  = na
+var float lastLimitL = na
+var float lastStopS  = na
+var float lastLimitS = na
+var bool  lastStopWasTrailingL = false
+var bool  lastStopWasTrailingS = false
+
+var float stopL  = na
+var float limitL = na
+var float stopS  = na
+var float limitS = na
+
+var float firstEntryPrice = na
+
+if openedThisBar or flippedThisBar
+    if curDir != 0
+        [furthestL0, closestL0, furthestS0, closestS0] = getExtremeEntryPrices()
+        entryForTrail := curDir > 0 ? furthestL0 : furthestS0
+        entryForInit  := curDir > 0 ? closestL0  : closestS0
+        firstEntryPrice := strategy.position_avg_price
+        bricksMoved     := 0
+        peakPrice       := useHLforTrail ? high : close
+        troughPrice     := useHLforTrail ? low  : close
+        trailStop       := na
+    else
+        entryForTrail   := na
+        entryForInit    := na
+        firstEntryPrice := na
+        bricksMoved     := 0
+        peakPrice       := na
+        troughPrice     := na
+        trailStop       := na
+
+if strategy.opentrades > 0
+    [furthestL, closestL, furthestS, closestS] = getExtremeEntryPrices()
+    if strategy.position_size > 0
+        entryForTrail := furthestL
+        entryForInit  := closestL
+    else if strategy.position_size < 0
+        entryForTrail := furthestS
+        entryForInit  := closestS
+
+if strategy.opentrades > 0
+    if strategy.position_size > 0
+        peakPrice       := math.max(peakPrice, useHLforTrail ? high : close)
+        bricksMoved     := int(math.floor(((peakPrice - entryForTrail) / renkoBrickSize) + 1e-6))
+        trailingActiveL = not enableStaticSL and (bricksMoved >= trailStartBricks)
+        initStopL = entryForInit - initialSLBricks * renkoBrickSize
+        trailWhenActiveL = peakPrice - trailDistanceBricks * renkoBrickSize
+        stopBasisL = enableStaticSL ? (entryForInit - stopLossBricks * renkoBrickSize) : (trailingActiveL ? trailWhenActiveL : initStopL)
+        stopL      := stopBasisL
+        limitL     := enableStaticTP ? (entryForTrail + takeProfitBricks * renkoBrickSize) : na
+        lastStopL  := stopL
+        lastLimitL := limitL
+        lastStopWasTrailingL := trailingActiveL
+        strategy.exit("EXIT_LONG_1", from_entry="ENTRY_LONG_1", stop=stopL, limit=limitL, comment="Exit Long")
+        strategy.exit("EXIT_LONG_2", from_entry="ENTRY_LONG_2", stop=stopL, limit=limitL, comment="Exit Long")
+        strategy.exit("EXIT_LONG_3", from_entry="ENTRY_LONG_3", stop=stopL, limit=limitL, comment="Exit Long")
+        strategy.exit("EXIT_LONG_4", from_entry="ENTRY_LONG_4", stop=stopL, limit=limitL, comment="Exit Long")
+
+    if strategy.position_size < 0
+        troughPrice       := math.min(troughPrice, useHLforTrail ? low : close)
+        bricksMoved       := int(math.floor(((entryForTrail - troughPrice) / renkoBrickSize) + 1e-6))
+        trailingActiveS    = not enableStaticSL and (bricksMoved >= trailStartBricks)
+        initStopS = entryForInit + initialSLBricks * renkoBrickSize
+        trailWhenActiveS = troughPrice + trailDistanceBricks * renkoBrickSize
+        stopBasisS = enableStaticSL ? (entryForInit + stopLossBricks * renkoBrickSize) : (trailingActiveS ? trailWhenActiveS : initStopS)
+        stopS      := stopBasisS
+        limitS     := enableStaticTP ? (entryForTrail - takeProfitBricks * renkoBrickSize) : na
+        lastStopS  := stopS
+        lastLimitS := limitS
+        lastStopWasTrailingS := trailingActiveS
+        strategy.exit("EXIT_SHORT_1", from_entry="ENTRY_SHORT_1", stop=stopS, limit=limitS, comment="Exit Short")
+        strategy.exit("EXIT_SHORT_2", from_entry="ENTRY_SHORT_2", stop=stopS, limit=limitS, comment="Exit Short")
+        strategy.exit("EXIT_SHORT_3", from_entry="ENTRY_SHORT_3", stop=stopS, limit=limitS, comment="Exit Short")
+        strategy.exit("EXIT_SHORT_4", from_entry="ENTRY_SHORT_4", stop=stopS, limit=limitS, comment="Exit Short")
+
+// ───────────────────── Forced close (v4.3 style) ─────────────────────
+if shouldForceClose
+    strategy.close("ENTRY_LONG_1",  comment="Force Close")
+    strategy.close("ENTRY_LONG_2",  comment="Force Close")
+    strategy.close("ENTRY_LONG_3",  comment="Force Close")
+    strategy.close("ENTRY_LONG_4",  comment="Force Close")
+    strategy.close("ENTRY_SHORT_1", comment="Force Close")
+    strategy.close("ENTRY_SHORT_2", comment="Force Close")
+    strategy.close("ENTRY_SHORT_3", comment="Force Close")
+    strategy.close("ENTRY_SHORT_4", comment="Force Close")
+
+// ───────────────────── TP/SL label logic ─────────────────────
+ylSetting = labelPosOpt == "Above Bar" ? yloc.abovebar : labelPosOpt == "Below Bar" ? yloc.belowbar : yloc.price
+labelStyle(isTP, isLong) =>
+    st = label.style_label_up
+    if labelStyleOpt == "Up"
+        st := label.style_label_up
+    else if labelStyleOpt == "Down"
+        st := label.style_label_down
+    else if labelStyleOpt == "Left"
+        st := label.style_label_left
+    else if labelStyleOpt == "Right"
+        st := label.style_label_right
+    else
+        st := isTP ? (isLong ? label.style_label_down : label.style_label_up)
+                   : (isLong ? label.style_label_up   : label.style_label_down)
+    st
+
+var int tpCount = 0
+var int slCount = 0
+longReduced  = prevPosSize > 0 and strategy.position_size <  prevPosSize
+shortReduced = prevPosSize < 0 and strategy.position_size >  prevPosSize
+useTPforTrailing = (not enableStaticTP) and (not enableStaticSL)
+legsPer = qtyPerLeg == 0.0 ? na : qtyPerLeg
+calcExitedLegsLong()  => na(legsPer) ? 0 : int(math.round((math.max(prevPosSize, 0) - math.max(strategy.position_size, 0)) / legsPer))
+calcExitedLegsShort() => na(legsPer) ? 0 : int(math.round((math.max(-prevPosSize, 0) - math.max(-strategy.position_size, 0)) / legsPer))
+
+if showTPSLLabels and (longReduced or shortReduced) and not flippedThisBar
+    avgBefore = strategy.position_avg_price[1]
+
+    if longReduced and showLongTPSLLabels
+        hitTP   = not na(lastLimitL) and high >= lastLimitL
+        hitStop = not na(lastStopL)  and low  <= lastStopL and not hitTP
+        exitPxL = hitTP ? lastLimitL : hitStop ? lastStopL : na
+        madeProfitL = not na(exitPxL) and not na(avgBefore) and exitPxL > avgBefore
+        yL = ylSetting == yloc.price ? nz(exitPxL, close) : (labelPosOpt == "Above Bar" ? high : low)
+        if hitTP or hitStop
+            txtL = useCustomTPSLText ? (madeProfitL ? tpLongText : slLongText) : (madeProfitL ? "TP" : "SL")
+            label.new(bar_index, yL, txtL, style=labelStyle(madeProfitL, true), color=(madeProfitL ? tpLabelBgColor : slLabelBgColor), textcolor=(madeProfitL ? tpLabelTextColor : slLabelTextColor), size=labelSize2, yloc=ylSetting)
+            if madeProfitL
+                tpCount += 1
+            else
+                slCount += 1
+
+    if shortReduced and showShortTPSLLabels
+        hitTPs   = not na(lastLimitS) and low  <= lastLimitS
+        hitStops = not na(lastStopS)  and high >= lastStopS and not hitTPs
+        exitPxS = hitTPs ? lastLimitS : hitStops ? lastStopS : na
+        madeProfitS = not na(exitPxS) and not na(avgBefore) and exitPxS < avgBefore
+        yS = ylSetting == yloc.price ? nz(exitPxS, close) : (labelPosOpt == "Above Bar" ? high : low)
+        if hitTPs or hitStops
+            txtS = useCustomTPSLText ? (madeProfitS ? tpShortText : slShortText) : (madeProfitS ? "TP" : "SL")
+            label.new(bar_index, yS, txtS, style=labelStyle(madeProfitS, false), color=(madeProfitS ? tpLabelBgColor : slLabelBgColor), textcolor=(madeProfitS ? tpLabelTextColor : slLabelTextColor), size=labelSize2, yloc=ylSetting)
+            if madeProfitS
+                tpCount += 1
+            else
+                slCount += 1
+
+// Reversal labels
+if showTPSLLabels and showReversalLabels and flippedThisBar
+    prevWasLong = prevPosSize > 0
+    prevAvg     = strategy.position_avg_price[1]
+    madeProfit  = prevWasLong ? (close > prevAvg) : (close < prevAvg)
+    yRev = ylSetting == yloc.price ? close : (labelPosOpt == "Above Bar" ? high : low)
+    txtRev = useCustomTPSLText ? (madeProfit ? (prevWasLong ? tpLongText : tpShortText) : (prevWasLong ? slLongText : slShortText)) : (madeProfit ? "TP" : "SL")
+    txtRev := tagReversalSuffix ? (txtRev + " (R)") : txtRev
+    label.new(bar_index, yRev, txtRev, style=labelStyle(madeProfit, prevWasLong), color=madeProfit ? revTpLabelBgColor : revSlLabelBgColor, textcolor=madeProfit ? revTpLabelTextColor : revSlLabelTextColor, size=labelSize2, yloc=ylSetting)
+    if madeProfit
+        tpCount += 1
+    else
+        slCount += 1
+
+if (prevPosSize > 0 and strategy.position_size <  prevPosSize)
+    exitsLongThisBar += calcExitedLegsLong()
+if (prevPosSize < 0 and strategy.position_size >  prevPosSize)
+    exitsShortThisBar += calcExitedLegsShort()
+prevPosSize := strategy.position_size
+
+// Exit counters display
+var table tStats = na
+var label lblCounters = na
+if showExitCounters and countersDisplay == "Corner Table"
+    if na(tStats)
+        tStats := table.new(position.top_right, 1, 2)
+    if barstate.islast
+        table.cell(tStats, 0, 0, "TP exits: " + str.tostring(tpCount))
+        table.cell(tStats, 0, 1, "SL exits: " + str.tostring(slCount))
+else if showExitCounters and countersDisplay == "Floating Label"
+    if barstate.islast
+        txt = "TP: " + str.tostring(tpCount) + "  SL: " + str.tostring(slCount)
+        if na(lblCounters)
+            lblCounters := label.new(bar_index, close, txt, yloc=yloc.price, style=label.style_label_left, size=size.tiny)
+        else
+            label.set_x(lblCounters, bar_index)
+            label.set_y(lblCounters, close)
+            label.set_text(lblCounters, txt)
+else
+    if not na(lblCounters)
+        label.delete(lblCounters)
+        lblCounters := na
+if (not showExitCounters) or (countersDisplay != "Floating Label")
+    if not na(lblCounters)
+        label.delete(lblCounters)
+        lblCounters := na
+
+// ─────────────────── Aggregated labels & Alerts ───────────────────
+getY(isAbove) => labelPosOpt == "At Price" ? (isAbove ? high : low) : na
+var bool drewLongLabelThisBar  = false
+var bool drewShortLabelThisBar = false
+if barstate.isnew
+    drewLongLabelThisBar  := false
+    drewShortLabelThisBar := false
+
+alertFreq = fireIntrabarAlerts ? alert.freq_once_per_bar : (alertOncePerBarClose ? alert.freq_once_per_bar_close : alert.freq_once_per_bar)
+shouldSendNow = fireIntrabarAlerts ? barstate.isrealtime : (alertOncePerBarClose ? barstate.isconfirmed : barstate.isrealtime)
+
+nextSeq() =>
+    var int _seq = 0
+    _seq += 1
+    _seq
+
+buildEntryJson(side, legs) =>
+    qty = legs * qtyPerLeg
+    oid = (side == "buy" ? "ENTRY_LONG_" : "ENTRY_SHORT_") + str.tostring(time) + "_" + str.tostring(nextSeq())
+    '{"contract":"' + syminfo.ticker + '","trade_type":"' + side + '","quantity":' + str.tostring(qty) + ',"flip_qty":' + str.tostring(strategy.position_size) + ',"price":' + str.tostring(close) + ',"spam-key":"' + alertSpamKey + '","user_id":"' + alertUserId + '","strategy":' + str.tostring(alertStrategyId) + ',"forward_trade":' + str.tostring(alertForwardTrade) + ',"order_id":"' + oid + '","ts":' + str.tostring(time) + ',"side":"entry","legs":' + str.tostring(legs) + ',"reason":"signal"}'
+
+buildExitJson(side, legs, reason) =>
+    oid = (side == "sell" ? "EXIT_LONG_" : "EXIT_SHORT_") + str.tostring(time) + "_" + str.tostring(nextSeq())
+    '{"contract":"' + syminfo.ticker + '","trade_type":"' + side + '","quantity":' + str.tostring(legs * qtyPerLeg) + ',"flip_qty":' + str.tostring(strategy.position_size) + ',"price":' + str.tostring(close) + ',"spam-key":"' + alertSpamKey + '","user_id":"' + alertUserId + '","strategy":' + str.tostring(alertStrategyId) + ',"forward_trade":' + str.tostring(alertForwardTrade) + ',"order_id":"' + oid + '","ts":' + str.tostring(time) + ',"side":"exit","legs":' + str.tostring(legs) + ',"reason":"' + reason + '"}'
+
+var bool sentLongThisBar        = false
+var bool sentShortThisBar       = false
+var bool sentExitLongThisBar    = false
+var bool sentExitShortThisBar   = false
+if barstate.isnew
+    sentLongThisBar      := false
+    sentShortThisBar     := false
+    sentExitLongThisBar  := false
+    sentExitShortThisBar := false
+
+if useProgrammaticAlerts and shouldSendNow
+    if entriesLongThisBar > 0 and not sentLongThisBar
+        msg = buildEntryJson("buy", entriesLongThisBar)
+        alert(msg, alertFreq)
+        sentLongThisBar := true
+        if showAggregatedTradeLabels and not drewLongLabelThisBar
+            ylAgg  = ylSetting
+            yBelow = ylAgg == yloc.price ? getY(false) : na
+            label.new(bar_index, ylAgg == yloc.price ? yBelow : na, "Entry Long x" + str.tostring(entriesLongThisBar), style=label.style_label_up, yloc=ylAgg, size=size.tiny)
+            drewLongLabelThisBar := true
+    if entriesShortThisBar > 0 and not sentShortThisBar
+        msgS = buildEntryJson("sell", entriesShortThisBar)
+        alert(msgS, alertFreq)
+        sentShortThisBar := true
+        if showAggregatedTradeLabels and not drewShortLabelThisBar
+            ylAgg  = ylSetting
+            yBelow = ylAgg == yloc.price ? getY(false) : na
+            label.new(bar_index, ylAgg == yloc.price ? yBelow : na, "Entry Short x" + str.tostring(entriesShortThisBar), style=label.style_label_down, yloc=ylAgg, size=size.tiny)
+            drewShortLabelThisBar := true
+    if exitsLongThisBar > 0 and not sentExitLongThisBar
+        reason = (not na(lastLimitL) and high >= lastLimitL) ? "tp" : ((lastStopWasTrailingL and ((not enableStaticTP) and (not enableStaticSL))) ? "trailTP" : "sl")
+        msgEL = buildExitJson("sell", exitsLongThisBar, reason)
+        alert(msgEL, alertFreq)
+        sentExitLongThisBar := true
+    if exitsShortThisBar > 0 and not sentExitShortThisBar
+        reasonS = (not na(lastLimitS) and low <= lastLimitS) ? "tp" : ((lastStopWasTrailingS and ((not enableStaticTP) and (not enableStaticSL))) ? "trailTP" : "sl")
+        msgES = buildExitJson("buy", exitsShortThisBar, reasonS)
+        alert(msgES, alertFreq)
+        sentExitShortThisBar := true
+
+// ───────────────────────────── PLOTS ─────────────────────────────
+plot(hma,    title="HMA",     display = enableHmaFilters ? display.all : display.none)
+plot(htfHma, title="HTF HMA", display = enableHtfTrend   ? display.all : display.none)
+
+// Conditional visual aids
+showCondEdgeLetters = input.bool(false, "Show Conditional Edge Letters (A/B/C/D/E/F)")
+showStateBars       = input.bool(true,  "Show Combined State Bars")
+stateBarSizeOpt     = input.string("Small", "State Bar Size", options=["Tiny","Small","Normal","Large"])
+
+plotchar(showCondEdgeLetters and enableConditional  and aEdge(condBullNow),  title="CondA Buy Edge",  char='A', location=location.bottom, size=size.tiny, color=color.teal)
+plotchar(showCondEdgeLetters and enableConditional  and aEdge(condBearNow),  title="CondA Sell Edge", char='B', location=location.top,    size=size.tiny, color=color.orange)
+plotchar(showCondEdgeLetters and enableConditional2 and aEdge(cond2BullNow), title="CondB Buy Edge",  char='C', location=location.bottom, size=size.tiny, color=color.teal)
+plotchar(showCondEdgeLetters and enableConditional2 and aEdge(cond2BearNow), title="CondB Sell Edge", char='D', location=location.top,    size=size.tiny, color=color.orange)
+plotchar(showCondEdgeLetters and enableConditional3 and aEdge(cond3BullNow), title="CondC Buy Edge",  char='E', location=location.bottom, size=size.tiny, color=color.teal)
+plotchar(showCondEdgeLetters and enableConditional3 and aEdge(cond3BearNow), title="CondC Sell Edge", char='F', location=location.top,    size=size.tiny, color=color.orange)
+
+// Combined state bars
+longOnlyBar  = showStateBars and (conditionalLongOK and not conditionalShortOK)
+shortOnlyBar = showStateBars and (conditionalShortOK and not conditionalLongOK)
+isTiny   = stateBarSizeOpt == "Tiny"
+isSmall  = stateBarSizeOpt == "Small"
+isNormal = stateBarSizeOpt == "Normal"
+isLarge  = stateBarSizeOpt == "Large"
+plotshape(longOnlyBar and isTiny,   title="Combined Long State (tiny)",   style=shape.square, location=location.bottom, size=size.tiny,   color=color.new(color.green, 0))
+plotshape(longOnlyBar and isSmall,  title="Combined Long State (small)",  style=shape.square, location=location.bottom, size=size.small,  color=color.new(color.green, 0))
+plotshape(longOnlyBar and isNormal, title="Combined Long State (normal)", style=shape.square, location=location.bottom, size=size.normal, color=color.new(color.green, 0))
+plotshape(longOnlyBar and isLarge,  title="Combined Long State (large)",  style=shape.square, location=location.bottom, size=size.large,  color=color.new(color.green, 0))
+plotshape(shortOnlyBar and isTiny,   title="Combined Short State (tiny)",   style=shape.square, location=location.top, size=size.tiny,   color=color.new(color.red, 0))
+plotshape(shortOnlyBar and isSmall,  title="Combined Short State (small)",  style=shape.square, location=location.top, size=size.small,  color=color.new(color.red, 0))
+plotshape(shortOnlyBar and isNormal, title="Combined Short State (normal)", style=shape.square, location=location.top, size=size.normal, color=color.new(color.red, 0))
+plotshape(shortOnlyBar and isLarge,  title="Combined Short State (large)",  style=shape.square, location=location.top, size=size.large,  color=color.new(color.red, 0))
+
+// Guide Lines
+longPos   = strategy.position_size > 0
+shortPos  = strategy.position_size < 0
+hasPos    = strategy.position_size != 0
+tpActivationLong  = hasPos ? (entryForTrail + trailStartBricks * renkoBrickSize) : na
+tpActivationShort = hasPos ? (entryForTrail - trailStartBricks * renkoBrickSize) : na
+initSLlong        = hasPos ? (entryForInit  - initialSLBricks * renkoBrickSize) : na
+initSLshort       = hasPos ? (entryForInit  + initialSLBricks * renkoBrickSize) : na
+staticTPlong      = hasPos and enableStaticTP ? (entryForTrail + takeProfitBricks * renkoBrickSize) : na
+staticTPshort     = hasPos and enableStaticTP ? (entryForTrail - takeProfitBricks * renkoBrickSize) : na
+staticSLlong      = hasPos and enableStaticSL ? (entryForInit  - stopLossBricks * renkoBrickSize)   : na
+staticSLshort     = hasPos and enableStaticSL ? (entryForInit  + stopLossBricks * renkoBrickSize)   : na
+guideUpper =
+     longPos  ? (enableStaticTP ? staticTPlong  : tpActivationLong)
+   : shortPos ? (enableStaticTP ? staticTPshort : tpActivationShort)
+   : na
+guideLower =
+     longPos  ? (enableStaticSL ? staticSLlong  : initSLlong)
+   : shortPos ? (enableStaticSL ? staticSLshort : initSLshort)
+   : na
+liveTrail =
+     longPos  ? (showLiveTrail and lastStopWasTrailingL ? lastStopL : na)
+   : shortPos ? (showLiveTrail and lastStopWasTrailingS ? lastStopS : na)
+   : na
+plot(showGuideLines ? guideUpper : na, title="Guide (TP or Trailing Activation)", color=guideUpperColor, linewidth=guideLineWidth)
+plot(showGuideLines ? guideLower : na, title="Guide (Stop Loss)",               color=guideLowerColor, linewidth=guideLineWidth)
+plot(showLiveTrail  ? liveTrail  : na, title="Live Trailing Stop",              color=guideTrailColor, linewidth=guideLineWidth)
+
+View in Pine Editor・825 lines
+Use on chart
+6
+8
+1
+1 773
+Sep 19, 2025
+Triple Quad Frosty v4.5 is a Renko-friendly strategy that lets you trade from up to four signal sources per side. Orders are only placed when your chosen conditional filters (A/B/C) agree, giving you full control over when entries are valid. You decide how signals must line up — from simple single-source triggers to majority or full agreement across all four.
+
+Renko-based, with customizable static stops, take profits, and trailing stops. Time/day filters, daily trade limits, and forced closures let you restrict trading to specific windows.
+
+The HTF filters in Triple Quad Frosty v4.5 use a higher-timeframe Hull Moving Average (HMA) to confirm trend direction, while slope and distance settings on the local HMA help filter out weak or choppy setups. Longs only trigger when price is above the HTF HMA and meets slope/distance requirements, and shorts only when the opposite is true.
+
+Color-coded labels mark each exit as a win or loss, with reversal trades labeled separately for clarity. Conditional bars plotted above and below the chart show when the A/B/C filters align on a long or short bias, giving clear visual confirmation of entry conditions. Stop loss and take profit levels are plotted directly on the chart with guide lines, so you can easily track active trade management in real time.
+Nov 10, 2025
+Release Notes
+Removed existing spam key

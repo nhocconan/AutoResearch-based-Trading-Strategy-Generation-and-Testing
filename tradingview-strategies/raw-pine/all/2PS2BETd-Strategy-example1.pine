@@ -1,0 +1,4 @@
+//@version=3
+trackprice=##input(defval=false,type='INPUT_BOOL',##id='in_0')
+##root(root_metainfo,rm_0,trackprice)
+##root(root_metainfo,rm_1,trackprice)

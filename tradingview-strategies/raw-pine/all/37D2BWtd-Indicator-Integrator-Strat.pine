@@ -1,0 +1,50 @@
+//@version=2
+strategy("Indicator Integrator Strat",default_qty_type = strategy.percent_of_equity, default_qty_value = 100,currency="USD",initial_capital=100, overlay=true)
+
+l = input(defval=170,title="Length for indicator",type=integer)
+s = input(title="Length of summation",type=integer,defval=29)
+a= sma(close,l)
+r=roc(close,l)
+k=close-a
+sum = 0
+for i = 0 to s
+    sum := sum + k[i]
+plot(a,color=yellow,linewidth=2,transp=0)
+//bc =  iff( sum > 0, white, teal)
+//plot(sum,color=bc, transp=20, linewidth=3,style=columns)
+//plot(sma(sum,3),color=white)
+//hline(0)
+
+inpTakeProfit = input(defval = 0, title = "Take Profit", minval = 0)
+inpStopLoss = input(defval = 0, title = "Stop Loss", minval = 0)
+inpTrailStop = input(defval = 0, title = "Trailing Stop Loss", minval = 0)
+inpTrailOffset = input(defval = 0, title = "Trailing Stop Loss Offset", minval = 0)
+useTakeProfit = inpTakeProfit >= 1 ? inpTakeProfit : na
+useStopLoss = inpStopLoss >= 1 ? inpStopLoss : na
+useTrailStop = inpTrailStop >= 1 ? inpTrailStop : na
+useTrailOffset = inpTrailOffset >= 1 ? inpTrailOffset : na
+
+
+longCondition = sum>0
+exitlong = sum<0
+
+shortCondition = sum<0
+exitshort = sum>0
+
+strategy.entry(id = "Long", long=true, when = longCondition)
+strategy.close(id = "Long", when = exitlong)
+strategy.exit("Exit Long", from_entry = "Long", profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset, when=exitlong)
+
+strategy.entry(id = "Short", long=false, when = shortCondition)
+strategy.close(id = "Short", when = exitshort)
+strategy.exit("Exit Short", from_entry = "Short", profit = useTakeProfit, loss = useStopLoss, trail_points = useTrailStop, trail_offset = useTrailOffset, when=exitshort)
+
+View in Pine Editor・40 lines
+Use on chart
+1
+3
+2
+3 590
+This strategy is based on my Indicator Integrator. The code sums the distances from the close of the price to an SMA (200 in example) with a summation period of the last 29 bars. I tuned this to NZDUSD 15min chart using 200SMA and 29 period sum. If I am reading strat tester correctly this hits a 39% gain since Mar-13 or 104 days. It has the ability to set stops and limits which they are not set at this point. There is no repainting or HA charts and other tricks of boosting a false gain. My codes are built for autotrading with some oversight, i.e stopping the autotrading prior to extreme news events on the economic calendar. I pick pairs that have low volatility so that the code does not have to act through heavy price changes.
+
+Comments welcome

@@ -1,0 +1,166 @@
+//@version=6
+strategy("Gold Breakout Strategy - RR 4", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+donchianLength = input.int(96, "Donchian Channel Length")
+maVolumeLength = input.int(30, "Volume MA Length")
+lwtiLength = input.int(25, "LWTI Length")
+lwtiSmooth = input.int(5, "LWTI Smoothing")
+startHour = input.int(20, "Start Hour")
+endHour = input.int(8, "End Hour")
+
+// === TIME FILTER (Corrected) ===
+startTimestamp = timestamp("GMT-5", year, month, dayofmonth, startHour, 0)
+endTimestamp = timestamp("GMT-5", year, month, dayofmonth + (startHour > endHour ? 1 : 0), endHour, 0)
+inSession = time >= startTimestamp and time < endTimestamp
+
+var int currentDay = na
+var bool tradeTakenToday = false
+    
+   
+
+// === DONCHIAN CHANNEL ===
+donchianUpper = ta.highest(high, donchianLength)
+donchianLower = ta.lowest(low, donchianLength)
+donchianUpperPrev = ta.highest(high[1], donchianLength)
+donchianLowerPrev = ta.lowest(low[1], donchianLength)
+
+// === VOLUME INDICATOR ===
+volumeMA = ta.sma(volume, maVolumeLength)
+volumeCondition = volume > volumeMA
+
+// === LWTI ===
+lwti = ta.wma(close - close[1], lwtiLength)
+smoothedLWTI = ta.sma(lwti, lwtiSmooth)
+lwtiConditionLong = lwti > smoothedLWTI
+lwtiConditionShort = lwti < smoothedLWTI
+
+// === SIGNAL CONDITIONS ===
+breaksUpper = close > donchianUpperPrev and donchianUpper > donchianUpperPrev
+breaksLower = close < donchianLowerPrev and donchianLower < donchianLowerPrev
+
+longCondition = not tradeTakenToday and inSession and breaksUpper and volumeCondition and lwtiConditionLong
+shortCondition = not tradeTakenToday and inSession and breaksLower and volumeCondition and lwtiConditionShort
+
+// === TRADE EXECUTION ===
+if longCondition
+    stopLoss = low
+    takeProfit = close + (close - stopLoss) * 4
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL", from_entry="Long", stop=stopLoss, limit=takeProfit)
+    tradeTakenToday := true
+
+if shortCondition
+    stopLoss = high
+    takeProfit = close - (stopLoss - close) * 4
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL", from_entry="Short", stop=stopLoss, limit=takeProfit)
+    tradeTakenToday := true
+
+// === VISUALS ===
+plotshape(longCondition, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(shortCondition, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+plot(donchianUpper, "Donchian Upper", color=color.orange)
+plot(donchianLower, "Donchian Lower", color=color.blue)
+
+View in Pine Editor・66 lines
+Use on chart
+3
+9
+1 634
+Strategy Name: Gold Breakout Strategy - RR 4
+🧠 Main Objective
+This strategy aims to capitalize on breakouts from the Donchian Channel on Gold (XAU/USD) by filtering trades with:
+
+Volume confirmation,
+
+A custom momentum indicator (LWTI - Linear Weighted Trend Index),
+
+And a specific trading session (8 PM to 8 AM Quebec time — GMT-5).
+
+It takes only one trade per day, either a buy or a sell, using a fixed stop-loss at the wick of the breakout candle and a 4:1 reward-to-risk (RR) ratio.
+
+📊 Indicators Used
+Donchian Channel
+
+Length: 96
+
+Detects breakouts of recent highs or lows.
+
+Volume
+
+Simple Moving Average (SMA) over 30 bars.
+
+A breakout is only valid if the current volume is above the SMA.
+
+LWTI (Linear Weighted Trend Index)
+
+Measures momentum using price differences over 25 bars, smoothed over 5.
+
+Used to confirm trend direction:
+
+Buy when LWTI > its smoothed version (uptrend).
+
+Sell when LWTI < its smoothed version (downtrend).
+
+⏰ Time Filter
+The strategy only allows entries between 8 PM and 8 AM (GMT-5 / Quebec time).
+
+A timestamp-based filter ensures the system recognizes the correct trading session even across midnight.
+
+📌 Entry Conditions
+🟢 Buy (Long)
+Price breaks above the previous Donchian Channel high.
+
+The current channel high is higher than the previous one.
+
+Volume is above its moving average.
+
+LWTI confirms an uptrend.
+
+The time is within the trading session (20:00 to 08:00).
+
+No trade has been taken yet today.
+
+🔴 Sell (Short)
+Price breaks below the previous Donchian Channel low.
+
+The current channel low is lower than the previous one.
+
+Volume is above its moving average.
+
+LWTI confirms a downtrend.
+
+The time is within the trading session.
+
+No trade has been taken yet today.
+
+💸 Trade Management
+Stop-Loss (SL):
+
+For long entries: placed below the wick low of the breakout candle.
+
+For short entries: placed above the wick high of the breakout candle.
+
+Take-Profit (TP):
+
+Set at a fixed 4:1 reward-to-risk ratio.
+
+Calculated as 4x the distance between the entry price and stop-loss.
+
+No trailing stop, no break-even, no scaling in/out.
+
+🎨 Visuals
+Green triangle appears below the candle on a buy signal.
+
+Red triangle appears above the candle on a sell signal.
+
+Donchian Channel lines are plotted on the chart.
+
+The strategy is designed for the 5-minute timeframe.
+
+🔄 One Trade Per Day Rule
+Once a trade is taken (buy or sell), no more trades will be executed for the rest of the day. This prevents overtrading and limits exposure.
+
+

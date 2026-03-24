@@ -1,0 +1,96 @@
+//@version=5
+strategy("EMA + S/R Breakout", overlay=true, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=10,
+     calc_on_every_tick=false)
+
+// ─── INPUTS ───────────────────────────────────────────────────────────────────
+ema9_len    = input.int(9,    "EMA Fast")
+ema20_len   = input.int(20,   "EMA Slow")
+sr_lookback = input.int(20,   "S/R Lookback Bars")
+target_pct  = input.float(12.0, "Target %",    step=0.5) / 100
+sl_pct      = input.float(6.0,  "Stop Loss %", step=0.5) / 100
+
+// ─── EMA ──────────────────────────────────────────────────────────────────────
+ema9  = ta.ema(close, ema9_len)
+ema20 = ta.ema(close, ema20_len)
+
+plot(ema9,  "EMA 9",  color=color.orange, linewidth=2)
+plot(ema20, "EMA 20", color=color.blue,   linewidth=2)
+
+// ─── S/R LEVELS (no lag - rolling highest/lowest) ─────────────────────────────
+// Use [1] so we reference COMPLETED bars only - no repainting
+res = ta.highest(high[1], sr_lookback)  // resistance
+sup = ta.lowest(low[1],   sr_lookback)  // support
+
+// ─── DRAW DOTTED S/R SEGMENTS AT PIVOT POINTS ─────────────────────────────────
+ph = ta.pivothigh(high, sr_lookback, sr_lookback)
+pl = ta.pivotlow(low,   sr_lookback, sr_lookback)
+
+if not na(ph)
+    line.new(bar_index[sr_lookback] - 4, ph,
+             bar_index[sr_lookback] + 4, ph,
+             color=color.red, style=line.style_dotted, width=2)
+
+if not na(pl)
+    line.new(bar_index[sr_lookback] - 4, pl,
+             bar_index[sr_lookback] + 4, pl,
+             color=color.green, style=line.style_dotted, width=2)
+
+// ─── BREAKOUT CONDITIONS ──────────────────────────────────────────────────────
+// Long:  price closes above resistance + EMA9 above EMA20
+// Short: price closes below support    + EMA9 below EMA20
+long_signal  = ta.crossover(close, res)  and ema9 > ema20
+short_signal = ta.crossunder(close, sup) and ema9 < ema20
+
+// ─── ENTRIES ──────────────────────────────────────────────────────────────────
+if long_signal
+    strategy.entry("Long", strategy.long, comment="BUY")
+
+if short_signal
+    strategy.entry("Short", strategy.short, comment="SELL")
+
+// ─── EXITS ────────────────────────────────────────────────────────────────────
+if strategy.position_size > 0
+    strategy.exit("L-Exit", "Long",
+         limit = strategy.position_avg_price * (1 + target_pct),
+         stop  = strategy.position_avg_price * (1 - sl_pct),
+         comment_profit = "TP +12%",
+         comment_loss   = "SL -6%")
+
+if strategy.position_size < 0
+    strategy.exit("S-Exit", "Short",
+         limit = strategy.position_avg_price * (1 - target_pct),
+         stop  = strategy.position_avg_price * (1 + sl_pct),
+         comment_profit = "TP +12%",
+         comment_loss   = "SL -6%")
+
+// ─── VISUAL SIGNALS (plotshape - most reliable, always shows) ─────────────────
+plotshape(long_signal,  title="Long Entry",  location=location.belowbar, 
+     style=shape.triangleup,   color=color.green, size=size.normal, text="BUY")
+
+plotshape(short_signal, title="Short Entry", location=location.abovebar, 
+     style=shape.triangledown, color=color.red,   size=size.normal, text="SELL")
+
+View in Pine Editor・73 lines
+Use on chart
+1
+8
+554
+Here is the full strategy description:
+Strategy Name: EMA + S/R Breakout Strategy
+This strategy is based on two core concepts — EMA trend direction and Support/Resistance breakout confirmation.
+EMA Logic
+Two Exponential Moving Averages are plotted on the chart. EMA 9 is the fast line shown in orange and EMA 20 is the slow line shown in blue. When EMA 9 is above EMA 20 it confirms an uptrend. When EMA 9 is below EMA 20 it confirms a downtrend. These two lines together act as a trend filter so that trades are only taken in the direction of the current trend.
+Support and Resistance Logic
+Resistance is calculated as the highest high of the last 20 completed bars. Support is calculated as the lowest low of the last 20 completed bars. These levels are drawn on the chart as short dotted segments at pivot points only so the chart stays clean and not cluttered with continuous lines.
+Breakout Logic
+A buy signal is generated when the closing price crosses above the resistance level and at the same time EMA 9 is above EMA 20. This combination confirms that price has broken a key resistance level and the trend is also supporting the move upward. A sell signal is generated when the closing price crosses below the support level and EMA 9 is below EMA 20 confirming a downside breakout with trend alignment.
+Entry
+Entry is taken on the same candle where the breakout is confirmed. A green triangle with BUY label appears below the candle for long entry and a red triangle with SELL label appears above the candle for short entry.
+Exit Logic
+For long trades the target is set at 12 percent above the entry price and the stop loss is set at 6 percent below the entry price. For short trades the target is 12 percent below entry and stop loss is 6 percent above entry. Exits are handled automatically by the strategy and labeled as TP +12% when target is hit and SL -6% when stop loss is triggered.
+Risk to Reward
+The strategy maintains a fixed 1:2 risk to reward ratio on every trade. You risk 6 percent to make 12 percent which means even if only 40 percent of trades hit target the strategy remains profitable over time.
+Best Timeframe
+This strategy works best on 5 minute to 1 hour charts for intraday and swing trades. The S/R lookback period and EMA lengths can be adjusted from the settings panel based on the stock or asset being traded.

@@ -1,0 +1,6 @@
+//@version=5
+rsiLevel=##input(defval=50,type='INPUT_INTEGER',##id='in_3')
+##root(root_metainfo,rm_0,2,input__integer,plot,linewidth)
+##root(root_metainfo,rm_1,2,input__integer,plot,linewidth)
+##root(root_metainfo,rm_2,rsiLevel,input__float)
+##root(root_metainfo,rm_3,2,input__integer,plot,linewidth)

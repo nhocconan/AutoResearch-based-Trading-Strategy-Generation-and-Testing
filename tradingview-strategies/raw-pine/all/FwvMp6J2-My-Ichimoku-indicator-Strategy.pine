@@ -1,0 +1,112 @@
+//@version=3
+strategy("My Ichimoku Strat", overlay=true,default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=1000, currency=currency.EUR,commission_type=strategy.commission.percent,commission_value=0.05)
+// === BACKTEST RANGE ===
+FromMonth = input(defval = 3, title = "From Month", minval = 1)
+FromDay   = input(defval = 10, title = "From Day", minval = 1)
+FromYear  = input(defval = 2018, title = "From Year", minval = 2014)
+ToMonth   = input(defval = 1, title = "To Month", minval = 1)
+ToDay     = input(defval = 1, title = "To Day", minval = 1)
+ToYear    = input(defval = 9999, title = "To Year", minval = 2014)
+
+// === SERIES SETUP ===
+//**** Inputs *******
+KijunSenLag = input(6,title="KijunSen Lag",minval=1)
+
+//Kijun-sen
+//Support resistance line, buy signal when price crosses it
+KijunSen = sma((high+low)/2,26)
+buy2 = crossover(close,KijunSen) and (rising(KijunSen,KijunSenLag) or falling(KijunSen,KijunSenLag))
+sell2= crossunder(close,KijunSen) and (rising(KijunSen,KijunSenLag) or falling(KijunSen,KijunSenLag))
+
+
+//Tenkan-Sen
+TenkanSen = sma((high+low)/2,9)
+
+//Senkou Span A 
+SenkouSpanA = (KijunSen + TenkanSen)/2
+
+//Senkou Span B 
+SenkouSpanB = sma((high+low)/2,52)
+
+//Cloud conditions : ignore buy if price is under the cloud
+// Huge cloud means safe support and resistance. Little cloud means danger.
+buy3 = close > SenkouSpanA and close > SenkouSpanB
+sell3 = close < SenkouSpanA and close < SenkouSpanB
+
+
+//Chikou Span
+//Buy signal : crossover(ChikouSpan,close)
+//Sell Signal : crossunder(ChikouSpan,close)
+ChikouSpan = close
+buy1=crossover(ChikouSpan,close[26])
+sell1=crossunder(ChikouSpan,close[26])
+
+plotshape(buy1,style=shape.diamond,color=lime,size=size.small)
+plotshape(sell1,style=shape.diamond,color=orange,size=size.small)
+
+//Alerts
+
+buyCompteur = -1
+buyCompteur := nz(buyCompteur[1],-1)
+buyCompteur := buy2 or buy3 ? 1 : buyCompteur
+buyCompteur := buyCompteur > 0 ? buyCompteur + 1 : buyCompteur
+buyCompteur := sell2 or sell3 ? -1 : buyCompteur
+
+sellCompteur = -1
+sellCompteur := nz(sellCompteur[1],-1)
+sellCompteur := sell2 or sell3 ? 1 : sellCompteur
+sellCompteur := sellCompteur > 0 ? sellCompteur + 1 : sellCompteur
+sellCompteur := buy2 or buy3 ? -1 : sellCompteur
+
+sell= sell2 and sell3 or (sell1 and buyCompteur <= 8)
+buy=buy2 and buy3 or (buy1 and sellCompteur <=8)
+plotchar(buy,char='B',size=size.small,color=lime)
+plotchar(sell,char='S',size=size.small,color=orange)
+
+//plots
+plot(KijunSen,title="Kijun-Sen",color=blue,linewidth=4)
+plot(TenkanSen,title="Tenkan-Sen",color=red,linewidth=2)
+cloudA = plot(SenkouSpanA,title="cloud A", color=lime,offset=26,linewidth=2)
+cloudB = plot(SenkouSpanB,title="cloud B", color=orange,offset=26,linewidth=2)
+plot(ChikouSpan,title="lag span",color=fuchsia, linewidth=2,offset=-26)
+//plot()
+fill(cloudA,cloudB,color=SenkouSpanA>SenkouSpanB?lime:orange)
+//plot(close,color=silver,linewidth=4)
+
+// === ALERTS ===
+strategy.entry("L", strategy.long, when=(buy and (time > timestamp(FromYear, FromMonth, FromDay, 00, 00)) and (time < timestamp(ToYear, ToMonth, ToDay, 23, 59))))
+strategy.close("L", when=(sell and (time < timestamp(ToYear, ToMonth, ToDay, 23, 59))))
+
+View in Pine Editor・78 lines
+Use on chart
+2
+0
+3
+7
+8 513
+Mar 13, 2018
+hello I'm a beginner in trading, but I try to learn how to code strategies.
+I recoded the Ichimoku indicator, and created my personnal strategy based on it.
+
+The backtesting is done from 1/1/2017 to today in 45 min Time Unit for candles, with a 1 000 € equity.
+The trades are all Long Entries and Exits with no pyramiding, no short trades at all.
+
+/!\ Exchanges commission fees are not calculated and can in reality easily divide by 2 the total profit (am I right guys?) /!\
+
+A buy signal is triggered upon these conditions:
+
+- close is above the Kuma (cloud)
+AND
+- close crosses over Kijunsen AND Kijunsen is not flat (calculated with rising and falling with input "Kijunsen Lag")
+
+OR
+- Close crosses over ChikouSpan AND there was a sell signal in the last 8 candles
+
+Sell signal is the same but reversed.
+
+I appreciate your feedback ! Maybe I will update this later if I get better results.
+
+Aug 29, 2018
+Release Notes
+I added the commmission fees and we can see that this strategy is not profitable anymore.
+This is a very old script. Please check my more recent scripts!

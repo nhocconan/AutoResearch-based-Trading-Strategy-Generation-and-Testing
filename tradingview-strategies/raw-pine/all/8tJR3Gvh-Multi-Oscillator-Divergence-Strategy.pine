@@ -1,0 +1,257 @@
+//@version=4
+strategy(title="Multi-Oscillator Divergence Strategy", calc_on_order_fills=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, currency="USD", default_qty_value=100)
+
+
+
+maType =    input(title="Moving Average Type", options=["DPO", "Momentum", "MACD", "RSI", "Stoch"], defval="DPO")
+len = input(title="LookBack Period", minval=1, defval=117)
+src = input(title="Price Source", defval=close)
+lbR = input(title="Pivot Lookback Right", defval=5)
+lbL = input(title="Pivot Lookback Left", defval=5, maxval=21)
+rangeUpper = input(title="Max of Lookback Range", defval=500)
+rangeLower = input(title="Min of Lookback Range", defval=7)
+plotBull = input(title="Plot Bullish", defval=true)
+plotHiddenBull = input(title="Plot Hidden Bullish", defval=true)
+plotBear = input(title="Plot Bearish", defval=true)
+plotHiddenBear = input(title="Plot Hidden Bearish", defval=true)
+
+bearColor = color.red
+bullColor = color.green
+hiddenBullColor = color.new(color.yellow, 70)
+hiddenBearColor = color.new(color.orange, 70)
+textColor = color.white
+noneColor = color.new(color.white, 100)
+
+
+osc = ema(src, len)
+
+//DPO
+detrend = src - osc
+length = input(1, "RMA of DPO Length - Only use if you have DPO selected")
+rma = rma(detrend, length)
+
+
+//MACD
+fast = input(21, "Fast MACD - Only use if you have MACD selected")
+slow = len
+fastMA = ema(src, fast)
+slowMA = ema(src, len)
+
+macd = fastMA - slowMA
+
+////Stochastic
+
+
+fastStoch = input(3, minval=1, title = "%D")
+K = stoch(close, high, low, len)
+D = sma(K, fastStoch)
+
+
+
+
+
+// Moving Average Calculation
+ma =     maType == "DPO" ? rma :
+         maType == "Momentum" ? mom(src, len) :
+         maType == "RSI" ? rsi(src, len) :
+         maType == "Stoch" ? D :
+         macd
+
+
+
+
+
+
+
+plot(ma, title="MaType", linewidth=1, color=#8D1699)
+
+hline(0, title="Middle Line", linestyle=hline.style_dotted)
+
+
+plFound = na(pivotlow(ma, lbL, lbR)) ? false : true
+phFound = na(pivothigh(ma, lbL, lbR)) ? false : true
+
+_inRange(cond) =>
+    bars = barssince(cond == true)
+    rangeLower <= bars and bars <= rangeUpper
+
+
+
+
+
+
+
+
+
+
+//------------------------------------------------------------------------------
+// Regular Bullish
+
+// Osc: Higher Low
+oscHL = ma[lbR] > valuewhen(plFound, ma[lbR], 1) and _inRange(plFound[1])
+
+// Price: Lower Low
+priceLL = low[lbR] < valuewhen(plFound, low[lbR], 1)
+
+bullCond = plotBull and priceLL and oscHL and plFound
+
+plot(
+     plFound ? ma[lbR] : na,
+     offset=-lbR,
+     title="Regular Bullish",
+     linewidth=2,
+     color=(bullCond ? bullColor : noneColor),
+     transp=0
+     )
+
+plotshape(
+     bullCond ? ma[lbR] : na,
+     offset=-lbR,
+     title="Regular Bullish Label",
+     text=" Bull ",
+     style=shape.labelup,
+     location=location.bottom,
+     color=bullColor,
+     size=size.small,
+     textcolor=textColor,
+     transp=0
+     )
+
+//------------------------------------------------------------------------------
+// Hidden Bullish
+
+// Osc: Lower Low
+oscLL = ma[lbR] < valuewhen(plFound, ma[lbR], 1) and _inRange(plFound[1])
+
+// Price: Higher Low
+priceHL = low[lbR] > valuewhen(plFound, low[lbR], 1)
+
+hiddenBullCond = plotHiddenBull and priceHL and oscLL and plFound
+
+plot(
+     plFound ? ma[lbR] : na,
+     offset=-lbR,
+     title="Hidden Bullish",
+     linewidth=2,
+     color=(hiddenBullCond ? hiddenBullColor : noneColor),
+     transp=0
+     )
+
+plotshape(
+     hiddenBullCond ? ma[lbR] : na,
+     offset=-lbR,
+     title="Hidden Bullish Label",
+     text=" H Bull ",
+     style=shape.labelup,
+     location=location.bottom,
+     color=hiddenBullColor,
+     size=size.small,
+     textcolor=textColor,
+     transp=0
+     )
+
+//------------------------------------------------------------------------------
+// Regular Bearish
+
+// Osc: Lower High
+oscLH = ma[lbR] < valuewhen(phFound, ma[lbR], 1) and _inRange(phFound[1])
+
+// Price: Higher High
+priceHH = high[lbR] > valuewhen(phFound, high[lbR], 1)
+
+bearCond = plotBear and priceHH and oscLH and phFound
+
+plot(
+     phFound ? ma[lbR] : na,
+     offset=-lbR,
+     title="Regular Bearish",
+     linewidth=2,
+     color=(bearCond ? bearColor : noneColor),
+     transp=0
+     )
+
+plotshape(
+     bearCond ? ma[lbR] : na,
+     offset=-lbR,
+     title="Regular Bearish Label",
+     text=" Bear ",
+     style=shape.labeldown,
+     location=location.top,
+     color=bearColor,
+     size=size.small,
+     textcolor=textColor,
+     transp=0
+     )
+
+//------------------------------------------------------------------------------
+// Hidden Bearish
+
+// Osc: Higher High
+oscHH = ma[lbR] > valuewhen(phFound, ma[lbR], 1) and _inRange(phFound[1])
+
+// Price: Lower High
+priceLH = high[lbR] < valuewhen(phFound, high[lbR], 1)
+
+hiddenBearCond = plotHiddenBear and priceLH and oscHH and phFound
+
+plot(
+     phFound ? ma[lbR] : na,
+     offset=-lbR,
+     title="Hidden Bearish",
+     linewidth=2,
+     color=(hiddenBearCond ? hiddenBearColor : noneColor),
+     transp=0
+     )
+
+plotshape(
+     hiddenBearCond ? ma[lbR] : na,
+     offset=-lbR,
+     title="Hidden Bearish Label",
+     text=" H Bear ",
+     style=shape.labeldown,
+     location=location.top,
+     color=hiddenBearColor,
+     size=size.tiny,
+     textcolor=textColor,
+     transp=0
+     )
+
+bull = offset(bullCond, lbR) or offset(hiddenBullCond, lbR)
+bear = offset(bearCond, lbR) or offset(hiddenBearCond, lbR)
+
+
+
+strategy.entry("Long", strategy.long, when=bull)
+strategy.entry("Short", strategy.short, when=bear)
+
+View in Pine Editor・235 lines
+Use on chart
+1 K
+18
+33 103
+Dec 30, 2019
+Note: This is a modified version of TradingView's built-in "Divergence Indicator" and applied in "Strategy" format to show back testing results
+It finds bullish and bearish divergence in a selection of well known MA formulas: MACD, RSI, STOCH, DETRENDED PRICE OSCILLATOR, MOMENTUM.
+
+I've found good results even on 1 minute charts!
+
+In this example the chart backtest is utilizing the detrended price oscillator (DPO)
+
+There are multiple variables, so the ability to find good back test can sometimes be "time consuming"
+And please note that if you increase "Pivot LookBack Right" variable too high, then you will increase chance of repaint. Keep this variable as low as possible
+
+
+I've also drawn my own solutions on the chart (red and green trend lines) to find good take profit and safe stop loss. In order to study this properly you need the own the chart. Scripts don't give you this option.
+See private chart publication link to "own" the chart for yourself. Simply click on the "Share" button (it's the megaphone icon) and click on "Make it Mine"
+
+
+
+
+I've found the best approach is to create 5 copies of indicator on 1 chart and have each running with different MA formula. This will give you a majority consensus type environment.
+
+I will post study with alert conditions next
+
+Good luck and enjoy!
+Dec 30, 2019
+Release Notes
+Updated

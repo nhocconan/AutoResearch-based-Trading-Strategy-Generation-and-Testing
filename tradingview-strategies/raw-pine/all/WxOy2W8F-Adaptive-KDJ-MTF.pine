@@ -1,0 +1,219 @@
+//@version=5
+strategy("Adaptive KDJ (MTF) v1.2", calc_on_every_tick = false, overlay = false, pyramiding = 10)
+
+// Dropdown for calculation method of the Swinglength
+method = input.int(1, title="Method", options=[1, 2, 3], tooltip="1: Volatility-based\n2: Volatility-based (reversed)\n3: Static length")
+
+// Static length for method 3
+fixedLength = input.int(9, title="Static KDJ length", minval=3, maxval=150)
+
+// Timeframes
+tf1 = input.timeframe("1", title="Timeframe 1")
+tf2 = input.timeframe("5", title="Timeframe 2")
+tf3 = input.timeframe("15", title="Timeframe 3")
+
+// Timeframe-weighting
+weightOption = input.int(1, title="Timeframe-weighting", options=[1, 2, 3, 4, 5], tooltip="1: TF1:50%, TF2:33%, TF3:17%\n2: TF1:40%, TF2:33%, TF3:27%\n3: TF1:33%, TF2:33%, TF3:33%\n4: TF1:20%, TF2:33%, TF3:47%\n5: TF1:10%, TF2:33%, TF3:57%")
+weightTF1 = weightOption == 1 ? 0.5 : weightOption == 2 ? 0.4 : weightOption == 3 ? 0.33 : weightOption == 4 ? 0.2 : 0.1
+weightTF2 = 0.33
+weightTF3 = 1.0 - (weightTF1 + weightTF2)
+
+// EMA-Smoothinglength
+smoothingLength = input.int(4, title="EMA-smoothing length", minval=1, maxval=50)
+
+// Trend definition
+trendLength = input.int(30, title="Trend definition over X periods", minval=5, maxval=50)
+
+// KDJ-function
+f_kdj(len, srcHigh, srcLow, srcClose) =>
+    roundedLen = int(math.round(len))
+    high_max = ta.highest(srcHigh, roundedLen)
+    low_min = ta.lowest(srcLow, roundedLen)
+    rsv = 100 * (srcClose - low_min) / (high_max - low_min)
+    k = ta.sma(rsv, 3)
+    d = ta.sma(k, 3)
+    j = 3 * k - 2 * d
+    [k, d, j]
+
+// Swinglength function
+f_swingLength(tf) =>
+    atrLen = 14
+    volatility = request.security(syminfo.tickerid, tf, ta.atr(atrLen) / close)
+    var float length = na
+    if method == 1
+        length := volatility > 0.03 ? 3 : volatility < 0.002 ? 15 : math.round(3 + (15 - 3) * ((0.03 - nz(volatility)) / (0.03 - 0.002)))
+    if method == 2
+        length := volatility > 0.03 ? 15 : volatility < 0.002 ? 3 : math.round(15 - (15 - 3) * ((0.03 - nz(volatility)) / (0.03 - 0.002)))
+    if method == 3
+        length := fixedLength
+    length
+
+// Swinglengths
+swingLength1 = f_swingLength(tf1)
+swingLength2 = f_swingLength(tf2)
+swingLength3 = f_swingLength(tf3)
+
+// KDJ-Values
+[k1, d1, j1] = f_kdj(swingLength1, request.security(syminfo.tickerid, tf1, high), request.security(syminfo.tickerid, tf1, low), request.security(syminfo.tickerid, tf1, close))
+[k2, d2, j2] = f_kdj(swingLength2, request.security(syminfo.tickerid, tf2, high), request.security(syminfo.tickerid, tf2, low), request.security(syminfo.tickerid, tf2, close))
+[k3, d3, j3] = f_kdj(swingLength3, request.security(syminfo.tickerid, tf3, high), request.security(syminfo.tickerid, tf3, low), request.security(syminfo.tickerid, tf3, close))
+
+// Weighted averages
+avgK = (k1 * weightTF1 + k2 * weightTF2 + k3 * weightTF3)
+avgD = (d1 * weightTF1 + d2 * weightTF2 + d3 * weightTF3)
+avgJ = (j1 * weightTF1 + j2 * weightTF2 + j3 * weightTF3)
+smoothAvgK = ta.ema(avgK, smoothingLength)
+smoothAvgD = ta.ema(avgD, smoothingLength)
+smoothAvgJ = ta.ema(avgJ, smoothingLength)
+smoothAvgTotal = ta.ema((avgK + avgD + avgJ) / 3, smoothingLength)
+
+// Trend definition
+trendAvg = ta.sma(smoothAvgTotal, trendLength)
+isUptrend = trendAvg > 60
+isDowntrend = trendAvg < 40
+
+// Dynamic signal thresholds
+buyLevel = 20//isUptrend ? 40 : isDowntrend ? 15 : 25
+mildbuyLevel = 40
+sellLevel = 80//isUptrend ? 85 : isDowntrend ? 60 : 75
+mildsellLevel = 60
+
+// Buy-/Sellsignals
+buySignal = smoothAvgJ < buyLevel and ta.crossover(smoothAvgK, smoothAvgD)
+mildbuySignal = smoothAvgJ < mildbuyLevel and smoothAvgJ > buyLevel and ta.crossover(smoothAvgK, smoothAvgD)
+sellSignal = smoothAvgJ > sellLevel and ta.crossunder(smoothAvgK, smoothAvgD)
+mildsellSignal = smoothAvgJ > mildsellLevel and smoothAvgJ < sellLevel and ta.crossunder(smoothAvgK, smoothAvgD)
+
+// Antizipate signals
+anticipateBuy = (smoothAvgK - smoothAvgK[1]) > 0 and (smoothAvgD - smoothAvgD[1]) < 0 and math.abs(smoothAvgK - smoothAvgD) < 5 and smoothAvgTotal < 40
+anticipateSell = (smoothAvgK - smoothAvgK[1]) < 0 and (smoothAvgD - smoothAvgD[1]) > 0 and math.abs(smoothAvgK - smoothAvgD) < 5 and smoothAvgTotal > 60
+
+// Entry-Conditions
+avgVolume = ta.sma(volume, 100)
+volFilter = volume > avgVolume //* 1.4
+longEntryCondition = buySignal //(and smoothAvgTotal < 22)
+shortEntryCondition = sellSignal //(and smoothAvgTotal > 78)
+
+// Entry-Orders
+if buySignal
+    strategy.entry("Long", strategy.long)
+    alert("Buy-" + syminfo.ticker, alert.freq_once_per_bar)
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    alert("Sell-" + syminfo.ticker, alert.freq_once_per_bar)
+
+// Trailing Stop-Loss
+atrMultiplierTSL = 3.0
+atrValueTSL = ta.atr(7) * atrMultiplierTSL
+if anticipateSell or sellSignal
+    strategy.exit("TSL Long", from_entry="Long", trail_offset = 500, trail_price = open, trail_points = 30)
+if anticipateBuy or buySignal
+    strategy.exit("TSL Short", from_entry="Short", trail_offset = 500, trail_price = open, trail_points = 30)
+
+// Buy-/Sellareas
+hline_80 = hline(80,"Overbought", color=color.rgb(100, 100, 100, 100))
+hline_20 = hline(20,"Oversold", color=color.rgb(100, 100, 100, 100))
+hline_100 = hline(100,"Overbought2", color=color.rgb(100, 100, 100, 100))
+hline_0 = hline(0,"Oversold2", color=color.rgb(100, 100, 100, 100))
+fill(hline_80, hline_100, color=color.red, transp=90)
+fill(hline_20, hline_0, color=color.green, transp=90)
+
+// Divergences
+// Price highs and lows
+ph = ta.pivothigh(high, 10, 10) // pivot high
+pl = ta.pivotlow(low, 10, 10) // pivot low
+// KDJ highs and lows
+kdj_high = ta.pivothigh(smoothAvgJ, 10, 10) // kdj high
+kdj_low = ta.pivotlow(smoothAvgJ, 10, 10) //kdj low
+// Bear div
+bear_div_potential = high > ta.valuewhen(ph, high, 1) and smoothAvgJ < ta.valuewhen(kdj_high, smoothAvgJ, 1)
+bear_div_confirmed = ta.barssince(bear_div_potential) == 1
+// Bull div
+bull_div_potential = low < ta.valuewhen(pl, low, 1) and smoothAvgJ > ta.valuewhen(kdj_low, smoothAvgJ, 1)
+bull_div_confirmed = ta.barssince(bull_div_potential) == 1
+// Previous pivot values
+prev_ph_bar = ta.valuewhen(ph, bar_index, 1)
+prev_ph_kdj = ta.valuewhen(kdj_high, smoothAvgJ, 1)
+
+prev_pl_bar = ta.valuewhen(pl, bar_index, 1)
+prev_pl_kdj = ta.valuewhen(kdj_low, smoothAvgJ, 1)
+// Draw lines
+var line last_bear_line = na
+var line last_bull_line = na
+
+// Signal plots oscillator
+plotshape(series=buySignal, title="buySignal oscillator", location=location.bottom, style=shape.triangleup, color=color.green, size=size.small)
+plotshape(series=sellSignal, title="sellSignal oscillator", location=location.top, style=shape.triangledown, color=color.red, size=size.small)
+plotshape(series=mildbuySignal, title="mildbuySignal oscillator", location=location.bottom, style=shape.labelup, color=color.rgb(76, 175, 79, 70), size=size.tiny)
+plotshape(series=mildsellSignal, title="mildsellSignal oscillator", location=location.top, style=shape.labeldown, color=color.rgb(255, 82, 82, 70), size=size.tiny)
+plotshape(series=anticipateBuy, title="buySignal oscillator", location=location.bottom, style=shape.triangleup, color=color.blue, size=size.tiny, offset=-1)
+plotshape(series=anticipateSell, title="sellSignal oscillator", location=location.top, style=shape.triangledown, color=color.orange, size=size.tiny, offset=-1)
+
+// Div plots
+plotshape(series=bear_div_potential, title="bear div potential", location=location.top, style=shape.cross, color=color.orange, size=size.tiny)
+plotshape(series=bear_div_confirmed, title="bear div confirmed", location=location.top, style=shape.cross, color=color.red, size=size.tiny)
+
+plotshape(series=bull_div_potential, title="bull div potential", location=location.bottom, style=shape.cross, color=color.orange, size=size.tiny)
+plotshape(series=bull_div_confirmed, title="bull div confirmed", location=location.bottom, style=shape.cross, color=color.green, size=size.tiny)
+
+// Signal plots chart
+//plotshape(series=buySignal, title="buySignal chart", location=location.belowbar, style=shape.triangleup, color=color.green, size=size.small)
+//plotshape(series=sellSignal, title="sellSignal chart", location=location.abovebar, style=shape.triangledown, color=color.red, size=size.small)
+//plotshape(series=anticipateBuy, title="anticipateBuy chart", location=location.belowbar, style=shape.triangleup, color=color.blue, size=size.tiny, offset=-1)
+//plotshape(series=anticipateSell, title="anticipateSell chart", location=location.abovebar, style=shape.triangledown, color=color.orange, size=size.tiny, offset=-1)
+
+// KDJ-Lines (average)
+plot(smoothAvgK, color=color.blue, linewidth=1)
+plot(smoothAvgD, color=color.orange, linewidth=1)
+plot(smoothAvgJ, color=color.purple, linewidth=1)
+plot(smoothAvgTotal, color=color.white, linewidth=1)
+
+// © Lausekopf
+
+View in Pine Editor・174 lines
+Use on chart
+7
+5
+3
+2 240
+Mar 27, 2025
+Hey guys,
+
+this is an adaptive MTF KDJ oscillator.
+Pick up to 3 different timeframes, choose a weighting if you want and enjoy the beautiful signals it will show you.
+
+The length of every timeframe is adaptive and based of the timeframe's ATR.
+The plot shows the smoothed average of the 3 KDJ values.
+
+Large triangles show KDJ crossings.
+Small triangles show anticipations of possible crossings.
+
+I found out it works best with 1m, 5m, 15m and weighting=1 for forex scalping in 1m.
+Use other indicators for confluence.
+Mar 29, 2025
+Release Notes
+Hey guys,
+
+this is an adaptive MTF KDJ oscillator.
+Pick up to 3 different timeframes, choose a weighting if you want and enjoy the beautiful signals it will show you.
+
+The length of every timeframe is adaptive and based of the timeframe's ATR.
+The plot shows the smoothed average of the 3 KDJ values.
+
+Large triangles show KDJ crossings.
+Small triangles show anticipations of possible crossings.
+
+I found out it works best with 1m, 5m, 15m and weighting=1 for forex scalping in 1m.
+Use other indicators for confluence (%R Williams works great!)
+
+Update v1.1:
+-overbought (red) and oversold (green) areas added
+-less but stronger anticipation signals
+Jan 28
+Release Notes
+Update v1.2:
+-potential upcoming and confirmed divergences added
+-minor fixes and improvements
+Jan 28
+Release Notes
+-minor code fixes

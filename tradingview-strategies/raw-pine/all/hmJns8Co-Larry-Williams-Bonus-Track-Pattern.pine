@@ -1,0 +1,151 @@
+//@version=5
+strategy("Larry Williams Bonus Track Pattern",
+     overlay=true,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.01,
+     pyramiding=0,
+     process_orders_on_close=false,
+     calc_on_order_fills=true)
+
+//──────────────────────────────────
+// Inputs
+//──────────────────────────────────
+useDayFilter    = input.bool(true, "Operar solo L/J/V")
+sl_type         = input.string("Puntos", "Tipo de Stop Loss", options=["Puntos","Porcentaje"])
+sl_value        = input.float(1.0, "Valor SL (puntos o %)", step=0.1, minval=0.0)
+debugPlot       = input.bool(false, "Mostrar niveles")
+
+//──────────────────────────────────
+// Series DIARIAS para la SEÑAL
+//──────────────────────────────────
+hD = request.security(syminfo.tickerid, "D", high,  lookahead=barmerge.lookahead_off)
+lD = request.security(syminfo.tickerid, "D", low,   lookahead=barmerge.lookahead_off)
+oD = request.security(syminfo.tickerid, "D", open,  lookahead=barmerge.lookahead_off)
+cD = request.security(syminfo.tickerid, "D", close, lookahead=barmerge.lookahead_off)
+
+// Inside (ayer) y vela previa (anteayer) alcista
+inside_prev           = hD[1] < hD[2] and lD[1] > lD[2]
+prev_of_inside_bull   = cD[2] > oD[2]
+
+// Máximos relevantes: inside (t-1) + dos previos al inside (t-2, t-3)
+inside_high           = hD[1]
+max_pre_inside_two    = math.max(hD[2], hD[3])
+entry_stop_price      = math.max(inside_high, max_pre_inside_two)   // mayor de los 3 previos
+
+//──────────────────────────────────
+// Lógica por DÍA (primera barra del día)
+//──────────────────────────────────
+isNewDay   = ta.change(time("D"))     // true en la PRIMERA barra de cada día
+dayOpen    = open                      // en la 1ª barra del día es la apertura diaria real
+dow        = dayofweek                // día de la semana actual (intradiario sirve)
+
+passDay    = not useDayFilter or (dow == dayofweek.monday or dow == dayofweek.thursday or dow == dayofweek.friday)
+open_ok    = dayOpen < inside_high and dayOpen < max_pre_inside_two
+
+// Setup válido SOLO para el día inmediatamente posterior al inside
+longSetupToday = isNewDay and passDay and inside_prev and prev_of_inside_bull and open_ok
+
+//──────────────────────────────────
+// Función auxiliar para crear un “identificador de día” numérico
+//──────────────────────────────────
+getDayId() =>
+    year(time) * 10000 + month(time) * 100 + dayofmonth(time)
+
+//──────────────────────────────────
+// Gestión de pendientes / entrada exacta en la vela siguiente al inside
+//──────────────────────────────────
+var float entryPrice = na
+var int entryDayId = na
+
+if isNewDay
+    // Cancelamos cualquier stop pendiente del día anterior (TIF: 1 día)
+    strategy.cancel("LE")
+
+    // Si hoy es el día siguiente al inside y la apertura es válida:
+    if longSetupToday and strategy.position_size == 0
+        if dayOpen >= entry_stop_price
+            // Gap por encima del stop -> entrar a mercado en la APERTURA del día t
+            strategy.entry("LE", strategy.long)
+        else
+            // Sin gap -> dejamos un STOP válido SOLO para hoy
+            strategy.entry("LE", strategy.long, stop=entry_stop_price)
+
+// Guardamos el día de entrada cuando se ejecuta
+enteredNow = strategy.position_size > 0 and strategy.position_size[1] == 0
+if enteredNow
+    entryPrice := strategy.position_avg_price
+    entryDayId := getDayId()
+
+//──────────────────────────────────
+// Stop Loss fijo
+//──────────────────────────────────
+if strategy.position_size > 0
+    avg = strategy.position_avg_price
+    sl_price = sl_type == "Puntos" ? (avg - sl_value) : (avg * (1.0 - sl_value/100.0))
+    strategy.exit(id="SL", from_entry="LE", stop=sl_price)
+else
+    strategy.cancel("SL")
+
+//──────────────────────────────────
+// FPO: cerrar en la PRIMERA apertura rentable POSTERIOR al día de entrada
+// (nunca el mismo día)
+//──────────────────────────────────
+if isNewDay and strategy.position_size > 0 and not na(entryDayId)
+    if getDayId() > entryDayId and dayOpen > strategy.position_avg_price
+        strategy.close("LE", comment="FPO")
+
+//──────────────────────────────────
+// Plots opcionales
+//──────────────────────────────────
+plot(debugPlot ? inside_high        : na, "Inside High (D-1)")
+plot(debugPlot ? max_pre_inside_two : na, "Máx (D-2/D-3)")
+plot(debugPlot ? entry_stop_price   : na, "Entrada (máx 3 prev)", linewidth=2)
+
+View in Pine Editor・103 lines
+Use on chart
+2
+4
+972
+This strategy trades the day immediately following an Inside Day, under specific directional and timing conditions. It is designed for daily-based setups but executed on intraday charts to ensure orders are placed exactly at the open of the following day, rather than at the daily bar close.
+
+Entry Conditions
+
+Only trades on Monday, Thursday, or Friday.
+
+The previous day must be an Inside Day (its high is lower than the prior high and its low is higher than the prior low).
+
+The bar before the Inside Day must be bullish (close > open).
+
+
+
+On the following day (t):
+
+
+The daily open must be below both the Inside Day’s high and the highest high of the two days before that.
+
+A buy stop is placed at the highest high of the three previous days (Inside Day and the two days before it).
+
+If the new day’s open is already above that level (gap up), the strategy enters long immediately at the open.
+
+
+
+Exit Rules
+
+
+Stop Loss: Fixed, defined in points or percentage (user input).
+
+FPO (First Profitable Open): the position is closed at the first daily open after the entry day where the open price is above the average entry price (the first profitable open).
+
+
+
+Notes
+The script must be applied on an intraday timeframe (e.g., 15-minute or 1-hour) so that the strategy can:
+
+
+Detect the Inside Day pattern using daily data (request.security).
+
+Execute orders in real time at the next day’s open.
+
+Running it directly on the daily timeframe will delay executions by one bar due to Pine Script’s evaluation model.
+

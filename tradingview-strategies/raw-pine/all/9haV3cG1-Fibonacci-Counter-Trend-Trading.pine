@@ -1,0 +1,165 @@
+//@version=6
+
+strategy('Fibonacci Counter-Trend Trading', shorttitle = 'FiboCTT', overlay = true, margin_long = 100, margin_short = 100, initial_capital = 10000, commission_type =  strategy.commission.percent, commission_value = 0.01,calc_on_every_tick = false, slippage = 3)
+//Inputs
+length = input.int(100, title = 'Moving Average Length', minval = 1)
+src = input(close, title = 'Source')
+mult = input.float(2.0, minval = 0.001, maxval = 50, title = 'Bands multiplier')
+// Input for trading levels
+upperLevel = input.string("1", title="Upper level", options=["0.236", "0.382", "0.5", "0.618", "0.764", "1"])
+lowerLevel = input.string("1", title="Lower level", options=["0.236", "0.382", "0.5", "0.618", "0.764", "1"])
+exitBasis = input.bool(false, title = "Exit at base line?")
+
+//Calculation
+basis = ta.vwma(src, length)
+dev = mult * ta.stdev(src, length)
+upper_1 = basis + 0.236 * dev
+upper_2 = basis + 0.382 * dev
+upper_3 = basis + 0.5 * dev
+upper_4 = basis + 0.618 * dev
+upper_5 = basis + 0.764 * dev
+upper_6 = basis + 1 * dev
+lower_1 = basis - 0.236 * dev
+lower_2 = basis - 0.382 * dev
+lower_3 = basis - 0.5 * dev
+lower_4 = basis - 0.618 * dev
+lower_5 = basis - 0.764 * dev
+lower_6 = basis - 1 * dev
+
+//Plots
+color_1 = color.new(color.red, 90)
+color_2 = color.new(color.green, 90)
+
+p0 = plot(basis, linewidth = 2)
+p1 = plot(upper_1, linewidth = 1, title = '0.236', color = color_1)
+p2 = plot(upper_2, linewidth = 1, title = '0.382', color = color_1)
+p3 = plot(upper_3, linewidth = 1, title = '0.5', color = color_1)
+p4 = plot(upper_4, linewidth = 1, title = '0.618', color = color_1)
+p5 = plot(upper_5, linewidth = 1, title = '0.764', color = color_1)
+p6 = plot(upper_6, linewidth = 2, title = '1', color = color_1)
+
+p13 = plot(lower_1, linewidth = 1, title = '0.236', color = color_2)
+p14 = plot(lower_2, linewidth = 1, title = '0.382', color = color_2)
+p15 = plot(lower_3, linewidth = 1, title = '0.5', color = color_2)
+p16 = plot(lower_4, linewidth = 1, title = '0.618', color = color_2)
+p17 = plot(lower_5, linewidth = 1, title = '0.764', color = color_2)
+p18 = plot(lower_6, linewidth = 2, title = '1', color = color_2)
+// Area fill
+fill(p1, p2, color=color.new(color_1, 95), title='Area 0.236 - 0.382')
+fill(p2, p3, color=color.new(color_1, 85), title='Area 0.382 - 0.5')
+fill(p3, p4, color=color.new(color_1, 75), title='Area 0.5 - 0.618')
+fill(p4, p5, color=color.new(color_1, 65), title='Area 0.618 - 0.764')
+fill(p5, p6, color=color.new(color_1, 55), title='Area 0.764 - 1')
+
+fill(p13, p14, color=color.new(color_2, 95), title='Area 0.236 - 0.382 (Lower)')
+fill(p14, p15, color=color.new(color_2, 85), title='Area 0.382 - 0.5 (Lower)')
+fill(p15, p16, color=color.new(color_2, 75), title='Area 0.5 - 0.618 (Lower)')
+fill(p16, p17, color=color.new(color_2, 65), title='Area 0.618 - 0.764 (Lower)')
+fill(p17, p18, color=color.new(color_2, 55), title='Area 0.764 - 1 (Lower)')
+
+fill (p13,p1, color = color.new(#a952ff, 95),title='Basis Area')
+
+// Select levels from inputs
+upperValue = switch upperLevel
+    "0.236" => upper_1
+    "0.382" => upper_2
+    "0.5" => upper_3
+    "0.618" => upper_4
+    "0.764" => upper_5
+    "1" => upper_6
+
+lowerValue = switch lowerLevel
+    "0.236" => lower_1
+    "0.382" => lower_2
+    "0.5" => lower_3
+    "0.618" => lower_4
+    "0.764" => lower_5
+    "1" => lower_6
+
+// Trading logic
+buyEntry = ta.crossover(lowerValue, src)
+sellEntry = ta.crossunder(upperValue, src)
+
+// Order execution
+if buyEntry
+    strategy.entry('Long', strategy.long)
+if sellEntry
+    strategy.entry('Short', strategy.short)
+
+// Exits
+if sellEntry and not exitBasis
+    strategy.exit('Exit Long', 'Long', stop = lowerValue)
+if buyEntry and not exitBasis
+    strategy.exit('Exit Short', 'Short', stop = upperValue)
+
+crossBasis = ta.cross(basis, src)
+if exitBasis and crossBasis
+    strategy.close_all(comment = "Close at blue line")
+
+View in Pine Editor・103 lines
+Use on chart
+9
+5
+2 483
+Overview:
+The Fibonacci Counter-Trend Trading strategy is designed to capitalize on price reversals by utilizing Fibonacci levels calculated from the standard deviation of price movements. This strategy opens a sell order when the closing price crosses above a specified upper Fibonacci level and a buy order when the closing price crosses below a specified lower Fibonacci level. By leveraging the principles of Fibonacci retracement and volatility, this strategy aims to identify potential reversal points in the market.
+
+How It Works:
+
+Fibonacci Levels Calculation:
+
+
+The strategy calculates upper and lower Fibonacci levels based on the standard deviation of the price over a specified moving average length. These levels are derived from the Fibonacci sequence, which is widely used in technical analysis to identify potential support and resistance levels.
+
+The upper levels are calculated by adding specific Fibonacci ratios (0.236, 0.382, 0.5, 0.618, 0.764, and 1.0) multiplied by the standard deviation to the basis (the volume-weighted moving average).
+
+The lower levels are calculated by subtracting the same Fibonacci ratios multiplied by the standard deviation from the basis.
+
+
+
+Trade Entry Rules:
+
+
+Sell Order: A sell order is triggered when the closing price crosses above the selected upper Fibonacci level. This indicates a potential reversal point where the price may start to decline.
+
+Buy Order: A buy order is initiated when the closing price crosses below the selected lower Fibonacci level. This suggests a potential reversal point where the price may begin to rise.
+
+
+
+Trade Management:
+The strategy includes stop-losses based on the Fibonacci levels to protect against adverse price movements.
+
+How to Use:
+
+
+Users can customize the moving average length and the multiplier for the standard deviation to suit their trading preferences and market conditions.
+
+The strategy can be applied to various financial instruments, including stocks, forex, and cryptocurrencies, making it versatile for different trading environments.
+
+
+
+Pros:
+
+
+
+The Fibonacci Counter-Trend Trading strategy combines the mathematical principles of the Fibonacci sequence with the statistical measure of standard deviation, providing a unique approach to identifying potential market reversals.
+
+This strategy is particularly useful in volatile markets where price swings can lead to significant trading opportunities.
+
+The use of Fibonacci levels can help traders identify key support and resistance areas, enhancing decision-making.
+
+
+
+Cons:
+
+The strategy may generate false signals in choppy or sideways markets, leading to potential losses if the price does not reverse as anticipated.
+
+Relying solely on Fibonacci levels without considering other technical indicators or market conditions may result in missed opportunities or increased risk.
+
+The effectiveness of the strategy can vary depending on the chosen parameters (e.g., moving average length and standard deviation multiplier), requiring users to spend time optimizing these settings for different market conditions.
+
+As with any counter-trend strategy, there is a risk of significant drawdowns during strong trending markets, where the price continues to move in one direction without reversing.
+
+
+
+By understanding the mechanics of the Fibonacci Counter-Trend Trading strategy, along with its pros and cons, traders can effectively implement it in their trading routines and potentially enhance their trading performance.

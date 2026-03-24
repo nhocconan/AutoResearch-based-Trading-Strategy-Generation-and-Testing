@@ -1,0 +1,38 @@
+//@version=2
+//Developed from ©Finnbo code
+strategy("Simple Trailing Buy & Stop Strategy", overlay=true)
+offset = input(defval=1.5, title="Stop Offset %", type=float, minval=0.1, maxval=100, step=0.1)
+buyoffset = input(defval=1.9, title="Trailing Buy Offset %", type=float, minval=0.1, maxval=100, step=0.1)
+
+sumbars = input(defval=6, title="Use last x bars for calculation", type=integer, minval=1)
+srcts = input(title="Source Trailing Stop calculation", type=source, defval=close)
+srctb = input(title="Source Trailing Buy calculation", type=source, defval=close)
+srctrigger = input(title="Source Stop Trigger", type=source, defval=low)
+srctriggerbuy = input(title="Source Buy Trigger", type=source, defval=high)
+tsl = rma(srcts, sumbars)*(1-(offset/100))// = (sum(srcts,sumbars)/sumbars)*(1-(offset/100))
+tbuy = rma(srctb, sumbars)*(1+(buyoffset/100))
+plot(tsl, color=(srctrigger<tsl)?red:green)
+plot(tbuy, color=(srctriggerbuy>tbuy)?red:green)
+//plotshape(crossunder(srctrigger,tsl), text="Long Stop", style=shape.circle, color=red)
+alertcondition(crossunder(srctrigger,tsl), "Long Stop alert", "SELL")
+//plotshape(crossover(srctriggerbuy,tbuy), text="Long", style=shape.circle, color=green)
+alertcondition(crossover(srctriggerbuy,tbuy), "Long alert", "BUY")
+
+longCondition =  crossover(srctriggerbuy,tbuy)
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+closeCondition = crossunder(srctrigger,tsl)
+if (closeCondition)
+    strategy.close("Long")
+
+View in Pine Editor・26 lines
+Use on chart
+3
+1
+8
+9 061
+Allows you to backtest a simple percentage based trailing stop, with a trailing buy. Experiment with different percentages on different timeframes for different charts.
+
+For BTCUSD, on daily 4.3% stop and 1.9% buy works well, while on 4hr a 1.5% stop and 1.9% buy works best.
+
+Please comment with any other combos that work well for you on different markets or timeframes.

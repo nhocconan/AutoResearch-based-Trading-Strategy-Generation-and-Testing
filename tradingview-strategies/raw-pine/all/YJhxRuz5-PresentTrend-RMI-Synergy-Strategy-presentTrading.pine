@@ -1,0 +1,166 @@
+//@version=5
+strategy("PresentTrend RMI Synergy - Strategy [presentTrading]", shorttitle="PresentTrend RMI Synergy - Strategy [presentTrading]", overlay=false, precision=3, 
+ commission_value= 0.1, commission_type=strategy.commission.percent, slippage= 1, 
+  currency=currency.USD, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, initial_capital= 10000)
+
+// Inputs
+tradeDirection = input.string("Both", title="Trade Direction", options=["Long", "Short", "Both"])
+lengthRMI = input.int(21, title="RMI Length")
+lengthSuperTrend = input.int(5, title="presentTrend Length")
+multiplierSuperTrend = input.float(4.0, title="presentTrend Multiplier")
+
+// RMI Calculation
+up = ta.rma(math.max(ta.change(close), 0), lengthRMI)
+down = ta.rma(-math.min(ta.change(close), 0), lengthRMI)
+rmi = 100 - (100 / (1 + up / down))
+
+// PresentTrend Dynamic Threshold Calculation (Simplified Example)
+presentTrend = ta.sma(close, lengthRMI) * multiplierSuperTrend // Simplified for demonstration
+
+// SuperTrend for Dynamic Trailing Stop
+atr = ta.atr(lengthSuperTrend)
+upperBand = ta.sma(close, lengthSuperTrend) + multiplierSuperTrend * atr
+lowerBand = ta.sma(close, lengthSuperTrend) - multiplierSuperTrend * atr
+trendDirection = close > ta.sma(close, lengthSuperTrend) ? 1 : -1
+// Entry Logic
+longEntry = rmi > 60 and trendDirection == 1 
+shortEntry = rmi < 40 and trendDirection == -1 
+
+// Exit Logic with Dynamic Trailing Stop
+longExitPrice = trendDirection == 1 ? lowerBand : na
+shortExitPrice = trendDirection == -1 ? upperBand : na
+
+// Strategy Execution
+if (tradeDirection == "Long" or tradeDirection == "Both") and longEntry
+    strategy.entry("Long Entry", strategy.long)
+    strategy.exit("Exit Long", stop=longExitPrice)
+
+if (tradeDirection == "Short" or tradeDirection == "Both") and shortEntry
+    strategy.entry("Short Entry", strategy.short)
+    strategy.exit("Exit Short", stop=shortExitPrice)
+
+// Visualization
+plot(rmi, title="RMI", color=color.orange)
+hline(50, "Baseline", color=color.white)
+hline(30, "Baseline", color=color.blue)
+hline(70, "Baseline", color=color.blue)
+
+View in Pine Editor・49 lines
+Use on chart
+2
+5
+4
+7 400
+█ Introduction and How it is Different
+
+The "PresentTrend RMI Synergy Strategy" is the combined power of the Relative Momentum Index (RMI) and a custom presentTrend indicator. This strategy introduces a multifaceted approach, integrating momentum analysis with trend direction to offer traders a more nuanced and responsive trading mechanism.
+
+BTCUSD 6h L/S Performance
+
+
+
+Local
+
+
+
+█ Strategy, How It Works: Detailed Explanation
+
+The "PresentTrend RMI Synergy Strategy" intricately combines the Relative Momentum Index (RMI) and a custom SuperTrend indicator to create a powerful tool for traders.
+
+🔶 Relative Momentum Index (RMI)
+
+The RMI is a variation of the Relative Strength Index (RSI), but instead of using price closes against itself, it measures the momentum of up and down movements in price relative to previous prices over a given period. The RMI for a period length `N` is calculated as follows:
+
+RMI = 100 - 100/ (1 + U/D)
+
+where:
+
+- `U` is the average upward price change over `N` periods,
+- `D` is the average downward price change over `N` periods.
+
+The RMI oscillates between 0 and 100, with higher values indicating stronger upward momentum and lower values suggesting stronger downward momentum.
+
+RMI = 21
+
+
+
+RMI = 42
+
+
+
+For more information - RMI Trend Sync - Strategy [presentTrading] :
+
+
+
+🔶 presentTrend Indicator
+
+The presentTrend indicator combines the Average True Range (ATR) with a moving average to determine trend direction and dynamic support or resistance levels. The presentTrend for a period length `M` and a multiplier `F` is defined as:
+
+- Upper Band: MA + (ATR x F)
+- Lower Band: MA - (ATR x F)
+
+where:
+
+- `MA` is the moving average of the close price over `M` periods,
+- `ATR` is the Average True Range over the same period,
+- `F` is the multiplier to adjust the sensitivity.
+
+The trend direction switches when the price crosses the presentTrend bands, signaling potential entry or exit points.
+
+presentTrend length = 3
+
+
+
+presentTrend length = 10
+
+
+
+For more information - PresentTrend - Strategy [presentTrading]:
+
+
+
+🔶 Strategy Logic
+
+
+Entry Conditions:
+
+- Long Entry: Triggered when the RMI exceeds a threshold, say 60, indicating a strong bullish momentum, and when the price is above the presentTrend, confirming an uptrend.
+- Short Entry: Occurs when the RMI drops below a threshold, say 40, showing strong bearish momentum, and the price is below the present trend, indicating a downtrend.
+
+Exit Conditions with Dynamic Trailing Stop:
+
+- Long Exit: Initiated when the price crosses below the lower presentTrend band or when the RMI falls back towards a neutral level, suggesting a weakening of the bullish momentum.
+- Short Exit: Executed when the price crosses above the upper presentTrend band or when the RMI rises towards a neutral level, indicating a reduction in bearish momentum.
+
+Equations for Dynamic Trailing Stop:
+
+- For Long Positions: The exit price is set at the lower SuperTrend band once the entry condition is met.
+- For Short Positions: The exit price is determined by the upper SuperTrend band post-entry.
+
+These dynamic trailing stops adjust as the market moves, providing a method to lock in profits while allowing room for the position to grow.
+
+This strategy's strength lies in its dual analysis approach, leveraging RMI for momentum insights and presentTrend for trend direction and dynamic stops. This combination offers traders a robust framework to navigate various market conditions, aiming to capture trends early and exit positions strategically to maximize gains and minimize losses.
+
+
+█ Trade Direction
+
+The strategy provides flexibility in trade direction selection, offering "Long," "Short," or "Both" options to cater to different market conditions and trader preferences. This adaptability ensures that traders can align the strategy with their market outlook, risk tolerance, and trading goals.
+
+
+█ Usage
+
+To utilize the "PresentTrend RMI Synergy Strategy," traders should input their preferred settings in the Pine Script™ and apply the strategy to their charts. Monitoring RMI for momentum shifts and adjusting positions based on SuperTrend signals can optimize entry and exit points, enhancing potential returns while managing risk.
+
+
+█ Default Settings
+
+1. RMI Length: 21
+The 21-period RMI length strikes a balance between capturing momentum and filtering out market noise, offering a medium-term outlook on market trends.
+2. Super Trend Length: 7
+A SuperTrend length of 7 periods is chosen for its responsiveness to price movements, providing a dynamic framework for trend identification without excessive sensitivity.
+3. Super Trend Multiplier: 4.0
+The multiplier of 4.0 for the SuperTrend indicator widens the trend bands, focusing on significant market moves and reducing the impact of minor fluctuations.
+
+---
+
+The "PresentTrend RMI Synergy Strategy" represents a significant step forward in trading strategy development, blending momentum and trend analysis in a unique way. By providing a detailed framework for understanding market dynamics, this strategy empowers traders to make more informed decisions.

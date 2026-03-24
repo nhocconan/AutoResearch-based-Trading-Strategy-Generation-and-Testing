@@ -1,0 +1,96 @@
+//@version=5
+
+strategy('EVWMA VWAP MACD Strategy - HTF Trigger with SL & EMA Exit', shorttitle='MACD_HTF_SL_EMA', overlay=true)
+
+// -------------------------------------
+// --------------- Inputs --------------
+// -------------------------------------
+sum_length       = input.int(30, title='EVWMA Length')
+signal_length1   = input.int(5, title='Signal Smoothing 1')
+signal_length2   = input.int(20, title='Signal Smoothing 2')
+ema_length       = input.int(200, title='EMA Filter Length')
+
+// --- 策略觸發時間週期 (固定為 1 小時) ---
+strategy_timeframe = input.timeframe(title='Strategy Trigger Timeframe', defval='60')
+
+// --- 出場輸入 ---
+stop_loss_points = input.float(500, title='Stop Loss Points (in Ticks)') 
+use_ema_exit     = input.bool(true, title="Use EMA Crossover Exit")
+
+// -------------------------------------
+// ----- High Timeframe Logic Block ----
+// -------------------------------------
+
+// 將所有計算和信號邏輯封裝在一個函數中 (在 HTF 上執行)
+f_htf_signal_logic() =>
+    
+    // 在此 context 內，所有變數都是 HTF 的數據
+    vol_period = math.sum(volume, sum_length)
+    evwma_htf = 0.0
+    evwma_htf := ((vol_period - volume) * nz(evwma_htf[1], close) + volume * close) / vol_period
+
+    diff_htf = ta.vwap - evwma_htf // 這裡使用 HTF 的 ta.vwap
+    macd_htf = ta.ema(diff_htf, signal_length1)
+    signal_htf = ta.ema(diff_htf, signal_length2)
+
+    ema_filter_htf = ta.ema(close, ema_length)
+
+    // 趨勢判斷
+    long_trend_ok_htf = close > ema_filter_htf
+    short_trend_ok_htf = close < ema_filter_htf
+
+    // 入場信號
+    long_signal_htf = ta.crossover(macd_htf, signal_htf) and long_trend_ok_htf
+    short_signal_htf = ta.crossunder(macd_htf, signal_htf) and short_trend_ok_htf
+    
+    // EMA 出場信號 (價格與 HTF EMA 交叉)
+    long_exit_htf = ta.crossunder(close, ema_filter_htf)
+    short_exit_htf = ta.crossover(close, ema_filter_htf)
+    
+    // 返回所有需要的信號和數據
+    [long_signal_htf, short_signal_htf, ema_filter_htf, long_exit_htf, short_exit_htf]
+
+// 修正: 移除了 security 函數內部可能導致錯誤的換行和多餘逗號
+[long_sig_src, short_sig_src, ema_src, long_exit_src, short_exit_src] = request.security(syminfo.tickerid, strategy_timeframe, f_htf_signal_logic(), lookahead=barmerge.lookahead_on)
+
+// -------------------------------------
+// ----------- Plot EMA Line -----------
+// -------------------------------------
+
+// 繪製 1 小時的 EMA 線 (會呈現鋸齒狀)
+plot(ema_src, title='HTF EMA Filter', color=color.new(color.blue, 0), linewidth=2, style=plot.style_line)
+
+// -------------------------------------
+// ---------- Strategy Orders ----------
+// -------------------------------------
+
+// 開啟空頭倉位 
+strategy.entry('Short', strategy.short, when=short_sig_src)
+
+// 開啟多頭倉位 
+strategy.entry('Long', strategy.long, when=long_sig_src)
+
+
+// -------------------------------------
+// ---------- Strategy Exits (SL + EMA Crossover) ----------
+// -------------------------------------
+
+// 1. 固定點數停損 (Stop Loss)
+strategy.exit('SL Long', 'Long', loss=stop_loss_points) 
+strategy.exit('SL Short', 'Short', loss=stop_loss_points)
+
+// 2. EMA 趨勢反轉出場 (使用 if 語句控制開關)
+if use_ema_exit
+    // 多頭出場: 價格跌破 HTF EMA
+    strategy.close('Long', when=long_exit_src, comment='EMA Exit') 
+    
+    // 空頭出場: 價格升破 HTF EMA
+    strategy.close('Short', when=short_exit_src, comment='EMA Exit')
+
+View in Pine Editor・88 lines
+Use on chart
+4
+3
+1
+1 148
+EVWMA VWAP MACD Strategy - HTF Trigger with SL & EMA Exit

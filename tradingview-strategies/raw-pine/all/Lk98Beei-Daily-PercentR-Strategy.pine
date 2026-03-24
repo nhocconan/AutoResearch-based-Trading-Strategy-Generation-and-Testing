@@ -1,0 +1,5 @@
+//@version=5
+LowMarker=##input(defval=-67,type='INPUT_INTEGER',##id='in_7')
+HighMarker=##input(defval=-17,type='INPUT_INTEGER',##id='in_8')
+##root(root_metainfo,rm_0,LowMarker,input__float)
+##root(root_metainfo,rm_1,HighMarker,input__float)

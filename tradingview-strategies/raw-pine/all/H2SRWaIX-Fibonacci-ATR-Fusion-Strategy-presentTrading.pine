@@ -1,0 +1,362 @@
+//@version=5
+strategy("Fibonacci ATR Fusion - Strategy [presentTrading]", overlay=false, precision=3, commission_value= 0.1, commission_type=strategy.commission.percent, slippage= 1, currency=currency.USD, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, initial_capital=10000)
+
+// Calculate True High and True Low
+tradingDirection = input.string(title="Trading Direction", defval="Both", options=["Long", "Short", "Both"])
+
+// Trading Condition Thresholds
+long_entry_threshold = input.float(58.0, title="Long Entry Threshold")
+short_entry_threshold = input.float(42.0, title="Short Entry Threshold")
+long_exit_threshold = input.float(42.0, title="Long Exit Threshold")
+short_exit_threshold = input.float(58.0, title="Short Exit Threshold")
+
+// Enable or Disable 4-Step Take Profit
+useTakeProfit = input.bool(false, title="Enable 4-Step Take Profit")
+
+// Take Profit Levels (as multiples of ATR)
+tp1ATR = input.float(3.0, title="Take Profit Level 1 ATR Multiplier")
+tp2ATR = input.float(8.0, title="Take Profit Level 2 ATR Multiplier")
+tp3ATR = input.float(14.0, title="Take Profit Level 3 ATR Multiplier")
+
+// Take Profit Percentages
+tp1_percent = input.float(12.0, title="TP Level 1 Percentage", minval=0.0, maxval=100.0)
+tp2_percent = input.float(12.0, title="TP Level 2 Percentage", minval=0.0, maxval=100.0)
+tp3_percent = input.float(12.0, title="TP Level 3 Percentage", minval=0.0, maxval=100.0)
+
+true_low = math.min(low, close[1])
+true_high = math.max(high, close[1])
+
+// Calculate True Range
+true_range = true_high - true_low
+
+// Calculate BP (Buying Pressure)
+bp = close - true_low
+
+// Calculate ratios for different periods
+calc_ratio(len) =>
+    sum_bp = math.sum(bp, len)
+    sum_tr = math.sum(true_range, len)
+    100 * sum_bp / sum_tr
+
+// Calculate weighted average of different timeframes
+weighted_avg = (5 * calc_ratio(8) + 4 * calc_ratio(13) + 3 * calc_ratio(21) + 2 * calc_ratio(34) + calc_ratio(55)) / (5 + 4 + 3 + 2 + 1)
+weighted_avg_sma = ta.sma(weighted_avg,3)
+
+// Plot the indicator
+plot(weighted_avg, "Fibonacci ATR", color=color.blue, linewidth=2)
+plot(weighted_avg_sma, "SMA Fibonacci ATR", color=color.yellow, linewidth=2)
+
+// Define trading conditions
+longCondition = ta.crossover(weighted_avg_sma, long_entry_threshold)  // Enter long when weighted average crosses above threshold
+shortCondition = ta.crossunder(weighted_avg_sma, short_entry_threshold) // Enter short when weighted average crosses below threshold
+longExit = ta.crossunder(weighted_avg_sma, long_exit_threshold)
+shortExit = ta.crossover(weighted_avg_sma, short_exit_threshold)
+
+
+atrPeriod = 14
+atrValue = ta.atr(atrPeriod)
+
+if (tradingDirection == "Long" or tradingDirection == "Both")
+    if (longCondition)
+        strategy.entry("Long", strategy.long)
+        // Set Take Profit levels for Long positions
+        if useTakeProfit
+            tpPrice1 = strategy.position_avg_price + tp1ATR * atrValue
+            tpPrice2 = strategy.position_avg_price + tp2ATR * atrValue
+            tpPrice3 = strategy.position_avg_price + tp3ATR * atrValue
+            // Close partial positions at each Take Profit level
+            strategy.exit("TP1 Long", from_entry="Long", qty_percent=tp1_percent, limit=tpPrice1)
+            strategy.exit("TP2 Long", from_entry="Long", qty_percent=tp2_percent, limit=tpPrice2)
+            strategy.exit("TP3 Long", from_entry="Long", qty_percent=tp3_percent, limit=tpPrice3)
+    if (longExit)
+        strategy.close("Long")
+
+if (tradingDirection == "Short" or tradingDirection == "Both")
+    if (shortCondition)
+        strategy.entry("Short", strategy.short)
+        // Set Take Profit levels for Short positions
+        if useTakeProfit
+            tpPrice1 = strategy.position_avg_price - tp1ATR * atrValue
+            tpPrice2 = strategy.position_avg_price - tp2ATR * atrValue
+            tpPrice3 = strategy.position_avg_price - tp3ATR * atrValue
+            // Close partial positions at each Take Profit level
+            strategy.exit("TP1 Short", from_entry="Short", qty_percent=tp1_percent, limit=tpPrice1)
+            strategy.exit("TP2 Short", from_entry="Short", qty_percent=tp2_percent, limit=tpPrice2)
+            strategy.exit("TP3 Short", from_entry="Short", qty_percent=tp3_percent, limit=tpPrice3)
+    if (shortExit)
+        strategy.close("Short")
+
+View in Pine Editor・94 lines
+Use on chart
+3
+5
+2
+2
+7 253
+Open-script again! This time is also an ATR-related strategy. Enjoy! :)
+If you have any questions, let me know, and I'll help make this as effective as possible.
+
+█ Introduction and How It Is Different
+
+The Fibonacci ATR Fusion Strategy is an advanced trading approach that uniquely integrates Fibonacci-based weighted averages with the Average True Range (ATR) to identify and capitalize on significant market trends.
+
+Unlike traditional strategies that rely on single indicators or static parameters, this method combines multiple timeframes and dynamic volatility measurements to enhance precision and adaptability. Additionally, it features a 4-step Take Profit (TP) mechanism, allowing for systematic profit-taking at various levels, which optimizes both risk management and return potential in long and short market positions.
+
+BTCUSD 6hr Performance
+
+
+
+█ Strategy, How It Works: Detailed Explanation
+
+The Fibonacci ATR Fusion Strategy utilizes a combination of technical indicators and weighted averages to determine optimal entry and exit points. Below is a breakdown of its key components and operational logic.
+
+🔶 1. Enhanced True Range Calculation
+
+The strategy begins by calculating the True Range (TR) to measure market volatility accurately.
+
+
+Pine Script®
+TR = max(High - Low, abs(High - Previous Close), abs(Low - Previous Close))
+
+
+
+
+High and Low: Highest and lowest prices of the current trading period.
+
+Previous Close: Closing price of the preceding trading period.
+
+max: Selects the largest value among the three calculations to account for gaps and limit movements.
+
+
+
+🔶 2. Buying Pressure (BP) Calculation
+
+Buying Pressure (BP) quantifies the extent to which buyers are driving the price upwards within a period.
+
+
+Pine Script®
+BP = Close - True Low
+
+
+
+
+Close: Current period's closing price.
+
+True Low: The lower boundary determined in the True Range calculation.
+
+
+
+🔶 3. Ratio Calculation for Different Periods
+
+To assess the strength of buying pressure relative to volatility, the strategy calculates a ratio over various Fibonacci-based timeframes.
+
+
+Pine Script®
+Ratio = 100 * (Sum of BP over n periods) / (Sum of TR over n periods)
+
+
+
+
+n: Length of the period (e.g., 8, 13, 21, 34, 55).
+
+Sum of BP: Cumulative Buying Pressure over n periods.
+
+Sum of TR: Cumulative True Range over n periods.
+
+
+
+This ratio normalizes buying pressure, making it comparable across different timeframes.
+
+🔶 4. Weighted Average Calculation
+
+The strategy employs a weighted average of ratios from multiple Fibonacci-based periods to smooth out signals and enhance trend detection.
+
+
+Pine Script®
+Weighted Avg = (w1 * Ratio_p1 + w2 * Ratio_p2 + w3 * Ratio_p3 + w4 * Ratio_p4 + Ratio_p5) / (w1 + w2 + w3 + w4 + 1)
+
+
+
+
+w1, w2, w3, w4: Weights assigned to each ratio period.
+
+Ratio_p1 to Ratio_p5: Ratios calculated for periods p1 to p5 (e.g., 8, 13, 21, 34, 55).
+
+
+
+This weighted approach emphasizes shorter periods more heavily, capturing recent market dynamics while still considering longer-term trends.
+
+🔶 5. Simple Moving Average (SMA) of Weighted Average
+
+To further smooth the weighted average and reduce noise, a Simple Moving Average (SMA) is applied.
+
+
+Pine Script®
+Weighted Avg SMA = SMA(Weighted Avg, m)
+
+
+
+- m: SMA period (e.g., 3).
+
+This smoothed line serves as the primary signal generator for trade entries and exits.
+
+🔶 6. Trading Condition Thresholds
+
+The strategy defines specific threshold values to determine optimal entry and exit points based on crossovers and crossunders of the SMA.
+
+
+Pine Script®
+Long Condition = Crossover(Weighted Avg SMA, Long Entry Threshold)
+Short Condition = Crossunder(Weighted Avg SMA, Short Entry Threshold)
+Long Exit = Crossunder(Weighted Avg SMA, Long Exit Threshold)
+Short Exit = Crossover(Weighted Avg SMA, Short Exit Threshold)
+
+
+
+
+Long Entry Threshold (T_LE): Level at which a long position is triggered.
+
+Short Entry Threshold (T_SE): Level at which a short position is triggered.
+
+Long Exit Threshold (T_LX): Level at which a long position is exited.
+
+Short Exit Threshold (T_SX): Level at which a short position is exited.
+
+
+
+These conditions ensure that trades are only executed when clear trends are identified, enhancing the strategy's reliability.
+
+Previous local performance
+
+
+
+🔶 7. ATR-Based Take Profit Mechanism
+
+When enabled, the strategy employs a 4-step Take Profit system to systematically secure profits as the trade moves in the desired direction.
+
+
+Pine Script®
+TP Price_1 Long = Entry Price + (TP1ATR * ATR Value)
+TP Price_2 Long = Entry Price + (TP2ATR * ATR Value)
+TP Price_3 Long = Entry Price + (TP3ATR * ATR Value)
+
+TP Price_1 Short = Entry Price - (TP1ATR * ATR Value)
+TP Price_2 Short = Entry Price - (TP2ATR * ATR Value)
+TP Price_3 Short = Entry Price - (TP3ATR * ATR Value)
+
+Expand 2 lines
+
+
+- ATR Value: Calculated using ATR over a specified period (e.g., 14).
+- TPxATR: User-defined multipliers for each take profit level.
+- TPx_percent: Percentage of the position to exit at each TP level.
+
+This multi-tiered exit strategy allows for partial position closures, optimizing profit capture while maintaining exposure to potential further gains.
+
+█ Trade Direction
+
+The Fibonacci ATR Fusion Strategy is designed to operate in both long and short market conditions, providing flexibility to traders in varying market environments.
+
+
+Long Trades: Initiated when the SMA of the weighted average crosses above the Long Entry Threshold (T_LE), indicating strong upward momentum.
+
+Short Trades: Initiated when the SMA of the weighted average crosses below the Short Entry Threshold (T_SE), signaling robust downward momentum.
+
+
+
+Additionally, the strategy can be configured to trade exclusively in one direction—Long, Short, or Both—based on the trader’s preference and market analysis.
+
+█ Usage
+
+Implementing the Fibonacci ATR Fusion Strategy involves several steps to ensure it aligns with your trading objectives and market conditions.
+
+1. Configure Strategy Parameters:
+- Trading Direction: Choose between Long, Short, or Both based on your market outlook.
+- Trading Condition Thresholds: Set the Long Entry, Short Entry, Long Exit, and Short Exit thresholds to define when to enter and exit trades.
+
+2. Set Take Profit Levels (if enabled):
+- ATR Multipliers: Define how many ATRs away from the entry price each take profit level is set.
+- Take Profit Percentages: Allocate what percentage of the position to close at each TP level.
+
+3. Apply to Desired Chart:
+- Add the strategy to the chart of the asset you wish to trade.
+- Observe the plotted Fibonacci ATR and SMA Fibonacci ATR indicators for visual confirmation.
+
+4. Monitor and Adjust:
+- Regularly review the strategy’s performance through backtesting.
+- Adjust the input parameters based on historical performance and changing market dynamics.
+
+5. Risk Management:
+- Ensure that the sum of take profit percentages does not exceed 100% to avoid over-closing positions.
+- Utilize the ATR-based TP levels to adapt to varying market volatilities, maintaining a balanced risk-reward ratio.
+
+█ Default Settings
+
+Understanding the default settings is crucial for optimizing the Fibonacci ATR Fusion Strategy's performance. Here's a precise and simple overview of the key parameters and their effects:
+
+🔶 Key Parameters and Their Effects
+
+1. Trading Direction (`tradingDirection`)
+- Default: Both
+- Effect: Determines whether the strategy takes both long and short positions or restricts to one direction. Selecting Both allows maximum flexibility, while Long or Short can be used for directional bias.
+
+2. Trading Condition Thresholds
+
+Long Entry (long_entry_threshold = 58.0): Higher values reduce false positives but may miss trades.
+
+Short Entry (short_entry_threshold = 42.0): Lower values capture early short trends but may increase false signals.
+
+Long Exit (long_exit_threshold = 42.0): Exits long positions early, securing profits but potentially cutting trends short.
+
+Short Exit (short_exit_threshold = 58.0): Delays short exits to capture favorable movements, avoiding premature exits.
+
+
+
+3. Take Profit Configuration (`useTakeProfit` = false)
+- Effect: When enabled, the strategy employs a 4-step TP mechanism to secure profits at multiple levels. By default, it is disabled to allow users to opt-in based on their trading style.
+
+4. ATR-Based Take Profit Multipliers
+TP1 (tp1ATR = 3.0): Sets the first TP at 3 ATRs for initial profit capture.
+TP2 (tp2ATR = 8.0): Targets larger trends, though less likely to be reached.
+TP3 (tp3ATR = 14.0): Optimizes for extreme price moves, seldom triggered.
+
+5. Take Profit Percentages
+TP Level 1 (tp1_percent = 12%): Secures 12% at the first TP.
+TP Level 2 (tp2_percent = 12%): Exits another 12% at the second TP.
+TP Level 3 (tp3_percent = 12%): Closes an additional 12% at the third TP.
+
+6. Weighted Average Parameters
+
+Ratio Periods: Fibonacci-based intervals (8, 13, 21, 34, 55) balance responsiveness.
+
+Weights: Emphasizes recent data for timely responses to market trends.
+
+SMA Period (weighted_avg_sma_period = 3): Smoothens data with minimal lag, balancing noise reduction and responsiveness.
+
+
+
+7. ATR Period (`atrPeriod` = 14)
+Effect: Sets the ATR calculation length, impacting TP sensitivity to volatility.
+
+🔶 Impact on Performance
+
+- Sensitivity and Responsiveness:
+- Shorter Ratio Periods and Higher Weights: Make the weighted average more responsive to recent price changes, allowing quicker trade entries and exits but increasing the likelihood of false signals.
+- Longer Ratio Periods and Lower Weights: Provide smoother signals with fewer false positives but may delay trade entries, potentially missing out on significant price moves.
+
+- Profit Taking:
+- ATR Multipliers: Higher multipliers set take profit levels further away, targeting larger price movements but reducing the probability of reaching these levels.
+- Fixed Percentages: Allocating equal percentages at each TP level ensures consistent profit realization and risk management, preventing overexposure.
+
+- Trade Direction Control:
+- Selecting Specific Directions: Restricting trades to Long or Short can align the strategy with market trends or personal biases, potentially enhancing performance in trending markets.
+
+- Risk Management:
+- Take Profit Percentages: Dividing the position into smaller percentages at multiple TP levels helps lock in profits progressively, reducing risk and allowing the remaining position to ride further trends.
+
+- Market Adaptability:
+- Weighted Averages and ATR: By combining multiple timeframes and adjusting to volatility, the strategy adapts to different market conditions, maintaining effectiveness across various asset classes and timeframes.
+
+---
+If you want to know more about ATR, can also check "SuperATR 7-Step Profit".
+Enjoy trading.

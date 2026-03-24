@@ -1,0 +1,4 @@
+//@version=5
+adxThreshold=##input(defval=25,type='INPUT_INTEGER',##id='in_1')
+##root(root_metainfo,rm_0,2,input__integer,plot,linewidth)
+##root(root_metainfo,rm_1,adxThreshold,input__float)

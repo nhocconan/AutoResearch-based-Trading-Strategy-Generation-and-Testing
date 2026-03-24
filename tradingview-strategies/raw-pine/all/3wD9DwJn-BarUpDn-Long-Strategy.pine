@@ -1,0 +1,33 @@
+//@version=4
+strategy("BarUpDn Long Strategy", overlay=true, initial_capital = 10000, default_qty_value = 10000, default_qty_type = strategy.cash)
+
+// There will be no short entries, only exits from long.
+strategy.risk.allow_entry_in(strategy.direction.long)
+
+BarsUp = input(1)
+BarsDown = input(1)
+
+// Strategy Backesting
+startDate  = input(timestamp("2021-01-01T00:00:00"), type = input.time)
+finishDate = input(timestamp("2021-12-31T00:00:00"), type = input.time)
+
+time_cond  = time >= startDate and time <= finishDate
+
+// Messages for buy and sell
+message_buy  = input("{{strategy.order.alert_message}}", title="Buy message")
+message_sell = input("{{strategy.order.alert_message}}", title="Sell message")
+
+if (close > open and open > close[BarsUp]) and time_cond
+    strategy.entry("BarUp", strategy.long, stop = high + syminfo.mintick, alert_message = message_buy)
+if (close < open and open < close[BarsDown]) and time_cond
+    strategy.entry("BarDn", strategy.short, stop = low + syminfo.mintick, alert_message = message_sell)
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+View in Pine Editor・24 lines
+Use on chart
+4
+9
+1
+2 002
+This is a bar up/down strategy for going long only where you can specify how many bars up to buy and how many bars down to sell. It also has code to check and make sure the condition is still true when launching the official alert, which helps back testing and live results line up, however be sure to enter commission and slippage into the properties to accurately reflect profits. I added back testing date ranges to this so you can easily pull up and see back tested results for a certain date range. I also added a buy and sell message fields in the properties so you can launch alerts that will work with automated trading services. Simply enter your buy message and sell message into those fields in the properties and then when you create an alert enter {{strategy.order.alert_message}} into the alert body and it will dynamically pull in your buy and sell messages when it fires alerts.
+

@@ -1,0 +1,8 @@
+//@version=4
+ld=##input(defval=50,type='INPUT_INTEGER',##id='in_5')
+ul=ld
+ll=(ld-(ld*2))
+##root(root_metainfo,rm_0,ul,input__float)
+##root(root_metainfo,rm_1,ll,input__float)
+##root(root_metainfo,rm_2,ul,input__float)
+##root(root_metainfo,rm_3,ll,input__float)

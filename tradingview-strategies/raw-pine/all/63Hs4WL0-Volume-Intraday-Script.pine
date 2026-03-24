@@ -1,0 +1,24 @@
+//@version=3
+strategy("My Script")
+plot(close)
+x=20%10
+strategy.risk.max_intraday_loss(100, strategy.cash)
+strategy.entry("buy", true, when = open > close)
+plot(swma(close))
+// Pinescript, basic weighted moving averages
+pine_swma(x) =>
+    x[3] * 1 / 6 + x[2] * 2 / 6 + x[1] * 2 / 6 + x[0] * 1 / 6
+plot(pine_swma(close))
+plot(vwma(close, 10))
+// same on pine, but less efficient
+pine_vwma(x, y) =>
+    sma(x * volume, y) / sma(volume, y)
+plot(pine_vwma(close, 10))
+
+View in Pine Editor・16 lines
+Use on chart
+5
+8
+2
+5 218
+I am still learning pinescript, and part of this was created using the Pine Script language reference manual. This includes looking at the time series, a fixed length, and the default intraday_loss variables. This also includes the basic fixed lengths for an swma (Symmetrically weighted moving average) and the script to start creating a strategy. All in all this is just a basic sample of pinescript that you can customize for your trading needs. This can work with Cryptocurrency but these moving averages usually work more efficiently for forex.

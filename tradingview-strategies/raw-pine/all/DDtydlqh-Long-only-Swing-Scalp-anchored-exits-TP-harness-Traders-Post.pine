@@ -1,0 +1,126 @@
+//@version=6
+strategy("Long-only Swing/Scalp (anchored exits + TP harness)", overlay=true,
+     pyramiding=0, max_bars_back=1000, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// ===== Inputs =====
+tf = input.string("5", "Timeframe (unused; runs on chart TF)", options=["5","15"])
+takeProf        = input.float(1.0, "Take-Profit %")/100
+stopLoss        = input.float(2.0, "Stop-Loss %")/100
+breakeven       = input.bool(false, "Breakeven at +0.5%")
+trail           = input.bool(false, "Trail by ATR(14)×0.6")
+investmentUSD   = input.int(1000, "Investment Size USD", minval=1)
+botUUID         = input.string("uuid", "Bot UUID (tag only)")
+startTS         = input.int(0, "Backtest Start", inline="start")
+endTS           = input.int(0, "Backtest End", inline="end")
+
+// Alerts (TradersPost)
+sendAlerts        = input.bool(true,  "TP: Send alerts?")
+sendAlertOnExit   = input.bool(true,  "TP: Send SELL on TP/SL hits?")
+stripPrefixInJSON = input.bool(true,  "TP: Strip exchange prefix (e.g., NYSEARCA:SPY → SPY)")
+
+// ===== Core calcs =====
+ema200 = ta.ema(close,200)
+ema21  = ta.ema(close,21)
+rsi14  = ta.rsi(close,14)
+atr14  = ta.atr(14)
+
+range20_h = ta.highest(high,20)
+range20_l = ta.lowest(low,20)
+mid20   = (range20_h + range20_l) / 2.0
+
+plusDM   = math.max(high - high[1], 0)
+minusDM  = math.max(low[1] - low, 0)
+trarto   = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+plusDI   = 100 * ta.rma(plusDM,14) / trarto
+minusDI  = 100 * ta.rma(minusDM,14) / trarto
+dx       = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx14    = ta.rma(dx,14)
+
+// Guards
+atrGuard    = atr14/close < 0.0025
+midGuard    = math.abs(close - mid20) / mid20 < 0.003
+chooseTrade = not atrGuard and not midGuard
+
+timeValid = (startTS==0 or time>=startTS) and (endTS==0 or time<endTS)
+
+// Setup
+pullback  = close <= ema21 and close > ema200
+rsiCond   = rsi14 > 38 and rsi14 < 55 and ta.rising(rsi14,3)
+adxCond   = adx14 > 20
+flat      = strategy.position_size == 0
+
+// Entry
+longEntry = chooseTrade and pullback and rsiCond and adxCond and flat and timeValid
+qty = math.floor(investmentUSD / close)
+if (longEntry and barstate.isconfirmed)
+    strategy.entry("Long", strategy.long, qty=qty)
+
+// ===== Exit management (anchored to fill) =====
+var bool beActive = false
+
+if flat
+    beActive := false
+
+if (strategy.position_size > 0)
+    avg = strategy.position_avg_price
+
+    // 1) Take-profit (limit-only), always placed
+    strategy.exit("TP_ONLY", from_entry="Long", limit=avg * (1 + takeProf), stop=na)
+
+    // 2) Protective stop OR BE/Trail (stop-only)
+    if not beActive
+        strategy.exit("SL_ONLY", from_entry="Long", stop=avg * (1 - stopLoss), limit=na)
+    else
+        if trail
+            strategy.exit("BE_ONLY", from_entry="Long", trail_offset=atr14 * 0.6, limit=na)
+        else
+            strategy.exit("BE_ONLY", from_entry="Long", stop=avg * 1.005, limit=na)
+
+    // Arm breakeven once +0.5% in profit
+    if (not beActive and breakeven and close > avg * 1.005)
+        beActive := true
+
+// ===== TradersPost alert harness =====
+// BUY when flat & confirmed; SELL on TP/SL hit approximation.
+// Trailing exits are backtest-managed only here.
+sym() =>
+    if stripPrefixInJSON and str.contains(syminfo.ticker, ":")
+        parts = str.split(syminfo.ticker, ":")
+        array.get(parts, 1)
+    else
+        syminfo.ticker
+
+tp_send(action) =>
+    string s = ""
+    s := "{"
+    s += "\"ticker\":\"" + sym() + "\","
+    s += "\"action\":\"" + action + "\""
+    s += "}"
+    alert(s, freq=alert.freq_once_per_bar_close)
+
+if sendAlerts
+    // Entry alert
+    if (longEntry and barstate.isconfirmed and flat)
+        tp_send("buy")
+
+    // Exit alert on TP/SL (approx)
+    if (sendAlertOnExit and strategy.position_size > 0 and barstate.isconfirmed)
+        avg_ = strategy.position_avg_price
+        tpP  = avg_ * (1 + takeProf)
+        slP  = beActive ? (trail ? na : avg_ * 1.005) : avg_ * (1 - stopLoss)
+        tpHit = high >= tpP
+        slHit = not na(slP) and low <= slP
+        if (tpHit or slHit)
+            tp_send("sell")
+
+// ===== Visuals =====
+plot(ema200, "EMA200", color=color.new(color.blue, 0))
+plot(ema21,  "EMA21",  color=color.new(color.green, 0))
+plot(close,  "Close",  color=color.new(color.gray, 70))
+
+View in Pine Editor・120 lines
+Use on chart
+3
+4
+1 266
+This is the Traders Post friendly drag and drop version of the swing/ scalp strategy for the algo traders out there. Let me know your thoughts, constructive criticism is always welcome.

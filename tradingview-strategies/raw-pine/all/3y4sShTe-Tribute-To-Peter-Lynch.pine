@@ -1,0 +1,978 @@
+//@version=6
+strategy("Tribute To Peter Lynch - Fund Manager Simulator", overlay = true, margin_long = 0, margin_short = 0,
+     default_qty_type = strategy.percent_of_equity, default_qty_value = 25,
+     initial_capital = 100000, commission_type = strategy.commission.cash_per_order, commission_value = 0.0,
+     calc_on_every_tick = false)
+
+import sabricat/imlib/1 as imlib
+// ==============================================================================
+//  ##   ##    PETER LYNCH STRATEGY TOOLKIT v3
+//  ##   ##    "Know what you own, and know why you own it."
+//  ##   ##    Fundamental-Only . Category-Specific . Story Framework
+//  ==   ==    6 Categories . PEG Engine . Lynch Scoring . Fair Value Channel
+// ==============================================================================
+
+// -----------------------------------------------------------------------------
+//  GROUP 1: LYNCH STOCK CLASSIFICATION
+// -----------------------------------------------------------------------------
+string GP1 = "(1) Lynch Classification"
+string categoryInput = input.string("Fast Grower", "Stock Category",
+     options = ["Fast Grower", "Slow Grower", "Stalwart", "Cyclical", "Turnaround", "Asset Play"],
+     group = GP1,
+     tooltip = "Fast Growers (20%+), Slow Growers (3-8%), Stalwarts (10-14%), Cyclicals (economy-linked), Turnarounds (battered), Asset Plays (hidden value)")
+int inningInput = input.int(3, "Baseball Inning (1-9)", minval = 1, maxval = 9, group = GP1,
+     tooltip = "Growth cycle stage: Early (1-3) = runway. Mid (4-6) = proving. Late (7-9) = mature.")
+
+// -----------------------------------------------------------------------------
+//  GROUP 2: FUNDAMENTAL DATA INPUTS
+// -----------------------------------------------------------------------------
+string GP2 = "(2) Fundamental Data"
+string dataSourceInput = input.string("Auto (Financial Data)", "Data Source",
+     options = ["Auto (Financial Data)", "Manual Input"], group = GP2,
+     tooltip = "Auto pulls TradingView financials (stocks only). Manual = enter values yourself.")
+string periodInput = input.string("FY", "Financial Period", options = ["FY", "FQ", "TTM"], group = GP2)
+
+float manualEpsInput       = input.float(2.50, "Manual EPS ($)", step = 0.01, group = GP2)
+float manualEpsGrowthInput = input.float(20.0, "Manual EPS Growth (%)", step = 0.1, group = GP2)
+float manualRevGrowthInput = input.float(15.0, "Manual Revenue Growth (%)", step = 0.1, group = GP2)
+float manualDebtEqInput    = input.float(0.30, "Manual Debt/Equity Ratio", step = 0.01, group = GP2)
+float manualMarginInput    = input.float(12.0, "Manual Profit Margin (%)", step = 0.1, group = GP2)
+float manualDivYieldInput  = input.float(1.5, "Manual Dividend Yield (%)", step = 0.1, group = GP2)
+float manualCashPerShare   = input.float(5.0, "Manual Cash Per Share ($)", step = 0.01, group = GP2)
+float manualPayoutInput    = input.float(30.0, "Manual Div Payout Ratio (%)", step = 0.1, group = GP2)
+
+// -----------------------------------------------------------------------------
+//  GROUP 3: PEG & VALUATION RULES
+// -----------------------------------------------------------------------------
+string GP3 = "(3) PEG & Valuation"
+float pegBuyInput  = input.float(1.0, "PEG Buy Threshold (<=)", step = 0.1, minval = 0.1, group = GP3,
+     tooltip = "PEG=1 means PE equals growth rate = fairly priced. Below 1.0 = cheap.")
+float pegSellInput = input.float(2.0, "PEG Sell Threshold (>=)", step = 0.1, minval = 0.5, group = GP3)
+float pegDivAdjust = input.float(0.0, "Dividend Yield PEG Adjustment", step = 0.1, group = GP3,
+     tooltip = "Set 1.0 to subtract div yield from PEG (useful for slow growers).")
+float maxPeInput   = input.float(40.0, "Maximum PE Ratio", step = 1.0, group = GP3)
+
+// -----------------------------------------------------------------------------
+//  GROUP 4: BALANCE SHEET THRESHOLDS
+// -----------------------------------------------------------------------------
+string GP4 = "(4) Balance Sheet Health"
+float maxDebtEqInput = input.float(0.50, "Max Debt/Equity Ratio", step = 0.05, group = GP4)
+float minCashRatio   = input.float(0.10, "Min Cash/Market Cap Ratio", step = 0.01, group = GP4)
+float maxPayoutInput = input.float(80.0, "Max Dividend Payout Ratio (%)", step = 1.0, group = GP4)
+
+// -----------------------------------------------------------------------------
+//  GROUP 5: CATEGORY-SPECIFIC RULES (NEW)
+// -----------------------------------------------------------------------------
+string GP5 = "(5) Category-Specific Rules"
+
+// Fast Grower
+float fgMinGrowth       = input.float(20.0, "Fast Grower: Min EPS Growth (%)", step = 1.0, group = GP5,
+     tooltip = "Minimum earnings growth to enter a Fast Grower position")
+float fgExitGrowth      = input.float(15.0, "Fast Grower: Exit Growth Decel (%)", step = 1.0, group = GP5,
+     tooltip = "Exit when growth decelerates below this level")
+int   fgMaxInning       = input.int(6, "Fast Grower: Max Entry Inning", minval = 1, maxval = 9, group = GP5,
+     tooltip = "Only enter Fast Growers in innings 1 through this value")
+
+// Slow Grower
+float sgMinYield        = input.float(2.0, "Slow Grower: Min Dividend Yield (%)", step = 0.1, group = GP5,
+     tooltip = "Minimum dividend yield for Slow Grower entry")
+float sgMaxPE           = input.float(18.0, "Slow Grower: Max PE", step = 1.0, group = GP5)
+float sgMaxPayout       = input.float(90.0, "Slow Grower: Unsustainable Payout (%)", step = 1.0, group = GP5,
+     tooltip = "Exit if payout ratio exceeds this level")
+
+// Stalwart
+float stGainTarget      = input.float(40.0, "Stalwart: Rotate Gain Target (%)", step = 5.0, minval = 10.0, group = GP5,
+     tooltip = "Lynch's rule: rotate stalwarts after 30-50% gain. Exit at this % gain from entry.")
+float stMinGrowth       = input.float(10.0, "Stalwart: Min EPS Growth (%)", step = 1.0, group = GP5)
+float stPegMult         = input.float(1.2, "Stalwart: PEG Entry Multiplier", step = 0.1, group = GP5,
+     tooltip = "PEG must be <= pegBuyInput * this multiplier")
+
+// Cyclical
+float cyTroughPE        = input.float(25.0, "Cyclical: Trough PE Threshold (high=buy)", step = 1.0, group = GP5,
+     tooltip = "Lynch's counterintuitive rule: buy cyclicals when PE is HIGH (earnings at trough)")
+float cyPeakGrowth      = input.float(80.0, "Cyclical: Peak Euphoria Growth (%)", step = 5.0, group = GP5,
+     tooltip = "Exit when earnings growth exceeds this (peak cycle euphoria)")
+float cyPeakPE          = input.float(8.0, "Cyclical: Peak PE (low=sell)", step = 1.0, group = GP5,
+     tooltip = "Exit when PE drops very low (earnings peaking)")
+
+// Turnaround
+float taMinCashRatio    = input.float(0.05, "Turnaround: Survival Cash/Price Ratio", step = 0.01, group = GP5,
+     tooltip = "Company must have net cash > this ratio * price to survive")
+float taNormalizedPE    = input.float(25.0, "Turnaround: Normalized PE Exit", step = 1.0, group = GP5,
+     tooltip = "Exit when turnaround is complete and PE exceeds this level")
+
+// Asset Play
+float apMinCashRatio    = input.float(0.15, "Asset Play: Min Cash/Price Ratio", step = 0.01, group = GP5,
+     tooltip = "Net cash per share must exceed this ratio * price")
+float apExitCashRatio   = input.float(0.05, "Asset Play: Exit Cash/Price Ratio", step = 0.01, group = GP5,
+     tooltip = "Exit when market recognizes asset value and cash ratio falls below this")
+
+// -----------------------------------------------------------------------------
+//  GROUP 6: STRATEGY SETTINGS
+// -----------------------------------------------------------------------------
+string GP6 = "(6) Strategy Settings"
+bool  useScoreGate     = input.bool(false, "Use Lynch Score as Entry Gate", group = GP6,
+     tooltip = "When enabled, requires minimum Lynch Score for entry. When disabled, score is display-only as a conviction meter.")
+float entryScoreInput  = input.float(65.0, "Lynch Score Entry Threshold", minval = 10, maxval = 100, step = 5, group = GP6,
+     tooltip = "Only used when Score Gate is enabled")
+float exitScoreInput   = input.float(35.0, "Lynch Score Exit Threshold", minval = 0, maxval = 90, step = 5, group = GP6,
+     tooltip = "Only used when Score Gate is enabled")
+
+// -----------------------------------------------------------------------------
+//  GROUP 7: RISK MANAGEMENT
+// -----------------------------------------------------------------------------
+string GP7 = "(7) Risk Management"
+float stopLossPct      = input.float(15.0, "Stop Loss (%)", step = 1.0, minval = 1.0, group = GP7)
+float takeProfitPct    = input.float(100.0, "Take Profit (%)", step = 5.0, minval = 5.0, group = GP7)
+
+// -----------------------------------------------------------------------------
+//  GROUP 8: DISPLAY SETTINGS
+// -----------------------------------------------------------------------------
+string GP8 = "(8) Display"
+bool showPortrait    = input.bool(true, "Show Lynch Portrait", group = GP8)
+bool showDashboard   = input.bool(true, "Show Dashboard Panel", group = GP8)
+bool showSignals     = input.bool(true, "Show Chart Signals", group = GP8)
+color bullColor      = input.color(color.new(#00c853, 0), "Bull Color", group = GP8)
+color bearColor      = input.color(color.new(#ff1744, 0), "Bear Color", group = GP8)
+color neutColor      = input.color(color.new(#ffd600, 0), "Neutral Color", group = GP8)
+
+// ==============================================================================
+//  FINANCIAL DATA RETRIEVAL
+// ==============================================================================
+bool isAuto = dataSourceInput == "Auto (Financial Data)"
+
+float rawEps      = request.financial(syminfo.tickerid, "EARNINGS_PER_SHARE_DILUTED", periodInput, ignore_invalid_symbol = true)
+float rawRevenue  = request.financial(syminfo.tickerid, "TOTAL_REVENUE", periodInput, ignore_invalid_symbol = true)
+float rawNetInc   = request.financial(syminfo.tickerid, "NET_INCOME", periodInput, ignore_invalid_symbol = true)
+float rawDebt     = request.financial(syminfo.tickerid, "TOTAL_DEBT", periodInput, ignore_invalid_symbol = true)
+float rawEquity   = request.financial(syminfo.tickerid, "TOTAL_EQUITY", periodInput, ignore_invalid_symbol = true)
+float rawCash     = request.financial(syminfo.tickerid, "CASH_N_SHORT_TERM_INVEST", periodInput, ignore_invalid_symbol = true)
+float rawOperInc  = request.financial(syminfo.tickerid, "OPER_INCOME", periodInput, ignore_invalid_symbol = true)
+float rawShares   = request.financial(syminfo.tickerid, "TOTAL_SHARES_OUTSTANDING", periodInput, ignore_invalid_symbol = true)
+
+// ==============================================================================
+//  FUNDAMENTAL CALCULATIONS
+// ==============================================================================
+float eps = isAuto and not na(rawEps) ? rawEps : manualEpsInput
+float epsPrev = eps[1]
+float epsGrowth = isAuto and not na(rawEps) and not na(epsPrev) and epsPrev != 0 ?
+     ((eps - epsPrev) / math.abs(epsPrev)) * 100 : manualEpsGrowthInput
+
+float revenue = isAuto and not na(rawRevenue) ? rawRevenue : na
+float revPrev = revenue[1]
+float revGrowth = isAuto and not na(revenue) and not na(revPrev) and revPrev != 0 ?
+     ((revenue - revPrev) / math.abs(revPrev)) * 100 : manualRevGrowthInput
+
+float peRatio = eps > 0 ? close / eps : na
+
+float growthForPeg = math.max(epsGrowth, 0.01)
+float adjDivYield = pegDivAdjust > 0 ? manualDivYieldInput * pegDivAdjust : 0.0
+float pegRatio = not na(peRatio) and growthForPeg > 0 ?
+     (peRatio - adjDivYield) / growthForPeg : na
+
+float debtToEquity = isAuto and not na(rawDebt) and not na(rawEquity) and rawEquity > 0 ?
+     rawDebt / rawEquity : manualDebtEqInput
+
+float cashPS = isAuto and not na(rawCash) and not na(rawShares) and rawShares > 0 ?
+     rawCash / rawShares : manualCashPerShare
+
+float profitMargin = isAuto and not na(rawOperInc) and not na(rawRevenue) and rawRevenue > 0 ?
+     (rawOperInc / rawRevenue) * 100 : manualMarginInput
+float marginPrev = profitMargin[1]
+bool  marginExpanding = not na(marginPrev) ? profitMargin > marginPrev : true
+
+float divYield  = manualDivYieldInput
+float divPayout = manualPayoutInput
+
+float netCashPS = isAuto and not na(rawCash) and not na(rawDebt) and not na(rawShares) and rawShares > 0 ?
+     (rawCash - rawDebt) / rawShares : cashPS - (manualDebtEqInput * close)
+
+// -- Lynch Fair Value Prices (PEG-derived) --
+float fairPrice  = eps > 0 and epsGrowth > 0 ? eps * epsGrowth * 1.0 : na
+float cheapPrice = eps > 0 and epsGrowth > 0 ? eps * epsGrowth * pegBuyInput * 0.5 : na
+float richPrice  = eps > 0 and epsGrowth > 0 ? eps * epsGrowth * pegSellInput : na
+
+// ==============================================================================
+//  LYNCH SCORING ENGINE (0 - 100 points) — Conviction Meter
+// ==============================================================================
+
+// --- [A] PEG SCORE (0-25 points) ---
+float pegScore = 0.0
+if not na(pegRatio)
+    if pegRatio <= 0.5
+        pegScore := 25.0
+    else if pegRatio <= 0.75
+        pegScore := 22.0
+    else if pegRatio <= 1.0
+        pegScore := 18.0
+    else if pegRatio <= 1.5
+        pegScore := 12.0
+    else if pegRatio <= 2.0
+        pegScore := 5.0
+    else
+        pegScore := 0.0
+
+// --- [B] EARNINGS GROWTH SCORE (0-25 points) ---
+float growthTarget = switch categoryInput
+    "Fast Grower" => 20.0
+    "Stalwart"    => 10.0
+    "Slow Grower" => 5.0
+    "Cyclical"    => 8.0
+    "Turnaround"  => 0.0
+    "Asset Play"  => 3.0
+    => 10.0
+
+float earningsScore = 0.0
+if categoryInput == "Turnaround"
+    if epsGrowth > 50
+        earningsScore := 25.0
+    else if epsGrowth > 20
+        earningsScore := 20.0
+    else if epsGrowth > 0
+        earningsScore := 15.0
+    else if epsGrowth > -10
+        earningsScore := 8.0
+    else
+        earningsScore := 0.0
+else
+    float ratio = growthTarget > 0 ? epsGrowth / growthTarget : 0
+    if ratio >= 1.5
+        earningsScore := 25.0
+    else if ratio >= 1.2
+        earningsScore := 22.0
+    else if ratio >= 1.0
+        earningsScore := 18.0
+    else if ratio >= 0.75
+        earningsScore := 12.0
+    else if ratio >= 0.5
+        earningsScore := 6.0
+    else
+        earningsScore := 0.0
+
+// --- [C] BALANCE SHEET SCORE (0-20 points) ---
+float balanceScore = 0.0
+if debtToEquity <= 0.10
+    balanceScore += 10.0
+else if debtToEquity <= 0.25
+    balanceScore += 8.0
+else if debtToEquity <= 0.50
+    balanceScore += 5.0
+else if debtToEquity <= 1.0
+    balanceScore += 2.0
+if netCashPS > close * 0.5
+    balanceScore += 10.0
+else if netCashPS > close * 0.25
+    balanceScore += 8.0
+else if netCashPS > 0
+    balanceScore += 5.0
+else if netCashPS > -close * 0.25
+    balanceScore += 2.0
+
+// --- [D] PROFIT MARGIN SCORE (0-15 points) ---
+float marginScore = 0.0
+if profitMargin >= 20
+    marginScore := 10.0
+else if profitMargin >= 15
+    marginScore := 8.0
+else if profitMargin >= 10
+    marginScore := 6.0
+else if profitMargin >= 5
+    marginScore := 4.0
+else
+    marginScore := 1.0
+if marginExpanding
+    marginScore += 5.0
+
+// --- [E] DIVIDEND SCORE (0-15 points) ---
+float dividendScore = 0.0
+if categoryInput == "Fast Grower"
+    dividendScore := 10.0
+    if divYield > 0
+        dividendScore := 12.0
+else if categoryInput == "Slow Grower" or categoryInput == "Stalwart"
+    if divYield >= 3.0 and divPayout < maxPayoutInput
+        dividendScore := 15.0
+    else if divYield >= 2.0 and divPayout < maxPayoutInput
+        dividendScore := 12.0
+    else if divYield >= 1.0
+        dividendScore := 8.0
+    else
+        dividendScore := 2.0
+    if divPayout > 90
+        dividendScore := math.max(dividendScore - 8, 0)
+else
+    if divYield > 0 and divPayout < 70
+        dividendScore := 10.0
+    else if divYield > 0
+        dividendScore := 6.0
+    else
+        dividendScore := 5.0
+
+// --- COMPOSITE LYNCH SCORE ---
+float lynchScore = pegScore + earningsScore + balanceScore + marginScore + dividendScore
+
+float inningMult = switch inningInput
+    1 => 1.15
+    2 => 1.12
+    3 => 1.10
+    4 => 1.05
+    5 => 1.00
+    6 => 0.95
+    7 => 0.90
+    8 => 0.85
+    9 => 0.75
+    => 1.0
+lynchScore := math.min(math.round(lynchScore * inningMult, 1), 100)
+
+// ==============================================================================
+//  CATEGORY-SPECIFIC ENTRY/EXIT CONDITIONS (Purely Fundamental)
+//  No technical indicators — Lynch was a fundamental investor.
+// ==============================================================================
+
+// --- Stalwart: Track position gain for auto-rotate ---
+float positionGainPct = strategy.position_size > 0 and strategy.position_avg_price > 0 ?
+     ((close - strategy.position_avg_price) / strategy.position_avg_price) * 100 : 0.0
+
+// --- Category Buy Conditions ---
+bool catBuyCondition = switch categoryInput
+    "Fast Grower" =>
+         (na(pegRatio) ? true : pegRatio <= pegBuyInput) and
+         epsGrowth >= fgMinGrowth and
+         inningInput <= fgMaxInning and
+         debtToEquity < maxDebtEqInput
+    "Slow Grower" =>
+         divYield >= sgMinYield and
+         (na(peRatio) ? true : peRatio < sgMaxPE) and
+         debtToEquity < maxDebtEqInput and
+         divPayout < maxPayoutInput
+    "Stalwart" =>
+         (na(pegRatio) ? true : pegRatio <= pegBuyInput * stPegMult) and
+         epsGrowth >= stMinGrowth and
+         debtToEquity < maxDebtEqInput
+    "Cyclical" =>
+         (na(peRatio) ? true : peRatio >= cyTroughPE) and
+         epsGrowth > 0 and
+         debtToEquity < maxDebtEqInput * 1.5
+    "Turnaround" =>
+         (netCashPS > close * taMinCashRatio or debtToEquity < maxDebtEqInput * 2) and
+         (epsGrowth > -5 or eps > epsPrev)
+    "Asset Play" =>
+         netCashPS > close * apMinCashRatio and
+         debtToEquity < maxDebtEqInput
+    => true
+
+// --- Category Sell Conditions ---
+bool catSellCondition = switch categoryInput
+    "Fast Grower" =>
+         epsGrowth < fgExitGrowth or
+         inningInput >= 8 or
+         (not na(pegRatio) and pegRatio > pegSellInput) or
+         (not marginExpanding and profitMargin < marginPrev * 0.9)
+    "Slow Grower" =>
+         divPayout > sgMaxPayout or
+         divYield < sgMinYield * 0.5 or
+         epsGrowth < -5
+    "Stalwart" =>
+         positionGainPct >= stGainTarget or
+         (not na(pegRatio) and pegRatio > pegSellInput) or
+         epsGrowth < stMinGrowth * 0.5
+    "Cyclical" =>
+         epsGrowth > cyPeakGrowth or
+         (not na(peRatio) and peRatio < cyPeakPE and epsGrowth > 30)
+    "Turnaround" =>
+         (epsGrowth > 30 and debtToEquity < 0.3 and not na(peRatio) and peRatio > taNormalizedPE) or
+         (debtToEquity > maxDebtEqInput * 3)
+    "Asset Play" =>
+         netCashPS < close * apExitCashRatio
+    => false
+
+// ==============================================================================
+//  STORY STATUS — What's the fundamental narrative right now?
+// ==============================================================================
+string storyStatus = switch categoryInput
+    "Fast Grower" =>
+         epsGrowth >= fgMinGrowth and marginExpanding ? "Growth Accelerating" :
+         epsGrowth >= fgMinGrowth ? "Growth On Track" :
+         epsGrowth >= fgExitGrowth ? "Growth Slowing" :
+         "Growth Stalling"
+    "Slow Grower" =>
+         divYield >= sgMinYield and divPayout < 60 ? "Healthy Dividend" :
+         divYield >= sgMinYield ? "Dividend Stable" :
+         divPayout > sgMaxPayout ? "Payout Unsustainable" :
+         "Dividend Weakening"
+    "Stalwart" =>
+         positionGainPct >= stGainTarget ? "Rotate — Target Hit" :
+         epsGrowth >= stMinGrowth and not na(pegRatio) and pegRatio <= 1.5 ? "Solid & Cheap" :
+         epsGrowth >= stMinGrowth ? "Steady Growth" :
+         "Growth Fading"
+    "Cyclical" =>
+         not na(peRatio) and peRatio >= cyTroughPE ? "Trough — Buy Zone" :
+         epsGrowth > cyPeakGrowth ? "Peak Euphoria — Sell" :
+         epsGrowth > 0 ? "Recovery Phase" :
+         "Downturn"
+    "Turnaround" =>
+         epsGrowth > 20 and debtToEquity < 0.5 ? "Turnaround Succeeding" :
+         epsGrowth > 0 ? "Turnaround In Progress" :
+         eps > 0 ? "Loss Narrowing" :
+         "Still Struggling"
+    "Asset Play" =>
+         netCashPS > close * apMinCashRatio * 2 ? "Deep Hidden Value" :
+         netCashPS > close * apMinCashRatio ? "Undervalued Assets" :
+         netCashPS > close * apExitCashRatio ? "Value Narrowing" :
+         "Value Recognized"
+    => "—"
+
+// --- Category Signal Reason ---
+string catSignalReason = ""
+if catBuyCondition and strategy.position_size <= 0
+    catSignalReason := switch categoryInput
+        "Fast Grower" => "PEG OK + Growth " + str.tostring(epsGrowth, "#.#") + "% + Inn " + str.tostring(inningInput)
+        "Slow Grower" => "Yield " + str.tostring(divYield, "#.#") + "% + PE < " + str.tostring(sgMaxPE, "#")
+        "Stalwart"    => "PEG OK + Growth " + str.tostring(epsGrowth, "#.#") + "%"
+        "Cyclical"    => "High PE (Trough) + Recovering"
+        "Turnaround"  => "Cash OK + Losses Narrowing"
+        "Asset Play"  => "Net Cash $" + str.tostring(netCashPS, "#.##") + " > Threshold"
+        => ""
+else if catSellCondition and strategy.position_size > 0
+    catSignalReason := switch categoryInput
+        "Fast Grower" =>
+             epsGrowth < fgExitGrowth ? "Growth Decel to " + str.tostring(epsGrowth, "#.#") + "%" :
+             inningInput >= 8 ? "Late Inning " + str.tostring(inningInput) :
+             "PEG > " + str.tostring(pegSellInput, "#.#")
+        "Slow Grower" =>
+             divPayout > sgMaxPayout ? "Payout " + str.tostring(divPayout, "#") + "% Unsustainable" :
+             "Yield/Earnings Deteriorating"
+        "Stalwart" =>
+             positionGainPct >= stGainTarget ? "Gain " + str.tostring(positionGainPct, "#.#") + "% — Rotate" :
+             "PEG/Growth Deteriorating"
+        "Cyclical" =>
+             epsGrowth > cyPeakGrowth ? "Peak Growth " + str.tostring(epsGrowth, "#") + "%" :
+             "Low PE = Peak Earnings"
+        "Turnaround" =>
+             debtToEquity > maxDebtEqInput * 3 ? "Debt Worsening" :
+             "Turnaround Complete"
+        "Asset Play" => "Asset Value Recognized"
+        => ""
+else
+    catSignalReason := "No Signal"
+
+// ==============================================================================
+//  STRATEGY EXECUTION (Fundamental Only)
+// ==============================================================================
+bool scoreOk    = useScoreGate ? lynchScore >= entryScoreInput : true
+bool scoreFail  = useScoreGate ? lynchScore < exitScoreInput : false
+
+bool masterBuy  = catBuyCondition and scoreOk and (na(peRatio) or peRatio <= maxPeInput)
+bool masterSell = catSellCondition or scoreFail
+
+bool buySignal  = masterBuy and (strategy.position_size <= 0)
+bool sellSignal = masterSell and (strategy.position_size > 0)
+
+if buySignal
+    strategy.entry("Lynch Buy", strategy.long)
+if sellSignal
+    strategy.close("Lynch Buy", comment = "Lynch Exit")
+if strategy.position_size > 0
+    float entryPrice = strategy.position_avg_price
+    strategy.exit("Lynch Risk", "Lynch Buy",
+         stop  = entryPrice * (1 - stopLossPct / 100),
+         limit = entryPrice * (1 + takeProfitPct / 100))
+
+// ==============================================================================
+//  CHART PLOTS — Clean, minimal on-chart visuals
+// ==============================================================================
+
+// Buy/Sell signal markers only
+plotshape(showSignals and buySignal ? low : na, "Buy Signal",
+     shape.labelup, location.belowbar, bullColor, size = size.small, text = "BUY", textcolor = color.white)
+plotshape(showSignals and sellSignal ? high : na, "Sell Signal",
+     shape.labeldown, location.abovebar, bearColor, size = size.small, text = "SELL", textcolor = color.white)
+
+//  PETER LYNCH COLOR PORTRAIT (imlib library)
+// ==============================================================================
+
+// --- Portrait dynamic coloring (non-repainting) ---
+int totalClosed       = strategy.closedtrades
+var int prevClosed    = 0
+var bool stopLossHit  = false
+var int slFlashBars   = 0
+
+if barstate.isconfirmed
+    bool newClose     = totalClosed > prevClosed
+    if newClose
+        float lastProfit  = strategy.closedtrades.profit(totalClosed - 1)
+        float lastEntryPx = strategy.closedtrades.entry_price(totalClosed - 1)
+        float lastExitPx  = strategy.closedtrades.exit_price(totalClosed - 1)
+        float slLevel     = lastEntryPx * (1 - stopLossPct / 100)
+        stopLossHit := lastProfit < 0 and lastExitPx <= slLevel * 1.005
+    else
+        stopLossHit := false
+    prevClosed := totalClosed
+    if stopLossHit
+        slFlashBars := 3
+    else if slFlashBars > 0
+        slFlashBars -= 1
+
+var float confirmedEquity = strategy.initial_capital
+if barstate.isconfirmed
+    confirmedEquity := strategy.equity
+float equityRetPct = ((confirmedEquity - strategy.initial_capital) / strategy.initial_capital) * 100
+float drawdownPct  = strategy.equity < strategy.initial_capital ?
+     ((strategy.initial_capital - strategy.equity) / strategy.initial_capital) * 100 : 0.0
+
+// --- Peter Lynch Color Portrait (imlib) ---
+string lynchPortraitRaw = "^^⫝!#$%&()*+,-./:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`abcdefghijklmnopqrstuvwxyz{|}~¡¢£¤¥¦§¨©ª«¬­®¯°±´µ¶·¸º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒőőŐ¶ŐŌŇ¶ŊŋŊ¶ŉłĺ¶ŌĹħ¶Ļŀľ¶ĶĹĹ¶ŅĨĐ¶ĦħĤ¶ĳĊê¶ćĈă¶ĢìÌ¶øíâ¶ĀÈ©¶ÕáÞ¶ÅÎË¶¶º´¶Ð|j¶ÀbP¶w|w¶hvu¶]hi¶P[]¶kH?¶HNN¶BKL¶AD@¶;C@¶/?;¶/>;¶/;.¶->/¶-<G¶-<.¶,:/¶+:,¶,,*¶*/,¶).+¶(-*¶),)¶)*(¶%+(¶()&¶&&%¶$&%¶$$$¶!##¶⫝48MGRT2WR2T2W2TUVQPQ3V2U]X][2QY[XVQ4KJ2KQ3K3QMHST10WUTUVQ[ZRF<;AG2]QXYX3QKL2KPQK3Q2VMHSP2T4WT3W2TUV]C/-+3!+;A]XVX2V2QN3K4QV2XJH3S3TW2T2WTSRWG=+3!3$2!$<QXQVXQS2ON2P3QVXYOH4SRST4SPN]G-2!$6!$2!-KYQ2XUJO4P2SUVXOH2R2STW3RPNPIA/!2$9!$!-K2QXU2O2S2P2STUVOGP5RSR3NZ;$!2$11!$!;]K2QOR2PSPRSUXWOGPN2R2PRPNIZ<!2$13!$!(EY2QO2RQ4SUVTOHR2N2PR2NITB(!$3!5#3!2#!#(!;]QX3VU2WT2UVSJHPN2L4NLW/!$3!#11%#%2+C[VXVX3VRSUXSOGN5LNJTC(2$!3#3%3&5*&#)-=]Q2X2YVUQ3U2WGJILJ3IHW@2$!%&%8&*3,/-%+=]UY2XY3XUSX2VG2IL4IGZ=$%#&4*6&*3,:=-(=]QYVQZ2[5XZGI5LIHWB2)%&2,2*7&*,.>:;+/2X[YVZ3[Z2VZ[GI6LITB+)%*2,*6&4*,>:-+-G]Y[Z5[Y3[GINLI3LIW@(%+,2*&*,.2,2.3:.2>/(<]VYZ[]3[2Z[][GLS2TRNLHXA%#-/*.:>?D?2:?D2?D>D@;G[X3[3]5[ZGNP3TWTNUE/&+.:?4D?.:5D2:=E]X5[2]5[ZGNP2TU2WU2Q>,&*.4>:.,.>3:.,.BKXYXY3[2]2[][][GPRST2W2XV[D3.3,.,*.*,:2,*&,.GQY4XY4[4][GPSRT3W2VUY>2:,*2&*2,2&:.,*,.>?GX2Y3XYZ2[]Z2YXGNRSR4WVT]D,2.3,>:,2.:>?3:?DQVX2Y[XVZYV[4]GNR2SRT2WVUVK2,:2.2>.>?2D2>3?DYQXVXYX2Q3]XB2=@GNS2W2RWX3UVED:.2:3.>?>:2>?>DSR2XWXZ2]FB=-($%(GNSTP2RTU2SUST]>.:.:?3:>D?:3>]ZRIHIE@/+(%()3+GPTPNSTS3RSRPXD2.,5.2:2.>?<@BC@;/-(%)3+4-GRSNLSTSRPNR2PIQ>.,2*,2.:.,:2D;=<2=2B@<;5/;<=G2R2JS2TO2NPNLIPD:.2*,3.2,>QA+@4<@A@=;5<=AGRNLJOTWO2J2NJPF@2:,6*,DY=(2=;3<2;3<3=2@AGRL2JO2TRIJONIW2=.>:,*,.,.>GQ/$2=2;3<;3=2@A3BGSN2JP2SR2HOJWC-@-:2?3:>?DVB+(=A3<;<;2@=@A2B2CHP3JORSOEH2JT/+A-2:?5DGS;()=F@2=<2=ABCE3CEFGP3JORSOEFJ]<+-A/+2:>?3DV@+2);ABA2@ACE2F2EFCEFGN3JO2ROFJ]<)-/A<!+/:>?DG@+(2)+=FBABC6EF2CEGNH2JRSRJWI;(2-/@A3)+/=?D-!()(-<@EBCE3FHJ2HFCEHNH2J2OJ]B-(+2-/@F-)2+2)/>?-$2);-;2CBCE3F3HOHFGN2I2JOW=)(2+2-/=C@+(3%+:>E+$+/2+;F2BC4E2FMOHGLIJHRG/$)2+3-/<@<(#3%&*-G@!/-2(+BCB2C2ECEC2FCFJIJOG-$+3-5/+!#%3#%&:KB-;)$()=FCE7CEBGNJIO-$)+;@=/2<-%4#&*,2.,>B<-$2()-CFE7CFBGNHZ<(2+-<@C@=<)!2#&,:?2DKD><-$3(2)<B@2B3C2EFCGIZA)+2<;=2@A@<&2%#*.:=@KGD>:+$2(2)(-@=@AB2C2EFEGWE2+;2@<=@2A@/2&4#%!&DK?2:-#(5)<B=@A2BC3FGI-+/=2B=@AB2@,2*&2%*,2.>D2:.,(2)2()(-BA2@A2B3CR@)-<@BE3A2@<&*,*#%*,-/?D?=*,+)4(2)=C3@4ABN=+/<@BCBAB2@-*3,2&%2&*DKG@2,-(2)2(2);CA@A@3AB48M"
+
+var imlib.ImgData lynchImgData = na
+var table portraitTable = na
+
+if barstate.isfirst
+    lynchImgData := imlib.load(lynchPortraitRaw)
+    // Create table: W columns × (H+1) rows — extra row for caption
+    portraitTable := table.new(position.bottom_center, lynchImgData.w, lynchImgData.h + 1,
+         bgcolor = color.new(#0a0f1a, 0),
+         frame_color = color.new(#1a237e, 0),
+         frame_width = 2,
+         border_color = color.new(#0a0f1a, 100),
+         border_width = 0)
+
+if barstate.islast and showPortrait
+    // Render the color portrait
+    imlib.show(lynchImgData, portraitTable, 20.0, "16/8.5")
+    // Caption row below the portrait
+    color captionBg = slFlashBars > 0 ? color.new(#000000, 10) :
+         drawdownPct > 5 ? color.new(#1a1a1a, 10) : color.new(#1a237e, 10)
+    color captionTxt = slFlashBars > 0 ? color.new(#ff1744, 0) :
+         equityRetPct > 0 ? color.new(#00e676, 0) :
+         drawdownPct > 5 ? color.new(#e53935, 0) : color.new(#26c6da, 0)
+    // Fill caption row cells, then merge them
+    for col = 0 to lynchImgData.w - 1
+        table.cell(portraitTable, col, lynchImgData.h, text = "", bgcolor = captionBg)
+    table.merge_cells(portraitTable, 0, lynchImgData.h, lynchImgData.w - 1, lynchImgData.h)
+    table.cell_set_text(portraitTable, 0, lynchImgData.h, "PETER LYNCH  |  Magellan Fund  |  29.2% CAGR  |  1977-1990")
+    table.cell_set_text_color(portraitTable, 0, lynchImgData.h, captionTxt)
+    table.cell_set_text_size(portraitTable, 0, lynchImgData.h, size.tiny)
+    table.cell_set_text_halign(portraitTable, 0, lynchImgData.h, text.align_center)
+
+// ==============================================================================
+//  MAIN DASHBOARD (top-right)
+// ==============================================================================
+var table dashTable = table.new(position.top_right, 4, 24,
+     bgcolor = color.new(#0d1117, 5),
+     frame_color = color.new(#1a237e, 0),
+     frame_width = 1,
+     border_color = color.new(#1e293b, 60),
+     border_width = 0)
+
+// Helper: traffic light dot color
+dotColor(float val, float good, float mid, bool higher) =>
+    if higher
+        val >= good ? bullColor : val >= mid ? neutColor : bearColor
+    else
+        val <= good ? bullColor : val <= mid ? neutColor : bearColor
+
+// Helper: score bar
+makeBar(float score, float maxScore) =>
+    int total = 10
+    int filled = math.round(score / maxScore * total)
+    string bar = ""
+    for i = 0 to total - 1
+        bar += i < filled ? "█" : "░"
+    bar
+
+if barstate.islast and showDashboard
+    color hdrBg  = color.new(#1a237e, 10)
+    color hdrTxt = color.new(#e8eaed, 0)
+    color lblTxt = color.new(#90a4ae, 0)
+    color valTxt = color.new(#e8eaed, 0)
+    color dimTxt = color.new(#546e7a, 0)
+    string sm    = size.tiny
+    string tn    = size.tiny
+    int r = 0
+
+    // === HEADER ===
+    table.cell(dashTable, 0, r, "PETER LYNCH TOOLKIT v3", text_color = color.new(#ffd740, 0), text_size = sm, bgcolor = hdrBg, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "", bgcolor = hdrBg)
+    table.cell(dashTable, 2, r, categoryInput, text_color = color.new(#69f0ae, 0), text_size = sm, bgcolor = hdrBg, text_halign = text.align_center)
+    table.cell(dashTable, 3, r, "Inn " + str.tostring(inningInput) + "/9", text_color = neutColor, text_size = sm, bgcolor = hdrBg, text_halign = text.align_right)
+    r += 1
+
+    // === LYNCH SCORE (Conviction Meter) ===
+    color lsColor = lynchScore >= 70 ? bullColor : lynchScore >= 50 ? neutColor : bearColor
+    string lsBar  = ""
+    int lsFill2   = math.round(lynchScore / 5)
+    for i = 0 to 19
+        lsBar += i < lsFill2 ? "█" : "░"
+    string gateText = useScoreGate ? " (GATE ON)" : " (METER)"
+    table.cell(dashTable, 0, r, "SCORE" + gateText, text_color = lblTxt, text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, lsBar, text_color = lsColor, text_size = tn, text_halign = text.align_left, text_font_family = font.family_monospace)
+    table.cell(dashTable, 2, r, str.tostring(lynchScore, "#.#"), text_color = lsColor, text_size = sm, text_halign = text.align_right)
+    string signalTxt = strategy.position_size > 0 ? "  LONG ●" : masterBuy ? "  BUY ◉" : masterSell ? "  EXIT ◉" : "  WAIT ○"
+    color  sigColor  = strategy.position_size > 0 ? bullColor : masterBuy ? bullColor : masterSell ? bearColor : color.gray
+    table.cell(dashTable, 3, r, signalTxt, text_color = sigColor, text_size = sm, text_halign = text.align_right)
+    r += 1
+
+    // === STORY STATUS (NEW) ===
+    color storyColor = catBuyCondition ? bullColor : catSellCondition ? bearColor : neutColor
+    table.cell(dashTable, 0, r, "STORY", text_color = color.new(#ce93d8, 0), text_size = sm, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, storyStatus, text_color = storyColor, text_size = sm, text_halign = text.align_left)
+    table.cell(dashTable, 2, r, "", text_size = tn)
+    table.cell(dashTable, 3, r, "", text_size = tn)
+    r += 1
+
+    // === CATEGORY SIGNAL (NEW) ===
+    table.cell(dashTable, 0, r, "SIGNAL", text_color = color.new(#80cbc4, 0), text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, catSignalReason, text_color = catBuyCondition and strategy.position_size <= 0 ? bullColor : catSellCondition and strategy.position_size > 0 ? bearColor : lblTxt, text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 2, r, "", text_size = tn)
+    table.cell(dashTable, 3, r, "", text_size = tn)
+    r += 1
+
+    // === POSITION P&L (NEW — only when in trade) ===
+    if strategy.position_size > 0
+        float plDollar = close - strategy.position_avg_price
+        color plColor = positionGainPct >= 0 ? bullColor : bearColor
+        string plSign = positionGainPct >= 0 ? "+" : ""
+        table.cell(dashTable, 0, r, "P&L", text_color = plColor, text_size = sm, text_halign = text.align_left)
+        table.cell(dashTable, 1, r, plSign + str.tostring(positionGainPct, "#.#") + "%", text_color = plColor, text_size = sm, text_halign = text.align_left)
+        table.cell(dashTable, 2, r, plSign + "$" + str.tostring(plDollar, "#.##") + "/share", text_color = plColor, text_size = sm, text_halign = text.align_center)
+        string rotateWarn = categoryInput == "Stalwart" and positionGainPct >= stGainTarget * 0.8 ? "ROTATE SOON" : categoryInput == "Stalwart" ? str.tostring(stGainTarget, "#") + "% target" : ""
+        table.cell(dashTable, 3, r, rotateWarn, text_color = positionGainPct >= stGainTarget * 0.8 ? neutColor : lblTxt, text_size = tn, text_halign = text.align_right)
+        r += 1
+    else
+        table.cell(dashTable, 0, r, "", text_size = tn)
+        table.cell(dashTable, 1, r, "", text_size = tn)
+        table.cell(dashTable, 2, r, "", text_size = tn)
+        table.cell(dashTable, 3, r, "", text_size = tn)
+        r += 1
+
+    // === VALUATION SECTION ===
+    table.cell(dashTable, 0, r, "── VALUATION", text_color = dimTxt, text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 2, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 3, r, makeBar(pegScore, 25), text_color = dotColor(pegScore, 18, 10, true), text_size = tn, text_halign = text.align_right, text_font_family = font.family_monospace)
+    r += 1
+
+    // PEG
+    color pegC = not na(pegRatio) ? (pegRatio <= 1.0 ? bullColor : pegRatio <= 2.0 ? neutColor : bearColor) : color.gray
+    string pegLbl = not na(pegRatio) ? (pegRatio <= 0.5 ? "Very Cheap" : pegRatio <= 1.0 ? "Undervalued" : pegRatio <= 1.5 ? "Fair" : pegRatio <= 2.0 ? "Rich" : "Overvalued") : "--"
+    table.cell(dashTable, 0, r, "★ PEG Ratio", text_color = color.new(#ffd740, 0), text_size = sm, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, not na(pegRatio) ? str.tostring(pegRatio, "#.##") : "N/A", text_color = pegC, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 2, r, pegLbl, text_color = pegC, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 3, r, str.tostring(pegScore, "#") + "/25", text_color = lblTxt, text_size = tn, text_halign = text.align_right)
+    r += 1
+
+    // PE
+    table.cell(dashTable, 0, r, "  PE Ratio", text_color = lblTxt, text_size = sm, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, not na(peRatio) ? str.tostring(peRatio, "#.#") : "N/A", text_color = not na(peRatio) ? dotColor(peRatio, 15, 25, false) : color.gray, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 2, r, not na(peRatio) ? (peRatio < 15 ? "Cheap" : peRatio < 25 ? "Fair" : "Pricey") : "--", text_color = lblTxt, text_size = tn, text_halign = text.align_center)
+    float fvDelta = not na(fairPrice) and fairPrice > 0 ? ((close - fairPrice) / fairPrice) * 100 : na
+    table.cell(dashTable, 3, r, not na(fvDelta) ? (fvDelta > 0 ? "+" : "") + str.tostring(fvDelta, "#.#") + "% vs FV" : "", text_color = not na(fvDelta) ? (fvDelta < 0 ? bullColor : fvDelta < 30 ? neutColor : bearColor) : color.gray, text_size = tn, text_halign = text.align_right)
+    r += 1
+
+    // === EARNINGS SECTION ===
+    table.cell(dashTable, 0, r, "── EARNINGS", text_color = dimTxt, text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 2, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 3, r, makeBar(earningsScore, 25), text_color = dotColor(earningsScore, 18, 10, true), text_size = tn, text_halign = text.align_right, text_font_family = font.family_monospace)
+    r += 1
+
+    color egC = epsGrowth >= growthTarget ? bullColor : epsGrowth >= growthTarget * 0.5 ? neutColor : bearColor
+    table.cell(dashTable, 0, r, "  EPS", text_color = lblTxt, text_size = sm, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "$" + str.tostring(eps, "#.##"), text_color = eps > 0 ? bullColor : bearColor, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 2, r, "Growth " + str.tostring(epsGrowth, "#.#") + "%", text_color = egC, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 3, r, "tgt " + str.tostring(growthTarget, "#") + "%+", text_color = lblTxt, text_size = tn, text_halign = text.align_right)
+    r += 1
+
+    table.cell(dashTable, 0, r, "  Revenue Growth", text_color = lblTxt, text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, str.tostring(revGrowth, "#.#") + "%", text_color = revGrowth > 10 ? bullColor : revGrowth > 0 ? neutColor : bearColor, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 2, r, str.tostring(earningsScore, "#") + "/25", text_color = lblTxt, text_size = tn, text_halign = text.align_center)
+    table.cell(dashTable, 3, r, "", text_size = tn)
+    r += 1
+
+    // === BALANCE SHEET ===
+    table.cell(dashTable, 0, r, "── BALANCE SHEET", text_color = dimTxt, text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 2, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 3, r, makeBar(balanceScore, 20), text_color = dotColor(balanceScore, 15, 8, true), text_size = tn, text_halign = text.align_right, text_font_family = font.family_monospace)
+    r += 1
+
+    color deC = dotColor(debtToEquity, 0.25, 0.50, false)
+    table.cell(dashTable, 0, r, "  Debt/Equity", text_color = lblTxt, text_size = sm, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "●  " + str.tostring(debtToEquity, "#.##"), text_color = deC, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 2, r, debtToEquity < 0.20 ? "Strong" : debtToEquity < 0.50 ? "OK" : "Heavy", text_color = deC, text_size = sm, text_halign = text.align_center)
+    float cashPct = close != 0 ? (netCashPS / close) * 100 : 0
+    table.cell(dashTable, 3, r, "Cash $" + str.tostring(netCashPS, "#.#") + " (" + str.tostring(cashPct, "#") + "%)", text_color = netCashPS > 0 ? bullColor : bearColor, text_size = tn, text_halign = text.align_right)
+    r += 1
+
+    // === MARGINS ===
+    table.cell(dashTable, 0, r, "── MARGINS", text_color = dimTxt, text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 2, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 3, r, makeBar(marginScore, 15), text_color = dotColor(marginScore, 12, 7, true), text_size = tn, text_halign = text.align_right, text_font_family = font.family_monospace)
+    r += 1
+
+    table.cell(dashTable, 0, r, "  Profit Margin", text_color = lblTxt, text_size = sm, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "●  " + str.tostring(profitMargin, "#.#") + "%", text_color = dotColor(profitMargin, 15, 8, true), text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 2, r, marginExpanding ? "▲ Expanding" : "▼ Contracting", text_color = marginExpanding ? bullColor : bearColor, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 3, r, str.tostring(marginScore, "#") + "/15", text_color = lblTxt, text_size = tn, text_halign = text.align_right)
+    r += 1
+
+    // === DIVIDENDS ===
+    table.cell(dashTable, 0, r, "── DIVIDENDS", text_color = dimTxt, text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 2, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 3, r, makeBar(dividendScore, 15), text_color = dotColor(dividendScore, 12, 7, true), text_size = tn, text_halign = text.align_right, text_font_family = font.family_monospace)
+    r += 1
+
+    color payC = divPayout > 80 ? bearColor : divYield > 2 ? bullColor : valTxt
+    table.cell(dashTable, 0, r, "  Yield / Payout", text_color = lblTxt, text_size = sm, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "●  " + str.tostring(divYield, "#.#") + "% / " + str.tostring(divPayout, "#") + "%", text_color = payC, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 2, r, divPayout > 90 ? "Unsustainable" : divPayout > 70 ? "Watch" : "Healthy", text_color = divPayout > 80 ? bearColor : bullColor, text_size = sm, text_halign = text.align_center)
+    table.cell(dashTable, 3, r, str.tostring(dividendScore, "#") + "/15", text_color = lblTxt, text_size = tn, text_halign = text.align_right)
+    r += 1
+
+    // === WISDOM ===
+    int qi = math.floor(timenow / 86400000) % 7
+    string wisdom = switch qi
+        0 => "Know what you own, and know why you own it."
+        1 => "Go for a business any idiot can run."
+        2 => "The key organ is the stomach, not the brain."
+        3 => "Behind every stock is a company."
+        4 => "My best stocks were 5th, 6th, 7th year holds."
+        5 => "You can be wrong and still make money."
+        6 => "Invest in what you know."
+        => "Do a little research."
+    table.cell(dashTable, 0, r, wisdom, text_color = color.new(#78909c, 20), text_size = tn, text_halign = text.align_left)
+    table.cell(dashTable, 1, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 2, r, "", bgcolor = color.new(#0d1117, 5))
+    table.cell(dashTable, 3, r, "- P. Lynch", text_color = color.new(#78909c, 40), text_size = tn, text_halign = text.align_right)
+
+// ==============================================================================
+//  STATUS LINE (no chart drawing — data window only)
+// ==============================================================================
+plot(lynchScore, "Lynch Score", color = lynchScore >= 70 ? bullColor : lynchScore >= 50 ? neutColor : bearColor, display = display.status_line)
+plot(not na(pegRatio) ? pegRatio : na, "PEG Ratio", display = display.status_line)
+plot(not na(peRatio) ? peRatio : na, "PE Ratio", display = display.status_line)
+
+View in Pine Editor・756 lines
+Use on chart
+4
+4
+1 120
+Feb 15
+Tribute To Peter Lynch - Fund Manager Simulator
+
+"Know what you own, and know why you own it." - Peter Lynch
+
+
+WHO WAS PETER LYNCH?
+
+Peter Lynch is one of the greatest investors who ever lived. From 1977 to 1990, he managed the Fidelity Magellan Fund and turned it from $18 million into $14 billion in assets. He averaged a 29.2% annual return for 13 straight years, making Magellan the best-performing mutual fund in the world.
+
+What made Lynch different? He believed regular people could beat Wall Street. He bought stocks in companies he understood - he'd ask minivan owners at movie theaters what they thought of their Chrysler, he'd notice the local factory hiring more people, he'd pay attention to which donut shop had the longest line. He called this your "investor's edge" - the things you already know from your daily life that Wall Street analysts sitting in their offices can't see.
+
+Lynch famously said: "If you can tell your stock story to a fifth grader and they understand it, you've got a good one. The more complicated the story, the more likely it is to fall apart."
+
+He also had the stomach for downturns. During his 13 years at Magellan, the market dropped 10% or more NINE times, and Magellan fell right along with it every single time. But he never panicked. He knew that behind every stock is a company, and if the company is doing well, the stock will eventually follow.
+
+
+WHAT THIS SCRIPT DOES
+
+This is a fund manager simulator built entirely around Peter Lynch's investing philosophy. It's not a technical indicator. There are no moving averages, no RSI, no MACD. Lynch was a fundamental investor - he cared about what a company earns, how fast it's growing, how much debt it has, and whether the story makes sense.
+
+The script classifies any stock into one of Lynch's 6 categories, scores it on a 0-100 Lynch Score, evaluates the fundamental story, and generates buy/sell signals based purely on the same criteria Lynch used at Magellan.
+
+
+THE 6 STOCK CATEGORIES
+
+Lynch believed you can't treat all stocks the same. A 50% gain on a Slow Grower is fantastic and probably time to sell. The same 50% on a Fast Grower could be just the beginning of a 10-bagger. He broke every stock into 6 categories:
+
+1. FAST GROWERS (20%+ earnings growth)
+Companies growing earnings fast, typically small to mid-sized. These are the potential 10-baggers. Lynch looked for PEG ratios below 1.0 and used his "baseball inning" concept - you want to buy these in innings 2-5, when the formula is proven but there's still a long runway ahead. Think of Walmart when it only had a few hundred stores, or Microsoft 3 years after its IPO.
+
+2. SLOW GROWERS (3-8% earnings growth)
+Large, mature companies that grow about as fast as the overall economy. You buy these for the dividend. Lynch looked for steady, rising dividends with a low payout ratio (so the dividend is safe). If the dividend yield drops or the payout ratio gets too high, it's time to move on.
+
+3. STALWARTS (10-14% earnings growth)
+Big, solid companies that aren't going to disappear but aren't going to triple overnight either. Lynch's rule: take your 30-50% gain and rotate the money into another Stalwart. These are your portfolio's defense - they hold up in recessions and won't go bankrupt.
+
+4. CYCLICALS (tied to the economic cycle)
+Companies in industries like autos, airlines, steel, and chemicals that boom and bust with the economy. Here's Lynch's counterintuitive trick: buy cyclicals when the PE is HIGH (that means earnings are at the trough and about to recover) and sell when the PE is LOW (earnings have peaked and are about to fall). This is the opposite of how PE works for every other category.
+
+5. TURNAROUNDS (beaten down, potential recovery)
+Companies in deep trouble that might recover. Lynch always checked: does this company have enough cash to survive? Is there a real plan (new management, cost cutting, selling bad divisions)? He said don't buy on hope - wait for actual evidence the turnaround is working. But when they work, the upside can be enormous.
+
+6. ASSET PLAYS (hidden value)
+Companies sitting on assets the market doesn't see or doesn't value - real estate, patents, brand names, cash on the balance sheet. Lynch's example: Disney after it opened Epcot. Growth slowed, but the company was sitting on the Disney name, all that Florida land, and a library of characters worth billions that were carried on the books for nothing.
+
+
+BAR REPLAY - WHERE THIS SCRIPT REALLY SHINES
+
+This script was built with TradingView's Bar Replay feature in mind. Bar Replay is what transforms this from a backtest into a fund manager simulator.
+
+HOW TO USE BAR REPLAY:
+
+1. Add the script to your chart
+2. Pick any stock and classify it (Fast Grower, Stalwart, etc.)
+3. Set your fundamental inputs if using Manual mode, or let Auto mode pull TradingView financial data
+4. Click the Bar Replay button on your toolbar (the clock icon with a rewind arrow)
+5. Pick a starting date - maybe go back 5 years, or 10, or start right before a crash
+6. Press Play and watch the simulation unfold bar by bar
+
+WHAT YOU'LL SEE IN BAR REPLAY:
+
+- The Lynch Score updates in real time as fundamentals change each quarter
+- The Story Status shifts: "Growth Accelerating" might become "Growth Slowing" as the company matures
+- Buy and sell signals fire when Lynch's criteria are met
+- The P&L tracker shows your position gain in real time
+- The Peter Lynch portrait in the corner changes color based on how your portfolio is doing:
+-- Equity rising: Lynch appears in bright GREEN against a deep BLUE background, getting more vivid as gains grow
+-- Heavy drawdown: Lynch turns CRIMSON RED against a BLACK background
+-- Stop loss hit: The portrait FLASHES RED as a warning
+-- Neutral: Lynch appears in CYAN/TEAL against dark navy
+- The daily Lynch wisdom quote rotates, keeping you in his mindset
+
+BAR REPLAY SCENARIOS TO TRY:
+
+- Start replay on Apple (AAPL) in 2003 as a Turnaround - watch it reclassify into a Fast Grower
+- Replay Ford (F) through 2008-2012 as a Cyclical - see Lynch's high-PE-buy rule in action
+- Run Coca-Cola (KO) from 1990 as a Stalwart - practice the 30-50% rotate rule
+- Try any stock through the 2020 COVID crash - Lynch survived 9 crashes at Magellan, now you can experience one
+
+
+SETTINGS GUIDE - EXPLAINED SIMPLY
+
+Think of the settings like customizing a video game character before you play. Here's what each group does:
+
+GROUP 1: STOCK TYPE
+"What kind of company is this?"
+Pick one of the 6 categories. This changes ALL the rules the script uses.
+
+Baseball Inning: Where is this company in its life?
+- Innings 1-3 = Young, lots of room to grow (like a kid)
+- Innings 4-6 = Middle age, proving itself
+- Innings 7-9 = Old, running out of gas
+Early innings get a score bonus. Late innings get a penalty.
+
+GROUP 2: FUNDAMENTAL DATA
+"Where do the numbers come from?"
+- Auto mode: TradingView pulls real financial data (EPS, revenue, debt) automatically. Best for stocks.
+- Manual mode: You type in the numbers yourself. Use this for crypto, forex, or if Auto data looks wrong.
+
+GROUP 3: PEG & VALUATION
+"How do I know if a stock is cheap or expensive?"
+PEG = Price-to-Earnings divided by Growth rate.
+- PEG of 1.0 = fairly priced (PE matches growth rate)
+- PEG below 1.0 = cheap (you're paying less than what the growth is worth)
+- PEG above 2.0 = expensive
+The Buy Threshold (default 1.0) means: "only buy if PEG is at or below this number."
+The Sell Threshold (default 2.0) means: "sell if PEG goes above this number."
+
+GROUP 4: BALANCE SHEET HEALTH
+"Is this company in good financial shape?"
+- Max Debt/Equity: How much debt is too much? Default 0.50 means total debt shouldn't be more than half of the company's net worth. Lynch always checked the balance sheet.
+- Min Cash Ratio: Does the company have enough cash? Important for Turnarounds.
+- Max Payout Ratio: Is the company paying out too much of its earnings as dividends? Above 80% means the dividend might get cut.
+
+GROUP 5: CATEGORY RULES
+"Special rules for each stock type."
+These are the specific thresholds for each of the 6 categories. The defaults are based on Lynch's actual criteria from his books.
+
+Examples:
+- Fast Grower Min Growth 20%: Lynch said a Fast Grower needs at least 20% earnings growth
+- Stalwart Rotate Target 40%: Lynch rotated Stalwarts after 30-50% gains
+- Cyclical Trough PE 25: Buy cyclicals when PE is HIGH (counterintuitive!)
+
+GROUP 6: STRATEGY SETTINGS
+"Should the Lynch Score control the trades?"
+- Score Gate OFF (default): The Lynch Score is just a meter showing conviction. Trades fire based on category rules alone.
+- Score Gate ON: The Lynch Score must be above the entry threshold to buy and below the exit threshold to sell. This adds an extra filter.
+
+GROUP 7: RISK MANAGEMENT
+"How much can I lose on one trade?"
+- Stop Loss: If the stock drops this % from your entry price, sell automatically. Default 15%.
+- Take Profit: If the stock rises this % from your entry price, sell automatically. Default 100% (a double).
+
+GROUP 8: DISPLAY
+"What do I see on the chart?"
+- Show/hide the Lynch portrait, the dashboard panel, and buy/sell signals
+- Customize your bull/bear/neutral colors
+
+
+THE DASHBOARD
+
+The top-right panel shows everything Lynch would want to see at a glance:
+
+- LYNCH SCORE: A 0-100 conviction meter with a visual bar. Built from 5 sub-scores:
+-- PEG Score (0-25): Is the stock cheap relative to its growth?
+-- Earnings Score (0-25): Is earnings growth meeting the target for this category?
+-- Balance Sheet Score (0-20): How healthy is the financial structure?
+-- Margin Score (0-15): Are profit margins good and expanding?
+-- Dividend Score (0-15): Is the dividend policy appropriate for this category?
+
+- STORY STATUS: The current fundamental narrative in plain English
+-- "Growth Accelerating", "Trough - Buy Zone", "Turnaround Succeeding", etc.
+
+- SIGNAL: The specific reason behind the current buy or sell signal
+
+- P&L: When in a trade, shows your unrealized gain/loss and warns Stalwart holders when approaching the rotate target
+
+- VALUATION: PEG ratio, PE ratio, and fair value comparison
+
+- EARNINGS: EPS, EPS growth rate, and revenue growth vs. category targets
+
+- BALANCE SHEET: Debt/equity ratio and net cash per share
+
+- MARGINS: Profit margin trend (expanding or contracting)
+
+- DIVIDENDS: Yield, payout ratio, and sustainability assessment
+
+- DAILY WISDOM: A rotating quote from Peter Lynch to keep you grounded
+
+
+RESEARCH & SOURCES
+
+This script was built using the following primary sources, all studied extensively:
+
+1. "One Up On Wall Street" by Peter Lynch with John Rothchild (1989)
+https://share.google/LbJsS8HjvxVJ2yiVP
+
+Lynch's first book laying out his complete investment philosophy - the 6 categories, PEG ratio, the "story" framework, and the idea that everyday investors have edges over professionals.
+
+2. "Beating the Street" by Peter Lynch with John Rothchild (1993)
+https://share.google/LbJsS8HjvxVJ2yiVP
+
+Lynch's second book where he walks through his actual portfolio decisions at Magellan, explains his mutual fund strategy, and shows step-by-step how he picks stocks. 328 pages of real-world application.
+
+3. "The Peter Lynch Playbook" compiled by Mayur Jain (@mjbaldbard)
+https://share.google/VKMCMsSrFzqEc671A
+
+A comprehensive set of notes summarizing both Lynch books plus interview snippets. Covers portfolio allocation percentages, category-specific checklists, the 2-minute drill for each stock type, risk/reward profiles, and sell criteria. This document was instrumental in translating Lynch's qualitative approach into quantifiable rules.
+
+4. Peter Lynch's "Stock Shop" Video Consultation (Fidelity Archives)
+https://youtu.be/cRMpgaBv-U4?si=PjFIiAtSfMZbLSej
+
+A full-length video presentation where Lynch personally explains his approach to categorizing stocks, building stories, understanding PE ratios, evaluating balance sheets, and managing risk. Key quotes transcribed and used to calibrate the scoring engine and story status logic.
+
+
+IMPORTANT NOTES
+
+- This is a STRATEGY script, not an indicator. It generates actual backtestable trades.
+- The script is purely fundamental. No technical analysis. Lynch didn't use charts to make decisions.
+- Auto mode requires stocks with TradingView financial data. For other instruments, use Manual mode.
+- The Lynch Score is a CONVICTION METER by default, not a trade gate. Enable Score Gate in settings if you want it to filter trades.
+- All portrait coloring is non-repainting. Colors only update on confirmed (closed) bars.
+- Start with Bar Replay. That's where the magic happens. Watch the story unfold bar by bar, just like Lynch did at his desk at Fidelity every morning.
+
+
+"The key organ is the stomach, not the brain." - Peter Lynch
+
+Feb 16
+Release Notes
+Portrait Upgrade
+
+I have made the tributary picture of Lynch a higher resolution , multi colored non Text Image to help with visualization of the script.
+
+Note
+
+For current bar replay capability , Lynch does not change color to strategy P&L / Stop Loss activations anymore. Instead, I have made the photo description bar underneath the reactive display.

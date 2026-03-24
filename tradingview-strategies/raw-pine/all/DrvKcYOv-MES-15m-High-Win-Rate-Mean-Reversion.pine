@@ -1,0 +1,255 @@
+//@version=6
+strategy("MES 15m High Win Rate Mean Reversion",
+     overlay=true,
+     pyramiding=0,
+     default_qty_type=strategy.fixed,
+     default_qty_value=6)
+
+// === SETTINGS ===
+stopPoints   = 5.0
+targetPoints = 6.0
+
+dailyMaxLoss   = 450.0
+dailyMaxProfit = 700.0
+maxTradesPerDay = 2
+
+sessionInput = input.session("0945-1400", "NY Session")
+
+// === SESSION FILTER ===
+inSession = not na(time(timeframe.period, sessionInput))
+
+// === DAILY RESET ===
+var float dayStartEquity = na
+var int tradeCount = 0
+var bool longTaken = false
+var bool shortTaken = false
+
+newDay = dayofmonth != dayofmonth[1]
+
+if newDay
+    dayStartEquity := strategy.equity
+    tradeCount := 0
+    longTaken := false
+    shortTaken := false
+
+dailyPnL = strategy.equity - dayStartEquity
+
+tradingAllowed =
+     dailyPnL > -dailyMaxLoss and
+     dailyPnL < dailyMaxProfit and
+     tradeCount < maxTradesPerDay
+
+// === VOLATILITY COMPRESSION FILTER ===
+atr = ta.atr(14)
+atrCompression = atr < ta.sma(atr, 30)
+
+// === VWAP + BOLLINGER EXTREMES ===
+vwapValue = ta.vwap(close)
+basis = ta.sma(close, 20)
+dev = ta.stdev(close, 20)
+upperBand = basis + 2 * dev
+lowerBand = basis - 2 * dev
+
+longCondition =
+     close < lowerBand and
+     close < vwapValue and
+     atrCompression and
+     not longTaken
+
+shortCondition =
+     close > upperBand and
+     close > vwapValue and
+     atrCompression and
+     not shortTaken
+
+// === ENTRY ===
+if (longCondition and inSession and tradingAllowed)
+    strategy.entry("Long", strategy.long)
+    tradeCount += 1
+    longTaken := true
+
+if (shortCondition and inSession and tradingAllowed)
+    strategy.entry("Short", strategy.short)
+    tradeCount += 1
+    shortTaken := true
+
+// === EXIT ===
+if (strategy.position_size > 0)
+    strategy.exit("Long Exit", from_entry="Long",
+         stop=strategy.position_avg_price - stopPoints,
+         limit=strategy.position_avg_price + targetPoints)
+
+if (strategy.position_size < 0)
+    strategy.exit("Short Exit", from_entry="Short",
+         stop=strategy.position_avg_price + stopPoints,
+         limit=strategy.position_avg_price - targetPoints)
+
+View in Pine Editor・85 lines
+Use on chart
+2
+1
+745
+Core Idea
+
+It assumes:
+
+Most 15-minute moves in normal conditions revert back toward fair value.
+
+Fair value = VWAP + 20-period mean
+
+It is not a trend strategy.
+It bets against short-term overextension.
+
+Market Environment It Wants
+
+This system performs best when:
+
+Market is rotational
+
+Volatility is moderate
+
+No major macro catalyst
+
+Institutions are rebalancing inventory
+
+It avoids:
+
+Strong breakout days
+
+Expansion after news
+
+Persistent trend sessions
+
+Step-By-Step Logic
+1️⃣ Volatility Compression Filter
+
+It checks:
+
+ATR (14)
+
+Compared to its 30-bar average
+
+If ATR is too high → no trade.
+
+This attempts to skip news days and expansion regimes.
+
+2️⃣ Extreme Detection
+
+On the 15-minute chart:
+
+It calculates:
+
+20-period mean
+
+2 standard deviation Bollinger Bands
+
+VWAP
+
+A trade triggers only when:
+
+For Long:
+
+Price touches lower 2σ band
+
+Price is below VWAP
+
+For Short:
+
+Price touches upper 2σ band
+
+Price is above VWAP
+
+This defines “statistical stretch.”
+
+3️⃣ Position Structure
+
+6 MES contracts
+
+5 point stop (~$150 risk)
+
+6–6.5 point target (~$180–$195 reward)
+
+Max 2 trades per day
+
+One trade per direction
+
+Why It Has Higher Win Rate
+
+Because:
+
+It trades exhaustion, not continuation.
+
+It enters after price is statistically stretched.
+
+Target is smaller than stop multiple systems.
+
+It avoids high volatility regimes.
+
+Mean reversion strategies win often because markets rotate more than they trend.
+
+What It Is Not
+
+It is not:
+
+A breakout system
+
+A momentum system
+
+A trend following model
+
+A high daily payout generator
+
+It is a:
+
+Low-frequency, moderate-edge, capital-preservation framework.
+
+Risk Characteristics
+
+From your backtest:
+
+Win rate ≈ 60%
+
+Profit factor ≈ 1.7
+
+Max drawdown ≈ $435
+
+Low trade count
+
+That is healthy.
+
+But understand:
+
+When trend days hit, it will lose.
+If volatility regime changes structurally, edge degrades.
+
+Strengths
+
+Smooth equity curve
+
+Compatible with prop trailing drawdown
+
+Emotionally manageable
+
+Predictable trade frequency
+
+Weaknesses
+
+Underperforms in trending months
+
+Can have clusters of 3–4 losses
+
+Needs volatility filter to stay safe
+
+Won’t consistently produce $350 every day
+
+Psychological Fit
+
+This system fits traders who:
+
+Prefer frequent small wins
+
+Can accept occasional flat weeks
+
+Care more about survival than speed
+
+Avoid revenge trading

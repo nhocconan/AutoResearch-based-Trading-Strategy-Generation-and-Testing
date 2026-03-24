@@ -1,0 +1,327 @@
+//@version=6
+strategy("Mirror Blocks: Strategy",
+     overlay = true,
+     initial_capital = 1000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1,
+     calc_on_every_tick = true,
+     pyramiding = 0)
+
+// === Inputs ===
+len  = input.int(3,  "Smoothing Length")
+amp  = input.float(1.0, "Mirror Distance")
+
+fastLen  = input.int(8,  "Fast EMA Length")
+slowLen  = input.int(21, "Slow MA Length")
+slowType = input.string("EMA", "Slow MA Type", options = ["EMA", "SMA", "WMA", "RMA"])
+
+useTrendGate   = input.bool(false, "Use Trend Filter (Gate)")
+showTrendLines = input.bool(false, "Show Trend Lines")
+
+// Trade direction mode
+tradeMode = input.string("Long Only", "Trade Mode", options = ["Long Only", "Long & Short", "Short Only"])
+
+// Fixed stops (percent from entry)
+longSLPct  = input.float(13.0, "Long Fixed Stop (%)",  step = 0.1)
+shortSLPct = input.float(13.0, "Short Fixed Stop (%)", step = 0.1)
+
+// === Price Source (No Heiken Ashi) ===
+src = (high + low) / 2.0
+
+// === DNA Mirror Lines ===
+base = ta.wma(ta.wma(src, len), len)
+top  = base + (base - ta.wma(base, len)) * amp  // Red
+bot  = base - (base - ta.wma(base, len)) * amp  // Yellow
+
+// === Stack Logic ===
+isBuy  = top > base and base > bot  // Bullish DNA stack
+isSell = bot > base and base > top  // Bearish DNA stack
+
+// === Trend Lines (Fast EMA + Slow MA Type) ===
+emaFast = ta.ema(close, fastLen)
+slowMA  = slowType == "EMA" ? ta.ema(close, slowLen) :
+          slowType == "SMA" ? ta.sma(close, slowLen) :
+          slowType == "WMA" ? ta.wma(close, slowLen) :
+          ta.rma(close, slowLen)
+
+trendUp = emaFast > slowMA
+
+// === Position State ===
+posSize = strategy.position_size
+inLong  = posSize > 0
+inShort = posSize < 0
+flat    = posSize == 0
+
+// Previous-bar state (for exit label detection)
+inLongPrev  = bar_index > 0 ? inLong[1]  : false
+inShortPrev = bar_index > 0 ? inShort[1] : false
+
+exitLongBar  = inLongPrev  and not inLong
+exitShortBar = inShortPrev and not inShort
+
+// === Base DNA signal logic (before mode) ===
+longCondBase  = isBuy  and (not useTrendGate or trendUp)
+shortCondBase = isSell
+
+// === Trade Mode Helpers ===
+isLongOnly   = tradeMode == "Long Only"
+isShortOnly  = tradeMode == "Short Only"
+isLongShort  = tradeMode == "Long & Short"
+
+useLongs  = isLongOnly or isLongShort
+useShorts = isShortOnly or isLongShort
+
+// === Entry conditions per mode ===
+//
+// Long entries allowed when:
+// - Long trading enabled
+// - DNA long condition is true
+// - Either flat, or (in L&S mode) we may flip from short
+longEntryCond  = useLongs  and longCondBase  and (flat or inShort)
+
+// Short entries allowed when:
+// - Short trading enabled
+// - DNA short condition is true
+// - Either flat, or (in L&S mode) we may flip from long
+shortEntryCond = useShorts and shortCondBase and (flat or inLong)
+
+// === Fixed Stop Levels (from average entry price) ===
+avgPrice = strategy.position_avg_price
+
+// Long stop (13% default below entry)
+longStopPrice  = inLong  and longSLPct  > 0 ? avgPrice * (1.0 - longSLPct  / 100.0) : na
+// Short stop (13% default above entry)
+shortStopPrice = inShort and shortSLPct > 0 ? avgPrice * (1.0 + shortSLPct / 100.0) : na
+
+// Attach exits to positions (fixed stops)
+strategy.exit("Long Stop",  from_entry = "Long",  stop = longStopPrice)
+strategy.exit("Short Stop", from_entry = "Short", stop = shortStopPrice)
+
+// === Order Logic ===
+if longEntryCond
+    // If currently short and in Long & Short mode, flip: close short then go long
+    if inShort
+        strategy.close("Short")
+    if flat or inShort
+        strategy.entry("Long", strategy.long)
+
+if shortEntryCond
+    // If currently long and in Long & Short mode, flip: close long then go short
+    if inLong
+        strategy.close("Long")
+    if flat or inLong
+        strategy.entry("Short", strategy.short)
+
+// === DNA-based exits (never gated by trend) ===
+// Long side: exit long on DNA short flip (in modes that use longs)
+if useLongs and inLong and shortCondBase
+    strategy.close("Long")
+
+// Short side: exit short on DNA long flip (in modes that use shorts)
+if useShorts and inShort and longCondBase
+    strategy.close("Short")
+
+// === Plots ===
+plot(top,  "Top (Red)",        color = color.red,   style = plot.style_stepline)
+plot(base, "Base (Green)",     color = color.green, style = plot.style_stepline)
+plot(bot,  "Bottom (Yellow)",  color = color.yellow, style = plot.style_stepline)
+
+// Trend lines (optional visual)
+plot(showTrendLines ? emaFast : na, "Fast EMA", color = color.new(color.blue,  0))
+plot(showTrendLines ? slowMA  : na, "Slow MA",  color = color.new(color.purple, 0))
+
+// === Labels (mode-dependent text) ===
+//
+// Long & Short mode:
+//  - LONG label on long entries
+//  - SHORT label on short entries
+//
+// Long Only mode:
+//  - ENTER label on long entries
+//  - EXIT  label when long closes
+//
+// Short Only mode:
+//  - SHORT label on short entries
+//  - EXIT  label when short closes
+
+// Entry labels
+longShort_LongLabel  = isLongShort and longEntryCond
+longShort_ShortLabel = isLongShort and shortEntryCond
+
+longOnly_EnterLabel  = isLongOnly  and longEntryCond
+shortOnly_ShortLabel = isShortOnly and shortEntryCond
+
+// Exit labels
+longOnly_ExitLabel   = isLongOnly  and exitLongBar
+shortOnly_ExitLabel  = isShortOnly and exitShortBar
+
+// Plot labels
+// Long & Short mode entries
+plotshape(longShort_LongLabel,
+          title = "Long Entry (L&S)",
+          location = location.belowbar,
+          color = color.green,
+          style = shape.labelup,
+          text = "LONG")
+
+plotshape(longShort_ShortLabel,
+          title = "Short Entry (L&S)",
+          location = location.abovebar,
+          color = color.red,
+          style = shape.labeldown,
+          text = "SHORT")
+
+// Long Only mode: ENTER / EXIT
+plotshape(longOnly_EnterLabel,
+          title = "Enter (Long Only)",
+          location = location.belowbar,
+          color = color.green,
+          style = shape.labelup,
+          text = "ENTER")
+
+plotshape(longOnly_ExitLabel,
+          title = "Exit (Long Only)",
+          location = location.abovebar,
+          color = color.orange,
+          style = shape.labeldown,
+          text = "EXIT")
+
+// Short Only mode: SHORT / EXIT
+plotshape(shortOnly_ShortLabel,
+          title = "Short Entry (Short Only)",
+          location = location.abovebar,
+          color = color.red,
+          style = shape.labeldown,
+          text = "SHORT")
+
+plotshape(shortOnly_ExitLabel,
+          title = "Exit (Short Only)",
+          location = location.belowbar,
+          color = color.orange,
+          style = shape.labelup,
+          text = "EXIT")
+
+View in Pine Editor・202 lines
+Use on chart
+9
+0
+1 788
+Mirror Blocks is an educational structural-wave model built around a unique concept:
+the interaction of mirrored weighted moving averages (“blocks”) that reflect shifts in market structure as price transitions between layered symmetry zones.
+
+Rather than attempting to “predict” markets, the Mirror Blocks framework visualizes how price behaves when it expands away from, contracts toward, or flips across stacked WMA structures. These mirrored layers form a wave-like block system that highlights transitional zones in a clean, mechanical way.
+
+This strategy version allows you to study how these structural transitions behave in different environments and on different timeframes.
+The goal is understanding wave structure, not generating signals.
+
+How It Works
+
+Mirror Blocks builds three mirrored layers:
+
+Top Block (Structural High Symmetry)
+
+Base Block (Neutral Wave)
+
+Bottom Block (Structural Low Symmetry)
+
+The relative position of these blocks — and how price interacts with them — helps visualize:
+
+Compression and expansion
+
+Reversal zones
+
+Wave stability
+
+Momentum transitions
+
+Structure flips
+
+A structure is considered bullish-stack aligned when:
+
+Top > Base > Bottom
+
+
+and bearish-stack aligned when:
+
+Bottom > Base > Top
+
+
+These formations create the core of the Mirror Blocks wave engine.
+
+What the Strategy Version Adds
+
+This version includes:
+
+Long Only, Short Only, or Long & Short modes
+
+Adjustable symmetry distance (Mirror Distance)
+
+Configurable WMA smoothing length
+
+Optional trend filter using fast/slow MA comparison
+
+ENTER / EXIT / LONG / SHORT labels for structural transitions
+
+Fixed stop-loss controls for research
+
+A clean, transparent structure with no hidden components
+
+It is optimized for educational chart study, not automated signals.
+
+Intended Purpose
+
+Mirror Blocks is meant to help traders:
+
+Study structural transitions
+
+Understand symmetry-based wave models
+
+Explore how price interacts with mirrored layers
+
+Examine reversals and expansions from a mechanical perspective
+
+Conduct long and short backtesting for research
+
+Develop a deeper sense of market rhythm
+
+This is not a prediction model.
+It is a visual and structural framework for understanding movement.
+
+Backtesting Disclaimer
+
+Backtest results can vary depending on:
+
+Slippage settings
+
+Commission settings
+
+Timeframe
+
+Asset volatility
+
+Structural sensitivity parameters
+
+Past performance does not guarantee future results.
+Use this as a research tool only.
+
+Warnings & Compliance
+
+This script is educational.
+
+It is not financial advice.
+
+It does not provide signals.
+
+It does not promise profitability.
+
+The purpose is to help visualize structure, not predict price.
+
+The strategy features are simply here to help users study how structural transitions behave under various conditions.
+
+License
+
+Released under the Michael Culpepper Gratitude License (2025).
+Use and modify freely for education and research with attribution.
+No resale.
+No promises of profitability.
+Purpose is understanding, not signals.

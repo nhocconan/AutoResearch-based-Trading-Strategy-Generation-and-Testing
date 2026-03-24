@@ -1,0 +1,6 @@
+//@version=4
+CumulationLength=##input(defval=2,type='INPUT_INTEGER',##id='in_2')
+##var_0=##input(defval=80,type='INPUT_INTEGER',##id='in_3')
+##root(root_metainfo,rm_0,(((100*CumulationLength)*##var_0)*0.01),input__float)
+##var_1=##input(defval=20,type='INPUT_INTEGER',##id='in_4')
+##root(root_metainfo,rm_1,(((100*CumulationLength)*##var_1)*0.01),input__float)

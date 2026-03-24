@@ -1,0 +1,168 @@
+//@version=5
+strategy("NQ Scalping ORB + VWAP Bias (ATR Brackets)",
+     overlay=true,
+     initial_capital=10000,
+     pyramiding=0,
+     calc_on_every_tick=true,
+     process_orders_on_close=true)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inputs
+// ─────────────────────────────────────────────────────────────────────────────
+tz              = "America/New_York"
+tradeSession    = input.session("0930-1500", "Trade Session (NY)")
+useSession      = input.bool(true, "Use Session Filter")
+
+orbMinutes      = input.int(15, "Opening Range Minutes", minval=1, maxval=120)
+maxTradesPerDay = input.int(4, "Max Trades Per Day", minval=1)
+
+useVWAPBias     = input.bool(true, "Require VWAP Bias")
+useVolFilter    = input.bool(true, "Volume Filter (Vol > SMA)")
+volSmaLen       = input.int(20, "Volume SMA Length", minval=1)
+
+atrLen          = input.int(14, "ATR Length", minval=1)
+stopATR         = input.float(1.0, "Stop Loss (ATR)", step=0.1)
+targetATR       = input.float(1.4, "Take Profit (ATR)", step=0.1)
+useTrail        = input.bool(false, "Use Trailing Stop")
+trailATR        = input.float(0.8, "Trailing (ATR)", step=0.1)
+
+useTimeExit     = input.bool(true, "Time Exit")
+maxBarsInTrade  = input.int(30, "Max Bars in Trade", minval=1)
+
+flattenAtEnd    = input.bool(true, "Flatten at Session End")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session + Daily trade count
+// ─────────────────────────────────────────────────────────────────────────────
+inSession = not na(time(timeframe.period, tradeSession, tz))
+canTrade  = useSession ? inSession : true
+
+var int tradesToday = 0
+newDay = ta.change(time("D"))
+if newDay
+    tradesToday := 0
+tradeLimitOK = tradesToday < maxTradesPerDay
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VWAP + Volume filters
+// ─────────────────────────────────────────────────────────────────────────────
+vwap = ta.vwap(hlc3)
+volOK = useVolFilter ? (volume > ta.sma(volume, volSmaLen)) : true
+
+vwapLongOK  = not useVWAPBias or close > vwap
+vwapShortOK = not useVWAPBias or close < vwap
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Opening Range (ORB) calculation
+// - We build the high/low for the first N minutes after 9:30
+// - Then trade breakouts of that range during the session
+// ─────────────────────────────────────────────────────────────────────────────
+is0930 = (hour(time, tz) == 9 and minute(time, tz) == 30)
+var float orbHigh = na
+var float orbLow  = na
+var bool  orbReady = false
+
+// Count minutes from 9:30 using 1-minute time stamps even on higher TFs.
+t1 = time("1", "0930-1600", tz)  // 1m anchor during regular session
+var int orbBars = 0
+newRTH = ta.change(time("D")) or is0930
+
+if newRTH
+    orbHigh := na
+    orbLow := na
+    orbReady := false
+    orbBars := 0
+
+// Build range only while in the first orbMinutes after 9:30
+// On non-1m charts, this is an approximation; works best on 1m/2m/3m.
+inORBWindow = (hour(time, tz) == 9 and minute(time, tz) >= 30) and (hour(time, tz) == 9 and minute(time, tz) < (30 + orbMinutes)) or
+              (orbMinutes > 30 and ((hour(time, tz) == 10 and minute(time, tz) < (orbMinutes - 30))))
+
+if inORBWindow
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow)  ? low  : math.min(orbLow, low)
+    orbBars += 1
+
+// Mark ORB ready after window has elapsed (and we have values)
+if not inORBWindow and not na(orbHigh) and not na(orbLow)
+    orbReady := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Breakout Signals
+// ─────────────────────────────────────────────────────────────────────────────
+atr = ta.atr(atrLen)
+
+// A “clean” breakout: close breaks beyond ORB boundary.
+// Optional: require a retest can be added, but keeping this scalpy & simple.
+longSignal  = canTrade and tradeLimitOK and volOK and orbReady and vwapLongOK  and close > orbHigh
+shortSignal = canTrade and tradeLimitOK and volOK and orbReady and vwapShortOK and close < orbLow
+
+// Avoid immediate re-entries if already in same direction
+if longSignal and strategy.position_size <= 0
+    strategy.entry("L", strategy.long)
+    tradesToday += 1
+
+if shortSignal and strategy.position_size >= 0
+    strategy.entry("S", strategy.short)
+    tradesToday += 1
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exits (for trading report)
+// ─────────────────────────────────────────────────────────────────────────────
+longStop   = strategy.position_avg_price - stopATR * atr
+longTarget = strategy.position_avg_price + targetATR * atr
+
+shortStop   = strategy.position_avg_price + stopATR * atr
+shortTarget = strategy.position_avg_price - targetATR * atr
+
+trailPts = trailATR * atr
+
+strategy.exit("L-Exit", from_entry="L",
+     stop=longStop,
+     limit=longTarget,
+     trail_points=useTrail ? trailPts : na)
+
+strategy.exit("S-Exit", from_entry="S",
+     stop=shortStop,
+     limit=shortTarget,
+     trail_points=useTrail ? trailPts : na)
+
+// Time-based exit
+var int entryBar = na
+if strategy.position_size != 0 and na(entryBar)
+    entryBar := bar_index
+if strategy.position_size == 0
+    entryBar := na
+
+barsInTrade = strategy.position_size != 0 ? (bar_index - entryBar) : 0
+if useTimeExit and strategy.position_size > 0 and barsInTrade >= maxBarsInTrade
+    strategy.close("L", comment="Time Exit")
+if useTimeExit and strategy.position_size < 0 and barsInTrade >= maxBarsInTrade
+    strategy.close("S", comment="Time Exit")
+
+// Flatten at session end
+if flattenAtEnd and useSession and not inSession and strategy.position_size != 0
+    strategy.close_all(comment="Session End")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plots
+// ─────────────────────────────────────────────────────────────────────────────
+plot(vwap, "VWAP", linewidth=2)
+plot(orbHigh, "ORB High", linewidth=2, style=plot.style_linebr)
+plot(orbLow,  "ORB Low",  linewidth=2, style=plot.style_linebr)
+
+plotshape(longSignal,  title="Long",  style=shape.triangleup,   location=location.belowbar, size=size.tiny, text="L")
+plotshape(shortSignal, title="Short", style=shape.triangledown, location=location.abovebar, size=size.tiny, text="S")
+
+View in Pine Editor・155 lines
+Use on chart
+1
+7
+578
+This strategy trades Nasdaq (NQ) using an Opening Range Breakout (ORB) framework combined with VWAP directional bias and optional volume confirmation. The opening range is defined by the first X minutes after the 9:30 AM New York session open. Trades are triggered when price breaks above or below the established range.
+
+To improve trade quality, long positions require price to be above VWAP (and below VWAP for shorts), aligning entries with intraday directional flow. An optional volume filter ensures breakouts occur during higher participation.
+
+Risk management uses ATR-based dynamic stop loss and take profit levels, with optional trailing stops and time-based exits to keep trades short-term and scalping-focused. The strategy also includes session controls, daily trade limits, and automatic end-of-session flattening for clean backtest reporting.
+
+Designed for lower timeframes (1–3 minute charts), this system aims to capture early-session momentum while maintaining structured risk management.

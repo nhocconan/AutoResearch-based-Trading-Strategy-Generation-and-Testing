@@ -1,0 +1,284 @@
+//@version=6
+strategy("Trend Entry_0 [TS_Indie]" , overlay=true, max_labels_count=500 , max_lines_count = 500 ,max_boxes_count = 500, max_bars_back = 5000 , margin_long=0, margin_short=0 , initial_capital = 100000 )
+
+Time_Filter = "Time Filter"
+s_date = input.time(timestamp("01 Jan 1970"),"Start" , group = Time_Filter )
+en_date = input.time(timestamp("01 Jan 2500"), "End ", group = Time_Filter )
+
+show_line = input.bool(true,'Line', inline="1" , group = Time_Filter)
+sw_line_style = input.string('⎯⎯⎯', '' , options = ['⎯⎯⎯', '----', '····'] , inline = '1' , group = Time_Filter)
+Color_sw = input(title = " " , defval = #f700ff  , inline = "1" , group = Time_Filter)
+
+Entry_Position = "Entry Condition"
+B_long = input.bool( true ,"Long   |" , inline="2", group = Entry_Position)
+S_short = input.bool( false ," Short" , inline="2", group = Entry_Position)
+
+//======== Table ======== 
+position(select) =>
+    switch select
+        "bottom_right"  => position.bottom_right
+        "bottom_center" => position.bottom_center
+        "bottom_left"   => position.bottom_left
+        "top_center"    => position.top_center
+        "top_left"      => position.top_left
+        "top_right"     => position.top_right
+        "mid_center"    => position.middle_center
+        "mid_left"      => position.middle_left
+        "mid_right"     => position.middle_right
+
+result_group = "====== Trading Result Table ======"
+Show_result = input.bool( true ,"Show Result" , inline = "1" , group = result_group ,tooltip = "The Profit Factor here is calculated using the formula:\n\(Number of Wins x Risk-Reward Ratio) / Number of Losses\n\This formula is based on the assumption that the risk per losing trade is fixed — for example, every losing trade costs exactly 1% of the account.\n\Because of this assumption, the calculated Profit Factor will not match TradingView’s result, since TradingView uses:\n\Gross Profit / Gross Loss\n\And in actual TradingView trades, the loss amount of each trade is not always equal, because the system doesn’t enforce a fixed-risk rule for every losing trade. " )
+select_position = input.string("bottom_right", "", options = ["bottom_right", "bottom_center", "bottom_left", "top_center", "top_left" , "top_right" , "mid_center" , "mid_left" , "mid_right" ], group = result_group  , inline="1" , display = display.data_window)
+Factor_up = input.float( 1.3 ,"Profit Factor > " , step=0.1 , inline = "2" , group = result_group )
+Factor_up_color = input(title = "   " , defval = #a5d6a7  , inline = "2" , group = result_group)
+Factor_donw = input.float( 1 ,"Profit Factor < " , step=0.1 , inline = "3" , group = result_group )
+Factor_donw_color = input(title = "   " , defval = #faa1a4  , inline = "3" , group = result_group)
+
+
+get_line_style(style) =>
+    out = switch style
+        '⎯⎯⎯'  => line.style_solid
+        '----' => line.style_dashed
+        '····' => line.style_dotted
+
+var float big_high = na , var float big_low = na , var int Bar_big_high = 0 , var int Bar_big_low = 0
+var float s_high = na , var float s_low = na , var int Bar_s_high = 0 , var int Bar_s_low = 0
+
+var bool Structure_Trend = false
+bool Change_up = false , bool Change_down = false
+
+In_up_color = color.teal
+In_down_color = #f23645
+
+var H_bar_ary = array.new_int(0,na)  , var L_bar_ary = array.new_int(0,na)
+var High_ary = array.new_float(0,na)  , var Low_ary = array.new_float(0,na) 
+
+//first trend
+if na(s_high) and barstate.isconfirmed
+    if close > open
+        Structure_Trend := true
+    s_high := high
+    s_low := low
+
+// Direction dwon
+if not Structure_Trend and not na(s_high) and barstate.isconfirmed
+    //trend change up
+    if close > s_high
+        if low <= s_low 
+            big_low := low , Bar_big_low := bar_index 
+        if low > s_low 
+            big_low := s_low , Bar_big_low := Bar_s_low
+
+        array.unshift(Low_ary , big_low) , array.unshift(L_bar_ary , Bar_big_low)
+
+        Structure_Trend := true , Change_up := true
+        s_high := high , s_low := low , Bar_s_high := bar_index , Bar_s_low := bar_index 
+
+    if not Change_up and low <= s_low 
+        s_high := high , s_low := low , Bar_s_high := bar_index , Bar_s_low := bar_index 
+
+// Direction up
+if Structure_Trend and not na(s_high) and barstate.isconfirmed
+    //trend change down
+    if close < s_low
+        if high >= s_high
+            big_high := high , Bar_big_high := bar_index
+        if high < s_high
+            big_high := s_high , Bar_big_high := Bar_s_high
+
+        array.unshift(High_ary , big_high) , array.unshift(H_bar_ary , Bar_big_high)
+
+        Structure_Trend := false , Change_down := true
+        s_high := high , s_low := low , Bar_s_high := bar_index , Bar_s_low := bar_index 
+
+    if not Change_down and high >= s_high 
+        s_high := high , s_low := low , Bar_s_high := bar_index , Bar_s_low := bar_index 
+
+var line sm_line = na , var line sm_line2 = na
+
+if show_line
+    if Change_up
+        big_line = line.new( Bar_big_high[1] , big_high[1] , Bar_big_low , big_low  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+    if Change_down
+        big_line = line.new( Bar_big_high , big_high , Bar_big_low[1] , big_low[1]  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+
+    line.delete(sm_line[1]) ,  line.delete(sm_line2[1])
+    bb_bar = Structure_Trend ? Bar_big_low : Bar_big_high  ,    bb_price = Structure_Trend ? big_low : big_high
+    cc_bar = Structure_Trend ? Bar_s_high : Bar_s_low      ,    cc_price = Structure_Trend ? s_high : s_low
+    sm_line := line.new(  bb_bar  , bb_price , cc_bar , cc_price  ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+
+    sm_line2 := line.new( cc_bar , cc_price , bar_index , close ,xloc = xloc.bar_index , color = Color_sw , style = get_line_style(sw_line_style))
+
+con_time = time >= s_date and time <= en_date
+
+Label_Long = false , Label_Short = false
+Label_Close_Long = false , Label_Close_Short = false
+//Buy condition
+if Change_up and con_time and B_long and not S_short
+    strategy.entry("Long", strategy.long , comment = "Long" )
+    Label_Long := true
+
+if Change_down and B_long and not S_short and strategy.position_size != 0
+    strategy.close_all("Close")
+    Label_Close_Long := true
+
+//Sell condition
+if Change_down and con_time and S_short and not B_long
+    strategy.entry("Short" , strategy.short , comment = "Short" )
+    Label_Short := true
+
+if Change_up and S_short and not B_long and strategy.position_size != 0
+    strategy.close_all("Close")
+    Label_Close_Short := true
+
+//All condition
+if Change_up and con_time and B_long and S_short
+    strategy.entry("Long" , strategy.long , comment = "Long" )
+    Label_Long := true
+
+if Change_down and con_time and S_short and B_long
+    strategy.entry("Short", strategy.short , comment = "Short" )
+    Label_Short := true
+    
+if Label_Long
+    Con_Long = label.new( bar_index+1 , low , "Long" ,xloc = xloc.bar_index, color = color.blue , textcolor = color.white , style = label.style_label_up , size = size.small )
+    alert("Long", alert.freq_all)
+if Label_Close_Long 
+    Con_Long = label.new( bar_index+1 , high , "Close" ,xloc = xloc.bar_index, color = color.navy , textcolor = color.white , style = label.style_label_down , size = size.small )
+    alert("Close Long", alert.freq_all)
+
+if Label_Short
+    Con_Short = label.new( bar_index+1 , high , "Short" ,xloc = xloc.bar_index, color = color.fuchsia , textcolor = color.white , style = label.style_label_down , size = size.small )
+    alert("Short", alert.freq_all)
+if Label_Close_Short
+    Con_Short = label.new( bar_index+1 , low , "Close" ,xloc = xloc.bar_index, color = color.purple , textcolor = color.white , style = label.style_label_up , size = size.small )
+    alert("Close Short", alert.freq_all)
+
+var int Loss_Buy = 0 , var int Win_Buy = 0  , var float grossprofit_buy = 0 , var float grossloss_buy = 0
+var int Loss_Sell = 0 , var int Win_Sell = 0 , var float grossprofit_sell = 0 , var float grossloss_sell = 0
+if Show_result
+    cf_win  = strategy.grossprofit > strategy.grossprofit[1]
+    cf_loss = strategy.grossloss > strategy.grossloss[1]
+    cal_profit = strategy.grossprofit - strategy.grossprofit[1]
+    cal_loss = strategy.grossloss - strategy.grossloss[1]
+    //Check SL buy
+    if strategy.position_size[1] > 0 and cf_loss and barstate.isconfirmed
+        Loss_Buy += 1
+        grossloss_buy += cal_loss
+    //check TP buy
+    if strategy.position_size[1] > 0 and cf_win and barstate.isconfirmed
+        Win_Buy += 1
+        grossprofit_buy += cal_profit
+
+    //Check SL Sell
+    if strategy.position_size[1] < 0 and cf_loss and barstate.isconfirmed
+        Loss_Sell += 1
+        grossloss_sell += cal_loss
+    //check TP Sell
+    if strategy.position_size[1] < 0 and cf_win and barstate.isconfirmed
+        Win_Sell += 1
+        grossprofit_sell += cal_profit
+
+barcolor( Structure_Trend ? In_up_color : In_down_color )
+
+var table Balane_status = table.new( position(select_position) , 6 , 6 , border_width = 1)
+
+Total_all = Win_Buy + Loss_Buy + Win_Sell + Loss_Sell
+if Show_result and (Total_all > Total_all[1])
+    Long_all = Win_Buy + Loss_Buy , Short_all = Win_Sell + Loss_Sell
+    Total_win = Win_Buy + Win_Sell , Total_loss = Loss_Buy + Loss_Sell
+    Factor_all = strategy.grossprofit/strategy.grossloss
+    Factor_buy = grossprofit_buy/grossloss_buy
+    Factor_sell = grossprofit_sell/grossloss_sell
+    txt1_1 = str.tostring(Total_all,format.volume)
+    txt1_2 = str.tostring(Long_all,format.volume)
+    txt1_3 = str.tostring(Short_all,format.volume)
+    txt2_1 = str.tostring(Total_win,format.volume)
+    txt3_1 = str.tostring(Total_loss,format.volume)
+    txt4_1 = str.tostring((Total_win/Total_all)*100,format.percent)
+    txt5_1 = str.format("{0,number,#.##}", Factor_all )
+
+    txt2_2 = str.tostring(Win_Buy,format.volume)
+    txt3_2 = str.tostring(Loss_Buy,format.volume)
+    txt4_2 = str.tostring((Win_Buy/Long_all)*100,format.percent)
+    txt5_2 = str.format("{0,number,#.##}", Factor_buy )
+
+    txt2_3 = str.tostring(Win_Sell,format.volume)
+    txt3_3 = str.tostring(Loss_Sell,format.volume)
+    txt4_3 = str.tostring((Win_Sell/Short_all)*100,format.percent)
+    txt5_3 = str.format("{0,number,#.##}", Factor_sell)
+
+    Factor_all_color = Factor_all > Factor_up ? Factor_up_color : Factor_all < Factor_donw ? Factor_donw_color : color.white 
+    Factor_buy_color = Factor_buy > Factor_up ? Factor_up_color : Factor_buy < Factor_donw ? Factor_donw_color : color.white 
+    Factor_sell_color = Factor_sell > Factor_up ? Factor_up_color : Factor_sell < Factor_donw ? Factor_donw_color : color.white 
+
+    table.cell(Balane_status , 1 , 1 , txt1_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 2 , 1 , txt2_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 3 , 1 , txt3_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 4 , 1 , txt4_1 , bgcolor = color.black , text_color = Factor_all_color )
+    table.cell(Balane_status , 5 , 1 , txt5_1 , bgcolor = color.black , text_color = Factor_all_color )
+
+    table.cell(Balane_status , 1 , 2 , txt1_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 2 , 2 , txt2_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 3 , 2 , txt3_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 4 , 2 , txt4_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    table.cell(Balane_status , 5 , 2 , txt5_2 , bgcolor = color.black , text_color = Factor_buy_color )
+    
+    table.cell(Balane_status , 1 , 3 , txt1_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 2 , 3 , txt2_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 3 , 3 , txt3_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 4 , 3 , txt4_3 , bgcolor = color.black , text_color = Factor_sell_color )
+    table.cell(Balane_status , 5 , 3 , txt5_3 , bgcolor = color.black , text_color = Factor_sell_color )
+
+    table.cell(Balane_status , 0 , 1 , "Total" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 0 , 2 , "Long" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 0 , 3 , "Short" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 1 , 0 , "All" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 2 , 0 , "Win" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 3 , 0 , "Loss" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 4 , 0 , "Winrate" , bgcolor = color.black , text_color = color.white )
+    table.cell(Balane_status , 5 , 0 , "Profit\n\Factor" , bgcolor = color.black , text_color = color.white )
+
+View in Pine Editor・243 lines
+Use on chart
+4
+7
+9
+2
+8 003
+Nov 2, 2025
+Trend Entry_0 — Mechanism Overview
+
+The core structure of this strategy is based on a price action reversal pattern, as detailed below:
+
+In the case of a Bullish Trend Reversal:
+
+
+The price initially moves in a bearish direction. When candle A forms a low lower than the previous low, the high of candle A becomes a key reference point. If the next candle closes above the high of candle A, it confirms a Bullish Trend Reversal.
+* Upon a Bullish signal, a Long position is opened at the opening price of the next candle (candle B).
+* When a subsequent Bearish signal occurs, the Long position is closed at the opening price of the next candle (candle C).
+
+In the case of a Bearish Trend Reversal:
+
+
+The price initially moves in a bullish direction. When candle A forms a high higher than the previous high, the low of candle A becomes a key reference point. If the next candle closes below the low of candle A, it confirms a Bearish Trend Reversal.
+* Upon a Bearish signal, a Short position is opened at the opening price of the next candle (candle B).
+* When a subsequent Bullish signal occurs, the Short position is closed at the opening price of the next candle (candle C).
+
+Options
+* The start and end dates of the backtest can be customized.
+* The swing lines of the trend can be displayed as an optional visual aid.
+* The user can choose whether to open only Long or Short positions.
+
+Backtest Results and Observations
+Based on the backtesting results of this strategy across various assets and timeframes, it has been observed that this approach works best on trending assets such as Gold, BTC, and stocks. It also performs well on higher timeframes, starting from the Daily timeframe and above, especially when taking Long positions only. 
+However, when applied to currency pairs such as EUR/USD, the results tend to be less impressive.
+I encourage everyone to try backtesting and further developing this strategy — adding new conditions or filters may potentially lead to improved performance.
+
+Disclaimer
+This script is intended solely for backtesting purposes, based on a particular price action pattern. It does not constitute financial or investment advice. Backtest results do not guarantee future performance.
+
+Nov 22, 2025
+Release Notes
+Add a Trading Result Table so that everyone can see the results more easily.
+

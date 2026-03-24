@@ -1,0 +1,167 @@
+//@version=5
+strategy("Algomist: Adaptive Velocity Cross", shorttitle="Algomist: Adaptive Velocity Cross", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital = 100)
+
+// This script implements an adaptive moving average crossover (using Hull MA for speed) filtered with current and higher scale ATRs.
+// Script has built-in Algomist adaption - Modify parameters for your pair and strategy and set up full automation on @ algomist.app
+
+// --- Strategy Inputs ---
+fastLen = input.int(10, "Fast HMA Length", minval=1)
+slowLen = input.int(50, "Slow HMA Length", minval=1)
+ATRLength = input.int(14, title="ATR Length")
+ATRMinFilter = input.float(5.5, title="Min ATR Filter (avoid low vol)", step=0.01)
+higherATRTrendPeriod = input.string("60", "Higher ATR Trend Period")
+higherATRMinFilter = input.float(15.0, title="ATR Length")
+rsiLen = input.int(14, title="RSI Lenght")
+riskMultiplier   = input.float(2, title="Stop Loss (x ATR)")
+rewardMultiplier = input.float(6, title="Take Profit (x ATR)")
+
+// === Position Size Calculation ===
+// Only for TradingView backtesting - Won't be sent to Algomist
+initialCapital = 100
+leverage = 125
+qtyPercent = 0.05
+positionValue = initialCapital * leverage * qtyPercent
+qty = positionValue / close
+
+// --- Hull Moving Average (HMA) Calculation Function ---
+// HMA is used for its reduced lag
+hma(src, length) =>
+    wma1 = ta.wma(src, math.round(length / 2))
+    wma2 = ta.wma(src, length)
+    diff = 2 * wma1 - wma2
+    ta.wma(diff, math.round(math.sqrt(length)))
+
+fastHMA = hma(close, fastLen)
+slowHMA = hma(close, slowLen)
+atr = ta.atr(ATRLength)
+atr_higher = request.security(syminfo.tickerid, higherATRTrendPeriod, atr[0])
+
+// --- Trend Strenght Fitler ---
+// Assure that ATR filters are Management
+isVolatile = atr > ATRMinFilter
+isTrending = atr_higher > higherATRMinFilter
+isUp =  ta.crossover(fastHMA, slowHMA)
+isDown = ta.crossover(slowHMA, fastHMA)
+
+// --- Trading Logic ---
+// When and why to place entries
+longCondition = isUp and isVolatile and isTrending
+shortCondition = isDown and isVolatile and isTrending
+
+// === Risk Management ===
+// Calculating stop-loss and take-proft
+longSL = math.round(hl2 - atr * riskMultiplier, 1)
+longTP = math.round(hl2 + atr * rewardMultiplier, 1)
+shortSL = math.round(hl2 + atr * riskMultiplier, 1)
+shortTP = math.round(hl2 - atr * rewardMultiplier, 1)
+
+// === Trade Execution ===
+// Sending out JSON formatted trading signals to Algomist
+if (longCondition and strategy.position_size == 0)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP)
+    alert('{ "symbol": "ETHUSDC", "side": "LONG", "entry_price": ' + str.tostring(close, "#.0") + 
+          ', "stop_loss": ' + str.tostring(longSL, "#.0") + 
+          ', "take_profit": ' + str.tostring(longTP, "#.0") +
+          ', "timestamp": ' + str.tostring(timenow) + '}', alert.freq_once_per_bar_close)
+
+if (shortCondition and strategy.position_size == 0)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+    alert('{ "symbol": "ETHUSDC", "side": "SHORT", "entry_price": ' + str.tostring(close, "#.0") + 
+          ', "stop_loss": ' + str.tostring(shortSL, "#.0") + 
+          ', "take_profit": ' + str.tostring(shortTP, "#.0") +
+          ', "timestamp": ' + str.tostring(timenow) + '}', alert.freq_once_per_bar_close)
+    
+// --- Plotting and Visualization ---
+pFast = plot(fastHMA, title="Fast HMA", color=color.new(#00b9ff, 0), linewidth=2)
+pSlow = plot(slowHMA, title="Slow HMA", color=color.new(#ff14fb, 0), linewidth=2)
+plot(atr, title="ATR", color=color.gray, linewidth=1)
+plot(atr_higher, title="Higher ATR", color=color.gray, linewidth=1)
+hmaFillColor = fastHMA > slowHMA ? #00b9ff : #ff14fb
+hmaFillTransparency = 50 // Use a high transparency for chart clarity
+fill(pFast, pSlow, color=color.new(hmaFillColor, hmaFillTransparency))
+
+location = close * 1.01
+if bar_index % 5000 == 0
+    label.new(bar_index, location, "Automate your edge @ www.algomist.app", yloc = yloc.price, style = label.style_none, textcolor = color.gray, size = size.small)
+
+View in Pine Editor・87 lines
+Use on chart
+2
+9
+1 031
+🚀 Algomist: The Adaptive Velocity Cross (AVC)
+
+Automate Your Edge
+
+This strategy transcends the limitations of classic Moving Average (MA) crossovers. The Adaptive Velocity Cross (AVC) is a state-of-the-art trend-following system designed for automated execution, filtering out low-probability whipsaws and prioritizing high-momentum breakouts in volatile markets.
+
+It's not just a signal generator; it's a fully automated, risk-managed trading plan that delivers structured trade signals directly to your Algomist account.
+
+🔥 Key Features & Technology
+
+
+Adaptive Hull Moving Averages (HMA): Utilizes the Hull MA to significantly reduce lag compared to standard EMAs and SMAs. The faster and slower HMAs provide a highly responsive gauge of short-term and medium-term trend direction.
+
+Multi-Layer Volatility Filtering: Trades are strictly prohibited during flat, low-volatility market conditions.
+
+Current Timeframe Filter (ATRMinFilter): Ensures trades only fire when current market momentum is strong enough to carry the trend.
+
+Higher Timeframe Filter: Checks the ATR on a higher timeframe (e.g., 1H) to confirm the structural trend strength, preventing entries during tight squeezes.
+
+Visual Trend Velocity: The space between the Fast (Blue) and Slow (Pink) HMAs is colored and filled, providing an immediate visual cue for trend direction and strength (width of the band).
+
+Asymmetric Risk Management: Uses the dynamic Average True Range (ATR) to calculate Stop Loss and Take Profit levels, ensuring risk and reward are proportional to current market volatility.
+
+
+
+
+⚙️ How It Works (The Logic)
+
+The AVC only executes a trade when all three high-conviction criteria are met:
+
+
+Trend Signal: The Fast $\text{HMA}$ crosses the Slow $\text{HMA}$ (Crossover).
+
+Volatile Market Confirmation: The market must be sufficiently volatile on both the current timeframe and the higher structural timeframe ($\text{ATR}$ filters passed).
+
+Risk Management: A defined $\text{SL}$ (Stop Loss) and $\text{TP}$ (Take Profit) are calculated based on the current market $\text{ATR}$ to manage the position before entry.
+
+
+
+🤖 Automation Ready
+
+The strategy is built with automation as the priority. Upon a confirmed entry, the script sends a cleanly formatted JSON string via a TradingView Webhook alert to Algomist. Create your account and get your own web hook @ algomist.app
+
+
+Example Alert Output:
+
+
+Pine Script®
+{
+  "symbol": "ETHUSDC", 
+  "side": "LONG", 
+  "entry_price": 67500.0, 
+  "stop_loss": 66000.0, 
+  "take_profit": 70000.0,
+  "timestamp": 1766715660462
+}
+
+Expand 3 lines
+
+
+This signal is ready for immediate consumption by your Algomist execution engine, ensuring lightning-fast and error-free order placement.
+
+📊 Recommended Use
+
+
+Asset Class: Highly effective on high-liquidity, high-volatility assets (e.g., Crypto Majors, Forex Pairs, Indices).
+
+Timeframes: Works best on 1m to 15 min charts.
+
+Risk Profile: Medium-to-High frequency trend-following system.
+
+
+
+Disclaimer: The strategy code provided is for informational and educational purposes. Past performance is not indicative of future results. Always backtest and forward-test any automated strategy extensively before using real capital.

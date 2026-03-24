@@ -1,0 +1,58 @@
+//@version=5
+strategy("High Probability Trend Continuation (1:5 RR)", 
+     overlay=true, 
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=1)
+
+// === INPUTS ===
+fastEMA = input.int(50, "Fast EMA")
+slowEMA = input.int(200, "Slow EMA")
+atrLen  = input.int(14, "ATR Length")
+riskATR = input.float(1.0, "Stop Loss (ATR Multiplier)")
+rr      = input.float(5.0, "Risk Reward Ratio (Fixed 1:5)")
+
+// === INDICATORS ===
+emaFast = ta.ema(close, fastEMA)
+emaSlow = ta.ema(close, slowEMA)
+atr     = ta.atr(atrLen)
+
+// === TREND CONDITIONS ===
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
+
+// === PULLBACK CONDITIONS ===
+bullPullback = bullTrend and close > emaSlow and low <= emaFast
+bearPullback = bearTrend and close < emaSlow and high >= emaFast
+
+// === ENTRY CONDITIONS ===
+longEntry  = bullPullback and ta.crossover(close, emaFast)
+shortEntry = bearPullback and ta.crossunder(close, emaFast)
+
+// === RISK MANAGEMENT ===
+longSL  = close - atr * riskATR
+shortSL = close + atr * riskATR
+
+longTP  = close + (close - longSL) * rr
+shortTP = close - (shortSL - close) * rr
+
+// === EXECUTION ===
+if longEntry
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// === PLOTS ===
+plot(emaFast, color=color.orange, linewidth=2)
+plot(emaSlow, color=color.blue, linewidth=2)
+
+View in Pine Editor・50 lines
+Use on chart
+7
+804
+this strategy is based on a high-probability trend continuation pattern, one of the most frequently occurring setups in financial markets. It uses EMA trend alignment to identify strong bullish or bearish conditions and waits for a controlled pullback before entering a trade in the direction of the trend.
+Risk management is fully automated using ATR-based stop losses, ensuring the strategy adapts to market volatility. Each trade is executed with a fixed 1:5 risk-to-reward ratio, allowing profitability even with a modest win rate.
+The strategy is designed to work across multiple markets and timeframes, including forex, stocks, indices, and crypto, making it suitable for both intraday and swing trading.

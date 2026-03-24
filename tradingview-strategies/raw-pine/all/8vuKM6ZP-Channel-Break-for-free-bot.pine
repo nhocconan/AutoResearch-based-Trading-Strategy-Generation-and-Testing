@@ -1,0 +1,96 @@
+//@version=4
+strategy("Channel Break [for free bot]", overlay=true, default_qty_type= strategy.percent_of_equity, initial_capital = 1000, default_qty_value = 20, commission_type=strategy.commission.percent, commission_value=0.075)
+
+//Options
+buyPeriod = input(13, "Channel Period for Long position")
+sellPeriod = input(18, "Channel Period for Short position")
+isMiddleExit = input(true, "Is exit on Base Line?")
+takeProfit = input(46, "Take Profit (%) for position")
+stopLoss = input(9, "Stop Loss (%) for position")
+
+// Test Start
+startYear = input(2005, "Test Start Year")
+startMonth = input(1, "Test Start Month")
+startDay = input(1, "Test Start Day")
+startTest = timestamp(startYear,startMonth,startDay,0,0)
+
+//Test End
+endYear = input(2050, "Test End Year")
+endMonth = input(12, "Test End Month")
+endDay = input(30, "Test End Day")
+endTest = timestamp(endYear,endMonth,endDay,23,59)
+
+timeRange = time > startTest and time < endTest ? true : false
+
+// Long&Short Levels
+BuyEnter = highest(buyPeriod)
+BuyExit = isMiddleExit ? (highest(buyPeriod) + lowest(buyPeriod)) / 2: lowest(buyPeriod)
+
+SellEnter = lowest(sellPeriod)
+SellExit = isMiddleExit ? (highest(sellPeriod) + lowest(sellPeriod)) / 2: highest(sellPeriod)
+
+// Plot Data
+plot(BuyEnter, style=plot.style_line, linewidth=2, color=color.blue, title="Buy Enter")
+plot(BuyExit, style=plot.style_line, linewidth=1, color=color.blue, title="Buy Exit", transp=50)
+plot(SellEnter, style=plot.style_line, linewidth=2, color=color.red, title="Sell Enter")
+plot(SellExit, style=plot.style_line, linewidth=1, color=color.red, title="Sell Exit", transp=50)
+
+// Calc Take Profits & Stop Loss
+TP = 0.0
+SL = 0.0
+if strategy.position_size > 0
+    TP := strategy.position_avg_price*(1 + takeProfit/100)
+    SL := strategy.position_avg_price*(1 - stopLoss/100)
+
+if strategy.position_size > 0 and SL > BuyExit
+    BuyExit := SL
+    
+if strategy.position_size < 0
+    TP := strategy.position_avg_price*(1 - takeProfit/100)
+    SL := strategy.position_avg_price*(1 + stopLoss/100)
+
+if strategy.position_size < 0 and SL < SellExit
+    SellExit := SL
+    
+    
+// Long Position    
+if timeRange and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, stop = BuyEnter)
+strategy.exit("Long Exit", "Long", stop=BuyExit, limit = TP, when = strategy.position_size > 0)
+
+
+// Short Position
+if timeRange and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, stop = SellEnter)
+    
+strategy.exit("Short Exit", "Short", stop=SellExit, limit = TP, when = strategy.position_size < 0)
+
+// Close & Cancel when over End of the Test
+if time > endTest
+    strategy.close_all()
+    strategy.cancel_all()
+
+View in Pine Editor・75 lines
+Use on chart
+7
+0
+1
+2
+20 863
+[EN]I present to you a script for testing the channel breakout strategy for the Bitmex exchange.
+Cryptocurrency itself is a trending tool, which is why breakout strategies generate the largest profits, and the channel breakout strategy is one of the most effective trend strategies.
+
+The optimization result shows the result of trading on a volume of 20% of the deposit. But since Bitmex trades in futures contracts, you can use 50%, 100% and even much more, depending on your attitude to risk.
+At the time of publication on the Bitmex exchange there are 12 different contracts, i.e. You can diversify your trading well (by pre-optimizing the settings for each contract).
+
+In the script, you can set up many trading options - timeframe, periods for buying and selling, method of exiting a trade, stop loss, take profit, risk management, etc.
+Thus, you create a strategy "for yourself".
+
+[RU] Представляю Вам скрипт для тестирования стратегии пробоя канала для биржи Битмекс.
+Криптовалюта, сама по себе является трендовым инструментом, именно поэтому, пробойные стратегии генерируют самую большую прибыль, а стратегия пробоя канала – является одной из самых эффективных трендовых стратегий.
+
+На результате оптимизации показан результат торговли на объеме в 20% от депозита. Но так как на Битмекс торговля идет фьючерсными контрактами, Вы можете использовать 50%, 100% и даже намного больше, в зависимости от Вашего отношения к риску.
+На момент публикации на бирже Битмекс есть 12 разных контрактов, т.е. Вы можете хороши диверсифицировать свою торговлю (предварительно оптимизируя настройки по каждый контракт).
+
+В скрипте Вы можете настроить множество вариантов торговли - таймфрейм, периоды для покупки и продажи, метод выхода из сделки, стоп-лосс, тейк-профит, рискменеджмент и т.п.
+Таким образом Вы создаете стратегию "под себя".

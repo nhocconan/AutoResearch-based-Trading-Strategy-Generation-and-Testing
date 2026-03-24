@@ -1,0 +1,136 @@
+//@version=4
+strategy("Swing Parabolic SAR Strategy", overlay=true)
+start = input(0.02)
+increment = input(0.02)
+maximum = input(0.2)
+var bool uptrend = na
+var float EP = na
+var float SAR = na
+var float AF = start
+var float nextBarSAR = na
+
+//MONEY MANAGEMENT--------------------------------------------------------------
+balance = strategy.netprofit + strategy.initial_capital //current balance
+floating = strategy.openprofit          //floating profit/loss
+risk = input(1,type=input.float,title="Risk %")/100           //risk % per trade
+
+if bar_index > 0
+    firstTrendBar = false
+    SAR := nextBarSAR
+    if bar_index == 1
+        float prevSAR = na
+        float prevEP = na
+        lowPrev = low[1]
+        highPrev = high[1]
+        closeCur = close
+        closePrev = close[1]
+        if closeCur > closePrev
+            uptrend := true
+            EP := high
+            prevSAR := lowPrev
+            prevEP := high
+        else
+            uptrend := false
+            EP := low
+            prevSAR := highPrev
+            prevEP := low
+        firstTrendBar := true
+        SAR := prevSAR + start * (prevEP - prevSAR)
+    if uptrend
+        if SAR > low
+            firstTrendBar := true
+            uptrend := false
+            SAR := max(EP, high)
+            EP := low
+            AF := start
+    else
+        if SAR < high
+            firstTrendBar := true
+            uptrend := true
+            SAR := min(EP, low)
+            EP := high
+            AF := start
+    if not firstTrendBar
+        if uptrend
+            if high > EP
+                EP := high
+                AF := min(AF + increment, maximum)
+        else
+            if low < EP
+                EP := low
+                AF := min(AF + increment, maximum)
+    if uptrend
+        SAR := min(SAR, low[1])
+        if bar_index > 1
+            SAR := min(SAR, low[2])
+    else
+        SAR := max(SAR, high[1])
+        if bar_index > 1
+            SAR := max(SAR, high[2])
+    nextBarSAR := SAR + AF * (EP - SAR)
+    if barstate.isconfirmed
+        if uptrend
+            //dataL = (close-SAR)*100000
+            dataS = (SAR-close)*1000
+            
+                //Calculate the size of the next trade
+            temp01 = balance * risk     //Risk in USD
+            temp02 = temp01/dataS        //Risk in lots
+            temp03 = temp02*100000      //Convert to contracts
+            size = temp03 - temp03%1000 //Normalize to 1000s (Trade size)
+            if(size < 1000)
+                size := 1000           //Set min. lot size
+            strategy.entry("short", strategy.short,size, stop=nextBarSAR, comment="short")
+            //strategy.exit("tp/sl short","short",stop=dataS)
+            strategy.cancel("long")
+        else
+            dataL = (close-SAR)*1000
+            //dataS = (SAR-close)*100000
+            
+                //Calculate the size of the next trade
+            temp01 = balance * risk     //Risk in USD
+            temp02 = temp01/dataL        //Risk in lots
+            temp03 = temp02*100000      //Convert to contracts
+            size = temp03 - temp03%1000 //Normalize to 1000s (Trade size)
+            if(size < 1000)
+                size := 1000           //Set min. lot size
+            strategy.entry("long", strategy.long,size, stop=nextBarSAR, comment="long")
+            //strategy.exit("tp/sl LONG","long",stop=dataL)
+            strategy.cancel("short")
+            
+plot(SAR, style=plot.style_cross, linewidth=3, color=color.orange)
+plot(nextBarSAR, style=plot.style_cross, linewidth=3, color=color.aqua)
+
+View in Pine Editor・102 lines
+Use on chart
+6
+2
+8
+5
+19 172
+Sep 10, 2020
+This is a strategy build inside tradingview, which I found it works great with swing/position trading.
+
+It works based on parabolic sar indicator, when indicator is below the candle, is an uptrend and when its its above is a downtrend.
+
+At the same time it's very nice, because it has a sort of stop loss which is dynamic, because it triggers when candle crosses with indicator, so you dont have to worry about stop loss or take profit .
+
+
+The key here of course, is going to be the risk management, if you want to success with it, never trade more than 2% of you capital, and if you want you can always apply a rule inside the code to close all position if x % amount of equity was going down, although I recommend have patience and let the system do its job.
+
+
+
+I recommend this strategy to be used with charts like 1 day or 1 week. If you need and want I can convert it to an indicator that uses alerts (although with strategy as well can be made to send alerts).
+
+PS. When you add this strategy on chart, inside is has different versions, if you use first version(1), it uses the system I explain above. If you use the last one, its based on risk management when the stop loss is the difference between psar and the candle, but it still needs some adjustments to make.
+Overall first one is atm much more profitable, but I believe that the version with risk management can be much better, but it need much more adjustments to make which I dont have the time at the moment for it.
+
+Enjoy it .
+Sep 10, 2020
+Release Notes
+Added risk management.
+For currencies without JPY, change the dataL and dataS line to 100.000 instead of 1000.
+It still needs some adjustments and tweaks :)
+Sep 10, 2020
+Release Notes
+Uncomment the line 84 and 98 to apply the risk management calculated by the difference between the sar and close candle

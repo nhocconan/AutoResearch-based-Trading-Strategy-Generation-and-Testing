@@ -1,0 +1,16 @@
+//@version=5
+disp_type(x) =>
+    if (x=='Columns')
+        plot.style_columns
+    else if (x=='Histogram')
+        plot.style_histogram
+    else if (x=='Line')
+        plot.style_line
+##root(root_metainfo,rm_0,'volume',const__string,indicator,format)
+rv_disp=##input(defval='Columns',type='INPUT_STRING',##id='in_53')
+bsv_disp=##input(defval='Columns',type='INPUT_STRING',##id='in_55')
+vd_disp=##input(defval='Columns',type='INPUT_STRING',##id='in_56')
+##root(root_metainfo,rm_1,disp_type(rv_disp),cb__input__plot_style__integer,plot,style)
+##root(root_metainfo,rm_2,disp_type(bsv_disp),cb__input__plot_style__integer,plot,style)
+##root(root_metainfo,rm_3,disp_type(bsv_disp),cb__input__plot_style__integer,plot,style)
+##root(root_metainfo,rm_4,disp_type(vd_disp),cb__input__plot_style__integer,plot,style)

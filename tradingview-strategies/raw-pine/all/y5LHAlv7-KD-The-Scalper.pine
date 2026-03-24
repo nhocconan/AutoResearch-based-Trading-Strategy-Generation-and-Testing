@@ -1,0 +1,142 @@
+//@version=6
+strategy("Clean 25/50/100 EMA Pullback Scalper — Entries Only (Side Select)",
+     overlay=true, calc_on_every_tick=true, calc_on_order_fills=true,
+     initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.05,
+     pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === Side selector ===
+side = input.string("Both", "Trade Side", options=["Both", "Long Only", "Short Only"])
+longsEnabled  = side == "Both" or side == "Long Only"
+shortsEnabled = side == "Both" or side == "Short Only"
+
+// === Inputs ===
+lenFast   = input.int(25,  "Fast EMA (pullback)", minval=1)
+lenMid    = input.int(50,  "Mid EMA (filter)",    minval=1)
+lenSlow   = input.int(100, "Slow EMA (safety)",   minval=1)
+
+useSlope  = input.bool(true,  "Require EMAs sloping same way?")
+useSpread = input.bool(true,  "Require clean spacing (min spread)?")
+spreadPct = input.float(0.10, "Min spread vs ATR (0.10 = 0.10×ATR)", step=0.01, minval=0.0)
+
+pullLookback = input.int(15, "Max bars after pullback", minval=1, maxval=100)
+showSignals  = input.bool(true, "Show entry markers?")
+
+// === Series ===
+ema25  = ta.ema(close, lenFast)
+ema50  = ta.ema(close, lenMid)
+ema100 = ta.ema(close, lenSlow)
+atr    = ta.atr(14)
+
+// === Trend & spacing ===
+isUpStack   = ema25 > ema50 and ema50 > ema100
+isDownStack = ema25 < ema50 and ema50 < ema100
+slopeUp     = ema25 > ema25[1] and ema50 > ema50[1] and ema100 > ema100[1]
+slopeDown   = ema25 < ema25[1] and ema50 < ema50[1] and ema100 < ema100[1]
+
+minGap = atr * spreadPct
+spreadUpOK   = (ema25 - ema50) > minGap and (ema50 - ema100) > minGap
+spreadDownOK = (ema100 - ema50) > minGap and (ema50 - ema25) > minGap
+
+trendLongOK  = isUpStack   and (useSlope ? slopeUp   : true) and (useSpread ? spreadUpOK   : true)
+trendShortOK = isDownStack and (useSlope ? slopeDown : true) and (useSpread ? spreadDownOK : true)
+
+// === Pullback detection state ===
+var bool  pullArmedLong   = false
+var bool  pullArmedShort  = false
+var int   pullBarIdxLong  = na
+var int   pullBarIdxShort = na
+var float pullMinLong     = na
+var float pullMaxShort    = na
+
+// Long pullback state
+if trendLongOK
+    touched25 = low <= ema25
+    touched50 = low <= ema50
+    stayedAbove100 = low > ema100
+    if (touched25 or touched50) and stayedAbove100
+        pullArmedLong  := true
+        pullBarIdxLong := bar_index
+        pullMinLong    := na(pullMinLong) ? low : math.min(pullMinLong, low)
+    else if pullArmedLong
+        pullMinLong := na(pullMinLong) ? low : math.min(pullMinLong, low)
+        if low <= ema100 or (bar_index - pullBarIdxLong > pullLookback)
+            pullArmedLong := false
+            pullMinLong   := na
+else
+    pullArmedLong := false
+    pullMinLong   := na
+
+// Short pullback state
+if trendShortOK
+    touched25s = high >= ema25
+    touched50s = high >= ema50
+    stayedBelow100 = high < ema100
+    if (touched25s or touched50s) and stayedBelow100
+        pullArmedShort  := true
+        pullBarIdxShort := bar_index
+        pullMaxShort    := na(pullMaxShort) ? high : math.max(pullMaxShort, high)
+    else if pullArmedShort
+        pullMaxShort := na(pullMaxShort) ? high : math.max(pullMaxShort, high)
+        if high >= ema100 or (bar_index - pullBarIdxShort > pullLookback)
+            pullArmedShort := false
+            pullMaxShort   := na
+else
+    pullArmedShort := false
+    pullMaxShort   := na
+
+// === Entry triggers (confirmed bar & whole candle outside 25 EMA) ===
+longEntryRaw  = pullArmedLong  and barstate.isconfirmed and (open > ema25 and low > ema25 and close > ema25) and (na(pullMinLong)  or pullMinLong  > ema100)
+shortEntryRaw = pullArmedShort and barstate.isconfirmed and (open < ema25 and high < ema25 and close < ema25) and (na(pullMaxShort) or pullMaxShort < ema100)
+
+longEntry  = longsEnabled  and longEntryRaw
+shortEntry = shortsEnabled and shortEntryRaw
+
+// Disarm after trigger
+if longEntry
+    pullArmedLong := false
+    pullMinLong   := na
+if shortEntry
+    pullArmedShort := false
+    pullMaxShort   := na
+
+// === Orders (entries only; no TP/SL) ===
+if longEntry and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+
+if shortEntry and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+
+// === Plots & visuals ===
+plot(ema25,  "EMA 25",  color=color.new(color.teal, 0))
+plot(ema50,  "EMA 50",  color=color.new(color.orange, 0))
+plot(ema100, "EMA 100", color=color.new(color.purple, 0))
+
+bgcolor(trendLongOK  ? color.new(color.green, 92) : na)
+bgcolor(trendShortOK ? color.new(color.red, 92)   : na)
+
+if showSignals and longEntry
+    label.new(bar_index, low, "▲ BUY\nFull candle above 25 EMA", style=label.style_label_up, textcolor=color.white, color=color.new(color.green, 0))
+if showSignals and shortEntry
+    label.new(bar_index, high, "▼ SELL\nFull candle below 25 EMA", style=label.style_label_down, textcolor=color.white, color=color.new(color.red, 0))
+
+View in Pine Editor・120 lines
+Use on chart
+3
+7
+1
+1 394
+We have to take the trade when all three EMAs are pointing in the same direction (no criss-cross, no up/down, sideways). All 3 EMAs should be cleanly separated from each other with strong spacing between them; they are not tangled, sideways, or messy. This is our first filter before entering the trade. Are the EMAs stacked neatly, and is the price outside of the 25 EMA? If price pulls back and closes near or below the 25 or 50 EMA and breaks the 100 EMA, we don't trade. Use the 100 EMA as a safety net and refrain from trading if the price touches or falls below the 100 EMA.
+
+1. Confirm the trend- All 3 EMAs must align, and they must spread
+2. Watch price pull back to the 25th or the 50 EMA
+3. Wait for the price to bounce - And re-approach the 25 EMA
+
+Why is this powerful?
+Removes 80% of the low-probability Trades
+It keeps you out of choppy markets
+Avoids Reversal Traps
+Anchors us to momentum
+
+We take the entry when the price moves up again and touches the 25 EMA from below, and then when it breaks above the 25 EMA, or even better, when a lovely green bullish candle forms. A bullish candle indicates good momentum. When a bullish candle closes in green, it means the momentum has increased significantly. This is when we enter a long trade, with the stop-loss just below the 50 EMA and the profit target being 1.5 times the stop-loss.
+
+The same rule applies to the bearish trade.

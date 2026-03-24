@@ -1,0 +1,109 @@
+//@version=4
+strategy("Cycles Strategy", overlay=true)
+
+// Getting inputs
+StopTgt = input(20, minval=1, title="Stop Loss $")
+ProfTgt = input(100, minval=1, title="Profit Target $")
+longOnly = input(false, title="Long or Short Only")
+useTrend = input(false, title="Use Trend Filter")
+useMACD = input(false, title="Use MACD Filter")
+useSignal = input(false, title="Use Signal Fltr")
+useHHLL = input(false, title="Use High/Low Fltr")
+useK =  input(false, title="Use %K Threshold Fltr")
+useD =  input(false, title="Use %D Threshold Fltr")
+useForce = input(false, title="Use Force Filter")
+useOBOS = input(false, title="Use OverBought/OverSold Filter")
+//Filter backtest month and year
+startMonth = input(10, minval=1, maxval=12, title="Month")
+startYear = input(2020, minval=2000, maxval=2100, title="Year")
+//Filter funtion inputs
+periodA = input(20, minval=1, title="Period SMA")
+periodK = input(5, minval=1, title="Period %K")
+smoothD = input(3, minval=1, title="Smooth %D")
+smoothK = input(3, minval=1, title="Smooth %K")
+threshold_k = input(30, minval=-50, maxval=50, title="Threshold %K (-50 is disabled)")
+threshold_d = input(-5, minval=-50, maxval=50, title="Threshold %D (-50 is disabled)")
+fast_length = input(title="Period Fast", type=input.integer, defval=5)
+slow_length = input(title="Period Slow", type=input.integer, defval=20)
+signal_length = input(title="Signal Smoothing", type=input.integer, minval = 1, maxval = 50, defval = 30)
+
+//Calculations
+ma = sma(close, periodA)
+k = sma(stoch(close, high, low, periodK), smoothK) - 50
+d = sma(k, smoothD)
+macd = ema(close,fast_length) - ema(close,slow_length)
+signal = ema(macd,signal_length)
+hist = macd - signal
+force = (d - d[1])
+
+if (not na(k) and not na(d) and longOnly and month>=startMonth and year>=startYear)
+    if(((k > k[2] and k[3] >= k[2]) or not useK) and (d > d[1] or not useD) and  (ma > ma[1] or not useTrend) and (not useMACD or (macd > macd[1] and macd[2] >= macd[1] and hist > 0)) and (not useSignal or signal > signal[1]) and (not useForce or force > force[1]) and (not useHHLL or high > high[1]) and (not useOBOS or (k[1] <= -threshold_k or not useK) and (d <= threshold_d or not useD))) 
+        strategy.order("CyclesLE", strategy.long, when=strategy.position_size == 0, comment="CyclesLE")
+
+if (not na(k) and not na(d) and not longOnly and month>=startMonth and year>=startYear)
+    if(((k < k[2] and k[3] <= k[2]) or not useK) and (d < d[1] or not useD) and  (ma < ma[1] or not useTrend) and (not useMACD or (macd < macd[1] and macd[2] <= macd[1] and hist < 0)) and (not useSignal or signal < signal[1]) and (not useForce or force < force[1]) and (not useHHLL or low < low[1]) and (not useOBOS or (k[1] >= threshold_k or not useK) and (d >= -threshold_d or not useD))) 
+        strategy.order("CyclesSE", strategy.short, when=strategy.position_size == 0, comment="CyclesSE")
+
+strategy.exit("bracket", loss=StopTgt, profit=ProfTgt, when=strategy.position_size > 0)
+strategy.exit("bracket", loss=StopTgt, profit=ProfTgt, when=strategy.position_size < 0)
+
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+View in Pine Editor・50 lines
+Use on chart
+9
+8
+4 559
+Oct 9, 2020
+This is back-testable strategy is a modified version of the Stochastic strategy. It is meant to accompany the modified Stochastic indicator: "Cycles".
+
+Modifications to the Stochastic strategy include;
+
+1. Programmable settings for the Stochastic Periods (%K, %D and Smooth %K).
+2. Programmable settings for the MACD Periods (Fast, Slow, Smoothing)
+3. Programmable thresholds for %K, to qualify a potential entry strategy.
+4. Programmable thresholds for %D, to qualify a potential exit strategy.
+5. Buttons to choose which components to use in the trading algorithm.
+6. Choose the month and year to back test.
+
+The trading algorithm:
+1. When %K exceeds the upper/lower threshold and then hooks down/up, in the direction of the Moving Average (MA). This is the minimum entry qualification.
+2. When %D exceeds the lower/upper threshold and angled in the direction of the trade, is the exit qualification.
+3. Additional entry filters include the direction of MACD, Signal and %D. Also, the "cliff", being a long entry is a higher high or a short entry is a lower low.
+4. Strategy can only go "Long" or "Short" depending on the selected setting.
+5. By matching the settings in the "Cycles" indicator, you can (almost) see what the strategy is doing.
+6. Be sure to select the "Recalculate" buttons, to recalculate on every new Tick, for best results.
+
+Please click the Like button and leave a comment if you appreciate this script. Improvements will be implemented as time goes on.
+
+I am not a licensed trade advisor. This strategy is for entertainment only. Use at your own risk!
+
+
+
+
+
+
+
+
+
+
+
+Oct 10, 2020
+Release Notes
+Updated trading algorithm: Oct. 9, 2020
+1. Corrected errors on %K and %D thresholds. Signs were reversed.
+2. Added buttons to enable/disable %K and/or %D thresholds
+3. Added button to enable/disable Higher close and Lower Close Filter
+In general, made the strategy behave more like the current Cycles Indicator.
+
+Oct 11, 2020
+Release Notes
+1. Backtested and updated trading algorithm to compare highs with highs, and lows with lows.
+2. Corrected sign error in the algorithm when going short.
+3. Decoupled %D from exit strategy. Only Period %K will affect the exit, the Thresholds will not.
+4. Updated text labels.
+5. Updated Cycles indicator to match.
+Oct 25, 2020
+Release Notes
+1. Updated trading algorithm so that there are switches for every filter. If no switches are selected, the strategy will place orders short if there is no current position. Make sure to select at least 1 filter.
+2. Revised Exit strategy so you can now input a constant profit target and stop loss target value in $.
+

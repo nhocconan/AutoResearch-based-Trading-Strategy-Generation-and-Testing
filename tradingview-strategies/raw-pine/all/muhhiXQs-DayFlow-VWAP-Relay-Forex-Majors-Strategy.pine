@@ -1,0 +1,251 @@
+//@version=6
+strategy("DayFlow VWAP Relay — Majors",
+     shorttitle="DayFlow Relay",
+     overlay=true, pyramiding=0,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=3,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.0001,
+     slippage=3,
+     process_orders_on_close=true,
+     calc_on_every_tick=false, calc_on_order_fills=false,
+     margin_long=0, margin_short=0)
+
+// =============== GROUPS
+grp_setup   = "Setup"
+grp_bands   = "VWAP Bands"
+grp_micro   = "Micro Flow"
+grp_sess    = "Sessions"
+grp_risk    = "Risk"
+grp_view    = "View"
+
+// =============== INPUTS
+// Setup
+sig_len     = input.int(63, "Signal length", minval=20, group=grp_setup, tooltip="Lookback window for regime math on residuals")
+lower_tf    = input.timeframe("1", "Micro TF", group=grp_micro, tooltip="Lower timeframe used to read micro flow inside the current bar")
+micro_span  = input.int(10, "Micro span bars", minval=3, group=grp_micro, tooltip="How many lower TF bars to summarize for micro flow")
+micro_gate  = input.float(0.20, "Micro flow gate 0..1", minval=0.0, maxval=1.0, step=0.05, group=grp_micro, tooltip="Minimum absolute micro flow needed to trust a trigger")
+
+// Bands and regime
+stdev_mult  = input.float(1.0, "VWAP stdev multiplier", minval=0.2, step=0.1, group=grp_bands, tooltip="Width of daily anchored VWAP envelope")
+exp_gate    = input.float(0.65, "Expansion gate 0..3", minval=0.0, maxval=3.0, step=0.05, group=grp_bands, tooltip="If expansion score above this, prefer breakouts. Otherwise prefer fades")
+
+// Sessions
+sess_en     = input.bool(true, "Use session filter", group=grp_sess)
+sess_str    = input.session("0700-1700", "Trade window UTC", group=grp_sess, tooltip="Common London through NY window")
+
+// Risk
+atr_len     = input.int(14, "ATR length", minval=5, group=grp_risk)
+sl_atr      = input.float(1.2, "Stop ATR x", minval=0.2, step=0.1, group=grp_risk)
+tp_atr      = input.float(1.8, "Target ATR x", minval=0.2, step=0.1, group=grp_risk)
+cooldown    = input.int(10, "Cooldown bars after close", minval=0, group=grp_risk)
+side_opt    = input.string("Both", "Side", options=["Both","Long only","Short only"], group=grp_risk)
+
+// View
+show_bands  = input.bool(true, "Show VWAP and bands", group=grp_view)
+show_resid  = input.bool(true, "Color bars by residual regime", group=grp_view)
+
+// =============== HELPERS
+micro_flow(array<float> a, int span) =>
+    int n = array.size(a)
+    if n < 2
+        0.0
+    else
+        int last = math.max(1, n - 1)  // exclude freshest element
+        int from = math.max(1, last - span + 1)
+        float acc = 0.0
+        for i = from to last
+            float prev = array.get(a, i - 1)
+            float curr = array.get(a, i)
+            acc += curr > prev ? 1 : curr < prev ? -1 : 0
+        acc /= math.max(1, last - from + 1)
+
+// =============== CALC
+anchor_daily = timeframe.change("1D")
+[vwap_d, vup, vdn] = ta.vwap(hlc3, anchor_daily, stdev_mult)
+
+resid = close - vwap_d
+
+v_slope   = ta.linreg(vwap_d, sig_len, 0) - ta.linreg(vwap_d, sig_len, 1)
+expansion = ta.stdev(resid, sig_len) / math.max(1e-10, ta.stdev(close, sig_len))
+
+const float PCT_UP = 75.0
+const float PCT_DN = 25.0
+res_hi = ta.percentile_linear_interpolation(resid, sig_len, PCT_UP)
+res_lo = ta.percentile_linear_interpolation(resid, sig_len, PCT_DN)
+
+arr_close = request.security_lower_tf(syminfo.tickerid, lower_tf, close)
+mf = micro_flow(arr_close, micro_span)
+
+in_sess = not sess_en or not na(time(timeframe.period, sess_str))
+
+since_closed = ta.barssince(ta.change(strategy.closedtrades) > 0)
+cool_ok = na(since_closed) or since_closed >= cooldown
+
+allow_long  = side_opt != "Short only"
+allow_short = side_opt != "Long only"
+
+// =============== SIGNALS
+balanced_day = expansion < exp_gate
+trend_day    = expansion >= exp_gate
+
+long_fade   = balanced_day and resid <= res_lo and mf >  micro_gate and in_sess and cool_ok
+short_fade  = balanced_day and resid >= res_hi and mf < -micro_gate and in_sess and cool_ok
+long_break  = trend_day    and close > vup and v_slope > 0 and mf >  micro_gate and in_sess and cool_ok
+short_break = trend_day    and close < vdn and v_slope < 0 and mf < -micro_gate and in_sess and cool_ok
+
+go_long  = allow_long  and (long_fade or long_break)
+go_short = allow_short and (short_fade or short_break)
+
+// =============== RISK
+atr = ta.atr(atr_len)
+to_ticks(x) => int(math.round(x / syminfo.mintick))
+loss_ticks   = to_ticks(atr * sl_atr)
+profit_ticks = to_ticks(atr * tp_atr)
+
+if go_long
+    strategy.entry("L", strategy.long)
+if go_short
+    strategy.entry("S", strategy.short)
+
+if strategy.position_size > 0
+    strategy.exit("Lx", from_entry="L", loss=loss_ticks, profit=profit_ticks)
+    if go_short
+        strategy.close("L")
+if strategy.position_size < 0
+    strategy.exit("Sx", from_entry="S", loss=loss_ticks, profit=profit_ticks)
+    if go_long
+        strategy.close("S")
+
+// =============== PLOTS
+col_bal = color.new(color.teal, 80)
+col_trd = color.new(color.orange, 80)
+bgcolor(show_resid ? (balanced_day ? col_bal : col_trd) : na, title="Regime")
+
+plot(show_bands ? vwap_d : na, "VWAP D", color=color.white, linewidth=2)
+plot(show_bands ? vup    : na, "VWAP Up", color=color.green)
+plot(show_bands ? vdn    : na, "VWAP Dn", color=color.red)
+
+plotshape(go_long,  title="Go Long",  style=shape.triangleup,   location=location.belowbar, color=color.lime, size=size.tiny, text="L")
+plotshape(go_short, title="Go Short", style=shape.triangledown, location=location.abovebar, color=color.red,  size=size.tiny, text="S")
+
+alertcondition(go_long,  title="DayFlow Long",  message="DayFlow Relay long {{ticker}} {{interval}}")
+alertcondition(go_short, title="DayFlow Short", message="DayFlow Relay short {{ticker}} {{interval}}")
+
+View in Pine Editor・135 lines
+Use on chart
+1
+0
+2
+2 855
+Oct 24, 2025
+Summary in one paragraph
+
+DayFlow VWAP Relay is a day-trading strategy for major FX pairs on intraday timeframes, demonstrated on EURUSD 15 minutes. It waits for alignment between a daily anchored VWAP regime check, residual percentiles, and lower-timeframe micro flow before suggesting trades. The originality is the fusion of daily VWAP residual percentiles with a live micro-flow score from 1 minute data to switch between fade and breakout behavior inside the same session. Add it to a clean chart and use the markers and alerts.
+
+Scope and intent
+
+• Markets: Major FX pairs such as EURUSD, GBPUSD, USDJPY, AUDUSD, USDCHF, USDCAD
+• Timeframes: One minute to one hour
+• Default demo in this publication: EURUSD on 15 minutes
+• Purpose: Reduce false starts by acting only when context, location and micro flow agree
+• Limits: This is a strategy. Orders are simulated on standard candles only
+
+Originality and usefulness
+
+• Core novelty: Residual percentiles to daily anchored VWAP decide “balanced versus expanding day”. A separate 1 minute micro-flow score confirms direction, so the same model fades extremes in balance and rides range breaks in expansion
+• Failure modes addressed: Chop fakeouts and unconfirmed breakouts are filtered by the expansion gate and micro-flow threshold
+• Testability: Every input is exposed. Bands, background regime color, and markers show why a suggestion appears
+• Portable yardstick: Stops and targets are ATR multiples converted to ticks, which transfer across symbols
+• Open source status: No reused third-party code that requires attribution
+
+Method overview in plain language
+
+The day is anchored with a VWAP that updates from the daily session start. Price minus VWAP is the residual. Percentiles of that residual measured over a rolling window define location extremes for the current day. A regime score compares residual volatility to price volatility. When expansion is low, the day is treated as balanced and the model fades residual extremes if 1 minute micro flow points back to VWAP. When expansion is high, the model trades breakouts outside the VWAP bands if slope and micro flow agree with the move.
+
+Base measures
+
+• Range basis: True Range smoothed by ATR for stops and targets, length 14
+• Return basis: Not required for signals; residuals are absolute price distance to VWAP
+
+Components
+
+• Daily Anchor VWAP Bands. VWAP with standard-deviation bands. Slope sign is used for trend confirmation on breakouts
+• Residual Percentiles. Rolling percentiles of close minus VWAP over Signal length. Identify location extremes inside the day
+• Expansion Ratio. Standard deviation of residuals divided by standard deviation of price over Signal length. Classifies balanced versus expanding day
+• Micro Flow. Net up minus down closes from 1 minute data across a short span, normalized to −1..+1. Confirms direction and avoids fades against pressure
+• Session Window optional. Restricts trading to your configured hours to avoid thin periods
+• Cooldown optional. Bars to wait after a position closes to prevent immediate re-entry
+
+Fusion rule
+
+Gating rather than weighting. First choose regime by Expansion Ratio versus the Expansion gate. Inside each regime all listed conditions must be true: location test plus micro-flow threshold plus session window plus cooldown. Breakouts also require VWAP slope alignment.
+
+Signal rule
+
+• Long suggestion on balanced day: residual at or below the lower percentile and micro flow positive above the gate while inside session and cooldown is satisfied
+• Short suggestion on balanced day: residual at or above the upper percentile and micro flow negative below the gate while inside session and cooldown is satisfied
+• Long suggestion on expanding day: close above the upper VWAP band, VWAP slope positive, micro flow positive, session and cooldown satisfied
+• Short suggestion on expanding day: close below the lower VWAP band, VWAP slope negative, micro flow negative, session and cooldown satisfied
+• Positions flip on opposite suggestions or exit by brackets
+
+What you will see on the chart
+
+• Markers on suggestion bars: L for long, S for short
+• Exit occurs on reverse signal or when a bracket order is filled
+• Reference lines: daily anchored VWAP with upper and lower bands
+• Optional background: teal for balanced day, orange for expanding day
+
+Inputs with guidance
+
+Setup
+• Signal length. Residual and regime window. Typical 40 to 100. Higher smooths, lower reacts faster
+
+Micro Flow
+• Micro TF. Lower timeframe used for micro flow, default 1 minute
+• Micro span bars. Count of lower-TF bars. Typical 5 to 20
+• Micro flow gate 0..1. Minimum absolute flow. Raising it demands stronger confirmation and reduces trade count
+
+VWAP Bands
+• VWAP stdev multiplier. Band width. Typical 0.8 to 1.6. Wider bands reduce breakout frequency and increase fade distance
+• Expansion gate 0..3. Threshold to switch from fades to breakouts. Raising it favors fades, lowering it favors breakouts
+
+Sessions
+• Use session filter. Enable to trade only inside your window
+• Trade window UTC. Default 07:00 to 17:00
+
+Risk
+• ATR length. Stop and target basis. Typical 10 to 21
+• Stop ATR x. Initial stop distance in ATR multiples
+• Target ATR x. Profit target distance in ATR multiples
+• Cooldown bars after close. Wait bars before a new entry
+• Side. Both, long only, or short only
+
+View
+• Show VWAP and bands
+• Color bars by residual regime
+
+
+Properties visible in this publication
+
+• Initial capital 10000
+• Base currency Default
+• request.security uses lookahead off everywhere
+• Strategy: Percent of equity with value 3. Pyramiding 0. Commission cash per order 0.0001 USD. Slippage 3 ticks. Process orders on close ON. Bar magnifier ON. Recalculate after order is filled OFF. Calc on every tick OFF. Using standard OHLC fills ON.
+
+Realism and responsible publication
+
+No performance claims. Past results never guarantee future outcomes. Fills and slippage vary by venue. Shapes can move while a bar forms and settle on close. Strategies must run on standard candles for signals and orders.
+
+Honest limitations and failure modes
+
+High impact news, session opens, and thin liquidity can invalidate assumptions. Very quiet days can reduce contrast between residuals and price volatility. Session windows use the chart exchange time. If both stop and target are touched within a single bar, TradingView’s standard OHLC price-movement model decides the outcome.
+Expect different behavior on illiquid pairs or during holidays. The model is sensitive to session definitions and feed time. Past results never guarantee future outcomes.
+
+Legal
+
+Education and research only. Not investment advice. You are responsible for your decisions. Test on historical data and in simulation before any live use. Use realistic costs.
+
+
+Nov 3, 2025
+Release Notes
+fixed comission to apply per contract instead of order

@@ -1,0 +1,45 @@
+//@version=3
+strategy(title="ema(ema10-21)", overlay=true, pyramiding = 0, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, initial_capital = 15000, commission_type = strategy.commission.percent, commission_value = 0.2)
+
+useTimeLimit    = input(defval = false, title = "Use Start Time Limiter?")
+startYear       = input(defval = 2016, title = "Start From Year", type = integer, minval = 0, step = 1)
+startMonth      = input(defval = 05, title = "Start From Month", type = integer, minval = 0,step = 1)
+startDay        = input(defval = 01, title = "Start From Day", type = integer, minval = 0,step = 1)
+startHour       = input(defval = 00, title = "Start From Hour", type = integer, minval = 0,step = 1)
+startMinute     = input(defval = 00, title = "Start From Minute", type = integer, minval = 0,step = 1)
+
+startTimeOk() =>
+    inputTime   = timestamp(syminfo.timezone, startYear, startMonth, startDay, startHour, startMinute)
+    timeOk      = time > inputTime ? true : false
+    r = (useTimeLimit and timeOk) or not useTimeLimit
+
+lenght0 = input(10)
+lenght1 = input(21)
+
+source = close
+
+EmaShort = ema(ema(source, lenght0), lenght0)
+EmaLong = ema(ema(source, lenght1),lenght1)
+plot(EmaShort, color=red)
+plot(EmaLong, color=purple)
+
+growth = ((EmaShort-EmaLong)*100)/((EmaShort+EmaLong)/2)
+thresholdUp = input(defval=0.05, title="Threshold Up", type=float, step=0.01)
+thresholdDown = input(defval=-0.165, title="Threshold Down", type=float, step=0.001)
+
+if( startTimeOk() )
+    buy_condition = EmaShort > EmaLong and growth > thresholdUp
+    buy_exit_condition = EmaShort < EmaLong and growth < thresholdDown
+    strategy.entry("buy", strategy.long, comment="buy", when=buy_condition)
+    strategy.close(id='buy', when=buy_exit_condition)
+
+View in Pine Editor・34 lines
+Use on chart
+1
+8
+8
+1
+5 460
+This code works better in 1 hour for crypto currencies like BTC 1.51% or LTC.
+It seems to beat the market. Feedback or improvement are welcome.
+

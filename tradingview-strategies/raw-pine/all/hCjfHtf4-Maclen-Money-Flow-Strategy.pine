@@ -1,0 +1,9 @@
+//@version=4
+sobrecompra=##input(defval=61,type='INPUT_INTEGER',##id='in_10')
+sobreventa=##input(defval=42,type='INPUT_INTEGER',##id='in_11')
+##root(root_metainfo,rm_0,sobrecompra,input__float)
+##root(root_metainfo,rm_1,sobreventa,input__float)
+lLong=##input(defval=59,type='INPUT_INTEGER',##id='in_12')
+lShort=##input(defval=44,type='INPUT_INTEGER',##id='in_13')
+##root(root_metainfo,rm_2,lLong,input__float)
+##root(root_metainfo,rm_3,lShort,input__float)

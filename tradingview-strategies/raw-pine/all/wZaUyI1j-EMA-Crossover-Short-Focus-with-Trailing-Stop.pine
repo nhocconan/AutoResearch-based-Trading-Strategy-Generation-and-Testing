@@ -1,0 +1,75 @@
+//@version=6
+strategy("EMA Crossover (Short Focus with Trailing Stop)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=20)
+
+// Define EMA and SMA lengths
+shortEMALength = 13
+midEMALength = 25
+longEMALength = 33
+sma100Length = 100
+sma200Length = 200
+
+// Calculate EMAs
+shortEMA = ta.ema(close, shortEMALength)
+midEMA = ta.ema(close, midEMALength)
+longEMA = ta.ema(close, longEMALength)
+
+// Calculate SMAs
+sma100 = ta.sma(close, sma100Length)
+sma200 = ta.sma(close, sma200Length)
+
+// Plot EMAs and SMAs
+plot(shortEMA, title="13 EMA", color=color.blue)
+plot(midEMA, title="25 EMA", color=color.red)
+plot(longEMA, title="33 EMA", color=color.green)
+plot(sma100, title="100 SMA", color=color.purple)
+plot(sma200, title="200 SMA", color=color.orange)
+
+// ENTRY CONDITIONS (Fast & Real-Time Execution)
+longCondition  = shortEMA >= longEMA and strategy.position_size <= 0
+shortCondition = shortEMA <= longEMA and strategy.position_size >= 0
+
+// EXIT CONDITIONS
+exitLong  = shortEMA < longEMA  // Exit long when 13 EMA falls below 33 EMA
+exitShort = shortEMA > midEMA   // Exit short when 13 EMA rises above 25 EMA
+
+// EXECUTE LONG
+if (longCondition)
+    strategy.close("Short", comment="Close Short for Long Entry")
+    strategy.entry("Long", strategy.long, alert_message="FAST Long Entry: 13 EMA >= 33 EMA")
+
+// EXECUTE SHORT
+if (shortCondition)
+    strategy.close("Long", comment="Close Long for Short Entry")
+    strategy.entry("Short", strategy.short, alert_message="FAST Short Entry: 13 EMA <= 33 EMA")
+
+// Trailing Stop Parameters
+trailOffsetPts = 2
+trail = 10
+
+// Trailing Stop for Longs
+if (strategy.position_size > 0)
+    strategy.exit("Long Trail Exit", from_entry="Long", trail_offset=trailOffsetPts, trail_price=high - trail, comment="Long Trailing Stop")
+
+// Trailing Stop for Shorts
+if (strategy.position_size < 0)
+    strategy.exit("Short Trail Exit", from_entry="Short", trail_offset=trailOffsetPts, trail_price=low + trail, comment="Short Trailing Stop")
+
+// EXIT STRATEGY
+if (exitLong)
+    strategy.close("Long", comment="Exit Long: 13 EMA < 33 EMA")
+
+if (exitShort)
+    strategy.close("Short", comment="Exit Short: 13 EMA > 25 EMA")
+
+View in Pine Editor・62 lines
+Use on chart
+7
+3
+1 882
+This strategy utilizes a combination of Exponential Moving Averages (EMA) and Simple Moving Averages (SMA) to generate entry and exit signals for both long and short positions. The core of the strategy is based on the 13-period EMA (short EMA) crossing the 33-period EMA (long EMA) for entering long trades, while a 13-period EMA crossing the 25-period EMA (mid EMA) generates short trade signals. The 100-period SMA and 200-period SMA serve as additional trend indicators to provide context for the market conditions. The strategy aims to capitalize on trend reversals and momentum shifts in the market.
+
+The strategy is designed to execute trades swiftly with an emphasis on entering positions when conditions align in real time. For long entries, the strategy initiates a buy when the 13 EMA is greater than the 33 EMA, indicating a bullish trend. For short entries, the 13 EMA crossing below the 33 EMA signals a bearish trend, prompting a short position. Importantly, the code includes built-in exit conditions for both long and short positions. Long positions are exited when the 13 EMA falls below the 33 EMA, while short positions are closed when the 13 EMA crosses above the 25 EMA.
+
+A key feature of the strategy is the use of trailing stops for both long and short positions. This dynamic exit method adjusts the stop level as the market moves in favor of the trade, locking in profits while reducing the risk of losses. The trailing stop for long positions is based on the high price of the current bar, while the trailing stop for short positions is set using the low price, providing more flexibility in managing risk. This trailing stop mechanism helps to capture profits from favorable market moves while ensuring that positions are exited if the market moves against them.
+
+This strategy works best on the daily timeframe and is optimized for major cryptocurrency pairs. The daily chart allows for the EMAs to provide more reliable signals, as the strategy is designed to capture broader trends rather than short-term market fluctuations. Using it on major crypto pairs increases its effectiveness as these assets tend to have strong and sustained trends, providing better opportunities for the strategy to perform well.

@@ -1,0 +1,103 @@
+//@version=4
+strategy(shorttitle='Low volatility Buy w/ TP & SL (by Coinrule)',title='Low volatility Buy w/ TP & SL', overlay=true, initial_capital = 1000, process_orders_on_close=true, default_qty_type = strategy.percent_of_equity, default_qty_value = 30, commission_type=strategy.commission.percent, commission_value=0.1)
+
+//Backtest dates
+fromMonth = input(defval = 1,    title = "From Month",      type = input.integer, minval = 1, maxval = 12)
+fromDay   = input(defval = 10,    title = "From Day",        type = input.integer, minval = 1, maxval = 31)
+fromYear  = input(defval = 2019, title = "From Year",       type = input.integer, minval = 1970)
+thruMonth = input(defval = 1,    title = "Thru Month",      type = input.integer, minval = 1, maxval = 12)
+thruDay   = input(defval = 1,    title = "Thru Day",        type = input.integer, minval = 1, maxval = 31)
+thruYear  = input(defval = 2112, title = "Thru Year",       type = input.integer, minval = 1970)
+
+showDate  = input(defval = true, title = "Show Date Range", type = input.bool)
+
+start     = timestamp(fromYear, fromMonth, fromDay, 00, 00)        // backtest start window
+finish    = timestamp(thruYear, thruMonth, thruDay, 23, 59)        // backtest finish window
+window()  => time >= start and time <= finish ? true : false       // create function "within window of time"
+
+//MA inputs and calculations
+movingaverage_fast = sma(close, input(50))
+movingaverage_slow = sma(close, input(200))
+movingaverage_normal= sma(close, input(100))
+
+//Entry 
+strategy.entry(id="long", long = true, when = movingaverage_slow > movingaverage_normal and movingaverage_fast > movingaverage_normal)
+
+//Exit
+Stop_loss= ((input (3))/100)
+Take_profit= ((input (6))/100)
+
+longStopPrice  = strategy.position_avg_price * (1 - Stop_loss)
+longTakeProfit = strategy.position_avg_price * (1 + Take_profit)
+
+strategy.close("long", when = close < longStopPrice or close > longTakeProfit and window())
+
+//PLOT
+
+plot(movingaverage_fast, color=color.orange, linewidth=2)
+plot(movingaverage_slow, color=color.purple, linewidth=3)
+plot(movingaverage_normal, color=color.blue, linewidth=2)
+View in Pine Editor・39 lines
+Use on chart
+2
+4
+4
+11 810
+Oct 22, 2020
+The compression of volatility usually leads to expansion. When the breakout comes, it can ignite strong trends. One way to catch a coin trading in an accumulation area is to spot three moving averages with values close to each other. The strategy uses a combination of Moving Averages to spot the best time to buy a coin before its breakout.
+
+
+Buy Condition
+
+
+The MA200 is greater than the MA100
+The MA50 is greater than the MA100
+
+
+
+According to backtesting results, the 1-hour time frame is the best to run this strategy.
+
+
+Sell Condition
+
+
+
+*Take Profit: the price increases 8% from the entry price
+Stop Loss: the price drops 4% from the entry price
+
+
+The strategy has a profitability of 40-60% (depending on the market conditions). Having a ratio of two between Take profit and Stop Loss helps keeping the strategy profitable in the long term.
+
+
+Nov 4, 2020
+Release Notes
+The compression of volatility usually leads to expansion. When the breakout comes, it can ignite strong trends. One way to catch a coin trading in an accumulation area is to spot three moving averages with values close to each other. The strategy uses a combination of Moving Averages to spot the best time to buy a coin before its breakout.
+
+This setup helps catching also early reversals at the end of downtrends.
+
+
+Buy Condition
+
+- The MA200 is greater than the MA100
+- The MA50 is greater than the MA100
+
+According to backtesting results, the 1-hour time frame is the best to run this strategy.
+
+
+Sell Condition
+
+
+
+Take Profit: the price increases 8% from the entry price
+Stop Loss: the price drops 4% from the entry price
+
+
+The strategy has a profitability of 40-60% (depending on the market conditions). Having a ratio of two between Take profit and Stop Loss helps keeping the strategy profitable in the long term.
+
+Dec 23, 2020
+Release Notes
+The new Script adds the commission to the trades. Now a trading fee of 0.1% is taken into account.
+
+The strategy in the new version trades only with 30% of capital to make the results more aligned to a real-use case.
+
+After backtesting different setups, the take-profit and stop-loss percentages are revised to increase the average return and reduce the standard deviation or the results.

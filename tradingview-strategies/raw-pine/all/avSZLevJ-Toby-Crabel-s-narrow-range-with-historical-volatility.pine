@@ -1,0 +1,60 @@
+//@version=2
+strategy("Toby Crabel's narrow range with historical volatility", shorttitle="hvol + NR", default_qty_type = strategy.percent_of_equity, default_qty_value = 100, overlay = true)
+nrPeriod = input(4, minval = 1)
+
+nr = abs(high - low)
+
+LookBackBig = input(100, minval=1)
+LookBackSmall = input(6, minval=1)
+Annual = input(365, minval=1)
+xPrice = log(close / close[1])
+nPer = iff(isintraday or isdaily, 1, 7)
+xStdDevBig= stdev(xPrice, LookBackBig)
+HVolBig = (xStdDevBig * sqrt(Annual / nPer)) * 100
+
+xStdDevSmall= stdev(xPrice, LookBackSmall)
+HVolSmall = (xStdDevSmall * sqrt(Annual / nPer)) * 100
+
+hvolSmallToBig = HVolSmall / HVolBig
+useHvol = input(true)
+hvolRatio = input(0.50)
+strategy.cancel_all()
+strategy.close_all()
+if nr == lowest(nr, nrPeriod) and (hvolSmallToBig < hvolRatio or not useHvol) and high < high[1] and low > low[1]
+    strategy.order("Short", strategy.short, stop = low)
+    strategy.exit("ExitShort", "Short", stop = high)
+    strategy.order("Long", strategy.long, stop = high)
+    strategy.exit("ExitLong", "Long", stop = low)
+
+    
+
+// === Backtesting Dates ===
+testPeriodSwitch = input(false, "Custom Backtesting Dates")
+testStartYear = input(2018, "Backtest Start Year")
+testStartMonth = input(3, "Backtest Start Month")
+testStartDay = input(6, "Backtest Start Day")
+testStartHour = input(08, "Backtest Start Hour")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,testStartHour,0)
+testStopYear = input(2018, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(14, "Backtest Stop Day")
+testStopHour = input(14, "Backtest Stop Hour")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,testStopHour,0)
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+isPeriod = testPeriodSwitch == true ? testPeriod() : true
+// === /END
+if not isPeriod
+    strategy.cancel_all()
+    strategy.close_all()
+
+View in Pine Editor・49 lines
+Use on chart
+2
+4
+2
+3
+12 026
+1. Find bar with the smallest narrow range for a chosen period. Use hvol for filter.
+2. Place stop-order for long position at previous high and stop-order for short at previous low to catch breakout in any direction.
+3. Take profit on the next bar.

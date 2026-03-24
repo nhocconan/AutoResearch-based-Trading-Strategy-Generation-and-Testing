@@ -1,0 +1,69 @@
+//@version=5
+strategy("SMC: 6E v3.1 (Auto-Breakeven Fixed)", overlay=true, initial_capital=50000, default_qty_type=strategy.fixed, default_qty_value=1, currency=currency.USD)
+
+// --- 1. PARAMÈTRES ---
+rr_ratio = input.float(2.0, "Ratio Target")
+be_trigger = input.float(15, "Déclenchement BE (en Ticks)", tooltip="Mettre à 0 le stop après X ticks de profit")
+be_offset = input.float(2, "Offset BE (en Ticks)", tooltip="Sécuriser X ticks (couvrir les frais)")
+
+// Filtre Horaire Large (Londres + NY complet)
+use_time = input.bool(true, "Activer Filtre Horaire")
+sess = input.session("0300-1600", "Session (NY Time)")
+
+// --- 2. LOGIQUE TECHNIQUE (MIDNIGHT + FVG) ---
+midnight_price = request.security(syminfo.tickerid, "D", open, lookahead = barmerge.lookahead_on)
+plot(midnight_price, "Midnight Open", color=color.blue)
+
+// Détection FVG Haussier
+is_bull_fvg = (low[0] > high[2]) and (close[1] > open[1])
+
+// Variables globales (accessibles partout)
+var float ifvg_top = na
+var float ifvg_bottom = na
+var bool hunt_mode = false
+var float tp_price = na // <--- Correction ici : déclarée globalement
+
+if is_bull_fvg
+    ifvg_top := low[0]
+    ifvg_bottom := high[2]
+    hunt_mode := true 
+
+// --- 3. EXÉCUTION ---
+// Condition : Cassure du FVG par le bas (Close) + Prix sous Midnight + Dans les heures
+in_session = use_time ? not na(time(timeframe.period, sess, "America/New_York")) : true
+break_confirmed = hunt_mode and close < ifvg_bottom
+
+if break_confirmed and close < midnight_price and in_session
+    strategy.entry("Short v3", strategy.short)
+    
+    // Calcul SL / TP
+    sl_dist = high - close
+    // Sécurité : SL minimum de 10 ticks pour éviter les refus
+    if sl_dist < syminfo.mintick * 10
+        sl_dist := syminfo.mintick * 10
+        
+    sl_price = high
+    tp_price := close - (sl_dist * rr_ratio) // On met à jour la variable globale
+    
+    strategy.exit("Exit", "Short v3", stop=sl_price, limit=tp_price)
+    hunt_mode := false 
+
+// --- 4. GESTION DU BREAK-EVEN ---
+// Si le prix descend de X ticks en notre faveur, on bouge le SL au point d'entrée
+if strategy.position_size < 0 // On est Short
+    entry_p = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    
+    // Si le Low actuel va plus bas que (Entrée - Trigger)
+    if low < (entry_p - (be_trigger * syminfo.mintick))
+        // On modifie l'ordre de sortie "Exit" existant
+        new_sl = entry_p - (be_offset * syminfo.mintick)
+        strategy.exit("Exit", "Short v3", stop=new_sl, limit=tp_price)
+
+View in Pine Editor・60 lines
+Use on chart
+3
+4
+1 046
+oui
+jsp quoi dire mais jss obligé pour poster c'est cadeau l'équipe
+m15

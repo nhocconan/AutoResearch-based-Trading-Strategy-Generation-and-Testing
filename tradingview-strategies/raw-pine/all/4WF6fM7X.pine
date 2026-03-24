@@ -1,0 +1,98 @@
+//@version=5
+strategy("Naked K 5min Sniper", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ===== 参数（专为5m优化）=====
+lookback = input.int(6, "支撑/阻力回溯K线数", minval=3, maxval=12)
+smaLen = input.int(9, "趋势SMA周期", minval=5, maxval=20)
+atrLen = input.int(7, "ATR周期", minval=5)
+atrMultSL = input.float(1.8, "止损ATR倍数", minval=1.0, step=0.1)
+rrRatio = input.float(1.5, "止盈风险回报比", minval=1.0, step=0.1)
+useVolumeFilter = input.bool(true, "启用成交量过滤（需有成交量数据）")
+cooldownBars = input.int(3, "交易冷却期（K线数）", minval=0)
+
+// ===== 趋势过滤 =====
+smaFast = ta.sma(close, smaLen)
+uptrend = close > smaFast
+downtrend = close < smaFast
+
+// ===== 支撑/阻力区域 =====
+recentLow = ta.lowest(low, lookback)
+recentHigh = ta.highest(high, lookback)
+nearSupport = low <= recentLow * 1.002  // 0.2%容差
+nearResistance = high >= recentHigh * 0.998
+
+/// ===== 蜡烛形态识别 =====
+body = math.abs(open - close)
+candleRange = high - low  // ← 改名为 candleRange
+
+// Pin Bar 逻辑
+lowerShadow = math.min(open, close) - low
+upperShadow = high - math.max(open, close)
+isBullPin = lowerShadow >= 2 * body and upperShadow <= 0.3 * body and candleRange > ta.atr(atrLen) * 0.5
+isBearPin = upperShadow >= 2 * body and lowerShadow <= 0.3 * body and candleRange > ta.atr(atrLen) * 0.5
+
+// 吞没形态
+bullEngulf = open[1] > close[1] and close > open and close > open[1] and open < close[1]
+bearEngulf = open[1] < close[1] and close < open and close < open[1] and open > close[1]
+
+// ===== 成交量过滤（可选）=====
+volAvg = ta.sma(volume, 5)
+volOK = not useVolumeFilter or volume >= volAvg * 1.2
+
+// ===== 信号生成 =====
+bullishPattern = (isBullPin or bullEngulf)
+bearishPattern = (isBearPin or bearEngulf)
+
+longSignal = uptrend and nearSupport and bullishPattern and close > high[1] and volOK
+shortSignal = downtrend and nearResistance and bearishPattern and close < low[1] and volOK
+
+// ===== 冷却期控制 =====
+var int lastTradeBar = na
+inCooldown = not na(lastTradeBar) and (bar_index - lastTradeBar) <= cooldownBars
+
+if (longSignal and not inCooldown)
+    sl = low[1] - atrMultSL * ta.atr(atrLen)
+    tp = close + rrRatio * (close - sl)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL", from_entry="Long", stop=sl, limit=tp)
+    lastTradeBar := bar_index
+
+if (shortSignal and not inCooldown)
+    sl = high[1] + atrMultSL * ta.atr(atrLen)
+    tp = close - rrRatio * (sl - close)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL", from_entry="Short", stop=sl, limit=tp)
+    lastTradeBar := bar_index
+
+// ===== 可视化 =====
+plotshape(longSignal, title="Buy", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY", size=size.tiny)
+plotshape(shortSignal, title="Sell", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL", size=size.tiny)
+plot(smaFast, color=color.orange, title="SMA9")
+
+View in Pine Editor・70 lines
+Use on chart
+8
+330
+. Trend Filter (Fast Response)
+Replace SMA20 with SMA9 for quicker trend responsiveness.
+Long bias: Close price > SMA9
+Short bias: Close price < SMA9
+2. Key Price Zone Identification
+Support/Resistance levels are defined as the lowest low and highest high of the most recent 6 candles (approximately a 30-minute window).
+Price must touch and reverse from these zones—mere proximity is insufficient.
+3. High-Probability Candlestick Patterns Only
+Bullish Signals:
+✅ Bullish Engulfing
+✅ Bullish Pin Bar (lower wick ≥ 2× body length, upper wick ≤ 0.3× body length)
+Bearish Signals:
+✅ Bearish Engulfing
+✅ Bearish Pin Bar (upper wick ≥ 2× body length, lower wick ≤ 0.3× body length)
+❌ Excluded patterns: Piercing Line and Dark Cloud Cover (low reliability on 5-minute charts)
+4. Dual Confirmation Mechanism
+After a valid pattern forms, the next candle must close beyond the pattern’s high (for longs) or low (for shorts).
+Additionally, volume must be at least 1.2× the 5-candle average volume (optional; applicable only if volume data is available).
+5. Dynamic Risk Management
+Stop Loss: Set at the pattern’s extreme point ± 1.8 × ATR(7)
+Take Profit: Fixed 1:1.5 risk-reward ratio (due to limited continuation potential on 5-minute timeframes)
+Cooldown Period: 3 candles (15 minutes) after each trade to prevent emotional overtrading
+

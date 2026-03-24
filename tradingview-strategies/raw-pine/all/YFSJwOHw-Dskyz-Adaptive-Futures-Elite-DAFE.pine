@@ -1,0 +1,542 @@
+//@version=6
+strategy('Dskyz Adaptive Futures Elite (DAFE) - Updated', 
+         overlay=true, 
+         default_qty_type=strategy.fixed, 
+         initial_capital=1000000, 
+         commission_value=0, 
+         slippage=1, 
+         pyramiding=10)
+
+// === INPUTS ===
+
+// Moving Average Settings
+fastLength       = input.int(9, '[MA] Fast MA Length', minval=1)
+slowLength       = input.int(19, '[MA] Slow MA Length', minval=1)
+
+// RSI Settings
+useRSI           = input.bool(false, '[RSI Settings] Use RSI Filter')
+rsiLength        = input.int(14, 'RSI Length', minval=1)
+rsiOverbought    = input.int(60, 'RSI Overbought', minval=50, maxval=100)
+rsiOversold      = input.int(40, 'RSI Oversold', minval=0, maxval=50)
+rsiLookback      = input.int(1, 'RSI Lookback', minval=1)
+
+// Pattern Settings
+usePatterns      = input.bool(true, '[Pattern Settings] Use Candlestick Patterns')
+patternLookback  = input.int(19, 'Pattern Lookback Bars', minval=1)
+
+// Filter Settings
+useTrendFilter   = input.bool(true, '[Filter Settings] Use 15m Trend Filter')
+minVolume        = input.int(10, 'Minimum Volume', minval=1)
+volatilityThreshold = input.float(1.0, 'Volatility Threshold (%)', minval=0.1, step=0.1) / 100
+tradingStartHour = input.int(9, 'Trading Start Hour (24h)', minval=0, maxval=23)
+tradingEndHour   = input.int(16, 'Trading End Hour (24h)', minval=0, maxval=23)
+
+// DCA Settings
+useDCA           = input.bool(false, '[DCA Settings] Use DCA')
+maxTotalEntries  = input.int(4, 'Max Total Entries per Direction', minval=1)
+dcaMultiplier    = input.float(1.0, 'DCA ATR Multiplier', minval=0.1, step=0.1)
+
+// Signal Settings
+signalPriority   = input.string('MA', '[Signal Settings] Signal Priority', options=['Pattern', 'MA'])
+minBarsBetweenSignals = input.int(5, 'Min Bars Between Signals', minval=1)
+plotMode         = input.string('Potential Signals', 'Plot Mode', options=['Potential Signals', 'Actual Entries'])
+
+// Exit Settings
+trailOffset      = input.float(0.5, '[Exit Settings] Trailing Stop Offset ATR Multiplier', minval=0.01, step=0.01)
+trailPointsMult  = input.float(0.5, 'Trailing Stop Points ATR Multiplier', minval=0.01, step=0.01)
+profitTargetATRMult = input.float(1.2, 'Profit Target ATR Multiplier', minval=0.1, step=0.1)  // Profit target factor
+fixedStopMultiplier  = input.float(1.3, 'Fixed Stop Multiplier', minval=0.5, step=0.1)    // Fixed stop multiplier
+
+// General Settings
+debugLogging     = input.bool(true, '[General Settings] Enable Debug Logging')
+fixedQuantity    = input.int(2, 'Trade Quantity', minval=1)
+cooldownMinutes  = input.int(0, 'Cooldown Minutes', minval=0)
+
+// ATR Settings – Use Dynamic ATR or fixed value
+useDynamicATR    = input.bool(true, title="Use Dynamic ATR")
+userATRPeriod    = input.int(7, title="ATR Period (if not using dynamic)", minval=1)
+defaultATR       = timeframe.isminutes and timeframe.multiplier <= 2 ? 5 :
+                   timeframe.isminutes and timeframe.multiplier <= 5 ? 7 : 10
+atrPeriod        = useDynamicATR ? defaultATR : userATRPeriod
+
+// === TRADE TRACKING VARIABLES ===
+var int lastSignalBar   = 0
+var int lastSignalType  = 0         // 1 for long, -1 for short
+var int entryBarIndex   = 0
+var bool inLongTrade    = false
+var bool inShortTrade   = false
+
+// DCA Tracking Variables
+var int longEntryCount  = 0
+var int shortEntryCount = 0
+var float longInitialEntryPrice = na
+var float shortInitialEntryPrice = na
+var float longEntryATR  = na
+var float shortEntryATR = na
+var float long_stop_price = na
+var float short_stop_price = na
+
+// Signal Plotting Variables
+var int lastLongPlotBar = 0
+var int lastShortPlotBar = 0
+
+// === CALCULATIONS ===
+
+// Volume and Time Filters
+volumeOk    = volume >= minVolume
+currentHour = hour(time)
+timeWindow  = currentHour >= tradingStartHour and currentHour <= tradingEndHour
+
+// Additional Entry Filter: Volume Spike Condition
+volumeSpike = volume > 1.2 * ta.sma(volume, 10)
+
+// ATR & Volatility Calculations
+atr         = ta.atr(atrPeriod)
+volatility  = nz(atr / close, 0)
+volatilityOk= volatility <= volatilityThreshold
+
+// Adaptive MA Lengths
+fastLengthAdaptive = math.round(fastLength / (1 + volatility))
+slowLengthAdaptive = math.round(slowLength / (1 + volatility))
+fastLengthSafe     = math.max(1, not na(atr) ? fastLengthAdaptive : fastLength)
+slowLengthSafe     = math.max(1, not na(atr) ? slowLengthAdaptive : slowLength)
+fastMA             = ta.sma(close, fastLengthSafe)
+slowMA             = ta.sma(close, slowLengthSafe)
+
+// RSI Calculation
+rsi               = ta.rsi(close, rsiLength)
+rsiCrossover      = ta.crossover(rsi, rsiOversold)
+rsiCrossunder     = ta.crossunder(rsi, rsiOverbought)
+rsiLongOk         = not useRSI or (rsiCrossover and rsi[rsiLookback] < 70)
+rsiShortOk        = not useRSI or (rsiCrossunder and rsi[rsiLookback] > 30)
+
+// 15m Trend Filter
+[fastMA15m, slowMA15m] = request.security(syminfo.tickerid, '15', [ta.sma(close, fastLength), ta.sma(close, slowLength)])
+trend15m = fastMA15m > slowMA15m ? 1 : fastMA15m < slowMA15m ? -1 : 0
+
+// Candlestick Patterns
+isBullishEngulfing() =>
+    close[1] < open[1] and close > open and open < close[1] and close > open[1] and (close - open) > (open[1] - close[1]) * 0.8
+
+isBearishEngulfing() =>
+    close[1] > open[1] and close < open and open > close[1] and close < open[1] and (open - close) > (close[1] - open[1]) * 0.8
+
+// Pattern Strength Calculation
+patternStrength(isBull) =>
+    bull = isBull ? 1 : 0
+    bear = isBull ? 0 : 1
+    volumeStrength = volume > ta.sma(volume, 10) ? 1 : 0
+    rangeStrength  = (high - low) > ta.sma(high - low, 10) ? 1 : 0
+    strength = bull * (volumeStrength + rangeStrength) - bear * (volumeStrength + rangeStrength)
+    strength
+
+bullStrength = patternStrength(true)
+bearStrength = patternStrength(false)
+
+// Detect Patterns
+bullishEngulfingOccurred = ta.barssince(isBullishEngulfing()) <= patternLookback and bullStrength >= 1
+bearishEngulfingOccurred = ta.barssince(isBearishEngulfing()) <= patternLookback and bearStrength <= -1
+patternConflict          = bullishEngulfingOccurred and bearishEngulfingOccurred
+
+// MA Conditions with Trend & RSI Filters
+maAbove      = close > fastMA and fastMA > slowMA and close > close[1]
+maBelow      = close < fastMA and fastMA < slowMA and close < close[1]
+trendLongOk  = not useTrendFilter or trend15m >= 0
+trendShortOk = not useTrendFilter or trend15m <= 0
+
+// Signal Priority Logic
+bullPattern  = usePatterns and bullishEngulfingOccurred
+bearPattern  = usePatterns and bearishEngulfingOccurred
+bullMA       = maAbove and trendLongOk and rsiLongOk
+bearMA       = maBelow and trendShortOk and rsiShortOk
+
+longCondition  = false
+shortCondition = false
+
+if signalPriority == 'Pattern'
+    longCondition  := bullPattern or (not bearPattern and bullMA)
+    shortCondition := bearPattern or (not bullPattern and bearMA)
+else
+    longCondition  := bullMA or (not bearMA and bullPattern)
+    shortCondition := bearMA or (not bullMA and bearPattern)
+
+// Apply Filters and require volume spike for quality entries
+longCondition  := longCondition and volumeOk and volumeSpike and timeWindow and volatilityOk and not patternConflict
+shortCondition := shortCondition and volumeOk and volumeSpike and timeWindow and volatilityOk and not patternConflict
+
+// Update Trade Status
+if strategy.position_size > 0
+    inLongTrade := true
+    inShortTrade := false
+else if strategy.position_size < 0
+    inShortTrade := true
+    inLongTrade := false
+else
+    inLongTrade := false
+    inShortTrade := false
+
+// Entry Checks
+canTrade      = strategy.position_size == 0
+validQuantity = fixedQuantity > 0
+quantity      = fixedQuantity
+
+// Prevent Multiple Alerts Per Bar
+var bool alertSent = false
+if barstate.isnew
+    alertSent := false
+
+// Cooldown Logic
+var float lastExitTime = na
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    lastExitTime := time
+canEnter = na(lastExitTime) or ((time - lastExitTime) / 60000 >= cooldownMinutes)
+
+// === ENTRY LOGIC ===
+if canTrade and validQuantity and not alertSent and canEnter and barstate.isconfirmed
+    if longCondition and not shortCondition and (lastSignalBar != bar_index or lastSignalType != 1)
+        strategy.entry('Long', strategy.long, qty=quantity)
+        longInitialEntryPrice := close
+        longEntryATR         := atr
+        longEntryCount       := 1
+        alert('Enter Long', alert.freq_once_per_bar)
+        alertSent            := true
+        lastSignalBar        := bar_index
+        lastSignalType       := 1
+        entryBarIndex        := bar_index
+        if debugLogging
+            log.info('Long entry executed: Qty=' + str.tostring(quantity))
+    else if shortCondition and not longCondition and (lastSignalBar != bar_index or lastSignalType != -1)
+        strategy.entry('Short', strategy.short, qty=quantity)
+        shortInitialEntryPrice := close
+        shortEntryATR          := atr
+        shortEntryCount        := 1
+        alert('Enter Short', alert.freq_once_per_bar)
+        alertSent             := true
+        lastSignalBar         := bar_index
+        lastSignalType        := -1
+        entryBarIndex         := bar_index
+        if debugLogging
+            log.info('Short entry executed: Qty=' + str.tostring(quantity))
+
+// === DCA LOGIC (IF ENABLED) ===
+if useDCA
+    if strategy.position_size > 0 and longEntryCount < maxTotalEntries and bullMA and rsi < 70
+        nextDCALevel = longInitialEntryPrice - longEntryCount * longEntryATR * dcaMultiplier
+        if close <= nextDCALevel
+            strategy.entry('Long DCA ' + str.tostring(longEntryCount), strategy.long, qty=quantity)
+            longEntryCount := longEntryCount + 1
+    if strategy.position_size < 0 and shortEntryCount < maxTotalEntries and bearMA and rsi > 30
+        nextDCALevel = shortInitialEntryPrice + shortEntryATR * shortEntryCount * dcaMultiplier
+        if close >= nextDCALevel
+            strategy.entry('Short DCA ' + str.tostring(shortEntryCount), strategy.short, qty=quantity)
+            shortEntryCount := shortEntryCount + 1
+
+// === RESET DCA VARIABLES ON EXIT ===
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    longEntryCount := 0
+    shortEntryCount := 0
+    longInitialEntryPrice := na
+    shortInitialEntryPrice := na
+    longEntryATR := na
+    shortEntryATR := na
+
+// === FIXED STOP-LOSS CALCULATION (WIDER INITIAL STOP) ===
+long_stop_price  := strategy.position_avg_price - atr * fixedStopMultiplier
+short_stop_price := strategy.position_avg_price + atr * fixedStopMultiplier
+
+// === ADJUST TRAILING POINTS BASED ON PROFIT ===
+profitLong  = strategy.position_size > 0 ? close - strategy.position_avg_price : 0
+profitShort = strategy.position_size < 0 ? strategy.position_avg_price - close : 0
+trailPointsMultAdjusted       = profitLong > atr ? 0.3 : profitLong > atr * 0.66 ? 0.4 : trailPointsMult      // For long positions
+trailPointsMultAdjustedShort  = profitShort > atr ? 0.3 : profitShort > atr * 0.66 ? 0.4 : trailPointsMult   // For short positions
+trailPointsLong  = atr * trailPointsMultAdjusted
+trailPointsShort = atr * trailPointsMultAdjustedShort
+
+// === EXIT LOGIC ===
+// On the entry bar, always use the fixed stop; thereafter, use a combination of fixed stop, trailing stop, and a profit target.
+// Profit Target: For longs, exit at avg_entry + atr * profitTargetATRMult; for shorts, exit at avg_entry - atr * profitTargetATRMult.
+if strategy.position_size > 0
+    if bar_index == entryBarIndex
+        if debugLogging
+            log.info("Long exit on entry bar: fixed stop applied. Price=" + str.tostring(close))
+        strategy.exit('Long Exit', 'Long', stop=long_stop_price)
+    else
+        if debugLogging
+            log.info("Long Trade: profit=" + str.tostring(profitLong) + ", ATR=" + str.tostring(atr))
+        strategy.exit('Long Exit', 'Long', 
+             stop=long_stop_price, 
+             limit = strategy.position_avg_price + atr * profitTargetATRMult,
+             trail_points=trailPointsLong, 
+             trail_offset=atr * trailOffset)
+            
+if strategy.position_size < 0
+    if bar_index == entryBarIndex
+        if debugLogging
+            log.info("Short exit on entry bar: fixed stop applied. Price=" + str.tostring(close))
+        strategy.exit('Short Exit', 'Short', stop=short_stop_price)
+    else
+        if debugLogging
+            log.info("Short Trade: profit=" + str.tostring(profitShort) + ", ATR=" + str.tostring(atr))
+        strategy.exit('Short Exit', 'Short', 
+             stop=short_stop_price, 
+             limit = strategy.position_avg_price - atr * profitTargetATRMult,
+             trail_points=trailPointsShort, 
+             trail_offset=atr * trailOffset)
+
+// === FORCE CLOSE ON LAST BAR (OPTIONAL) ===
+if barstate.islast
+    if strategy.position_size > 0
+        strategy.close('Long', comment='Forced Exit')
+    if strategy.position_size < 0
+        strategy.close('Short', comment='Forced Exit')
+
+// === SIGNAL PLOTTING LOGIC ===
+plotLongSignal  = longCondition and canTrade and (bar_index - lastLongPlotBar >= minBarsBetweenSignals or lastLongPlotBar == 0)
+plotShortSignal = shortCondition and canTrade and (bar_index - lastShortPlotBar >= minBarsBetweenSignals or lastShortPlotBar == 0)
+
+if plotLongSignal
+    lastLongPlotBar := bar_index
+if plotShortSignal
+    lastShortPlotBar := bar_index
+
+// Define plotting conditions based on plotMode
+plotLongShape  = plotMode == 'Potential Signals' ? plotLongSignal : strategy.position_size > 0 and strategy.position_size[1] <= 0
+plotShortShape = plotMode == 'Potential Signals' ? plotShortSignal : strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+// === VISUALIZATION ===
+plot(fastMA, color=color.blue, linewidth=2, title='Fast MA')
+plot(slowMA, color=color.red, linewidth=2, title='Slow MA')
+
+var float longSL  = na
+var float shortSL = na
+if strategy.position_size > 0
+    longSL := math.max(longSL, high - trailPointsLong)
+else
+    longSL := na
+plot(longSL, color=color.green, style=plot.style_stepline, title='Long SL')
+
+if strategy.position_size < 0
+    shortSL := math.min(shortSL, low + trailPointsShort)
+else
+    shortSL := na
+plot(shortSL, color=color.red, style=plot.style_stepline, title='Short SL')
+
+bgcolor(timeWindow ? color.new(color.blue, 95) : na, title="Trading Hours Highlight")
+if plotLongShape
+    label.new(bar_index, low, "Buy", yloc=yloc.belowbar, color=color.green, textcolor=color.white, style=label.style_label_up)
+if plotShortShape
+    label.new(bar_index, high, "Sell", yloc=yloc.abovebar, color=color.red, textcolor=color.white, style=label.style_label_down)
+
+// === DEBUG TABLE ===
+var table debugTable = table.new(position.top_right, 3, 10, bgcolor=color.rgb(0, 0, 0, 80), border_color=color.white, border_width=1)
+if barstate.islast
+    table.cell(debugTable, 0, 0, 'Signal', text_color=color.rgb(168, 168, 168), bgcolor=color.rgb(50, 50, 50))
+    table.cell(debugTable, 1, 0, 'Status', text_color=color.rgb(168, 168, 168), bgcolor=color.rgb(50, 50, 50))
+    table.cell(debugTable, 2, 0, 'Priority', text_color=color.rgb(168, 168, 168), bgcolor=color.rgb(50, 50, 50))
+
+    table.cell(debugTable, 0, 1, 'MA Long', text_color=color.blue)
+    table.cell(debugTable, 1, 1, bullMA ? 'Yes' : 'No', text_color=bullMA ? color.green : color.red)
+    table.cell(debugTable, 2, 1, signalPriority == 'MA' ? 'High' : 'Low', text_color=color.white)
+
+    table.cell(debugTable, 0, 2, 'MA Short', text_color=color.blue)
+    table.cell(debugTable, 1, 2, bearMA ? 'Yes' : 'No', text_color=bearMA ? color.green : color.red)
+    table.cell(debugTable, 2, 2, signalPriority == 'MA' ? 'High' : 'Low', text_color=color.white)
+
+    table.cell(debugTable, 0, 3, 'Bull Pattern', text_color=color.blue)
+    table.cell(debugTable, 1, 3, bullPattern ? 'Yes' : 'No', text_color=bullPattern ? color.green : color.red)
+    table.cell(debugTable, 2, 3, signalPriority == 'Pattern' ? 'High' : 'Low', text_color=color.white)
+
+    table.cell(debugTable, 0, 4, 'Bear Pattern', text_color=color.blue)
+    table.cell(debugTable, 1, 4, bearPattern ? 'Yes' : 'No', text_color=bearPattern ? color.green : color.red)
+    table.cell(debugTable, 2, 4, signalPriority == 'Pattern' ? 'High' : 'Low', text_color=color.white)
+
+    table.cell(debugTable, 0, 5, 'Filters', text_color=color.rgb(168, 168, 168), bgcolor=color.rgb(50, 50, 50))
+    table.cell(debugTable, 1, 5, 'Status', text_color=color.rgb(168, 168, 168), bgcolor=color.rgb(50, 50, 50))
+    table.cell(debugTable, 2, 5, '', text_color=color.white, bgcolor=color.rgb(50, 50, 50))
+
+    table.cell(debugTable, 0, 6, 'Time Window', text_color=color.blue)
+    table.cell(debugTable, 1, 6, timeWindow ? 'OK' : 'Closed', text_color=timeWindow ? color.green : color.red)
+    table.cell(debugTable, 2, 6, str.tostring(currentHour) + 'h', text_color=color.white)
+
+    table.cell(debugTable, 0, 7, 'Volume', text_color=color.blue)
+    table.cell(debugTable, 1, 7, volumeOk ? 'OK' : 'Low', text_color=volumeOk ? color.green : color.red)
+    table.cell(debugTable, 2, 7, str.tostring(volume, '#'), text_color=color.white)
+
+    table.cell(debugTable, 0, 8, 'Volatility', text_color=color.blue)
+    table.cell(debugTable, 1, 8, volatilityOk ? 'OK' : 'High', text_color=volatilityOk ? color.green : color.red)
+    table.cell(debugTable, 2, 8, str.tostring(volatility * 100, '#.##') + '%', text_color=color.white)
+
+    table.cell(debugTable, 0, 9, 'Signals', text_color=color.blue)
+    table.cell(debugTable, 1, 9, longCondition and not shortCondition ? 'LONG' : shortCondition and not longCondition ? 'SHORT' : longCondition and shortCondition ? 'CONFLICT' : 'NONE', text_color=longCondition and not shortCondition ? color.green : shortCondition and not longCondition ? color.red : color.yellow)
+    table.cell(debugTable, 2, 9, canEnter ? alertSent ? 'Sent' : 'Ready' : 'Cooldown', text_color=canEnter ? alertSent ? color.yellow : color.green : color.gray)
+
+// === PERFORMANCE DASHBOARD ===
+var table dashboard = table.new(position.bottom_left, 3, 3, bgcolor=color.rgb(0, 0, 0, 80), border_color=color.white, border_width=1)
+if barstate.islast
+    table.cell(dashboard, 0, 0, 'Position', text_color=color.rgb(168, 168, 168), bgcolor=color.rgb(50, 50, 50))
+    table.cell(dashboard, 1, 0, 'P/L', text_color=color.rgb(168, 168, 168), bgcolor=color.rgb(50, 50, 50))
+    table.cell(dashboard, 2, 0, 'Statistics', text_color=color.rgb(168, 168, 168), bgcolor=color.rgb(50, 50, 50))
+
+    table.cell(dashboard, 0, 1, strategy.position_size > 0 ? 'Long' : strategy.position_size < 0 ? 'Short' : 'Flat', text_color=strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.blue)
+    table.cell(dashboard, 1, 1, str.tostring(strategy.netprofit, '#.##'), text_color=strategy.netprofit >= 0 ? color.green : color.red)
+    table.cell(dashboard, 2, 1, 'Win Rate', text_color=color.white)
+
+    table.cell(dashboard, 0, 2, strategy.position_size != 0 ? 'Bars: ' + str.tostring(bar_index - entryBarIndex) : '', text_color=color.white)
+    table.cell(dashboard, 1, 2, strategy.position_size != 0 ? 'Cooldown: ' + str.tostring(cooldownMinutes) + 'm' : '', text_color=color.white)
+    table.cell(dashboard, 2, 2, strategy.closedtrades > 0 ? str.tostring(strategy.wintrades / strategy.closedtrades * 100, '#.##') + '%' : 'N/A', text_color=color.white)
+
+// === CHART TITLE ===
+var table titleTable = table.new(position.bottom_right, 1, 1, bgcolor=color.rgb(0, 0, 0, 80), border_color=color.rgb(0, 50, 137), border_width=1)
+table.cell(titleTable, 0, 0, "Dskyz - DAFE Trading Systems", text_color=color.rgb(159, 127, 255, 80), text_size=size.large)
+
+View in Pine Editor・390 lines
+Use on chart
+2
+6
+9
+12
+5 872
+Apr 9, 2025
+Dskyz Adaptive Futures Edge (DAFE)
+
+https://imgur.com/a/pnDDMqJ
+
+
+A Dynamic Futures Trading Strategy
+
+DAFE adapts to market volatility and price action using technical indicators and advanced risk management. It’s built for high-stakes futures trading (e.g., MNQ, BTCUSDT.P), offering modular logic for scalpers and swing traders alike.
+
+Key Features
+
+Adaptive Moving Averages
+Dynamic Logic: Fast and slow SMAs adjust lengths via ATR, reacting to momentum shifts and smoothing in calm markets.
+Signals: Long entry on fast SMA crossing above slow SMA with price confirmation; short on cross below.
+
+RSI Filtering (Optional)
+Momentum Check: Confirms entries with RSI crossovers (e.g., above oversold for longs). Toggle on/off with custom levels.
+Fine-Tuning: Adjustable lookback and thresholds (e.g., 60/40) for precision.
+
+Candlestick Pattern Recognition
+Eng|Enhanced Detection: Identifies strong bullish/bearish engulfing patterns, validated by volume and range strength (vs. 10-period SMA).
+Conflict Avoidance: Skips trades if both patterns appear in the lookback window, reducing whipsaws.
+
+Multi-Timeframe Trend Filter
+15-Minute Alignment: Syncs intrabar trades with 15-minute SMA trends; optional for flexibility.
+
+Dollar-Cost Averaging (DCA) New!
+Scaling: Adds up to a set number of entries (e.g., 4) on pullbacks/rallies, spaced by ATR multiples.
+Control: Caps exposure and resets on exit, enhancing trend-following potential.
+
+Trade Execution & Risk Management
+Entry Rules: Prioritizes moving averages or patterns (user choice), with volume, volatility, and time filters.
+Stops & Trails:
+Initial Stop: ATR-based (2–3.5x, volatility-adjusted).
+Trailing Stop: Locks profits with configurable ATR offset and multiplier.
+
+Discipline
+Cooldown: Pauses post-exit (e.g., 0–5 minutes).
+Min Hold: Ensures trades last a set number of bars (e.g., 2–10).
+
+Visualization & Tools
+Charts: Overlays MAs, stops, and signals; trend shaded in background.
+Dashboard: Shows position, P&L, win rate, and more in real-time.
+Debugging: Logs signal details for optimization.
+
+Input Parameters
+Parameter Purpose Suggested Use
+Use RSI Filter - Toggle RSI confirmation *Disable 4 price-only
+trading
+RSI Length - RSI period (e.g., 14) *7–14 for sensitivity
+RSI Overbought/Oversold - Adjust for market type *Set levels (e.g., 60/40)
+Use Candlestick Patterns - Enables engulfing signals *Disable for MA focus
+Pattern Lookback - Pattern window (e.g., 19) *10–20 bars for balance
+Use 15m Trend Filter - Align with 15-min trend *Enable for trend trades
+Fast/Slow MA Length - Base MA lengths (e.g., 9/19) *10–25 / 30–60 per
+timeframe
+Volatility Threshold - Filters volatile spikes *Max ATR/close (e.g., 1%)
+Min Volume - Entry volume threshold *Avoid illiquid periods
+(e.g., 10)
+ATR Length - ATR period (e.g., 14) *Standard volatility
+measure
+Trailing Stop ATR Offset - Trail distance (e.g., 0.5) *0.5–1.5 for tightness
+Trailing Stop ATR Multi - Trail multiplier (e.g., 1.0) *1–3 for trend room
+Cooldown Minutes - Post-exit pause (e.g., 0–5) *Prevents overtrading
+Min Bars to Hold - Min trade duration (e.g., 2) *5–10 for intraday
+Trading Hours - Active window (e.g., 9–16) *Focus on key sessions
+Use DCA - Toggle DCA *Enable for scaling
+Max DCA Entries - Cap entries (e.g., 4) *Limit risk exposure
+DCA ATR Multiplier Entry spacing (e.g., 1.0) *1–2 for wider gaps
+
+
+Pine Script®
+Compliance
+
+
+Realistic Testing: Fixed quantities, capital, and slippage for accurate backtests.
+Transparency: All logic is user-visible and adjustable.
+Risk Controls: Cooldowns, stops, and hold periods ensure stability.
+Flexibility: Adapts to various futures and timeframes.
+
+Summary
+DAFE excels in volatile futures markets with adaptive logic, DCA scaling, and robust risk tools. Currently in prop account testing, it’s a powerful framework for precision trading.
+
+Caution
+DAFE is experimental, not a profit guarantee. Futures trading risks significant losses due to leverage. Backtest, simulate, and monitor actively before live use. All trading decisions are your responsibility.
+Apr 10, 2025
+Release Notes
+────────────────────────────── Dskyz Adaptive Futures Edge (DAFE) Summary
+
+DAFE is a dynamic futures trading strategy designed for high-stakes instruments (e.g., MNQ, BTCUSDT.P) that adapts to market volatility and price action with advanced technical indicators and risk controls. It caters to both scalpers and swing traders by offering modular logic and detailed input parameters.
+
+Adaptive Technical Indicators and Signal Generation
+
+Adaptive Moving Averages: Uses fast and slow SMAs whose lengths adjust dynamically based on ATR. A long signal is generated when the fast SMA crosses above the slow SMA with price confirmation, while a short signal occurs on the reverse.
+
+RSI Filtering (Optional): Provides momentum checks through RSI crossovers (e.g., confirmations above oversold levels for longs). Traders can toggle the filter and customize RSI lookback and thresholds (e.g., 60/40) for precision.
+
+Candlestick Pattern Recognition: Detects strong bullish or bearish engulfing patterns confirmed by volume and strength relative to a 10-period SMA. It avoids conflicts by skipping trades if multiple patterns occur in the lookback window.
+
+Multi-Timeframe Trend Filter: Optionally aligns intrabar signals with a 15-minute SMA trend, adding another layer of confirmation.
+
+Risk Management and Trade Execution
+
+Entry Rules: Prioritizes either the moving average signals or candlestick patterns, supplemented by filters on volume, volatility, and time.
+
+Stops & Trailing Stops:
+
+Initial Stop: Set using ATR (typically 2–3.5×, adjusted for volatility) applied from the entry bar.
+
+Trailing Stop: Employs an ATR-based offset and multiplier that tightens as the trade becomes profitable (e.g., shifts to a 0.3–0.5 multiplier based on profit thresholds) to lock in gains.
+
+Dollar-Cost Averaging (DCA):
+
+Implements scaling into positions by adding up to a set number of entries (e.g., 4) on pullbacks or rallies, spaced by ATR multiples.
+
+Ensures that exposure is capped and DCA variables reset on exit, maintaining clear state management.
+
+Visualization, Debugging, and Compliance
+
+Charts and Dashboard: Overlays include adaptive moving averages, stop levels, and entry signals (displayed as “Buy”/“Sell” labels), with a background trend indicator. A performance dashboard shows live position data, P&L, and win rate.
+
+Debugging: Signal details are logged for systematic optimization.
+
+Risk Controls and Discipline: Cooldown periods after exits and minimum hold durations help manage entry frequency and avoid overtrading.
+
+Comparison of Old and New Code Improvements
+
+ATR Calculation: Instead of a fixed ATR (period 14), the new system offers dynamic ATR adjustments based on chart timeframe (e.g., 5 for 2-minute, 7 for 5-minute) or a user-defined default, enhancing market responsiveness.
+
+Volume Spike Filter: The new version adds a condition to check for a volume spike (volume > 1.2 * ta.sma(volume, 10)), ensuring entries are made during significant volume surges, unlike the old minimum volume threshold.
+
+Stop-Loss & Trailing Stop Enhancements:
+
+Introduces a wider initial stop (fixedStopMultiplier = 1.3) on the entry bar and adds a profit target (profitTargetATRMult = 1.2) to secure gains.
+
+Implements dynamic trailing stops that adjust based on profit levels (tightening when profit exceeds certain ATR thresholds), preventing premature exits.
+
+Enhanced Exit Logic and DCA Reset: Improves exit strategies by combining fixed stops, profit targets, and dynamically adjusted trailing stops, while ensuring that DCA variables reset properly, avoiding logic conflicts.
+
+Visualization Enhancements: Upgraded debugging tables with better color coding and a comprehensive performance dashboard add clarity and ease of use.
+
+────────────────────────────── Final Note:
+While DAFE offers a robust framework for adaptive futures trading, it is experimental and not a profit guarantee. Detailed backtesting, simulation, and active monitoring are essential due to inherent trading risks with leveraged instruments.

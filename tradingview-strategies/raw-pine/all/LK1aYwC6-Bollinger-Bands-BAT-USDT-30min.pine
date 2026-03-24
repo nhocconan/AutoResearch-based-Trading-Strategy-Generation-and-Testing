@@ -1,0 +1,72 @@
+//@version=4
+strategy("Bollinger Bands BAT/USDT 30min", overlay=true, initial_capital=10000, pyramiding = 0, currency="USD", default_qty_type=strategy.percent_of_equity, default_qty_value=100,  commission_type=strategy.commission.percent,commission_value=0.0)
+
+/// Indicators
+///Bollinger Bands
+source = close
+length = input(16, minval=1)
+mult = input(3, step=0.1, minval=0.001, maxval=50)
+basis = sma(source, length)
+dev = mult * stdev(source, length)
+
+upper = basis + dev
+lower = basis - dev
+
+plot(basis, color=color.red)
+p1 = plot(upper, color=color.blue)
+p2 = plot(lower, color=color.blue)
+fill(p1, p2)
+
+//Bollinger bands width
+bbw = (upper-lower)/basis*1000
+//plot(bbw, color=color.blue)
+
+upper_bbw_input = input(title="BBW Upper Threshold", step=1, minval=0, defval=50)
+lower_bbw_input = input(title="BBW Lower Threshold", step=1, minval=0, defval=20)
+
+
+// Backtesting Period
+testStartYear = input(2019, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2020, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(31, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+
+// Take Profit
+tp_inp = input(8, title='Take Profit %', step=0.1)/100
+take_level = strategy.position_avg_price * (1 + tp_inp)
+
+//Entry Strategy
+entry_long = crossover(source, lower) and (bbw < upper_bbw_input) and (bbw > lower_bbw_input)
+exit_long = cross(high,upper) or close < lower
+
+if testPeriod()
+
+    strategy.entry(id="LongBB", long=true, comment="LongBB", when=entry_long)
+    strategy.exit("Take Profit Long","LongBB",limit=take_level)
+    strategy.close(id="LongBB", when=exit_long )
+
+View in Pine Editor・55 lines
+Use on chart
+1
+1
+8
+1
+3 603
+This is ready to use Bollinger Band strategy that was backtested on the data from the previous year 2019.
+
+The main purpose of this strategy is to determine trades with the highest probability of success, to keep a consistent portfolio growth throughout the year. This strategy cherry-picks the most reliable points of entry on a particular timeframe (30m) for the particular asset (BAT/USDT). The backtest shows a great result of 78.95% profitability with the maximum drawdown of -4.02%. This is one of my strategies out of the group of automated strategies that helps to grow my portfolio steadily.
+
+You are welcome to change inputs and backtest the following strategy. Any comments or ideas would be appreciated.
+
+If you are happy with existing results and would like to automate the strategy, which can be done through alerts, then you need to convert it to study and add alerts in the code.
+
+Let me know if you are interested in that and I will create a study based on this strategy.

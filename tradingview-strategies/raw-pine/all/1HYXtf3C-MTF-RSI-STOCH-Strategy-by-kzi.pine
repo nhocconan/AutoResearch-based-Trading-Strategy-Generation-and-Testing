@@ -1,0 +1,5 @@
+//@version=5
+rsioverbought=##input(defval=70,type='INPUT_INTEGER',##id='in_8')
+rsioversold=##input(defval=30,type='INPUT_INTEGER',##id='in_9')
+##root(root_metainfo,rm_0,rsioverbought,input__float)
+##root(root_metainfo,rm_1,rsioversold,input__float)

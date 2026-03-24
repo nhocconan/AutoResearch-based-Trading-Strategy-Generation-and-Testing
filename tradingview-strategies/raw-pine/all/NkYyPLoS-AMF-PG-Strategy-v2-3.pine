@@ -1,0 +1,343 @@
+//@version=6
+strategy("AMF PG Strategy v2.3", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, pyramiding=0, process_orders_on_close=true, close_entries_rule="ANY")
+
+g_a = "Group A"
+p_a1 = input.string('{"action": "buy", "symbol": "{{ticker}}"}', "Param A1", group=g_a)
+p_a2 = input.string('{"action": "sell", "symbol": "{{ticker}}"}', "Param A2", group=g_a)
+p_a3 = input.string('{"action": "close", "symbol": "{{ticker}}"}', "Param A3", group=g_a)
+
+clr1 = color.new(#26A69A, 0)
+clr2 = color.new(#EF5350, 0)
+clr3 = color.new(#FFCA28, 0)
+
+g_b = "Group B"
+p_b1 = input.bool(true, "AMF PG ", group=g_b)
+p_b2 = input.int(10, "Param B1", group=g_b)
+p_b3 = input.float(3.0, "Param B2", group=g_b, step=0.1)
+p_b4 = input.float(1.7, "Param B3", group=g_b, step=0.1)
+
+g_c = "Group C"
+p_c1 = input.bool(true, "Maximum Drawdown", group=g_c)
+p_c2 = input.float(15.0, "Param C1 (%)", minval=1.0, group=g_c)
+
+g_d = "Group D"
+p_d1 = input.bool(true, "Filter D1", group=g_d)
+p_d2 = input.int(14, "Param D1", group=g_d)
+p_d3 = input.float(22.0, "Param D2", group=g_d)
+p_d4 = input.bool(true, "Filter D2", group=g_d)
+p_d5 = input.int(14, "Param D3", group=g_d)
+p_d6 = input.float(60.0, "Param D4", group=g_d)
+p_d7 = input.bool(true, "Filter D3", group=g_d)
+p_d8 = input.int(14, "Param D5", group=g_d)
+
+g_e = "Group E"
+p_e1 = input.bool(true, "Filter E1", group=g_e)
+p_e2 = input.int(100, "Param E1", group=g_e)
+p_e3 = input.float(0.5, "Param E2", group=g_e, step=0.01)
+p_e4 = input.int(20, "Param E3", group=g_e)
+p_e5 = input.int(100, "Param E4", group=g_e)
+p_e6 = input.float(1.5, "Param E5", group=g_e, step=0.1)
+
+f1(s, p) => ta.sma(s, p)
+f2(s, p) =>
+    var float v = na
+    a = 1.0 / p
+    v := na(v[1]) ? f1(s, p) : a * s + (1 - a) * nz(v[1])
+    v
+f3(s, p) =>
+    var float v = na
+    a = 2.0 / (p + 1)
+    v := na(v[1]) ? f1(s, p) : a * s + (1 - a) * nz(v[1])
+    v
+f4(p) =>
+    tr = ta.tr
+    f2(tr, p)
+f5(s, l) =>
+    ln = math.log(l)
+    lrs = 0.0
+    if l > 1
+        m = ta.sma(s, l)
+        ys = 0.0
+        ss = 0.0
+        rmax = -1e10
+        rmin = 1e10
+        for i = 0 to l - 1
+            d = s[i] - m
+            ys += d
+            rmax := math.max(rmax, ys)
+            rmin := math.min(rmin, ys)
+            ss += d * d
+        rv = rmax - rmin
+        sv = math.sqrt(ss / l)
+        if sv > 0
+            lrs := math.log(rv / sv)
+    ln > 0 ? lrs / ln : 0.5
+
+var b1 = array.new_float(0)
+var b2 = array.new_float(0)
+var b3 = array.new_float(0)
+var b4 = array.new_float(0)
+var b5 = array.new_float(0)
+
+pr1 = timeframe.isintraday ? timeframe.multiplier <= 5 ? 7 : 9 : timeframe.isdaily ? 14 : 21
+pr2 = timeframe.isintraday ? timeframe.multiplier <= 5 ? 30 : 55 : timeframe.isdaily ? 100 : 150
+pr3 = timeframe.isintraday ? timeframe.multiplier <= 5 ? 30 : 50 : timeframe.isdaily ? 75 : 100
+
+array.push(b1, close)
+array.push(b2, high)
+array.push(b3, low)
+vl1 = ta.tr
+array.push(b4, vl1)
+
+vl2 = close / close[1] - 1
+vl3 = ta.stdev(vl2, pr3) * 100
+vl4 = na(vl3) or pr3 <= 0 ? pr1 : math.round(pr1 + (ta.highest(vl3, pr3) - ta.lowest(vl3, pr3) > 0 ? (vl3 - ta.lowest(vl3, pr3)) / (ta.highest(vl3, pr3) - ta.lowest(vl3, pr3)) : 0) * (pr2 - pr1))
+pr4 = int(na(vl4) or vl4 < 1 ? 14 : vl4)
+pr5 = pr4 > 0 ? int(math.round(pr4 * 0.66)) : 1
+pr5 := pr5 < 1 ? 1 : pr5
+
+var float vl5 = 0.0
+if bar_index > 0
+    vl6 = 1.0 / pr5
+    vl7 = array.size(b4) >= pr5 ? array.avg(array.slice(b4, array.size(b4) - pr5, array.size(b4))) : vl1
+    vl5 := na(vl5[1]) ? vl7 : vl6 * vl1 + (1 - vl6) * nz(vl5[1])
+
+array.push(b5, vl5)
+
+if array.size(b1) > pr2 + 5
+    array.shift(b1)
+    array.shift(b2)
+    array.shift(b3)
+    array.shift(b4)
+    array.shift(b5)
+
+f6() =>
+    l1 = 3
+    l2 = 8
+    bb_b1 = ta.sma(close, 100)
+    bb_d1 = ta.stdev(close, 100)
+    lt_bbw = bb_b1 > 0 ? (bb_b1 + 2 * bb_d1 - (bb_b1 - 2 * bb_d1)) / bb_b1 : 0
+    bb_b2 = ta.sma(close, 20)
+    bb_d2 = ta.stdev(close, 20)
+    st_bbw = bb_b2 > 0 ? (bb_b2 + 2 * bb_d2 - (bb_b2 - 2 * bb_d2)) / bb_b2 : 0
+    vr = lt_bbw > 0 ? st_bbw / lt_bbw : 1.0
+    dm = math.max(1.5, math.min(2.5 * vr, 3.5))
+    ms = close - close[1]
+    ms1 = ta.sma(ms, l1)
+    ms2 = ta.sma(ms, l2)
+    ms3 = ta.stdev(ms, l2)
+    mt = ms3 * dm
+    ma_u = ms1 > ms2 + mt
+    ma_d = ms1 < ms2 - mt
+    asrc = ta.atr(1)
+    as1 = ta.sma(asrc, l1)
+    as2 = ta.sma(asrc, l2)
+    as3 = ta.stdev(asrc, l2)
+    at = as3 * dm
+    aa = as1 > as2 + at
+    vs1 = ta.sma(volume, l1)
+    vs2 = ta.sma(volume, l2)
+    vs3 = ta.stdev(volume, l2)
+    vt = vs3 * dm
+    va = vs1 > vs2 + vt
+    tr_s = ma_d and (aa or va)
+    tr_b = ma_u and (aa or va)
+    sig = tr_s ? -1 : tr_b ? 1 : 0
+    [sig, tr_s, tr_b]
+
+f7(p1, p2) =>
+    [dp, dn, ax] = ta.dmi(p1, p2)
+    up = ax > 30 and dp > dn
+    down = ax > 30 and dn > dp
+    [up, down]
+
+f8(len) =>
+    sa = ta.sma(ta.tr, len)
+    rh = ta.highest(high, len)
+    rl = ta.lowest(low, len)
+    rd = rh - rl
+    ch = rd > 0 ? 100 * math.log10(sa / rd) / math.log10(len) : 50
+    ch
+
+[dmi_p, dmi_n, val_adx] = ta.dmi(p_d8, p_d2)
+val_chop = f8(p_d5)
+var float val_h = 0.5
+if bar_index % 5 == 0
+    val_h := f5(math.log(close), p_e2)
+v1 = ta.sma(ta.atr(1), p_e4)
+v2 = ta.sma(ta.atr(1), p_e5)
+v_exp = v2 > 0 ? v1 / v2 > p_e6 : false
+
+f9(src, flow_u, flow_d) =>
+    atr_val = f4(14)
+    var int dir = 0
+    var float trail = na
+    var bool stat = false
+
+    if bar_index >= pr2
+        ps = pr4
+        pn = pr5
+        nr = vl5
+        a = 2.0 / (ps + 1)
+        i_sma = ta.sma(src, ps)
+        e1 = 0.0
+        e1 := na(e1[1]) ? i_sma : a * src + (1 - a) * nz(e1[1])
+        e2 = 0.0
+        e2 := na(e2[1]) ? i_sma : a * e1 + (1 - a) * nz(e2[1])
+        v = 2 * e1 - e2
+        e = (ta.highest(high, ps) + ta.lowest(low, ps)) / 2
+        kv = f1(nr, 3)
+        ln = ta.sma(nr, pn)
+        vr = ln > 0 ? kv / ln : 1
+        af = math.min(vr, 3.0)
+        gs = (f1(volume, 3) + f1(volume, 5) + f1(volume, 8)) / 3.0
+        ge = f3(gs, 5)
+        fs = (f1(volume, 3) + volume) / 2.0
+        fx = math.min(ge > 0 ? fs / ge : 1, 3.0)
+        
+        [sig_pg, sell_pg, buy_pg] = f6()
+        cnd = sell_pg or buy_pg
+        cp = (v * fx + e * (2.0 - fx)) / 2.0
+        dm = af * fx
+        b = atr_val * 0.5
+        ub_n = cp + kv * dm + b
+        lb_n = cp - kv * dm - b
+        ub = cnd ? src + kv * p_b4 : ub_n
+        lb = cnd ? src - kv * p_b4 : lb_n
+
+        stat := cnd
+        
+        c1_ok = not p_d1 or val_adx > p_d3
+        c2_ok = not p_d4 or val_chop < p_d6
+        c3_ok = not p_d7 or dmi_p > dmi_n
+        c4_ok = not p_d7 or dmi_n > dmi_p
+        c5_ok = not p_e1 or (val_h > p_e3 and not v_exp)
+        l_ok = c1_ok and c2_ok and c3_ok and c5_ok
+        s_ok = c1_ok and c2_ok and c4_ok and c5_ok
+
+        if sell_pg
+            dir := -1
+            trail := ub
+        else if buy_pg
+            dir := 1
+            trail := lb
+        else 
+            if dir == 0
+                if src > ub and not na(ub) and flow_u and l_ok
+                    dir := 1
+                    trail := lb
+                else if src < lb and not na(lb) and flow_d and s_ok
+                    dir := -1
+                    trail := ub
+                else 
+                    trail := nz(trail[1])
+            else if dir == 1
+                nt = not na(lb) ? math.max(nz(trail[1]), lb) : nz(trail[1])
+                if src < nt and flow_d
+                    dir := -1
+                    trail := ub
+                else
+                    dir := 1
+                    trail := nt
+            else if dir == -1
+                nt = not na(ub) ? math.min(nz(trail[1]), ub) : nz(trail[1])
+                if src > nt and flow_u
+                    dir := 1
+                    trail := lb
+                else
+                    dir := -1
+                    trail := nt
+    
+    if na(trail)
+        trail := nz(trail[1])
+    [trail, stat]
+
+[s_u, s_d] = f7(5, 10)
+[t_vec, s_act] = f9(close, s_u, s_d)
+
+var float p_eq = strategy.equity
+p_eq := math.max(p_eq, strategy.equity)
+float dd = (p_eq - strategy.equity) / p_eq * 100
+var bool dd_p = false
+if p_c1 and not dd_p and dd >= p_c2
+    dd_p := true
+
+var string l_s_d = na
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    l_s_d := na
+
+f1_g = not p_d1 or val_adx > p_d3
+f2_g = not p_d4 or val_chop < p_d6
+f3_g = not p_d7 or dmi_p > dmi_n
+f4_g = not p_d7 or dmi_n > dmi_p
+f5_g = not p_e1 or (val_h > p_e3 and not v_exp)
+l_g_ok = f1_g and f2_g and f3_g and f5_g
+s_g_ok = f1_g and f2_g and f4_g and f5_g
+
+c_l = (close > t_vec) and s_u and l_g_ok
+c_s = (close < t_vec) and s_d and s_g_ok
+
+cf_l = c_l
+cf_s = c_s
+
+ev_u = cf_l and (na(l_s_d) or l_s_d != 'LONG')
+ev_d = cf_s and (na(l_s_d) or l_s_d != 'SHORT')
+
+if ev_u
+    l_s_d := 'LONG'
+if ev_d
+    l_s_d := 'SHORT'
+
+if ev_u and not dd_p
+    strategy.entry('L_Entry', strategy.long, alert_message=p_a1)
+
+if ev_d and not dd_p
+    strategy.entry('S_Entry', strategy.short, alert_message=p_a2)
+
+lc = s_act ? clr3 : strategy.position_size > 0 ? clr1 : strategy.position_size < 0 ? clr2 : na
+plot(t_vec, 'Trail', color=lc, linewidth=2, style=plot.style_stepline)
+plotshape(ev_u, style=shape.triangleup, location=location.belowbar, color=color.new(clr1, 0), size=size.small, title='Buy')
+plotshape(ev_d, style=shape.triangledown, location=location.abovebar, color=color.new(clr2, 0), size=size.small, title='Sell')
+
+if dd_p and strategy.position_size != 0
+    strategy.close_all(comment='DD Exit')
+
+bgcolor(dd_p ? color.new(color.maroon, 75) : na, title='DD Active')
+
+View in Pine Editor・306 lines
+Use on chart
+1
+3
+6
+2 521
+AMF PG Strategy v2.3
+1. Core Philosophy: Filtered and Volatility-Aware Trend Following
+"AMF PG Strategy" is an advanced trend-following system designed to adapt to the dynamic nature of modern markets. The strategy's core philosophy is not just to follow the trend but also to wait for the right conditions to enter the market.
+
+This is not a "black box." It is a rules-based framework that gives the user full control over various market filters. By requiring multiple conditions to be met simultaneously, the strategy aims to filter out low-quality signals and focus only on high-probability trend opportunities.
+
+2. Core Engine: AMF PG Trend Following
+At the heart of the strategy is a proprietary, volatility-aware trend-following mechanism called AMF PG (Praetorian Guard). This engine operates as follows:
+Dynamic Bands: Creates a dynamic upper and lower band around the price that is constantly recalculated. The width of these bands is not fixed; It dynamically adjusts based on recent market volatility, volume flow, and price expansion. This adaptive structure allows the strategy to adapt to both calm and high-volatility markets.
+Entry Signals: A buy signal is triggered when the price rises above the upper band. A sell signal is triggered when the price falls below the lower band. However, these signals are executed only when all the active filters described below give the green light.
+Trailing Stop-Loss: When a position is entered, the opposite band automatically acts as a trailing stop-loss level. For example, when a buy position is opened, the lower band follows the price as a stop-loss. This allows for profit retention and trend continuation.
+3. Multi-Layered Filter System: Understanding the Market
+The power of this strategy comes from its modular filter system, which allows the user to filter market conditions based on their own analysis. Each filter can be enabled or disabled individually in the settings:
+Filter 1: Trend Strength (ADX Filter): This filter confirms whether there is a strong trend in the market. It uses the ADX (Average Directional Index) indicator and only allows trades if the ADX value is above a certain threshold. This helps avoid trading in weak or directionless markets. It also confirms the direction of the trend by checking the position of the DMI (+DI and -DI) lines.
+Filter 2: Sideways Market (Chop Index Filter): This filter determines whether the market is excessively choppy or directionless. Using the Chop Index, this filter aims to protect against fakeouts by blocking trades when the market is highly indecisive.
+Filter 3: Market Structure (Hurst Exponent Filter): This is one of the strategy's most advanced filters. It analyzes the current market behavior using the Hurst Exponent. This mathematical tool attempts to determine whether a market tends to trend (permanent), tends to revert to the mean (anti-permanent), or moves randomly. This filter ensures that signals are generated only when market structure supports trending trades.
+
+4. Risk Management: Maximum Drawdown Protection
+This strategy includes a built-in capital protection mechanism. Users can specify the percentage of their capital they will tolerate to decline from its peak. If the strategy's capital reaches this set drawdown limit, the protection feature is activated, closing all open positions and preventing new trades from being opened. This acts as an emergency brake to protect capital against unexpected market conditions.
+
+5. Automation Ready: Customizable Webhook Alerts
+The strategy is designed for traders who want to automate their signals. From the Settings menu, you can configure custom alert messages in JSON format, compatible with third-party automation services (via Webhooks).
+6. Strategy Backtest Information
+Please note that past performance is not indicative of future results. The published chart and performance report were generated on the 4-hour timeframe of the BTCUSD pair with the following settings:
+Test Period: January 1, 2016 - October 31, 2025
+Default Position Size: 15% of Capital
+Pyramiding: Closed
+Commission: 0.0008
+Slippage: 2 ticks (Please enter the slippage you used in your own tests)
+Testing Approach: The published test includes 423 trades and is statistically significant. It is strongly recommended that you test on different assets and timeframes for your own analysis. The default settings are a template and should be adjusted by the user for their own analysis.

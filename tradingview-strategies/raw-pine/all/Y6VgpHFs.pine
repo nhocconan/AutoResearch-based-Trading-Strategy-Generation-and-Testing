@@ -1,0 +1,107 @@
+//@version=6
+strategy("Trend Following Strategy with KNN", overlay=true,initial_capital=1000,default_qty_value=100,commission_value=0.03,currency='USD', commission_type=strategy.commission.percent,default_qty_type=strategy.cash)
+
+
+// Input parameters
+k = input.int(5, title="K (Number of Neighbors)", minval=1)  // Number of neighbors for KNN algorithm
+window_size = input.int(20, title="Window Size", minval=1)  // Window size for feature vector calculation
+ma_length = input.int(50, title="MA Length", minval=1)  // Length of the moving average
+
+// Calculate moving average
+ma = ta.sma(close, ma_length)
+
+// Initialize variables
+var float[] features = na
+var float[] distances = na
+var int[] nearest_neighbors = na
+
+if bar_index >= window_size - 1  // Ensure there is enough historical data
+    features := array.new_float(0)  // Keep only the current window data
+    for i = 0 to window_size - 1
+        array.push(features, close[i])
+
+    // Calculate distances
+    distances := array.new_float(0)  // Clear the array for each calculation
+    for i = 0 to window_size - 1  // Calculate the distance between the current price and all prices in the window
+        var float distance = 0.0
+        for j = 0 to window_size - 1
+            distance += math.pow(close[j] - array.get(features, j), 2)
+        distance := math.sqrt(distance)
+        array.push(distances, distance)
+
+    // Find the nearest neighbors
+    if array.size(distances) > 0 and array.size(distances) >= k
+        nearest_neighbors := array.new_int(0)
+        for i = 0 to k - 1
+            var int min_index = -1
+            var float min_distance = na
+            for j = 0 to array.size(distances) - 1
+                if na(min_distance) or array.get(distances, j) < min_distance
+                    min_index := j
+                    min_distance := array.get(distances, j)
+            if min_index != -1
+                array.push(nearest_neighbors, min_index)
+                array.remove(distances, min_index)  // Remove the processed neighbor
+
+    // Calculate the average price change of the neighbors
+    var float average_change = 0.0
+    if array.size(nearest_neighbors) > 0
+        for i = 0 to array.size(nearest_neighbors) - 1
+            var int index = array.get(nearest_neighbors, i)
+            // Ensure index + 1 is within range
+            if index + 1 < bar_index
+                average_change += (close[index] - close[index + 1])
+        average_change := average_change / array.size(nearest_neighbors)
+
+    // Generate trading signals
+    if average_change > 0 and close > ma
+        strategy.entry("Long", strategy.long)
+    else if average_change < 0 and close < ma
+        strategy.entry("Short", strategy.short)
+
+View in Pine Editor・60 lines
+Use on chart
+1
+2
+5
+3 571
+
+### 1. Strategy Features
+
+This strategy combines the K-Nearest Neighbors (KNN) algorithm with a trend-following strategy to predict future price movements by analyzing historical price data. Here are the main features of the strategy:
+
+1. **Dynamic Parameter Adjustment**: Uses the KNN algorithm to dynamically adjust parameters of the trend-following strategy, such as moving average length and channel length, to adapt to market changes.
+2. **Trend Following**: Captures market trends using moving averages and price channels to generate buy and sell signals.
+3. **Multi-Factor Analysis**: Combines the KNN algorithm with moving averages to comprehensively analyze the impact of multiple factors, improving the accuracy of trading signals.
+4. **High Adaptability**: Automatically adjusts parameters using the KNN algorithm, allowing the strategy to adapt to different market environments and asset types.
+
+### 2. Simple Introduction to the KNN Algorithm
+
+The K-Nearest Neighbors (KNN) algorithm is a simple and intuitive machine learning algorithm primarily used for classification and regression problems. Here are the basic concepts of the KNN algorithm:
+
+1. **Non-Parametric Model**: KNN is a non-parametric algorithm, meaning it does not make any assumptions about the data distribution. Instead, it directly uses training data for predictions.
+2. **Instance-Based Learning**: KNN is an instance-based learning method that uses training data directly for predictions, rather than generating a model through a training process.
+3. **Distance Metrics**: The core of the KNN algorithm is calculating the distance between data points. Common distance metrics include Euclidean distance, Manhattan distance, and Minkowski distance.
+4. **Neighbor Selection**: For each test data point, the KNN algorithm finds the K nearest neighbors in the training dataset.
+5. **Classification and Regression**: In classification problems, KNN determines the class of a test data point through a voting mechanism. In regression problems, KNN predicts the value of a test data point by calculating the average of the K nearest neighbors.
+
+### 3. Applications of the KNN Algorithm in Quantitative Trading Strategies
+
+The KNN algorithm can be applied to various quantitative trading strategies. Here are some common use cases:
+
+1. **Trend-Following Strategies**: KNN can be used to identify market trends, helping traders capture the beginning and end of trends.
+2. **Mean Reversion Strategies**: In mean reversion strategies, KNN can be used to identify price deviations from the mean.
+3. **Arbitrage Strategies**: In arbitrage strategies, KNN can be used to identify price discrepancies between different markets or assets.
+4. **High-Frequency Trading Strategies**: In high-frequency trading strategies, KNN can be used to quickly identify market anomalies, such as price spikes or volume anomalies.
+5. **Event-Driven Strategies**: In event-driven strategies, KNN can be used to identify the impact of market events.
+6. **Multi-Factor Strategies**: In multi-factor strategies, KNN can be used to comprehensively analyze the impact of multiple factors.
+
+### 4. Final Considerations
+
+1. **Computational Efficiency**: The KNN algorithm may face computational efficiency issues with large datasets, especially in real-time trading. Optimize the code to reduce access to historical data and improve computational efficiency.
+2. **Parameter Selection**: The choice of K value significantly affects the performance of the KNN algorithm. Use cross-validation or other methods to select the optimal K value.
+3. **Data Standardization**: KNN is sensitive to data standardization and feature selection. Standardize the data to ensure equal weighting of different features.
+4. **Noisy Data**: KNN is sensitive to noisy data, which can lead to overfitting. Preprocess the data to remove noise.
+5. **Market Environment**: The effectiveness of the KNN algorithm may be influenced by market conditions. Combine it with other technical indicators and fundamental analysis to enhance the robustness of the strategy.
+
+

@@ -1,0 +1,182 @@
+//@version=6
+strategy("BP Strategy Malisa", overlay=true, pyramiding=0, calc_on_every_tick=false, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// ===== CAPITAL & RISK INPUTS =====
+accountCapital = input.float(10000, "Account Capital (€)", step=100)
+riskMode = input.string("Percent", "Risk Mode", options=["Percent", "Fixed"])
+riskPercent = input.float(1.0, "Risk % per Trade", step=0.1)
+riskFixed   = input.float(100, "Fixed € Risk per Trade", step=10)
+
+// ===== STRATEGY INPUTS =====
+useSession     = input.bool(true, "Enable NY Session")
+emaLen         = input.int(34, "EMA Length")
+slATRmult      = input.float(2.6, "SL ATR Mult")
+tp1RR          = input.float(0.8, "TP1 R:R (BE)")
+tpRR           = input.float(1.6, "Final TP R:R")
+useBreakeven   = input.bool(true, "Move SL to BE at TP1")
+maxDailyLosses = input.int(2, "Max Losing Trades Per Day")
+
+// ===== FILTERS (KAO NA SLICI) =====
+useRSI = input.bool(true, "Use RSI Filter")
+rsiOB  = input.int(80, "RSI Overbought")
+rsiOS  = input.int(30, "RSI Oversold")
+
+useADX = input.bool(true, "Use ADX Filter")
+adxMin = input.int(37, "ADX Minimum")
+
+// ===== SESSION =====
+sessOK = not useSession or not na(time(timeframe.period, "0930-1500", "America/New_York"))
+
+// ===== CORE =====
+ema = ta.ema(close, emaLen)
+atr = ta.atr(14)
+rsi = ta.rsi(close, 14)
+[dip, dim, adx] = ta.dmi(14, 14)
+
+bullTrend = close > ema
+bearTrend = close < ema
+
+// ===== SIGNALS (S OPCIJAMA) =====
+longSignal = sessOK and bullTrend and (not useRSI or rsi < rsiOB) and (not useADX or adx > adxMin)
+
+shortSignal = sessOK and bearTrend and (not useRSI or rsi > rsiOS) and (not useADX or adx > adxMin)
+
+
+
+// ===== DAILY LOSS CONTROL =====
+var int lossesToday = 0
+newDay = dayofmonth(time) != dayofmonth(time[1])
+if newDay
+    lossesToday := 0
+
+canTradeToday = lossesToday < maxDailyLosses
+
+// ===== TRADE STATE =====
+var bool tradeActive = false
+var bool tradeLong   = false
+var bool beActive    = false
+
+var float entryPrice = na
+var float slPrice    = na
+var float tp1Price   = na
+var float tpPrice    = na
+
+var line entryLine = na
+var line slLine    = na
+var line tp1Line   = na
+var line tpLine    = na
+var box  tradeBox  = na
+
+// ===== RISK CALC FUNCTION =====
+calcPositionSize(entry, stop) =>
+    riskPerTrade = riskMode == "Percent" ? accountCapital * (riskPercent / 100.0) : riskFixed
+    riskPerUnit  = math.abs(entry - stop)
+    qty          = riskPerUnit > 0 ? riskPerTrade / riskPerUnit : 0
+    qty
+
+// ===== LONG ENTRY =====
+if longSignal and not tradeActive and canTradeToday
+    tradeActive := true
+    tradeLong   := true
+    beActive    := false
+
+    entryPrice := close
+    risk = atr * slATRmult
+    slPrice  := entryPrice - risk
+    tp1Price := entryPrice + risk * tp1RR
+    tpPrice  := entryPrice + risk * tpRR
+
+    qty = calcPositionSize(entryPrice, slPrice)
+
+    strategy.entry("LONG", strategy.long, qty=qty)
+    strategy.exit("EXIT LONG", "LONG", stop=slPrice, limit=tpPrice)
+
+    entryLine = line.new(bar_index, entryPrice, bar_index, entryPrice, color=color.gray, width=2)
+    slLine    = line.new(bar_index, slPrice, bar_index, slPrice, color=color.red, width=2)
+    tp1Line   = line.new(bar_index, tp1Price, bar_index, tp1Price, color=color.green, width=1)
+    tpLine    = line.new(bar_index, tpPrice, bar_index, tpPrice, color=color.green, width=2)
+
+    tradeBox := box.new(
+        left = bar_index,
+        right = bar_index,
+        top = tpPrice,
+        bottom = slPrice,
+        bgcolor = color.new(color.gray, 85),
+        border_color = color.gray
+    )
+
+// ===== SHORT ENTRY =====
+if shortSignal and not tradeActive and canTradeToday
+    tradeActive := true
+    tradeLong   := false
+    beActive    := false
+
+    entryPrice := close
+    risk = atr * slATRmult
+    slPrice  := entryPrice + risk
+    tp1Price := entryPrice - risk * tp1RR
+    tpPrice  := entryPrice - risk * tpRR
+
+    qty = calcPositionSize(entryPrice, slPrice)
+
+    strategy.entry("SHORT", strategy.short, qty=qty)
+    strategy.exit("EXIT SHORT", "SHORT", stop=slPrice, limit=tpPrice)
+
+    entryLine = line.new(bar_index, entryPrice, bar_index, entryPrice, color=color.gray, width=2)
+    slLine    = line.new(bar_index, slPrice, bar_index, slPrice, color=color.red, width=2)
+    tp1Line   = line.new(bar_index, tp1Price, bar_index, tp1Price, color=color.green, width=1)
+    tpLine    = line.new(bar_index, tpPrice, bar_index, tpPrice, color=color.green, width=2)
+
+    tradeBox := box.new(
+        left = bar_index,
+        right = bar_index,
+        top = slPrice,
+        bottom = tpPrice,
+        bgcolor = color.new(color.gray, 85),
+        border_color = color.gray
+    )
+
+// ===== UPDATE TRADE =====
+if tradeActive
+    line.set_x2(entryLine, bar_index)
+    line.set_x2(slLine, bar_index)
+    line.set_x2(tp1Line, bar_index)
+    line.set_x2(tpLine, bar_index)
+    box.set_right(tradeBox, bar_index)
+
+    if useBreakeven and not beActive
+        if tradeLong and high >= tp1Price
+            slPrice := entryPrice
+            beActive := true
+        if not tradeLong and low <= tp1Price
+            slPrice := entryPrice
+            beActive := true
+
+    if tradeLong and low <= slPrice
+        box.set_bgcolor(tradeBox, color.new(color.red, 80))
+        lossesToday += 1
+        tradeActive := false
+
+    if tradeLong and high >= tpPrice
+        box.set_bgcolor(tradeBox, color.new(color.green, 80))
+        tradeActive := false
+
+    if not tradeLong and high >= slPrice
+        box.set_bgcolor(tradeBox, color.new(color.red, 80))
+        lossesToday += 1
+        tradeActive := false
+
+    if not tradeLong and low <= tpPrice
+        box.set_bgcolor(tradeBox, color.new(color.green, 80))
+        tradeActive := false
+
+// ===== CONTEXT =====
+plot(ema, color=color.white)
+
+View in Pine Editor・174 lines
+Use on chart
+1
+5
+474
+Get money and get rich for free fkc yeah hdhdhsissohdhrhebdnskskskshdd
+Bdhsisjsowjdheiekenndhxuxux

@@ -1,0 +1,28 @@
+{
+  "slug": "ultimate-stochastics-nhbprod",
+  "chart_url": "https://www.tradingview.com/script/NJ9KR55k-Ultimate-Stochastics-Strategy-by-NHBprod-Use-to-Day-Trade-BTC/",
+  "name": "Ultimate Stochastics Strategy by NHBprod Use to Day Trade BTC",
+  "pine_file": "raw-pine/bulk/NJ9KR55k-Ultimate-Stochastics-Strategy-by-NHBprod-Use-to-Day-Trade-BTC.pine",
+  "classification": "partial",
+  "strategy_name": "ultimate-stochastics-nhbprod",
+  "timeframe": "4h",
+  "reason": "Uses strategy.exit with limit/stop levels requiring intrabar simulation; signal persistence logic requires state tracking.",
+  "adaptations": [
+    "Simulate intrabar TP/SL using High/Low prices",
+    "Implement signal persistence counter for barssince logic",
+    "Filter data by custom timestamp range inputs"
+  ],
+  "queue_rank": 53,
+  "updated_at": "2026-03-22T08:22:30.367485+00:00",
+  "conversion_notes": [
+    "Simulated intrabar TP/SL using High/Low prices within state machine.",
+    "Implemented signal persistence counter to replicate ta.barssince logic.",
+    "Removed custom timestamp range inputs as backtester handles data slicing.",
+    "Converted Pine strategy.exit to next-bar signal changes via position tracking.",
+    "Ensured generate_signals returns numpy array matching input prices length.",
+    "Implemented custom MA functions (SMA, EMA, WMA, RMA, HMA) without external libraries."
+  ],
+  "python_file": "python-strategies/bulk/ultimate-stochastics-nhbprod.py",
+  "repair_attempts_used": 0,
+  "import_ok": true
+}

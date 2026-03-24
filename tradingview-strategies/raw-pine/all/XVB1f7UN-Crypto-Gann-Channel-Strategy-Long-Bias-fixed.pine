@@ -1,0 +1,53 @@
+//@version=6
+strategy("Crypto Gann Channel Strategy (Long Bias, fixed)", overlay=true,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// === Inputs ===
+maLength    = input.int(100, "Baseline MA Length")
+atrLength   = input.int(14,  "ATR Length")
+multiplier  = input.float(2.0, "ATR Multiplier", step=0.1)
+stopATR     = input.float(1.5, "Stop Loss ATR", step=0.1)
+takeATR     = input.float(3.0, "Take Profit ATR", step=0.1)
+trendMA     = input.int(200, "Trend Filter MA")
+shadeTransp = input.int(75,  "Zone Shade Transparency (0–100)", minval=0, maxval=100)
+
+// === Channel Calculation ===
+basis = ta.sma(close, maLength)
+atr   = ta.atr(atrLength)
+upper = basis + atr * multiplier
+lower = basis - atr * multiplier
+
+// === Trend Filter ===
+trend = ta.sma(close, trendMA)
+
+// === Plot Gann Channel ===
+pBasis = plot(basis, "Basis (MA)", color=color.orange, linewidth=2)
+pUpper = plot(upper, "Upper Channel", color=color.green)
+pLower = plot(lower, "Lower Channel", color=color.red)
+fill(pUpper, pLower, color=color.new(color.blue, 92), title="Channel Fill")
+
+// === Buy / Sell Zones Shading ===
+buyZone  = close > upper
+sellZone = close < lower
+bgcolor(buyZone  ? color.new(color.green, shadeTransp) : na, title="Buy Zone Shading")
+bgcolor(sellZone ? color.new(color.red,   shadeTransp) : na, title="Sell Zone Shading")
+
+// === Entry Logic (Long-only, crypto bias) ===
+longCond = ta.crossover(close, upper) and close > trend
+if longCond
+    strategy.entry("Long", strategy.long)
+
+// === Bracket Exit (updates each bar while in position) ===
+if strategy.position_size > 0
+    longStop  = strategy.position_avg_price - stopATR * atr
+    longLimit = strategy.position_avg_price + takeATR * atr
+    // keep it on one line to avoid parser issues
+    strategy.exit("Exit Long", "Long", stop=longStop, limit=longLimit)
+
+View in Pine Editor・46 lines
+Use on chart
+4
+5
+1 310
+This is Gann Strategy Cody with Long Bias. Please try and let me know if can be improved.

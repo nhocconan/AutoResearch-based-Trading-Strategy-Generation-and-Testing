@@ -1,0 +1,64 @@
+//@version=2
+strategy("Multiple MACD RSI simple strategy", overlay=true, initial_capital=5000, default_qty_type=strategy.percent_of_equity, default_qty_value=80, pyramiding=0, calc_on_order_fills=true)
+
+fastLength = input(10)
+slowlength = input(22)
+MACDLength = input(9)
+
+MACD = ema(close, fastLength) - ema(close, slowlength)
+aMACD = sma(MACD, MACDLength)
+delta = MACD - aMACD
+
+fastLength2 = input(21)
+slowlength2 = input(45)
+MACDLength2 = input(20)
+
+MACD2 = ema(open, fastLength2) - ema(open, slowlength2)
+aMACD2 = sma(MACD2, MACDLength2)
+delta2 = MACD2 - aMACD2
+
+
+uptrend = (close + high)/(close[1] + high[1])
+downtrend = (close + low)/(close[1] + low[1])
+
+smoothK = input(2, minval=1, title="K smoothing Stoch RSI")
+smoothD = input(3, minval=1, title= "D smoothing for Stoch RSI")
+lengthRSI = input(7, minval=1, title="RSI Length")
+lengthStoch = input(8, minval=1, title="Stochastic Length")
+src = input(close, title="RSI Source")
+
+rsi1 = rsi(src, lengthRSI)
+k = sma(stoch(rsi1, rsi1, rsi1, lengthStoch), smoothK)
+d = sma(k, smoothD)
+h0 = hline(80)
+h1 = hline(20)
+
+yearin = input(2018, title="Year to start backtesting from")
+
+if (delta > 0) and (year>=yearin) and (delta2 > 0) and (uptrend > 1)
+    strategy.entry("buy", strategy.long, comment="buy")
+
+if (delta < 0) and (year>=yearin) and (delta2 < 0) and (downtrend < 1) and (d > 20)
+    strategy.entry("sell", strategy.short, comment="sell")
+
+//plot(strategy.equity, title="equity", color=red, linewidth=2, style=areabr)
+
+View in Pine Editor・44 lines
+Use on chart
+6
+9
+2
+4
+35 841
+Simple strategy script I've had for a while but looks like I never published.
+Although it is one of my most simple it seems to have the best profitability. It is pretty rough though. the Stoch RSI has only a little weight to the trade trigger. I'll refine it more over time or you can by all means. Basically the Stoch RSI current K line has to be OVER 40 to trigger a SELL. It has no effect on buy side.
+
+The triggers are roughly as follows:
+Year- since so many assets have gone 2x, 3x, 10x+ since 2013 having a strategy that earns a 500% return from 2013 to now isn't that good if buy-and-holding would have got you 800%. This eliminates some of that noise and makes it a little easier to quickly gauge success. So buy/sell trigger need a value of greater or equal to 2018 (default)
+MACD 1 - First MACD (short) needs to indicate greater than 0 to buy or less than 0 to sell.
+MACD 2 - Same as MACD1 but for second MACD set (long)
+Uptrend - Latest close + high divided by last periods close + high needs to be grater than 1. So if latest is 34.30 close and 34.60 high and previous interval is 34.80 close and 34.82 high, that is 0.99 and will not trigger a buy trade.
+Downtrend - Same thing but close + low and less than 1.
+
+This script/strategy is pretty rough but if there is interest I'll polish it more since it is a pretty solid but simple strategy for most assets.
+

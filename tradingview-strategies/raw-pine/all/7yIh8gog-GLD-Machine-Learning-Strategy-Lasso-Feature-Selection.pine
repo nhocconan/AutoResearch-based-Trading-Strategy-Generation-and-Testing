@@ -1,0 +1,70 @@
+//@version=5
+strategy("GLD linear threshold strategy", overlay=false, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.05000000)
+
+// GLD Lasso Strategy (Research Implementation)
+// Derived from the paper:
+// "An Extension of Temporal Feature Selection"
+// https://zenodo.org/records/18729703
+//
+// The signal is based on Lasso-selected moving-average features
+// constructed from OHLCV data.
+//
+// Designed for GLD on the daily timeframe (1D).
+// For research and educational purposes only.
+// Not investment advice.
+
+
+
+
+threshold = input.float(0.379073202241, "Threshold", step=0.000001)
+
+// ohlcmode=cdelta
+// model_type=linear
+f0 = ta.sma(volume, 2)
+f1 = ta.sma((open - close), 1)
+f2 = ta.sma((high - close) * (low - close), 1)
+f3 = (ta.sma((open - close), 2)) * (ta.sma(volume, 2))
+f4 = (ta.sma((low - close), 1)) * (ta.sma(volume, 2))
+
+score_lin = 0.5223463687150838
+score_lin += (0.0012444888950145) * ((f0 - (6735594.9841713225468993)) / (3241843.4822131437249482))
+score_lin += (0.0029769186339496) * ((f1 - (-0.0910537243947856)) / (1.4953030683416331))
+score_lin += (0.0061458206471210) * ((f2 - (-0.9481280302141537)) / (1.4894312820065110))
+score_lin += (0.0113005100794886) * ((f3 - (-603183.3954082156997174)) / (9833879.5778208561241627))
+score_lin += (0.0065075254154198) * ((f4 - (-8826653.8223241623491049)) / (11670853.5754192266613245))
+score = score_lin
+longCond = score >= threshold
+if longCond
+    strategy.entry("L", strategy.long)
+else
+    strategy.close("L")
+
+plot(score, "score", color=color.new(color.aqua, 0))
+hline(threshold, "threshold", color=color.new(color.orange, 0))
+plot(longCond ? 1 : 0, "position_flag", style=plot.style_stepline, color=color.new(color.green, 0))
+
+View in Pine Editor・44 lines
+Use on chart
+6
+405
+This script implements a GLD trading strategy derived from the paper:
+
+An Extension of Temporal Feature Selection
+zenodo.org/records/18729703
+
+
+The strategy is based on a sparse linear model selected by Lasso from moving-average-based features constructed from OHLCV data. The underlying research extends Temporal Feature Selection (TFS) to include polynomial and interaction terms of moving averages, and evaluates the resulting signals on financial time series.
+
+This TradingView version reproduces the GLD strategy corresponding to the best Sharpe-ratio result reported in the study.
+
+Instrument: GLD
+Designed timeframe: Daily (1D)
+
+Important notes:
+- The model is instrument-specific and was selected for GLD.
+- Performance may differ substantially on other symbols or timeframes.
+- The result reported in the paper depends on the historical sample, execution assumptions, and backtest settings.
+- This script is provided for research and educational purposes only and is not investment advice.
+
+Paper:
+zenodo.org/records/18729703

@@ -1,0 +1,467 @@
+//@version=6
+strategy("OrangePulse v3.0 Lite", overlay=true, pyramiding=4, default_qty_type=strategy.fixed, initial_capital=10000, calc_on_order_fills=true, calc_on_every_tick=false, process_orders_on_close=true, max_lines_count=100)
+
+// ============================================================
+// SIMPLE MEAN REVERSION DCA STRATEGY
+// A Bollinger Bands + RSI mean reversion strategy with
+// Dollar Cost Averaging (DCA) Safety Orders.
+// For educational purposes only.
+// ============================================================
+
+// ====== Time Window ======
+int start_time = input.time(timestamp("21 Jan 2025 00:00"), "Start Trading Time", tooltip="Bot will only trade after this date/time")
+int end_time = input.time(timestamp("01 Jan 2050 00:00"), "End Trading Time", tooltip="Bot will stop trading after this date/time")
+bool in_time_window = time >= start_time and time <= end_time
+
+// ====== Direction ======
+string direction = input.string("LONG", "Direction", options=["LONG", "SHORT"], tooltip="Trading direction: LONG or SHORT")
+
+// ====== Order Sizes (USD) ======
+float bo_usd = input.float(1000, "BO Size (USD)", minval=1, group="Order Sizes", tooltip="Base Order size in USD")
+float so_usd = input.float(1000, "SO Size (USD)", minval=1, group="Order Sizes", tooltip="Safety Order size in USD")
+
+// ====== DCA Settings ======
+int so_number = input.int(3, "Number of Safety Orders", minval=0, maxval=3, group="DCA Settings", tooltip="Total number of Safety Orders (max 3)")
+float pd_pct = input.float(3.0, "Price Deviation %", minval=0.1, group="DCA Settings", tooltip="Price deviation for first SO")
+float vs = input.float(2.0, "Volume Scale", minval=1.0, group="DCA Settings", tooltip="Each SO size multiplier")
+float sc = input.float(1.25, "Step Scale", minval=1.0, group="DCA Settings", tooltip="Price deviation multiplier for each SO")
+int cooldown_after_bo = input.int(2, "Cooldown after BO (bars)", minval=0, group="DCA Settings", tooltip="Bars to wait after BO before allowing SO")
+int so_cooldown_bars = input.int(1, "Cooldown between SOs (bars)", minval=0, group="DCA Settings", tooltip="Bars to wait between consecutive SOs")
+
+// ====== Take Profit / Stop Loss ======
+bool use_tp = input.bool(true, "Take Profit %", inline="tp", group="Exit Settings", tooltip="Enable Take Profit")
+float tp_pct = input.float(1, "", minval=0.05, inline="tp", group="Exit Settings", tooltip="Take Profit %")
+
+bool use_sl = input.bool(false, "Stop Loss %", inline="sl", group="Exit Settings", tooltip="Enable Stop Loss")
+float sl_pct = input.float(3.0, "", minval=0.1, inline="sl", group="Exit Settings", tooltip="Stop Loss %")
+
+// ====== Trailing TP (simplified) ======
+bool use_trail_tp = input.bool(false, "Trailing TP", inline="trail", group="Exit Settings", tooltip="Enable trailing take profit")
+float trail_activation_pct = input.float(1.0, "Act%", minval=0.1, inline="trail", group="Exit Settings", tooltip="Activation % above AVG")
+float trail_distance_pct = input.float(0.5, "Trail%", minval=0.1, inline="trail", group="Exit Settings", tooltip="Trail distance %")
+
+// ====== Mean Reversion Parameters ======
+int bb_len = input.int(20, "BB Period", minval=5, group="Strategy Settings", tooltip="Bollinger Bands period")
+float bb_mult = input.float(2.0, "BB Multiplier", minval=0.5, group="Strategy Settings", tooltip="BB standard deviation multiplier")
+float rsi_oversold = input.float(50, "RSI Oversold (LONG <)", minval=1, maxval=99, group="Strategy Settings", tooltip="RSI threshold for LONG")
+float rsi_overbought = input.float(70, "RSI Overbought (SHORT >)", minval=1, maxval=99, group="Strategy Settings", tooltip="RSI threshold for SHORT")
+int rsi_len = input.int(14, "RSI Period", minval=2, group="Strategy Settings", tooltip="RSI period")
+
+// ====== Visualization ======
+bool show_so_lines = input.bool(true, "Show SO Lines", group="Visualization")
+bool show_status_table = input.bool(true, "Show Status Table", group="Visualization")
+
+// ====== Indicators ======
+float bb_basis = ta.sma(close, bb_len)
+float bb_dev = ta.stdev(close, bb_len) * bb_mult
+float bb_upper = bb_basis + bb_dev
+float bb_lower = bb_basis - bb_dev
+float rsi = ta.rsi(close, rsi_len)
+
+// ====== Helper Functions ======
+f_qty_from_usd(usd, price) =>
+    price > 0 ? usd / price : 0.0
+
+f_to_tick(p) =>
+    math.round(p / syminfo.mintick) * syminfo.mintick
+
+// ====== DCA Ladder State ======
+var bool ladder_active = false
+var float bo_ref_price = na
+var so_prices = array.new_float()
+var so_usds = array.new_float()
+var so_filled = array.new_bool()
+var int last_entry_bar = na
+var int lastSOBar = na
+var int so_next_idx = 0
+var float last_so_fill_price = na
+
+// ====== SO Line Drawing ======
+var line[] so_lines = array.new_line(0)
+
+f_draw_so_line(float _price, int _level) =>
+    if not na(_price) and show_so_lines
+        line _l = line.new(bar_index, _price, bar_index + 1, _price, extend=extend.none, color=color.orange, width=2, style=line.style_dotted)
+        array.push(so_lines, _l)
+        _l
+
+f_end_last_line() =>
+    if array.size(so_lines) > 0
+        line _last = array.get(so_lines, array.size(so_lines) - 1)
+        line.set_x2(_last, bar_index)
+        line.set_extend(_last, extend.none)
+
+f_clear_so_lines() =>
+    if array.size(so_lines) > 0
+        for i = 0 to array.size(so_lines) - 1
+            line.delete(array.get(so_lines, i))
+        array.clear(so_lines)
+
+// ====== Build DCA Ladder ======
+// Builds SO prices based on cumulative deviation from BO price
+// SO1 = BO - pd%, SO2 = SO1 - (pd% * sc), SO3 = SO2 - (pd% * sc^2), etc.
+f_build_ladder(float basePrice, string dir) =>
+    array.clear(so_prices)
+    array.clear(so_usds)
+    array.clear(so_filled)
+    
+    float prev = basePrice
+    float usd = so_usd
+    
+    for i = 0 to so_number - 1
+        // Calculate step for this SO level
+        float step_pct = pd_pct * math.pow(sc, i)
+        float delta = prev * (step_pct / 100.0)
+        float raw_price = dir == "LONG" ? (prev - delta) : (prev + delta)
+        float price_q = f_to_tick(raw_price)
+        
+        // Ensure monotonic: each SO must be strictly beyond the previous
+        if dir == "LONG"
+            if price_q >= prev
+                price_q := prev - syminfo.mintick
+        else
+            if price_q <= prev
+                price_q := prev + syminfo.mintick
+        
+        array.push(so_prices, price_q)
+        array.push(so_usds, usd)
+        array.push(so_filled, false)
+        
+        prev := price_q
+        usd := usd * vs
+
+// ====== Trailing State ======
+var float hh_since_entry = na
+var float ll_since_entry = na
+var bool trail_armed = false
+
+// ====== Cooldown ======
+var int last_exit_bar = na
+
+// ====== Position State ======
+bool in_pos = strategy.position_size != 0
+float pos_avg = strategy.position_avg_price
+
+// ====== Entry Signal (Mean Reversion) ======
+bool band_touch_long = close <= bb_lower or low <= bb_lower
+bool band_touch_short = close >= bb_upper or high >= bb_upper
+bool rsi_extreme_long = rsi < rsi_oversold
+bool rsi_extreme_short = rsi > rsi_overbought
+
+bool entry_signal_long = band_touch_long and rsi_extreme_long
+bool entry_signal_short = band_touch_short and rsi_extreme_short
+bool entry_signal = direction == "LONG" ? entry_signal_long : entry_signal_short
+
+// ====== TP/SL Prices ======
+float tp_price = na
+float sl_price = na
+if in_pos
+    if direction == "LONG"
+        tp_price := pos_avg * (1 + tp_pct / 100.0)
+        sl_price := pos_avg * (1 - sl_pct / 100.0)
+    else
+        tp_price := pos_avg * (1 - tp_pct / 100.0)
+        sl_price := pos_avg * (1 + sl_pct / 100.0)
+
+// ====== Trailing TP Logic ======
+if in_pos
+    if direction == "LONG"
+        hh_since_entry := na(hh_since_entry) ? high : math.max(hh_since_entry, high)
+    else
+        ll_since_entry := na(ll_since_entry) ? low : math.min(ll_since_entry, low)
+
+float trail_activation_price = na
+float trail_trigger_price = na
+if in_pos and use_trail_tp
+    if direction == "LONG"
+        trail_activation_price := pos_avg * (1 + trail_activation_pct / 100.0)
+        if high >= trail_activation_price
+            trail_armed := true
+        if trail_armed and not na(hh_since_entry)
+            trail_trigger_price := hh_since_entry * (1 - trail_distance_pct / 100.0)
+    else
+        trail_activation_price := pos_avg * (1 - trail_activation_pct / 100.0)
+        if low <= trail_activation_price
+            trail_armed := true
+        if trail_armed and not na(ll_since_entry)
+            trail_trigger_price := ll_since_entry * (1 + trail_distance_pct / 100.0)
+
+// ====== Exit Triggers ======
+bool tp_trigger = use_tp and in_pos and not use_trail_tp and (direction == "LONG" ? high >= tp_price : low <= tp_price)
+bool sl_trigger = use_sl and in_pos and (direction == "LONG" ? low <= sl_price : high >= sl_price)
+bool trail_trigger = use_trail_tp and in_pos and trail_armed and not na(trail_trigger_price) and (direction == "LONG" ? close <= trail_trigger_price : close >= trail_trigger_price)
+
+bool will_exit = tp_trigger or sl_trigger or trail_trigger
+
+// ====== Exit Execution ======
+if will_exit
+    last_exit_bar := bar_index
+    f_end_last_line()
+    f_clear_so_lines()
+    
+    string exit_comment = tp_trigger ? "TP" : (sl_trigger ? "SL" : "Trail TP")
+    strategy.close_all(comment=exit_comment + " @ " + str.tostring(close, "#"))
+    
+    // Reset state
+    ladder_active := false
+    bo_ref_price := na
+    so_next_idx := 0
+    lastSOBar := na
+    last_so_fill_price := na
+    array.clear(so_prices)
+    array.clear(so_usds)
+    array.clear(so_filled)
+    hh_since_entry := na
+    ll_since_entry := na
+    trail_armed := false
+
+// ====== Entry Logic (BO) ======
+bool can_enter = in_time_window and strategy.position_size == 0 and not will_exit
+
+if barstate.isconfirmed and can_enter and entry_signal
+    float qty = f_qty_from_usd(bo_usd, close)
+    if qty > 0
+        string entry_comment = "BO $" + str.tostring(bo_usd, "#") + " @ " + str.tostring(close, "#")
+        if direction == "LONG"
+            strategy.entry("BO", strategy.long, qty=qty, comment=entry_comment)
+        else
+            strategy.entry("BO", strategy.short, qty=qty, comment=entry_comment)
+        
+        last_entry_bar := bar_index
+        bo_ref_price := close
+        
+        // Build DCA ladder
+        if so_number > 0
+            f_build_ladder(bo_ref_price, direction)
+            ladder_active := true
+            so_next_idx := 0
+            lastSOBar := na
+            last_so_fill_price := na
+            
+            // Draw first SO line
+            if array.size(so_prices) > 0
+                float _so1 = array.get(so_prices, 0)
+                f_draw_so_line(_so1, 1)
+        
+        // Reset trailing
+        hh_since_entry := na
+        ll_since_entry := na
+        trail_armed := false
+
+// ====== SO Logic ======
+if ladder_active and strategy.position_size != 0 and in_time_window and so_number > 0 and not will_exit
+    int sz = array.size(so_prices)
+    if so_next_idx < sz
+        float level_next = array.get(so_prices, so_next_idx)
+        bool touched = direction == "LONG" ? (low <= level_next) : (high >= level_next)
+        
+        // Monotonic guard: SO cannot fill higher (LONG) or lower (SHORT) than previous fill
+        // For first SO, reference is BO price; for subsequent SOs, reference is last_so_fill_price
+        float ref_prev_fill = na(last_so_fill_price) ? bo_ref_price : last_so_fill_price
+        
+        // For LONG: fill only if close <= min(level_next, ref_prev_fill - tick)
+        // For SHORT: fill only if close >= max(level_next, ref_prev_fill + tick)
+        float guard_long_max = na(ref_prev_fill) ? level_next : math.min(level_next, ref_prev_fill - syminfo.mintick)
+        float guard_short_min = na(ref_prev_fill) ? level_next : math.max(level_next, ref_prev_fill + syminfo.mintick)
+        
+        bool monotonic_ok = direction == "LONG" ? (close <= guard_long_max) : (close >= guard_short_min)
+        
+        // Cooldowns
+        bool cooldown_ok = na(lastSOBar) or (bar_index - lastSOBar >= so_cooldown_bars + 1)
+        bool bo_cooldown_ok = so_next_idx == 0 ? (na(last_entry_bar) or (bar_index - last_entry_bar >= cooldown_after_bo + 1)) : true
+        
+        bool so_ready = touched and cooldown_ok and bo_cooldown_ok and monotonic_ok
+        
+        if barstate.isconfirmed and so_ready
+            float usd_amt = array.get(so_usds, so_next_idx)
+            float qty = f_qty_from_usd(usd_amt, close)
+            
+            if qty > 0
+                string so_id = "SO" + str.tostring(so_next_idx + 1)
+                string so_comment = so_id + " $" + str.tostring(usd_amt, "#") + " @ " + str.tostring(close, "#")
+                
+                if direction == "LONG"
+                    strategy.entry(so_id, strategy.long, qty=qty, comment=so_comment)
+                else
+                    strategy.entry(so_id, strategy.short, qty=qty, comment=so_comment)
+                
+                array.set(so_filled, so_next_idx, true)
+                so_next_idx += 1
+                lastSOBar := bar_index
+                last_so_fill_price := close
+                
+                // Reset trail after DCA
+                trail_armed := false
+                if direction == "LONG"
+                    hh_since_entry := close
+                else
+                    ll_since_entry := close
+                
+                // Update SO line
+                f_end_last_line()
+                if so_next_idx < sz
+                    float _next = array.get(so_prices, so_next_idx)
+                    f_draw_so_line(_next, so_next_idx + 1)
+
+// Extend active SO line
+if ladder_active and array.size(so_lines) > 0
+    line _last = array.get(so_lines, array.size(so_lines) - 1)
+    line.set_x2(_last, bar_index)
+
+// ====== Visualization ======
+// AVG line (yellow - original style)
+float avg_now = in_pos ? pos_avg : na
+plot(avg_now, "AVG", color=color.yellow, linewidth=2, style=plot.style_linebr)
+
+// TP line (green - original style)
+float tp_now = in_pos and use_tp and not use_trail_tp ? tp_price : na
+plot(tp_now, "TP", color=color.green, linewidth=2, style=plot.style_linebr)
+
+// SL line
+plot(in_pos and use_sl ? sl_price : na, "SL", color=color.red, linewidth=1, style=plot.style_linebr)
+
+// Trail TP trigger
+plot(in_pos and use_trail_tp and trail_armed ? trail_trigger_price : na, "Trail TP", color=color.purple, linewidth=2, style=plot.style_linebr)
+
+// Bollinger Bands (subtle)
+plot(bb_upper, "BB Upper", color=color.new(color.gray, 70), linewidth=1)
+plot(bb_basis, "BB Basis", color=color.new(color.gray, 80), linewidth=1)
+plot(bb_lower, "BB Lower", color=color.new(color.gray, 70), linewidth=1)
+
+// RSI plots
+plot(rsi, "RSI", color=color.purple)
+hline(rsi_oversold, "RSI Oversold", color=color.green, linestyle=hline.style_dotted)
+hline(rsi_overbought, "RSI Overbought", color=color.red, linestyle=hline.style_dotted)
+hline(50, "RSI 50", color=color.gray, linestyle=hline.style_dotted)
+
+// Entry signals
+plotshape(entry_signal and can_enter and direction == "LONG", title="Long Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(entry_signal and can_enter and direction == "SHORT", title="Short Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+// ====== Status Table ======
+var table status_tbl = na
+
+if show_status_table
+    if na(status_tbl)
+        status_tbl := table.new(position.bottom_right, 2, 8, border_width=1)
+    
+    // Calculate values
+    float invested_total = 0.0
+    int filled_so_count = 0
+    if in_pos
+        invested_total := bo_usd
+        if array.size(so_filled) > 0
+            for i = 0 to array.size(so_filled) - 1
+                if array.get(so_filled, i)
+                    invested_total += array.get(so_usds, i)
+                    filled_so_count += 1
+    
+    int remaining_so = so_number - so_next_idx
+    float next_so_price = ladder_active and so_next_idx < array.size(so_prices) ? array.get(so_prices, so_next_idx) : na
+    
+    float pnl_pct = na
+    if in_pos and pos_avg > 0
+        pnl_pct := direction == "LONG" ? (close/pos_avg - 1.0) * 100.0 : (pos_avg/close - 1.0) * 100.0
+    
+    string status_text = in_pos ? "IN POSITION" : "WAITING"
+    color status_bg = in_pos ? color.new(color.green, 30) : color.new(color.gray, 30)
+    
+    // Table styling
+    color header_bg = color.rgb(31, 119, 180, 15)
+    color body_bg = color.new(color.white, 15)
+    
+    // Row 0: Status
+    table.cell(status_tbl, 0, 0, "Status", text_color=color.white, bgcolor=header_bg)
+    table.cell(status_tbl, 1, 0, status_text, text_color=color.white, bgcolor=status_bg)
+    
+    // Row 1: Direction
+    table.cell(status_tbl, 0, 1, "Direction", text_color=color.black, bgcolor=body_bg)
+    table.cell(status_tbl, 1, 1, direction, text_color=color.black, bgcolor=body_bg)
+    
+    // Row 2: Invested
+    table.cell(status_tbl, 0, 2, "Invested", text_color=color.black, bgcolor=body_bg)
+    table.cell(status_tbl, 1, 2, "$" + str.tostring(invested_total, "#"), text_color=color.black, bgcolor=body_bg)
+    
+    // Row 3: AVG Price
+    table.cell(status_tbl, 0, 3, "AVG Price", text_color=color.black, bgcolor=body_bg)
+    table.cell(status_tbl, 1, 3, in_pos ? "$" + str.tostring(pos_avg, "#") : "N/A", text_color=color.black, bgcolor=body_bg)
+    
+    // Row 4: PnL
+    string pnl_text = na(pnl_pct) ? "N/A" : ((pnl_pct >= 0 ? "+" : "") + str.tostring(pnl_pct, "#.##") + "%")
+    table.cell(status_tbl, 0, 4, "PnL", text_color=color.black, bgcolor=body_bg)
+    table.cell(status_tbl, 1, 4, pnl_text, text_color=color.black, bgcolor=body_bg)
+    
+    // Row 5: Remaining SO
+    table.cell(status_tbl, 0, 5, "Rem SO", text_color=color.black, bgcolor=body_bg)
+    table.cell(status_tbl, 1, 5, str.tostring(remaining_so) + "/" + str.tostring(so_number), text_color=color.black, bgcolor=body_bg)
+    
+    // Row 6: Next SO Price
+    table.cell(status_tbl, 0, 6, "Next SO", text_color=color.black, bgcolor=body_bg)
+    table.cell(status_tbl, 1, 6, na(next_so_price) ? "N/A" : "$" + str.tostring(next_so_price, "#"), text_color=color.black, bgcolor=body_bg)
+    
+    // Row 7: TP/SL
+    string tp_text = use_tp ? str.tostring(tp_pct, "#.##") + "%" : "OFF"
+    string sl_text = use_sl ? str.tostring(sl_pct, "#.##") + "%" : "OFF"
+    string trail_text = use_trail_tp ? "Trail" : ""
+    table.cell(status_tbl, 0, 7, "TP/SL", text_color=color.black, bgcolor=body_bg)
+    table.cell(status_tbl, 1, 7, tp_text + " / " + sl_text + (trail_text != "" ? " " + trail_text : ""), text_color=color.black, bgcolor=body_bg)
+else
+    if not na(status_tbl)
+        table.delete(status_tbl)
+        status_tbl := na
+
+// ====== Clear ladder when flat (but NOT on same bar as BO/SO) ======
+if barstate.isconfirmed and strategy.position_size == 0 and ladder_active and (na(last_entry_bar) or bar_index > last_entry_bar) and (na(lastSOBar) or bar_index > lastSOBar)
+    ladder_active := false
+    f_clear_so_lines()
+    array.clear(so_prices)
+    array.clear(so_usds)
+    array.clear(so_filled)
+    so_next_idx := 0
+    lastSOBar := na
+    last_so_fill_price := na
+
+View in Pine Editor・422 lines
+Use on chart
+4
+3
+1 213
+Jan 23
+This open-source script is a simplified version of the OrangePulse algorithm, designed for educational purposes to demonstrate the power of Dollar Cost Averaging (DCA) and Mean Reversion.
+
+📈 Strategy Logic:
+The script uses a combination of Bollinger Bands and RSI (Relative Strength Index) to identify potential mean reversion opportunities.
+- Entry: Triggered when price pushes below the lower Bollinger Band while RSI is in oversold territory.
+- Management: Utilizes up to 3 Safety Orders (DCA) to improve the average entry price during pullbacks.
+
+🎯 Features:
+• Customizable Volume Scale and Step Scale for Safety Orders.
+• Visual AVG price line and TP/SL levels.
+• Time-window filter for backtesting.
+• Real-time Status Table for position monitoring.
+
+This script is shared in the spirit of open-source development on TradingView. It is intended to help traders understand how automated position building and risk management work in volatile markets.
+
+Check my profile status/bio for more information on our project.
+
+⚠️ Disclaimer: For educational purposes only. Past performance does not guarantee future results.
+Jan 25
+Release Notes
+This open-source script is a simplified version of the OrangePulse algorithm, designed for educational purposes to demonstrate the power of Dollar Cost Averaging (DCA) and Mean Reversion.
+
+📈 Strategy Logic:
+The script uses a combination of Bollinger Bands and RSI (Relative Strength Index) to identify potential mean reversion opportunities.
+- Entry: Triggered when price pushes below the lower Bollinger Band while RSI is in oversold territory.
+- Management: Utilizes up to 3 Safety Orders (DCA) to improve the average entry price during pullbacks.
+
+🎯 Features:
+• Customizable Volume Scale and Step Scale for Safety Orders.
+• Visual AVG price line and TP/SL levels.
+• Time-window filter for backtesting.
+• Real-time Status Table for position monitoring.
+
+This script is shared in the spirit of open-source development on TradingView. It is intended to help traders understand how automated position building and risk management work in volatile markets.
+
+Check my profile status/bio for more information on our project.
+
+⚠️ Disclaimer: For educational purposes only. Past performance does not guarantee future results.

@@ -1,0 +1,192 @@
+//@version=5
+strategy("Multi-Timeframe MACD Strategy ver 1.0", overlay=true, shorttitle="MTF MACD Strategy ver 1.0")
+
+// --- Input Settings ---
+
+// MACD Settings
+fastLength = input.int(12, title="Fast Length")
+slowLength = input.int(26, title="Slow Length")
+signalLength = input.int(9, title="Signal Smoothing")
+
+// Multi-Timeframe Settings
+higherTimeframe = input.timeframe("D", title="Higher Timeframe")
+showCurrentTF = input.bool(true, title="Show Current Timeframe MACD")
+showHigherTF = input.bool(true, title="Show Higher Timeframe MACD")
+
+// Color Settings (Optional - for visual clarity on the chart)
+currentMACDColor = input.color(color.blue, title="Current MACD Color")
+currentSignalColor = input.color(color.orange, title="Current Signal Color")
+higherMACDColor = input.color(color.aqua, title="Higher MACD Color")
+higherSignalColor = input.color(color.fuchsia, title="Higher Signal Color")
+
+// Entry/Exit Type
+entryType = input.string("Crossover", title="Entry Type", options=["Crossover", "Zero Cross", "Both"])
+useTrailingStop = input.bool(false, title="Use Trailing Stop Loss")
+trailingStopPercent = input.float(2.0, title="Trailing Stop %", minval=0.1, step=0.1) / 100
+
+// --- MACD Calculations ---
+
+// Current Timeframe MACD
+[currentMACD, currentSignal, _] = ta.macd(close, fastLength, slowLength, signalLength)
+
+// Higher Timeframe MACD (using request.security with lookahead=barmerge.lookahead_off)
+[higherMACD, higherSignal, _] = request.security(syminfo.tickerid, higherTimeframe, ta.macd(close, fastLength, slowLength, signalLength), lookahead=barmerge.lookahead_off)
+
+// --- Plotting (Optional - to visualize the MACD lines on the chart)
+// We don't plot the MACD as a histogram like a traditional MACD indicator.
+// Instead, we only plot the MACD and Signal lines as circles.
+
+plot(showCurrentTF ? currentMACD : na, style=plot.style_circles, color=currentMACDColor, linewidth=2, title="Current MACD")
+plot(showCurrentTF ? currentSignal : na, style=plot.style_circles, color=currentSignalColor, linewidth=2, title="Current Signal")
+
+plot(showHigherTF ? higherMACD : na, style=plot.style_circles, color=higherMACDColor, linewidth=2, title="Higher MACD")
+plot(showHigherTF ? higherSignal : na, style=plot.style_circles, color=higherSignalColor, linewidth=2, title="Higher Signal")
+
+// --- Strategy Logic ---
+
+// 1. Determine MACD States (for easier readability)
+currentMACDBullish = currentMACD > currentSignal
+currentMACDBearish = currentMACD < currentSignal
+higherMACDBullish = higherMACD > higherSignal
+higherMACDBearish = higherMACD < higherSignal
+
+currentMACDAboveZero = currentMACD > 0
+currentMACDBelowZero = currentMACD < 0
+higherMACDAboveZero = higherMACD > 0
+higherMACDBelowZero = higherMACD < 0
+
+// 2. Entry Conditions
+longCondition_Crossover = false
+shortCondition_Crossover = false
+longCondition_ZeroCross = false
+shortCondition_ZeroCross = false
+
+//Crossover conditions
+if showCurrentTF and showHigherTF
+    longCondition_Crossover := currentMACDBullish and higherMACDBullish and ta.crossover(currentMACD, currentSignal)
+    shortCondition_Crossover := currentMACDBearish and higherMACDBearish and ta.crossunder(currentMACD, currentSignal)
+else if showCurrentTF and not showHigherTF
+    longCondition_Crossover := currentMACDBullish and ta.crossover(currentMACD, currentSignal)
+    shortCondition_Crossover := currentMACDBearish and ta.crossunder(currentMACD, currentSignal)
+else if not showCurrentTF and showHigherTF
+    longCondition_Crossover := higherMACDBullish and ta.crossover(higherMACD, higherSignal) //Using crossover for HTF only
+    shortCondition_Crossover := higherMACDBearish and ta.crossunder(higherMACD, higherSignal)
+
+// Zero Cross Conditions
+if showCurrentTF and showHigherTF
+    longCondition_ZeroCross := currentMACDAboveZero and higherMACDAboveZero and ta.crossover(currentMACD, 0)
+    shortCondition_ZeroCross := currentMACDBelowZero and higherMACDBelowZero and ta.crossunder(currentMACD, 0)
+else if showCurrentTF and not showHigherTF
+    longCondition_ZeroCross := currentMACDAboveZero and ta.crossover(currentMACD, 0)
+    shortCondition_ZeroCross := currentMACDBelowZero and ta.crossunder(currentMACD, 0)
+else if not showCurrentTF and showHigherTF
+    longCondition_ZeroCross := higherMACDAboveZero and ta.crossover(higherMACD, 0)
+    shortCondition_ZeroCross := higherMACDBelowZero and ta.crossunder(higherMACD, 0)
+
+//Combine conditions based on entry type.
+longCondition = (entryType == "Crossover" and longCondition_Crossover) or (entryType == "Zero Cross" and longCondition_ZeroCross) or (entryType == "Both" and (longCondition_Crossover or longCondition_ZeroCross))
+shortCondition = (entryType == "Crossover" and shortCondition_Crossover) or (entryType == "Zero Cross" and shortCondition_ZeroCross) or (entryType == "Both" and (shortCondition_Crossover or shortCondition_ZeroCross))
+// 3. Trailing Stop Loss (Optional)
+var float longStopPrice = na
+var float shortStopPrice = na
+
+if (useTrailingStop)
+    longStopPrice := strategy.position_avg_price * (1 - trailingStopPercent)
+    shortStopPrice := strategy.position_avg_price * (1 + trailingStopPercent)
+
+    if (strategy.position_size > 0)
+        longStopPrice := math.max(longStopPrice, close * (1 - trailingStopPercent))  // Update trailing stop
+        strategy.exit("Trailing Stop Long", "Long", stop=longStopPrice)
+    else if (strategy.position_size < 0)
+        shortStopPrice := math.min(shortStopPrice, close * (1 + trailingStopPercent)) // Update trailing stop
+        strategy.exit("Trailing Stop Short", "Short", stop=shortStopPrice)
+
+
+// 4. Exit Conditions (without trailing stop - for Crossover/Zero Cross)
+longExitCondition = (entryType == "Crossover" or entryType == "Both") and ta.crossunder(currentMACD, currentSignal)
+shortExitCondition = (entryType == "Crossover" or entryType == "Both") and ta.crossover(currentMACD, currentSignal)
+longExitConditionZero = (entryType == "Zero Cross" or entryType == "Both") and ta.crossunder(currentMACD, 0)
+shortExitConditionZero = (entryType == "Zero Cross" or entryType == "Both") and ta.crossover(currentMACD, 0)
+
+// 5. Strategy Orders
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+
+if (not useTrailingStop)
+    if longExitCondition or longExitConditionZero
+        strategy.close("Long", comment = "MACD Exit")
+    if shortExitCondition or shortExitConditionZero
+        strategy.close("Short", comment = "MACD Exit")
+
+View in Pine Editor・122 lines
+Use on chart
+4
+8
+2 575
+Multi-Timeframe MACD Strategy: Enhanced Trend Trading with Customizable Entry and Trailing Stop
+This strategy utilizes the Moving Average Convergence Divergence (MACD) indicator across multiple timeframes to identify strong trends, generate precise entry and exit signals, and manage risk with an optional trailing stop loss. By combining the insights of both the current chart's timeframe and a user-defined higher timeframe, this strategy aims to improve trade accuracy, reduce exposure to false signals, and capture larger market moves.
+
+Key Features:
+
+Dual Timeframe Analysis: Calculates and analyzes the MACD on both the current chart's timeframe and a user-selected higher timeframe (e.g., Daily MACD on a 1-hour chart). This provides a broader market context, helping to confirm trends and filter out short-term noise.
+
+Configurable MACD: Fine-tune the MACD calculation with adjustable Fast Length, Slow Length, and Signal Length parameters. Optimize the indicator's sensitivity to match your trading style and the volatility of the asset.
+
+Flexible Entry Options: Choose between three distinct entry types:
+
+Crossover: Enters trades when the MACD line crosses above (long) or below (short) the Signal line.
+
+Zero Cross: Enters trades when the MACD line crosses above (long) or below (short) the zero line.
+
+Both: Combines both Crossover and Zero Cross signals, providing more potential entry opportunities.
+
+Independent Timeframe Control: Display and trade based on the current timeframe MACD, the higher timeframe MACD, or both. This allows you to focus on the information most relevant to your analysis.
+
+Optional Trailing Stop Loss: Implements a configurable trailing stop loss to protect profits and limit potential losses. The trailing stop is adjusted dynamically as the price moves in your favor, based on a user-defined percentage.
+
+No Repainting: Employs lookahead=barmerge.lookahead_off in the request.security() function to prevent data leakage and ensure accurate backtesting and real-time signals.
+
+Clear Visual Signals (Optional): Includes optional plotting of the MACD and Signal lines for both timeframes, with distinct colors for easy visual identification. These plots are for visual confirmation and are not required for the strategy's logic.
+
+Suitable for Various Trading Styles: Adaptable to swing trading, day trading, and trend-following strategies across diverse markets (stocks, forex, cryptocurrencies, etc.).
+
+Fully Customizable: All parameters are adjustable, including timeframes, MACD Settings, Entry signal type and trailing stop settings.
+
+How it Works:
+
+MACD Calculation: The strategy calculates the MACD (using the standard formula) for both the current chart's timeframe and the specified higher timeframe.
+
+Trend Identification: The relationship between the MACD line, Signal line, and zero line is used to determine the current trend for each timeframe.
+
+Entry Signals: Buy/sell signals are generated based on the selected "Entry Type":
+
+Crossover: A long signal is generated when the MACD line crosses above the Signal line, and both timeframes are in agreement (if both are enabled). A short signal is generated when the MACD line crosses below the Signal line, and both timeframes are in agreement.
+
+Zero Cross: A long signal is generated when the MACD line crosses above the zero line, and both timeframes agree. A short signal is generated when the MACD line crosses below the zero line and both timeframes agree.
+
+Both: Combines Crossover and Zero Cross signals.
+
+Trailing Stop Loss (Optional): If enabled, a trailing stop loss is set at a specified percentage below (for long positions) or above (for short positions) the entry price. The stop-loss is automatically adjusted as the price moves favorably.
+
+Exit Signals:
+
+Without Trailing Stop: Positions are closed when the MACD signals reverse according to the selected "Entry Type" (e.g., a long position is closed when the MACD line crosses below the Signal line if using "Crossover" entries).
+
+With Trailing Stop: Positions are closed if the price hits the trailing stop loss.
+
+Backtesting and Optimization: The strategy automatically backtests on the chart's historical data, allowing you to assess its performance and optimize parameters for different assets and timeframes.
+
+Example Use Cases:
+
+Confirming Trend Strength: A trader on a 1-hour chart sees a bullish MACD crossover on the current timeframe. They check the MTF MACD strategy and see that the Daily MACD is also bullish, confirming the strength of the uptrend.
+
+Filtering Noise: A trader using a 15-minute chart wants to avoid false signals from short-term volatility. They use the strategy with a 4-hour higher timeframe to filter out noise and only trade in the direction of the dominant trend.
+
+Dynamic Risk Management: A trader enters a long position and enables the trailing stop loss. As the price rises, the trailing stop is automatically adjusted upwards, protecting profits. The trade is exited either when the MACD reverses or when the price hits the trailing stop.
+
+Disclaimer:
+
+The MACD is a lagging indicator and can produce false signals, especially in ranging markets. This strategy is for educational and informational purposes only and should not be considered financial advice. Backtest and optimize the strategy thoroughly, combine it with other technical analysis tools, and always implement sound risk management practices before using it with real capital. Past performance is not indicative of future results. Conduct your own due diligence and consider your risk tolerance before making any trading decisions.

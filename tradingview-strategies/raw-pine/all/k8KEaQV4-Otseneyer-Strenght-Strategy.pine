@@ -1,0 +1,121 @@
+//@version=3
+strategy("Otseneyer Strenght Strategy", overlay=true)
+    
+//ICHIMOKU CLUD
+
+conversionPeriods = input(9, minval=1, title="Conversion Line Periods"),
+basePeriods = input(26, minval=1, title="Base Line Periods")
+laggingSpan2Periods = input(52, minval=1, title="Lagging Span 2 Periods"),
+displacement = input(26, minval=1, title="Displacement")
+
+donchian(len) => avg(lowest(len), highest(len))
+
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+
+
+//BOLLINGER
+length = input(20, minval=1)
+src = input(close, title="Source")
+mult = input(2.0, minval=0.001, maxval=50)
+basis = sma(src, length)
+dev = mult * stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+
+//MACD
+// Getting inputs
+fast_length = input(title="Fast Length", type=integer, defval=12)
+slow_length = input(title="Slow Length", type=integer, defval=26)
+src2 = input(title="Source", type=source, defval=close)
+signal_length = input(title="Signal Smoothing", type=integer, minval = 1, maxval = 50, defval = 9)
+sma_source = input(title="Simple MA(Oscillator)", type=bool, defval=false)
+sma_signal = input(title="Simple MA(Signal Line)", type=bool, defval=false)
+
+// Plot colors
+col_grow_above = #26A69A
+col_grow_below = #FFCDD2
+col_fall_above = #B2DFDB
+col_fall_below = #EF5350
+col_macd = #0094ff
+col_signal = #ff6a00
+
+// Calculating
+fast_ma = sma_source ? sma(src, fast_length) : ema(src, fast_length)
+slow_ma = sma_source ? sma(src, slow_length) : ema(src, slow_length)
+macd = fast_ma - slow_ma
+signal = sma_signal ? sma(macd, signal_length) : ema(macd, signal_length)
+hist = macd - signal
+div= macd/signal
+
+//HV
+length3 = input(10, minval=1)
+annual = 365
+per = isintraday or isdaily and interval == 1 ? 1 : 7
+hv = 100 * stdev(log(close / close[1]), length3) * sqrt(annual / per)
+
+//RSI
+src5 = close, len = input(14, minval=1, title="Length")
+up = rma(max(change(src5), 0), len)
+down = rma(-min(change(src5), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+
+
+lineaBlanca=52
+
+longCondition1 = macd > signal //Verde Positivo
+longCondition2 = 1//conversionLine > baseLine //Lineas de Ichimoku
+longCondition3 = close > leadLine1[lineaBlanca] and close > leadLine2[lineaBlanca]  //Linea blanca arriba de la nube de ichimoku
+longCondition4 = 1//hv > 0 // Volatilidad
+longCondition5 = close > upper[26] // Linea blanca arriba de bollinger
+longCondition6 = close > leadLine1 and close > leadLine2 //Precio arriba de Ichimoku
+longCondition7 = 1//hist>=0 and hist[1] < hist  and hist[2] < hist[1] and hist[3] < hist[2] // HISTOGRAMA
+longCondition8 = 1
+longCondition9 = close > sma(close,100)[26] and close > sma(close,200)[26]//Linea blanca arriba de la media movil de 100 y de 200
+longCondition10 = hist > 0.6
+longCondition11 = 1//rsi < 63
+conditionForBuy = 1//rsi(close,1)>70 //ANULA orden cuando el rsi es mayor que 70
+conditionForSell = 1//rsi(close,1)<30//ANULA orden cuando el resi es menor que 30
+
+
+
+if (longCondition1 and longCondition2 and longCondition3 and longCondition4 and longCondition5 and longCondition6 and longCondition7 and longCondition8 and longCondition9 and longCondition10 and longCondition11 )
+    strategy.entry("LONG", strategy.long)
+    
+strategy.cancel("LONG", when = not conditionForBuy) // cancel the entry order with name "long" if conditionForBuy is false
+
+
+shortCondition1 = macd < signal //MACD rojo
+shortCondition2 = 1//conversionLine < baseLine // Cruce hacia abajo de lineas de Ichimoku
+shortCondition3 = close < leadLine1[lineaBlanca] and close < leadLine2[lineaBlanca] //Linea blanca esta abajo de la nube de Ichimoku
+shortCondition4 = 1//hv > 0 //Volatilidad mayor que x
+shortCondition5 = close < lower[26]  //Linea blanca menor que Bollinger
+shortCondition6 = close < leadLine1 and close < leadLine2 //Precio abajo de nube de ichimoku
+shortCondition7 = 1//hist<=0 and hist[1] > hist  and hist[2] > hist[1]
+shortCondition8 =  1//lead1   > lead1 
+shortCondition9 = close < sma(close,100)[26]  and close < sma(close,200)[26]//Linea blanca es menor que la media movil de 100 y de 200
+
+
+
+if (shortCondition1 and shortCondition2 and shortCondition3 and shortCondition4 and shortCondition5 and shortCondition6 and shortCondition7 and shortCondition8 and shortCondition9  )
+    strategy.entry("SHORT", strategy.short) 
+
+
+
+alertcondition(longCondition1 and longCondition2 and longCondition3 and longCondition4 and longCondition5 and longCondition6 and longCondition7 and longCondition8 and longCondition9 and longCondition10 and longCondition11 , "LONG OTSENEYER STRATEGY", "LONG")
+alertcondition(shortCondition1 and shortCondition2 and shortCondition3 and shortCondition4 and shortCondition5 and shortCondition6 and shortCondition7 and shortCondition8 and shortCondition9 , "SHORT OTSENEYER STRATEGY", "SHORT")
+
+
+
+
+//TOMAR GANANCIAS
+
+View in Pine Editor・114 lines
+Use on chart
+1
+9
+2 077
+This strategy shows if the market is strong or weak, marking short or long respectively, however this does not represent a direct entry, only a strength or weakness, which applied with some other parameters (candlestick patterns, resistances, etc) can throw us a very good entry, especially in the appropriate temporality, where there is a balance between volatility and the persistence of micro-tendencies.

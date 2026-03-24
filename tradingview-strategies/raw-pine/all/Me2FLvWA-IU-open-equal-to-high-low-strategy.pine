@@ -1,0 +1,95 @@
+//@version=6
+strategy('IU open equal to high/low strategy', overlay = true, initial_capital = 100000, slippage = 1, commission_value = 0.02)
+
+// _____________________________________________ User input ___________________________________________________\\
+RTR = input.float(2.00, 'RTR = ', tooltip = "Risk to Reward Ratio")
+
+// _____________________________________________ getting the open, high and low _______________________________\\
+days_first_open = ta.valuewhen(session.isfirstbar, open, 0)
+days_first_high = ta.valuewhen(session.isfirstbar, high, 0)
+days_first_low  = ta.valuewhen(session.isfirstbar, low , 0)
+
+
+//_______________________________________________ long short cond ______________________________________________\\
+long_cond  = days_first_open == days_first_low  and session.isfirstbar
+short_cond = days_first_open == days_first_high and session.isfirstbar
+
+// -------- going long ----------\\
+if long_cond and strategy.position_size == 0
+    strategy.entry('long', strategy.long, comment = 'Long Entry')
+    // -------- going short ----------\\
+if short_cond and strategy.position_size == 0 and session.isfirstbar
+    strategy.entry('short', strategy.short, comment = 'Short Entry')
+
+
+//____________________________________ Long and short exits __________________________________________\\
+long_SL  = ta.valuewhen(strategy.position_size > 0 and strategy.position_size[1] == 0 , low[1], 0)
+long_TP  = strategy.position_avg_price + (strategy.position_avg_price - long_SL) * RTR
+short_SL = ta.valuewhen(strategy.position_size < 0 and strategy.position_size[1] == 0 , high[1], 0)
+short_TP = strategy.position_avg_price - (short_SL - strategy.position_avg_price) * RTR
+
+//--------- long exit ---------\\
+if strategy.position_size > 0
+    strategy.exit('long', 'long', stop = long_SL, limit = long_TP, comment = 'Long Exit')
+    //--------- short exit ---------\\
+if strategy.position_size < 0
+    strategy.exit('short', 'short', stop = short_SL, limit = short_TP, comment = 'Short Exit')
+
+
+// ________________________________________ plotting long and short SL/TP ______________________________\\
+//-------- long and short SL/TP ----------\\
+long_SL_plot  = plot(strategy.position_size[1]  > 0 ? long_SL     : na, 'Long SL' , color.red  , style = plot.style_linebr)
+long_TP_plot  = plot(strategy.position_size[1]  > 0 ? long_TP[1]  : na, 'Long TP' , color.green, style = plot.style_linebr)
+short_SL_plot = plot(strategy.position_size[1] < 0 ? short_SL     : na, 'Shprt SL', color.red  , style = plot.style_linebr)
+short_TP_plot = plot(strategy.position_size[1] < 0 ? short_TP[1]  : na, 'Short TP', color.green, style = plot.style_linebr)
+// -------- plotting labels --------------\\
+plotshape(long_cond , 'Open==Low' , shape.labelup  , location.belowbar, color.new(color.green,80), size = size.huge
+             , text = "Open == Low" , textcolor = color.white)
+plotshape(short_cond, 'Open==High', shape.labeldown, location.abovebar, color.new(color.red,80)  , size = size.huge
+             , text = "Open == high", textcolor = color.white)
+
+
+
+//______________________________ Filling stop loss and take profits ______________//
+entry_plot = plot(strategy.position_size[1] != 0 ? strategy.position_avg_price[1] : na, color = color.new(color.silver, 20)
+             , style = plot.style_linebr)
+// ------------- for long ----------- \\
+fill(entry_plot, long_SL_plot , color.new(color.red, 85)  , 'Long SL plot')
+fill(entry_plot, long_TP_plot , color.new(color.green, 85), 'Long TP plot')
+// ------------- for short ---------- \\ 
+fill(entry_plot, short_SL_plot, color.new(color.red, 85)  , 'Short SL plot')
+fill(entry_plot, short_TP_plot, color.new(color.green, 85), 'Short TP plot')
+
+View in Pine Editor・64 lines
+Use on chart
+1
+7
+9
+3 174
+IU open equal to high/low strategy:
+
+The "IU Open Equal to High/Low Strategy" is designed to identify and trade specific market conditions where the day's first price action shows a strong directional bias. This strategy automatically enters trades based on the relationship between the market's open price and its first high or low of the day.
+
+Entry Conditions:
+
+1. Long Entry: A long position is initiated when the first open price of the session equals the day's first low. This signals a potential upward move.
+
+2. Short Entry: A short position is initiated when the first open price of the session equals the day's first high. This signals a potential downward move.
+
+Exit Conditions:
+
+1. Stop Loss (SL): For both long and short trades, the stop loss is calculated based on the low or high of the candle where the position was entered.
+
+2. Take Profit (TP): The take profit is set using a Risk-to-Reward (RTR) ratio, which is customizable by the user. The TP is calculated relative to the entry price and the distance between the entry and the stop loss.
+
+
+Additional Features:
+
+- Plots are used to visualize the entry price, stop loss, and take profit levels directly on the chart, providing clear and actionable insights.
+
+- Labels are displayed to indicate the occurrence of the "Open == Low" or "Open == High" conditions for easier identification of potential trade setups.
+
+- A dynamic fill highlights the areas between the entry price and the stop loss or take profit, offering a clear visual representation of the trade's risk and reward zones.
+
+
+This strategy is designed for traders looking to capitalize on directional momentum at the start of the trading session. It is customizable, allowing users to set their desired Risk-to-Reward ratio and tailor the strategy to fit their trading style.

@@ -1,0 +1,90 @@
+//@version=5
+strategy("Linear Mean Reversion Strategy with 20pt Stop", overlay=true)
+
+// === INPUTS ===
+halflife = input.int(14, title="Half-Life (Lookback Window)")
+scale = input.float(1.0, title="Position Scaling Factor")
+entry_threshold = input.float(2.0, title="Z-score Entry Threshold")
+exit_threshold = input.float(0.2, title="Z-score Exit Threshold")
+stop_loss_points = input.float(50.0, title="Fixed Stop Loss (points)")
+
+// === CORE CALCULATIONS ===
+price = close
+mean = ta.sma(price, halflife)
+std = ta.stdev(price, halflife)
+zscore = std != 0 ? (price - mean) / std : 0
+
+// === ENTRY CONDITIONS ===
+long_entry  = zscore < -entry_threshold
+short_entry = zscore >  entry_threshold
+
+// === EXIT CONDITIONS ===
+exit_long  = zscore > -exit_threshold
+exit_short = zscore <  exit_threshold
+
+// === MARKET ENTRIES ===
+if (long_entry)
+    strategy.entry("Long", strategy.long)
+
+if (short_entry)
+    strategy.entry("Short", strategy.short)
+
+// === MARKET EXITS ===
+if (strategy.position_size > 0 and exit_long)
+    strategy.close("Long")
+
+if (strategy.position_size < 0 and exit_short)
+    strategy.close("Short")
+
+// === STOP LOSS (20 points) ===
+strategy.exit("SL Long",  from_entry="Long",  loss=stop_loss_points)
+strategy.exit("SL Short", from_entry="Short", loss=stop_loss_points)
+
+// === PLOTS ===
+//plot(zscore, title="Z-score", color=color.orange)
+//hline( entry_threshold,  "Upper Entry", color=color.red)
+//////hline(-entry_threshold,  "Lower Entry", color=color.green)
+//hline(0,                 "Mean",        color=color.gray)
+
+View in Pine Editor・47 lines
+Use on chart
+3
+7
+1 380
+Aug 2, 2025
+📘 Strategy Introduction: Linear Mean Reversion with Fixed Stop
+This strategy implements a simple yet powerful mean reversion model that assumes price tends to oscillate around a dynamic average over time. It identifies statistically significant deviations from the moving average using a z-score, and enters trades expecting a return to the mean.
+
+🧠 Core Logic:
+A z-score is calculated by comparing the current price to its moving average, normalized by standard deviation, over a user-defined half-life window.
+
+Trades are entered when the z-score crosses a threshold (e.g., ±1), signaling overbought or oversold conditions.
+
+The strategy exits positions either when price reverts back near the mean (z-score close to 0), or if a fixed stop loss of 100 points is hit, whichever comes first.
+
+⚙️ Key Features:
+Dynamic mean and volatility estimation using moving average and standard deviation
+
+Configurable z-score thresholds for entry and exit
+
+Position size scaling based on z-score magnitude
+
+Fixed stop loss to control risk and avoid prolonged drawdowns
+
+🧪 Use Case:
+Ideal for range-bound markets or assets that exhibit stationary behavior around a mean, this strategy is especially useful on assets with mean-reverting characteristics like currency pairs, ETFs, or large-cap stocks. It is best suited for traders looking for short-term reversions rather than long-term trends.
+Aug 3, 2025
+Release Notes
+The idea is simple: if an instrument’s price is truly mean-reverting, we can expect it to return to its long-term average.
+
+Most assets, however, behave more like random walks and show little tendency to revert. The VIX—an index of S&P 500 volatility—is a notable exception, exhibiting clear mean-reversion.
+
+For this strategy, I’ve assumed a trading cost of 0.1%, which seems reasonable given the typical bid-ask spread on the VIX is about 0.18 points.
+
+A z-score is calculated by comparing the current price to its moving average, normalized by standard deviation, over a user-defined half-life window.
+
+Trades are entered when the z-score crosses a threshold (e.g., ±1), signaling overbought or oversold conditions.
+
+The strategy exits positions either when price reverts back near the mean (z-score close to 0), or if a fixed stop loss is hit, whichever comes first.
+
+Designed for a 1 H window, where the VIX’s mean reversion and assumed costs tend to align well.

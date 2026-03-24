@@ -1,0 +1,186 @@
+//@version=5
+strategy("Session First FVG Strategy with CHoCH Exits, Adaptive TP & Entry Cooldown", overlay=true, margin_long=100, margin_short=100)
+
+session_input = input.session("1600-1700", "FVG Session Time")
+trading_session = input.session("0930-1600", "Trading Hours (No Entries After)")
+
+// Cooldown after every exit
+cooldown_bars = input.int(6, "Cooldown Bars After Exit")
+var int cooldown = 0
+
+// Each bar, decrement cooldown
+if cooldown > 0
+    cooldown -= 1
+
+// ATR for adaptive TP
+use_atr_tp = input.bool(true, "Use ATR-based Take Profit")
+atr_period = input.int(14, "ATR Period")
+tp_mult = input.float(6.0, "TP ATR Multiplier")
+
+// Pivot settings for CHoCH (using fractal-like pivots, left/right=2 for 5-bar fractals)
+pivot_left = input.int(2, "Pivot Left Bars")
+pivot_right = input.int(2, "Pivot Right Bars")
+
+// Check if current bar is within the user-defined session
+in_session = not na(time(timeframe.period, session_input))
+
+// Check if within trading hours for entries
+can_trade = not na(time(timeframe.period, trading_session))
+
+// Detect new session start
+new_session = in_session and not in_session[1]
+
+// Variables to store the first FVG midpoint and type
+var bool found = false
+var float fvg_mid = na
+var bool is_bull_fvg = false
+var float fvg_bottom = na
+var float fvg_top = na
+var box fvg_box = na
+
+// Reset at new session
+if new_session
+    found := false
+    fvg_mid := na
+    fvg_bottom := na
+    fvg_top := na
+    if not na(fvg_box)
+        box.delete(fvg_box)
+    fvg_box := na
+
+// Detect FVGs
+bull_fvg = low > high[2]
+bear_fvg = high < low[2]
+
+// Find the first FVG in the session
+if in_session and not found and (bull_fvg or bear_fvg)
+    float bottom = na
+    float top = na
+    if bull_fvg
+        bottom := high[2]
+        top := low
+        is_bull_fvg := true
+    else if bear_fvg
+        bottom := high
+        top := low[2]
+        is_bull_fvg := false
+    fvg_mid := (bottom + top) / 2
+    fvg_bottom := bottom
+    fvg_top := top
+    found := true
+    
+    // Draw the FVG box
+    color c = is_bull_fvg ? color.green : color.red
+    fvg_box := box.new(bar_index - 2, bottom, bar_index + 100, top, xloc = xloc.bar_index, extend = extend.right, border_color = na, bgcolor = color.new(c, 80))
+
+// Plot the 50% line
+plot(fvg_mid, "50% FVG Line", color = color.blue, linewidth = 2, style = plot.style_linebr)
+
+// Trading logic if FVG mid is set
+if not na(fvg_mid)
+    // Rejection Long: Price above, touches but closes above
+    long_reject = (close[1] > fvg_mid) and (low <= fvg_mid) and (close > fvg_mid)
+    
+    // Rejection Short: Price below, touches but closes below
+    short_reject = (close[1] < fvg_mid) and (high >= fvg_mid) and (close < fvg_mid)
+    
+    // Breakout Long: Closes above from below
+    long_break = ta.crossover(close, fvg_mid)
+    
+    // Breakout Short: Closes below from above
+    short_break = ta.crossunder(close, fvg_mid)
+    
+    // Inversion conditions (strong break in opposite direction)
+    bull_fvg_inversion = ta.crossunder(close, fvg_bottom)  // For bull FVG, inversion to downside (close below bottom)
+    bear_fvg_inversion = ta.crossover(close, fvg_top)      // For bear FVG, inversion to upside (close above top)
+    
+    // Asymmetric entries based on FVG type, only at bar close
+    if is_bull_fvg
+        // Prefer longs, short only on inversion
+        if (long_reject or long_break) and cooldown <= 0 and can_trade and barstate.isconfirmed
+            strategy.entry("FVG Long", strategy.long)
+            alert("FVG Long Entry", alert.freq_once_per_bar_close)
+        if bull_fvg_inversion and cooldown <= 0 and can_trade and barstate.isconfirmed
+            strategy.entry("FVG Short", strategy.short)
+            alert("FVG Short Entry (Inversion)", alert.freq_once_per_bar_close)
+    else
+        // Prefer shorts, long only on inversion
+        if (short_reject or short_break) and cooldown <= 0 and can_trade and barstate.isconfirmed
+            strategy.entry("FVG Short", strategy.short)
+            alert("FVG Short Entry", alert.freq_once_per_bar_close)
+        if bear_fvg_inversion and cooldown <= 0 and can_trade and barstate.isconfirmed
+            strategy.entry("FVG Long", strategy.long)
+            alert("FVG Long Entry (Inversion)", alert.freq_once_per_bar_close)
+
+// Detect closed trades and set cooldown after every exit
+if strategy.closedtrades > strategy.closedtrades[1]
+    cooldown := cooldown_bars
+
+// CHoCH Detection
+ph = ta.pivothigh(high, pivot_left, pivot_right)
+pl = ta.pivotlow(low, pivot_left, pivot_right)
+
+var float last_ph = na
+var float prev_ph = na
+var float last_pl = na
+var float prev_pl = na
+
+if not na(ph)
+    prev_ph := last_ph
+    last_ph := ph
+
+if not na(pl)
+    prev_pl := last_pl
+    last_pl := pl
+
+var bool is_bull_trend = na(close[1]) ? true : close > close[1]  // Initial assumption
+
+bool bos_bull = false
+bool choch_bear = false
+bool bos_bear = false
+bool choch_bull = false
+
+if is_bull_trend
+    if close > last_ph
+        bos_bull := true
+    if close < last_pl
+        choch_bear := true
+        is_bull_trend := false
+else
+    if close < last_pl
+        bos_bear := true
+    if close > last_ph
+        choch_bull := true
+        is_bull_trend := true
+
+// Plot CHoCH labels for visualization
+if choch_bull
+    label.new(bar_index, high, "CHoCH Bull", color=color.green, style=label.style_label_down)
+if choch_bear
+    label.new(bar_index, low, "CHoCH Bear", color=color.red, style=label.style_label_up)
+
+// Use CHoCH as exit signals, only at bar close
+if choch_bear and strategy.position_size > 0 and barstate.isconfirmed
+    strategy.close("FVG Long", comment="CHoCH Bear Exit")
+    alert("CHoCH Bear Exit (Close Long)", alert.freq_once_per_bar_close)
+if choch_bull and strategy.position_size < 0 and barstate.isconfirmed
+    strategy.close("FVG Short", comment="CHoCH Bull Exit")
+    alert("CHoCH Bull Exit (Close Short)", alert.freq_once_per_bar_close)
+
+// Adaptive TP using ATR (applied after any entry)
+if strategy.position_size != strategy.position_size[1] and strategy.position_size > 0 and use_atr_tp
+    float entry_price = strategy.position_avg_price
+    float atr_val = ta.atr(atr_period)
+    strategy.exit("TP Long", "FVG Long", limit=entry_price + tp_mult * atr_val)
+if strategy.position_size != strategy.position_size[1] and strategy.position_size < 0 and use_atr_tp
+    float entry_price = strategy.position_avg_price
+    float atr_val = ta.atr(atr_period)
+    strategy.exit("TP Short", "FVG Short", limit=entry_price - tp_mult * atr_val)
+
+View in Pine Editor・178 lines
+Use on chart
+3
+2
+2
+1 565
+A strategy that is purely based off of prices reaction to the first presented fair value gap at 9:30 market open. Works best on NASDAQ one minute timeframe. Experimental indicator for me to back test first presented fair value gap.

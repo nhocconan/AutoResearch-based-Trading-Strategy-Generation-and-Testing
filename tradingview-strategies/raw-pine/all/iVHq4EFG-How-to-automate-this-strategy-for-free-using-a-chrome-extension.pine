@@ -1,0 +1,353 @@
+//@version=3
+// Learn more about Autoview and how you can automate strategies like this one here: https://autoview.with.pink/
+strategy("Autoview Build-a-bot", "Strategy", overlay=true, pyramiding=2000, default_qty_value=10000)
+// study("Autoview Build-a-bot", "Alerts")
+
+///////////////////////////////////////////////
+//* Backtesting Period Selector | Component *//
+///////////////////////////////////////////////
+
+//* https://www.tradingview.com/script/eCC1cvxQ-Backtesting-Period-Selector-Component *//
+//* https://www.tradingview.com/u/pbergden/ *//
+//* Modifications made *//
+
+testStartYear = input(1, "Backtest Start Year") 
+testStartMonth = input(11, "Backtest Start Month")
+testStartDay = input(10, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(77777777, "Backtest Stop Year")
+testStopMonth = input(11, "Backtest Stop Month")
+testStopDay = input(15, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+/////////////////////////////////////
+//* Put your strategy logic below *//
+/////////////////////////////////////
+
+src = close
+len = input(4, minval=1, title="Length")
+
+up = rma(max(change(src), 0), len)
+down = rma(-min(change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+rsin = input(5)
+sn = 100 - rsin
+ln = 0 + rsin
+
+// Put your long and short rules here
+longLocic = crossunder(rsi, ln)
+shortLogic = crossover(rsi, sn)
+
+//////////////////////////
+//* Strategy Component *//
+//////////////////////////
+
+isLong = input(false, "Longs Only")
+isShort = input(false, "Shorts Only")
+isFlip = input(false, "Flip the Opens")
+
+long = longLocic
+short = shortLogic
+
+if isFlip
+    long := shortLogic
+    short := longLocic
+else
+    long := longLocic
+    short := shortLogic
+
+if isLong
+    long := long
+    short := na
+
+if isShort
+    long := na
+    short := short
+    
+////////////////////////////////
+//======[ Signal Count ]======//
+////////////////////////////////
+
+sectionLongs = 0
+sectionLongs := nz(sectionLongs[1])
+sectionShorts = 0
+sectionShorts := nz(sectionShorts[1])
+
+if long
+    sectionLongs := sectionLongs + 1
+    sectionShorts := 0
+
+if short
+    sectionLongs := 0
+    sectionShorts := sectionShorts + 1
+
+//////////////////////////////
+//======[ Pyramiding ]======//
+//////////////////////////////
+
+pyrl = input(1, "Pyramiding less than") // If your count is less than this number
+pyre = input(0, "Pyramiding equal to") // If your count is equal to this number
+pyrg = input(1000000, "Pyramiding greater than") // If your count is greater than this number
+
+longCondition = long and sectionLongs <= pyrl or long and sectionLongs >= pyrg or long and sectionLongs == pyre ? 1 : 0
+shortCondition = short and sectionShorts <= pyrl or short and sectionShorts >= pyrg or short and sectionShorts == pyre ? 1 : 0
+
+////////////////////////////////
+//======[ Entry Prices ]======//
+////////////////////////////////
+
+last_open_longCondition = na
+last_open_shortCondition = na
+last_open_longCondition := longCondition ? close : nz(last_open_longCondition[1])
+last_open_shortCondition := shortCondition ? close : nz(last_open_shortCondition[1])
+
+////////////////////////////////////
+//======[ Open Order Count ]======//
+////////////////////////////////////
+
+sectionLongConditions = 0
+sectionLongConditions := nz(sectionLongConditions[1])
+sectionShortConditions = 0
+sectionShortConditions := nz(sectionShortConditions[1])
+
+if longCondition
+    sectionLongConditions := sectionLongConditions + 1
+    sectionShortConditions := 0
+
+if shortCondition
+    sectionLongConditions := 0
+    sectionShortConditions := sectionShortConditions + 1
+    
+///////////////////////////////////////////////
+//======[ Position Check (long/short) ]======//
+///////////////////////////////////////////////
+
+last_longCondition = na
+last_shortCondition = na
+last_longCondition := longCondition ? time : nz(last_longCondition[1])
+last_shortCondition := shortCondition ? time : nz(last_shortCondition[1])
+
+in_longCondition = last_longCondition > last_shortCondition
+in_shortCondition = last_shortCondition > last_longCondition
+
+/////////////////////////////////////
+//======[ Position Averages ]======//
+/////////////////////////////////////
+
+totalLongs = 0.0
+totalLongs := nz(totalLongs[1])
+totalShorts = 0.0
+totalShorts := nz(totalShorts[1])
+averageLongs = 0.0
+averageLongs := nz(averageLongs[1])
+averageShorts = 0.0
+averageShorts := nz(averageShorts[1]) 
+
+if longCondition
+    totalLongs := totalLongs + last_open_longCondition
+    totalShorts := 0.0
+
+if shortCondition
+    totalLongs := 0.0
+    totalShorts := totalShorts + last_open_shortCondition
+
+averageLongs := totalLongs / sectionLongConditions
+averageShorts := totalShorts / sectionShortConditions
+
+/////////////////////////////////
+//======[ Trailing Stop ]======//
+/////////////////////////////////
+
+isTS = input(false, "Trailing Stop")
+tsi = input(100, "Activate Trailing Stop Price (%). Divided by 100 (1 = 0.01%)") / 100 
+ts = input(100, "Trailing Stop (%). Divided by 100 (1 = 0.01%)") / 100
+
+last_high = na
+last_low = na
+last_high_short = na
+last_low_short = na
+last_high := not in_longCondition ? na : in_longCondition and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_high_short := not in_shortCondition ? na : in_shortCondition and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_shortCondition ? na : in_shortCondition and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+last_low_short := not in_longCondition ? na : in_longCondition and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+
+long_ts = isTS and not na(last_high) and low <= last_high - last_high / 100 * ts and longCondition == 0 and last_high >= averageLongs + averageLongs / 100 * tsi
+short_ts = isTS and not na(last_low) and high >= last_low + last_low / 100 * ts and shortCondition == 0 and last_low <= averageShorts - averageShorts/ 100 * tsi
+
+///////////////////////////////
+//======[ Take Profit ]======//
+///////////////////////////////
+
+isTP = input(false, "Take Profit")
+tp = input(100, "Take Profit (%). Divided by 100 (1 = 0.01%)") / 100
+long_tp = isTP and close > averageLongs + averageLongs / 100 * tp and not longCondition
+short_tp = isTP and close < averageShorts - averageShorts / 100 * tp and not shortCondition
+
+/////////////////////////////
+//======[ Stop Loss ]======//
+/////////////////////////////
+
+isSL = input(false, "Stop Loss")
+sl = input(100, "Stop Loss (%). Divided by 100 (1 = 0.01%)") / 100
+long_sl = isSL and close < averageLongs - averageLongs / 100 * sl and longCondition == 0
+short_sl = isSL and close > averageShorts + averageShorts / 100 * sl and shortCondition == 0
+
+/////////////////////////////////
+//======[ Close Signals ]======//
+/////////////////////////////////
+
+longClose = long_tp or long_sl or long_ts ? 1 : 0
+shortClose = short_tp or short_sl or short_ts ? 1: 0
+
+///////////////////////////////
+//======[ Plot Colors ]======//
+///////////////////////////////
+
+longCloseCol = na
+shortCloseCol = na
+longCloseCol := long_tp ? purple : long_sl ? maroon : long_ts ? blue : longCloseCol[1]
+shortCloseCol := short_tp ? purple : short_sl ? maroon : short_ts ? blue : shortCloseCol[1]
+tpColor = isTP and in_longCondition ? purple : isTP and in_shortCondition ? purple : white
+slColor = isSL and in_longCondition ? red : isSL and in_shortCondition ? red : white
+
+//////////////////////////////////
+//======[ Strategy Plots ]======//
+//////////////////////////////////
+
+plot(isTS and in_longCondition ? averageLongs + averageLongs / 100 * tsi : na, "Long Trailing Activate", blue, style=3, linewidth=2)
+plot(isTS and in_longCondition and last_high >= averageLongs +  averageLongs / 100 * tsi ? last_high - last_high / 100 * ts : na, "Long Trailing", fuchsia, style=2, linewidth=3)
+plot(isTS and in_shortCondition ? averageShorts - averageShorts/ 100 * tsi : na, "Short Trailing Activate", blue, style=3, linewidth=2)
+plot(isTS and in_shortCondition and last_low <= averageShorts - averageShorts/ 100 * tsi ? last_low + last_low / 100 * ts : na, "Short Trailing", fuchsia, style=2, linewidth=3)
+plot(isTP and in_longCondition and last_high < averageLongs + averageLongs / 100 * tp ? averageLongs + averageLongs / 100 * tp : na, "Long TP", tpColor, style=3, linewidth=2)
+plot(isTP and in_shortCondition and last_low > averageShorts - averageShorts / 100 * tp ? averageShorts - averageShorts / 100 * tp : na, "Short TP", tpColor, style=3, linewidth=2)
+plot(isSL and in_longCondition and last_low_short > averageLongs - averageLongs / 100 * sl ? averageLongs - averageLongs / 100 * sl : na, "Long SL", slColor, style=3, linewidth=2)
+plot(isSL and in_shortCondition and last_high_short < averageShorts + averageShorts / 100 * sl ? averageShorts + averageShorts / 100 * sl : na, "Short SL", slColor, style=3, linewidth=2)
+
+///////////////////////////////
+//======[ Alert Plots ]======//
+///////////////////////////////
+
+// plot(longCondition, "Long", green)
+// plot(shortCondition, "Short", red)
+// plot(longClose, "Long Close", longCloseCol)
+// plot(shortClose, "Short Close", shortCloseCol)
+
+///////////////////////////////////
+//======[ Reset Variables ]======//
+///////////////////////////////////
+
+if longClose or not in_longCondition
+    averageLongs := 0
+    totalLongs := 0.0
+    sectionLongs := 0
+    sectionLongConditions := 0
+
+if shortClose or not in_shortCondition
+    averageShorts := 0
+    totalShorts := 0.0
+    sectionShorts := 0
+    sectionShortConditions := 0
+
+////////////////////////////////////////////
+//======[ Strategy Entry and Exits ]======//
+////////////////////////////////////////////
+
+if testPeriod()
+    strategy.entry("Long", 1, when=longCondition)
+    strategy.entry("Short", 0,  when=shortCondition)
+    strategy.close("Long", when=longClose)
+    strategy.close("Short", when=shortClose)
+
+View in Pine Editor・264 lines
+Use on chart
+3.1 K
+110
+126 691
+Oct 24, 2015
+Hey everyone,
+
+Recently we developed a chrome extension for automating TradingView strategies using the alerts they provide. Initially we were charging a monthly fee for the extension, but we have now decided to make it FREE for everyone. So to display the power of automating strategies via TradingView, we figured we would also provide a profitable strategy along with the custom alert script and commands for the alerts so you can easily cut and paste to begin trading for profit while you sleep.
+
+Step 1:
+You are going to need to download the Chrome Extension called AutoView. You can get the extension for free by following this link: bit.ly/1NY9Rl0
+ ( I had to shorten the link as it contains Google and TV automatically converts it to a symbol)
+
+Step 2: Go to your chrome extension page, and under the new extension you'll see a "settings" button. In the setting you will have to connect and give permission to the exchange 1broker allowing the extension to place your orders automatically when triggered by an alert.
+
+Step 3: Setup the strategy and custom script for the alerts in TradingView. The attached script is the strategy, you can play with the settings yourself to try and get better numbers/performance if you please.
+
+This following script is for the custom alerts:
+//version=2
+study("4All-Alert", shorttitle="Alerts")
+
+src = close
+len = input(4, minval=1, title="Length")
+
+up = rma(max(change(src), 0), len)
+down = rma(-min(change(src), 0), len)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+rsin = input(5)
+sn = 100 - rsin
+ln = 0 + rsin
+
+short = crossover(rsi, sn) ? 1 : 0
+long = crossunder(rsi, ln) ? 1 : 0
+
+plot(long, "Long", color=green)
+plot(short, "Short", color=red)
+
+Now that you have the extension installed, the custom strategy and alert scripts in place, you simply need to create the alerts.
+
+To get the alerts to communicate with the extension properly, there is a specific syntax that you will need to put in the message of the alert. You can find more details about the syntax here : gist.github.com/tranzium/34727307c823dfa75e49
+
+
+For this specific strategy, I use the Alerts script, long/short greater than 0.9 on close.
+In the message for a long place this as your message:
+Long
+c=order b=short
+c=position b=short l=200 t=market
+b=long q=0.01 l=200 t=market tp=13 sl=25
+
+and for the short...
+
+Short
+c=order b=long
+c=position b=long l=200 t=market
+b=short q=0.01 l=200 t=market tp=13 sl=25
+
+If you'll notice in my above messages, compared to the strategy my tp and sl (take profit and stop loss) vary by a few pips. This is to cover the market opens and spread on 1broker. You can change the tp and sl in the strategy to the above and see that the overall profit will not vary much at all.
+
+I hope this all makes sense and it is enough to not only make some people money, but to show the power of coming up with your own strategy and automating it using TradingView alerts and the free Chrome Extension AutoView.
+
+ps. I highly recommend upgrading your TradingView account so you have access to back testing and multiple alerts.
+
+There is really no reason you won't cover the cost and then some on a monthly basis using the tools provided.
+
+Best of luck and happy trading.
+
+Note: The extension currently allows for automation on 2 exchanges; 1broker and Okcoin. If you do not have accounts there, we'd appreciate you signing up using our referral links.
+okcoin.com/?invid=2016110
+
+1broker.com/m/r.php?i=3228
+Nov 20, 2015
+Note
+A section of the alert script in the description has been converted to ticker data. So I published the script here to make things a little easier.
+
+Jan 13, 2016
+Note
+All orders are now being tracked in a Google Sheet for public viewing.
+
+Since: 03/01/2016 18:01:00
+Net Profit = 161 pips
+
+Link for tracked statistics here:
+bit.ly/1ZYDQMt
+Dec 3, 2017
+Release Notes
+Updated to Pinexcript Version 3 and added all the new standard components.

@@ -1,0 +1,204 @@
+//@version=5
+strategy("Previous Day High Low Strategy only for Long", overlay=true, margin_long=100, margin_short=0, calc_on_every_tick=true, default_qty_value = 50)
+[HH, LL] = request.security(syminfo.tickerid, '1D', [high, low], barmerge.gaps_off, barmerge.lookahead_off)
+
+OpenTime = timestamp(year, month, dayofmonth , 09, 30)   
+CloseTime = timestamp(year, month, dayofmonth, 15, 10)  
+ExitTime = timestamp(year, month, dayofmonth, 15, 15)  
+
+TradeTime = time >= OpenTime and time <= CloseTime
+
+UW = open > close ? high - open : high - close
+LW = open > close ? close - low : open - low
+Body = open > close ? open - close : close - open
+
+UWP = (UW / (LW + UW)) * 100
+LWP = (LW / (LW + UW)) * 100
+
+longCondition = ta.crossover(close, HH)
+longCondition := longCondition or ta.crossover(close, LL)
+longCondition := longCondition //and  high == close
+
+
+plot(HH, color=color.red,linewidth = 1)
+plot(LL, color=color.red,linewidth = 1) 
+
+//============================================= Market Strength ============================
+LWadxlength = input(9, title='ADX period')
+LWdilength = input(11, title='DMI Length')
+
+dirmov(len) =>
+    up = ta.change(high)
+    down = -ta.change(low)
+    truerange = ta.rma(ta.tr, len)
+    plus = fixnan(100 * ta.rma(up > down and up > 0 ? up : 0, len) / truerange)
+    minus = fixnan(100 * ta.rma(down > up and down > 0 ? down : 0, len) / truerange)
+    [plus, minus]
+
+adx(LWdilength, LWadxlength) =>
+    [plus, minus] = dirmov(LWdilength)
+    sum = plus + minus
+    adx = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), LWadxlength)
+    [adx, plus, minus]
+
+[ADX, up, down] = adx(LWdilength, LWadxlength)
+LWADX = (ADX - 15) * 2.5
+adxcolor = up > down ? color.green : color.red
+
+strength_up = LWADX > 11 and  up > down and LWADX > ta.highest(LWADX[1],4)
+
+longCondition := longCondition and strength_up // and close>= high-input(15,'LW Size') 
+plotshape(longCondition, title="Buy Signal", location=location.belowbar, color=color.green, textcolor = color.white, style=shape.labelup, text="BUY")
+//========================== POSITIONS ================================
+float MaxProfit = input(150.00,"Max Profit")
+float T1 = MaxProfit * 0.3
+float T2 = MaxProfit * 0.5
+float T3 = MaxProfit * 0.8
+float SL =  na
+float CP = na
+float EP = na
+
+
+if not na(EP[1]) 
+    EP := EP[1]
+
+if not na(CP[1]) 
+    CP := CP[1]
+
+if not na(SL[1]) 
+    SL := SL[1]
+
+
+// Execute strategy on tick
+if (barstate.isconfirmed)
+    if (strategy.position_size == 0)
+        EP := na
+        CP := na
+        SL := na
+    if (longCondition and TradeTime)
+        strategy.entry("Long", strategy.long)
+
+
+if (strategy.position_size > 0)
+    if na(EP[1]) 
+        EP := strategy.position_avg_price
+        CP := EP
+        SL := math.min(input(15,"Max SL"), MaxProfit * 0.4)
+    if (high >= EP + T1) and CP <  EP + T1
+        CP := EP + T1
+        SL := CP-EP//SL * 0.8
+    if (high >= EP + T2) and CP < EP + T2
+        CP := EP + T2
+        SL := CP-EP-T1//SL * 0.8
+    if (high >= EP + T3) and CP < EP + T3
+        CP := EP + MaxProfit
+        SL := CP-EP-T2//SL * 0.8
+    strategy.exit("Exit Long", "Long", limit = EP + MaxProfit, stop =CP-SL)
+
+if (strategy.position_size > 0 and time > CloseTime)
+    strategy.close("Long")
+
+//PLOT
+plot(CP, title="Stop Loss", color=color.yellow, linewidth=1, style = plot.style_linebr)
+plot(EP, title="Stop Loss", color=color.white, linewidth=1, style = plot.style_linebr)
+plot(CP - SL, title="Stop Loss", color=color.red, linewidth=1, style = plot.style_linebr)
+plot(EP + T1, title="Target 1", color=color.blue, linewidth=1, style = plot.style_linebr)
+plot(EP + T2, title="Target 2", color=color.blue, linewidth=1, style = plot.style_linebr)
+plot(EP + T3, title="Target 3", color=color.blue, linewidth=1, style = plot.style_linebr)
+plot(EP + MaxProfit, title="Max Profit", color=color.green, linewidth=1, style = plot.style_linebr)
+
+View in Pine Editor・111 lines
+Use on chart
+3
+7
+4
+12 471
+Welcome to the "Previous Day High Low Strategy only for Long"!.
+
+
+This strategy aims to identify potential long trading opportunities based on the previous day's high and low prices, along with certain market strength conditions.
+
+Key Features:
+
+Entry Conditions: The strategy triggers a long position when the current day's closing price crosses above the previous day's high or low.
+
+Market Strength Filter: The strategy incorporates a market strength filter using the Average Directional Index (ADX). It only takes long positions when the ADX value is above a specific threshold and when there is a predominance of upward movement.
+
+Trade Timing: The strategy operates within a specified trade window, starting at 09:30 and ending at 15:10. Positions are closed at 15:15 if still active.
+
+Risk Management: The strategy employs dynamic stop-loss and profit-taking levels based on a user-defined Max Profit value. It has three profit targets (T1, T2, T3) and a stop-loss level to manage risk effectively.
+
+Rules:
+
+
+Ensure that the strategy idea is clearly understandable. Provide an easy-to-read title and a thoughtful description explaining the reasoning behind the strategy.
+
+All content should be ad-free. Avoid any form of promotion, advertising, or solicitation.
+
+No fundraising requests or money solicitation is allowed on TradingView.
+
+Publish in the same language as the TradingView subdomain you're on, except for script titles, which must be in English.
+
+Don't plagiarize. Create and share only unique content, and always give credit when using someone else's work.
+
+Be respectful, kind, and constructive when engaging with others.
+
+Zero tolerance for contentious political discourse, defamatory, threatening, or discriminatory remarks.
+
+Avoid sharing harmful, misleading, or inappropriate content.
+
+Respect the moderators' work and address complaints privately.
+
+Use only your original account and avoid creating duplicate or fake accounts.
+
+Do not attempt to manipulate the reputation system or engage in like-for-like schemes.
+
+
+
+Explanation of how the strategy works
+1. Previous Day's High and Low (HH, LL):
+In this strategy, we start by obtaining the high and low prices of the previous day (not the current day) using the request.security function. This function allows us to access historical data for a specific time frame. The high and low prices are stored in the variables HH and LL, respectively.
+
+2. Entry Conditions:
+The strategy uses two conditions to trigger a long position:
+
+
+Condition 1 (Long Condition 1): If the closing price of the current day crosses above the previous day's high (HH), it generates a long signal. This is achieved using the ta.crossover function, which detects when a crossover occurs.
+
+Condition 2 (Long Condition 2): Similarly, if the closing price of the current day crosses above the previous day's low (LL), it also generates a long signal.
+
+Combined Condition: To take long positions, the strategy combines both long conditions using the logical OR operator (or). This means that if either of the two conditions is met, a long position will be initiated.
+
+3. Market Strength Filter:
+The strategy also includes a filter based on the Average Directional Index (ADX) to gauge the market's strength before taking long positions. The ADX measures the strength of a trend in the market. The higher the ADX value, the stronger the trend.
+
+Calculation of ADX: The ADX is calculated using the adx function, which takes two parameters: LWdilength (DMI Length) and LWadxlength (ADX period).
+
+Strength Condition (strength_up): The strategy requires that the ADX value should be above a threshold (11 in this case) and that there is a predominance of upward movement (up > down) before initiating a long position. The LWADX value is multiplied by 2.5 and compared to the highest value of LWADX from the last 4 periods using ta.highest(LWADX[1], 4). If these conditions are met, the variable strength_up is set to true.
+
+Combined Condition: The strength_up condition is then combined with the long conditions using the logical AND operator (and). This means that the strategy will only take a long position if both the long conditions and the market strength condition are met.
+
+4. Trade Timing:
+The strategy sets a specific trade window between 09:30 and 15:10. It will only execute trades within this time frame (TradeTime).
+
+5. Risk Management:
+The strategy implements dynamic stop-loss (SL) and profit-taking levels (T1, T2, T3) based on a user-defined Max Profit value. The stop-loss is set as a percentage of the Max Profit value. As the position moves in favor of the trader, the profit targets are adjusted accordingly.
+
+
+
+
+6. Position Management:
+The strategy uses the strategy.entry function to enter long positions based on the combined entry conditions. Once a position is open, the script uses strategy.exit to define the exit condition when either the profit target or stop-loss level is hit. The strategy.close function is used to close any open position at the end of the trade window (15:15).
+
+7. Plotting:
+The strategy uses the plot function to visualize the previous day's high and low prices, as well as the stop-loss (SL) and profit-taking (T1, T2, T3) levels on the chart.
+
+Overall, the "Previous Day High Low Strategy only for Long" aims to identify potential long trading opportunities based on the previous day's price action and market strength conditions. However, as with any trading strategy, it's essential to thoroughly test it and consider risk management before applying it to real-world trading scenarios.
+
+Disclaimer:
+The information presented by this strategy is for educational purposes only and should not be considered as investment advice. The strategy is not designed for qualified investors. Always conduct your own research and consult with a financial advisor before making any trading decisions.
+
+Remember, the success of any trading strategy depends on various factors, including market conditions, risk management, and individual trading skills. Past performance is not indicative of future results.
+
+
+

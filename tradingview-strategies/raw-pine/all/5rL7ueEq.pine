@@ -1,0 +1,68 @@
+//@version=5
+strategy("EMA 1 & SALMA Kesişim Stratejisi", overlay=true, initial_capital=10000, default_qty_type=strategy.cash)
+
+// --- Girdiler ---
+salma_len = input.int(15, title="SALMA Periyodu")
+ema_len = input.int(1, title="EMA Periyodu (Fiyat)")
+rsi_len = input.int(14, title="RSI Periyodu")
+
+// --- Hesaplamalar ---
+float salma = ta.sma(ta.sma(close, salma_len), 5) 
+float ema1 = ta.ema(close, ema_len)
+float rsi = ta.rsi(close, rsi_len)
+
+// --- Al-Sat Mantığı (Kesişim Odaklı) ---
+
+// AL Sinyali: EMA 1, SALMA'yı aşağıdan yukarıya kestiğinde
+longCondition = ta.crossover(ema1, salma) and rsi > 50
+if (longCondition)
+    strategy.entry("Long", strategy.long, comment="EMA Kes-Yukarı (AL)")
+
+// SAT Sinyali: EMA 1, SALMA'yı yukarıdan aşağıya kestiğinde
+shortCondition = ta.crossunder(ema1, salma) and rsi < 50
+if (shortCondition)
+    strategy.entry("Short", strategy.short, comment="EMA Kes-Aşağı (SAT)")
+
+// --- Grafik Çizimi ---
+plot(salma, color=color.new(color.gray, 0), linewidth=2, title="SALMA Çizgisi")
+plot(ema1, color=color.blue, linewidth=1, title="EMA 1 (Fiyat)")
+
+// Sinyal Görselleri
+plotshape(series=longCondition, title="Al", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small, text="AL")
+plotshape(series=shortCondition, title="Sat", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small, text="SAT")
+
+View in Pine Editor・32 lines
+Use on chart
+2
+4
+901
+Trading Strategy: EMA 1 & SALMA Crossover System
+This strategy is a Trend-Following system that focuses on the direct interaction between the price (represented by EMA 1) and a smoothed trendline (SALMA). Instead of relying on the color changes of the indicator, it uses mechanical crossover signals to enter and exit trades.
+
+1. Indicators Used
+EMA 1 (Exponential Moving Average): Since the period is 1, it effectively represents the Current Price. It reacts instantly to every market move.
+
+SALMA v3.0 (Smoothed Adaptive Lattice Moving Average): A double-smoothed moving average that acts as the "Base Line" or "Trend Support/Resistance."
+
+RSI (Relative Strength Index): Used as a Momentum Filter to ensure we don't trade against the market's strength.
+
+2. Buy (Long) Entry Rules
+You enter a Long position when the following conditions are met:
+
+The Crossover: The EMA 1 (Price) crosses ABOVE the SALMA line. This indicates that the short-term momentum is shifting higher than the average trend.
+
+The Filter (RSI): The RSI must be above 50. This confirms that the buyers are in control and the upward move has enough strength.
+
+3. Sell (Short) Entry Rules
+You enter a Short position when the following conditions are met:
+
+The Crossunder: The EMA 1 (Price) crosses BELOW the SALMA line. This indicates a breakdown in price action.
+
+The Filter (RSI): The RSI must be below 50. This confirms that the sellers are dominating and the downward momentum is real.
+
+4. Key Advantages of This System
+Objectivity: You don't guess based on the color of the line; you wait for a clear physical break (cross) of the line.
+
+Precision: By using EMA 1, you get the earliest possible entry signal compared to slower moving averages.
+
+False Signal Protection: The RSI 50 filter prevents you from entering "weak" trades where the price crosses the line but lacks the volume or momentum to continue.

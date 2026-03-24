@@ -1,0 +1,55 @@
+//@version=5
+strategy("SuperTrend+ Updated", overlay = true, format=format.price, precision=2)
+import Electrified/SupportResitanceAndTrend/4 as SRT
+
+ATR = "Average True Range", CONFIRM = "Confirmation", DISPLAY = "Display"
+WMA = "WMA", EMA = "EMA", SMA = "SMA", VWMA = "VWMA", VAWMA = "VAWMA"
+
+mode = input.string(VAWMA, "Mode", options=[SMA,EMA,WMA,VWMA,VAWMA], group=ATR, tooltip="Selects which averaging function will be used to determine the ATR value.")
+atrPeriod = input.int(120, "Period", group=ATR, tooltip="The number of bars to use in calculating the ATR value.")
+atrM = input.float(3.0, title="Multiplier", step=0.5, group=ATR, tooltip="The multiplier used when defining the super trend limits.")
+maxDeviation = input.float(0, title="Max Deviation", minval=0, step=0.5, group=ATR, tooltip="The maximum deviation of the true range before being considered and outlier.\nA value of zero (default) results in no filtering.")
+
+closeBars = input.int(2, "Closed Bars", minval = 0, group=CONFIRM, tooltip="The number of closed bars that have to exceed the super-trend value before the trend reversal is confirmed.")
+
+showsignals = input(false, title="Show Buy/Sell Signals ?", group=DISPLAY)
+highlighting = input(true, "Highlighter On/Off ?", group=DISPLAY)
+
+[trend, up, dn, unconfirmed, warn, reversal] =
+  SRT.superTrend(atrM, atrPeriod, mode, closeBars, maxDeviation)
+
+upPlot = plot(trend==1 ? up : na, title="Up Trend", style=plot.style_linebr, linewidth=2, color=unconfirmed==0?color.green:color.yellow)
+buySignal = trend == 1 and trend[1] == -1
+plotshape(buySignal ? up : na, title="UpTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.green)
+plotshape(buySignal and showsignals ? up : na, title="Buy", text="Buy", location=location.absolute, style=shape.labelup, size=size.tiny, color=color.green, textcolor=color.white)
+dnPlot = plot(trend==1 ? na : dn, title="Down Trend", style=plot.style_linebr, linewidth=2, color=unconfirmed==0?color.red:color.yellow)
+sellSignal = trend == -1 and trend[1] == 1
+plotshape(sellSignal ? dn : na, title="DownTrend Begins", location=location.absolute, style=shape.circle, size=size.tiny, color=color.red)
+plotshape(sellSignal and showsignals ? dn : na, title="Sell", text="Sell", location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.red, textcolor=color.white)
+mPlot = plot(ohlc4, title="", style=plot.style_circles, linewidth=0)
+longFillColor = color.new(highlighting ? (trend == 1 ? color.green : color.white) : color.white, 75)
+shortFillColor = color.new(highlighting ? (trend == -1 ? color.red : color.white) : color.white, 75)
+fill(mPlot, upPlot, title="UpTrend Highligter", color=longFillColor)
+fill(mPlot, dnPlot, title="DownTrend Highligter", color=shortFillColor)
+
+if (buySignal ? up : na) 
+    strategy.entry("buy", strategy.long) 
+if (sellSignal ? dn : na)
+    strategy.entry("short", strategy.short)
+
+alertcondition(warn or reversal,
+  "1) Warning", message="SuperTrend+ Warning ({{ticker}} {{interval}})")
+alertcondition(reversal,
+  "2) Reversal", message="SuperTrend+ Reversal ({{ticker}} {{interval}})")
+alertcondition(buySignal,
+  "3) Up ▲ (+)", message="SuperTrend+ Up ▲ (+) ({{ticker}} {{interval}})")
+alertcondition(sellSignal,
+  "4) Down ▼ (-)", message="SuperTrend+ Down ▼ (-) ({{ticker}} {{interval}})")
+
+View in Pine Editor・50 lines
+Use on chart
+2
+9
+3
+4 729
+This is an update of an existing supertrend strategy.

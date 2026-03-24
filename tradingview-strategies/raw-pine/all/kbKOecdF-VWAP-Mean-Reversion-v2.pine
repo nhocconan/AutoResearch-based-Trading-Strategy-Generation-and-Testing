@@ -1,0 +1,125 @@
+//@version=5
+strategy("VWAP Mean Reversion v2 (Cleaner Entries + Cooldown + Better Shorts)",
+     overlay=true,
+     initial_capital=10000,
+     pyramiding=0,
+     process_orders_on_close=true,
+     calc_on_order_fills=true)
+
+// ───────── Inputs
+qty            = input.int(1, "Contracts/Shares", minval=1)
+
+rsiLen         = input.int(14, "RSI Length", minval=1)
+rsiOS          = input.int(28, "RSI Oversold (stricter)", minval=1, maxval=50)
+rsiOB          = input.int(72, "RSI Overbought (stricter)", minval=50, maxval=99)
+
+devLen         = input.int(50, "Deviation Lookback", minval=10)
+devMult        = input.float(2.2, "Deviation Mult (stricter)", step=0.1, minval=0.5)
+
+atrLen         = input.int(14, "ATR Length", minval=1)
+stopATR        = input.float(2.2, "Stop = ATR Mult", step=0.1, minval=0.5)
+targetR        = input.float(1.2, "Target = R Multiple", step=0.1, minval=0.5)
+
+exitAtVWAP     = input.bool(true, "Take Profit at VWAP (else fixed R)")
+timeStopOn     = input.bool(true, "Time Stop")
+timeStopBars   = input.int(25, "Time Stop Bars", minval=5)
+
+useSession     = input.bool(true, "Use Session Filter (recommended)")
+sessionStr     = input.session("0830-1500", "Session (Exchange Time)")
+
+useHTFTrend    = input.bool(true, "HTF Trend Filter")
+htfTf          = input.timeframe("60", "HTF (e.g., 60, 240, D)")
+htfEmaLen      = input.int(200, "HTF EMA Length", minval=1)
+
+useVolFilter   = input.bool(true, "Volatility Filter (avoid dead chop)")
+atrMaLen       = input.int(50, "ATR MA Length", minval=5)
+atrMinMult     = input.float(1.0, "ATR must be > ATR_MA ×", step=0.05, minval=0.5)
+
+cooldownOn     = input.bool(true, "Cooldown (reduce overtrading)")
+cooldownBars   = input.int(8, "Cooldown Bars After Exit", minval=0)
+
+shortsOn       = input.bool(true, "Enable Shorts")
+extraShortStrict = input.bool(true, "Make Shorts Stricter (recommended)")
+shortExtraDev  = input.float(0.3, "Extra Short Deviation", step=0.1, minval=0.0)  // adds to devMult for shorts
+
+// ───────── Filters
+inSession = not useSession or not na(time(timeframe.period, sessionStr))
+
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen), barmerge.gaps_off, barmerge.lookahead_off)
+trendLongOk  = not useHTFTrend or close >= htfEma
+trendShortOk = not useHTFTrend or close <= htfEma
+
+atr  = ta.atr(atrLen)
+atrMA = ta.sma(atr, atrMaLen)
+volOk = not useVolFilter or (atr > atrMA * atrMinMult)
+
+// ───────── Cooldown tracking
+var int lastExitBar = na
+
+// detect exit (position was nonzero previous bar, now flat)
+if (strategy.position_size == 0 and strategy.position_size[1] != 0)
+    lastExitBar := bar_index
+
+cooldownOk = not cooldownOn or na(lastExitBar) or (bar_index - lastExitBar >= cooldownBars)
+
+// ───────── Core signals
+vwap = ta.vwap(hlc3)
+rsi  = ta.rsi(close, rsiLen)
+
+// Deviation from VWAP (standardized)
+dist     = close - vwap
+distMean = ta.sma(dist, devLen)
+distStd  = ta.stdev(dist, devLen)
+z        = distStd != 0 ? (dist - distMean) / distStd : 0.0
+
+// Make shorts a bit stricter (because your shorts PF < 1.0)
+shortDevNeed = devMult + (extraShortStrict ? shortExtraDev : 0.0)
+
+// ───────── Entry logic (fade extremes)
+longCond  = inSession and cooldownOk and volOk and trendLongOk  and (z <= -devMult)       and (rsi <= rsiOS)
+shortCond = inSession and cooldownOk and volOk and trendShortOk and (z >=  shortDevNeed)  and (rsi >= rsiOB) and shortsOn
+
+if (longCond and strategy.position_size <= 0)
+    strategy.entry("Long", strategy.long, qty=qty)
+
+if (shortCond and strategy.position_size >= 0)
+    strategy.entry("Short", strategy.short, qty=qty)
+
+// ───────── Risk (hard stop + target)
+riskDist = atr * stopATR
+
+longStop   = strategy.position_avg_price - riskDist
+shortStop  = strategy.position_avg_price + riskDist
+
+longTargetR  = strategy.position_avg_price + riskDist * targetR
+shortTargetR = strategy.position_avg_price - riskDist * targetR
+
+// If exitAtVWAP, profit target is VWAP but never “worse” than fixed-R target
+longLimit  = exitAtVWAP ? math.max(vwap, longTargetR)  : longTargetR
+shortLimit = exitAtVWAP ? math.min(vwap, shortTargetR) : shortTargetR
+
+strategy.exit("LX", from_entry="Long",  stop=longStop,  limit=longLimit)
+strategy.exit("SX", from_entry="Short", stop=shortStop, limit=shortLimit)
+
+// ───────── Time stop
+var int entryBar = na
+if (strategy.position_size != 0 and strategy.position_size[1] == 0)
+    entryBar := bar_index
+if (strategy.position_size == 0)
+    entryBar := na
+
+if timeStopOn and strategy.position_size != 0 and not na(entryBar)
+    if (bar_index - entryBar) >= timeStopBars
+        strategy.close(strategy.position_size > 0 ? "Long" : "Short", comment="TimeStop")
+
+// ───────── Visuals
+plot(vwap, "VWAP", color=color.yellow, linewidth=2)
+plot(htfEma, "HTF EMA", color=color.gray)
+plotchar(longCond,  "Long",  "▲", location=location.belowbar, size=size.tiny)
+plotchar(shortCond, "Short", "▼", location=location.abovebar, size=size.tiny)
+
+View in Pine Editor・119 lines
+Use on chart
+4
+625
+nice indicator based on volume and price action. it pays attention to RSI ema.VWAP. and many more indicators

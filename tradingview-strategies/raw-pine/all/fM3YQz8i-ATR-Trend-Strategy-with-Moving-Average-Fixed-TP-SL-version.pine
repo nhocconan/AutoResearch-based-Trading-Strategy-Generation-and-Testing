@@ -1,0 +1,499 @@
+//@version=6
+strategy(
+    title = "ATR Trend Strategy with Moving Average | Fixed TP/SL version",
+    shorttitle = "ATR MA Strategy | Fixed TP/SL",
+    overlay = true,
+    initial_capital = 10000,
+    currency = currency.USD,
+    default_qty_type = strategy.percent_of_equity,
+    default_qty_value = 10,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.04,
+    slippage = 2,
+    pyramiding = 0,
+    calc_on_order_fills = false,
+    process_orders_on_close = true,
+    calc_on_every_tick = false
+    )
+// GROUP
+MA = "Moving Average"
+ATR = "ATR Signal"
+Thresh = "Threshold (%)"
+BarsConf = "Number Bars Confirmed"
+// MA Input
+MAtype = input.string(
+    defval = "EMA",
+    title = "MA Type",
+    options = ["EMA", "SMA", "WMA", "Hull MA", "VWMA", "RMA", "TEMA"],
+    group = MA,
+    display = display.none
+    )
+MAlen = input.int(
+    defval = 100,
+    title = "MA Length",
+    group = MA,
+    display = display.none
+    )
+MAsrc = input.source(
+    defval = close,
+    title = "MA Source",
+    group = MA,
+    display = display.none
+    )
+// ATR Input
+ATRtype = input.string(
+    defval = "RMA",
+    title = "ATR Type",
+    group = ATR,
+    options = ["EMA", "SMA", "WMA", "RMA"],
+    display = display.none
+    )
+ATRmult = input.float(
+    defval = 3,
+    title = "ATR Multiplier",
+    group = ATR,
+    display = display.none
+    )
+ATRlen = input.int(
+    defval = 7,
+    title = "ATR Length",
+    group = ATR,
+    display = display.none
+    )
+// Bars confirmed input
+ConfirmBars = input.int(
+    defval = 1,
+    title = "Bars Confirmed",
+    tooltip = "Number of bars required beyond the ATR band to confirm a trend. Higher values reduce noise but delay signals.",
+    minval = 1,
+    step = 1,
+    group = BarsConf
+    ,display = display.none
+    )
+ConfirmSrc = input.string(
+    defval = "Close",
+    title = "Source Confirmed",
+    options = ["Close", "Low/high"],
+    group = BarsConf,
+    display = display.none
+    )
+// Threshold(%) input
+entryMethod = input.string(
+    defval = "Breakout",
+    title = "Entry Method",
+    options = ["Breakout", "MA Cross"],
+    tooltip = "Choose the entry method: breakout of the ATR band or pullback entry using a Moving Average cross.",
+    group = Thresh,
+    display = display.none
+    )
+TPthresh = input.float(
+    defval = 5.0,
+    title = "Take Profit (%)",
+    minval = 0.1,
+    step = 0.1,
+    group = Thresh,
+    display = display.none
+    )
+SLthresh = input.float(
+    defval = 2.0,
+    title = "Stop Loss (%)",
+    minval = 0.1,
+    step = 0.1,
+    group = Thresh,
+    display = display.none
+    )
+// MA and ATR value
+MAselect(_source, _lockback, _type) =>
+    switch _type
+        "EMA" => ta.ema(_source, _lockback)
+        "SMA" => ta.sma(_source, _lockback)
+        "WMA" => ta.wma(_source, _lockback)
+        "Hull MA" => ta.hma(_source, _lockback)
+        "VWMA" => ta.vwma(_source, _lockback)
+        "RMA" => ta.rma(_source, _lockback)
+        "TEMA" => ta.tema(_source, _lockback)
+MAtmp = MAselect(MAsrc, MAlen, MAtype)
+TR = ta.tr(true)
+ATRtmp = MAselect(TR, ATRlen, ATRtype)
+float MAval = MAtmp[1]
+float ATRval = ATRtmp[1]
+ATRupper = MAval + ATRval * ATRmult
+ATRlower = MAval - ATRval * ATRmult
+plot(MAval, title = "MA Line", color = color.blue, linewidth = 1)
+plotATRupper = plot(ATRupper, title = "ATR Upper", color = color.green, linewidth = 1)
+plotATRlower = plot(ATRlower, title = "ATR Lower", color = color.red, linewidth = 1)
+// Uptrend Downtrend Zone
+var int trend       = 0 // trend = 1 (Uptrend) / = -1 (Downtrend)
+breakPoint          = 0 //breakPoint = 1 (Long breakout), = -1 (Short Breakout)
+uptrendPrice        = ConfirmSrc == "Close" ? close : high
+downtrendPrice      = ConfirmSrc == "Close" ? close : low
+isUptrendRaw        = uptrendPrice > ATRupper
+isDowntrendRaw      = downtrendPrice < ATRlower
+isUptrendConfirmed      = ta.barssince(not isUptrendRaw) == ConfirmBars
+isDowntrendConfirmed    = ta.barssince(not isDowntrendRaw) == ConfirmBars
+var crossUsed           = false
+if isUptrendConfirmed and trend != 1
+    trend := 1
+    breakPoint := 1
+    crossUsed := false
+if isDowntrendConfirmed and trend != -1
+    trend := -1
+    breakPoint := -1
+    crossUsed := false
+uptrendBg   = color.new(color.green, 80)
+downtrendBg = color.new(color.red, 80)
+NeutralBg   = color.new(color.gray, 80)
+fill(
+    plotATRupper,
+    plotATRlower,
+    color = trend == 1 ? uptrendBg : trend == -1 ? downtrendBg : NeutralBg
+    )
+// Long Short positions
+offset = 100 * syminfo.mintick
+if entryMethod == "Breakout"
+    if breakPoint == 1 and strategy.position_size == 0
+        strategy.entry("Long", strategy.long)
+        label.new(
+            x = bar_index,
+            y = low - offset,
+            text = "Br Long",
+            color = color.green,
+            style = label.style_label_up,
+            size = size.normal
+            )
+    if breakPoint == -1 and strategy.position_size == 0
+        strategy.entry("Short", strategy.short)
+        label.new(
+            x = bar_index,
+            y = high + offset,
+            text = "Br Short",
+            color = color.red,
+            size = size.normal
+            )
+crossUnder = ta.crossunder(close, MAval)
+crossOver = ta.crossover(close, MAval)
+if entryMethod == "MA Cross" and strategy.position_size == 0 and not crossUsed
+    if trend == 1 and crossUnder
+        strategy.entry("Long", strategy.long)
+        crossUsed := true
+        label.new(
+            x = bar_index,
+            y = low - offset,
+            text = "Cr Long",
+            color = color.green,
+            style = label.style_label_up,
+            size = size.normal
+            )
+    if trend == -1 and crossOver
+        strategy.entry("Short", strategy.short)
+        crossUsed := true
+        label.new(
+            x = bar_index,
+            y = high + offset,
+            text = "Cr Short",
+            color = color.red,
+            size = size.normal
+            )
+// TP, SL Zone
+longTP  = strategy.position_avg_price * (1 + TPthresh/100)
+longSL  = strategy.position_avg_price * (1 - SLthresh/100)
+shortTP = strategy.position_avg_price * (1 - TPthresh/100)
+shortSL = strategy.position_avg_price * (1 + SLthresh/100)
+strategy.exit("Long Exit", "Long", limit = longTP, stop = longSL)
+strategy.exit("Short Exit", "Short", limit = shortTP, stop = shortSL)
+var box longBox = na
+if strategy.position_size > 0 and na(longBox)
+    longBox := box.new(
+        left = bar_index,
+        right = bar_index,
+        top = longTP,
+        bottom = longSL,
+        border_width = 0,
+        bgcolor = color.new(color.blue, 80)
+        )
+if not na(longBox)
+    box.set_right(longBox, bar_index)
+var box shortBox = na
+if strategy.position_size < 0 and na(shortBox)
+    shortBox := box.new(
+        left = bar_index,
+        right = bar_index,
+        top = shortSL,
+        bottom = shortTP,
+        border_width = 0,
+        bgcolor = color.new(color.blue, 80)
+        )
+if not na(shortBox)
+    box.set_right(shortBox, bar_index)
+if strategy.position_size == 0
+    longBox := na
+    shortBox := na
+// Trade Analytics Panel
+var table statsTable = table.new(
+    position = position.top_right,
+    columns = 2,
+    rows = 7,
+    bgcolor = color.rgb(0, 255, 255, 30),
+    border_color = color.black,
+    border_width = 2
+    )
+totalTrades = strategy.closedtrades
+wintrades = strategy.wintrades
+lossTrades = strategy.losstrades
+netProfit = strategy.netprofit_percent
+profitFactor = strategy.grossprofit / math.abs(strategy.grossloss)
+winRate = totalTrades > 0 ? (wintrades / totalTrades) * 100 : na
+avgWin = wintrades > 0 ? strategy.grossprofit / wintrades : na
+avgLoss = lossTrades > 0 ? math.abs(strategy.grossloss) / lossTrades : na
+lossRate = 100 - winRate
+expectancy = (winRate / 100 * avgWin) - (lossRate / 100 * avgLoss) // trung bình lợi nhuận mỗi trade
+avgR = avgWin / avgLoss
+maxDDpct = strategy.max_drawdown_percent // % sụt giảm vốn lớn nhất
+table.cell(statsTable, 0, 0, "Total Trades")
+table.cell(statsTable, 1, 0, str.tostring(totalTrades))
+table.cell(statsTable, 0, 1, "Win Rate")
+table.cell(statsTable, 1, 1, str.tostring(winRate, "#.##") + "%")
+table.cell(statsTable, 0, 2, "Profit Factor")
+table.cell(statsTable, 1, 2, str.tostring(profitFactor, "#.##"))
+table.cell(statsTable, 0, 3, "Net Profit")
+table.cell(statsTable, 1, 3, str.tostring(netProfit, "#.##") + "%")
+table.cell(statsTable, 0, 4, "Expectancy")
+table.cell(statsTable, 1, 4, str.tostring(expectancy, "#.##"))
+table.cell(statsTable, 0, 5, "Avg R")
+table.cell(statsTable, 1, 5, str.tostring(avgR, "#.##"))
+table.cell(statsTable, 0, 6, "Max Drawdown")
+table.cell(statsTable, 1, 6, str.tostring(maxDDpct, "#.##") + "%")
+
+View in Pine Editor・272 lines
+Use on chart
+9
+4
+8
+1
+11 553
+Mar 11
+📈 ## ATR Trend Strategy with Moving Average
+
+# Overview
+
+This strategy combines a **Moving Average trend filter** with an **ATR-based breakout channel** to identify directional market movements. It is designed for traders who prefer **systematic trend-following strategies with clearly defined risk management**.
+
+The script builds an adaptive channel around a selected Moving Average using **Average True Range (ATR)**. When price moves beyond the ATR band and the move is confirmed for a defined number of bars, a trend state is established. Trade entries can then occur either on the initial breakout or on a pullback to the Moving Average.
+
+The strategy also includes **fixed percentage Take Profit and Stop Loss levels**, allowing users to evaluate performance under consistent risk parameters.
+
+---
+
+⚙️ # Key Features
+
+• **Multiple Moving Average types**
+Supports EMA, SMA, WMA, Hull MA, VWMA, RMA, and TEMA.
+
+• **ATR-based dynamic channel**
+Uses ATR to create adaptive upper and lower boundaries around the Moving Average.
+
+• **Two entry methods**
+Users can choose between breakout entries or Moving Average pullback entries.
+
+• **Trend confirmation filter**
+Signals are confirmed only after a configurable number of bars remain beyond the ATR boundary.
+
+• **Built-in risk management**
+Includes fixed percentage Take Profit and Stop Loss levels.
+
+• **Trade visualization**
+Displays the TP/SL zone directly on the chart for each trade.
+
+• **Performance statistics panel**
+Shows key strategy metrics such as:
+
+* Total trades
+* Win rate
+* Profit factor
+* Net profit
+* Expectancy
+* Average R
+* Maximum drawdown
+
+---
+
+🧠 # Strategy Logic
+
+The strategy follows a simple **trend-following structure**:
+
+1️⃣ A Moving Average defines the market's baseline trend.
+
+2️⃣ An ATR multiplier builds a dynamic volatility channel around the Moving Average.
+
+3️⃣ When price breaks above or below this channel and remains there for a specified number of bars, a trend is confirmed.
+
+4️⃣ Entries can occur via:
+
+**Breakout Mode**
+
+* Long when price breaks above the upper ATR band.
+* Short when price breaks below the lower ATR band.
+
+**MA Cross Mode**
+
+* After a confirmed trend, entries occur on pullbacks that cross the Moving Average.
+
+5️⃣ Risk is controlled using **fixed percentage Take Profit and Stop Loss levels**.
+
+---
+
+⚙️ # Inputs
+
+Moving Average
+
+* MA Type
+* MA Length
+* MA Source
+
+ATR Signal
+
+* ATR Type
+* ATR Length
+* ATR Multiplier
+
+Trend Confirmation
+
+* Number of confirmation bars
+* Confirmation price source (Close or High/Low)
+
+Entry & Risk Management
+
+* Entry method (Breakout or MA Cross)
+* Take Profit (%)
+* Stop Loss (%)
+
+---
+
+📊 ## Usage Notes
+
+This strategy is designed for **trend-following market conditions** and may perform best in environments with sustained directional movement.
+
+Users are encouraged to **experiment with different Moving Average types, ATR multipliers, and confirmation settings** to adapt the strategy to different markets and timeframes.
+
+---
+
+⚠️ ## Disclaimer
+
+This script is provided for **educational and research purposes only**.
+Past performance does not guarantee future results.
+
+---
+
+Mar 11
+Release Notes
+## 📈 ATR Trend Strategy with Moving Average
+
+# Overview
+
+This strategy combines a **Moving Average trend filter** with an **ATR-based breakout channel** to identify directional market movements. It is designed for traders who prefer **systematic trend-following strategies with clearly defined risk management**.
+
+The script builds an adaptive channel around a selected Moving Average using **Average True Range (ATR)**. When price moves beyond the ATR band and the move is confirmed for a defined number of bars, a trend state is established. Trade entries can then occur either on the initial breakout or on a pullback to the Moving Average.
+
+The strategy also includes **fixed percentage Take Profit and Stop Loss levels**, allowing users to evaluate performance under consistent risk parameters.
+
+---
+
+⚙️ Key Features
+
+• **Multiple Moving Average types**
+Supports EMA, SMA, WMA, Hull MA, VWMA, RMA, and TEMA.
+
+• **ATR-based dynamic channel**
+Uses ATR to create adaptive upper and lower boundaries around the Moving Average.
+
+• **Two entry methods**
+Users can choose between breakout entries or Moving Average pullback entries.
+
+• **Trend confirmation filter**
+Signals are confirmed only after a configurable number of bars remain beyond the ATR boundary.
+
+• **Built-in risk management**
+Includes fixed percentage Take Profit and Stop Loss levels.
+
+• **Trade visualization**
+Displays the TP/SL zone directly on the chart for each trade.
+
+• **Performance statistics panel**
+Shows key strategy metrics such as:
+
+* Total trades
+* Win rate
+* Profit factor
+* Net profit
+* Expectancy
+* Average R
+* Maximum drawdown
+
+---
+
+🧠 Strategy Logic
+
+The strategy follows a simple **trend-following structure**:
+
+1️⃣ A Moving Average defines the market's baseline trend.
+
+2️⃣ An ATR multiplier builds a dynamic volatility channel around the Moving Average.
+
+3️⃣ When price breaks above or below this channel and remains there for a specified number of bars, a trend is confirmed.
+
+4️⃣ Entries can occur via:
+
+**Breakout Mode**
+
+* Long when price breaks above the upper ATR band.
+* Short when price breaks below the lower ATR band.
+
+**MA Cross Mode**
+
+* After a confirmed trend, entries occur on pullbacks that cross the Moving Average.
+
+5️⃣ Risk is controlled using **fixed percentage Take Profit and Stop Loss levels**.
+
+---
+
+⚙️ Inputs
+
+# Moving Average
+
+* MA Type
+* MA Length
+* MA Source
+
+# ATR Signal
+
+* ATR Type
+* ATR Length
+* ATR Multiplier
+
+# Trend Confirmation
+
+* Number of confirmation bars
+* Confirmation price source (Close or High/Low)
+
+# Entry & Risk Management
+
+* Entry method (Breakout or MA Cross)
+* Take Profit (%)
+* Stop Loss (%)
+
+---
+
+📊 Usage Notes
+
+This strategy is designed for **trend-following market conditions** and may perform best in environments with sustained directional movement.
+
+Users are encouraged to **experiment with different Moving Average types, ATR multipliers, and confirmation settings** to adapt the strategy to different markets and timeframes.
+
+---
+
+⚠️ Disclaimer
+
+This script is provided for **educational and research purposes only**.
+Past performance does not guarantee future results.
+
+---

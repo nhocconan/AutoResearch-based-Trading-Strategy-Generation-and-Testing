@@ -1,0 +1,67 @@
+//@version=2
+strategy(title='[RS]Function Account Margin Call Functions V0', overlay=false, default_qty_type=strategy.cash, default_qty_value=1000, initial_capital=100000, currency=currency.USD)
+
+f_account_margin_call(_ammount)=>_return = na(_return[1]) ? false : strategy.equity <= _ammount ? true : _return[1]
+
+f_account_fixed_trail_call(_ammount)=>
+    _maximum_equity = na(_maximum_equity[1]) ? strategy.equity : max(_maximum_equity[1], strategy.equity)
+    _return = na(_return[1]) ? false : strategy.equity <= _maximum_equity - _ammount ? true : _return[1]
+
+f_account_percent_trail_call(_percent)=>
+    _maximum_equity = na(_maximum_equity[1]) ? strategy.equity : max(_maximum_equity[1], strategy.equity)
+    _return = na(_return[1]) ? false : strategy.equity <= _maximum_equity * (_percent/100) ? true : _return[1]
+
+use_margin_call = input(true)
+margin_call_mode = input(defval=1, title='1:fixed value, 2:fixed value trail, 3:percent equity trail', type=integer, minval=1, maxval=3)
+margin_value = input(95000)
+
+f_trade_if_margin_call = use_margin_call ? (margin_call_mode == 1 ? not f_account_margin_call(margin_value) : margin_call_mode == 2 ? not f_account_fixed_trail_call(margin_value) : margin_call_mode == 3 ? not f_account_percent_trail_call(margin_value) : false) : true
+    
+
+wins_multiplier = input(defval=1.00, title='Scaling Multiplier for Consecutive Wins:')
+losses_multiplier = input(defval=2.00, title='Scaling Multiplier for Consecutive Losses:')
+src = input(close)
+fast_ma = ema(src, input(5))
+slow_ma = ema(src, input(55))
+// Setup trading conditions based on last performed trades performance.
+direction = na(direction[1]) ? 1 : crossunder(fast_ma, slow_ma) and direction[1] > 0 ? -1 : crossover(fast_ma, slow_ma) and direction[1] < 0 ? 1 : direction[1]
+
+buy_cond = f_trade_if_margin_call and direction > 0 and strategy.opentrades < 1
+sel_cond = f_trade_if_margin_call and direction < 0 and strategy.opentrades < 1
+
+f_martingale_wins_multiplier(_multiplier) => _return = na(_return[1]) ? 1 : change(strategy.losstrades) > 0 ? 1 : change(strategy.wintrades) > 0 or change(strategy.eventrades) > 0 ? _return[1] * _multiplier : _return[1]
+f_martingale_loss_multiplier(_multiplier) => _return = na(_return[1]) ? 1 : change(strategy.wintrades) > 0 ? 1 : change(strategy.losstrades) > 0 or change(strategy.eventrades) > 0 ? _return[1] * _multiplier : _return[1]
+
+mode = change(strategy.wintrades) > 0 ? 1 : change(strategy.losstrades) > 0 ? -1 : nz(mode[1], 1)
+trade_multiplier = mode > 0 ? f_martingale_wins_multiplier(wins_multiplier) : f_martingale_loss_multiplier(losses_multiplier)
+
+trade_size = input(defval=25, title='Base trade value:')
+trade_leverage = input(defval=400, title='Base Leverage value:')
+trade_size_multiplied = (trade_size * trade_leverage) * trade_multiplier
+
+//plot(strategy.closedtrades)
+strategy.entry('B', long=true, qty=trade_size_multiplied, comment='=' + tostring(strategy.closedtrades+1) + '.', when=buy_cond)
+strategy.entry('S', long=false, qty=trade_size_multiplied, when=sel_cond)
+
+take_profit = input(defval=250, title='TP in ticks(1/10 of a pip):')
+stop_loss = input(defval=100, title='SL in ticks(1/10 of a pip):')
+strategy.exit('B', from_entry='B', profit=take_profit, loss=stop_loss)
+strategy.exit('S', from_entry='S', profit=take_profit, loss=stop_loss)
+
+p_eq = plot(series=strategy.equity, title='Equity', color=black, linewidth=2)
+
+drawdown = change(strategy.closedtrades) > 0 ? strategy.equity : drawdown[1]
+p_dd = plot(series=drawdown, title='Drawdown', style=linebr, color=red, linewidth=1)
+
+fill(plot1=p_eq, plot2=p_dd, color=red, transp=70, title='DD')
+//plot(series=lowest(strategy.equity, 100), title='Base', color=red)
+//hline(100000)
+
+View in Pine Editor・58 lines
+Use on chart
+1
+0
+7
+1
+4 750
+some simple functions to handle account margin call / trailling stop for account.

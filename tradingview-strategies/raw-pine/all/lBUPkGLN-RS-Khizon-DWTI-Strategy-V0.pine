@@ -1,0 +1,57 @@
+//@version=2
+strategy(title='[RS]Khizon (DWTI) Strategy V0', shorttitle='K', overlay=false, pyramiding=0, initial_capital=100000, currency=currency.USD)
+//  ||  Inputs:
+macd_src = input(title='MACD Source:', type=source, defval=close)
+macd_fast = input(title='MACD Fast Length:', type=integer, defval=12)
+macd_slow = input(title='MACD Slow Length:', type=integer, defval=26)
+macd_signal_smooth = input(title='MACD Signal Smoothing:', type=integer, defval=9)
+srsi_src = input(title='SRSI Source:', type=source, defval=close)
+srsi_rsi_length = input(title='SRSI RSI Length:', type=integer, defval=14)
+srsi_stoch_length = input(title='SRSI Stoch Length:', type=integer, defval=14)
+srsi_smooth = input(title='SRSI Smoothing:', type=integer, defval=3)
+srsi_signal_smooth = input(title='SRSI Signal Smoothing:', type=integer, defval=3)
+//  ||  Strategy Inputs:
+trade_size = input(title='Trade Size in USD:', type=float, defval=10000)
+buy_trade = input(title='Perform buy trading?', type=bool, defval=true)
+sel_trade = input(title='Perform sell trading?', type=bool, defval=true)
+//  ||  MACD(close, 12, 26, 9):     ||---------------------------------------------||
+f_macd_trigger(_src, _fast, _slow, _signal_smooth)=>
+    _macd = ema(_src, _fast) - ema(_src, _slow)
+    _signal = sma(_macd, _signal_smooth)
+    _return_trigger = _macd >= _signal ? true : false
+//  ||  Stoch RSI(close, 14, 14, 3, 3)  ||-----------------------------------------||
+f_srsi_trigger(_src, _rsi_length, _stoch_length, _smooth, _signal_smooth)=>
+    _rsi = rsi(_src, _rsi_length)
+    _stoch = sma(stoch(_rsi, _rsi, _rsi, _stoch_length), _smooth)
+    _signal = sma(_stoch, _signal_smooth)
+    _return_trigger = _stoch >= _signal ? true : false
+//  ||-----------------------------------------------------------------------------||
+//  ||-----------------------------------------------------------------------------||
+//  ||  Check Directional Bias from daily timeframe:
+daily_trigger = security('USOIL', 'D', f_macd_trigger(macd_src, macd_fast, macd_slow, macd_signal_smooth) and f_srsi_trigger(srsi_src, srsi_rsi_length, srsi_stoch_length, srsi_smooth, srsi_signal_smooth))
+h4_trigger = security('USOIL', '240', f_macd_trigger(macd_src, macd_fast, macd_slow, macd_signal_smooth) and f_srsi_trigger(srsi_src, srsi_rsi_length, srsi_stoch_length, srsi_smooth, srsi_signal_smooth))
+
+plot(title='D1T', series=daily_trigger?0:na, style=circles, color=blue, linewidth=4, transp=65)
+plot(title='H4T', series=h4_trigger?0:na, style=circles, color=navy, linewidth=2, transp=0)
+
+sel_open = sel_trade and daily_trigger and h4_trigger
+buy_open = buy_trade and not daily_trigger and not h4_trigger
+sel_close = not buy_trade and not daily_trigger and not h4_trigger
+buy_close = not sel_trade and daily_trigger and h4_trigger
+
+strategy.entry('sel', long=false, qty=trade_size, comment='sel', when=sel_open)
+strategy.close('sel', when=sel_close)
+strategy.entry('buy', long=true, qty=trade_size, comment='buy', when=buy_open)
+strategy.close('buy', when=buy_close)
+
+View in Pine Editor・45 lines
+Use on chart
+1
+5
+4
+3
+4 515
+Request for Khizon01:
+corrected a issue with the default stoch rsi settings (14 smoothing when it should be 3), can always change back since the 14 settings were better performing at the current chart.
+added option to just open buy trades or sell trades separately and close were previously swing trade occur.
+added plot titles.

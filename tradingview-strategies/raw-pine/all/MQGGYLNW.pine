@@ -1,0 +1,109 @@
+//@version=6
+strategy("2xSPYTIPS Strategy", overlay=true)
+
+// Input parametri
+sp500_ticker = input("SPX", title="S&P 500 Ticker")
+tips_ticker  = input("TIP", title="TIPS ETF Ticker")
+sma_length   = input(200, title="SMA Length")
+
+// Opzioni di leva personalizzabili
+leverage_option = input.string("1x", title="Leverage", options=["1x", "1.5x", "2x", "2.5x", "3x", "4x", "5x", "6x"])
+leverage = switch leverage_option
+    "1x" => 1
+    "1.5x" => 1.5
+    "2x" => 2
+    "2.5x" => 2.5
+    "3x" => 3
+    "4x" => 4
+    "5x" => 5
+    "6x" => 6
+
+// Caricamento dati
+sp500 = request.security(sp500_ticker, timeframe.period, close)
+tips  = request.security(tips_ticker, timeframe.period, close)
+
+// Calcolo SMA
+sma_sp500 = ta.sma(sp500, sma_length)
+sma_tips  = ta.sma(tips, sma_length)
+
+// Visualizzazione della SMA
+plot(sma_sp500, title="SMA S&P 500", color=color.blue, linewidth=2)
+plot(sma_tips, title="SMA TIPS", color=color.orange, linewidth=2)
+
+// Condizioni di ingresso aggiornate
+month_end = ta.change(time("M")) !=0
+buy_condition = sp500 > sma_sp500 and tips > sma_tips and month_end
+
+// Gestione della strategia migliorata
+if buy_condition
+    capital_per_trade = strategy.equity * 0.1  // Usa il 10% del capitale per ogni trade
+    contract_size = capital_per_trade / close  // Calcola la quantità basata sul prezzo
+    strategy.entry("Long", strategy.long, qty=contract_size * leverage, comment="BUY")
+
+// Aggiunta di segnale per entrate migliorate
+plotshape(series=buy_condition, location=location.belowbar, color=color.green, style=shape.labelup, title="BUY Signal", size=size.small)
+
+// Aggiunta di avvisi
+alertcondition(buy_condition, title="BUY Alert", message="BUY Signal Triggered")
+
+View in Pine Editor・47 lines
+Use on chart
+4
+5
+1
+1 514
+Feb 16, 2025
+This is a test strategy with S&P500, open source so everyone can suggest everything, I'm open to any advice.
+
+Rules of the "2xSPYTIPS" Strategy :
+
+This trading strategy is designed to operate on the S&P 500 index and the TIPS ETF. Here’s how it works:
+
+1. Buy Conditions ("BUY"):
+- The S&P 500 must be above its **200-day simple moving average (SMA 200)**.
+- This condition is checked at the **end of each month**.
+
+2. Position Management:
+- If leverage is enabled (**2x leverage**), the purchase quantity is increased based on a configurable percentage.
+
+3. Take Profit:
+- A **Take Profit** is set at a fixed percentage above the entry price.
+
+4. Visualization & Alerts:
+- The **SMA 200** for both S&P 500 and TIPS is plotted on the chart.
+- A **BUY signal** appears visually and an alert is triggered.
+
+What This Strategy Does NOT Do
+- It does not use a **Stop Loss** or **Trailing Stop**.
+- It does not directly manage position exits except through Take Profit.
+
+
+Feb 16, 2025
+Release Notes
+This is a test strategy with S&P500, open source so everyone can suggest everything, I'm open to any advice.
+
+Rules of the "2xSPYTIPS" Strategy :
+
+This trading strategy is designed to operate on the S&P 500 index and the TIPS ETF. Here’s how it works:
+
+1. Buy Conditions ("BUY"):
+- The S&P 500 must be above its **200-day simple moving average (SMA 200)**.
+- TIPS must be above its **200-day simple moving average (SMA 200)**.
+- This condition is checked at the **end of each month**.
+
+2. Position Management:
+- If leverage is enabled (**2x leverage**), the purchase quantity is increased based on a configurable percentage.
+
+3. Visualization & Alerts:
+- The **SMA 200** for both S&P 500 and TIPS is plotted on the chart.
+- A **BUY signal** appears visually and an alert is triggered.
+
+What This Strategy Does NOT Do
+- It does not use a **Stop Loss** or **Trailing Stop**.
+- It does not directly manage position exits.
+
+This strategy is not mine but from another guy who improved a strategy he found.
+(Still in developing)
+Feb 16, 2025
+Release Notes
+Debug

@@ -1,0 +1,9 @@
+//@version=5
+fcastCss=##input(defval=#2157f3,type='INPUT_COLOR',##id='in_5')
+refArea=##input(defval=#ff5d0033,type='INPUT_COLOR',##id='in_8')
+corrArea=##input(defval=#08998133,type='INPUT_COLOR',##id='in_9')
+evalArea=##input(defval=#787B8633,type='INPUT_COLOR',##id='in_10')
+##root(root_metainfo,rm_ic_0,fcastCss,input__color)
+##root(root_metainfo,rm_ic_1,refArea,input__color)
+##root(root_metainfo,rm_ic_2,corrArea,input__color)
+##root(root_metainfo,rm_ic_3,evalArea,input__color)

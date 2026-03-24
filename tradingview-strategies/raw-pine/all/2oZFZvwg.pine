@@ -1,0 +1,104 @@
+//@version=5
+strategy("Daily vs Intraday Candle Match Strategy", 
+     overlay=true, 
+     initial_capital=10000000,   // 초기 자본금 1,000만 원으로 수정
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=10,       // 하우스 룰 준수: 리스크 10%로 하향 조정
+     commission_type=strategy.commission.percent, 
+     commission_value=0.04, 
+     slippage=2)
+
+// ===== 파라미터 설정 =====
+entry_timeframe = input.string("60", "Entry Timeframe (Min)", options=["15", "60"])
+use_stop_loss = input.bool(true, "Use Stop Loss")
+stop_loss_pct = input.float(2.0, "Stop Loss %", minval=0.1, maxval=10.0)
+use_take_profit = input.bool(true, "Use Take Profit")
+take_profit_pct = input.float(4.0, "Take Profit %", minval=0.1, maxval=20.0)
+close_eod = input.bool(true, "EOD Close at 14:50")
+
+// ===== 시간 설정 (KOSPI 최적화) =====
+kst_timezone = "Asia/Seoul"
+kst_hour = hour(time, kst_timezone)
+kst_minute = minute(time, kst_timezone)
+kst_dayofweek = dayofweek(time, kst_timezone)
+
+// 평일 체크
+is_trading_day = kst_dayofweek >= 2 and kst_dayofweek <= 6
+is_close_time = kst_hour == 14 and kst_minute >= 50
+
+// ===== 일봉 방향 계산 =====
+var float prev_day_close = na
+var bool daily_bullish = na
+var bool traded_today = false
+
+new_day = ta.change(dayofmonth(time, kst_timezone))
+if new_day
+    prev_day_close := close[1]
+    traded_today := false
+
+if not na(prev_day_close)
+    daily_bullish := close > prev_day_close
+
+// ===== 진입 타임프레임 캔들 방향 =====
+candle_bullish = close > open
+is_entry_candle_close = false
+
+// 타임프레임별 정각/분할 체크 (데이터 유실 방지를 위해 유연하게 설정)
+if entry_timeframe == "60"
+    is_entry_candle_close := kst_minute == 0 and kst_hour > 9
+if entry_timeframe == "15"
+    is_entry_candle_close := (kst_minute == 0 or kst_minute == 15 or kst_minute == 30 or kst_minute == 45) and kst_hour >= 9
+
+// ===== 진입 및 청산 로직 =====
+long_signal = is_trading_day and not na(daily_bullish) and daily_bullish and candle_bullish and is_entry_candle_close and not traded_today and kst_hour < 14
+short_signal = is_trading_day and not na(daily_bullish) and not daily_bullish and not candle_bullish and is_entry_candle_close and not traded_today and kst_hour < 14
+
+if long_signal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, comment="Daily UP + " + entry_timeframe + "M UP")
+    traded_today := true
+
+if short_signal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, comment="Daily DOWN + " + entry_timeframe + "M DOWN")
+    traded_today := true
+
+// SL/TP 설정 (strategy.exit은 별도 블록으로 관리하는 것이 더 안정적입니다)
+if strategy.position_size > 0
+    strategy.exit("L-Exit", "Long", stop=strategy.position_avg_price * (1 - stop_loss_pct/100), limit=use_take_profit ? strategy.position_avg_price * (1 + take_profit_pct/100) : na)
+if strategy.position_size < 0
+    strategy.exit("S-Exit", "Short", stop=strategy.position_avg_price * (1 + stop_loss_pct/100), limit=use_take_profit ? strategy.position_avg_price * (1 - take_profit_pct/100) : na)
+
+// 장 마감 청산
+if close_eod and is_close_time and strategy.position_size != 0
+    strategy.close_all(comment="EOD Close")
+
+// ===== 시각화 및 테이블 (기존 유지) =====
+bgcolor(not na(daily_bullish) and daily_bullish ? color.new(color.green, 95) : not na(daily_bullish) ? color.new(color.red, 95) : na)
+plot(prev_day_close, "Prev Day Close", color=color.new(color.blue, 50), linewidth=1, style=plot.style_linebr)
+plotshape(long_signal, "Long", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(short_signal, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+View in Pine Editor・78 lines
+Use on chart
+8
+632
+This strategy is designed for the KOSPI market, focusing on the synergy between daily price action and intraday momentum. It is specifically backtested on KODEX 200 Leverage (122630) with a realistic capital of 10,000,000 KRW.
+
+Key Logic:
+
+Trend Alignment: The script identifies the daily trend by comparing the current price with the previous day's close.
+
+Execution: It enters a position only when the intraday candle (15M or 60M) aligns with the daily trend.
+
+LONG: Daily Bullish + Intraday Bullish Close.
+
+SHORT: Daily Bearish + Intraday Bearish Close.
+
+Risk Management: - Follows TradingView House Rules by limiting risk to 10% of equity per trade.
+
+Includes realistic 0.04% commission and 2-tick slippage.
+
+Features built-in Stop Loss and Take Profit levels.
+
+Intraday Focus: Automatically closes all positions at 14:50 KST to avoid overnight market gaps.
+
+

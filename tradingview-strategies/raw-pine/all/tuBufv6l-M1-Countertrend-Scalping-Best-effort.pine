@@ -1,0 +1,146 @@
+//@version=5
+strategy("M1 Countertrend Scalping (Best-effort)",
+  overlay=true,
+  calc_on_every_tick=true,
+  initial_capital=10000,
+  commission_type=strategy.commission.percent, commission_value=0.02,
+  default_qty_type=strategy.percent_of_equity, default_qty_value=5,
+  pyramiding=1)
+
+// ----------------------
+// Inputs
+// ----------------------
+useTrendFilter = input.bool(true, "Use EMA trend filter (optional)")
+emaFast = input.int(50, "EMA Fast (for trend)")
+emaSlow = input.int(200, "EMA Slow (for trend)")
+
+bbLen = input.int(20, "BB Length")
+bbStd = input.float(2.0, "BB StdDev")
+
+rsiLen = input.int(14, "RSI Length")
+rsiOB  = input.int(70, "RSI Overbought")
+rsiOS  = input.int(30, "RSI Oversold")
+
+stoK = input.int(5, "Stochastic %K")
+stoD = input.int(3, "Stochastic %D")
+stoSmooth = input.int(3, "%K smooth")
+stoOB = input.int(80, "Stoch Overbought")
+stoOS = input.int(20, "Stoch Oversold")
+
+atrLen = input.int(14, "ATR Length")
+slATR  = input.float(0.6, "SL (x ATR)", step=0.1)
+tpATR  = input.float(1.2, "TP (x ATR)", step=0.1)
+
+minBars = input.int(200, "Require at least N bars before trading", minval=50)
+
+// ----------------------
+// Indicators
+// ----------------------
+emaF = ta.ema(close, emaFast)
+emaS = ta.ema(close, emaSlow)
+
+basis = ta.sma(close, bbLen)
+dev = ta.stdev(close, bbLen)
+upper = basis + bbStd * dev
+lower = basis - bbStd * dev
+
+rsi = ta.rsi(close, rsiLen)
+k = ta.sma(ta.stoch(close, high, low, stoK), stoSmooth)
+d = ta.sma(k, stoD)
+atr = ta.atr(atrLen)
+
+// Heiken Ashi (optional confirmation)
+ha_t = request.security(syminfo.tickerid, timeframe.period, (open+high+low+close)/4) // quick HA-ish - for speed we use close-average; or use full HA if desired
+
+// ----------------------
+// Conditions for countertrend entries
+// ----------------------
+// SELL (countertrend): price closes above upper BB (spike), oscillators show OB, and optional trend-filter (if enabled choose: allow countertrend only when ema50 > ema200? usually countertrend trades both ways so filter can restrict)
+priceAboveUpper = close > upper and close[1] <= upper[1]
+rsiOBcond = rsi > rsiOB
+stoOBcond = k > stoOB and d > stoOB
+
+sellRaw = priceAboveUpper and rsiOBcond and stoOBcond
+
+// BUY (countertrend): price closes below lower BB (spike down), oscillators show OS
+priceBelowLower = close < lower and close[1] >= lower[1]
+rsiOScond = rsi < rsiOS
+stoOScond = k < stoOS and d < stoOS
+
+buyRaw = priceBelowLower and rsiOScond and stoOScond
+
+// Trend filter option: if enabled, restrict trades to 'countertrend vs bigger trend' behavior
+// Many countertrend approaches allow both directions; this filter can be used to only take contra to short-term trend or to disallow trading along major trend.
+// We'll implement: when useTrendFilter = true, allow SELL only if emaF < emaS (i.e., major downtrend) ? Since it's countertrend, maybe user wants to take small reversals even within trend. We'll present: if enabled, require price to be opposite EMA slope (i.e., for a SELL spike we require emaF < emaS?)
+// To keep it simple: allow trades always but provide filter that when enabled, we require price to be on opposite side of emaF relative to emaS.
+trendDown = emaF < emaS
+trendUp   = emaF > emaS
+
+sellCond = sellRaw and (not useTrendFilter or trendDown)
+buyCond  = buyRaw  and (not useTrendFilter or trendUp)
+
+// Additional safety: don't trade if not enough bars
+canTrade = bar_index > minBars
+
+// Prevent multiple re-entries: only one position at a time via pyramiding=1
+enterSell = sellCond and canTrade and strategy.position_size == 0
+enterBuy  = buyCond  and canTrade and strategy.position_size == 0
+
+// ----------------------
+// Entries & Exits (ATR SL/TP)
+// ----------------------
+if enterSell
+    strategy.entry("Short-BB", strategy.short)
+
+if enterBuy
+    strategy.entry("Long-BB", strategy.long)
+
+// dynamic stops/take based on entry price (use close as entry reference)
+if strategy.position_size > 0
+    stopL = strategy.position_avg_price - atr * slATR
+    takeL = strategy.position_avg_price + atr * tpATR
+    strategy.exit("Exit Long", from_entry="Long-BB", stop=stopL, limit=takeL)
+
+if strategy.position_size < 0
+    stopS = strategy.position_avg_price + atr * slATR
+    takeS = strategy.position_avg_price - atr * tpATR
+    strategy.exit("Exit Short", from_entry="Short-BB", stop=stopS, limit=takeS)
+
+// Optional immediate safety: if price moves 'really' beyond opposite BB direction (strong breakout), close position early
+if strategy.position_size > 0 and close > basis + dev*3
+    strategy.close("Long-BB")
+if strategy.position_size < 0 and close < basis - dev*3
+    strategy.close("Short-BB")
+
+// ----------------------
+// Plot & Alerts
+// ----------------------
+plot(upper,  title="BB Upper",  linewidth=1, style=plot.style_line)
+plot(basis,  title="BB Basis",  linewidth=1, style=plot.style_line)
+plot(lower,  title="BB Lower",  linewidth=1, style=plot.style_line)
+
+plot(emaF, title="EMA Fast", color=color.blue)
+plot(emaS, title="EMA Slow", color=color.orange)
+
+plotshape(enterSell, title="Enter Sell", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+plotshape(enterBuy, title="Enter Buy", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny)
+
+alertcondition(enterSell, "SELL Entry", "M1 Countertrend SELL signal")
+alertcondition(enterBuy,  "BUY Entry",  "M1 Countertrend BUY signal")
+
+// ----------------------
+// Information on chart
+// ----------------------
+var label info = na
+if barstate.islast
+    label.delete(info)
+    info := label.new(bar_index, high, text = "M1 Countertrend (BB+RSI+Stoch)\nSL=" + str.tostring(slATR) + "xATR TP=" + str.tostring(tpATR) + "xATR\nUseFilter=" + str.tostring(useTrendFilter),
+      style=label.style_label_left, yloc=yloc.abovebar, color=color.new(color.gray,85), textcolor=color.white)
+
+View in Pine Editor・138 lines
+Use on chart
+3
+0
+1 576
+M1 Countertrend Scalping (Best-effort)
+M1 Countertrend Scalping (Best-effort)

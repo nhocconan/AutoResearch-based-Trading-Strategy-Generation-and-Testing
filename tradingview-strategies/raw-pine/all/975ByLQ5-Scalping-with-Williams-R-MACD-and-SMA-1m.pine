@@ -1,0 +1,144 @@
+//@version=5
+strategy("Scalping Strategy with Williams %R, MACD, and SMA (1-Minute Only)", overlay=true)
+
+// Check if the current timeframe is 1 minute
+isOneMinute = (str.tostring(timeframe.period) == "1")
+
+// Display a warning if not on 1-minute timeframe
+if not isOneMinute
+    label.new(x=bar_index, y=na, text="WARNING: Switch to 1-Minute Timeframe", color=color.red, textcolor=color.white, size=size.large, style=label.style_label_down)
+
+// Williams %R Settings
+williamsLength = 140
+williamsHigh = ta.highest(high, williamsLength)
+williamsLow = ta.lowest(low, williamsLength)
+williamsR = (williamsHigh - close) / (williamsHigh - williamsLow) * -100
+
+// MACD Settings
+fastLength = 24
+slowLength = 52
+macdLength = 9
+[macdLine, signalLine, macdHistogram] = ta.macd(close, fastLength, slowLength, macdLength)
+
+// SMA Settings
+smaLength = 7
+sma = ta.sma(close, smaLength)
+
+// Plot Williams %R, MACD Histogram, and SMA
+//plot(isOneMinute ? williamsR : na, color=color.blue, title="Williams %R")
+//hline(-92, "Williams %R -94", color=color.red)
+//hline(-60, "Williams %R -60", color=color.red)
+//hline(-8, "Williams %R -6", color=color.green)
+//hline(-40, "Williams %R -40", color=color.green)
+
+//plot(isOneMinute ? macdHistogram : na, color=color.purple, title="MACD Histogram", style=plot.style_histogram)
+//plot(isOneMinute ? sma : na, color=color.orange, title="SMA")
+
+// Define conditions only if on 1-minute timeframe
+if isOneMinute
+    // Define conditions
+    buyCondition = ta.crossover(williamsR, -94)
+    sellCondition = ta.crossunder(williamsR, -6)
+    deactivateBuyCondition = ta.crossover(williamsR, -40)
+    deactivateSellCondition = ta.crossunder(williamsR, -60)
+
+    // MACD Histogram Conditions for entry and exit
+    macdHistPositive = macdHistogram > 0
+    macdHistNegative = macdHistogram < 0
+    macdHistPositiveAfterNegative = macdHistogram[1] < 0 and macdHistPositive
+    macdHistNegativeAfterPositive = macdHistogram[1] > 0 and macdHistNegative
+
+    // Trend Confirmation
+    isBullTrend = close > sma
+    isBearTrend = close < sma
+
+    // Buy and sell signals
+    var bool buyActive = false
+    var bool sellActive = false
+
+    if buyCondition and isBullTrend
+        buyActive := true
+    if deactivateBuyCondition
+        buyActive := false
+    if buyActive and macdHistPositiveAfterNegative
+        strategy.entry("Buy", strategy.long)
+        alert("Long entry signal: Buy order executed", alert.freq_once_per_bar_close)
+    if macdHistogram < macdHistogram[1]
+        strategy.close("Buy")
+        alert("Long exit signal: Buy order closed", alert.freq_once_per_bar_close)
+
+    if sellCondition and isBearTrend
+        sellActive := true
+    if deactivateSellCondition
+        sellActive := false
+    if sellActive and macdHistNegativeAfterPositive
+        strategy.entry("Sell", strategy.short)
+        alert("Short entry signal: Sell order executed", alert.freq_once_per_bar_close)
+    if macdHistogram > macdHistogram[1]
+        strategy.close("Sell")
+        alert("Short exit signal: Sell order closed", alert.freq_once_per_bar_close)
+
+View in Pine Editor・82 lines
+Use on chart
+3.2 K
+3
+59 608
+Overview:
+This trading strategy is designed for scalping in the 1-minute timeframe. It uses a combination of the Williams %R, MACD, and SMA indicators to generate buy and sell signals. It also includes alert functionalities to notify users when trades are executed or closed.
+
+Indicators Used:
+
+Williams %R: A momentum indicator that measures overbought and oversold conditions. The Williams %R values range from -100 to 0.
+Length: 140 bars (i.e., 140-period).
+
+
+MACD (Moving Average Convergence Divergence): A trend-following momentum indicator that shows the relationship between two moving averages of a security's price.
+Fast Length: 24 bars
+Slow Length: 52 bars
+MACD Length: 9 bars (signal line)
+
+
+SMA (Simple Moving Average): A trend-following indicator that smooths out price data to create a trend-following indicator.
+Length: 7 bars
+
+
+
+Conditions and Logic:
+
+Timeframe Check:
+The strategy is designed specifically for the 1-minute timeframe. If the current chart is not on the 1-minute timeframe, a warning label is displayed on the chart instructing the user to switch to the 1-minute timeframe.
+
+
+Williams %R Conditions:
+Buy Condition: The strategy looks for a crossover of Williams %R from below -94 to above -94. This indicates a potential buying opportunity when the market is moving out of an oversold condition.
+Sell Condition: The strategy looks for a crossunder of Williams %R from above -6 to below -6. This indicates a potential selling opportunity when the market is moving out of an overbought condition.
+Deactivate Buy: If Williams %R crosses above -40, the buy signal is deactivated, suggesting that the buying condition is no longer valid.
+Deactivate Sell: If Williams %R crosses below -60, the sell signal is deactivated, suggesting that the selling condition is no longer valid.
+
+
+MACD Conditions:
+MACD Histogram: Used to identify the momentum and the direction of the trend.
+Long Entry: The strategy initiates a buy order if the MACD histogram shows a positive bar after a negative bar while a buy condition is active and Williams %R is above -94.
+Long Exit: The strategy exits the buy position if the MACD histogram turns negative and is below the previous histogram bar.
+Short Entry: The strategy initiates a sell order if the MACD histogram shows a negative bar after a positive bar while a sell condition is active and Williams %R is below -6.
+Short Exit: The strategy exits the sell position if the MACD histogram turns positive and is above the previous histogram bar.
+
+
+Trend Confirmation (Using SMA):
+Bullish Trend: The strategy considers a bullish trend if the current price is above the 7-bar SMA. A buy signal is only considered if this condition is met.
+Bearish Trend: The strategy considers a bearish trend if the current price is below the 7-bar SMA. A sell signal is only considered if this condition is met.
+
+
+
+Alerts:
+Long Entry Alert: An alert is triggered when a buy order is executed.
+Long Exit Alert: An alert is triggered when the buy order is closed.
+Short Entry Alert: An alert is triggered when a sell order is executed.
+Short Exit Alert: An alert is triggered when the sell order is closed.
+
+Summary:
+Buy Signal: Activated when Williams %R crosses above -94 and the price is above the 7-bar SMA. A buy order is placed if the MACD histogram shows a positive bar after a negative bar. The buy order is closed when the MACD histogram turns negative and is below the previous histogram bar.
+
+Sell Signal: Activated when Williams %R crosses below -6 and the price is below the 7-bar SMA. A sell order is placed if the MACD histogram shows a negative bar after a positive bar. The sell order is closed when the MACD histogram turns positive and is above the previous histogram bar.
+
+This strategy combines momentum (Williams %R), trend-following (MACD), and trend confirmation (SMA) to identify trading opportunities in the 1-minute timeframe. It is designed for short-term trading or scalping.

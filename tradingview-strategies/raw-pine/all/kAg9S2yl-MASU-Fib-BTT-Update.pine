@@ -1,0 +1,651 @@
+//@version=6
+// v2.0 — NO REPAINTING: calc_on_every_tick=false, entries on confirmed bars only, trailing tick-fixed
+strategy("MASU+ Fib [BTT]", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, pyramiding=0, calc_on_every_tick=false, max_labels_count=500, max_lines_count=200, max_boxes_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. SETTINGS  
+// ═══════════════════════════════════════════════════════════════════════════
+symbol_group = input.string("Auto") 
+use_adaptive = input.bool(true, "Use Adaptive Parameters", group="Strategy Settings")
+base_timeframe = input.string("15", "Base Timeframe", group="Strategy Settings")
+use_time_filter = input.bool(true, "Trade Only During Session", group="Time Filter")
+trading_session = input.session("0900-2200", "Trading Hours", group="Time Filter")
+trend_ema_fast = input.int(21, "Trend EMA Fast", minval=5, group="Trend Following")
+trend_ema_slow = input.int(50, "Trend EMA Slow", minval=10, group="Trend Following")
+trend_ema_filter = input.int(200, "Trend Filter EMA", minval=50, group="Trend Following")
+use_mtf_filter = input.bool(true, "Use MTF Filter", group="MTF Filter")
+mtf_timeframe = input.timeframe("240", "Higher Timeframe", group="MTF Filter")
+mtf_ema_fast = input.int(21, "MTF EMA Fast", minval=5, group="MTF Filter")
+mtf_ema_slow = input.int(55, "MTF EMA Slow", minval=10, group="MTF Filter")
+use_ma_ribbon = input.bool(true, "Use MA Ribbon", group="MA Ribbon")
+ribbon_type = input.string("EMA", "Ribbon MA Type", options=["EMA", "SMA", "HMA"], group="MA Ribbon")
+ribbon_ma1 = input.int(8, "Ribbon MA 1", minval=2, group="MA Ribbon")
+ribbon_ma2 = input.int(13, "Ribbon MA 2", minval=2, group="MA Ribbon")
+ribbon_ma3 = input.int(21, "Ribbon MA 3", minval=2, group="MA Ribbon")
+ribbon_ma4 = input.int(34, "Ribbon MA 4", minval=2, group="MA Ribbon")
+ribbon_ma5 = input.int(55, "Ribbon MA 5", minval=2, group="MA Ribbon")
+ribbon_ma6 = input.int(89, "Ribbon MA 6", minval=2, group="MA Ribbon")
+ribbon_ma7 = input.int(144, "Ribbon MA 7", minval=2, group="MA Ribbon")
+ribbon_ma8 = input.int(233, "Ribbon MA 8", minval=2, group="MA Ribbon")
+ribbon_threshold = input.int(6, "Ribbon Alignment Threshold", minval=4, maxval=8, group="MA Ribbon")
+use_order_flow = input.bool(true, "Enable Order Flow Analysis", group="Order Flow")
+show_vwap = input.bool(true, "Show VWAP Bands", group="Order Flow")
+vwap_std_mult1 = input.float(1.0, "VWAP Std 1", minval=0.1, step=0.1, group="Order Flow")
+vwap_std_mult2 = input.float(2.0, "VWAP Std 2", minval=0.1, step=0.1, group="Order Flow")
+vwap_std_mult3 = input.float(3.0, "VWAP Std 3", minval=0.1, step=0.1, group="Order Flow")
+cvd_length = input.int(20, "CVD Period", minval=1, group="Order Flow")
+cvd_threshold = input.float(0.6, "CVD Threshold", minval=0.1, maxval=1.0, step=0.1, group="Order Flow")
+show_volume_profile = input.bool(true, "Show Volume Profile POC", group="Order Flow")
+volume_profile_bins = input.int(20, "VP Bins", minval=10, maxval=50, group="Order Flow")
+use_fib = input.bool(true, "Enable Fibonacci", group="Fibonacci")
+show_fib_levels = input.bool(true, "Show Fib Levels", group="Fibonacci")
+fib_swing_lb = input.int(15, "Swing Lookback", minval=5, maxval=40, group="Fibonacci")
+fib_min_atr = input.float(1.0, "Min Swing ATR", minval=0.3, maxval=3.0, step=0.1, group="Fibonacci")
+fib_zone = input.float(0.6, "Fib Zone ATR", minval=0.2, maxval=1.5, step=0.1, group="Fibonacci")
+fib_use_382 = input.bool(true, "Use 38.2%", group="Fibonacci")
+fib_use_500 = input.bool(true, "Use 50.0%", group="Fibonacci")
+fib_use_618 = input.bool(true, "Use 61.8%", group="Fibonacci")
+fib_wick_min = input.float(0.25, "Bounce Wick Min", minval=0.1, maxval=0.6, step=0.05, group="Fibonacci")
+use_vol_regime = input.bool(true, "Enable Volatility Regime", group="Volatility Regime")
+bb_vr_length = input.int(20, "BB VR Period", minval=10, group="Volatility Regime")
+bb_vr_mult = input.float(2.0, "BB VR Multiplier", minval=1.0, step=0.1, group="Volatility Regime")
+atr_percentile_length = input.int(100, "ATR Percentile Period", minval=20, group="Volatility Regime")
+vol_expansion_threshold = input.float(1.5, "Expansion Threshold", minval=1.0, step=0.1, group="Volatility Regime")
+vol_contraction_threshold = input.float(0.7, "Contraction Threshold", minval=0.1, maxval=1.0, step=0.1, group="Volatility Regime")
+use_correlation = input.bool(false, "Enable Multi-Asset Correlation", group="Correlation")
+corr_symbol1 = input.symbol("OANDA:SPX500USD", "Correlation Symbol 1", group="Correlation")
+corr_symbol2 = input.symbol("OANDA:XAUUSD", "Correlation Symbol 2", group="Correlation")
+corr_length = input.int(20, "Correlation Period", minval=10, group="Correlation")
+corr_threshold = input.float(0.7, "Correlation Threshold", minval=0.5, maxval=1.0, step=0.1, group="Correlation")
+breakout_length = input.int(20, "Breakout Period", minval=5, group="Breakout")
+breakout_atr_mult = input.float(1.5, "Breakout ATR Multiplier", minval=0.5, step=0.1, group="Breakout")
+bb_length = input.int(20, "Bollinger Bands Period", minval=5, group="Mean Reversion")
+bb_mult = input.float(2.0, "BB Std Dev", minval=0.5, step=0.1, group="Mean Reversion")
+rsi_length = input.int(14, "RSI Period", minval=2, group="Mean Reversion")
+rsi_ob = input.int(70, "RSI Overbought", minval=50, maxval=100, group="Mean Reversion")
+rsi_os = input.int(30, "RSI Oversold", minval=0, maxval=50, group="Mean Reversion")
+atr_length = input.int(14, "ATR Period", minval=1, group="Risk Management")
+stop_atr_mult = input.float(2.0, "Stop Loss ATR Multiplier", minval=0.5, step=0.1, group="Risk Management")
+tp_atr_mult = input.float(3.0, "Take Profit ATR Multiplier", minval=0.5, step=0.1, group="Risk Management")
+use_trailing = input.bool(true, "Use Trailing Stop", group="Risk Management")
+trailing_atr_mult = input.float(1.5, "Trailing ATR Multiplier", minval=0.5, step=0.1, group="Risk Management")
+adx_length = input.int(14, "ADX Period", minval=1, group="Filters")
+adx_threshold = input.int(20, "ADX Threshold", minval=10, maxval=50, group="Filters")
+volume_mult = input.float(1.2, "Volume Multiplier", minval=1.0, step=0.1, group="Filters")
+showDashboard = input.bool(true, "Show Institutional Dashboard", group="Display")
+show_support_resistance = input.bool(true, "Show Support/Resistance Lines", group="Display")
+show_tp_sl_lines = input.bool(true, "Show TP/SL Lines", group="Display")
+sr_lookback = input.int(50, "S/R Lookback Period", minval=20, group="Display")
+sr_line_width = input.int(2, "S/R Line Width", minval=1, maxval=5, group="Display")
+tp_sl_line_width = input.int(2, "TP/SL Line Width", minval=1, maxval=5, group="Display")
+sr_line_style = input.string("Solid", "S/R Line Style", options=["Solid", "Dashed", "Dotted"], group="Display")
+tp_sl_line_style = input.string("Dashed", "TP/SL Line Style", options=["Solid", "Dashed", "Dotted"], group="Display")
+use_gradient = input.bool(true, "Gradient Candles", group="Display")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. HELPERS & INDICATORS
+// ═══════════════════════════════════════════════════════════════════════════
+hma(src, len) =>
+    wma1 = ta.wma(src, len / 2)
+    wma2 = ta.wma(src, len)
+    ta.wma(2 * wma1 - wma2, math.round(math.sqrt(len)))
+calc_ma(src, len, ma_type) =>
+    switch ma_type
+        "EMA" => ta.ema(src, len)
+        "SMA" => ta.sma(src, len)
+        "HMA" => hma(src, len)
+        => ta.ema(src, len)
+sr_style = sr_line_style == "Dashed" ? line.style_dashed : sr_line_style == "Dotted" ? line.style_dotted : line.style_solid
+tp_sl_style = tp_sl_line_style == "Dashed" ? line.style_dashed : tp_sl_line_style == "Dotted" ? line.style_dotted : line.style_solid
+atr = ta.atr(atr_length)
+ema_fast = ta.ema(close, trend_ema_fast)
+ema_slow = ta.ema(close, trend_ema_slow)
+ema_filter = ta.ema(close, trend_ema_filter)
+[diPlus, diMinus, adx] = ta.dmi(adx_length, adx_length)
+bb_basis = ta.sma(close, bb_length)
+bb_dev = bb_mult * ta.stdev(close, bb_length)
+bb_upper = bb_basis + bb_dev
+bb_lower = bb_basis - bb_dev
+rsi = ta.rsi(close, rsi_length)
+volume_sma = ta.sma(volume, 20)
+volume_spike = volume > volume_sma * volume_mult
+highest_high = ta.highest(high, breakout_length)
+lowest_low = ta.lowest(low, breakout_length)
+
+r1 = calc_ma(close, ribbon_ma1, ribbon_type)
+r2 = calc_ma(close, ribbon_ma2, ribbon_type)
+r3 = calc_ma(close, ribbon_ma3, ribbon_type)
+r4 = calc_ma(close, ribbon_ma4, ribbon_type)
+r5 = calc_ma(close, ribbon_ma5, ribbon_type)
+r6 = calc_ma(close, ribbon_ma6, ribbon_type)
+r7 = calc_ma(close, ribbon_ma7, ribbon_type)
+r8 = calc_ma(close, ribbon_ma8, ribbon_type)
+ribbon_bullish_count = (r1>r2?1:0)+(r2>r3?1:0)+(r3>r4?1:0)+(r4>r5?1:0)+(r5>r6?1:0)+(r6>r7?1:0)+(r7>r8?1:0)
+ribbon_bearish_count = (r1<r2?1:0)+(r2<r3?1:0)+(r3<r4?1:0)+(r4<r5?1:0)+(r5<r6?1:0)+(r6<r7?1:0)+(r7<r8?1:0)
+ribbon_bullish = ribbon_bullish_count >= (ribbon_threshold - 1)
+ribbon_bearish = ribbon_bearish_count >= (ribbon_threshold - 1)
+
+mtf_ema_fast_val = request.security(syminfo.tickerid, mtf_timeframe, ta.ema(close, mtf_ema_fast), lookahead=barmerge.lookahead_off)
+mtf_ema_slow_val = request.security(syminfo.tickerid, mtf_timeframe, ta.ema(close, mtf_ema_slow), lookahead=barmerge.lookahead_off)
+mtf_close = request.security(syminfo.tickerid, mtf_timeframe, close, lookahead=barmerge.lookahead_off)
+mtf_bullish = mtf_ema_fast_val > mtf_ema_slow_val and mtf_close > mtf_ema_fast_val
+mtf_bearish = mtf_ema_fast_val < mtf_ema_slow_val and mtf_close < mtf_ema_fast_val
+mtf_filter_long = not use_mtf_filter or mtf_bullish
+mtf_filter_short = not use_mtf_filter or mtf_bearish
+ribbon_filter_long = not use_ma_ribbon or ribbon_bullish
+ribbon_filter_short = not use_ma_ribbon or ribbon_bearish
+
+var float vwap_sum = 0.0, var float vol_sum = 0.0, var float vwap = 0.0
+is_new_day = ta.change(time('D')) != 0
+if barstate.isfirst or is_new_day
+    vwap_sum := 0.0
+    vol_sum := 0.0
+vwap_sum += volume * hlc3
+vol_sum += volume
+vwap := vol_sum > 0 ? vwap_sum / vol_sum : close
+vwap_dev = ta.stdev(close, cvd_length)
+vwap_upper1 = vwap + vwap_std_mult1 * vwap_dev
+vwap_lower1 = vwap - vwap_std_mult1 * vwap_dev
+vwap_upper2 = vwap + vwap_std_mult2 * vwap_dev
+vwap_lower2 = vwap - vwap_std_mult2 * vwap_dev
+vwap_upper3 = vwap + vwap_std_mult3 * vwap_dev
+vwap_lower3 = vwap - vwap_std_mult3 * vwap_dev
+buy_volume = close > open ? volume : 0
+sell_volume = close < open ? volume : 0
+delta = buy_volume - sell_volume
+cvd = ta.cum(delta)
+cvd_sma = ta.sma(cvd, cvd_length)
+cvd_bullish = cvd > cvd_sma and close < close[1] and cvd > cvd[1]
+cvd_bearish = cvd < cvd_sma and close > close[1] and cvd < cvd[1]
+volume_ratio = buy_volume / math.max(sell_volume, 1)
+strong_buying = volume_ratio > (1 + cvd_threshold)
+strong_selling = volume_ratio < (1 - cvd_threshold)
+price_above_vwap = close > vwap
+price_below_vwap = close < vwap
+vwap_cross_up = ta.crossover(close, vwap)
+vwap_cross_down = ta.crossunder(close, vwap)
+of_bullish = use_order_flow and ((cvd_bullish or strong_buying) and (vwap_cross_up or price_above_vwap))
+of_bearish = use_order_flow and ((cvd_bearish or strong_selling) and (vwap_cross_down or price_below_vwap))
+
+var float[] volume_levels = array.new_float(volume_profile_bins, 0.0)
+var float poc_price = na
+vp_highest = ta.highest(high, volume_profile_bins)
+vp_lowest = ta.lowest(low, volume_profile_bins)
+if barstate.islastconfirmedhistory and show_volume_profile
+    price_range = vp_highest - vp_lowest
+    bin_size = price_range / volume_profile_bins
+    array.fill(volume_levels, 0.0)
+    for i = 0 to volume_profile_bins - 1
+        bin_price = vp_lowest + i * bin_size
+        for j = 0 to volume_profile_bins - 1
+            if low[j] <= bin_price and high[j] >= bin_price
+                array.set(volume_levels, i, array.get(volume_levels, i) + volume[j])
+    max_volume = array.max(volume_levels)
+    max_index = array.indexof(volume_levels, max_volume)
+    poc_price := vp_lowest + max_index * bin_size
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FIBONACCI
+// ═══════════════════════════════════════════════════════════════════════════
+var float fib_swH = na, var int fib_swHb = 0, var float fib_swL = na, var int fib_swLb = 0
+bool fib_isSH = high == ta.highest(high, fib_swing_lb + 1)
+bool fib_isSL = low == ta.lowest(low, fib_swing_lb + 1)
+float fib_rngLo = ta.lowest(low, fib_swing_lb + 1)
+float fib_rngHi = ta.highest(high, fib_swing_lb + 1)
+if fib_isSH and (high - fib_rngLo) >= fib_min_atr * atr
+    fib_swH := high
+    fib_swHb := bar_index
+if fib_isSL and (fib_rngHi - low) >= fib_min_atr * atr
+    fib_swL := low
+    fib_swLb := bar_index
+bool fib_ok = not na(fib_swH) and not na(fib_swL) and fib_swHb > 0 and fib_swLb > 0
+float fib_diff = fib_ok ? fib_swH - fib_swL : 0.0
+bool fib_upswing = fib_ok and fib_swHb > fib_swLb
+float f382 = fib_ok ? fib_swH - 0.382 * fib_diff : na
+float f500 = fib_ok ? fib_swH - 0.500 * fib_diff : na
+float f618 = fib_ok ? fib_swH - 0.618 * fib_diff : na
+float fExt = fib_ok ? fib_swH + 0.618 * fib_diff : na
+float fib_cr = high - low
+float fib_bW = fib_cr > 0 ? (math.min(open, close) - low) / fib_cr : 0.0
+float fib_sW = fib_cr > 0 ? (high - math.max(open, close)) / fib_cr : 0.0
+float fz = fib_zone * atr
+bool fib_swOld = fib_ok and bar_index - fib_swHb >= 2 and bar_index - fib_swLb >= 2
+bool fib_tL382 = fib_use_382 and fib_upswing and not na(f382) and math.abs(low - f382) <= fz
+bool fib_tL500 = fib_use_500 and fib_upswing and not na(f500) and math.abs(low - f500) <= fz
+bool fib_tL618 = fib_use_618 and fib_upswing and not na(f618) and math.abs(low - f618) <= fz
+bool fib_touchL = fib_tL382 or fib_tL500 or fib_tL618
+float fib_nearL = fib_tL382 ? f382 : fib_tL500 ? f500 : f618
+bool fib_bounceL = fib_bW >= fib_wick_min or (close > open and close > fib_nearL)
+bool fib_tS382 = fib_use_382 and not fib_upswing and not na(f382) and math.abs(high - f382) <= fz
+bool fib_tS500 = fib_use_500 and not fib_upswing and not na(f500) and math.abs(high - f500) <= fz
+bool fib_tS618 = fib_use_618 and not fib_upswing and not na(f618) and math.abs(high - f618) <= fz
+bool fib_touchS = fib_tS382 or fib_tS500 or fib_tS618
+float fib_nearS = fib_tS382 ? f382 : fib_tS500 ? f500 : f618
+bool fib_rejectS = fib_sW >= fib_wick_min or (close < open and close < fib_nearS)
+fib_bullish = use_fib and fib_swOld and fib_touchL and fib_bounceL
+fib_bearish = use_fib and fib_swOld and fib_touchS and fib_rejectS
+fib_status_str = fib_bullish ? "SUPPORT" : fib_bearish ? "RESIST" : fib_upswing ? "UP" : "DOWN"
+
+// Volatility & Regime
+bb_vr_basis = ta.sma(close, bb_vr_length)
+bb_vr_dev = bb_vr_mult * ta.stdev(close, bb_vr_length)
+bb_vr_width = (bb_vr_basis + bb_vr_dev - (bb_vr_basis - bb_vr_dev)) / bb_vr_basis
+atr_percentile = ta.percentrank(atr, atr_percentile_length)
+high_volatility = atr_percentile > 70
+low_volatility = atr_percentile < 30
+bb_vr_width_sma = ta.sma(bb_vr_width, bb_vr_length)
+bb_expansion = bb_vr_width > bb_vr_width_sma * vol_expansion_threshold
+bb_contraction = bb_vr_width < bb_vr_width_sma * vol_contraction_threshold
+vol_regime_trending = use_vol_regime and (bb_expansion or high_volatility)
+vol_regime_ranging = use_vol_regime and (bb_contraction or low_volatility)
+is_trending = adx > adx_threshold
+is_ranging = adx <= adx_threshold
+bullish_trend = ema_fast > ema_slow and close > ema_filter
+bearish_trend = ema_fast < ema_slow and close < ema_filter
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. CONFLUENCE & SIGNALS
+// ═══════════════════════════════════════════════════════════════════════════
+universal_long_sl = close - (atr * stop_atr_mult)
+universal_long_tp = close + (atr * tp_atr_mult)
+universal_short_sl = close + (atr * stop_atr_mult)
+universal_short_tp = close - (atr * tp_atr_mult)
+pivot_high = ta.pivothigh(high, sr_lookback, sr_lookback)
+pivot_low = ta.pivotlow(low, sr_lookback, sr_lookback)
+var float dynamic_resistance = na, var float dynamic_support = na
+highest_price = ta.highest(high, sr_lookback)
+lowest_price = ta.lowest(low, sr_lookback)
+if not na(pivot_high)
+    dynamic_resistance := pivot_high
+if not na(pivot_low)
+    dynamic_support := pivot_low
+dynamic_resistance := na(dynamic_resistance) ? highest_price : dynamic_resistance
+dynamic_support := na(dynamic_support) ? lowest_price : dynamic_support
+
+var int total_trades = 0, var int winning_trades = 0
+var float total_profit = 0.0, var float total_loss = 0.0
+if strategy.closedtrades > total_trades
+    total_trades := strategy.closedtrades
+    if strategy.closedtrades.profit(strategy.closedtrades - 1) > 0
+        winning_trades += 1
+        total_profit += strategy.closedtrades.profit(strategy.closedtrades - 1)
+    else
+        total_loss += math.abs(strategy.closedtrades.profit(strategy.closedtrades - 1))
+win_rate = total_trades > 0 ? winning_trades / total_trades : 0.5
+avg_win = winning_trades > 0 ? total_profit / winning_trades : tp_atr_mult * atr
+avg_loss = (total_trades - winning_trades) > 0 ? total_loss / (total_trades - winning_trades) : stop_atr_mult * atr
+win_loss_ratio = avg_loss > 0 ? avg_win / avg_loss : tp_atr_mult / stop_atr_mult
+kelly_percentage = math.max(0, math.min(win_rate - ((1 - win_rate) / win_loss_ratio), 0.25))
+position_size_pct = kelly_percentage * 100
+
+of_filter_long = not use_order_flow or of_bullish or price_above_vwap
+of_filter_short = not use_order_flow or of_bearish or price_below_vwap
+fib_filter_long = not use_fib or fib_bullish or fib_upswing
+fib_filter_short = not use_fib or fib_bearish or not fib_upswing
+signal_strength_long = (mtf_filter_long?1:0) + (ribbon_filter_long?1:0) + (of_filter_long?1:0) + (fib_filter_long?1:0) + (adx>adx_threshold?1:0)
+signal_strength_short = (mtf_filter_short?1:0) + (ribbon_filter_short?1:0) + (of_filter_short?1:0) + (fib_filter_short?1:0) + (adx>adx_threshold?1:0)
+current_signal = signal_strength_long > signal_strength_short ? "LONG" : signal_strength_short > signal_strength_long ? "SHORT" : "WAIT"
+signal_color_bg = current_signal == "LONG" ? color.new(color.green, 70) : current_signal == "SHORT" ? color.new(color.red, 70) : color.new(color.gray, 70)
+confluence_score = math.max(signal_strength_long, signal_strength_short)
+confluence_color = confluence_score >= 4 ? color.green : confluence_score >= 3 ? color.orange : color.red
+confluence_status = confluence_score >= 4 ? "STRONG" : confluence_score >= 3 ? "MODERATE" : "WEAK"
+universal_sl_display = current_signal == "LONG" ? universal_long_sl : universal_short_sl
+universal_tp_display = current_signal == "LONG" ? universal_long_tp : universal_short_tp
+
+var float volume_buy_pct = 50.0, var string volume_pressure = "NEUTRAL", var color volume_pressure_color = color.gray
+if bar_index >= 20
+    float cb = 0.0, float cs = 0.0
+    for i = 0 to 19
+        cb += (close[i] > open[i] ? volume[i] : 0)
+        cs += (close[i] < open[i] ? volume[i] : 0)
+    float tv = cb + cs
+    volume_buy_pct := tv > 0 ? (cb / tv * 100) : 50.0
+    volume_pressure := volume_buy_pct > 60 ? "BUYING" : volume_buy_pct < 40 ? "SELLING" : "NEUTRAL"
+    volume_pressure_color := volume_buy_pct > 60 ? color.green : volume_buy_pct < 40 ? color.red : color.gray
+
+london_session = not na(time(timeframe.period, "0800-1600"))
+ny_session = not na(time(timeframe.period, "1300-2100"))
+asia_session = not na(time(timeframe.period, "0000-0800"))
+current_session = london_session and ny_session ? "LON/NY" : london_session ? "LON" : ny_session ? "NY" : asia_session ? "ASIA" : "OFF"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4. STRATEGY EXECUTION — NO REPAINTING
+// ═══════════════════════════════════════════════════════════════════════════
+in_session = not use_time_filter or not na(time(timeframe.period, trading_session))
+confirmed = barstate.isconfirmed  // ◄ FIX: decisions only on closed bars
+
+ema_cross_up = ta.crossover(ema_fast, ema_slow)
+ema_cross_down = ta.crossunder(ema_fast, ema_slow)
+rsi_cross_up = ta.crossover(rsi, rsi_os)
+rsi_cross_down = ta.crossunder(rsi, rsi_ob)
+
+trend_long = is_trending and bullish_trend and ema_cross_up and volume_spike
+trend_short = is_trending and bearish_trend and ema_cross_down and volume_spike
+breakout_long = close > highest_high[1] and volume_spike and close > ema_filter
+breakout_short = close < lowest_low[1] and volume_spike and close < ema_filter
+mean_reversion_long = is_ranging and close < bb_lower and rsi < rsi_os and rsi_cross_up
+mean_reversion_short = is_ranging and close > bb_upper and rsi > rsi_ob and rsi_cross_down
+
+long_condition = (trend_long or breakout_long or mean_reversion_long) and mtf_filter_long and ribbon_filter_long and of_filter_long and fib_filter_long and in_session and confirmed
+short_condition = (trend_short or breakout_short or mean_reversion_short) and mtf_filter_short and ribbon_filter_short and of_filter_short and fib_filter_short and in_session and confirmed
+
+if long_condition and strategy.position_size == 0
+    stop_loss = close - (atr * stop_atr_mult)
+    take_profit = close + (atr * tp_atr_mult)
+    strategy.entry("Long", strategy.long)
+    alert("BUY Signal | Price: " + str.tostring(close), alert.freq_once_per_bar_close)
+    if use_trailing
+        strategy.exit("Exit Long", "Long", stop=stop_loss, trail_offset=atr * trailing_atr_mult / syminfo.mintick, trail_points=atr * trailing_atr_mult / syminfo.mintick)
+    else
+        strategy.exit("Exit Long", "Long", stop=stop_loss, limit=take_profit)
+
+if short_condition and strategy.position_size == 0
+    stop_loss = close + (atr * stop_atr_mult)
+    take_profit = close - (atr * tp_atr_mult)
+    strategy.entry("Short", strategy.short)
+    alert("SELL Signal | Price: " + str.tostring(close), alert.freq_once_per_bar_close)
+    if use_trailing
+        strategy.exit("Exit Short", "Short", stop=stop_loss, trail_offset=atr * trailing_atr_mult / syminfo.mintick, trail_points=atr * trailing_atr_mult / syminfo.mintick)
+    else
+        strategy.exit("Exit Short", "Short", stop=stop_loss, limit=take_profit)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. VISUALIZATION
+// ═══════════════════════════════════════════════════════════════════════════
+plot(ema_fast, "EMA Fast", color=color.new(#2196F3, 40), linewidth=1)
+plot(ema_slow, "EMA Slow", color=color.new(#FF9800, 40), linewidth=1)
+plot(ema_filter, "EMA 200", color=color.new(#9E9E9E, 60), linewidth=1)
+plot(show_vwap ? vwap : na, "VWAP", color=color.new(#AB47BC, 30), linewidth=2)
+plot(show_vwap ? vwap_upper1 : na, "V+1", color=color.new(#AB47BC, 75))
+plot(show_vwap ? vwap_lower1 : na, "V-1", color=color.new(#AB47BC, 75))
+plot(show_vwap ? vwap_upper2 : na, "V+2", color=color.new(#AB47BC, 85))
+plot(show_vwap ? vwap_lower2 : na, "V-2", color=color.new(#AB47BC, 85))
+
+// Fib lines
+c_fib_382 = #26A69A, c_fib_500 = #FFA726, c_fib_618 = #EF5350, c_fib_ext = #7E57C2, c_swing = #78909C
+var line fib_line_382=na, var line fib_line_500=na, var line fib_line_618=na, var line fib_line_ext=na
+var line fib_line_swH=na, var line fib_line_swL=na
+var label fib_lbl_382=na, var label fib_lbl_500=na, var label fib_lbl_618=na, var label fib_lbl_ext=na
+var linefill fill_382_500=na, var linefill fill_500_618=na, var linefill fill_golden=na
+
+if show_fib_levels and barstate.islastconfirmedhistory and fib_ok
+    line.delete(fib_line_382), line.delete(fib_line_500), line.delete(fib_line_618), line.delete(fib_line_ext)
+    line.delete(fib_line_swH), line.delete(fib_line_swL)
+    label.delete(fib_lbl_382), label.delete(fib_lbl_500), label.delete(fib_lbl_618), label.delete(fib_lbl_ext)
+    linefill.delete(fill_382_500), linefill.delete(fill_500_618)
+    int lb = math.max(fib_swHb, fib_swLb)
+    int ext_r = bar_index + 25
+    fib_line_swH := line.new(lb, fib_swH, ext_r, fib_swH, color=color.new(c_swing,70), style=line.style_dotted, width=1)
+    fib_line_swL := line.new(lb, fib_swL, ext_r, fib_swL, color=color.new(c_swing,70), style=line.style_dotted, width=1)
+    fib_line_382 := line.new(lb, f382, ext_r, f382, color=color.new(c_fib_382,20), style=line.style_dashed, width=2)
+    fib_line_500 := line.new(lb, f500, ext_r, f500, color=color.new(c_fib_500,20), style=line.style_dashed, width=2)
+    fib_line_618 := line.new(lb, f618, ext_r, f618, color=color.new(c_fib_618,20), style=line.style_dashed, width=2)
+    fib_line_ext := line.new(lb, fExt, ext_r, fExt, color=color.new(c_fib_ext,30), style=line.style_dotted, width=1)
+    fill_382_500 := linefill.new(fib_line_382, fib_line_500, color=color.new(c_fib_382,92))
+    fill_500_618 := linefill.new(fib_line_500, fib_line_618, color=color.new(c_fib_618,90))
+    fib_lbl_382 := label.new(ext_r, f382, "38.2% "+str.tostring(f382, format.mintick), color=color.new(c_fib_382,85), textcolor=c_fib_382, style=label.style_label_left, size=size.tiny)
+    fib_lbl_500 := label.new(ext_r, f500, "50.0% "+str.tostring(f500, format.mintick), color=color.new(c_fib_500,85), textcolor=c_fib_500, style=label.style_label_left, size=size.tiny)
+    fib_lbl_618 := label.new(ext_r, f618, "61.8% "+str.tostring(f618, format.mintick), color=color.new(c_fib_618,85), textcolor=c_fib_618, style=label.style_label_left, size=size.tiny)
+    fib_lbl_ext := label.new(ext_r, fExt, "Ext "+str.tostring(fExt, format.mintick), color=color.new(c_fib_ext,85), textcolor=c_fib_ext, style=label.style_label_left, size=size.tiny)
+
+plotshape(long_condition, "Buy", shape.diamond, location.belowbar, #00C853, size=size.small)
+plotshape(short_condition, "Sell", shape.diamond, location.abovebar, #FF1744, size=size.small)
+plotshape(fib_bullish and barstate.isconfirmed, "Fib▲", shape.triangleup, location.belowbar, color.new(#26A69A,30), size=size.tiny)
+plotshape(fib_bearish and barstate.isconfirmed, "Fib▼", shape.triangledown, location.abovebar, color.new(#EF5350,30), size=size.tiny)
+bgcolor(long_condition ? color.new(#00C853,92) : short_condition ? color.new(#FF1744,92) : na)
+
+// S/R + TP/SL
+var line resistance_line=na, var line support_line=na, var label resistance_label=na, var label support_label=na
+var line tp_line=na, var line sl_line=na, var label tp_label=na, var label sl_label=na
+if show_support_resistance and barstate.islastconfirmedhistory
+    line.delete(resistance_line), line.delete(support_line), label.delete(resistance_label), label.delete(support_label)
+    resistance_line := line.new(bar_index-50, dynamic_resistance, bar_index+10, dynamic_resistance, color=color.new(#EF5350,30), width=sr_line_width, style=sr_style, extend=extend.right)
+    support_line := line.new(bar_index-50, dynamic_support, bar_index+10, dynamic_support, color=color.new(#26A69A,30), width=sr_line_width, style=sr_style, extend=extend.right)
+    resistance_label := label.new(bar_index-45, dynamic_resistance, "R "+str.tostring(dynamic_resistance, format.mintick), color=color.new(#EF5350,90), textcolor=#EF5350, style=label.style_label_down, size=size.tiny)
+    support_label := label.new(bar_index-45, dynamic_support, "S "+str.tostring(dynamic_support, format.mintick), color=color.new(#26A69A,90), textcolor=#26A69A, style=label.style_label_up, size=size.tiny)
+if show_tp_sl_lines and strategy.position_size != 0 and barstate.islastconfirmedhistory
+    line.delete(tp_line), line.delete(sl_line), label.delete(tp_label), label.delete(sl_label)
+    float dtp = strategy.position_size > 0 ? universal_long_tp : universal_short_tp
+    float dsl = strategy.position_size > 0 ? universal_long_sl : universal_short_sl
+    tp_line := line.new(bar_index-10, dtp, bar_index+10, dtp, color=color.new(#00C853,30), width=tp_sl_line_width, style=tp_sl_style)
+    sl_line := line.new(bar_index-10, dsl, bar_index+10, dsl, color=color.new(#FF1744,30), width=tp_sl_line_width, style=tp_sl_style)
+    tp_label := label.new(bar_index+11, dtp, "TP "+str.tostring(dtp, format.mintick), color=color.new(#00C853,90), textcolor=#00C853, style=label.style_label_left, size=size.tiny)
+    sl_label := label.new(bar_index+11, dsl, "SL "+str.tostring(dsl, format.mintick), color=color.new(#FF1744,90), textcolor=#FF1744, style=label.style_label_left, size=size.tiny)
+
+// Gradient candles
+grad_rsi = ta.rsi(close, 14)
+get_gc() =>
+    if grad_rsi > 60 and close > open
+        color.from_gradient(grad_rsi, 60, 80, color.new(#1B5E20,0), color.new(#00E676,0))
+    else if grad_rsi < 40 and close < open
+        color.from_gradient(grad_rsi, 20, 40, color.new(#FF1744,0), color.new(#B71C1C,0))
+    else
+        color.new(#78909C, 0)
+barcolor(use_gradient ? get_gc() : na)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+mtf_15m_trend = request.security(syminfo.tickerid, "15", ta.ema(close, 21) > ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+mtf_15m_neutral = request.security(syminfo.tickerid, "15", math.abs(ta.ema(close, 21) - ta.ema(close, 50)) < atr * 0.5, lookahead=barmerge.lookahead_off)
+mtf_15m_status = mtf_15m_neutral ? "—" : (mtf_15m_trend ? "▲" : "▼")
+mtf_1h_trend = request.security(syminfo.tickerid, "60", ta.ema(close, 21) > ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+mtf_1h_neutral = request.security(syminfo.tickerid, "60", math.abs(ta.ema(close, 21) - ta.ema(close, 50)) < atr * 0.5, lookahead=barmerge.lookahead_off)
+mtf_1h_status = mtf_1h_neutral ? "—" : (mtf_1h_trend ? "▲" : "▼")
+mtf_4h_trend = request.security(syminfo.tickerid, "240", ta.ema(close, 21) > ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+mtf_4h_neutral = request.security(syminfo.tickerid, "240", math.abs(ta.ema(close, 21) - ta.ema(close, 50)) < atr * 0.5, lookahead=barmerge.lookahead_off)
+mtf_4h_status = mtf_4h_neutral ? "—" : (mtf_4h_trend ? "▲" : "▼")
+trend_15m_aligned = mtf_15m_status == "▲" ? 1 : mtf_15m_status == "▼" ? -1 : 0
+trend_1h_aligned = mtf_1h_status == "▲" ? 1 : mtf_1h_status == "▼" ? -1 : 0
+trend_4h_aligned = mtf_4h_status == "▲" ? 1 : mtf_4h_status == "▼" ? -1 : 0
+trend_alignment_score = math.abs(trend_15m_aligned) + math.abs(trend_1h_aligned) + math.abs(trend_4h_aligned)
+rr_ratio = current_signal == "LONG" ? (universal_long_tp > universal_long_sl ? (universal_long_tp - close) / math.max(close - universal_long_sl, syminfo.mintick) : 0) : (universal_short_sl > universal_short_tp ? (close - universal_short_tp) / math.max(universal_short_sl - close, syminfo.mintick) : 0)
+
+if showDashboard
+    var table tb = table.new(position.bottom_right, 3, 14, border_width=0, frame_width=0)
+    if barstate.islastconfirmedhistory
+        bg  = #FAFAFA, hd  = #F0F0F0, tx  = #424242, dm  = #9E9E9E
+        gn  = #2E7D32, rd  = #C62828, am  = #E65100, bl  = #1565C0
+        sz  = size.tiny
+        table.cell(tb, 0, 0, "MASU+", text_color=tx, bgcolor=hd, text_size=size.small, text_halign=text.align_left)
+        table.cell(tb, 1, 0, "Fib", text_color=bl, bgcolor=hd, text_size=size.small, text_halign=text.align_center)
+        table.cell(tb, 2, 0, syminfo.ticker, text_color=dm, bgcolor=hd, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 1, "MTF", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 1, mtf_15m_status+" "+mtf_1h_status+" "+mtf_4h_status, text_color=trend_alignment_score==3?gn:trend_alignment_score==0?dm:am, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 1, str.tostring(trend_alignment_score)+"/3", text_color=trend_alignment_score==3?gn:trend_alignment_score>=2?am:rd, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 2, "Ribbon", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 2, ribbon_bullish?"Bull":ribbon_bearish?"Bear":"Flat", text_color=ribbon_bullish?gn:ribbon_bearish?rd:dm, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 2, str.tostring(ribbon_bullish_count)+"/7", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 3, "ADX", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 3, str.tostring(math.round(adx,1)), text_color=adx>adx_threshold?gn:dm, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 3, of_bullish?"OF▲":of_bearish?"OF▼":"OF—", text_color=of_bullish?gn:of_bearish?rd:dm, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 4, "Fib", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 4, fib_status_str, text_color=fib_bullish?gn:fib_bearish?rd:dm, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 4, fib_upswing?"Up":"Dn", text_color=fib_upswing?gn:rd, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 5, "38.2", text_color=color.new(c_fib_382,0), bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 5, not na(f382)?str.tostring(f382, format.mintick):"—", text_color=tx, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 5, "50.0", text_color=color.new(c_fib_500,0), bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 6, not na(f500)?str.tostring(f500, format.mintick):"—", text_color=tx, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 6, "61.8", text_color=color.new(c_fib_618,0), bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 6, not na(f618)?str.tostring(f618, format.mintick):"—", text_color=tx, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 7, "Vol", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 7, str.tostring(math.round(atr_percentile,0))+"%", text_color=high_volatility?am:low_volatility?bl:dm, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 7, volume_pressure=="BUYING"?"Buy":volume_pressure=="SELLING"?"Sell":"—", text_color=volume_buy_pct>60?gn:volume_buy_pct<40?rd:dm, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 8, "S", text_color=gn, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 8, str.tostring(dynamic_support, format.mintick), text_color=gn, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 8, str.tostring(dynamic_resistance, format.mintick), text_color=rd, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 9, "SL", text_color=rd, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 9, str.tostring(universal_sl_display, format.mintick), text_color=rd, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 9, str.tostring(universal_tp_display, format.mintick), text_color=gn, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 10, "R:R", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 10, "1:"+str.tostring(math.round(rr_ratio,1)), text_color=rr_ratio>=2?gn:rr_ratio>=1.5?am:rd, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 10, str.tostring(math.round(kelly_percentage*100,1))+"%K", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 11, "Score", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 11, str.tostring(confluence_score)+"/5", text_color=confluence_score>=4?gn:confluence_score>=3?am:rd, bgcolor=bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 11, current_session, text_color=bl, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        table.cell(tb, 0, 12, str.tostring(close, format.mintick), text_color=tx, bgcolor=bg, text_size=sz, text_halign=text.align_left)
+        table.cell(tb, 1, 12, "", bgcolor=bg, text_size=sz)
+        table.cell(tb, 2, 12, timeframe.period + " v2.0", text_color=dm, bgcolor=bg, text_size=sz, text_halign=text.align_right)
+        string sig_txt = current_signal == "LONG" ? "◆ LONG" : current_signal == "SHORT" ? "◆ SHORT" : "— WAIT"
+        color sig_bg = current_signal == "LONG" ? color.new(gn,85) : current_signal == "SHORT" ? color.new(rd,85) : color.new(dm,90)
+        color sig_tx = current_signal == "LONG" ? gn : current_signal == "SHORT" ? rd : dm
+        table.cell(tb, 0, 13, sig_txt, text_color=sig_tx, bgcolor=sig_bg, text_size=size.small, text_halign=text.align_left)
+        table.cell(tb, 1, 13, confluence_status, text_color=sig_tx, bgcolor=sig_bg, text_size=sz, text_halign=text.align_center)
+        table.cell(tb, 2, 13, str.tostring(math.round(position_size_pct,1))+"%", text_color=sig_tx, bgcolor=sig_bg, text_size=sz, text_halign=text.align_right)
+
+View in Pine Editor・494 lines
+Use on chart
+1
+2
+4
+1 726
+══════════════════════════════════════════
+TRADINGVIEW DESCRIPTION
+══════════════════════════════════════════
+
+TITLE:
+MASU+ Fib v2.0 [BTT]
+
+SHORT DESCRIPTION:
+Non-repainting Fibonacci retracement strategy with 5-layer confluence, MA ribbon, order flow, volatility regime, and MTF alignment. v2.0 fixes repainting.
+
+══════════════════════════════════════════
+FULL DESCRIPTION:
+══════════════════════════════════════════
+
+█ UPDATE v2.0 — REPAINTING FIX
+
+This is a critical update. The previous version had a repainting issue that produced unrealistic backtest results, including trades opening and closing within seconds with impossibly tight SL/TP levels.
+
+Root cause: calc_on_every_tick was enabled, allowing the strategy to execute on simulated intra-bar ticks during backtesting.
+
+Fixed in v2.0:
+— calc_on_every_tick = false
+— All entries gated by barstate.isconfirmed (closed bars only)
+— Trailing stop properly converted to ticks (/ syminfo.mintick)
+— Dashboard uses barstate.islastconfirmedhistory
+
+If you are using v1, please update immediately. Backtest results will be lower but now reflect real-world performance.
+
+
+█ WHAT IS THIS?
+
+A multi-strategy system that combines trend following, breakout detection, and mean reversion with Fibonacci retracement analysis. Instead of Smart Money Concepts, this version uses dynamic Fibonacci swing detection to identify high-probability entry zones at the 38.2%, 50%, and 61.8% retracement levels.
+
+
+█ FIBONACCI ENGINE
+
+The strategy automatically detects swing highs and lows using a configurable lookback window, then calculates live Fibonacci retracement levels. Entry signals require price to touch a Fib level AND show a confirming candle pattern:
+
+For longs (upswing retracement):
+— Price pulls back to 38.2%, 50%, or 61.8% level
+— Candle shows a bullish bounce: lower wick ≥ 25% of candle range, or bullish close above the Fib level
+
+For shorts (downswing retracement):
+— Price rallies to 38.2%, 50%, or 61.8% level
+— Candle shows bearish rejection: upper wick ≥ 25% of candle range, or bearish close below the Fib level
+
+Visual: Fib levels drawn as colored dashed lines with zone shading between 38.2–50% and 50–61.8%. Extension target at 61.8% above swing high.
+
+
+█ THREE ENTRY STRATEGIES
+
+The system runs three independent entry engines simultaneously:
+
+Trend Following — EMA 21/50 crossover confirmed by EMA 200 direction and volume spike. Fires in trending markets (ADX > threshold).
+
+Breakout — Price breaks above/below the Donchian channel (highest high / lowest low) with volume confirmation and EMA 200 alignment.
+
+Mean Reversion — Price at Bollinger Band extreme with RSI reversal signal. Fires only in ranging markets (ADX ≤ threshold).
+
+Each entry must pass all 5 confluence filters before execution.
+
+
+█ 5-LAYER CONFLUENCE FILTERS
+
+Every trade requires alignment across independent analysis layers:
+
+1. MTF Filter — Higher timeframe (default 4H) EMA trend confirmation
+2. MA Ribbon — 8-layer Fibonacci ribbon (8/13/21/34/55/89/144/233) with alignment threshold
+3. Order Flow — VWAP position + CVD divergence + buy/sell volume delta
+4. Fibonacci — Retracement support/resistance + bounce/rejection candle patterns
+5. ADX — Minimum trend strength threshold
+
+Confluence score: 0–5. Trades fire only when all enabled filters agree.
+
+
+█ ORDER FLOW ANALYSIS
+
+Built-in institutional flow detection:
+— Session VWAP with ±1σ, ±2σ, ±3σ bands
+— Cumulative Volume Delta (CVD) divergence detection
+— Buy/sell volume ratio with configurable threshold
+— Optional Volume Profile with Point of Control (POC)
+
+
+█ VOLATILITY REGIME
+
+Automatic market regime classification using dual metrics:
+— Bollinger Band width expansion/contraction vs moving average
+— ATR percentile ranking over 100 bars
+
+The system identifies trending (expansion + high ATR) vs ranging (contraction + low ATR) environments and routes signals to the appropriate strategy engine.
+
+
+█ RISK MANAGEMENT
+
+— ATR-based stop loss (default 2.0× ATR)
+— ATR-based take profit (default 3.0× ATR)
+— Optional trailing stop (default 1.5× ATR) — properly tick-normalized in v2.0
+— Kelly Criterion position sizing displayed on dashboard
+— Session time filter with configurable trading hours
+
+
+█ DASHBOARD
+
+Light-themed compact panel (bottom-right) showing:
+— MTF trend alignment (15m / 1h / 4h) with score
+— MA Ribbon status and alignment count
+— ADX value + Order Flow direction
+— Fibonacci status (Support / Resist / Up / Down) with live levels
+— Volatility percentile + volume pressure
+— Support / Resistance levels
+— SL / TP values
+— Risk/Reward ratio + Kelly %
+— Confluence score
+— Current session + active signal
+
+
+█ VISUALIZATION
+
+— Fibonacci zone lines with shaded retracement bands
+— Labeled price levels at 38.2%, 50%, 61.8%, and extension
+— Diamond entry markers (green buy, red sell)
+— Fib bounce/rejection triangles
+— Signal background pulse
+— Gradient trend candles (RSI-based color intensity)
+— EMA lines (21, 50, 200)
+— VWAP bands (toggleable)
+— Dynamic Support/Resistance lines
+— Active TP/SL lines when in position
+
+
+█ USAGE
+
+— Works on any instrument and timeframe
+— Optimized for 15m–4H
+— All filters independently toggleable
+— Fibonacci parameters fully configurable (swing lookback, zone width, which levels to use)
+— Does NOT repaint — backtest = live performance
+
+
+█ CHANGELOG
+
+v2.0 (current):
+— Fixed repainting: calc_on_every_tick=false + barstate.isconfirmed
+— Fixed trailing stop tick conversion
+— Dashboard anti-repaint (islastconfirmedhistory)
+— Version indicator in dashboard
+
+v1.0:
+— Initial release with Fibonacci engine replacing SMC

@@ -1,0 +1,81 @@
+//@version=3
+strategy("FTSE Fridays", overlay=false, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+///////////////////////////////////////////////////////////////////////////////
+// Date:2017.11.13
+// Author: Backtest-Rookies.com
+// Version: 1.0
+// Description: A simple backtest to
+///////////////////////////////////////////////////////////////////////////////
+// Notes:
+//  - This strategy is intended to be run on a 4H timeframe only. It uses some
+//    the prior 4H bar to enter. This in turn allows the strategy to go long at
+//    the open.
+//
+//  - The strategy is inspired by some statistical analysis that showed in most
+//    years going long on Fridays only has an edge. 
+//    https://backtest-rookies.com/2017/09/11/statistical-analysis-ftse-100-period-trends/
+//
+//  - 4H low stop takes the low of the 4H prior to the market opening to use as
+//    a stop 
+//  - Daily ATR stop, sets the stop at the close - daily ATR value. 
+//////////////////////////////////////////////////////////////////////////////
+
+// Create General Strategy Inputs
+st_yr_inp = input(defval=2012, title='Backtest Start Year', type=integer)
+st_mn_inp = input(defval=01, title='Backtest Start Month', type=integer)
+st_dy_inp = input(defval=01, title='Backtest Start Day', type=integer)
+en_yr_inp = input(defval=2025, title='Backtest End Year', type=integer)
+en_mn_inp = input(defval=01, title='Backtest End Month', type=integer)
+en_dy_inp = input(defval=01, title='Backtest End Day', type=integer)
+stp_inp = input(defval="None", title="Type of Stop to use", options=["None","4H Low", "Daily ATR"] )
+stp_atr_inp = input(defval=7, title='Period used for ATR stop', type=integer, minval=1)
+
+// Set start and end dates for backtest
+start = timestamp(st_yr_inp, st_mn_inp, st_dy_inp,00,00)
+end = timestamp(en_yr_inp, en_mn_inp, en_dy_inp,00,00)
+
+// Setup Daily ATR
+atr_ind = security(tickerid, "D", atr(stp_atr_inp))
+
+pre_mkt = time(period, "0400-0800")
+mkt_hrs = time(period, "0800-1600")
+eod = time(period, "1200-1600")
+
+// go long in pre_mkt so next bar enters at the open.
+long_condition = dayofweek == 6 and
+  pre_mkt and  
+  time >= start and
+  time <= end
+
+if (long_condition)
+    strategy.entry("Long Entry",  strategy.long)
+    
+    if strategy.position_size <= 0 and stp_inp == "4H Low" // Less than as in both direction strat - Could be long before switching
+        stop = low // Stop at low of the pre-market
+        strategy.exit('4H Stop Exit', "Long Entry", stop=stop)
+
+    if strategy.position_size <= 0 and stp_inp == "Daily ATR"
+        stop = close - atr_ind
+        strategy.exit('ATR Stop Exit', "Long Entry", stop=stop)
+    
+strategy.close_all(eod) // so will close at 16:00 (next bar on 4 hour time frame)
+
+// Testing & Debug Plots
+plot(dayofweek == 6 ? 1 : 0)
+plot(dayofweek == 6 and pre_mkt ? 1 : 0, color=red)
+
+View in Pine Editor・66 lines
+Use on chart
+7
+3
+4 540
+This code snippet below is a quick and dirty follow up to some statistical analysis performed on the FTSE 100. It showed that over the long run, (since 1995) going long on a Friday appeared to have a statistical edge (53%). As a bit of fun, I wanted to create a quick pine script backtest to test this and see if it is possible to profit from it. After all, the index might finish up 53% of the time, but that doesn't mean one can profit from it.
+
+A full commentary to the script and FTSE analysis post can be found on the Backtest-Rookies website. To comply with house rules, I cannot post a direct link here.
+
+Important Note
+
+The script must run on the 4H time frame…..Why? It is a quick and dirty implementation and it relies on entering a long position on the 4H bar before the market opens. This way the position will enter at the open of the market. (Since positions are always opening on the bar following an entry signal).
+
+

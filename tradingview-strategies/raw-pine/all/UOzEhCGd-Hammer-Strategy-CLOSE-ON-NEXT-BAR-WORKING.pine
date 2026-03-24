@@ -1,0 +1,156 @@
+//@version=6
+strategy("Hammer Strategy (Stop under RAW candle) [WORKING]",
+     overlay=true,
+     process_orders_on_close=true,
+     pyramiding=0,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1)
+
+// ───── Mode ─────
+signalMode = input.string("CONFIRM", "Entry mode", options=["RAW","CONFIRM"])
+exitMode   = input.string("Stop/Target (next bar)", "Exit mode", options=["Next bar close","Stop/Target (next bar)"])
+
+// ───── Hammer thresholds (range-% based) ─────
+hammerLowerWickPctMin = input.float(0.50, "Hammer: min lower wick % of range", step=0.05)
+hammerBodyPctMax      = input.float(0.45, "Hammer: max body % of range", step=0.05)
+hammerUpperWickPctMax = input.float(0.30, "Hammer: max upper wick % of range", step=0.05)
+
+invUpperWickPctMin = input.float(0.50, "Inv Hammer: min upper wick % of range", step=0.05)
+invBodyPctMax      = input.float(0.45, "Inv Hammer: max body % of range", step=0.05)
+invLowerWickPctMax = input.float(0.30, "Inv Hammer: max lower wick % of range", step=0.05)
+
+// ───── Confirmation ─────
+confirmMaxBars = input.int(40, "Confirm within N bars", minval=1)
+
+// ───── Risk settings ─────
+stopBufferTicks = input.int(2, "Stop buffer (ticks) under RAW candle", minval=0)
+rrMultiple      = input.float(2.0, "Target R multiple", step=0.25)
+
+// ───── Candle parts ─────
+rng = high - low
+body = math.abs(close - open)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+valid = rng > 0
+
+// ───── Raw patterns ─────
+rawHammer = valid and (lowerWick / rng >= hammerLowerWickPctMin) and (body / rng <= hammerBodyPctMax) and (upperWick / rng <= hammerUpperWickPctMax)
+rawInv    = valid and (upperWick / rng >= invUpperWickPctMin) and (body / rng <= invBodyPctMax) and (lowerWick / rng <= invLowerWickPctMax)
+rawSignal = rawHammer or rawInv
+
+plotshape(rawHammer, title="RAW Hammer", style=shape.circle, location=location.belowbar, size=size.tiny, text="HAM?")
+plotshape(rawInv,    title="RAW Inv",    style=shape.circle, location=location.belowbar, size=size.tiny, text="INV?")
+
+// ───── Candidate storage for CONFIRM (store RAW candle info) ─────
+var float candHammerBodyTop = na
+var float candRawLow_HAM    = na
+var int   candHammerBar     = na
+
+var float candInvHigh       = na
+var float candRawLow_INV    = na
+var int   candInvBar        = na
+
+if rawHammer and na(candHammerBar)
+    candHammerBodyTop := math.max(open, close)
+    candRawLow_HAM    := low          // <-- RAW candle low saved here
+    candHammerBar     := bar_index
+
+if rawInv and na(candInvBar)
+    candInvHigh    := high
+    candRawLow_INV := low             // <-- RAW candle low saved here
+    candInvBar     := bar_index
+
+// Expire candidates
+if (not na(candHammerBar)) and ((bar_index - candHammerBar) > confirmMaxBars)
+    candHammerBodyTop := na
+    candRawLow_HAM    := na
+    candHammerBar     := na
+
+if (not na(candInvBar)) and ((bar_index - candInvBar) > confirmMaxBars)
+    candInvHigh    := na
+    candRawLow_INV := na
+    candInvBar     := na
+
+// Confirmations (close crosses above level)
+hammerConfirm = (not na(candHammerBodyTop)) and ta.crossover(close, candHammerBodyTop)
+invConfirm    = (not na(candInvHigh)) and ta.crossover(close, candInvHigh)
+confirmSignal = hammerConfirm or invConfirm
+
+plotshape(hammerConfirm, title="CONF Hammer", style=shape.triangleup, location=location.belowbar, size=size.tiny, text="HAM")
+plotshape(invConfirm,    title="CONF Inv",    style=shape.triangleup, location=location.belowbar, size=size.tiny, text="INV")
+
+// ───── Choose entry signal ─────
+tradeSignal = signalMode == "RAW" ? rawSignal : confirmSignal
+
+// ───── Store stop anchor from RAW candle (always) ─────
+var float entryStopAnchorLow = na
+var int   entryBar           = na
+var bool  bracketSet         = false
+
+if tradeSignal and strategy.position_size == 0
+    // If entering RAW, stop anchor is the RAW candle low (current bar)
+    // If entering CONFIRM, stop anchor is the RAW candle low that created the candidate
+    float anchorLow = na
+    if signalMode == "RAW"
+        anchorLow := low
+    else
+        anchorLow := hammerConfirm ? candRawLow_HAM : candRawLow_INV
+
+    entryStopAnchorLow := anchorLow
+    strategy.entry("Long", strategy.long)
+    entryBar := bar_index
+    bracketSet := false
+
+    // Clear whichever candidate confirmed (so it can re-arm later)
+    if hammerConfirm
+        candHammerBodyTop := na
+        candRawLow_HAM    := na
+        candHammerBar     := na
+    if invConfirm
+        candInvHigh    := na
+        candRawLow_INV := na
+        candInvBar     := na
+
+// ───── Exit mode 1: close next bar (always works) ─────
+if exitMode == "Next bar close"
+    if strategy.position_size > 0 and not na(entryBar) and (bar_index >= entryBar + 1)
+        strategy.close("Long")
+        entryBar := na
+        entryStopAnchorLow := na
+        bracketSet := false
+
+// ───── Exit mode 2: Stop/Target bracket placed NEXT bar ─────
+if exitMode == "Stop/Target (next bar)"
+    if strategy.position_size > 0 and not bracketSet and not na(entryBar) and (bar_index >= entryBar + 1) and not na(entryStopAnchorLow)
+        tick = syminfo.mintick
+        stopPrice  = entryStopAnchorLow - (stopBufferTicks * tick)
+        entryPrice = strategy.position_avg_price
+
+        // Only place bracket if stop is below entry
+        if stopPrice < entryPrice
+            risk = entryPrice - stopPrice
+            targetPrice = entryPrice + (risk * rrMultiple)
+            strategy.exit("TP/SL", "Long", stop=stopPrice, limit=targetPrice)
+            bracketSet := true
+        else
+            // If invalid, close and reset
+            strategy.close("Long")
+            entryBar := na
+            entryStopAnchorLow := na
+            bracketSet := false
+
+    // reset state when flat
+    if strategy.position_size == 0
+        entryBar := na
+        entryStopAnchorLow := na
+        bracketSet := false
+
+View in Pine Editor・146 lines
+Use on chart
+2
+1
+1
+1 065
+Adjustable hammer and inverted hammer candle
+Ham? INV? is the hammer
+Entry on HAM, INV OR HAM?, INV? close next bar

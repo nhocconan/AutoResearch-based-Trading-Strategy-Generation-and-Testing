@@ -1,0 +1,61 @@
+//@version=3
+strategy(title='Super Simple Martingale Crossover', shorttitle="MartiMcFly",overlay=true, slippage=5, commission_type=strategy.commission.cash_per_contract, commission_value=0.00007, initial_capital=1000, currency=currency.USD)
+src = close
+//Moving average definition (for crossover)
+fastEMA = ema(src, input(title="Fast EMA Period", defval=8))
+slowEMA = ema(src, input(title="Slow EMA Period", defval=62))
+//Take Profit and Stop Loss settings in points
+TP = input(defval=1000, step=10, title='Take Profit (points)')
+SL = input(defval=500, step=10, title='Stop Loss (points')
+win_mult = input(defval=1.00, type=float, step=0.05, title='Multiplier for Winning Streak')
+loss_mult = input(defval=1.7, type=float, step=0.05, title='Multiplier for Losing Streak')
+//Just hedge the last trade lmao
+dir = 0.0
+dir := na(dir[1]) ? 1 : crossunder(fastEMA, slowEMA) and dir[1] > 0 ? -1 : crossover(fastEMA, slowEMA) and dir[1] < 0 ? 1 : dir[1]
+//Count the current streak of winning/losing trades
+calcWinMult(mult) => 
+    result = 0.0
+    result := na(result[1]) ? 1 : change(strategy.losstrades) > 0 ? 1 : change(strategy.wintrades) > 0 or change(strategy.eventrades) > 0 ? nz(result[1]) * mult : nz(result[1])
+calcLossMult(mult) => 
+    result = 0.0
+    result := na(result[1]) ? 1 : change(strategy.wintrades) > 0 ? 1 : change(strategy.losstrades) > 0 or change(strategy.eventrades) > 0 ? nz(result[1]) * mult : nz(result[1])
+//Gett the type of trade we need
+type = 0.0
+type := change(strategy.wintrades) > 0 ? 1 : change(strategy.losstrades) > 0 ? -1 : nz(type[1], 1)
+//Get the martingale multiplier for the nex trade
+qtyMult = type > 0 ? calcWinMult(win_mult) : calcLossMult(loss_mult)
+//Basic buy/sell signals
+buy = dir > 0 and strategy.opentrades < 1
+sell = dir < 0 and strategy.opentrades < 1
+//EMA plots
+plot(fastEMA, color=red, linewidth=2)
+plot(slowEMA, color=orange, linewidth=2)
+lots = input(defval=0.01, title='Min Lot Size')*100000
+adjustedLots = lots * qtyMult
+if(strategy.equity > strategy.initial_capital * 0.2 and (strategy.closedtrades + strategy.opentrades) < 1499)
+    strategy.entry('LONG', strategy.long, qty=adjustedLots, when=buy)
+    strategy.entry('SHORT', strategy.short, qty=adjustedLots, when=sell)
+    strategy.exit('L.exit', from_entry='LONG', profit=TP, loss=SL)
+    strategy.exit('S.exit', from_entry='SHORT', profit=TP, loss=SL)
+
+View in Pine Editor・39 lines
+Use on chart
+5
+9
+3
+7
+17 896
+In my experimentation to add some sort of hedging to trades, I stumbled on the Martingale roulette betting strategy.
+If it works in the casino, why not here?
+
+The principle is simple:
+If you lose a trade, immediately go the opposite direction and double your bet.
+
+In this case, we're just applying a multiplier.
+
+The strategy is a simple EMA crossover - defaulted to my favorite periods 8 and 62.
+
+Enjoy :) I'll make a new one that's contained in a function, so you can simply implement it in your own strategy and have it monitor winning/losing trades automatically.
+
+Cheers,
+DasanC

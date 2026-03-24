@@ -1,0 +1,57 @@
+//@version=6
+strategy("RSI Divergence Strategy", overlay=true, format=format.price, pyramiding=0, calc_on_every_tick=true)
+
+//================ Input Settings ===================
+len       = input.int(title="RSI Period", defval=14)
+src       = input.source(title="RSI Source", defval=close)
+lbR       = input.int(title="Pivot Lookback Right", defval=5)
+lbL       = input.int(title="Pivot Lookback Left", defval=5)
+rangeUpper= input.int(title="Max of Lookback Range", defval=60)
+rangeLower= input.int(title="Min of Lookback Range", defval=5)
+slPerc    = input.float(0.02, "Stop Loss %", step=0.01)
+tpPerc    = input.float(0.04, "Take Profit %", step=0.01)
+
+//================ RSI Calculation ==================
+rsi = ta.rsi(src, len)
+
+//================ Pivot Detection ==================
+plFound = not na(ta.pivotlow(rsi, lbL, lbR))
+phFound = not na(ta.pivothigh(rsi, lbL, lbR))
+
+_inRange(cond) =>
+    bars = ta.barssince(cond)
+    rangeLower <= bars and bars <= rangeUpper
+
+//================ Bullish Divergence ===============
+inRangePl = _inRange(plFound[1])
+oscHL     = rsi[lbR] > ta.valuewhen(plFound, rsi[lbR], 1) and inRangePl
+priceLL   = low[lbR] < ta.valuewhen(plFound, low[lbR], 1)
+bullishDiv= priceLL and oscHL and plFound
+
+//================ Bearish Divergence ===============
+inRangePh = _inRange(phFound[1])
+oscLH     = rsi[lbR] < ta.valuewhen(phFound, rsi[lbR], 1) and inRangePh
+priceHH   = high[lbR] > ta.valuewhen(phFound, high[lbR], 1)
+bearishDiv= priceHH and oscLH and phFound
+
+//================ Entry / Exit Logic ===============
+if bullishDiv and rsi < 30
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=close * (1 - slPerc), limit=close * (1 + tpPerc))
+
+if bearishDiv and rsi > 70
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=close * (1 + slPerc), limit=close * (1 - tpPerc))
+
+//================ Plot RSI =========================
+plot(rsi, title="RSI", color=color.blue)
+hline(70, "Overbought", color=color.red)
+hline(30, "Oversold", color=color.green)
+hline(50, "Middle", color=color.gray, linestyle=hline.style_dotted)
+
+View in Pine Editor・50 lines
+Use on chart
+2
+0
+838
+upper( trim( get( parseJSON( {{5.value}} ); "action") ) )

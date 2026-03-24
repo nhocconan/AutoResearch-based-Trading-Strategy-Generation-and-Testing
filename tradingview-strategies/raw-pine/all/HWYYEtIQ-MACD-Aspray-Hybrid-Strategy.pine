@@ -1,0 +1,62 @@
+//@version=5
+strategy("MACD Aspray Hybrid Strategy (Long Only, Histogram < 0)", 
+     overlay=false, 
+     initial_capital=10000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=100)
+
+// MACD settings
+fastLength   = input.int(12, "Fast EMA")
+slowLength   = input.int(26, "Slow EMA")
+signalLength = input.int(9,  "MACD Signal EMA")
+aspSignalLen = input.int(9,  "Aspray Signal EMA")
+
+// MACD Line (Appel)
+fastEMA   = ta.ema(close, fastLength)
+slowEMA   = ta.ema(close, slowLength)
+macdLine  = fastEMA - slowEMA
+
+// Signal Line (Appel)
+signalLine = ta.ema(macdLine, signalLength)
+
+// MACD Aspray Line (Histogram values)
+aspLine = macdLine - signalLine
+
+// New Signal Line (9-EMA of Aspray Line)
+aspSignal = ta.ema(aspLine, aspSignalLen)
+
+// Entry & Exit conditions
+longCondition = ta.crossunder(aspSignal, aspLine) and aspLine < 0
+exitCondition = ta.crossover(aspSignal, aspLine)
+
+// Trade logic
+if (longCondition and strategy.position_size <= 0)
+    strategy.entry("Long", strategy.long)
+
+if (exitCondition and strategy.position_size > 0)
+    strategy.close("Long")
+
+// Plot Histogram Bars
+plot(aspLine, style=plot.style_columns, color=aspLine >= 0 ? color.teal : color.red, title="Histogram")
+
+// Plot Aspray Line
+plot(aspLine, color=color.teal, linewidth=2, title="MACD Aspray Line")
+
+// Plot New Signal Line
+plot(aspSignal, color=color.orange, linewidth=2, title="Aspray Signal Line")
+
+// Zero Line
+hline(0, 'Zero Line', color=color.gray)
+
+// Entry/Exit Markers
+plotshape(longCondition, title="Buy Signal", style=shape.triangleup, color=color.green, size=size.small, location=location.belowbar)
+plotshape(exitCondition, title="Sell Signal", style=shape.triangledown, color=color.red, size=size.small, location=location.abovebar)
+
+View in Pine Editor・53 lines
+Use on chart
+5
+4
+3
+2
+7 940
+The MACD Aspray Hybrid Strategy is a trend-following trading system based on a modified version of the MACD indicator.

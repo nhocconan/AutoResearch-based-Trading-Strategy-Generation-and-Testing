@@ -1,0 +1,1317 @@
+//@version=6
+strategy("Vortex Confluence Protocol [JOAT]", "VCP [JOAT]", overlay=true, 
+        default_qty_type=strategy.percent_of_equity, default_qty_value=2,
+        initial_capital=100000, commission_type=strategy.commission.percent, 
+        commission_value=0.1, slippage=2, pyramiding=0,
+        max_lines_count=500, max_boxes_count=300, max_labels_count=200)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VORTEX CONFLUENCE PROTOCOL - STRATEGY
+// Combines market structure, momentum, volume, MTF analysis, and session data
+// Features: Multi-layer confluence, Regime-aware entries, Dynamic risk management
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COLOR PALETTE - Vortex Quantum Theme
+// ─────────────────────────────────────────────────────────────────────────────
+// Vortex Colors
+var color VCP_BULL_ENTRY     = #00ffd5
+var color VCP_BEAR_ENTRY     = #ff2d55
+var color VCP_BULL_EXIT      = #00b389
+var color VCP_BEAR_EXIT      = #d93d64
+var color VCP_NEUTRAL        = #5d6d7e
+var color VCP_SL_COLOR       = #ff4976
+var color VCP_TP_COLOR       = #00d4a1
+
+// Quantum Colors
+var color VCP_QUANTUM        = #9c27b0
+var color VCP_ENTANGLEMENT   = #673ab7
+var color VCP_COHERENCE      = #3f51b5
+var color VCP_SUPERPOSITION = #e91e63
+
+// Structure Colors
+var color VCP_STRUCTURE_BULL = #00e5cc
+var color VCP_STRUCTURE_BEAR = #e06377
+var color VCP_LIQUIDITY_BULL = #00ffbb
+var color VCP_LIQUIDITY_BEAR = #ff1100
+
+// Special States
+var color VCP_INSTITUTIONAL  = #ffc107
+var color VCP_SMART_MONEY    = #4caf50
+var color VCP_HARMONIC       = #ff9800
+var color VCP_RESONANCE      = #c792ea
+var color VCP_WARNING        = #ff5722
+var color VCP_GLOW           = #00ffff
+
+// Visual Effects
+var color VCP_FVG_BULL       = color.new(#00d4a1, 80)
+var color VCP_FVG_BEAR       = color.new(#ff4976, 80)
+var color VCP_ZONE_BULL      = color.new(#00ffd5, 85)
+var color VCP_ZONE_BEAR      = color.new(#ff2d55, 85)
+var color VCP_BACKGROUND     = #1a237e
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STRATEGY INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+string grpStrategy = "Strategy Settings"
+bool useLongTrades    = input.bool(true, "Enable Long Trades", group=grpStrategy)
+bool useShortTrades   = input.bool(true, "Enable Short Trades", group=grpStrategy)
+int minConfluence     = input.int(3, "Minimum Confluence Score", minval=1, maxval=5, group=grpStrategy)
+bool useRegimeFilter  = input.bool(true, "Use Regime Filter", group=grpStrategy)
+bool useSessionFilter = input.bool(true, "Use Session Filter", group=grpStrategy)
+
+string grpAdvanced = "Advanced Features"
+bool useQuantumFilter   = input.bool(true, "Use Quantum Confluence", group=grpAdvanced)
+bool useLiquidityFilter = input.bool(true, "Use Liquidity Analysis", group=grpAdvanced)
+bool useSmartMoney      = input.bool(true, "Use Smart Money Concepts", group=grpAdvanced)
+bool useHarmonicPattern = input.bool(true, "Use Harmonic Patterns", group=grpAdvanced)
+float quantumThreshold = input.float(0.7, "Quantum Coherence Threshold", minval=0.5, maxval=1.0, step=0.05, group=grpAdvanced)
+bool showGlowEffect    = input.bool(true, "Show Glow Effects", group=grpAdvanced)
+string colorScheme     = input.string("Quantum", "Color Scheme", options=["Quantum", "Classic", "Professional", "Neon"], group=grpAdvanced)
+
+string grpRisk = "Risk Management"
+float riskPercent     = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=5.0, step=0.1, group=grpRisk)
+float rrRatio         = input.float(2.0, "Risk:Reward Ratio", minval=1.0, maxval=5.0, step=0.5, group=grpRisk)
+bool useTrailStop     = input.bool(true, "Use Trailing Stop", group=grpRisk)
+float trailATRMult    = input.float(2.0, "Trail ATR Multiplier", minval=0.5, maxval=5.0, step=0.5, group=grpRisk)
+float slATRMult       = input.float(1.5, "Stop Loss ATR Multiplier", minval=0.5, maxval=3.0, step=0.5, group=grpRisk)
+
+string grpStructure = "Market Structure"
+int pivotStrength     = input.int(5, "Pivot Strength", minval=2, maxval=20, group=grpStructure)
+bool requireBOS       = input.bool(true, "Require BOS/CHoCH", group=grpStructure)
+bool requireFVG       = input.bool(true, "Require FVG Confluence", group=grpStructure)
+
+string grpMomentum = "Momentum Settings"
+int rsiLength         = input.int(14, "RSI Length", minval=5, maxval=30, group=grpMomentum)
+int rsiOverbought     = input.int(70, "RSI Overbought", minval=60, maxval=90, group=grpMomentum)
+int rsiOversold       = input.int(30, "RSI Oversold", minval=10, maxval=40, group=grpMomentum)
+bool requireMomAlign  = input.bool(true, "Require Momentum Alignment", group=grpMomentum)
+
+string grpMTF = "Multi-Timeframe"
+bool useMTFFilter     = input.bool(true, "Use MTF Filter", group=grpMTF)
+string htfTimeframe   = input.timeframe("60", "Higher Timeframe", group=grpMTF)
+int mtfTrendLength    = input.int(20, "MTF Trend Length", minval=5, maxval=50, group=grpMTF)
+
+string grpVolume = "Volume Analysis"
+bool useVolumeFilter  = input.bool(true, "Use Volume Filter", group=grpVolume)
+int volMALength       = input.int(20, "Volume MA Length", minval=5, maxval=50, group=grpVolume)
+float volThreshold    = input.float(1.2, "Volume Threshold", minval=0.5, maxval=3.0, step=0.1, group=grpVolume)
+
+string grpSession = "Session Settings"
+string activeSession  = input.session("0800-1600", "Active Trading Session", group=grpSession)
+string sessionTZ      = input.string("America/New_York", "Timezone", options=["America/New_York", "Europe/London", "Asia/Tokyo", "UTC"], group=grpSession)
+
+string grpVisual = "Visual Settings"
+bool showEntrySignals = input.bool(true, "Show Entry Signals", group=grpVisual)
+bool showSLTP         = input.bool(true, "Show SL/TP Levels", group=grpVisual)
+bool showDashboard    = input.bool(true, "Show Dashboard", group=grpVisual)
+bool showFVGZones     = input.bool(true, "Show FVG Zones", group=grpVisual)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TYPE DEFINITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+type TradeState
+    bool inPosition
+    int direction
+    float entryPrice
+    float stopLoss
+    float takeProfit
+    float trailStop
+    int entryBar
+
+type ConfluenceScore
+    int structure
+    int momentum
+    int volume
+    int mtf
+    int session
+    int liquidity
+    int quantum
+    int smartMoney
+    int harmonic
+    int total
+
+type QuantumState
+    float coherence
+    float entanglement
+    float superposition
+    bool isCollapsed
+    float wavePhase
+
+type LiquidityState
+    float sweepStrength
+    bool liquidityTaken
+    float absorptionRatio
+    int liquidityLevel
+
+type SmartMoneyState
+    bool isAccumulating
+    bool isDistributing
+    float institutionalDelta
+    float smartMoneyScore
+
+type MarketRegime
+    int trend
+    bool isTrending
+    float volatility
+    float strength
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GLOBAL VARIABLES
+// ─────────────────────────────────────────────────────────────────────────────
+var TradeState trade = TradeState.new(false, 0, na, na, na, na, na)
+var ConfluenceScore confluence = ConfluenceScore.new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+var MarketRegime regime = MarketRegime.new(0, false, 0.0, 0.0)
+var QuantumState quantum = QuantumState.new(0.0, 0.0, 0.0, false, 0.0)
+var LiquidityState liquidity = LiquidityState.new(0.0, false, 0.0, 0)
+var SmartMoneyState smartMoney = SmartMoneyState.new(false, false, 0.0, 0.0)
+
+var array<box> fvgBoxes = array.new<box>()
+var array<float> fvgTops = array.new<float>()
+var array<float> fvgBottoms = array.new<float>()
+var array<bool> fvgBullish = array.new<bool>()
+
+// Series variables for UDT fields (needed for history referencing)
+var bool seriesQuantumCollapsed = false
+var float seriesQuantumCoherence = 0.0
+var float seriesQuantumEntanglement = 0.0
+var bool seriesLiquidityTaken = false
+var bool seriesSmartMoneyAccumulating = false
+var bool seriesSmartMoneyDistributing = false
+var int seriesConfluenceHarmonic = 0
+var bool seriesRegimeTrending = false
+var int seriesRegimeTrend = 0
+
+// Animation variables
+var float animationPhase = 0.0
+var int lastAnimationBar = 0
+
+float atrVal = ta.atr(14)
+float fvgTop = na
+float fvgBottom = na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARKET STRUCTURE ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+float pivotHigh = ta.pivothigh(high, pivotStrength, pivotStrength)
+float pivotLow = ta.pivotlow(low, pivotStrength, pivotStrength)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+var float prevSwingHigh = na
+var float prevSwingLow = na
+var int structureDirection = 0
+
+if not na(pivotHigh)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := pivotHigh
+    lastSwingHighBar := bar_index - pivotStrength
+
+if not na(pivotLow)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := pivotLow
+    lastSwingLowBar := bar_index - pivotStrength
+
+bool bosUp = not na(lastSwingHigh) and close > lastSwingHigh and structureDirection <= 0
+bool bosDown = not na(lastSwingLow) and close < lastSwingLow and structureDirection >= 0
+bool chochUp = not na(prevSwingHigh) and close > prevSwingHigh and structureDirection < 0
+bool chochDown = not na(prevSwingLow) and close < prevSwingLow and structureDirection > 0
+
+if bosUp or chochUp
+    structureDirection := 1
+if bosDown or chochDown
+    structureDirection := -1
+
+int structureSignal = bosUp or chochUp ? 1 : bosDown or chochDown ? -1 : 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FVG DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
+bool bullFVG = low > high[2] and close[1] > open[1]
+bool bearFVG = high < low[2] and close[1] < open[1]
+
+float minFVGSize = atrVal * 0.3
+
+if bullFVG and (low - high[2]) >= minFVGSize
+    fvgTop := low
+    fvgBottom := high[2]
+    array.push(fvgTops, fvgTop)
+    array.push(fvgBottoms, fvgBottom)
+    array.push(fvgBullish, true)
+    
+    if showFVGZones
+        box newBox = box.new(bar_index - 2, fvgTop, bar_index + 20, fvgBottom,
+                        border_color=color.new(VCP_STRUCTURE_BULL, 60),
+                        bgcolor=VCP_FVG_BULL, border_width=1)
+        array.push(fvgBoxes, newBox)
+
+if bearFVG and (low[2] - high) >= minFVGSize
+    fvgTop := low[2]
+    fvgBottom := high
+    array.push(fvgTops, fvgTop)
+    array.push(fvgBottoms, fvgBottom)
+    array.push(fvgBullish, false)
+    
+    if showFVGZones
+        box newBox = box.new(bar_index - 2, fvgTop, bar_index + 20, fvgBottom,
+                        border_color=color.new(VCP_STRUCTURE_BEAR, 60),
+                        bgcolor=VCP_FVG_BEAR, border_width=1)
+        array.push(fvgBoxes, newBox)
+
+while array.size(fvgTops) > 30
+    array.shift(fvgTops)
+    array.shift(fvgBottoms)
+    array.shift(fvgBullish)
+    if array.size(fvgBoxes) > 0
+        box oldBox = array.shift(fvgBoxes)
+        box.delete(oldBox)
+
+bool inBullFVG = false
+bool inBearFVG = false
+
+if array.size(fvgTops) > 0
+    for i = 0 to array.size(fvgTops) - 1
+        float fTop = array.get(fvgTops, i)
+        float fBottom = array.get(fvgBottoms, i)
+        bool isBull = array.get(fvgBullish, i)
+        
+        if low <= fTop and high >= fBottom
+            if isBull
+                inBullFVG := true
+            else
+                inBearFVG := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MOMENTUM ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+float rsiValue = ta.rsi(close, rsiLength)
+float rsiSmooth = ta.ema(rsiValue, 3)
+float rsiMomentum = ta.change(rsiSmooth, 3)
+
+bool momBullish = rsiSmooth > 50 and rsiMomentum > 0 and rsiSmooth < rsiOverbought
+bool momBearish = rsiSmooth < 50 and rsiMomentum < 0 and rsiSmooth > rsiOversold
+
+bool rsiDivBull = rsiSmooth < 40 and close > close[5] and rsiSmooth > rsiSmooth[5]
+bool rsiDivBear = rsiSmooth > 60 and close < close[5] and rsiSmooth < rsiSmooth[5]
+
+int momentumSignal = momBullish ? 1 : momBearish ? -1 : 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VOLUME ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+float volMA = ta.sma(volume, volMALength)
+float volRatio = volume / volMA
+bool highVolume = volRatio >= volThreshold
+
+float buyVolume = close > open ? volume : volume * (close - low) / (high - low + 0.0001)
+float sellVolume = close < open ? volume : volume * (high - close) / (high - low + 0.0001)
+float volumeDelta = buyVolume - sellVolume
+float cumDelta = math.sum(volumeDelta, 10)
+
+// Volume anomaly detection
+float volStd = ta.stdev(volume, 20)
+float volZScore = (volume - volMA) / volStd
+bool volAnomaly = math.abs(volZScore) > 2.0
+
+bool volumeBullish = highVolume and volumeDelta > 0 and cumDelta > 0
+bool volumeBearish = highVolume and volumeDelta < 0 and cumDelta < 0
+
+int volumeSignal = volumeBullish ? 1 : volumeBearish ? -1 : highVolume ? 0 : 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIQUIDITY ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+if useLiquidityFilter
+    // Detect liquidity sweeps
+    liquidity.sweepStrength := math.abs(volumeDelta) / volMA
+    liquidity.liquidityTaken := liquidity.sweepStrength > 2.0
+    
+    // Calculate absorption ratio
+    absorption = math.abs(volumeDelta) / volume
+    liquidity.absorptionRatio := absorption
+    
+    // Liquidity level classification
+    if liquidity.absorptionRatio > 0.7
+        liquidity.liquidityLevel := 3  // High
+    else if liquidity.absorptionRatio > 0.5
+        liquidity.liquidityLevel := 2  // Medium
+    else if liquidity.absorptionRatio > 0.3
+        liquidity.liquidityLevel := 1  // Low
+    else
+        liquidity.liquidityLevel := 0  // None
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMART MONEY ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+// Pre-compute ta.change at global scope
+float _smPriceChange = ta.change(close, 5)
+float _smVolumeChange = ta.change(volume, 5)
+
+if useSmartMoney
+    // Institutional delta calculation
+    smartMoney.institutionalDelta := volumeDelta * volRatio
+    
+    // Accumulation/Distribution detection
+    smartMoney.isAccumulating := _smPriceChange > 0 and _smVolumeChange > 0 and smartMoney.institutionalDelta > 0
+    smartMoney.isDistributing := _smPriceChange < 0 and _smVolumeChange > 0 and smartMoney.institutionalDelta < 0
+    
+    // Smart money score
+    smScore = 0.0
+    if smartMoney.isAccumulating
+        smScore += math.abs(smartMoney.institutionalDelta) / volMA
+    if smartMoney.isDistributing
+        smScore -= math.abs(smartMoney.institutionalDelta) / volMA
+    if volAnomaly
+        smScore *= 1.5
+    smartMoney.smartMoneyScore := math.min(100, math.max(-100, smScore * 10))
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MULTI-TIMEFRAME ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+// Pre-compute ta.* at global scope for request.security consistency
+float _htfEmaGlobal = ta.ema(close, mtfTrendLength)
+float _htfRsiGlobal = ta.rsi(close, rsiLength)
+
+float htfClose = request.security(syminfo.tickerid, htfTimeframe, close, barmerge.gaps_off, barmerge.lookahead_off)
+float htfEMA = request.security(syminfo.tickerid, htfTimeframe, _htfEmaGlobal, barmerge.gaps_off, barmerge.lookahead_off)
+float htfRSI = request.security(syminfo.tickerid, htfTimeframe, _htfRsiGlobal, barmerge.gaps_off, barmerge.lookahead_off)
+
+int htfTrend = htfClose > htfEMA ? 1 : htfClose < htfEMA ? -1 : 0
+bool htfMomBull = htfRSI > 50
+bool htfMomBear = htfRSI < 50
+
+bool mtfBullish = htfTrend > 0 and htfMomBull
+bool mtfBearish = htfTrend < 0 and htfMomBear
+
+int mtfSignal = mtfBullish ? 1 : mtfBearish ? -1 : 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUANTUM CONFLUENCE ANALYSIS
+// ─────────────────────────────────────────────────────────────────────────────
+if useQuantumFilter
+    // Calculate quantum coherence
+    trendAlignment = (structureDirection + momentumSignal + volumeSignal + mtfSignal) / 4
+    quantum.coherence := math.abs(trendAlignment)
+    
+    // Calculate entanglement between timeframes
+    quantum.entanglement := (htfTrend == structureDirection ? 0.5 : -0.5) + (mtfSignal == momentumSignal ? 0.5 : -0.5)
+    
+    // Superposition state
+    quantum.superposition := (quantum.coherence + quantum.entanglement) / 2
+    quantum.isCollapsed := quantum.superposition > quantumThreshold
+    quantum.wavePhase := (time / 1000) % 360
+
+// Update animation
+if barstate.islast
+    if bar_index != lastAnimationBar
+        animationPhase := (animationPhase + 5) % 360
+        lastAnimationBar := bar_index
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION FILTER
+// ─────────────────────────────────────────────────────────────────────────────
+bool inActiveSession = not na(time(timeframe.period, activeSession, sessionTZ))
+int sessionSignal = inActiveSession ? 1 : 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REGIME DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
+int adxLen = 14
+float upMove = ta.change(high)
+float downMove = -ta.change(low)
+float plusDM = na(upMove) ? na : (upMove > downMove and upMove > 0 ? upMove : 0)
+float minusDM = na(downMove) ? na : (downMove > upMove and downMove > 0 ? downMove : 0)
+float trueRange = ta.rma(ta.tr, adxLen)
+float plusDI = 100 * ta.rma(plusDM, adxLen) / trueRange
+float minusDI = 100 * ta.rma(minusDM, adxLen) / trueRange
+float dx = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+float adxValue = ta.rma(dx, adxLen)
+
+regime.isTrending := adxValue > 25
+regime.trend := plusDI > minusDI ? 1 : -1
+regime.volatility := atrVal / close * 100
+regime.strength := adxValue
+
+bool regimeAllowsLong = not useRegimeFilter or (regime.isTrending and regime.trend > 0) or not regime.isTrending
+bool regimeAllowsShort = not useRegimeFilter or (regime.isTrending and regime.trend < 0) or not regime.isTrending
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFLUENCE SCORING
+// ─────────────────────────────────────────────────────────────────────────────
+calcConfluence() =>
+    int structScore = 0
+    int momScore = 0
+    int volScore = 0
+    int mtfScore = 0
+    int sessScore = 0
+    int liqScore = 0
+    int quantumScore = 0
+    int smScore = 0
+    int harmonicScore = 0
+    
+    // Structure confluence
+    if requireBOS
+        structScore := structureSignal != 0 ? 1 : 0
+    else
+        structScore := structureDirection != 0 ? 1 : 0
+    
+    if requireFVG
+        if inBullFVG and structureDirection > 0
+            structScore += 1
+        if inBearFVG and structureDirection < 0
+            structScore += 1
+    
+    // Momentum confluence
+    if requireMomAlign
+        momScore := momentumSignal != 0 ? 1 : 0
+    else
+        momScore := 1
+    
+    // Volume confluence
+    if useVolumeFilter
+        volScore := volumeSignal != 0 ? 1 : 0
+        if volAnomaly
+            volScore += 1  // Bonus for anomaly
+    else
+        volScore := 1
+    
+    // MTF confluence
+    if useMTFFilter
+        mtfScore := mtfSignal != 0 ? 1 : 0
+    else
+        mtfScore := 1
+    
+    // Session confluence
+    if useSessionFilter
+        sessScore := sessionSignal
+    else
+        sessScore := 1
+    
+    // Liquidity confluence
+    if useLiquidityFilter
+        if liquidity.liquidityLevel >= 2
+            liqScore := 1
+        if liquidity.liquidityTaken
+            liqScore += 1  // Bonus for sweep
+    else
+        liqScore := 1
+    
+    // Quantum confluence
+    if useQuantumFilter
+        quantumScore := quantum.isCollapsed ? 1 : 0
+        if quantum.coherence > 0.8
+            quantumScore += 1  // Bonus for high coherence
+    else
+        quantumScore := 1
+    
+    // Smart money confluence
+    if useSmartMoney
+        if smartMoney.smartMoneyScore > 50
+            smScore := 1
+        if smartMoney.isAccumulating or smartMoney.isDistributing
+            smScore += 1  // Bonus for clear SM activity
+    else
+        smScore := 1
+    
+    // Harmonic confluence
+    if useHarmonicPattern
+        // Simple harmonic detection
+        harmonicPeriod = 8
+        harmonicPhase = (bar_index % harmonicPeriod) * 360 / harmonicPeriod
+        harmonicActive = math.sin(harmonicPhase * math.pi / 180) * structureDirection > 0.5
+        harmonicScore := harmonicActive ? 1 : 0
+    else
+        harmonicScore := 1
+    
+    [structScore, momScore, volScore, mtfScore, sessScore, liqScore, quantumScore, smScore, harmonicScore]
+
+[structScore, momScore, volScore, mtfScore, sessScore, liqScore, quantumScore, smScore, harmonicScore] = calcConfluence()
+
+confluence.structure := structScore
+confluence.momentum := momScore
+confluence.volume := volScore
+confluence.mtf := mtfScore
+confluence.session := sessScore
+confluence.liquidity := liqScore
+confluence.quantum := quantumScore
+confluence.smartMoney := smScore
+confluence.harmonic := harmonicScore
+confluence.total := structScore + momScore + volScore + mtfScore + sessScore + liqScore + quantumScore + smScore + harmonicScore
+
+// Update series variables from UDTs for history referencing
+seriesQuantumCollapsed := quantum.isCollapsed
+seriesQuantumCoherence := quantum.coherence
+seriesQuantumEntanglement := quantum.entanglement
+seriesLiquidityTaken := liquidity.liquidityTaken
+seriesSmartMoneyAccumulating := smartMoney.isAccumulating
+seriesSmartMoneyDistributing := smartMoney.isDistributing
+seriesConfluenceHarmonic := confluence.harmonic
+seriesRegimeTrending := regime.isTrending
+seriesRegimeTrend := regime.trend
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+bool _confStructBull = structureDirection > 0
+bool _confMomBull = not requireMomAlign or momentumSignal >= 0
+bool _confMtfBull = not useMTFFilter or mtfSignal >= 0
+bool _confVolBull = not useVolumeFilter or volumeSignal >= 0
+bool _confSessBull = not useSessionFilter or inActiveSession
+bool _confQuantBull = not useQuantumFilter or quantum.superposition > 0
+bool _confSmBull = not useSmartMoney or smartMoney.smartMoneyScore >= 0
+bool bullConfluence = confluence.total >= minConfluence and _confStructBull and _confMomBull and _confMtfBull and _confVolBull and _confSessBull and regimeAllowsLong and _confQuantBull and _confSmBull
+
+bool _confStructBear = structureDirection < 0
+bool _confMomBear = not requireMomAlign or momentumSignal <= 0
+bool _confMtfBear = not useMTFFilter or mtfSignal <= 0
+bool _confVolBear = not useVolumeFilter or volumeSignal <= 0
+bool _confSessBear = not useSessionFilter or inActiveSession
+bool _confQuantBear = not useQuantumFilter or quantum.superposition < 0
+bool _confSmBear = not useSmartMoney or smartMoney.smartMoneyScore <= 0
+bool bearConfluence = confluence.total >= minConfluence and _confStructBear and _confMomBear and _confMtfBear and _confVolBear and _confSessBear and regimeAllowsShort and _confQuantBear and _confSmBear
+
+bool _fvgLong = requireFVG ? inBullFVG : true
+bool _bosLong = requireBOS ? (bosUp or chochUp) : true
+bool longEntry = useLongTrades and bullConfluence and _fvgLong and _bosLong and strategy.position_size == 0
+
+bool _fvgShort = requireFVG ? inBearFVG : true
+bool _bosShort = requireBOS ? (bosDown or chochDown) : true
+bool shortEntry = useShortTrades and bearConfluence and _fvgShort and _bosShort and strategy.position_size == 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RISK CALCULATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+// Pre-compute ta.lowest/ta.highest at global scope for calcStopLoss
+float _recentLow = ta.lowest(low, pivotStrength * 2)
+float _recentHigh = ta.highest(high, pivotStrength * 2)
+
+calcStopLoss(bool isLong) =>
+    float sl = na
+    
+    if isLong
+        sl := math.min(close - atrVal * slATRMult, _recentLow - atrVal * 0.2)
+    else
+        sl := math.max(close + atrVal * slATRMult, _recentHigh + atrVal * 0.2)
+    
+    sl
+
+calcTakeProfit(float entry, float sl, bool isLong) =>
+    float tp = na
+    risk = math.abs(entry - sl)
+    
+    if isLong
+        tp := entry + risk * rrRatio
+    else
+        tp := entry - risk * rrRatio
+    
+    tp
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRADE EXECUTION
+// ─────────────────────────────────────────────────────────────────────────────
+if longEntry
+    sl = calcStopLoss(true)
+    tp = calcTakeProfit(close, sl, true)
+    
+    trade.inPosition := true
+    trade.direction := 1
+    trade.entryPrice := close
+    trade.stopLoss := sl
+    trade.takeProfit := tp
+    trade.trailStop := sl
+    trade.entryBar := bar_index
+    
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+
+if shortEntry
+    sl = calcStopLoss(false)
+    tp = calcTakeProfit(close, sl, false)
+    
+    trade.inPosition := true
+    trade.direction := -1
+    trade.entryPrice := close
+    trade.stopLoss := sl
+    trade.takeProfit := tp
+    trade.trailStop := sl
+    trade.entryBar := bar_index
+    
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRAILING STOP UPDATE
+// ─────────────────────────────────────────────────────────────────────────────
+if useTrailStop and strategy.position_size != 0
+    trailDistance = atrVal * trailATRMult
+    
+    if strategy.position_size > 0
+        newTrail = high - trailDistance
+        if newTrail > trade.trailStop
+            trade.trailStop := newTrail
+            strategy.exit("Long Exit", "Long", stop=trade.trailStop, limit=trade.takeProfit)
+    
+    if strategy.position_size < 0
+        newTrail = low + trailDistance
+        if newTrail < trade.trailStop
+            trade.trailStop := newTrail
+            strategy.exit("Short Exit", "Short", stop=trade.trailStop, limit=trade.takeProfit)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POSITION RESET
+// ─────────────────────────────────────────────────────────────────────────────
+if strategy.position_size == 0 and trade.inPosition
+    trade.inPosition := false
+    trade.direction := 0
+    trade.entryPrice := na
+    trade.stopLoss := na
+    trade.takeProfit := na
+    trade.trailStop := na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTTING - ENTRY SIGNALS
+// ─────────────────────────────────────────────────────────────────────────────
+// Apply color scheme
+getEntryColor(bool isLong) =>
+    if colorScheme == "Professional"
+        isLong ? #089981 : #F23645
+    else if colorScheme == "Classic"
+        isLong ? #4CAF50 : #F44336
+    else if colorScheme == "Neon"
+        isLong ? #00ffff : #ff00ff
+    else
+        isLong ? VCP_BULL_ENTRY : VCP_BEAR_ENTRY
+
+color longEntryColor = getEntryColor(true)
+color shortEntryColor = getEntryColor(false)
+
+// Glow effect for entries
+if showGlowEffect and (longEntry or shortEntry)
+    float glowAlpha = 50 + math.sin(animationPhase * math.pi / 180) * 30
+    longEntryColor := color.new(longEntryColor, math.round(100 - glowAlpha))
+    shortEntryColor := color.new(shortEntryColor, math.round(100 - glowAlpha))
+
+plotshape(showEntrySignals and longEntry, "Long Entry", shape.circle, location.belowbar, 
+         longEntryColor, size=size.small)
+plotshape(showEntrySignals and shortEntry, "Short Entry", shape.circle, location.abovebar, 
+         shortEntryColor, size=size.small)
+
+// Quantum collapse signals
+plotshape(useQuantumFilter and seriesQuantumCollapsed and not seriesQuantumCollapsed[1], "Quantum Collapse", shape.xcross, location.belowbar, 
+         VCP_QUANTUM, size=size.small)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTTING - SL/TP LEVELS
+// ─────────────────────────────────────────────────────────────────────────────
+plot(showSLTP and strategy.position_size > 0 ? trade.stopLoss : na, "Long SL", VCP_SL_COLOR, 1, plot.style_linebr)
+plot(showSLTP and strategy.position_size > 0 ? trade.takeProfit : na, "Long TP", VCP_TP_COLOR, 1, plot.style_linebr)
+plot(showSLTP and strategy.position_size > 0 and useTrailStop ? trade.trailStop : na, "Long Trail", color.new(VCP_SL_COLOR, 50), 1, plot.style_linebr)
+
+plot(showSLTP and strategy.position_size < 0 ? trade.stopLoss : na, "Short SL", VCP_SL_COLOR, 1, plot.style_linebr)
+plot(showSLTP and strategy.position_size < 0 ? trade.takeProfit : na, "Short TP", VCP_TP_COLOR, 1, plot.style_linebr)
+plot(showSLTP and strategy.position_size < 0 and useTrailStop ? trade.trailStop : na, "Short Trail", color.new(VCP_SL_COLOR, 50), 1, plot.style_linebr)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTTING - STRUCTURE VISUALIZATION
+// ─────────────────────────────────────────────────────────────────────────────
+color structureColor = structureDirection > 0 ? VCP_STRUCTURE_BULL : structureDirection < 0 ? VCP_STRUCTURE_BEAR : VCP_NEUTRAL
+barcolor(color.new(structureColor, 70))
+
+// BOS/CHoCH markers
+plotshape(bosUp or chochUp, "Bull Structure", shape.diamond, location.belowbar, 
+         VCP_STRUCTURE_BULL, size=size.tiny)
+plotshape(bosDown or chochDown, "Bear Structure", shape.diamond, location.abovebar, 
+         VCP_STRUCTURE_BEAR, size=size.tiny)
+
+// Liquidity sweep visualization
+plotshape(useLiquidityFilter and liquidity.liquidityTaken and liquidity.sweepStrength > 2.5, "Liquidity Sweep Bull", shape.triangleup, location.belowbar, 
+         VCP_LIQUIDITY_BULL, size=size.tiny)
+plotshape(useLiquidityFilter and liquidity.liquidityTaken and liquidity.sweepStrength < -2.5, "Liquidity Sweep Bear", shape.triangledown, location.abovebar, 
+         VCP_LIQUIDITY_BEAR, size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLOTTING - BACKGROUND
+// ─────────────────────────────────────────────────────────────────────────────
+color bgColor = na
+if strategy.position_size > 0
+    bgColor := color.new(VCP_BULL_ENTRY, 95)
+else if strategy.position_size < 0
+    bgColor := color.new(VCP_BEAR_ENTRY, 95)
+
+bgcolor(bgColor)
+
+color sessionBg = inActiveSession ? color.new(VCP_NEUTRAL, 97) : na
+bgcolor(useSessionFilter ? sessionBg : na)
+
+// Quantum coherence background
+color quantumBg = useQuantumFilter and quantum.isCollapsed ? color.new(VCP_QUANTUM, 98) : na
+bgcolor(quantumBg)
+
+// Smart money background
+color smBg = useSmartMoney and (smartMoney.isAccumulating or smartMoney.isDistributing) ? color.new(VCP_SMART_MONEY, 99) : na
+bgcolor(smBg)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD
+// ─────────────────────────────────────────────────────────────────────────────
+if showDashboard
+    var table dashboard = table.new(position.top_right, 3, 16, 
+                                   bgcolor=color.new(VCP_BACKGROUND, 5), 
+                                   border_color=color.new(VCP_NEUTRAL, 50),
+                                   border_width=1)
+    
+    if barstate.islast
+        // Header with gradient
+        color headerBg = colorScheme == "Quantum" ? color.new(VCP_GLOW, 90) : color.new(#1a1a2e, 10)
+        table.cell(dashboard, 0, 0, "VCP", text_color=VCP_GLOW, text_size=size.small, bgcolor=headerBg)
+        table.cell(dashboard, 1, 0, "State", text_color=VCP_NEUTRAL, text_size=size.tiny, bgcolor=headerBg)
+        table.cell(dashboard, 2, 0, "Score", text_color=VCP_NEUTRAL, text_size=size.tiny, bgcolor=headerBg)
+        
+        string positionText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+        color positionCol = strategy.position_size > 0 ? VCP_BULL_ENTRY : strategy.position_size < 0 ? VCP_BEAR_ENTRY : VCP_NEUTRAL
+        
+        string structText = structureDirection > 0 ? "BULLISH" : structureDirection < 0 ? "BEARISH" : "NEUTRAL"
+        color structCol = structureDirection > 0 ? VCP_STRUCTURE_BULL : structureDirection < 0 ? VCP_STRUCTURE_BEAR : VCP_NEUTRAL
+        
+        string regimeText = regime.isTrending ? (regime.trend > 0 ? "TREND UP" : "TREND DOWN") : "RANGING"
+        color regimeCol = regime.isTrending ? (regime.trend > 0 ? VCP_STRUCTURE_BULL : VCP_STRUCTURE_BEAR) : VCP_NEUTRAL
+        
+        string momText = momentumSignal > 0 ? "BULLISH" : momentumSignal < 0 ? "BEARISH" : "NEUTRAL"
+        color momCol = momentumSignal > 0 ? VCP_BULL_ENTRY : momentumSignal < 0 ? VCP_BEAR_ENTRY : VCP_NEUTRAL
+        
+        string volText = volumeSignal > 0 ? "BUY PRESSURE" : volumeSignal < 0 ? "SELL PRESSURE" : "NEUTRAL"
+        color volCol = volumeSignal > 0 ? VCP_BULL_ENTRY : volumeSignal < 0 ? VCP_BEAR_ENTRY : VCP_NEUTRAL
+        
+        string mtfText = mtfSignal > 0 ? "BULLISH" : mtfSignal < 0 ? "BEARISH" : "NEUTRAL"
+        color mtfCol = mtfSignal > 0 ? VCP_BULL_ENTRY : mtfSignal < 0 ? VCP_BEAR_ENTRY : VCP_NEUTRAL
+        
+        string sessText = inActiveSession ? "ACTIVE" : "INACTIVE"
+        color sessCol = inActiveSession ? VCP_BULL_ENTRY : VCP_NEUTRAL
+        
+        int maxConfluence = 9  // Updated for new confluence factors
+        string confText = str.tostring(confluence.total) + "/" + str.tostring(maxConfluence)
+        color confCol = confluence.total >= minConfluence ? VCP_BULL_ENTRY : VCP_NEUTRAL
+        
+        // Basic metrics
+        table.cell(dashboard, 0, 1, "Position", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 1, positionText, text_color=positionCol, text_size=size.tiny)
+        table.cell(dashboard, 2, 1, "", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 2, "Structure", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 2, structText, text_color=structCol, text_size=size.tiny)
+        table.cell(dashboard, 2, 2, str.tostring(confluence.structure, "#"), text_color=structCol, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 3, "Regime", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 3, regimeText, text_color=regimeCol, text_size=size.tiny)
+        table.cell(dashboard, 2, 3, str.tostring(regime.strength, "#.#"), text_color=regimeCol, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 4, "Momentum", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 4, momText, text_color=momCol, text_size=size.tiny)
+        table.cell(dashboard, 2, 4, str.tostring(confluence.momentum, "#"), text_color=momCol, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 5, "Volume", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 5, volText, text_color=volCol, text_size=size.tiny)
+        table.cell(dashboard, 2, 5, str.tostring(confluence.volume, "#"), text_color=volCol, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 6, "MTF (" + htfTimeframe + ")", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 6, mtfText, text_color=mtfCol, text_size=size.tiny)
+        table.cell(dashboard, 2, 6, str.tostring(confluence.mtf, "#"), text_color=mtfCol, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 7, "Session", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 7, sessText, text_color=sessCol, text_size=size.tiny)
+        table.cell(dashboard, 2, 7, str.tostring(confluence.session, "#"), text_color=sessCol, text_size=size.tiny)
+        
+        // Advanced metrics
+        if useLiquidityFilter
+            string liqText = liquidity.liquidityTaken ? "SWEEP" : "NORMAL"
+            color liqCol = liquidity.liquidityTaken ? VCP_LIQUIDITY_BULL : VCP_NEUTRAL
+            table.cell(dashboard, 0, 8, "Liquidity", text_color=VCP_NEUTRAL, text_size=size.tiny)
+            table.cell(dashboard, 1, 8, liqText, text_color=liqCol, text_size=size.tiny)
+            table.cell(dashboard, 2, 8, str.tostring(confluence.liquidity, "#"), text_color=liqCol, text_size=size.tiny)
+        
+        if useQuantumFilter
+            string quantumText = quantum.isCollapsed ? "COLLAPSED" : "SUPERPOS"
+            color quantumCol = quantum.isCollapsed ? VCP_QUANTUM : VCP_ENTANGLEMENT
+            table.cell(dashboard, 0, 9, "Quantum", text_color=VCP_NEUTRAL, text_size=size.tiny)
+            table.cell(dashboard, 1, 9, quantumText, text_color=quantumCol, text_size=size.tiny)
+            table.cell(dashboard, 2, 9, str.tostring(confluence.quantum, "#"), text_color=quantumCol, text_size=size.tiny)
+        
+        if useSmartMoney
+            string smText = smartMoney.isAccumulating ? "ACCUM" : smartMoney.isDistributing ? "DIST" : "NEUTRAL"
+            color smCol = smartMoney.isAccumulating ? VCP_SMART_MONEY : smartMoney.isDistributing ? VCP_WARNING : VCP_NEUTRAL
+            table.cell(dashboard, 0, 10, "Smart Money", text_color=VCP_NEUTRAL, text_size=size.tiny)
+            table.cell(dashboard, 1, 10, smText, text_color=smCol, text_size=size.tiny)
+            table.cell(dashboard, 2, 10, str.tostring(confluence.smartMoney, "#"), text_color=smCol, text_size=size.tiny)
+        
+        if useHarmonicPattern
+            string harmonicText = confluence.harmonic > 0 ? "ACTIVE" : "INACTIVE"
+            color harmonicCol = confluence.harmonic > 0 ? VCP_HARMONIC : VCP_NEUTRAL
+            table.cell(dashboard, 0, 11, "Harmonic", text_color=VCP_NEUTRAL, text_size=size.tiny)
+            table.cell(dashboard, 1, 11, harmonicText, text_color=harmonicCol, text_size=size.tiny)
+            table.cell(dashboard, 2, 11, str.tostring(confluence.harmonic, "#"), text_color=harmonicCol, text_size=size.tiny)
+        
+        // Total confluence
+        table.cell(dashboard, 0, 12, "Confluence", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 12, confText, text_color=confCol, text_size=size.tiny)
+        table.cell(dashboard, 2, 12, str.tostring(confluence.total, "#"), text_color=confCol, text_size=size.tiny)
+        
+        // Indicators
+        table.cell(dashboard, 0, 13, "RSI", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 13, str.tostring(rsiSmooth, "#.#"), text_color=#a8b5c4, text_size=size.tiny)
+        table.cell(dashboard, 2, 13, str.tostring(rsiValue, "#.#"), text_color=#a8b5c4, text_size=size.tiny)
+        
+        table.cell(dashboard, 0, 14, "ADX", text_color=VCP_NEUTRAL, text_size=size.tiny)
+        table.cell(dashboard, 1, 14, str.tostring(adxValue, "#.#"), text_color=#a8b5c4, text_size=size.tiny)
+        table.cell(dashboard, 2, 14, str.tostring(regime.volatility, "#.##"), text_color=#a8b5c4, text_size=size.tiny)
+        
+        // P&L
+        if strategy.position_size != 0
+            float pnlPct = strategy.position_size > 0 ? (close - trade.entryPrice) / trade.entryPrice * 100 : (trade.entryPrice - close) / trade.entryPrice * 100
+            color pnlCol = pnlPct > 0 ? VCP_BULL_ENTRY : VCP_BEAR_ENTRY
+            table.cell(dashboard, 0, 15, "P&L", text_color=VCP_NEUTRAL, text_size=size.tiny)
+            table.cell(dashboard, 1, 15, str.tostring(pnlPct, "#.##") + "%", text_color=pnlCol, text_size=size.tiny)
+            table.cell(dashboard, 2, 15, str.tostring(strategy.position_size, "#.##"), text_color=pnlCol, text_size=size.tiny)
+        else
+            table.cell(dashboard, 0, 15, "P&L", text_color=VCP_NEUTRAL, text_size=size.tiny)
+            table.cell(dashboard, 1, 15, "-", text_color=#a8b5c4, text_size=size.tiny)
+            table.cell(dashboard, 2, 15, colorScheme, text_color=VCP_GLOW, text_size=size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────────
+// Basic entry alerts
+alertcondition(longEntry, "Long Entry Signal", "VCP Strategy: Long entry signal triggered")
+alertcondition(shortEntry, "Short Entry Signal", "VCP Strategy: Short entry signal triggered")
+
+// Structure alerts
+alertcondition(bosUp or chochUp, "Bullish Structure Break", "VCP Strategy: Bullish structure break detected")
+alertcondition(bosDown or chochDown, "Bearish Structure Break", "VCP Strategy: Bearish structure break detected")
+alertcondition(structureDirection > 0 and structureDirection[1] <= 0, "Structure Changed to Bull", "VCP Strategy: Market structure changed to bullish")
+alertcondition(structureDirection < 0 and structureDirection[1] >= 0, "Structure Changed to Bear", "VCP Strategy: Market structure changed to bearish")
+
+// Confluence alerts
+alertcondition(confluence.total >= minConfluence and structureDirection > 0, "Bull Confluence Ready", "VCP Strategy: Bullish confluence threshold reached")
+alertcondition(confluence.total >= minConfluence and structureDirection < 0, "Bear Confluence Ready", "VCP Strategy: Bearish confluence threshold reached")
+alertcondition(confluence.total >= 7, "High Confluence", "VCP Strategy: High confluence detected")
+
+// Liquidity alerts
+alertcondition(seriesLiquidityTaken and not seriesLiquidityTaken[1], "Liquidity Sweep", "VCP Strategy: Liquidity sweep detected")
+alertcondition(liquidity.absorptionRatio > 0.8, "High Absorption", "VCP Strategy: High volume absorption")
+alertcondition(liquidity.liquidityLevel >= 3, "High Liquidity Level", "VCP Strategy: High liquidity level detected")
+
+// Quantum alerts
+alertcondition(seriesQuantumCollapsed and not seriesQuantumCollapsed[1], "Quantum Collapse", "VCP Strategy: Quantum state collapsed")
+alertcondition(seriesQuantumCoherence > 0.9 and seriesQuantumCoherence[1] <= 0.9, "High Quantum Coherence", "VCP Strategy: High quantum coherence")
+alertcondition(seriesQuantumEntanglement > 1.0 and seriesQuantumEntanglement[1] <= 1.0, "Quantum Entanglement", "VCP Strategy: Strong quantum entanglement")
+
+// Smart money alerts
+alertcondition(seriesSmartMoneyAccumulating and not seriesSmartMoneyAccumulating[1], "Smart Money Accumulation", "VCP Strategy: Smart money accumulation detected")
+alertcondition(seriesSmartMoneyDistributing and not seriesSmartMoneyDistributing[1], "Smart Money Distribution", "VCP Strategy: Smart money distribution detected")
+alertcondition(smartMoney.smartMoneyScore > 80, "High Smart Money Score", "VCP Strategy: High smart money activity")
+alertcondition(math.abs(smartMoney.institutionalDelta) > volMA * 5, "Institutional Activity", "VCP Strategy: Strong institutional delta detected")
+
+// Harmonic alerts
+alertcondition(seriesConfluenceHarmonic > 0 and seriesConfluenceHarmonic[1] == 0, "Harmonic Pattern Active", "VCP Strategy: Harmonic pattern activated")
+alertcondition(seriesConfluenceHarmonic == 0 and seriesConfluenceHarmonic[1] > 0, "Harmonic Pattern Inactive", "VCP Strategy: Harmonic pattern deactivated")
+
+// Volume anomaly alerts
+alertcondition(volAnomaly and not volAnomaly[1], "Volume Anomaly", "VCP Strategy: Volume anomaly detected")
+alertcondition(volRatio > 3.0, "Extreme Volume", "VCP Strategy: Extreme volume detected")
+
+// Momentum alerts
+alertcondition(momBullish and not momBullish[1], "Momentum Bullish", "VCP Strategy: Momentum turned bullish")
+alertcondition(momBearish and not momBearish[1], "Momentum Bearish", "VCP Strategy: Momentum turned bearish")
+alertcondition(rsiDivBull, "RSI Bullish Divergence", "VCP Strategy: RSI bullish divergence detected")
+alertcondition(rsiDivBear, "RSI Bearish Divergence", "VCP Strategy: RSI bearish divergence detected")
+
+// Regime alerts
+alertcondition(seriesRegimeTrending and not seriesRegimeTrending[1], "Regime Changed to Trending", "VCP Strategy: Market regime changed to trending")
+alertcondition(not seriesRegimeTrending and seriesRegimeTrending[1], "Regime Changed to Ranging", "VCP Strategy: Market regime changed to ranging")
+alertcondition(seriesRegimeTrend > 0 and seriesRegimeTrend[1] <= 0, "Trend Changed to Up", "VCP Strategy: Trend changed to up")
+alertcondition(seriesRegimeTrend < 0 and seriesRegimeTrend[1] >= 0, "Trend Changed to Down", "VCP Strategy: Trend changed to down")
+
+// MTF alerts
+alertcondition(mtfBullish and not mtfBullish[1], "MTF Bullish Alignment", "VCP Strategy: MTF turned bullish")
+alertcondition(mtfBearish and not mtfBearish[1], "MTF Bearish Alignment", "VCP Strategy: MTF turned bearish")
+
+// Exit alerts
+alertcondition(strategy.position_size > 0 and close < trade.stopLoss, "Long Stop Loss Hit", "VCP Strategy: Long stop loss hit")
+alertcondition(strategy.position_size < 0 and close > trade.stopLoss, "Short Stop Loss Hit", "VCP Strategy: Short stop loss hit")
+alertcondition(strategy.position_size > 0 and close > trade.takeProfit, "Long Take Profit Hit", "VCP Strategy: Long take profit hit")
+alertcondition(strategy.position_size < 0 and close < trade.takeProfit, "Short Take Profit Hit", "VCP Strategy: Short take profit hit")
+
+View in Pine Editor・945 lines
+Use on chart
+8
+9
+947
+Vortex Confluence Protocol - Strategy
+
+Introduction
+
+The Vortex Confluence Protocol is an open-source strategy that combines market structure analysis, momentum filtering, volume confirmation, multi-timeframe alignment, session awareness, liquidity analysis, and smart money concepts into a multi-layer confluence scoring system. A trade is only taken when enough independent factors agree on direction, producing a confluence score that meets a configurable minimum threshold. The strategy includes ATR-based stop losses, risk-reward take profits, and an optional trailing stop, all designed around realistic risk management principles.
+
+Built with Pine Script v6, the strategy uses custom types for trade state, confluence scoring, quantum state, liquidity state, smart money state, and market regime detection.
+
+
+
+
+Why This Strategy Exists
+
+Most strategies rely on one or two conditions for entry — a moving average crossover, an RSI level, or a pattern match. These single-factor approaches are fragile because they lack confirmation from other market dimensions. The Vortex Confluence Protocol takes the opposite approach: it requires agreement across multiple independent analytical layers before committing capital. This multi-factor design aims to:
+
+
+Reduce false signals: By requiring confluence from structure, momentum, volume, and MTF analysis simultaneously, the strategy filters out low-conviction setups
+
+Adapt to market conditions: The regime filter (ADX-based) prevents trend-following entries during ranging markets and vice versa
+
+Enforce discipline: The confluence scoring system makes the entry criteria explicit and quantifiable, removing subjective judgment from the entry decision
+
+Manage risk systematically: ATR-based stops, configurable risk-reward ratios, and trailing stops provide a structured risk management framework
+
+
+
+Strategy Default Properties
+
+The strategy is published with the following default properties, which are critical to understanding the backtesting results:
+
+
+Initial Capital: $100,000
+
+Position Size: 2% of equity per trade
+
+Commission: 0.1% per trade (round-trip 0.2%)
+
+Slippage: 2 ticks per order
+
+Pyramiding: 0 (no adding to positions)
+
+Risk Per Trade: 1.0% of account
+
+Risk:Reward Ratio: 2.0 (target is 2x the stop distance)
+
+
+
+These defaults are intentionally conservative. The commission and slippage settings are included to produce realistic results that account for real-world execution costs. The 2% position size and 1% risk per trade ensure that no single trade can significantly damage the account.
+
+Core Components Explained
+
+1. Market Structure Analysis
+
+The strategy uses pivot-based swing detection to identify the market's structural direction. It tracks swing highs and swing lows, then classifies structural events:
+
+
+Break of Structure (BOS): Price breaks above the last swing high (bullish BOS) or below the last swing low (bearish BOS), confirming the existing trend
+
+Change of Character (CHoCH): Price breaks a previous swing point against the current trend direction, signaling a potential reversal
+
+
+
+The structure direction variable tracks the prevailing bias. When `requireBOS` is enabled (default), the strategy requires a fresh BOS or CHoCH event for entry, ensuring trades are taken at structurally significant moments rather than during drift.
+
+2. FVG Confluence
+
+Fair Value Gaps are detected using the standard three-bar pattern, filtered by a minimum size of 0.3x ATR. The strategy maintains arrays of active FVGs and checks whether current price is inside any bullish or bearish FVG zone. When `requireFVG` is enabled (default), the strategy requires price to be within an FVG zone aligned with the trade direction, adding an imbalance-based confirmation layer.
+
+
+Pine Script®
+bool bullFVG = low > high[2] and close[1] > open[1]
+bool bearFVG = high < low[2] and close[1] < open[1]
+
+
+
+FVG zones older than 30 bars are automatically cleaned up to prevent stale zones from influencing current decisions.
+
+3. Momentum Analysis
+
+The momentum layer uses RSI with configurable length (default 14) and overbought/oversold levels (default 70/30). The RSI is smoothed with a 3-period EMA, and its rate of change is calculated to determine momentum direction:
+
+
+Bullish momentum: Smoothed RSI above 50, RSI rising, and not overbought
+
+Bearish momentum: Smoothed RSI below 50, RSI falling, and not oversold
+
+
+
+The strategy also detects RSI divergences as additional context, though divergences alone do not trigger entries.
+
+4. Volume Analysis
+
+Volume confirmation requires the current volume to exceed a configurable multiple (default 1.2x) of the volume moving average. Additionally, the strategy estimates buying and selling volume using candle structure and calculates cumulative delta over 10 bars:
+
+
+Bullish volume: High relative volume + positive delta + positive cumulative delta
+
+Bearish volume: High relative volume + negative delta + negative cumulative delta
+
+
+
+Volume anomalies (Z-score > 2.0) receive a bonus point in the confluence scoring system.
+
+5. Multi-Timeframe Filter
+
+The MTF filter fetches close, EMA, and RSI from a configurable higher timeframe (default 60m) using `request.security()` with `barmerge.lookahead_off` to prevent repainting. The higher timeframe trend must agree with the trade direction:
+
+
+Pine Script®
+int htfTrend = htfClose > htfEMA ? 1 : htfClose < htfEMA ? -1 : 0
+bool mtfBullish = htfTrend > 0 and htfRSI > 50
+
+
+
+This ensures trades are taken in the direction of the larger trend, filtering out counter-trend entries that have lower win rates.
+
+6. Session and Regime Filters
+
+The session filter restricts trading to a configurable active session (default 0800-1600 EST). Trading outside of liquid market hours often produces worse fills and more erratic price action.
+
+The regime filter uses ADX to classify the market as trending (ADX > 25) or ranging. In a trending regime, the strategy only takes trades in the trend direction. In a ranging regime, both directions are allowed. This prevents the strategy from fighting strong trends.
+
+Chart showing the Vortex Confluence Protocol with entry signals, stop loss and take profit levels drawn on the chart, FVG zones highlighted, and the dashboard displaying the confluence score breakdown
+
+7. Confluence Scoring System
+
+The heart of the strategy is the confluence scoring system. Each analytical layer contributes points to a total score:
+
+
+Structure: 1 point for structural direction alignment, +1 bonus if price is in an aligned FVG
+
+Momentum: 1 point for momentum alignment
+
+Volume: 1 point for volume confirmation, +1 bonus for anomaly
+
+MTF: 1 point for higher timeframe alignment
+
+Session: 1 point if within active session
+
+Liquidity: 1 point for medium+ liquidity level, +1 bonus for sweep
+
+Quantum: 1 point for quantum collapse, +1 bonus for high coherence
+
+Smart Money: 1 point for positive SM score, +1 bonus for clear accumulation/distribution
+
+Harmonic: 1 point for harmonic alignment
+
+
+
+The total score must meet the minimum confluence threshold (default 3) for an entry to be considered. Additionally, all directional filters must agree — structure, momentum, MTF, volume, session, quantum, and smart money must all either support the direction or be disabled.
+
+8. Risk Management
+
+Stop Loss: Calculated as the tighter of two values: the ATR-based stop (close minus ATR * SL multiplier) or the recent swing low minus a small ATR buffer (for longs). This ensures the stop is placed at a structurally meaningful level.
+
+
+Pine Script®
+if isLong
+    sl := math.min(close - atrVal * slATRMult, _recentLow - atrVal * 0.2)
+
+
+
+Take Profit: Calculated as the entry price plus the stop distance multiplied by the risk-reward ratio (default 2.0). A 2:1 RR means the strategy needs to win only 34% of trades to break even (before commissions).
+
+Trailing Stop: When enabled, the trailing stop follows price at a distance of ATR * trail multiplier (default 2.0). It only moves in the favorable direction, locking in profits as the trade progresses. The trailing stop updates the exit order dynamically.
+
+
+
+
+Entry Conditions Summary
+
+A long entry requires ALL of the following:
+
+Long trades enabled
+
+Confluence score >= minimum threshold
+
+Structure direction is bullish
+
+Momentum is not bearish (or momentum filter disabled)
+
+MTF is not bearish (or MTF filter disabled)
+
+Volume is not bearish (or volume filter disabled)
+
+Within active session (or session filter disabled)
+
+Regime allows longs
+
+Quantum superposition is positive (or quantum filter disabled)
+
+Smart money score is non-negative (or SM filter disabled)
+
+Price is in a bullish FVG (if requireFVG enabled)
+
+A BOS or CHoCH has occurred (if requireBOS enabled)
+
+No existing position
+
+
+
+Short entries require the inverse conditions.
+
+Backtesting Considerations
+
+Important notes about the published results:
+
+
+Results include 0.1% commission per trade and 2 ticks slippage to simulate realistic execution
+
+The strategy uses 2% of equity per trade, not 100% — this significantly reduces both returns and drawdowns compared to full-equity strategies
+
+Pyramiding is disabled (0), meaning only one position can be open at a time
+
+The strategy does not use leverage beyond what the position size implies
+
+Results will vary significantly across different instruments, timeframes, and market conditions
+
+Past performance does not indicate future results
+
+
+
+Parameter sensitivity: The minimum confluence score is the most impactful parameter. Lower values (2-3) produce more trades but with lower average quality. Higher values (4-5) produce fewer, higher-quality trades but may miss valid setups. The default of 3 represents a balance between trade frequency and quality.
+
+Optimization warning: Over-optimizing parameters to fit historical data will produce misleading results. The default parameters are designed to be reasonable across a range of instruments rather than perfectly fitted to any single one. If you adjust parameters, test across multiple instruments and time periods to verify robustness.
+
+Sample size: For meaningful statistical analysis, ensure the backtest produces at least 100 trades. On higher timeframes or with high confluence requirements, you may need to extend the backtest period to achieve sufficient sample size.
+
+Strategy performance panel showing trade list, equity curve, and key metrics with the confluence dashboard visible on the chart
+
+Input Parameters
+
+Strategy Settings:
+
+Enable Long/Short Trades independently
+
+Minimum Confluence Score (default 3)
+
+Use Regime Filter, Session Filter
+
+
+
+Advanced Features:
+
+Quantum Confluence, Liquidity Analysis, Smart Money Concepts, Harmonic Patterns toggles
+
+Quantum Coherence Threshold (default 0.7)
+
+
+
+Risk Management:
+
+Risk Per Trade (default 1.0%)
+
+Risk:Reward Ratio (default 2.0)
+
+Trailing Stop toggle and ATR Multiplier (default 2.0)
+
+Stop Loss ATR Multiplier (default 1.5)
+
+
+
+Market Structure:
+
+Pivot Strength (default 5)
+
+Require BOS/CHoCH and Require FVG Confluence toggles
+
+
+
+Momentum:
+
+RSI Length (default 14), Overbought (70), Oversold (30)
+
+Require Momentum Alignment toggle
+
+
+
+Multi-Timeframe:
+
+Higher Timeframe (default 60m)
+
+MTF Trend Length (default 20)
+
+
+
+Volume:
+
+Volume MA Length (default 20) and Volume Threshold (default 1.2)
+
+
+
+Session:
+
+Active Trading Session (default 0800-1600)
+
+Timezone selection
+
+
+
+Visual:
+
+Show Entry Signals, SL/TP Levels, Dashboard, FVG Zones
+
+
+
+How to Use This Strategy
+
+Step 1: Apply the strategy to your instrument and timeframe. Review the default settings and adjust the session times and timezone to match your market.
+
+Step 2: Run the backtest and review the results. Check the total number of trades — if fewer than 100, consider lowering the minimum confluence score or extending the backtest period.
+
+Step 3: Review the equity curve for consistency. A healthy equity curve shows steady growth without extreme drawdowns. Large drawdowns followed by recovery may indicate the strategy is taking excessive risk.
+
+Step 4: Use the dashboard to understand why trades are being taken. The confluence score breakdown shows which factors are contributing to each entry.
+
+Step 5: If adapting parameters, change one at a time and test across multiple instruments. Avoid optimizing all parameters simultaneously, as this leads to curve-fitting.
+
+Step 6: Consider using the strategy's signals as a filter for manual trading rather than as a fully automated system. The confluence score provides a quantified measure of setup quality that can inform discretionary decisions.
+
+Strategy Limitations
+
+
+The strategy uses market orders for entry, which means execution price may differ from the signal price, especially on volatile instruments or during news events
+
+Delta and volume analysis use candle-structure estimation, not actual order flow data. This is an approximation.
+
+The multi-factor requirement means the strategy will miss valid moves that only satisfy some conditions. This is by design — it prioritizes quality over quantity.
+
+Backtesting results assume orders are filled at the close of the signal bar. Real-world execution may differ.
+
+The strategy does not account for overnight gaps, dividend adjustments, or corporate events that can cause sudden price changes
+
+Higher confluence requirements reduce trade frequency, which may not suit traders who need frequent activity
+
+The regime filter uses ADX, which has an inherent lag in detecting regime changes
+
+Commission and slippage settings should be adjusted to match your actual broker costs for accurate backtesting
+
+
+
+Originality Statement
+
+This strategy is original in its multi-layer confluence scoring approach. While individual components (structure detection, RSI, volume analysis, MTF filtering) are established concepts, this strategy is justified because:
+
+
+It synthesizes nine independent analytical layers into a quantified confluence scoring system, providing a structured framework for multi-factor trade evaluation
+
+The regime-aware filtering automatically adjusts entry criteria based on ADX-detected market conditions
+
+Liquidity analysis with sweep detection and absorption ratio adds an institutional activity layer not found in standard multi-factor strategies
+
+The quantum coherence scoring provides a novel metric for measuring the consistency of agreement across all analytical layers
+
+Smart money phase detection (accumulation/distribution) adds a Wyckoff-inspired context layer to the entry decision
+
+The risk management system combines structural stop placement (recent swing + ATR buffer) with dynamic trailing, providing both initial protection and profit locking
+
+All entry conditions are explicit and quantifiable, making the strategy fully transparent and reproducible
+
+
+
+Disclaimer
+
+This strategy is provided for educational and informational purposes only. It is not financial advice or a recommendation to buy or sell any financial instrument. Trading involves substantial risk of loss and is not suitable for all investors. Backtesting results are hypothetical and do not guarantee future performance. Past performance is not indicative of future results. The strategy's results depend heavily on the instrument, timeframe, and market conditions. Commission, slippage, and execution quality in live trading may differ significantly from backtesting assumptions. Always use proper risk management, including position sizing appropriate for your account size and risk tolerance. Never risk more than you can afford to lose. The author is not responsible for any losses incurred from using this strategy.
+
+-Made with passion by officialjackofalltrades
+

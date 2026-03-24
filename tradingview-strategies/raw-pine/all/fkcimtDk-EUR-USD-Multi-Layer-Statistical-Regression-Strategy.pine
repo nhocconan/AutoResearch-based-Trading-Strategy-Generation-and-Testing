@@ -1,0 +1,693 @@
+//@version=5
+strategy("EUR/USD Multi-Layer Statistical Regression Strategy v2",
+         overlay=true,
+         initial_capital=100000,
+         currency=currency.USD,
+         default_qty_type=strategy.cash,
+         default_qty_value=50000,
+         commission_type=strategy.commission.percent,
+         commission_value=0.0002,
+         slippage=1,
+         pyramiding=1)
+
+// === MULTI-LAYER REGRESSION INPUTS ===
+lr_short_length = input.int(20, "Short-Term LR Length", minval=10, maxval=50, step=2)
+lr_medium_length = input.int(50, "Medium-Term LR Length", minval=30, maxval=100, step=5)
+lr_long_length = input.int(100, "Long-Term LR Length", minval=50, maxval=200, step=10)
+
+// Statistical Validation - IMPROVED THRESHOLDS
+min_r_squared = input.float(0.45, "Min R-Squared Threshold", minval=0.2, maxval=0.8, step=0.05)
+slope_threshold = input.float(0.00005, "Min Slope Significance", minval=0.000001, maxval=0.0005, step=0.000005)
+correlation_min = input.float(0.5, "Min Correlation", minval=0.3, maxval=0.8, step=0.05)
+
+// Adaptive Statistical Thresholds
+use_adaptive_thresholds = input.bool(true, "Use Adaptive Statistical Thresholds")
+lookback_for_adaptation = input.int(100, "Adaptation Lookback Period", minval=50, maxval=200)
+
+// Lookback/Look-Forward Analysis
+validation_lookback = input.int(30, "Validation Lookback", minval=10, maxval=60, step=5)
+prediction_horizon = input.int(10, "Prediction Horizon", minval=5, maxval=20, step=1)
+
+// Dynamic Ensemble Weights
+use_dynamic_weights = input.bool(true, "Use Dynamic Performance-Based Weights")
+weight_short  = input.float(0.4,  "Base Short-Term Weight",  minval=0.1, maxval=0.6, step=0.1)
+weight_medium = input.float(0.35, "Base Medium-Term Weight", minval=0.1, maxval=0.6, step=0.05)
+weight_long   = input.float(0.25, "Base Long-Term Weight",   minval=0.1, maxval=0.6, step=0.05)
+
+// Risk Management
+position_size_pct    = input.float(50.0, "Position Size %", minval=10.0, maxval=100.0, step=5.0)
+max_daily_loss       = input.float(12.0, "Max Daily Loss %", minval=5.0, maxval=25.0, step=2.5)
+confidence_threshold = input.float(0.65, "Signal Confidence Threshold", minval=0.5, maxval=0.85, step=0.05)
+
+// === ENHANCED STATISTICAL FUNCTIONS ===
+linear_regression_stats(src, length) =>
+    var float sum_x = 0
+    var float sum_y = 0
+    var float sum_xy = 0
+    var float sum_x2 = 0
+    var float sum_y2 = 0
+    var int   valid_points = 0
+    sum_x := 0
+    sum_y := 0
+    sum_xy := 0
+    sum_x2 := 0
+    sum_y2 := 0
+    valid_points := 0
+    for i = 0 to length - 1
+        x = i + 1
+        y = src[i]
+        if not na(y)
+            sum_x += x
+            sum_y += y
+            sum_xy += x * y
+            sum_x2 += x * x
+            sum_y2 += y * y
+            valid_points += 1
+    n = valid_points
+    if n < math.max(5, length * 0.7)
+        [na, 0.0, 0.0, 0.0, na]
+    else
+        denominator = n * sum_x2 - sum_x * sum_x
+        slope = denominator != 0 ? (n * sum_xy - sum_x * sum_y) / denominator : 0
+        intercept = (sum_y - slope * sum_x) / n
+        corr_denominator = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
+        correlation = corr_denominator != 0 ? (n * sum_xy - sum_x * sum_y) / corr_denominator : 0
+        r_squared = correlation * correlation
+        current_lr = intercept + slope * n
+        projected_lr = intercept + slope * (n + prediction_horizon)
+        [current_lr, slope, r_squared, correlation, projected_lr]
+
+calculate_adaptive_thresholds() =>
+    var array<float> historical_r2_short  = array.new<float>()
+    var array<float> historical_r2_medium = array.new<float>()
+    var array<float> historical_r2_long   = array.new<float>()
+    if use_adaptive_thresholds and bar_index >= lookback_for_adaptation
+        [_, _, r2s, _, _] = linear_regression_stats(close, lr_short_length)
+        [_, _, r2m, _, _] = linear_regression_stats(close, lr_medium_length)
+        [_, _, r2l, _, _] = linear_regression_stats(close, lr_long_length)
+        if not na(r2s)
+            array.push(historical_r2_short, r2s)
+            if array.size(historical_r2_short) > lookback_for_adaptation
+                array.shift(historical_r2_short)
+        if not na(r2m)
+            array.push(historical_r2_medium, r2m)
+            if array.size(historical_r2_medium) > lookback_for_adaptation
+                array.shift(historical_r2_medium)
+        if not na(r2l)
+            array.push(historical_r2_long, r2l)
+            if array.size(historical_r2_long) > lookback_for_adaptation
+                array.shift(historical_r2_long)
+        adaptive_r2_threshold = array.size(historical_r2_short) > 20 ? array.percentile_nearest_rank(historical_r2_short, 25) : min_r_squared
+        math.max(0.2, math.min(0.7, adaptive_r2_threshold))
+    else
+        min_r_squared
+
+adaptive_r2_threshold = calculate_adaptive_thresholds()
+
+enhanced_statistical_significance(r_squared, correlation, slope_abs, layer_name) =>
+    primary_significant = r_squared >= adaptive_r2_threshold and math.abs(correlation) >= correlation_min and math.abs(slope_abs) >= slope_threshold
+    fallback_significant = layer_name == "short" ? (r_squared >= 0.2 and math.abs(correlation) >= 0.3) : (r_squared >= 0.3 and math.abs(correlation) >= 0.4)
+    quality_score = (r_squared * 0.5 + math.abs(correlation) * 0.3 + math.min(1.0, math.abs(slope_abs) * 10000) * 0.2)
+    [primary_significant, fallback_significant, quality_score]
+
+// === MULTI-LAYER REGRESSION ANALYSIS ===
+[lr_short,  slope_short,  r2_short,  corr_short,  proj_short]  = linear_regression_stats(close, lr_short_length)
+[sig_short_primary,  sig_short_fallback,  quality_short]  = enhanced_statistical_significance(r2_short,  corr_short,  slope_short,  "short")
+
+[lr_medium, slope_medium, r2_medium, corr_medium, proj_medium] = linear_regression_stats(close, lr_medium_length)
+[sig_medium_primary, sig_medium_fallback, quality_medium] = enhanced_statistical_significance(r2_medium, corr_medium, slope_medium, "medium")
+
+[lr_long,   slope_long,   r2_long,   corr_long,   proj_long]   = linear_regression_stats(close, lr_long_length)
+[sig_long_primary,   sig_long_fallback,   quality_long]   = enhanced_statistical_significance(r2_long,   corr_long,   slope_long,   "long")
+
+// === DYNAMIC PERFORMANCE-BASED WEIGHTS ===
+calculate_dynamic_weights() =>
+    if use_dynamic_weights and bar_index >= 50
+        total_quality = quality_short + quality_medium + quality_long
+        if total_quality > 0
+            dynamic_weight_short  = (quality_short  / total_quality) * 0.6 + weight_short  * 0.4
+            dynamic_weight_medium = (quality_medium / total_quality) * 0.6 + weight_medium * 0.4
+            dynamic_weight_long   = (quality_long   / total_quality) * 0.6 + weight_long   * 0.4
+            total_dynamic = dynamic_weight_short + dynamic_weight_medium + dynamic_weight_long
+            [dynamic_weight_short/total_dynamic, dynamic_weight_medium/total_dynamic, dynamic_weight_long/total_dynamic]
+        else
+            [weight_short, weight_medium, weight_long]
+    else
+        [weight_short, weight_medium, weight_long]
+
+[current_weight_short, current_weight_medium, current_weight_long] = calculate_dynamic_weights()
+
+// === ENHANCED LOOKBACK VALIDATION ===
+validate_prediction_accuracy() =>
+    var array<float> accuracy_scores = array.new<float>()
+    var array<float> short_errors = array.new<float>()
+    var array<float> medium_errors = array.new<float>()
+    var array<float> long_errors = array.new<float>()
+    if bar_index >= validation_lookback + prediction_horizon
+        actual_change = (close - close[prediction_horizon]) / close[prediction_horizon]
+        pred_slope_short  = na(slope_short[prediction_horizon])  ? 0 : slope_short[prediction_horizon]
+        pred_slope_medium = na(slope_medium[prediction_horizon]) ? 0 : slope_medium[prediction_horizon]
+        pred_slope_long   = na(slope_long[prediction_horizon])   ? 0 : slope_long[prediction_horizon]
+        error_short  = math.abs(actual_change - pred_slope_short  * prediction_horizon)
+        error_medium = math.abs(actual_change - pred_slope_medium * prediction_horizon)
+        error_long   = math.abs(actual_change - pred_slope_long   * prediction_horizon)
+        array.push(short_errors,  error_short)
+        array.push(medium_errors, error_medium)
+        array.push(long_errors,   error_long)
+        if array.size(short_errors) > validation_lookback
+            array.shift(short_errors), array.shift(medium_errors), array.shift(long_errors)
+        ensemble_pred = (pred_slope_short * current_weight_short + pred_slope_medium * current_weight_medium + pred_slope_long * current_weight_long) * prediction_horizon
+        ensemble_error = math.abs(actual_change - ensemble_pred)
+        accuracy = math.max(0, 1 - ensemble_error * 100)
+        array.push(accuracy_scores, accuracy)
+        if array.size(accuracy_scores) > validation_lookback
+            array.shift(accuracy_scores)
+    avg_accuracy = array.size(accuracy_scores) > 5 ? array.avg(accuracy_scores) : 0.5
+    short_reliability = array.size(short_errors) > 5 ? 1 - array.avg(short_errors) : 0.5
+    [avg_accuracy, short_reliability]
+
+[validation_accuracy, short_layer_reliability] = validate_prediction_accuracy()
+
+// === ROBUST ENSEMBLE SIGNAL GENERATION ===
+generate_layer_signal(slope_val, r2_val, sig_primary, sig_fallback, quality_score) =>
+    if sig_primary
+        slope_val > 0 ? 1.0 : -1.0
+    else if sig_fallback
+        (slope_val > 0 ? 0.6 : -0.6) * quality_score
+    else if not na(slope_val) and quality_score > 0.3
+        (slope_val > 0 ? 0.3 : -0.3) * quality_score
+    else
+        0.0
+
+signal_short  = generate_layer_signal(slope_short,  r2_short,  sig_short_primary,  sig_short_fallback,  quality_short)
+signal_medium = generate_layer_signal(slope_medium, r2_medium, sig_medium_primary, sig_medium_fallback, quality_medium)
+signal_long   = generate_layer_signal(slope_long,   r2_long,   sig_long_primary,   sig_long_fallback,   quality_long)
+
+ensemble_score = (signal_short * current_weight_short + signal_medium * current_weight_medium + signal_long * current_weight_long)
+
+calculate_overall_confidence() =>
+    signals_array = array.from(signal_short, signal_medium, signal_long)
+    non_zero_signals = 0
+    signal_sum = 0.0
+    for i = 0 to 2
+        sig = array.get(signals_array, i)
+        if math.abs(sig) > 0.1
+            non_zero_signals += 1
+            signal_sum += sig
+    agreement_score = non_zero_signals > 0 ? math.abs(signal_sum) / non_zero_signals : 0
+    stat_confidence = (r2_short * current_weight_short + r2_medium * current_weight_medium + r2_long * current_weight_long)
+    validation_confidence = validation_accuracy
+    reliability_factor = math.min(1.0, short_layer_reliability + 0.3)
+    base_confidence = (agreement_score * 0.35 + stat_confidence * 0.35 + validation_confidence * 0.3)
+    base_confidence * reliability_factor
+
+overall_confidence = calculate_overall_confidence()
+
+// === POSITION MGMT BASICS (unchanged) ===
+trend_strength  = math.abs(ensemble_score)
+trend_direction = ensemble_score > 0.1 ? 1 : ensemble_score < -0.1 ? -1 : 0
+
+confidence_multiplier = overall_confidence > confidence_threshold ? 1.0 + (overall_confidence - confidence_threshold) * 0.5 : overall_confidence / confidence_threshold * 0.8
+base_position_value = strategy.equity * (position_size_pct / 100)
+adjusted_position_value = base_position_value * confidence_multiplier
+position_units = adjusted_position_value / close
+
+var float daily_start_equity = strategy.equity
+if ta.change(time("1D"))
+    daily_start_equity := strategy.equity
+current_daily_loss = daily_start_equity > 0 ? (daily_start_equity - strategy.equity) / daily_start_equity * 100 : 0
+halt_trading = current_daily_loss > max_daily_loss
+
+
+// === FLIP STABILILITY GATE (entry filter) ===
+flip_window = input.int(20, "Flip Window (bars)", minval=5, maxval=100)
+min_persist = input.int(3, "Min Bars After Flip", minval=1, maxval=10)
+
+// MEDIUM-LR FLIP BOOKKEEPING (SIGN FLIPS OF SLOPE_MEDIUM)
+bs_med_up = ta.barssince(ta.crossover(slope_medium, 0))
+bs_med_dn = ta.barssince(ta.crossunder(slope_medium, 0))
+last_med_flip_up = not na(bs_med_up) and (na(bs_med_dn) or bs_med_up < bs_med_dn)
+last_med_flip_down = not na(bs_med_dn) and (na(bs_med_up) or bs_med_dn < bs_med_up)
+med_up_recent = last_med_flip_up and bs_med_up <= flip_window
+med_down_recent = last_med_flip_down and bs_med_dn <= flip_window
+// persistence: require slope_medium to have stayed on its side
+med_pos_streak = ta.barssince(slope_medium <= 0)  // bars since last non-positive
+med_neg_streak = ta.barssince(slope_medium >= 0)  // bars since last non-negative
+
+// Ensemble flip bookkeeping (crosses of 0)
+bs_ens_up = ta.barssince(ta.crossover(ensemble_score, 0))
+bs_ens_dn = ta.barssince(ta.crossunder(ensemble_score, 0))
+last_ens_flip_up = not na(bs_ens_up) and (na(bs_ens_dn) or bs_ens_up < bs_ens_dn)
+last_ens_flip_down = not na(bs_ens_dn) and (na(bs_ens_up) or bs_ens_dn < bs_ens_up)
+ens_up_recent = last_ens_flip_up and bs_ens_up <= flip_window
+ens_down_recent = last_ens_flip_down and bs_ens_dn <= flip_window
+// persistence: require ensemble_score to have stayed on its side
+ens_pos_streak = ta.barssince(ensemble_score <= 0)
+ens_neg_streak = ta.barssince(ensemble_score >= 0)
+
+// Final gate conditions: recent flip in trade direction + short persistence
+flip_flop_gate_long = (med_up_recent and med_pos_streak >= min_persist) or (ens_up_recent and ens_pos_streak >= min_persist)
+flip_flop_gate_short = (med_down_recent and med_neg_streak >= min_persist) or (ens_down_recent and ens_neg_streak >= min_persist)
+
+// === ENHANCED ENTRY/EXIT LOGIC (original signals) ===
+long_condition  = ensemble_score > 0.3  and overall_confidence > confidence_threshold and (sig_short_primary or sig_short_fallback) and (sig_medium_primary or sig_medium_fallback) and flip_flop_gate_long
+short_condition = ensemble_score < -0.3 and overall_confidence > confidence_threshold and (sig_short_primary or sig_short_fallback) and (sig_medium_primary or sig_medium_fallback) and flip_flop_gate_short
+
+// ======================================================================
+// === ENTRY/EXIT OPTIMIZER ADD-ON ======================================
+// ======================================================================
+
+// --- Optimizer Inputs ---
+atr_len              = input.int(14, "ATR Length (Optimizer)", minval=5)
+pullback_atr_long    = input.float(0.35, "Pullback ATR (Long)", step=0.05)
+pullback_atr_short   = input.float(0.35, "Pullback ATR (Short)", step=0.05)
+momentum_break_buf   = input.float(0.10, "Breakout Buffer (x ATR)", step=0.05)
+strong_momo_thresh   = input.float(0.60, "Strong Momentum Threshold (|Ensemble|)", step=0.05)
+entry_timeout_bars   = input.int(6, "Pending Entry Timeout (bars)", minval=1)
+
+stop_atr_mult        = input.float(1.2, "Initial Stop: ATR x", step=0.1)
+target_R             = input.float(1.8, "Profit Target: R", step=0.1)
+trail_activate_R     = input.float(1.0, "Trail Activates at R", step=0.1)
+trail_atr_mult       = input.float(0.9, "Trailing Stop: ATR x", step=0.1)
+time_stop_bars       = input.int(60, "Time Stop (bars after entry)", minval=5)
+
+use_lr_exit_flip     = input.bool(true, "Exit on LR Flip (Medium)")
+use_ensemble_exit    = input.bool(true, "Exit when Ensemble crosses 0")
+
+// --- Helpers / State ---
+atr = ta.atr(atr_len)
+tick = syminfo.mintick
+
+// “Momentum vs Pullback” entry chooser
+isStrongMomentum = math.abs(ensemble_score) >= strong_momo_thresh and overall_confidence >= confidence_threshold
+
+// Pending order state
+var bool  pend_long  = false
+var bool  pend_short = false
+var int   pend_bar   = na
+var float pend_price = na
+var string pend_id   = ""
+
+// Raise/cancel pendings on opposite signal or Timeout
+if ((pend_long and short_condition) or (pend_short and long_condition)) or (not na(pend_bar) and (bar_index - pend_bar) > entry_timeout_bars)
+    pend_long := false
+    pend_short := false
+    pend_bar := na
+    pend_price := na
+    pend_id := ""
+
+// --- Create/refresh pending entries when a signal appears ---
+if not halt_trading and strategy.position_size == 0 and barstate.isconfirmed
+    if long_condition and not pend_long
+        if isStrongMomentum
+            // Momentum: buy stop above recent high by buffer*ATR
+            trigger = math.max(high, close) + momentum_break_buf * atr
+            pend_id := "LongMom"
+            strategy.order(pend_id, strategy.long, qty=position_units, stop=trigger, oca_name="EntryOCA", oca_type=strategy.oca.cancel)
+        else
+            // Pullback: limit near better price
+            limit_px = close - pullback_atr_long * atr
+            pend_id := "LongPull"
+            strategy.order(pend_id, strategy.long, qty=position_units, limit=limit_px, oca_name="EntryOCA", oca_type=strategy.oca.cancel)
+        pend_long := true, pend_short := false, pend_bar := bar_index, pend_price := na
+
+    if short_condition and not pend_short
+        if isStrongMomentum
+            trigger = math.min(low, close) - momentum_break_buf * atr
+            pend_id := "ShortMom"
+            strategy.order(pend_id, strategy.short, qty=position_units, stop=trigger, oca_name="EntryOCA", oca_type=strategy.oca.cancel)
+        else
+            limit_px = close + pullback_atr_short * atr
+            pend_id := "ShortPull"
+            strategy.order(pend_id, strategy.short, qty=position_units, limit=limit_px, oca_name="EntryOCA", oca_type=strategy.oca.cancel)
+        pend_short := true, pend_long := false, pend_bar := bar_index, pend_price := na
+
+// Clear pendings when we actually have a position
+if strategy.position_size != 0
+    pend_long := false, pend_short := false, pend_bar := na, pend_price := na, pend_id := ""
+
+// --- Exits: initial stop/target + dynamic trail + time stop ---
+var float entry_price  = na
+var int   entry_bar    = na
+enteredLong  = strategy.position_size > 0
+enteredShort = strategy.position_size < 0
+
+// Detect entry and record stats
+if ta.change(strategy.position_size)
+    if strategy.position_size == 0
+        entry_price := na, entry_bar := na
+    else
+        entry_price := strategy.position_avg_price
+        entry_bar   := bar_index
+
+// Compute dynamic stops/targets if in trade
+long_stop  = enteredLong  ? (entry_price - stop_atr_mult * atr) : na
+short_stop = enteredShort ? (entry_price + stop_atr_mult * atr) : na
+// 1R defined as initial risk per unit:
+R_price = enteredLong ? (entry_price - long_stop) : enteredShort ? (short_stop - entry_price) : na
+long_target  = enteredLong  and not na(R_price) ? entry_price + target_R * R_price : na
+short_target = enteredShort and not na(R_price) ? entry_price - target_R * R_price : na
+
+// Trail after price moves >= trail_activate_R * R
+trail_on_long  = enteredLong  and not na(R_price) and (high - entry_price) >= trail_activate_R * R_price
+trail_on_short = enteredShort and not na(R_price) and (entry_price - low)  >= trail_activate_R * R_price
+
+trail_stop_long  = trail_on_long  ? (high - trail_atr_mult * atr) : na
+trail_stop_short = trail_on_short ? (low  + trail_atr_mult * atr) : na
+
+// Choose the tighter (risk-reducing) stop
+active_stop_long  = enteredLong  ? math.max(long_stop,  trail_stop_long)  : na
+active_stop_short = enteredShort ? math.min(short_stop, trail_stop_short) : na
+
+// Exit on statistical flips if enabled
+lr_flip_exit_long  = use_lr_exit_flip  and enteredLong  and slope_medium < 0
+lr_flip_exit_short = use_lr_exit_flip  and enteredShort and slope_medium > 0
+ens_flip_exit_long = use_ensemble_exit and enteredLong  and ensemble_score <= 0
+ens_flip_exit_short= use_ensemble_exit and enteredShort and ensemble_score >= 0
+should_flatten = (enteredLong and (lr_flip_exit_long or ens_flip_exit_long)) or (enteredShort and (lr_flip_exit_short or ens_flip_exit_short))
+
+// Time stop
+time_stop = not na(entry_bar) and (bar_index - entry_bar) >= time_stop_bars
+
+// Place/refresh exits every bar
+if enteredLong
+    strategy.exit("LX", from_entry=pend_id == "" ? "Long" : pend_id, stop=active_stop_long, limit=long_target)
+if enteredShort
+    strategy.exit("SX", from_entry=pend_id == "" ? "Short" : pend_id, stop=active_stop_short, limit=short_target)
+
+// Emergency & optimization exits
+if (halt_trading or should_flatten or time_stop) and strategy.position_size != 0
+    strategy.close_all(comment=halt_trading ? "Daily Loss Limit" : should_flatten ? "Stat Flip Exit" : "Time Stop")
+
+// --- (Optional) relaxed initializers kept but now redundant with optimizer ---
+// You can keep or remove these; optimizer will handle staged entries.
+if strategy.position_size == 0 and not halt_trading and barstate.isconfirmed
+    if ensemble_score > 0.2 and overall_confidence > 0.5 and not pend_long and not pend_short
+        // No immediate market entry; let optimizer place pending orders on next bar if signal persists
+        na
+    else if ensemble_score < -0.2 and overall_confidence > 0.5 and not pend_long and not pend_short
+        na
+
+// === VISUALIZATION ===
+plot(lr_short,  "Short-Term LR",  color=sig_short_primary  ? color.blue   : color.new(color.blue, 50),   linewidth=2)
+plot(lr_medium, "Medium-Term LR", color=sig_medium_primary ? color.orange : color.new(color.orange, 50), linewidth=2)
+plot(lr_long,   "Long-Term LR",   color=sig_long_primary   ? color.purple : color.new(color.purple, 50), linewidth=2)
+
+bgcolor(overall_confidence > confidence_threshold ? (ensemble_score > 0.3 ? color.new(color.green, 90) : ensemble_score < -0.3 ? color.new(color.red, 90) : color.new(color.gray, 95)) : color.new(color.gray, 95))
+
+plotshape(long_condition,  "Long Signal",  shape.triangleup,   location.belowbar, color=color.green, size=size.normal)
+plotshape(short_condition, "Short Signal", shape.triangledown, location.abovebar, color=color.red,   size=size.normal)
+
+// === ENHANCED STATISTICS DASHBOARD (unchanged) ===
+var table stats_table = table.new(position.top_right, 4, 13, bgcolor=color.white, border_width=1, frame_color=color.black, frame_width=1)
+if barstate.islast
+    table.clear(stats_table, 0, 0, 3, 12)
+    table.cell(stats_table, 0, 0, "Metric", text_color=color.black, bgcolor=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, 0, "Value",  text_color=color.black, bgcolor=color.gray, text_size=size.small)
+    table.cell(stats_table, 2, 0, "Quality",text_color=color.black, bgcolor=color.gray, text_size=size.small)
+    table.cell(stats_table, 3, 0, "Weight", text_color=color.black, bgcolor=color.gray, text_size=size.small)
+    table.cell(stats_table, 0, 1, "Net Profit", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 1, "$" + str.tostring(strategy.netprofit, "#,###"), text_color=strategy.netprofit > 0 ? color.green : color.red, text_size=size.small)
+    table.cell(stats_table, 0, 2, "Short R²", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 2, str.tostring(r2_short, "#.##"), text_color=sig_short_primary ? color.green : sig_short_fallback ? color.orange : color.red, text_size=size.small)
+    table.cell(stats_table, 2, 2, sig_short_primary ? "✓" : sig_short_fallback ? "~" : "✗", text_color=sig_short_primary ? color.green : sig_short_fallback ? color.orange : color.red, text_size=size.small)
+    table.cell(stats_table, 3, 2, str.tostring(current_weight_short, "#.##"), text_color=color.blue, text_size=size.small)
+
+    table.cell(stats_table, 0, 3, "Medium R²", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 3, str.tostring(r2_medium, "#.##"), text_color=sig_medium_primary ? color.green : sig_medium_fallback ? color.orange : color.red, text_size=size.small)
+    table.cell(stats_table, 2, 3, sig_medium_primary ? "✓" : sig_medium_fallback ? "~" : "✗", text_color=sig_medium_primary ? color.green : sig_medium_fallback ? color.orange : color.red, text_size=size.small)
+    table.cell(stats_table, 3, 3, str.tostring(current_weight_medium, "#.##"), text_color=color.orange, text_size=size.small)
+
+    table.cell(stats_table, 0, 4, "Long R²", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 4, str.tostring(r2_long, "#.##"), text_color=sig_long_primary ? color.green : sig_long_fallback ? color.orange : color.red, text_size=size.small)
+    table.cell(stats_table, 2, 4, sig_long_primary ? "✓" : sig_long_fallback ? "~" : "✗", text_color=sig_long_primary ? color.green : sig_long_fallback ? color.orange : color.red, text_size=size.small)
+    table.cell(stats_table, 3, 4, str.tostring(current_weight_long, "#.##"), text_color=color.purple, text_size=size.small)
+
+    table.cell(stats_table, 0, 5, "Short Signal",  text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 5, str.tostring(signal_short, "#.##"),  text_color=signal_short  > 0 ? color.green : signal_short  < 0 ? color.red : color.gray, text_size=size.small)
+    table.cell(stats_table, 0, 6, "Medium Signal", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 6, str.tostring(signal_medium, "#.##"), text_color=signal_medium > 0 ? color.green : signal_medium < 0 ? color.red : color.gray, text_size=size.small)
+    table.cell(stats_table, 0, 7, "Long Signal",   text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 7, str.tostring(signal_long, "#.##"),   text_color=signal_long   > 0 ? color.green : signal_long   < 0 ? color.red : color.gray, text_size=size.small)
+
+    table.cell(stats_table, 0, 8,  "Ensemble",   text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 8,  str.tostring(ensemble_score, "#.##"), text_color=ensemble_score > 0.3 ? color.green : ensemble_score < -0.3 ? color.red : color.gray, text_size=size.small)
+    table.cell(stats_table, 2, 8,  trend_direction > 0 ? "LONG" : trend_direction < 0 ? "SHORT" : "NEUTRAL", text_color=trend_direction > 0 ? color.green : trend_direction < 0 ? color.red : color.gray, text_size=size.small)
+
+    table.cell(stats_table, 0, 9, "Confidence",           text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 9, str.tostring(overall_confidence, "#.##"), text_color=overall_confidence > confidence_threshold ? color.green : color.red, text_size=size.small)
+    table.cell(stats_table, 0,10,"Adapt R² Thresh",       text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1,10,str.tostring(adaptive_r2_threshold, "#.##"), text_color=color.blue, text_size=size.small)
+    table.cell(stats_table, 0,11,"Short Reliability",     text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1,11,str.tostring(short_layer_reliability, "#.##"), text_color=short_layer_reliability > 0.5 ? color.green : color.red, text_size=size.small)
+    // New optimizer status line:
+    table.cell(stats_table, 0,12,"Entry Mode", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1,12, (isStrongMomentum ? "Momentum/Breakout" : "Pullback/Limit"), text_color=isStrongMomentum ? color.green : color.orange, text_size=size.small)
+
+// Debug plots
+plot(overall_confidence, "Overall Confidence", color=color.purple, display=display.data_window)
+plot(ensemble_score,     "Ensemble Score",    color=color.blue,   display=display.data_window)
+plot(short_layer_reliability, "Short Layer Reliability", color=color.yellow, display=display.data_window)
+
+View in Pine Editor・450 lines
+Use on chart
+2
+3
+881
+Jul 30, 2025
+Strategy Overview
+This advanced EUR/USD trading system employs a triple-layer linear regression framework with statistical validation and ensemble weighting. It combines short, medium, and long-term regression analyses to generate high-confidence directional signals while enforcing strict risk controls.
+
+Core Components
+Multi-Layer Regression Engine:
+
+Parallel regression analysis across 3 customizable timeframes (short/medium/long)
+
+Projects future price values using prediction horizons
+
+Statistical significance filters (R-squared, correlation, slope thresholds)
+
+Signal Validation System:
+
+Lookback validation tests historical prediction accuracy
+
+Ensemble weighting of layer signals (adjustable influence per timeframe)
+
+Confidence scoring combining statistical strength, layer agreement, and validation accuracy
+
+Risk Management:
+
+Position sizing scaled by signal confidence (1%-100% of equity)
+
+Daily loss circuit breaker (halts trading at user-defined threshold)
+
+Forex-tailored execution (pip slippage, percentage-based commissions)
+
+Visual Intelligence:
+
+Real-time regression line plots (3 layered colors)
+
+Projection markers for short-term forecasts
+
+Background coloring for market bias indication
+
+Comprehensive statistics dashboard (R-squared metrics, validation scores, P&L)
+
+Key Parameters
+Category Settings
+Regression Short/Med/Long lengths (20/50/100 bars)
+Statistics Min R² (0.65), Correlation (0.7), Slope (0.0001)
+Validation 30-bar lookback, 10-bar projection
+Risk Controls 50% position size, 12% daily loss limit, 75% confidence threshold
+Trading Logic
+Entries require:
+
+Ensemble score > |0.5|
+
+Confidence > threshold
+
+Short & medium-term significance
+
+Active daily loss limit not breached
+
+Exits triggered by:
+
+Opposite high-confidence signals
+
+Daily loss limit violation (emergency exit)
+
+The strategy blends quantitative finance techniques with practical trading safeguards, featuring a self-optimizing design where signal quality directly impacts position sizing. The visual dashboard provides real-time feedback on model performance and market conditions.
+Aug 1, 2025
+Release Notes
+EUR/USD Multi-Layer Statistical Regression Strategy v2
+📊 Strategy Overview
+This advanced algorithmic trading strategy employs multi-layer statistical regression analysis combined with adaptive machine learning techniques to identify high-probability trading opportunities in the EUR/USD forex pair. The strategy uses three distinct regression layers operating on different timeframes to create a robust ensemble prediction system.
+🔬 Core Methodology
+Multi-Layer Regression System
+
+Short-Term Layer (20 periods): Captures immediate price momentum and micro-trends
+Medium-Term Layer (50 periods): Identifies intermediate trend direction and strength
+Long-Term Layer (100 periods): Provides macro trend context and stability
+
+Statistical Validation Framework
+
+R-Squared Analysis: Ensures regression quality with adaptive thresholds (default ≥0.45)
+Correlation Testing: Validates signal reliability with minimum correlation requirements (≥0.5)
+Slope Significance: Filters out statistically insignificant price movements
+Adaptive Thresholds: Dynamically adjusts validation criteria based on historical performance
+
+🧠 Advanced Features
+Dynamic Performance-Based Weighting
+The strategy continuously evaluates each regression layer's performance and adjusts their influence weights accordingly:
+
+Base weights: Short 40%, Medium 35%, Long 25%
+Dynamic adjustment based on recent statistical quality scores
+Real-time weight normalization for optimal ensemble performance
+
+Lookback Validation System
+
+Validates prediction accuracy using historical performance data
+Tracks layer-specific reliability metrics
+Implements fallback logic for maintaining signal generation during low-confidence periods
+
+Adaptive Statistical Thresholds
+
+Monitors rolling 100-period performance windows
+Automatically adjusts R² thresholds based on market conditions
+Maintains signal quality while adapting to changing market volatility
+
+💡 Signal Generation Logic
+Enhanced Ensemble Scoring
+The strategy generates signals through a sophisticated multi-layer approach:
+
+Primary Signals: Generated when all statistical criteria are met
+Fallback Signals: Activated with relaxed criteria to maintain trading activity
+Quality Weighting: Even "insignificant" signals contribute based on quality scores
+Confidence Calculation: Combines agreement scores, statistical quality, and validation metrics
+
+Entry Conditions
+
+Long Entry: Ensemble score >0.3, confidence >65%, multiple layer agreement
+Short Entry: Ensemble score <-0.3, confidence >65%, multiple layer agreement
+Initialization: Relaxed conditions for first position establishment
+
+🛡️ Risk Management
+Position Sizing
+
+Base Size: 50% of equity (configurable 10-100%)
+Confidence Multiplier: Dynamic sizing based on signal confidence
+Maximum Position: Limited by available equity and risk parameters
+
+Daily Loss Protection
+
+Maximum Daily Loss: 12% of equity (configurable 5-25%)
+Emergency Exit: Automatic position closure when daily limit is reached
+Halt Trading: Temporary suspension during high-loss periods
+
+Statistical Risk Controls
+
+Minimum Data Requirements: Ensures adequate sample sizes for reliable statistics
+Division by Zero Protection: Robust error handling for edge cases
+NA Value Management: Proper handling of missing or invalid data points
+
+📈 Performance Optimization
+Real-Time Monitoring Dashboard
+The strategy includes a comprehensive statistics table displaying:
+
+Net profit and performance metrics
+R² values for each regression layer with quality indicators
+Dynamic weight allocations
+Signal strengths and ensemble scores
+Confidence levels and reliability metrics
+Adaptive threshold values
+
+Visual Indicators
+
+Regression Lines: Color-coded based on statistical significance
+Background Coloring: Visual confidence and trend indication
+Signal Markers: Clear entry point identification
+Debug Plots: Additional data for strategy analysis
+
+⚙️ Customizable Parameters
+Regression Configuration
+
+Layer Lengths: Adjustable periods for each regression layer
+Statistical Thresholds: Customizable R², correlation, and slope requirements
+Prediction Horizon: Configurable look-forward period (5-20 bars)
+
+Risk Parameters
+
+Position Sizing: Flexible equity percentage allocation
+Daily Loss Limits: Configurable maximum daily drawdown
+Confidence Thresholds: Adjustable minimum confidence for trade execution
+
+Adaptation Settings
+
+Adaptive Mode: Toggle for dynamic threshold adjustment
+Lookback Periods: Customizable validation and adaptation windows
+Weight Dynamics: Option for performance-based weight adjustment
+
+🎯 Strategy Applications
+Suitable For
+
+Forex Traders: Specifically optimized for EUR/USD pair
+Systematic Traders: Fully automated execution with minimal intervention
+Risk-Conscious Investors: Multiple layers of risk management
+Data-Driven Approaches: Statistical validation and performance tracking
+
+Market Conditions
+
+Trending Markets: Long-term layer provides trend context
+Ranging Markets: Short-term layer captures oscillations
+Volatile Periods: Adaptive thresholds adjust to changing conditions
+Low Volatility: Fallback logic maintains trading activity
+
+📋 Implementation Notes
+Backtesting Configuration
+
+Initial Capital: $100,000 USD
+Commission: 0.02% per trade
+Slippage: 1 pip
+Currency: USD base
+Pyramiding: Single position allowed
+
+Performance Expectations
+The strategy aims to achieve consistent returns through:
+
+Statistical edge identification
+Adaptive parameter optimization
+Robust risk management
+Multi-timeframe analysis convergence
+
+⚠️ Important Disclaimers
+
+Past Performance: No guarantee of future results
+Market Risk: All trading involves risk of capital loss
+Parameter Sensitivity: Results may vary with different settings
+Market Conditions: Performance may vary across different market environments
+
+
+This strategy represents an advanced implementation of statistical regression analysis for forex trading. Users should thoroughly backtest and paper trade before live implementation. Always trade responsibly and never risk more than you can afford to lose.
+Sep 19, 2025
+Release Notes
+This strategy combines three linear regression layers (short, medium, long) into a weighted ensemble to capture trend direction with statistical validation (R², correlation, slope). Position sizing is based on overall signal confidence, which blends agreement across layers, statistical strength, and validation accuracy.
+
+Key Features
+
+Ensemble Score: Weighted mix of short/medium/long LR signals
+
+Confidence Model: Adjusts position size dynamically
+
+Entry Optimizer: Chooses between momentum breakouts (ATR stop) or pullback limits (ATR discount)
+
+Risk Controls: ATR-based stops, profit targets, trailing stops, flip exits, and daily loss limits
+
+Flip-Flop Stability Gate (new): Requires a recent and persistent regime flip (LR slope or ensemble crossing 0) before entries are allowed → helps filter false starts
+
+How to Use
+
+Works best on EUR/USD, but adaptable to other assets/timeframes
+
+Adjust confidence_threshold, ATR settings, or flip-flop parameters (flip_window, min_persist) to match volatility and risk preference
+
+Check the built-in dashboard table for layer quality, ensemble score, and confidence status

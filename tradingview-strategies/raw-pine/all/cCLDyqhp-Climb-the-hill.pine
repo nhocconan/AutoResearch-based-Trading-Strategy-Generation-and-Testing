@@ -1,0 +1,69 @@
+//@version=5
+strategy("SuperTrend + RSI + Adjustable EMA Filter", overlay=true, margin_long=100, margin_short=100)
+
+// === Inputs ===
+// SuperTrend
+atrPeriod   = input.int(10, "SuperTrend ATR Period")
+atrMult     = input.float(3.0, "SuperTrend ATR Multiplier")
+
+// RSI
+rsiLength   = input.int(14, "RSI Length")
+rsiLongLvl  = input.int(40, "RSI Long Level (Oversold)")
+rsiShortLvl = input.int(80, "RSI Short Level (Overbought)")
+
+// EMA Filter
+emaLength   = input.int(200, "EMA Length")          // adjustable EMA length
+useEMAFilter = input.bool(true, "Use EMA Filter?")  // toggle filter on/off
+
+// Pip-based TP
+tpPips      = input.int(30, "Take Profit (pips)")
+
+// === SuperTrend Calculation ===
+[superTrend, dir] = ta.supertrend(atrMult, atrPeriod)
+// dir == -1 → bullish trend, dir == 1 → bearish trend
+bullTrend = dir == -1
+bearTrend = dir == 1
+
+plot(superTrend, "SuperTrend", color=bullTrend ? color.green : color.red)
+
+// === RSI Calculation ===
+rsi = ta.rsi(close, rsiLength)
+plot(rsi, "RSI", color=color.blue)
+hline(rsiLongLvl, "Oversold", color=color.green)
+hline(rsiShortLvl, "Overbought", color=color.red)
+
+// === EMA Calculation ===
+emaFilter = ta.ema(close, emaLength)
+plot(emaFilter, "EMA Filter", color=color.orange)
+
+// === Pip Conversion ===
+pipValue = syminfo.mintick
+tpDist   = tpPips * pipValue
+
+// === Entry Conditions ===
+// Long: RSI oversold + SuperTrend bullish + (optional EMA filter: price above EMA)
+longCondition  = rsi <= rsiLongLvl and bullTrend and strategy.position_size == 0 and (not useEMAFilter or close > emaFilter)
+
+// Short: RSI overbought + SuperTrend bearish + (optional EMA filter: price below EMA)
+shortCondition = rsi >= rsiShortLvl and bearTrend and strategy.position_size == 0 and (not useEMAFilter or close < emaFilter)
+
+// === Orders ===
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("TP/SL Long", "Long", stop=superTrend, limit=close + tpDist)
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("TP/SL Short", "Short", stop=superTrend, limit=close - tpDist)
+
+View in Pine Editor・57 lines
+Use on chart
+6
+327
+
+This strategy combines the strength of the SuperTrend indicator with RSI extremes and an optional EMA bias filter to identify high‑probability reversal setups.
+• SuperTrend bias: Trades only in the direction of the SuperTrend trend (green = longs, red = shorts).
+• RSI trigger: Long entries occur when RSI closes below the oversold threshold, short entries when RSI closes above the overbought threshold. Both levels are fully adjustable.
+• EMA filter (optional): You can enable or disable the EMA bias filter. When enabled, longs are only taken above the chosen EMA and shorts only below it. The EMA length is adjustable.
+• Risk management: Stop loss is automatically placed at the SuperTrend line, while take profit is set at a fixed pip distance (adjustable).
+• Flexibility: All key parameters — ATR period/multiplier, RSI length and thresholds, EMA

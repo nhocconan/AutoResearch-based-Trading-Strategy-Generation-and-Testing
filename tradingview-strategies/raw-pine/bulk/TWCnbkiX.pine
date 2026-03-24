@@ -1,0 +1,101 @@
+//@version=5
+strategy("ETH Signal 15m", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=15)
+
+// Backtest period
+start_time = input.time(timestamp("2024-08-01 00:00"), title="Backtest Start Time")
+end_time = input.time(timestamp("2054-01-01 00:00"), title="Backtest End Time")
+
+atrPeriod = input(12, "ATR Length")
+factor = input.float(2.76, "Factor", step=0.01)
+rsiLength = input(12, title="RSI Length")
+rsiOverbought = input(70, title="RSI Overbought Level")
+rsiOversold = input(30, title="RSI Oversold Level")
+
+[_, direction] = ta.supertrend(factor, atrPeriod)
+rsi = ta.rsi(close, rsiLength)
+
+// Ensure current time is within the backtest period
+in_date_range = (time >= start_time) and (time <= end_time)
+
+// Long condition: Supertrend buy signal and RSI not overbought
+if in_date_range and ta.change(direction) < 0 and rsi < rsiOverbought
+    strategy.entry("Long", strategy.long)
+
+// Short condition: Supertrend sell signal and RSI not oversold
+if in_date_range and ta.change(direction) > 0 and rsi > rsiOversold
+    strategy.entry("Short", strategy.short)
+
+// Optional: Add stop loss and take profit using ATR
+atr = ta.atr(atrPeriod)
+strategy.exit("Exit Long", "Long", stop=close - 4 * atr, limit=close + 2 * atr)
+strategy.exit("Exit Short", "Short", stop=close + 4 * atr, limit=close - 2.237 * atr)
+
+View in Pine Editor・31 lines
+Use on chart
+2
+9
+1
+1
+5 450
+
+This strategy uses the Supertrend indicator combined with RSI to generate buy and sell signals, with stop loss (SL) and take profit (TP) conditions based on ATR (Average True Range). Below is a detailed explanation of each part:
+
+1. General Information 
+ETHUSDT.P
+
+Strategy Name: "ETH Signal 15m"
+Designed for use on the 15-minute time frame for the ETH pair.
+Default capital allocation is 15% of total equity for each trade.
+2. Backtest Period
+start_time and end_time: Define the start and end time of the backtest period.
+
+start_time = 2024-08-01: Start date of the backtest.
+end_time = 2054-01-01: End date of the backtest.
+The strategy will only run when the current time falls within this specified range.
+
+3. Supertrend Indicator
+Supertrend is a trend-following indicator that provides buy or sell signals based on the direction of price changes.
+
+factor = 2.76: The multiplier used in the Supertrend calculation (increasing this value makes the Supertrend less sensitive to price movements).
+atrPeriod = 12: Number of periods used to calculate ATR.
+Output:
+
+direction: Determines the buy/sell direction based on Supertrend.
+If direction decreases, it signals a buy (Long).
+If direction increases, it signals a sell (Short).
+4. RSI Indicator
+RSI (Relative Strength Index) is a momentum indicator, often used to identify overbought or oversold conditions.
+rsiLength = 12: Number of periods used to calculate RSI.
+rsiOverbought = 70: RSI level considered overbought.
+rsiOversold = 30: RSI level considered oversold.
+5. Entry Conditions
+Long Entry:
+
+Supertrend gives a buy signal (ta.change(direction) < 0).
+RSI must be below the overbought level (rsi < rsiOverbought).
+Short Entry:
+
+Supertrend gives a sell signal (ta.change(direction) > 0).
+RSI must be above the oversold level (rsi > rsiOversold).
+The strategy will only execute trades if the current time is within the backtest period (in_date_range).
+
+6. Stop Loss (SL) and Take Profit (TP) Conditions
+ATR (Average True Range) is used to calculate the distance for Stop Loss and Take Profit based on price volatility.
+
+atr = ta.atr(atrPeriod): ATR is calculated using 12 periods.
+Stop Loss and Take Profit are calculated as follows:
+
+Long Trade:
+Stop Loss: Set at close - 4 * atr (current price minus 4 times the ATR).
+Take Profit: Set at close + 2 * atr (current price plus 2 times the ATR).
+Short Trade:
+Stop Loss: Set at close + 4 * atr (current price plus 4 times the ATR).
+Take Profit: Set at close - 2.237 * atr (current price minus 2.237 times the ATR).
+
+Summary:
+This strategy enters a Long trade when the Supertrend indicates an upward trend and RSI is not in the overbought region. Conversely, a Short trade is entered when Supertrend signals a downtrend, and RSI is not oversold.
+The trade is exited when the price reaches the Stop Loss or Take Profit levels, which are determined based on price volatility (ATR).
+
+Disclaimer:
+
+The content provided in this strategy is for informational and educational purposes only. It is not intended as financial, investment, or trading advice. Trading in cryptocurrency, stocks, or any financial markets involves significant risk, and you may lose more than your initial investment. Past performance is not indicative of future results, and no guarantee of profit can be made. You should consult with a professional financial advisor before making any investment decisions. The creator of this strategy is not responsible for any financial losses or damages incurred as a result of following this strategy. All trades are executed at your own risk.

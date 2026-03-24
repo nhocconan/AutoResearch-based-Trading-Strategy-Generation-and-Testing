@@ -1,0 +1,3 @@
+//@version=5
+threshold=##input(defval=-0.8,type='INPUT_FLOAT',##id='in_2')
+##root(root_metainfo,rm_0,threshold,input__float)

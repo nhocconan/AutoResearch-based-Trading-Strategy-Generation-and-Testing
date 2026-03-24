@@ -1,0 +1,81 @@
+//@version=3
+strategy("STRATEGY AVERAGE MULTI_SMA", overlay=true)
+
+
+sma1 = sma(close,input(title="SMA 1", defval=8))
+
+sma2 = sma(close,input(title="SMA 2", defval=21))
+
+sma3 = sma(close,input(title="SMA 3", defval=50))
+
+sma4 = sma(close,input(title="SMA 4", defval=100))
+
+sma5 = sma(close,input(title="SMA 5", defval=200))
+
+
+mediaSMA= (sma1+sma2+sma3+sma4+sma5)/5
+
+//color mediaSMA
+
+MediaUP = mediaSMA>mediaSMA[1]
+colorUP = (MediaUP ? #3CFF35 : na)
+
+MediaDOWN = mediaSMA<mediaSMA[1]
+colorDOWN =(MediaDOWN ? #FF0F03 : na)
+
+colorN =(not MediaUP and not MediaDOWN and mediaSMA==mediaSMA[1] ? white : na )
+
+plot(mediaSMA,title="Avarege MULTI_SMA UP", color=colorUP, style=circles, linewidth=2, transp=0)
+plot(mediaSMA,title="Avarege MULTI_SMA DOWN", color=colorDOWN, style=circles, linewidth=2, transp=0)
+plot(mediaSMA,title="Avarege MULTI_SMA UP NEUTRAL", color=colorN, style=circles, linewidth=2, transp=0)
+
+
+//plot(sma1,color=blue,linewidth=1, style=line,transp=0,title="SMA 1")
+//plot(sma2,color=yellow,linewidth=1, style=line,transp=0,title="SMA 2")
+//plot(sma3,color=green,linewidth=1, style=line,transp=0,title="SMA 3")
+//plot(sma4,color=purple,linewidth=1, style=line,transp=0,title="SMA 4")
+//plot(sma5,color=red,linewidth=1, style=line,transp=0,title="SMA 5")
+
+
+// Strategy
+
+//BUY
+comprar=close>mediaSMA and mediaSMA>mediaSMA[1] 
+fechar=close<mediaSMA and mediaSMA<mediaSMA[1]
+ 
+strategy.entry("BUY",strategy.long,when=comprar)
+strategy.entry("SELL",strategy.short, when=fechar)
+
+//SELL
+vender=close<mediaSMA and mediaSMA<mediaSMA[1] 
+fechar2=close>mediaSMA and mediaSMA>mediaSMA[1]
+
+strategy.entry("SELL",strategy.short, when=vender)
+strategy.entry("BUY", strategy.long,when=fechar2)
+
+View in Pine Editor・54 lines
+Use on chart
+2
+6
+2
+1
+5 113
+This strategy is based on my script "AVERAGE MULTI_SMA"
+
+The strategy is based on the created media, giving BUY signal when the price closes above the average and the average is rising. For the SELL signal the price closes below the average with the average falling.
+
+For those who are interested in how the "AVERAGE MULTI_SMA" script works, I ask you to analyze it there, because I explain how it works.
+
+Please do not use the indicator as the only factor to do your operations, try to use more as a study.
+
+
+____PTBR_____
+
+
+Essa estrategia é baseada no meu script "AVERAGE MULTI_SMA"
+
+A estrategia é baseada na media criada, para o sinal de compra(BUY) o preço fecha acima da média e a média está subindo. Para o sinal de venda(SELL) o preço fecha abaixo da média e a média caindo.
+
+Para quem se interessar em saber como funciona o script "AVERAGE MULTI_SMA", peço que analise ele lá, pois explico como funciona.
+
+Peço que não use o indicador como único fator para fazer suas operações, tente usar mais como um estudo.

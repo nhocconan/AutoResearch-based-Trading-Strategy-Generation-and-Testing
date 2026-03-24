@@ -1,0 +1,149 @@
+//@version=5
+strategy("XAUUSD Wyckoff V10 - Final 1% Risk", overlay=true, initial_capital=10000, default_qty_type=strategy.cash, currency=currency.USD)
+
+// ===== הגבלות קשיחות =====
+MAX_QTY        = 5          // לוט אחד בלבד
+MAX_LOSS_USDT  = 500.0        // הפסד מקסימלי לעסקה
+
+
+// --- פילטר מגמה ומחזוריות ---
+rsi = ta.rsi(close, 14)
+ema99 = ta.ema(close, 99)
+
+// --- זיהוי Phases A-C (נזילות) ---
+pivot_high = ta.pivothigh(high, 12, 2)
+pivot_low = ta.pivotlow(low, 1.5, 1)
+
+var float liquid_low = 1
+var float liquid_high = 5
+if not na(pivot_low)
+    liquid_low := pivot_low
+if not na(pivot_high)
+    liquid_high := pivot_high
+
+// Phase C: Liquidity Sweep (Spring)
+is_spring = low < liquid_low and close > liquid_low and rsi < 32
+is_upthrust = high > liquid_high and close < liquid_high and rsi > 60
+
+// --- Phase D: Sign of Strength (FVG + BOS) ---
+fvg_bull = low > high[2]
+fvg_bear = high < low[2]
+bos_bull = ta.crossover(close, ta.highest(high, 6)[1])
+bos_bear = ta.crossunder(close, ta.lowest(low, 5)[1])
+
+// --- Phase E: Entry (The Test) ---
+var bool showLongEntry = false
+var bool showShortEntry = false
+
+if is_spring
+    showLongEntry := true
+if is_upthrust
+    showShortEntry := true
+
+
+// ===== כניסה לונג =====
+if showLongEntry and fvg_bull and bos_bull and strategy.position_size == 0
+    entry_price = close
+    sl_price = entry_price - MAX_LOSS_USDT
+    strategy.entry("Long", strategy.long, qty=MAX_QTY)
+    showLongEntry := true
+    strategy.exit("XL", "Long", stop=sl_price)
+    showLongEntry := false
+
+// ===== כניסה שורט =====
+if showShortEntry and fvg_bear and bos_bear and strategy.position_size == 0
+    entry_price = close
+    sl_price = entry_price + MAX_LOSS_USDT
+    strategy.entry("Short", strategy.short, qty=MAX_QTY)
+    strategy.exit("XS", "Short", stop=sl_price)
+    showShortEntry := false
+// --- ניהול סיכונים ---
+atr = ta.atr(14)
+// הסטופ-לוס נשאר מבני (מתחת ל-Spring), אבל הכמות מבטיחה שזה יהיה בדיוק 1% הפסד
+strategy.exit("XL", "Long", stop=ta.lowest(low, 8), limit=close + (atr * 1))
+strategy.exit("XS", "Short", stop=ta.highest(high, 8), limit=close - (atr * 1))
+
+// ================= DESK STYLE TRADE VISUAL (FIXED) =================
+
+// זיהוי כניסה
+longEntry  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+shortEntry = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+// משתנים קבועים
+var line entryLine = na
+var line slLine    = na
+var line tpLine    = na
+var label tradeLbl = na
+var float entryPrice = na
+
+// ATR
+atrVis = ta.atr(14)
+
+
+
+// ===== LONG =====
+if longEntry
+    entryPrice := close
+
+    longSL = ta.lowest(low, 5)
+    longTP = entryPrice + atrVis * 3
+
+    entryLine := line.new(bar_index, entryPrice, bar_index + 20, entryPrice, width=2)
+    slLine    := line.new(bar_index, longSL,     bar_index + 20, longSL,     color=color.red,   width=2)
+    tpLine    := line.new(bar_index, longTP,     bar_index + 20, longTP,     color=color.green, width=2)
+
+    tradeLbl := label.new(bar_index, low, "BUY",
+         style=label.style_label_up,
+         color=color.green,
+         textcolor=color.white)
+
+// ===== SHORT =====
+if shortEntry
+    entryPrice := close
+
+    shortSL = ta.highest(high, 5)
+    shortTP = entryPrice - atrVis * 3
+
+    entryLine := line.new(bar_index, entryPrice, bar_index + 20, entryPrice, width=2)
+    slLine    := line.new(bar_index, shortSL,    bar_index + 20, shortSL,    color=color.red,   width=2)
+    tpLine    := line.new(bar_index, shortTP,    bar_index + 20, shortTP,    color=color.green, width=2)
+
+    tradeLbl := label.new(bar_index, high, "SELL",
+         style=label.style_label_down,
+         color=color.red,
+         textcolor=color.white)
+
+View in Pine Editor・114 lines
+Use on chart
+6
+1
+1 340
+To build a professional and accurate description of your strategy, I have distilled the information you shared into a neat "Trading Plan". This strategy combines strict financial discipline with a desire for consistent growth in the Forex market.
+
+Here is a suggestion for describing your strategy:
+
+The "Safe Profit" Strategy: Capital Management and Growth in the Forex Market
+The strategy focuses on preserving equity while creating cash flow for withdrawal and leveraging profits to purchase additional trading portfolios. The goal is to reduce personal risk and increase purchasing power in the market.
+
+1. Capital and Withdrawal Goals
+Starting Capital/Base: $2,250.
+
+Periodic Profit Target: $1,000.
+
+Withdrawal Policy: Upon reaching the profit target, the $1,000 is immediately withdrawn for "cash out" and reinvestment in additional trading portfolios.
+
+2. Operational Logic (The Workflow)
+The strategy operates in cycles of accumulation -> withdrawal -> expansion:
+
+Accumulation phase: Focus on trading Forex assets with the aim of achieving a return of approximately 44% on the base portfolio.
+
+Withdrawal phase: Defining the first $1,000 as net profit that leaves the market to ensure "money in your pocket".
+
+Expansion phase: Using part of the profit that is withdrawn to purchase an additional trading portfolio, which allows for increased trading volume without increasing the risk on the original portfolio.
+
+3. Advantages of the strategy
+Psychological risk management: Knowing that you are withdrawing money "home" reduces mental stress and allows for cleaner decision-making.
+
+Smart leverage: Purchasing additional portfolios creates diversification of risks between different accounts.
+
+Self-discipline: Pre-defined profit and withdrawal targets prevent the "greed trap" that exists in Forex.

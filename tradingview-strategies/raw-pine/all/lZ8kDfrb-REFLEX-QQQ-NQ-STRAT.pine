@@ -1,0 +1,372 @@
+//@version=5
+strategy("SMC Pro v3 Strategy - Liquidity Sweeps + FVG + BOS/CHoCH", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.01, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+//=====================================================
+// INPUTS
+//=====================================================
+groupStructure = "Structure"
+swingLen            = input.int(5, "Swing Length", minval=2, group=groupStructure)
+showBOS             = input.bool(true, "Show BOS", group=groupStructure)
+showCHoCH           = input.bool(true, "Show CHoCH", group=groupStructure)
+
+groupLiquidity = "Liquidity"
+showSweeps          = input.bool(true, "Show Sweeps / Stop Hunts", group=groupLiquidity)
+sweepLookback       = input.int(8, "Sweep Lookback Bars", minval=1, group=groupLiquidity)
+
+groupFVG = "Fair Value Gaps"
+showFVG             = input.bool(true, "Show FVG", group=groupFVG)
+fvgMinAtrMult       = input.float(0.15, "Min FVG Size ATR Mult", step=0.05, group=groupFVG)
+extendFVG           = input.int(20, "Extend FVG Bars", minval=5, group=groupFVG)
+onlyFreshFVG        = input.bool(true, "Only Freshest FVG", group=groupFVG)
+
+groupZones = "Institutional Zones"
+showZones           = input.bool(true, "Show Institutional Zones", group=groupZones)
+zoneAtrMult         = input.float(0.8, "Displacement Threshold ATR Mult", step=0.1, group=groupZones)
+extendZones         = input.int(25, "Extend Zone Bars", minval=5, group=groupZones)
+
+groupTrend = "Trend Filter"
+useTrendFilter      = input.bool(true, "Use EMA Trend Filter", group=groupTrend)
+fastEMA             = input.int(20, "Fast EMA", minval=1, group=groupTrend)
+slowEMA             = input.int(50, "Slow EMA", minval=1, group=groupTrend)
+
+groupPD = "Premium / Discount"
+usePDFilter         = input.bool(true, "Use Premium / Discount Filter", group=groupPD)
+pdLookback          = input.int(40, "PD Range Lookback", minval=5, group=groupPD)
+
+groupLevels = "Key Levels"
+showPDHL            = input.bool(true, "Show Previous Day High/Low", group=groupLevels)
+
+groupSignals = "Signals / Execution"
+signalConfirmBreak  = input.bool(true, "Require Confirmation Break", group=groupSignals)
+allowLongs          = input.bool(true, "Allow Longs", group=groupSignals)
+allowShorts         = input.bool(true, "Allow Shorts", group=groupSignals)
+oneTradeAtATime     = input.bool(true, "One Trade At A Time", group=groupSignals)
+
+groupRisk = "Risk Management"
+useSwingStops       = input.bool(true, "Use Signal Candle Swing Stop", group=groupRisk)
+atrStopMult         = input.float(1.0, "ATR Stop Mult (if not using swing stop)", minval=0.1, step=0.1, group=groupRisk)
+rrTarget            = input.float(2.0, "Take Profit RR", minval=0.5, step=0.5, group=groupRisk)
+useTrailingStop     = input.bool(false, "Use Trailing Stop", group=groupRisk)
+trailAtrMult        = input.float(1.0, "Trail ATR Mult", minval=0.1, step=0.1, group=groupRisk)
+moveToBEat1R        = input.bool(true, "Move Stop to Breakeven at 1R", group=groupRisk)
+
+groupStyle = "Style"
+showLabels          = input.bool(true, "Show Labels", group=groupStyle)
+cleanMode           = input.bool(true, "Clean Mode", group=groupStyle)
+showTP_SL_Lines     = input.bool(true, "Show Entry / TP / SL Lines", group=groupStyle)
+
+//=====================================================
+// CORE
+//=====================================================
+atr = ta.atr(14)
+emaFast = ta.ema(close, fastEMA)
+emaSlow = ta.ema(close, slowEMA)
+bullTrend = emaFast > emaSlow
+bearTrend = emaFast < emaSlow
+
+plot(useTrendFilter ? emaFast : na, "Fast EMA", color=color.new(color.aqua, 0))
+plot(useTrendFilter ? emaSlow : na, "Slow EMA", color=color.new(color.orange, 0))
+
+//=====================================================
+// SWINGS
+//=====================================================
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+
+if not na(ph)
+    lastSwingHigh := ph
+    lastSwingHighBar := bar_index - swingLen
+
+if not na(pl)
+    lastSwingLow := pl
+    lastSwingLowBar := bar_index - swingLen
+
+plotshape(not cleanMode and not na(ph) ? ph : na, title="Swing High", style=shape.circle, location=location.absolute, color=color.new(color.red, 50), size=size.tiny)
+
+plotshape(not cleanMode and not na(pl) ? pl : na, title="Swing Low", style=shape.circle, location=location.absolute, color=color.new(color.green, 50), size=size.tiny)
+
+//=====================================================
+// BOS / CHoCH
+//=====================================================
+var int trendState = 0  // 1 bullish, -1 bearish, 0 neutral
+
+bullBreak = not na(lastSwingHigh) and close > lastSwingHigh
+bearBreak = not na(lastSwingLow) and close < lastSwingLow
+
+bullCHoCH = bullBreak and trendState == -1
+bearCHoCH = bearBreak and trendState == 1
+bullBOS = bullBreak and trendState != -1
+bearBOS = bearBreak and trendState != 1
+
+if bullBreak
+    trendState := 1
+if bearBreak
+    trendState := -1
+
+if showBOS and bullBOS and not bullCHoCH and showLabels
+    label.new(bar_index, high, "BOS ↑", style=label.style_label_down, color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+if showBOS and bearBOS and not bearCHoCH and showLabels
+    label.new(bar_index, low, "BOS ↓", style=label.style_label_up, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+
+if showCHoCH and bullCHoCH and showLabels
+    label.new(bar_index, high, "CHoCH ↑", style=label.style_label_down, color=color.new(color.lime, 0), textcolor=color.black, size=size.small)
+if showCHoCH and bearCHoCH and showLabels
+    label.new(bar_index, low, "CHoCH ↓", style=label.style_label_up, color=color.new(color.maroon, 0), textcolor=color.white, size=size.small)
+
+//=====================================================
+// PREVIOUS DAY HIGH / LOW
+//=====================================================
+prevDayHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+prevDayLow  = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+
+plot(showPDHL ? prevDayHigh : na, "Prev Day High", color=color.new(color.yellow, 0), linewidth=1)
+plot(showPDHL ? prevDayLow : na, "Prev Day Low", color=color.new(color.yellow, 0), linewidth=1)
+
+//=====================================================
+// PREMIUM / DISCOUNT
+//=====================================================
+rangeHigh = ta.highest(high, pdLookback)
+rangeLow = ta.lowest(low, pdLookback)
+eq = (rangeHigh + rangeLow) / 2.0
+
+plot(usePDFilter ? eq : na, "Equilibrium", color=color.new(color.gray, 30), linewidth=1)
+pdTop = plot(usePDFilter ? rangeHigh : na, "PD High", color=color.new(color.gray, 100))
+pdBot = plot(usePDFilter ? rangeLow : na, "PD Low", color=color.new(color.gray, 100))
+eqPlot1 = plot(usePDFilter ? eq : na, "", color=color.new(color.red, 100))
+eqPlot2 = plot(usePDFilter ? eq : na, "", color=color.new(color.green, 100))
+fill(pdTop, eqPlot1, color=color.new(color.red, 92), title="Premium")
+fill(eqPlot2, pdBot, color=color.new(color.green, 92), title="Discount")
+
+inPremium = close > eq
+inDiscount = close < eq
+
+//=====================================================
+// LIQUIDITY SWEEPS / STOP HUNTS
+//=====================================================
+bearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+bullSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+
+pdhSweep = high > prevDayHigh and close < prevDayHigh
+pdlSweep = low < prevDayLow and close > prevDayLow
+
+recentBearSweep = ta.barssince(bearSweep or pdhSweep) >= 0 and ta.barssince(bearSweep or pdhSweep) <= sweepLookback
+recentBullSweep = ta.barssince(bullSweep or pdlSweep) >= 0 and ta.barssince(bullSweep or pdlSweep) <= sweepLookback
+
+if showSweeps and bearSweep and showLabels
+    label.new(bar_index, high, "Stop Hunt High", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+if showSweeps and bullSweep and showLabels
+    label.new(bar_index, low, "Stop Hunt Low", style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white, size=size.tiny)
+
+//=====================================================
+// FAIR VALUE GAPS
+//=====================================================
+bullFVG = low > high[2] and (low - high[2]) > atr * fvgMinAtrMult
+bearFVG = high < low[2] and (low[2] - high) > atr * fvgMinAtrMult
+
+var float bullFVGTop = na
+var float bullFVGBot = na
+var int bullFVGBar = na
+var box bullFVGBox = na
+
+var float bearFVGTop = na
+var float bearFVGBot = na
+var int bearFVGBar = na
+var box bearFVGBox = na
+
+if showFVG and bullFVG
+    if onlyFreshFVG and not na(bullFVGBox)
+        box.delete(bullFVGBox)
+    bullFVGTop := low
+    bullFVGBot := high[2]
+    bullFVGBar := bar_index
+    bullFVGBox := box.new(bar_index - 2, bullFVGTop, bar_index + extendFVG, bullFVGBot, bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 25))
+    if showLabels and not cleanMode
+        label.new(bar_index, low, "Bull FVG", style=label.style_label_up, color=color.new(color.green, 20), textcolor=color.white, size=size.tiny)
+
+if showFVG and bearFVG
+    if onlyFreshFVG and not na(bearFVGBox)
+        box.delete(bearFVGBox)
+    bearFVGTop := low[2]
+    bearFVGBot := high
+    bearFVGBar := bar_index
+    bearFVGBox := box.new(bar_index - 2, bearFVGTop, bar_index + extendFVG, bearFVGBot, bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 25))
+    if showLabels and not cleanMode
+        label.new(bar_index, high, "Bear FVG", style=label.style_label_down, color=color.new(color.red, 20), textcolor=color.white, size=size.tiny)
+
+inBullFVG = not na(bullFVGTop) and low <= bullFVGTop and high >= bullFVGBot
+inBearFVG = not na(bearFVGTop) and high >= bearFVGBot and low <= bearFVGTop
+
+//=====================================================
+// INSTITUTIONAL ZONES
+//=====================================================
+bullDisplacement = close > high[1] and (close - open) > atr * zoneAtrMult
+bearDisplacement = close < low[1] and (open - close) > atr * zoneAtrMult
+
+var float bullZoneTop = na
+var float bullZoneBot = na
+var box bullZoneBox = na
+
+var float bearZoneTop = na
+var float bearZoneBot = na
+var box bearZoneBox = na
+
+if showZones and bullDisplacement and close[1] < open[1]
+    bullZoneTop := math.max(open[1], close[1])
+    bullZoneBot := low[1]
+    if not na(bullZoneBox)
+        box.delete(bullZoneBox)
+    bullZoneBox := box.new(bar_index - 1, bullZoneTop, bar_index + extendZones, bullZoneBot, bgcolor=color.new(color.teal, 85), border_color=color.new(color.teal, 25))
+    if showLabels and not cleanMode
+        label.new(bar_index - 1, bullZoneBot, "Bull Zone", style=label.style_label_up, color=color.new(color.teal, 20), textcolor=color.white, size=size.tiny)
+
+if showZones and bearDisplacement and close[1] > open[1]
+    bearZoneTop := high[1]
+    bearZoneBot := math.min(open[1], close[1])
+    if not na(bearZoneBox)
+        box.delete(bearZoneBox)
+    bearZoneBox := box.new(bar_index - 1, bearZoneTop, bar_index + extendZones, bearZoneBot, bgcolor=color.new(color.maroon, 85), border_color=color.new(color.maroon, 25))
+    if showLabels and not cleanMode
+        label.new(bar_index - 1, bearZoneTop, "Bear Zone", style=label.style_label_down, color=color.new(color.maroon, 20), textcolor=color.white, size=size.tiny)
+
+inBullZone = not na(bullZoneTop) and low <= bullZoneTop and high >= bullZoneBot
+inBearZone = not na(bearZoneTop) and high >= bearZoneBot and low <= bearZoneTop
+
+//=====================================================
+// ENTRY CONFIRMATION
+//=====================================================
+bullConfirm = signalConfirmBreak ? (close > open and close > high[1]) : (close > open)
+bearConfirm = signalConfirmBreak ? (close < open and close < low[1]) : (close < open)
+
+longContextOk =
+     recentBullSweep and
+     (inBullZone or inBullFVG) and
+     bullConfirm and
+     (not usePDFilter or inDiscount) and
+     (not useTrendFilter or bullTrend)
+
+shortContextOk =
+     recentBearSweep and
+     (inBearZone or inBearFVG) and
+     bearConfirm and
+     (not usePDFilter or inPremium) and
+     (not useTrendFilter or bearTrend)
+
+canEnter = oneTradeAtATime ? strategy.position_size == 0 : true
+
+longSignal = allowLongs and longContextOk and canEnter
+shortSignal = allowShorts and shortContextOk and canEnter
+
+plotshape(longSignal, title="BUY", text="BUY", style=shape.labelup, location=location.belowbar, color=color.new(color.lime, 0), textcolor=color.black, size=size.small)
+plotshape(shortSignal, title="SELL", text="SELL", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+
+//=====================================================
+// TRADE MANAGEMENT
+//=====================================================
+var float longSL = na
+var float longTP = na
+var float longEntry = na
+var float longRisk = na
+
+var float shortSL = na
+var float shortTP = na
+var float shortEntry = na
+var float shortRisk = na
+
+var line slLine = na
+var line tpLine = na
+var line entryLine = na
+
+if longSignal
+    longEntry := close
+    longSL := useSwingStops ? low : close - atr * atrStopMult
+    longRisk := longEntry - longSL
+    longTP := longEntry + longRisk * rrTarget
+
+    if longRisk > syminfo.mintick
+        strategy.entry("Long", strategy.long)
+
+        if showTP_SL_Lines
+            if not na(slLine)
+                line.delete(slLine)
+            if not na(tpLine)
+                line.delete(tpLine)
+            if not na(entryLine)
+                line.delete(entryLine)
+            entryLine := line.new(bar_index, longEntry, bar_index + 20, longEntry, color=color.white, width=1, style=line.style_dotted)
+            slLine := line.new(bar_index, longSL, bar_index + 20, longSL, color=color.red, width=2)
+            tpLine := line.new(bar_index, longTP, bar_index + 20, longTP, color=color.lime, width=2)
+
+if shortSignal
+    shortEntry := close
+    shortSL := useSwingStops ? high : close + atr * atrStopMult
+    shortRisk := shortSL - shortEntry
+    shortTP := shortEntry - shortRisk * rrTarget
+
+    if shortRisk > syminfo.mintick
+        strategy.entry("Short", strategy.short)
+
+        if showTP_SL_Lines
+            if not na(slLine)
+                line.delete(slLine)
+            if not na(tpLine)
+                line.delete(tpLine)
+            if not na(entryLine)
+                line.delete(entryLine)
+            entryLine := line.new(bar_index, shortEntry, bar_index + 20, shortEntry, color=color.white, width=1, style=line.style_dotted)
+            slLine := line.new(bar_index, shortSL, bar_index + 20, shortSL, color=color.red, width=2)
+            tpLine := line.new(bar_index, shortTP, bar_index + 20, shortTP, color=color.lime, width=2)
+
+//=====================================================
+// ACTIVE EXIT LOGIC
+//=====================================================
+longActive = strategy.position_size > 0
+shortActive = strategy.position_size < 0
+
+currLongSL = longSL
+currShortSL = shortSL
+
+if longActive and moveToBEat1R and not na(longEntry) and not na(longRisk)
+    if high >= longEntry + longRisk
+        currLongSL := math.max(currLongSL, longEntry)
+
+if shortActive and moveToBEat1R and not na(shortEntry) and not na(shortRisk)
+    if low <= shortEntry - shortRisk
+        currShortSL := math.min(currShortSL, shortEntry)
+
+if longActive and useTrailingStop
+    trailSL = close - atr * trailAtrMult
+    currLongSL := math.max(currLongSL, trailSL)
+
+if shortActive and useTrailingStop
+    trailSL = close + atr * trailAtrMult
+    currShortSL := math.min(currShortSL, trailSL)
+
+if longActive and not na(currLongSL) and not na(longTP)
+    strategy.exit("Long Exit", from_entry="Long", stop=currLongSL, limit=longTP)
+
+if shortActive and not na(currShortSL) and not na(shortTP)
+    strategy.exit("Short Exit", from_entry="Short", stop=currShortSL, limit=shortTP)
+
+//=====================================================
+// ALERTS
+//=====================================================
+alertcondition(longSignal, title="Long Entry", message="SMC Pro v3 Long Entry")
+alertcondition(shortSignal, title="Short Entry", message="SMC Pro v3 Short Entry")
+alertcondition(bullSweep or pdlSweep, title="Bullish Sweep", message="Bullish liquidity sweep detected")
+alertcondition(bearSweep or pdhSweep, title="Bearish Sweep", message="Bearish liquidity sweep detected")
+alertcondition(bullCHoCH, title="Bullish CHoCH", message="Bullish CHoCH detected")
+alertcondition(bearCHoCH, title="Bearish CHoCH", message="Bearish CHoCH detected")
+alertcondition(bullFVG, title="Bullish FVG", message="Bullish FVG detected")
+alertcondition(bearFVG, title="Bearish FVG", message="Bearish FVG detected")
+
+View in Pine Editor・365 lines
+Use on chart
+8
+463
+REFLEX BUY SELL QQQ NQ STRAT
+SMC Pro v3 Strategy - Liquidity Sweeps + FVG + BOS/CHoCH

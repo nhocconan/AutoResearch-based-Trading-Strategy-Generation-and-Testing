@@ -1,0 +1,5 @@
+//@version=5
+PlotHLineInput=##input(defval=false,type='INPUT_BOOL',##id='in_5')
+HLine=##input(defval=5.0,type='INPUT_FLOAT',##id='in_6')
+HlinePlot=((PlotHLineInput==true)?HLine:na)
+##root(root_metainfo,rm_0,HlinePlot,input__float)

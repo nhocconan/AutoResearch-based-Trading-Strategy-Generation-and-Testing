@@ -1,0 +1,397 @@
+//@version=5
+
+strategy(title='Trend Deviation strategy - BTC [IkkeOmar]', overlay=true, default_qty_type  = strategy.percent_of_equity , pyramiding=1 , initial_capital = 1000 , default_qty_value = 100)
+
+src = input(close, title="Source")
+
+// INPUTS: ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//DMI input
+
+len2 = input.int(15, minval=1, title="DI Length", group="DMI - Confluence 1")
+
+// BB inputs
+BB_Length = input.int(13, minval=1, group="BBANDS - Confluence 2")
+mult = input.float(2.3, title="BB Mult",minval=0.001, maxval=50, group="BBANDS - Confluence 2")
+
+//STC Inputs
+EEEEEE = input(14, 'LengthSTC', group="STC")
+BBBB = input(25, 'FastLengthSTC', group="STC")
+BBBBB = input(60, 'SlowLengthSTC', group="STC")
+
+
+// MACD inputs:
+MACD_Fast_Length = input(15, group="MACD")
+MACD_Slow_Length = input(200, group="MACD")
+MACD_Length = input(25, group="MACD")
+
+// Momentum input
+length4 = input.int(10, title="Momentum Length", minval=1, group="Momentum Indicator")
+
+//AROON Input
+AROON_Length = input.int(5, minval=1, group="AROON")
+
+//Trend inputs
+atrPeriod = input(200, "Trendline Length", group="Trendline Indicator")
+factor = input.float(2, "Trendline Factor", step = 0.01, group="Trendline Indicator")
+
+
+// CALCULATIONS: ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+// DMI
+lensig2 = 34
+up2 = ta.change(high)
+down2 = -ta.change(low)
+plusDM2 = na(up2) ? na : (up2 > down2 and up2 > 0 ? up2 : 0)
+minusDM2 = na(down2) ? na : (down2 > up2 and down2 > 0 ? down2 : 0)
+trur2 = ta.rma(ta.tr, len2)
+plus2 = fixnan(100 * ta.rma(plusDM2, len2) / trur2)
+minus2 = fixnan(100 * ta.rma(minusDM2, len2) / trur2)
+sum2 = plus2 + minus2
+adx2 = 100 * ta.rma(math.abs(plus2 - minus2) / (sum2 == 0 ? 1 : sum2), lensig2)
+
+dmi_long =  ((plus2 > adx2) and (adx2 > 20) and (plus2 > 20))   or (((adx2 > adx2[1]) and (adx2[1] > adx2[2])) and (plus2 > adx2) and (adx2 >20)) or ((ta.crossover(plus2, minus2) and adx2 > 40)) or ((adx2 > 30) and (minus2 < plus2) and (plus2 > 25)) 
+dmi_up = ((plus2[0] > plus2[1]) and (plus2[0] > plus2[2]) and (plus2[0] > plus2[3])) and ((adx2 > adx2[1]) and (adx2[1] > adx2[2]) and (adx2[2] > adx2[3]))
+dmi_cross_up = ta.crossover(plus2, minus2)
+dmi_bottom = (adx2 > 55) and (minus2 > 40) and (plus2 <15)
+dmi_short = ((ta.crossover(minus2, plus2) and adx2 > 20)) or ((adx2 > 32) and (minus2 > plus2)) or ((minus2 > adx2) and (adx2 > 40) and (minus2 > 25))  or (((adx2 > adx2[1]) and (adx2[1] > adx2[2])) and (minus2 > adx2) and (adx2 > 25)) or ((minus2 > plus2) and (adx2 >30))
+dmi_down = ((minus2[0] > minus2[1]) and (minus2[0] > minus2[2]) and (minus2[0] > minus2[3])) and ((adx2 > adx2[1]) and (adx2[1] > adx2[2]) and (adx2[2] > adx2[3]))
+dmi_cross_down = ta.crossover(minus2, plus2)
+dmi_top = (adx2 > 55) and (plus2 > 40) and (minus2 <15)
+
+
+//Bolinger Bands
+source = hlc3
+basis = ta.sma(source, BB_Length)
+dev = mult * ta.stdev(source, BB_Length)
+upper = basis + dev
+lower = basis - dev
+bblong = source < upper
+bbshort = source > lower
+
+
+// Aroon 
+AROONupper = 100 * (ta.highestbars(high, AROON_Length+1) + AROON_Length)/AROON_Length
+AROONlower = 100 * (ta.lowestbars(low, AROON_Length+1) + AROON_Length)/AROON_Length
+
+aroon_bull = ta.crossover(AROONupper, AROONlower)
+aroon_bear = ta.crossunder(AROONupper, AROONlower)
+aroon_long = AROONlower > AROONupper
+aroon_short = AROONlower < AROONupper
+
+// STC
+AAAA(BBB, BBBB, BBBBB) =>
+    fastMA = ta.ema(BBB, BBBB)
+    slowMA = ta.ema(BBB, BBBBB)
+    AAAA = fastMA - slowMA
+    AAAA
+
+AAAAA(EEEEEE, BBBB, BBBBB) =>
+    AAA = input(1.5, title="STC Factor", group="STC")
+    var CCCCC = 0.0
+    var DDD = 0.0
+    var DDDDDD = 0.0
+    var EEEEE = 0.0
+    BBBBBB = AAAA(close, BBBB, BBBBB)
+    CCC = ta.lowest(BBBBBB, EEEEEE)
+    CCCC = ta.highest(BBBBBB, EEEEEE) - CCC
+    CCCCC := CCCC > 0 ? (BBBBBB - CCC) / CCCC * 100 : nz(CCCCC[1])
+    DDD := na(DDD[1]) ? CCCCC : DDD[1] + AAA * (CCCCC - DDD[1])
+    DDDD = ta.lowest(DDD, EEEEEE)
+    DDDDD = ta.highest(DDD, EEEEEE) - DDDD
+    DDDDDD := DDDDD > 0 ? (DDD - DDDD) / DDDDD * 100 : nz(DDDDDD[1])
+    EEEEE := na(EEEEE[1]) ? DDDDDD : EEEEE[1] + AAA * (DDDDDD - EEEEE[1])
+    EEEEE
+
+mAAAAA = AAAAA(EEEEEE, BBBB, BBBBB)
+
+
+stc_short = (mAAAAA[3] <= mAAAAA[2]) and (mAAAAA[2] >= mAAAAA[1]) and (mAAAAA > 40)
+stc_long = (mAAAAA[3] >= mAAAAA[2]) and (mAAAAA[2] <= mAAAAA[1]) and (mAAAAA < 60)
+  
+stc_low = mAAAAA < 25
+stc_high = mAAAAA > 75
+
+
+
+// MACD
+MACD = ta.ema(close, MACD_Fast_Length) - ta.ema(close, MACD_Slow_Length)
+aMACD = ta.ema(MACD, MACD_Length)
+delta = MACD - aMACD
+
+macd_long = MACD > aMACD
+macd_short = MACD < aMACD
+
+
+// Momentum
+price = close
+momentum(seria, length4) =>
+    mom = seria - seria[length4]
+    mom
+mom0 = momentum(price, length4)
+mom1 = momentum( mom0, 1)
+mom_long = (mom0 > 0 and mom1 > 0)
+    
+
+mom_short = (mom0 < 0 and mom1 < 0)
+
+
+// Trend
+[_, direction] = ta.supertrend(factor, atrPeriod)
+
+trendlong = ta.change(direction) < 0
+   
+
+trendshort = ta.change(direction) > 0
+  
+//RSI
+//RSI_Length = input.int(14, minval=1, group="RSI - Confluence 3")
+rsi = ta.rsi(close, 14)
+rsi_over_sold = rsi < 37
+rsi_over_bought = rsi > 60
+rsi_high = rsi > 50
+rsi_low = rsi < 50
+
+//EMA
+fastEMA = ta.ema(close, 26)
+slowEMA = ta.ema(hlc3, 200)
+ema_long = fastEMA > slowEMA
+ema_short = fastEMA < slowEMA
+slow_ema_long = slowEMA > src
+slow_ema_short = slowEMA < src
+
+//VWAP
+vwap = ta.vwap(close)
+vwap_long = vwap > src
+vwap_short = vwap < src
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// CONDITIONS: ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+// Options that configure the backtest start date
+startDate = input.time(title='Start Date', defval=timestamp('01 Jan 2018 00:00'))
+
+
+// Option to select trade directions
+tradeDirection = input.string(title='Trade Direction', options=['Long', 'Short', 'Both'], defval='Long')
+
+// Translate input into trading conditions
+longOK = tradeDirection == 'Long' or tradeDirection == 'Both'
+shortOK = tradeDirection == 'Short' or tradeDirection == 'Both'
+
+
+// Check if the close time of the current bar falls inside the date range
+inDateRange = time >= startDate
+
+
+longCondition = dmi_cross_up and bblong and (mom_long or macd_long or trendlong or stc_long or stc_low or aroon_long or aroon_bull) 
+
+
+shortCondition = dmi_cross_down and bbshort and (mom_short or macd_short or trendshort or stc_short or stc_high or aroon_short or aroon_bear) 
+
+
+
+if time >= startDate and longCondition
+    strategy.entry("long", strategy.long, when = longCondition)
+
+if time >= startDate and shortCondition
+    strategy.entry("short", strategy.short, when = shortCondition)
+
+View in Pine Editor・212 lines
+Use on chart
+1
+5
+6
+4 905
+Intro:
+This is an example if anyone needs a push to get started with making strategies in pine script. This is an example on BTC, obviously it isn't a good strategy, and I wouldn't share my own good strategies because of alpha decay.
+
+This strategy integrates several technical indicators to determine market trends and potential trade setups. These indicators include:
+
+
+Directional Movement Index (DMI)
+
+Bollinger Bands (BB)
+
+Schaff Trend Cycle (STC)
+
+Moving Average Convergence Divergence (MACD)
+
+Momentum Indicator
+
+Aroon Indicator
+
+Supertrend Indicator
+
+Relative Strength Index (RSI)
+
+Exponential Moving Average (EMA)
+
+Volume Weighted Average Price (VWAP)
+
+
+
+It's crucial for you guys to understand the strengths and weaknesses of each indicator and identify synergies between them to improve the strategy's effectiveness.
+
+
+Indicator Settings:
+
+DMI (Directional Movement Index):
+Length: This parameter determines the number of bars used in calculating the DMI. A higher length may provide smoother results but might lag behind the actual price action.
+
+
+Bollinger Bands:
+
+
+Length: This parameter specifies the number of bars used to calculate the moving average for the Bollinger Bands. A longer length results in a smoother average but might lag behind the price action.
+
+Multiplier: The multiplier determines the width of the Bollinger Bands. It scales the standard deviation of the price data. A higher multiplier leads to wider bands, indicating increased volatility, while a lower multiplier results in narrower bands, suggesting decreased volatility.
+
+
+
+
+
+Schaff Trend Cycle (STC):
+
+
+Length: This parameter defines the length of the STC calculation. A longer length may result in smoother but slower-moving signals.
+
+Fast Length: Specifies the length of the fast moving average component in the STC calculation.
+
+Slow Length: Specifies the length of the slow moving average component in the STC calculation.
+
+
+
+
+
+MACD (Moving Average Convergence Divergence):
+
+
+Fast Length: Determines the number of bars used to calculate the fast EMA (Exponential Moving Average) in the MACD.
+
+Slow Length: Specifies the number of bars used to calculate the slow EMA in the MACD.
+
+Signal Length: Defines the number of bars used to calculate the signal line, which is typically an EMA of the MACD line.
+
+
+
+Momentum Indicator:
+
+Length: This parameter sets the number of bars over which momentum is calculated. A longer length may provide smoother momentum readings but might lag behind significant price changes.
+
+
+
+Aroon Indicator:
+
+Length: Specifies the number of bars over which the Aroon indicator calculates its values. A longer length may result in smoother Aroon readings but might lag behind significant market movements.
+
+
+Supertrend Indicator:
+
+
+Trendline Length: Determines the length of the period used in the Supertrend calculation. A longer length results in a smoother trendline but might lag behind recent price changes.
+
+Trendline Factor: Specifies the multiplier used in calculating the trendline. It affects the sensitivity of the indicator to price changes.
+
+
+
+RSI (Relative Strength Index):
+
+Length: This parameter sets the number of bars over which RSI calculates its values. A longer length may result in smoother RSI readings but might lag behind significant price changes.
+
+
+
+EMA (Exponential Moving Average):
+
+
+Fast EMA: Specifies the number of bars used to calculate the fast EMA. A shorter period results in a more responsive EMA to recent price changes.
+
+Slow EMA: Determines the number of bars used to calculate the slow EMA. A longer period results in a smoother EMA but might lag behind recent price changes.
+
+
+
+VWAP (Volume Weighted Average Price):
+
+Default settings are typically used for VWAP calculations, which consider the volume traded at each price level over a specific period. This indicator provides insights into the average price weighted by trading volume.
+
+
+
+
+backtest range and rules:
+
+
+You can specify the start date for backtesting purposes.
+
+
+You can can select the desired trade direction: Long, Short, or Both.
+
+
+
+Entry and Exit Conditions:
+
+LONG:
+
+DMI Cross Up: The Directional Movement Index (DMI) indicates a bullish trend when the positive directional movement (+DI) crosses above the negative directional movement (-DI).
+
+Bollinger Bands (BB): The price is below the upper Bollinger Band, indicating a potential reversal from the upper band.
+
+Momentum Indicator: Momentum is positive, suggesting increasing buying pressure.
+
+MACD (Moving Average Convergence Divergence): The MACD line is above the signal line, indicating bullish momentum.
+
+Supertrend Indicator: The Supertrend indicator signals an uptrend.
+
+Schaff Trend Cycle (STC): The STC indicates a bullish trend.
+
+Aroon Indicator: The Aroon indicator signals a bullish trend or crossover.
+
+
+
+When all these conditions are met simultaneously, the strategy considers it a favorable opportunity to enter a long trade.
+
+SHORT:
+
+DMI Cross Down: The Directional Movement Index (DMI) indicates a bearish trend when the negative directional movement (-DI) crosses above the positive directional movement (+DI).
+
+Bollinger Bands (BB): The price is above the lower Bollinger Band, suggesting a potential reversal from the lower band.
+
+Momentum Indicator: Momentum is negative, indicating increasing selling pressure.
+
+MACD (Moving Average Convergence Divergence): The MACD line is below the signal line, signaling bearish momentum.
+
+Supertrend Indicator: The Supertrend indicator signals a downtrend.
+
+Schaff Trend Cycle (STC): The STC indicates a bearish trend.
+
+Aroon Indicator: The Aroon indicator signals a bearish trend or crossover.
+
+
+
+When all these conditions align, the strategy considers it an opportune moment to enter a short trade.
+
+
+
+Disclaimer:
+THIS ISN'T AN OPTIMAL STRATEGY AT ALL! It was just an old project from when I started learning pine script!
+The backtest doesn't promise the same results in the future, always do both in-sample and out-of-sample testing when backtesting a strategy. And make sure you forward test it as well before implementing it!
+
+Furthermore this strategy uses both trend and mean-reversion systems, that is usually a no-go if you want to build robust trend systems.
+
+Don't hesitate to comment if you have any questions or if you have some good notes for a beginner.
+
+
+
+
+

@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-03-23T06:39:32.609267+00:00",
+  "queue_rank": 3376,
+  "page": 141,
+  "name": "Momentum Strategy (BTC/USDT; 30m) - STOCH RSI (with source code)",
+  "slug": "momentum-stoch-rsi-30m",
+  "chart_url": "https://www.tradingview.com/script/79Tn4cQY-Momentum-Strategy-BTC-USDT-30m-STOCH-RSI-with-source-code/",
+  "pine_file": "raw-pine/bulk/79Tn4cQY-Momentum-Strategy-BTC-USDT-30m-STOCH-RSI-with-source-code.pine",
+  "symbol_name": "BINANCE:BTCUSDT",
+  "repo_timeframe_hint": "30m",
+  "status": "converted",
+  "classification": "partial",
+  "timeframe": "30m",
+  "reason": "Uses strategy.exit with stop/limit requiring intrabar approximation; dynamic sizing relies on trade history state.",
+  "adaptations": [
+    "Approximate stop/limit fills using bar high/low",
+    "Implement stateful trade history for gamble sizing",
+    "Normalize position sizing to repo contract",
+    "Remove webhook JSON logic",
+    "Enforce next-bar execution semantics"
+  ],
+  "attempts_used": 1,
+  "attempt_log": [],
+  "conversion_notes": [
+    "Converted Stochastic RSI logic using pure numpy/pandas implementations",
+    "Approximated strategy.exit stop/limit fills using bar high/low checks",
+    "Implemented stateful gamble sizing based on simulated trade history",
+    "Enforced next-bar execution semantics (entries use previous bar close)",
+    "Removed webhook JSON and TV-HUB integration code (repo-incompatible)",
+    "Normalized position sizing to target-position fractions (-1, 0, 1)",
+    "Bars delay logic preserved for signal-based exits",
+    "EMA trend filter applied to both long and short entries",
+    "Stop loss and take profit levels calculated at entry and checked each bar",
+    "Classified as partial due to intrabar SL/TP approximation"
+  ],
+  "python_file": "python-strategies/stage2-local/momentum-stoch-rsi-30m.py",
+  "failed_python_files": [],
+  "validation": {
+    "module_name": "Momentum Strategy (BTC/USDT; 30m) - STOCH RSI",
+    "module_timeframe": "30m",
+    "symbol": "BTCUSDT",
+    "bars_checked": 7249,
+    "non_zero_signals": 6455,
+    "finite_ratio": 1.0
+  },
+  "last_error": null
+}

@@ -1,0 +1,39 @@
+//@version=6
+strategy("DBO_Prod", shorttitle="DBO_Prod", overlay=true, calc_on_every_tick=true, process_orders_on_close=false, margin_long=0, margin_short=0)
+
+// Minimal artifact to satisfy TradingView publish requirements.
+// Draws nothing visible on the chart.
+// Hidden plot to satisfy publish requirements even if you later remove the dummy trade.
+plot(na, title="Retired", display=display.none)
+
+var bool didEntry = false
+var bool didExit = false
+
+bool canSimTrade = not barstate.isrealtime
+
+if canSimTrade and barstate.isfirst and not didEntry
+    strategy.entry("RETIRE_TEST", strategy.long, qty=1)
+    didEntry := true
+
+if canSimTrade and didEntry and not didExit and not barstate.isfirst
+    strategy.close("RETIRE_TEST")
+    didExit := true
+
+View in Pine Editor・20 lines
+Use on chart
+3
+9
+999
+Sep 28, 2025
+Added News Day Support, has support for variable sizing on recoup trading. This does a opposite trade using YM in real time, but keeps MYM on historical bars.
+
+Known bug: On the historical view, I'm getting a ghost trade causing results to be 13% inflated.
+Sep 29, 2025
+Release Notes
+A custom version of daily breakout, based on london open with a fix for the trading view glitch on sizing.
+Sep 29, 2025
+Release Notes
+Fixed the Jolts news day and added news trading labels.
+Jan 22
+Release Notes
+Current Code

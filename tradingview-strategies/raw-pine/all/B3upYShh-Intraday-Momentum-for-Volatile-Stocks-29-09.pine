@@ -1,0 +1,138 @@
+//@version=5
+strategy("Intraday Momentum for Volatile Stocks (Nifty Filter)", overlay=true)
+
+// =============================================================================
+//                            INPUTS
+// =============================================================================
+
+// Session Timing
+intra_end_hour = input.int(15, "End Hour Intraday (24h)", minval=9, maxval=15, group="Timing & Entry")
+intra_end_min = input.int(0, "End Min Intraday", minval=0, maxval=59, group="Timing & Entry")
+pct_above_open = input.float(2.5, "Entry: % Above Open", step=0.1, group="Timing & Entry") / 100
+
+// Exit Parameters
+atr_period = input.int(14, "ATR Period", minval=1, group="Exits")
+atr_multiplier = input.float(3.0, "Stop Loss (ATR Multiplier)", minval=0.1, step=0.1, group="Exits")
+// NEW: Profit target is now based on ATR, not a fixed percentage.
+profit_target_atr_mult = input.float(4.0, "Profit Target (ATR Multiplier)", minval=0.5, step=0.1, group="Exits")
+
+// Filters
+// REVERTED: The filter is now fixed to the Nifty 50 index.
+index_symbol = input.symbol("NIFTY", "Market Index Symbol", group="Filters")
+mr_length = input.int(50, "Market Regime SMA Period", minval=1, group="Filters")
+mfi_length = input.int(14, "MFI Period", minval=1, group="Filters")
+
+
+// =============================================================================
+//                      CALCULATIONS & LOGIC
+// =============================================================================
+
+// Time and Session Variables
+var float today_open = na
+var float daily_cum_vol = 0.0
+is_newday = ta.change(time("D")) != 0
+
+// Calculate the 20-day simple moving average of volume.
+vol_sma_20 = ta.sma(volume, 20)
+float volume_benchmark = request.security(syminfo.tickerid, "D", vol_sma_20[1], lookahead=barmerge.lookahead_off)
+
+if is_newday
+    today_open := open
+    daily_cum_vol := volume
+else
+    daily_cum_vol += volume
+
+// --- Filters ---
+index_close = request.security(index_symbol, "D", close, lookahead=barmerge.lookahead_off)
+index_sma = ta.sma(index_close, mr_length)
+mr_filter = index_close > index_sma
+mfi_filter = ta.mfi(hlc3, mfi_length) > 50
+
+// --- Entry Conditions ---
+is_intraday_time = (hour < intra_end_hour) or (hour == intra_end_hour and minute <= intra_end_min)
+price_cross_up = high >= (today_open * (1 + pct_above_open))
+vol_achieved = daily_cum_vol >= volume_benchmark
+
+buy_signal = price_cross_up and vol_achieved and is_intraday_time and mr_filter and mfi_filter and strategy.position_size == 0
+
+
+// --- Exit Conditions ---
+var float long_stop_price = na
+var float profit_target_price = na
+
+sell_signal = false
+profit_hit = false
+atr_value = ta.atr(atr_period) // Calculate ATR once for both exits
+
+if strategy.position_size > 0
+    // Set Profit Target ONCE when the trade begins
+    if strategy.position_size[1] == 0
+        entry_price = strategy.opentrades.entry_price(strategy.opentrades - 1)
+        // MODIFIED: Profit target calculation now uses the ATR multiplier.
+        profit_target_price := entry_price + (atr_value * profit_target_atr_mult)
+
+    // Calculate Trailing Stop on every bar of the trade
+    new_stop = high - (atr_value * atr_multiplier)
+    long_stop_price := na(long_stop_price) ? new_stop : math.max(new_stop, long_stop_price)
+
+    // Check for exit conditions
+    sell_signal := close < long_stop_price
+    profit_hit := close >= profit_target_price
+else
+    // Reset prices when not in a position
+    long_stop_price := na
+    profit_target_price := na
+
+
+// =============================================================================
+//                      STRATEGY EXECUTION & PLOTS
+// =============================================================================
+
+if buy_signal
+    strategy.entry("Buy", strategy.long)
+
+if sell_signal or profit_hit
+    strategy.close("Buy", comment = profit_hit ? "Profit Target Hit" : "ATR Stop")
+    
+plotshape(buy_signal, title="Buy Signal", style=shape.triangleup, color=color.new(color.green, 0), location=location.belowbar, size=size.small)
+plotshape(sell_signal or profit_hit, title="Sell Signal", style=shape.triangledown, color=color.new(color.red, 0), location=location.abovebar, size=size.small)
+plot(strategy.position_size > 0 ? long_stop_price : na, title="ATR Trailing Stop", color=color.orange, style=plot.style_linebr)
+plot(strategy.position_size > 0 ? profit_target_price : na, title="Profit Target", color=color.new(color.teal, 0), style=plot.style_linebr)
+
+View in Pine Editor・100 lines
+Use on chart
+4
+0
+2
+1 559
+The strategy targets intraday momentum breakouts in volatile stocks when the broader market (Nifty) is in an uptrend. It enters long positions when stocks move significantly above their daily opening price with sufficient volume confirmation, then manages the trade using dynamic ATR-based stops and profit targets.
+
+Entry Conditions
+Price Momentum Filter: The stock must move at least 2.5% above its daily opening price, indicating strong bullish momentum. This percentage threshold is customizable and targets gap-up scenarios or strong intraday breakouts.
+
+Volume Confirmation: Daily cumulative volume must exceed the 20-day average volume, ensuring institutional participation and genuine momentum. This prevents false breakouts on low volume.
+
+Market Regime Filter: The Nifty index must be trading above its 50-day SMA, indicating a favorable market environment for momentum trades. This macro filter helps avoid trades during bearish market conditions.
+
+Money Flow Index: MFI must be above 50, confirming buying pressure and positive money flow into the stock. This adds another layer of momentum confirmation.
+
+Time Restriction: Trades are only initiated before 3:00 PM to ensure sufficient time for position management and avoid end-of-day volatility.
+
+Exit Management
+ATR Trailing Stop Loss: Uses a 3x ATR multiplier for dynamic stop-loss placement that trails higher highs, protecting profits while giving trades room to breathe. The trailing mechanism locks in gains as the stock moves favorably.
+
+Profit Target: Set at 4x ATR above the entry price, providing a favorable risk-reward ratio based on the stock's volatility characteristics. This adaptive approach adjusts targets based on individual stock behavior.
+
+Position Reset: Both stops and targets reset when not in a position, ensuring fresh calculations for each new trade.
+
+Key Strengths
+Volatility Adaptation: The ATR-based approach automatically adjusts risk parameters to match current market volatility levels. Higher volatility stocks get wider stops, while calmer stocks get tighter management.
+
+Multi-Timeframe Filtering: Combines intraday price action with daily volume patterns and market regime analysis for robust signal generation.
+
+Risk Management Focus: The strategy prioritizes capital preservation through systematic stop-loss placement and position sizing considerations.
+
+Considerations for NSE Trading
+This strategy appears well-suited for NSE intraday momentum trading, particularly for mid-cap and small-cap stocks that exhibit high volatility. The Nifty filter helps align trades with broader market sentiment, which is crucial in the Indian market context where sectoral and index movements strongly influence individual stocks.
+
+The 2.5% threshold above open price is appropriate for volatile NSE stocks, though traders might consider adjusting this parameter based on the specific stocks being traded. The strategy's emphasis on volume confirmation is particularly valuable in the NSE environment where retail participation can create misleading price movements without institutional backin

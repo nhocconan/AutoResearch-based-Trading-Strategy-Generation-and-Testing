@@ -1,0 +1,385 @@
+//@version=6
+strategy("Hash Supertrend", 
+         shorttitle="Hash Supertrend", 
+         overlay=true, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=15)
+
+// Company Information - Info icon only, no text box
+_ = input.bool(true, "ℹ️ About Hash Capital Research", tooltip="Developed by Hash Capital Partners\n\nFollow us on TradingView for exclusive premium indicators and cutting-edge quantitative research.", group="Company Information")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// CORE SUPERTREND SETTINGS
+// ════════════════════════════════════════════════════════════════════════════════
+
+atrPeriod = input.int(16, "ATR Length", minval=1, group="Supertrend Settings", tooltip="Number of bars for ATR calculation. Lower values (7-10) = more sensitive. Higher values (12-14) = smoother but slower.")
+factor = input.float(3.11, "Factor", step=0.01, minval=0.1, group="Supertrend Settings", tooltip="ATR multiplier. Lower values (1.5-2.5) = more signals but more whipsaws. Higher values (3.0-4.0) = fewer but stronger signals.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TIME FILTER SETTINGS
+// ════════════════════════════════════════════════════════════════════════════════
+
+useTimeFilter = input.bool(false, "Enable Time Filter", group="Time Filter", tooltip="Only trade during specified hours. Useful for avoiding choppy sessions or off-hours volatility.")
+startHour = input.int(9, "Start Hour", minval=0, maxval=23, group="Time Filter", tooltip="Trading session start hour in exchange timezone (24-hour format).")
+startMinute = input.int(30, "Start Minute", minval=0, maxval=59, group="Time Filter", tooltip="Trading session start minute.")
+endHour = input.int(16, "End Hour", minval=0, maxval=23, group="Time Filter", tooltip="Trading session end hour in exchange timezone (24-hour format).")
+endMinute = input.int(0, "End Minute", minval=0, maxval=59, group="Time Filter", tooltip="Trading session end minute.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// VISUAL SETTINGS - HASH CAPITAL STYLE
+// ════════════════════════════════════════════════════════════════════════════════
+
+colorIntensity = input.float(7.0, "Color Intensity", minval=1.0, maxval=10.0, step=1.0, group="Visual", tooltip="Controls color vibrancy. 1-3 = subtle colors, 4-6 = balanced, 7-10 = very bright and vibrant colors.")
+showGlowEffect = input.bool(true, "Glow Effect", group="Visual", tooltip="Adds luminous glow around the Supertrend line. Creates a more dramatic visual effect.")
+glowIntensity = input.float(5.0, "Glow Intensity", minval=1.0, maxval=10.0, step=1.0, group="Visual", tooltip="Controls glow brightness. 1-3 = subtle glow, 4-6 = moderate glow, 7-10 = intense glow effect.")
+showSignals = input.bool(true, "Show Entry Signals", group="Visual", tooltip="Display buy/sell signals on chart when trend changes.")
+showZone = input.bool(true, "Show Trend Zone", group="Visual", tooltip="Fill area between price and Supertrend line to visualize trend zones.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SUPERTREND CALCULATION
+// ════════════════════════════════════════════════════════════════════════════════
+
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+// Trend state
+isBullish = direction < 0
+isBearish = direction > 0
+
+// Detect trend changes
+trendChanged = ta.change(direction) != 0
+longSignal = ta.change(direction) < 0
+shortSignal = ta.change(direction) > 0
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TIME FILTER LOGIC
+// ════════════════════════════════════════════════════════════════════════════════
+
+isInSession = true
+
+if useTimeFilter
+    // Get current time components
+    currentHour = hour(time)
+    currentMinute = minute(time)
+    
+    // Convert to minutes for easier comparison
+    currentTimeInMinutes = currentHour * 60 + currentMinute
+    startTimeInMinutes = startHour * 60 + startMinute
+    endTimeInMinutes = endHour * 60 + endMinute
+    
+    // Handle cases where session crosses midnight
+    if endTimeInMinutes > startTimeInMinutes
+        // Normal case: session within same day (e.g., 9:30 to 16:00)
+        isInSession := currentTimeInMinutes >= startTimeInMinutes and currentTimeInMinutes <= endTimeInMinutes
+    else
+        // Session crosses midnight (e.g., 22:00 to 02:00)
+        isInSession := currentTimeInMinutes >= startTimeInMinutes or currentTimeInMinutes <= endTimeInMinutes
+
+// ════════════════════════════════════════════════════════════════════════════════
+// HASH CAPITAL COLOR SYSTEM - FLUORESCENT GRADIENT
+// ════════════════════════════════════════════════════════════════════════════════
+
+getAdaptiveColor(bool bullish) =>
+    // Convert 1-10 scale to 0-1 for calculations
+    colorScale = colorIntensity / 10.0
+    
+    if bullish
+        // Bright fluorescent green spectrum for bullish
+        intensity = colorScale
+        redVal = math.round(100 * (1 - intensity))
+        greenVal = 255
+        blueVal = math.round(100 * (1 - intensity * 0.7))
+        alpha = math.max(0, math.round(30 * (1 - intensity)))
+        color.rgb(redVal, greenVal, blueVal, alpha)
+    else
+        // Bright fluorescent red spectrum for bearish
+        intensity = colorScale
+        redVal = 255
+        greenVal = math.round(100 * (1 - intensity))
+        blueVal = math.round(100 * (1 - intensity * 0.7))
+        alpha = math.max(0, math.round(30 * (1 - intensity)))
+        color.rgb(redVal, greenVal, blueVal, alpha)
+
+// Enhanced Glow effect
+getGlowColor(bool bullish) =>
+    if showGlowEffect
+        // Convert 1-10 scale to usable range
+        glowScale = glowIntensity / 10.0
+        glowAlpha = math.round(100 - (60 * glowScale))
+        
+        if bullish
+            // Bright green glow for bullish
+            color.new(#00FF00, math.max(30, glowAlpha))
+        else
+            // Bright red glow for bearish
+            color.new(#FF0000, math.max(30, glowAlpha))
+    else
+        na
+
+// ════════════════════════════════════════════════════════════════════════════════
+// STRATEGY EXECUTION
+// ════════════════════════════════════════════════════════════════════════════════
+
+if longSignal and isInSession
+    strategy.entry("Long", strategy.long)
+
+if shortSignal and isInSession
+    strategy.entry("Short", strategy.short)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// VISUAL PLOTTING - HASH CAPITAL STYLE
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Main Supertrend line with adaptive color
+mainColor = getAdaptiveColor(isBullish)
+glowColor = getGlowColor(isBullish)
+
+// Plot main line with glow effect
+supertrendGlow = plot(supertrend, "Supertrend Glow", color=glowColor, linewidth=6, display=display.all)
+supertrendMain = plot(supertrend, "Supertrend", color=mainColor, linewidth=3, display=display.all)
+
+// Trend zone fill - area between price and Supertrend
+priceLinePlot = plot(close, "Price Reference", color=color.new(color.white, 100), display=display.none)
+
+// Fill zones conditionally
+bullishZoneColor = color.new(#00FF00, 92)
+bearishZoneColor = color.new(#FF0000, 92)
+
+// Create conditional fill colors
+currentBullFill = isBullish ? bullishZoneColor : na
+currentBearFill = isBearish ? bearishZoneColor : na
+
+// Bullish zone - green tint
+fill(supertrendMain, priceLinePlot, 
+     color=currentBullFill, 
+     title="Bullish Zone")
+
+// Bearish zone - red tint
+fill(supertrendMain, priceLinePlot, 
+     color=currentBearFill, 
+     title="Bearish Zone")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS - TINY FLUORESCENT DOTS
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Long signals - tiny bright green dot
+plotshape(showSignals and longSignal, 
+          title="Long Signal", 
+          style=shape.circle, 
+          location=location.belowbar, 
+          color=color.new(#00FF00, 0), 
+          size=size.tiny)
+
+// Short signals - tiny bright red dot
+plotshape(showSignals and shortSignal, 
+          title="Short Signal", 
+          style=shape.circle, 
+          location=location.abovebar, 
+          color=color.new(#FF0000, 0), 
+          size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TIME FILTER VISUAL INDICATOR (OPTIONAL)
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Subtle background shading when outside trading hours
+bgcolor(useTimeFilter and not isInSession ? color.new(color.gray, 95) : na, title="Outside Trading Hours")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ALERT SYSTEM - PROFESSIONAL, NO EMOJIS
+// ════════════════════════════════════════════════════════════════════════════════
+
+alertcondition(longSignal and isInSession, "Long Entry", "Supertrend flipped BULLISH - Long signal triggered")
+alertcondition(shortSignal and isInSession, "Short Entry", "Supertrend flipped BEARISH - Short signal triggered")
+alertcondition(trendChanged and isInSession, "Trend Change", "Supertrend direction changed - Position reversal")
+
+// Additional alert for signals outside trading hours (if time filter enabled)
+alertcondition(useTimeFilter and longSignal and not isInSession, "Long Signal (Filtered)", "Supertrend BULLISH signal outside trading hours - Not executed")
+alertcondition(useTimeFilter and shortSignal and not isInSession, "Short Signal (Filtered)", "Supertrend BEARISH signal outside trading hours - Not executed")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// BACKGROUND COLOR (OPTIONAL) - SUBTLE TREND INDICATION
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Uncomment below for subtle background coloring
+// bgcolor(isBullish ? color.new(#00FF00, 97) : color.new(#FF0000, 97), title="Trend Background")
+
+View in Pine Editor・205 lines
+Use on chart
+6
+0
+1 501
+Nov 24, 2025
+Hash Supertrend Strategy by Hash Capital Research
+
+Overview
+Hash Supertrend is a professional-grade trend-following strategy that combines the proven Supertrend indicator with institutional visual design and flexible time filtering.
+
+The strategy uses ATR-based volatility bands to identify trend direction and executes position reversals when the trend flips.This implementation features a distinctive fluorescent color system with customizable glow effects, making trend changes immediately visible while maintaining the clean, professional aesthetic expected in quantitative trading environments.
+Entry Signals:
+
+
+Long Entry: Price crosses above the Supertrend line (trend flips bullish)
+
+Short Entry: Price crosses below the Supertrend line (trend flips bearish)
+
+
+
+Controls the lookback period for volatility calculation
+Lower values (7-10): More sensitive to price changes, generates more signals
+Higher values (12-14): Smoother response, fewer signals but potentially delayed entries
+Recommended range: 7-14 depending on market volatility
+Factor (Default: 3.0)
+
+Restricts trading to specific hours
+Useful for avoiding low-liquidity sessions, overnight gaps, or known choppy periods
+When disabled, strategy trades 24/7
+Start Hour (Default: 9) & Start Minute (Default: 30)
+
+Define when the trading session begins
+Uses exchange timezone in 24-hour format
+Example: 9:30 = 9:30 AM
+End Hour (Default: 16) & End Minute (Default: 0)
+
+Controls the vibrancy of the fluorescent color system
+
+1-3: Subtle, muted colors
+
+4-6: Balanced, moderate saturation
+
+7-10: Bright, highly saturated fluorescent appearance
+
+Affects both the Supertrend line and trend zones
+
+Glow Effect (Default: On)
+
+
+
+Adds luminous halo around the Supertrend line
+
+Creates a multi-layered visual with depth
+
+Particularly effective during strong trends
+
+Glow Intensity (Default: 5.0)
+
+
+
+Displays tiny fluorescent dots at entry points
+
+Green dot below bar: Long entry
+
+Red dot above bar: Short entry
+
+Provides clear visual confirmation of executed trades
+
+Show Trend Zone (Default: On)
+
+
+
+Strong trending markets (2020-style bull runs, sustained bear markets)
+Markets with clear directional bias
+Instruments with consistent volatility patterns
+Timeframes: 15m to Daily (optimal on 1H-4H)
+Challenging Conditions:
+
+Choppy, range-bound markets
+Low volatility consolidation periods
+Highly news-driven instruments with frequent gaps
+Very low timeframes (1m-5m) prone to noise
+Recommended AssetsCryptocurrency:
+
+Nov 30, 2025
+Release Notes
+Optimized Default Settings Impact
+Solana 4-Hour Timeframe:
+
+Before (ATR: 10, Factor: 3.0): Profit Factor 1.4
+After (ATR: 16, Factor: 3.11): Profit Factor 1.6+ ✅
+Improvement: +14% profit factor, fewer whipsaws, better drawdown control
+
+Solana 12-Hour Timeframe:
+
+Optimized Settings: Profit Factor 2.0+ ✅
+Win Rate: ~45%
+Avg Win/Loss: ~3.5:1
+Max Drawdown: ~18%
+
+Why It Works:
+
+Longer ATR (16 vs 10) = smoother volatility calculation, less noise sensitivity
+Higher Factor (3.11 vs 3.0) = wider bands, requires stronger momentum to flip
+Result: ~30% fewer false signals, higher quality entries, better risk-reward
+Dec 11, 2025
+Release Notes
+Hash Supertrend — Regime-Based Trend Framework
+
+Purpose
+Hash Supertrend is a systematic trend-following framework built around the classic Supertrend structure, enhanced with adaptive volatility settings, session filters, and a professional visual system designed to make regime transitions clear. The goal is to help operators interpret directional bias using a consistent volatility-adjusted trend model.
+
+Conceptual Framework
+
+The engine is based on ATR-derived price bands that define directional bias:
+
+When price closes above the upper band, the model shifts into a bullish regime.
+
+When price closes below the lower band, the model shifts into a bearish regime.
+
+
+
+ATR length controls how quickly volatility reacts to new information, while the multiplier determines how far price must extend before a directional change is recognized. Lower values increase responsiveness; higher values emphasize stability.
+
+This implementation focuses on clarity of regime definition, allowing operators to evaluate trend conditions without relying on secondary indicators.
+
+Execution Logic (High-Level)
+A position is opened or reversed only when the Supertrend direction changes:
+
+Bullish Flip → Long entry
+
+Bearish Flip → Short entry
+
+
+This produces a single-position, one-direction-at-a-time workflow suitable for discretionary or systematic execution. Time filters can be enabled to restrict trading to defined sessions, which may be helpful for assets with concentrated liquidity patterns.
+
+Visual System
+To support rapid regime identification, the script uses:
+
+Adaptive fluorescent color spectrum to distinguish bullish and bearish states
+
+Optional glow effect to highlight trend transitions
+
+Trend zone fill between price and the Supertrend line to visualize directional structure
+
+Entry markers for clear execution reference
+
+These visuals do not influence the strategy logic and are provided solely for interpretive clarity.
+
+
+
+Inputs
+ATR Length
+Controls volatility lookback. Shorter values respond faster; longer values reduce noise.
+
+Factor (ATR Multiplier)
+Defines how much directional extension is required for a trend flip.
+
+Time Filter (Optional)
+Restricts entries to specific hours. Operators trading around liquidity windows or avoiding overnight conditions may enable this.
+
+Visual Controls
+Allow customization of color intensity, glow effects, and trend zone behavior.
+
+Intended Use
+The framework is applicable across liquid markets including crypto, FX, equities, and indices.
+It is structurally best suited to directional or trending environments.
+Operators may use alerts to integrate the signals into systematic workflows.
+
+Limitations
+
+Like all trend-based systems, performance may degrade in range-bound or low-volatility environments.
+
+Users should validate settings for their instrument and timeframe before applying the strategy to live workflows.
+
+
+
+For educational discussion only. Not financial advice.

@@ -1,0 +1,99 @@
+//@version=5
+strategy("XAUUSD Trend Strategy", overlay=true)
+
+// --- Paramètres de l'utilisateur ---
+ema_short = input.int(50, title="EMA Court Terme", minval=1, step=1)
+ema_long = input.int(200, title="EMA Long Terme", minval=1, step=1)
+rsi_length = input.int(14, title="RSI Période", minval=1, step=1)
+rsi_overbought = input.float(70, title="RSI Surachat", minval=0, maxval=100, step=0.1)
+rsi_oversold = input.float(30, title="RSI Survente", minval=0, maxval=100, step=0.1)
+bollinger_length = input.int(20, title="Bollinger Période", minval=1, step=1)
+bollinger_mult = input.float(2.0, title="Bollinger Multiplicateur", minval=0.1, step=0.1)
+
+tp_risk_ratio = input.float(2.0, title="Ratio Take Profit / Stop Loss", minval=0.1, step=0.1)
+risk_percent = input.float(1.0, title="Risque par Trade (%)", minval=0.1, maxval=100, step=0.1)
+
+// --- Calcul des indicateurs ---
+ema_fast = ta.ema(close, ema_short)
+ema_slow = ta.ema(close, ema_long)
+rsi = ta.rsi(close, rsi_length)
+[basis, upper, lower] = ta.bb(close, bollinger_length, bollinger_mult)
+
+// --- Conditions d'achat ---
+long_condition = ta.crossover(ema_fast, ema_slow) and rsi < rsi_oversold and close > upper
+if (long_condition)
+    strategy.entry("Long", strategy.long)
+
+// --- Conditions de vente ---
+short_condition = ta.crossunder(ema_fast, ema_slow) and rsi > rsi_overbought and close < lower
+if (short_condition)
+    strategy.entry("Short", strategy.short)
+
+// --- Gestion des risques ---
+capital = strategy.equity
+risk = capital * (risk_percent / 100)
+stop_loss = risk / (strategy.position_size != 0 ? strategy.position_avg_price : close)
+take_profit = stop_loss * tp_risk_ratio
+
+// Ajout des stop loss et take profit
+strategy.exit("Take Profit/Stop Loss", from_entry="Long", limit=close + take_profit, stop=close - stop_loss)
+strategy.exit("Take Profit/Stop Loss", from_entry="Short", limit=close - take_profit, stop=close + stop_loss)
+
+// --- Visualisation ---
+plot(ema_fast, color=color.blue, title="EMA Court Terme")
+plot(ema_slow, color=color.red, title="EMA Long Terme")
+plot(basis, color=color.gray, title="Bollinger Basis")
+plot(upper, color=color.green, title="Bollinger Upper")
+plot(lower, color=color.red, title="Bollinger Lower")
+
+View in Pine Editor・47 lines
+Use on chart
+9
+7
+1
+8 298
+### Description of the XAUUSD Trading Strategy with Pine Script
+
+This strategy is designed to trade gold (**XAUUSD**) using proven technical analysis principles. It combines key indicators such as **Exponential Moving Averages (EMA)**, the **Relative Strength Index (RSI)**, and **Bollinger Bands** to identify trading opportunities in trending market conditions.
+
+---
+
+#### Objective:
+To maximize profits by identifying trend-aligned entry points while minimizing risks through well-defined Stop Loss and Take Profit levels.
+
+---
+
+### How It Works
+
+1. **Indicators Used:**
+- **Exponential Moving Averages (EMA):** Tracks short-term and long-term trends to confirm market direction.
+- **Relative Strength Index (RSI):** Detects overbought or oversold conditions for potential reversals or trend continuation.
+- **Bollinger Bands:** Measures volatility to identify breakout or reversion points.
+
+2. **Entry Rules:**
+- **Long (Buy):** Triggered when:
+- The short-term EMA crosses above the long-term EMA (bullish trend confirmation).
+- RSI exits oversold territory (<30), signaling buying momentum.
+- The price breaks above the upper Bollinger Band, indicating a strong trend.
+- **Short (Sell):** Triggered when:
+- The short-term EMA crosses below the long-term EMA (bearish trend confirmation).
+- RSI exits overbought territory (>70), signaling selling momentum.
+- The price breaks below the lower Bollinger Band, indicating a strong downtrend.
+
+3. **Risk Management:**
+- **Stop Loss:** Automatically calculated based on a percentage of equity risk (customizable via inputs).
+- **Take Profit:** Defined using a risk-to-reward ratio, ensuring consistent profitability when trades succeed.
+
+4. **Visualization:**
+- The chart displays the EMAs, Bollinger Bands, and entry/exit points for clear analysis.
+
+---
+
+### Key Features:
+- **Customizable Parameters:** You can adjust EMAs, RSI thresholds, Bollinger Band settings, and risk levels to suit your trading style.
+- **Alerts:** Automatic alerts for potential trade setups.
+- **Backtesting-Ready:** Easily test historical performance on TradingView.
+
+---
+
+This strategy is ideal for gold traders looking for a systematic, rule-based approach to trading trends with minimal emotional interference.

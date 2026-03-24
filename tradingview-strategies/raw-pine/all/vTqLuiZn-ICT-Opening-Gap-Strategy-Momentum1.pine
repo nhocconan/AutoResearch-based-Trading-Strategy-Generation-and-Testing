@@ -1,0 +1,73 @@
+//@version=5
+strategy("ICT Opening Gap Strategy [Fixed]", overlay = true, max_boxes_count = 500, margin_long = 100, margin_short = 100)
+
+//------------------------------------------------------------------------------
+// Settings
+//-----------------------------------------------------------------------------
+show       = input.string('NDOG', 'Gap Type' , options = ['NWOG', 'NDOG'])
+trailTicks = input.int(10, 'Trailing Stop (Ticks)', minval = 1)
+
+//-----------------------------------------------------------------------------
+// Gap Detection
+//-----------------------------------------------------------------------------
+var float gapTop = na
+var float gapBtm = na
+var bool tradeTakenToday = false
+var bool priceWasAbove = false
+var bool priceWasBelow = false
+
+tf = show == 'NWOG' ? 'W' : 'D'
+isNewPeriod = timeframe.change(tf)
+isNewDay    = timeframe.change("D")
+
+if isNewDay
+    tradeTakenToday := false
+
+if isNewPeriod
+    gapTop := math.max(close[1], open)
+    gapBtm := math.min(close[1], open)
+    // Reset position tracking when a new gap is created
+    priceWasAbove := false
+    priceWasBelow := false
+
+// Track price position relative to the gap
+if not na(gapTop)
+    if high > gapTop
+        priceWasAbove := true
+    if low < gapBtm
+        priceWasBelow := true
+
+//-----------------------------------------------------------------------------
+// Entry Logic (The Fix for Line 35)
+//-----------------------------------------------------------------------------
+canTrade = not tradeTakenToday and not na(gapTop) and strategy.position_size == 0
+
+// Long: Was above, now price crosses into the gap from the top
+longCondition = canTrade and priceWasAbove and low <= gapTop and low > gapBtm
+
+// Short: Was below, now price crosses into the gap from the bottom
+shortCondition = canTrade and priceWasBelow and high >= gapBtm and high < gapTop
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+    tradeTakenToday := true
+    priceWasAbove := false // Reset after entry
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+    tradeTakenToday := true
+    priceWasBelow := false // Reset after entry
+
+//-----------------------------------------------------------------------------
+// Trailing Stop Loss
+//-----------------------------------------------------------------------------
+if strategy.position_size != 0
+    // trail_points is in ticks/pips depending on the symbol
+    strategy.exit("Exit", stop = na, trail_points = trailTicks, trail_offset = 0)
+
+View in Pine Editor・66 lines
+Use on chart
+5
+9
+1 500
+Momentum strategy taken off the close of the first candle after the NDOG/NWOG. Built with Gemini.

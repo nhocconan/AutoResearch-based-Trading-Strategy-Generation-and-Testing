@@ -1,0 +1,149 @@
+//@version=4
+// Credit for the initial code to nathanhoffer - I simply added the ability to select a time period, stop loss and take profit
+strategy("Cloud Breakout BF 🚀", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.0)
+
+/////////////// Time Frame ///////////////
+testStartYear = input(2012, "Backtest Start Year") 
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(1, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay, 0, 0)
+
+testStopYear = input(2019, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(31, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay, 0, 0)
+
+testPeriod() => time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+Ten = input(18, minval=1, title="Tenkan")
+Kij = input(60, minval=1, title="Kijun")
+LeadSpan = input(30, minval=1, title="Senkou B")
+Displace = input(52, minval=1, title="Senkou A")
+SpanOffset = input(52, minval=1, title="Span Offset")
+
+sts = input(false, title="Show Tenkan")
+sks = input(false, title="Show Kijun")
+ssa = input(true, title="Show Span A")
+ssb = input(true, title="Show Span B")
+sc = input(false, title="Show Chikou")
+
+//Script for Ichimoku Indicator
+source = close
+donchian(len) => avg(lowest(len), highest(len))
+TS = donchian(Ten)
+KS = donchian(Kij)
+SpanA = avg(TS, KS)
+SpanB = donchian(LeadSpan)
+CloudTop = max(TS, KS)
+
+Chikou = source[Displace]
+SpanAA = avg(TS, KS)[SpanOffset]
+SpanBB = donchian(LeadSpan)[SpanOffset]
+
+//Kumo Breakout (Long)
+SpanA_Top = SpanAA >= SpanBB ? 1 : 0
+SpanB_Top = SpanBB >= SpanAA ? 1 : 0
+SpanA_Top2 = SpanA >= SpanB ? 1 : 0
+SpanB_Top2 = SpanB >= SpanA ? 1 : 0
+SpanA1 = SpanA_Top2 ? SpanA : na
+SpanA2 = SpanA_Top2 ? SpanB : na
+SpanB1 = SpanB_Top2 ? SpanA : na
+SpanB2 = SpanB_Top2 ? SpanB : na
+
+LongSpan = (SpanA_Top and source[1] < SpanAA[1] and source > SpanAA) or (SpanB_Top and source[1] < SpanBB[1] and source > SpanBB) ? 1 : 0
+ShortSpan = (SpanB_Top and source[1] > SpanAA[1] and source < SpanAA) or (SpanA_Top and source[1] > SpanBB[1] and source < SpanBB) ? 1 : 0
+
+/////////////// Strategy ///////////////
+long = LongSpan
+short = ShortSpan
+
+last_long = 0.0
+last_short = 0.0
+last_long := long ? time : nz(last_long[1])
+last_short := short ? time : nz(last_short[1])
+
+long_signal = crossover(last_long, last_short)
+short_signal = crossover(last_short, last_long)
+
+last_open_long_signal = 0.0
+last_open_short_signal = 0.0
+last_open_long_signal := long_signal ? open : nz(last_open_long_signal[1])
+last_open_short_signal := short_signal ? open : nz(last_open_short_signal[1])
+
+last_long_signal = 0.0
+last_short_signal = 0.0
+last_long_signal := long_signal ? time : nz(last_long_signal[1])
+last_short_signal := short_signal ? time : nz(last_short_signal[1])
+
+in_long_signal = last_long_signal > last_short_signal
+in_short_signal = last_short_signal > last_long_signal
+
+last_high = 0.0
+last_low = 0.0
+last_high := not in_long_signal ? na : in_long_signal and (na(last_high[1]) or high > nz(last_high[1])) ? high : nz(last_high[1])
+last_low := not in_short_signal ? na : in_short_signal and (na(last_low[1]) or low < nz(last_low[1])) ? low : nz(last_low[1])
+
+sl_inp = input(100.0, title='Stop Loss %') / 100
+tp_inp = input(5000.0, title='Take Profit %') / 100
+ 
+take_level_l = strategy.position_avg_price * (1 + tp_inp)
+take_level_s = strategy.position_avg_price * (1 - tp_inp)
+
+since_longEntry = barssince(last_open_long_signal != last_open_long_signal[1]) // LONG SL
+since_shortEntry = barssince(last_open_short_signal != last_open_short_signal[1]) // SHORT SL
+
+slLong = in_long_signal ? strategy.position_avg_price * (1 - sl_inp) : na
+slShort = strategy.position_avg_price * (1 + sl_inp)
+long_sl = in_long_signal ? slLong : na
+short_sl = in_short_signal ? slShort : na
+
+/////////////// Execution ///////////////
+if testPeriod()
+    strategy.entry("Long",  strategy.long, when=long)
+    strategy.entry("Short", strategy.short, when=short)
+    strategy.exit("Long Ex", "Long", stop=long_sl, limit=take_level_l, when=since_longEntry > 0)
+    strategy.exit("Short Ex", "Short", stop=short_sl, limit=take_level_s, when=since_shortEntry > 0)
+    
+/////////////// Plotting ///////////////
+p1= plot(sts and TS ? TS : na, title="Tenkan", linewidth = 2, color = color.gray)
+p2 = plot(sks and KS ? KS : na, title="Kijun", linewidth = 2, color = color.black)
+p5 = plot(sc and Displace ? close: na, title="Chikou", linewidth = 2, offset=-Displace, color = color.orange)
+p3 = plot(ssa and SpanA ? SpanA : na, title="SpanA", linewidth=2, offset=Displace, color=color.green)
+p4 = plot(ssb and SpanB ? SpanB : na, title="SpanB", linewidth=2, offset=Displace, color=color.red)
+p8 = plot(ssa and SpanA1 ? SpanA1 : na, title="Span A1 above", style=plot.style_linebr, linewidth=1, offset=Displace, color=color.green)
+p9 = plot(ssa and SpanA2 ? SpanA2 : na, title="Span A2 above", style=plot.style_linebr, linewidth=1, offset=Displace, color=color.green)
+p10 = plot(ssb and SpanB1 ? SpanB1 : na, title="Span B1 above", style=plot.style_linebr, linewidth=1, offset=Displace, color=color.red)
+p11 = plot(ssb and SpanB2 ? SpanB2 : na, title="Span B2 above", style=plot.style_linebr, linewidth=1, offset=Displace, color=color.red)
+
+fill(p8, p9, color = color.lime, transp=70, title="Kumo Cloud Up")
+fill (p10, p11, color = color.red, transp=70, title="Kumo Cloud Down")
+bgcolor(long ? color.lime : short ? color.red : na, transp=70)
+bgcolor(long_signal ? color.lime : short_signal ? color.red : na, transp=50)
+
+View in Pine Editor・121 lines
+Use on chart
+1
+5
+9
+4 133
+Sep 21, 2019
+Based on code by nathanhoffer
+
+Long signal is after a close above Kumo cloud, short signal after close below it.
+
+You can adjust stuff in the settings.
+Sep 21, 2019
+Release Notes
+Removed code that wasn't used for generating signals to make for easier reading.
+Sep 21, 2019
+Release Notes
+Set the lines other than the cloud spans to invisible by default.
+Sep 21, 2019
+Release Notes
+Simplified code further
+Sep 22, 2019
+Release Notes
+Updated code to version 4. Added Stop-Loss and Take-Profit functions (defaultsettings are high to emulate no stop loss and no take profit)
+Sep 29, 2019
+Release Notes
+Tidied up code a bit and added background colour to more easily visualise long and short signals.

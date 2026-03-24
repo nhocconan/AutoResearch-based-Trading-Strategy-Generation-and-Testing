@@ -1,0 +1,93 @@
+//@version=5
+strategy("BTC Momentum Trading - RSI Cross", overlay=false, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// --- Inputs ---
+rsiLen   = input.int(14, "RSI Length")
+upperTh  = input.float(55.0, "Upper Threshold")
+lowerTh  = input.float(45.0, "Lower Threshold")
+midLevel = input.float(50.0, "Midline for Exits")
+
+// --- Indicator ---
+rsi = ta.rsi(close, rsiLen)
+
+// --- Entry Conditions ---
+// Long when RSI crosses up through upper threshold
+longEntry  = ta.crossover(rsi, upperTh)
+
+// Short when RSI crosses down through lower threshold
+shortEntry = ta.crossunder(rsi, lowerTh)
+
+// --- Exit Conditions ---
+// Exit long when RSI crosses down through midline
+exitLong  = strategy.position_size > 0 and ta.crossunder(rsi, midLevel)
+
+// Exit short when RSI crosses up through midline
+exitShort = strategy.position_size < 0 and ta.crossover(rsi, midLevel)
+
+// --- Orders ---
+if longEntry
+    strategy.entry("Long", strategy.long)
+
+if shortEntry
+    strategy.entry("Short", strategy.short)
+
+if exitLong
+    strategy.close("Long")
+
+if exitShort
+    strategy.close("Short")
+
+// --- Plot RSI ---
+plot(rsi, "RSI", color=color.new(color.purple, 0))
+hline(upperTh, "Upper", color=color.new(color.green, 50))
+hline(lowerTh, "Lower", color=color.new(color.red, 50))
+hline(midLevel, "Midline", color=color.new(color.gray, 60))
+
+View in Pine Editor・45 lines
+Use on chart
+1
+390
+For the third algorithm (the “trading” strategy), I built a momentum-based system using RSI crossovers on BTCUSD. This algorithm is different from my mean-reversion and trend-trading strategies because it reacts directly to short-term momentum shifts rather than trend direction or oversold conditions.
+
+IF / THEN Logic Used (Momentum Trading)
+
+Long Entry (Buy):
+
+IF the RSI(14) crosses above 55,
+THEN the algorithm enters a long position.
+(This signals short-term upward momentum.)
+
+Short Entry (Sell):
+
+IF the RSI(14) crosses below 45,
+THEN the algorithm enters a short position.
+(This signals downside momentum.)
+
+Long Exit:
+
+IF I am in a long position AND RSI crosses below 50,
+THEN exit the long position.
+
+Short Exit:
+
+IF I am in a short position AND RSI crosses above 50,
+THEN exit the short position.
+
+Purpose of the Strategy
+
+This strategy demonstrates real-time trading behavior, where entries and exits are driven by momentum signals rather than mean reversion or trend structure. It is meant to show how an algo reacts quickly to shifts in strength/weakness in price movement.
+
+Backtest Requirements
+
+I ran the strategy on BTCUSD, 10-minute timeframe (Feb 16–23, 2026).
+This produced:
+
+Total trades: 1,284
+
+Profitable trades: 27.92%
+
+Profit factor: 0.886
+
+Drawdown: 2.13%
+
+The large number of trades provides a sufficient sample size for analysis, as required by the assignment.

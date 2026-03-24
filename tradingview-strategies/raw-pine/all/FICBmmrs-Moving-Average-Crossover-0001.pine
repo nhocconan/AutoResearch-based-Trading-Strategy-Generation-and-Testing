@@ -1,0 +1,49 @@
+//@version=2
+strategy("Moving Average Crossover", overlay=true)
+
+ema14 = ema(close, 14)
+ema28 = ema(close, 28)
+sma56 = sma(close, 56)
+
+long = cross(ema14, sma56) and ema14 > ema28
+short = cross(ema14, sma56) and ema14 < ema28   
+
+plot(ema14, title="14", color=green, linewidth=2)
+plot(ema28, title="28", color=red, linewidth=2)
+plot(sma56, title="56", color=blue, linewidth=3)
+
+testStartYear = input(2014, "Backtest Start Year")
+testStartMonth = input(1, "Backtest Start Month")
+testStartDay = input(2, "Backtest Start Day")
+testPeriodStart = timestamp(testStartYear,testStartMonth,testStartDay,0,0)
+
+testStopYear = input(2015, "Backtest Stop Year")
+testStopMonth = input(12, "Backtest Stop Month")
+testStopDay = input(30, "Backtest Stop Day")
+testPeriodStop = timestamp(testStopYear,testStopMonth,testStopDay,0,0)
+
+if time >= testPeriodStart
+    if time <= testPeriodStop
+        strategy.entry("Long", strategy.long, 1.0, when=long)
+        strategy.entry("Short", strategy.short, 1.0, when=short)
+
+if time >= testPeriodStart
+    if time <= testPeriodStop
+        strategy.exit("Close Long", "Long", profit=2000, loss=500)
+        strategy.exit("Close Short", "Short", profit=2000, loss=500)
+
+View in Pine Editor・33 lines
+Use on chart
+4
+1
+9
+5
+14 017
+The first strategy for my (also first) Everyday project. During the rest of 2016 I plan to create a new strategy everyday
+and I give myself between 15 minutes and 2 hours to complete the idea.
+
+The goal is to improve my knowledge of Pine Script, become a faster strategy coder, and experiment with different strategic trading ideas.
+
+I'm new to strategies and algorithmic trading, and hoping to learn from the community, so any feedback, advice or corrections is very much welcome!
+/pbergden
+

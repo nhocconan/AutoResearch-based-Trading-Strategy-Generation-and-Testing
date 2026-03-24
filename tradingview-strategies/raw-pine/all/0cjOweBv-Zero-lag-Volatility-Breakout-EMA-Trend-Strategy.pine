@@ -1,0 +1,70 @@
+//@version=5
+strategy("Zero-lag Volatility-Breakout EMA Trend Strategy",overlay=false,shorttitle="ZL-VBEMA Trend Strategy",
+ initial_capital=1000,default_qty_type=strategy.percent_of_equity,default_qty_value=10,commission_value=0.1)
+
+tt1 = "If selected, the strategy will not close long or short positions until the opposite signal is received. This"+
+ " exposes you to more risk but potentially could generate larger returns."
+
+src = input.source(close,"Source")
+lx = input.int(200,"EMA Difference Length")
+bbmult = input.float(2.0,"Standard Deviation Multiple")
+useBinaryStrategy = input.bool(true,"Use Binary Strategy",tooltip = tt1)
+
+hJumper = math.max(src,ta.ema(src,lx))
+lJumper = math.min(src,ta.ema(src,lx))
+
+dif = (hJumper / lJumper) - 1
+
+[bbm,bbu,bbl] = ta.bb(dif,lx,bbmult)
+
+plot(dif,color=color.white,title="Zero lag EMA Difference")
+plot(bbu,color=color.lime,title="Bollinger Top")
+plot(bbl,color=color.red,title="Bollinger Bottom")
+plot(bbm,color=color.yellow,title="Bollinger Middle")
+
+sigEnter = ta.crossover(dif,bbu)
+sigExit = ta.crossunder(dif,bbm)
+emaBase = ta.ema(src,lx)
+enterLong = sigEnter and emaBase > emaBase[1]
+enterShort = sigEnter and emaBase < emaBase[1]
+
+plotshape(enterLong,style=shape.labelup,location=location.bottom,color=color.green,size=size.tiny)
+plotshape(enterShort,style=shape.labeldown,location=location.top,color=color.red,size=size.tiny)
+
+if enterLong
+    strategy.entry("Long",strategy.long)
+if enterShort
+    strategy.entry("Short",strategy.short)
+if not useBinaryStrategy and sigExit
+    strategy.close("Long")
+    strategy.close("Short")
+
+View in Pine Editor・43 lines
+Use on chart
+3
+0
+9
+2
+13 673
+This is a simple volatility-breakout strategy which uses the difference in two different zero-lag* EMAs (explained below on what exactly I mean by this) to track the upwards or downwards strength of an instrument. When the difference breaks above a Bollinger Band of a configurable standard deviation multiple, the strategy enters based off the direction of the base EMA used (i.e. if the difference breaks above and the current EMA is rising, a long entry is produced. If the difference breaks above and the current EMA is falling, a short entry is produced).
+
+The two EMA-type metrics used to calculate the volatility difference are calculated by the following formula:
+
+
+Pine Script®
+top_ema = math.max(src, ta.ema(src, length))
+bottom_ema = math.min(src, ta.ema(src, length))
+
+ema_difference = (top_ema - bottom_ema) - 1
+
+
+
+This produces a difference which responds immediately to large price movements, instead of lagging if it used strictly the EMA itself.
+
+SETTINGS
+Source: The source of the strategy - close, hlc3, another indicator plot, etc.
+EMA Difference Length: The length of both the EMA difference statistics and the base EMA used to calculate the entry side.
+Standard Deviation Multiple: The Bollinger Bands multiple used when the difference is breaking out.
+Use Binary Strategy: The strategy has two configurations: Binary and Rapid-Exit. 'Binary' means that it will not close a long position until a short position is generated, and vice-versa. 'Rapid-Exit' will close a long or short position once the difference reaches the middle Bollinger Band MA. This means that turning on 'Binary' will expose you to more market risk, but potentially greater market return. Turning off 'Binary' will exit quickly and reduce drawdown.
+
+The strategy results below use 10% equity and 0.1% fees per trade.

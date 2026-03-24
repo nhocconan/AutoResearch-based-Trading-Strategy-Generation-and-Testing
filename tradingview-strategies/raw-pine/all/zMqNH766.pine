@@ -1,0 +1,263 @@
+//@version=6
+strategy("TVC:GOLD | G1 Intrabar Auto v6",
+     overlay=true,
+     pyramiding=1,
+     initial_capital=100000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.0300,
+     margin_long=100,
+     slippage=1,
+     process_orders_on_close=false,
+     calc_on_order_fills=false,
+     calc_on_every_tick=true)
+
+lotShares = input.int(1, "A-share lot shares", minval=1)
+roundToLot(shares) =>
+    s = math.floor(shares)
+    math.floor(s / lotShares) * lotShares
+
+limitPct = input.float(1.00, "Daily limit (%)", minval=0.01, maxval=1.00, step=0.01)
+blockEntryOnLimitUp  = input.bool(false,  "Block entry on limit-up")
+blockExitOnLimitDown = input.bool(false, "Conservative: block exits on limit-down")
+isLimitUp   = not na(close[1]) and close >= close[1] * (1 + limitPct - 0.001)
+isLimitDown = not na(close[1]) and close <= close[1] * (1 - limitPct + 0.001)
+canEnterBar = not (blockEntryOnLimitUp and isLimitUp)
+canExitBar  = not (blockExitOnLimitDown and isLimitDown)
+useHardDD = input.bool(false, "Hard max drawdown guard")
+hardDDPct = input.float(14.5, "Hard max drawdown %", minval=1.0, maxval=50.0, step=0.1)
+strategy.risk.max_drawdown(useHardDD ? hardDDPct : 100.0, strategy.percent_of_equity)
+
+atr = ta.atr(14)
+atrPct = atr / close * 100.0
+ema200 = ta.ema(close, 200)
+
+requireSlope = input.bool(false, "Require EMA slope up")
+slopeBars    = input.int(12, "EMA slope lookback", minval=5, maxval=120)
+emaUp        = ema200 > ema200[slopeBars]
+
+diLen = input.int(14, "DMI length", minval=5, maxval=50)
+adxSmooth = input.int(14, "ADX smoothing", minval=5, maxval=50)
+[pdi, mdi, adx] = ta.dmi(diLen, adxSmooth)
+useAdxFilter = input.bool(false, "Use ADX filter")
+adxMin       = input.float(26.40, "ADX min", minval=5, step=0.5)
+
+useAtrGuard = input.bool(true, "ATR% guard")
+atrPctGuard = input.float(20.35, "Block entry/add if ATR% >", minval=3.0, step=0.1)
+atrOk = (not useAtrGuard) or (atrPct <= atrPctGuard)
+
+bullRegime = close > ema200 and (not requireSlope or emaUp) and (not useAdxFilter or adx >= adxMin)
+
+var float peakEq = na
+peakEq := na(peakEq) ? strategy.equity : math.max(peakEq, strategy.equity)
+ddPct = peakEq > 0 ? (peakEq - strategy.equity) / peakEq * 100.0 : 0.0
+
+ddStart = input.float(5.67, "DD scale start %", minval=0.5, step=0.5)
+ddEnd   = input.float(8.67, "DD scale end %", minval=1.0, step=0.5)
+ddMinScale = input.float(0.96, "Min scale", minval=0.1, maxval=1.0, step=0.01)
+scaleDD = ddPct <= ddStart ? 1.0 : ddPct >= ddEnd ? ddMinScale : (1.0 - (ddPct - ddStart)/(ddEnd - ddStart) * (1.0 - ddMinScale))
+
+useVolTarget = input.bool(true, "Volatility targeting")
+volTargetPct = input.float(5.31, "Target ATR%", minval=0.5, step=0.1)
+volMinLev = input.float(1.40, "Min lev", minval=0.1, maxval=3.0, step=0.01)
+volMaxLev = input.float(2.71, "Max lev", minval=0.5, maxval=5.0, step=0.01)
+lev = (useVolTarget and atrPct > 0) ? math.min(volMaxLev, math.max(volMinLev, volTargetPct/atrPct)) : 1.0
+scale = scaleDD * lev
+
+maxExposurePct = input.float(94.0, "Max exposure cap (% equity)", minval=10, maxval=250, step=5)
+entryPct       = input.float(72.8, "Entry exposure (% equity)", minval=1, maxval=250, step=1)
+feeReservePct  = input.float(0.12, "Fee+slip reserve (%)", minval=0.0, step=0.01)
+
+useRiskCap = input.bool(true, "Risk cap sizing")
+riskCapPct = input.float(2.97, "Max loss at stop (% equity)", minval=0.1, step=0.1)
+
+qtyFromPct(pct, fillPrice) =>
+    safeEq        = strategy.equity * math.max(0.0, 1.0 - feeReservePct/100.0)
+    px            = na(fillPrice) or fillPrice <= 0 ? close : fillPrice
+    desiredValue  = safeEq * (pct/100.0)
+    desiredShares = desiredValue / px
+    capValue      = safeEq * (maxExposurePct/100.0)
+    capShares     = capValue / px
+    cashCapShares = safeEq / px
+    remainShares  = math.max(0.0, math.min(capShares, cashCapShares) - math.max(strategy.position_size, 0))
+    roundToLot(math.min(desiredShares, remainShares))
+
+riskCapShares(stopDist) =>
+    raw = stopDist > 0 ? (strategy.equity * (riskCapPct/100.0) / stopDist) : 1e18
+    roundToLot(raw)
+
+breakBufPct  = input.float(0.30, "Breakout buffer %", minval=0.0, step=0.05)
+cooldownBars = input.int(7, "Cooldown bars after exit", minval=0, maxval=200)
+minHoldBars  = input.int(0, "Min hold bars before Donchian exit", minval=0, maxval=100)
+var int lastExitBar = na
+flatExit = (strategy.position_size==0) and (strategy.position_size[1]>0)
+if flatExit
+    lastExitBar := bar_index
+coolOk = cooldownBars==0 ? (na(lastExitBar) or bar_index > lastExitBar) : (na(lastExitBar) or (bar_index-lastExitBar>=cooldownBars))
+
+entryLen = input.int(17, "Entry breakout len", minval=10, maxval=200)
+exitLen  = input.int(18,  "Exit breakout len", minval=5, maxval=120)
+addLen   = input.int(39,   "Fast EMA len (pullback)", minval=5, maxval=120)
+pullbackPct = input.float(1.08, "Pullback below fast EMA %", minval=0.0, step=0.1)
+hiEntry = ta.highest(high, entryLen)[1]
+loExit  = ta.lowest(low,  exitLen)[1]
+emaFastEntry = ta.ema(close, addLen)
+rsiPull = ta.rsi(close, 14)
+rsiEntryThr = math.max(24.0, math.min(45.0, 18.0 + 0.8 * adxMin))
+breakLevel = not na(hiEntry) ? hiEntry * (1 + breakBufPct/100.0) : na
+breakSetup = bullRegime and atrOk and coolOk and canEnterBar and not na(breakLevel)
+pullPrev = bullRegime[1] and rsiPull[1] < rsiEntryThr and close[1] < emaFastEntry[1] * (1 - pullbackPct/100.0)
+pullSetup = bullRegime and atrOk and coolOk and canEnterBar and pullPrev and close > close[1]
+entryStopLevel = breakSetup ? breakLevel : na
+entryStopLevel := pullSetup and not na(emaFastEntry) ? (na(entryStopLevel) ? emaFastEntry : math.min(entryStopLevel, emaFastEntry)) : entryStopLevel
+entrySignal = not na(entryStopLevel) and high >= entryStopLevel
+
+initStopATR = input.float(1.20, "Init stop ATR mult", minval=0.5, step=0.1)
+trailBase   = input.float(3.67, "Trail ATR mult (base)", minval=1.0, step=0.1)
+trailTight  = input.float(3.57, "Trail ATR mult (tight)", minval=1.0, step=0.1)
+tightenAtR  = input.float(4.51, "Tighten after MFE >= R", minval=0.5, step=0.1)
+useBE = input.bool(true, "Breakeven after +R")
+beR   = input.float(1.79, "BE trigger (R)", minval=0.2, step=0.1)
+useRegimeExit = input.bool(true, "Regime exit (close < EMA200)")
+
+inPos = strategy.position_size > 0
+avg   = strategy.position_avg_price
+var float entryStopDist = na
+var float hhSince = na
+var float trailMono = na
+var int entryBar = na
+var int lastFilledEntryBar = na
+var float effStopPlot = na
+
+newPos = (strategy.position_size > 0) and (strategy.position_size[1] <= 0)
+if newPos
+    entryStopDist := initStopATR * atr
+    hhSince := high
+    trailMono := na
+    entryBar := bar_index
+    lastFilledEntryBar := bar_index
+
+if not inPos
+    entryStopDist := na
+    hhSince := na
+    trailMono := na
+    entryBar := na
+    effStopPlot := na
+
+canEnterNew = na(lastFilledEntryBar) or bar_index > lastFilledEntryBar
+if (not inPos) and canEnterNew and not na(entryStopLevel)
+    stopDistNow = initStopATR * atr
+    entryStopDist := stopDistNow
+    planFillPx = math.max(entryStopLevel, open)
+    q = useRiskCap ? math.min(qtyFromPct(entryPct * scale, planFillPx), riskCapShares(stopDistNow)) : qtyFromPct(entryPct * scale, planFillPx)
+    if q >= lotShares
+        strategy.entry("L", strategy.long, qty=q, stop=entryStopLevel)
+
+if inPos and not na(entryStopDist)
+    hhSince := na(hhSince) ? high : math.max(hhSince, high)
+    profitR_mfe = (hhSince - avg)/entryStopDist
+    tMult = (profitR_mfe >= tightenAtR) ? trailTight : trailBase
+    trailRaw = hhSince - tMult*atr
+    trailMono := na(trailMono[1]) ? trailRaw : math.max(trailMono[1], trailRaw)
+    initStop = avg - entryStopDist
+    effStop  = math.max(initStop, trailMono)
+    if useBE and (close-avg >= beR*entryStopDist)
+        effStop := math.max(effStop, avg)
+    holdOk = (minHoldBars==0) ? true : (not na(entryBar) and (bar_index-entryBar>=minHoldBars))
+    dynExit = effStop
+    dynExit := holdOk and not na(loExit) ? math.max(dynExit, loExit) : dynExit
+    dynExit := useRegimeExit ? math.max(dynExit, ema200) : dynExit
+    effStopPlot := dynExit
+    if canExitBar
+        strategy.exit("STOP", from_entry="L", stop=dynExit)
+else
+    effStopPlot := na
+
+plot(ema200, "EMA200", linewidth=2)
+plot(effStopPlot, "Stop", style=plot.style_linebr, linewidth=2)
+alertcondition(strategy.position_size == 0 and entrySignal, "Long Intrabar Trigger", "Long intrabar trigger reached.")
+alertcondition(strategy.position_size > 0 and canExitBar and not na(effStopPlot) and low <= effStopPlot, "Exit Intrabar Trigger", "Exit intrabar stop reached.")
+
+View in Pine Editor・178 lines
+Use on chart
+2
+2
+1
+581
+# TVC GOLD | G1 Intrabar Auto v6
+## Release Notes / 发行说明 (CN + EN)
+
+### 中文（简体）
+**版本定位**
+- 这是一个日线趋势跟随策略（Long-only），核心目标是用“突破 + 回踩再收复”双引擎捕捉主升段。
+- 本版本支持盘中触发（intrabar），用于减少“只在收盘成交”的执行偏差。
+
+**核心逻辑（简述）**
+- 入场引擎 A：Donchian 突破入场（带小缓冲）。
+- 入场引擎 B：回踩快线后再收复（pullback reclaim）入场。
+- 趋势过滤：价格在 EMA200 上方才允许做多。
+- 风控层：
+- ATR 初始止损 + 分阶段移动止损。
+- 回撤缩放（Drawdown scaling）动态降低仓位。
+- 可选风险上限（risk-cap）和最大敞口上限（exposure cap）。
+
+**本次发布重点**
+- 保留盘中触发执行模型（`process_orders_on_close=false` + `calc_on_every_tick=true`）。
+- 强化参数稳定性，优先控制回撤一致性与可复现性。
+- 保留提醒条件（Alert Conditions）：
+- `Long Intrabar Trigger`
+- `Exit Intrabar Trigger`
+
+**使用建议**
+- 推荐先在 `TVC:GOLD` 日线图运行，再根据你的交易成本与滑点做微调。
+- 请使用与你账户更接近的手续费/滑点参数，避免回测偏乐观。
+- 若你使用自动提醒，请先小仓位验证 2-4 周执行一致性。
+
+**风险披露（重要）**
+- 本脚本仅用于研究与教育，不构成任何投资建议或收益承诺。
+- 历史回测结果不代表未来表现；不同券商、时区、数据修正、滑点与成交规则都会导致结果差异。
+- 极端行情（跳空、流动性骤降、黑天鹅）可能导致止损偏离与回撤放大。
+
+**社区合规说明**
+- 不展示或暗示“保证收益”“稳定翻倍”等结论。
+- 不鼓励盲目跟单；请独立评估风险承受能力。
+- 发表策略时请附带回测区间、交易成本假设与主要限制条件。
+
+---
+
+### English
+**Version Scope**
+- This is a daily trend-following strategy (Long-only) built to capture major upswings via a dual-engine entry model: breakout + pullback reclaim.
+- This release keeps intrabar execution enabled to reduce close-only fill bias.
+
+**Core Logic (Short)**
+- Entry Engine A: Donchian breakout with a small breakout buffer.
+- Entry Engine B: Pullback below fast EMA followed by reclaim.
+- Trend Filter: Long entries allowed only when price is above EMA200.
+- Risk Stack:
+- ATR-based initial stop + staged trailing stop.
+- Drawdown-based position scaling.
+- Optional risk-cap sizing and max exposure cap.
+
+**What Is Updated In This Release**
+- Intrabar execution model preserved (`process_orders_on_close=false`, `calc_on_every_tick=true`).
+- Parameter stability improvements with priority on drawdown consistency and reproducibility.
+- Alert conditions retained:
+- `Long Intrabar Trigger`
+- `Exit Intrabar Trigger`
+
+**Usage Notes**
+- Start on `TVC:GOLD` daily chart, then tune costs/slippage to your real execution environment.
+- Use realistic commission and slippage values; otherwise backtests may be overly optimistic.
+- If using alerts for execution, validate with small size first for 2-4 weeks.
+
+**Risk Disclosure (Important)**
+- This script is for research and educational purposes only. It is not investment advice and does not promise returns.
+- Past performance does not guarantee future results.
+- Results may vary due to broker emulator behavior, session/timezone settings, data revisions, slippage, and liquidity conditions.
+- Extreme events (gaps, low liquidity, tail risk) can expand drawdowns and degrade exits.
+
+**Community Compliance Statement**
+- No guaranteed-return claims.
+- No copy-trade solicitation.
+- Always disclose backtest window, cost assumptions, and major limitations when publishing.
+

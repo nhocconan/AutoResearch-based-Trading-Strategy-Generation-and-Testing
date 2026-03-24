@@ -1,0 +1,47 @@
+//@version=3
+//                                                HULL & ICHIMOKU & MATHS
+strategy("3 HULLs & ICHIMOKU divided by PRICE", shorttitle="3H&I/P", overlay=true, default_qty_type=strategy.percent_of_equity, max_bars_back=720, default_qty_value=100, calc_on_order_fills=true, calc_on_every_tick=true, pyramiding=0)
+keh=input(title="Hull MA period",type=integer,defval=6)
+p=ohlc4[1]
+n2ma=2*wma(p,round(keh/2))
+nma=wma(p,keh)
+diff=n2ma-nma
+sqn=round(sqrt(keh))
+n2ma1=2*wma(p[1],round(keh/2))
+nma1=wma(p[1],keh)
+diff1=n2ma1-nma1
+sqn1=round(sqrt(keh))
+n1=wma(diff,sqn)
+n2=wma(diff1,sqn)
+conversionPeriods = input(9, minval=1, title="Conversion Line Periods")
+basePeriods = input(26, minval=1, title="Base Line Periods")
+laggingSpan2Periods = input(52, minval=1, title="Lagging Span 2 Periods")
+displacement = input(26, minval=1, title="Displacement")
+donchian(len) => avg(lowest(len), highest(len))
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+post1=((n1[1]*3)+leadLine1)/p
+post2=((n2[1]*3)+leadLine2)/p
+if (post1<post2)
+    strategy.entry("buy", strategy.long, comment="BUY")
+if (post1>post2)
+    strategy.entry("sell", strategy.short, comment="SELL")
+
+View in Pine Editor・30 lines
+Use on chart
+1
+5
+7
+4
+6 879
+Basically just another form of moving average, for quick swings, built for testing/use with API cryptobots, simple switch from buy to sell.
+Hull MA(2 candles back) times 3 plus Ichimoku divided by price(1 candle back) = value1
+Hull MA(3 candles back) times 3 plus Ichimoku divided by price(1 candle back) = value2
+if value1>value2 then buy else sell
+calculates price from 1 candle back, and calculates signal from 2nd and 3rd candle prices, so no repainting? so best on low timeframes.
+for when use in bot, would not need 1 candle lag. Lag is for TV chartists to not have to suffer repainting.
+Bots do not repaint. they are not "painting" anything, they simply open or close orders, which cannot be "repainted"
+but here on TV chart, when you refresh the browser page, the script recalculates, and signals may be repainted.
+hopefully this will not repaint. please test. thankyou

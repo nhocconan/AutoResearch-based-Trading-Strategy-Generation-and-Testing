@@ -1,0 +1,129 @@
+//@version=5
+strategy("NASDAQ 100 Peak Hours Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=1.5)
+
+startSession = timestamp("GMT-5", year, month, dayofmonth, 09, 30)
+endSession = timestamp("GMT-5", year, month, dayofmonth, 11, 30)
+
+extendedStartSession = timestamp("GMT-5", year, month, dayofmonth, 08, 00)
+extendedEndSession = timestamp("GMT-5", year, month, dayofmonth, 16, 00)
+
+longTermEmaLength = 21
+shortTermEmaLength = 9
+rsiLength = 14
+atrLength = 14
+vwap = ta.vwap(hlc3)
+
+longTermEma = ta.ema(close, longTermEmaLength)
+shortTermEma = ta.ema(close, shortTermEmaLength)
+rsi = ta.rsi(close, rsiLength)
+atr = ta.atr(atrLength)
+volatilityFilter = atr > ta.sma(atr, 20)
+
+longEmaDirection = longTermEma > ta.ema(longTermEma[1], 3)
+shortEmaDirection = shortTermEma > ta.ema(shortTermEma[1], 3)
+
+isTradeWindow = (time >= extendedStartSession and time <= extendedEndSession) and volatilityFilter
+
+longCondition = (close > shortTermEma) and (shortTermEma > longTermEma) and longEmaDirection and shortEmaDirection and (rsi > 50) and (close > vwap) and isTradeWindow and (time >= startSession and time <= endSession)
+shortCondition = (close < shortTermEma) and (shortTermEma < longTermEma) and not longEmaDirection and not shortEmaDirection and (rsi < 50) and (close < vwap) and isTradeWindow and (time >= startSession and time <= endSession)
+
+var int longEntryBar = na
+var int shortEntryBar = na
+var float longEntryPrice = na
+var float shortEntryPrice = na
+
+if (longCondition)
+    strategy.entry("Long", strategy.long, qty=1.5)
+    longEntryBar := bar_index
+    longEntryPrice := close
+if (shortCondition)
+    strategy.entry("Short", strategy.short, qty=1.5)
+    shortEntryBar := bar_index
+    shortEntryPrice := close
+
+trailStopATRMultiplier = 1.5
+trailStopLong = atr * trailStopATRMultiplier
+trailStopShort = atr * trailStopATRMultiplier
+initialStopLossMultiplier = 0.5
+
+strategy.exit("Exit Long", "Long", stop=close - atr * initialStopLossMultiplier, trail_points=trailStopLong, trail_offset=trailStopLong / 2)
+strategy.exit("Exit Short", "Short", stop=close + atr * initialStopLossMultiplier, trail_points=trailStopShort, trail_offset=trailStopShort / 2)
+
+breakEvenTrigger = 1.5 * atr
+if (strategy.position_size > 0 and close > longEntryPrice + breakEvenTrigger)
+    strategy.exit("Break-even Long", "Long", stop=longEntryPrice)
+if (strategy.position_size < 0 and close < shortEntryPrice - breakEvenTrigger)
+    strategy.exit("Break-even Short", "Short", stop=shortEntryPrice)
+
+timeExitBars = 20
+if (not na(longEntryBar) and bar_index - longEntryBar >= timeExitBars)
+    strategy.close("Long")
+    longEntryBar := na
+if (not na(shortEntryBar) and bar_index - shortEntryBar >= timeExitBars)
+    strategy.close("Short")
+    shortEntryBar := na
+
+trendReversalExitLong = (shortTermEma < longTermEma) and not longEmaDirection
+trendReversalExitShort = (shortTermEma > longTermEma) and not shortEmaDirection
+
+if (strategy.position_size > 0 and trendReversalExitLong)
+    strategy.close("Long")
+if (strategy.position_size < 0 and trendReversalExitShort)
+    strategy.close("Short")
+
+maxDrawdown = 20
+if (strategy.equity / strategy.initial_capital < 1 - (maxDrawdown / 100.0))
+    strategy.cancel_all()
+    strategy.close_all()
+
+View in Pine Editor・77 lines
+Use on chart
+3
+3
+5
+13
+9 912
+NASDAQ 100 Peak Hours Trading Strategy
+
+
+Description
+Our NASDAQ 100 Peak Hours Trading Strategy leverages a carefully designed algorithm to trade within specific hours of high market activity, particularly focusing on the first two hours of the trading session from 09:30 AM to 11:30 AM GMT-5. This period is identified for its increased volatility and liquidity, offering numerous trading opportunities.
+
+The strategy incorporates a blend of technical indicators to identify entry and exit points for both long and short positions. These indicators include:
+
+
+Exponential Moving Averages (EMAs): A short-term 9-period EMA and a longer-term 21-period EMA to determine the market trend and momentum.
+
+Relative Strength Index (RSI): A 14-period RSI to gauge the market's momentum.
+
+Average True Range (ATR): A 14-period ATR to assess market volatility and to set dynamic stop losses and trailing stops.
+
+Volume Weighted Average Price (VWAP): To identify the market's average price weighted by volume, serving as a benchmark for the trading day.
+
+
+
+Our strategy uniquely applies a volatility filter using the ATR, ensuring trades are only executed in conditions that favor our setup. Additionally, we consider the direction of the EMAs to confirm the market's trend before entering trades.
+
+Originality and Usefulness
+This strategy stands out by combining these indicators within the NASDAQ 100's peak hours, exploiting the specific market conditions that prevail during these times. The inclusion of a volatility filter and dynamic stop-loss mechanisms based on the ATR provides a robust method for managing risk.
+
+By focusing on the early trading hours, the strategy aims to capture the initial market movements driven by overnight news and the opening rush, often characterized by higher volatility. This approach is particularly useful for traders looking to maximize gains from short-term fluctuations while limiting exposure to longer-term market uncertainty.
+
+Strategy Results
+To ensure the strategy's effectiveness and reliability, it has undergone rigorous backtesting over a significant dataset to produce a sample size of more than 100 trades. This testing phase helps in identifying the strategy's potential in various market conditions, its consistency, and its risk-to-reward ratio.
+
+Our backtesting adheres to realistic trading conditions, accounting for slippage and commission to reflect actual trading scenarios accurately. The strategy is designed with a conservative approach to risk management, advising not to risk more than 5-10% of equity on a single trade. The default settings in the script align with these principles, ensuring that users can replicate our tested conditions.
+
+Using the Strategy
+The strategy is designed for simplicity and ease of use:
+
+
+Trade Hours: Focuses on 09:30 AM to 11:30 AM GMT-5, during the NASDAQ 100's peak activity hours.
+
+Entry Conditions: Trades are initiated based on the alignment of EMAs, RSI, VWAP, and the ATR's volatility filter within the designated time frame.
+
+Exit Conditions: Includes dynamic trailing stops based on ATR, a predefined time exit strategy, and a trend reversal exit condition for risk management.
+
+
+
+This script is a powerful tool for traders looking to leverage the NASDAQ 100's peak hours, providing a structured approach to navigating the early market hours with a robust set of criteria for making informed trading decisions.

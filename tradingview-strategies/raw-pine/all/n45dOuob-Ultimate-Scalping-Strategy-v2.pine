@@ -1,0 +1,247 @@
+//@version=5
+// Strategy: 5-Min Scalping (EMA + VWAP)
+// Enhancements: 
+// 1. Optional confirmation filters for Price Action (Engulfing) and Volume Spikes.
+// 2. Toggles to enable Longs-Only or Shorts-Only trading modes.
+// 3. Automatic plotting of Take Profit and Stop Loss lines for each individual trade.
+// 4. Optional ATR-based Trailing Stop to replace fixed Take Profit.
+// 5. Visual plotting of the active Trailing Stop Loss line. (Corrected)
+
+strategy("Ultimate Scalping Strategy v2.3 (Corrected TSL Plot)",
+         shorttitle="Ult. EMA+VWAP v2.3",
+         overlay=true,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=10) 
+
+// === Input Parameters ===
+group_main = "Main Indicator Settings"
+fastEMA_len = input.int(9, title="Fast EMA Length", group=group_main)
+slowEMA_len = input.int(21, title="Slow EMA Length", group=group_main)
+
+group_direction = "Trade Direction Settings"
+allowLongs = input.bool(true, title="✅ Allow Longs (Buys)?", group=group_direction)
+allowShorts = input.bool(true, "✅ Allow Shorts (Sells)?", group=group_direction)
+
+group_filters = "Confirmation Filters (Optional)"
+usePriceAction = input.bool(false, title="Use Price Action (Engulfing)?", group=group_filters)
+useVolume = input.bool(false, title="Use Volume Confirmation?", group=group_filters)
+vol_ma_len = input.int(20, title="Volume MA Length", group=group_filters)
+
+group_exits = "Exit Logic Settings"
+atr_len = input.int(14, title="ATR Length for SL/TP", group=group_exits)
+sl_atr_multiplier = input.float(1.5, title="Stop Loss ATR Multiplier", step=0.1, group=group_exits)
+tp_atr_multiplier = input.float(2.0, title="Take Profit ATR Multiplier", step=0.1, group=group_exits)
+useExitOnOppositeSignal = input.bool(true, title="Exit on Opposite Signal?", group=group_exits)
+
+// --- Trailing Stop Inputs ---
+useTrailingStop = input.bool(false, title="✅ Use Trailing Stop Loss?", tooltip="If checked, this will replace the fixed Take Profit. The Stop Loss will still be active from the start.", group=group_exits)
+ts_activation_multiplier = input.float(1.0, title="Trailing Activation ATR Multiplier", step=0.1, tooltip="Price must move this many ATRs in your favor before the trail begins.", group=group_exits)
+ts_atr_multiplier = input.float(2.0, title="Trailing Stop ATR Multiplier", step=0.1, tooltip="The distance the stop will trail behind the price.", group=group_exits)
+
+
+// === Indicator & Confirmation Calculations ===
+emaFast = ta.ema(close, fastEMA_len)
+emaSlow = ta.ema(close, slowEMA_len)
+vwapLine = ta.vwap
+atr = ta.atr(atr_len)
+isBullishCandle = close > open
+isBearishCandle = close < open
+bullishEngulfing = isBullishCandle and isBearishCandle[1] and close > open[1] and open < close[1]
+bearishEngulfing = isBearishCandle and isBullishCandle[1] and close < open[1] and open > close[1]
+volumeMA = ta.sma(volume, vol_ma_len)
+isVolumeSpike = volume > volumeMA
+
+// === Entry Conditions ===
+baseLongCond = ta.crossover(emaFast, emaSlow) and close > vwapLine
+baseShortCond = ta.crossunder(emaFast, emaSlow) and close < vwapLine
+longCond = baseLongCond and (not usePriceAction or bullishEngulfing) and (not useVolume or isVolumeSpike)
+shortCond = baseShortCond and (not usePriceAction or bearishEngulfing) and (not useVolume or isVolumeSpike)
+
+// === Plotting on Chart ===
+plot(emaFast, color=color.blue, title="Fast EMA")
+plot(emaSlow, color=color.orange, title="Slow EMA")
+plot(vwapLine, color=color.white, title="VWAP")
+plotshape(longCond and allowLongs, title="Buy Signal Arrow", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.small)
+plotshape(shortCond and allowShorts, title="Sell Signal Arrow", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.small)
+
+// === Strategy Execution Logic ===
+if (longCond and allowLongs)
+    strategy.entry("Long", strategy.long)
+
+if (shortCond and allowShorts)
+    strategy.entry("Short", strategy.short)
+
+// --- Exit Logic ---
+if (strategy.position_size > 0)
+    initialStopPrice = strategy.position_avg_price - atr * sl_atr_multiplier
+    if (useTrailingStop)
+        trailActivationPrice = strategy.position_avg_price + atr * ts_activation_multiplier
+        trailDistance = atr * ts_atr_multiplier
+        strategy.exit("Long Trail Exit", from_entry="Long", stop=initialStopPrice, trail_price=trailActivationPrice, trail_offset=trailDistance)
+    else
+        takeProfitPrice = strategy.position_avg_price + atr * tp_atr_multiplier
+        strategy.exit("Long Exit", from_entry="Long", stop=initialStopPrice, limit=takeProfitPrice)
+    
+    if (shortCond and useExitOnOppositeSignal)
+        strategy.close("Long", comment="Exit on Short Signal")
+
+if (strategy.position_size < 0)
+    initialStopPrice = strategy.position_avg_price + atr * sl_atr_multiplier
+    if (useTrailingStop)
+        trailActivationPrice = strategy.position_avg_price - atr * ts_activation_multiplier
+        trailDistance = atr * ts_atr_multiplier
+        strategy.exit("Short Trail Exit", from_entry="Short", stop=initialStopPrice, trail_price=trailActivationPrice, trail_offset=trailDistance)
+    else
+        takeProfitPrice = strategy.position_avg_price - atr * tp_atr_multiplier
+        strategy.exit("Short Exit", from_entry="Short", stop=initialStopPrice, limit=takeProfitPrice)
+    
+    if (longCond and useExitOnOppositeSignal)
+        strategy.close("Short", comment="Exit on Long Signal")
+
+
+// === CORRECTED: Advanced Exit Plotting Logic ===
+
+// Declare persistent variables to hold plot levels and captured trade data
+var float plot_sl_level = na
+var float plot_tp_level = na
+var float trade_high = na
+var float trade_low = na
+var float trade_entry_price = na
+var float trade_entry_atr = na
+
+// Detect trade state changes
+bool isNewTrade = strategy.position_size != 0 and strategy.position_size[1] == 0
+bool isTradeClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+// If a new trade starts, set initial plot levels and CAPTURE data
+if (isNewTrade)
+    trade_entry_price := strategy.position_avg_price
+    trade_entry_atr := atr
+    if (strategy.position_size > 0) // New Long
+        plot_sl_level := trade_entry_price - trade_entry_atr * sl_atr_multiplier
+        plot_tp_level := trade_entry_price + trade_entry_atr * tp_atr_multiplier
+        trade_high := high
+    else // New Short
+        plot_sl_level := trade_entry_price + trade_entry_atr * sl_atr_multiplier
+        plot_tp_level := trade_entry_price - trade_entry_atr * tp_atr_multiplier
+        trade_low := low
+
+// If a trade is ongoing, update the trail plot using CAPTURED data
+if (strategy.position_size != 0 and useTrailingStop)
+    if (strategy.position_size > 0) // Ongoing Long
+        trade_high := math.max(trade_high, high)
+        trailActivationPrice = trade_entry_price + trade_entry_atr * ts_activation_multiplier
+        if (trade_high >= trailActivationPrice)
+            trailDistance = trade_entry_atr * ts_atr_multiplier
+            potentialNewStop = trade_high - trailDistance
+            plot_sl_level := math.max(plot_sl_level, potentialNewStop)
+    else // Ongoing Short
+        trade_low := math.min(trade_low, low)
+        trailActivationPrice = trade_entry_price - trade_entry_atr * ts_activation_multiplier
+        if (trade_low <= trailActivationPrice)
+            trailDistance = trade_entry_atr * ts_atr_multiplier
+            potentialNewStop = trade_low + trailDistance
+            plot_sl_level := math.min(plot_sl_level, potentialNewStop)
+
+// If a trade closes, reset all plots and captured data to 'na'
+if (isTradeClosed)
+    plot_sl_level := na
+    plot_tp_level := na
+    trade_high := na
+    trade_low := na
+    trade_entry_price := na
+    trade_entry_atr := na
+
+// --- Final Plots ---
+plot(useTrailingStop ? na : plot_tp_level, title="Take Profit", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=2)
+plot(plot_sl_level, title="Stop Loss / Trailing Stop", color=useTrailingStop ? color.new(color.purple, 0) : color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+
+
+// === Alerts ===
+alertcondition(longCond and allowLongs, title="Long Entry Alert", message="Strategy Long: {{ticker}} at {{close}}")
+alertcondition(shortCond and allowShorts, title="Short Entry Alert", message="Strategy Short: {{ticker}} at {{close}}")
+
+View in Pine Editor・163 lines
+Use on chart
+4
+7
+7
+8
+10 708
+Aug 4, 2025
+Strategy Overview
+This is a versatile scalping strategy designed primarily for low timeframes (like 1-min, 3-min, or 5-min charts). Its core logic is based on a classic EMA (Exponential Moving Average) crossover system, which is then filtered by the VWAP (Volume-Weighted Average Price) to confirm the trade's direction in alignment with the market's current intraday sentiment.
+
+The strategy is highly customizable, allowing traders to add layers of confirmation, control trade direction, and manage exits with precision.
+
+Core Strategy Logic
+
+The strategy's entry signals are generated when two primary conditions are met simultaneously:
+
+Momentum Shift (EMA Crossover): It looks for a crossover between a fast EMA (default length 9) and a slow EMA (default length 21).
+
+Buy Signal: The fast EMA crosses above the slow EMA, indicating a potential shift to bullish momentum.
+
+Sell Signal: The fast EMA crosses below the slow EMA, indicating a potential shift to bearish momentum.
+
+Trend/Sentiment Filter (VWAP): The crossover signal is only considered valid if the price is on the "correct" side of the VWAP.
+
+For a Buy Signal: The price must be trading above the VWAP. This confirms that, on average, buyers are in control for the day.
+
+For a Sell Signal: The price must be trading below the VWAP. This confirms that sellers are generally in control.
+
+
+
+Confirmation Filters (Optional)
+
+To increase the reliability of the signals and reduce false entries, the strategy includes two optional confirmation filters:
+
+Price Action Filter (Engulfing Candle): If enabled (Use Price Action), the entry signal is only valid if the crossover candle is also an "engulfing" candle.
+
+A Bullish Engulfing candle is a large green candle that completely "engulfs" the body of the previous smaller red candle, signaling strong buying pressure.
+
+A Bearish Engulfing candle is a large red candle that engulfs the previous smaller green candle, signaling strong selling pressure.
+
+Volume Filter (Volume Spike): If enabled (Use Volume Confirmation), the entry signal must be accompanied by a surge in volume. This is confirmed if the volume of the entry candle is greater than its recent moving average (default 20 periods). This ensures the move has strong participation behind it.
+
+
+
+Exit Strategy
+
+A position can be closed in one of three ways, creating a comprehensive exit plan:
+
+Stop Loss (SL): A fixed stop loss is set at a level determined by a multiple of the Average True Range (ATR). For example, a 1.5 multiplier places the stop 1.5 times the current ATR value away from the entry price. This makes the stop dynamic, adapting to market volatility.
+
+Take Profit (TP): A fixed take profit is also set using an ATR multiplier. By setting the TP multiplier higher than the SL multiplier (e.g., 2.0 for TP vs. 1.5 for SL), the strategy aims for a positive risk-to-reward ratio on each trade.
+
+Exit on Opposite Signal (Reversal): If enabled, an open position will be closed automatically if a valid entry signal in the opposite direction appears. For example, if you are in a long trade and a valid short signal occurs, the strategy will exit the long position immediately. This feature turns the strategy into more of a reversal system.
+
+
+
+Key Features & Customization
+
+
+Trade Direction Control: You can enable or disable long and short trades independently using the Allow Longs and Allow Shorts toggles. This is useful for trading in harmony with a higher-timeframe trend (e.g., only allowing longs in a bull market).
+
+Visual Plots: The strategy plots the Fast EMA, Slow EMA, and VWAP on the chart for easy visualization of the setup. It also plots up/down arrows to mark where valid buy and sell signals occurred.
+
+Dynamic SL/TP Line Plotting: A standout feature is that the strategy automatically draws the exact Stop Loss and Take Profit price lines on the chart for every active trade. These lines appear when a trade is entered and disappear as soon as it is closed, providing a clear visual of your risk and reward targets.
+
+Alerts: The script includes built-in alertcondition calls. This allows you to create alerts in TradingView that can notify you on your phone or execute trades automatically via a webhook when a long or short signal is generated.
+
+Nov 2, 2025
+Release Notes
+Summary of Updates: From Original v2 to v2.3
+The strategy has been significantly enhanced with a powerful new exit feature based on user feedback. Here are the key updates:
+Optional ATR-Based Trailing Stop Loss:
+You can now enable a trailing stop loss in the settings. When active, it replaces the fixed Take Profit.
+This feature is designed to let winning trades run longer to capture bigger market moves, automatically locking in profits as the price moves in your favor.
+New User Settings for Trailing Stop:
+Three new options have been added under "Exit Logic Settings" to give you full control over the trailing stop's behavior:
+Use Trailing Stop Loss?: A checkbox to turn the feature on or off.
+Trailing Activation ATR Multiplier: Sets how far price must move in your favor before the trail begins.
+Trailing Stop ATR Multiplier: Sets the distance the stop will trail behind the price.
+Dynamic Plotting of the Trailing Stop:
+To make the feature easy to understand, the script now visually plots the trailing stop's level on the chart.
+When a trade is active with this feature enabled, you will see a purple line representing the stop loss. As the trade becomes profitable, you will see this line move up (for longs) or down (for shorts), showing you exactly where your profits are being protected.

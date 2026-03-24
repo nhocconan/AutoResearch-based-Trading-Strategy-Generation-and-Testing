@@ -1,0 +1,3 @@
+//@version=5
+label_bg_color=##input(defval=#FFFFFF,type='INPUT_COLOR',##id='in_3')
+##root(root_metainfo,rm_ic_0,label_bg_color,input__color)

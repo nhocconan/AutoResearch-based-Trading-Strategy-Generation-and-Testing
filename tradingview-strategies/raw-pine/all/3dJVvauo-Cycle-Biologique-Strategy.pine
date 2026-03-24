@@ -1,0 +1,59 @@
+//@version=5
+strategy("Cycle Biologique Strategy", overlay=true)
+
+// Paramètres pour ajuster la période du cycle
+cycle_length = input.int(30, title="Longueur du cycle", minval=1)
+amplitude = input.float(1.0, title="Amplitude du cycle", step=0.1)
+offset = input.int(0, title="Décalage du cycle", minval=-360, maxval=360)
+
+// Calcul du cycle périodique avec une fonction sinusoïdale
+cycle_value = amplitude * math.sin((2 * math.pi * (bar_index + offset)) / cycle_length)
+
+// Indicateurs d'achat et de vente en fonction du cycle
+buy_signal = ta.crossover(cycle_value, 0)
+sell_signal = ta.crossunder(cycle_value, 0)
+
+// Exécution des ordres en fonction des signaux
+if (buy_signal)
+    strategy.entry("Long Entry", strategy.long)
+
+if (sell_signal)
+    strategy.close("Long Entry")
+
+// Afficher le cycle périodique sur le graphique
+plot(cycle_value, color=color.blue, title="Cycle Biologique")
+
+View in Pine Editor・28 lines
+Use on chart
+3
+9
+1 801
+// (\_/)
+// ( •.•)
+// (")_(")
+//@fr33domz
+
+Experimental Research: Cycle Biologique Strategy
+Overview
+The "Cycle Biologique Strategy" is an experimental trading algorithm designed to leverage periodic cycles in price movements by utilizing a sinusoidal function. This strategy aims to identify potential buy and sell signals based on the behavior of a custom-defined biological cycle.
+
+Key Parameters
+Cycle Length: This parameter defines the duration of the cycle, set by default to 30 periods. The user can adjust this value to optimize the strategy for different asset classes or market conditions.
+
+Amplitude: The amplitude of the cycle influences the scale of the sinusoidal wave, allowing for customization in the sensitivity of buy and sell signals.
+Offset: The offset parameter introduces phase shifts to the cycle, adjustable within a range of -360 to 360 degrees. This flexibility allows the strategy to align with various market rhythms.
+Methodology
+The core of the strategy lies in the calculation of a periodic cycle using a sinusoidal function.
+
+Trading Signals
+Buy Signal: A buy signal is generated when the cycle value crosses above zero, indicating a potential upward momentum.
+
+Sell Signal: Conversely, a sell signal is triggered when the cycle value crosses below zero, suggesting a potential downtrend.
+
+Execution
+The strategy executes trades based on these signals:
+
+Upon receiving a buy signal, the algorithm enters a long position.
+When a sell signal occurs, the strategy closes the long position.
+Visualization
+To enhance user experience, the periodic cycle is plotted visually on the chart in blue, allowing traders to observe the cyclical nature of the strategy and its alignment with market movements.

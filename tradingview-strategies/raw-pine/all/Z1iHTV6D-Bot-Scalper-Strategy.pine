@@ -1,0 +1,119 @@
+//@version=6
+strategy("STANK SCALPER SPY — TP/SL (no trailing, entry/exit only)",
+     overlay=true, pyramiding=0, max_bars_back=1000,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     process_orders_on_close=true, calc_on_every_tick=true)
+
+// ===== Inputs =====
+tf               = input.string("5", "Timeframe (unused; runs on chart TF)", options=["5","15"])
+takeProfPct      = input.float(1.2, "Take-Profit %", step=0.1) / 100
+stopLossPct      = input.float(1.0, "Stop-Loss %",  step=0.1) / 100
+breakeven        = input.bool(false, "Breakeven at +0.5%")
+investmentUSD    = input.int(1000,   "Investment Size USD", minval=1)
+botUUID          = input.string("uuid", "Bot UUID (tag only)")
+startTS          = input.int(0,      "Backtest Start", inline="start")
+endTS            = input.int(0,      "Backtest End",   inline="end")
+
+// --- NEW: Cooldown control ---
+cooldownBars     = input.int(1, "Cooldown bars after any trade", minval=0, tooltip="Blocks new entries for this many bars after an entry/exit")
+
+// Optional ATR-based % for TP/SL
+useATRexits      = input.bool(false, "Use ATR-based TP/SL?")
+tpATRmult        = input.float(0.8,  "TP = ATR ×", step=0.1, tooltip="TP % = (ATR×mult)/close")
+slATRmult        = input.float(1.4,  "SL = ATR ×", step=0.1, tooltip="SL % = (ATR×mult)/close")
+
+// JSON helper
+stripPrefixInJSON = input.bool(true,  "Strip exchange prefix in JSON (e.g., NYSEARCA:SPY → SPY)")
+
+// ===== Core calcs =====
+ema200 = ta.ema(close, 200)
+ema21  = ta.ema(close, 21)
+rsi14  = ta.rsi(close, 14)
+atr14  = ta.atr(14)
+
+// ADX via DMI
+[plusDI, minusDI, adx14] = ta.dmi(14, 14)
+
+range20_h = ta.highest(high, 20)
+range20_l = ta.lowest(low,  20)
+mid20     = (range20_h + range20_l) / 2.0
+
+// ===== Guards (SPY-friendly) =====
+atrGuardThr = 0.0003         // 0.03%
+midDeadzone = 0.0015         // 0.15%
+atrGuard    = atr14 / close < atrGuardThr
+midGuard    = math.abs(close - mid20) / mid20 < midDeadzone
+chooseTrade = not atrGuard and not midGuard
+
+timeValid = (startTS == 0 or time >= startTS) and (endTS == 0 or time < endTS)
+
+// ===== Setup =====
+pullback  = close <= ema21 and close > ema200
+rsiCond   = rsi14 > 30 and rsi14 < 70 and ta.rising(rsi14, 1)
+adxCond   = adx14 > 18
+flat      = strategy.position_size == 0
+
+// ===== TP/SL selection (percent) =====
+tpPct_dyn = (atr14 * tpATRmult) / close
+slPct_dyn = (atr14 * slATRmult) / close
+tpUse     = useATRexits ? tpPct_dyn : takeProfPct
+slUse     = useATRexits ? slPct_dyn : stopLossPct
+
+// ===== Symbol formatting for JSON =====
+sym() =>
+    if stripPrefixInJSON and str.contains(syminfo.ticker, ":")
+        parts = str.split(syminfo.ticker, ":")
+        array.get(parts, 1)
+    else
+        syminfo.ticker
+
+// ===== JSON alert messages =====
+enterLong = '{"ticker":"' + sym() + '","action":"buy","price":"'  + str.tostring(close) + '","order_id":"Long","bot_uuid":"'      + botUUID + '"}'
+ExitLong  = '{"ticker":"' + sym() + '","action":"sell","price":"' + str.tostring(close) + '","order_id":"Long Exit","bot_uuid":"' + botUUID + '"}'
+
+// ===== Breakeven state =====
+var bool beActive = false
+if flat
+    beActive := false
+
+// --- NEW: Cooldown state & helpers ---
+var int lastTradeBar = na
+tradeJustClosed = strategy.position_size == 0 and strategy.position_size[1] > 0
+canTrade = na(lastTradeBar) or (bar_index - lastTradeBar >= cooldownBars)
+
+// Stamp lastTradeBar on close of a trade (bar close only to avoid intrabar noise)
+if barstate.isconfirmed and tradeJustClosed
+    lastTradeBar := bar_index
+
+// ===== Entry (now gated by bar close + cooldown) =====
+longEntryCore = chooseTrade and pullback and rsiCond and adxCond and flat and timeValid
+longEntry = barstate.isconfirmed and canTrade and longEntryCore  // <-- only at bar close, honors cooldown
+
+if longEntry
+    qty = math.max(1, math.floor(investmentUSD / close))
+    strategy.entry("Long", strategy.long, qty=qty, comment="Long", alert_message=enterLong)
+    // Stamp cooldown when we actually place the entry
+    lastTradeBar := bar_index
+
+// ===== Exit (no trailing) =====
+if strategy.position_size > 0
+    avg = strategy.position_avg_price
+    tpU = avg * (1 + tpUse)
+    slU = beActive ? avg * 1.005 : avg * (1 - slUse)   // switch to BE stop once armed
+
+    strategy.exit("Long Exit", from_entry="Long", limit=tpU, stop=slU, comment="L Exit", alert_message=ExitLong)
+
+    // Arm breakeven after +0.5% profit (only if enabled)
+    if not beActive and breakeven and close > avg * 1.005
+        beActive := true
+
+// ===== Visuals =====
+plot(ema200, "EMA200", color=color.new(color.blue, 0))
+plot(ema21,  "EMA21",  color=color.new(color.green, 0))
+
+View in Pine Editor・115 lines
+Use on chart
+2
+4
+833
+Bot scalper strategy, used with webhooks, can be used with api supported broker

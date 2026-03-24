@@ -1,0 +1,325 @@
+//@version=6
+strategy("Universal Breakout Strategy [KedArc Quant]",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     calc_on_every_tick=true)
+
+//@author: [KedArc Quant]
+//@createdOn: [30-Sep-2025]
+
+// ================= Inputs (unchanged) =================
+len    = input.int(20, "Lookback Period", minval=1)
+bbMult = input.float(2.0, "Bollinger Multiplier", minval=0.1, step=0.1)
+mode   = input.string("Prev Day",
+     title="Breakout Mode",
+     options=["Prev Day", "Bollinger", "Volume", "ATR Stop", "Time Filter", "EMA Trend", "RSI Confirm", "Candle Confirm"])
+sess   = input.session("0900-1500", "Session (exchange time)")
+intrabar = input.bool(false, "Evaluate intrabar (simulate tick mode)")
+
+// Table/Stats toggles (non-invasive)
+showTable   = input.bool(true,  "Show Info Table")
+showStats   = input.bool(true,  "Show P&L Stats")
+tableCorner = input.string("Top Right", "Table Corner", options=["Top Right","Top Left","Bottom Right","Bottom Left"])
+
+// ================= Core Levels (unchanged) =================
+// Use previous-bar extremes so breakouts can occur on current bar
+hhPrev = ta.highest(high[1], len)
+llPrev = ta.lowest(low[1],  len)
+
+// Prev Day (yesterday values available from session open)
+prevHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+prevLow  = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+
+// Bollinger (basis, upper, lower)
+[basis, bbUpper, bbLower] = ta.bb(close, len, bbMult)
+
+// ================= Filters/Helpers (unchanged) =================
+volSma     = ta.sma(volume, len)
+volConfirm = volume > volSma
+
+atr        = ta.atr(len)
+
+inSession  = not na(time(timeframe.period, sess))
+
+emaFast    = ta.ema(close, 9)
+emaSlow    = ta.ema(close, 21)
+trendUp    = emaFast > emaSlow
+trendDown  = emaFast < emaSlow
+
+rsiVal     = ta.rsi(close, len)
+
+bullishCndl = close > open and close > close[1]
+bearishCndl = close < open and close < close[1]
+candleType  = bullishCndl ? "Bullish" : bearishCndl ? "Bearish" : "Neutral"
+
+// ================= Breakout Logic (UNCHANGED) =================
+// Intrabar toggle affects only how the base breakout is detected; logic stays the same
+longBase  = intrabar ? high > hhPrev  : ta.crossover(close, hhPrev)
+shortBase = intrabar ? low  < llPrev  : ta.crossunder(close, llPrev)
+
+longCond =
+     mode == "Prev Day"       ? ta.crossover(close, prevHigh) :
+     mode == "Bollinger"      ? ta.crossover(close, bbUpper)  :
+     mode == "Volume"         ? longBase  and volConfirm :
+     mode == "ATR Stop"       ? longBase  and (high - close[1] > atr) :
+     mode == "Time Filter"    ? longBase  and inSession :
+     mode == "EMA Trend"      ? longBase  and trendUp :
+     mode == "RSI Confirm"    ? longBase  and (rsiVal > 55) :
+     mode == "Candle Confirm" ? longBase  and bullishCndl :
+     false
+
+shortCond =
+     mode == "Prev Day"       ? ta.crossunder(close, prevLow) :
+     mode == "Bollinger"      ? ta.crossunder(close, bbLower) :
+     mode == "Volume"         ? shortBase and volConfirm :
+     mode == "ATR Stop"       ? shortBase and (close[1] - low > atr) :
+     mode == "Time Filter"    ? shortBase and inSession :
+     mode == "EMA Trend"      ? shortBase and trendDown :
+     mode == "RSI Confirm"    ? shortBase and (rsiVal < 45) :
+     mode == "Candle Confirm" ? shortBase and bearishCndl :
+     false
+
+// ================= Orders (unchanged) =================
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// ================= Plots (unchanged) =================
+plot(mode == "Prev Day" ? prevHigh : na, "Prev High", color=color.new(color.green, 0))
+plot(mode == "Prev Day" ? prevLow  : na, "Prev Low",  color=color.new(color.red,   0))
+
+plot(mode != "Bollinger" and mode != "Prev Day" ? hhPrev : na, "HH prev (len)", color=color.new(color.teal, 0))
+plot(mode != "Bollinger" and mode != "Prev Day" ? llPrev : na, "LL prev (len)", color=color.new(color.orange, 0))
+
+plot(mode == "Bollinger" ? bbUpper : na, "BB Upper", color=color.new(color.fuchsia, 0))
+plot(mode == "Bollinger" ? basis   : na, "BB Basis", color=color.new(color.gray, 60))
+plot(mode == "Bollinger" ? bbLower : na, "BB Lower", color=color.new(color.aqua, 0))
+
+plotshape(longCond,  title="Long",  location=location.belowbar, color=color.green, style=shape.triangleup,   size=size.tiny, text="↗︎")
+plotshape(shortCond, title="Short", location=location.abovebar, color=color.red,   style=shape.triangledown, size=size.tiny, text="↘︎")
+
+// ================= Right-Side INFO TABLE (streamlined & const position) =================
+var table infoTbl = na
+if barstate.isfirst
+    if tableCorner == "Top Right"
+        infoTbl := table.new(position.top_right,  columns=2, rows=9, border_width=1)
+    else if tableCorner == "Top Left"
+        infoTbl := table.new(position.top_left,   columns=2, rows=9, border_width=1)
+    else if tableCorner == "Bottom Right"
+        infoTbl := table.new(position.bottom_right, columns=2, rows=9, border_width=1)
+    else
+        infoTbl := table.new(position.bottom_left, columns=2, rows=9, border_width=1)
+
+f_set(row, label, value, txtColor=color.white) =>
+    table.cell(infoTbl, 0, row, label, text_color=color.white, text_halign=text.align_left,  bgcolor=color.black)
+    table.cell(infoTbl, 1, row, value, text_color=txtColor,    text_halign=text.align_right, bgcolor=color.black)
+
+f_clear(row) =>
+    table.cell(infoTbl, 0, row, "", bgcolor=color.black)
+    table.cell(infoTbl, 1, row, "", bgcolor=color.black)
+
+fmtPrice(x) => str.tostring(x, format.mintick)
+fmtVol(x)   => str.tostring(x, format.volume)
+fmt2(x)     => str.tostring(x, "#.##")
+
+// Optional extra stats (safe, non-invasive)
+totalTrades = strategy.closedtrades
+winTrades   = strategy.wintrades
+lossTrades  = strategy.losstrades
+winRate     = totalTrades > 0 ? 100.0 * winTrades / totalTrades : na
+avgTrade    = totalTrades > 0 ? (strategy.netprofit / totalTrades) : na
+
+// Single build block (no logic changes)
+if barstate.islast and showTable
+    // Header + common rows
+    f_set(0, "Universal Breakout", syminfo.ticker)
+    f_set(1, "Mode", mode)
+    f_set(2, "Current Price", fmtPrice(close))
+
+    // Clear mode rows
+    f_clear(3), f_clear(4)
+
+    // Mode-specific rows (values only; logic untouched)
+    if mode == "Prev Day"
+        f_set(3, "Prev High", fmtPrice(prevHigh))
+        f_set(4, "Prev Low",  fmtPrice(prevLow))
+    else if mode == "Bollinger"
+        f_set(3, "Upper BB", fmtPrice(bbUpper))
+        f_set(4, "Lower BB", fmtPrice(bbLower))
+    else if mode == "Volume"
+        f_set(3, "Avg Volume", fmtVol(volSma))
+        f_set(4, "Volume",     fmtVol(volume))
+    else if mode == "ATR Stop"
+        f_set(3, "ATR (" + str.tostring(len) + ")", fmt2(atr))
+    else if mode == "Time Filter"
+        // Only current price requested (already at row 2)
+        na
+    else if mode == "EMA Trend"
+        f_set(3, "EMA Fast (9)",  fmtPrice(emaFast))
+        f_set(4, "EMA Slow (21)", fmtPrice(emaSlow))
+    else if mode == "RSI Confirm"
+        rsiColor = rsiVal > 55 ? color.green : rsiVal < 45 ? color.red : color.white
+        f_set(3, "RSI (" + str.tostring(len) + ")", fmt2(rsiVal), rsiColor)
+    else if mode == "Candle Confirm"
+        cCol = candleType == "Bullish" ? color.green : candleType == "Bearish" ? color.red : color.white
+        f_set(3, "Candle", candleType, cCol)
+
+    // ====== P&L STATS (optional) ======
+    if showStats
+        netCol = strategy.netprofit >= 0 ? color.green : color.red
+        f_set(5, "Net Profit",  str.tostring(strategy.netprofit, "#.##"), netCol)
+        f_set(6, "Trades (W/L)", str.tostring(winTrades) + "/" + str.tostring(lossTrades))
+        f_set(7, "Win Rate %",  na(winRate) ? "—" : str.tostring(winRate, "#.##"))
+        f_set(8, "Avg Trade",   na(avgTrade) ? "—" : str.tostring(avgTrade, "#.##"))
+    else
+        // Clear stats rows when hidden
+        f_clear(5), f_clear(6), f_clear(7), f_clear(8)
+
+View in Pine Editor・178 lines
+Use on chart
+1.1 K
+3
+15 541
+Description:
+
+A flexible breakout framework where you can test different logics (Prev Day, Bollinger, Volume, ATR, EMA Trend, RSI Confirm, Candle Confirm, Time Filter) under one system.
+Choose your breakout mode, and the strategy will handle entries, exits, and optional risk management (ATR stops, take-profits, daily loss guard, cooldowns).
+An on-chart info table shows live mode values (like Prev High/Low, Bollinger levels, RSI, etc.) plus P&L stats for quick analysis.
+Use it to compare which breakout style works best on your instrument and timeframe, whether intraday, swing, or positional trading
+
+
+🔑 Why it’s useful
+
+* Flexibility: Switch between breakout strategies without loading different indicators.
+* Clarity: On-chart info table displays current mode, relevant indicator levels, and live strategy P&L stats.
+* Testing efficiency: Quickly A/B test different breakout styles under the same backtest environment.
+* Transparency: Every trade is rule-based and displayed with entry/exit markers.
+
+🚀 How it helps traders
+
+* Lets you experiment with breakout strategies quickly without loading multiple scripts.
+* Helps identify which breakout method fits your instrument & timeframe.
+* Gives clear on-chart visual + statistical feedback for confident decision-making.
+
+
+⚙️ Input Configuration
+
+* Breakout Mode → choose which strategy to test:
+
+* *Prev Day* → breakouts of yesterday’s High/Low.
+* *Bollinger* → Upper/Lower BB pierce.
+* *Volume* → Breakout confirmed with volume above average.
+* *ATR Stop* → Wide range breakout using ATR filter.
+* *Time Filter* → Breakouts inside defined session hours.
+* *EMA Trend* → Breakouts only in EMA fast > slow alignment.
+* *RSI Confirm* → Breakouts with RSI confirmation (e.g. >55 for longs).
+* *Candle Confirm* → Breakouts validated by bullish/bearish candle.
+* Lookback / ATR / Bollinger inputs → adjust sensitivity.
+* Intrabar mode → option to evaluate breakouts using bar highs/lows instead of closes.
+* Table options → show/hide info table, show/hide P&L stats, choose corner placement.
+
+
+
+📈 Entry & Exit Logic
+
+* Entry → occurs when breakout condition of chosen mode is met.
+* Exit → default exits via opposite signals or optional stop/target if enabled.
+* Session filter → optional auto-flat at session end.
+* P&L management → optional daily loss guard, cooldown between trades, and ATR-based stop/take profit.
+
+
+
+❓ FAQ — Choosing the best setup
+
+Q: Which strategy should I use for which chart?
+
+* *Prev Day Breakouts*: Best on indices, FX, and liquid futures with strong daily levels.
+* *Bollinger*: Works well in range-bound environments, or crypto pairs with volatility compression.
+* *Volume*: Good on equities where breakout strength is tied to volume spikes.
+* *ATR Stop*: Suits volatile instruments (commodities, crypto).
+* *EMA Trend*: Useful in trending markets (stocks, indices).
+* *RSI Confirm*: Adds momentum filter, better for swing trades.
+* *Candle Confirm*: Ideal for scalpers needing visual confirmation.
+* *Time Filter*: For intraday traders who want signals only in high-liquidity sessions.
+
+Q: What timeframe should I use?
+
+* Intraday traders → 5m to 15m (Time Filter, Candle Confirm).
+* Swing traders → 1H to 4H (EMA Trend, RSI Confirm, ATR Stop).
+* Position traders → Daily (Prev Day, Bollinger).
+
+* Breakout
+A trade entry condition triggered when price crosses above a resistance level (for longs) or below a support level (for shorts).
+
+* Prev Day High/Low
+
+Formula:
+Prev High = High of (Day[1])
+Prev Low = Low of (Day[1])
+
+* Bollinger Bands
+
+Formula:
+Basis = SMA(Close, Length)
+Upper Band = Basis + (Multiplier × StdDev(Close, Length))
+Lower Band = Basis – (Multiplier × StdDev(Close, Length))
+
+* Volume Confirmation
+A breakout is only valid if:
+Volume > SMA(Volume, Length)
+
+* ATR (Average True Range)
+Measures volatility.
+
+Formula:
+ATR = SMA(True Range, Length)
+where True Range = max(High–Low, |High–Close[1]|, |Low–Close[1]|)
+
+* EMA (Exponential Moving Average)
+
+Weighted moving average giving more weight to recent prices.
+
+Formula:
+EMA = (Price × α) + (EMA[1] × (1–α))
+with α = 2 / (Length + 1)
+
+* RSI (Relative Strength Index)
+
+Momentum oscillator scaled 0–100.
+
+Formula:
+RSI = 100 – (100 / (1 + RS))
+where RS = Avg(Gain, Length) ÷ Avg(Loss, Length)
+
+* Candle Confirmation
+
+Bullish candle: Close > Open AND Close > Close[1]
+Bearish candle: Close < Open AND Close < Close[1]
+Win Rate (%)
+
+Formula:
+Win Rate = (Winning Trades ÷ Total Trades) × 100
+
+* Average Trade P&L
+Formula:
+Avg Trade = Net Profit ÷ Total Trades
+
+📊 Performance Notes
+
+The Universal Breakout Strategy is designed as a framework rather than a single-asset optimized system. Results will vary depending on the chart, timeframe, and asset chosen.
+On the current defaults (15-minute, INR-denominated example), the backtest produced 132 trades over the selected period. This provides a statistically sufficient sample size.
+Win rate (~35%) is relatively low, but this is balanced by a positive reward-to-risk ratio (~1.8). In practice, a lower win rate with larger wins versus smaller losses is sustainable.
+The average P&L per trade is close to breakeven under default settings. This is expected, as the strategy is not tuned for a single symbol but offered as a universal breakout framework.
+Commissions (0.1%) and slippage (1 tick) are included in the simulation, ensuring realistic conditions.
+Risk management is conservative, with order sizing set at 1 unit per trade. This avoids over-leveraging and keeps exposure well under the 5-10% equity risk guideline.
+
+👉 Traders are encouraged to:
+Experiment with inputs such as ATR period, breakout length, or Bollinger parameters.
+Test across different timeframes and instruments (equities, futures, forex, crypto) to find optimal setups.
+Combine with filters (trend direction, volatility regimes, or volume conditions) for further refinement.
+
+⚠️ Disclaimer This script is provided for educational purposes only.
+Past performance does not guarantee future results.
+Trading involves risk, and users should exercise caution and use proper risk management when applying this strategy.

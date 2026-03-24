@@ -1,0 +1,124 @@
+//@version=5
+strategy(  "Momentum Concepts | Baseline Strategy ",  overlay=false , pyramiding=0,  initial_capital=1000 ,default_qty_type=strategy.cash,default_qty_value=1000, commission_type=strategy.commission.percent, commission_value=0.01,  slippage=2 ,process_orders_on_close=true)
+
+//━━━━━━━━━━━━━━━━━━━
+// DATE FILTER
+//━━━━━━━━━━━━━━━━━━━
+startYear  = input.int(2023, "Start Year")
+startMonth = input.int(6,   "Start Month")
+startDay   = input.int(16,    "Start Day")
+
+startDate  = timestamp(startYear, startMonth, startDay, 00, 00)
+dateFilter = time >= startDate
+
+//━━━━━━━━━━━━━━━━━━━
+// SESSION FILTER
+//━━━━━━━━━━━━━━━━━━━
+tradeSession  = input.session("0000-0000", "Trading Session")
+inSession     = not na(time(timeframe.period, tradeSession))
+sessionStart  = inSession and not inSession[1]
+
+//━━━━━━━━━━━━━━━━━━━
+// INPUTS
+//━━━━━━━━━━━━━━━━━━━
+src     = input.source(close, "Source")
+fastLen = input.int(9, "Fast Oscillator Length")
+
+useBarClose = input.bool(true, "Trade on Bar Close Only")
+confirm     = useBarClose ? barstate.isconfirmed : true
+
+//━━━━━━━━━━━━━━━━━━━
+// FAST OSCILLATOR
+//━━━━━━━━━━━━━━━━━━━
+fastRSI  = ta.rsi(src, fastLen)
+fastWave = ta.ema(fastRSI - 50, 3)
+
+//━━━━━━━━━━━━━━━━━━━
+// BASELINE
+//━━━━━━━━━━━━━━━━━━━
+baseline = 0.0
+
+//━━━━━━━━━━━━━━━━━━━
+// TRADE ALLOWED
+//━━━━━━━━━━━━━━━━━━━
+tradeAllowed = dateFilter and inSession and confirm
+
+//━━━━━━━━━━━━━━━━━━━
+// CONDITIONS (STATE BASED)
+//━━━━━━━━━━━━━━━━━━━
+aboveBase = fastWave > baseline
+belowBase = fastWave < baseline
+
+// Session start entry
+buyAtSessionStart  = sessionStart and aboveBase and dateFilter
+sellAtSessionStart = sessionStart and belowBase and dateFilter
+
+// Normal continuation
+buyCond  = tradeAllowed and aboveBase and strategy.position_size <= 0
+sellCond = tradeAllowed and belowBase and strategy.position_size >= 0
+
+//━━━━━━━━━━━━━━━━━━━
+// EXECUTION
+//━━━━━━━━━━━━━━━━━━━
+if buyAtSessionStart or buyCond
+    strategy.entry("BUY", strategy.long)
+
+if sellAtSessionStart or sellCond
+    strategy.entry("SELL", strategy.short)
+
+//━━━━━━━━━━━━━━━━━━━
+// PLOTS
+//━━━━━━━━━━━━━━━━━━━
+plot(fastWave, title="Fast Oscillator", color=color.aqua, linewidth=2)
+hline(0, "Baseline", color=color.gray)
+
+plotshape(buyAtSessionStart,  title="Buy @ Session Start",  style=shape.circle, location=location.bottom, color=color.lime, size=size.small)
+plotshape(sellAtSessionStart, title="Sell @ Session Start", style=shape.circle, location=location.top,   color=color.red,  size=size.small)
+
+View in Pine Editor・76 lines
+Use on chart
+3
+3
+817
+**Momentum Concepts | Baseline Strategy**
+
+**Overview**
+Momentum Concepts | Baseline Strategy is a momentum-based trading strategy designed to identify directional bias using a smoothed RSI oscillator relative to a neutral baseline. The strategy evaluates momentum strength and automatically opens long or short positions when the oscillator moves above or below the baseline level. It is intended for analytical, educational, and strategy-testing purposes on TradingView charts.
+
+**How It Works**
+The strategy calculates an RSI-based momentum value and smooths it using an exponential moving average. The resulting oscillator fluctuates around a neutral baseline (zero level), which represents the balance point between bullish and bearish momentum.
+
+* When the oscillator rises above the baseline, it indicates strengthening bullish momentum and a long position is opened.
+* When the oscillator falls below the baseline, it indicates strengthening bearish momentum and a short position is opened.
+* The strategy continuously evaluates momentum and reverses positions when momentum direction changes.
+* Optional date and session filters allow users to restrict trading to specific time ranges.
+* Execution can be configured to occur only after candle close to ensure stable signal confirmation.
+
+**Recommended Usage**
+This strategy is suitable for multiple markets, including cryptocurrencies, forex, and indices. It is particularly effective on instruments with strong trending behavior.
+
+Recommended settings for cryptocurrency testing:
+
+* Symbol: BTCUSDT or other BTC pairs
+* Timeframe: 1 Day
+* Position sizing: Use percent of equity or realistic cash value for accurate backtesting
+* Commission and slippage settings should be configured according to your exchange conditions
+
+**Features**
+
+* Momentum-based directional bias detection
+* Automatic long and short position switching
+* Non-repainting signal logic when used with bar close confirmation
+* Configurable date filter for historical testing
+* Configurable session filter
+* Clean oscillator visualization with baseline reference
+
+**Strategy Purpose**
+This script is designed to help users study momentum behavior, evaluate trend continuation, and test systematic trading concepts using historical data. It can be used to analyze how momentum shifts influence directional movement over time.
+
+**Disclaimer**
+This script is provided for educational and informational purposes only and does not constitute financial, investment, or trading advice. Trading involves risk, and past performance does not guarantee future results. Users are responsible for their own trading decisions and should carefully evaluate any strategy before using it in live trading. The author makes no representations or warranties regarding the performance or outcomes of this strategy. Use at your own risk.
+
+**Best Practice Recommendation**
+For Bitcoin analysis, the 1 Day timeframe provides clearer trend structure and reduces market noise, making it suitable for studying momentum-based directional bias.
+

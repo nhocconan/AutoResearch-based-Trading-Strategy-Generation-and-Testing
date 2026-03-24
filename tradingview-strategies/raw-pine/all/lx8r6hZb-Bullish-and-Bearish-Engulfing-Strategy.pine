@@ -1,0 +1,33 @@
+//@version=2
+strategy("Super Envolvente", overlay=true)
+
+secLast = 1
+
+checkingHighsAndLows(position) =>
+    high >= high[position] and low <= low[position]
+
+isBearishEngulfing(position) =>
+    checkingHighsAndLows(position) and open >= close[position] and open >= open[position] and close <= open[position] and close <= close[position]
+
+isBullishEngulfing(position) =>
+    checkingHighsAndLows(position) and open <= close[position] and open <= open[position] and close >= open[position] and close >= close[position]
+
+
+longCondition = isBullishEngulfing(1)
+
+if (longCondition)
+    strategy.entry("Long Entry", strategy.long)
+
+shortCondition = isBearishEngulfing(1)
+
+if (shortCondition)
+    strategy.entry("Short Entry", strategy.short)
+
+View in Pine Editor・24 lines
+Use on chart
+3
+1
+5
+4
+16 121
+I've been trying to put a stop loss in the High or Low of the last second bar after I open a position but in this example the only way to close it, is with the opposite action. Does anyone know how to put a stop loss and order with just stop loss and close when there is a bullish or bearish engulfing bar?

@@ -1,0 +1,119 @@
+//@version=6
+strategy(
+    "Supertrend + OBV AND Logic (FINAL – NO ta.obv)",
+    overlay = true,
+    initial_capital = 100000,
+    default_qty_type = strategy.percent_of_equity,
+    default_qty_value = 100,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.04
+)
+
+// =====================
+// INPUTS
+// =====================
+atrPeriod  = input.int(10, "Supertrend ATR Period")
+atrMult    = input.float(3.0, "Supertrend Multiplier")
+
+obvLen     = input.int(20, "OBV EMA Length")
+signalLen  = input.int(20, "OBV Signal Length")
+
+// =====================
+// SUPERTREND (OFFICIAL POLARITY)
+// =====================
+[st, dir] = ta.supertrend(atrMult, atrPeriod)
+
+// TradingView built-in Supertrend:
+// dir ==  1 → Bullish
+// dir == -1 → Bearish
+supertrendBull = dir == 1
+supertrendBear = dir == -1
+
+// =====================
+// OBV (MANUAL – NO ta.obv)
+// =====================
+var float obv = na
+if bar_index == 0
+    obv := volume
+else
+    obv := close > close[1] ? nz(obv[1]) + volume :
+           close < close[1] ? nz(obv[1]) - volume :
+           nz(obv[1])
+
+obvEMA   = ta.ema(obv, obvLen)
+signal   = ta.ema(obvEMA, signalLen)
+
+obvCrossUp   = ta.crossover(obvEMA, signal)
+obvCrossDown = ta.crossunder(obvEMA, signal)
+
+// =====================
+// ENTRY / EXIT CONDITIONS
+// =====================
+
+// ENTRY:
+// OBV crosses UP while Supertrend is bullish
+ENTER = obvCrossUp and supertrendBull and strategy.position_size == 0
+
+// EXIT:
+// Supertrend flips bearish
+EXIT = supertrendBear and strategy.position_size > 0
+
+// =====================
+// STRATEGY EXECUTION
+// =====================
+if ENTER
+    strategy.entry("LONG", strategy.long)
+
+if EXIT
+    strategy.close("LONG")
+
+// =====================
+// VISUALS
+// =====================
+plot(st, color = supertrendBull ? color.green : color.red, linewidth = 2, title="Supertrend")
+
+plotshape(
+    ENTER,
+    title="ENTRY",
+    location=location.belowbar,
+    style=shape.labelup,
+    color=color.green,
+    text="ENTER",
+    textcolor=color.white
+)
+
+plotshape(
+    obvCrossDown,
+    title="PROTECT (Visual)",
+    location=location.abovebar,
+    style=shape.labeldown,
+    color=color.orange,
+    text="OBV ↓",
+    textcolor=color.white
+)
+
+plotshape(
+    EXIT,
+    title="EXIT",
+    location=location.abovebar,
+    style=shape.labeldown,
+    color=color.red,
+    text="EXIT",
+    textcolor=color.white
+)
+
+View in Pine Editor・103 lines
+Use on chart
+2
+3
+663
+Supertrend + OBV Regime Filter (Long-Only) is a rule-based trend regime detection script that combines ATR-based Supertrend structure with volume-confirmed momentum using On-Balance Volume (OBV). The Supertrend (ATR 10, multiplier 3) defines the primary market regime and acts as the absolute authority for trend direction, while OBV—manually calculated for robustness and smoothed using EMA(20) with a signal EMA(20)—is used to confirm participation and momentum.
+
+A long signal is generated only on confirmed bar close when the Supertrend is bullish (price above the Supertrend line) and OBV momentum turns positive via an EMA crossover, enforcing strict AND-logic confirmation and preventing entries during low-volume or transitional phases.
+
+The strategy maintains a single long position per trend, with no pyramiding, averaging, or discretionary overrides. A full exit is triggered immediately when the Supertrend flips bearish, serving as a hard regime exit rather than a profit-target-based stop.
+
+Additionally, an OBV downside crossover generates a non-executable “Protect” signal (visual only), intended for risk-management actions such as reducing exposure or pausing position additions, particularly for grid or DCA implementations.
+
+
+This script is not designed as a grid, scalping, or buy-and-hold strategy; instead, it functions as a conservative trend and regime filter suitable for discretionary trading or as a signal layer to control automated long-bias execution systems. Forward testing and proper risk management are strongly recommended.

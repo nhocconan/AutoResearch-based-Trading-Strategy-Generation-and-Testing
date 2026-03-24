@@ -1,0 +1,286 @@
+//@version=6
+strategy("RSI-Adaptive T3 & SAR Strategy [PrimeAutomation]", overlay=true
+ , default_qty_type = strategy.percent_of_equity
+ , default_qty_value = 10 
+ , commission_type = strategy.commission.percent 
+ , commission_value = 0.06 
+ , initial_capital = 10000
+ , margin_long = 0
+ , margin_short = 0
+ , process_orders_on_close = true
+ , pyramiding = 0
+ )
+
+
+string OpSettings           = "➞ Optimization Settings 🔸"
+string OpSettings1          = "➞ Settings 🔸"
+
+
+// Strategy Settings
+startTime     = input.time(timestamp("01-01-2023"), "Strategy Start Date", group = OpSettings1)
+MarketClosed  = input.bool(false ,"Exit before market close", group = OpSettings1)
+
+
+var StartTIME = 0
+totaltrades = strategy.closedtrades
+PNL = strategy.netprofit_percent + strategy.openprofit_percent
+WinRate = (strategy.wintrades / totaltrades ) * 100 
+MaxDraw = strategy.max_drawdown_percent
+
+Con = strategy.closedtrades == 0 and strategy.opentrades == 1 
+StartTIME:= ta.valuewhen(Con and not Con[1],time,0)
+
+
+var float dailyPNL = na
+var int maxDays = 60
+var float lastNetProfit = na
+var array<string> PNLS = array.new_string()
+
+newDay = ta.change(time("D")) != 0
+currentNetProfit = strategy.netprofit
+
+if newDay
+    if not na(lastNetProfit)
+        dailyPNL := currentNetProfit - lastNetProfit
+
+        if dailyPNL != 0
+            dateStr = str.format("{0,date,MM-dd}", time)
+            combined = dateStr + ":" + str.tostring(dailyPNL, "#.##")
+            array.unshift(PNLS, combined)
+
+            if array.size(PNLS) > maxDays
+                array.pop(PNLS)
+
+    lastNetProfit := currentNetProfit
+
+
+
+// log.error(str.tostring(PNLS))
+
+MC()=>
+    hr = hour == 15
+    min = minute == 55
+    _Hr = request.security(syminfo.tickerid,"5",hr)
+    _min = request.security(syminfo.tickerid,"5",min)
+    MClose = (_Hr and _min )
+    MClose
+
+tradesCount = strategy.closedtrades
+
+// Get PnL of last closed trade
+LastPNL = 0.
+if tradesCount > 0
+    LastPNL := strategy.closedtrades.profit(tradesCount - 1)
+
+
+
+method parseing(string st,tp = 0 , sl = 0 , size = 0 , per = 0.)=>
+    string ret = st
+    ret := str.replace_all(ret, "{{tickerid}}", syminfo.tickerid)
+    ret := str.replace_all(ret, "{{ticker}}", syminfo.ticker)
+    ret := str.replace_all(ret, "{{exchange}}", syminfo.prefix)
+    ret := str.replace_all(ret, "{{close}}", str.tostring(close))
+    ret := str.replace_all(ret, "{{open}}", str.tostring(open))
+    ret := str.replace_all(ret, "{{high}}", str.tostring(high))
+    ret := str.replace_all(ret, "{{low}}", str.tostring(low))
+    ret := str.replace_all(ret, "{{time}}", str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone))
+    ret := str.replace_all(ret, "{{timenow}}", str.format_time(timenow, "yyyy-MM-dd HH:mm", syminfo.timezone))
+    ret := str.replace_all(ret, "{{volume}}", str.tostring(volume))
+    ret := str.replace_all(ret, "{{interval}}", timeframe.period)
+    ret := str.replace_all(ret, "{{country}}", syminfo.country)
+    ret := str.replace_all(ret, "{{description}}", syminfo.description)
+    ret := str.replace_all(ret, "{{root}}", syminfo.root)
+    ret := str.replace_all(ret, "{{industry}}", syminfo.industry)
+    ret := str.replace_all(ret, "{{type}}", syminfo.type)
+    ret := str.replace_all(ret, "{{tp}}", str.tostring(tp))
+    ret := str.replace_all(ret, "{{sl}}", str.tostring(sl))
+    ret := str.replace_all(ret, "{{size}}", str.tostring(size))
+    ret := str.replace_all(ret, "{{per}}", str.tostring(per))
+    ret := str.replace_all(ret, "{{TotalTrades}}", str.tostring(strategy.closedtrades))
+    ret := str.replace_all(ret, "{{PNL}}", str.tostring(strategy.netprofit_percent + strategy.openprofit_percent,"#.##"))
+    ret := str.replace_all(ret, "{{WinRate}}", str.tostring((strategy.wintrades / totaltrades) * 100 ,"#.##"))
+    ret := str.replace_all(ret, "{{MaxDraw}}", str.tostring(strategy.max_drawdown_percent,"#.##" ))
+    ret := str.replace_all(ret, "{{StartDate}}", str.format("{0,date,medium}",StartTIME))
+    ret := str.replace_all(ret, "{{DailyPnl}}", str.tostring(dailyPNL,"#.##"))
+    ret := str.replace_all(ret, "{{historyPNL}}", str.tostring(PNLS))
+    ret := str.replace_all(ret, "{{LastPNL}}", str.tostring(LastPNL))
+    ret
+
+
+
+LongEntryMSG   = '{"ticker": "{{ticker}}","action": "buy","price": "{{close}}", "time": "{{timenow}}", "size": "{{size}}","TotalTrades":  "{{TotalTrades}}" ,"PNL": "{{PNL}}", "WinRate":  "{{WinRate}}", "MaxDraw": "{{MaxDraw}}", "StartDate":  "{{StartDate}}", "DailyPNL": "{{DailyPnl}}"}'
+LongExitMSG    = '{"ticker": "{{ticker}}","action": "exit_buy","price": "{{close}}", "time": "{{timenow}}", "size": "{{size}}", "per": "{{per}}", "sl": "{{sl}}", "tp": "{{tp}}","TotalTrades":  "{{TotalTrades}}" ,"PNL": "{{PNL}}", "WinRate":  "{{WinRate}}", "MaxDraw": "{{MaxDraw}}", "StartDate":  "{{StartDate}}", "DailyPNL": "{{DailyPnl}}"}'
+ShortEntryMSG  = '{"ticker": "{{ticker}}","action": "sell","price": "{{close}}", "time": "{{timenow}}", "size": "{{size}}","TotalTrades":  "{{TotalTrades}}" ,"PNL": "{{PNL}}", "WinRate":  "{{WinRate}}", "MaxDraw": "{{MaxDraw}}", "StartDate":  "{{StartDate}}", "DailyPNL": "{{DailyPnl}}"}'
+ShortExitMSG   = '{"ticker": "{{ticker}}","action": "exit_sell","price": "{{close}}", "time": "{{timenow}}", "size": "{{size}}", "per": "{{per}}", "sl": "{{sl}}", "tp": "{{tp}}","TotalTrades":  "{{TotalTrades}}" ,"PNL": "{{PNL}}", "WinRate":  "{{WinRate}}", "MaxDraw": "{{MaxDraw}}", "StartDate":  "{{StartDate}}", "DailyPNL": "{{DailyPnl}}"}'
+
+
+
+
+var float currentSize = na
+isNewTrade = strategy.opentrades > strategy.opentrades[1]
+
+if isNewTrade
+    currentSize := math.abs(strategy.opentrades.size(strategy.opentrades -1))
+
+
+
+MarketisClose = MC()
+
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 📌 𝙐𝙎𝙀𝙍 𝙄𝙉𝙋𝙐𝙏𝙎
+// --------------------------------------------------------------------------------------------------------------------{
+
+src         = close
+rsiLen      = input.int(14, 'RSI Length', group = "T3")
+minLen      = input.int(5, 'Min T3 Length', group = "T3")
+maxLen      = input.int(50, 'Max T3 Length', group = "T3")
+v           = input.float(0.7, 'T3 Volume Factor', step = 0.01, maxval = 2, minval = 0.1, group = "T3")
+
+start = input.float(0.02, step = 0.0001, group = "SAR Filter")
+increment = input.float(0.0002, step = 0.00011, group = "SAR Filter")
+maximum = input(0.21, group = "SAR Filter")
+
+
+stopLen = input.int(10, "Stop Loss Length")
+
+
+
+color_up    = input.color(#21b8f3, "", inline = "col")
+color_dn    = input.color(#fd761b, "", inline = "col")
+
+
+
+// --------------------------------------------------------------------------------------------------------------------}
+// 📌 𝙄𝙉𝘿𝙄𝘾𝘼𝙏𝙊𝙍 𝘾𝘼𝙇𝘾𝙐𝙇𝘼𝙏𝙄𝙊𝙉𝙎
+// --------------------------------------------------------------------------------------------------------------------{
+
+// Step 1: Adaptive length via RSI
+rsi = ta.rsi(src, rsiLen)
+rsi_scale = 1 - rsi / 100
+len = math.round(minLen + (maxLen - minLen) * rsi_scale)
+
+pine_ema(src, length) =>
+    alpha = 2 / (length + 1)
+    sum = 0.0
+    sum := na(sum[1]) ? src : alpha * src + (1 - alpha) * nz(sum[1])
+    sum
+
+// Step 2: T3 with adaptive length
+e1 = pine_ema(src, len)
+e2 = pine_ema(e1, len)
+e3 = pine_ema(e2, len)
+e4 = pine_ema(e3, len)
+e5 = pine_ema(e4, len)
+e6 = pine_ema(e5, len)
+
+c1 = -v * v * v
+c2 = 3 * v * v + 3 * v * v * v
+c3 = -6 * v * v - 3 * v - 3 * v * v * v
+c4 = 1 + 3 * v + v * v * v + 3 * v * v
+t3 = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3
+
+t3_col = t3 > t3[2] ? color_up : color_dn
+
+
+
+
+L = ta.lowest(stopLen)
+H = ta.highest(stopLen)
+
+import TradingView/ta/7 as ta
+
+
+sar = ta.sar(start, increment, maximum)
+
+Long = close > sar
+
+Buy  = ta.crossover(t3, t3[2]) and Long and strategy.position_size <= 0
+Sell = ta.crossunder(t3, t3[2]) and not Long and strategy.position_size >= 0
+
+BuyExit = ta.crossunder(t3, t3[2])
+SellExit = ta.crossover(t3, t3[2])
+
+plot(Long != Long[1] ? float(na) : sar, "SAR Filter", linewidth=2, color = close > sar ? color_up : color_dn, style = plot.style_circles)
+
+
+plotchar(Buy or Sell ? t3 : na, "", "🞛", location.absolute, t3_col)
+pt31 = plot(t3, "T3", color = t3_col, linewidth = 1, editable = true)
+pt32 = plot(t3[2], "T3", color = t3_col, linewidth = 1, editable = true)
+fill(pt31, pt32, color.new(t3_col, 90))
+
+var stop = float(na)
+
+
+// Strategy Execution
+
+if time >= startTime 
+
+    if strategy.opentrades == 0
+        stop := float(na)
+    // Trades
+    if Buy
+        strategy.close('Short', 'Short Exit', alert_message = ShortExitMSG.parseing(per = 100,size = math.abs(strategy.position_size)))   
+        strategy.entry("Long", strategy.long, comment="Long", alert_message =  LongEntryMSG.parseing( size = currentSize ))
+        stop := L
+    if Sell
+        strategy.close('Long', 'Long Exit', alert_message = LongExitMSG.parseing(per = 100,size = math.abs(strategy.position_size))) 
+        strategy.entry("Short", strategy.short, comment="Short", alert_message =  ShortEntryMSG.parseing( size = currentSize))
+        stop := H
+    // Exits
+    // if BuyExit
+    //     strategy.close('Long', 'Long Exit', alert_message = LongExitMSG.parseing(per = 100,size = math.abs(strategy.position_size))) 
+    // if SellExit
+    //     strategy.close('Short', 'Short Exit', alert_message = ShortExitMSG.parseing(per = 100,size = math.abs(strategy.position_size)))   
+
+    strategy.exit("Long Stop", "Long", qty_percent = 100, stop = stop, alert_message = LongExitMSG.parseing(per = 100,size = math.abs(strategy.position_size)))
+    strategy.exit("Short Stop", "Short", qty_percent = 100, stop = stop, alert_message = ShortExitMSG.parseing(per = 100,size = math.abs(strategy.position_size)))
+
+
+plot(stop != stop[1] ? float(na) : stop, "Stop", color = chart.fg_color, style = plot.style_linebr)
+
+// --------------------------------------------------------------------------------------------------------------------}
+
+View in Pine Editor・246 lines
+Use on chart
+2 K
+13
+26 014
+⯁ OVERVIEW
+The RSI-Adaptive T3 and SAR Confluence Strategy combines adaptive smoothing with dynamic trend confirmation to identify precise trend reversals and continuation opportunities. It fuses the power of an RSI-based adaptive T3 moving average with the Parabolic SAR filter, aiming to trade in harmony with dominant momentum shifts while maintaining tight control through automatic stop-loss placement.
+
+The RSI-Adaptive T3 is a precision trend-following tool built around the legendary T3 smoothing algorithm developed by Tim Tillson, designed to enhance responsiveness while reducing lag compared to traditional moving averages. Current implementation takes it a step further by dynamically adapting the smoothing length based on real-time RSI conditions — allowing the T3 to “breathe” with market volatility. This dynamic length makes the curve faster in trending moves and smoother during consolidations.
+
+To help traders visualize volatility and directional momentum, adaptive volatility bands are plotted around the T3 line, with visual crossover markers and a dynamic info panel on the chart. It’s ideal for identifying trend shifts, spotting momentum surges, and adapting strategy execution to the pace of the market.
+
+⯁ LOGIC
+
+The T3 moving average length dynamically adjusts based on RSI values — when RSI is high, the smoothing period shortens to react faster; when RSI is low, the period increases for stability in slow markets.
+
+A Parabolic SAR filter confirms directional bias, ensuring trades only occur in alignment with the broader market trend.
+
+Long Entries: Trigger when the T3 curve crosses upward while the current price remains above the SAR — signaling bullish momentum alignment.
+
+Short Entries: Trigger when the T3 crosses downward while the price remains below the SAR — confirming bearish trend alignment.
+
+Stops: Dynamic stops are placed using the highest or lowest price over a set lookback period, adapting automatically to market volatility.
+
+
+
+⯁ FEATURES
+
+RSI-Adaptive T3 Filter: Adjusts smoothing in real time to market conditions, blending responsiveness with noise reduction.
+
+SAR Confluence Check: Prevents counter-trend entries by confirming momentum direction via the Parabolic SAR.
+
+Automatic Stop Placement: Uses recent highs or lows as stop-loss anchors, minimizing risk exposure.
+
+Color-coded Visualization: The T3 line dynamically changes color based on slope direction, making momentum shifts visually intuitive.
+
+Smoothed Trend Structure: Reduces market noise, allowing cleaner, more reliable trend recognition across different assets.
+
+
+
+⯁ CONCLUSION
+The RSI-Adaptive T3 and SAR Confluence Strategy delivers an advanced fusion of adaptive smoothing and structural confirmation. By combining RSI-driven reactivity with Parabolic SAR trend validation, this strategy offers a balanced approach to identifying sustainable momentum reversals while maintaining strong risk management through automatic stop levels. Ideal for traders who seek precision entries aligned with adaptive trend dynamics.
+
