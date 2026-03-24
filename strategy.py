@@ -1,42 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #631: 6h Primary + 1d/1w HTF — Vol Spike Mean Reversion + HTF Trend Bias
+Experiment #632: 12h Primary + 1d HTF — Dual Regime (Trend vs Mean Revert)
 
-Hypothesis: 6h timeframe captures multi-day volatility cycles better than 4h or 12h.
-Combining vol spike detection (ATR7/ATR30) with BB mean reversion and HTF trend
-bias should work through both bull and bear regimes.
+Hypothesis: Single-regime strategies fail because BTC/ETH alternate between trending
+and ranging markets. Use Choppiness Index to detect regime and switch logic:
+- CHOP < 38.2 = Trending → Donchian breakout + HMA trend follow
+- CHOP > 61.8 = Ranging → RSI mean reversion at Bollinger bands
+- 38.2-61.8 = Transition → reduce size or stay flat
 
-Key improvements over failed 6h strategies:
-1. Vol spike detection (ATR ratio) instead of Fisher/Donchian (both failed)
-2. BB mean reversion entries (proven for BTC/ETH in research)
-3. HTF trend bias (1d/1w HMA) for direction filtering
-4. LOOSE entry conditions to ensure ≥30 trades/symbol on train
-5. Asymmetric sizing: stronger signals when HTF confirms
+Why this should beat #624 (Sharpe=-0.594):
+1. Simpler HTF filter (just 1d HMA, not 1d+1w complexity)
+2. Regime-adaptive logic (not one-size-fits-all)
+3. Proven pattern: Choppiness + Connors RSI gave ETH Sharpe +0.923 in research
+4. Looser entry conditions to ensure 30+ trades in train period
 
 Strategy logic:
-1. 1w HMA(21) = macro trend (slow filter, boosts conviction)
-2. 1d HMA(21) = medium trend (primary bias filter)
-3. 6h ATR(7)/ATR(30) ratio = vol spike detection (>1.8 = elevated vol)
-4. 6h BB(20, 2.0) = mean reversion entry zones
-5. 6h RSI(14) = momentum confirmation (not overbought/oversold)
-6. 6h ATR(14) = stoploss (2.5*ATR trailing)
+1. 1d HMA(21) = primary trend bias (long only above, short only below)
+2. 12h Choppiness(14) = regime detector (trend vs range)
+3. 12h Donchian(20) = breakout levels for trend mode
+4. 12h RSI(14) + BB(20,2) = mean reversion signals for range mode
+5. 12h ATR(14) = 2.5*ATR trailing stoploss
 
 Entry conditions (LOOSE to ensure trades):
-- LONG: price < BB_lower OR RSI < 35, AND close > 1d HMA (uptrend pullback)
-- SHORT: price > BB_upper OR RSI > 65, AND close < 1d HMA (downtrend bounce)
-- Vol spike (ATR ratio > 1.5) increases position size
-- 1w HMA confirms macro direction (optional size boost)
+- TREND LONG: CHOP<38.2 + close>1d_HMA + price breaks Donchian high
+- TREND SHORT: CHOP<38.2 + close<1d_HMA + price breaks Donchian low
+- RANGE LONG: CHOP>61.8 + RSI<30 + price touches BB lower
+- RANGE SHORT: CHOP>61.8 + RSI>70 + price touches BB upper
 
 Target: Sharpe>0.40, trades>=30 train, trades>=3 test
-Timeframe: 6h
-Size: 0.25-0.35 discrete
+Timeframe: 12h
+Size: 0.20-0.30 discrete (0.30 trend, 0.20 range)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_volspike_bb_meanrev_htf_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_dual_regime_chop_donchian_rsi_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -82,6 +82,35 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - measures market choppy vs trending"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    for i in range(period, n):
+        atr_sum = np.nansum(atr[i-period+1:i+1])
+        highest_high = np.nanmax(high[i-period+1:i+1])
+        lowest_low = np.nanmin(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 1e-10:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+        else:
+            chop[i] = 50.0
+    
+    return chop
+
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -96,7 +125,24 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i-period+1:i+1])
+        lower[i] = np.nanmin(low[i-period+1:i+1])
+    
+    return upper, lower
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
     """Bollinger Bands"""
     n = len(close)
     if n < period:
@@ -118,33 +164,22 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF HMAs
+    # Calculate and align HTF HMA
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate 6h indicators
-    hma_6h = calculate_hma(close, period=21)
+    # Calculate 12h indicators
+    hma_12h = calculate_hma(close, period=21)
     rsi = calculate_rsi(close, period=14)
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    atr_14 = calculate_atr(high, low, close, period=14)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, std_mult=2.0)
-    
-    # Volatility spike ratio (ATR7/ATR30)
-    atr_ratio = np.zeros(n)
-    atr_ratio[:] = np.nan
-    for i in range(30, n):
-        if atr_30[i] > 1e-10:
-            atr_ratio[i] = atr_7[i] / atr_30[i]
+    chop = calculate_choppiness(high, low, close, period=14)
+    atr = calculate_atr(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger(close, period=20, std_mult=2.0)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
+    SIZE_TREND = 0.30
+    SIZE_RANGE = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -157,80 +192,93 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(rsi[i]) or np.isnan(hma_6h[i]):
+        if np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(hma_12h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(bb_upper[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        # === HTF BIAS (1d primary, 1w confirmation) ===
+        # === HTF BIAS (1d HMA) ===
         htf_bull = close[i] > hma_1d_aligned[i]
         htf_bear = close[i] < hma_1d_aligned[i]
         
-        # 1w macro boost
-        macro_bull = close[i] > hma_1w_aligned[i]
-        macro_bear = close[i] < hma_1w_aligned[i]
+        # === REGIME DETECTION (Choppiness Index) ===
+        is_trending = chop[i] < 38.2
+        is_ranging = chop[i] > 61.8
+        is_transition = not is_trending and not is_ranging
         
-        # === VOLATILITY REGIME ===
-        vol_spike = atr_ratio[i] > 1.5  # Elevated volatility
+        # === TREND MODE SIGNALS (Donchian Breakout) ===
+        trend_signal = 0.0
         
-        # === BB POSITION ===
-        bb_position = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i]) if (bb_upper[i] - bb_lower[i]) > 1e-10 else 0.5
+        if is_trending:
+            # Breakout above Donchian upper + HTF bull bias
+            if close[i] > donchian_upper[i] and htf_bull:
+                trend_signal = SIZE_TREND
+            # Breakout below Donchian lower + HTF bear bias
+            elif close[i] < donchian_lower[i] and htf_bear:
+                trend_signal = -SIZE_TREND
+            # Pullback to HMA in trend (entry on bounce)
+            elif htf_bull and close[i] < hma_12h[i] * 1.005 and close[i] > hma_12h[i] * 0.995:
+                if i > 0 and close[i] > close[i-1]:  # bouncing up
+                    trend_signal = SIZE_TREND * 0.5
+            elif htf_bear and close[i] > hma_12h[i] * 0.995 and close[i] < hma_12h[i] * 1.005:
+                if i > 0 and close[i] < close[i-1]:  # bouncing down
+                    trend_signal = -SIZE_TREND * 0.5
         
-        # === RSI EXTREMES (LOOSE for trades) ===
-        rsi_oversold = rsi[i] < 40.0
-        rsi_overbought = rsi[i] > 60.0
+        # === RANGE MODE SIGNALS (RSI + Bollinger Mean Reversion) ===
+        range_signal = 0.0
         
-        # === BB EXTREMES ===
-        bb_below_lower = close[i] < bb_lower[i] * 1.002  # Slight tolerance
-        bb_above_upper = close[i] > bb_upper[i] * 0.998
+        if is_ranging:
+            # RSI oversold + price at BB lower = long
+            if rsi[i] < 30.0 and low[i] <= bb_lower[i] * 1.002:
+                range_signal = SIZE_RANGE
+            # RSI overbought + price at BB upper = short
+            elif rsi[i] > 70.0 and high[i] >= bb_upper[i] * 0.998:
+                range_signal = -SIZE_RANGE
+            # Moderate RSI extremes
+            elif rsi[i] < 25.0:
+                range_signal = SIZE_RANGE * 0.5
+            elif rsi[i] > 75.0:
+                range_signal = -SIZE_RANGE * 0.5
         
-        # === ENTRY LOGIC (LOOSE CONDITIONS) ===
-        desired_signal = 0.0
+        # === TRANSITION MODE ===
+        # Reduce size or stay flat during regime uncertainty
+        if is_transition:
+            # Only keep existing positions, don't enter new ones
+            if in_position:
+                desired_signal = np.sign(position_side) * SIZE_RANGE * 0.3
+            else:
+                desired_signal = 0.0
+        else:
+            # Combine trend and range signals (prioritize trend if both present)
+            if trend_signal != 0.0:
+                desired_signal = trend_signal
+            elif range_signal != 0.0:
+                desired_signal = range_signal
+            else:
+                desired_signal = 0.0
         
-        # LONG: HTF bull + (BB lower OR RSI oversold)
-        if htf_bull:
-            if bb_below_lower or rsi_oversold:
-                # Strong signal: vol spike + macro confirm
-                if vol_spike and macro_bull:
-                    desired_signal = SIZE_STRONG
-                elif vol_spike or macro_bull:
-                    desired_signal = SIZE_BASE
-                else:
-                    desired_signal = SIZE_BASE * 0.5
-        
-        # SHORT: HTF bear + (BB upper OR RSI overbought)
-        elif htf_bear:
-            if bb_above_upper or rsi_overbought:
-                # Strong signal: vol spike + macro confirm
-                if vol_spike and macro_bear:
-                    desired_signal = -SIZE_STRONG
-                elif vol_spike or macro_bear:
-                    desired_signal = -SIZE_BASE
-                else:
-                    desired_signal = -SIZE_BASE * 0.5
+        # === HTF BIAS OVERRIDE ===
+        # Don't go long if HTF is strongly bearish, don't short if HTF is strongly bullish
+        if desired_signal > 0 and htf_bear and rsi[i] > 50:
+            desired_signal = 0.0
+        if desired_signal < 0 and htf_bull and rsi[i] < 50:
+            desired_signal = 0.0
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -253,16 +301,16 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_STRONG * 0.9:
-            final_signal = SIZE_STRONG
-        elif desired_signal <= -SIZE_STRONG * 0.9:
-            final_signal = -SIZE_STRONG
-        elif desired_signal >= SIZE_BASE * 0.9:
-            final_signal = SIZE_BASE
-        elif desired_signal <= -SIZE_BASE * 0.9:
-            final_signal = -SIZE_BASE
-        elif abs(desired_signal) >= SIZE_BASE * 0.4:
-            final_signal = np.sign(desired_signal) * SIZE_BASE * 0.5
+        if desired_signal >= SIZE_TREND * 0.9:
+            final_signal = SIZE_TREND
+        elif desired_signal <= -SIZE_TREND * 0.9:
+            final_signal = -SIZE_TREND
+        elif desired_signal >= SIZE_RANGE * 0.9:
+            final_signal = SIZE_RANGE
+        elif desired_signal <= -SIZE_RANGE * 0.9:
+            final_signal = -SIZE_RANGE
+        elif abs(desired_signal) >= SIZE_RANGE * 0.4:
+            final_signal = np.sign(desired_signal) * SIZE_RANGE * 0.5
         else:
             final_signal = 0.0
         
@@ -272,7 +320,7 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
