@@ -1,82 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #824: 12h Primary + 1d/1w HTF — KAMA Adaptive Trend with RSI Entries
+Experiment #825: 15m Primary + 4h/1d HTF — Intraday Trend Following with Session Filter
 
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) outperforms HMA/EMA on BTC/ETH
-because it adapts to market regime automatically. In trending markets, KAMA follows
-price closely. In choppy/ranging markets (common in 2022-2024), KAMA flattens and
-avoids whipsaw entries. Combined with 1w ultra-HTF bias + 1d trend + 12h entries.
+Hypothesis: 15m timeframe with 4h/1d HTF bias captures intraday trends while avoiding
+the whipsaw of pure 15m strategies. Key innovation: session filter (00-12 UTC) for
+quality entries during London/NY overlap, combined with LOOSE RSI thresholds to
+ensure sufficient trade generation (target: 50-100 trades/year).
 
-Key innovations:
-1. 1w HMA(21) for ultra-HTF regime bias (bull/bear market identification)
-2. 1d KAMA(10,2,30) for adaptive HTF trend direction
-3. 12h KAMA crossover (fast/slow) for entry timing
-4. 12h RSI(14) with loose thresholds (40/60) for entry confirmation
-5. ATR(14) 2.5x trailing stop for risk management
-6. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
+Why this might work on 15m:
+1. 1d HMA(21) provides macro bias — only trade in direction of daily trend
+2. 4h HMA(16/48) confirms intermediate trend — avoids counter-trend 15m entries
+3. 15m RSI(7) with loose thresholds (35/65) — generates entries on pullbacks
+4. Session filter (00-12 UTC) — avoids low-liquidity Asian session whipsaw
+5. ATR(14) 2.5x trailing stop — protects against 15m volatility spikes
+6. Discrete sizing (0.20/0.30) — minimizes fee churn on signal changes
 
-Entry conditions (LOOSE to ensure ≥30 trades/train, ≥3/test):
-- LONG: 1w HMA bull + 1d KAMA bull + (12h KAMA cross OR RSI<45)
-- SHORT: 1w HMA bear + 1d KAMA bear + (12h KAMA cross OR RSI>55)
+CRITICAL: Loose entry conditions to avoid 0-trade failure (seen in #817, #821)
+- RSI thresholds: 35/65 (not 20/80)
+- Session filter: 00-12 UTC (12 hours = 48 bars/day, enough opportunities)
+- Entry: HTF bull + (RSI<45 OR 15m HMA crossover) — OR condition for more trades
 
-Target: Sharpe>0.45, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 12h
-Size: 0.25-0.30 discrete
+Timeframe: 15m
+HTF: 4h (trend), 1d (bias)
+Size: 0.20 base, 0.30 strong
+Target: Sharpe>0.45, trades>=50/train, trades>=5/test, DD>-35%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_rsi_adaptive_1d1w_v1"
-timeframe = "12h"
+name = "mtf_15m_hma_rsi_session_4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
-
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts smoothing based on market efficiency ratio.
-    ER = |net change| / sum of absolute changes over period
-    High ER (trending) → fast smoothing constant
-    Low ER (choppy) → slow smoothing constant
-    """
-    n = len(close)
-    if n < slow_period + er_period:
-        return np.full(n, np.nan)
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n)
-    er[:] = np.nan
-    
-    for i in range(er_period, n):
-        net_change = abs(close[i] - close[i - er_period])
-        sum_changes = 0.0
-        for j in range(1, er_period + 1):
-            sum_changes += abs(close[i - j + 1] - close[i - j])
-        if sum_changes > 1e-10:
-            er[i] = net_change / sum_changes
-        else:
-            er[i] = 0.0
-    
-    # Calculate smoothing constants
-    fast_sc = 2.0 / (fast_period + 1.0)
-    slow_sc = 2.0 / (slow_period + 1.0)
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Initialize KAMA at SMA of first slow_period bars
-    kama[slow_period] = np.mean(close[:slow_period + 1])
-    
-    for i in range(slow_period + 1, n):
-        if not np.isnan(er[i]):
-            # Adaptive smoothing constant
-            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-        else:
-            kama[i] = kama[i - 1]
-    
-    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while maintaining smoothness"""
@@ -137,27 +92,31 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align HTF HMAs
+    hma_4h_16_raw = calculate_hma(df_4h['close'].values, period=16)
+    hma_4h_48_raw = calculate_hma(df_4h['close'].values, period=48)
+    hma_4h_16_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_16_raw)
+    hma_4h_48_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_48_raw)
     
-    kama_1d_raw = calculate_kama(df_1d['close'].values, er_period=10, fast_period=2, slow_period=30)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 12h indicators
-    kama_12h_fast = calculate_kama(close, er_period=10, fast_period=2, slow_period=10)
-    kama_12h_slow = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    # Calculate 15m indicators
+    hma_15m_8 = calculate_hma(close, period=8)
+    hma_15m_21 = calculate_hma(close, period=21)
+    rsi_7 = calculate_rsi(close, period=7)
     rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
+    SIZE_BASE = 0.20
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -178,63 +137,85 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(kama_12h_fast[i]) or np.isnan(kama_12h_slow[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(hma_15m_8[i]) or np.isnan(hma_15m_21[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(kama_1d_aligned[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === ULTRA-HTF BIAS (1w HMA) ===
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
+        if np.isnan(hma_4h_16_aligned[i]) or np.isnan(hma_4h_48_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === HTF TREND (1d KAMA) ===
-        htf_1d_bull = close[i] > kama_1d_aligned[i]
-        htf_1d_bear = close[i] < kama_1d_aligned[i]
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === 12h KAMA CROSSOVER ===
-        kama_crossover_long = False
-        kama_crossover_short = False
-        if i > 0 and not np.isnan(kama_12h_fast[i-1]) and not np.isnan(kama_12h_slow[i-1]):
-            kama_crossover_long = (kama_12h_fast[i-1] <= kama_12h_slow[i-1]) and (kama_12h_fast[i] > kama_12h_slow[i])
-            kama_crossover_short = (kama_12h_fast[i-1] >= kama_12h_slow[i-1]) and (kama_12h_fast[i] < kama_12h_slow[i])
+        # === SESSION FILTER (00-12 UTC) ===
+        # open_time is in milliseconds, convert to hour
+        timestamp_ms = open_time[i]
+        hour_utc = (timestamp_ms // (1000 * 60 * 60)) % 24
+        in_session = 0 <= hour_utc <= 12
         
-        # === 12h KAMA TREND ===
-        kama_12h_bull = kama_12h_fast[i] > kama_12h_slow[i]
-        kama_12h_bear = kama_12h_fast[i] < kama_12h_slow[i]
+        # === HTF BIAS (1d HMA) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        
+        # === 4h TREND (HMA crossover) ===
+        htf_4h_bull = hma_4h_16_aligned[i] > hma_4h_48_aligned[i]
+        htf_4h_bear = hma_4h_16_aligned[i] < hma_4h_48_aligned[i]
+        
+        # === 15m HMA CROSSOVER ===
+        hma_cross_long = False
+        hma_cross_short = False
+        if i > 0 and not np.isnan(hma_15m_8[i-1]) and not np.isnan(hma_15m_21[i-1]):
+            hma_cross_long = (hma_15m_8[i-1] <= hma_15m_21[i-1]) and (hma_15m_8[i] > hma_15m_21[i])
+            hma_cross_short = (hma_15m_8[i-1] >= hma_15m_21[i-1]) and (hma_15m_8[i] < hma_15m_21[i])
+        
+        # === 15m HMA TREND ===
+        hma_15m_bull = hma_15m_8[i] > hma_15m_21[i]
+        hma_15m_bear = hma_15m_8[i] < hma_15m_21[i]
         
         # === RSI CONDITIONS (LOOSE for more trades) ===
-        rsi_oversold = rsi_14[i] < 45.0
-        rsi_overbought = rsi_14[i] > 55.0
-        rsi_extreme_oversold = rsi_14[i] < 30.0
-        rsi_extreme_overbought = rsi_14[i] > 70.0
+        rsi_oversold = rsi_7[i] < 45.0
+        rsi_overbought = rsi_7[i] > 55.0
+        rsi_extreme_oversold = rsi_7[i] < 30.0
+        rsi_extreme_overbought = rsi_7[i] > 70.0
         
         # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: 1w bull + 1d bull + (12h KAMA cross OR RSI oversold OR 12h KAMA bull)
-        if htf_1w_bull and htf_1d_bull:
-            if rsi_oversold or kama_crossover_long or kama_12h_bull:
-                if rsi_extreme_oversold or kama_crossover_long:
-                    desired_signal = SIZE_STRONG
-                else:
-                    desired_signal = SIZE_BASE
+        # LONG: 1d bull + 4h bull + (RSI oversold OR 15m HMA cross OR 15m HMA bull) + session
+        if htf_1d_bull and htf_4h_bull:
+            if in_session:
+                if rsi_oversold or hma_cross_long or hma_15m_bull:
+                    if rsi_extreme_oversold or hma_cross_long:
+                        desired_signal = SIZE_STRONG
+                    else:
+                        desired_signal = SIZE_BASE
         
-        # SHORT: 1w bear + 1d bear + (12h KAMA cross OR RSI overbought OR 12h KAMA bear)
-        elif htf_1w_bear and htf_1d_bear:
-            if rsi_overbought or kama_crossover_short or kama_12h_bear:
-                if rsi_extreme_overbought or kama_crossover_short:
-                    desired_signal = -SIZE_STRONG
-                else:
-                    desired_signal = -SIZE_BASE
+        # SHORT: 1d bear + 4h bear + (RSI overbought OR 15m HMA cross OR 15m HMA bear) + session
+        elif htf_1d_bear and htf_4h_bear:
+            if in_session:
+                if rsi_overbought or hma_cross_short or hma_15m_bear:
+                    if rsi_extreme_overbought or hma_cross_short:
+                        desired_signal = -SIZE_STRONG
+                    else:
+                        desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
