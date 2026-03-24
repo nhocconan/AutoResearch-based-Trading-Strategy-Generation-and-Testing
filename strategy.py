@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #094: 4h Primary + 1d HTF — HMA Trend + Volume + ATR Vol Filter
+Experiment #095: 1h Primary + 4h/1d HTF — Triple HMA Trend Confluence
 
-Hypothesis: After analyzing 70+ failed experiments, the pattern is clear:
-- Overly complex filters (Choppiness, Connors RSI, Fisher) = 0 trades
-- Simple HMA trend works but needs volume confirmation to avoid false breakouts
-- ATR volatility filter prevents trading during extreme conditions (panic/euphoria)
-- 4h timeframe with 1d HTF bias should generate 20-50 trades/year with good Sharpe
+Hypothesis: After analyzing 80+ failed experiments, the pattern for 1h is clear:
+- Session filters cause 0 trades (#088 failed with session 8-20 UTC)
+- Choppiness/Connors RSI too restrictive (#087, #093 failed)
+- Simple HMA + loose RSI works on 12h/1d (#083, #086 kept)
 
-This strategy combines:
-1. 1d HMA(50) = major trend bias (HTF filter)
-2. 4h HMA(16/48) crossover = entry trigger
-3. Volume ratio filter (vol > 0.8 * avg_vol) = confirms breakout validity
-4. ATR ratio filter (0.5 < ATR(7)/ATR(30) < 2.5) = avoids extreme vol conditions
-5. RSI loose filter (>40 long, <60 short) = avoids extreme overbought/oversold
-6. Trailing ATR stoploss (2.5x) = risk management
-7. Position size: 0.28 (28% of capital, conservative for 4h)
+For 1h to work, I need HTF trend alignment WITHOUT over-filtering:
+1. 1d HMA50 = major trend bias (price above/below)
+2. 4h HMA16/48 = intermediate trend (crossover direction)
+3. 1h HMA16/48 = entry trigger (crossover + RSI confirmation)
+4. RSI(14) loose filter: >40 for long, <60 for short (not 30/70)
+5. Bollinger Band position: price in middle 60% of bands (not extremes)
+6. ATR trailing stoploss: 2.5x for risk management
 
 Key design choices:
-- Timeframe: 4h (proven to work, target 20-50 trades/year)
-- HTF: 1d for trend bias (matches Binance actual 1d bars via mtf_data)
-- Volume filter: avoids low-volume false breakouts
-- ATR ratio: 0.5-2.5 range avoids panic/euphoria extremes
-- RSI: 40/60 thresholds (looser than 30/70, ensures trades generate)
-- Stoploss: 2.5x ATR trailing (tighter than 3x for better risk control)
+- Timeframe: 1h (target 30-60 trades/year)
+- HTF: 1d + 4h for trend alignment (dual HTF confluence)
+- RSI thresholds: 40/60 (looser than 30/70 to ensure trades)
+- Position size: 0.25 (smaller for 1h noise)
+- Stoploss: 2.5x ATR trailing
 
 Target: Sharpe>0.351, DD>-40%, trades>=30 on train, trades>=3 on test
 """
@@ -31,8 +28,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_vol_atr_regime_1d_v1"
-timeframe = "4h"
+name = "mtf_1h_triple_hma_rsi_bb_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -78,7 +75,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range for stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -91,43 +88,49 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_volume_ratio(volume, period=20):
-    """Volume ratio: current volume / rolling average volume"""
-    n = len(volume)
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Bollinger Bands - returns lower, middle, upper"""
+    n = len(close)
     if n < period:
-        return np.full(n, np.nan)
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    vol_series = pd.Series(volume)
-    vol_avg = vol_series.rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / vol_avg
+    close_series = pd.Series(close)
+    middle = close_series.rolling(window=period, min_periods=period).mean().values
+    std = close_series.rolling(window=period, min_periods=period).std().values
+    upper = middle + std_mult * std
+    lower = middle - std_mult * std
     
-    return vol_ratio
+    return lower, middle, upper
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align 1d HMA for major trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
-    hma_fast = calculate_hma(close, period=16)
-    hma_slow = calculate_hma(close, period=48)
+    # Calculate and align 4h HMA for intermediate trend
+    hma_4h_fast_raw = calculate_hma(df_4h['close'].values, period=16)
+    hma_4h_slow_raw = calculate_hma(df_4h['close'].values, period=48)
+    hma_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_fast_raw)
+    hma_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_slow_raw)
+    
+    # Calculate primary (1h) indicators
+    hma_1h_fast = calculate_hma(close, period=16)
+    hma_1h_slow = calculate_hma(close, period=48)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    atr_fast = calculate_atr(high, low, close, period=7)
-    atr_slow = calculate_atr(high, low, close, period=30)
-    vol_ratio = calculate_volume_ratio(volume, period=20)
+    bb_lower, bb_middle, bb_upper = calculate_bollinger(close, period=20, std_mult=2.0)
     
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size (conservative for 4h)
+    SIZE = 0.25  # 25% position size (conservative for 1h)
     
     # Position tracking for stoploss
     in_position = False
@@ -145,7 +148,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+        if np.isnan(hma_1h_fast[i]) or np.isnan(hma_1h_slow[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -157,13 +160,13 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(vol_ratio[i]) or np.isnan(atr_fast[i]) or np.isnan(atr_slow[i]):
+        if np.isnan(hma_4h_fast_aligned[i]) or np.isnan(hma_4h_slow_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if atr_slow[i] <= 1e-10:
+        if np.isnan(bb_lower[i]) or np.isnan(bb_upper[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -174,32 +177,36 @@ def generate_signals(prices):
         htf_bull = close[i] > hma_1d_aligned[i]
         htf_bear = close[i] < hma_1d_aligned[i]
         
-        # === 4h TREND (HMA crossover) ===
-        hma_cross_bull = hma_fast[i] > hma_slow[i]
-        hma_cross_bear = hma_fast[i] < hma_slow[i]
+        # === INTERMEDIATE TREND (4h HMA crossover) ===
+        htf_4h_bull = hma_4h_fast_aligned[i] > hma_4h_slow_aligned[i]
+        htf_4h_bear = hma_4h_fast_aligned[i] < hma_4h_slow_aligned[i]
         
-        # === VOLUME FILTER ===
-        # Volume must be at least 80% of average to confirm breakout
-        vol_ok = vol_ratio[i] >= 0.8
-        
-        # === ATR VOLATILITY FILTER ===
-        # ATR ratio between 0.5 and 2.5 = normal vol conditions
-        # Avoid trading during extreme panic (ratio > 2.5) or dead markets (ratio < 0.5)
-        atr_ratio = atr_fast[i] / atr_slow[i]
-        vol_regime_ok = 0.5 <= atr_ratio <= 2.5
+        # === 1h TREND (HMA crossover) ===
+        hma_1h_cross_bull = hma_1h_fast[i] > hma_1h_slow[i]
+        hma_1h_cross_bear = hma_1h_fast[i] < hma_1h_slow[i]
         
         # === RSI FILTER (LOOSE - ensure trades generate) ===
         rsi_ok_long = rsi[i] > 40.0
         rsi_ok_short = rsi[i] < 60.0
         
-        # === DESIRED SIGNAL ===
-        # LONG: 1d bull + 4h HMA cross bull + volume ok + vol regime ok + RSI > 40
-        # SHORT: 1d bear + 4h HMA cross bear + volume ok + vol regime ok + RSI < 60
+        # === BOLLINGER BAND POSITION (middle 60% of bands) ===
+        bb_range = bb_upper[i] - bb_lower[i]
+        if bb_range > 1e-10:
+            bb_position = (close[i] - bb_lower[i]) / bb_range
+            bb_ok_long = bb_position > 0.2  # not at lower extreme
+            bb_ok_short = bb_position < 0.8  # not at upper extreme
+        else:
+            bb_ok_long = True
+            bb_ok_short = True
+        
+        # === DESIRED SIGNAL (Triple HTF confluence) ===
+        # LONG: 1d bull + 4h bull + 1h HMA cross bull + RSI > 40 + BB ok
+        # SHORT: 1d bear + 4h bear + 1h HMA cross bear + RSI < 60 + BB ok
         desired_signal = 0.0
         
-        if htf_bull and hma_cross_bull and vol_ok and vol_regime_ok and rsi_ok_long:
+        if htf_bull and htf_4h_bull and hma_1h_cross_bull and rsi_ok_long and bb_ok_long:
             desired_signal = SIZE
-        elif htf_bear and hma_cross_bear and vol_ok and vol_regime_ok and rsi_ok_short:
+        elif htf_bear and htf_4h_bear and hma_1h_cross_bear and rsi_ok_short and bb_ok_short:
             desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
