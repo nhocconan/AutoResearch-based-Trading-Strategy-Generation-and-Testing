@@ -1,42 +1,76 @@
 #!/usr/bin/env python3
 """
-Experiment #1518: 30m Primary + 4h/1d HTF — Session-Filtered HMA Trend + RSI Pullback
+Experiment #1519: 4h Primary + 1d HTF — KAMA Adaptive Trend + RSI Pullback + HMA Confirmation
 
-Hypothesis: Lower TF (30m) can work IF we strictly control trade frequency via:
-1. Dual HTF trend filter (4h HMA + 1d HMA) - both must agree
-2. Session filter (8-20 UTC) - avoid Asian session whipsaw
-3. Volume confirmation (>0.8x 20-bar avg) - ensure liquidity
-4. RSI pullback within trend (not extreme) - quality entries
-5. Smaller position size (0.20) - lower TF = more trades = need smaller size
+Hypothesis: Based on #1513 success (1d HMA+RSI+Donchian), adapting to 4h primary with 1d HTF
+should generate more trades (40-80/year vs 20-50) while maintaining quality. Key insights:
 
-Key learnings from 1100+ failed strategies:
-- Complex regime filters (CHOP, CRSI) = 0 trades or negative Sharpe
-- Volume-only filters = 0 trades (too restrictive)
-- Session filter IS critical for lower TF (8-20 UTC avoids Asia chop)
-- Dual HTF agreement (4h+1d) reduces false signals significantly
-- 30m with proper filters can achieve 40-80 trades/year (sweet spot)
+1. KAMA (Kaufman Adaptive MA) adapts to volatility - better than HMA in choppy 4h markets
+2. 1d HMA for macro trend bias (proven in #1513)
+3. Looser RSI bands (25-75) ensure trades happen without over-filtering
+4. Simple confluence: HTF trend + Primary trend + RSI pullback = entry
+5. ATR 2.5x trailing stop for risk management
 
 Design:
-- 1d HMA(21) for macro trend (strictest filter)
-- 4h HMA(21) for intermediate trend (confirmation)
-- 30m RSI(14) for pullback entries (40-60 range = quality pullback)
-- Session: only 8-20 UTC (European/US overlap = best liquidity)
-- Volume: >0.8x 20-bar SMA (avoid low-liquidity traps)
-- ATR(14) 2.5x trailing stop
-- Position size: 0.20 (discrete: 0.0, ±0.20)
+- 1d HMA(21) for macro trend direction (HTF filter)
+- 4h KAMA(21) for primary adaptive trend
+- 4h RSI(14) for pullback entries (loose: 25-75 range)
+- 4h ATR(14) 2.5x trailing stop
+- Position size 0.28 (discrete: 0.0, ±0.28)
+- Target: 40-80 trades/train (4 years), 10-20 trades/test (15 months)
 
-Timeframe: 30m (as required by experiment)
-HTF: 4h + 1d (dual confirmation)
-Target: 40-80 trades/train (4 years), 10-20 trades/test (15 months)
-Target Sharpe: >0.618 (beat current best)
+Timeframe: 4h (as required by experiment)
+HTF: 1d (daily trend bias)
+Position Size: 0.28 (discrete levels to minimize fee churn)
+Target: Sharpe > 0.618 (beat current best), DD < -30%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_hma_rsi_session_4h1d_atr_v1"
-timeframe = "30m"
+name = "mtf_4h_kama_hma_rsi_1d_atr_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_kama(close, period=21, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts to market volatility - smooth in trends, responsive in ranges
+    ER = |Close - Close_n| / Sum(|Close_i - Close_i-1|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    KAMA = KAMA_prev + SC * (Close - KAMA_prev)
+    """
+    n = len(close)
+    if n < period + slow_period:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(period, n):
+        signal = abs(close[i] - close[i - period])
+        noise = 0.0
+        for j in range(i - period + 1, i + 1):
+            noise += abs(close[j] - close[j - 1])
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 0.0
+    
+    # Calculate Smoothing Constant (SC)
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
+    sc = np.zeros(n)
+    for i in range(period, n):
+        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama[period] = close[period]
+    for i in range(period + 1, n):
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """
@@ -105,40 +139,26 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def extract_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds since epoch
-    return (open_time // 3600000) % 24
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
+    # Calculate and align 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (30m) indicators
-    hma_30m = calculate_hma(close, period=21)
+    # Calculate primary (4h) indicators
+    kama_4h = calculate_kama(close, period=21)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     
-    # Volume SMA for filter
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
-    BASE_SIZE = 0.20  # Smaller size for 30m (target 40-80 trades/year)
+    BASE_SIZE = 0.28  # Appropriate size for 4h (40-80 trades/year target)
     
     # Position tracking for stoploss
     in_position = False
@@ -156,76 +176,70 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(hma_30m[i]):
+        if np.isnan(rsi[i]) or np.isnan(kama_4h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (8-20 UTC) - CRITICAL for lower TF ===
-        hour = extract_hour(open_time[i])
-        in_session = 8 <= hour <= 20
-        
-        # === VOLUME FILTER ===
-        volume_ok = volume[i] >= 0.8 * vol_sma[i]
-        
-        # === MACRO TREND (1d HMA) - strictest filter ===
+        # === MACRO TREND (1d HMA) - primary direction bias ===
         daily_bull = close[i] > hma_1d_aligned[i]
         daily_bear = close[i] < hma_1d_aligned[i]
         
-        # === INTERMEDIATE TREND (4h HMA) - confirmation ===
-        fourh_bull = close[i] > hma_4h_aligned[i]
-        fourh_bear = close[i] < hma_4h_aligned[i]
+        # === PRIMARY TREND (4h KAMA) - adaptive confirmation ===
+        kama_bull = close[i] > kama_4h[i]
+        kama_bear = close[i] < kama_4h[i]
         
-        # === PRIMARY TREND (30m HMA) - entry timing ===
-        thirtym_bull = close[i] > hma_30m[i]
-        thirtym_bear = close[i] < hma_30m[i]
+        # === KAMA SLOPE - trend momentum ===
+        kama_slope_bull = False
+        kama_slope_bear = False
+        if i >= 5 and not np.isnan(kama_4h[i-5]):
+            kama_slope_bull = kama_4h[i] > kama_4h[i-5]
+            kama_slope_bear = kama_4h[i] < kama_4h[i-5]
         
-        # === RSI PULLBACK - quality entries within trend ===
-        # Long: RSI pulled back but not oversold (40-55 = healthy pullback)
-        rsi_pullback_long = 40.0 <= rsi[i] <= 55.0
-        # Short: RSI rallied but not overbought (45-60 = healthy rally)
-        rsi_pullback_short = 45.0 <= rsi[i] <= 60.0
+        # === RSI PULLBACK - LOOSE bands for MORE trades ===
+        # Long: RSI pulled back but not oversold (25-55)
+        rsi_pullback_long = 25.0 <= rsi[i] <= 55.0
+        # Short: RSI rallied but not overbought (45-75)
+        rsi_pullback_short = 45.0 <= rsi[i] <= 75.0
         
-        # === DESIRED SIGNAL - STRICT CONFLUENCE for 30m ===
+        # === DESIRED SIGNAL - SIMPLIFIED FOR 4h ===
         desired_signal = 0.0
         
-        # LONG: 1d bull + 4h bull + 30m bull + RSI pullback + session + volume
-        # Option 1: Full confluence (all filters agree)
-        if (daily_bull and fourh_bull and thirtym_bull and 
-            rsi_pullback_long and in_session and volume_ok):
+        # LONG: 1d bullish + 4h KAMA bull + RSI pullback
+        # Option 1: Strong trend (1d + 4h both bull + slope) + RSI pullback
+        if daily_bull and kama_bull and kama_slope_bull and rsi_pullback_long:
             desired_signal = BASE_SIZE
-        # Option 2: HTF agreement + RSI pullback (slightly looser)
-        elif (daily_bull and fourh_bull and rsi_pullback_long and in_session):
-            desired_signal = BASE_SIZE * 0.8
-        # Option 3: HTF agreement + 30m trend (fallback for trades)
-        elif (daily_bull and fourh_bull and thirtym_bull and in_session and volume_ok):
-            desired_signal = BASE_SIZE * 0.6
+        # Option 2: 1d bull + 4h KAMA bull + RSI pullback (standard)
+        elif daily_bull and kama_bull and rsi_pullback_long:
+            desired_signal = BASE_SIZE * 0.9
+        # Option 3: 1d bull + 4h KAMA bull + RSI not overbought (looser)
+        elif daily_bull and kama_bull and rsi[i] < 65.0:
+            desired_signal = BASE_SIZE * 0.7
+        # Option 4: 1d bull + 4h above KAMA + RSI neutral (fallback for trades)
+        elif daily_bull and kama_bull and 35.0 <= rsi[i] <= 65.0:
+            desired_signal = BASE_SIZE * 0.5
         
-        # SHORT: 1d bear + 4h bear + 30m bear + RSI pullback + session + volume
-        # Option 1: Full confluence (all filters agree)
-        elif (daily_bear and fourh_bear and thirtym_bear and 
-              rsi_pullback_short and in_session and volume_ok):
+        # SHORT: 1d bearish + 4h KAMA bear + RSI pullback
+        # Option 1: Strong trend (1d + 4h both bear + slope) + RSI pullback
+        elif daily_bear and kama_bear and kama_slope_bear and rsi_pullback_short:
             desired_signal = -BASE_SIZE
-        # Option 2: HTF agreement + RSI pullback (slightly looser)
-        elif (daily_bear and fourh_bear and rsi_pullback_short and in_session):
-            desired_signal = -BASE_SIZE * 0.8
-        # Option 3: HTF agreement + 30m trend (fallback for trades)
-        elif (daily_bear and fourh_bear and thirtym_bear and in_session and volume_ok):
-            desired_signal = -BASE_SIZE * 0.6
+        # Option 2: 1d bear + 4h KAMA bear + RSI pullback (standard)
+        elif daily_bear and kama_bear and rsi_pullback_short:
+            desired_signal = -BASE_SIZE * 0.9
+        # Option 3: 1d bear + 4h KAMA bear + RSI not oversold (looser)
+        elif daily_bear and kama_bear and rsi[i] > 35.0:
+            desired_signal = -BASE_SIZE * 0.7
+        # Option 4: 1d bear + 4h below KAMA + RSI neutral (fallback for trades)
+        elif daily_bear and kama_bear and 35.0 <= rsi[i] <= 65.0:
+            desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -246,18 +260,18 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= BASE_SIZE * 0.9:
+        if desired_signal >= BASE_SIZE * 0.85:
             final_signal = BASE_SIZE
-        elif desired_signal >= BASE_SIZE * 0.7:
-            final_signal = BASE_SIZE * 0.8
-        elif desired_signal >= BASE_SIZE * 0.5:
-            final_signal = BASE_SIZE * 0.6
-        elif desired_signal <= -BASE_SIZE * 0.9:
+        elif desired_signal >= BASE_SIZE * 0.65:
+            final_signal = BASE_SIZE * 0.75
+        elif desired_signal >= BASE_SIZE * 0.45:
+            final_signal = BASE_SIZE * 0.5
+        elif desired_signal <= -BASE_SIZE * 0.85:
             final_signal = -BASE_SIZE
-        elif desired_signal <= -BASE_SIZE * 0.7:
-            final_signal = -BASE_SIZE * 0.8
-        elif desired_signal <= -BASE_SIZE * 0.5:
-            final_signal = -BASE_SIZE * 0.6
+        elif desired_signal <= -BASE_SIZE * 0.65:
+            final_signal = -BASE_SIZE * 0.75
+        elif desired_signal <= -BASE_SIZE * 0.45:
+            final_signal = -BASE_SIZE * 0.5
         else:
             final_signal = 0.0
         
