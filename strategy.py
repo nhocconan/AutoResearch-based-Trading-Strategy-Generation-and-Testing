@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #184: 12h Primary + 1d/1w HTF — Simplified Trend + Mean Reversion Hybrid
+Experiment #185: 15m Primary + 4h/1d HTF — Simplified Trend-Pullback with Session Filter
 
-Hypothesis: Previous 12h strategies failed due to TOO MANY filters causing 0 trades.
-This version SIMPLIFIES entry logic while keeping proven components:
+Hypothesis: 15m strategies failed because entry conditions were TOO STRICT (0 trades).
+This version SIMPLIFIES entries while keeping HTF bias for direction.
 
-1. HTF Bias: 1d HMA(50) determines major trend direction
-2. Primary Trend: 12h HMA(21) for intermediate trend
-3. Entry Trigger: RSI(14) pullback in trend direction (NOT extreme values)
-4. Regime Filter: Choppiness Index < 60 to avoid dead chop
-5. Volatility Filter: ATR ratio to avoid low-vol traps
+Core Logic:
+- 4h HMA(21) slope determines trend bias (long-only or short-only)
+- 1d HMA(50) confirms major regime (avoid counter-trend in strong trends)
+- 15m RSI(7) extreme for entry timing (oversold in uptrend, overbought in downtrend)
+- Session filter: 00-12 UTC (London/NY overlap = higher volume, cleaner moves)
+- ATR trailing stop for risk management
 
-Key changes from #172:
-- REMOVED Connors RSI (too complex, rare signals)
-- REMOVED Donchian breakout (whipsaw in 2022)
-- SIMPLIFIED to RSI pullback + HMA trend (proven pattern)
-- LOWERED RSI thresholds (30/70 instead of 15/85) for MORE trades
-- ADDED funding rate contrarian signal for BTC/ETH edge
+Why this should work:
+- Fewer filters = more trades (previous 15m got 0 trades from over-filtering)
+- HTF bias prevents whipsaw (don't long in 4h downtrend)
+- RSI(7) is fast enough for 15m but not too noisy
+- Session filter reduces low-volume chop (Asia session often fake moves)
 
-Position sizing: 0.25 base, 0.30 strong
-Stoploss: 2.5x ATR trailing
-Target: Sharpe>0.40 (beat #183), trades>=30 train, trades>=5 test
+Position sizing: 0.20 base, 0.30 strong confluence (smaller due to higher frequency)
+Target: 50-80 trades/year, Sharpe > 0.40, DD > -40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_rsi_chop_funding_1d1w_v1"
-timeframe = "12h"
+name = "mtf_15m_trend_rsi_session_4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -87,125 +86,49 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness vs trending
-    CHOP > 61.8 = choppy/range bound
-    CHOP < 38.2 = trending
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+def calculate_hma_slope(hma, lookback=5):
+    """Calculate HMA slope over lookback period"""
+    n = len(hma)
+    slope = np.zeros(n)
+    slope[:] = np.nan
     
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    for i in range(lookback, n):
+        if not np.isnan(hma[i]) and not np.isnan(hma[i-lookback]):
+            slope[i] = (hma[i] - hma[i-lookback]) / hma[i-lookback] * 100.0
     
-    chop = np.zeros(n)
-    chop[:] = np.nan
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i-period+1:i+1])
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
-
-def calculate_sma(close, period):
-    """Simple Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
-
-def load_funding_data(symbol):
-    """
-    Load funding rate data for contrarian signal.
-    Returns z-score of 30-day funding rate.
-    """
-    try:
-        # Map symbol to funding file path
-        symbol_map = {
-            'BTCUSDT': 'data/processed/funding/BTCUSDT.parquet',
-            'ETHUSDT': 'data/processed/funding/ETHUSDT.parquet',
-            'SOLUSDT': 'data/processed/funding/SOLUSDT.parquet'
-        }
-        
-        if symbol not in symbol_map:
-            return None
-        
-        df_funding = pd.read_parquet(symbol_map[symbol])
-        if 'funding_rate' not in df_funding.columns:
-            return None
-        
-        # Calculate 30-period rolling z-score
-        funding = df_funding['funding_rate'].values
-        n = len(funding)
-        
-        zscore = np.zeros(n)
-        zscore[:] = np.nan
-        
-        for i in range(30, n):
-            window = funding[i-30:i]
-            mean_f = np.mean(window)
-            std_f = np.std(window)
-            if std_f > 1e-10:
-                zscore[i] = (funding[i] - mean_f) / std_f
-        
-        return zscore
-    except Exception:
-        return None
+    return slope
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # Get symbol from prices DataFrame (if available)
-    symbol = prices.get('symbol', ['BTCUSDT'])[0] if 'symbol' in prices.columns else 'BTCUSDT'
-    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for major trend bias
+    # Calculate and align 4h HMA for trend bias
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
+    # Calculate 4h HMA slope (trend direction)
+    hma_4h_slope = calculate_hma_slope(hma_4h_aligned, lookback=3)
+    
+    # Calculate and align 1d HMA for regime filter
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 1w HMA for ultra-long-term bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Load funding rate z-score (for BTC/ETH contrarian edge)
-    funding_zscore = load_funding_data(symbol)
-    if funding_zscore is None:
-        funding_zscore = np.zeros(n)
-        funding_zscore[:] = np.nan
-    
-    # Calculate primary (12h) indicators
-    hma_12h = calculate_hma(close, period=21)
-    hma_12h_fast = calculate_hma(close, period=9)
+    # Calculate primary (15m) indicators
+    rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=14)
-    sma_200 = calculate_sma(close, 200)
-    
-    # ATR ratio for volatility filter
-    atr_short = calculate_atr(high, low, close, period=7)
-    atr_long = calculate_atr(high, low, close, period=30)
-    atr_ratio = atr_short / atr_long
+    hma_15m = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25  # 25% base position size
-    SIZE_STRONG = 0.30  # 30% for strong signals
+    SIZE_BASE = 0.20  # 20% base position size (15m = higher frequency)
+    SIZE_STRONG = 0.30  # 30% for strong confluence
     
     # Position tracking for stoploss
     in_position = False
@@ -215,7 +138,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(250, n):  # Start after indicators are ready
+    for i in range(100, n):  # Start after indicators are ready
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -223,85 +146,77 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_12h[i]) or np.isnan(chop[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_4h_slope[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma_200[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(rsi_7[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d HMA50) ===
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        # === SESSION FILTER (00-12 UTC = London + NY overlap) ===
+        # open_time is in milliseconds
+        hour_utc = (open_time[i] // (1000 * 60 * 60)) % 24
+        in_good_session = 0 <= hour_utc <= 12
         
-        # === ULTRA HTF BIAS (1w HMA21) ===
-        htf_1w_bull = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else htf_1d_bull
-        htf_1w_bear = close[i] < hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else htf_1d_bear
+        # === 4h TREND BIAS ===
+        # Positive slope = bullish, Negative slope = bearish
+        hma_4h_bullish = hma_4h_slope[i] > 0.0
+        hma_4h_bearish = hma_4h_slope[i] < 0.0
         
-        # === REGIME FILTER (Choppiness Index) ===
-        not_too_choppy = chop[i] < 62.0  # Avoid dead chop
+        # === 1d REGIME FILTER ===
+        # Price above 1d HMA = bull market (prefer longs)
+        # Price below 1d HMA = bear market (prefer shorts)
+        bull_regime = close[i] > hma_1d_aligned[i]
+        bear_regime = close[i] < hma_1d_aligned[i]
         
-        # === 12h HMA TREND ===
-        hma_bull = close[i] > hma_12h[i]
-        hma_bear = close[i] < hma_12h[i]
+        # === 15m RSI EXTREMES ===
+        rsi_oversold = rsi_7[i] < 35.0  # Less strict than 30 to get more trades
+        rsi_overbought = rsi_7[i] > 65.0  # Less strict than 70 to get more trades
         
-        # === HMA CROSSOVER (fast vs slow) ===
-        hma_cross_bull = hma_12h_fast[i] > hma_12h[i] if not np.isnan(hma_12h_fast[i]) else False
-        hma_cross_bear = hma_12h_fast[i] < hma_12h[i] if not np.isnan(hma_12h_fast[i]) else False
-        
-        # === SMA200 FILTER ===
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
-        
-        # === RSI PULLBACK VALUES ===
-        rsi_pullback_long = 35.0 < rsi[i] < 55.0  # Pullback in uptrend
-        rsi_pullback_short = 45.0 < rsi[i] < 65.0  # Pullback in downtrend
-        rsi_oversold = rsi[i] < 35.0
-        rsi_overbought = rsi[i] > 65.0
-        
-        # === VOLATILITY FILTER ===
-        vol_ok = not np.isnan(atr_ratio[i]) and 0.5 < atr_ratio[i] < 3.0
-        
-        # === FUNDING RATE CONTRARIAN (BTC/ETH edge) ===
-        funding_extreme_long = not np.isnan(funding_zscore[i]) and funding_zscore[i] < -1.5
-        funding_extreme_short = not np.isnan(funding_zscore[i]) and funding_zscore[i] > 1.5
+        # === 15m HMA CONFIRMATION ===
+        hma_15m_bull = close[i] > hma_15m[i]
+        hma_15m_bear = close[i] < hma_15m[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG ENTRY: Trend + Pullback + HTF confirmation
-        if hma_bull and htf_1d_bull and not_too_choppy and vol_ok:
-            # Primary: RSI pullback in uptrend
-            if rsi_pullback_long or rsi_oversold:
-                desired_signal = SIZE_BASE
+        # LONG ENTRY: 4h bullish + RSI oversold + (1d bull OR neutral) + session
+        if hma_4h_bullish and rsi_oversold:
+            confluence_count = 0
+            if bull_regime:
+                confluence_count += 1
+            if hma_15m_bull:
+                confluence_count += 1
+            if in_good_session:
+                confluence_count += 1
             
-            # Strong: Add HMA crossover confirmation
-            if (rsi_pullback_long or rsi_oversold) and hma_cross_bull:
-                desired_signal = SIZE_STRONG
-            
-            # Bonus: Funding rate extreme (contrarian long)
-            if funding_extreme_long and above_sma200:
-                desired_signal = max(desired_signal, SIZE_STRONG)
+            if confluence_count >= 2:  # Need at least 2 of 3 confirmations
+                if confluence_count >= 3:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
         
-        # SHORT ENTRY: Trend + Pullback + HTF confirmation
-        elif hma_bear and htf_1d_bear and not_too_choppy and vol_ok:
-            # Primary: RSI pullback in downtrend
-            if rsi_pullback_short or rsi_overbought:
-                desired_signal = -SIZE_BASE
+        # SHORT ENTRY: 4h bearish + RSI overbought + (1d bear OR neutral) + session
+        elif hma_4h_bearish and rsi_overbought:
+            confluence_count = 0
+            if bear_regime:
+                confluence_count += 1
+            if hma_15m_bear:
+                confluence_count += 1
+            if in_good_session:
+                confluence_count += 1
             
-            # Strong: Add HMA crossover confirmation
-            if (rsi_pullback_short or rsi_overbought) and hma_cross_bear:
-                desired_signal = -SIZE_STRONG
-            
-            # Bonus: Funding rate extreme (contrarian short)
-            if funding_extreme_short and below_sma200:
-                desired_signal = min(desired_signal, -SIZE_STRONG)
+            if confluence_count >= 2:  # Need at least 2 of 3 confirmations
+                if confluence_count >= 3:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
