@@ -1,32 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #1615: 1h Primary + 4h/1d HTF — Simple Trend Pullback with RSI
+Experiment #1616: 12h Primary + 1d HTF — Simplified Trend Pullback Strategy
 
-Hypothesis: After 11 failed experiments with complex regime detection (chop, CRSI, etc.),
-the issue is OVER-FILTERING. 1h strategies with session+volume+multiple confluence = 0 trades.
+Hypothesis: After 11 consecutive failures with complex regime detection (Sharpe=0.000),
+the problem is TOO MANY FILTERS preventing trade generation. This strategy SIMPLIFIES:
 
-NEW APPROACH: Simpler is better for lower TF.
-- 4h HMA(21) = primary trend direction
-- 1d HMA(21) = long-term bias filter (only trade with daily trend)
-- 1h RSI(14) pullback = entry timing within HTF trend
-- ATR(14) 2.5x = trailing stoploss
+Key changes from failed experiments:
+1. REMOVED regime switching (chop/trend) - was causing 0 trades
+2. REMOVED dual HMA crossover - too many confluence requirements
+3. SIMPLIFIED to: 1d HMA bias + 12h EMA pullback + RSI confirmation
+4. LOOSER thresholds: RSI 35-65 (not 40-60), CHOP < 65 (not < 55)
+5. Single entry logic: pullback in direction of HTF trend
+6. ATR 2.5x trailing stop for drawdown control
 
-Why this should work where #1605 failed:
-- NO session filter (too restrictive)
-- NO volume filter (too restrictive)  
-- LOOSE RSI thresholds (35/65 instead of 25/75)
-- Only 2 HTF filters (4h + 1d), not 3+
-- Focus on pullback entries, not regime detection
+Why this should work:
+- 12h timeframe naturally produces 20-50 trades/year
+- 1d HMA(21) provides clear trend bias without over-filtering
+- EMA(21) pullback entries are proven (less lag than SMA)
+- RSI filter ensures we're not buying tops/selling bottoms
+- CHOP filter only excludes extreme chop (not moderate)
+- SIMPLER = more trades generated = actual Sharpe calculation
 
-Target: 40-80 trades/year on 1h, Sharpe > 0.5, DD > -40%
-Timeframe: 1h (required for this experiment)
+Timeframe: 12h (required for this experiment)
+HTF: 1d HMA for bias (use mtf_data helper - call ONCE before loop)
+Target: Sharpe > 0.618, trades > 10/symbol train, > 3/symbol test, DD > -50%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_trend_pullback_rsi_4h1d_hma_atr_v1"
-timeframe = "1h"
+name = "mtf_12h_trend_pullback_1d_hma_rsi_chop_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -61,6 +65,10 @@ def calculate_hma(close, period=21):
     hma = wma(diff, sqrt_period)
     return hma
 
+def calculate_ema(close, period=21):
+    """Exponential Moving Average with proper min_periods"""
+    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+
 def calculate_rsi(close, period=14):
     """RSI with proper min_periods"""
     n = len(close)
@@ -78,7 +86,6 @@ def calculate_rsi(close, period=14):
     mask = loss_smooth > 1e-10
     rsi[mask] = 100.0 - (100.0 / (1.0 + gain_smooth[mask] / loss_smooth[mask]))
     rsi[loss_smooth <= 1e-10] = 100.0
-    rsi[:period] = np.nan
     
     return rsi
 
@@ -96,6 +103,32 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP) - measures market choppiness vs trending
+    CHOP > 61.8 = range/chop, CHOP < 38.2 = trend
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan)
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 1e-10:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -103,23 +136,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 4h HMA for primary trend
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    # Calculate and align 1d HMA for long-term bias
+    # Calculate and align 1d HMA for long-term trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1h indicators
+    # Calculate primary (12h) indicators
     atr = calculate_atr(high, low, close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
+    ema_21 = calculate_ema(close, period=21)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25  # Smaller size for 1h to reduce fee impact
+    BASE_SIZE = 0.28  # Discrete position size (28% of capital)
     
     # Position tracking for stoploss
     in_position = False
@@ -137,41 +167,45 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]):
+        if np.isnan(chop[i]) or np.isnan(rsi[i]) or np.isnan(ema_21[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF TREND DIRECTION (4h + 1d HMA) ===
-        trend_4h_bull = close[i] > hma_4h_aligned[i]
-        trend_4h_bear = close[i] < hma_4h_aligned[i]
-        trend_1d_bull = close[i] > hma_1d_aligned[i]
-        trend_1d_bear = close[i] < hma_1d_aligned[i]
+        # === TREND BIAS (1d HMA) ===
+        daily_bull = close[i] > hma_1d_aligned[i]
+        daily_bear = close[i] < hma_1d_aligned[i]
         
-        # === RSI PULLBACK SIGNALS ===
-        # Long: RSI pulled back to 35-45 in uptrend
-        rsi_pullback_long = 30.0 <= rsi[i] <= 50.0
-        # Short: RSI rallied to 55-70 in downtrend
-        rsi_pullback_short = 50.0 <= rsi[i] <= 70.0
+        # === CHOPPINESS FILTER (only skip extreme chop) ===
+        is_choppy = chop[i] > 65.0  # Only skip when VERY choppy
+        
+        # === PULLBACK DETECTION ===
+        # Price near EMA(21) for pullback entry (within 1.5%)
+        ema_dist = abs(close[i] - ema_21[i]) / ema_21[i] if ema_21[i] > 1e-10 else 999
+        near_ema = ema_dist < 0.015
+        
+        # === RSI CONFIRMATION (LOOSE thresholds for trade generation) ===
+        rsi_bull = 35.0 < rsi[i] < 70.0  # Bullish momentum, not overbought
+        rsi_bear = 30.0 < rsi[i] < 65.0  # Bearish momentum, not oversold
         
         # === PRIMARY SIGNAL ===
         desired_signal = 0.0
         
-        # LONG: 4h bull + 1d bull + RSI pullback
-        if trend_4h_bull and trend_1d_bull and rsi_pullback_long:
-            desired_signal = BASE_SIZE
-        
-        # SHORT: 4h bear + 1d bear + RSI pullback
-        elif trend_4h_bear and trend_1d_bear and rsi_pullback_short:
-            desired_signal = -BASE_SIZE
+        if not is_choppy:
+            # LONG: Daily bull + pullback to EMA + RSI confirmation
+            if daily_bull and near_ema and rsi_bull:
+                desired_signal = BASE_SIZE
+            # SHORT: Daily bear + pullback to EMA + RSI confirmation
+            elif daily_bear and near_ema and rsi_bear:
+                desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
