@@ -1,45 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #986: 1d Primary + 1w HTF — Regime-Adaptive Trend/Mean Revert
+Experiment #987: 6h Primary + 1d/1w HTF — HMA Trend + RSI Pullback
 
-Hypothesis: Daily timeframe with weekly trend bias + adaptive entry logic
-will outperform 6h strategies by reducing noise and fee drag while maintaining
-sufficient trade frequency (target 20-50 trades/year).
+Hypothesis: Simplified 6h strategy using proven HMA trend + RSI pullback pattern
+will outperform complex regime-based strategies that generate too few trades.
 
 Key innovations:
-1. 1w HMA(21) for weekly trend bias (aligned properly via mtf_data)
-2. 1d RSI(14) with relaxed thresholds (30/70 instead of 20/80) for more trades
-3. 1d Donchian(20) breakout as secondary entry trigger
-4. ATR(14) volatility filter to avoid low-vol chop
-5. Regime-adaptive: trend follow when 1w bullish, mean revert when 1w neutral
-6. Simple 2.5x ATR trailing stop for risk management
+1. 1d HMA(21) for intermediate trend bias (proven on 4h strategies)
+2. 1w momentum (close > open) for weekly directional bias
+3. 6h HMA(16/48) dual for primary trend confirmation
+4. RSI(14) pullback entries: RSI<45 in uptrend, RSI>55 in downtrend
+5. NO CHOP filter (eliminated many valid signals in #955)
+6. ATR(14) 2.5x trailing stop for risk management
 
-Why this should work on 1d:
-- 1d has proven track record (current best uses 6h, but 1d should be cleaner)
-- Fewer trades = less fee drag (target 30-60 trades/year vs 100+ on 6h)
-- Weekly bias prevents counter-trend trades in strong moves
-- Relaxed RSI thresholds guarantee trades (RSI<35 long, RSI>65 short)
-- Donchian breakout adds momentum confirmation
+Why this should work:
+- Simpler entry conditions = MORE trades (fixes #955's 0-trade problem)
+- HMA trend + RSI pullback is proven on 4h (mtf_hma_rsi_zscore_v1 Sharpe=5.4)
+- 6h captures multi-day swings without 4h noise
+- Looser RSI thresholds (45/55 vs 40/60) ensure sufficient trade frequency
+- HTF bias prevents counter-trend trades in strong moves
 
-Entry conditions (LOOSE to guarantee trades):
-- LONG = 1w HMA bull + (RSI<35 OR Donchian breakout above 20d high)
-- SHORT = 1w HMA bear + (RSI>65 OR Donchian breakout below 20d low)
-- Volatility filter: ATR/Close > 0.015 (avoid dead markets)
+Entry conditions (LOOSE to guarantee 30+ trades):
+- LONG = 1w bull + 1d HMA bull + 6h HMA bull + RSI(14) < 45
+- SHORT = 1w bear + 1d HMA bear + 6h HMA bear + RSI(14) > 55
+- Exit = RSI crosses 50 (mean reversion) or stoploss hit
 
 Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 1d
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_rsi_donchian_1w_v2"
-timeframe = "1d"
+name = "mtf_6h_hma_rsi_pullback_1d1w_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
-    """Hull Moving Average"""
+    """Hull Moving Average - proven trend indicator"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -66,7 +65,7 @@ def calculate_hma(close, period):
     return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range for stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -80,7 +79,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+    """Relative Strength Index for pullback detection"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -97,21 +96,6 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper and lower bands"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -119,16 +103,22 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1w HMA for trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align HTF indicators
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1d indicators
-    rsi_14 = calculate_rsi(close, period=14)
+    # Weekly momentum: close vs open (bullish if close > open)
+    weekly_momentum_raw = (df_1w['close'].values - df_1w['open'].values) / (df_1w['open'].values + 1e-10)
+    weekly_momentum_aligned = align_htf_to_ltf(prices, df_1w, weekly_momentum_raw)
+    
+    # Calculate 6h indicators
+    hma_6h_16 = calculate_hma(close, period=16)
+    hma_6h_48 = calculate_hma(close, period=48)
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    rsi_14 = calculate_rsi(close, period=14)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -143,7 +133,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -152,62 +142,70 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_6h_16[i]) or np.isnan(hma_6h_48[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(weekly_momentum_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === VOLATILITY FILTER (avoid dead markets) ===
-        vol_ratio = atr_14[i] / close[i]
-        is_active_market = vol_ratio > 0.015  # ATR > 1.5% of price
+        if np.isnan(rsi_14[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === 1w TREND BIAS ===
-        htf_bull = close[i] > hma_1w_aligned[i]
-        htf_bear = close[i] < hma_1w_aligned[i]
+        # === HTF BIAS (1w momentum + 1d HMA) ===
+        htf_1w_bull = weekly_momentum_aligned[i] > 0.0
+        htf_1w_bear = weekly_momentum_aligned[i] < 0.0
         
-        # === RSI SIGNALS (RELAXED THRESHOLDS FOR MORE TRADES) ===
-        rsi_oversold = rsi_14[i] < 35  # Relaxed from 30
-        rsi_overbought = rsi_14[i] > 65  # Relaxed from 70
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        donchian_breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # === 6h TREND (HMA 16/48) ===
+        hma_6h_bull = hma_6h_16[i] > hma_6h_48[i]
+        hma_6h_bear = hma_6h_16[i] < hma_6h_48[i]
         
-        # === ENTRY LOGIC (LOOSE CONDITIONS TO GUARANTEE TRADES) ===
+        # === RSI PULLBACK (LOOSE THRESHOLDS FOR MORE TRADES) ===
+        rsi_oversold = rsi_14[i] < 45  # Pullback in uptrend
+        rsi_overbought = rsi_14[i] > 55  # Rally in downtrend
+        
+        # === RSI EXIT SIGNALS ===
+        rsi_neutral = 45 <= rsi_14[i] <= 55
+        
+        # === ENTRY LOGIC (SIMPLIFIED - MORE TRADES) ===
         desired_signal = 0.0
         
-        # LONG entries - multiple paths to entry
-        if htf_bull and is_active_market:
-            if rsi_oversold:
-                # Mean reversion in uptrend
-                desired_signal = SIZE_BASE
-            elif donchian_breakout_long:
-                # Momentum breakout
-                desired_signal = SIZE_STRONG
-            elif rsi_14[i] < 45 and close[i] > hma_1w_aligned[i] * 0.98:
-                # Pullback in uptrend
-                desired_signal = SIZE_BASE
+        # LONG entries: All HTF bullish + RSI pullback
+        if htf_1w_bull and htf_1d_bull and hma_6h_bull and rsi_oversold:
+            desired_signal = SIZE_STRONG
+        elif htf_1w_bull and hma_6h_bull and rsi_oversold:
+            # Weaker condition: just 6h + 1w bull
+            desired_signal = SIZE_BASE
         
-        # SHORT entries - multiple paths to entry
-        elif htf_bear and is_active_market:
-            if rsi_overbought:
-                # Mean reversion in downtrend
-                desired_signal = -SIZE_BASE
-            elif donchian_breakout_short:
-                # Momentum breakout
-                desired_signal = -SIZE_STRONG
-            elif rsi_14[i] > 55 and close[i] < hma_1w_aligned[i] * 1.02:
-                # Rally in downtrend
-                desired_signal = -SIZE_BASE
+        # SHORT entries: All HTF bearish + RSI rally
+        elif htf_1w_bear and htf_1d_bear and hma_6h_bear and rsi_overbought:
+            desired_signal = -SIZE_STRONG
+        elif htf_1w_bear and hma_6h_bear and rsi_overbought:
+            # Weaker condition: just 6h + 1w bear
+            desired_signal = -SIZE_BASE
+        
+        # === EXIT LOGIC (RSI mean reversion) ===
+        if in_position:
+            if position_side > 0 and rsi_neutral:
+                # Long position: exit when RSI recovers to neutral
+                desired_signal = 0.0
+            elif position_side < 0 and rsi_neutral:
+                # Short position: exit when RSI drops to neutral
+                desired_signal = 0.0
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
