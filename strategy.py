@@ -1,84 +1,170 @@
 #!/usr/bin/env python3
 """
-Experiment #883: 6h Primary + 1d/1w HTF — Keltner/Fisher/ADX Regime Adaptive
+Experiment #884: 12h Primary + 1d/1w HTF — Fisher Transform + BB Compression + HTF Trend
 
-Hypothesis: 6h timeframe sits between 4h (too noisy) and 12h (too slow).
-Using Keltner Channels for volatility-based entries (different from BB),
-Ehlers Fisher Transform for reversal signals (proven in bear/range markets),
-and triple HTF structure (1w bias + 1d trend + 6h entry) provides unique edge.
+Hypothesis: Bear/range markets (2025+) favor mean-reversion strategies with volatility
+compression detection. Ehlers Fisher Transform excels at catching reversals in bear
+rallies. Bollinger Band Width percentile identifies compression before expansion.
+12h timeframe provides optimal trade frequency (20-50/year) with high signal quality.
 
 Key innovations:
-1. 1w HMA(21) for ultra-long-term market bias (bull/bear regime)
-2. 1d HMA(21) for intermediate trend direction
-3. 6h Keltner Channels (EMA20 + 1.5*ATR) for volatility-based entry zones
-4. Ehlers Fisher Transform(9) for reversal signals at extremes
-5. ADX(14) for trend strength confirmation (threshold=20, loose)
-6. Regime-adaptive: mean-revert when ADX<20, trend-follow when ADX>=20
-7. ATR(14) 2.5x trailing stop for risk management
+1. Ehlers Fisher Transform (period=9) - proven reversal detector in bear markets
+2. BB Width percentile (100-period) - only trade when vol compressed <40th percentile
+3. 1d HMA(21) for HTF trend bias - directional filter
+4. 1w HMA(50) for major regime - avoid counter-trend in strong weekly trends
+5. Volume confirmation - current vol > 0.8 * vol_ma(20)
+6. ATR(14) 2.5x trailing stop for risk management
+7. Discrete sizing: 0.0, ±0.25, ±0.30
 
-Entry conditions (LOOSE to ensure trades):
-- LONG BIAS (1w HMA bull + 1d HMA bull):
-  - ADX<20 (range): Fisher<-1.2 + price<Keltner_lower
-  - ADX>=20 (trend): Price>Keltner_mid + Fisher crossing up from <-1.0
-- SHORT BIAS (1w HMA bear + 1d HMA bear):
-  - ADX<20 (range): Fisher>1.2 + price>Keltner_upper
-  - ADX>=20 (trend): Price<Keltner_mid + Fisher crossing down from >1.0
+Entry conditions (LOOSE to ensure ≥10 trades/train, ≥3/test):
+- LONG: Fisher crosses above -1.2 + BBW < 40th %ile + 1d HMA bull + volume confirm
+- SHORT: Fisher crosses below +1.2 + BBW < 40th %ile + 1d HMA bear + volume confirm
 
-Target: Sharpe>0.45, trades>=40 train, trades>=10 test, DD>-40%
-Timeframe: 6h
+Target: Sharpe>0.45, trades>=10 train, trades>=3 test, DD>-40%
+Timeframe: 12h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_keltner_fisher_adx_triple_htf_v1"
-timeframe = "6h"
+name = "mtf_12h_fisher_bbw_compression_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
+def calculate_fisher_transform(high, low, close, period=9):
+    """
+    Ehlers Fisher Transform
+    Identifies turning points by normalizing price and applying inverse tanh
+    
+    Steps:
+    1. Calculate typical price: (high + low) / 2
+    2. Smooth with EMA
+    3. Normalize to -1 to +1 range using highest high / lowest low over period
+    4. Apply Fisher: 0.5 * ln((1+x)/(1-x))
+    5. Smooth Fisher with EMA
+    """
+    n = len(close)
+    if n < period + 10:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    # Typical price
+    typical = (high + low) / 2.0
+    
+    # Smooth typical price with EMA
+    typical_smooth = pd.Series(typical).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Normalize to -1 to +1
+    normalized = np.zeros(n)
+    normalized[:] = np.nan
+    
+    for i in range(period, n):
+        highest = np.max(typical_smooth[i - period + 1:i + 1])
+        lowest = np.min(typical_smooth[i - period + 1:i + 1])
+        range_val = highest - lowest
+        
+        if range_val > 1e-10:
+            normalized[i] = 0.999 * (2.0 * (typical_smooth[i] - lowest) / range_val - 1.0)
+            # Clamp to avoid division by zero in Fisher
+            normalized[i] = np.clip(normalized[i], -0.999, 0.999)
+        else:
+            normalized[i] = 0.0
+    
+    # Fisher Transform: 0.5 * ln((1+x)/(1-x))
+    fisher = np.zeros(n)
+    fisher[:] = np.nan
+    
+    for i in range(period, n):
+        if not np.isnan(normalized[i]):
+            x = normalized[i]
+            if abs(x) < 0.999:
+                fisher[i] = 0.5 * np.log((1.0 + x) / (1.0 - x))
+            else:
+                fisher[i] = np.sign(x) * 3.0  # Cap at extreme
+        else:
+            fisher[i] = np.nan
+    
+    # Smooth Fisher with EMA
+    fisher_smooth = pd.Series(fisher).ewm(span=3, min_periods=3, adjust=False).mean().values
+    
+    return fisher_smooth, normalized
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Bollinger Bands with width calculation"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    # Middle band (SMA)
+    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    
+    # Standard deviation
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    # Upper and lower bands
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    
+    # Band width (normalized)
+    bbw = np.zeros(n)
+    bbw[:] = np.nan
+    for i in range(period, n):
+        if middle[i] > 1e-10:
+            bbw[i] = (upper[i] - lower[i]) / middle[i]
+        else:
+            bbw[i] = 0.0
+    
+    return upper, lower, middle, bbw
+
+def calculate_bbw_percentile(bbw, lookback=100):
+    """Calculate percentile rank of current BBW vs lookback period"""
+    n = len(bbw)
+    percentile = np.zeros(n)
+    percentile[:] = np.nan
+    
+    for i in range(lookback, n):
+        if not np.isnan(bbw[i]):
+            window = bbw[i - lookback + 1:i + 1]
+            valid_window = window[~np.isnan(window)]
+            if len(valid_window) > 0:
+                count_below = np.sum(valid_window[:-1] < bbw[i])
+                percentile[i] = count_below / (len(valid_window) - 1) * 100.0
+            else:
+                percentile[i] = 50.0
+        else:
+            percentile[i] = np.nan
+    
+    return percentile
+
 def calculate_hma(close, period):
-    """
-    Hull Moving Average (HMA)
-    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    Reduces lag while maintaining smoothness
-    """
+    """Hull Moving Average - reduces lag while maintaining smoothness"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
     
     half = period // 2
     sqrt_n = int(np.sqrt(period))
-    if sqrt_n < 1:
-        sqrt_n = 1
     
     def wma(series, span):
-        if span < 1:
-            span = 1
         result = np.full(len(series), np.nan)
-        weights = np.arange(1, span + 1, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=float)
         for i in range(span - 1, len(series)):
             window = series[i - span + 1:i + 1]
-            result[i] = np.sum(window * weights) / np.sum(weights)
+            if not np.any(np.isnan(window)):
+                result[i] = np.sum(window * weights) / np.sum(weights)
         return result
     
     wma_half = wma(close, half)
     wma_full = wma(close, period)
     
-    diff = np.full(n, np.nan)
+    diff = np.zeros(n)
+    diff[:] = np.nan
     for i in range(period - 1, n):
         if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
             diff[i] = 2 * wma_half[i] - wma_full[i]
     
     hma = wma(diff, sqrt_n)
     return hma
-
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -94,128 +180,39 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """
-    Average Directional Index (ADX)
-    Measures trend strength (not direction)
-    ADX > 25 = strong trend, ADX < 20 = weak/range
-    """
-    n = len(close)
-    if n < period * 2 + 1:
+def calculate_volume_ma(volume, period=20):
+    """Volume moving average"""
+    n = len(volume)
+    if n < period:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        elif down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        if atr[i] > 1e-10:
-            plus_di[i] = 100.0 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
-            minus_di[i] = 100.0 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
-    
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 1e-10:
-            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
-
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Ehlers Fisher Transform
-    Transforms price into a Gaussian distribution for clearer reversal signals
-    Long when Fisher crosses above -1.5, Short when crosses below +1.5
-    Using looser thresholds (-1.2/+1.2) for more trades
-    """
-    n = len(close := (high + low) / 2)
-    if n < period + 1:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    fisher = np.zeros(n)
-    fisher[:] = np.nan
-    fisher_prev = np.zeros(n)
-    fisher_prev[:] = np.nan
-    
-    for i in range(period, n):
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        price_range = highest - lowest
-        
-        if price_range < 1e-10:
-            continue
-        
-        x = (close[i] - lowest) / price_range
-        x = max(0.001, min(0.999, x))
-        
-        fisher_val = 0.5 * np.log((1 + x) / (1 - x))
-        
-        if i > period:
-            fisher_prev[i] = fisher[i-1]
-        
-        fisher[i] = 0.67 * fisher_val + 0.33 * fisher[i-1] if i > period else fisher_val
-    
-    return fisher, fisher_prev
-
-def calculate_keltner(high, low, close, ema_period=20, atr_period=14, multiplier=1.5):
-    """
-    Keltner Channels
-    Middle = EMA(20)
-    Upper = EMA(20) + multiplier * ATR(14)
-    Lower = EMA(20) - multiplier * ATR(14)
-    """
-    n = len(close)
-    ema_mid = calculate_ema(close, ema_period)
-    atr = calculate_atr(high, low, close, atr_period)
-    
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(n):
-        if not np.isnan(ema_mid[i]) and not np.isnan(atr[i]):
-            upper[i] = ema_mid[i] + multiplier * atr[i]
-            lower[i] = ema_mid[i] - multiplier * atr[i]
-    
-    return ema_mid, upper, lower
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF HMAs
+    # Calculate and align HTF HMA
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 6h indicators
-    keltner_mid, keltner_upper, keltner_lower = calculate_keltner(high, low, close, ema_period=20, atr_period=14, multiplier=1.5)
-    fisher, fisher_prev = calculate_fisher_transform(high, low, period=9)
-    adx_14 = calculate_adx(high, low, close, period=14)
+    # Calculate 12h indicators
+    fisher, fisher_normalized = calculate_fisher_transform(high, low, close, period=9)
+    bb_upper, bb_lower, bb_middle, bbw = calculate_bollinger_bands(close, period=20, std_dev=2.0)
+    bbw_percentile = calculate_bbw_percentile(bbw, lookback=100)
     atr_14 = calculate_atr(high, low, close, period=14)
+    vol_ma_20 = calculate_volume_ma(volume, period=20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -239,7 +236,7 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(keltner_mid[i]) or np.isnan(fisher[i]) or np.isnan(adx_14[i]):
+        if np.isnan(fisher[i]) or np.isnan(bbw_percentile[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -253,68 +250,51 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w + 1d HMA) ===
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
+        # === HTF BIAS (1d HMA) ===
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # Combined bias (both must agree for strong signal)
-        strong_bull_bias = htf_1w_bull and htf_1d_bull
-        strong_bear_bias = htf_1w_bear and htf_1d_bear
+        # === WEEKLY REGIME FILTER (1w HMA) ===
+        # Avoid strong counter-trend trades in major weekly trends
+        htf_1w_bull = close[i] > hma_1w_aligned[i]
+        htf_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # Weak bias (only 1d agrees, allows more trades)
-        weak_bull_bias = htf_1d_bull
-        weak_bear_bias = htf_1d_bear
+        # === FISHER TRANSFORM SIGNALS ===
+        fisher_cross_long = False
+        fisher_cross_short = False
         
-        # === ADX REGIME ===
-        adx_trending = adx_14[i] >= 20.0  # Loose threshold for more trades
-        adx_ranging = adx_14[i] < 20.0
+        if i > 0 and not np.isnan(fisher[i-1]):
+            # Long: Fisher crosses above -1.2 from below
+            fisher_cross_long = (fisher[i-1] < -1.2) and (fisher[i] >= -1.2)
+            # Short: Fisher crosses below +1.2 from above
+            fisher_cross_short = (fisher[i-1] > 1.2) and (fisher[i] <= 1.2)
         
-        # === FISHER SIGNALS ===
-        fisher_oversold = fisher[i] < -1.2
-        fisher_overbought = fisher[i] > 1.2
-        fisher_cross_up = (fisher_prev[i] < -1.0) and (fisher[i] >= -1.0)
-        fisher_cross_down = (fisher_prev[i] > 1.0) and (fisher[i] <= 1.0)
+        # === BB WIDTH COMPRESSION ===
+        # Only trade when volatility is compressed (bottom 40% of recent range)
+        bbw_compressed = bbw_percentile[i] < 40.0
         
-        # === KELTNER POSITION ===
-        price_below_lower = close[i] < keltner_lower[i]
-        price_above_upper = close[i] > keltner_upper[i]
-        price_above_mid = close[i] > keltner_mid[i]
-        price_below_mid = close[i] < keltner_mid[i]
+        # === VOLUME CONFIRMATION ===
+        # Current volume should be at least 80% of 20-period MA
+        volume_confirm = volume[i] >= 0.8 * vol_ma_20[i] if vol_ma_20[i] > 1e-10 else True
         
-        # === ENTRY LOGIC (REGIME ADAPTIVE + LOOSE FOR TRADES) ===
+        # === ENTRY LOGIC (LOOSE FOR TRADES) ===
         desired_signal = 0.0
         
-        if strong_bull_bias or weak_bull_bias:
-            # Bullish bias - look for longs
-            if adx_ranging:
-                # Range regime: mean reversion at Keltner lower + Fisher oversold
-                if price_below_lower and fisher_oversold:
-                    desired_signal = SIZE_STRONG
-                elif fisher_oversold:
-                    desired_signal = SIZE_BASE
-            else:
-                # Trend regime: pullback to mid + Fisher turning up
-                if price_above_mid and fisher_cross_up:
-                    desired_signal = SIZE_STRONG
-                elif price_above_mid and fisher[i] > -0.5:
-                    desired_signal = SIZE_BASE
+        # Long entry: Fisher cross + BBW compression + HTF bull + volume
+        if htf_1d_bull and bbw_compressed and volume_confirm:
+            if fisher_cross_long:
+                desired_signal = SIZE_STRONG
+            elif fisher[i] < -1.0 and htf_1w_bull:
+                # Additional long signal if Fisher very oversold + weekly bull
+                desired_signal = SIZE_BASE
         
-        elif strong_bear_bias or weak_bear_bias:
-            # Bearish bias - look for shorts
-            if adx_ranging:
-                # Range regime: mean reversion at Keltner upper + Fisher overbought
-                if price_above_upper and fisher_overbought:
-                    desired_signal = -SIZE_STRONG
-                elif fisher_overbought:
-                    desired_signal = -SIZE_BASE
-            else:
-                # Trend regime: pullback to mid + Fisher turning down
-                if price_below_mid and fisher_cross_down:
-                    desired_signal = -SIZE_STRONG
-                elif price_below_mid and fisher[i] < 0.5:
-                    desired_signal = -SIZE_BASE
+        # Short entry: Fisher cross + BBW compression + HTF bear + volume
+        elif htf_1d_bear and bbw_compressed and volume_confirm:
+            if fisher_cross_short:
+                desired_signal = -SIZE_STRONG
+            elif fisher[i] > 1.0 and htf_1w_bear:
+                # Additional short signal if Fisher very overbought + weekly bear
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
