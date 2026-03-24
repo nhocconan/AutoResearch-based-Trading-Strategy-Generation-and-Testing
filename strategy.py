@@ -1,39 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #1632: 12h Primary + 1d HTF — Donchian Breakout + HMA Bias + RSI Momentum
+Experiment #1633: 1d Primary + 1w HTF — Donchian Breakout + Weekly HMA Bias + RSI Momentum
 
-Hypothesis: Previous 12h strategies failed due to OVER-FILTERING (too many confluence conditions).
-This strategy SIMPLIFIES entry logic to generate MORE trades while maintaining edge:
+Hypothesis: Previous 12h strategies failed due to over-filtering causing 0 trades or negative Sharpe.
+The current best strategy (mtf_1d_donchian_hma_rsi_1w_atr_v1, Sharpe=0.618) proves that:
+1. 1d primary timeframe works well (higher TF = fewer false breakouts)
+2. 1w HTF HMA provides strong trend bias without over-filtering
+3. Donchian breakout + RSI momentum is a winning combination
 
-1. Single HTF bias: 1d HMA(21) for trend direction (proven in best strategy #1617 lineage)
-2. Donchian(20) breakout: Clean breakout signal, fewer false signals than HMA crossover
-3. RSI(14) momentum filter: RSI > 50 for long, < 50 for short (simple, generates trades)
-4. ATR(14) 3x trailing stop: Wider stops for 12h timeframe volatility
-5. NO complex regime switching: Pure trend-following with momentum confirmation
+This strategy SIMPLIFIES to ensure trade generation while maintaining edge:
+1. 1w HMA(21) for weekly trend bias (stronger than daily, fewer whipsaws)
+2. Donchian(20) breakout on 1d for clean entry signals
+3. RSI(14) > 45 for long, < 55 for short (looser than 50 = MORE TRADES)
+4. ATR(14) 2.5x trailing stop (tighter than 3x for 1d volatility)
+5. NO regime filters (CHOP, ADX caused 0 trades in #1622, #1623, #1628)
+6. Discrete position sizing: 0.0, ±0.30 (minimize fee churn)
 
-Why this should work on 12h:
-- Donchian breakouts work best on higher timeframes (less noise)
-- 1d HMA provides clear bias without over-filtering
-- RSI > 50/< 50 is much looser than pullback zones = MORE TRADES
-- 12h targets 20-50 trades/year = optimal fee/trade balance
-- Simpler logic = fewer conditions that can all fail simultaneously
+Key improvements over #1632 (12h version that had Sharpe=-0.182):
+- 1d instead of 12h (proven better in best strategy lineage)
+- 1w HTF instead of 1d (stronger trend signal)
+- Looser RSI thresholds (45/55 vs 50/50) = more entries
+- 2.5x ATR stop vs 3x (1d has less noise than 12h)
 
-Key difference from #1626:
-- Removed CHOP regime detection (was filtering out valid trades)
-- Changed from HMA crossover to Donchian breakout (cleaner signals)
-- Changed RSI from pullback (35-55) to momentum (>50/<50) = more entries
-- Wider ATR stop (3x vs 2.5x) = fewer premature exits
-
-Timeframe: 12h (required)
-HTF: 1d HMA via mtf_data.get_htf_data() — called ONCE before loop
+Timeframe: 1d (required per experiment)
+HTF: 1w HMA via mtf_data.get_htf_data() — called ONCE before loop
 Target: Sharpe > 0.618, trades > 30/symbol train, > 5/symbol test, DD > -40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_1d_rsi_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_hma_1w_rsi_atr_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -126,13 +124,13 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 1w HMA for trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
+    # Calculate primary (1d) indicators
     atr = calculate_atr(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
@@ -156,7 +154,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -175,42 +173,42 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === TREND BIAS (1d HMA) ===
-        daily_bull = close[i] > hma_1d_aligned[i]
-        daily_bear = close[i] < hma_1d_aligned[i]
+        # === TREND BIAS (1w HMA) ===
+        weekly_bull = close[i] > hma_1w_aligned[i]
+        weekly_bear = close[i] < hma_1w_aligned[i]
         
         # === DONCHIAN BREAKOUT ===
-        # Check if price broke out of Donchian channel
+        # Check if price broke out of Donchian channel (using previous bar's levels)
         donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
         donchian_breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # === RSI MOMENTUM FILTER ===
-        rsi_bull = rsi[i] > 50.0
-        rsi_bear = rsi[i] < 50.0
+        # === RSI MOMENTUM FILTER (looser thresholds for more trades) ===
+        rsi_bull = rsi[i] > 45.0  # More lenient than 50
+        rsi_bear = rsi[i] < 55.0  # More lenient than 50
         
         # === PRIMARY SIGNAL ===
         desired_signal = 0.0
         
-        # LONG: Donchian breakout + price above 1d HMA + RSI > 50
-        if donchian_breakout_long and daily_bull and rsi_bull:
+        # LONG: Donchian breakout + price above 1w HMA + RSI > 45
+        if donchian_breakout_long and weekly_bull and rsi_bull:
             desired_signal = BASE_SIZE
         
-        # SHORT: Donchian breakout + price below 1d HMA + RSI < 50
-        elif donchian_breakout_short and daily_bear and rsi_bear:
+        # SHORT: Donchian breakout + price below 1w HMA + RSI < 55
+        elif donchian_breakout_short and weekly_bear and rsi_bear:
             desired_signal = -BASE_SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 3x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.5x for 1d) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
