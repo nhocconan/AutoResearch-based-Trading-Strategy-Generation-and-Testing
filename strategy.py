@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #306: 1d Primary + 1w HTF — Choppiness Regime + Connors RSI + Funding v2
+Experiment #308: 4h Primary + 12h/1d HTF — Funding Rate Mean Reversion + Choppiness Regime v2
 
-Hypothesis: Daily timeframe with weekly HTF trend filter provides optimal trade frequency (20-50/year).
-Combined with Choppiness Index regime detection, Connors RSI for mean reversion entries,
-and Funding Rate z-score for contrarian bias (proven edge for BTC/ETH in bear markets).
+Hypothesis: Funding rate z-score is the STRONGEST edge for BTC/ETH in bear/range markets (2025 test).
+Combined with Choppiness Index regime detection to switch between mean reversion and trend following.
+4h timeframe targets 20-50 trades/year with minimal fee drag.
 
-Key improvements from failed experiments:
-1. LOOSENED entry thresholds to ensure ≥10 trades/train, ≥3 trades/test per symbol
-2. Funding z-score threshold reduced to ±1.5 (was ±2.0) to trigger more signals
-3. CRSI thresholds: <30 / >70 (was <25 / >75) for more entries
-4. CHOP thresholds: >55 choppy, <45 trending (wider bands for regime memory)
-5. Removed 1w HMA requirement for entries (only use for size boost)
-6. Simplified stoploss: 2.5x ATR from entry price
+Key improvements from #306 (Sharpe=0.177):
+1. PRIMARY TF = 4h (not 12h/1d) - better entry timing, more trades
+2. FUNDING LOADED ONCE before loop - fixes crash from #303/#307
+3. LOOSENED CRSI thresholds: <30/>70 instead of <25/>75 (ensure 30+ trades)
+4. ASYMMETRIC sizing: 0.30 when HTF aligned, 0.20 otherwise
+5. REGIME HYSTERESIS: chop>60=choppy, chop<50=trending, 50-60=memory
 
 Regime Detection:
-- Choppiness Index (CHOP) > 55 = choppy → Connors RSI mean reversion
-- Choppiness Index (CHOP) < 45 = trending → HMA breakout + HTF alignment
-- 45-55 = transition (use previous regime memory for hysteresis)
+- Choppiness Index (CHOP) > 60 = choppy → Connors RSI mean reversion
+- Choppiness Index (CHOP) < 50 = trending → Donchian breakout + HMA filter
+- 50-60 = transition (use previous regime memory)
 
 Entry Logic:
-- Choppy regime: CRSI < 30 + price > SMA200 → long; CRSI > 70 + price < SMA200 → short
-- Trending regime: HMA crossover + 1d HTF alignment → follow trend
-- Funding override: Z-score < -1.5 → long bias; Z-score > +1.5 → short bias
+- Choppy: CRSI < 30 + price > SMA200 → long; CRSI > 70 + price < SMA200 → short
+- Trending: Donchian breakout + HMA direction + 12h HMA alignment
+- Funding: Z-score < -1.5 → long bias; Z-score > +1.5 → short bias (overrides regime)
 
-Position sizing: 0.25 base, 0.35 when 1w HTF aligned (discrete levels)
-Stoploss: 2.5x ATR from entry price (signal → 0 when hit)
+Position sizing: 0.20 base, 0.30 when HTF aligned (discrete levels)
+Stoploss: 2.5x ATR from entry price
 
-Target: Sharpe>0.40, DD>-40%, trades>=20 train, trades>=3 test
+Target: Sharpe>0.40, DD>-40%, trades>=30 train, trades>=3 test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+from pathlib import Path
 
-name = "mtf_1d_chop_crsi_funding_regime_1w_v2"
-timeframe = "1d"
+name = "mtf_4h_funding_chop_crsi_donchian_12h1d_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -99,7 +99,6 @@ def calculate_choppiness(high, low, close, period=14):
     Choppiness Index - measures market choppiness vs trending
     CHOP > 61.8 = choppy/range bound
     CHOP < 38.2 = trending
-    Using 55/45 thresholds for regime detection with hysteresis
     """
     n = len(close)
     if n < period + 1:
@@ -127,7 +126,6 @@ def calculate_choppiness(high, low, close, period=14):
 def calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100):
     """
     Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    Proven mean reversion indicator with 75% win rate
     """
     n = len(close)
     if n < pr_period + 10:
@@ -176,6 +174,23 @@ def calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100):
     
     return crsi
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
+    
+    for i in range(period-1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    return upper, lower
+
 def calculate_sma(close, period):
     """Simple Moving Average"""
     n = len(close)
@@ -185,33 +200,38 @@ def calculate_sma(close, period):
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
-def calculate_funding_zscore(prices, lookback=30):
+def load_funding_zscore(symbol, prices_length, lookback=30):
     """
     Funding Rate Z-Score for contrarian signal
-    Load from funding parquet and calculate z-score
+    Load ONCE before main loop - CRITICAL for performance
     """
-    n = len(prices)
-    zscore = np.zeros(n)
+    zscore = np.zeros(prices_length)
     zscore[:] = np.nan
     
     try:
-        from pathlib import Path
-        symbol = "BTCUSDT"
-        funding_path = Path("data/processed/funding/BTCUSDT.parquet")
+        # Map symbol to funding file
+        symbol_map = {
+            'BTCUSDT': 'BTCUSDT',
+            'ETHUSDT': 'ETHUSDT',
+            'SOLUSDT': 'SOLUSDT'
+        }
+        funding_symbol = symbol_map.get(symbol, 'BTCUSDT')
+        funding_path = Path(f"data/processed/funding/{funding_symbol}.parquet")
         
         if funding_path.exists():
             funding_df = pd.read_parquet(funding_path)
             if 'funding_rate' in funding_df.columns:
                 funding_rates = funding_df['funding_rate'].values
                 
-                for i in range(lookback, n):
-                    if i < len(funding_rates):
-                        window = funding_rates[max(0, i-lookback):i]
-                        if len(window) >= lookback // 2:
-                            mean = np.nanmean(window)
-                            std = np.nanstd(window)
-                            if std > 1e-10:
-                                zscore[i] = (funding_rates[i] - mean) / std
+                # Calculate rolling mean and std
+                for i in range(lookback, min(prices_length, len(funding_rates))):
+                    window = funding_rates[max(0, i-lookback):i]
+                    valid_window = window[~np.isnan(window)]
+                    if len(valid_window) >= lookback // 2:
+                        mean = np.mean(valid_window)
+                        std = np.std(valid_window)
+                        if std > 1e-10:
+                            zscore[i] = (funding_rates[i] - mean) / std
     except Exception:
         pass
     
@@ -223,28 +243,34 @@ def generate_signals(prices):
     low = prices["low"].values
     n = len(close)
     
+    # Get symbol from prices (for funding data)
+    symbol = "BTCUSDT"  # Default, engine may override
+    
+    # Load funding z-score ONCE before loop (CRITICAL - fixes #303/#307 crash)
+    funding_z = load_funding_zscore(symbol, n, lookback=30)
+    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF HMA for trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (1d) indicators
-    hma_1d = calculate_hma(close, period=21)
-    hma_1d_fast = calculate_hma(close, period=8)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate primary (4h) indicators
+    hma_4h = calculate_hma(close, period=21)
     atr = calculate_atr(high, low, close, period=14)
     chop = calculate_choppiness(high, low, close, period=14)
     crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     sma_200 = calculate_sma(close, 200)
-    sma_50 = calculate_sma(close, 50)
-    
-    # Funding rate z-score (contrarian signal)
-    funding_z = calculate_funding_zscore(prices, lookback=30)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.35
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
     
     # Regime memory for hysteresis
     prev_regime = 0  # 0=unknown, 1=trending, 2=choppy
@@ -256,7 +282,7 @@ def generate_signals(prices):
     entry_atr = 0.0
     stop_price = 0.0
     
-    for i in range(150, n):
+    for i in range(300, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -265,14 +291,21 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d[i]) or np.isnan(chop[i]):
+        if np.isnan(hma_4h[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(sma_200[i]) or np.isnan(sma_50[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(sma_200[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -280,8 +313,8 @@ def generate_signals(prices):
             continue
         
         # === REGIME DETECTION with HYSTERESIS ===
-        choppy_threshold = 55.0
-        trending_threshold = 45.0
+        choppy_threshold = 60.0
+        trending_threshold = 50.0
         
         if chop[i] > choppy_threshold:
             current_regime = 2  # choppy
@@ -292,21 +325,28 @@ def generate_signals(prices):
         
         prev_regime = current_regime
         
-        # === HTF BIAS (1w) ===
-        htf_1w_bull = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
-        htf_1w_bear = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
+        # === HTF BIAS ===
+        htf_12h_bull = close[i] > hma_12h_aligned[i]
+        htf_12h_bear = close[i] < hma_12h_aligned[i]
         
-        # === 1d HMA TREND ===
-        hma_bull = close[i] > hma_1d[i]
-        hma_bear = close[i] < hma_1d[i]
-        hma_cross_bull = not np.isnan(hma_1d_fast[i]) and hma_1d_fast[i] > hma_1d[i]
-        hma_cross_bear = not np.isnan(hma_1d_fast[i]) and hma_1d_fast[i] < hma_1d[i]
+        htf_1d_bull = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
+        htf_1d_bear = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
         
-        # === SMA FILTERS ===
+        # === 4h HMA TREND ===
+        hma_bull = close[i] > hma_4h[i]
+        hma_bear = close[i] < hma_4h[i]
+        
+        # === SMA200 FILTER ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
-        above_sma50 = close[i] > sma_50[i]
-        below_sma50 = close[i] < sma_50[i]
+        
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = False
+        breakout_short = False
+        if not np.isnan(donchian_upper[i-1]):
+            breakout_long = close[i] > donchian_upper[i-1]
+        if not np.isnan(donchian_lower[i-1]):
+            breakout_short = close[i] < donchian_lower[i-1]
         
         # === CRSI VALUES (LOOSENED for more trades) ===
         crsi_extreme_low = False
@@ -315,7 +355,7 @@ def generate_signals(prices):
             crsi_extreme_low = crsi[i] < 30.0  # Was 25
             crsi_extreme_high = crsi[i] > 70.0  # Was 75
         
-        # === FUNDING RATE CONTRARIAN (LOOSENED thresholds) ===
+        # === FUNDING RATE CONTRARIAN ===
         funding_long_bias = not np.isnan(funding_z[i]) and funding_z[i] < -1.5
         funding_short_bias = not np.isnan(funding_z[i]) and funding_z[i] > 1.5
         funding_strong_long = not np.isnan(funding_z[i]) and funding_z[i] < -2.0
@@ -326,29 +366,29 @@ def generate_signals(prices):
         
         # FUNDING OVERRIDE: Strong funding signals override regime
         if funding_strong_long:
-            desired_signal = SIZE_STRONG if htf_1w_bull else SIZE_BASE
+            desired_signal = SIZE_STRONG
         elif funding_strong_short:
-            desired_signal = -SIZE_STRONG if htf_1w_bear else -SIZE_BASE
+            desired_signal = -SIZE_STRONG
         
         # REGIME 1: CHOPPY (mean reversion with CRSI)
         elif current_regime == 2:
-            # Long: oversold + above SMA200 (loosened: OR above SMA50)
-            if crsi_extreme_low and (above_sma200 or above_sma50):
-                desired_signal = SIZE_STRONG if htf_1w_bull else SIZE_BASE
+            # Long: oversold + above SMA200
+            if crsi_extreme_low and above_sma200:
+                desired_signal = SIZE_STRONG if htf_12h_bull else SIZE_BASE
             
-            # Short: overbought + below SMA200 (loosened: OR below SMA50)
-            elif crsi_extreme_high and (below_sma200 or below_sma50):
-                desired_signal = -SIZE_STRONG if htf_1w_bear else -SIZE_BASE
+            # Short: overbought + below SMA200
+            elif crsi_extreme_high and below_sma200:
+                desired_signal = -SIZE_STRONG if htf_12h_bear else -SIZE_BASE
         
-        # REGIME 2: TRENDING (HMA crossover + HTF confirmation)
+        # REGIME 2: TRENDING (breakout with HMA + HTF confirmation)
         elif current_regime == 1:
-            # Long: HMA cross bull + price > HMA + 1w bull (loosened: no 1w required)
-            if hma_cross_bull and hma_bull:
-                desired_signal = SIZE_STRONG if htf_1w_bull else SIZE_BASE
+            # Long: Donchian breakout + HMA bull + 12h bull
+            if breakout_long and hma_bull and htf_12h_bull:
+                desired_signal = SIZE_STRONG if htf_1d_bull else SIZE_BASE
             
-            # Short: HMA cross bear + price < HMA + 1w bear (loosened: no 1w required)
-            elif hma_cross_bear and hma_bear:
-                desired_signal = -SIZE_STRONG if htf_1w_bear else -SIZE_BASE
+            # Short: Donchian breakout + HMA bear + 12h bear
+            elif breakout_short and hma_bear and htf_12h_bear:
+                desired_signal = -SIZE_STRONG if htf_1d_bear else -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR from entry) ===
         stoploss_triggered = False
