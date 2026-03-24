@@ -1,32 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #062: 4h Primary + 1d/1w HTF — Connors RSI + Fisher Transform + HMA Trend
+Experiment #063: 6h Primary + 1d/1w HTF — Weekly Trend + Daily RSI Pullback
 
-Hypothesis: After 61 failed experiments, the pattern shows:
-- Pure trend following (Donchian/HMA) fails on BTC/ETH in bear markets (#058 Sharpe=-0.828)
-- Choppiness Index regime switching didn't work on 4h timeframe
-- SOLUTION: Connors RSI (75% win rate proven) + Fisher Transform (reversal detection)
-- 1d HMA provides major trend bias without blocking trades
-- Fisher Transform catches bear market reversals better than RSI alone
-- Volume confirmation filters false breakouts
-- LOOSE entry thresholds to ensure >=30 trades on train, >=3 on test
+Hypothesis: After 62 failed experiments, 6h timeframe needs SIMPLER logic:
+- Weekly HMA50 establishes major trend bias (bull/bear regime)
+- Daily RSI identifies pullback entries within the trend
+- 6h price action for execution timing
+- ASYMMETRIC entries: only long in bull regime, only short in bear regime
+- This avoids complex regime switching that failed in #060, #062
+
+Why this might work on 6h:
+- 6h is middle ground: enough bars for entries, not too many for fee drag
+- Weekly trend filter prevents counter-trend trades that destroyed 2022 performance
+- Daily RSI pullback is proven pattern (current best uses CRSI on 1d)
+- Simple logic = more trades generated (addressing #1 failure mode)
 
 Key design choices:
-- Timeframe: 4h (20-50 trades/year target, proven best for crypto)
-- HTF: 1d HMA(50) for major trend, 1w HMA(21) for macro bias
-- Entry: CRSI<15 (oversold) + Fisher<-1.5 (reversal) + volume>avg for long
-- Exit: CRSI>85 or Fisher>+1.5 or 2.5x ATR trailing stop
-- Position size: 0.30 (30% of capital, discrete levels)
-- Regime-adaptive: larger size in trending regime (1w HMA slope)
+- Timeframe: 6h (30-60 trades/year target)
+- HTF: 1w HMA50 for trend, 1d RSI for entry timing
+- Entry: Weekly trend + Daily RSI pullback + 6h momentum confirm
+- Position size: 0.27 (27% of capital, conservative for 6h)
+- Stoploss: 2.5x ATR trailing
+- LOOSE filters to ensure >=30 trades on train, >=3 on test
 
-Target: Sharpe>0.167 (beat current best), DD>-40%, trades>=30 train, trades>=3 test
+Target: Sharpe>0.167 (beat current best), DD>-40%, trades>=30 on train, trades>=3 on test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_crsi_fisher_hma_1d1w_v1"
-timeframe = "4h"
+name = "mtf_6h_weekly_trend_daily_rsi_pullback_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -72,94 +76,6 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """
-    Connors RSI (CRSI)
-    CRSI = (RSI(close,3) + RSI(streak,2) + PercentRank(100)) / 3
-    Proven 75% win rate for mean reversion
-    """
-    n = len(close)
-    if n < rank_period:
-        return np.full(n, np.nan)
-    
-    # RSI(3) on close
-    rsi_close = calculate_rsi(close, rsi_period)
-    
-    # RSI on streak (consecutive up/down days)
-    delta = np.diff(close)
-    delta = np.concatenate([[0.0], delta])
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if delta[i] > 0:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif delta[i] < 0:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = 0
-    
-    # Convert streak to positive for RSI calculation
-    streak_abs = np.abs(streak)
-    streak_gain = np.where(streak > 0, streak_abs, 0.0)
-    streak_loss = np.where(streak < 0, streak_abs, 0.0)
-    
-    avg_streak_gain = pd.Series(streak_gain).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
-    avg_streak_loss = pd.Series(streak_loss).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
-    
-    rsi_streak = np.zeros(n)
-    rsi_streak[:] = np.nan
-    for i in range(streak_period, n):
-        if avg_streak_loss[i] < 1e-10:
-            rsi_streak[i] = 100.0
-        else:
-            rs = avg_streak_gain[i] / avg_streak_loss[i]
-            rsi_streak[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    # Percent Rank over 100 periods
-    percent_rank = np.zeros(n)
-    percent_rank[:] = np.nan
-    for i in range(rank_period, n):
-        window = close[i-rank_period+1:i+1]
-        current = close[i]
-        count_below = np.sum(window[:-1] < current)
-        percent_rank[i] = 100.0 * count_below / (rank_period - 1)
-    
-    # Combine into CRSI
-    crsi = (rsi_close + rsi_streak + percent_rank) / 3.0
-    
-    return crsi
-
-def calculate_fisher(close, period=9):
-    """
-    Ehlers Fisher Transform
-    Transforms price into Gaussian distribution for clearer reversal signals
-    Long when Fisher crosses above -1.5, short when crosses below +1.5
-    """
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    fisher = np.zeros(n)
-    fisher[:] = np.nan
-    fisher_prev = np.zeros(n)
-    fisher_prev[:] = np.nan
-    
-    # Normalize price using highest high and lowest low
-    for i in range(period - 1, n):
-        highest = np.max(close[i-period+1:i+1])
-        lowest = np.min(close[i-period+1:i+1])
-        range_hl = highest - lowest
-        
-        if range_hl > 1e-10:
-            normalized = 2.0 * (close[i] - lowest) / range_hl - 1.0
-            # Clamp to avoid division issues
-            normalized = np.clip(normalized, -0.999, 0.999)
-            # Fisher transform
-            fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
-            if i > period - 1:
-                fisher_prev[i] = fisher[i-1]
-    
-    return fisher, fisher_prev
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range for stoploss"""
     n = len(close)
@@ -174,44 +90,40 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_volume_sma(volume, period=20):
-    """Simple moving average of volume"""
-    n = len(volume)
+def calculate_sma(close, period):
+    """Simple Moving Average"""
+    n = len(close)
     if n < period:
         return np.full(n, np.nan)
     
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for major trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Calculate and align 1w HMA for macro bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    # Calculate and align 1w HMA for major trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (4h) indicators
-    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    fisher, fisher_prev = calculate_fisher(close, period=9)
+    # Calculate and align 1d RSI for entry timing
+    rsi_1d_raw = calculate_rsi(df_1d['close'].values, period=14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_raw)
+    
+    # Calculate primary (6h) indicators
+    hma_6h = calculate_hma(close, period=21)
     atr = calculate_atr(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, period=20)
-    hma_4h = calculate_hma(close, period=21)
+    sma_50 = calculate_sma(close, period=50)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.30  # 30% position size base
-    SIZE_MAX = 0.35   # Max size in strong trend
+    SIZE = 0.27  # 27% position size (conservative for 6h)
     
     # Position tracking for stoploss
     in_position = False
@@ -229,99 +141,56 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(crsi[i]) or np.isnan(fisher[i]):
+        if np.isnan(hma_6h[i]) or np.isnan(sma_50[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(hma_4h[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d and 1w HMA) ===
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
+        # === HTF BIAS (1w HMA50) ===
+        # Weekly trend determines allowed direction
+        weekly_bull = close[i] > hma_1w_aligned[i]
+        weekly_bear = close[i] < hma_1w_aligned[i]
         
-        # === 4h HMA TREND ===
-        hma_4h_bull = close[i] > hma_4h[i]
-        hma_4h_bear = close[i] < hma_4h[i]
+        # === DAILY RSI PULLBACK ===
+        # In bull regime: wait for RSI pullback to 35-50 zone
+        # In bear regime: wait for RSI rally to 50-65 zone
+        daily_rsi = rsi_1d_aligned[i]
+        rsi_pullback_long = 30.0 < daily_rsi < 55.0
+        rsi_pullback_short = 45.0 < daily_rsi < 70.0
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 1.0 * vol_sma[i]  # above average
+        # === 6h MOMENTUM CONFIRM ===
+        # Price above 6h HMA for long, below for short
+        hma_6h_bull = close[i] > hma_6h[i]
+        hma_6h_bear = close[i] < hma_6h[i]
         
-        # === CONNORS RSI SIGNALS (Mean Reversion) ===
-        crsi_oversold = crsi[i] < 15.0  # Very oversold
-        crsi_overbought = crsi[i] > 85.0  # Very overbought
-        crsi_neutral = crsi[i] >= 15.0 and crsi[i] <= 85.0
+        # === SMA50 FILTER (additional trend confirm) ===
+        sma_bull = close[i] > sma_50[i]
+        sma_bear = close[i] < sma_50[i]
         
-        # === FISHER TRANSFORM SIGNALS (Reversal) ===
-        fisher_cross_up = fisher_prev[i] < -1.5 and fisher[i] >= -1.5
-        fisher_cross_down = fisher_prev[i] > 1.5 and fisher[i] <= 1.5
-        fisher_extreme_low = fisher[i] < -1.8
-        fisher_extreme_high = fisher[i] > 1.8
-        
-        # === DESIRED SIGNAL (Multi-signal confluence) ===
+        # === DESIRED SIGNAL (Asymmetric Trend-Follow) ===
         desired_signal = 0.0
-        signal_strength = 0.0
         
-        # LONG ENTRY: CRSI oversold + Fisher reversal + volume + HTF not strongly bear
-        long_conditions = 0
-        if crsi_oversold:
-            long_conditions += 2
-        if fisher_cross_up or fisher_extreme_low:
-            long_conditions += 2
-        if volume_confirmed:
-            long_conditions += 1
-        if hma_4h_bull:
-            long_conditions += 1
-        if htf_1d_bull or not htf_1d_bear:
-            long_conditions += 1
+        # LONG: Weekly bull + Daily RSI pullback + 6h momentum + SMA confirm
+        if weekly_bull and rsi_pullback_long and hma_6h_bull and sma_bull:
+            desired_signal = SIZE
         
-        if long_conditions >= 4:
-            desired_signal = SIZE_BASE
-            signal_strength = long_conditions
+        # SHORT: Weekly bear + Daily RSI rally + 6h momentum + SMA confirm
+        elif weekly_bear and rsi_pullback_short and hma_6h_bear and sma_bear:
+            desired_signal = -SIZE
         
-        # SHORT ENTRY: CRSI overbought + Fisher reversal + volume + HTF not strongly bull
-        short_conditions = 0
-        if crsi_overbought:
-            short_conditions += 2
-        if fisher_cross_down or fisher_extreme_high:
-            short_conditions += 2
-        if volume_confirmed:
-            short_conditions += 1
-        if hma_4h_bear:
-            short_conditions += 1
-        if htf_1d_bear or not htf_1d_bull:
-            short_conditions += 1
-        
-        if short_conditions >= 4 and desired_signal == 0.0:
-            desired_signal = -SIZE_BASE
-            signal_strength = short_conditions
-        
-        # === ADJUST SIZE BASED ON REGIME ===
-        # Strong trend (both 1d and 1w aligned) = larger size
-        if htf_1d_bull and htf_1w_bull and desired_signal > 0:
-            desired_signal = min(desired_signal * 1.15, SIZE_MAX)
-        elif htf_1d_bear and htf_1w_bear and desired_signal < 0:
-            desired_signal = max(desired_signal * 1.15, -SIZE_MAX)
+        # Fallback: Strong weekly trend with 6h confirm (relax daily RSI)
+        elif weekly_bull and hma_6h_bull and sma_bull and daily_rsi < 60.0:
+            desired_signal = SIZE * 0.6
+        elif weekly_bear and hma_6h_bear and sma_bear and daily_rsi > 40.0:
+            desired_signal = -SIZE * 0.6
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -341,21 +210,15 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT CONDITIONS (CRSI extreme opposite) ===
-        if in_position and position_side > 0 and crsi_overbought:
-            desired_signal = 0.0  # Take profit on long
-        if in_position and position_side < 0 and crsi_oversold:
-            desired_signal = 0.0  # Take profit on short
-        
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_BASE * 0.85:
-            final_signal = SIZE_BASE
-        elif desired_signal <= -SIZE_BASE * 0.85:
-            final_signal = -SIZE_BASE
-        elif desired_signal >= SIZE_BASE * 0.5:
-            final_signal = SIZE_BASE * 0.5
-        elif desired_signal <= -SIZE_BASE * 0.5:
-            final_signal = -SIZE_BASE * 0.5
+        if desired_signal >= SIZE * 0.85:
+            final_signal = SIZE
+        elif desired_signal <= -SIZE * 0.85:
+            final_signal = -SIZE
+        elif desired_signal >= SIZE * 0.5:
+            final_signal = SIZE * 0.6
+        elif desired_signal <= -SIZE * 0.5:
+            final_signal = -SIZE * 0.6
         else:
             final_signal = 0.0
         
