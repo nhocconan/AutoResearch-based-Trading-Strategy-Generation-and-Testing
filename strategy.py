@@ -1,29 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #242: 4h Primary + 1d/1w HTF — Simplified RSI Pullback + HMA Trend
+Experiment #243: 6h Primary + 1d/1w HTF — Keltner Channel + ADX Regime
 
-Hypothesis: After 217 failed experiments, complexity is the enemy. This strategy 
-uses PROVEN patterns from research notes:
-1. RSI pullback entries (not extremes) in direction of HTF trend
-2. HMA for faster trend response than EMA
-3. ATR trailing stop for risk management
-4. 1d HMA(50) for major trend bias, 1w HMA(50) for macro filter
+Hypothesis: 6h timeframe with Keltner Channel mean-reversion in low-ADX regimes
+and trend-following in high-ADX regimes. Previous 6h attempts used Fisher, funding,
+weekly pivots - all failed. This tries Keltner Channels (EMA + ATR bands) which
+have different dynamics than Bollinger Bands.
 
-Why this should work:
-- RSI pullback (40/60 levels) generates MORE trades than extreme RSI (15/85)
-- HTF trend filter prevents counter-trend disasters in bear markets
-- 4h timeframe = 20-50 trades/year target (fee manageable)
-- Discrete sizing (0.25/0.30) minimizes churn costs
+Regime Detection:
+- ADX(14) < 20 = range-bound → mean revert at Keltner bands
+- ADX(14) > 25 = trending → trade breakouts with HMA confirmation
 
-Key difference from failed #238: Simpler entry logic, no complex regime switching.
-Entry: RSI crosses 40 upward (long) or 60 downward (short) + HTF trend alignment.
+Keltner Channels:
+- Upper = EMA(20) + 2.0 * ATR(14)
+- Lower = EMA(20) - 2.0 * ATR(14)
+- Long when price touches lower band + ADX low + HTF bull
+- Short when price touches upper band + ADX low + HTF bear
+
+1d HTF: HMA(50) for intermediate trend bias
+1w HTF: HMA(21) for secular trend filter (only trade in direction)
+
+Position sizing: 0.25 base, 0.30 for strong confluence
+Stoploss: 2.5x ATR trailing
+
+Target: Sharpe>0.399 (beat current 6h best), DD>-40%, trades>=30 train, trades>=3 test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_rsi_pullback_hma_1d1w_v1"
-timeframe = "4h"
+name = "mtf_6h_keltner_adx_regime_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -42,6 +49,97 @@ def calculate_hma(close, period):
     hma = pd.Series(diff).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean().values
     
     return hma
+
+def calculate_ema(close, period):
+    """Exponential Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return ema
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Average Directional Index - measures trend strength
+    ADX > 25 = trending, ADX < 20 = ranging
+    """
+    n = len(close)
+    if n < period * 3:
+        return np.full(n, np.nan)
+    
+    # Calculate True Range and Directional Movement
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+        else:
+            plus_dm[i] = 0
+            
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+        else:
+            minus_dm[i] = 0
+    
+    # Smooth with EMA
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period, n):
+        if atr[i] > 1e-10:
+            plus_di[i] = 100.0 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
+            minus_di[i] = 100.0 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
+    
+    # Calculate DX and ADX
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 1e-10:
+            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return adx
+
+def calculate_keltner(high, low, close, ema_period=20, atr_period=14, atr_mult=2.0):
+    """
+    Keltner Channels - EMA +/- ATR multiplier
+    Upper = EMA(20) + 2.0 * ATR(14)
+    Lower = EMA(20) - 2.0 * ATR(14)
+    """
+    n = len(close)
+    ema = calculate_ema(close, ema_period)
+    atr = calculate_atr(high, low, close, atr_period)
+    
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(max(ema_period, atr_period), n):
+        if not np.isnan(ema[i]) and not np.isnan(atr[i]):
+            upper[i] = ema[i] + atr_mult * atr[i]
+            lower[i] = ema[i] - atr_mult * atr[i]
+    
+    return upper, lower, ema
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -69,29 +167,6 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_sma(close, period):
-    """Simple Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -102,20 +177,20 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for major trend bias
+    # Calculate and align 1d HMA for intermediate trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 1w HMA for macro trend filter
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
+    # Calculate and align 1w HMA for secular trend filter
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (4h) indicators
-    hma_4h = calculate_hma(close, period=21)
-    hma_4h_fast = calculate_hma(close, period=10)
+    # Calculate primary (6h) indicators
+    keltner_upper, keltner_lower, keltner_ema = calculate_keltner(high, low, close, ema_period=20, atr_period=14, atr_mult=2.0)
     atr = calculate_atr(high, low, close, period=14)
+    adx = calculate_adx(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
-    sma_200 = calculate_sma(close, 200)
+    hma_6h = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25  # 25% base position size
@@ -129,82 +204,93 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    # Track RSI crosses
-    prev_rsi = np.nan
+    # Start after all indicators are ready (need ~300 bars for 1w alignment)
+    start_idx = 300
     
-    for i in range(250, n):  # Start after indicators are ready
+    for i in range(start_idx, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
-            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
             continue
-        
-        if np.isnan(hma_4h[i]) or np.isnan(rsi[i]):
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
-            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
             continue
-        
+        if np.isnan(adx[i]) or np.isnan(hma_6h[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
-            prev_rsi = rsi[i] if not np.isnan(rsi[i]) else prev_rsi
             continue
         
         # === HTF BIAS (1d and 1w HMA) ===
-        # Strong bull: price > 1d HMA AND 1d HMA > 1w HMA
-        htf_strong_bull = (close[i] > hma_1d_aligned[i]) and (hma_1d_aligned[i] > hma_1w_aligned[i])
-        # Strong bear: price < 1d HMA AND 1d HMA < 1w HMA
-        htf_strong_bear = (close[i] < hma_1d_aligned[i]) and (hma_1d_aligned[i] < hma_1w_aligned[i])
-        # Neutral bull: price > 1d HMA but 1w unclear
-        htf_neutral_bull = close[i] > hma_1d_aligned[i]
-        # Neutral bear: price < 1d HMA but 1w unclear
-        htf_neutral_bear = close[i] < hma_1d_aligned[i]
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        htf_1w_bull = close[i] > hma_1w_aligned[i]
+        htf_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === 4h LOCAL TREND ===
-        hma_bull = close[i] > hma_4h[i]
-        hma_bear = close[i] < hma_4h[i]
-        hma_fast_bull = hma_4h_fast[i] > hma_4h[i] if not np.isnan(hma_4h_fast[i]) else False
-        hma_fast_bear = hma_4h_fast[i] < hma_4h[i] if not np.isnan(hma_4h_fast[i]) else False
+        # === 6h HMA TREND ===
+        hma_6h_bull = close[i] > hma_6h[i]
+        hma_6h_bear = close[i] < hma_6h[i]
         
-        # === SMA200 FILTER ===
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
+        # === REGIME DETECTION (ADX) ===
+        is_ranging = adx[i] < 20.0  # Low ADX = range-bound
+        is_trending = adx[i] > 25.0  # High ADX = trending
+        # 20-25 is transition zone
         
-        # === RSI PULLBACK DETECTION ===
-        # Long: RSI was <40, now crosses above 40 (pullback ending)
-        rsi_cross_long = False
-        if not np.isnan(prev_rsi) and not np.isnan(rsi[i]):
-            rsi_cross_long = (prev_rsi < 40.0) and (rsi[i] >= 40.0)
+        # === KELTNER CHANNEL POSITION ===
+        near_lower_band = close[i] <= keltner_lower[i] * 1.002  # Within 0.2% of lower band
+        near_upper_band = close[i] >= keltner_upper[i] * 0.998  # Within 0.2% of upper band
+        below_lower_band = close[i] < keltner_lower[i]
+        above_upper_band = close[i] > keltner_upper[i]
         
-        # Short: RSI was >60, now crosses below 60 (rally ending)
-        rsi_cross_short = False
-        if not np.isnan(prev_rsi) and not np.isnan(rsi[i]):
-            rsi_cross_short = (prev_rsi > 60.0) and (rsi[i] <= 60.0)
+        # === RSI EXTREMES ===
+        rsi_oversold = not np.isnan(rsi[i]) and rsi[i] < 35.0
+        rsi_overbought = not np.isnan(rsi[i]) and rsi[i] > 65.0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG ENTRY: RSI pullback + HTF bull + local trend confirmation
-        if rsi_cross_long:
-            if htf_strong_bull and hma_bull and above_sma200:
-                desired_signal = SIZE_STRONG  # Strong signal
-            elif htf_neutral_bull and hma_bull:
-                desired_signal = SIZE_BASE  # Base signal
+        # REGIME 1: RANGING (ADX < 20) - Mean reversion at Keltner bands
+        if is_ranging:
+            # Long: Price at/below lower Keltner + RSI oversold + HTF not strongly bear
+            if near_lower_band and rsi_oversold and not (htf_1d_bear and htf_1w_bear):
+                desired_signal = SIZE_BASE
+            
+            # Short: Price at/above upper Keltner + RSI overbought + HTF not strongly bull
+            elif near_upper_band and rsi_overbought and not (htf_1d_bull and htf_1w_bull):
+                desired_signal = -SIZE_BASE
         
-        # SHORT ENTRY: RSI pullback + HTF bear + local trend confirmation
-        elif rsi_cross_short:
-            if htf_strong_bear and hma_bear and below_sma200:
-                desired_signal = -SIZE_STRONG  # Strong signal
-            elif htf_neutral_bear and hma_bear:
-                desired_signal = -SIZE_BASE  # Base signal
+        # REGIME 2: TRENDING (ADX > 25) - Trend following with Keltner breakout
+        elif is_trending:
+            # Long: Price breaks above upper Keltner + HMA bull + 1d HTF bull
+            if above_upper_band and hma_6h_bull and htf_1d_bull:
+                desired_signal = SIZE_STRONG
+            
+            # Short: Price breaks below lower Keltner + HMA bear + 1d HTF bear
+            elif below_lower_band and hma_6h_bear and htf_1d_bear:
+                desired_signal = -SIZE_STRONG
+        
+        # REGIME 3: TRANSITION (ADX 20-25) - Require stronger HTF alignment
+        else:
+            # Long: Keltner lower + HMA bull + 1d bull + 1w bull
+            if near_lower_band and hma_6h_bull and htf_1d_bull and htf_1w_bull:
+                desired_signal = SIZE_BASE * 0.8
+            
+            # Short: Keltner upper + HMA bear + 1d bear + 1w bear
+            elif near_upper_band and hma_6h_bear and htf_1d_bear and htf_1w_bear:
+                desired_signal = -SIZE_BASE * 0.8
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -233,6 +319,10 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
+        elif desired_signal >= SIZE_BASE * 0.5:
+            final_signal = SIZE_BASE * 0.8
+        elif desired_signal <= -SIZE_BASE * 0.5:
+            final_signal = -SIZE_BASE * 0.8
         else:
             final_signal = 0.0
         
@@ -266,6 +356,5 @@ def generate_signals(prices):
                 lowest_since_entry = float('inf')
         
         signals[i] = final_signal
-        prev_rsi = rsi[i]
     
     return signals
