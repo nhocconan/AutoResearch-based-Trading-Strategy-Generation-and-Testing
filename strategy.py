@@ -1,33 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #085: 1h Primary + 4h/1d HTF — Funding Rate Contrarian with Trend Filter
+Experiment #086: 12h Primary + 1d HTF — Dual Regime Adaptive Strategy
 
-Hypothesis: After 84 experiments, funding rate mean reversion shows BEST edge for BTC/ETH
-(Sharpe 0.8-1.5 through 2022 crash per research). Combined with 4h HMA trend filter
-and session timing, this should generate consistent profits with controlled drawdown.
+Hypothesis: After 80+ failed experiments, the key insight is that ONE strategy type
+doesn't work across all market conditions. This uses DUAL REGIME logic:
+1. TREND REGIME (1d HMA slope > 0): Breakout entries with RSI confirmation
+2. RANGE REGIME (1d HMA slope <= 0): Mean reversion at RSI extremes
 
 Why this should work:
-1. Funding rate z-score < -2 = crowd too short → long contrarian
-2. Funding rate z-score > +2 = crowd too long → short contrarian
-3. 4h HMA ensures we only trade WITH higher timeframe trend
-4. Session filter (8-20 UTC) = highest volume, best fills
-5. Volume filter avoids low-liquidity fake breakouts
-6. 1h timeframe = 30-60 trades/year target (fee-efficient)
+- 12h timeframe = 20-50 trades/year (fee-efficient, proven TF)
+- Dual regime adapts to market conditions (bull/bear/range)
+- LOOSE thresholds ensure trades actually generate (learned from 0-trade failures)
+- 1d HMA slope detects regime change early
+- Simple logic = fewer bugs, reliable execution
 
 Entry Logic:
-- Long: funding_z < -1.5 + price > 4h HMA + RSI(14) < 45 + volume > 0.8x avg + 8-20 UTC
-- Short: funding_z > +1.5 + price < 4h HMA + RSI(14) > 55 + volume > 0.8x avg + 8-20 UTC
-- Size: 0.25 (discrete, minimizes fee churn)
+- TREND REGIME (1d HMA rising):
+  - Long: Price > 1d HMA + RSI(14) > 45 + breakout above 20-bar high
+  - Short: Price < 1d HMA + RSI(14) < 55 + breakout below 20-bar low
+- RANGE REGIME (1d HMA flat/falling):
+  - Long: RSI(14) < 35 + price > 1d HMA - 2*ATR (not crashing)
+  - Short: RSI(14) > 65 + price < 1d HMA + 2*ATR (not ripping)
 
 Risk: 2.5x ATR trailing stop, signal→0 when stopped out
+Size: 0.28 discrete (balances return vs drawdown)
 Target: Sharpe>0.4, trades>30/symbol train, >3/symbol test, DD>-35%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_funding_contrarian_4h_hma_session_v1"
-timeframe = "1h"
+name = "mtf_12h_dual_regime_hma_rsi_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -57,7 +61,7 @@ def calculate_hma(close, period=21):
     return hma
 
 def calculate_rsi(close, period=14):
-    """RSI - momentum filter"""
+    """RSI - momentum filter with LOOSE thresholds"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -95,112 +99,47 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_funding_zscore(prices, symbol, lookback=30):
-    """
-    Funding rate z-score over lookback days.
-    Loads funding data from processed folder.
-    """
-    try:
-        # Try to load funding data - path pattern from research notes
-        import os
-        funding_path = f"data/processed/funding/{symbol.lower()}_funding.parquet"
-        if not os.path.exists(funding_path):
-            # Fallback: use synthetic funding based on price momentum
-            # This simulates funding rate behavior (positive in uptrends, negative in downtrends)
-            close = prices['close'].values
-            n = len(close)
-            momentum = pd.Series(close).pct_change(periods=24).rolling(24, min_periods=24).mean().values
-            funding_sim = np.tanh(momentum * 10)  # Map to -1 to +1 range
-            funding = funding_sim
-        else:
-            df_funding = pd.read_parquet(funding_path)
-            # Merge with prices on open_time
-            prices_times = prices['open_time'].values
-            funding_times = df_funding['open_time'].values
-            funding_rates = df_funding['funding_rate'].values
-            
-            # Align funding to prices (forward fill)
-            funding = np.full(len(prices_times), np.nan)
-            f_idx = 0
-            for i in range(len(prices_times)):
-                while f_idx < len(funding_times) and funding_times[f_idx] <= prices_times[i]:
-                    f_idx += 1
-                if f_idx > 0:
-                    funding[i] = funding_rates[f_idx - 1]
-        
-        # Calculate z-score
-        n = len(funding)
-        zscore = np.full(n, np.nan)
-        for i in range(lookback * 24, n):  # lookback days * 24 hours
-            window = funding[i - lookback * 24:i]
-            valid = window[~np.isnan(window)]
-            if len(valid) >= lookback * 12:  # Need at least half the data
-                mean = np.mean(valid)
-                std = np.std(valid)
-                if std > 1e-10:
-                    zscore[i] = (funding[i] - mean) / std
-                else:
-                    zscore[i] = 0.0
-        
-        return zscore
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - breakout levels"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
     
-    except Exception as e:
-        # Fallback: use price-based proxy for funding sentiment
-        close = prices['close'].values
-        n = len(close)
-        returns = pd.Series(close).pct_change().values
-        zscore = np.full(n, np.nan)
-        for i in range(lookback * 24, n):
-            window = returns[i - lookback * 24:i]
-            valid = window[~np.isnan(window)]
-            if len(valid) >= 10:
-                mean = np.mean(valid)
-                std = np.std(valid)
-                if std > 1e-10:
-                    # Cumulative returns as funding proxy
-                    cum_ret = np.sum(valid[-24:])  # Last 24h returns
-                    zscore[i] = cum_ret / (std * np.sqrt(24))
-                else:
-                    zscore[i] = 0.0
-        return zscore
-
-def get_utc_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds
-    ts_seconds = open_time / 1000
-    utc_hour = pd.to_datetime(ts_seconds, unit='s').hour
-    return utc_hour
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Extract symbol from prices metadata if available
-    symbol = "BTCUSDT"  # Default, will work for all symbols with funding proxy
-    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 4h HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (1h) indicators
+    # Calculate 1d HMA slope (regime detection)
+    hma_1d_slope = np.full(n, np.nan)
+    for i in range(5, n):
+        if not np.isnan(hma_1d_aligned[i]) and not np.isnan(hma_1d_aligned[i-5]):
+            hma_1d_slope[i] = (hma_1d_aligned[i] - hma_1d_aligned[i-5]) / hma_1d_aligned[i-5]
+    
+    # Calculate primary (12h) indicators
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     
-    # Calculate volume SMA (20 bars)
-    vol_sma = pd.Series(volume).rolling(20, min_periods=20).mean().values
-    
-    # Calculate funding z-score
-    funding_z = calculate_funding_zscore(prices, symbol, lookback=30)
-    
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position size
+    SIZE = 0.28  # Discrete position size
     
     # Position tracking for stoploss
     in_position = False
@@ -218,48 +157,55 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1d_slope[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]):
+        if np.isnan(rsi[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (8-20 UTC only) ===
-        utc_hour = get_utc_hour(open_time[i])
-        session_ok = (8 <= utc_hour <= 20)
+        # === REGIME DETECTION (1d HMA slope) ===
+        trend_regime = hma_1d_slope[i] > 0.002  # Rising = trend follow
+        # range_regime = hma_1d_slope[i] <= 0.002  # Flat/falling = mean revert
         
-        # === VOLUME FILTER ===
-        volume_ok = volume[i] > 0.8 * vol_sma[i] if not np.isnan(vol_sma[i]) else False
+        # === TREND BIAS (1d HMA) ===
+        price_above_hma = close[i] > hma_1d_aligned[i]
+        price_below_hma = close[i] < hma_1d_aligned[i]
         
-        # === HTF TREND BIAS (4h HMA) ===
-        hma_4h_bull = close[i] > hma_4h_aligned[i]
-        hma_4h_bear = close[i] < hma_4h_aligned[i]
+        # === DONCHIAN BREAKOUT DETECTION ===
+        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # === FUNDING Z-SCORE (Contrarian) ===
-        funding_z_long = not np.isnan(funding_z[i]) and funding_z[i] < -1.5
-        funding_z_short = not np.isnan(funding_z[i]) and funding_z[i] > 1.5
-        
-        # === RSI FILTER (Entry timing) ===
-        rsi_ok_long = rsi[i] < 45.0  # Pullback in uptrend
-        rsi_ok_short = rsi[i] > 55.0  # Rally in downtrend
+        # === RSI VALUES ===
+        rsi_val = rsi[i]
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # Long entry: funding contrarian + 4h HMA bullish + RSI pullback + session + volume
-        if funding_z_long and hma_4h_bull and rsi_ok_long and session_ok and volume_ok:
-            desired_signal = SIZE
-        
-        # Short entry: funding contrarian + 4h HMA bearish + RSI rally + session + volume
-        elif funding_z_short and hma_4h_bear and rsi_ok_short and session_ok and volume_ok:
-            desired_signal = -SIZE
+        if trend_regime:
+            # TREND REGIME: Breakout entries with RSI confirmation
+            # Long: breakout + RSI > 45 (momentum) + price above 1d HMA
+            if breakout_long and rsi_val > 45.0 and price_above_hma:
+                desired_signal = SIZE
+            # Short: breakout + RSI < 55 (momentum) + price below 1d HMA
+            elif breakout_short and rsi_val < 55.0 and price_below_hma:
+                desired_signal = -SIZE
+        else:
+            # RANGE REGIME: Mean reversion at RSI extremes
+            # Long: RSI < 35 (oversold) + price not crashing (above HMA - 2*ATR)
+            hma_support = hma_1d_aligned[i] - 2.0 * atr[i]
+            if rsi_val < 35.0 and close[i] > hma_support:
+                desired_signal = SIZE
+            # Short: RSI > 65 (overbought) + price not ripping (below HMA + 2*ATR)
+            hma_resistance = hma_1d_aligned[i] + 2.0 * atr[i]
+            if rsi_val > 65.0 and close[i] < hma_resistance:
+                desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
