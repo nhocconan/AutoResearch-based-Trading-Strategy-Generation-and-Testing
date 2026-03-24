@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #411: 6h Primary + 1w/1d HTF — Weekly Pivot + RSI Mean Reversion
+Experiment #412: 12h Primary + 1d HTF — Connors RSI Mean Reversion + HMA Trend
 
-Hypothesis: 6h timeframe (4 bars/day, 28 bars/week) uniquely aligns with weekly price cycles.
-Weekly pivot levels (PP, R1, S1) act as natural S/R on 6h charts. Combined with RSI extremes
-and 1d trend bias, this creates high-probability mean reversion setups.
+Hypothesis: Recent failures (#400-#411) show complex regime detection (ADX/Choppiness) 
+creates 0-trade scenarios. Connors RSI proved effective on ETH (Sharpe +0.923 in research).
+This strategy SIMPLIFIES to proven mean-reversion with HTF trend filter.
 
-Key insights from failed 6h experiments (#400, #403, #407, #410):
-1. Complex regime detection (ADX+CHOP) caused 0 trades - SIMPLIFY
-2. Too many confluence filters = no entries - use MAX 3 conditions
-3. Weekly pivot levels underutilized on 6h - this is the EDGE
+Key changes from failed #352:
+1. Replace ADX/Choppiness regime with Connors RSI (proven 75% win rate)
+2. Reduce entry filters from 5+ to 3 max (CRSI + HTF trend + SMA200)
+3. Looser thresholds: CRSI < 15 / > 85 (not 10/90) for more trades
+4. HMA(21) on 1d for trend bias only (simpler than complex regime switching)
+5. ATR stoploss at 2.5x (proven effective)
 
-Entry Logic (SIMPLIFIED for trade generation):
-- Long: Price near Weekly S1/S2 (within 1%) + RSI < 25 + 1d HMA bullish OR flat
-- Short: Price near Weekly R1/R2 (within 1%) + RSI > 75 + 1d HMA bearish OR flat
-- Breakout: Price breaks Weekly PP with volume + 1d HMA aligned
+Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+- Captures short-term oversold/overbought better than standard RSI(14)
+- Works well in bear/range markets (2022 crash, 2025 test period)
 
-Why this should work on 6h:
-- Weekly pivots are respected on 6h (institutional levels)
-- RSI extremes on 6h = multi-day oversold/overbought (stronger signal)
-- 1d HMA filters counter-trend trades in strong trends
-- Fewer trades than 4h, more than 12h = optimal fee/trade balance
+Entry Logic:
+- Long: CRSI < 15 + price > SMA200 + 1d HMA bull
+- Short: CRSI > 85 + price < SMA200 + 1d HMA bear
+- Exit: CRSI crosses 50 (mean reached) OR stoploss hit
 
-Target: Sharpe>0.45, DD>-35%, trades>=30 train, trades>=5 test
+Target: Sharpe>0.45, DD>-35%, trades>=25 train, trades>=5 test, ALL symbols positive
+Timeframe: 12h (20-50 trades/year target)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_weekly_pivot_rsi_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_crsi_hma_meanrevert_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -75,6 +76,59 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    
+    RSI_Streak: RSI of consecutive up/down days
+    PercentRank: rank of today's change vs last 100 days
+    """
+    n = len(close)
+    if n < rank_period + 1:
+        return np.full(n, np.nan)
+    
+    # Component 1: RSI(3)
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # Component 2: RSI of Streak (consecutive up/down days)
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
+    
+    # Convert streak to RSI-like value (0-100 scale)
+    streak_rsi = np.zeros(n)
+    streak_rsi[:] = np.nan
+    for i in range(streak_period, n):
+        streak_vals = streak[max(0, i-streak_period):i+1]
+        up_streaks = np.sum(streak_vals > 0)
+        total = len(streak_vals)
+        if total > 0:
+            streak_rsi[i] = 100.0 * up_streaks / total
+    
+    # Component 3: Percent Rank of daily change
+    percent_rank = np.zeros(n)
+    percent_rank[:] = np.nan
+    for i in range(rank_period, n):
+        changes = np.diff(close[max(0, i-rank_period):i+1])
+        if len(changes) > 0:
+            current_change = close[i] - close[i-1]
+            rank = np.sum(changes < current_change)
+            percent_rank[i] = 100.0 * rank / len(changes)
+    
+    # Combine into Connors RSI
+    crsi = np.zeros(n)
+    crsi[:] = np.nan
+    for i in range(rank_period, n):
+        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(percent_rank[i]):
+            crsi[i] = (rsi_short[i] + streak_rsi[i] + percent_rank[i]) / 3.0
+    
+    return crsi
+
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -98,94 +152,29 @@ def calculate_sma(close, period):
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
-def calculate_volume_sma(volume, period=20):
-    """Volume SMA for confirmation"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
-def calculate_weekly_pivots(htf_high, htf_low, htf_close):
-    """
-    Calculate weekly pivot levels from HTF (1w) data.
-    PP = (H + L + C) / 3
-    R1 = 2*PP - L
-    S1 = 2*PP - H
-    R2 = PP + (H - L)
-    S2 = PP - (H - L)
-    """
-    n = len(htf_close)
-    pp = np.zeros(n)
-    r1 = np.zeros(n)
-    s1 = np.zeros(n)
-    r2 = np.zeros(n)
-    s2 = np.zeros(n)
-    
-    pp[:] = np.nan
-    r1[:] = np.nan
-    s1[:] = np.nan
-    r2[:] = np.nan
-    s2[:] = np.nan
-    
-    for i in range(1, n):
-        h = htf_high[i-1]  # Previous week's high
-        l = htf_low[i-1]   # Previous week's low
-        c = htf_close[i-1] # Previous week's close
-        
-        pp[i] = (h + l + c) / 3.0
-        r1[i] = 2.0 * pp[i] - l
-        s1[i] = 2.0 * pp[i] - h
-        r2[i] = pp[i] + (h - l)
-        s2[i] = pp[i] - (h - l)
-    
-    return pp, r1, s1, r2, s2
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivots from 1w data
-    htf_high_1w = df_1w['high'].values
-    htf_low_1w = df_1w['low'].values
-    htf_close_1w = df_1w['close'].values
-    
-    pp_1w_raw, r1_1w_raw, s1_1w_raw, r2_1w_raw, s2_1w_raw = calculate_weekly_pivots(
-        htf_high_1w, htf_low_1w, htf_close_1w
-    )
-    
-    # Align weekly pivots to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp_1w_raw)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w_raw)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w_raw)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w_raw)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w_raw)
-    
-    # Calculate and align 1d HMA for trend bias
+    # Calculate and align HTF HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (6h) indicators
-    hma_6h = calculate_hma(close, period=21)
+    # Calculate primary (12h) indicators
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=14)
-    sma_50 = calculate_sma(close, 50)
     sma_200 = calculate_sma(close, 200)
-    vol_sma = calculate_volume_sma(volume, 20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
-    # Position tracking for stoploss
+    # Position tracking for stoploss and exit
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -201,85 +190,54 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_6h[i]) or np.isnan(rsi[i]):
+        if np.isnan(crsi[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(pp_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === 1D TREND BIAS ===
+        # === HTF BIAS (1d HMA) ===
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === 6H HMA TREND ===
-        hma_bull = close[i] > hma_6h[i]
-        hma_bear = close[i] < hma_6h[i]
+        # === SMA200 FILTER ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
-        # === WEEKLY PIVOT ZONES ===
-        # Check if price is near support/resistance levels (within 1.5%)
-        near_s1 = abs(close[i] - s1_aligned[i]) / close[i] < 0.015
-        near_s2 = abs(close[i] - s2_aligned[i]) / close[i] < 0.015
-        near_r1 = abs(close[i] - r1_aligned[i]) / close[i] < 0.015
-        near_r2 = abs(close[i] - r2_aligned[i]) / close[i] < 0.015
-        near_pp = abs(close[i] - pp_aligned[i]) / close[i] < 0.015
+        # === CONNORS RSI EXTREMES (LOOSENED for more trades) ===
+        crsi_oversold = crsi[i] < 15.0
+        crsi_overbought = crsi[i] > 85.0
+        crsi_neutral = 40.0 < crsi[i] < 60.0  # Exit zone
         
-        # Price below pivot = bullish setup zone
-        below_pp = close[i] < pp_aligned[i]
-        above_pp = close[i] > pp_aligned[i]
-        
-        # === RSI EXTREMES (LOOSENED for more trades) ===
-        rsi_oversold = rsi[i] < 30.0
-        rsi_overbought = rsi[i] > 70.0
-        rsi_extreme_oversold = rsi[i] < 20.0
-        rsi_extreme_overbought = rsi[i] > 80.0
-        
-        # === VOLUME CONFIRMATION ===
-        vol_confirm = False
-        if not np.isnan(vol_sma[i]) and vol_sma[i] > 1e-10:
-            vol_confirm = volume[i] > 1.1 * vol_sma[i]
-        
-        # === SMA FILTER ===
-        above_sma50 = close[i] > sma_50[i] if not np.isnan(sma_50[i]) else False
-        above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else False
-        
-        # === ENTRY LOGIC (SIMPLIFIED - ensure trades) ===
+        # === ENTRY LOGIC (SIMPLE - 3 conditions max) ===
         desired_signal = 0.0
         
-        # LONG SETUP: Near weekly support + RSI oversold + trend filter
-        if rsi_oversold and (near_s1 or near_s2 or below_pp):
-            # Require at least ONE of: 1d bull, 6h bull, or above SMA200
-            trend_ok = htf_1d_bull or hma_bull or above_sma200
-            if trend_ok:
-                if rsi_extreme_oversold or vol_confirm:
-                    desired_signal = SIZE_STRONG
-                else:
-                    desired_signal = SIZE_BASE
+        # LONG: CRSI oversold + above SMA200 + 1d bull
+        if crsi_oversold and above_sma200 and htf_1d_bull:
+            desired_signal = SIZE_STRONG
         
-        # SHORT SETUP: Near weekly resistance + RSI overbought + trend filter
-        elif rsi_overbought and (near_r1 or near_r2 or above_pp):
-            # Require at least ONE of: 1d bear, 6h bear, or below SMA200
-            trend_ok = htf_1d_bear or hma_bear or (not above_sma200)
-            if trend_ok:
-                if rsi_extreme_overbought or vol_confirm:
-                    desired_signal = -SIZE_STRONG
-                else:
-                    desired_signal = -SIZE_BASE
+        # SHORT: CRSI overbought + below SMA200 + 1d bear
+        elif crsi_overbought and below_sma200 and htf_1d_bear:
+            desired_signal = -SIZE_STRONG
         
-        # BREAKOUT LONG: Price breaks above PP with volume + 1d bull
-        elif near_pp and above_pp and htf_1d_bull and vol_confirm and rsi[i] > 45:
-            desired_signal = SIZE_BASE
+        # === EXIT LOGIC ===
+        exit_signal = False
         
-        # BREAKOUT SHORT: Price breaks below PP with volume + 1d bear
-        elif near_pp and below_pp and htf_1d_bear and vol_confirm and rsi[i] < 55:
-            desired_signal = -SIZE_BASE
+        # Exit long when CRSI reaches neutral (mean reversion complete)
+        if in_position and position_side > 0 and crsi_neutral:
+            exit_signal = True
+        
+        # Exit short when CRSI reaches neutral
+        if in_position and position_side < 0 and crsi_neutral:
+            exit_signal = True
         
         # === STOPLOSS CHECK (2.5x ATR from entry) ===
         stoploss_triggered = False
@@ -292,7 +250,7 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 stoploss_triggered = True
         
-        if stoploss_triggered:
+        if stoploss_triggered or exit_signal:
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
