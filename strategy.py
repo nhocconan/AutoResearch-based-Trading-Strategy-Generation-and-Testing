@@ -1,38 +1,57 @@
 #!/usr/bin/env python3
 """
-Experiment #086: 12h Primary + 1d HTF — Dual Regime Adaptive Strategy
+Experiment #087: 1d Primary + 1w HTF — Bollinger Mean Reversion with Weekly Trend Filter
 
-Hypothesis: After 80+ failed experiments, the key insight is that ONE strategy type
-doesn't work across all market conditions. This uses DUAL REGIME logic:
-1. TREND REGIME (1d HMA slope > 0): Breakout entries with RSI confirmation
-2. RANGE REGIME (1d HMA slope <= 0): Mean reversion at RSI extremes
+Hypothesis: After 86 failed experiments, the pattern is clear:
+1. 0-trade failures come from TOO MANY filters (RSI thresholds too narrow, ADX too high)
+2. Negative Sharpe comes from fighting the major trend in bear markets
+3. 1d timeframe should work IF we use proper mean reversion + HTF trend bias
 
-Why this should work:
-- 12h timeframe = 20-50 trades/year (fee-efficient, proven TF)
-- Dual regime adapts to market conditions (bull/bear/range)
-- LOOSE thresholds ensure trades actually generate (learned from 0-trade failures)
-- 1d HMA slope detects regime change early
-- Simple logic = fewer bugs, reliable execution
+This strategy combines:
+1. Bollinger Band(20, 2.0) extremes - proven mean reversion signal
+2. RSI(14) with LOOSE thresholds (30/70 not 15/85) - ensures trades generate
+3. 1w HMA trend filter - don't mean-revert against major weekly trend
+4. ATR(14) 2.5x stoploss - mandatory risk management
+5. Discrete sizing: 0.30 (balanced for fee drag vs. drawdown)
+
+Why this should beat current best (Sharpe=0.368):
+- 1d timeframe = 20-50 trades/year (optimal for fee efficiency)
+- BB mean reversion works in range markets (2022, 2025)
+- 1w HMA prevents catastrophic counter-trend trades
+- LOOSE RSI ensures we actually get entries (learned from 0-trade failures)
+- Simple logic = fewer bugs, more reliable execution
 
 Entry Logic:
-- TREND REGIME (1d HMA rising):
-  - Long: Price > 1d HMA + RSI(14) > 45 + breakout above 20-bar high
-  - Short: Price < 1d HMA + RSI(14) < 55 + breakout below 20-bar low
-- RANGE REGIME (1d HMA flat/falling):
-  - Long: RSI(14) < 35 + price > 1d HMA - 2*ATR (not crashing)
-  - Short: RSI(14) > 65 + price < 1d HMA + 2*ATR (not ripping)
+- Long: Close < BB_lower + RSI(14) < 35 + price > 1w HMA (bullish weekly)
+- Short: Close > BB_upper + RSI(14) > 65 + price < 1w HMA (bearish weekly)
+- Size: 0.30 (discrete, minimizes fee churn)
 
 Risk: 2.5x ATR trailing stop, signal→0 when stopped out
-Size: 0.28 discrete (balances return vs drawdown)
-Target: Sharpe>0.4, trades>30/symbol train, >3/symbol test, DD>-35%
+Target: Sharpe>0.4, trades>30/symbol train, >3/symbol test, DD>-40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_dual_regime_hma_rsi_v1"
-timeframe = "12h"
+name = "mtf_1d_bb_rsi_meanrev_1w_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Bollinger Bands - mean reversion levels"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    # Use pandas for rolling calculations (proper min_periods)
+    close_s = pd.Series(close)
+    sma = close_s.rolling(window=period, min_periods=period).mean().values
+    std = close_s.rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    
+    return upper, lower, sma
 
 def calculate_hma(close, period=21):
     """Hull Moving Average - for HTF trend"""
@@ -99,21 +118,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout levels"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -121,25 +125,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 1w HMA for trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 1d HMA slope (regime detection)
-    hma_1d_slope = np.full(n, np.nan)
-    for i in range(5, n):
-        if not np.isnan(hma_1d_aligned[i]) and not np.isnan(hma_1d_aligned[i-5]):
-            hma_1d_slope[i] = (hma_1d_aligned[i] - hma_1d_aligned[i-5]) / hma_1d_aligned[i-5]
-    
-    # Calculate primary (12h) indicators
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    # Calculate primary (1d) indicators
+    bb_upper, bb_lower, bb_sma = calculate_bollinger(close, period=20, std_mult=2.0)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE = 0.28  # Discrete position size
+    SIZE = 0.30  # Discrete position size
     
     # Position tracking for stoploss
     in_position = False
@@ -157,55 +155,43 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1d_slope[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME DETECTION (1d HMA slope) ===
-        trend_regime = hma_1d_slope[i] > 0.002  # Rising = trend follow
-        # range_regime = hma_1d_slope[i] <= 0.002  # Flat/falling = mean revert
+        # === HTF TREND BIAS (1w HMA) ===
+        hma_1w_bull = close[i] > hma_1w_aligned[i]
+        hma_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === TREND BIAS (1d HMA) ===
-        price_above_hma = close[i] > hma_1d_aligned[i]
-        price_below_hma = close[i] < hma_1d_aligned[i]
+        # === BOLLINGER BAND EXTREMES ===
+        # Price at BB lower = oversold (long opportunity)
+        # Price at BB upper = overbought (short opportunity)
+        at_bb_lower = close[i] <= bb_lower[i]
+        at_bb_upper = close[i] >= bb_upper[i]
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
-        
-        # === RSI VALUES ===
-        rsi_val = rsi[i]
+        # === RSI FILTER (LOOSE thresholds to ensure trades) ===
+        rsi_oversold = rsi[i] < 35.0  # Not extremely oversold (was 15)
+        rsi_overbought = rsi[i] > 65.0  # Not extremely overbought (was 85)
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        if trend_regime:
-            # TREND REGIME: Breakout entries with RSI confirmation
-            # Long: breakout + RSI > 45 (momentum) + price above 1d HMA
-            if breakout_long and rsi_val > 45.0 and price_above_hma:
-                desired_signal = SIZE
-            # Short: breakout + RSI < 55 (momentum) + price below 1d HMA
-            elif breakout_short and rsi_val < 55.0 and price_below_hma:
-                desired_signal = -SIZE
-        else:
-            # RANGE REGIME: Mean reversion at RSI extremes
-            # Long: RSI < 35 (oversold) + price not crashing (above HMA - 2*ATR)
-            hma_support = hma_1d_aligned[i] - 2.0 * atr[i]
-            if rsi_val < 35.0 and close[i] > hma_support:
-                desired_signal = SIZE
-            # Short: RSI > 65 (overbought) + price not ripping (below HMA + 2*ATR)
-            hma_resistance = hma_1d_aligned[i] + 2.0 * atr[i]
-            if rsi_val > 65.0 and close[i] < hma_resistance:
-                desired_signal = -SIZE
+        # Long entry: BB lower + RSI oversold + 1w HMA bullish
+        if at_bb_lower and rsi_oversold and hma_1w_bull:
+            desired_signal = SIZE
+        
+        # Short entry: BB upper + RSI overbought + 1w HMA bearish
+        elif at_bb_upper and rsi_overbought and hma_1w_bear:
+            desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
