@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1567: 1d Primary + 1w HTF — Simplified Donchian Breakout with Weekly Trend Filter
+Experiment #1568: 30m Primary + 4h/1d HTF — Simplified Trend Pullback Strategy
 
-Hypothesis: Daily timeframe with weekly trend filter provides cleaner signals than complex dual-regime.
-The current best (Sharpe=0.618) uses Donchian+HMA+RSI on 1d. This simplifies further:
-- 1w HMA(21) for strong trend bias (only trade in direction of weekly trend)
-- Donchian(20) breakout for entry (proven on SOL Sharpe +0.879)
-- RSI(14) filter to avoid chasing extremes (RSI 35-65 for entries)
-- ATR(14) 3x trailing stop for drawdown control
-- Size 0.30 discrete for fee efficiency
+Hypothesis: Lower TF (30m) strategies fail due to OVER-FILTERING (0 trades) or UNDER-FILTERING (fee drag).
+This strategy uses MINIMAL filters to ensure trade generation while maintaining HTF direction bias.
 
-Why this should beat Sharpe 0.618:
-1. Simpler = more robust across market regimes (complex regimes failed in exp #1558, #1559, #1563)
-2. 1w HMA is stronger trend filter than 1d (avoids counter-trend trades in 2022 crash)
-3. RSI filter prevents entering at exhaustion (RSI>70 or <30 = wait for pullback)
-4. 1d timeframe naturally targets 20-40 trades/year (optimal for fee drag)
-5. Looser entry conditions than dual-regime (generates trades in all market conditions)
+Key design decisions based on 1163 failed experiments:
+1. 4h HMA(21) for trend direction ONLY (no complex regime detection = more trades)
+2. 30m RSI(14) pullback entries with LOOSE thresholds (RSI<50 long, RSI>50 short in trend)
+3. NO session filter (caused 0 trades in #1560, #1565)
+4. Volume filter VERY LOOSE (0.3x avg, not 0.8x) to avoid filtering valid signals
+5. ATR(14) 2.5x trailing stop for drawdown control
+6. Size = 0.25 (conservative for 30m TF to handle whipsaws)
 
-Key fix from failed experiments:
-- Exp #1563 (1d dual regime) got Sharpe=-0.743 — too complex, regime switching failed
-- Exp #1560, #1564, #1565 got 0 trades — entry conditions too strict
-- This strategy uses SINGLE regime (trend follow) with weekly confirmation
-- RSI range 35-65 is WIDE enough to generate trades (not 42-43 which gives 0 trades)
+Why this should work when #1558, #1560, #1565 failed:
+- Those strategies had Sharpe=0.000 = ZERO trades (entry conditions too strict)
+- This uses PERMISSIVE RSI thresholds (<50/>50 not <30/>70)
+- No session filter (trades 24/7, crypto never sleeps)
+- Single regime (trend following) not dual-regime (simpler = more trades)
+- 4h HMA ensures we trade WITH higher timeframe trend
 
-Timeframe: 1d (required for this experiment)
-HTF: 1w HMA for bias
-Target: Sharpe > 0.618, trades > 10/symbol train, > 3/symbol test, DD > -50%
+Timeframe: 30m (required for this experiment)
+HTF: 4h HMA for trend bias, 1d HMA for macro filter
+Target: 40-80 trades/year, Sharpe > 0.618, DD > -50%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_breakout_1w_hma_rsi_atr_v1"
-timeframe = "1d"
+name = "mtf_30m_trend_pullback_4h1d_hma_rsi_loose_atr_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -105,46 +102,57 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
+def calculate_sma(close, period=20):
+    """Simple Moving Average with proper min_periods"""
+    n = len(close)
     if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
+    sma = np.full(n, np.nan)
     for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+        sma[i] = np.mean(close[i - period + 1:i + 1])
     
-    return upper, lower
+    return sma
+
+def calculate_volume_sma(volume, period=20):
+    """Volume SMA for volume filter"""
+    n = len(volume)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    vol_sma = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        vol_sma[i] = np.mean(volume[i - period + 1:i + 1])
+    
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 1w HMA for strong trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 4h HMA for trend bias
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate primary (1d) indicators
+    # Calculate and align 1d HMA for macro bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate primary (30m) indicators
     atr = calculate_atr(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
-    
-    # Donchian channels for breakout detection
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    
-    # Daily HMA for additional trend confirmation
-    hma_1d = calculate_hma(close, period=21)
+    vol_sma = calculate_volume_sma(volume, period=20)
+    sma_200 = calculate_sma(close, period=200)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -154,7 +162,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(100, n):
+    for i in range(250, n):  # Start after 200 SMA + indicator warmup
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -162,59 +170,61 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d[i]):
+        
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        
+        if np.isnan(rsi[i]) or np.isnan(vol_sma[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND BIAS (1w HMA - strongest filter) ===
-        weekly_bull = close[i] > hma_1w_aligned[i]
-        weekly_bear = close[i] < hma_1w_aligned[i]
+        # === TREND BIAS (4h HMA + 1d HMA) ===
+        # Both HTFs must agree for strong signal
+        hma_4h_bull = close[i] > hma_4h_aligned[i]
+        hma_4h_bear = close[i] < hma_4h_aligned[i]
         
-        # Daily trend confirmation
-        daily_bull = close[i] > hma_1d[i]
-        daily_bear = close[i] < hma_1d[i]
+        hma_1d_bull = close[i] > hma_1d_aligned[i]
+        hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === RSI FILTER (avoid extremes - WIDE range for trade generation) ===
-        # RSI 35-65 allows entries without chasing tops/bottoms
-        rsi_neutral = 35.0 <= rsi[i] <= 65.0
+        # === VOLUME FILTER (loose: 0.3x average) ===
+        vol_ok = volume[i] > 0.3 * vol_sma[i] if vol_sma[i] > 1e-10 else True
         
-        # === PRIMARY SIGNAL (Donchian Breakout) ===
+        # === PRIMARY SIGNAL (RSI pullback in trend) ===
         desired_signal = 0.0
         
-        # LONG: Breakout above Donchian + Weekly bull + Daily bull + RSI not overbought
-        # Use previous bar's Donchian to avoid look-ahead
-        if i > 0 and not np.isnan(donchian_upper[i-1]):
-            breakout_long = close[i] > donchian_upper[i-1]
-            if breakout_long and weekly_bull and daily_bull and rsi[i] < 70.0:
-                desired_signal = BASE_SIZE
+        # LONG: 4h bull + 1d bull (or neutral) + RSI pullback < 50 + volume ok
+        # Using RSI < 50 (not < 30) to ensure trades generate
+        if hma_4h_bull and vol_ok:
+            if rsi[i] < 50.0:  # Pullback in uptrend
+                # 1d HMA adds confirmation but not required (looser)
+                if hma_1d_bull or not hma_1d_bear:
+                    desired_signal = BASE_SIZE
         
-        # SHORT: Breakout below Donchian + Weekly bear + Daily bear + RSI not oversold
-        if i > 0 and not np.isnan(donchian_lower[i-1]):
-            breakout_short = close[i] < donchian_lower[i-1]
-            if breakout_short and weekly_bear and daily_bear and rsi[i] > 30.0:
-                desired_signal = -BASE_SIZE
+        # SHORT: 4h bear + 1d bear (or neutral) + RSI rally > 50 + volume ok
+        if hma_4h_bear and vol_ok:
+            if rsi[i] > 50.0:  # Rally in downtrend
+                if hma_1d_bear or not hma_1d_bull:
+                    desired_signal = -BASE_SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 3x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -239,6 +249,7 @@ def generate_signals(prices):
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
+                # Position flip
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr[i]
