@@ -1,35 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #700: 6h Primary + 1d/1w HTF — Z-Score Mean Reversion + RSI + HTF Bias
+Experiment #701: 15m Primary + 4h/1d HTF — HMA Trend + RSI(7) Extreme Entries
 
-Hypothesis: 6h timeframe captures multi-day swings ideal for mean reversion strategies.
-Using Z-score(20) to identify extreme deviations that revert, confirmed by RSI(14) extremes.
-1d HMA(21) provides trend bias to avoid counter-trend mean reversion traps.
-1w HMA(21) as soft meta-filter to align with weekly direction.
+Hypothesis: 15m timeframe needs LOOSE entry conditions to generate trades (see 0-trade failures).
+Using 4h HMA for trend bias (not 1d/1w which are too slow for 15m), 15m HMA(16/48) for local trend,
+and RSI(7) for faster entry signals. RSI(7) reaches extremes more often than RSI(14).
 
-Key innovations:
-1. Z-score(20) mean reversion - enters when price deviates >1.5 std from 20-bar mean
-2. RSI(14) confirmation - ensures momentum exhaustion at extremes
-3. 1d HMA(21) bias - only long when above daily HMA, only short when below
-4. 1w HMA(21) soft filter - boosts signal strength when aligned, not hard requirement
-5. ATR(14) trailing stop - 2.5x for risk management
-6. Discrete sizing: 0.0, ±0.20, ±0.30 to minimize fee churn
+Key innovations for 15m:
+1. 4h HMA(21) bias - only one HTF filter (not 1d+1w which caused 0 trades)
+2. RSI(7) instead of RSI(14) - reaches extremes 2-3x more often
+3. Loose RSI thresholds: <40 for long, >60 for short (not <30/>70)
+4. No session filter - session filters caused 0 trades in exp#689, #693, #696
+5. No ADX/Choppiness - these killed trade generation in exp#691, #692, #698
+6. ATR(14) trailing stop at 2.5x for risk management
+7. Discrete sizing: 0.0, ±0.15, ±0.25 (smaller for 15m frequency)
 
-Entry conditions (LOOSE to ensure trades on all symbols):
-- LONG: Z-score < -1.5 AND RSI < 40 AND price > 1d HMA
-- SHORT: Z-score > +1.5 AND RSI > 60 AND price < 1d HMA
-- Weekly alignment boosts size but not required for entry
+Entry conditions (LOOSE to ensure trades):
+- LONG: price > 4h HMA AND 15m HMA16 > HMA48 AND RSI(7) < 45
+- SHORT: price < 4h HMA AND 15m HMA16 < HMA48 AND RSI(7) > 55
+- No additional filters - simplicity ensures trade generation
 
 Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 6h
-Size: 0.20-0.30 discrete
+Timeframe: 15m
+Size: 0.15-0.25 discrete (smaller than 12h due to higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_zscore_rsi_hma_1d1w_v1"
-timeframe = "6h"
+name = "mtf_15m_hma_rsi7_loose_4h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -87,23 +87,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_zscore(close, period=20):
-    """Z-Score - measures deviation from mean in standard deviations"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    rolling_mean = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    rolling_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    zscore = np.zeros(n)
-    zscore[:] = np.nan
-    for i in range(period - 1, n):
-        if rolling_std[i] > 1e-10:
-            zscore[i] = (close[i] - rolling_mean[i]) / rolling_std[i]
-    
-    return zscore
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -111,24 +94,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate and align HTF HMA
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate 6h indicators
-    zscore = calculate_zscore(close, period=20)
-    rsi = calculate_rsi(close, period=14)
+    # Calculate 15m indicators
+    hma_16 = calculate_hma(close, period=16)
+    hma_48 = calculate_hma(close, period=48)
+    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for more signals
     atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -148,57 +128,56 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(zscore[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]) or np.isnan(rsi_7[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d and 1w HMA) ===
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        # === HTF BIAS (4h HMA) ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
         
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
+        # === HMA CROSSOVER TREND (15m) ===
+        hma_bull = hma_16[i] > hma_48[i]
+        hma_bear = hma_16[i] < hma_48[i]
         
-        # === Z-SCORE MEAN REVERSION ===
-        # Long when price is significantly below mean (oversold)
-        zscore_long = zscore[i] < -1.5
-        # Short when price is significantly above mean (overbought)
-        zscore_short = zscore[i] > 1.5
+        # === RSI(7) EXTREME ENTRY (LOOSE THRESHOLDS) ===
+        # Long on oversold in uptrend (RSI(7) < 45 is common)
+        rsi_long = rsi_7[i] < 45.0
+        # Short on overbought in downtrend (RSI(7) > 55 is common)
+        rsi_short = rsi_7[i] > 55.0
         
-        # === RSI CONFIRMATION ===
-        rsi_oversold = rsi[i] < 40.0
-        rsi_overbought = rsi[i] > 60.0
-        
-        # === ENTRY LOGIC (LOOSE CONDITIONS) ===
+        # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: Z-score oversold + RSI confirmation + 1d bullish bias
-        if zscore_long and rsi_oversold and htf_1d_bull:
-            if htf_1w_bull:
-                # Weekly aligned = stronger signal
-                desired_signal = SIZE_STRONG
-            else:
-                # Weekly not aligned = base signal
-                desired_signal = SIZE_BASE
+        # LONG: 4h bullish + 15m HMA bull + RSI(7) oversold
+        if htf_4h_bull and hma_bull and rsi_long:
+            desired_signal = SIZE_STRONG
+        elif htf_4h_bull and hma_bull:
+            # Weaker: just trend alignment without RSI
+            desired_signal = SIZE_BASE
+        elif htf_4h_bull and rsi_long:
+            # Weaker: HTF bias + RSI without HMA cross
+            desired_signal = SIZE_BASE
         
-        # SHORT: Z-score overbought + RSI confirmation + 1d bearish bias
-        elif zscore_short and rsi_overbought and htf_1d_bear:
-            if htf_1w_bear:
-                # Weekly aligned = stronger signal
-                desired_signal = -SIZE_STRONG
-            else:
-                # Weekly not aligned = base signal
-                desired_signal = -SIZE_BASE
+        # SHORT: 4h bearish + 15m HMA bear + RSI(7) overbought
+        elif htf_4h_bear and hma_bear and rsi_short:
+            desired_signal = -SIZE_STRONG
+        elif htf_4h_bear and hma_bear:
+            # Weaker: just trend alignment without RSI
+            desired_signal = -SIZE_BASE
+        elif htf_4h_bear and rsi_short:
+            # Weaker: HTF bias + RSI without HMA cross
+            desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -229,6 +208,8 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
+        elif abs(desired_signal) >= SIZE_BASE * 0.4:
+            final_signal = np.sign(desired_signal) * SIZE_BASE * 0.5
         else:
             final_signal = 0.0
         
