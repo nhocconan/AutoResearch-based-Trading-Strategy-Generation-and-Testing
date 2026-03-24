@@ -1,36 +1,50 @@
 #!/usr/bin/env python3
 """
-Experiment #1072: 12h Primary + 1d HTF — Simple HMA Trend + RSI Filter
+Experiment #1073: 5m Primary + 15m/4h HTF — Session-Filtered Trend Pullback
 
-Hypothesis: A very simple 12h strategy with 1d HMA bias + 12h HMA crossover 
-+ minimal RSI filter will generate enough trades across all symbols while 
-maintaining positive Sharpe. Previous complex strategies failed due to 0 trades.
+Hypothesis: 5m timeframe with strict session filters and HTF trend alignment can capture 
+intraday momentum while avoiding overnight/low-volume whipsaws. Using 4h HMA for trend 
+bias + 15m RSI for momentum + 5m EMA pullback entries during high-volume sessions (08-20 UTC).
 
-Key design:
-1. 1d HMA(21) for long-term bias (only trade with bias)
-2. 12h HMA(8/21) crossover for entry timing
-3. RSI(14) > 30 for long, < 70 for short (very loose)
-4. ATR(14) 2.5x trailing stop
-5. LOOSE conditions to guarantee ≥30 trades/train, ≥3/test
+Key innovations:
+1. Session filter: Only trade 08-20 UTC (highest volume, least whipsaw)
+2. 4h HMA(21) for primary trend direction (aligned with shift(1))
+3. 15m RSI(14) > 45 for long, < 55 for short (momentum confirmation)
+4. 5m EMA(21) pullback entry (price above/below EMA in trend direction)
+5. 2.5x ATR(14) trailing stop for risk management
+6. Small position size (0.15-0.20) due to higher trade frequency
 
-Entry (LOOSE):
-- LONG: 12h_HMA8 > 12h_HMA21 + close > 1d_HMA21 + RSI > 30
-- SHORT: 12h_HMA8 < 12h_HMA21 + close < 1d_HMA21 + RSI < 70
+Why this should work:
+- Session filter eliminates 60% of low-volume noise (overnight Asian session)
+- 4h trend alignment prevents counter-trend trades (major failure mode)
+- 15m RSI adds momentum confirmation (avoids entering at exhaustion)
+- 5m EMA pullback captures intraday retracements with good risk/reward
+- Small size (0.15) accounts for fee drag on 5m timeframe
 
-Why this works:
-- 12h captures multi-day swings (20-50 trades/year target)
-- Simple HMA crossover generates frequent signals
-- 1d bias filters against major trend
-- Loose RSI ensures trades in all market conditions
-- Discrete sizing minimizes fee churn
+Entry conditions (LOOSE enough to guarantee trades):
+- LONG: 4h_HMA bullish + 15m_RSI>45 + 5m_price>5m_EMA + session 08-20 UTC
+- SHORT: 4h_HMA bearish + 15m_RSI<55 + 5m_price<5m_EMA + session 08-20 UTC
+
+Target: Sharpe>0.45, trades>=50 train, trades>=5 test, DD>-40%
+Timeframe: 5m
+Size: 0.15-0.20 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_cross_rsi_simple_1d_v1"
-timeframe = "12h"
+name = "mtf_5m_session_pullback_4h15m_v1"
+timeframe = "5m"
 leverage = 1.0
+
+def calculate_ema(close, period):
+    """Exponential Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return ema
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -98,24 +112,32 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # Load 1d HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
+    df_15m = get_htf_data(prices, '15m')
     
-    # Calculate and align 1d HMA
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align HTF indicators
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 12h indicators
+    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
+    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
+    
+    # Calculate 5m indicators
+    ema_21 = calculate_ema(close, period=21)
+    ema_50 = calculate_ema(close, period=50)
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    hma_12h_8 = calculate_hma(close, period=8)
-    hma_12h_21 = calculate_hma(close, period=21)
+    
+    # Extract hour from open_time for session filter
+    # open_time is in milliseconds since epoch
+    hours = (open_time // (1000 * 60 * 60)) % 24
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -126,9 +148,6 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Track previous HMA relationship for crossover detection
-    prev_hma8_above_hma21 = False
-    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
@@ -138,51 +157,58 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_12h_8[i]) or np.isnan(hma_12h_21[i]):
+        if np.isnan(ema_21[i]) or np.isnan(ema_50[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_15m_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # Current HMA relationship
-        curr_hma8_above_hma21 = hma_12h_8[i] > hma_12h_21[i]
+        # === SESSION FILTER (08-20 UTC) ===
+        current_hour = hours[i]
+        in_session = (current_hour >= 8) and (current_hour <= 20)
         
-        # === TREND BIAS (1d HMA) ===
-        trend_bull = close[i] > hma_1d_aligned[i]
-        trend_bear = close[i] < hma_1d_aligned[i]
+        # === 4H TREND BIAS ===
+        hma_4h_bull = close[i] > hma_4h_aligned[i]
+        hma_4h_bear = close[i] < hma_4h_aligned[i]
         
-        # === CROSSOVER DETECTION ===
-        # Bullish crossover: HMA8 crosses above HMA21
-        bullish_cross = curr_hma8_above_hma21 and not prev_hma8_above_hma21
-        # Bearish crossover: HMA8 crosses below HMA21
-        bearish_cross = not curr_hma8_above_hma21 and prev_hma8_above_hma21
+        # === 15M MOMENTUM FILTER ===
+        rsi_15m = rsi_15m_aligned[i]
+        rsi_bull = rsi_15m > 45.0
+        rsi_bear = rsi_15m < 55.0
         
-        # === ENTRY LOGIC (LOOSE CONDITIONS) ===
+        # === 5M ENTRY SIGNAL ===
+        price_above_ema = close[i] > ema_21[i]
+        price_below_ema = close[i] < ema_21[i]
+        
+        # EMA alignment for stronger signals
+        ema_bull = ema_21[i] > ema_50[i]
+        ema_bear = ema_21[i] < ema_50[i]
+        
+        # === ENTRY LOGIC (LOOSE to guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: bullish cross OR already bullish + trend bias + RSI not extreme
-        if (bullish_cross or curr_hma8_above_hma21) and trend_bull and rsi_14[i] > 30.0:
-            # Stronger signal on fresh crossover
-            if bullish_cross and rsi_14[i] < 70.0:
-                desired_signal = SIZE_STRONG
-            elif rsi_14[i] < 65.0:
-                desired_signal = SIZE_BASE
-        
-        # SHORT: bearish cross OR already bearish + trend bias + RSI not extreme
-        elif (bearish_cross or not curr_hma8_above_hma21) and trend_bear and rsi_14[i] < 70.0:
-            # Stronger signal on fresh crossover
-            if bearish_cross and rsi_14[i] > 30.0:
-                desired_signal = -SIZE_STRONG
-            elif rsi_14[i] > 35.0:
-                desired_signal = -SIZE_BASE
+        if in_session:
+            # LONG: 4h bullish + 15m RSI bullish + price above EMA
+            if hma_4h_bull and rsi_bull and price_above_ema:
+                if ema_bull:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
+            
+            # SHORT: 4h bearish + 15m RSI bearish + price below EMA
+            if hma_4h_bear and rsi_bear and price_below_ema:
+                if ema_bear:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -240,8 +266,5 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = final_signal
-        
-        # Update previous state for next iteration
-        prev_hma8_above_hma21 = curr_hma8_above_hma21
     
     return signals
