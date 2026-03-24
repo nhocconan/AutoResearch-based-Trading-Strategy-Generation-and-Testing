@@ -1,35 +1,76 @@
 #!/usr/bin/env python3
 """
-Experiment #685: 15m Primary + 4h/1d HTF — RSI Mean Reversion with Trend Bias
+Experiment #686: 1d Primary + 1w HTF — KAMA Trend + Donchian Breakout + RSI Entry
 
-Hypothesis: 15m timeframe can work with VERY selective entries using HTF trend bias.
-Key insight from failed 15m experiments (#677, #681): too many filters = 0 trades.
-Solution: Simplify to 2-3 confluence factors, wider RSI thresholds, session filter.
+Hypothesis: Daily timeframe with weekly bias provides optimal signal quality for crypto perpetuals.
+KAMA (Kaufman Adaptive Moving Average) adapts to volatility - fast in trends, slow in chop.
+Donchian(20) breakout confirms momentum. RSI(14) ensures we're not buying at extremes.
+Weekly HMA(21) provides meta-trend filter to avoid counter-trend trades.
 
-Strategy design:
-1. 4h HMA(21) for primary trend direction (bullish/bearish bias)
-2. 15m RSI(7) for mean-reversion entries within trend (wider thresholds: 35-65)
-3. 15m SMA(50) as additional confirmation (price position relative to SMA)
-4. Session filter: 00-12 UTC only (London+NY overlap, reduces trades by ~50%)
-5. ATR(14) trailing stop at 2.0x for risk management
-6. Discrete sizing: 0.15 (base), 0.25 (strong) — smaller due to 15m frequency
+Key innovations:
+1. KAMA(10,2,30) - adaptive trend following, reduces whipsaw in chop
+2. Donchian(20) breakout - price must break 20-day high/low for entry confirmation
+3. RSI(14) filter - avoid entries at extremes (RSI 30-70 range for entries)
+4. 1w HMA(21) bias - only long when price > weekly HMA, only short when below
+5. ATR(14) trailing stop - 2.5x for risk management, signal→0 on stop
+6. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Entry logic (LOOSE to ensure trades):
-- LONG: 4h HMA bullish + 15m RSI(7) < 45 + price > SMA(50) + session
-- SHORT: 4h HMA bearish + 15m RSI(7) > 55 + price < SMA(50) + session
+Entry conditions (LOOSE to ensure trades):
+- LONG: price > 1w HMA AND KAMA rising AND Donchian breakout AND RSI 35-65
+- SHORT: price < 1w HMA AND KAMA falling AND Donchian breakdown AND RSI 35-65
 
-Target: Sharpe>0.40, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 15m
-Size: 0.15-0.25 (smaller for higher frequency to reduce fee drag)
-Trade frequency target: 50-100/year (use session filter to limit)
+Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-40%
+Timeframe: 1d
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi_meanrev_4h_bias_session_v1"
-timeframe = "15m"
+name = "mtf_1d_kama_donchian_rsi_1w_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_kama(close, fast_period=2, slow_period=30, efficiency_period=10):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing constant based on market efficiency (trend vs noise)
+    Fast SC = 2/(fast_period+1), Slow SC = 2/(slow_period+1)
+    """
+    n = len(close)
+    if n < efficiency_period + slow_period:
+        return np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    er[:] = np.nan
+    
+    for i in range(efficiency_period, n):
+        signal = abs(close[i] - close[i - efficiency_period])
+        noise = 0.0
+        for j in range(i - efficiency_period + 1, i + 1):
+            noise += abs(close[j] - close[j - 1])
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 1.0
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Initialize KAMA with SMA of first efficiency_period bars
+    kama[efficiency_period] = np.mean(close[:efficiency_period + 1])
+    
+    for i in range(efficiency_period + 1, n):
+        if not np.isnan(er[i]):
+            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while maintaining smoothness"""
@@ -86,47 +127,45 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period):
-    """Simple Moving Average"""
-    n = len(close)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
     if n < period:
-        return np.full(n, np.nan)
+        return np.full(n, np.nan), np.full(n, np.nan)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
-
-def is_session_active(open_time):
-    """Check if bar is within 00-12 UTC session (London+NY overlap for crypto)"""
-    # open_time is in milliseconds since epoch
-    hour = pd.to_datetime(open_time, unit='ms').hour
-    return 0 <= hour < 12
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF HMA
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Calculate 15m indicators
-    rsi_7 = calculate_rsi(close, period=7)
-    sma_50 = calculate_sma(close, period=50)
+    # Calculate 1d indicators
+    kama = calculate_kama(close, fast_period=2, slow_period=30, efficiency_period=10)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.25
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -137,6 +176,15 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
+    # KAMA direction tracking
+    kama_rising = np.zeros(n, dtype=bool)
+    kama_falling = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n):
+        if not np.isnan(kama[i]) and not np.isnan(kama[i-1]):
+            kama_rising[i] = kama[i] > kama[i-1]
+            kama_falling[i] = kama[i] < kama[i-1]
+    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
@@ -146,80 +194,81 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(sma_50[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC only) ===
-        session_active = is_session_active(open_time[i])
+        if np.isnan(hma_1w_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === HTF BIAS (4h HMA) ===
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        # === HTF BIAS (1w HMA) ===
+        htf_bull = close[i] > hma_1w_aligned[i]
+        htf_bear = close[i] < hma_1w_aligned[i]
         
-        # Additional 1d confirmation (optional boost)
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        # === KAMA TREND ===
+        kama_uptrend = kama_rising[i]
+        kama_downtrend = kama_falling[i]
         
-        # === 15m PRICE POSITION ===
-        price_above_sma = close[i] > sma_50[i]
-        price_below_sma = close[i] < sma_50[i]
+        # === DONCHIAN BREAKOUT ===
+        donchian_breakout_long = close[i] >= donchian_upper[i] * 0.995  # near or at breakout
+        donchian_breakdown_short = close[i] <= donchian_lower[i] * 1.005  # near or at breakdown
         
-        # === RSI MEAN REVERSION (wider thresholds for trade generation) ===
-        rsi_oversold = rsi_7[i] < 45.0
-        rsi_overbought = rsi_7[i] > 55.0
+        # === RSI FILTER (loose - ensure trades) ===
+        rsi_ok_long = 30.0 <= rsi[i] <= 70.0  # not overbought
+        rsi_ok_short = 30.0 <= rsi[i] <= 70.0  # not oversold
         
-        # Strong signals when both 4h and 1d align
-        htf_strong_bull = htf_4h_bull and htf_1d_bull
-        htf_strong_bear = htf_4h_bear and htf_1d_bear
-        
-        # === ENTRY LOGIC (LOOSE CONDITIONS TO GENERATE TRADES) ===
+        # === ENTRY LOGIC (LOOSE CONDITIONS) ===
         desired_signal = 0.0
         
-        # LONG: 4h bullish + RSI oversold + price above SMA + session
-        if session_active:
-            if htf_strong_bull and rsi_oversold and price_above_sma:
-                desired_signal = SIZE_STRONG
-            elif htf_4h_bull and rsi_oversold and price_above_sma:
-                desired_signal = SIZE_BASE
-            elif htf_4h_bull and rsi_oversold:
-                # Weakest: just 4h bias + RSI (no SMA filter)
-                desired_signal = SIZE_BASE * 0.5
-            
-            # SHORT: 4h bearish + RSI overbought + price below SMA + session
-            if htf_strong_bear and rsi_overbought and price_below_sma:
-                desired_signal = -SIZE_STRONG
-            elif htf_4h_bear and rsi_overbought and price_below_sma:
-                desired_signal = -SIZE_BASE
-            elif htf_4h_bear and rsi_overbought:
-                # Weakest: just 4h bias + RSI (no SMA filter)
-                desired_signal = -SIZE_BASE * 0.5
+        # LONG: Weekly bullish + KAMA rising + Donchian breakout + RSI ok
+        if htf_bull and kama_uptrend and donchian_breakout_long and rsi_ok_long:
+            desired_signal = SIZE_STRONG
+        elif htf_bull and kama_uptrend and rsi_ok_long:
+            # Weaker: just weekly bias + KAMA + RSI
+            desired_signal = SIZE_BASE
+        elif htf_bull and kama_uptrend:
+            # Weakest: just trend alignment
+            desired_signal = SIZE_BASE * 0.5
         
-        # === STOPLOSS CHECK (2.0x ATR trailing) ===
+        # SHORT: Weekly bearish + KAMA falling + Donchian breakdown + RSI ok
+        elif htf_bear and kama_downtrend and donchian_breakdown_short and rsi_ok_short:
+            desired_signal = -SIZE_STRONG
+        elif htf_bear and kama_downtrend and rsi_ok_short:
+            # Weaker: just weekly bias + KAMA + RSI
+            desired_signal = -SIZE_BASE
+        elif htf_bear and kama_downtrend:
+            # Weakest: just trend alignment
+            desired_signal = -SIZE_BASE * 0.5
+        
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             if low[i] < stop_price:
                 stoploss_triggered = True
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
             if high[i] > stop_price:
                 stoploss_triggered = True
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
         
         if stoploss_triggered:
@@ -249,9 +298,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
