@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #747: 6h Primary + 1d HTF — Donchian Breakout with Trend Filter
+Experiment #748: 4h Primary + 12h/1d HTF — Simplified Trend-Follow with Loose Entries
 
-Hypothesis: 6h Donchian(20) breakouts filtered by 1d HMA(21) trend direction
-will generate consistent trades (30-60/year) while avoiding counter-trend
-breakouts that fail in bear markets. Simpler than regime-based approaches
-that failed in experiments #735, #738, #742, #743, #744.
+Hypothesis: 4h timeframe with 12h/1d HTF bias provides optimal trade frequency (20-50/year)
+with quality signals. Previous 4h experiments failed due to overly complex regime filters
+that blocked all trades. This version uses SIMPLE, LOOSE conditions to guarantee
+trade generation while maintaining edge through HTF alignment.
 
 Key innovations:
-1. 1d HMA(21) for HTF trend bias — only trade breakouts in trend direction
-2. 6h Donchian(20) for clean breakout signals (20 bars = 5 days on 6h)
-3. 6h ATR ratio (ATR7/ATR30) > 1.3 to confirm volatility expansion
-4. 6h RSI(14) 40-60 filter to avoid extreme entries
-5. 2.5x ATR trailing stop via signal→0
-6. Discrete sizing: 0.0, ±0.25, ±0.30
+1. 1d HMA(21) for primary HTF trend bias — simple, reliable direction filter
+2. 12h HMA(16/48) for secondary trend confirmation — adds confluence without blocking
+3. 4h RSI(14) with LOOSE thresholds (40/60 not 30/70) for entry timing
+4. 4h Donchian(20) breakout for momentum confirmation — catches trends early
+5. ATR(14) 2.5x trailing stop for risk management — protects from reversals
+6. Discrete sizing: 0.0, ±0.25, ±0.30 — minimizes fee churn
 
-Entry conditions (balanced for trade generation):
-- LONG: 1d HMA bull + Donchian upper break + ATR ratio > 1.3 + RSI 40-65
-- SHORT: 1d HMA bear + Donchian lower break + ATR ratio > 1.3 + RSI 35-60
+Entry conditions (LOOSE to ensure ≥30 trades/train, ≥3/test):
+- LONG: 1d HMA bull + (RSI<50 OR Donchian breakout high) + 12h HMA not strongly bear
+- SHORT: 1d HMA bear + (RSI>50 OR Donchian breakout low) + 12h HMA not strongly bull
 
 Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 6h
+Timeframe: 4h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_hma_atr_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_hma_rsi_donchian_12h1d_loose_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -73,7 +73,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range - volatility measure"""
+    """Average True Range - volatility measure for stops"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -92,14 +92,8 @@ def calculate_donchian(high, low, period=20):
     if n < period:
         return np.full(n, np.nan), np.full(n, np.nan)
     
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
     return upper, lower
 
@@ -110,20 +104,21 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF HMA
+    # Calculate and align HTF HMAs
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     hma_16 = calculate_hma(close, period=16)
     hma_48 = calculate_hma(close, period=48)
     rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
@@ -138,11 +133,6 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    
-    # Track previous Donchian state for breakout detection
-    prev_close = close[0]
-    prev_donchian_upper = donchian_upper[0] if not np.isnan(donchian_upper[0]) else 0.0
-    prev_donchian_lower = donchian_lower[0] if not np.isnan(donchian_lower[0]) else 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -160,7 +150,14 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -171,38 +168,65 @@ def generate_signals(prices):
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        donchian_upper_break = (close[i] > donchian_upper[i]) and (prev_close <= prev_donchian_upper)
-        donchian_lower_break = (close[i] < donchian_lower[i]) and (prev_close >= prev_donchian_lower)
+        # === 12h HMA TREND (secondary confirmation) ===
+        htf_12h_bull = close[i] > hma_12h_aligned[i]
+        htf_12h_bear = close[i] < hma_12h_aligned[i]
         
-        # === ATR VOLATILITY RATIO ===
-        atr_ratio = atr_7[i] / atr_30[i] if atr_30[i] > 1e-10 else 0.0
-        vol_expansion = atr_ratio > 1.3
+        # === 4h HMA CROSSOVER ===
+        hma_crossover_long = False
+        hma_crossover_short = False
+        if i > 0 and not np.isnan(hma_16[i-1]) and not np.isnan(hma_48[i-1]):
+            hma_crossover_long = (hma_16[i-1] <= hma_48[i-1]) and (hma_16[i] > hma_48[i])
+            hma_crossover_short = (hma_16[i-1] >= hma_48[i-1]) and (hma_16[i] < hma_48[i])
         
-        # === RSI FILTER (avoid extremes) ===
-        rsi_ok_long = 40.0 <= rsi_14[i] <= 65.0
-        rsi_ok_short = 35.0 <= rsi_14[i] <= 60.0
+        # === 4h HMA TREND ===
+        hma_4h_bull = hma_16[i] > hma_48[i]
+        hma_4h_bear = hma_16[i] < hma_48[i]
         
-        # === 6h HMA TREND CONFIRMATION ===
-        hma_6h_bull = hma_16[i] > hma_48[i]
-        hma_6h_bear = hma_16[i] < hma_48[i]
+        # === RSI CONDITIONS (LOOSE for more trades) ===
+        rsi_neutral_long = rsi_14[i] < 55.0  # Loose: not overbought
+        rsi_neutral_short = rsi_14[i] > 45.0  # Loose: not oversold
+        rsi_oversold = rsi_14[i] < 40.0
+        rsi_overbought = rsi_14[i] > 60.0
         
-        # === ENTRY LOGIC ===
+        # === DONCHIAN BREAKOUT ===
+        donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
+        donchian_breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        
+        # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: 1d bull + Donchian upper break + vol expansion + RSI ok + 6h HMA bull
-        if htf_1d_bull and donchian_upper_break and vol_expansion and rsi_ok_long:
-            if hma_6h_bull:
-                desired_signal = SIZE_STRONG
-            else:
-                desired_signal = SIZE_BASE
+        # LONG: 1d bull + (RSI ok OR breakout OR HMA bull)
+        if htf_1d_bull:
+            long_conditions = 0
+            if rsi_neutral_long:
+                long_conditions += 1
+            if hma_crossover_long or hma_4h_bull:
+                long_conditions += 1
+            if donchian_breakout_long:
+                long_conditions += 1
+            
+            if long_conditions >= 1:  # At least 1 condition
+                if rsi_oversold or hma_crossover_long or donchian_breakout_long:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
         
-        # SHORT: 1d bear + Donchian lower break + vol expansion + RSI ok + 6h HMA bear
-        elif htf_1d_bear and donchian_lower_break and vol_expansion and rsi_ok_short:
-            if hma_6h_bear:
-                desired_signal = -SIZE_STRONG
-            else:
-                desired_signal = -SIZE_BASE
+        # SHORT: 1d bear + (RSI ok OR breakout OR HMA bear)
+        elif htf_1d_bear:
+            short_conditions = 0
+            if rsi_neutral_short:
+                short_conditions += 1
+            if hma_crossover_short or hma_4h_bear:
+                short_conditions += 1
+            if donchian_breakout_short:
+                short_conditions += 1
+            
+            if short_conditions >= 1:  # At least 1 condition
+                if rsi_overbought or hma_crossover_short or donchian_breakout_short:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -260,10 +284,5 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = final_signal
-        
-        # Update previous state for next iteration
-        prev_close = close[i]
-        prev_donchian_upper = donchian_upper[i]
-        prev_donchian_lower = donchian_lower[i]
     
     return signals
