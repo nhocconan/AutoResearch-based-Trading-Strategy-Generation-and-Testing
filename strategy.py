@@ -1,47 +1,86 @@
 #!/usr/bin/env python3
 """
-Experiment #1047: 6h Primary + 1d HTF — Donchian Breakout + Volume + HTF Trend Filter
+Experiment #1048: 4h Primary + 12h/1d HTF — KAMA Adaptive Trend + RSI Pullback + Volume Filter
 
-Hypothesis: 6h timeframe is ideal for breakout strategies - fast enough to capture
-multi-day moves, slow enough to filter noise. Donchian channel breakouts with volume
-confirmation and 1d trend filter should outperform mean-reversion strategies on 6h.
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) adapts to market volatility better than HMA/EMA,
+reducing whipsaws in choppy markets while capturing trends efficiently. Combined with 12h trend bias
+and RSI pullback entries on 4h, this should generate consistent signals with fewer false entries.
 
 Key innovations:
-1. Donchian(20) breakout: 20-bar high/low for entry triggers (Turtle Trading classic)
-2. Volume confirmation: volume > 1.5x 20-bar average (filters false breakouts)
-3. 1d HMA(21) trend filter: only trade breakouts in HTF trend direction
-4. ROC(10) momentum filter: confirms breakout has momentum (ROC > 2% for long)
-5. ATR(14) 2.5x stoploss with trailing
-6. Time-based exit: exit after 10 bars if no profit (prevents dead capital)
+1. KAMA (Efficiency Ratio = 10): Adapts smoothing based on market noise
+   - Fast SC = 2/(2+1) = 0.667, Slow SC = 2/(30+1) = 0.065
+   - ER = |close - close_n| / sum(|close_i - close_i-1|)
+2. 12h HMA(21) for intermediate trend bias (faster than 1d, slower than 4h)
+3. 1d HMA(21) for long-term bias filter
+4. RSI(14) pullback entries: Long when RSI 40-55 in uptrend, Short when RSI 45-60 in downtrend
+5. Volume filter: Only enter when volume > 0.8 * volume_SMA(20)
+6. ATR(14) 2.0x trailing stop (tighter than 2.5x to reduce drawdown)
 7. Discrete sizing: 0.0, ±0.25, ±0.30
 
-Why 6h Donchian should work:
-- 6h captures 3-5 day moves (Donchian 20 = ~5 days)
-- Volume filter avoids fake breakouts (common in crypto)
-- 1d HTF filter prevents counter-trend trades (major failure mode)
-- ROC momentum ensures breakout has follow-through
-- Time exit prevents capital tied in stalled positions
+Why this should work:
+- KAMA reduces lag in trends while smoothing in ranges (adaptive)
+- 12h HTF is sweet spot between 4h noise and 1d slowness
+- RSI pullback (not extreme) entries catch continuation moves
+- Volume filter avoids low-liquidity false breakouts
+- 4h timeframe targets 25-40 trades/year (fee-efficient)
 
 Entry conditions (LOOSE to guarantee trades):
-- LONG: price > Donchian_high(20) + volume > 1.5x avg + close > 1d_HMA + ROC(10) > 1%
-- SHORT: price < Donchian_low(20) + volume > 1.5x avg + close < 1d_HMA + ROC(10) < -1%
-
-Exit conditions:
-- Stoploss: 2.5x ATR from entry (trailing for longs, inverse for shorts)
-- Time exit: 10 bars with no profit > 0.5R
-- Signal flip: opposite direction signal
+- LONG: price > 12h_HMA > 1d_HMA + RSI(14) 40-55 + volume > 0.8*vol_SMA
+- SHORT: price < 12h_HMA < 1d_HMA + RSI(14) 45-60 + volume > 0.8*vol_SMA
+- Exit: RSI crosses opposite threshold OR stoploss hit
 
 Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 6h
+Timeframe: 4h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_vol_htf_trend_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_kama_rsi_pullback_vol_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market efficiency/volatility
+    
+    Efficiency Ratio (ER) = |Close - Close_n| / Sum(|Close_i - Close_i-1|)
+    Smoothing Constant (SC) = ER * (fast_SC - slow_SC) + slow_SC
+    fast_SC = 2/(fast_period+1), slow_SC = 2/(slow_period+1)
+    
+    KAMA[i] = KAMA[i-1] + SC * (Close[i] - KAMA[i-1])
+    """
+    n = len(close)
+    if n < period + slow_period:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan, dtype=np.float64)
+    
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
+    
+    # Initialize KAMA with SMA of first period bars
+    kama[period - 1] = np.nanmean(close[:period])
+    
+    for i in range(period, n):
+        # Efficiency Ratio: signal / noise
+        signal = abs(close[i] - close[i - period])
+        noise = np.sum(np.abs(np.diff(close[i - period:i + 1])))
+        
+        if noise > 1e-10:
+            er = signal / noise
+        else:
+            er = 0.0
+        
+        # Smoothing constant
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        
+        # KAMA calculation
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -87,42 +126,23 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-def calculate_roc(close, period=10):
-    """Rate of Change - momentum indicator"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    roc = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if close[i - period] != 0:
-            roc[i] = 100.0 * (close[i] - close[i - period]) / close[i - period]
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    return roc
-
-def calculate_volume_ma(volume, period=20):
-    """Volume moving average"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_ma
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi[:period] = np.nan
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -132,32 +152,36 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
+    kama_10 = calculate_kama(close, period=10, fast_period=2, slow_period=30)
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    roc_10 = calculate_roc(close, period=10)
-    vol_ma_20 = calculate_volume_ma(volume, period=20)
+    rsi_14 = calculate_rsi(close, period=14)
+    
+    # Volume SMA for filter
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
-    # Position tracking for stoploss and time exit
+    # Position tracking for stoploss
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    entry_bar = 0
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    max_profit_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if indicators not ready
@@ -168,72 +192,77 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(kama_10[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(roc_10[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(vol_sma[i]) or vol_sma[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF TREND FILTER (1d HMA) ===
-        hma_1d_bull = close[i] > hma_1d_aligned[i]
-        hma_1d_bear = close[i] < hma_1d_aligned[i]
+        # === HTF TREND BIAS ===
+        # 12h HMA vs 1d HMA alignment
+        hma_12h_above_1d = hma_12h_aligned[i] > hma_1d_aligned[i]
+        hma_12h_below_1d = hma_12h_aligned[i] < hma_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Price vs 12h HMA
+        price_above_12h = close[i] > hma_12h_aligned[i]
+        price_below_12h = close[i] < hma_12h_aligned[i]
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Long breakout: price crosses above Donchian upper
-        long_breakout = close[i] > donchian_upper[i]
-        # Short breakout: price crosses below Donchian lower
-        short_breakout = close[i] < donchian_lower[i]
+        # Price vs KAMA
+        price_above_kama = close[i] > kama_10[i]
+        price_below_kama = close[i] < kama_10[i]
         
-        # === MOMENTUM FILTER (ROC) ===
-        momentum_long = roc_10[i] > 1.0  # >1% momentum
-        momentum_short = roc_10[i] < -1.0  # <-1% momentum
+        # KAMA slope (simplified: current vs 5 bars ago)
+        kama_slope_up = not np.isnan(kama_10[i-5]) and kama_10[i] > kama_10[i-5]
+        kama_slope_down = not np.isnan(kama_10[i-5]) and kama_10[i] < kama_10[i-5]
+        
+        # === VOLUME FILTER ===
+        vol_confirmed = volume[i] > 0.8 * vol_sma[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: Donchian breakout + volume + HTF bull + momentum
-        if long_breakout and volume_confirmed and hma_1d_bull and momentum_long:
-            desired_signal = SIZE_STRONG
-        # SHORT: Donchian breakout + volume + HTF bear + momentum
-        elif short_breakout and volume_confirmed and hma_1d_bear and momentum_short:
-            desired_signal = -SIZE_STRONG
-        # Weaker signals without volume confirmation
-        elif long_breakout and hma_1d_bull and momentum_long:
-            desired_signal = SIZE_BASE
-        elif short_breakout and hma_1d_bear and momentum_short:
-            desired_signal = -SIZE_BASE
+        # LONG: Uptrend + RSI pullback + volume
+        if price_above_12h and hma_12h_above_1d and price_above_kama and kama_slope_up:
+            if 40.0 <= rsi_14[i] <= 55.0 and vol_confirmed:
+                desired_signal = SIZE_BASE
+            elif 45.0 <= rsi_14[i] <= 52.0 and vol_confirmed:
+                desired_signal = SIZE_STRONG
         
-        # === STOPLOSS CHECK (2.5x ATR trailing) ===
+        # SHORT: Downtrend + RSI pullback + volume
+        elif price_below_12h and hma_12h_below_1d and price_below_kama and kama_slope_down:
+            if 45.0 <= rsi_14[i] <= 60.0 and vol_confirmed:
+                desired_signal = -SIZE_BASE
+            elif 48.0 <= rsi_14[i] <= 55.0 and vol_confirmed:
+                desired_signal = -SIZE_STRONG
+        
+        # === STOPLOSS CHECK (2.0x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -241,13 +270,11 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TIME-BASED EXIT (10 bars with no profit) ===
-        time_exit_triggered = False
-        if in_position:
-            bars_held = i - entry_bar
-            if bars_held >= 10 and max_profit_since_entry < 0.5 * entry_atr:
-                time_exit_triggered = True
-                desired_signal = 0.0
+        # === EXIT ON RSI REVERSAL ===
+        if in_position and position_side > 0 and rsi_14[i] > 70.0:
+            desired_signal = 0.0  # Overbought exit
+        elif in_position and position_side < 0 and rsi_14[i] < 30.0:
+            desired_signal = 0.0  # Oversold exit
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal >= SIZE_STRONG * 0.9:
@@ -268,31 +295,21 @@ def generate_signals(prices):
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
-                entry_bar = i
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                max_profit_since_entry = 0.0
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
-            # Track max profit for time exit
-            if position_side > 0:
-                current_profit = high[i] - entry_price
-            else:
-                current_profit = entry_price - low[i]
-            max_profit_since_entry = max(max_profit_since_entry, current_profit)
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
                 entry_atr = 0.0
-                entry_bar = 0
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
-                max_profit_since_entry = 0.0
         
         signals[i] = final_signal
     
