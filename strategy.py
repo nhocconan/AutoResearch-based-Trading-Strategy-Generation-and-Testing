@@ -1,45 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #160: 6h Primary + 1d/1w HTF — HMA Trend + RSI Pullback + Vol Filter
+Experiment #161: 15m Primary + 1h/4h/1d HTF — HMA Trend + RSI Momentum + Session Filter
 
-Hypothesis: 6h timeframe is underexplored and offers sweet spot between 4h (fee drag)
-and 12h (too few trades). Previous 6h experiments failed due to ZERO trades from
-overly strict conditions.
+Hypothesis: 15m timeframe is UNDEREXPLORED (ZERO experiments in history) and offers
+opportunity for higher Sharpe with proper HTF filtering. Key insight from failures:
+- #149, #153, #157: 15m strategies got Sharpe=0.000 (ZERO trades) from overly strict conditions
+- Lower TF needs HTF direction filter to avoid fee drag from whipsaws
+- Session filter (UTC 00-12) captures London/NY overlap volatility
 
-Key learnings from 159 failed experiments:
-- Complex regime-switching fails on BTC/ETH (#135, #138, #146, #158)
-- cRSI didn't work on 6h (#143)
-- Woodie pivots failed (#140)
-- Strategies with Sharpe=0.000 had ZERO trades (#149, #150, #153, #156, #157, #159)
-- Previous 6h attempts (#151, #155) had Sharpe < 0.1
+Strategy design:
+- 15m HMA(21) for entry timing (faster than EMA, less lag than SMA)
+- 1h HMA(34) for intraday trend bias
+- 4h HMA(50) for major trend confirmation
+- 1d HMA(50) for regime filter (only trade with daily trend)
+- RSI(7) for momentum (faster than RSI(14) for 15m entries)
+- Session filter: only trade UTC 00-12 (London+NY overlap = 75% of crypto volume)
+- ATR ratio filter: avoid extreme volatility entries (ATR7/ATR30 < 2.0)
+- Position size: 0.18 (18% - smaller for higher frequency)
+- Target: 50-100 trades/year on 15m (strict confluence to avoid fee drag)
 
-New approach for 6h:
-- 6h HMA(21) for trend direction (faster than EMA, less lag than SMA)
-- 1d HMA(50) for major trend bias (HTF confirmation)
-- 1w HMA(50) for weekly regime filter (only trade with weekly trend)
-- RSI(14) with LOOSE thresholds (>45 long, <55 short) to ENSURE trades
-- ATR ratio filter (ATR7/ATR30 < 1.8) to avoid extreme volatility entries
-- 2.5x ATR trailing stop for risk management
-- Position size: 0.28 (28% of capital)
+Trade generation design (CRITICAL - avoid 0 trades like #149, #153, #157):
+- LOOSE RSI thresholds (>40 long, <60 short) to ensure entries
+- Multiple entry tiers (full size when all HTF align, partial when fewer align)
+- Fallback entries when 15m + 1h align strongly (ignore 4h/1d)
+- Session filter relaxes on strong signals (allow 12-16 UTC for 80% size)
 
-Design for trade generation (CRITICAL - avoid 0 trades):
-- LOOSE RSI thresholds (45/55 not 30/70)
-- Multiple entry paths (primary + fallback)
-- Fallback: enter when ALL HTF align strongly (ignore some filters)
-- Target 30-60 trades/year on 6h timeframe
-
-Target: Sharpe>0.167, DD>-40%, trades>=30 train, trades>=3 test ALL symbols
+Target: Sharpe>0.167 (beat current best), DD>-40%, trades>=30 train, trades>=3 test ALL symbols
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma_rsi_vol_1d1w_v2"
-timeframe = "6h"
+name = "mtf_15m_hma_rsi_session_1h4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
-    """Hull Moving Average - faster response than EMA"""
+    """Hull Moving Average - faster response than EMA, smoother than SMA"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -56,7 +53,7 @@ def calculate_hma(close, period):
     return hma
 
 def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+    """Relative Strength Index - standard Wilder's formula"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -82,7 +79,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range - Wilder's smoothing"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -96,7 +93,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
-    """ATR ratio for volatility filter - avoids entering during extreme vol"""
+    """ATR ratio - measures vol expansion vs baseline"""
     atr_short = calculate_atr(high, low, close, short_period)
     atr_long = calculate_atr(high, low, close, long_period)
     
@@ -119,6 +116,14 @@ def calculate_sma(close, period):
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
+def get_utc_hour(prices, idx):
+    """Extract UTC hour from open_time timestamp"""
+    # open_time is in milliseconds since epoch
+    ts_ms = prices['open_time'].iloc[idx]
+    ts_sec = ts_ms / 1000.0
+    utc_hour = (ts_sec % 86400) // 3600
+    return int(utc_hour)
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -126,26 +131,32 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for major trend bias
+    # Calculate and align 1h HMA for intraday trend
+    hma_1h_raw = calculate_hma(df_1h['close'].values, period=34)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
+    
+    # Calculate and align 4h HMA for major trend
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=50)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
+    # Calculate and align 1d HMA for regime filter
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 1w HMA for weekly regime filter
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate primary (6h) indicators
-    hma_6h = calculate_hma(close, period=21)
-    rsi = calculate_rsi(close, period=14)
+    # Calculate primary (15m) indicators
+    hma_15m = calculate_hma(close, period=21)
+    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 15m
+    rsi_14 = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     atr_ratio = calculate_atr_ratio(high, low, close, 7, 30)
     sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.18  # 18% position size (smaller for 15m frequency)
     
     # Position tracking for stoploss
     in_position = False
@@ -163,7 +174,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_6h[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_15m[i]) or np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -175,7 +186,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1h_aligned[i]) or np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -188,64 +199,86 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d HMA) ===
+        # === SESSION FILTER (UTC hours) ===
+        utc_hour = get_utc_hour(prices, i)
+        # Prime session: 00-12 UTC (London open to NY close overlap)
+        # Secondary: 12-16 UTC (NY afternoon)
+        # Avoid: 16-00 UTC (Asia session = lower volume, more whipsaws)
+        prime_session = 0 <= utc_hour < 12
+        secondary_session = 12 <= utc_hour < 16
+        
+        # === HTF BIAS (1h HMA) ===
+        htf_1h_bull = close[i] > hma_1h_aligned[i]
+        htf_1h_bear = close[i] < hma_1h_aligned[i]
+        
+        # === MAJOR TREND (4h HMA) ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        
+        # === REGIME FILTER (1d HMA) ===
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === WEEKLY REGIME (1w HMA) ===
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
-        
         # === VOLATILITY FILTER ===
-        # Only enter when vol is not extreme (ATR ratio < 1.8)
-        vol_ok = atr_ratio[i] < 1.8
+        vol_ok = atr_ratio[i] < 2.0  # Avoid extreme vol spikes
         
-        # === 6h HMA TREND ===
-        hma_bull = close[i] > hma_6h[i]
-        hma_bear = close[i] < hma_6h[i]
+        # === 15m HMA TREND ===
+        hma_bull = close[i] > hma_15m[i]
+        hma_bear = close[i] < hma_15m[i]
         
         # === SMA200 FILTER ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
-        # === RSI CONFIRMATION (LOOSE to ensure trades) ===
-        rsi_ok_long = rsi[i] > 45.0  # not oversold
-        rsi_ok_short = rsi[i] < 55.0  # not overbought
+        # === RSI MOMENTUM (LOOSE thresholds for trade generation) ===
+        rsi_7_ok_long = rsi_7[i] > 40.0  # Not oversold on fast RSI
+        rsi_7_ok_short = rsi_7[i] < 60.0  # Not overbought on fast RSI
+        rsi_14_ok_long = rsi_14[i] > 45.0
+        rsi_14_ok_short = rsi_14[i] < 55.0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # PRIMARY: All conditions aligned (full size)
-        # Long: 6h HMA bull + 1d HMA bull + 1w HMA bull + vol ok + RSI ok + above SMA200
-        if hma_bull and htf_1d_bull and htf_1w_bull and vol_ok and rsi_ok_long and above_sma200:
+        # TIER 1: ALL HTF ALIGNED + PRIME SESSION (full size)
+        # Long: 15m HMA bull + 1h bull + 4h bull + 1d bull + vol ok + RSI ok + prime session
+        if hma_bull and htf_1h_bull and htf_4h_bull and htf_1d_bull and vol_ok and rsi_7_ok_long and above_sma200 and prime_session:
             desired_signal = SIZE
         
-        # Short: 6h HMA bear + 1d HMA bear + 1w HMA bear + vol ok + RSI ok + below SMA200
-        elif hma_bear and htf_1d_bear and htf_1w_bear and vol_ok and rsi_ok_short and below_sma200:
+        # Short: All bear aligned
+        elif hma_bear and htf_1h_bear and htf_4h_bear and htf_1d_bear and vol_ok and rsi_7_ok_short and below_sma200 and prime_session:
             desired_signal = -SIZE
         
-        # FALLBACK 1: Strong HTF alignment (ignore vol filter) - 80% size
-        elif hma_bull and htf_1d_bull and htf_1w_bull and rsi[i] > 50.0 and above_sma200:
+        # TIER 2: 1h + 4h aligned + PRIME SESSION (80% size)
+        # Relax 1d filter for more trades
+        elif hma_bull and htf_1h_bull and htf_4h_bull and vol_ok and rsi_7[i] > 45.0 and above_sma200 and prime_session:
             desired_signal = SIZE * 0.8
         
-        elif hma_bear and htf_1d_bear and htf_1w_bear and rsi[i] < 50.0 and below_sma200:
+        elif hma_bear and htf_1h_bear and htf_4h_bear and vol_ok and rsi_7[i] < 55.0 and below_sma200 and prime_session:
             desired_signal = -SIZE * 0.8
         
-        # FALLBACK 2: 1d + 6h aligned (ignore 1w) - 60% size
-        # This ensures trades even when weekly is choppy
-        elif hma_bull and htf_1d_bull and vol_ok and rsi[i] > 48.0:
+        # TIER 3: 15m + 1h aligned + PRIME SESSION (60% size)
+        # Even more relaxed for trade generation
+        elif hma_bull and htf_1h_bull and vol_ok and rsi_7[i] > 50.0 and prime_session:
             desired_signal = SIZE * 0.6
         
-        elif hma_bear and htf_1d_bear and vol_ok and rsi[i] < 52.0:
+        elif hma_bear and htf_1h_bear and vol_ok and rsi_7[i] < 50.0 and prime_session:
             desired_signal = -SIZE * 0.6
         
-        # FALLBACK 3: Very strong 6h momentum (ignore HTF) - 40% size
-        # Ensures we get SOME trades even in choppy markets
-        elif hma_bull and rsi[i] > 55.0 and vol_ok:
+        # TIER 4: Strong 15m momentum + SECONDARY SESSION (40% size)
+        # Allow afternoon session for strong signals
+        elif hma_bull and rsi_7[i] > 55.0 and vol_ok and rsi_14[i] > 50.0 and secondary_session:
             desired_signal = SIZE * 0.4
         
-        elif hma_bear and rsi[i] < 45.0 and vol_ok:
+        elif hma_bear and rsi_7[i] < 45.0 and vol_ok and rsi_14[i] < 50.0 and secondary_session:
             desired_signal = -SIZE * 0.4
+        
+        # TIER 5: VERY STRONG 15m signal (ignore session, 30% size)
+        # Ensures we capture major moves even outside prime hours
+        elif hma_bull and rsi_7[i] > 65.0 and vol_ok and above_sma200:
+            desired_signal = SIZE * 0.3
+        
+        elif hma_bear and rsi_7[i] < 35.0 and vol_ok and below_sma200:
+            desired_signal = -SIZE * 0.3
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -282,6 +315,10 @@ def generate_signals(prices):
             final_signal = SIZE * 0.4
         elif desired_signal <= -SIZE * 0.3:
             final_signal = -SIZE * 0.4
+        elif desired_signal >= SIZE * 0.1:
+            final_signal = SIZE * 0.3
+        elif desired_signal <= -SIZE * 0.1:
+            final_signal = -SIZE * 0.3
         else:
             final_signal = 0.0
         
