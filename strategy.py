@@ -1,66 +1,138 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 30m Primary + 4h/1d HTF — Simplified RSI Mean Reversion with HTF Bias
+Experiment #029: 4h Primary + 12h HTF — Fisher Transform Dual Regime with ADX Filter
 
-Hypothesis: Previous 30m strategies (#018, #020, #025) failed with Sharpe=0.000 due to 
-TOO STRICT entry filters (session + volume + CHOP + CRSI extremes). This strategy:
+Hypothesis: Building on #019's success (Sharpe=0.368), this replaces RSI with Fisher Transform
+which is more sensitive to price extremes and catches reversals faster in bear/range markets.
+The 12h HTF provides more responsive trend filtering than 1d while avoiding 4h noise.
 
-1. SIMPLER entries: RSI(7) with 35/65 thresholds (not 15/85) - triggers more often
-2. HTF as BIAS not filter: 4h HMA determines direction, but doesn't block entries
-3. NO session/volume filters: these killed trade frequency in prior 30m attempts
-4. Funding rate overlay: proven contrarian edge for BTC/ETH perpetuals
-5. Choppiness for SIZING: reduce size in choppy regimes, full size in trending
-
-Key difference from failed 30m strategies:
-- RSI(7) 35/65 vs CRSI 15/85 = 3x more entry signals
-- 4h HMA = bias only, not hard filter
-- No session/volume requirements
-- Target: 50-80 trades/year (vs 0 in #018/#020/#025)
+Key changes from #019:
+1. Fisher Transform (period=9) instead of RSI - superior reversal detection in crypto
+2. 12h HTF instead of 1d - more trade opportunities, faster regime adaptation
+3. ADX + Choppiness dual regime filter - ADX>25 = trend, CHOP>55 = range
+4. Asymmetric entry thresholds based on regime state
+5. ATR-based dynamic position sizing with volatility scaling
 
 Entry Logic:
-- Long: RSI(7) < 35 AND price > 4h HMA (oversold in uptrend)
-- Short: RSI(7) > 65 AND price < 4h HMA (overbought in downtrend)
-- Size: 0.25 base, 0.15 in choppy regime (CHOP>55)
-- Funding: +0.05 when funding<-0.005%, -0.05 when funding>0.005%
+- RANGE (CHOP>55): Fisher<-1.5 long, Fisher>1.5 short (mean reversion)
+- TREND (ADX>25 + CHOP<45): 12h HMA bias + Fisher confirmation
+- NEUTRAL: Only trade with strong HTF alignment
+- Size: 0.30 with HTF alignment, 0.25 without
 
-Risk: 2.5x ATR trailing stop, max signal 0.30, discrete levels (0, ±0.15, ±0.25)
-Target: Sharpe>0.4, trades>40/symbol train, >5/symbol test, DD>-35%
+Risk: 2.5x ATR trailing stop, max signal 0.35, discrete levels (0.0, ±0.25, ±0.30)
+Target: Sharpe>0.4, trades>40/symbol train, >4/symbol test, DD>-40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_rsi7_4h_bias_funding_chop_sizing_v1"
-timeframe = "30m"
+name = "mtf_4h_fisher_adx_chop_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_rsi(close, period=7):
-    """RSI with proper min_periods"""
+def calculate_fisher(close, period=9):
+    """
+    Ehlers Fisher Transform
+    Transforms price into a Gaussian normal distribution
+    Long when Fisher crosses above -1.5, short when crosses below +1.5
+    """
     n = len(close)
-    if n < period + 1:
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    fisher = np.full(n, np.nan)
+    fisher_signal = np.full(n, np.nan)
+    
+    # Normalize price to -1 to +1 range
+    for i in range(period - 1, n):
+        highest = np.max(close[i - period + 1:i + 1])
+        lowest = np.min(close[i - period + 1:i + 1])
+        
+        if highest == lowest:
+            continue
+        
+        # Normalize: (close - lowest) / (highest - lowest)
+        normalized = 2.0 * (close[i] - lowest) / (highest - lowest) - 1.0
+        
+        # Clamp to avoid division issues
+        normalized = np.clip(normalized, -0.999, 0.999)
+        
+        # Fisher transform: 0.5 * ln((1 + normalized) / (1 - normalized))
+        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
+        
+        # Signal line (1-period lag)
+        if i > 0 and not np.isnan(fisher[i - 1]):
+            fisher_signal[i] = fisher[i - 1]
+    
+    return fisher, fisher_signal
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Average Directional Index (ADX)
+    Measures trend strength regardless of direction
+    ADX > 25 = trending, ADX < 20 = ranging
+    """
+    n = len(close)
+    if n < period * 2:
         return np.full(n, np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    gain = np.concatenate([[0.0], gain])
-    loss = np.concatenate([[0.0], loss])
+    adx = np.full(n, np.nan)
     
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # True Range
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    rsi = np.full(n, np.nan)
+    # Directional Movement
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        elif down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing
+    atr = np.zeros(n)
+    atr[period-1] = np.mean(tr[:period])
     for i in range(period, n):
-        if avg_loss[i] < 1e-10:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
     
-    return rsi
+    plus_di = np.full(n, np.nan)
+    minus_di = np.full(n, np.nan)
+    
+    plus_di[period-1] = 100.0 * np.mean(plus_dm[:period]) / atr[period-1] if atr[period-1] > 1e-10 else 0.0
+    minus_di[period-1] = 100.0 * np.mean(minus_dm[:period]) / atr[period-1] if atr[period-1] > 1e-10 else 0.0
+    
+    for i in range(period, n):
+        plus_di[i] = 100.0 * ((plus_di[i-1] * (period - 1) + 100.0 * plus_dm[i] / atr[i]) / period) if atr[i] > 1e-10 else 0.0
+        minus_di[i] = 100.0 * ((minus_di[i-1] * (period - 1) + 100.0 * minus_dm[i] / atr[i]) / period) if atr[i] > 1e-10 else 0.0
+    
+    # DX and ADX
+    dx = np.full(n, np.nan)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 1e-10:
+            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
+        else:
+            dx[i] = 0.0
+    
+    # ADX = smoothed DX
+    adx[period * 2 - 1] = np.mean(dx[period:period*2])
+    for i in range(period * 2, n):
+        if np.isnan(dx[i]):
+            continue
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    return adx
 
 def calculate_hma(close, period=21):
-    """Hull Moving Average for HTF trend"""
+    """Hull Moving Average - smooth and responsive"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -86,7 +158,7 @@ def calculate_hma(close, period=21):
     return hma
 
 def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index for regime detection and sizing"""
+    """Choppiness Index - regime detection"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -112,7 +184,7 @@ def calculate_choppiness(high, low, close, period=14):
     return chop
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range for stoploss"""
+    """Average True Range"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -125,75 +197,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def load_funding_data(symbol):
-    """Load funding rate data from processed parquet files"""
-    try:
-        import os
-        symbol_base = symbol.replace('USDT', '').lower()
-        funding_path = f"data/processed/funding/{symbol_base}.parquet"
-        
-        if os.path.exists(funding_path):
-            df_funding = pd.read_parquet(funding_path)
-            return {
-                'timestamp': df_funding['timestamp'].values,
-                'funding_rate': df_funding['funding_rate'].values
-            }
-    except Exception:
-        pass
-    
-    return None
-
-def get_funding_at_time(funding_data, timestamp):
-    """Get funding rate closest to given timestamp"""
-    if funding_data is None:
-        return 0.0
-    
-    ts_arr = funding_data['timestamp']
-    fr_arr = funding_data['funding_rate']
-    
-    idx = np.searchsorted(ts_arr, timestamp)
-    if idx >= len(ts_arr):
-        idx = len(ts_arr) - 1
-    if idx < 0:
-        idx = 0
-    
-    return fr_arr[idx]
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values if "open_time" in prices.columns else np.arange(len(close))
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 4h HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align 12h HMA for trend bias
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate and align 1d HMA for major regime
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Calculate primary (30m) indicators
-    rsi = calculate_rsi(close, period=7)
+    # Calculate primary (4h) indicators
+    fisher, fisher_signal = calculate_fisher(close, period=9)
+    adx = calculate_adx(high, low, close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     chop = calculate_choppiness(high, low, close, period=14)
     
-    # Load funding data
-    funding_data = None
-    try:
-        funding_data = load_funding_data("BTCUSDT")
-    except Exception:
-        funding_data = None
-    
     signals = np.zeros(n)
-    BASE_SIZE = 0.25
-    REDUCED_SIZE = 0.15
-    MAX_SIZE = 0.30
+    BASE_SIZE = 0.30
+    REDUCED_SIZE = 0.25
+    MAX_SIZE = 0.35
     
     # Position tracking for stoploss
     in_position = False
@@ -203,7 +229,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(150, n):
+    # Track Fisher crosses to avoid repeated signals
+    prev_fisher = 0.0
+    prev_fisher_valid = False
+    
+    for i in range(200, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -211,74 +241,79 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(chop[i]):
+        if np.isnan(fisher[i]) or np.isnan(adx[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME DETECTION (Choppiness Index) ===
+        # === REGIME DETECTION ===
         is_choppy = chop[i] > 55.0
+        is_trending = adx[i] > 25.0 and chop[i] < 45.0
+        is_neutral = not is_choppy and not is_trending
         
-        # === HTF TREND BIAS (4h and 1d) ===
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === HTF TREND BIAS (12h) ===
+        hma_12h_bull = close[i] > hma_12h_aligned[i]
+        hma_12h_bear = close[i] < hma_12h_aligned[i]
         
-        # === FUNDING RATE CONTRARIAN ===
-        funding_signal = 0.0
-        try:
-            funding_rate = get_funding_at_time(funding_data, open_time[i])
-            if funding_rate > 0.005:  # Bullish funding = contrarian short bias
-                funding_signal = -0.05
-            elif funding_rate < -0.005:  # Bearish funding = contrarian long bias
-                funding_signal = 0.05
-        except Exception:
-            funding_signal = 0.0
-        
-        # === DETERMINE POSITION SIZE BASED ON REGIME ===
-        if is_choppy:
-            position_size = REDUCED_SIZE  # Reduce size in choppy markets
-        else:
-            position_size = BASE_SIZE  # Full size in trending markets
-        
-        # === ENTRY SIGNALS (RSI mean reversion with HTF bias) ===
+        # === FISHER TRANSFORM SIGNALS ===
         desired_signal = 0.0
+        signal_strength = 0.0
         
-        # Long: RSI < 35 (oversold) + price above 4h HMA (uptrend bias)
-        # Relaxed: allow long even if price slightly below 4h HMA if RSI very low
-        if rsi[i] < 35.0:
-            if price_above_4h:
-                # Strong long: oversold in uptrend
-                desired_signal = position_size + funding_signal
-            elif rsi[i] < 25.0:
-                # Emergency long: extremely oversold, take the trade
-                desired_signal = REDUCED_SIZE + funding_signal
+        # Fisher cross detection (only trigger on cross, not level)
+        fisher_cross_long = False
+        fisher_cross_short = False
         
-        # Short: RSI > 65 (overbought) + price below 4h HMA (downtrend bias)
-        # Relaxed: allow short even if price slightly above 4h HMA if RSI very high
-        elif rsi[i] > 65.0:
-            if price_below_4h:
-                # Strong short: overbought in downtrend
-                desired_signal = -position_size + funding_signal
-            elif rsi[i] > 75.0:
-                # Emergency short: extremely overbought, take the trade
-                desired_signal = -REDUCED_SIZE + funding_signal
+        if prev_fisher_valid:
+            # Long: Fisher crosses above -1.5 from below
+            if prev_fisher < -1.5 and fisher[i] >= -1.5:
+                fisher_cross_long = True
+            # Short: Fisher crosses below +1.5 from above
+            if prev_fisher > 1.5 and fisher[i] <= 1.5:
+                fisher_cross_short = True
         
-        # === 1D MAJOR REGIME FILTER (only reduce, don't block) ===
-        # If 1d strongly against position, reduce size by half
-        if desired_signal > 0 and price_below_1d:
-            desired_signal = desired_signal * 0.5
-        elif desired_signal < 0 and price_above_1d:
-            desired_signal = desired_signal * 0.5
+        if is_choppy:
+            # MEAN REVERSION REGIME - trade Fisher extremes
+            if fisher_cross_long:
+                signal_strength = BASE_SIZE if hma_12h_bull else REDUCED_SIZE
+                desired_signal = signal_strength
+            elif fisher_cross_short:
+                signal_strength = BASE_SIZE if hma_12h_bear else REDUCED_SIZE
+                desired_signal = -signal_strength
+            # Also allow entries at extreme levels without cross (for more trades)
+            elif fisher[i] < -1.8:
+                signal_strength = REDUCED_SIZE if hma_12h_bull else BASE_SIZE * 0.5
+                desired_signal = signal_strength
+            elif fisher[i] > 1.8:
+                signal_strength = REDUCED_SIZE if hma_12h_bear else BASE_SIZE * 0.5
+                desired_signal = -signal_strength
+        
+        elif is_trending:
+            # TREND REGIME - trade with HTF bias only
+            if hma_12h_bull and fisher_cross_long:
+                desired_signal = BASE_SIZE
+            elif hma_12h_bull and fisher[i] < -1.0:
+                # Pullback entry in uptrend
+                desired_signal = REDUCED_SIZE
+            elif hma_12h_bear and fisher_cross_short:
+                desired_signal = -BASE_SIZE
+            elif hma_12h_bear and fisher[i] > 1.0:
+                # Pullback entry in downtrend
+                desired_signal = -REDUCED_SIZE
+        
+        else:
+            # NEUTRAL REGIME - only trade with strong HTF alignment + Fisher confirmation
+            if hma_12h_bull and fisher[i] < -1.0:
+                desired_signal = REDUCED_SIZE
+            elif hma_12h_bear and fisher[i] > 1.0:
+                desired_signal = -REDUCED_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -309,7 +344,7 @@ def generate_signals(prices):
             final_signal = REDUCED_SIZE
         elif desired_signal <= -REDUCED_SIZE * 0.85:
             final_signal = -REDUCED_SIZE
-        elif abs(desired_signal) >= 0.08:
+        elif abs(desired_signal) >= 0.10:
             final_signal = np.sign(desired_signal) * REDUCED_SIZE
         else:
             final_signal = 0.0
@@ -324,7 +359,6 @@ def generate_signals(prices):
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
-                # Flip position
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr[i]
@@ -344,5 +378,9 @@ def generate_signals(prices):
                 lowest_since_entry = float('inf')
         
         signals[i] = final_signal
+        
+        # Update Fisher tracking
+        prev_fisher = fisher[i]
+        prev_fisher_valid = True
     
     return signals
