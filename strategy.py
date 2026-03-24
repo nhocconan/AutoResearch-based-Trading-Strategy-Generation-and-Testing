@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 4h Primary + 12h/1d HTF — Vol Spike Reversion + Regime Adaptive
+Experiment #029: 15m Primary + 1h/1d HTF — Camarilla Pivot + RSI Mean Reversion + Session Filter
 
-Hypothesis: After 27 failed experiments, the pattern shows:
-- Pure trend following fails on BTC/ETH in bear/range (2022 crash, 2025 bear)
-- CRSI+Choppiness combos are overused and not working on 4h
-- Vol spike reversion works well for capturing panic bottoms (ATR ratio > 1.8)
-- Regime-adaptive logic (different for bull/bear/chop) improves win rate
-- 12h HMA for intermediate trend, 1d HMA for major trend bias
-- This combines: Vol spike reversion (proven in bear) + Donchian breakout (trending) + Choppiness regime
+Hypothesis: 15m strategies fail due to either too many trades (fee drag) or too few (0 Sharpe).
+Solution: Use 1d Camarilla pivot levels for key S/R zones, 1h HMA for trend bias, 15m RSI for entry timing.
+- Camarilla R3/S3 = mean reversion zones (fade extremes)
+- Camarilla R4/S4 = breakout zones (follow with trend)
+- Session filter: Only trade 00-12 UTC (London+NY overlap, highest crypto volume)
+- 3+ confluence required: HTF trend + pivot level + RSI extreme + session
+- Position size: 0.18 (conservative for 15m frequency)
+- Target: 50-80 trades/year, Sharpe > 0.2
 
-Key design:
-- Timeframe: 4h (20-50 trades/year target)
-- HTF: 12h HMA + 1d HMA for dual trend bias
-- Vol spike: ATR(7)/ATR(30) > 1.8 = panic/extreme vol
-- Regime: CHOP>55 = range (mean revert), CHOP<55 = trend (breakout)
-- Asymmetric: In bear (price<1d HMA), only short breakouts, long vol spike reversion
-- Position size: 0.27 (27% of capital)
-- Stoploss: 2.5x ATR trailing
-
-Target: Sharpe>0.167 (beat current best), DD>-40%, trades>=30 train, >=3 test
+Key design choices:
+- Timeframe: 15m (use HTF for direction, 15m for precise entry)
+- HTF: 1d Camarilla pivots + 1h HMA trend
+- Entry: RSI(7) extremes at pivot levels with session filter
+- Stoploss: 2.0x ATR trailing (tighter for 15m)
+- LOOSE enough filters to ensure >=30 trades on train, >=3 on test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_volspike_regime_hma_12h1d_v1"
-timeframe = "4h"
+name = "mtf_15m_camarilla_rsi_session_1h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -73,7 +70,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range for stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -86,86 +83,82 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - measures market choppiness vs trending"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+def calculate_camarilla_pivots(open_prev, high_prev, low_prev, close_prev):
+    """
+    Camarilla Pivot Points
+    R4/S4 = breakout levels, R3/S3 = mean reversion levels
+    Formula based on previous day's OHLC
+    """
+    range_hl = high_prev - low_prev
     
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    r4 = close_prev + range_hl * 1.5000
+    r3 = close_prev + range_hl * 1.2500
+    r2 = close_prev + range_hl * 1.1666
+    r1 = close_prev + range_hl * 1.0833
     
-    chop = np.zeros(n)
-    chop[:] = np.nan
+    s4 = close_prev - range_hl * 1.5000
+    s3 = close_prev - range_hl * 1.2500
+    s2 = close_prev - range_hl * 1.1666
+    s1 = close_prev - range_hl * 1.0833
     
-    for i in range(period, n):
-        sum_tr = np.sum(tr[i-period+1:i+1])
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        range_hl = highest_high - lowest_low
-        
-        if range_hl > 1e-10 and sum_tr > 1e-10:
-            chop[i] = 100.0 * np.log10(sum_tr / range_hl) / np.log10(period)
-        else:
-            chop[i] = 50.0
+    pivot = (high_prev + low_prev + close_prev) / 3.0
     
-    return chop
+    return r4, r3, r2, r1, pivot, s1, s2, s3, s4
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
+def get_session_hour(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds
+    hour = (open_time // (1000 * 60 * 60)) % 24
+    return hour
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_price = prices["open"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_1h = get_htf_data(prices, '1h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 12h HMA for intermediate trend
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 1h HMA for trend bias
+    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
     
     # Calculate and align 1d HMA for major trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
-    hma_4h = calculate_hma(close, period=21)
-    rsi = calculate_rsi(close, period=14)
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_14 = calculate_atr(high, low, close, period=14)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    chop = calculate_choppiness(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    # Calculate 1d Camarilla pivots and align
+    n_1d = len(df_1d)
+    r4_1d = np.zeros(n_1d)
+    r3_1d = np.zeros(n_1d)
+    s3_1d = np.zeros(n_1d)
+    s4_1d = np.zeros(n_1d)
     
-    # Volatility spike ratio: ATR(7)/ATR(30)
-    vol_ratio = np.zeros(n)
-    vol_ratio[:] = np.nan
-    for i in range(30, n):
-        if atr_30[i] > 1e-10:
-            vol_ratio[i] = atr_7[i] / atr_30[i]
+    for i in range(1, n_1d):
+        r4_1d[i], r3_1d[i], _, _, _, _, _, s3_1d[i], s4_1d[i] = calculate_camarilla_pivots(
+            df_1d['open'].values[i-1],
+            df_1d['high'].values[i-1],
+            df_1d['low'].values[i-1],
+            df_1d['close'].values[i-1]
+        )
+    
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Calculate primary (15m) indicators
+    rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
+    atr = calculate_atr(high, low, close, period=14)
+    hma_15m = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
-    SIZE = 0.27  # 27% position size
+    SIZE = 0.18  # 18% position size (conservative for 15m)
     
     # Position tracking for stoploss
     in_position = False
@@ -177,120 +170,99 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h[i]) or np.isnan(rsi[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(chop[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(hma_15m[i]) or np.isnan(hma_1h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(vol_ratio[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (12h + 1d HMA) ===
-        htf_12h_bull = close[i] > hma_12h_aligned[i]
-        htf_12h_bear = close[i] < hma_12h_aligned[i]
+        # === SESSION FILTER (00-12 UTC = London+NY overlap) ===
+        hour = get_session_hour(open_time[i])
+        in_session = (hour >= 0 and hour <= 12)
+        
+        # === HTF TREND BIAS ===
+        htf_1h_bull = close[i] > hma_1h_aligned[i]
+        htf_1h_bear = close[i] < hma_1h_aligned[i]
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # Major regime: bull market vs bear market
-        is_bull_market = htf_1d_bull
-        is_bear_market = htf_1d_bear
+        # === 15m HMA TREND ===
+        hma_15m_bull = close[i] > hma_15m[i]
+        hma_15m_bear = close[i] < hma_15m[i]
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        is_choppy = chop[i] > 55.0
-        is_trending = chop[i] <= 55.0
+        # === CAMARILLA PIVOT LEVELS ===
+        # Near S3 = oversold zone (mean reversion long)
+        # Near R3 = overbought zone (mean reversion short)
+        # Break above R4 = bullish breakout
+        # Break below S4 = bearish breakout
+        near_s3 = close[i] <= s3_aligned[i] * 1.002  # within 0.2% of S3
+        near_r3 = close[i] >= r3_aligned[i] * 0.998  # within 0.2% of R3
+        breakout_r4 = close[i] > r4_aligned[i]
+        breakout_s4 = close[i] < s4_aligned[i]
         
-        # === VOLATILITY SPIKE DETECTION ===
-        vol_spike = vol_ratio[i] > 1.8  # ATR(7) > 1.8x ATR(30)
-        vol_extreme = vol_ratio[i] > 2.2  # Extreme panic
+        # === RSI EXTREMES (LOOSE to ensure trades) ===
+        rsi_oversold = rsi_7[i] < 35.0
+        rsi_overbought = rsi_7[i] > 65.0
+        rsi_extreme_oversold = rsi_7[i] < 25.0
+        rsi_extreme_overbought = rsi_7[i] > 75.0
         
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        donchian_breakout_bull = close[i] > donchian_upper[i-1]
-        donchian_breakout_bear = close[i] < donchian_lower[i-1]
-        
-        # === MEAN REVERSION SIGNALS (in choppy regime) ===
-        donchian_range = donchian_upper[i] - donchian_lower[i] + 1e-10
-        near_lower = (close[i] - donchian_lower[i]) / donchian_range < 0.15
-        near_upper = (close[i] - donchian_lower[i]) / donchian_range > 0.85
-        
-        # === RSI FILTER ===
-        rsi_oversold = rsi[i] < 35.0
-        rsi_overbought = rsi[i] > 65.0
-        rsi_ok_long = rsi[i] > 25.0
-        rsi_ok_short = rsi[i] < 75.0
-        
-        # === 4h HMA TREND ===
-        hma_bull = close[i] > hma_4h[i]
-        hma_bear = close[i] < hma_4h[i]
-        
-        # === ASYMMETRIC REGIME LOGIC ===
+        # === DESIRED SIGNAL (Multiple Entry Patterns) ===
         desired_signal = 0.0
         
-        if is_bear_market:
-            # BEAR MARKET: Prefer shorts on breakouts, longs only on vol spike reversion
-            if is_trending:
-                # Short breakouts with HTF confirmation
-                if donchian_breakout_bear and htf_12h_bear and rsi_ok_short:
-                    desired_signal = -SIZE
-                # Long ONLY on extreme vol spike (panic bottom)
-                elif vol_extreme and rsi_oversold and hma_bull:
-                    desired_signal = SIZE * 0.6
-            else:
-                # Choppy bear: mean revert shorts at upper, vol spike longs at lower
-                if near_upper and rsi_overbought:
-                    desired_signal = -SIZE * 0.8
-                elif vol_spike and rsi_oversold and near_lower:
-                    desired_signal = SIZE * 0.7
-        else:
-            # BULL MARKET: Prefer longs on breakouts, shorts only on vol spike
-            if is_trending:
-                # Long breakouts with HTF confirmation
-                if donchian_breakout_bull and htf_12h_bull and rsi_ok_long:
-                    desired_signal = SIZE
-                # Short ONLY on extreme vol spike (panic top)
-                elif vol_extreme and rsi_overbought and hma_bear:
-                    desired_signal = -SIZE * 0.6
-            else:
-                # Choppy bull: mean revert longs at lower, vol spike shorts at upper
-                if near_lower and rsi_oversold:
-                    desired_signal = SIZE * 0.8
-                elif vol_spike and rsi_overbought and near_upper:
-                    desired_signal = -SIZE * 0.7
+        # Pattern 1: Mean reversion at S3 + RSI oversold + HTF not bearish
+        if near_s3 and rsi_oversold and not htf_1d_bear and in_session:
+            desired_signal = SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
+        # Pattern 2: Mean reversion at R3 + RSI overbought + HTF not bullish
+        elif near_r3 and rsi_overbought and not htf_1d_bull and in_session:
+            desired_signal = -SIZE
+        
+        # Pattern 3: Breakout above R4 + HTF bull + RSI confirming
+        elif breakout_r4 and htf_1h_bull and rsi_7[i] > 50.0 and in_session:
+            desired_signal = SIZE * 0.7
+        
+        # Pattern 4: Breakout below S4 + HTF bear + RSI confirming
+        elif breakout_s4 and htf_1h_bear and rsi_7[i] < 50.0 and in_session:
+            desired_signal = -SIZE * 0.7
+        
+        # Pattern 5: Extreme RSI mean reversion (any session)
+        elif rsi_extreme_oversold and hma_15m_bull and not htf_1d_bear:
+            desired_signal = SIZE * 0.5
+        
+        elif rsi_extreme_overbought and hma_15m_bear and not htf_1d_bull:
+            desired_signal = -SIZE * 0.5
+        
+        # === STOPLOSS CHECK (Trailing ATR 2.0x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * entry_atr
+            stop_price = highest_since_entry - 2.0 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * entry_atr
+            stop_price = lowest_since_entry + 2.0 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -315,13 +287,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
+                # Flip position
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
