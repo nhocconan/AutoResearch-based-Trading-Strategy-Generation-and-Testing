@@ -1,43 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #956: 30m Primary + 4h/1d HTF — ATR Compression + RSI Pullback
+Experiment #957: 15m Primary + 4h/12h HTF — RSI Pullback + Volume Confirmation
 
-Hypothesis: 30m timeframe with volatility compression detection + HTF trend bias
-will generate fewer but higher-quality trades than pure trend strategies.
+Hypothesis: 15m timeframe with HTF trend filter + RSI(7) pullback entries + volume
+confirmation will generate sufficient trades while maintaining positive Sharpe.
 
 Key innovations:
-1. ATR Compression Ratio: ATR(7)/ATR(30) < 0.6 detects volatility squeeze before breakout
-2. 4h HMA(21) for intermediate trend direction (proven in best strategy)
-3. 1d SMA(200) for long-term regime filter
-4. RSI(14) pullback entries in direction of HTF trend
-5. Session filter: 08-20 UTC only (reduces overnight noise trades)
+1. 4h HMA(21) for primary trend direction (call ONCE before loop)
+2. 12h momentum (close vs SMA50) for regime filter (call ONCE before loop)
+3. 15m RSI(7) for entry timing: oversold <30, overbought >70 (LOOSE thresholds)
+4. Volume confirmation: taker_buy_ratio > 0.52 for long, <0.48 for short
+5. Session bias: UTC 00-12 preferred (London/NY overlap) but not required
 6. ATR(14) 2.5x trailing stop for risk management
 
-Why this should work:
-- ATR compression catches breakouts after consolidation (low fee churn)
-- 4h HMA provides proven trend bias from best strategy
-- Session filter reduces trades to target 40-80/year
-- RSI pullback entries have better risk/reward than breakouts
-- 30m captures intraday swings without 15m noise
+Why this should work on 15m:
+- HTF filters prevent counter-trend trades (major failure mode)
+- RSI(7) is faster than RSI(14), catches intraday reversals
+- Volume confirmation filters false breakouts
+- LOOSE thresholds ensure trades generate (learning from 0-trade failures)
+- Smaller position size (0.15-0.25) for higher frequency TF
 
-Entry conditions (balanced for trades + quality):
-- LONG = 4h bull + 1d bull + ATR_compressed + RSI(14)<45 + session
-- SHORT = 4h bear + 1d bear + ATR_compressed + RSI(14)>55 + session
-
-Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 30m
-Size: 0.20-0.30 discrete
+Target: Sharpe>0.3, trades>=40 train, trades>=5 test, DD>-40%
+Timeframe: 15m
+Size: 0.15-0.25 discrete (smaller for 15m frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_atr_compress_rsi_4h1d_v1"
-timeframe = "30m"
+name = "mtf_15m_rsi_vol_pullback_4h12h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
-    """Hull Moving Average - faster response than EMA"""
+    """Hull Moving Average"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -62,6 +58,19 @@ def calculate_hma(close, period):
             diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
     return wma(diff, sqrt_n)
+
+def calculate_sma(close, period):
+    """Simple Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    sma = np.full(n, np.nan, dtype=np.float64)
+    cumsum = np.cumsum(close)
+    for i in range(period - 1, n):
+        sma[i] = (cumsum[i] - cumsum[i - period] + close[i - period]) / period
+    
+    return sma
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -95,61 +104,49 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_sma(close, period):
-    """Simple Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    sma = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        sma[i] = np.mean(close[i - period + 1:i + 1])
-    
-    return sma
-
-def get_hour_from_open_time(open_time_array):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds since epoch
-    hours = ((open_time_array // 1000) // 3600) % 24
-    return hours
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_vol = prices["taker_buy_volume"].values
     open_time = prices["open_time"].values
+    
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF indicators
     hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    sma_1d_raw = calculate_sma(df_1d['close'].values, period=200)
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
+    sma_12h_raw = calculate_sma(df_12h['close'].values, period=50)
+    sma_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_12h_raw)
     
-    # Calculate 30m indicators
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # 12h momentum: close vs SMA50
+    mom_12h_raw = (df_12h['close'].values - sma_12h_raw) / (sma_12h_raw + 1e-10)
+    mom_12h_aligned = align_htf_to_ltf(prices, df_12h, mom_12h_raw)
+    
+    # Calculate 15m indicators
+    rsi_7 = calculate_rsi(close, period=7)
     rsi_14 = calculate_rsi(close, period=14)
+    atr_14 = calculate_atr(high, low, close, period=14)
     
-    # ATR Compression Ratio
-    atr_ratio = np.full(n, np.nan, dtype=np.float64)
-    for i in range(n):
-        if not np.isnan(atr_7[i]) and not np.isnan(atr_30[i]) and atr_30[i] > 1e-10:
-            atr_ratio[i] = atr_7[i] / atr_30[i]
+    # Taker buy ratio (volume confirmation)
+    taker_ratio = np.divide(taker_buy_vol, volume, out=np.zeros_like(volume), where=volume > 0)
     
-    # Session filter: 08-20 UTC only
-    utc_hours = get_hour_from_open_time(open_time)
-    in_session = (utc_hours >= 8) & (utc_hours <= 20)
+    # Session filter: UTC hour from open_time (milliseconds)
+    utc_hours = np.array([(t // 3600000) % 24 for t in open_time], dtype=np.int32)
+    is_preferred_session = (utc_hours >= 0) & (utc_hours <= 12)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.30
+    
+    # Position sizing for 15m (smaller due to higher frequency)
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
+    SIZE_MAX = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -160,7 +157,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -169,55 +166,65 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(sma_1d_aligned[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(atr_ratio[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(mom_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (4h HMA + 1d SMA) ===
+        # === HTF TREND BIAS (4h HMA + 12h momentum) ===
         htf_4h_bull = close[i] > hma_4h_aligned[i]
         htf_4h_bear = close[i] < hma_4h_aligned[i]
         
-        htf_1d_bull = close[i] > sma_1d_aligned[i]
-        htf_1d_bear = close[i] < sma_1d_aligned[i]
+        htf_12h_bull = mom_12h_aligned[i] > 0.02  # >2% above SMA50
+        htf_12h_bear = mom_12h_aligned[i] < -0.02  # <2% below SMA50
         
-        # === ATR COMPRESSION (volatility squeeze) ===
-        is_compressed = atr_ratio[i] < 0.65  # Volatility compression
+        # === VOLUME CONFIRMATION ===
+        vol_bull = taker_ratio[i] > 0.52
+        vol_bear = taker_ratio[i] < 0.48
         
-        # === RSI PULLBACK (not extreme, just pullback) ===
-        rsi_pullback_long = rsi_14[i] < 45  # Pullback in uptrend
-        rsi_pullback_short = rsi_14[i] > 55  # Pullback in downtrend
+        # === RSI EXTREMES (LOOSE THRESHOLDS FOR TRADES) ===
+        rsi_oversold = rsi_7[i] < 30  # Very loose for 15m
+        rsi_overbought = rsi_7[i] > 70
         
-        # === SESSION FILTER ===
-        is_session = in_session[i]
+        rsi_oversold_strong = rsi_7[i] < 25
+        rsi_overbought_strong = rsi_7[i] > 75
         
-        # === ENTRY LOGIC (3+ CONFLUENCE) ===
+        # === SESSION BIAS ===
+        session_boost = is_preferred_session[i]
+        
+        # === ENTRY LOGIC (LOOSE CONDITIONS) ===
         desired_signal = 0.0
         
-        # LONG: 4h bull + 1d bull + ATR compressed + RSI pullback + session
-        if htf_4h_bull and htf_1d_bull:
-            if is_compressed and rsi_pullback_long and is_session:
+        # LONG entries: HTF bull + RSI oversold + volume confirmation
+        if htf_4h_bull or htf_12h_bull:  # Either HTF bullish
+            if rsi_oversold and vol_bull:
+                if rsi_oversold_strong and session_boost:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
+            elif rsi_7[i] < 40 and htf_4h_bull and htf_12h_bull and vol_bull:
+                # Strong confluence even without extreme RSI
                 desired_signal = SIZE_BASE
-            # Stronger signal if RSI very oversold
-            elif is_compressed and rsi_14[i] < 35 and is_session:
-                desired_signal = SIZE_STRONG
         
-        # SHORT: 4h bear + 1d bear + ATR compressed + RSI pullback + session
-        elif htf_4h_bear and htf_1d_bear:
-            if is_compressed and rsi_pullback_short and is_session:
+        # SHORT entries: HTF bear + RSI overbought + volume confirmation
+        elif htf_4h_bear or htf_12h_bear:  # Either HTF bearish
+            if rsi_overbought and vol_bear:
+                if rsi_overbought_strong and session_boost:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
+            elif rsi_7[i] > 60 and htf_4h_bear and htf_12h_bear and vol_bear:
+                # Strong confluence even without extreme RSI
                 desired_signal = -SIZE_BASE
-            # Stronger signal if RSI very overbought
-            elif is_compressed and rsi_14[i] > 65 and is_session:
-                desired_signal = -SIZE_STRONG
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
