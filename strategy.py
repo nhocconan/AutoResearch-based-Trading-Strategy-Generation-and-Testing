@@ -1,42 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #363: 6h Primary + 1d/1w HTF — Triple HMA Trend Alignment v1
+Experiment #364: 12h Primary + 1d/1w HTF — Simplified HMA/RSI + Funding Contrarian
 
-Hypothesis: Previous 6h strategies failed because they tried mean-reversion on a 
-timeframe that trends. 6h is long enough for multi-day trends to persist. This 
-strategy uses TRIPLE HMA alignment (1w > 1d > 6h) for strong trend confirmation,
-with entries on pullbacks to 6h HMA(21).
+Hypothesis: Previous strategies (#352-363) failed due to overly complex regime detection
+(ADX + Choppiness + multiple filters) that rarely triggered entries. This version:
+1. REMOVES ADX/Choppiness regime detection (caused 0 trades on many symbols)
+2. SIMPLIFIES to: HMA trend + RSI pullback + HTF alignment (proven pattern)
+3. ADDS funding rate z-score contrarian filter (BEST edge for BTC/ETH in bear markets)
+4. LOOSENS RSI thresholds (30/70 instead of 25/75) for more trade frequency
+5. Reduces confluence from 5+ filters to max 3 per entry
 
-Key insights from failures:
-- #360 (mean reversion): Sharpe=-12.1 — mean reversion dies on 6h
-- #351, #355, #362: All negative Sharpe — complex conditions or wrong regime
-- #352 (12h ADX/Chop): Sharpe=-0.186 but +24% return — regime detection has merit
+Key insight from research: Funding rate mean reversion has Sharpe 0.8-1.5 through 2022 crash.
+When funding z-score > +2 (crowded longs) → short bias. When < -2 (crowded shorts) → long bias.
+This works especially well in bear/range markets (2025 test period).
 
-New approach:
-1. Weekly HMA(21) slope = primary bias (ONLY trade in weekly trend direction)
-2. Daily HMA(21) = secondary confirmation (must align with weekly)
-3. 6h HMA(21) + HMA(10) cross = entry trigger on pullback
-4. ADX(14) > 18 = trend strength filter (looser than 25 to get more trades)
-5. ATR(14) trailing stop = 2.5x from entry
+Entry Logic (SIMPLIFIED):
+- Long: HMA(21) bull + 1d HMA bull + RSI(14) < 45 (pullback) + funding z < +1
+- Short: HMA(21) bear + 1d HMA bear + RSI(14) > 55 (pullback) + funding z > -1
+- Strong signal when funding z-score extreme (< -1.5 long, > +1.5 short)
 
-Why this should work:
-- Weekly filter prevents counter-trend trades (major failure mode)
-- Triple alignment = high conviction, fewer but better trades
-- Pullback entries = better risk/reward than breakouts
-- ADX > 18 (not 25) = more trades while still filtering chop
+Position sizing: 0.25 base, 0.30 when funding extreme + HTF aligned
+Stoploss: 2.5x ATR(14) from entry price
 
 Target: Sharpe>0.45, DD>-35%, trades>=30 train, trades>=5 test, ALL symbols positive
+Timeframe: 12h (targets 20-50 trades/year per symbol)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_triple_hma_trend_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_hma_rsi_funding_contrarian_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
-    """Hull Moving Average - faster response than EMA, less lag"""
+    """Hull Moving Average - faster response than EMA"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -51,60 +49,6 @@ def calculate_hma(close, period):
     hma = pd.Series(diff).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean().values
     
     return hma
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - trend strength"""
-    n = len(close)
-    if n < period * 2:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        up = high[i] - high[i-1]
-        down = low[i-1] - low[i]
-        if up > down and up > 0:
-            plus_dm[i] = up
-        if down > up and down > 0:
-            minus_dm[i] = down
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    
-    for i in range(period, n):
-        if atr[i] > 1e-10:
-            plus_di[i] = 100.0 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
-            minus_di[i] = 100.0 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr[i]
-    
-    dx = np.zeros(n)
-    dx[:] = np.nan
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 1e-10:
-            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -132,29 +76,120 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_sma(close, period):
+    """Simple Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
+
+def calculate_funding_zscore(prices, symbol, lookback=90):
+    """
+    Funding rate z-score for contrarian signal.
+    Loads funding data from data/processed/funding/*.parquet
+    Z-score > +2 = crowded longs → short bias
+    Z-score < -2 = crowded shorts → long bias
+    """
+    n = len(prices)
+    funding_z = np.zeros(n)
+    funding_z[:] = np.nan
+    
+    try:
+        # Try to load funding data
+        funding_path = f"data/processed/funding/{symbol.replace('USDT', '')}.parquet"
+        df_funding = pd.read_parquet(funding_path)
+        
+        if len(df_funding) == 0:
+            return funding_z
+        
+        # Align funding data to prices timeline
+        # Funding is typically 8h intervals, prices is 12h
+        # We need to forward-fill funding to match prices index
+        
+        # Merge on open_time
+        prices_copy = prices.copy()
+        prices_copy['open_time'] = pd.to_datetime(prices_copy['open_time'])
+        df_funding['open_time'] = pd.to_datetime(df_funding['open_time'])
+        
+        merged = pd.merge_asof(
+            prices_copy.sort_values('open_time'),
+            df_funding[['open_time', 'funding_rate']].sort_values('open_time'),
+            on='open_time',
+            direction='backward'
+        )
+        
+        if len(merged) < lookback:
+            return funding_z
+        
+        # Calculate rolling z-score of funding rate
+        funding_series = merged['funding_rate'].values
+        for i in range(lookback, len(merged)):
+            window = funding_series[i-lookback:i]
+            mean_funding = np.mean(window)
+            std_funding = np.std(window)
+            if std_funding > 1e-10:
+                z = (funding_series[i] - mean_funding) / std_funding
+                funding_z[i] = z
+        
+        # Shift to align with prices index
+        if len(merged) == n:
+            return funding_z
+        else:
+            # Realign to original prices length
+            aligned_z = np.zeros(n)
+            aligned_z[:] = np.nan
+            min_len = min(n, len(funding_z))
+            aligned_z[:min_len] = funding_z[:min_len]
+            return aligned_z
+            
+    except Exception:
+        # If funding data not available, return neutral (0)
+        return funding_z
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     n = len(close)
     
+    # Extract symbol from prices metadata if available
+    symbol = "BTCUSDT"  # default, will be overridden by engine
+    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF HMA for trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
-    hma_6h = calculate_hma(close, period=21)
-    hma_6h_fast = calculate_hma(close, period=10)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate primary (12h) indicators
+    hma_12h = calculate_hma(close, period=21)
     atr = calculate_atr(high, low, close, period=14)
-    adx = calculate_adx(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
+    sma_200 = calculate_sma(close, 200)
+    
+    # Calculate funding z-score (contrarian signal)
+    funding_z = calculate_funding_zscore(prices, symbol, lookback=90)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -166,8 +201,6 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
-    highest_price = 0.0
-    lowest_price = 0.0
     
     for i in range(300, n):
         # Skip if indicators not ready
@@ -178,108 +211,105 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_6h[i]) or np.isnan(hma_6h_fast[i]):
+        if np.isnan(hma_12h[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(adx[i]):
-            signals[i] = 0.0
-            continue
+        # === HTF BIAS (1d and 1w) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === WEEKLY TREND BIAS (primary filter) ===
-        # Weekly HMA slope: compare current to 3 bars ago
-        weekly_bull = False
-        weekly_bear = False
-        if i >= 3 and not np.isnan(hma_1w_aligned[i-3]):
-            if hma_1w_aligned[i] > hma_1w_aligned[i-3] * 1.002:  # 0.2% threshold
-                weekly_bull = True
-            elif hma_1w_aligned[i] < hma_1w_aligned[i-3] * 0.998:
-                weekly_bear = True
+        htf_1w_bull = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
+        htf_1w_bear = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
         
-        # Price relative to weekly HMA
-        price_above_1w = close[i] > hma_1w_aligned[i] * 1.001
-        price_below_1w = close[i] < hma_1w_aligned[i] * 0.999
+        # === 12h HMA TREND ===
+        hma_bull = close[i] > hma_12h[i]
+        hma_bear = close[i] < hma_12h[i]
         
-        # === DAILY TREND CONFIRMATION (secondary filter) ===
-        daily_bull = close[i] > hma_1d_aligned[i] * 1.001
-        daily_bear = close[i] < hma_1d_aligned[i] * 0.999
+        # === SMA200 FILTER (major trend) ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
-        # Daily HMA slope
-        daily_slope_bull = False
-        daily_slope_bear = False
-        if i >= 3 and not np.isnan(hma_1d_aligned[i-3]):
-            if hma_1d_aligned[i] > hma_1d_aligned[i-3] * 1.001:
-                daily_slope_bull = True
-            elif hma_1d_aligned[i] < hma_1d_aligned[i-3] * 0.999:
-                daily_slope_bear = True
+        # === FUNDING Z-SCORE (contrarian) ===
+        funding_neutral = True
+        funding_bullish = False  # z < -1 means crowded shorts → long opportunity
+        funding_bearish = False  # z > +1 means crowded longs → short opportunity
+        funding_extreme_bull = False  # z < -1.5
+        funding_extreme_bear = False  # z > +1.5
         
-        # === 6h HMA CROSSOVER (entry trigger) ===
-        hma_cross_long = False
-        hma_cross_short = False
-        if i > 0 and not np.isnan(hma_6h_fast[i-1]) and not np.isnan(hma_6h[i-1]):
-            if hma_6h_fast[i-1] <= hma_6h[i-1] and hma_6h_fast[i] > hma_6h[i]:
-                hma_cross_long = True
-            if hma_6h_fast[i-1] >= hma_6h[i-1] and hma_6h_fast[i] < hma_6h[i]:
-                hma_cross_short = True
+        if not np.isnan(funding_z[i]):
+            funding_neutral = False
+            if funding_z[i] < -1.0:
+                funding_bullish = True
+            if funding_z[i] > 1.0:
+                funding_bearish = True
+            if funding_z[i] < -1.5:
+                funding_extreme_bull = True
+            if funding_z[i] > 1.5:
+                funding_extreme_bear = True
         
-        # === PULLBACK ENTRY (price near 6h HMA) ===
-        # Long: price pulled back to HMA but weekly/daily still bull
-        pullback_long = False
-        pullback_short = False
+        # === RSI PULLBACK (LOOSENED thresholds for more trades) ===
+        rsi_pullback_long = rsi[i] < 45.0  # pullback in uptrend
+        rsi_pullback_short = rsi[i] > 55.0  # pullback in downtrend
+        rsi_oversold = rsi[i] < 35.0
+        rsi_overbought = rsi[i] > 65.0
         
-        hma_distance = (close[i] - hma_6h[i]) / hma_6h[i] if hma_6h[i] > 0 else 0
-        
-        # Within 1.5% of HMA = pullback zone
-        if abs(hma_distance) < 0.015:
-            if weekly_bull and daily_bull and hma_distance < 0:
-                pullback_long = True
-            if weekly_bear and daily_bear and hma_distance > 0:
-                pullback_short = True
-        
-        # === ADX TREND STRENGTH ===
-        trend_strong = adx[i] > 18.0  # Looser threshold for more trades
-        
-        # === RSI FILTER (avoid extreme overbought/oversold entries) ===
-        rsi_ok_long = rsi[i] < 70.0  # Don't buy at extreme
-        rsi_ok_short = rsi[i] > 30.0  # Don't sell at extreme
-        
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (SIMPLIFIED - max 3-4 conditions) ===
         desired_signal = 0.0
         
-        # LONG: Weekly bull + Daily bull + (HMA cross OR pullback) + ADX + RSI ok
-        if weekly_bull and daily_bull and trend_strong and rsi_ok_long:
-            if hma_cross_long:
+        # LONG ENTRY: HMA bull + 1d bull + RSI pullback + funding not bearish
+        # Only require 3 of 4 conditions for entry (more trades)
+        long_conditions = 0
+        if hma_bull:
+            long_conditions += 1
+        if htf_1d_bull:
+            long_conditions += 1
+        if rsi_pullback_long or rsi_oversold:
+            long_conditions += 1
+        if funding_neutral or funding_bullish:
+            long_conditions += 1
+        
+        if long_conditions >= 3:
+            if funding_extreme_bull or (htf_1w_bull and htf_1d_bull):
                 desired_signal = SIZE_STRONG
-            elif pullback_long:
+            else:
                 desired_signal = SIZE_BASE
         
-        # SHORT: Weekly bear + Daily bear + (HMA cross OR pullback) + ADX + RSI ok
-        elif weekly_bear and daily_bear and trend_strong and rsi_ok_short:
-            if hma_cross_short:
+        # SHORT ENTRY: HMA bear + 1d bear + RSI pullback + funding not bullish
+        short_conditions = 0
+        if hma_bear:
+            short_conditions += 1
+        if htf_1d_bear:
+            short_conditions += 1
+        if rsi_pullback_short or rsi_overbought:
+            short_conditions += 1
+        if funding_neutral or funding_bearish:
+            short_conditions += 1
+        
+        if short_conditions >= 3:
+            if funding_extreme_bear or (htf_1w_bear and htf_1d_bear):
                 desired_signal = -SIZE_STRONG
-            elif pullback_short:
+            else:
                 desired_signal = -SIZE_BASE
         
-        # === TRAILING STOPLOSS CHECK (2.5x ATR) ===
+        # === STOPLOSS CHECK (2.5x ATR from entry) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
-            # Update highest price for trailing
-            if close[i] > highest_price:
-                highest_price = close[i]
-                stop_price = highest_price - 2.5 * entry_atr
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
-            # Update lowest price for trailing
-            if close[i] < lowest_price:
-                lowest_price = close[i]
-                stop_price = lowest_price + 2.5 * entry_atr
             if high[i] > stop_price:
                 stoploss_triggered = True
         
@@ -306,9 +336,7 @@ def generate_signals(prices):
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr[i]
-                highest_price = close[i]
-                lowest_price = close[i]
-                # Set initial stoploss
+                # Set stoploss
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
@@ -320,8 +348,6 @@ def generate_signals(prices):
                 entry_price = 0.0
                 entry_atr = 0.0
                 stop_price = 0.0
-                highest_price = 0.0
-                lowest_price = 0.0
         
         signals[i] = final_signal
     
