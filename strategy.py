@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #079: 1h Primary + 4h/12h HTF — RSI Pullback + HMA Trend + Session Filter
+Experiment #080: 6h Primary + 1d/1w HTF — Weekly Trend + Daily Pullback + 6h Entry
 
-Hypothesis: After 78 failed experiments, the clearest pattern is:
-- 1h strategies fail due to TOO STRICT conditions (exp #070, #073, #076, #077 = 0 trades)
-- Complex regime switching adds noise without edge (exp #068, #074, #075, #078 = negative)
-- SOLUTION: Simple 3-filter confluence with LOOSE thresholds to ensure trades generate
-- 4h HMA for trend direction (proven in baseline mtf_hma_rsi_zscore_v1)
-- 1h RSI pullback for entry timing (RSI 35-65 range, not extreme)
-- Session filter 08-20 UTC (active trading hours, less noise)
-- ATR volatility filter to avoid dead markets (ATR ratio > 0.8)
-- Position size: 0.25 (25% of capital, conservative for 1h)
-- Stoploss: 2.5x ATR trailing
+Hypothesis: After 9 failed 6h experiments, the issue is OVER-FILTERING. 
+Previous 6h strategies used too many conflicting conditions (Donchian+HMA+RSI+Chop+CRSI).
+This strategy SIMPLIFIES:
+- 1w HMA(21): Major trend direction (very slow, stable bias)
+- 1d RSI(14): Pullback detection within weekly trend
+- 6h entry trigger: Price action confirms daily signal
+- Fewer filters = MORE trades generated (critical for 6h to hit 30-60/year target)
 
-Key design for TRADE GENERATION (learned from 0-trade failures):
-- RSI long: 30-55 (not <30, allows entries during mild pullbacks)
-- RSI short: 45-70 (not >70, allows entries during mild rallies)
-- Only 3 filters: HTF trend + RSI range + session (no 4th filter blocking trades)
-- Fallback: enter on strong HTF trend even if RSI neutral (ensures trades in strong trends)
+Key differences from failed #071, #075:
+- NO Choppiness Index (adds complexity, reduced trades)
+- NO Donchian breakouts (whipsaw in 6h range markets)
+- NO CRSI (too many conditions, 0 trades on some symbols)
+- SIMPLE: Weekly trend + Daily pullback + 6h confirmation
 
-Target: Sharpe>0.167, DD>-40%, trades>=40/year on train, trades>=5/year on test
+Position sizing: 0.28 (28% capital, conservative for 6h volatility)
+Stoploss: 2.5x ATR trailing
+Target: 30-60 trades/year, Sharpe>0.167 (beat current best)
+
+CRITICAL: Call get_htf_data() ONCE before loop for BOTH 1d and 1w!
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_rsi_pullback_hma_4h12h_session_v1"
-timeframe = "1h"
+name = "mtf_6h_weekly_trend_daily_pullback_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -73,7 +74,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range for stoploss and volatility filter"""
+    """Average True Range for stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -86,35 +87,46 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_sma(close, period):
+    """Simple Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    # Get both 1d and 1w data upfront
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 4h HMA for trend direction
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align 1w HMA for major trend bias (very slow)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate and align 12h HMA for major trend bias
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=50)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 1d RSI for pullback detection
+    rsi_1d_raw = calculate_rsi(df_1d['close'].values, period=14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_raw)
     
-    # Calculate primary (1h) indicators
-    rsi = calculate_rsi(close, period=14)
+    # Calculate 1d HMA for secondary trend confirmation
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate primary (6h) indicators
+    hma_6h = calculate_hma(close, period=21)
+    rsi_6h = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    
-    # ATR ratio for volatility filter (current ATR / 30-bar avg ATR)
-    atr_30 = pd.Series(atr).ewm(span=30, min_periods=30, adjust=False).mean().values
-    atr_ratio = atr / (atr_30 + 1e-10)
+    sma_200 = calculate_sma(close, period=200)
     
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size (conservative for 1h)
+    SIZE = 0.28  # 28% position size (conservative for 6h)
     
     # Position tracking for stoploss
     in_position = False
@@ -124,7 +136,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(100, n):
+    for i in range(250, n):  # Start later to ensure all HTF data aligned
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -132,64 +144,70 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]):
+        if np.isnan(hma_6h[i]) or np.isnan(rsi_6h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma_200[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (08-20 UTC) ===
-        # Extract hour from open_time (milliseconds timestamp)
-        hour_utc = (open_time[i] // 3600000) % 24
-        is_active_session = 8 <= hour_utc <= 20
+        # === WEEKLY TREND BIAS (1w HMA21) ===
+        # This is the PRIMARY filter - only trade in direction of weekly trend
+        weekly_bull = close[i] > hma_1w_aligned[i]
+        weekly_bear = close[i] < hma_1w_aligned[i]
         
-        # === VOLATILITY FILTER ===
-        # Avoid dead markets (ATR ratio > 0.7)
-        vol_ok = atr_ratio[i] > 0.7 or np.isnan(atr_ratio[i])
+        # === DAILY TREND CONFIRMATION (1d HMA50) ===
+        daily_bull = close[i] > hma_1d_aligned[i]
+        daily_bear = close[i] < hma_1d_aligned[i]
         
-        # === HTF TREND BIAS (4h HMA) ===
-        htf_bull = close[i] > hma_4h_aligned[i]
-        htf_bear = close[i] < hma_4h_aligned[i]
+        # === DAILY RSI PULLBACK DETECTION ===
+        # In weekly uptrend: wait for daily RSI pullback to 35-50
+        # In weekly downtrend: wait for daily RSI rally to 50-65
+        daily_rsi_oversold = rsi_1d_aligned[i] < 45.0  # pullback in uptrend
+        daily_rsi_overbought = rsi_1d_aligned[i] > 55.0  # rally in downtrend
         
-        # === MAJOR TREND BIAS (12h HMA) ===
-        major_bull = close[i] > hma_12h_aligned[i]
-        major_bear = close[i] < hma_12h_aligned[i]
+        # === 6H ENTRY TRIGGER ===
+        # 6h RSI confirms the daily signal
+        rsi_6h_oversold = rsi_6h[i] < 40.0
+        rsi_6h_overbought = rsi_6h[i] > 60.0
         
-        # === RSI PULLBACK (LOOSE THRESHOLDS FOR TRADE GENERATION) ===
-        # Long: RSI 30-55 (pullback in uptrend, not oversold extreme)
-        # Short: RSI 45-70 (rally in downtrend, not overbought extreme)
-        rsi_long = 30.0 <= rsi[i] <= 55.0
-        rsi_short = 45.0 <= rsi[i] <= 70.0
+        # 6h price above HMA21 for long confirmation
+        hma_6h_bull = close[i] > hma_6h[i]
+        hma_6h_bear = close[i] < hma_6h[i]
         
-        # === DESIRED SIGNAL (Simple 3-Filter Confluence) ===
+        # === LONG TERM BIAS (SMA200) ===
+        # Only long if price above 200 SMA, only short if below
+        long_term_bull = close[i] > sma_200[i]
+        long_term_bear = close[i] < sma_200[i]
+        
+        # === DESIRED SIGNAL (Multi-TF Confluence) ===
         desired_signal = 0.0
         
-        # LONG: HTF bull + RSI pullback + (session OR major bull)
-        if htf_bull and rsi_long:
-            if is_active_session or major_bull:
-                desired_signal = SIZE
+        # LONG: Weekly bull + Daily bull + Daily RSI pullback + 6h confirmation + Long-term bull
+        if weekly_bull and daily_bull and daily_rsi_oversold and hma_6h_bull and long_term_bull:
+            desired_signal = SIZE
+        # Add secondary long entry: weekly bull + 6h RSI very oversold (deep pullback)
+        elif weekly_bull and rsi_6h[i] < 30.0 and long_term_bull:
+            desired_signal = SIZE * 0.7
         
-        # SHORT: HTF bear + RSI pullback + (session OR major bear)
-        if htf_bear and rsi_short:
-            if is_active_session or major_bear:
-                desired_signal = -SIZE
-        
-        # FALLBACK: Strong HTF trend even with neutral RSI (ensures trades in strong trends)
-        if desired_signal == 0.0:
-            # Very strong 4h trend (price > 2% above HMA)
-            hma_deviation = (close[i] - hma_4h_aligned[i]) / (hma_4h_aligned[i] + 1e-10)
-            
-            if htf_bull and hma_deviation > 0.02 and rsi[i] > 40.0 and rsi[i] < 65.0:
-                desired_signal = SIZE * 0.6
-            elif htf_bear and hma_deviation < -0.02 and rsi[i] > 35.0 and rsi[i] < 60.0:
-                desired_signal = -SIZE * 0.6
+        # SHORT: Weekly bear + Daily bear + Daily RSI rally + 6h confirmation + Long-term bear
+        elif weekly_bear and daily_bear and daily_rsi_overbought and hma_6h_bear and long_term_bear:
+            desired_signal = -SIZE
+        # Add secondary short entry: weekly bear + 6h RSI very overbought (sharp rally)
+        elif weekly_bear and rsi_6h[i] > 70.0 and long_term_bear:
+            desired_signal = -SIZE * 0.7
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -215,9 +233,9 @@ def generate_signals(prices):
         elif desired_signal <= -SIZE * 0.85:
             final_signal = -SIZE
         elif desired_signal >= SIZE * 0.5:
-            final_signal = SIZE * 0.6
+            final_signal = SIZE * 0.5
         elif desired_signal <= -SIZE * 0.5:
-            final_signal = -SIZE * 0.6
+            final_signal = -SIZE * 0.5
         else:
             final_signal = 0.0
         
