@@ -1,39 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #1456: 12h Primary + 1d HTF — Simplified Trend-Pullback Strategy
+Experiment #1457: 1d Primary + 1w HTF — Simplified Choppiness + RSI + HMA
 
-Hypothesis: After 1091 failed strategies, complexity is the enemy. The key insight:
-1. Too many filters = 0 trades (see #1445, #1448, #1455 all Sharpe=0.000)
-2. 12h timeframe needs SIMPLE entries to hit 20-50 trades/year target
-3. 1d HMA provides clean trend filter without over-complicating
-4. RSI(14) extremes + price pullback to EMA = proven entry pattern
-5. ATR trailing stop protects capital in volatile crypto markets
+Hypothesis: The current best (Sharpe=0.618) uses Donchian+HMA+RSI. Recent failures show
+complex multi-condition strategies generate 0 trades. This experiment SIMPLIFIES:
+1. Remove Donchian breakout (too few signals in bear/range 2025 market)
+2. Use standard RSI(14) instead of CRSI (more reliable, fewer edge cases)
+3. Choppiness Index regime switch: mean-revert in chop, trend-follow otherwise
+4. 1w HMA(21) for macro trend filter (proven in current best)
+5. Looser entry thresholds to ensure 30+ trades on train, 3+ on test
 
-Why this differs from failed #1452 (12h dual regime):
-- NO complex regime detection (CHOP/ADX filters killed trade count)
-- NO CRSI (too many calculations, marginal edge)
-- SIMPLE: 1d trend + 12h RSI extreme + pullback = entry
-- Looser thresholds: RSI < 40 / > 60 (not <15 / >85)
-- Position size 0.28 = conservative for 12h volatility
+Why this should work:
+- 1d timeframe proven to work in bear markets (current best Sharpe=0.618)
+- Choppiness + RSI worked on ETH with Sharpe +0.923 in research
+- Simpler conditions = more trades = avoid 0-trade failure mode
+- 1w HMA filter prevents counter-trend trades in strong trends
 
 Design:
-1. 1d HMA(21) = macro trend (call ONCE before loop via mtf_data)
-2. 12h EMA(21) = pullback level for entries
-3. RSI(14) = entry trigger (oversold/overbought)
-4. Long: price > 1d_HMA + RSI < 40 + price < EMA21 (pullback in uptrend)
-5. Short: price < 1d_HMA + RSI > 60 + price > EMA21 (pullback in downtrend)
-6. ATR(14) trailing stop 2.5x = risk management
-7. Position size 0.28 = discrete levels (0.0, ±0.28)
+1. 1w HMA(21) = macro trend (call ONCE before loop)
+2. Choppiness(14) = regime (>55 range, <45 trend)
+3. RSI(14) = entry trigger (<35 oversold, >65 overbought)
+4. Long: CHOP>55 + RSI<35 + price>1w_HMA | Short: CHOP>55 + RSI>65 + price<1w_HMA
+5. Long: CHOP<45 + RSI>50 + price>1w_HMA | Short: CHOP<45 + RSI<50 + price<1w_HMA
+6. ATR(14) trailing stop 2.5x
+7. Position size 0.30
 
-Target: 40-80 trades/year on 12h, Sharpe > 0.618, trades >= 30 train, >= 5 test
-Timeframe: 12h
+Target: 30-60 trades/year, Sharpe > 0.618, trades >= 30 train, >= 3 test
+Timeframe: 1d
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_trend_pullback_rsi_1d_hma_atr_v1"
-timeframe = "12h"
+name = "mtf_1d_chop_rsi_hma_1w_atr_simplified_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -72,17 +72,8 @@ def calculate_hma(close, period=21):
     
     return hma
 
-def calculate_ema(close, period=21):
-    """Exponential Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
-
 def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+    """Relative Strength Index - standard Wilder's RSI"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -102,6 +93,27 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - measures market choppy vs trending"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    chop = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        highest_high = np.nanmax(high[i-period+1:i+1])
+        lowest_low = np.nanmin(low[i-period+1:i+1])
+        
+        if highest_high > lowest_low:
+            tr_sum = 0.0
+            for j in range(i-period+1, i+1):
+                tr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            
+            chop[i] = 100.0 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
+    
+    return chop
+
 def calculate_atr(high, low, close, period=14):
     """Average True Range - for stoploss sizing"""
     n = len(close)
@@ -111,7 +123,7 @@ def calculate_atr(high, low, close, period=14):
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[j] - close[j-1]) if i > 0 else high[i] - low[i])
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
@@ -123,19 +135,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for macro trend
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 1w HMA for macro trend
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (12h) indicators
-    ema_21 = calculate_ema(close, period=21)
-    rsi_14 = calculate_rsi(close, period=14)
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # Calculate primary (1d) indicators
+    rsi = calculate_rsi(close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
+    atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.28
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -147,47 +159,57 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi_14[i]) or np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(ema_21[i]):
+        if np.isnan(chop[i]) or np.isnan(rsi[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === MACRO TREND (1d HMA) ===
-        macro_bull = close[i] > hma_1d_aligned[i]
-        macro_bear = close[i] < hma_1d_aligned[i]
+        # === MACRO TREND (1w HMA) ===
+        macro_bull = close[i] > hma_1w_aligned[i]
+        macro_bear = close[i] < hma_1w_aligned[i]
         
-        # === RSI EXTREMES (looser thresholds for more trades) ===
-        rsi_oversold = rsi_14[i] < 40.0
-        rsi_overbought = rsi_14[i] > 60.0
+        # === CHOPPINESS REGIME ===
+        is_choppy = chop[i] > 55.0  # Range market
+        is_trending = chop[i] < 45.0  # Trend market
         
-        # === PULLBACK TO EMA ===
-        pullback_long = close[i] < ema_21[i]
-        pullback_short = close[i] > ema_21[i]
+        # === RSI SIGNALS ===
+        rsi_oversold = rsi[i] < 35.0
+        rsi_overbought = rsi[i] > 65.0
+        rsi_bullish = rsi[i] > 50.0
+        rsi_bearish = rsi[i] < 50.0
         
-        # === DESIRED SIGNAL - SIMPLE TREND-PULLBACK LOGIC ===
+        # === DESIRED SIGNAL - DUAL REGIME LOGIC ===
         desired_signal = 0.0
         
-        # LONG: Uptrend + RSI oversold + pullback to EMA
-        if macro_bull and rsi_oversold and pullback_long:
+        # LONG ENTRIES
+        # Path 1: Choppy regime + RSI oversold + macro bull (mean reversion)
+        if is_choppy and rsi_oversold and macro_bull:
             desired_signal = BASE_SIZE
+        # Path 2: Trending regime + RSI bullish + macro bull (trend follow)
+        elif is_trending and rsi_bullish and macro_bull:
+            desired_signal = BASE_SIZE
+        # Path 3: Neutral regime + RSI very oversold + macro bull
+        elif rsi[i] < 30.0 and macro_bull:
+            desired_signal = BASE_SIZE * 0.5
         
-        # SHORT: Downtrend + RSI overbought + pullback to EMA
-        elif macro_bear and rsi_overbought and pullback_short:
+        # SHORT ENTRIES
+        # Path 1: Choppy regime + RSI overbought + macro bear (mean reversion)
+        elif is_choppy and rsi_overbought and macro_bear:
             desired_signal = -BASE_SIZE
+        # Path 2: Trending regime + RSI bearish + macro bear (trend follow)
+        elif is_trending and rsi_bearish and macro_bear:
+            desired_signal = -BASE_SIZE
+        # Path 3: Neutral regime + RSI very overbought + macro bear
+        elif rsi[i] > 70.0 and macro_bear:
+            desired_signal = -BASE_SIZE * 0.5
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -208,7 +230,7 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= BASE_SIZE * 0.5:
+        if desired_signal >= BASE_SIZE * 0.4:
             final_signal = BASE_SIZE if desired_signal > 0 else -BASE_SIZE
         else:
             final_signal = 0.0
@@ -219,14 +241,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
                 # Flip position
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
