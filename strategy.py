@@ -1,36 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #172: 12h Primary + 1d HTF — Dual Regime (Chop/Trend) + cRSI + Donchian
+Experiment #173: 5m Primary + 15m/4h HTF — Trend Pullback with Session Filter
 
-Hypothesis: 12h timeframe with regime detection can capture both mean-reversion in 
-choppy markets AND trend-following in trending markets. Previous 12h attempt (#164) 
-failed because it combined too many filters. This version simplifies:
+Hypothesis: 5m timeframe has NEVER been tested (0 experiments). This is unexplored territory.
+5m is extremely noisy, so we need:
+1. Strong HTF trend filter (4h HMA) - ONLY trade in HTF direction
+2. 15m momentum confirmation (RSI) - avoid exhausted moves
+3. 5m entry on pullback to EMA - precision timing
+4. Session filter (08-20 UTC) - avoid low liquidity whipsaws
+5. Small position size (0.15) - more trades = more fee drag
 
-Regime Detection:
-- Choppiness Index (CHOP) > 55 = choppy regime → use Connors RSI mean reversion
-- Choppiness Index (CHOP) < 45 = trending regime → use Donchian breakout + HMA filter
+Key insight from failures: Experiments #161, #165, #169, #170 all got Sharpe=0.000 (0 trades)
+because entry conditions were TOO STRICT. This version loosens entries:
+- RSI threshold: 35-65 (not extreme 20-80)
+- Only require 2 of 3 confluence factors (not all 3)
+- Session filter but not too narrow (12 hours, not 4)
 
-Connors RSI (CRSI) = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-- Long when CRSI < 15 (extreme oversold) + price > SMA200
-- Short when CRSI > 85 (extreme overbought) + price < SMA200
-
-Donchian Breakout:
-- Long when price breaks 20-bar high + HMA(21) bullish
-- Short when price breaks 20-bar low + HMA(21) bearish
-
-1d HTF filter: Only trade in direction of 1d HMA(50) trend
-
-Position sizing: 0.25 base, 0.30 for strong signals
-Stoploss: 2.5x ATR trailing
-
-Target: Sharpe>0.167 (beat current best), DD>-40%, trades>=20 train, trades>=3 test
+Target: 50-120 trades/year, Sharpe>0.167, DD>-40%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_regime_chop_crsi_donchian_1d_v2"
-timeframe = "12h"
+name = "mtf_5m_trend_pullback_session_15m4h_v1"
+timeframe = "5m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -76,6 +69,15 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_ema(close, period):
+    """Exponential Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return ema
+
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -90,108 +92,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness vs trending
-    CHOP > 61.8 = choppy/range bound
-    CHOP < 38.2 = trending
-    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    # Calculate ATR for each bar
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.zeros(n)
-    chop[:] = np.nan
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i-period+1:i+1])
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
-
-def calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100):
-    """
-    Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    
-    RSI_Streak: RSI of consecutive up/down days
-    PercentRank: percentile rank of today's return over last 100 days
-    """
-    n = len(close)
-    if n < pr_period:
-        return np.full(n, np.nan)
-    
-    # RSI(3)
-    rsi_short = calculate_rsi(close, rsi_period)
-    
-    # Streak RSI
-    streak = np.zeros(n)
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = 0
-    
-    # Convert streak to RSI-like value (map streak to 0-100)
-    streak_rsi = np.zeros(n)
-    streak_rsi[:] = np.nan
-    for i in range(streak_period, n):
-        streak_vals = streak[max(0, i-streak_period):i+1]
-        up_streak = np.sum(streak_vals > 0)
-        down_streak = np.sum(streak_vals < 0)
-        total = up_streak + down_streak
-        if total > 0:
-            streak_rsi[i] = 100.0 * up_streak / total
-        else:
-            streak_rsi[i] = 50.0
-    
-    # Percent Rank of returns
-    returns = np.diff(close) / close[:-1]
-    returns = np.concatenate([[0.0], returns])
-    
-    percent_rank = np.zeros(n)
-    percent_rank[:] = np.nan
-    for i in range(pr_period, n):
-        window = returns[i-pr_period:i]
-        if len(window) > 0:
-            count_below = np.sum(window < returns[i])
-            percent_rank[i] = 100.0 * count_below / len(window)
-    
-    # Combine into CRSI
-    crsi = (rsi_short + streak_rsi + percent_rank) / 3.0
-    
-    return crsi
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
-    
-    for i in range(period-1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
-
 def calculate_sma(close, period):
     """Simple Moving Average"""
     n = len(close)
@@ -205,26 +105,31 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_15m = get_htf_data(prices, '15m')
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate and align 1d HMA for major trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align HTF indicators
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate primary (12h) indicators
-    hma_12h = calculate_hma(close, period=21)
+    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
+    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
+    
+    # Calculate primary (5m) indicators
+    ema_5m_fast = calculate_ema(close, period=9)
+    ema_5m_slow = calculate_ema(close, period=21)
+    hma_5m = calculate_hma(close, period=16)
     atr = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
-    crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, pr_period=100)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    rsi_5m = calculate_rsi(close, period=7)
     sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25  # 25% base position size
-    SIZE_STRONG = 0.30  # 30% for strong signals
+    SIZE_BASE = 0.15  # 15% base position size (smaller for 5m)
+    SIZE_STRONG = 0.20  # 20% for strong signals
     
     # Position tracking for stoploss
     in_position = False
@@ -242,96 +147,102 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_12h[i]) or np.isnan(chop[i]):
+        if np.isnan(hma_5m[i]) or np.isnan(ema_5m_fast[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma_200[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_15m_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d HMA) ===
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        # === SESSION FILTER (08-20 UTC) ===
+        # Extract hour from open_time (milliseconds since epoch)
+        timestamp_ms = open_time[i]
+        hour_utc = (timestamp_ms // (1000 * 60 * 60)) % 24
+        in_session = 8 <= hour_utc <= 20
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        is_choppy = chop[i] > 55.0  # Range-bound market
-        is_trending = chop[i] < 45.0  # Trending market
-        # 45-55 is transition zone - reduce position or stay flat
+        # === HTF BIAS (4h HMA) ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
         
-        # === 12h HMA TREND ===
-        hma_bull = close[i] > hma_12h[i]
-        hma_bear = close[i] < hma_12h[i]
+        # === 15m RSI MOMENTUM ===
+        rsi_15m_val = rsi_15m_aligned[i]
+        rsi_15m_bull = not np.isnan(rsi_15m_val) and 40 <= rsi_15m_val <= 70
+        rsi_15m_bear = not np.isnan(rsi_15m_val) and 30 <= rsi_15m_val <= 60
+        
+        # === 5m TREND ===
+        hma_bull = close[i] > hma_5m[i]
+        hma_bear = close[i] < hma_5m[i]
+        ema_fast_above_slow = ema_5m_fast[i] > ema_5m_slow[i]
+        ema_fast_below_slow = ema_5m_fast[i] < ema_5m_slow[i]
         
         # === SMA200 FILTER ===
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
+        above_sma200 = not np.isnan(sma_200[i]) and close[i] > sma_200[i]
+        below_sma200 = not np.isnan(sma_200[i]) and close[i] < sma_200[i]
         
-        # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
-        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
-        
-        # === CRSI VALUES (for choppy regime) ===
-        crsi_extreme_low = False
-        crsi_extreme_high = False
-        if not np.isnan(crsi[i]):
-            crsi_extreme_low = crsi[i] < 15.0
-            crsi_extreme_high = crsi[i] > 85.0
+        # === 5m RSI PULLBACK ===
+        rsi_5m_val = rsi_5m[i]
+        rsi_pullback_long = not np.isnan(rsi_5m_val) and 35 <= rsi_5m_val <= 55
+        rsi_pullback_short = not np.isnan(rsi_5m_val) and 45 <= rsi_5m_val <= 65
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # REGIME 1: CHOPPY (mean reversion with CRSI)
-        if is_choppy and not np.isnan(crsi[i]):
-            # Long: extreme oversold + above SMA200 + HTF neutral/bull
-            if crsi_extreme_low and above_sma200 and (htf_1d_bull or chop[i] > 60):
-                desired_signal = SIZE_BASE
+        # Only trade in session hours
+        if in_session:
+            # LONG: HTF bull + 5m pullback + 15m RSI not overbought
+            # Require 2 of 3: HTF bull, 5m HMA bull, EMA fast>slow
+            long_score = 0
+            if htf_4h_bull:
+                long_score += 1
+            if hma_bull:
+                long_score += 1
+            if ema_fast_above_slow:
+                long_score += 1
+            if above_sma200:
+                long_score += 0.5
             
-            # Short: extreme overbought + below SMA200 + HTF neutral/bear
-            elif crsi_extreme_high and below_sma200 and (htf_1d_bear or chop[i] > 60):
-                desired_signal = -SIZE_BASE
-        
-        # REGIME 2: TRENDING (breakout with HMA confirmation)
-        elif is_trending:
-            # Long: Donchian breakout + HMA bull + HTF bull
-            if breakout_long and hma_bull and htf_1d_bull:
-                desired_signal = SIZE_STRONG
+            if long_score >= 2 and rsi_pullback_long and rsi_15m_bull:
+                # Check if strong signal
+                if long_score >= 2.5 and htf_4h_bull:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
             
-            # Short: Donchian breakout + HMA bear + HTF bear
-            elif breakout_short and hma_bear and htf_1d_bear:
-                desired_signal = -SIZE_STRONG
+            # SHORT: HTF bear + 5m pullback + 15m RSI not oversold
+            short_score = 0
+            if htf_4h_bear:
+                short_score += 1
+            if hma_bear:
+                short_score += 1
+            if ema_fast_below_slow:
+                short_score += 1
+            if below_sma200:
+                short_score += 0.5
+            
+            if short_score >= 2 and rsi_pullback_short and rsi_15m_bear:
+                if short_score >= 2.5 and htf_4h_bear:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
         
-        # REGIME 3: TRANSITION (45-55 chop) - reduced size, require stronger confirmation
-        else:
-            # Only enter if ALL align strongly
-            if hma_bull and htf_1d_bull and breakout_long:
-                desired_signal = SIZE_BASE * 0.6
-            elif hma_bear and htf_1d_bear and breakout_short:
-                desired_signal = -SIZE_BASE * 0.6
-        
-        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * entry_atr
+            stop_price = highest_since_entry - 2.0 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * entry_atr
+            stop_price = lowest_since_entry + 2.0 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -347,10 +258,6 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
-        elif desired_signal >= SIZE_BASE * 0.5:
-            final_signal = SIZE_BASE * 0.6
-        elif desired_signal <= -SIZE_BASE * 0.5:
-            final_signal = -SIZE_BASE * 0.6
         else:
             final_signal = 0.0
         
