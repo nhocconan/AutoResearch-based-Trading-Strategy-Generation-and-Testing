@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #063: 6h Primary + 1d/1w HTF — Weekly Trend + Daily RSI Pullback
+Experiment #064: 12h Primary + 1d HTF — KAMA Trend + ATR Volatility Breakout + RSI Filter
 
-Hypothesis: After 62 failed experiments, 6h timeframe needs SIMPLER logic:
-- Weekly HMA50 establishes major trend bias (bull/bear regime)
-- Daily RSI identifies pullback entries within the trend
-- 6h price action for execution timing
-- ASYMMETRIC entries: only long in bull regime, only short in bear regime
-- This avoids complex regime switching that failed in #060, #062
-
-Why this might work on 6h:
-- 6h is middle ground: enough bars for entries, not too many for fee drag
-- Weekly trend filter prevents counter-trend trades that destroyed 2022 performance
-- Daily RSI pullback is proven pattern (current best uses CRSI on 1d)
-- Simple logic = more trades generated (addressing #1 failure mode)
+Hypothesis: After 63 failed experiments, the pattern is clear:
+- Complex multi-filter strategies (CRSI+Chop+Fisher+HMA) generate 0 trades or negative Sharpe
+- 6h timeframe strategies consistently failed (experiments #054-#063)
+- 12h needs SIMPLER logic with fewer confluence requirements to ensure trades
+- KAMA (Kaufman Adaptive Moving Average) adapts to volatility - better than HMA for range/trend switches
+- ATR volatility breakout ensures entries during momentum expansion (not chop)
+- 1d HMA provides major trend bias without being too restrictive
+- LOOSE RSI filter (25-75) ensures we don't block entries at minor extremes
+- This is SIMPLER than #064's Donchian+Chop+HMA+RSI dual-regime (too many filters = 0 trades)
 
 Key design choices:
-- Timeframe: 6h (30-60 trades/year target)
-- HTF: 1w HMA50 for trend, 1d RSI for entry timing
-- Entry: Weekly trend + Daily RSI pullback + 6h momentum confirm
-- Position size: 0.27 (27% of capital, conservative for 6h)
+- Timeframe: 12h (20-50 trades/year target)
+- HTF: 1d HMA(50) for major trend bias
+- Entry: KAMA(21) trend + ATR(14) expansion (>1.3x avg) + RSI(14) filter
+- Position size: 0.30 (30% of capital)
 - Stoploss: 2.5x ATR trailing
-- LOOSE filters to ensure >=30 trades on train, >=3 on test
+- Fewer filters = more trades = better chance of positive Sharpe
 
 Target: Sharpe>0.167 (beat current best), DD>-40%, trades>=30 on train, trades>=3 on test
 """
@@ -29,9 +26,50 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_weekly_trend_daily_rsi_pullback_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_kama_atr_rsi_1d_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_kama(close, period=21, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market efficiency (trend vs noise)
+    More responsive in trends, smoother in chop
+    """
+    n = len(close)
+    if n < period + slow_period:
+        return np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    er[:] = np.nan
+    
+    for i in range(period, n):
+        change = abs(close[i] - close[i - period])
+        noise = np.sum(np.abs(np.diff(close[i-period:i+1])))
+        if noise > 1e-10:
+            er[i] = change / noise
+        else:
+            er[i] = 1.0
+    
+    # Calculate Smoothing Constant (SC)
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
+    
+    kama = np.zeros(n)
+    kama[:] = np.nan
+    
+    # Initialize KAMA with SMA
+    kama[period] = np.mean(close[:period+1])
+    
+    for i in range(period + 1, n):
+        if not np.isnan(er[i]):
+            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+            kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - faster response than EMA"""
@@ -77,7 +115,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range for stoploss"""
+    """Average True Range for volatility and stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -90,14 +128,19 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period):
-    """Simple Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
+def calculate_atr_ratio(atr, lookback=30):
+    """ATR ratio - current ATR / average ATR over lookback (volatility expansion)"""
+    n = len(atr)
+    ratio = np.zeros(n)
+    ratio[:] = np.nan
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
+    for i in range(lookback, n):
+        if not np.isnan(atr[i]):
+            avg_atr = np.nanmean(atr[i-lookback+1:i+1])
+            if avg_atr > 1e-10:
+                ratio[i] = atr[i] / avg_atr
+    
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -107,23 +150,19 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1w HMA for major trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 1d HMA for major trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 1d RSI for entry timing
-    rsi_1d_raw = calculate_rsi(df_1d['close'].values, period=14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_raw)
-    
-    # Calculate primary (6h) indicators
-    hma_6h = calculate_hma(close, period=21)
+    # Calculate primary (12h) indicators
+    kama = calculate_kama(close, period=21)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    sma_50 = calculate_sma(close, period=50)
+    atr_ratio = calculate_atr_ratio(atr, lookback=30)
     
     signals = np.zeros(n)
-    SIZE = 0.27  # 27% position size (conservative for 6h)
+    SIZE = 0.30  # 30% position size
     
     # Position tracking for stoploss
     in_position = False
@@ -141,56 +180,59 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_6h[i]) or np.isnan(sma_50[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(atr_ratio[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w HMA50) ===
-        # Weekly trend determines allowed direction
-        weekly_bull = close[i] > hma_1w_aligned[i]
-        weekly_bear = close[i] < hma_1w_aligned[i]
+        # === HTF BIAS (1d HMA) ===
+        htf_bull = close[i] > hma_1d_aligned[i]
+        htf_bear = close[i] < hma_1d_aligned[i]
         
-        # === DAILY RSI PULLBACK ===
-        # In bull regime: wait for RSI pullback to 35-50 zone
-        # In bear regime: wait for RSI rally to 50-65 zone
-        daily_rsi = rsi_1d_aligned[i]
-        rsi_pullback_long = 30.0 < daily_rsi < 55.0
-        rsi_pullback_short = 45.0 < daily_rsi < 70.0
+        # === KAMA TREND DIRECTION ===
+        kama_bull = close[i] > kama[i]
+        kama_bear = close[i] < kama[i]
         
-        # === 6h MOMENTUM CONFIRM ===
-        # Price above 6h HMA for long, below for short
-        hma_6h_bull = close[i] > hma_6h[i]
-        hma_6h_bear = close[i] < hma_6h[i]
+        # === KAMA SLOPE (momentum) ===
+        kama_slope_bull = kama[i] > kama[i-1] if not np.isnan(kama[i-1]) else False
+        kama_slope_bear = kama[i] < kama[i-1] if not np.isnan(kama[i-1]) else False
         
-        # === SMA50 FILTER (additional trend confirm) ===
-        sma_bull = close[i] > sma_50[i]
-        sma_bear = close[i] < sma_50[i]
+        # === VOLATILITY EXPANSION (ATR ratio > 1.3 = expanding vol) ===
+        vol_expansion = atr_ratio[i] > 1.3
         
-        # === DESIRED SIGNAL (Asymmetric Trend-Follow) ===
+        # === RSI FILTER (LOOSE - ensure trades generate) ===
+        rsi_ok_long = rsi[i] > 25.0 and rsi[i] < 80.0
+        rsi_ok_short = rsi[i] < 75.0 and rsi[i] > 20.0
+        rsi_momentum_long = rsi[i] > 45.0
+        rsi_momentum_short = rsi[i] < 55.0
+        
+        # === DESIRED SIGNAL (Simplified logic - fewer filters = more trades) ===
         desired_signal = 0.0
         
-        # LONG: Weekly bull + Daily RSI pullback + 6h momentum + SMA confirm
-        if weekly_bull and rsi_pullback_long and hma_6h_bull and sma_bull:
-            desired_signal = SIZE
+        # LONG: KAMA bull + HTF bull + RSI ok + (vol expansion OR RSI momentum)
+        if kama_bull and htf_bull and rsi_ok_long:
+            if vol_expansion or rsi_momentum_long:
+                desired_signal = SIZE
         
-        # SHORT: Weekly bear + Daily RSI rally + 6h momentum + SMA confirm
-        elif weekly_bear and rsi_pullback_short and hma_6h_bear and sma_bear:
-            desired_signal = -SIZE
+        # SHORT: KAMA bear + HTF bear + RSI ok + (vol expansion OR RSI momentum)
+        elif kama_bear and htf_bear and rsi_ok_short:
+            if vol_expansion or rsi_momentum_short:
+                desired_signal = -SIZE
         
-        # Fallback: Strong weekly trend with 6h confirm (relax daily RSI)
-        elif weekly_bull and hma_6h_bull and sma_bull and daily_rsi < 60.0:
-            desired_signal = SIZE * 0.6
-        elif weekly_bear and hma_6h_bear and sma_bear and daily_rsi > 40.0:
-            desired_signal = -SIZE * 0.6
+        # Fallback: Strong KAMA trend (ignore HTF if KAMA very strong)
+        if desired_signal == 0.0:
+            if kama_bull and kama_slope_bull and rsi[i] > 40.0 and rsi[i] < 75.0:
+                desired_signal = SIZE * 0.7
+            elif kama_bear and kama_slope_bear and rsi[i] > 25.0 and rsi[i] < 60.0:
+                desired_signal = -SIZE * 0.7
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -216,9 +258,9 @@ def generate_signals(prices):
         elif desired_signal <= -SIZE * 0.85:
             final_signal = -SIZE
         elif desired_signal >= SIZE * 0.5:
-            final_signal = SIZE * 0.6
+            final_signal = SIZE * 0.5
         elif desired_signal <= -SIZE * 0.5:
-            final_signal = -SIZE * 0.6
+            final_signal = -SIZE * 0.5
         else:
             final_signal = 0.0
         
