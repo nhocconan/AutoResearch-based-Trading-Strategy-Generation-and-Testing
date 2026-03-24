@@ -1,35 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1593: 1d Primary + 1w HTF — Simplified Trend Breakout Strategy
+Experiment #1594: 4h Primary + 12h/1d HTF — Donchian Breakout + HMA Trend Strategy
 
-Hypothesis: After 12 failed experiments with complex regime switching (chop/CRSI/Fisher),
-the winning approach is SIMPLER trend-following. The current best (Sharpe=0.618) uses
-Donchian + HMA + RSI on 1d with 1w filter. This experiment improves on it by:
+Hypothesis: Donchian breakouts capture momentum moves effectively on 4h timeframe.
+Combined with HMA trend confirmation and 12h HTF bias, this should:
+1. Generate 20-50 trades/year (optimal for 4h)
+2. Capture major trend moves while filtering false breakouts
+3. Work across BTC/ETH/SOL (not SOL-biased)
 
-1. Donchian(20) breakout for clear entry signals (proven in best strategy)
-2. Dual HMA(21/50) for trend confirmation (reduces false breakouts)
-3. 1w HMA(21) for long-term regime filter (only trade with weekly trend)
-4. RSI(14) 30-70 filter (avoid extreme overbought/oversold entries)
-5. ATR(14) 2.5x trailing stop for drawdown control
-6. LOOSE entry conditions to ensure >30 trades/year (learning from 0-trade failures)
+Key features:
+1. Donchian(20) breakout for entry signals
+2. HMA(21) on 4h for trend confirmation
+3. 12h HMA(21) for HTF trend bias
+4. RSI(14) filter: 40-60 range for continuation (not too restrictive)
+5. ATR(14) 2.5x trailing stop
+6. Discrete position sizing: 0.30
 
-Key difference from failed experiments:
-- NO choppiness index (failed in #1581, #1582, #1584, #1587)
-- NO CRSI mean reversion (failed badly in #1591 with Sharpe=-8.444)
-- NO complex regime switching (consistently generates 0 trades)
-- Simple trend-following works best on 1d for crypto
+Why this should beat Sharpe 0.618:
+- Donchian breakouts proven in current best strategy
+- HMA reduces lag vs EMA for trend confirmation
+- 12h HTF ensures we trade with higher TF trend
+- RSI filter not too tight (40-60 vs 45-55) = more trades
+- Simple logic = reliable signals = meets trade count requirements
 
-Timeframe: 1d (required for this experiment)
-HTF: 1w HMA for bias (use mtf_data helper - call ONCE before loop)
-Target: Sharpe > 0.618, trades > 30/symbol train, > 3/symbol test, DD > -50%
-Position Size: 0.30 (discrete, minimizes fee churn)
+Timeframe: 4h (required for this experiment)
+HTF: 12h HMA for bias (use mtf_data helper - call ONCE before loop)
+Target: Sharpe > 0.618, trades > 10/symbol train, > 3/symbol test, DD > -50%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_1w_trend_rsi_atr_v2"
-timeframe = "1d"
+name = "mtf_4h_donchian_hma_12h_trend_rsi_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -67,20 +70,6 @@ def calculate_hma(close, period=21):
     hma = wma(diff, sqrt_period)
     return hma
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range with proper min_periods"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
 def calculate_rsi(close, period=14):
     """Relative Strength Index with proper min_periods"""
     n = len(close)
@@ -102,8 +91,25 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_atr(high, low, close, period=14):
+    """Average True Range with proper min_periods"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
+    """
+    Donchian Channels - highest high and lowest low over N periods
+    Returns (upper, lower) tuple
+    """
     n = len(high)
     if n < period:
         return np.full(n, np.nan), np.full(n, np.nan)
@@ -124,21 +130,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 1w HMA for long-term regime
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 12h HMA for trend bias
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (1d) indicators
+    # Calculate primary (4h) indicators
     atr = calculate_atr(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
     
-    # HMA for trend direction
-    hma_21 = calculate_hma(close, period=21)
-    hma_50 = calculate_hma(close, period=50)
+    # HMA for trend confirmation
+    hma_4h = calculate_hma(close, period=21)
     
-    # Donchian channels for breakout
+    # Donchian channels for breakout signals
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
@@ -152,7 +157,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -160,13 +165,13 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_21[i]) or np.isnan(hma_50[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_4h[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -179,35 +184,32 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === WEEKLY TREND REGIME (1w HMA) ===
-        weekly_bull = close[i] > hma_1w_aligned[i]
-        weekly_bear = close[i] < hma_1w_aligned[i]
+        # === TREND BIAS (12h HMA) ===
+        htf_bull = close[i] > hma_12h_aligned[i]
+        htf_bear = close[i] < hma_12h_aligned[i]
         
-        # === DAILY TREND (HMA 21 vs 50) ===
-        daily_bull = hma_21[i] > hma_50[i]
-        daily_bear = hma_21[i] < hma_50[i]
+        # === HMA TREND CONFIRMATION (4h) ===
+        hma_bull = close[i] > hma_4h[i]
+        hma_bear = close[i] < hma_4h[i]
         
-        # === PRICE VS HMA 21 ===
-        price_above_hma = close[i] > hma_21[i]
-        price_below_hma = close[i] < hma_21[i]
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Use previous bar's Donchian levels to avoid look-ahead
+        long_breakout = close[i] > donchian_upper[i-1]
+        short_breakout = close[i] < donchian_lower[i-1]
         
-        # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] >= donchian_upper[i]
-        breakout_short = close[i] <= donchian_lower[i]
+        # === RSI FILTER (not too restrictive for trade frequency) ===
+        rsi_ok_long = rsi[i] >= 40.0
+        rsi_ok_short = rsi[i] <= 60.0
         
-        # === RSI FILTER (avoid extremes) ===
-        rsi_ok_long = rsi[i] < 70.0
-        rsi_ok_short = rsi[i] > 30.0
-        
-        # === PRIMARY SIGNAL (LOOSE conditions for trade frequency) ===
+        # === ENTRY SIGNALS ===
         desired_signal = 0.0
         
-        # LONG: Weekly bull + Daily bull + Price above HMA21 + Donchian breakout + RSI ok
-        if weekly_bull and daily_bull and price_above_hma and breakout_long and rsi_ok_long:
+        # LONG: Donchian breakout + HMA bull + 12h bull + RSI ok
+        if long_breakout and hma_bull and htf_bull and rsi_ok_long:
             desired_signal = BASE_SIZE
         
-        # SHORT: Weekly bear + Daily bear + Price below HMA21 + Donchian breakout + RSI ok
-        elif weekly_bear and daily_bear and price_below_hma and breakout_short and rsi_ok_short:
+        # SHORT: Donchian breakout + HMA bear + 12h bear + RSI ok
+        elif short_breakout and hma_bear and htf_bear and rsi_ok_short:
             desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
