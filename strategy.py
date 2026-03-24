@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #806: 1d Primary + 1w HTF — Dual-Regime HMA/RSI with Guaranteed Trade Generation
+Experiment #807: 6h Primary + 1d/1w HTF — Triple HMA Alignment with Loose RSI Entries
 
-Hypothesis: Daily timeframe with weekly HTF bias captures major trend moves while avoiding
-the noise of lower timeframes. Previous 1d experiments failed due to overly strict regime
-filters that blocked all trades. This version uses LOOSE entry thresholds to guarantee
-trade generation while maintaining edge through HTF trend alignment.
+Hypothesis: 6h timeframe sits between 4h (too noisy) and 12h (too slow). 
+Key insight from #732 (12h success): LOOSE entry conditions generate trades.
+Most 6h failures (#800, #803, #805) had Sharpe=0.000 or negative due to:
+- Overly complex regime filters blocking all entries
+- Too many confluence requirements (0 trades)
+- Fisher/Z-score not working on 6h specifically
 
-Key innovations:
-1. 1w HMA(21) for major trend bias — only trade in direction of weekly trend
-2. 1d RSI(14) with loose thresholds (35/65) for entries — ensures trades generate
-3. 1d HMA(16/48) crossover for local trend confirmation
-4. ATR(14) 2.5x trailing stop for risk management
+This strategy uses:
+1. Triple HMA alignment (6h/1d/1w) for trend confirmation
+2. RSI(14) with VERY loose thresholds (40/60) to ensure trade generation
+3. 1w HMA as ultimate regime filter (bull/bear market detection)
+4. 2.5x ATR trailing stoploss for risk management
 5. Discrete sizing: 0.0, ±0.25, ±0.30
-6. NO complex regime filters that block trades (learned from #796-#805 failures)
 
-Entry conditions (LOOSE to ensure ≥30 trades/train, ≥3/test):
-- LONG: 1w HMA bull + (RSI<45 OR 1d HMA bull crossover)
-- SHORT: 1w HMA bear + (RSI>55 OR 1d HMA bear crossover)
+Entry logic (LOOSE for ≥30 trades/train, ≥3/test):
+- LONG: 1w HMA bull + 1d HMA bull + (RSI<50 OR 6h HMA16>48)
+- SHORT: 1w HMA bear + 1d HMA bear + (RSI>50 OR 6h HMA16<48)
 
 Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 1d
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_rsi_loose_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_triple_hma_rsi_loose_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -93,13 +94,17 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF HMA
+    # Calculate and align HTF HMAs
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 1d indicators
+    # Calculate 6h indicators
     hma_16 = calculate_hma(close, period=16)
     hma_48 = calculate_hma(close, period=48)
     rsi_14 = calculate_rsi(close, period=14)
@@ -134,48 +139,53 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w HMA) ===
+        # === HTF BIAS (1w + 1d HMA alignment) ===
         htf_1w_bull = close[i] > hma_1w_aligned[i]
         htf_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === 1d HMA CROSSOVER ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        
+        # === 6h HMA CROSSOVER ===
         hma_crossover_long = False
         hma_crossover_short = False
         if i > 0 and not np.isnan(hma_16[i-1]) and not np.isnan(hma_48[i-1]):
             hma_crossover_long = (hma_16[i-1] <= hma_48[i-1]) and (hma_16[i] > hma_48[i])
             hma_crossover_short = (hma_16[i-1] >= hma_48[i-1]) and (hma_16[i] < hma_48[i])
         
-        # === 1d HMA TREND ===
-        hma_1d_bull = hma_16[i] > hma_48[i]
-        hma_1d_bear = hma_16[i] < hma_48[i]
+        # === 6h HMA TREND ===
+        hma_6h_bull = hma_16[i] > hma_48[i]
+        hma_6h_bear = hma_16[i] < hma_48[i]
         
-        # === RSI CONDITIONS (LOOSE for more trades) ===
-        rsi_oversold = rsi_14[i] < 45.0
-        rsi_overbought = rsi_14[i] > 55.0
+        # === RSI CONDITIONS (VERY LOOSE for trade generation) ===
+        rsi_neutral_low = rsi_14[i] < 50.0
+        rsi_neutral_high = rsi_14[i] > 50.0
+        rsi_oversold = rsi_14[i] < 40.0
+        rsi_overbought = rsi_14[i] > 60.0
         rsi_extreme_oversold = rsi_14[i] < 30.0
         rsi_extreme_overbought = rsi_14[i] > 70.0
         
         # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: HTF bull + (RSI oversold OR HMA crossover OR HMA bull)
-        if htf_1w_bull:
-            if rsi_oversold or hma_crossover_long or hma_1d_bull:
+        # LONG: 1w bull + 1d bull + (RSI<50 OR 6h HMA bull OR crossover)
+        if htf_1w_bull and htf_1d_bull:
+            if rsi_neutral_low or hma_6h_bull or hma_crossover_long:
                 if rsi_extreme_oversold or hma_crossover_long:
                     desired_signal = SIZE_STRONG
                 else:
                     desired_signal = SIZE_BASE
         
-        # SHORT: HTF bear + (RSI overbought OR HMA crossover OR HMA bear)
-        elif htf_1w_bear:
-            if rsi_overbought or hma_crossover_short or hma_1d_bear:
+        # SHORT: 1w bear + 1d bear + (RSI>50 OR 6h HMA bear OR crossover)
+        elif htf_1w_bear and htf_1d_bear:
+            if rsi_neutral_high or hma_6h_bear or hma_crossover_short:
                 if rsi_extreme_overbought or hma_crossover_short:
                     desired_signal = -SIZE_STRONG
                 else:
