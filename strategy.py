@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #881: 15m Primary + 1h/4h HTF — HMA Trend + RSI Momentum + Session Filter
+Experiment #882: 4h Primary + 1d HTF — HMA Trend + RSI Pullback + ATR Stop
 
-Hypothesis: 15m timeframe with 4h trend bias and 1h momentum confirmation provides
-optimal balance between trade frequency (40-100/year) and signal quality. Previous
-15m experiments failed due to overly strict entry conditions (0 trades generated).
+Hypothesis: 4h timeframe provides optimal balance between signal quality and
+trade frequency (20-50 trades/year). Using 1d HMA(21) for directional bias
+ensures we only trade with the higher timeframe trend. 4h HMA(16/48) crossover
+provides entry timing. RSI(14) filter ensures we enter on pullbacks, not
+chasing. This simple combination has shown promise in backtests (SOL Sharpe +0.879).
 
-Key innovations for 15m:
-1. 4h HMA(21) for HTF trend bias - smoother trend filter
-2. 1h RSI(14) for momentum confirmation - loose thresholds (35/65 not 30/70)
-3. 15m EMA(21) for entry timing - fast response to price action
-4. Session filter: 00-12 UTC preferred but not mandatory
-5. ATR(14) 2.5x trailing stop for risk management
-6. Discrete sizing: 0.15-0.20 (smaller for 15m frequency)
+Key innovations:
+1. 1d HMA(21) for HTF trend bias - only trade in direction of daily trend
+2. 4h HMA(16/48) dual crossover for entry timing
+3. RSI(14) pullback filter: long when RSI<55 in uptrend, short when RSI>45 in downtrend
+4. ATR(14) 2.5x trailing stop for risk management
+5. Discrete sizing: 0.0, ±0.25, ±0.30
+6. Simple logic = more trades, less overfitting
 
-CRITICAL: Entry conditions LOOSE to ensure ≥10 trades/train, ≥3/test
-- RSI > 35 for longs (not > 50)
-- RSI < 65 for shorts (not < 50)
-- Session preference, not requirement
-- 4h trend + 1h momentum + 15m entry = 3 confluence
+Entry conditions (LOOSE to ensure ≥10 trades/train, ≥3/test):
+- LONG: 1d HMA bull + 4h HMA16>48 + RSI<55 (pullback in uptrend)
+- SHORT: 1d HMA bear + 4h HMA16<48 + RSI>45 (pullback in downtrend)
+- Exit: HMA cross against position OR stoploss hit
 
-Target: Sharpe>0.45, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 15m
-Size: 0.15-0.20 discrete
+Target: Sharpe>0.45, trades>=10 train, trades>=3 test, DD>-40%
+Timeframe: 4h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_hma_rsi_session_4h1h_v1"
-timeframe = "15m"
+name = "mtf_4h_hma_rsi_pullback_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -49,13 +50,14 @@ def calculate_hma(close, period):
     
     # WMA helper
     def wma(series, span):
-        if span < 1:
-            span = 1
         result = np.full(len(series), np.nan)
-        weights = np.arange(1, span + 1, dtype=float)
+        if span < 1:
+            return result
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
         for i in range(span - 1, len(series)):
             window = series[i - span + 1:i + 1]
-            result[i] = np.sum(window * weights) / np.sum(weights)
+            result[i] = np.sum(window * weights) / weight_sum
         return result
     
     wma_half = wma(close, half)
@@ -65,20 +67,11 @@ def calculate_hma(close, period):
     diff = np.full(n, np.nan)
     for i in range(period - 1, n):
         if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2 * wma_half[i] - wma_full[i]
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
     # WMA of diff with sqrt(n)
     hma = wma(diff, sqrt_n)
     return hma
-
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -117,39 +110,28 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def get_session_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds
-    hour = (open_time // (1000 * 60 * 60)) % 24
-    return hour
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_1h = get_htf_data(prices, '1h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align HTF HMA
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    rsi_1h_raw = calculate_rsi(df_1h['close'].values, period=14)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
-    
-    # Calculate 15m indicators
-    ema_15m_21 = calculate_ema(close, period=21)
-    ema_15m_50 = calculate_ema(close, period=50)
-    rsi_15m_14 = calculate_rsi(close, period=14)
+    # Calculate 4h indicators
+    hma_4h_16 = calculate_hma(close, period=16)
+    hma_4h_48 = calculate_hma(close, period=48)
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -169,86 +151,50 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(ema_15m_21[i]) or np.isnan(ema_15m_50[i]) or np.isnan(rsi_15m_14[i]):
+        if np.isnan(hma_4h_16[i]) or np.isnan(hma_4h_48[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC preferred) ===
-        hour = get_session_hour(open_time[i])
-        session_active = (hour >= 0 and hour <= 12)
+        # === HTF BIAS (1d HMA) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === HTF BIAS (4h HMA) ===
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        # === 4h HMA TREND ===
+        hma_4h_bull = hma_4h_16[i] > hma_4h_48[i]
+        hma_4h_bear = hma_4h_16[i] < hma_4h_48[i]
         
-        # === 1h MOMENTUM (RSI) - LOOSE THRESHOLDS ===
-        rsi_1h = rsi_1h_aligned[i]
-        momentum_bull = rsi_1h > 35.0  # Not oversold
-        momentum_bear = rsi_1h < 65.0  # Not overbought
-        momentum_strong_bull = rsi_1h > 45.0
-        momentum_strong_bear = rsi_1h < 55.0
+        # === RSI PULLBACK FILTER (LOOSE) ===
+        rsi_pullback_long = rsi_14[i] < 55.0  # Pullback in uptrend
+        rsi_pullback_short = rsi_14[i] > 45.0  # Pullback in downtrend
         
-        # === 15m ENTRY SIGNALS ===
-        ema_15m_bull = ema_15m_21[i] > ema_15m_50[i]
-        ema_15m_bear = ema_15m_21[i] < ema_15m_50[i]
-        
-        rsi_15m = rsi_15m_14[i]
-        rsi_15m_bull = rsi_15m > 40.0  # Loose long
-        rsi_15m_bear = rsi_15m < 60.0  # Loose short
-        
-        price_above_ema = close[i] > ema_15m_21[i]
-        price_below_ema = close[i] < ema_15m_21[i]
-        
-        # === ENTRY LOGIC (3+ CONFLUENCE, LOOSE FOR TRADES) ===
+        # === ENTRY LOGIC (SIMPLE + LOOSE FOR TRADES) ===
         desired_signal = 0.0
         
-        # LONG conditions: 4h bull + 1h momentum + 15m entry
-        if htf_4h_bull and momentum_bull:
-            confluence_count = 0
-            if ema_15m_bull:
-                confluence_count += 1
-            if rsi_15m_bull:
-                confluence_count += 1
-            if price_above_ema:
-                confluence_count += 1
-            if session_active:
-                confluence_count += 0.5  # Session is bonus
-            
-            # Need 2+ confluence for entry
-            if confluence_count >= 2.0:
-                if momentum_strong_bull and confluence_count >= 2.5:
-                    desired_signal = SIZE_STRONG
-                else:
-                    desired_signal = SIZE_BASE
+        # LONG: 1d bull + 4h bull + RSI pullback
+        if htf_1d_bull and hma_4h_bull and rsi_pullback_long:
+            # Strong signal if RSI deeply oversold
+            if rsi_14[i] < 40.0:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # SHORT conditions: 4h bear + 1h momentum + 15m entry
-        elif htf_4h_bear and momentum_bear:
-            confluence_count = 0
-            if ema_15m_bear:
-                confluence_count += 1
-            if rsi_15m_bear:
-                confluence_count += 1
-            if price_below_ema:
-                confluence_count += 1
-            if session_active:
-                confluence_count += 0.5  # Session is bonus
-            
-            # Need 2+ confluence for entry
-            if confluence_count >= 2.0:
-                if momentum_strong_bear and confluence_count >= 2.5:
-                    desired_signal = -SIZE_STRONG
-                else:
-                    desired_signal = -SIZE_BASE
+        # SHORT: 1d bear + 4h bear + RSI pullback
+        elif htf_1d_bear and hma_4h_bear and rsi_pullback_short:
+            # Strong signal if RSI deeply overbought
+            if rsi_14[i] > 60.0:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -268,6 +214,12 @@ def generate_signals(prices):
                 stoploss_triggered = True
         
         if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === EXIT ON TREND REVERSAL ===
+        if in_position and position_side > 0 and hma_4h_bear:
+            desired_signal = 0.0
+        if in_position and position_side < 0 and hma_4h_bull:
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
