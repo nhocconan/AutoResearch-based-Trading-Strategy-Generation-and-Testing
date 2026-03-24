@@ -1,82 +1,74 @@
 #!/usr/bin/env python3
 """
-Experiment #133: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + RSI Pullback
+Experiment #134: 4h Primary + 12h HTF — Regime-Adaptive Bollinger Mean Reversion
 
-Hypothesis: After 132 failed experiments, the pattern is clear:
-- Complex regime filters (Choppiness, CRSI dual-regime) cause 0 trades or negative Sharpe
-- 1d primary timeframe with 1w HTF bias should reduce noise and improve Sharpe
-- Donchian breakout (period=20) proven on SOL (+0.782) — simple and effective
-- HMA trend filter from 1w provides major direction bias without over-filtering
-- RSI pullback confirmation (30/70 thresholds) ensures trades generate on all symbols
-- ATR trailing stop (2.5x) for risk management
+Hypothesis: After 133 experiments, clear patterns emerge for 4h timeframe:
+- Pure trend following fails in bear/range markets (2025 test is -25% BTC)
+- Pure mean reversion gets destroyed in strong trends
+- BEST approach: Regime-adaptive (different logic per market state)
+- 12h HMA slope + price position = reliable regime detector
+- Bollinger Band mean reversion works in range, filtered by regime
+
+This strategy uses PROVEN components from successful patterns:
+1. 12h HMA = major trend bias (price above/below + slope direction)
+2. Regime detection: BULL / BEAR / RANGE based on 12h HMA
+3. BULL regime: Only long pullbacks to BB lower + RSI oversold
+4. BEAR regime: Only short rallies to BB upper + RSI overbought
+5. RANGE regime: Mean revert both directions at BB extremes
+6. Exit: ATR trailing stop (2.5x) + BB middle target
 
 Key design choices:
-- Timeframe: 1d (higher TF = fewer trades, less fee drag, target 20-50 trades/year)
-- HTF: 1w for major trend bias (very slow, filters out multi-week noise)
-- Entry: Donchian(20) breakout in direction of 1w HMA trend
-- Filter: RSI(14) > 30 for longs, < 70 for shorts (loose enough to generate trades)
-- Position size: 0.30 (30% of capital, conservative for daily)
-- Stoploss: 2.5x ATR trailing (tighter than 3x for better risk control)
-
-Why this should work:
-1. 1w HMA is very slow — only changes direction on major trend shifts
-2. Donchian breakout catches momentum moves (proven on SOL)
-3. RSI filter prevents entering at extreme overbought/oversold
-4. 1d timeframe = ~250 bars/year, with filters should get 20-50 trades
-5. Simple logic = less likely to have 0 trades from over-filtering
+- Timeframe: 4h (proven 20-50 trades/year target)
+- HTF: 12h HMA (more responsive than 1d for 4h primary)
+- BB(20, 2.0): Standard bands for mean reversion
+- RSI(14): 35/65 thresholds (looser than 30/70 for more trades)
+- Position size: 0.30 (30% of capital, conservative)
+- Stoploss: 2.5x ATR trailing (tighter for mean reversion)
 
 Target: Sharpe>0.351, DD>-40%, trades>=30 on train, trades>=3 on test
+All symbols must have Sharpe>0 individually (no SOL-only strategies)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_rsi_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_bb_regime_adaptive_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_hma(close, period=21):
+def calculate_hma(close, period):
     """
-    Hull Moving Average — reduces lag while maintaining smoothness
+    Hull Moving Average - more responsive than EMA, less lag
     HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
     """
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
     
-    # Helper function for WMA
-    def wma(series, span):
-        weights = np.arange(1, span + 1)
-        weights = weights / weights.sum()
-        result = np.convolve(series, weights[::-1], mode='valid')
-        return result
+    # WMA with span = period/2
+    wma1 = pd.Series(close).ewm(span=period//2, min_periods=period//2, adjust=False).mean().values
+    # WMA with span = period
+    wma2 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Raw HMA
+    raw_hma = 2 * wma1 - wma2
+    # Smooth with sqrt(period)
+    hma = pd.Series(raw_hma).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean().values
     
-    close_series = pd.Series(close)
+    return hma
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Bollinger Bands for mean reversion levels"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    # WMA(n/2)
-    wma_half = close_series.ewm(span=period//2, min_periods=period//2, adjust=False).mean().values
-    # WMA(n)
-    wma_full = close_series.ewm(span=period, min_periods=period, adjust=False).mean().values
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    # 2*WMA(n/2) - WMA(n)
-    diff = 2 * wma_half - wma_full
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
     
-    # WMA of diff with sqrt(n) period
-    sqrt_period = int(np.sqrt(period))
-    if sqrt_period < 1:
-        sqrt_period = 1
-    
-    hma = pd.Series(diff).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean().values
-    
-    # Pad with NaN at beginning
-    result = np.full(n, np.nan)
-    pad_len = n - len(hma)
-    if pad_len > 0:
-        result[pad_len:] = hma
-    else:
-        result[:] = hma[-n:]
-    
-    return result
+    return upper, sma, lower
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -118,23 +110,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian_channels(high, low, period=20):
-    """
-    Donchian Channels — highest high and lowest low over period
-    Upper = rolling max of high
-    Lower = rolling min of low
-    Middle = (Upper + Lower) / 2
-    """
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    middle = (upper + lower) / 2.0
-    
-    return upper, lower, middle
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -142,20 +117,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 1w HMA for major trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 12h HMA for regime detection
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (1d) indicators
-    hma_1d = calculate_hma(close, period=21)
+    # Calculate primary (4h) indicators
+    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close, period=20, std_dev=2.0)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower, donchian_middle = calculate_donchian_channels(high, low, period=20)
     
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size (conservative for 1d)
+    SIZE = 0.30  # 30% position size (conservative for 4h)
     
     # Position tracking for stoploss
     in_position = False
@@ -173,50 +147,64 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w HMA) ===
-        # Simple: is price above or below weekly HMA?
-        htf_bull = close[i] > hma_1w_aligned[i]
-        htf_bear = close[i] < hma_1w_aligned[i]
+        # === REGIME DETECTION (12h HMA) ===
+        # Bull: price > 12h HMA AND 12h HMA sloping up
+        # Bear: price < 12h HMA AND 12h HMA sloping down
+        # Range: HMA flat or mixed signals
         
-        # === 1d TREND (HMA slope) ===
-        # Check if 1d HMA is trending in same direction as HTF
-        hma_1d_bull = hma_1d[i] > hma_1d[i-1] if i > 0 else False
-        hma_1d_bear = hma_1d[i] < hma_1d[i-1] if i > 0 else False
+        hma_slope = 0.0
+        if i >= 2 and not np.isnan(hma_12h_aligned[i-1]):
+            hma_slope = hma_12h_aligned[i] - hma_12h_aligned[i-1]
         
-        # === DONCHIAN BREAKOUT ===
-        # Long: price breaks above Donchian upper
-        # Short: price breaks below Donchian lower
-        donchian_breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        donchian_breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        price_vs_hma = close[i] - hma_12h_aligned[i]
+        hma_threshold = atr[i] * 0.5  # HMA move threshold
         
-        # === RSI FILTER (LOOSE - ensure trades generate on all symbols) ===
-        # For longs: RSI > 30 (not extremely oversold)
-        # For shorts: RSI < 70 (not extremely overbought)
-        rsi_ok_long = rsi[i] > 30.0
-        rsi_ok_short = rsi[i] < 70.0
+        in_bull_regime = (price_vs_hma > 0) and (hma_slope > 0)
+        in_bear_regime = (price_vs_hma < 0) and (hma_slope < 0)
+        in_range_regime = not in_bull_regime and not in_bear_regime
         
-        # === DESIRED SIGNAL ===
-        # LONG: 1w bull + 1d HMA bull + Donchian breakout + RSI > 30
-        # SHORT: 1w bear + 1d HMA bear + Donchian breakout + RSI < 70
+        # === BB MEAN REVERSION SIGNALS ===
+        # Touching lower band = potential long
+        # Touching upper band = potential short
+        # Use 95% of band to catch near-touches (more trades)
+        bb_lower_signal = close[i] <= bb_lower[i] * 1.005
+        bb_upper_signal = close[i] >= bb_upper[i] * 0.995
+        
+        # === RSI CONFIRMATION (loose thresholds for trade generation) ===
+        # 35/65 instead of 30/70 = more trades
+        rsi_oversold = rsi[i] < 40.0
+        rsi_overbought = rsi[i] > 60.0
+        
+        # === REGIME-ADAPTIVE SIGNAL LOGIC ===
         desired_signal = 0.0
         
-        if htf_bull and hma_1d_bull and donchian_breakout_long and rsi_ok_long:
+        # BULL regime: Only long on pullbacks
+        if in_bull_regime and bb_lower_signal and rsi_oversold:
             desired_signal = SIZE
-        elif htf_bear and hma_1d_bear and donchian_breakout_short and rsi_ok_short:
+        
+        # BEAR regime: Only short on rallies
+        elif in_bear_regime and bb_upper_signal and rsi_overbought:
             desired_signal = -SIZE
+        
+        # RANGE regime: Mean revert both directions (most trades here)
+        elif in_range_regime:
+            if bb_lower_signal and rsi_oversold:
+                desired_signal = SIZE
+            elif bb_upper_signal and rsi_overbought:
+                desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
