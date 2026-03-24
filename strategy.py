@@ -1,31 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #369: 15m Primary + 1h/1d HTF — Daily Pivot + HMA Trend + RSI Pullback
+Experiment #370: 1h Primary + 4h/1d HTF — Simplified HMA Trend + RSI Pullback v3
 
-Hypothesis: Previous 15m strategies failed due to (a) 0 trades from overly strict filters,
-or (b) too many trades causing fee drag. This version balances selectivity with trigger frequency.
+Hypothesis: Previous 1h strategies failed due to overly complex confluence (5+ filters)
+that rarely aligned, resulting in 0 trades. This version SIMPLIFIES to 3 core filters:
+1. 4h HMA for trend direction (proven edge from #352 baseline)
+2. 1h RSI for pullback timing (looser: 30/70 instead of 25/75)
+3. Session filter (08-20 UTC) to avoid low-volume whipsaws
 
-Key design:
-1. 1d Central Pivot Range (CPR) for concrete S/R levels - price action respects these
-2. 1h HMA(21) for trend bias - only trade in HTF trend direction
-3. 15m RSI(7) for entry timing - quick mean reversion within trend
-4. Volume confirmation (1.3x SMA) to avoid fake breakouts
-5. Session preference 00-14 UTC (London+NY overlap) but NOT mandatory
+Key changes from failed #359, #361, #365, #369:
+1. REMOVED volume confirmation (kills trade frequency)
+2. REMOVED Donchian breakout requirement (too rare on 1h)
+3. LOOSENED RSI thresholds (30/70 vs 25/75) for more entries
+4. SIMPLIFIED regime detection (just HTF trend + RSI, no ADX/Chop complexity)
+5. Added 1d HMA as secondary bias filter (not required, just boosts size)
 
-Entry Logic:
-- Long: 1h HMA bull + price > daily pivot + RSI(7) < 35 then crosses above 35 + vol confirm
-- Short: 1h HMA bear + price < daily pivot + RSI(7) > 65 then crosses below 65 + vol confirm
+Entry Logic (SIMPLE):
+- Long: 4h HMA bull + RSI < 35 + session 08-20 UTC
+- Short: 4h HMA bear + RSI > 65 + session 08-20 UTC
+- Size boost if 1d HMA also aligned
 
-Position sizing: 0.15 base, 0.20 when 1d trend aligned (conservative for 15m frequency)
-Stoploss: 2.5x ATR(14) from entry
-Target: 50-80 trades/year, Sharpe > 0.40, DD > -35%
+Position sizing: 0.20 base, 0.30 with 1d confirmation
+Stoploss: 2.0x ATR(14) from entry price
+
+Target: Sharpe>0.45, DD>-35%, trades>=30 train, trades>=5 test, ALL symbols positive
+Trade frequency: ~40-60/year on 1h (within limit)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_daily_pivot_hma_rsi_1h1d_v1"
-timeframe = "15m"
+name = "mtf_1h_hma_rsi_session_4h1d_v3"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -85,92 +91,42 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_daily_pivot(df_1d):
-    """
-    Calculate Daily Pivot levels from 1d data.
-    Returns: pivot, r1, s1, r2, s2, tc, bc (all aligned arrays)
-    Classic pivot: P = (H + L + C) / 3
-    CPR: TC = (P + BC) / 2, BC = (H + L) / 2
-    """
-    n_1d = len(df_1d)
-    
-    high = df_1d['high'].values
-    low = df_1d['low'].values
-    close = df_1d['close'].values
-    
-    pivot = np.zeros(n_1d)
-    r1 = np.zeros(n_1d)
-    s1 = np.zeros(n_1d)
-    r2 = np.zeros(n_1d)
-    s2 = np.zeros(n_1d)
-    tc = np.zeros(n_1d)  # Top Central Pivot
-    bc = np.zeros(n_1d)  # Bottom Central Pivot
-    
-    for i in range(1, n_1d):
-        h = high[i-1]  # Previous day's high
-        l = low[i-1]   # Previous day's low
-        c = close[i-1] # Previous day's close
-        
-        pivot[i] = (h + l + c) / 3.0
-        bc[i] = (h + l) / 2.0
-        tc[i] = (pivot[i] + bc[i]) / 2.0
-        
-        r1[i] = 2.0 * pivot[i] - l
-        s1[i] = 2.0 * pivot[i] - h
-        r2[i] = pivot[i] + (h - l)
-        s2[i] = pivot[i] - (h - l)
-    
-    # First bar has no previous day data
-    pivot[0] = np.nan
-    r1[0] = np.nan
-    s1[0] = np.nan
-    r2[0] = np.nan
-    s2[0] = np.nan
-    tc[0] = np.nan
-    bc[0] = np.nan
-    
-    return pivot, r1, s1, r2, s2, tc, bc
-
-def calculate_volume_sma(volume, period=20):
-    """Volume SMA for confirmation"""
-    n = len(volume)
+def calculate_sma(close, period):
+    """Simple Moving Average"""
+    n = len(close)
     if n < period:
         return np.full(n, np.nan)
     
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF HMA for trend bias (1h)
-    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
+    # Calculate and align HTF HMA for trend bias
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate and align daily pivot levels (1d)
-    pivot_1d, r1_1d, s1_1d, r2_1d, s2_1d, tc_1d, bc_1d = calculate_daily_pivot(df_1d)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    tc_aligned = align_htf_to_ltf(prices, df_1d, tc_1d)
-    bc_aligned = align_htf_to_ltf(prices, df_1d, bc_1d)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (15m) indicators
-    hma_15m = calculate_hma(close, period=21)
-    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 15m
-    rsi_14 = calculate_rsi(close, period=14)
+    # Calculate primary (1h) indicators
+    hma_1h = calculate_hma(close, period=21)
     atr = calculate_atr(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, 20)
+    rsi = calculate_rsi(close, period=14)
+    sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -179,10 +135,7 @@ def generate_signals(prices):
     entry_atr = 0.0
     stop_price = 0.0
     
-    # RSI cross tracking
-    prev_rsi_7 = 0.0
-    
-    for i in range(200, n):
+    for i in range(300, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -191,106 +144,66 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_15m[i]) or np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(hma_1h[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1h_aligned[i]) or np.isnan(pivot_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF TREND BIAS (1h HMA) ===
-        htf_1h_bull = close[i] > hma_1h_aligned[i]
-        htf_1h_bear = close[i] < hma_1h_aligned[i]
+        # === SESSION FILTER (08-20 UTC) ===
+        # Convert open_time (milliseconds) to hour
+        timestamp_ms = open_time[i]
+        hour_utc = (timestamp_ms // (1000 * 60 * 60)) % 24
+        session_active = 8 <= hour_utc <= 20
         
-        # === DAILY PIVOT POSITION ===
-        above_pivot = close[i] > pivot_aligned[i]
-        below_pivot = close[i] < pivot_aligned[i]
+        # === HTF TREND BIAS (4h HMA) ===
+        htf_4h_bull = close[i] > hma_4h_aligned[i]
+        htf_4h_bear = close[i] < hma_4h_aligned[i]
         
-        # CPR width (narrow CPR = potential breakout day)
-        cpr_width = np.nan
-        if not np.isnan(tc_aligned[i]) and not np.isnan(bc_aligned[i]):
-            cpr_width = abs(tc_aligned[i] - bc_aligned[i]) / pivot_aligned[i] * 100.0
+        # === HTF CONFIRMATION (1d HMA) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        narrow_cpr = cpr_width < 0.5 if not np.isnan(cpr_width) else False
+        # === 1h HMA TREND ===
+        hma_1h_bull = close[i] > hma_1h[i]
+        hma_1h_bear = close[i] < hma_1h[i]
         
-        # === 15m HMA TREND ===
-        hma_bull = close[i] > hma_15m[i]
-        hma_bear = close[i] < hma_15m[i]
+        # === SMA200 FILTER (long-term bias) ===
+        above_sma200 = close[i] > sma_200[i]
+        below_sma200 = close[i] < sma_200[i]
         
-        # === RSI CROSSOVER (mean reversion entry) ===
-        rsi_cross_up_35 = False
-        rsi_cross_down_65 = False
+        # === RSI PULLBACK (LOOSENED thresholds) ===
+        rsi_oversold = rsi[i] < 35.0  # was 25, now 35 for more trades
+        rsi_overbought = rsi[i] > 65.0  # was 75, now 65 for more trades
         
-        if i > 0 and not np.isnan(rsi_7[i]) and not np.isnan(prev_rsi_7):
-            if prev_rsi_7 < 35.0 and rsi_7[i] >= 35.0:
-                rsi_cross_up_35 = True
-            if prev_rsi_7 > 65.0 and rsi_7[i] <= 65.0:
-                rsi_cross_down_65 = True
-        
-        prev_rsi_7 = rsi_7[i]
-        
-        # === RSI EXTREMES ===
-        rsi_oversold = rsi_7[i] < 30.0
-        rsi_overbought = rsi_7[i] > 70.0
-        
-        # === VOLUME CONFIRMATION ===
-        vol_confirm = False
-        if not np.isnan(vol_sma[i]) and vol_sma[i] > 1e-10:
-            vol_confirm = volume[i] > 1.3 * vol_sma[i]
-        
-        # === SESSION FILTER (prefer 00-14 UTC, but not mandatory) ===
-        # 15m bars: 00:00 = bar 0, 00:15 = bar 1, etc.
-        # 14:00 UTC = bar 56 (14 * 4)
-        bar_of_day = i % 96  # 96 bars per day on 15m
-        preferred_session = bar_of_day < 56  # 00:00 - 14:00 UTC
-        
-        # === ENTRY LOGIC (3+ confluence required) ===
+        # === ENTRY LOGIC (SIMPLIFIED - 3 core filters) ===
         desired_signal = 0.0
         
-        # LONG: 1h bull + above pivot + RSI cross up OR RSI oversold bounce
-        long_confluence = 0
-        if htf_1h_bull:
-            long_confluence += 1
-        if above_pivot:
-            long_confluence += 1
-        if hma_bull:
-            long_confluence += 1
-        if rsi_cross_up_35 or rsi_oversold:
-            long_confluence += 1
-        if vol_confirm:
-            long_confluence += 1
+        # LONG: 4h bull + RSI pullback + session active
+        if htf_4h_bull and rsi_oversold and session_active:
+            # Bonus if 1d also bull
+            if htf_1d_bull:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # Need at least 3 confluence for long
-        if long_confluence >= 3 and (rsi_cross_up_35 or rsi_oversold):
-            if htf_1h_bull and above_pivot:
-                desired_signal = SIZE_STRONG if vol_confirm else SIZE_BASE
+        # SHORT: 4h bear + RSI pullback + session active
+        elif htf_4h_bear and rsi_overbought and session_active:
+            # Bonus if 1d also bear
+            if htf_1d_bear:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
-        # SHORT: 1h bear + below pivot + RSI cross down OR RSI overbought
-        short_confluence = 0
-        if htf_1h_bear:
-            short_confluence += 1
-        if below_pivot:
-            short_confluence += 1
-        if hma_bear:
-            short_confluence += 1
-        if rsi_cross_down_65 or rsi_overbought:
-            short_confluence += 1
-        if vol_confirm:
-            short_confluence += 1
-        
-        # Need at least 3 confluence for short
-        if short_confluence >= 3 and (rsi_cross_down_65 or rsi_overbought):
-            if htf_1h_bear and below_pivot:
-                desired_signal = -SIZE_STRONG if vol_confirm else -SIZE_BASE
-        
-        # === STOPLOSS CHECK (2.5x ATR from entry) ===
+        # === STOPLOSS CHECK (2.0x ATR from entry) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -326,9 +239,9 @@ def generate_signals(prices):
                 entry_atr = atr[i]
                 # Set stoploss
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
