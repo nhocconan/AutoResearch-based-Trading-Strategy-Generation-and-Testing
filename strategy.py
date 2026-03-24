@@ -1,35 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #810: 1h Primary + 4h/1d HTF — Regime-Adaptive with Loose Entries
+Experiment #811: 6h Primary + 1w/1d HTF — Keltner-RSI Pullback with Dual HTF Bias
 
-Hypothesis: 1h timeframe with 4h trend bias and Choppiness regime filter can
-achieve optimal trade frequency (40-80/year) while maintaining edge. Key insight
-from failures: overly strict regime filters block ALL trades. This version uses
-LOOSE thresholds to guarantee trade generation.
+Hypothesis: 6h timeframe captures 2-5 day swing moves optimally. Using 1w HMA for 
+ultra-long-term bias + 1d HMA for medium-term bias creates strong directional filter.
+6h RSI(7) provides faster mean-reversion signals than RSI(14), generating more trades.
+Keltner Channel (ATR-based) entries on pullbacks within HTF trend reduce whipsaw.
 
 Key innovations:
-1. 4h HMA(21) for HTF trend bias — simple, reliable direction filter
-2. 1h Choppiness(14) for regime — CHOP>50=range(mean revert), CHOP<40=trend(follow)
-3. 1h RSI(14) with loose thresholds (40/60 not 30/70) for entries
-4. Session filter: 08-20 UTC only (high liquidity periods)
-5. ATR(14) 2.5x trailing stop for risk management
-6. Discrete sizing: 0.0, ±0.20, ±0.25
+1. Dual HTF bias: 1w HMA(21) + 1d HMA(21) must align for strong signals
+2. 6h RSI(7) instead of RSI(14) — faster, more trades on 6h TF
+3. Keltner Channel pullback entries (not breakouts) — enter on dips in uptrend
+4. Volume confirmation: taker_buy_volume ratio > 0.45 for longs
+5. Asymmetric sizing: 0.30 when both HTF align, 0.20 when only 1d aligns
+6. 2.5x ATR trailing stop for risk management
 
-Entry conditions (LOOSE to ensure ≥40 trades/train, ≥3/test):
-- LONG: 4h HMA bull + CHOP>45 + RSI<50 + session 08-20 UTC
-- SHORT: 4h HMA bear + CHOP>45 + RSI>50 + session 08-20 UTC
-- Trend follow: CHOP<40 + HMA crossover confirmation
+Entry conditions (LOOSE for trade generation):
+- LONG: 1w HMA bull + 1d HMA bull + RSI(7)<50 + price>Keltner_lower
+- SHORT: 1w HMA bear + 1d HMA bear + RSI(7)>50 + price<Keltner_upper
 
-Target: Sharpe>0.40, trades>=40 train, trades>=3 test, DD>-40%
-Timeframe: 1h
-Size: 0.20-0.25 discrete
+Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-40%
+Timeframe: 6h
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_chop_rsi_regime_4h1d_v1"
-timeframe = "1h"
+name = "mtf_6h_keltner_rsi_hma_1w1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -74,7 +73,7 @@ def calculate_rsi(close, period=14):
     return rsi
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range - volatility measure for stops"""
+    """Average True Range - volatility measure"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -87,66 +86,62 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness vs trending
-    Formula: 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
-    CHOP > 61.8 = ranging market, CHOP < 38.2 = trending market
-    """
+def calculate_keltner(high, low, close, atr_period=20, mult=2.0):
+    """Keltner Channel - ATR-based volatility bands"""
     n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+    if n < atr_period + 1:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    # Calculate True Range
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # Middle line: EMA(20) of close
+    middle = pd.Series(close).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
-    choppiness = np.zeros(n)
-    choppiness[:] = np.nan
+    # ATR for band width
+    atr = calculate_atr(high, low, close, atr_period)
     
-    for i in range(period, n):
-        sum_atr = np.sum(tr[i-period+1:i+1])
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        price_range = highest_high - lowest_low
-        if price_range > 1e-10 and sum_atr > 1e-10:
-            choppiness[i] = 100.0 * np.log10(sum_atr / price_range) / np.log10(period)
-        else:
-            choppiness[i] = 50.0  # neutral
+    upper = middle + mult * atr
+    lower = middle - mult * atr
     
-    return choppiness
+    return upper, middle, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
+    volume = prices["volume"].values
+    taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF HMA
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     hma_16 = calculate_hma(close, period=16)
     hma_48 = calculate_hma(close, period=48)
+    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for more trades
     rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    choppiness = calculate_choppiness(high, low, close, period=14)
+    keltner_upper, keltner_middle, keltner_lower = calculate_keltner(high, low, close, atr_period=20, mult=2.0)
+    
+    # Volume ratio for confirmation
+    taker_ratio = np.zeros(n)
+    taker_ratio[:] = np.nan
+    for i in range(n):
+        if volume[i] > 1e-10:
+            taker_ratio[i] = taker_buy_vol[i] / volume[i]
+        else:
+            taker_ratio[i] = 0.5
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.25
+    SIZE_WEAK = 0.20  # When only 1d aligns
+    SIZE_STRONG = 0.30  # When both 1w and 1d align
     
     # Position tracking for stoploss
     in_position = False
@@ -166,97 +161,85 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]) or np.isnan(rsi_7[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(choppiness[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (08-20 UTC) ===
-        # Extract hour from open_time (milliseconds timestamp)
-        hour_utc = (open_time[i] // 3600000) % 24
-        in_session = 8 <= hour_utc <= 20
-        
-        # === HTF BIAS (4h HMA) ===
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
-        
-        # === 1d HMA CONFIRMATION ===
+        # === HTF BIAS (1w + 1d HMA) ===
+        htf_1w_bull = close[i] > hma_1w_aligned[i]
+        htf_1w_bear = close[i] < hma_1w_aligned[i]
         htf_1d_bull = close[i] > hma_1d_aligned[i]
         htf_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === CHOPPINESS REGIME ===
-        chop_range = choppiness[i] > 45.0  # Ranging market - mean reversion
-        chop_trend = choppiness[i] < 40.0  # Trending market - trend follow
+        # Strong bias when both align
+        htf_strong_bull = htf_1w_bull and htf_1d_bull
+        htf_strong_bear = htf_1w_bear and htf_1d_bear
+        htf_weak_bull = htf_1d_bull and not htf_1w_bull
+        htf_weak_bear = htf_1d_bear and not htf_1w_bear
         
-        # === 1h HMA CROSSOVER ===
-        hma_crossover_long = False
-        hma_crossover_short = False
-        if i > 0 and not np.isnan(hma_16[i-1]) and not np.isnan(hma_48[i-1]):
-            hma_crossover_long = (hma_16[i-1] <= hma_48[i-1]) and (hma_16[i] > hma_48[i])
-            hma_crossover_short = (hma_16[i-1] >= hma_48[i-1]) and (hma_16[i] < hma_48[i])
-        
-        # === 1h HMA TREND ===
-        hma_1h_bull = hma_16[i] > hma_48[i]
-        hma_1h_bear = hma_16[i] < hma_48[i]
+        # === 6h HMA TREND ===
+        hma_6h_bull = hma_16[i] > hma_48[i]
+        hma_6h_bear = hma_16[i] < hma_48[i]
         
         # === RSI CONDITIONS (LOOSE for more trades) ===
-        rsi_oversold = rsi_14[i] < 50.0  # Very loose for trade generation
-        rsi_overbought = rsi_14[i] > 50.0
-        rsi_extreme_oversold = rsi_14[i] < 40.0
-        rsi_extreme_overbought = rsi_14[i] > 60.0
+        rsi_7_oversold = rsi_7[i] < 50.0  # Loose threshold
+        rsi_7_overbought = rsi_7[i] > 50.0
+        rsi_7_extreme_oversold = rsi_7[i] < 35.0
+        rsi_7_extreme_overbought = rsi_7[i] > 65.0
+        
+        # === KELTNER CHANNEL POSITION ===
+        price_in_lower_half = close[i] < keltner_middle[i]
+        price_in_upper_half = close[i] > keltner_middle[i]
+        price_near_lower = close[i] < keltner_lower[i] + 0.5 * atr_14[i]
+        price_near_upper = close[i] > keltner_upper[i] - 0.5 * atr_14[i]
+        
+        # === VOLUME CONFIRMATION ===
+        vol_bullish = taker_ratio[i] > 0.48
+        vol_bearish = taker_ratio[i] < 0.52
         
         # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: Multiple confluence paths (any one can trigger)
-        if in_session:
-            # Path 1: Range market + HTF bull + RSI pullback
-            if chop_range and htf_4h_bull and rsi_oversold:
-                if rsi_extreme_oversold:
+        # LONG: HTF bull + RSI oversold + price in lower Keltner
+        if htf_strong_bull:
+            if rsi_7_oversold and price_in_lower_half:
+                if rsi_7_extreme_oversold or price_near_lower or hma_6h_bull:
                     desired_signal = SIZE_STRONG
                 else:
-                    desired_signal = SIZE_BASE
-            
-            # Path 2: Trend market + HTF bull + HMA crossover
-            elif chop_trend and htf_4h_bull and hma_crossover_long:
-                desired_signal = SIZE_STRONG
-            
-            # Path 3: Strong HTF alignment + 1h trend
-            elif htf_4h_bull and htf_1d_bull and hma_1h_bull and rsi_oversold:
-                desired_signal = SIZE_BASE
+                    desired_signal = SIZE_WEAK
+        elif htf_weak_bull:
+            if rsi_7_oversold and price_in_lower_half:
+                if rsi_7_extreme_oversold or hma_6h_bull:
+                    desired_signal = SIZE_WEAK
         
-        # SHORT: Multiple confluence paths (any one can trigger)
-        elif in_session:
-            # Path 1: Range market + HTF bear + RSI pullback
-            if chop_range and htf_4h_bear and rsi_overbought:
-                if rsi_extreme_overbought:
+        # SHORT: HTF bear + RSI overbought + price in upper Keltner
+        elif htf_strong_bear:
+            if rsi_7_overbought and price_in_upper_half:
+                if rsi_7_extreme_overbought or price_near_upper or hma_6h_bear:
                     desired_signal = -SIZE_STRONG
                 else:
-                    desired_signal = -SIZE_BASE
-            
-            # Path 2: Trend market + HTF bear + HMA crossover
-            elif chop_trend and htf_4h_bear and hma_crossover_short:
-                desired_signal = -SIZE_STRONG
-            
-            # Path 3: Strong HTF alignment + 1h trend
-            elif htf_4h_bear and htf_1d_bear and hma_1h_bear and rsi_overbought:
-                desired_signal = -SIZE_BASE
+                    desired_signal = -SIZE_WEAK
+        elif htf_weak_bear:
+            if rsi_7_overbought and price_in_upper_half:
+                if rsi_7_extreme_overbought or hma_6h_bear:
+                    desired_signal = -SIZE_WEAK
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -283,10 +266,10 @@ def generate_signals(prices):
             final_signal = SIZE_STRONG
         elif desired_signal <= -SIZE_STRONG * 0.9:
             final_signal = -SIZE_STRONG
-        elif desired_signal >= SIZE_BASE * 0.9:
-            final_signal = SIZE_BASE
-        elif desired_signal <= -SIZE_BASE * 0.9:
-            final_signal = -SIZE_BASE
+        elif desired_signal >= SIZE_WEAK * 0.9:
+            final_signal = SIZE_WEAK
+        elif desired_signal <= -SIZE_WEAK * 0.9:
+            final_signal = -SIZE_WEAK
         else:
             final_signal = 0.0
         
