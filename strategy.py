@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #273: 5m Primary + 15m/4h HTF — Session-Filtered Trend Pullback
+Experiment #274: 1d Primary + 1w HTF — Simplified HMA Trend + RSI Pullback v1
 
-Hypothesis: 5m timeframe with strict HTF trend alignment + session filter can capture
-intraday momentum while avoiding fee drag from overtrading. Key design:
+Hypothesis: After 273 experiments, complex regime-switching consistently fails.
+The best strategy (mtf_6h_regime_rsi_hma_1d1w_v1, Sharpe=0.399) uses simple
+HMA trend + RSI pullback + HTF filter. This version:
 
-1. 4h HMA(21) for MAJOR trend bias (only trade with 4h trend)
-2. 15m HMA(21) for INTERMEDIATE trend confirmation
-3. 5m RSI(7) pullback entry within HTF trend direction
-4. SESSION FILTER: Only 08-20 UTC (London/NY overlap - highest volume)
-5. SIZE: 0.15 (small due to high trade frequency on 5m)
-6. STOPLOSS: 2.5x ATR(14) trailing
+1. SIMPLIFIED: Remove choppy/trend regime switching (causes whipsaw)
+2. PURE PULLBACK: Enter on RSI pullback in direction of HMA trend
+3. 1W FILTER: Only trade with weekly HMA direction (major trend bias)
+4. LOOSENED ENTRY: RSI 35-65 range for pullbacks (not extreme 20/80)
+5. DISCRETE SIZING: 0.25 base, 0.30 strong (with 1w confirmation)
+6. ATR TRAIL: 2.5x ATR stoploss (proven effective)
 
-Why this might work on 5m:
-- 5m alone = noise. 4h+15m filter = only trade established trends
-- Session filter = avoid Asian session whipsaw (low volume = fake breakouts)
-- RSI pullback = enter on dips in uptrend, rallies in downtrend
-- Small size (0.15) = survive fee drag from more frequent trades
+Why this should work:
+- 1d timeframe = 20-50 trades/year target (not too many fees)
+- HMA(21) = faster than EMA, catches trends earlier
+- RSI(7) pullback = enters on dips in uptrend, rallies in downtrend
+- 1w HMA(50) = filters out counter-trend trades in major bear/bull markets
+- Simple = less overfitting, works across BTC/ETH/SOL
 
-Target: 50-120 trades/year, Sharpe>0.40, DD>-40%
+Target: Sharpe>0.40, DD>-40%, trades>=20 train, trades>=3 test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_5m_session_hma_rsi_pullback_15m4h_v1"
-timeframe = "5m"
+name = "mtf_1d_hma_rsi_pullback_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -94,39 +96,30 @@ def calculate_sma(close, period):
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
-def get_session_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds since epoch
-    import datetime
-    dt = datetime.datetime.utcfromtimestamp(open_time / 1000.0)
-    return dt.hour
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_15m = get_htf_data(prices, '15m')
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF HMA for trend bias
-    hma_15m_raw = calculate_hma(df_15m['close'].values, period=21)
-    hma_15m_aligned = align_htf_to_ltf(prices, df_15m, hma_15m_raw)
+    # Calculate and align 1w HMA for major trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    # Calculate primary (5m) indicators
-    hma_5m = calculate_hma(close, period=21)
+    # Calculate primary (1d) indicators
+    hma_21 = calculate_hma(close, period=21)
+    hma_50 = calculate_hma(close, period=50)
+    rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=7)  # Faster RSI for 5m entries
     sma_200 = calculate_sma(close, 200)
     
     signals = np.zeros(n)
-    SIZE = 0.15  # Small size due to 5m fee drag
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking
     in_position = False
@@ -136,78 +129,80 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(300, n):
+    for i in range(250, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(hma_5m[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_21[i]) or np.isnan(hma_50[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(hma_15m_aligned[i]) or np.isnan(hma_4h_aligned[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
         if np.isnan(sma_200[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        # === SESSION FILTER (08-20 UTC only) ===
-        hour = get_session_hour(open_time[i])
-        in_session = 8 <= hour <= 20
+        # === 1W HTF MAJOR TREND BIAS ===
+        htf_1w_bull = False
+        htf_1w_bear = False
+        if not np.isnan(hma_1w_aligned[i]):
+            htf_1w_bull = close[i] > hma_1w_aligned[i]
+            htf_1w_bear = close[i] < hma_1w_aligned[i]
         
-        if not in_session:
-            # Close existing positions outside session
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
-        
-        # === HTF TREND BIAS ===
-        # 4h HMA for major trend
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
-        
-        # 15m HMA for intermediate trend
-        htf_15m_bull = close[i] > hma_15m_aligned[i]
-        htf_15m_bear = close[i] < hma_15m_aligned[i]
-        
-        # === 5m HMA TREND ===
-        hma_5m_bull = close[i] > hma_5m[i]
-        hma_5m_bear = close[i] < hma_5m[i]
+        # === 1D HMA TREND ===
+        # HMA21 > HMA50 = bullish trend
+        # HMA21 < HMA50 = bearish trend
+        hma_bull = hma_21[i] > hma_50[i]
+        hma_bear = hma_21[i] < hma_50[i]
         
         # === SMA200 FILTER (long-term bias) ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
-        # === RSI PULLBACK ENTRY ===
-        # In uptrend: enter on RSI pullback to 35-50
-        # In downtrend: enter on RSI rally to 50-65
-        rsi_pullback_long = 35.0 <= rsi[i] <= 55.0
-        rsi_pullback_short = 45.0 <= rsi[i] <= 65.0
+        # === RSI PULLBACK DETECTION ===
+        # Long: RSI(7) pulled back to 35-50 in uptrend
+        # Short: RSI(7) rallied to 50-65 in downtrend
+        rsi_pullback_long = 35.0 <= rsi_7[i] <= 50.0
+        rsi_pullback_short = 50.0 <= rsi_7[i] <= 65.0
+        
+        # RSI(14) confirmation (not extreme)
+        rsi_14_neutral = 40.0 <= rsi_14[i] <= 60.0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: All HTF bullish + RSI pullback + above SMA200
-        if htf_4h_bull and htf_15m_bull and hma_5m_bull:
-            if rsi_pullback_long and above_sma200:
-                desired_signal = SIZE
+        # LONG: HMA bullish + RSI pullback + above SMA200
+        # Strong signal: also with 1w bullish bias
+        if hma_bull and rsi_pullback_long and above_sma200:
+            if htf_1w_bull:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # SHORT: All HTF bearish + RSI rally + below SMA200
-        elif htf_4h_bear and htf_15m_bear and hma_5m_bear:
-            if rsi_pullback_short and below_sma200:
-                desired_signal = -SIZE
+        # SHORT: HMA bearish + RSI pullback + below SMA200
+        # Strong signal: also with 1w bearish bias
+        elif hma_bear and rsi_pullback_short and below_sma200:
+            if htf_1w_bear:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -228,10 +223,14 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE * 0.9:
-            final_signal = SIZE
-        elif desired_signal <= -SIZE * 0.9:
-            final_signal = -SIZE
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_BASE * 0.9:
+            final_signal = SIZE_BASE
+        elif desired_signal <= -SIZE_BASE * 0.9:
+            final_signal = -SIZE_BASE
         else:
             final_signal = 0.0
         
