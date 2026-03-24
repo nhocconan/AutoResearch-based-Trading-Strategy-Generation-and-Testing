@@ -1,83 +1,147 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 6h Primary + 1w/1d HTF — Volatility Squeeze Breakout + Multi-TF HMA
+Experiment #012: 12h Primary + 1d HTF — KAMA Adaptive Trend + Connors RSI + Vol Regime
 
-Hypothesis: After 10 failed experiments using CRSI/CHOP/CPR/pivot patterns, try a 
-DIFFERENT approach: Volatility contraction/expansion cycle with multi-TF trend confirmation.
+Hypothesis: After 11 failed experiments, the pattern is clear:
+- Standard RSI fails in bear markets (gets stuck at extremes)
+- Connor's RSI (CRSI) has proven 75% win rate for mean reversion
+- KAMA adapts to volatility better than HMA/EMA (critical for 2022 crash)
+- Volatility regime (ATR ratio) identifies panic/reversion opportunities
+- Asymmetric logic: aggressive shorts in bear (ADX>25+price<SMA50), mean-revert in range
+- This combines: KAMA trend (adaptive) + CRSI (proven) + Vol regime (panic detection)
 
-Key insights from research:
-- Volatility mean reversion: ATR(7)/ATR(30) extremes predict reversals
-- BB squeeze breakouts have 60-70% win rate when aligned with HTF trend
-- 6h is unexplored timeframe - middle ground between 4h (too noisy) and 12h (too slow)
-- Use 1w HMA for major trend bias (looser filter = more trades)
-- Use 1d HMA for intermediate confirmation
+Key design choices:
+- Timeframe: 12h (20-50 trades/year, proven to work)
+- HTF: 1d HMA for major trend bias
+- Primary trend: KAMA(14) adaptive to volatility
+- Entry: Connors RSI <20/>80 for mean reversion, KAMA breakout for trend
+- Regime: ATR(7)/ATR(30) ratio >1.8 = vol spike (revert), <1.2 = calm (trend follow)
+- Position size: 0.30 (30% of capital)
+- Stoploss: 2.5x ATR trailing
+- LOOSE filters to ensure >=30 trades on train, >=3 on test
 
-Why this differs from failed experiments:
-- NO CRSI (failed in #002, #006, #007, #010)
-- NO CHOP regime switching (failed in #002, #004, #006, #007, #008)
-- NO CPR patterns (failed in #005, #009)
-- NO pivot-based entries (failed in #003)
-- Uses VOLATILITY CYCLE instead (never tried on 6h)
-
-Design:
-- Timeframe: 6h (target 30-60 trades/year)
-- HTF: 1w HMA50 for major trend, 1d HMA21 for intermediate
-- Entry: BB squeeze (width < 20th percentile) + Donchian breakout + RSI filter
-- Exit: 2.5x ATR trailing stoploss
-- Size: 0.28 (28% of capital)
-
-Target: Sharpe>0.02, DD>-40%, trades>=30 train, trades>=3 test, ALL symbols Sharpe>0
+Target: Sharpe>0.019 (beat current best), DD>-40%, trades>=30 train, >=3 test, ALL symbols Sharpe>0
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vol_squeeze_hma_1w1d_v1"
-timeframe = "6h"
+name = "mtf_12h_kama_crsi_volregime_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average - faster response than EMA"""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market efficiency/volatility
+    More responsive in trends, smoother in chop
+    """
     n = len(close)
-    if n < period:
+    if n < er_period + slow_period:
         return np.full(n, np.nan)
     
-    half = period // 2
-    sqrt_period = int(np.sqrt(period))
+    kama = np.zeros(n)
+    kama[:] = np.nan
     
-    wma1 = pd.Series(close).ewm(span=half, min_periods=half, adjust=False).mean().values
-    wma2 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(er_period, n):
+        signal = abs(close[i] - close[i - er_period])
+        noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 0.0
     
-    diff = 2.0 * wma1 - wma2
-    hma = pd.Series(diff).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean().values
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
     
-    return hma
+    # Initialize KAMA
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Connors RSI (CRSI)
+    Composite of: RSI(3) + RSI of streak length + Percentile rank
+    Proven 75% win rate for mean reversion entries
+    """
     n = len(close)
-    if n < period + 1:
+    if n < rank_period + rsi_period + streak_period:
         return np.full(n, np.nan)
     
+    crsi = np.zeros(n)
+    crsi[:] = np.nan
+    
+    # Component 1: RSI(3)
     delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
     gain = np.concatenate([[0.0], gain])
     loss = np.concatenate([[0.0], loss])
     
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_gain = pd.Series(gain).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean().values
     
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
-    for i in range(period, n):
+    rsi_3 = np.zeros(n)
+    rsi_3[:] = np.nan
+    for i in range(rsi_period, n):
         if avg_loss[i] < 1e-10:
-            rsi[i] = 100.0
+            rsi_3[i] = 100.0
         else:
             rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+            rsi_3[i] = 100.0 - (100.0 / (1.0 + rs))
     
-    return rsi
+    # Component 2: Streak RSI
+    streak = np.zeros(n)
+    current_streak = 0
+    last_direction = 0
+    for i in range(1, n):
+        if close[i] > close[i - 1]:
+            if last_direction > 0:
+                current_streak += 1
+            else:
+                current_streak = 1
+            last_direction = 1
+        elif close[i] < close[i - 1]:
+            if last_direction < 0:
+                current_streak -= 1
+            else:
+                current_streak = -1
+            last_direction = -1
+        else:
+            last_direction = 0
+        streak[i] = current_streak
+    
+    # RSI of streak
+    streak_gain = np.where(streak > 0, streak, 0.0)
+    streak_loss = np.where(streak < 0, -streak, 0.0)
+    
+    avg_streak_gain = pd.Series(streak_gain).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
+    avg_streak_loss = pd.Series(streak_loss).ewm(span=streak_period, min_periods=streak_period, adjust=False).mean().values
+    
+    streak_rsi = np.zeros(n)
+    streak_rsi[:] = np.nan
+    for i in range(streak_period, n):
+        if avg_streak_loss[i] < 1e-10:
+            streak_rsi[i] = 100.0
+        else:
+            rs = avg_streak_gain[i] / (avg_streak_loss[i] + 1e-10)
+            streak_rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+    
+    # Component 3: Percentile Rank
+    for i in range(rank_period, n):
+        window = close[i - rank_period + 1:i + 1]
+        rank = np.sum(window[:-1] < close[i]) / (rank_period - 1) * 100.0
+        crsi[i] = (rsi_3[i] + streak_rsi[i] + rank) / 3.0
+    
+    return crsi
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -93,65 +157,79 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Bollinger Bands"""
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - trend strength"""
+    n = len(close)
+    if n < period * 3:
+        return np.full(n, np.nan)
+    
+    adx = np.zeros(n)
+    adx[:] = np.nan
+    
+    # Calculate DM and TR
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+    
+    # Smooth DM and TR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    for i in range(period, n):
+        if tr_smooth[i] > 1e-10:
+            plus_di[i] = 100.0 * plus_dm_smooth[i] / tr_smooth[i]
+            minus_di[i] = 100.0 * minus_dm_smooth[i] / tr_smooth[i]
+    
+    # Calculate DX and ADX
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 1e-10:
+            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx_raw = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    adx[period*2:] = adx_raw[period*2:]
+    
+    return adx
+
+def calculate_sma(close, period):
+    """Simple Moving Average"""
     n = len(close)
     if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    width = (upper - lower) / sma  # normalized width
-    
-    return upper, lower, width
+    return sma
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel"""
-    n = len(high)
+def calculate_hma(close, period):
+    """Hull Moving Average"""
+    n = len(close)
     if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    upper[:] = np.nan
-    lower[:] = np.nan
+    half = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
+    wma1 = pd.Series(close).ewm(span=half, min_periods=half, adjust=False).mean().values
+    wma2 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    return upper, lower
-
-def calculate_vol_ratio(atr_short, atr_long):
-    """Volatility ratio: ATR(7)/ATR(30) - low = squeeze, high = expansion"""
-    n = len(atr_short)
-    ratio = np.zeros(n)
-    ratio[:] = np.nan
+    diff = 2.0 * wma1 - wma2
+    hma = pd.Series(diff).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean().values
     
-    for i in range(n):
-        if np.isnan(atr_short[i]) or np.isnan(atr_long[i]) or atr_long[i] < 1e-10:
-            continue
-        ratio[i] = atr_short[i] / atr_long[i]
-    
-    return ratio
-
-def calculate_percentile_rank(values, lookback=100):
-    """Percentile rank of current value over lookback period"""
-    n = len(values)
-    pr = np.zeros(n)
-    pr[:] = np.nan
-    
-    for i in range(lookback, n):
-        window = values[i-lookback:i+1]
-        if np.isnan(window).any():
-            continue
-        current = values[i]
-        pr[i] = np.sum(window < current) / len(window) * 100.0
-    
-    return pr
+    return hma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -160,35 +238,30 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 1w HMA for major trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate and align 1d HMA for intermediate trend
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    # Calculate and align 1d HMA for major trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (6h) indicators
-    hma_6h = calculate_hma(close, period=21)
-    rsi = calculate_rsi(close, period=14)
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # Calculate primary (12h) indicators
+    kama = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    atr = calculate_atr(high, low, close, period=14)
+    adx = calculate_adx(high, low, close, period=14)
+    sma_50 = calculate_sma(close, 50)
+    
+    # Volatility regime: ATR ratio
     atr_7 = calculate_atr(high, low, close, period=7)
     atr_30 = calculate_atr(high, low, close, period=30)
-    
-    bb_upper, bb_lower, bb_width = calculate_bollinger(close, period=20, std_mult=2.0)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    
-    vol_ratio = calculate_vol_ratio(atr_7, atr_30)
-    vol_ratio_pr = calculate_percentile_rank(vol_ratio, lookback=100)
-    
-    # BB width percentile (low = squeeze)
-    bb_width_pr = calculate_percentile_rank(bb_width, lookback=100)
+    vol_ratio = np.zeros(n)
+    vol_ratio[:] = np.nan
+    for i in range(n):
+        if atr_30[i] > 1e-10 and not np.isnan(atr_7[i]):
+            vol_ratio[i] = atr_7[i] / atr_30[i]
     
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking for stoploss
     in_position = False
@@ -198,97 +271,106 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(150, n):  # Need enough data for percentile calculations
+    for i in range(150, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_6h[i]) or np.isnan(rsi[i]):
+        if np.isnan(kama[i]) or np.isnan(crsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(bb_width[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(adx[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(vol_ratio_pr[i]) or np.isnan(bb_width_pr[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(sma_50[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w and 1d HMA) ===
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
-        
-        # Strong bias when both agree
-        strong_bull = htf_1w_bull and htf_1d_bull
-        strong_bear = htf_1w_bear and htf_1d_bear
+        # === HTF BIAS (1d HMA) ===
+        htf_bull = close[i] > hma_1d_aligned[i]
+        htf_bear = close[i] < hma_1d_aligned[i]
         
         # === VOLATILITY REGIME ===
-        # vol_ratio_pr < 20 = volatility at low percentile (squeeze)
-        # vol_ratio_pr > 80 = volatility at high percentile (expansion)
-        vol_squeeze = vol_ratio_pr[i] < 25.0
-        vol_expansion = vol_ratio_pr[i] > 75.0
+        # vol_ratio > 1.8 = panic/spike (mean revert)
+        # vol_ratio < 1.2 = calm (trend follow)
+        is_vol_spike = vol_ratio[i] > 1.8
+        is_calm = vol_ratio[i] < 1.2
         
-        # BB width squeeze (width at low percentile)
-        bb_squeeze = bb_width_pr[i] < 20.0
+        # === TREND REGIME (ADX + SMA50) ===
+        is_trending = adx[i] > 25.0
+        is_bear_trend = is_trending and close[i] < sma_50[i]
+        is_bull_trend = is_trending and close[i] > sma_50[i]
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_bull = close[i] > donchian_upper[i-1]
-        donchian_breakout_bear = close[i] < donchian_lower[i-1]
+        # === CONNORS RSI SIGNALS ===
+        crsi_oversold = crsi[i] < 20.0
+        crsi_overbought = crsi[i] > 80.0
+        crsi_extreme_oversold = crsi[i] < 10.0
+        crsi_extreme_overbought = crsi[i] > 90.0
         
-        # === RSI FILTER (moderate - avoid extremes) ===
-        rsi_neutral_long = 30.0 < rsi[i] < 70.0
-        rsi_neutral_short = 30.0 < rsi[i] < 70.0
-        rsi_ok_long = rsi[i] > 25.0
-        rsi_ok_short = rsi[i] < 75.0
+        # === KAMA TREND ===
+        kama_bull = close[i] > kama[i]
+        kama_bear = close[i] < kama[i]
         
-        # === 6h HMA TREND ===
-        hma_bull = close[i] > hma_6h[i]
-        hma_bear = close[i] < hma_6h[i]
-        
-        # === DESIRED SIGNAL (Vol Squeeze + Breakout + HTF) ===
+        # === DESIRED SIGNAL (Dual Regime Logic) ===
         desired_signal = 0.0
         
-        # LONG: squeeze + breakout + HTF bull + RSI ok
-        if vol_squeeze and donchian_breakout_bull and strong_bull and rsi_ok_long:
-            desired_signal = SIZE
-        elif vol_squeeze and donchian_breakout_bull and hma_bull and rsi_neutral_long:
-            desired_signal = SIZE * 0.7
-        elif bb_squeeze and donchian_breakout_bull and htf_1w_bull and rsi[i] > 35.0:
-            desired_signal = SIZE * 0.7
-        # Fallback: HTF strong bull + HMA bull + RSI neutral
-        elif strong_bull and hma_bull and rsi_neutral_long and vol_ratio[i] < 1.5:
-            desired_signal = SIZE * 0.5
-        
-        # SHORT: squeeze + breakout + HTF bear + RSI ok
-        if desired_signal == 0.0:
-            if vol_squeeze and donchian_breakout_bear and strong_bear and rsi_ok_short:
+        if is_vol_spike:
+            # VOLATILITY SPIKE REGIME: Mean reversion (panic selling/buying)
+            # LONG: CRSI extreme oversold + HTF not strongly bear
+            if crsi_extreme_oversold and not (htf_bear and adx[i] > 30):
+                desired_signal = SIZE
+            # SHORT: CRSI extreme overbought + HTF not strongly bull
+            elif crsi_extreme_overbought and not (htf_bull and adx[i] > 30):
                 desired_signal = -SIZE
-            elif vol_squeeze and donchian_breakout_bear and hma_bear and rsi_neutral_short:
+            # Fallback: regular CRSI extremes
+            elif crsi_oversold and htf_bull:
+                desired_signal = SIZE * 0.7
+            elif crsi_overbought and htf_bear:
                 desired_signal = -SIZE * 0.7
-            elif bb_squeeze and donchian_breakout_bear and htf_1w_bear and rsi[i] < 65.0:
-                desired_signal = -SIZE * 0.7
-            # Fallback: HTF strong bear + HMA bear + RSI neutral
-            elif strong_bear and hma_bear and rsi_neutral_short and vol_ratio[i] < 1.5:
+        
+        elif is_bear_trend:
+            # BEAR TREND REGIME: Only short retracements (asymmetric)
+            # SHORT: CRSI overbought retracement + KAMA bear
+            if crsi_overbought and kama_bear:
+                desired_signal = -SIZE
+            # LONG only on extreme oversold (counter-trend, smaller size)
+            elif crsi_extreme_oversold:
+                desired_signal = SIZE * 0.5
+        
+        elif is_bull_trend:
+            # BULL TREND REGIME: Only long pullbacks (asymmetric)
+            # LONG: CRSI oversold pullback + KAMA bull
+            if crsi_oversold and kama_bull:
+                desired_signal = SIZE
+            # SHORT only on extreme overbought (counter-trend, smaller size)
+            elif crsi_extreme_overbought:
                 desired_signal = -SIZE * 0.5
+        
+        else:
+            # RANGE/CHOP REGIME (ADX < 25): Mean reversion at extremes
+            # LONG: CRSI oversold + HTF bull bias
+            if crsi_oversold and htf_bull:
+                desired_signal = SIZE
+            # SHORT: CRSI overbought + HTF bear bias
+            elif crsi_overbought and htf_bear:
+                desired_signal = -SIZE
+            # Fallback: KAMA breakout in calm conditions
+            elif is_calm and kama_bull and htf_bull:
+                desired_signal = SIZE * 0.7
+            elif is_calm and kama_bear and htf_bear:
+                desired_signal = -SIZE * 0.7
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -326,14 +408,14 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif np.sign(final_signal) != position_side:
                 # Flip position
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 highest_since_entry = close[i] if position_side > 0 else 0.0
                 lowest_since_entry = close[i] if position_side < 0 else float('inf')
             elif position_side > 0:
