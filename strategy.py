@@ -1,83 +1,67 @@
 #!/usr/bin/env python3
 """
-Experiment #056: 12h Primary + 1d HTF — KAMA Trend + Donchian Breakout + Funding Contrarian
+Experiment #057: 1d Primary + 1w HTF — KAMA Adaptive Trend + Choppiness Regime + RSI
 
-Hypothesis: Previous regime-switching strategies (#046, #047, #054) failed due to 
-choppiness index whipsaw. This strategy uses SIMPLER trend-following with:
-1. KAMA(10,2,30) - Adaptive trend that reduces noise in choppy markets
-2. Donchian(20) breakout - Proven breakout signal for SOL
-3. 1d HMA(21) - Simple directional bias (not regime switch)
-4. RSI(14) pullback filter - Avoid chasing breakouts
-5. Funding rate z-score - Contrarian edge for BTC/ETH mean reversion
+Hypothesis: Daily timeframe captures major moves while reducing fee drag vs lower TFs.
+KAMA (Kaufman Adaptive Moving Average) adapts to volatility - fast in trends, slow in chops.
+Combined with Choppiness Index regime detection and RSI entries:
+- CHOP < 45: Trend regime → KAMA crossover signals
+- CHOP > 55: Range regime → RSI mean reversion signals
+- 1w KAMA for major trend bias (only trade with HTF direction)
 
-Key improvements over #052:
-- NO choppiness regime switching (failed in 3 experiments)
-- Looser RSI thresholds (35/65 not 30/70) for more trades
-- Funding rate contrarian signal adds uncorrelated alpha
-- KAMA adapts to volatility automatically
+Key improvements over failed #046/#047:
+- KAMA instead of HMA (better volatility adaptation)
+- RSI(14) instead of CRSI (simpler, more reliable on 1d)
+- Looser RSI thresholds (35/65 not 10/90) for trade generation
+- Volume confirmation filter
+- Size: 0.30 (discrete, conservative)
 
 Target: Sharpe>0.351, trades>30/symbol train, >3/symbol test, DD>-40%
-Timeframe: 12h (target 25-45 trades/year)
+Timeframe: 1d (target 20-50 trades/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_donchian_funding_1d_v1"
-timeframe = "12h"
+name = "mtf_1d_kama_chop_rsi_regime_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30):
+def calculate_kama(close, fast_period=2, slow_period=30, er_period=10):
     """
     Kaufman Adaptive Moving Average (KAMA)
-    Adapts to market noise - smooth in choppy, responsive in trends
+    Adapts to market noise - fast in trends, slow in ranges
     """
     n = len(close)
-    if n < efficiency_period + slow_period:
+    if n < er_period + slow_period:
         return np.full(n, np.nan)
     
     kama = np.full(n, np.nan)
     
-    # Calculate Efficiency Ratio (ER)
+    # Efficiency Ratio (ER)
     er = np.zeros(n)
-    for i in range(efficiency_period, n):
-        signal = abs(close[i] - close[i - efficiency_period])
+    for i in range(er_period, n):
+        signal = abs(close[i] - close[i - er_period])
         noise = 0.0
-        for j in range(i - efficiency_period + 1, i + 1):
+        for j in range(i - er_period + 1, i + 1):
             noise += abs(close[j] - close[j - 1])
-        if noise > 1e-10:
+        if noise > 0:
             er[i] = signal / noise
         else:
             er[i] = 0.0
     
-    # Calculate smoothing constant
+    # Smoothing constants
     fast_sc = 2.0 / (fast_period + 1.0)
     slow_sc = 2.0 / (slow_period + 1.0)
     
     # Initialize KAMA
-    kama[efficiency_period] = close[efficiency_period]
+    kama[er_period] = close[er_period]
     
-    for i in range(efficiency_period + 1, n):
+    for i in range(er_period + 1, n):
         sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
         kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
     
     return kama
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns (upper, lower, middle)"""
-    n = len(close := high)  # Use high length
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    middle = (upper + lower) / 2.0
-    return upper, lower, middle
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -104,8 +88,38 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = ranging market
+    CHOP < 38.2 = trending market
+    Using 45/55 as regime switch thresholds
+    """
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    chop = np.full(n, np.nan)
+    for i in range(period, n):
+        highest = np.max(high[i-period+1:i+1])
+        lowest = np.min(low[i-period+1:i+1])
+        atr_sum = 0.0
+        for j in range(i-period+1, i+1):
+            if j == 0:
+                tr = high[j] - low[j]
+            else:
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_sum += tr
+        
+        if highest > lowest and atr_sum > 0:
+            chop[i] = 100.0 * np.log10((highest - lowest) / atr_sum) / np.log10(period)
+        else:
+            chop[i] = 50.0
+    
+    return chop
+
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range for stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -118,77 +132,36 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def load_funding_zscore(symbol, dates):
-    """
-    Load funding rate data and calculate z-score
-    Returns aligned z-score array for contrarian signal
-    """
-    try:
-        # Map symbol to funding file
-        symbol_map = {
-            'BTCUSDT': 'BTCUSDT',
-            'ETHUSDT': 'ETHUSDT',
-            'SOLUSDT': 'SOLUSDT'
-        }
-        funding_symbol = symbol_map.get(symbol, 'BTCUSDT')
-        funding_path = f"data/processed/funding/{funding_symbol}.parquet"
-        
-        df_funding = pd.read_parquet(funding_path)
-        df_funding = df_funding.sort_values('open_time')
-        
-        # Calculate z-score of funding rate (30-period)
-        funding_rates = df_funding['funding_rate'].values
-        n_funding = len(funding_rates)
-        
-        zscore = np.full(n_funding, np.nan)
-        for i in range(30, n_funding):
-            window = funding_rates[i-30:i]
-            mean = np.mean(window)
-            std = np.std(window)
-            if std > 1e-10:
-                zscore[i] = (funding_rates[i] - mean) / std
-            else:
-                zscore[i] = 0.0
-        
-        # Align to prices timeframe
-        # Merge on open_time
-        df_funding['zscore'] = zscore
-        df_funding = df_funding[['open_time', 'zscore']]
-        
-        # Create prices dataframe with open_time for merge
-        df_prices = pd.DataFrame({'open_time': dates})
-        df_merged = pd.merge_asof(df_prices, df_funding, on='open_time', direction='backward')
-        
-        return df_merged['zscore'].values
-    except Exception:
-        # Return zeros if funding data unavailable
-        return np.zeros(len(dates))
+def calculate_volume_sma(volume, period=20):
+    """Simple Moving Average of volume"""
+    n = len(volume)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_times = prices["open_time"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # Infer symbol from prices (use BTC as default)
-    symbol = "BTCUSDT"
-    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for HTF trend bias
-    hma_1d_raw = calculate_kama(df_1d['close'].values, efficiency_period=10, fast_period=2, slow_period=30)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 1w KAMA for HTF trend bias
+    kama_1w_raw = calculate_kama(df_1w['close'].values, fast_period=2, slow_period=30, er_period=10)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w_raw)
     
-    # Calculate primary (12h) indicators
-    kama_12h = calculate_kama(close, efficiency_period=10, fast_period=2, slow_period=30)
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
+    # Calculate primary (1d) indicators
+    kama_fast = calculate_kama(close, fast_period=2, slow_period=10, er_period=10)
+    kama_slow = calculate_kama(close, fast_period=2, slow_period=30, er_period=10)
     rsi = calculate_rsi(close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    
-    # Load funding z-score
-    funding_zscore = load_funding_zscore(symbol, open_times)
+    vol_sma = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
     SIZE = 0.30  # Discrete position size
@@ -209,73 +182,65 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(kama_12h[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(vol_sma[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        if np.isnan(kama_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d KAMA) ===
-        hma_1d_bull = close[i] > hma_1d_aligned[i]
-        hma_1d_bear = close[i] < hma_1d_aligned[i]
+        # === HTF BIAS (1w KAMA) ===
+        htf_bull = close[i] > kama_1w_aligned[i]
+        htf_bear = close[i] < kama_1w_aligned[i]
         
-        # === 12h TREND (KAMA) ===
-        kama_bull = close[i] > kama_12h[i]
-        kama_bear = close[i] < kama_12h[i]
+        # === PRIMARY TREND (KAMA crossover) ===
+        kama_bull = kama_fast[i] > kama_slow[i]
+        kama_bear = kama_fast[i] < kama_slow[i]
         
-        # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i - 1] if i > 0 else False
-        breakout_short = close[i] < donchian_lower[i - 1] if i > 0 else False
+        # === REGIME (Choppiness) ===
+        is_trending = chop[i] < 45.0  # Trend market
+        is_ranging = chop[i] > 55.0   # Range market
+        # 45-55 = neutral, no new entries
         
-        # === RSI PULLBACK FILTER (loose thresholds for trade gen) ===
-        rsi_bull = rsi[i] > 35.0  # Not oversold
-        rsi_bear = rsi[i] < 65.0  # Not overbought
+        # === RSI SIGNALS ===
+        rsi_oversold = rsi[i] < 35.0
+        rsi_overbought = rsi[i] > 65.0
         
-        # === FUNDING CONTRARIAN ===
-        funding_extreme_long = funding_zscore[i] < -1.5 if not np.isnan(funding_zscore[i]) else False
-        funding_extreme_short = funding_zscore[i] > 1.5 if not np.isnan(funding_zscore[i]) else False
+        # === VOLUME FILTER ===
+        volume_ok = volume[i] > 0.8 * vol_sma[i]
         
         # === DESIRED SIGNAL ===
         desired_signal = 0.0
         
-        # LONG ENTRY: HTF bull + KAMA bull + (breakout OR pullback) + funding support
-        long_score = 0
-        if hma_1d_bull:
-            long_score += 1
-        if kama_bull:
-            long_score += 1
-        if breakout_long:
-            long_score += 1
-        if rsi_bull:
-            long_score += 1
-        if funding_extreme_long:
-            long_score += 1
+        # TREND REGIME: KAMA crossover + HTF alignment
+        if is_trending:
+            # Long: HTF bull + KAMA bull crossover + volume
+            if htf_bull and kama_bull and volume_ok:
+                desired_signal = SIZE
+            # Short: HTF bear + KAMA bear crossover + volume
+            elif htf_bear and kama_bear and volume_ok:
+                desired_signal = -SIZE
         
-        # SHORT ENTRY: HTF bear + KAMA bear + (breakout OR pullback) + funding support
-        short_score = 0
-        if hma_1d_bear:
-            short_score += 1
-        if kama_bear:
-            short_score += 1
-        if breakout_short:
-            short_score += 1
-        if rsi_bear:
-            short_score += 1
-        if funding_extreme_short:
-            short_score += 1
-        
-        # Entry threshold: need 3+ signals for long, 3+ for short
-        if long_score >= 3:
-            desired_signal = SIZE
-        elif short_score >= 3:
-            desired_signal = -SIZE
+        # RANGE REGIME: RSI mean reversion + HTF bias
+        elif is_ranging:
+            # Long: HTF bull (or neutral) + RSI oversold
+            if (htf_bull or not htf_bear) and rsi_oversold:
+                desired_signal = SIZE
+            # Short: HTF bear (or neutral) + RSI overbought
+            elif (htf_bear or not htf_bull) and rsi_overbought:
+                desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
