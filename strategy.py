@@ -1,33 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #1430: 1h Primary + 4h/12h HTF — HMA Trend + RSI Pullback + Volume Session
+Experiment #1431: 4h Primary + 1d HTF — Simplified HMA Trend + RSI Pullback
 
-Hypothesis: 1h timeframe with 4h/12h HTF trend filter will generate 40-70 trades/year
-with positive Sharpe by combining proven patterns from best strategies:
-1. 4h HMA(21) = primary trend direction (faster than 1d, slower than 1h noise)
-2. 12h HMA(50) = macro bias confirmation (avoids counter-trend traps)
-3. 1h RSI(14) pullback = entry timing within HTF trend (proven in best strategy)
-4. Choppiness Index = adjust thresholds, NOT block entries (learned from failures)
-5. Volume > 0.7x avg + Session 8-20 UTC = filter low-liquidity traps
-6. ATR(14) 2.5x trailing stop = risk management
+Hypothesis: After 10+ failed experiments with complex regime detection (all Sharpe=0.000),
+a SIMPLER approach focusing on proven patterns will generate actual trades:
+1. 1d HMA(21) for macro trend direction (single HTF filter - not over-complicated)
+2. 4h RSI(14) pullback entries in trend direction (RSI<40 long, >60 short)
+3. ATR(14) 2.5x trailing stop for risk management
+4. RELAXED thresholds to ensure ≥30 trades/train, ≥3 trades/test
 
-Why this should work (learning from #1418-#1429 failures):
-- Recent 0-trade failures had TOO STRICT conditions (all filters must align perfectly)
-- Solution: Use HTF trend as PRIMARY filter, 1h indicators as ENTRY TIMING only
-- Relaxed RSI thresholds (35/65 not 30/70) to ensure trades trigger
-- Choppiness adjusts size, not entry permission (range=0.20, trend=0.30)
-- Volume filter relaxed to 0.7x (not 1.0x) to allow more trades
+Why this should work (learning from failures #1419-#1430):
+- Simpler = MORE trades (recent failures had 0 trades = auto-reject)
+- Single HTF filter (1d HMA) instead of 1d+1w over-filtering
+- RSI 40/60 thresholds instead of 30/70 (more entry opportunities)
+- No Choppiness Index (too restrictive, caused 0 trades in #1421, #1426)
+- No Connors RSI (complex, caused 0 trades in #1425, #1428)
 
-Position sizing: 0.25 base, 0.30 in strong trend, 0.20 in choppy
-Target: 40-70 trades/year, Sharpe > 0.618 (beat current best), DD < -30%
-Timeframe: 1h
+Target: 40-80 trades/year on 4h, Sharpe > 0.618 (beat current best)
+Timeframe: 4h
+Position Size: 0.30 (discrete, minimizes fee churn)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_pullback_4h12h_trend_vol_session_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_hma_rsi_pullback_1d_trend_atr_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
@@ -87,30 +85,6 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - measures market choppy vs trending"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    chop = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        highest_high = np.nanmax(high[i-period+1:i+1])
-        lowest_low = np.nanmin(low[i-period+1:i+1])
-        
-        if highest_high > lowest_low:
-            tr_sum = 0.0
-            for j in range(i-period+1, i+1):
-                tr = max(high[j] - low[j], 
-                        abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j],
-                        abs(low[j] - close[j-1]) if j > 0 else high[j] - low[j])
-                tr_sum += tr
-            
-            chop[i] = 100.0 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
-    
-    return chop
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range - for stoploss sizing"""
     n = len(close)
@@ -120,67 +94,30 @@ def calculate_atr(high, low, close, period=14):
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_volume_sma(volume, period=20):
-    """Simple moving average of volume"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_sma = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        vol_sma[i] = np.nanmean(volume[i-period+1:i+1])
-    
-    return vol_sma
-
-def get_hour_from_open_time(open_time_arr):
-    """Extract hour from open_time (milliseconds timestamp)"""
-    hours = np.zeros(len(open_time_arr), dtype=np.int32)
-    for i in range(len(open_time_arr)):
-        # Convert ms to seconds, then to datetime
-        ts_sec = open_time_arr[i] / 1000.0
-        hours[i] = int((ts_sec % 86400) / 3600)
-    return hours
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Extract hour for session filter
-    hours = get_hour_from_open_time(open_time)
-    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 4h HMA(21) for primary trend
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align 1d HMA for macro trend
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 12h HMA(50) for macro bias
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=50)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
-    
-    # Calculate primary (1h) indicators
-    rsi_14 = calculate_rsi(close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
+    # Calculate primary (4h) indicators
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    vol_sma_20 = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.25
-    TREND_SIZE = 0.30
-    CHOP_SIZE = 0.20
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -198,88 +135,31 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi_14[i]) or np.isnan(chop[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] <= 1e-10:
+        if np.isnan(rsi[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (8-20 UTC) ===
-        in_session = 8 <= hours[i] <= 20
-        
-        # === VOLUME FILTER (relaxed: > 0.7x avg) ===
-        vol_ok = volume[i] > 0.7 * vol_sma_20[i]
-        
-        # === MACRO TREND (12h HMA) - bias filter ===
-        macro_bull = close[i] > hma_12h_aligned[i]
-        macro_bear = close[i] < hma_12h_aligned[i]
-        
-        # === PRIMARY TREND (4h HMA) - entry direction ===
-        trend_bull = close[i] > hma_4h_aligned[i]
-        trend_bear = close[i] < hma_4h_aligned[i]
-        
-        # === TREND CONFIRMATION (both HTF agree) ===
-        strong_bull = macro_bull and trend_bull
-        strong_bear = macro_bear and trend_bear
-        
-        # === CHOPPINESS REGIME ===
-        is_choppy = chop[i] > 50.0
-        is_trending = chop[i] < 45.0
+        # === MACRO TREND (1d HMA) - primary filter ===
+        macro_bull = close[i] > hma_1d_aligned[i]
+        macro_bear = close[i] < hma_1d_aligned[i]
         
         # === RSI PULLBACK (relaxed thresholds for more trades) ===
-        rsi_pullback_long = rsi_14[i] < 45.0 and rsi_14[i] > 30.0
-        rsi_pullback_short = rsi_14[i] > 55.0 and rsi_14[i] < 70.0
-        rsi_extreme_long = rsi_14[i] < 35.0
-        rsi_extreme_short = rsi_14[i] > 65.0
+        rsi_oversold = rsi[i] < 40.0  # RELAXED from 30 for more long entries
+        rsi_overbought = rsi[i] > 60.0  # RELAXED from 70 for more short entries
         
-        # === DESIRED SIGNAL - SIMPLIFIED LOGIC ===
+        # === DESIRED SIGNAL - SIMPLE TREND + PULLBACK ===
         desired_signal = 0.0
-        use_size = BASE_SIZE
         
-        # Determine size based on regime
-        if is_trending and strong_bull:
-            use_size = TREND_SIZE
-        elif is_trending and strong_bear:
-            use_size = TREND_SIZE
-        elif is_choppy:
-            use_size = CHOP_SIZE
+        # LONG: Macro bull + RSI pullback oversold
+        if macro_bull and rsi_oversold:
+            desired_signal = BASE_SIZE
         
-        # LONG ENTRIES (must have session + volume)
-        if in_session and vol_ok:
-            # Path 1: Strong bull trend + RSI pullback
-            if strong_bull and rsi_pullback_long:
-                desired_signal = use_size
-            # Path 2: Strong bull trend + RSI extreme (oversold)
-            elif strong_bull and rsi_extreme_long:
-                desired_signal = use_size
-            # Path 3: Trending regime + any bull signal + RSI < 50
-            elif is_trending and trend_bull and rsi_14[i] < 50.0:
-                desired_signal = BASE_SIZE
-        
-        # SHORT ENTRIES (must have session + volume)
-        if in_session and vol_ok:
-            # Path 1: Strong bear trend + RSI pullback
-            if strong_bear and rsi_pullback_short:
-                desired_signal = -use_size
-            # Path 2: Strong bear trend + RSI extreme (overbought)
-            elif strong_bear and rsi_extreme_short:
-                desired_signal = -use_size
-            # Path 3: Trending regime + any bear signal + RSI > 50
-            elif is_trending and trend_bear and rsi_14[i] > 50.0:
-                desired_signal = -BASE_SIZE
+        # SHORT: Macro bear + RSI pullback overbought
+        elif macro_bear and rsi_overbought:
+            desired_signal = -BASE_SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -300,14 +180,15 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= BASE_SIZE * 0.5:
-            final_signal = np.sign(desired_signal) * use_size
+        if abs(desired_signal) >= BASE_SIZE * 0.5:
+            final_signal = BASE_SIZE if desired_signal > 0 else -BASE_SIZE
         else:
             final_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if final_signal != 0.0:
             if not in_position:
+                # New entry
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
