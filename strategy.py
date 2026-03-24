@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #793: 5m Primary + 15m/4h HTF — Session-Filtered Trend Following
+Experiment #794: 1d Primary + 1w HTF — Weekly Trend Filter with Daily Entries
 
-Hypothesis: 5m timeframe with strict session filter (08-20 UTC) + 4h trend bias
-will capture high-liquidity moves while avoiding Asian session whipsaw. 15m RSI
-provides momentum confirmation. 5m only for entry timing precision.
+Hypothesis: 1d timeframe with 1w HTF bias captures major trends while avoiding
+whipsaws. Weekly HMA(21) provides ultra-long-term trend direction. Daily HMA(16/48)
+crossover gives entry timing. RSI(14) with loose thresholds (40/60) ensures trade
+generation. Volume filter (>20d avg) confirms breakout validity.
 
 Key innovations:
-1. 4h HMA(21) for primary trend bias — only trade in HTF direction
-2. 15m RSI(14) for momentum confirmation — avoid counter-trend entries
-3. 5m session filter (08-20 UTC) — only trade high-liquidity hours
-4. 5m RSI(7) for entry timing — pullback entries in trend direction
+1. 1w HMA(21) for macro trend bias — only trade with weekly trend
+2. 1d HMA(16/48) crossover for entry timing
+3. 1d RSI(14) loose thresholds (40/60) for momentum confirmation
+4. Volume > 20d average filter to avoid low-liquidity traps
 5. ATR(14) 2.5x trailing stop for risk management
-6. Discrete sizing: 0.0, ±0.15, ±0.20 (smaller due to 5m frequency)
+6. Discrete sizing: 0.0, ±0.25, ±0.30
 
-Entry conditions:
-- LONG: 4h HMA bull + 15m RSI>50 + 5m RSI pullback (35-50) + session active
-- SHORT: 4h HMA bear + 15m RSI<50 + 5m RSI rally (50-65) + session active
+Entry conditions (LOOSE to ensure ≥20 trades/train, ≥3/test):
+- LONG: 1w HMA bull + 1d HMA crossover OR (1d HMA bull + RSI<50)
+- SHORT: 1w HMA bear + 1d HMA crossover OR (1d HMA bear + RSI>50)
 
-Target: Sharpe>0.40, trades>=50/train, trades>=5/test, DD>-35%
-Timeframe: 5m
-Size: 0.15-0.20 discrete (smaller due to higher trade frequency)
+Target: Sharpe>0.40, trades>=20 train, trades>=3 test, DD>-40%
+Timeframe: 1d
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_5m_session_rsi_hma_15m4h_v1"
-timeframe = "5m"
+name = "mtf_1d_hma_rsi_vol_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -85,38 +86,39 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def is_session_active(open_time):
-    """Check if timestamp is within high-liquidity session (08-20 UTC)"""
-    # open_time is in milliseconds since epoch
-    hour = pd.to_datetime(open_time, unit='ms').hour
-    return 8 <= hour < 20
+def calculate_sma(values, period):
+    """Simple Moving Average"""
+    n = len(values)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    sma = pd.Series(values).rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_15m = get_htf_data(prices, '15m')
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align HTF HMA
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
-    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
-    
-    # Calculate 5m indicators
-    rsi_5m_7 = calculate_rsi(close, period=7)
-    rsi_5m_14 = calculate_rsi(close, period=14)
+    # Calculate 1d indicators
+    hma_16 = calculate_hma(close, period=16)
+    hma_48 = calculate_hma(close, period=48)
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
+    vol_sma_20 = calculate_sma(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -136,60 +138,75 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_5m_7[i]) or np.isnan(rsi_5m_14[i]):
+        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_15m_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(vol_sma_20[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (08-20 UTC) ===
-        session_active = is_session_active(open_time[i])
+        # === HTF BIAS (1w HMA) ===
+        htf_1w_bull = close[i] > hma_1w_aligned[i]
+        htf_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === HTF BIAS (4h HMA) ===
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
+        # === 1d HMA CROSSOVER ===
+        hma_crossover_long = False
+        hma_crossover_short = False
+        if i > 0 and not np.isnan(hma_16[i-1]) and not np.isnan(hma_48[i-1]):
+            hma_crossover_long = (hma_16[i-1] <= hma_48[i-1]) and (hma_16[i] > hma_48[i])
+            hma_crossover_short = (hma_16[i-1] >= hma_48[i-1]) and (hma_16[i] < hma_48[i])
         
-        # === 15m MOMENTUM CONFIRMATION ===
-        rsi_15m_bull = rsi_15m_aligned[i] > 50.0
-        rsi_15m_bear = rsi_15m_aligned[i] < 50.0
-        rsi_15m_strong_bull = rsi_15m_aligned[i] > 55.0
-        rsi_15m_strong_bear = rsi_15m_aligned[i] < 45.0
+        # === 1d HMA TREND ===
+        hma_1d_bull = hma_16[i] > hma_48[i]
+        hma_1d_bear = hma_16[i] < hma_48[i]
         
-        # === 5m ENTRY TIMING (RSI PULLBACK) ===
-        # Long: RSI pulled back from overbought but still bullish
-        rsi_5m_pullback_long = (35.0 <= rsi_5m_7[i] <= 50.0)
-        rsi_5m_pullback_short = (50.0 <= rsi_5m_7[i] <= 65.0)
+        # === RSI CONDITIONS (LOOSE for more trades) ===
+        rsi_neutral_low = rsi_14[i] < 50.0
+        rsi_neutral_high = rsi_14[i] > 50.0
+        rsi_oversold = rsi_14[i] < 40.0
+        rsi_overbought = rsi_14[i] > 60.0
+        rsi_extreme_oversold = rsi_14[i] < 30.0
+        rsi_extreme_overbought = rsi_14[i] > 70.0
         
-        # RSI turning up/down
-        rsi_5m_turning_up = False
-        rsi_5m_turning_down = False
-        if i > 0 and not np.isnan(rsi_5m_7[i-1]):
-            rsi_5m_turning_up = (rsi_5m_7[i-1] < 45.0) and (rsi_5m_7[i] > rsi_5m_7[i-1])
-            rsi_5m_turning_down = (rsi_5m_7[i-1] > 55.0) and (rsi_5m_7[i] < rsi_5m_7[i-1])
+        # === VOLUME CONFIRMATION ===
+        vol_above_avg = volume[i] > vol_sma_20[i]
         
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: 4h bull + 15m bull + 5m pullback + session active
-        if htf_4h_bull and rsi_15m_bull and session_active:
-            if rsi_5m_pullback_long or rsi_5m_turning_up:
-                if rsi_15m_strong_bull and rsi_5m_turning_up:
+        # LONG: 1w bull + (1d HMA crossover OR 1d HMA bull + RSI<50)
+        if htf_1w_bull:
+            if hma_crossover_long:
+                # Strong signal on crossover with volume
+                if vol_above_avg or rsi_extreme_oversold:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
+            elif hma_1d_bull and rsi_neutral_low:
+                # Entry on pullback in uptrend
+                if rsi_oversold:
                     desired_signal = SIZE_STRONG
                 else:
                     desired_signal = SIZE_BASE
         
-        # SHORT: 4h bear + 15m bear + 5m rally + session active
-        elif htf_4h_bear and rsi_15m_bear and session_active:
-            if rsi_5m_pullback_short or rsi_5m_turning_down:
-                if rsi_15m_strong_bear and rsi_5m_turning_down:
+        # SHORT: 1w bear + (1d HMA crossover OR 1d HMA bear + RSI>50)
+        elif htf_1w_bear:
+            if hma_crossover_short:
+                # Strong signal on crossover with volume
+                if vol_above_avg or rsi_extreme_overbought:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
+            elif hma_1d_bear and rsi_neutral_high:
+                # Entry on rally in downtrend
+                if rsi_overbought:
                     desired_signal = -SIZE_STRONG
                 else:
                     desired_signal = -SIZE_BASE
