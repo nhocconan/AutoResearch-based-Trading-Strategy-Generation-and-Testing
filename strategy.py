@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #296: 30m Primary + 4h/1d HTF — HMA Trend + RSI Pullback + Volume + Session v1
+Experiment #297: 15m Primary + 4h/1d HTF — Daily CPR Breakout + RSI Pullback v1
 
-Hypothesis: Simpler is better. Complex regime detection (Choppiness, Funding) has failed repeatedly.
-Return to proven pattern: HTF trend direction + LTF pullback entries + volume confirmation.
+Hypothesis: 15m timeframe needs VERY selective entries (40-100 trades/year) to avoid fee drag.
+Using Daily CPR (Central Pivot Range) from 1d HTF as key S/R levels, combined with
+4h trend direction and 15m RSI(7) pullback entries. This is proven in traditional
+trading (Pivot Boss methodology) but untested on crypto 15m.
 
-Key changes from failed experiments:
-1. REMOVED Choppiness Index — adds complexity without edge (failed in #284, #286, #287)
-2. REMOVED Funding Rate — data alignment issues, inconsistent results (#284, #287, #290)
-3. REMOVED Connors RSI — too many parameters, overfitting risk
-4. SIMPLIFIED to: 4h HMA trend + 1d HMA major trend + 30m RSI pullback + volume filter
-5. SESSION FILTER: Only trade 08-20 UTC (high liquidity, less whipsaw)
-6. VOLUME CONFIRMATION: Taker buy ratio > 0.55 for longs, < 0.45 for shorts
+Key innovations:
+1. DAILY CPR LEVELS: BC/TC/CP from 1d HTF act as magnet zones for entries
+2. NARROW CPR FILTER: Only trade when CPR width < 1.5% of price (consolidation)
+3. 4H HMA TREND: Direction filter - only long if 4h HMA bullish, vice versa
+4. RSI(7) PULLBACK: Enter on RSI(7) < 35 (long) or > 65 (short) within trend
+5. VOLUME CONFIRMATION: Entry bar volume > 1.3x 20-bar avg (avoids fakeouts)
+6. SESSION FILTER: Prefer 00-12 UTC (London+NY overlap for crypto liquidity)
 
-Entry Logic:
-- Long: 4h HMA bull + 1d HMA bull + RSI(14) pullback to 40-55 + volume confirmation + session
-- Short: 4h HMA bear + 1d HMA bear + RSI(14) pullback to 45-60 + volume confirmation + session
+Position sizing: 0.15 base, 0.25 when all confluence align (discrete levels)
+Stoploss: 2.5x ATR(14) from entry price
+Target: Sharpe>0.40, DD>-40%, trades>=30 train, trades>=3 test, ALL symbols positive
 
-Position sizing: 0.25 base, 0.30 when both 4h+1d aligned (discrete levels)
-Stoploss: 2.5x ATR from entry price
-Session: 08-20 UTC only (reduces overnight gap risk)
-
-Target: Sharpe>0.40, DD>-40%, trades>=30 train, trades>=3 test, 40-80 trades/year
+CRITICAL: 15m generates many bars - must be VERY selective to avoid >100 trades/year.
+Use 4+ confluence: HTF trend + CPR level + RSI extreme + volume spike.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_hma_rsi_pullback_volume_session_4h1d_v1"
-timeframe = "30m"
+name = "mtf_15m_cpr_rsi_pullback_volume_4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -97,14 +96,61 @@ def calculate_sma(close, period):
     sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     return sma
 
+def calculate_cpr_from_1d(df_1d):
+    """
+    Calculate Daily CPR (Central Pivot Range) from 1d data
+    CP = (High + Low + Close) / 3
+    BC = (High + Low) / 2
+    TC = (CP - BC) + CP
+    
+    Returns arrays aligned to 1d bars
+    """
+    n = len(df_1d)
+    cp = np.zeros(n)
+    bc = np.zeros(n)
+    tc = np.zeros(n)
+    cp[:] = np.nan
+    bc[:] = np.nan
+    tc[:] = np.nan
+    
+    high = df_1d['high'].values
+    low = df_1d['low'].values
+    close = df_1d['close'].values
+    
+    for i in range(1, n):
+        cp[i] = (high[i-1] + low[i-1] + close[i-1]) / 3.0
+        bc[i] = (high[i-1] + low[i-1]) / 2.0
+        tc[i] = (cp[i] - bc[i]) + cp[i]
+    
+    return cp, bc, tc
+
+def calculate_cpr_width(cp, bc, tc):
+    """
+    CPR Width = (TC - BC) / CP * 100
+    Narrow CPR (< 1.5%) indicates consolidation -> breakout likely
+    """
+    n = len(cp)
+    width = np.zeros(n)
+    width[:] = np.nan
+    
+    for i in range(n):
+        if not np.isnan(cp[i]) and cp[i] > 1e-10:
+            width[i] = (tc[i] - bc[i]) / cp[i] * 100.0
+    
+    return width
+
 def get_hour_from_open_time(prices):
     """Extract UTC hour from open_time column"""
-    # open_time is in milliseconds since epoch
-    open_time_ms = prices['open_time'].values
-    # Convert to seconds, then to datetime
-    open_time_s = open_time_ms / 1000.0
-    # Extract hour (UTC)
-    hours = ((open_time_s % 86400) / 3600).astype(int)
+    hours = np.zeros(len(prices), dtype=int)
+    for i in range(len(prices)):
+        try:
+            # open_time is in milliseconds
+            ts = prices['open_time'].iloc[i] / 1000.0
+            import datetime
+            dt = datetime.datetime.utcfromtimestamp(ts)
+            hours[i] = dt.hour
+        except:
+            hours[i] = 0
     return hours
 
 def generate_signals(prices):
@@ -112,39 +158,43 @@ def generate_signals(prices):
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    taker_buy_volume = prices["taker_buy_volume"].values
     n = len(close)
-    
-    # Extract UTC hours for session filter
-    hours = get_hour_from_open_time(prices)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF HMA for trend bias
+    # Calculate and align 4h HMA for trend bias
     hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 1d CPR levels
+    cp_1d_raw, bc_1d_raw, tc_1d_raw = calculate_cpr_from_1d(df_1d)
+    cp_1d_aligned = align_htf_to_ltf(prices, df_1d, cp_1d_raw)
+    bc_1d_aligned = align_htf_to_ltf(prices, df_1d, bc_1d_raw)
+    tc_1d_aligned = align_htf_to_ltf(prices, df_1d, tc_1d_raw)
     
-    # Calculate primary (30m) indicators
-    hma_30m = calculate_hma(close, period=21)
+    # Calculate CPR width (narrow = consolidation)
+    cpr_width_raw = calculate_cpr_width(cp_1d_raw, bc_1d_raw, tc_1d_raw)
+    cpr_width_aligned = align_htf_to_ltf(prices, df_1d, cpr_width_raw)
+    
+    # Calculate primary (15m) indicators
+    hma_15m = calculate_hma(close, period=21)
     atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
+    sma_50 = calculate_sma(close, 50)
     sma_200 = calculate_sma(close, 200)
     
-    # Volume ratio (taker buy / total volume)
-    taker_ratio = np.zeros(n)
-    taker_ratio[:] = np.nan
-    for i in range(n):
-        if volume[i] > 1e-10:
-            taker_ratio[i] = taker_buy_volume[i] / volume[i]
+    # Volume moving average
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session hours (UTC)
+    hours = get_hour_from_open_time(prices)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.25
     
     # Position tracking
     in_position = False
@@ -152,10 +202,6 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
-    
-    # Trade cooldown to limit frequency
-    last_trade_bar = -100
-    cooldown_bars = 20  # Minimum 10 hours between trades on 30m
     
     for i in range(300, n):
         # Skip if indicators not ready
@@ -166,72 +212,162 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_30m[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_15m[i]) or np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(cp_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(sma_200[i]) or np.isnan(taker_ratio[i]):
+        if np.isnan(sma_50[i]) or np.isnan(sma_200[i]) or np.isnan(vol_sma_20[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (08-20 UTC only) ===
-        in_session = (hours[i] >= 8) and (hours[i] <= 20)
-        
-        # === HTF TREND BIAS ===
+        # === 4H TREND BIAS ===
         htf_4h_bull = close[i] > hma_4h_aligned[i]
         htf_4h_bear = close[i] < hma_4h_aligned[i]
         
-        htf_1d_bull = close[i] > hma_1d_aligned[i]
-        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        # === 15M HMA TREND ===
+        hma_15m_bull = close[i] > hma_15m[i]
+        hma_15m_bear = close[i] < hma_15m[i]
         
-        # === 30m HMA TREND ===
-        hma_30m_bull = close[i] > hma_30m[i]
-        hma_30m_bear = close[i] < hma_30m[i]
+        # === CPR LEVELS ===
+        cp = cp_1d_aligned[i]
+        bc = bc_1d_aligned[i]
+        tc = tc_1d_aligned[i]
+        cpr_w = cpr_width_aligned[i]
         
-        # === SMA200 FILTER ===
+        # Narrow CPR filter (< 1.5% = consolidation, breakout likely)
+        narrow_cpr = not np.isnan(cpr_w) and cpr_w < 1.5
+        
+        # Price position relative to CPR
+        price_above_cpr = close[i] > tc
+        price_below_cpr = close[i] < bc
+        price_in_cpr = bc <= close[i] <= tc
+        
+        # === RSI CONDITIONS (7-period for faster response) ===
+        rsi_oversold = rsi_7[i] < 35.0
+        rsi_overbought = rsi_7[i] > 65.0
+        rsi_neutral = 40.0 <= rsi_7[i] <= 60.0
+        
+        # === VOLUME CONFIRMATION ===
+        vol_spike = volume[i] > 1.3 * vol_sma_20[i] if vol_sma_20[i] > 1e-10 else False
+        
+        # === SESSION FILTER (00-12 UTC preferred) ===
+        preferred_session = 0 <= hours[i] <= 12
+        
+        # === SMA200 TREND FILTER ===
         above_sma200 = close[i] > sma_200[i]
         below_sma200 = close[i] < sma_200[i]
         
-        # === VOLUME CONFIRMATION ===
-        volume_bull = taker_ratio[i] > 0.55  # More buying pressure
-        volume_bear = taker_ratio[i] < 0.45  # More selling pressure
-        
-        # === RSI PULLBACK ZONES ===
-        # Long: RSI pulled back to 40-55 in uptrend (not oversold, just pullback)
-        rsi_pullback_long = (rsi[i] >= 40.0) and (rsi[i] <= 55.0)
-        # Short: RSI pulled back to 45-60 in downtrend (not overbought, just retracement)
-        rsi_pullback_short = (rsi[i] >= 45.0) and (rsi[i] <= 60.0)
-        
-        # === COOLDOWN CHECK ===
-        bars_since_trade = i - last_trade_bar
-        can_trade = bars_since_trade >= cooldown_bars
-        
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (4+ confluence required) ===
         desired_signal = 0.0
+        confluence_count = 0
         
-        # LONG: 4h bull + 1d bull + RSI pullback + volume + session + cooldown
-        if (htf_4h_bull and htf_1d_bull and rsi_pullback_long and 
-            volume_bull and in_session and can_trade and above_sma200):
-            # Size boost when all HTF aligned
-            desired_signal = SIZE_STRONG
+        # LONG SETUP
+        long_conditions = []
         
-        # SHORT: 4h bear + 1d bear + RSI pullback + volume + session + cooldown
-        elif (htf_4h_bear and htf_1d_bear and rsi_pullback_short and 
-              volume_bear and in_session and can_trade and below_sma200):
-            desired_signal = -SIZE_STRONG
+        # 1. 4h trend bullish
+        if htf_4h_bull:
+            long_conditions.append(True)
+        else:
+            long_conditions.append(False)
+        
+        # 2. 15m HMA bullish OR price above SMA50
+        if hma_15m_bull or close[i] > sma_50[i]:
+            long_conditions.append(True)
+        else:
+            long_conditions.append(False)
+        
+        # 3. RSI oversold (pullback entry)
+        if rsi_oversold:
+            long_conditions.append(True)
+        else:
+            long_conditions.append(False)
+        
+        # 4. Price near CPR support (at or above BC)
+        if close[i] >= bc * 0.995 or price_above_cpr:
+            long_conditions.append(True)
+        else:
+            long_conditions.append(False)
+        
+        # 5. Volume spike confirmation
+        if vol_spike:
+            long_conditions.append(True)
+        else:
+            long_conditions.append(False)
+        
+        # 6. Above SMA200 (major trend)
+        if above_sma200:
+            long_conditions.append(True)
+        else:
+            long_conditions.append(False)
+        
+        confluence_long = sum(long_conditions)
+        
+        # SHORT SETUP
+        short_conditions = []
+        
+        # 1. 4h trend bearish
+        if htf_4h_bear:
+            short_conditions.append(True)
+        else:
+            short_conditions.append(False)
+        
+        # 2. 15m HMA bearish OR price below SMA50
+        if hma_15m_bear or close[i] < sma_50[i]:
+            short_conditions.append(True)
+        else:
+            short_conditions.append(False)
+        
+        # 3. RSI overbought (pullback entry)
+        if rsi_overbought:
+            short_conditions.append(True)
+        else:
+            short_conditions.append(False)
+        
+        # 4. Price near CPR resistance (at or below TC)
+        if close[i] <= tc * 1.005 or price_below_cpr:
+            short_conditions.append(True)
+        else:
+            short_conditions.append(False)
+        
+        # 5. Volume spike confirmation
+        if vol_spike:
+            short_conditions.append(True)
+        else:
+            short_conditions.append(False)
+        
+        # 6. Below SMA200 (major trend)
+        if below_sma200:
+            short_conditions.append(True)
+        else:
+            short_conditions.append(False)
+        
+        confluence_short = sum(short_conditions)
+        
+        # Require 4+ confluence for entry (very selective for 15m)
+        if confluence_long >= 4:
+            # Boost size if narrow CPR + preferred session
+            if narrow_cpr and preferred_session:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
+        elif confluence_short >= 4:
+            if narrow_cpr and preferred_session:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR from entry) ===
         stoploss_triggered = False
@@ -272,7 +408,6 @@ def generate_signals(prices):
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
-                last_trade_bar = i
         else:
             if in_position:
                 in_position = False
