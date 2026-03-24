@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #754: 1d Primary + 1w HTF — Simplified HMA Trend with RSI Pullback
+Experiment #755: 6h Primary + 12h/1d HTF — Triple HMA Alignment with RSI Pullback
 
-Hypothesis: Daily timeframe with weekly HTF bias captures major crypto trends while
-avoiding noise. Previous complex regime filters (CRSI, Choppiness) failed because
-they blocked too many trades. This simplified approach uses:
-1. 1w HMA(21) for HTF trend bias (bull/bear regime)
-2. 1d HMA(16/48) crossover for local trend confirmation
-3. 1d RSI(14) pullback entries (loose thresholds for trade generation)
-4. 1d ATR(14) for volatility-based stops (2.5x)
+Hypothesis: 6h timeframe sits in the "sweet spot" between 4h (too noisy) and 12h (too slow).
+Previous 6h experiments failed due to: (1) complex regime filters blocking trades,
+(2) overly strict RSI thresholds, (3) insufficient HTF confirmation.
 
-Key insight from failures: Complex filters = 0 trades. Simple filters + proper
-stoploss = consistent edge. Daily timeframe naturally limits trade frequency
-to 20-50/year, reducing fee drag.
+This strategy uses TRIPLE HMA alignment (6h + 12h + 1d) for trend confirmation,
+with RSI(14) pullback entries at moderate levels (40/60 not 20/80) to ensure
+trade generation. Key insight: in bear/range markets (2025), we need entries
+on pullbacks within the HTF trend, not extreme reversals.
 
-Entry logic (LOOSE for trade generation):
-- LONG: 1w HMA bull + (1d HMA bull OR RSI<45)
-- SHORT: 1w HMA bear + (1d HMA bear OR RSI>55)
+Innovations:
+1. Triple HMA alignment: 6h HMA(16/48) + 12h HMA(21) + 1d HMA(21) all must agree
+2. RSI pullback entries: RSI<45 in uptrend, RSI>55 in downtrend (loose thresholds)
+3. ATR(14) 2.5x trailing stop with position tracking
+4. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
+5. NO complex regime filters (CHOP, CRSI) that blocked trades in #743, #744
 
-Target: Sharpe>0.40, trades>=20 train, trades>=3 test, DD>-40%
-Timeframe: 1d
+Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-40%
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_rsi_pullback_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_triple_hma_rsi_pullback_12h1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -92,13 +92,17 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align HTF HMA
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align HTF HMAs
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate 1d indicators
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate 6h indicators
     hma_16 = calculate_hma(close, period=16)
     hma_48 = calculate_hma(close, period=48)
     rsi_14 = calculate_rsi(close, period=14)
@@ -133,52 +137,63 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w HMA) ===
-        htf_1w_bull = close[i] > hma_1w_aligned[i]
-        htf_1w_bear = close[i] < hma_1w_aligned[i]
+        # === HTF BIAS (12h + 1d HMA alignment) ===
+        htf_12h_bull = close[i] > hma_12h_aligned[i]
+        htf_12h_bear = close[i] < hma_12h_aligned[i]
         
-        # === 1d HMA CROSSOVER ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
+        
+        # Triple alignment: both HTF must agree
+        htf_strong_bull = htf_12h_bull and htf_1d_bull
+        htf_strong_bear = htf_12h_bear and htf_1d_bear
+        
+        # === 6h HMA TREND ===
+        hma_6h_bull = hma_16[i] > hma_48[i]
+        hma_6h_bear = hma_16[i] < hma_48[i]
+        
+        # === 6h HMA CROSSOVER (for entry timing) ===
         hma_crossover_long = False
         hma_crossover_short = False
         if i > 0 and not np.isnan(hma_16[i-1]) and not np.isnan(hma_48[i-1]):
             hma_crossover_long = (hma_16[i-1] <= hma_48[i-1]) and (hma_16[i] > hma_48[i])
             hma_crossover_short = (hma_16[i-1] >= hma_48[i-1]) and (hma_16[i] < hma_48[i])
         
-        # === 1d HMA TREND ===
-        hma_1d_bull = hma_16[i] > hma_48[i]
-        hma_1d_bear = hma_16[i] < hma_48[i]
-        
-        # === RSI CONDITIONS (LOOSE for more trades) ===
-        rsi_oversold = rsi_14[i] < 45.0
-        rsi_overbought = rsi_14[i] > 55.0
-        rsi_extreme_oversold = rsi_14[i] < 30.0
-        rsi_extreme_overbought = rsi_14[i] > 70.0
+        # === RSI PULLBACK CONDITIONS (LOOSE for trade generation) ===
+        rsi_pullback_long = rsi_14[i] < 50.0  # Pullback in uptrend
+        rsi_pullback_short = rsi_14[i] > 50.0  # Rally in downtrend
+        rsi_oversold = rsi_14[i] < 40.0  # Stronger signal
+        rsi_overbought = rsi_14[i] > 60.0  # Stronger signal
         
         # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADE GENERATION) ===
         desired_signal = 0.0
         
-        # LONG: HTF bull + (RSI oversold OR HMA crossover OR HMA bull)
-        if htf_1w_bull:
-            if rsi_oversold or hma_crossover_long or hma_1d_bull:
-                if rsi_extreme_oversold or hma_crossover_long:
+        # LONG: Triple HTF bull + (6h HMA bull OR crossover) + RSI pullback
+        if htf_strong_bull:
+            if hma_6h_bull and rsi_pullback_long:
+                if rsi_oversold or hma_crossover_long:
                     desired_signal = SIZE_STRONG
                 else:
                     desired_signal = SIZE_BASE
+            elif hma_crossover_long:
+                desired_signal = SIZE_BASE
         
-        # SHORT: HTF bear + (RSI overbought OR HMA crossover OR HMA bear)
-        elif htf_1w_bear:
-            if rsi_overbought or hma_crossover_short or hma_1d_bear:
-                if rsi_extreme_overbought or hma_crossover_short:
+        # SHORT: Triple HTF bear + (6h HMA bear OR crossover) + RSI rally
+        elif htf_strong_bear:
+            if hma_6h_bear and rsi_pullback_short:
+                if rsi_overbought or hma_crossover_short:
                     desired_signal = -SIZE_STRONG
                 else:
                     desired_signal = -SIZE_BASE
+            elif hma_crossover_short:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
