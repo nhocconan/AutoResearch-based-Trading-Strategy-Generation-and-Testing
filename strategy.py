@@ -1,61 +1,73 @@
 #!/usr/bin/env python3
 """
-Experiment #050: 1h Primary + 4h/12h HTF — Triple HMA Trend + RSI Pullback
+Experiment #051: 4h Primary + 1d HTF — KAMA Adaptive Trend + RSI Pullback
 
-Hypothesis: After analyzing 49 experiments, the winning pattern is SIMPLE + LOOSE:
-1. 12h HMA for primary trend bias (very slow, filters noise)
-2. 4h HMA for secondary trend confirmation
-3. 1h RSI for entry timing with LOOSE thresholds (45/55 not 30/70)
-4. NO session/volume filters that caused 0 trades in #045, #048, #049
-5. ATR trailing stop for risk management
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency better than HMA.
+In ranging markets (2022, 2025), KAMA flattens and reduces whipsaws. In trends, it follows closely.
+Combined with 1d HMA bias and loose RSI thresholds, this should:
+1. Reduce whipsaws in 2022 crash vs simple EMA/HMA
+2. Generate MORE trades than choppiness-filtered strategies (#039, #046, #047 failed with 0 trades)
+3. Work on ALL symbols (BTC/ETH/SOL) not just SOL
 
-Key insight from failures:
-- #045, #048, #049 had Sharpe=0.000 (0 trades) due to too many filters
-- Session + volume + strict regime = no trades
-- Need LOOSE entry conditions with HTF trend filter to ensure trade generation
+Key differences from #044:
+- KAMA instead of HMA (adapts to volatility, less whipsaw in ranges)
+- RSI thresholds: 40/60 instead of 45/55 (slightly tighter but still loose)
+- Add Bollinger Band mean reversion as SECONDARY entry path
+- Trailing stop: 2.0x ATR (tighter than 2.5x to protect gains)
+- Size: 0.25 (more conservative through 77% crash)
 
-Entry logic (LOOSE for trade generation):
-- LONG: 12h_HMA_bull + 4h_HMA_bull + RSI < 55 (pullback in uptrend)
-- SHORT: 12h_HMA_bear + 4h_HMA_bear + RSI > 45 (rally in downtrend)
+Entry logic (OR conditions for trade generation):
+LONG: 1d_HMA_bull AND (4h_KAMA_bull OR RSI<50 OR price<BB_lower)
+SHORT: 1d_HMA_bear AND (4h_KAMA_bear OR RSI>50 OR price>BB_upper)
 
-Size: 0.25 (discrete, conservative for 1h TF - safe through 77% crash)
-Target: Beat Sharpe=0.313, trades>30/symbol train, >3/symbol test, DD>-40%
-Timeframe: 1h (target 30-60 trades/year)
+This ensures we ALWAYS have entry opportunities when HTF trend aligns.
+Target: Sharpe>0.313, trades>30/symbol train, >3/symbol test, DD>-40%
+Timeframe: 4h (target 20-50 trades/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_triple_trend_loose_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_rsi_bb_dual_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_hma(close, period=21):
-    """Hull Moving Average - smoother and more responsive than EMA"""
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts to market efficiency ratio (ER).
+    ER=1 (trending): KAMA follows price closely
+    ER=0 (ranging): KAMA flattens, reduces whipsaws
+    """
     n = len(close)
-    if n < period:
+    if n < period + slow_period:
         return np.full(n, np.nan)
     
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
+    # Calculate Efficiency Ratio (ER)
+    er = np.zeros(n)
+    for i in range(slow_period, n):
+        price_change = abs(close[i] - close[i - slow_period])
+        sum_volatility = np.sum(np.abs(np.diff(close[i - slow_period:i + 1])))
+        if sum_volatility > 1e-10:
+            er[i] = price_change / sum_volatility
+        else:
+            er[i] = 0.0
     
-    def wma(data, span):
-        result = np.full(len(data), np.nan)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        for i in range(span - 1, len(data)):
-            window = data[i - span + 1:i + 1]
-            result[i] = np.sum(window * weights) / np.sum(weights)
-        return result
+    # Calculate smoothing constants
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
     
-    wma_half = wma(close, half_period)
-    wma_full = wma(close, period)
-    double_wma_half = 2.0 * wma_half - wma_full
-    hma = wma(double_wma_half, sqrt_period)
+    kama = np.full(n, np.nan)
+    kama[slow_period] = close[slow_period]  # Initialize
     
-    return hma
+    for i in range(slow_period + 1, n):
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_rsi(close, period=14):
-    """RSI - momentum filter with loose thresholds for trade generation"""
+    """RSI - momentum filter with loose thresholds"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -93,6 +105,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Bollinger Bands - for mean reversion entries"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    
+    return upper, lower
+
+def calculate_sma(close, period=200):
+    """Simple Moving Average - for long-term trend filter"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -100,23 +135,39 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 12h HMA for primary trend bias
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 1d HMA for HTF trend bias
+    def calc_hma(close_arr, period=21):
+        n = len(close_arr)
+        if n < period:
+            return np.full(n, np.nan)
+        half = period // 2
+        sqrt_p = int(np.sqrt(period))
+        def wma(data, span):
+            res = np.full(len(data), np.nan)
+            w = np.arange(1, span + 1, dtype=np.float64)
+            for i in range(span - 1, len(data)):
+                res[i] = np.sum(data[i - span + 1:i + 1] * w) / np.sum(w)
+            return res
+        wma_half = wma(close_arr, half)
+        wma_full = wma(close_arr, period)
+        double_wma = 2.0 * wma_half - wma_full
+        hma = wma(double_wma, sqrt_p)
+        return hma
     
-    # Calculate and align 4h HMA for secondary trend confirmation
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calc_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (1h) indicators
+    # Calculate primary (4h) indicators
+    kama_4h = calculate_kama(close, period=10, fast_period=2, slow_period=30)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
+    bb_upper, bb_lower = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    sma_200 = calculate_sma(close, period=200)
     
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position size - conservative for 1h TF
+    SIZE = 0.25  # Discrete position size - conservative through crashes
     
     # Position tracking for stoploss
     in_position = False
@@ -134,7 +185,7 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(kama_4h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -147,43 +198,69 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === HTF BIAS (12h HMA) ===
-        hma_12h_bull = close[i] > hma_12h_aligned[i]
-        hma_12h_bear = close[i] < hma_12h_aligned[i]
+        # === HTF BIAS (1d HMA) ===
+        hma_1d_bull = close[i] > hma_1d_aligned[i]
+        hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === 4h TREND CONFIRMATION ===
-        hma_4h_bull = close[i] > hma_4h_aligned[i]
-        hma_4h_bear = close[i] < hma_4h_aligned[i]
+        # === 4h TREND (KAMA) ===
+        kama_bull = close[i] > kama_4h[i]
+        kama_bear = close[i] < kama_4h[i]
         
-        # === DESIRED SIGNAL (LOOSE thresholds for trade generation) ===
+        # === RSI MOMENTUM ===
+        rsi_oversold = rsi[i] < 50.0  # Loose threshold for longs
+        rsi_overbought = rsi[i] > 50.0  # Loose threshold for shorts
+        
+        # === BOLLINGER BAND MEAN REVERSION ===
+        near_bb_lower = close[i] < bb_lower[i] * 1.005 if not np.isnan(bb_lower[i]) else False
+        near_bb_upper = close[i] > bb_upper[i] * 0.995 if not np.isnan(bb_upper[i]) else False
+        
+        # === LONG-TERM FILTER (SMA200) ===
+        above_sma200 = close[i] > sma_200[i] if not np.isnan(sma_200[i]) else True
+        below_sma200 = close[i] < sma_200[i] if not np.isnan(sma_200[i]) else True
+        
+        # === DESIRED SIGNAL (Multiple OR conditions for trade generation) ===
         desired_signal = 0.0
         
-        # LONG: 12h bull + 4h bull + RSI pullback < 55 (loose threshold)
-        # This ensures we trade with HTF trend but enter on ANY pullback
-        if hma_12h_bull and hma_4h_bull:
-            if rsi[i] < 55.0:
-                # Pullback in uptrend - buy the dip (loose threshold)
+        # LONG: 1d bull + ANY of (4h KAMA bull, RSI<50, BB lower) + SMA200 filter
+        if hma_1d_bull:
+            long_conditions = 0
+            if kama_bull:
+                long_conditions += 1
+            if rsi_oversold:
+                long_conditions += 1
+            if near_bb_lower:
+                long_conditions += 1
+            
+            # Need at least 1 condition + HTF bias (loose for trade generation)
+            if long_conditions >= 1 and above_sma200:
                 desired_signal = SIZE
         
-        # SHORT: 12h bear + 4h bear + RSI rally > 45 (loose threshold)
-        # This ensures we trade with HTF trend but enter on ANY rally
-        if hma_12h_bear and hma_4h_bear:
-            if rsi[i] > 45.0:
-                # Rally in downtrend - sell the rip (loose threshold)
+        # SHORT: 1d bear + ANY of (4h KAMA bear, RSI>50, BB upper) + SMA200 filter
+        if hma_1d_bear:
+            short_conditions = 0
+            if kama_bear:
+                short_conditions += 1
+            if rsi_overbought:
+                short_conditions += 1
+            if near_bb_upper:
+                short_conditions += 1
+            
+            # Need at least 1 condition + HTF bias (loose for trade generation)
+            if short_conditions >= 1 and below_sma200:
                 desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.0x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.5 * entry_atr
+            stop_price = highest_since_entry - 2.0 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.5 * entry_atr
+            stop_price = lowest_since_entry + 2.0 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
