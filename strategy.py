@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #095: 1h Primary + 4h/1d HTF — Triple HMA Trend Confluence
+Experiment #096: 12h Primary + 1d HTF — Donchian Breakout + HMA Trend + Volume
 
-Hypothesis: After analyzing 80+ failed experiments, the pattern for 1h is clear:
-- Session filters cause 0 trades (#088 failed with session 8-20 UTC)
-- Choppiness/Connors RSI too restrictive (#087, #093 failed)
-- Simple HMA + loose RSI works on 12h/1d (#083, #086 kept)
+Hypothesis: After analyzing 80+ failed experiments, the pattern shows:
+- HMA crossover alone (#086) works but Sharpe is low (0.074)
+- Donchian breakouts catch momentum moves that crossovers miss
+- Volume confirmation filters false breakouts (critical for 12h)
+- Combining Donchian + HMA trend + Volume should improve Sharpe
 
-For 1h to work, I need HTF trend alignment WITHOUT over-filtering:
-1. 1d HMA50 = major trend bias (price above/below)
-2. 4h HMA16/48 = intermediate trend (crossover direction)
-3. 1h HMA16/48 = entry trigger (crossover + RSI confirmation)
-4. RSI(14) loose filter: >40 for long, <60 for short (not 30/70)
-5. Bollinger Band position: price in middle 60% of bands (not extremes)
-6. ATR trailing stoploss: 2.5x for risk management
+This strategy uses:
+1. 1d HMA(50) = major trend bias (proven in #086)
+2. 12h Donchian(20) breakout = entry trigger (different from HMA crossover)
+3. 12h HMA(16/48) = trend confirmation (dual filter)
+4. Volume > 1.3x 20-period avg = breakout confirmation
+5. ATR(14) 2.5x trailing stoploss for risk management
+6. Position size: 0.30 (30% of capital)
 
 Key design choices:
-- Timeframe: 1h (target 30-60 trades/year)
-- HTF: 1d + 4h for trend alignment (dual HTF confluence)
-- RSI thresholds: 40/60 (looser than 30/70 to ensure trades)
-- Position size: 0.25 (smaller for 1h noise)
-- Stoploss: 2.5x ATR trailing
+- Timeframe: 12h (proven, 20-50 trades/year target)
+- HTF: 1d for trend bias only
+- Donchian period: 20 (balances trade frequency vs signal quality)
+- Volume multiplier: 1.3x (not too strict, ensures trades generate)
+- Stoploss: 2.5x ATR trailing (tighter for better risk control)
 
 Target: Sharpe>0.351, DD>-40%, trades>=30 on train, trades>=3 on test
 """
@@ -28,8 +29,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_triple_hma_rsi_bb_4h1d_v1"
-timeframe = "1h"
+name = "mtf_12h_donchian_hma_vol_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -49,30 +50,22 @@ def calculate_hma(close, period):
     
     return hma.values
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper, lower, middle"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    gain = np.concatenate([[0.0], gain])
-    loss = np.concatenate([[0.0], loss])
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    rsi = np.zeros(n)
-    for i in range(period, n):
-        if avg_loss[i] < 1e-10:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+    middle = (upper + lower) / 2.0
     
-    return rsi
+    return upper, lower, middle
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range for stoploss"""
@@ -88,49 +81,40 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Bollinger Bands - returns lower, middle, upper"""
-    n = len(close)
+def calculate_volume_ma(volume, period=20):
+    """Volume moving average for confirmation"""
+    n = len(volume)
     if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
-    close_series = pd.Series(close)
-    middle = close_series.rolling(window=period, min_periods=period).mean().values
-    std = close_series.rolling(window=period, min_periods=period).std().values
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    return lower, middle, upper
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align 1d HMA for major trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 4h HMA for intermediate trend
-    hma_4h_fast_raw = calculate_hma(df_4h['close'].values, period=16)
-    hma_4h_slow_raw = calculate_hma(df_4h['close'].values, period=48)
-    hma_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_fast_raw)
-    hma_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_slow_raw)
-    
-    # Calculate primary (1h) indicators
-    hma_1h_fast = calculate_hma(close, period=16)
-    hma_1h_slow = calculate_hma(close, period=48)
-    rsi = calculate_rsi(close, period=14)
+    # Calculate primary (12h) indicators
+    hma_fast = calculate_hma(close, period=16)
+    hma_slow = calculate_hma(close, period=48)
+    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, period=20)
     atr = calculate_atr(high, low, close, period=14)
-    bb_lower, bb_middle, bb_upper = calculate_bollinger(close, period=20, std_mult=2.0)
+    vol_ma = calculate_volume_ma(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size (conservative for 1h)
+    SIZE = 0.30  # 30% position size (conservative for 12h)
     
     # Position tracking for stoploss
     in_position = False
@@ -148,25 +132,19 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1h_fast[i]) or np.isnan(hma_1h_slow[i]):
+        if np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_4h_fast_aligned[i]) or np.isnan(hma_4h_slow_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        if np.isnan(bb_lower[i]) or np.isnan(bb_upper[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -177,36 +155,29 @@ def generate_signals(prices):
         htf_bull = close[i] > hma_1d_aligned[i]
         htf_bear = close[i] < hma_1d_aligned[i]
         
-        # === INTERMEDIATE TREND (4h HMA crossover) ===
-        htf_4h_bull = hma_4h_fast_aligned[i] > hma_4h_slow_aligned[i]
-        htf_4h_bear = hma_4h_fast_aligned[i] < hma_4h_slow_aligned[i]
+        # === 12h TREND (HMA confirmation) ===
+        hma_bull = hma_fast[i] > hma_slow[i]
+        hma_bear = hma_fast[i] < hma_slow[i]
         
-        # === 1h TREND (HMA crossover) ===
-        hma_1h_cross_bull = hma_1h_fast[i] > hma_1h_slow[i]
-        hma_1h_cross_bear = hma_1h_fast[i] < hma_1h_slow[i]
+        # === DONCHIAN BREAKOUT ===
+        # Long: price breaks above Donchian upper
+        # Short: price breaks below Donchian lower
+        donchian_breakout_long = close[i] > donchian_upper[i]
+        donchian_breakout_short = close[i] < donchian_lower[i]
         
-        # === RSI FILTER (LOOSE - ensure trades generate) ===
-        rsi_ok_long = rsi[i] > 40.0
-        rsi_ok_short = rsi[i] < 60.0
+        # === VOLUME CONFIRMATION ===
+        # Volume must be > 1.3x average for breakout confirmation
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 1e-10 else 0.0
+        vol_confirmed = vol_ratio > 1.3
         
-        # === BOLLINGER BAND POSITION (middle 60% of bands) ===
-        bb_range = bb_upper[i] - bb_lower[i]
-        if bb_range > 1e-10:
-            bb_position = (close[i] - bb_lower[i]) / bb_range
-            bb_ok_long = bb_position > 0.2  # not at lower extreme
-            bb_ok_short = bb_position < 0.8  # not at upper extreme
-        else:
-            bb_ok_long = True
-            bb_ok_short = True
-        
-        # === DESIRED SIGNAL (Triple HTF confluence) ===
-        # LONG: 1d bull + 4h bull + 1h HMA cross bull + RSI > 40 + BB ok
-        # SHORT: 1d bear + 4h bear + 1h HMA cross bear + RSI < 60 + BB ok
+        # === DESIRED SIGNAL ===
+        # LONG: 1d bull + 12h HMA bull + Donchian breakout + Volume confirmed
+        # SHORT: 1d bear + 12h HMA bear + Donchian breakout + Volume confirmed
         desired_signal = 0.0
         
-        if htf_bull and htf_4h_bull and hma_1h_cross_bull and rsi_ok_long and bb_ok_long:
+        if htf_bull and hma_bull and donchian_breakout_long and vol_confirmed:
             desired_signal = SIZE
-        elif htf_bear and htf_4h_bear and hma_1h_cross_bear and rsi_ok_short and bb_ok_short:
+        elif htf_bear and hma_bear and donchian_breakout_short and vol_confirmed:
             desired_signal = -SIZE
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
