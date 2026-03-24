@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #166: 1d Primary + 1w HTF — Choppiness Regime + Connors RSI + HMA Trend
+Experiment #167: 6h Primary + 1d/1w HTF — BB Mean Reversion + HTF Trend Bias
 
-Hypothesis: Daily timeframe with weekly trend filter offers optimal trade frequency
-(20-50/year) with minimal fee drag. Choppiness Index detects regime (trend vs range),
-Connors RSI provides sensitive entry signals, and 1w HMA ensures we trade with
-major trend direction.
+Hypothesis: Previous 6h trend-following strategies (#160, #163) achieved low Sharpe.
+Mean reversion with HTF trend bias should work better in 2025 bear/range market.
+This is DIFFERENT from all previous 6h attempts (which were pure trend following).
 
-Key design choices:
-- 1w HMA(50) for weekly trend bias (only long when price > 1w HMA, only short when <)
-- Choppiness Index(14) for regime: >55 = range (mean revert), <45 = trend (breakout)
-- Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-  - More sensitive than regular RSI, catches reversals faster
-  - Long when CRSI < 15, Short when CRSI > 85
-- Donchian(20) breakout confirmation for trend regime
-- ATR(14) trailing stop at 2.5x for risk management
+Key design:
+- 6h Bollinger Bands (20, 2.0) for mean reversion entries
+- 1d HMA(50) for major trend bias (only long if 1d bull, only short if 1d bear)
+- 1w HMA(50) for weekly regime filter (reduce size if weekly opposes)
+- RSI(7) for short-term extremes (faster than RSI14)
+- ATR(14) trailing stop at 2.5x
 - Position size: 0.30 (30% of capital)
 
-Trade generation strategy (CRITICAL - avoid 0 trades):
-- LOOSE CRSI thresholds (15/85 not 10/90)
-- Dual regime logic ensures entries in both trending AND ranging markets
-- Fallback entries when weekly trend is very strong (ignore chop filter)
-- Target 25-40 trades/year on 1d timeframe
+Why this should work:
+- BB mean reversion captures range-bound behavior (common in 2025)
+- HTF trend filter prevents counter-trend trades in strong trends
+- RSI(7) is more responsive than RSI(14) for 6h timeframe
+- Looser BB threshold (1.8 std for entry, not 2.0) ensures trades
 
 Target: Sharpe>0.167, DD>-40%, trades>=30 train, trades>=3 test ALL symbols
 """
@@ -29,8 +26,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_crsi_chop_hma_1w_v2"
-timeframe = "1d"
+name = "mtf_6h_bb_mr_hma_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -90,121 +87,33 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    Measures market choppiness vs trending
-    CHOP > 61.8 = ranging market
-    CHOP < 38.2 = trending market
-    """
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Bollinger Bands - mean reversion indicator"""
     n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    chop = np.zeros(n)
-    chop[:] = np.nan
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    
+    return upper, sma, lower
+
+def calculate_bb_percent_b(close, period=20, std_dev=2.0):
+    """Bollinger Band %B - position within bands (0=lower, 1=upper)"""
+    upper, sma, lower = calculate_bollinger_bands(close, period, std_dev)
+    
+    n = len(close)
+    bb_pct_b = np.zeros(n)
+    bb_pct_b[:] = np.nan
     
     for i in range(period, n):
-        highest_high = high[i-period+1:i+1].max()
-        lowest_low = low[i-period+1:i+1].min()
-        
-        if highest_high == lowest_low:
-            chop[i] = 100.0
-            continue
-        
-        atr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_sum += tr
-        
-        chop[i] = 100.0 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+        if upper[i] - lower[i] > 1e-10:
+            bb_pct_b[i] = (close[i] - lower[i]) / (upper[i] - lower[i])
     
-    return chop
-
-def calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """
-    Connors RSI (CRSI)
-    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    
-    More sensitive than regular RSI, designed for short-term mean reversion
-    Long when CRSI < 10-15, Short when CRSI > 85-90
-    """
-    n = len(close)
-    if n < rank_period + 1:
-        return np.full(n, np.nan)
-    
-    crsi = np.zeros(n)
-    crsi[:] = np.nan
-    
-    # RSI(3)
-    rsi_short = calculate_rsi(close, rsi_period)
-    
-    # Streak RSI - measure consecutive up/down days
-    streak_rsi = np.zeros(n)
-    streak_rsi[:] = np.nan
-    
-    for i in range(streak_period, n):
-        streak = 0
-        for j in range(i, max(0, i - 20), -1):
-            if j == 0:
-                break
-            if close[j] > close[j-1]:
-                streak += 1
-            elif close[j] < close[j-1]:
-                streak -= 1
-            else:
-                break
-        
-        # Convert streak to RSI-like value
-        if streak >= 0:
-            streak_rsi[i] = min(100.0, streak * 25.0)
-        else:
-            streak_rsi[i] = max(0.0, 100.0 + streak * 25.0)
-    
-    # Percent Rank - where current price ranks in last N periods
-    percent_rank = np.zeros(n)
-    percent_rank[:] = np.nan
-    
-    for i in range(rank_period, n):
-        window = close[i-rank_period+1:i+1]
-        current = close[i]
-        count_below = np.sum(window[:-1] < current)
-        percent_rank[i] = 100.0 * count_below / (rank_period - 1)
-    
-    # Combine into CRSI
-    for i in range(rank_period, n):
-        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(percent_rank[i]):
-            crsi[i] = (rsi_short[i] + streak_rsi[i] + percent_rank[i]) / 3.0
-    
-    return crsi
-
-def calculate_donchian_high(high, period=20):
-    """Donchian Channel Upper Band (highest high of last N periods)"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    donchian = np.zeros(n)
-    donchian[:] = np.nan
-    
-    for i in range(period - 1, n):
-        donchian[i] = high[i-period+1:i+1].max()
-    
-    return donchian
-
-def calculate_donchian_low(low, period=20):
-    """Donchian Channel Lower Band (lowest low of last N periods)"""
-    n = len(low)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    donchian = np.zeros(n)
-    donchian[:] = np.nan
-    
-    for i in range(period - 1, n):
-        donchian[i] = low[i-period+1:i+1].min()
-    
-    return donchian
+    return bb_pct_b
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -213,20 +122,22 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate and align 1d HMA for major trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     # Calculate and align 1w HMA for weekly regime filter
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (1d) indicators
-    hma_1d = calculate_hma(close, period=21)
-    crsi = calculate_connors_rsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    # Calculate primary (6h) indicators
+    bb_pct_b = calculate_bb_percent_b(close, period=20, std_dev=2.0)
+    bb_upper, bb_sma, bb_lower = calculate_bollinger_bands(close, period=20, std_dev=2.0)
+    rsi = calculate_rsi(close, period=7)  # Faster RSI for 6h
     atr = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
-    donchian_high = calculate_donchian_high(high, period=20)
-    donchian_low = calculate_donchian_low(low, period=20)
-    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
     signals = np.zeros(n)
     SIZE = 0.30  # 30% position size
@@ -239,7 +150,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(250, n):  # Start after 200 SMA is ready
+    for i in range(250, n):  # Start after HTF alignment is ready
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -247,97 +158,75 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1d[i]) or np.isnan(crsi[i]):
+        if np.isnan(bb_pct_b[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(chop[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(sma_200[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        
+        # === HTF BIAS (1d HMA) ===
+        htf_1d_bull = close[i] > hma_1d_aligned[i]
+        htf_1d_bear = close[i] < hma_1d_aligned[i]
         
         # === WEEKLY REGIME (1w HMA) ===
         htf_1w_bull = close[i] > hma_1w_aligned[i]
         htf_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === CHOPPINESS REGIME ===
-        # CHOP > 55 = ranging (use mean reversion)
-        # CHOP < 45 = trending (use breakout)
-        is_range = chop[i] > 55.0
-        is_trend = chop[i] < 45.0
+        # === BB %B MEAN REVERSION SIGNALS ===
+        # %B < 0.1 = near lower band (oversold), %B > 0.9 = near upper band (overbought)
+        bb_oversold = bb_pct_b[i] < 0.15
+        bb_overbought = bb_pct_b[i] > 0.85
         
-        # === CONNORS RSI SIGNALS ===
-        crsi_oversold = crsi[i] < 15.0  # Mean reversion long
-        crsi_overbought = crsi[i] > 85.0  # Mean reversion short
-        
-        # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_high[i-1] if not np.isnan(donchian_high[i-1]) else False
-        breakout_short = close[i] < donchian_low[i-1] if not np.isnan(donchian_low[i-1]) else False
-        
-        # === HMA TREND ===
-        hma_bull = close[i] > hma_1d[i]
-        hma_bear = close[i] < hma_1d[i]
-        
-        # === SMA200 FILTER ===
-        above_sma200 = close[i] > sma_200[i]
-        below_sma200 = close[i] < sma_200[i]
+        # === RSI CONFIRMATION ===
+        rsi_oversold = rsi[i] < 35.0
+        rsi_overbought = rsi[i] > 65.0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # REGIME 1: TRENDING MARKET (CHOP < 45) - Follow breakout with HTF
-        if is_trend:
-            # Long: Weekly bull + Donchian breakout + HMA bull + above SMA200
-            if htf_1w_bull and breakout_long and hma_bull and above_sma200:
+        # PRIMARY LONG: 1d bull + BB oversold + RSI oversold
+        if htf_1d_bull and bb_oversold and rsi_oversold:
+            # Full size if 1w also bull, reduced if 1w bear
+            if htf_1w_bull:
                 desired_signal = SIZE
-            
-            # Short: Weekly bear + Donchian breakdown + HMA bear + below SMA200
-            elif htf_1w_bear and breakout_short and hma_bear and below_sma200:
+            else:
+                desired_signal = SIZE * 0.6  # Reduce size if weekly opposes
+        
+        # PRIMARY SHORT: 1d bear + BB overbought + RSI overbought
+        elif htf_1d_bear and bb_overbought and rsi_overbought:
+            if htf_1w_bear:
                 desired_signal = -SIZE
-        
-        # REGIME 2: RANGING MARKET (CHOP > 55) - Mean reversion with HTF
-        elif is_range:
-            # Long: Weekly bull + CRSI oversold + above SMA200
-            if htf_1w_bull and crsi_oversold and above_sma200:
-                desired_signal = SIZE
-            
-            # Short: Weekly bear + CRSI overbought + below SMA200
-            elif htf_1w_bear and crsi_overbought and below_sma200:
-                desired_signal = -SIZE
-        
-        # FALLBACK 1: Strong weekly trend (ignore chop filter) - 80% size
-        # Ensures trades when weekly momentum is very strong
-        if desired_signal == 0.0:
-            if htf_1w_bull and hma_bull and crsi[i] < 30.0 and above_sma200:
-                desired_signal = SIZE * 0.8
-            elif htf_1w_bear and hma_bear and crsi[i] > 70.0 and below_sma200:
-                desired_signal = -SIZE * 0.8
-        
-        # FALLBACK 2: CRSI extreme (ignore weekly, use SMA200) - 60% size
-        # Ensures trades during strong mean reversion setups
-        if desired_signal == 0.0:
-            if crsi_oversold and above_sma200 and hma_bull:
-                desired_signal = SIZE * 0.6
-            elif crsi_overbought and below_sma200 and hma_bear:
+            else:
                 desired_signal = -SIZE * 0.6
         
-        # FALLBACK 3: Donchian breakout with HMA confirmation - 50% size
-        # Catches strong momentum moves
-        if desired_signal == 0.0:
-            if breakout_long and hma_bull and above_sma200:
-                desired_signal = SIZE * 0.5
-            elif breakout_short and hma_bear and below_sma200:
-                desired_signal = -SIZE * 0.5
+        # FALLBACK 1: Strong BB extreme (ignore RSI) - ensures trades
+        elif htf_1d_bull and bb_pct_b[i] < 0.08:
+            desired_signal = SIZE * 0.5
+        
+        elif htf_1d_bear and bb_pct_b[i] > 0.92:
+            desired_signal = -SIZE * 0.5
+        
+        # FALLBACK 2: RSI extreme with HTF bias (ignore BB) - ensures trades
+        elif htf_1d_bull and rsi[i] < 25.0:
+            desired_signal = SIZE * 0.4
+        
+        elif htf_1d_bear and rsi[i] > 75.0:
+            desired_signal = -SIZE * 0.4
+        
+        # FALLBACK 3: Mean reversion to BB middle (exit signal)
+        # If in long and price crosses above BB middle, reduce position
+        if in_position and position_side > 0 and bb_pct_b[i] > 0.6:
+            desired_signal = SIZE * 0.3  # Take partial profit
+        
+        if in_position and position_side < 0 and bb_pct_b[i] < 0.4:
+            desired_signal = -SIZE * 0.3  # Take partial profit
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
