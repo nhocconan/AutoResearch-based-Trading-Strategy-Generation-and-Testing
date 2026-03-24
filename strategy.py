@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #083: 1d Primary + 1w HTF — HMA Trend + RSI Pullback (Simplified)
+Experiment #084: 4h Primary + 12h/1d HTF — HMA Trend + RSI Pullback (Simplified)
 
-Hypothesis: After 70+ failed experiments, the #1 issue is TOO MANY filters causing 0 trades.
-This strategy uses MINIMAL filters to ensure trade generation:
-1. 1w HMA = major trend bias (only 1 HTF filter)
-2. 1d HMA crossover = entry trigger (proven pattern)
-3. RSI loose filter (>40 for long, <60 for short) - NOT restrictive
-4. ATR trailing stoploss for risk management
+Hypothesis: After 70+ failed experiments, the winning pattern is SIMPLICITY.
+Experiment #083 (1d + 1w HMA/RSI) achieved Sharpe=0.104 with +52.5% return.
+This adapts that proven formula to 4h primary with 12h HTF bias.
 
-Key differences from failed experiments:
-- Removed Choppiness Index (was blocking trades)
-- Removed Connors RSI (too complex, 0 trades)
-- Removed Donchian (conflicted with HMA)
-- Removed volume filters (irrelevant for daily)
-- Looser RSI thresholds (40/60 instead of 30/70)
+Key design decisions:
+1. 12h HMA(21) = major trend bias (single HTF filter, proven in #083)
+2. 4h HMA(16/48) crossover = entry trigger (responsive but smooth)
+3. RSI(14) loose filter (>35 long, <65 short) - ensures trade generation
+4. ATR(14) trailing stoploss 2.5x for risk management
+5. Position size = 0.28 (conservative for 4h volatility)
+
+Why this should work:
+- 4h naturally produces 20-50 trades/year (target frequency)
+- Single HTF bias avoids over-filtering (cause of 0-trade failures)
+- HMA is smoother than EMA, fewer whipsaws
+- Loose RSI ensures entries during pullbacks in trends
 
 Target: 20-50 trades/year, Sharpe>0.351, DD>-40%
-Timeframe: 1d (daily bars, naturally low trade count)
+Timeframe: 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_rsi_pullback_1w_v1"
-timeframe = "1d"
+name = "mtf_4h_hma_rsi_pullback_12h_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -83,13 +86,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period=50):
-    """Simple Moving Average for additional trend filter"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -97,21 +93,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate and align 1w HMA for major trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align 12h HMA for major trend bias
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate primary (1d) indicators
+    # Calculate primary (4h) indicators
     hma_fast = calculate_hma(close, period=16)
     hma_slow = calculate_hma(close, period=48)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    sma_50 = calculate_sma(close, period=50)
     
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size (conservative for daily)
+    SIZE = 0.28  # 28% position size (conservative for 4h)
     
     # Position tracking for stoploss
     in_position = False
@@ -135,54 +130,50 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(sma_50[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1w HMA) ===
-        # Only 1 filter - is price above or below weekly HMA?
-        htf_bull = close[i] > hma_1w_aligned[i]
-        htf_bear = close[i] < hma_1w_aligned[i]
+        # === HTF BIAS (12h HMA) ===
+        # Single filter - is price above or below 12h HMA?
+        htf_bull = close[i] > hma_12h_aligned[i]
+        htf_bear = close[i] < hma_12h_aligned[i]
         
-        # === 1d TREND (HMA crossover) ===
+        # === 4h TREND (HMA crossover) ===
         hma_cross_bull = hma_fast[i] > hma_slow[i]
         hma_cross_bear = hma_fast[i] < hma_slow[i]
         
         # === RSI FILTER (LOOSE - ensure trades generate) ===
-        # For longs: RSI > 40 (not oversold, momentum building)
-        # For shorts: RSI < 60 (not overbought, momentum fading)
-        rsi_ok_long = rsi[i] > 40.0
-        rsi_ok_short = rsi[i] < 60.0
-        
-        # === SMA50 TREND CONFIRMATION ===
-        above_sma50 = close[i] > sma_50[i]
-        below_sma50 = close[i] < sma_50[i]
+        # For longs: RSI > 35 (not deeply oversold, momentum building)
+        # For shorts: RSI < 65 (not deeply overbought, momentum fading)
+        rsi_ok_long = rsi[i] > 35.0
+        rsi_ok_short = rsi[i] < 65.0
         
         # === DESIRED SIGNAL ===
-        # LONG: 1w bull + 1d HMA cross bull + RSI > 40 + above SMA50
-        # SHORT: 1w bear + 1d HMA cross bear + RSI < 60 + below SMA50
+        # LONG: 12h bull + 4h HMA cross bull + RSI > 35
+        # SHORT: 12h bear + 4h HMA cross bear + RSI < 65
         desired_signal = 0.0
         
-        if htf_bull and hma_cross_bull and rsi_ok_long and above_sma50:
+        if htf_bull and hma_cross_bull and rsi_ok_long:
             desired_signal = SIZE
-        elif htf_bear and hma_cross_bear and rsi_ok_short and below_sma50:
+        elif htf_bear and hma_cross_bear and rsi_ok_short:
             desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 3x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
