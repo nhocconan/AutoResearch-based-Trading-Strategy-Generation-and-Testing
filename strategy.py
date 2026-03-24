@@ -1,97 +1,51 @@
 #!/usr/bin/env python3
 """
-Experiment #141: 4h Primary + 1d HTF — Supertrend + RSI Pullback + Volume Filter
+Experiment #142: 12h Primary + 1d HTF — Donchian Breakout + HMA Trend + RSI + Choppiness
 
-Hypothesis: After 140+ experiments, the clearest pattern is:
-- Supertrend provides cleaner trend signals than HMA/KAMA crossovers (less whipsaw)
-- RSI pullback TO trend (not extremes) generates more trades than RSI extremes
-- Volume confirmation filters out fake breakouts
-- 1d HTF bias prevents counter-trend trades in strong trends
-- Simple logic = more trades = better Sharpe (complex filters = 0 trades)
-
-This strategy uses PROVEN components from literature:
-1. Supertrend (ATR=10, mult=3) = primary trend direction
-2. RSI(14) pullback = entry timing (RSI 35-45 for long, 55-65 for short)
-3. Volume > SMA(20) = confirmation (avoids low-liquidity traps)
-4. 1d Supertrend = major trend bias (only trade with HTF trend)
-5. ATR(14) trailing stop 2.5x = risk management
+Hypothesis: After 141 failed experiments, the pattern is clear for 12h timeframe:
+- Pure trend following fails on BTC/ETH in bear/range markets (2022 crash, 2025 bear)
+- Pure mean reversion fails on SOL (strong trends)
+- SOLUTION: Dual-regime with Choppiness Index to switch between trend/mean-revert
+- Donchian(20) breakouts are COMMON enough to ensure trades on all symbols
+- 1d HMA provides major trend bias without being too restrictive
+- Loose RSI filter (20-80) ensures entries aren't blocked at extremes
+- This combines proven patterns: Donchian+HMA+RSI (SOL +0.782) + Choppiness regime (ETH +0.923)
 
 Key design choices:
-- Timeframe: 4h (proven 20-50 trades/year sweet spot)
-- HTF: 1d Supertrend for bias (more responsive than 1w)
-- RSI: 35-45/55-65 range (pullback zone, not extremes - ensures trades)
-- Volume filter: > 20-bar SMA (confirms genuine moves)
-- Position size: 0.28 (28% of capital, conservative)
-- Stoploss: 2.5x ATR trailing (tighter for 4h timeframe)
+- Timeframe: 12h (20-50 trades/year target, lower fee drag)
+- HTF: 1d HMA for major trend bias
+- Entry: Donchian(20) breakout + RSI filter + Choppiness regime
+- Regime: CHOP>55 = range (mean revert at Donchian bounds), CHOP<55 = trend (breakout follow)
+- Position size: 0.28 (28% of capital, conservative for 12h)
+- Stoploss: 2.5x ATR trailing (tighter for 12h swings)
+- LOOSE filters to ensure >=30 trades on train, >=3 on test
 
-Target: Sharpe>0.351, DD>-40%, trades>=30 on train, trades>=3 on test
+Target: Sharpe>0.351, DD>-40%, trades>=30 on train, trades>=3 on test, ALL symbols Sharpe>0
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_supertrend_rsi_vol_1d_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_hma_rsi_chop_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Supertrend indicator - trend following with ATR bands
-    Returns: supertrend values, direction (1=bull, -1=bear)
-    """
+def calculate_hma(close, period):
+    """Hull Moving Average - faster response than EMA"""
     n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan), np.full(n, np.nan)
+    if n < period:
+        return np.full(n, np.nan)
     
-    # Calculate ATR
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    half = period // 2
+    sqrt_period = int(np.sqrt(period))
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    wma1 = pd.Series(close).ewm(span=half, min_periods=half, adjust=False).mean().values
+    wma2 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    # Calculate basic bands
-    hl2 = (high + low) / 2.0
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+    diff = 2.0 * wma1 - wma2
+    hma = pd.Series(diff).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean().values
     
-    # Calculate Supertrend
-    supertrend = np.zeros(n)
-    supertrend[:] = np.nan
-    direction = np.zeros(n)
-    direction[:] = np.nan
-    
-    supertrend[period] = upper_band[period]
-    direction[period] = -1  # Start bearish
-    
-    for i in range(period + 1, n):
-        if direction[i-1] == 1:
-            # Previous was bullish
-            if lower_band[i] < supertrend[i-1]:
-                supertrend[i] = lower_band[i]
-            else:
-                supertrend[i] = supertrend[i-1]
-            
-            if close[i] < supertrend[i]:
-                direction[i] = -1
-                supertrend[i] = upper_band[i]
-            else:
-                direction[i] = 1
-        else:
-            # Previous was bearish
-            if upper_band[i] > supertrend[i-1]:
-                supertrend[i] = upper_band[i]
-            else:
-                supertrend[i] = supertrend[i-1]
-            
-            if close[i] > supertrend[i]:
-                direction[i] = 1
-                supertrend[i] = lower_band[i]
-            else:
-                direction[i] = -1
-    
-    return supertrend, direction
+    return hma
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -133,43 +87,78 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_volume_sma(volume, period=20):
-    """SMA of volume for volume filter"""
-    n = len(volume)
-    if n < period:
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    Measures market choppiness vs trending
+    CHOP > 61.8 = choppy/range, CHOP < 38.2 = trending
+    Formula: 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    """
+    n = len(close)
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    # Calculate ATR for each bar (simplified: just true range)
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.zeros(n)
+    chop[:] = np.nan
+    
+    for i in range(period, n):
+        sum_tr = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        range_hl = highest_high - lowest_low
+        
+        if range_hl > 1e-10 and sum_tr > 1e-10:
+            chop[i] = 100.0 * np.log10(sum_tr / range_hl) / np.log10(period)
+        else:
+            chop[i] = 50.0  # neutral
+    
+    return chop
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
+    
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 1d Supertrend for major trend bias
-    _, st_dir_1d_raw = calculate_supertrend(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values,
-        period=10,
-        multiplier=3.0
-    )
-    st_dir_1d_aligned = align_htf_to_ltf(prices, df_1d, st_dir_1d_raw)
+    # Calculate and align 1d HMA for major trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate primary (4h) indicators
-    _, st_dir_4h = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    # Calculate primary (12h) indicators
+    hma_12h = calculate_hma(close, period=21)
     rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
-    vol_sma = calculate_volume_sma(volume, period=20)
+    chop = calculate_choppiness(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size (conservative for 4h)
+    SIZE = 0.28  # 28% position size (conservative for 12h)
     
     # Position tracking for stoploss
     in_position = False
@@ -187,45 +176,83 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(st_dir_4h[i]) or np.isnan(st_dir_1d_aligned[i]):
+        if np.isnan(hma_12h[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(chop[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (1d Supertrend direction) ===
-        htf_bull = st_dir_1d_aligned[i] == 1
-        htf_bear = st_dir_1d_aligned[i] == -1
+        # === HTF BIAS (1d HMA) ===
+        htf_bull = close[i] > hma_1d_aligned[i]
+        htf_bear = close[i] < hma_1d_aligned[i]
         
-        # === 4h TREND (Supertrend direction) ===
-        st_bull = st_dir_4h[i] == 1
-        st_bear = st_dir_4h[i] == -1
+        # === REGIME DETECTION (Choppiness Index) ===
+        # CHOP > 55 = range/choppy (mean revert at Donchian bounds)
+        # CHOP < 55 = trending (breakout follow)
+        is_choppy = chop[i] > 55.0
+        is_trending = chop[i] <= 55.0
         
-        # === RSI PULLBACK (loose thresholds for trade generation) ===
-        # Long: RSI pulled back to 35-50 zone (not oversold, just cooling off)
-        # Short: RSI pulled back to 50-65 zone (not overbought, just cooling off)
-        rsi_pullback_long = 35.0 <= rsi[i] <= 50.0
-        rsi_pullback_short = 50.0 <= rsi[i] <= 65.0
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        donchian_breakout_bull = close[i] > donchian_upper[i-1]  # breaks previous upper
+        donchian_breakout_bear = close[i] < donchian_lower[i-1]  # breaks previous lower
         
-        # === VOLUME CONFIRMATION ===
-        vol_confirmed = volume[i] > vol_sma[i]
+        # === DONCHIAN MEAN REVERSION SIGNALS (in choppy regime) ===
+        # Long near Donchian lower, short near Donchian upper
+        near_lower = (close[i] - donchian_lower[i]) / (donchian_upper[i] - donchian_lower[i] + 1e-10) < 0.15
+        near_upper = (close[i] - donchian_lower[i]) / (donchian_upper[i] - donchian_lower[i] + 1e-10) > 0.85
         
-        # === DESIRED SIGNAL ===
-        # LONG: 1d bull + 4h Supertrend bull + RSI pullback + volume confirmed
-        # SHORT: 1d bear + 4h Supertrend bear + RSI pullback + volume confirmed
+        # === RSI FILTER (LOOSE - ensure trades generate) ===
+        rsi_ok_long = rsi[i] > 20.0  # very loose
+        rsi_ok_short = rsi[i] < 80.0  # very loose
+        rsi_oversold = rsi[i] < 40.0
+        rsi_overbought = rsi[i] > 60.0
+        
+        # === 12h HMA TREND ===
+        hma_bull = close[i] > hma_12h[i]
+        hma_bear = close[i] < hma_12h[i]
+        
+        # === DESIRED SIGNAL (Dual Regime Logic) ===
         desired_signal = 0.0
         
-        if htf_bull and st_bull and rsi_pullback_long and vol_confirmed:
-            desired_signal = SIZE
-        elif htf_bear and st_bear and rsi_pullback_short and vol_confirmed:
-            desired_signal = -SIZE
+        if is_trending:
+            # TREND REGIME: Follow Donchian breakouts with HTF bias
+            # LONG: breakout + HTF bull + RSI ok + HMA bull
+            if donchian_breakout_bull and htf_bull and rsi_ok_long and hma_bull:
+                desired_signal = SIZE
+            # SHORT: breakout + HTF bear + RSI ok + HMA bear
+            elif donchian_breakout_bear and htf_bear and rsi_ok_short and hma_bear:
+                desired_signal = -SIZE
+            # Fallback: breakout + HMA (ignore HTF if strong breakout)
+            elif donchian_breakout_bull and hma_bull and rsi[i] > 30.0:
+                desired_signal = SIZE * 0.7
+            elif donchian_breakout_bear and hma_bear and rsi[i] < 70.0:
+                desired_signal = -SIZE * 0.7
+        else:
+            # CHOPPY REGIME: Mean revert at Donchian bounds
+            # LONG: near lower + RSI oversold + HTF not strongly bear
+            if near_lower and rsi_oversold and not htf_bear:
+                desired_signal = SIZE
+            # SHORT: near upper + RSI overbought + HTF not strongly bull
+            elif near_upper and rsi_overbought and not htf_bull:
+                desired_signal = -SIZE
+            # Fallback: extreme RSI mean reversion
+            elif rsi[i] < 25.0 and hma_bull:
+                desired_signal = SIZE * 0.7
+            elif rsi[i] > 75.0 and hma_bear:
+                desired_signal = -SIZE * 0.7
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
@@ -250,6 +277,10 @@ def generate_signals(prices):
             final_signal = SIZE
         elif desired_signal <= -SIZE * 0.85:
             final_signal = -SIZE
+        elif desired_signal >= SIZE * 0.5:
+            final_signal = SIZE * 0.5
+        elif desired_signal <= -SIZE * 0.5:
+            final_signal = -SIZE * 0.5
         else:
             final_signal = 0.0
         
