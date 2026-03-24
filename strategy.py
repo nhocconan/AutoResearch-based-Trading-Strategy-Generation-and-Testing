@@ -1,87 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #653: 5m Primary + 15m/4h HTF — Session-Filtered Pullback Strategy
+Experiment #654: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + Loose RSI Filter
 
-Hypothesis: 5m timeframe has ZERO prior experiments. Key insight: 5m breakouts whipsaw badly,
-but pullback entries WITHIN established HTF trend work better. Use 4h HMA for primary bias,
-15m RSI for pullback detection, 5m for entry timing. CRITICAL: Session filter (13-17 UTC
-London/NY overlap) to avoid low-liquidity chop. This should reduce false signals while
-maintaining trade frequency.
+Hypothesis: After 553 failed experiments, the #1 issue is TOO MANY FILTERS = 0 trades.
+This strategy uses MINIMAL filters to ensure trade generation while maintaining edge:
+1. 1w HMA(21) for slow trend bias (changes weekly, not daily)
+2. 1d Donchian(20) breakout for entry timing (happens regularly)
+3. RSI(14) loose filter (>40 long, <60 short) - very permissive
+4. ATR(14) * 2.5 trailing stop for risk management
+5. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Key innovations:
-1. 4h HMA(21) - primary trend bias (long only above, short only below)
-2. 15m RSI(14) - pullback detection (RSI<40 in uptrend, RSI>60 in downtrend)
-3. 5m session filter - only trade 13-17 UTC (highest liquidity, lowest slippage)
-4. 5m EMA(8/21) crossover - entry timing precision within HTF trend
-5. ATR(14) trailing stop - 2.5x for risk management
-6. Discrete sizing: 0.15 base, 0.20 strong (small size for 5m fee drag)
-
-Entry conditions (LOOSE to ensure trades on all symbols):
-- LONG: 4h HMA bull + 15m RSI < 50 (pullback) + 5m EMA8 > EMA21 + session active
-- SHORT: 4h HMA bear + 15m RSI > 50 (pullback) + 5m EMA8 < EMA21 + session active
-- Exit: EMA cross against position OR stoploss hit
+Why this should work:
+- 1d timeframe = 20-50 trades/year target (not 100+ like lower TFs)
+- 1w HTF bias reduces whipsaw during 2022 crash
+- Loose RSI filter ensures trades actually trigger
+- Donchian breakout captures momentum when it exists
+- Simple = fewer bugs, more reliable trade generation
 
 Target: Sharpe>0.40, trades>=30 train, trades>=3 test, DD>-50%
-Timeframe: 5m
-Size: 0.15-0.20 discrete (small for 5m fee management)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_5m_session_pullback_hma_rsi_ema_v1"
-timeframe = "5m"
+name = "mtf_1d_donchian_hma_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_ema(close, span):
-    """Exponential Moving Average"""
-    n = len(close)
-    if n < span:
-        return np.full(n, np.nan)
-    ema = pd.Series(close).ewm(span=span, min_periods=span, adjust=False).mean().values
-    return ema
-
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rs = np.zeros(n)
-    rs[:] = np.nan
-    for i in range(period, n):
-        if avg_loss[i] > 1e-10:
-            rs[i] = avg_gain[i] / avg_loss[i]
-        else:
-            rs[i] = 100.0
-    
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    rsi[:period] = np.nan
-    return rsi
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
 def calculate_hma(close, period):
-    """Hull Moving Average for HTF"""
+    """Hull Moving Average - faster response than EMA with less lag"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -97,42 +44,82 @@ def calculate_hma(close, period):
     
     return hma
 
-def get_hour_from_open_time(open_time_array):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds since epoch
-    hours = (open_time_array // (1000 * 60 * 60)) % 24
-    return hours
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.zeros(n)
+    rsi[:] = np.nan
+    for i in range(period, n):
+        if avg_loss[i] < 1e-10:
+            rsi[i] = 100.0
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+    
+    return rsi
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    upper[:] = np.nan
+    lower[:] = np.nan
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i - period + 1:i + 1])
+        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Extract UTC hour for session filter
-    utc_hour = get_hour_from_open_time(open_time)
-    
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_15m = get_htf_data(prices, '15m')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align HTF HMA (4h)
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    # Calculate and align HTF HMA
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate and align HTF RSI (15m)
-    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
-    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
-    
-    # Calculate 5m indicators
-    ema_8 = calculate_ema(close, 8)
-    ema_21 = calculate_ema(close, 21)
+    # Calculate 1d indicators
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    rsi = calculate_rsi(close, period=14)
     atr = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -152,59 +139,61 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(ema_8[i]) or np.isnan(ema_21[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_15m_aligned[i]):
+        if np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (13-17 UTC London/NY overlap) ===
-        session_active = (utc_hour[i] >= 13) and (utc_hour[i] <= 17)
+        if np.isnan(hma_1w_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === HTF BIAS (4h HMA) ===
-        htf_bull = close[i] > hma_4h_aligned[i]
-        htf_bear = close[i] < hma_4h_aligned[i]
+        # === HTF BIAS (1w HMA) ===
+        htf_bull = close[i] > hma_1w_aligned[i]
+        htf_bear = close[i] < hma_1w_aligned[i]
         
-        # === 15m RSI PULLBACK ===
-        rsi_neutral = (rsi_15m_aligned[i] >= 35.0) and (rsi_15m_aligned[i] <= 65.0)
-        rsi_pullback_long = rsi_15m_aligned[i] < 50.0  # Pullback in uptrend
-        rsi_pullback_short = rsi_15m_aligned[i] > 50.0  # Pullback in downtrend
+        # === DONCHIAN BREAKOUT ===
+        breakout_long = close[i] >= donchian_upper[i]
+        breakout_short = close[i] <= donchian_lower[i]
         
-        # === 5m EMA CROSSOVER ===
-        ema_bull = ema_8[i] > ema_21[i]
-        ema_bear = ema_8[i] < ema_21[i]
+        # === RSI FILTER (VERY LOOSE) ===
+        rsi_ok_long = rsi[i] > 40.0  # Not oversold
+        rsi_ok_short = rsi[i] < 60.0  # Not overbought
         
-        # Check EMA cross direction (momentum confirmation)
-        ema_cross_long = False
-        ema_cross_short = False
-        if i >= 2 and not np.isnan(ema_8[i-1]) and not np.isnan(ema_21[i-1]):
-            ema_cross_long = (ema_8[i-1] <= ema_21[i-1]) and (ema_8[i] > ema_21[i])
-            ema_cross_short = (ema_8[i-1] >= ema_21[i-1]) and (ema_8[i] < ema_21[i])
-        
-        # === ENTRY LOGIC (LOOSE CONDITIONS FOR TRADES) ===
+        # === ENTRY LOGIC (LOOSE CONDITIONS - MUST GENERATE TRADES) ===
         desired_signal = 0.0
         
-        # LONG: 4h bull + 15m RSI pullback + 5m EMA bull + session active
-        if session_active and htf_bull and rsi_pullback_long and ema_bull:
-            if ema_cross_long:
-                desired_signal = SIZE_STRONG  # Fresh cross = stronger signal
-            else:
-                desired_signal = SIZE_BASE  # Already in trend
+        # LONG: HTF bull + Donchian breakout + RSI not oversold
+        if htf_bull and breakout_long and rsi_ok_long:
+            desired_signal = SIZE_STRONG
+        elif htf_bull and breakout_long:
+            # Even without RSI filter, take the trade
+            desired_signal = SIZE_BASE
+        elif htf_bull and close[i] > hma_1w_aligned[i] * 1.02:
+            # Price clearly above HTF HMA (2% buffer)
+            desired_signal = SIZE_BASE * 0.5
         
-        # SHORT: 4h bear + 15m RSI pullback + 5m EMA bear + session active
-        elif session_active and htf_bear and rsi_pullback_short and ema_bear:
-            if ema_cross_short:
-                desired_signal = -SIZE_STRONG  # Fresh cross = stronger signal
-            else:
-                desired_signal = -SIZE_BASE  # Already in trend
+        # SHORT: HTF bear + Donchian breakout + RSI not overbought
+        elif htf_bear and breakout_short and rsi_ok_short:
+            desired_signal = -SIZE_STRONG
+        elif htf_bear and breakout_short:
+            # Even without RSI filter, take the trade
+            desired_signal = -SIZE_BASE
+        elif htf_bear and close[i] < hma_1w_aligned[i] * 0.98:
+            # Price clearly below HTF HMA (2% buffer)
+            desired_signal = -SIZE_BASE * 0.5
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -225,13 +214,6 @@ def generate_signals(prices):
         
         if stoploss_triggered:
             desired_signal = 0.0
-        
-        # === EXIT ON EMA CROSS AGAINST POSITION ===
-        if in_position and position_side > 0 and ema_bear:
-            desired_signal = 0.0  # Exit long on EMA bear cross
-        
-        if in_position and position_side < 0 and ema_bull:
-            desired_signal = 0.0  # Exit short on EMA bull cross
         
         # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal >= SIZE_STRONG * 0.9:
