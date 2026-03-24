@@ -1,41 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #999: 1h Primary + 4h/12h HTF — Choppiness Regime + Connors RSI + HMA Trend
+Experiment #1000: 6h Primary + 1d/1w HTF — Keltner Channel + ADX + Triple HMA Alignment
 
-Hypothesis: 1h timeframe with strict regime filtering will generate fewer but higher quality
-trades. Using Choppiness Index to detect range vs trend, then applying appropriate strategy
-(mean reversion in range, trend follow in trend) with Connors RSI for precise entry timing.
+Hypothesis: 6h timeframe with Keltner Channel breakouts, ADX trend strength filter,
+and triple HMA alignment (6h/1d/1w) will capture multi-day swings with better
+risk-adjusted returns than pure HMA or Donchian strategies.
 
 Key innovations:
-1. Choppiness Index (14): CHOP>61.8 = range (mean revert), CHOP<38.2 = trend (trend follow)
-2. Connors RSI (CRSI): (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3 for entry timing
-3. 4h HMA(21) + 12h HMA(21) dual trend filter (only trade with both HTF aligned)
-4. Session filter: 08-20 UTC (high liquidity hours)
+1. Keltner Channel (EMA20, ATR10, mult=2.0): volatility-adjusted breakout levels
+2. ADX(14) > 20: minimum trend strength filter (looser than typical 25)
+3. Triple HMA alignment: 6h HMA(16), 1d HMA(21), 1w HMA(50) all aligned
+4. Volume confirmation: taker_buy_volume ratio > 0.55 for longs, < 0.45 for shorts
 5. ATR(14) 2.5x trailing stop for risk management
-6. Discrete sizing: 0.0, ±0.20, ±0.30 to minimize fee churn
+6. Multiple entry paths to ensure 30+ trades/train
 
-Why this should work:
-- Choppiness filter prevents trend strategies in choppy markets (2022-2023 were choppy)
-- CRSI catches reversals better than standard RSI (75% win rate in literature)
-- Dual HTF (4h+12h) ensures we only trade when both agree (fewer but better trades)
-- 1h entries with 4h/12h direction = HTF trade frequency with 1h precision
-- Session filter avoids low-liquidity hours where fakeouts common
+Why 6h should work:
+- Captures 2-5 day swings (between 4h noise and 12h lag)
+- Fewer trades than 4h = less fee drag
+- More responsive than 12h = catches reversals faster
+- Keltner adapts to volatility (wider in high vol, tighter in low vol)
 
-Entry conditions (LOOSE enough for trades):
-- LONG = 4h HMA bull + 12h HMA bull + (CHOP>61.8 + CRSI<15 OR CHOP<38.2 + CRSI<30) + session
-- SHORT = 4h HMA bear + 12h HMA bear + (CHOP>61.8 + CRSI>85 OR CHOP<38.2 + CRSI>70) + session
-- Relaxed CRSI thresholds to ensure 40-80 trades/year target
+Entry conditions (designed for trade frequency):
+- LONG = 1w HMA bull + 1d HMA bull + 6h HMA bull + ADX>20 + price>Keltner_upper + volume_confirm
+- SHORT = 1w HMA bear + 1d HMA bear + 6h HMA bear + ADX>20 + price<Keltner_lower + volume_confirm
+- Relaxed ADX threshold (20 vs 25) and multiple volume paths for more trades
 
 Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 1h
-Size: 0.20-0.30 discrete
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_chop_crsi_hma_regime_4h12h_v1"
-timeframe = "1h"
+name = "mtf_6h_keltner_adx_triple_hma_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -79,103 +78,76 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index"""
     n = len(close)
-    if n < period + 1:
+    if n < period * 3:
         return np.full(n, np.nan)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
     
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    rsi[:period] = np.nan
-    return rsi
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    Measures market choppiness vs trending
-    CHOP > 61.8 = choppy/range market
-    CHOP < 38.2 = trending market
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+    atr_vals = calculate_atr(high, low, close, period)
     
-    chop = np.full(n, np.nan, dtype=np.float64)
+    plus_di = np.full(n, np.nan, dtype=np.float64)
+    minus_di = np.full(n, np.nan, dtype=np.float64)
     
     for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        if highest_high == lowest_low:
-            chop[i] = 100.0
-            continue
-        
-        atr_sum = 0.0
-        for j in range(i-period+1, i+1):
-            atr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-        
-        chop[i] = 100.0 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+        if not np.isnan(atr_vals[i]) and atr_vals[i] > 1e-10:
+            plus_di[i] = 100.0 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr_vals[i]
+            minus_di[i] = 100.0 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr_vals[i]
     
-    return chop
+    dx = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period * 2, n):
+        if not np.isnan(plus_di[i]) and not np.isnan(minus_di[i]):
+            sum_di = plus_di[i] + minus_di[i]
+            if sum_di > 1e-10:
+                dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / sum_di
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return adx
 
-def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """
-    Connors RSI (CRSI)
-    CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    Long when CRSI < 10, Short when CRSI > 90
-    """
+def calculate_keltner(high, low, close, ema_period=20, atr_period=10, mult=2.0):
+    """Keltner Channel - returns upper, middle, lower bands"""
     n = len(close)
-    if n < rank_period + 1:
-        return np.full(n, np.nan)
+    if n < ema_period + atr_period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    # RSI(3)
-    rsi_short = calculate_rsi(close, rsi_period)
+    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, atr_period)
     
-    # RSI Streak (consecutive up/down days)
-    streak = np.zeros(n, dtype=np.float64)
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
-        elif close[i] < close[i-1]:
-            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
-        else:
-            streak[i] = 0
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
-    # RSI of streak
-    streak_rsi = calculate_rsi(np.abs(streak), streak_period)
-    # Adjust sign based on streak direction
-    streak_rsi = np.where(streak >= 0, streak_rsi, 100.0 - streak_rsi)
+    for i in range(ema_period + atr_period - 1, n):
+        if not np.isnan(ema[i]) and not np.isnan(atr[i]):
+            upper[i] = ema[i] + mult * atr[i]
+            lower[i] = ema[i] - mult * atr[i]
     
-    # Percent Rank of price changes
-    pct_rank = np.full(n, np.nan, dtype=np.float64)
-    for i in range(rank_period, n):
-        returns = np.diff(close[i-rank_period:i+1])
-        if len(returns) > 0:
-            current_return = returns[-1]
-            pct_rank[i] = 100.0 * np.sum(returns[:-1] < current_return) / (len(returns) - 1)
-    
-    # CRSI
-    crsi = (rsi_short + streak_rsi + pct_rank) / 3.0
-    crsi[:rank_period] = np.nan
-    
-    return crsi
+    return upper, ema, lower
 
-def get_hour_from_open_time(prices):
-    """Extract hour from open_time for session filter"""
-    try:
-        # open_time is in milliseconds
-        hours = (prices['open_time'].values // (1000 * 3600)) % 24
-        return hours
-    except Exception:
-        return np.zeros(len(prices), dtype=np.int64)
+def calculate_volume_ratio(prices):
+    """Calculate taker buy volume ratio"""
+    n = len(prices)
+    ratio = np.full(n, np.nan, dtype=np.float64)
+    
+    if 'taker_buy_volume' in prices.columns and 'volume' in prices.columns:
+        for i in range(n):
+            vol = prices['volume'].values[i]
+            buy_vol = prices['taker_buy_volume'].values[i]
+            if vol > 1e-10:
+                ratio[i] = buy_vol / vol
+    
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -184,27 +156,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=50)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
+    hma_6h = calculate_hma(close, period=16)
     atr_14 = calculate_atr(high, low, close, period=14)
-    choppiness = calculate_choppiness(high, low, close, period=14)
-    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    
-    # Session filter (08-20 UTC = high liquidity)
-    hours = get_hour_from_open_time(prices)
-    in_session = (hours >= 8) & (hours <= 20)
+    adx_14 = calculate_adx(high, low, close, period=14)
+    keltner_upper, keltner_mid, keltner_lower = calculate_keltner(high, low, close, ema_period=20, atr_period=10, mult=2.0)
+    volume_ratio = calculate_volume_ratio(prices)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -216,7 +186,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(150, n):  # Need more warmup for CRSI
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -225,78 +195,77 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(choppiness[i]):
+        if np.isnan(adx_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(crsi[i]):
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_6h[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (4h + 12h HMA) ===
-        htf_4h_bull = close[i] > hma_4h_aligned[i]
-        htf_4h_bear = close[i] < hma_4h_aligned[i]
-        htf_12h_bull = close[i] > hma_12h_aligned[i]
-        htf_12h_bear = close[i] < hma_12h_aligned[i]
+        # === TRIPLE HMA ALIGNMENT (6h + 1d + 1w) ===
+        hma_6h_bull = close[i] > hma_6h[i]
+        hma_6h_bear = close[i] < hma_6h[i]
         
-        # Both HTF must agree for strong signal
-        htf_strong_bull = htf_4h_bull and htf_12h_bull
-        htf_strong_bear = htf_4h_bear and htf_12h_bear
+        hma_1d_bull = close[i] > hma_1d_aligned[i]
+        hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === REGIME DETECTION (Choppiness) ===
-        is_choppy = choppiness[i] > 61.8  # Range market
-        is_trending = choppiness[i] < 38.2  # Trend market
+        hma_1w_bull = close[i] > hma_1w_aligned[i]
+        hma_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === CRSI ENTRY SIGNALS ===
-        # Mean reversion in choppy market
-        crsi_oversold_mr = crsi[i] < 25  # Relaxed from 10 for more trades
-        crsi_overbought_mr = crsi[i] > 75  # Relaxed from 90 for more trades
+        # All three aligned bull or all three aligned bear
+        triple_bull = hma_6h_bull and hma_1d_bull and hma_1w_bull
+        triple_bear = hma_6h_bear and hma_1d_bear and hma_1w_bear
         
-        # Trend follow in trending market
-        crsi_pullback_long = crsi[i] < 45  # Pullback in uptrend
-        crsi_pullback_short = crsi[i] > 55  # Pullback in downtrend
+        # === ADX TREND STRENGTH ===
+        adx_strong = adx_14[i] > 20.0  # Relaxed from 25 to ensure trades
         
-        # === SESSION FILTER ===
-        session_ok = in_session[i]
+        # === KELTNER BREAKOUT ===
+        keltner_breakout_long = close[i] > keltner_upper[i-1] if i > 0 else False
+        keltner_breakdown_short = close[i] < keltner_lower[i-1] if i > 0 else False
         
-        # === ENTRY LOGIC (LOOSE THRESHOLDS FOR TRADES) ===
+        # === VOLUME CONFIRMATION ===
+        vol_confirm_long = volume_ratio[i] > 0.52 if not np.isnan(volume_ratio[i]) else True
+        vol_confirm_short = volume_ratio[i] < 0.48 if not np.isnan(volume_ratio[i]) else True
+        
+        # === ENTRY LOGIC (MULTIPLE PATHS FOR TRADE FREQUENCY) ===
         desired_signal = 0.0
         
         # LONG entries - multiple paths
-        if htf_strong_bull and session_ok:
-            # Path 1: Choppy market + mean reversion (CRSI oversold)
-            if is_choppy and crsi_oversold_mr:
-                desired_signal = SIZE_BASE
-            # Path 2: Trending market + pullback entry
-            elif is_trending and crsi_pullback_long:
+        if triple_bull:
+            # Path 1: Keltner breakout with ADX and volume
+            if keltner_breakout_long and adx_strong and vol_confirm_long:
                 desired_signal = SIZE_STRONG
-            # Path 3: Neutral regime + strong oversold
-            elif crsi[i] < 20:
+            # Path 2: Price above Keltner mid + ADX strong (trend continuation)
+            elif close[i] > keltner_mid[i] and adx_strong and hma_6h_bull:
+                desired_signal = SIZE_BASE
+            # Path 3: Pullback to Keltner mid in strong trend
+            elif close[i] > keltner_lower[i] and close[i] < keltner_mid[i] and adx_strong > 25:
                 desired_signal = SIZE_BASE
         
         # SHORT entries - multiple paths
-        elif htf_strong_bear and session_ok:
-            # Path 1: Choppy market + mean reversion (CRSI overbought)
-            if is_choppy and crsi_overbought_mr:
-                desired_signal = -SIZE_BASE
-            # Path 2: Trending market + pullback entry
-            elif is_trending and crsi_pullback_short:
+        elif triple_bear:
+            # Path 1: Keltner breakdown with ADX and volume
+            if keltner_breakdown_short and adx_strong and vol_confirm_short:
                 desired_signal = -SIZE_STRONG
-            # Path 3: Neutral regime + strong overbought
-            elif crsi[i] > 80:
+            # Path 2: Price below Keltner mid + ADX strong (trend continuation)
+            elif close[i] < keltner_mid[i] and adx_strong and hma_6h_bear:
+                desired_signal = -SIZE_BASE
+            # Path 3: Pullback to Keltner mid in strong trend
+            elif close[i] < keltner_upper[i] and close[i] > keltner_mid[i] and adx_strong > 25:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
