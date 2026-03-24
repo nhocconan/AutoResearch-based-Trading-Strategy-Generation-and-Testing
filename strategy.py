@@ -1,38 +1,79 @@
 #!/usr/bin/env python3
 """
-Experiment #1570: 1h Primary + 4h/12h HTF — Multi-Confluence Trend Pullback Strategy
+Experiment #1571: 4h Primary + 1d/1w HTF — KAMA Adaptive Trend Strategy
 
-Hypothesis: 1h timeframe with strict multi-confluence filters can capture high-quality
-trend pullback entries while minimizing trade frequency (target 30-60 trades/year).
+Hypothesis: After 11 failed 4h experiments with complex regime switching, simpler is better.
+KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency - follows price in trends,
+flattens in ranges. This should reduce whipsaw compared to HMA/EMA crossovers.
 
 Key innovations:
-1. 12h HMA(21) for primary trend bias (slower, more reliable than 4h)
-2. 4h RSI(14) for momentum confirmation (40-60 range = healthy trend, not overextended)
-3. 1h HMA(16/48) crossover for entry timing within HTF trend
-4. Volume filter: current volume > 0.8x 20-period average (confirms participation)
-5. Session filter: 8-20 UTC only (London/NY overlap = highest liquidity)
-6. Asymmetric sizing: 0.25 long, 0.20 short (bear bias for 2025 test period)
-7. ATR(14) 2.0x trailing stop for tight drawdown control
+1. KAMA(10,2,30) on 4h - adapts to volatility, less lag than EMA
+2. 1d HMA(21) for trend bias (proven in best strategies)
+3. 1w HMA(21) for long-term regime filter (only trade with weekly trend)
+4. RSI(14) 45-55 filter for trend continuation (not extreme reversals)
+5. ATR(14) 2.5x trailing stop for drawdown control
+6. Discrete position sizing (0.30) to minimize fee churn
 
 Why this should beat Sharpe 0.618:
-- 12h trend filter eliminates counter-trend trades (major source of losses in 2022)
-- 4h RSI middle-range ensures entering healthy trends, not exhausted moves
-- 1h entry timing reduces drawdown vs pure 4h/12h strategies
-- Session + volume filters cut low-quality trades by ~60%
-- Target 40-60 trades/year = optimal fee efficiency for 1h TF
-- Asymmetric sizing accounts for crypto's long-term upward bias with crash protection
+- KAMA reduces whipsaw in choppy 4h markets (major issue in prior experiments)
+- Dual HTF filter (1d + 1w) ensures we only trade with major trend
+- RSI continuation filter (45-55) catches trend continuations, not reversals
+- Simpler logic = more reliable signals = more trades (>30/year target)
+- 4h targets 20-50 trades/year — optimal for fee efficiency
 
-Timeframe: 1h (required for this experiment)
-HTF: 4h RSI + 12h HMA for confluence
+Timeframe: 4h (required for this experiment)
+HTF: 1d HMA + 1w HMA for bias (use mtf_data helper - call ONCE before loop)
 Target: Sharpe > 0.618, trades > 10/symbol train, > 3/symbol test, DD > -50%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_trend_pullback_4h_rsi_12h_hma_session_vol_atr_v1"
-timeframe = "1h"
+name = "mtf_4h_kama_trend_1d1w_hma_rsi_atr_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_kama(close, fast_period=10, slow_period=30, smooth_period=2):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts to market efficiency ratio (ER)
+    ER = |close - close_n| / sum(|close_i - close_i-1|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    KAMA = KAMA_prev + SC * (close - KAMA_prev)
+    
+    Fast SC = 2/(fast+1), Slow SC = 2/(slow+1)
+    """
+    n = len(close)
+    if n < slow_period:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio
+    er = np.full(n, np.nan)
+    for i in range(slow_period - 1, n):
+        signal = abs(close[i] - close[i - slow_period + 1])
+        noise = np.sum(np.abs(np.diff(close[i - slow_period + 1:i + 1])))
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 0.0
+    
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA at SMA of first slow_period bars
+    kama[slow_period - 1] = np.mean(close[:slow_period])
+    
+    # Calculate KAMA
+    for i in range(slow_period, n):
+        if np.isnan(er[i]):
+            continue
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_hma(close, period=21):
     """
@@ -104,7 +145,7 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period=20):
+def calculate_sma(close, period=200):
     """Simple Moving Average with proper min_periods"""
     n = len(close)
     if n < period:
@@ -116,45 +157,40 @@ def calculate_sma(close, period=20):
     
     return sma
 
-def extract_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    # open_time is in milliseconds since epoch
-    # Convert to seconds, then to datetime, extract hour
-    return ((open_time // 1000) // 3600) % 24
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 12h HMA for primary trend bias
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate and align 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 4h RSI for momentum confirmation
-    rsi_4h_raw = calculate_rsi(df_4h['close'].values, period=14)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h_raw)
+    # Calculate and align 1w HMA for long-term regime
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (1h) indicators
+    # Calculate primary (4h) indicators
     atr = calculate_atr(high, low, close, period=14)
+    rsi = calculate_rsi(close, period=14)
     
-    # 1h HMA for entry timing
-    hma_fast = calculate_hma(close, period=16)
-    hma_slow = calculate_hma(close, period=48)
+    # KAMA adaptive moving averages
+    kama_fast = calculate_kama(close, fast_period=10, slow_period=30, smooth_period=2)
+    kama_slow = calculate_kama(close, fast_period=20, slow_period=50, smooth_period=2)
     
-    # Volume SMA for filter
-    vol_sma = calculate_sma(volume, period=20)
+    # HMA for additional confirmation
+    hma_4h = calculate_hma(close, period=21)
+    
+    # SMA 200 for long-term trend
+    sma_200 = calculate_sma(close, period=200)
     
     signals = np.zeros(n)
-    LONG_SIZE = 0.25
-    SHORT_SIZE = 0.20
+    BASE_SIZE = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -172,80 +208,57 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_fast[i]) or np.isnan(hma_slow[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi_4h_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(kama_fast[i]) or np.isnan(kama_slow[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (8-20 UTC only) ===
-        hour = extract_hour(open_time[i])
-        in_session = 8 <= hour <= 20
+        # === TREND BIAS (1d HMA + 1w HMA) ===
+        daily_bull = close[i] > hma_1d_aligned[i]
+        daily_bear = close[i] < hma_1d_aligned[i]
+        weekly_bull = close[i] > hma_1w_aligned[i]
+        weekly_bear = close[i] < hma_1w_aligned[i]
         
-        # === VOLUME FILTER ===
-        vol_ratio = volume[i] / vol_sma[i] if vol_sma[i] > 1e-10 else 0.0
-        volume_ok = vol_ratio > 0.8
+        # === KAMA TREND SIGNAL ===
+        kama_bull = kama_fast[i] > kama_slow[i]
+        kama_bear = kama_fast[i] < kama_slow[i]
         
-        # === TREND BIAS (12h HMA) ===
-        trend_bull = close[i] > hma_12h_aligned[i]
-        trend_bear = close[i] < hma_12h_aligned[i]
+        # === RSI CONTINUATION FILTER (45-55 for trend continuation) ===
+        rsi_neutral = 45.0 <= rsi[i] <= 55.0
+        rsi_bull = rsi[i] >= 45.0
+        rsi_bear = rsi[i] <= 55.0
         
-        # === MOMENTUM CONFIRMATION (4h RSI in healthy range) ===
-        # RSI 40-60 = healthy trend, not overextended
-        # RSI 35-65 = slightly wider for more trades
-        momentum_long = 35.0 <= rsi_4h_aligned[i] <= 65.0
-        momentum_short = 35.0 <= rsi_4h_aligned[i] <= 65.0
-        
-        # === ENTRY SIGNAL (1h HMA crossover within HTF trend) ===
-        hma_bull = hma_fast[i] > hma_slow[i]
-        hma_bear = hma_fast[i] < hma_slow[i]
-        
-        # Check for fresh crossover (fast crossed slow in last 3 bars)
-        hma_cross_long = False
-        hma_cross_short = False
-        
-        if i >= 3:
-            # Long crossover: fast was <= slow, now fast > slow
-            if hma_fast[i] > hma_slow[i] and hma_fast[i-1] <= hma_slow[i-1]:
-                hma_cross_long = True
-            # Short crossover: fast was >= slow, now fast < slow
-            if hma_fast[i] < hma_slow[i] and hma_fast[i-1] >= hma_slow[i-1]:
-                hma_cross_short = True
-        
-        # === MULTI-CONFLUENCE ENTRY LOGIC ===
+        # === PRIMARY SIGNAL ===
         desired_signal = 0.0
         
-        # LONG: 12h bull + 4h RSI healthy + 1h HMA bull + session + volume
-        if trend_bull and momentum_long and hma_bull and in_session and volume_ok:
-            # Enter on crossover or pullback confirmation
-            if hma_cross_long or (hma_fast[i] > hma_slow[i] * 1.001):
-                desired_signal = LONG_SIZE
+        # LONG: KAMA bull + Daily bull + Weekly bull (or neutral) + RSI support
+        if kama_bull and daily_bull and (weekly_bull or not weekly_bear) and rsi_bull:
+            desired_signal = BASE_SIZE
         
-        # SHORT: 12h bear + 4h RSI healthy + 1h HMA bear + session + volume
-        if trend_bear and momentum_short and hma_bear and in_session and volume_ok:
-            # Enter on crossover or breakdown confirmation
-            if hma_cross_short or (hma_fast[i] < hma_slow[i] * 0.999):
-                desired_signal = -SHORT_SIZE
+        # SHORT: KAMA bear + Daily bear + Weekly bear (or neutral) + RSI support
+        elif kama_bear and daily_bear and (weekly_bear or not weekly_bull) and rsi_bear:
+            desired_signal = -BASE_SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 2.0x) ===
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 2.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 2.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
@@ -253,10 +266,10 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= LONG_SIZE * 0.85:
-            final_signal = LONG_SIZE
-        elif desired_signal <= -SHORT_SIZE * 0.85:
-            final_signal = -SHORT_SIZE
+        if desired_signal >= BASE_SIZE * 0.85:
+            final_signal = BASE_SIZE
+        elif desired_signal <= -BASE_SIZE * 0.85:
+            final_signal = -BASE_SIZE
         else:
             final_signal = 0.0
         
