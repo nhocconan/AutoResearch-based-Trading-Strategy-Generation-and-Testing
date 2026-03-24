@@ -1,31 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #257: 15m Primary + 4h/12h HTF — Simplified Trend-Pullback with Volume Filter
+Experiment #258: 4h Primary + 1d HTF — Vol Spike Mean Reversion + HTF Trend Filter
 
-Hypothesis: Previous 15m strategies failed (Sharpe=0.000) because entry conditions were TOO STRICT.
-This version uses LOOSER entry logic to ensure 40-100 trades/year while maintaining edge:
+Hypothesis: After 230+ failed experiments, regime-switching strategies are overfitted.
+Simple vol-spike mean reversion with HTF trend filter should work better:
 
-1. 4h HMA(21) for trend bias — simpler than dual HTF
-2. 15m RSI(7) extremes for entries — RSI<35 long, RSI>65 short (not extreme 20/80)
-3. Volume filter — only trade when volume > 0.5x 20-bar avg (avoid dead hours)
-4. 12h HMA for major trend confirmation — only require alignment, not strict filter
-5. ATR(14) 2.5x trailing stoploss
+1. VOL SPIKE REVERSION: ATR(7)/ATR(30) > 2.0 indicates panic/extreme moves
+   - After panic, price tends to revert (vol crush)
+   - Entry when price at BB extreme + vol spike
 
-Key changes from failed 15m attempts:
-- RSI threshold: 35/65 instead of 30/70 (more triggers)
-- Removed session filter (was killing trade count)
-- Removed SMA200 filter (too slow for 15m)
-- Single HTF (4h) for direction, 12h for confirmation only
-- Position size: 0.20 base, 0.25 strong (smaller for higher frequency)
+2. HTF TREND FILTER: Only trade with 1d HMA(50) direction
+   - Long only when close > 1d HMA(50)
+   - Short only when close < 1d HMA(50)
+   - Reduces counter-trend trades that fail in 2022 crash
 
-Target: Sharpe>0.40, DD>-30%, trades>=40/year per symbol
+3. RSI CONFIRMATION: RSI(14) < 30 for long, > 70 for short
+   - Ensures we're catching extremes, not mid-range noise
+
+4. VOLUME CONFIRMATION: Volume > 1.5x 20-bar avg
+   - Panic moves have high volume, confirms the spike
+
+5. ASYMMETRIC SIZING: 0.25 base, 0.30 when all 4 conditions align
+   - Reduces exposure during uncertain conditions
+
+Why this should work:
+- Vol spike reversion has proven edge in crypto (panic = buying opportunity)
+- HTF filter prevents disaster in 2022-style crashes
+- Simple logic = fewer whipsaws than regime-switching
+- 4h TF = 20-50 trades/year target (not too many fees)
+
+Target: Sharpe>0.45, DD>-35%, trades>=25 train, trades>=3 test
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_trend_pullback_rsi_vol_4h12h_v1"
-timeframe = "15m"
+name = "mtf_4h_volspike_mr_hma_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -85,14 +96,52 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period):
-    """Simple Moving Average"""
+def calculate_bollinger_bands(close, period=20, std_mult=2.5):
+    """Bollinger Bands with wider std for extreme detection"""
     n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    
+    return upper, lower
+
+def calculate_vol_spike_ratio(high, low, close, short_period=7, long_period=30):
+    """ATR ratio to detect volatility spikes"""
+    n = len(close)
+    if n < long_period + 1:
+        return np.full(n, np.nan)
+    
+    atr_short = calculate_atr(high, low, close, short_period)
+    atr_long = calculate_atr(high, low, close, long_period)
+    
+    ratio = np.zeros(n)
+    ratio[:] = np.nan
+    for i in range(long_period, n):
+        if atr_long[i] > 1e-10:
+            ratio[i] = atr_short[i] / atr_long[i]
+    
+    return ratio
+
+def calculate_volume_ratio(volume, period=20):
+    """Volume relative to moving average"""
+    n = len(volume)
     if n < period:
         return np.full(n, np.nan)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    
+    ratio = np.zeros(n)
+    ratio[:] = np.nan
+    for i in range(period, n):
+        if vol_ma[i] > 1e-10:
+            ratio[i] = volume[i] / vol_ma[i]
+    
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -102,27 +151,24 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF HMA for trend bias
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
-    
-    # Calculate primary (15m) indicators
-    hma_15m = calculate_hma(close, period=21)
+    # Calculate primary (4h) indicators
     atr = calculate_atr(high, low, close, period=14)
-    rsi = calculate_rsi(close, period=7)  # Faster RSI for 15m
-    vol_sma = calculate_sma(volume, period=20)
+    rsi = calculate_rsi(close, period=14)
+    bb_upper, bb_lower = calculate_bollinger_bands(close, period=20, std_mult=2.5)
+    vol_ratio = calculate_vol_spike_ratio(high, low, close, short_period=7, long_period=30)
+    volume_ratio = calculate_volume_ratio(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.25
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
-    # Position tracking
+    # Position tracking for stoploss
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -134,55 +180,93 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(hma_15m[i]) or np.isnan(rsi[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        # === HTF TREND BIAS (4h HMA) ===
-        htf_bull = close[i] > hma_4h_aligned[i]
-        htf_bear = close[i] < hma_4h_aligned[i]
+        if np.isnan(vol_ratio[i]) or np.isnan(volume_ratio[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # === 12h MAJOR TREND CONFIRMATION ===
-        major_bull = not np.isnan(hma_12h_aligned[i]) and close[i] > hma_12h_aligned[i]
-        major_bear = not np.isnan(hma_12h_aligned[i]) and close[i] < hma_12h_aligned[i]
+        # === HTF TREND BIAS (1d HMA) ===
+        htf_bull = close[i] > hma_1d_aligned[i]
+        htf_bear = close[i] < hma_1d_aligned[i]
         
-        # === VOLUME FILTER ===
-        # Only trade when volume > 50% of 20-bar average (avoid dead hours)
-        vol_ok = volume[i] > 0.5 * vol_sma[i]
+        # === VOL SPIKE DETECTION ===
+        vol_spike = vol_ratio[i] > 2.0  # ATR(7) > 2x ATR(30)
         
-        # === RSI EXTREMES (looser thresholds for more trades) ===
-        rsi_oversold = rsi[i] < 35.0
-        rsi_overbought = rsi[i] > 65.0
+        # === VOLUME CONFIRMATION ===
+        vol_confirmed = volume_ratio[i] > 1.5  # Volume > 1.5x average
         
-        # === 15m HMA TREND ===
-        hma_bull = close[i] > hma_15m[i]
-        hma_bear = close[i] < hma_15m[i]
+        # === PRICE AT BB EXTREME ===
+        at_bb_lower = close[i] <= bb_lower[i]
+        at_bb_upper = close[i] >= bb_upper[i]
+        
+        # === RSI EXTREME ===
+        rsi_oversold = rsi[i] < 30.0
+        rsi_overbought = rsi[i] > 70.0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
+        signal_strength = 0
         
-        # LONG: 4h bullish + RSI oversold + volume ok
-        # Entry on pullback in uptrend
-        if htf_bull and rsi_oversold and vol_ok:
-            # Strong signal if 12h also bullish
-            if major_bull:
+        # LONG: Vol spike + BB lower + RSI oversold + HTF bull + Volume confirmed
+        long_conditions = 0
+        if vol_spike:
+            long_conditions += 1
+        if at_bb_lower:
+            long_conditions += 1
+        if rsi_oversold:
+            long_conditions += 1
+        if htf_bull:
+            long_conditions += 1
+        if vol_confirmed:
+            long_conditions += 1
+        
+        # Need at least 4 of 5 conditions for long
+        if long_conditions >= 4 and htf_bull:
+            if long_conditions >= 5:
                 desired_signal = SIZE_STRONG
+                signal_strength = 2
             else:
                 desired_signal = SIZE_BASE
+                signal_strength = 1
         
-        # SHORT: 4h bearish + RSI overbought + volume ok
-        # Entry on rally in downtrend
-        elif htf_bear and rsi_overbought and vol_ok:
-            if major_bear:
+        # SHORT: Vol spike + BB upper + RSI overbought + HTF bear + Volume confirmed
+        short_conditions = 0
+        if vol_spike:
+            short_conditions += 1
+        if at_bb_upper:
+            short_conditions += 1
+        if rsi_overbought:
+            short_conditions += 1
+        if htf_bear:
+            short_conditions += 1
+        if vol_confirmed:
+            short_conditions += 1
+        
+        # Need at least 4 of 5 conditions for short
+        if short_conditions >= 4 and htf_bear:
+            if short_conditions >= 5:
                 desired_signal = -SIZE_STRONG
+                signal_strength = 2
             else:
                 desired_signal = -SIZE_BASE
+                signal_strength = 1
         
         # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
