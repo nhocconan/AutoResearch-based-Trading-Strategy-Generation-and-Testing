@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #1611: 4h Primary + 1d/1w HTF — Simplified Trend Pullback with Donchian Confirmation
+Experiment #1612: 12h Primary + 1d/1w HTF — Simplified Donchian Breakout + HMA Trend
 
-Hypothesis: After analyzing 11 failed 4h experiments, complexity is the enemy. 
-The #1604 strategy had Sharpe=0.017 but only +27.5% return — too many false signals.
-This strategy SIMPLIFIES: remove complex regime switching, use cleaner trend-following.
+Hypothesis: After 11 failed experiments with overly complex regime detection,
+the key is SIMPLICITY + ensuring trade generation. Most 12h strategies failed
+with 0 trades because entry conditions were too restrictive.
 
-Key innovations:
-1. 1w HMA(21) = MAJOR trend filter (bull/bear market regime)
-2. 1d HMA(21) = INTERMEDIATE trend confirmation (must align with weekly)
-3. 4h RSI(14) pullback entries = enter on dips in uptrend, rallies in downtrend
-4. Donchian(20) breakout = momentum confirmation for entry timing
-5. ATR(14) 3x trailing stop = looser than 2.5x to avoid whipsaw
-6. LOOSE entry thresholds: RSI 35/65 (not 30/70) to ensure trade generation
-7. Position size 0.30 — discrete levels to minimize fee churn
+This strategy uses:
+1. Donchian(20) breakout - proven trend entry (break 20-period high/low)
+2. 1d HMA(21) - primary trend bias (only long if price > 1d HMA, short if <)
+3. 1w HMA(21) - major regime filter (avoid counter-trend trades)
+4. RSI(14) - momentum confirmation (RSI > 45 for long, < 55 for short)
+5. ATR(14) 2.5x trailing stop - drawdown control
+6. LOOSE entry conditions - ensure 20-50 trades/year on 12h
 
-Why this should beat Sharpe 0.618:
-- Simpler logic = fewer conflicting filters = more trades generated
-- 1w HMA filter prevents trading against major trend (critical for 2022 crash)
-- RSI pullback + Donchian breakout = high-probability entry timing
-- 3x ATR stop avoids premature exits in volatile crypto
-- 4h timeframe targets 20-50 trades/year — optimal fee efficiency
-- LOOSER RSI thresholds (35/65 vs 30/70) = more trade opportunities
+Why this should work better:
+- Fewer confluence filters = more trades generated
+- HTF trend bias provides edge without over-filtering
+- Donchian breakout is proven on higher timeframes
+- 12h targets 20-50 trades/year — optimal for fee efficiency
+- Discrete position sizing (0.25) minimizes fee churn
 
-Timeframe: 4h (required)
+Timeframe: 12h (required for this experiment)
 HTF: 1d HMA + 1w HMA for trend bias (use mtf_data helper - call ONCE before loop)
 Target: Sharpe > 0.618, trades > 10/symbol train, > 3/symbol test, DD > -50%
 """
@@ -31,14 +29,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_trend_pullback_donchian_1d1w_hma_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_hma_1d1w_rsi_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period=21):
     """
     Hull Moving Average - reduces lag while maintaining smoothness
-    HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
     """
     n = len(close)
     if n < period:
@@ -70,11 +67,22 @@ def calculate_hma(close, period=21):
     hma = wma(diff, sqrt_period)
     return hma
 
+def calculate_atr(high, low, close, period=14):
+    """Average True Range with proper min_periods"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
 def calculate_rsi(close, period=14):
-    """
-    Relative Strength Index - momentum oscillator
-    RSI = 100 - 100/(1 + RS), RS = avg_gain/avg_loss
-    """
+    """RSI with proper min_periods"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -96,13 +104,12 @@ def calculate_rsi(close, period=14):
 
 def calculate_donchian(high, low, period=20):
     """
-    Donchian Channel - breakout indicator
-    Upper = highest high over period
-    Lower = lowest low over period
+    Donchian Channel - breakout system
+    Returns: upper_band, lower_band, middle_band
     """
     n = len(high)
     if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
@@ -111,21 +118,8 @@ def calculate_donchian(high, low, period=20):
         upper[i] = np.max(high[i - period + 1:i + 1])
         lower[i] = np.min(low[i - period + 1:i + 1])
     
-    return upper, lower
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range with proper min_periods"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+    middle = (upper + lower) / 2.0
+    return upper, lower, middle
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -137,21 +131,27 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 1d HMA for intermediate trend
+    # Calculate and align 1d HMA for intermediate trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate and align 1w HMA for major trend regime
+    # Calculate and align 1w HMA for major regime filter
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate primary (4h) indicators
+    # Calculate primary (12h) indicators
     atr = calculate_atr(high, low, close, period=14)
     rsi = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    donchian_upper, donchian_lower, donchian_middle = calculate_donchian(high, low, period=20)
+    
+    # Also track previous bar for breakout detection
+    donchian_upper_prev = np.roll(donchian_upper, 1)
+    donchian_lower_prev = np.roll(donchian_lower, 1)
+    donchian_upper_prev[0] = np.nan
+    donchian_lower_prev[0] = np.nan
     
     signals = np.zeros(n)
-    BASE_SIZE = 0.30
+    BASE_SIZE = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -161,7 +161,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
@@ -175,61 +175,83 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             continue
-        if np.isnan(rsi[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(rsi[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === MAJOR TREND REGIME (1w HMA) ===
+        # === TREND BIAS (1d + 1w HMA) ===
+        # Only take longs if price above both HTF HMAs (bullish regime)
+        # Only take shorts if price below both HTF HMAs (bearish regime)
+        daily_bull = close[i] > hma_1d_aligned[i]
+        daily_bear = close[i] < hma_1d_aligned[i]
         weekly_bull = close[i] > hma_1w_aligned[i]
         weekly_bear = close[i] < hma_1w_aligned[i]
         
-        # === INTERMEDIATE TREND (1d HMA) ===
-        daily_bull = close[i] > hma_1d_aligned[i]
-        daily_bear = close[i] < hma_1d_aligned[i]
+        # Strong bullish: both 1d and 1w HMA below price
+        strong_bull = daily_bull and weekly_bull
+        # Strong bearish: both 1d and 1w HMA above price
+        strong_bear = daily_bear and weekly_bear
+        # Mixed regime - reduce position or stay flat
+        mixed_regime = (daily_bull and weekly_bear) or (daily_bear and weekly_bull)
         
-        # === TREND ALIGNMENT CHECK ===
-        # Only trade when 1w and 1d agree (strong trend)
-        strong_bull = weekly_bull and daily_bull
-        strong_bear = weekly_bear and daily_bear
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Long breakout: price breaks above previous Donchian upper
+        long_breakout = close[i] > donchian_upper_prev[i] and close[i-1] <= donchian_upper_prev[i-1] if not np.isnan(donchian_upper_prev[i]) else False
+        # Short breakout: price breaks below previous Donchian lower
+        short_breakout = close[i] < donchian_lower_prev[i] and close[i-1] >= donchian_lower_prev[i-1] if not np.isnan(donchian_lower_prev[i]) else False
         
-        # === RSI PULLBACK SIGNALS ===
-        # Long: RSI pulled back to 35-50 zone in bull trend
-        rsi_pullback_long = 35.0 <= rsi[i] <= 55.0
-        # Short: RSI rallied to 50-65 zone in bear trend
-        rsi_pullback_short = 45.0 <= rsi[i] <= 65.0
+        # Alternative: price currently above/below Donchian bands
+        above_upper = close[i] > donchian_upper[i]
+        below_lower = close[i] < donchian_lower[i]
         
-        # === DONCHIAN BREAKOUT CONFIRMATION ===
-        # Long: price breaks above Donchian upper (momentum confirmation)
-        donchian_breakout_long = close[i] > donchian_upper[i - 1] if i > 0 else False
-        # Short: price breaks below Donchian lower (momentum confirmation)
-        donchian_breakout_short = close[i] < donchian_lower[i - 1] if i > 0 else False
+        # === RSI MOMENTUM CONFIRMATION ===
+        rsi_bullish = rsi[i] > 45.0  # Not oversold
+        rsi_bearish = rsi[i] < 55.0  # Not overbought
+        rsi_strong_bull = rsi[i] > 50.0
+        rsi_strong_bear = rsi[i] < 50.0
         
         # === PRIMARY SIGNAL LOGIC ===
         desired_signal = 0.0
         
-        # LONG ENTRY: Strong bull trend + RSI pullback + Donchian breakout
-        if strong_bull and rsi_pullback_long and donchian_breakout_long:
-            desired_signal = BASE_SIZE
+        # LONG ENTRY: Strong bullish regime + Donchian breakout + RSI confirmation
+        if strong_bull:
+            if (long_breakout or above_upper) and rsi_bullish:
+                desired_signal = BASE_SIZE
+            # Also enter on pullback to Donchian middle in strong bull
+            elif close[i] <= donchian_middle[i] * 1.002 and close[i] > donchian_lower[i] and rsi_strong_bull:
+                desired_signal = BASE_SIZE
         
-        # SHORT ENTRY: Strong bear trend + RSI pullback + Donchian breakout
-        elif strong_bear and rsi_pullback_short and donchian_breakout_short:
-            desired_signal = -BASE_SIZE
+        # SHORT ENTRY: Strong bearish regime + Donchian breakout + RSI confirmation
+        elif strong_bear:
+            if (short_breakout or below_lower) and rsi_bearish:
+                desired_signal = -BASE_SIZE
+            # Also enter on pullback to Donchian middle in strong bear
+            elif close[i] >= donchian_middle[i] * 0.998 and close[i] < donchian_upper[i] and rsi_strong_bear:
+                desired_signal = -BASE_SIZE
         
-        # === STOPLOSS CHECK (Trailing ATR 3x) ===
+        # MIXED REGIME: Only hold existing positions, don't enter new
+        elif mixed_regime:
+            if not in_position:
+                desired_signal = 0.0
+            else:
+                # Keep current position but don't add
+                desired_signal = BASE_SIZE if position_side > 0 else -BASE_SIZE
+        
+        # === STOPLOSS CHECK (Trailing ATR 2.5x) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, close[i])
-            stop_price = highest_since_entry - 3.0 * entry_atr
+            stop_price = highest_since_entry - 2.5 * entry_atr
             if close[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, close[i])
-            stop_price = lowest_since_entry + 3.0 * entry_atr
+            stop_price = lowest_since_entry + 2.5 * entry_atr
             if close[i] > stop_price:
                 stoploss_triggered = True
         
