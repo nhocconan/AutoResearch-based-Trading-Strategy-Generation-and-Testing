@@ -1,81 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #1460: 6h Primary + 1d/1w HTF — Adaptive Trend with Volatility Confirmation
+Experiment #1461: 15m Primary + 1h/4h/1d HTF — Camarilla Pivot Mean-Reversion
 
-Hypothesis: 6h timeframe is underexplored (ZERO prior experiments). It offers a 
-middle ground between 4h (too many trades, fee drag) and 12h (too few trades, 
-missed opportunities). This strategy uses:
+Hypothesis: 15m timeframe with Camarilla pivot levels provides high-probability
+mean-reversion entries when combined with HTF trend filters. Camarilla R3/S3
+levels act as natural support/resistance for intraday reversals.
 
-1. KAMA(14) on 6h - Adaptive moving average that speeds up in trends, slows in chop
-2. 1d HMA(21) - Major trend bias (only trade with daily trend)
-3. 1w HMA(21) - Secular trend filter (avoid counter-secular trades)
-4. RSI(7) - Faster momentum for entry timing (vs RSI14)
-5. ATR(14) expansion filter - Only enter when volatility is expanding (breakout confirmation)
-6. Discrete sizing: 0.0, ±0.25, ±0.30 with 2.5x ATR trailing stop
+Key components:
+1. 1d HMA(21) for major trend bias (only trade with daily trend)
+2. 4h HMA(16) for intermediate momentum confirmation
+3. 15m Camarilla pivot levels (R3/S3 mean-reversion, R4/S4 breakout)
+4. RSI(7) for entry timing (oversold/overbought extremes)
+5. ATR(14) trailing stoploss at 2.5x
+6. Session filter: prefer 00-12 UTC (London+NY overlap)
+7. Discrete sizing: 0.15, 0.20, 0.25 (minimize fee churn)
 
-Why 6h should work:
-- Natural 30-50 trades/year (fee-efficient vs 15m/1h, more opportunities vs 12h/1d)
-- KAMA adapts to volatility regime automatically (no manual CHOP detection needed)
-- Triple-TF alignment (6h/1d/1w) prevents major counter-trend disasters
-- RSI(7) is loose enough to generate trades (not RSI 25/75 extremes)
-- ATR expansion filter avoids entering during vol compression (false breakouts)
+Why this should work:
+- Camarilla levels are proven for crypto intraday mean-reversion
+- HTF filters prevent counter-trend trades (major killer on 15m)
+- RSI(7) provides timely entries at pivot levels
+- Session filter avoids low-liquidity Asian session whipsaws
+- 15m TF with HTF bias = ~50-80 trades/year (fee-efficient)
 
-Entry logic (LOOSE to guarantee ≥30 trades/train, ≥3/test):
-- LONG: 1w_HMA bullish + 1d_HMA bullish + 6h_KAMA bullish + RSI(7)>45 + ATR expanding
-- SHORT: 1w_HMA bearish + 1d_HMA bearish + 6h_KAMA bearish + RSI(7)<55 + ATR expanding
+Entry logic (LOOSE enough for trades, strict enough for quality):
+- LONG: 1d_HMA bullish + 4h_HMA bullish + price near S3 + RSI(7)<25
+- SHORT: 1d_HMA bearish + 4h_HMA bearish + price near R3 + RSI(7)>75
+- BREAKOUT LONG: 1d bullish + price breaks R4 + volume confirmation
+- BREAKOUT SHORT: 1d bearish + price breaks S4 + volume confirmation
 
-Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.6, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.25 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_kama_triple_hma_rsi_atr_1d1w_v1"
-timeframe = "6h"
+name = "mtf_15m_camarilla_pivot_rsi_hma_1h4h1d_session_v1"
+timeframe = "15m"
 leverage = 1.0
-
-def calculate_kama(close, period=14, fast_period=2, slow_period=30):
-    """
-    Kaufman's Adaptive Moving Average (KAMA)
-    Adapts smoothing based on market efficiency (trend vs noise)
-    ER = |close - close_n| / sum(|close_i - close_i-1|)
-    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
-    """
-    n = len(close)
-    if n < period + slow_period:
-        return np.full(n, np.nan)
-    
-    kama = np.full(n, np.nan, dtype=np.float64)
-    
-    # Calculate Efficiency Ratio
-    er = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        signal = abs(close[i] - close[i - period])
-        noise = 0.0
-        for j in range(i - period + 1, i + 1):
-            noise += abs(close[j] - close[j - 1])
-        if noise > 1e-10:
-            er[i] = signal / noise
-        else:
-            er[i] = 1.0
-    
-    # Calculate Smoothing Constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    sc = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if not np.isnan(er[i]):
-            sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama[period] = close[period]
-    for i in range(period + 1, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -145,38 +108,85 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_camarilla_pivots(high, low, close, prev_close):
+    """
+    Camarilla Pivot Levels
+    R4 = C + (H-L) * 1.5000  (breakout level)
+    R3 = C + (H-L) * 1.2500  (mean-reversion short)
+    R2 = C + (H-L) * 1.1666
+    R1 = C + (H-L) * 1.0833
+    S1 = C - (H-L) * 1.0833
+    S2 = C - (H-L) * 1.1666
+    S3 = C - (H-L) * 1.2500  (mean-reversion long)
+    S4 = C - (H-L) * 1.5000  (breakout level)
+    """
+    n = len(close)
+    r4 = np.full(n, np.nan, dtype=np.float64)
+    r3 = np.full(n, np.nan, dtype=np.float64)
+    s3 = np.full(n, np.nan, dtype=np.float64)
+    s4 = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(1, n):
+        prev_h = high[i-1]
+        prev_l = low[i-1]
+        prev_c = prev_close[i-1] if i > 0 else close[i-1]
+        
+        range_val = prev_h - prev_l
+        
+        r4[i] = prev_c + range_val * 1.5000
+        r3[i] = prev_c + range_val * 1.2500
+        s3[i] = prev_c - range_val * 1.2500
+        s4[i] = prev_c - range_val * 1.5000
+    
+    return r4, r3, s3, s4
+
+def calculate_session_hour(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds since epoch
+    hours = (open_time // (1000 * 60 * 60)) % 24
+    return hours
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=16)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 6h indicators
-    kama_14 = calculate_kama(close, period=14)
+    hma_1h_raw = calculate_hma(df_1h['close'].values, period=16)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
+    
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
     
-    # ATR ratio for volatility expansion detection
-    atr_30 = calculate_atr(high, low, close, period=30)
-    atr_ratio = np.full(n, np.nan, dtype=np.float64)
-    for i in range(n):
-        if not np.isnan(atr_14[i]) and not np.isnan(atr_30[i]) and atr_30[i] > 1e-10:
-            atr_ratio[i] = atr_14[i] / atr_30[i]
+    # Camarilla pivots (need previous day's OHLC)
+    r4, r3, s3, s4 = calculate_camarilla_pivots(high, low, close, close)
+    
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session hours
+    session_hours = calculate_session_hour(open_time)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_MED = 0.20
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -188,7 +198,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 150
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -199,59 +209,90 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(kama_14[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(atr_ratio[i]):
+        if np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(r4[i]) or np.isnan(s4[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1w and 1d HMA bias) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        # === HTF TREND BIAS ===
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === 6h KAMA TREND (adaptive) ===
-        kama_bullish = close[i] > kama_14[i]
-        kama_bearish = close[i] < kama_14[i]
+        hma_4h_bullish = close[i] > hma_4h_aligned[i]
+        hma_4h_bearish = close[i] < hma_4h_aligned[i]
         
-        # === RSI MOMENTUM (fast, period 7) ===
-        rsi = rsi_7[i]
+        hma_1h_bullish = close[i] > hma_1h_aligned[i]
+        hma_1h_bearish = close[i] < hma_1h_aligned[i]
         
-        # === ATR VOLATILITY EXPANSION ===
-        vol_expanding = atr_ratio[i] > 1.1  # ATR(14) > 110% of ATR(30)
+        # === SESSION FILTER (prefer 00-12 UTC) ===
+        is_prime_session = 0 <= session_hours[i] <= 12
+        is_asian_session = 18 <= session_hours[i] or session_hours[i] <= 2
+        
+        # === CAMARILLA LEVEL PROXIMITY ===
+        near_s3 = abs(close[i] - s3[i]) / close[i] < 0.005  # within 0.5%
+        near_r3 = abs(close[i] - r3[i]) / close[i] < 0.005  # within 0.5%
+        broke_r4 = close[i] > r4[i]
+        broke_s4 = close[i] < s4[i]
+        
+        # === RSI EXTREMES ===
+        rsi_oversold = rsi_7[i] < 28
+        rsi_overbought = rsi_7[i] > 72
+        rsi_extreme_os = rsi_7[i] < 20
+        rsi_extreme_ob = rsi_7[i] > 80
+        
+        # === VOLUME CONFIRMATION ===
+        vol_above_avg = volume[i] > vol_ma[i] * 1.2 if not np.isnan(vol_ma[i]) else False
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: Triple alignment (1w + 1d + 6h bullish) + RSI momentum + vol expansion
-        if price_above_1w and price_above_1d and kama_bullish:
-            if rsi > 45 and vol_expanding:
-                desired_signal = SIZE_STRONG
-            elif rsi > 40:  # Weaker signal without vol expansion
-                desired_signal = SIZE_BASE
+        # MEAN-REVERSION LONG: HTF bullish + near S3 + RSI oversold
+        if price_above_1d and hma_4h_bullish:
+            if near_s3 and rsi_oversold:
+                if is_prime_session:
+                    desired_signal = SIZE_MED
+                else:
+                    desired_signal = SIZE_BASE
         
-        # SHORT: Triple alignment (1w + 1d + 6h bearish) + RSI momentum + vol expansion
-        elif price_below_1w and price_below_1d and kama_bearish:
-            if rsi < 55 and vol_expanding:
-                desired_signal = -SIZE_STRONG
-            elif rsi < 60:  # Weaker signal without vol expansion
-                desired_signal = -SIZE_BASE
+        # MEAN-REVERSION SHORT: HTF bearish + near R3 + RSI overbought
+        elif price_below_1d and hma_4h_bearish:
+            if near_r3 and rsi_overbought:
+                if is_prime_session:
+                    desired_signal = -SIZE_MED
+                else:
+                    desired_signal = -SIZE_BASE
+        
+        # BREAKOUT LONG: Strong HTF bullish + breaks R4 + volume
+        if price_above_1d and hma_4h_bullish and hma_1h_bullish:
+            if broke_r4 and vol_above_avg and rsi_7[i] < 75:
+                desired_signal = max(desired_signal, SIZE_STRONG)
+        
+        # BREAKOUT SHORT: Strong HTF bearish + breaks S4 + volume
+        if price_below_1d and hma_4h_bearish and hma_1h_bearish:
+            if broke_s4 and vol_above_avg and rsi_7[i] > 25:
+                desired_signal = min(desired_signal, -SIZE_STRONG)
+        
+        # EXTREME REVERSION (override HTF if RSI extreme enough)
+        if rsi_extreme_os and near_s3:
+            desired_signal = max(desired_signal, SIZE_BASE)
+        if rsi_extreme_ob and near_r3:
+            desired_signal = min(desired_signal, -SIZE_BASE)
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -278,6 +319,10 @@ def generate_signals(prices):
             final_signal = SIZE_STRONG
         elif desired_signal <= -SIZE_STRONG * 0.9:
             final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_MED * 0.9:
+            final_signal = SIZE_MED
+        elif desired_signal <= -SIZE_MED * 0.9:
+            final_signal = -SIZE_MED
         elif desired_signal >= SIZE_BASE * 0.9:
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
