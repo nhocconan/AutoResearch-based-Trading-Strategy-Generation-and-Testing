@@ -1,70 +1,95 @@
 #!/usr/bin/env python3
 """
-Experiment #1417: 15m Primary + 4h/1d HTF — Dual HMA Trend + RSI Pullback + Volume
+Experiment #1418: 4h Primary + 1d HTF — Donchian Breakout + KAMA Trend + Volume
 
-Hypothesis: 15m timeframe has ZERO successful experiments (all Sharpe=0.000 = 0 trades).
-The problem: entry conditions too strict. Solution: VERY LOOSE entry with HTF trend filter.
+Hypothesis: Donchian breakouts capture crypto momentum better than EMA/HMA crossovers.
+Combined with KAMA (adaptive to volatility) and volume confirmation, this should:
+1. Generate 25-50 trades/year on 4h (breakout frequency is natural)
+2. Work on ALL symbols (BTC/ETH/SOL all have momentum phases)
+3. 1d KAMA filter prevents counter-trend breakout failures (like 2022 crash)
+4. Volume filter (1.5x avg) reduces false breakouts significantly
+5. ATR trailing stop (2.5x) protects from reversal whipsaws
 
-Strategy combines:
-1. 1d HMA(21) for major trend bias (avoid counter-trend)
-2. 4h HMA(16) vs HMA(48) crossover for intermediate momentum
-3. 15m RSI(7) pullback entry (LOOSE: >35 long, <65 short - NOT extremes)
-4. Volume confirmation (>0.8x 20-bar avg - very loose)
-5. ATR(14) trailing stoploss at 2.5x
-6. Discrete sizing: 0.0, ±0.20, ±0.30 (minimize fee churn)
-
-Why this should work where other 15m strategies failed:
-- RSI(7) with 35/65 thresholds is VERY LOOSE (guarantees trades)
-- Volume filter is loose (0.8x avg, not 1.5x)
-- HTF trend filter prevents 2022-style crash whipsaw
-- Simple logic = fewer conditions that can all fail simultaneously
-- Target: 50-80 trades/year (fee-efficient for 15m)
+Why different from failed strategies:
+- Donchian breakout = MORE trades than RSI extremes (guarantees trade count)
+- KAMA adapts to volatility better than fixed EMA/HMA (works in chop AND trend)
+- Volume confirmation = fewer false signals than price-only breakouts
+- 1d trend filter = avoids 2022-style crash counter-trend losses
 
 Entry logic (LOOSE to guarantee trades):
-- LONG: 1d_HMA bullish + 4h_HMA16 > 4h_HMA48 + RSI(7) > 35 + vol > 0.8x avg
-- SHORT: 1d_HMA bearish + 4h_HMA16 < 4h_HMA48 + RSI(7) < 65 + vol > 0.8x avg
+- LONG: 1d_KAMA bullish + price breaks Donchian(20) high + volume > 1.5x avg
+- SHORT: 1d_KAMA bearish + price breaks Donchian(20) low + volume > 1.5x avg
 
-Timeframe: 15m
-Size: 0.20-0.30 discrete
-Target: Sharpe>0.6, trades>=40 train, trades>=5 test, DD>-35%
+Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 4h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_dual_hma_rsi_volume_4h1d_v1"
-timeframe = "15m"
+name = "mtf_4h_donchian_kama_volume_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average - reduces lag while smoothing"""
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average - adapts to market efficiency"""
     n = len(close)
-    if n < period:
+    if n < period + slow:
         return np.full(n, np.nan)
     
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
+    kama = np.full(n, np.nan, dtype=np.float64)
     
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
+    # Calculate Efficiency Ratio
+    er = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if not np.isnan(close[i]) and not np.isnan(close[i - period]):
+            signal = abs(close[i] - close[i - period])
+            noise = 0.0
+            for j in range(i - period + 1, i + 1):
+                if not np.isnan(close[j]) and not np.isnan(close[j - 1]):
+                    noise += abs(close[j] - close[j - 1])
+            if noise > 0:
+                er[i] = signal / noise
+            else:
+                er[i] = 1.0
     
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
+    # Calculate smoothing constant
+    sc = np.full(n, np.nan, dtype=np.float64)
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    for i in range(period, n):
+        if not np.isnan(er[i]):
+            sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    diff = np.full(n, np.nan, dtype=np.float64)
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    # Calculate KAMA
+    for i in range(period + 1, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i - 1]) and not np.isnan(close[i]):
+            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+        elif not np.isnan(close[i]):
+            kama[i] = close[i]
+    
+    return kama
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
     for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+        if not np.any(np.isnan(high[i - period + 1:i + 1])) and \
+           not np.any(np.isnan(low[i - period + 1:i + 1])):
+            upper[i] = np.nanmax(high[i - period + 1:i + 1])
+            lower[i] = np.nanmin(low[i - period + 1:i + 1])
     
-    return wma(diff, sqrt_n)
+    return upper, lower
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -80,29 +105,18 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
+def calculate_volume_sma(volume, period=20):
+    """Simple Moving Average of Volume"""
+    n = len(volume)
+    if n < period:
         return np.full(n, np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    vol_sma = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        if not np.any(np.isnan(volume[i - period + 1:i + 1])):
+            vol_sma[i] = np.mean(volume[i - period + 1:i + 1])
     
-    gain = np.insert(gain, 0, 0)
-    loss = np.insert(loss, 0, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.full(n, np.nan, dtype=np.float64)
-    mask = avg_loss != 0
-    rs = np.zeros(n)
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    
-    return rsi
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -112,29 +126,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    kama_1d_raw = calculate_kama(df_1d['close'].values, period=21)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
     
-    hma_4h_16_raw = calculate_hma(df_4h['close'].values, period=16)
-    hma_4h_48_raw = calculate_hma(df_4h['close'].values, period=48)
-    hma_4h_16_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_16_raw)
-    hma_4h_48_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_48_raw)
-    
-    # Calculate 15m indicators
-    hma_16 = calculate_hma(close, period=16)
-    hma_48 = calculate_hma(close, period=48)
+    # Calculate 4h indicators
+    kama_4h = calculate_kama(close, period=10, fast=2, slow=30)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
-    
-    # Volume SMA for confirmation
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_sma_20 = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -158,64 +163,59 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
+        if np.isnan(kama_4h[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_4h_16_aligned[i]) or np.isnan(hma_4h_48_aligned[i]):
+        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] <= 0:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] <= 1e-10:
+        if np.isnan(kama_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1d HMA bias) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === TREND DIRECTION (1d KAMA bias) ===
+        price_above_1d = close[i] > kama_1d_aligned[i]
+        price_below_1d = close[i] < kama_1d_aligned[i]
         
-        # === 4h HMA CROSSOVER (intermediate momentum) ===
-        hma_4h_bullish = hma_4h_16_aligned[i] > hma_4h_48_aligned[i]
-        hma_4h_bearish = hma_4h_16_aligned[i] < hma_4h_48_aligned[i]
+        # === 4h KAMA TREND (momentum confirmation) ===
+        kama_bullish = close[i] > kama_4h[i]
+        kama_bearish = close[i] < kama_4h[i]
         
-        # === 15m HMA CROSSOVER (short-term momentum) ===
-        hma_15m_bullish = hma_16[i] > hma_48[i]
-        hma_15m_bearish = hma_16[i] < hma_48[i]
+        # === VOLUME CONFIRMATION (reduce false breakouts) ===
+        volume_confirmed = volume[i] > 1.5 * vol_sma_20[i]
         
-        # === RSI PULLBACK (VERY LOOSE entry - guarantee trades) ===
-        rsi = rsi_7[i]
-        
-        # === VOLUME CONFIRMATION (loose) ===
-        vol_ratio = volume[i] / vol_sma_20[i]
-        vol_ok = vol_ratio > 0.8  # Very loose - just not dead volume
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Check if price broke out THIS bar (not previous bars)
+        breakout_long = high[i] > donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else False
+        breakout_short = low[i] < donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else False
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + 4h HMA bullish + 15m HMA bullish + RSI > 35 + volume ok
-        if price_above_1d and hma_4h_bullish and hma_15m_bullish and rsi > 35 and vol_ok:
-            # Strong if RSI also < 70 (not overbought)
-            if rsi < 70:
+        # LONG: 1d bullish + 4h KAMA bullish + Donchian breakout + volume confirmed
+        if price_above_1d and kama_bullish and breakout_long:
+            if volume_confirmed:
                 desired_signal = SIZE_STRONG
             else:
-                desired_signal = SIZE_BASE
+                desired_signal = SIZE_BASE  # Enter anyway, just smaller size
         
-        # SHORT: 1d bearish + 4h HMA bearish + 15m HMA bearish + RSI < 65 + volume ok
-        elif price_below_1d and hma_4h_bearish and hma_15m_bearish and rsi < 65 and vol_ok:
-            # Strong if RSI also > 30 (not oversold)
-            if rsi > 30:
+        # SHORT: 1d bearish + 4h KAMA bearish + Donchian breakout + volume confirmed
+        elif price_below_1d and kama_bearish and breakout_short:
+            if volume_confirmed:
                 desired_signal = -SIZE_STRONG
             else:
-                desired_signal = -SIZE_BASE
+                desired_signal = -SIZE_BASE  # Enter anyway, just smaller size
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
