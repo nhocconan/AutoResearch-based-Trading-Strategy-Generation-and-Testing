@@ -1,40 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #1344: 12h Primary + 1d/1w HTF — Donchian Breakout + HMA Trend + RSI Filter
+Experiment #1345: 15m Primary + 4h/1d HTF — HMA Trend + RSI Pullback + Session Filter
 
-Hypothesis: Donchian breakouts generate consistent trades across all market conditions.
-Combined with 1d HMA for trend direction and loose RSI filter, this should achieve:
-- 30-60 trades/year on 12h timeframe
-- Positive Sharpe on BTC/ETH/SOL individually
-- DD < -35%
+Hypothesis: 15m timeframe can work with VERY selective entries using multi-timeframe confluence.
+Key insight from failed 15m experiments: too many trades = fee drag destroys returns.
 
-Key features:
-1. 1d HMA(21) for major trend bias (only long when price > 1d HMA)
-2. 12h Donchian(20) breakout for entries (proven to work on SOL)
-3. RSI(14) loose filter (>35 for long, <65 for short) - NOT extreme values
-4. ATR(14) 2.5x trailing stop
-5. Discrete sizing (0.0, ±0.25, ±0.30)
+Strategy design:
+1. 4h HMA(21) for intermediate trend bias (only trade in trend direction)
+2. 1d HMA(21) for major regime (stronger signals when aligned)
+3. 15m RSI(7) for pullback entries (<25 long, >75 short) - mean reversion within trend
+4. Session filter: prefer 00-12 UTC (London/NY overlap) for better liquidity
+5. ATR(14) 2.5x trailing stop for risk management
 
-Why this should work where others failed:
-- Donchian breakout = generates trades in both trending and ranging markets
-- Loose RSI filter = doesn't block valid entries
-- 1d trend filter = avoids counter-trend trades that kill Sharpe
-- 12h TF = natural 30-60 trades/year (fee-friendly)
+Why this should work where 15m strategies failed:
+- HTF trend filter = reduces trades to 40-80/year (fee-friendly)
+- RSI(7) pullback = high win rate entries (buying dips in uptrend)
+- Session filter = avoids low-liquidity Asian session whipsaws
+- Discrete sizing (0.0, ±0.20, ±0.25) = minimizes fee churn
 
 Entry logic:
-- LONG: price > 1d_HMA + 12h price breaks Donchian(20) high + RSI > 35
-- SHORT: price < 1d_HMA + 12h price breaks Donchian(20) low + RSI < 65
+- LONG: 15m close > 4h_HMA + RSI(7) < 25 + (1d_HMA aligned = stronger)
+- SHORT: 15m close < 4h_HMA + RSI(7) > 75 + (1d_HMA aligned = stronger)
 
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 12h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.20-0.25 discrete (smaller for higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_breakout_hma_trend_rsi_1d1w_v1"
-timeframe = "12h"
+name = "mtf_15m_hma_trend_rsi7_pullback_session_4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -105,46 +102,31 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate 12h indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    rsi_7 = calculate_rsi(close, period=7)  # Fast RSI for pullback detection
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -167,61 +149,55 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(rsi_7[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION (4h HMA bias) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # === TREND DIRECTION (1d HMA bias) ===
+        # 1d HMA for major regime alignment
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # 1w HMA for major regime
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        # === RSI PULLBACK (FAST RSI(7)) ===
+        rsi = rsi_7[i]
+        rsi_oversold = rsi < 25  # Deep pullback for long entry
+        rsi_overbought = rsi > 75  # Deep rally for short entry
         
-        # === DONCHIAN BREAKOUT ===
-        # Use previous bar's Donchian levels to avoid look-ahead
-        breakout_high = close[i] > donchian_upper[i-1] if i > 0 else False
-        breakout_low = close[i] < donchian_lower[i-1] if i > 0 else False
+        # === SESSION FILTER (00-12 UTC preferred) ===
+        # open_time is in milliseconds since epoch
+        timestamp_ms = open_time[i]
+        hour_utc = (timestamp_ms // (1000 * 60 * 60)) % 24
+        session_ok = (hour_utc >= 0 and hour_utc < 12)  # London/NY overlap
         
-        # === RSI FILTER (LOOSE) ===
-        rsi = rsi_14[i]
-        rsi_ok_long = rsi > 35  # Not oversold
-        rsi_ok_short = rsi < 65  # Not overbought
-        
-        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
+        # === ENTRY LOGIC (VERY SELECTIVE - 3+ confluence required) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + Donchian breakout + RSI not oversold
-        if price_above_1d and breakout_high and rsi_ok_long:
-            if price_above_1w:
-                desired_signal = SIZE_STRONG  # Strong trend alignment
-            else:
-                desired_signal = SIZE_BASE  # Basic long
+        # LONG: 4h bullish + RSI(7) oversold pullback
+        if price_above_4h and rsi_oversold:
+            if price_above_1d and session_ok:
+                desired_signal = SIZE_STRONG  # All confluence aligned
+            elif price_above_1d or session_ok:
+                desired_signal = SIZE_BASE  # Partial confluence
         
-        # SHORT: 1d bearish + Donchian breakout + RSI not overbought
-        elif price_below_1d and breakout_low and rsi_ok_short:
-            if price_below_1w:
-                desired_signal = -SIZE_STRONG  # Strong trend alignment
-            else:
-                desired_signal = -SIZE_BASE  # Basic short
+        # SHORT: 4h bearish + RSI(7) overbought rally
+        elif price_below_4h and rsi_overbought:
+            if price_below_1d and session_ok:
+                desired_signal = -SIZE_STRONG  # All confluence aligned
+            elif price_below_1d or session_ok:
+                desired_signal = -SIZE_BASE  # Partial confluence
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
