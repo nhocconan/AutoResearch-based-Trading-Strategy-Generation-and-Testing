@@ -1,36 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #1398: 4h Primary + 1d HTF — Dual HMA Trend + RSI Pullback
+Experiment #1399: 1h Primary + 4h/12h HTF — Triple HMA Trend + RSI Pullback
 
-Hypothesis: 4h timeframe proven to work (20-50 trades/year, fee-efficient). 
-This strategy combines:
-1. 1d HMA(21) for major trend bias (avoid counter-trend trades)
-2. 4h HMA(16) vs HMA(48) crossover for trend momentum
-3. 4h RSI(14) pullback entry (RSI 40-60 zone, NOT extremes)
-4. ATR(14) trailing stoploss (signal→0 when stopped)
-5. Discrete sizing: 0.0, ±0.25, ±0.30 (minimize fee churn)
+Hypothesis: 1h timeframe with HTF trend filter can achieve 40-80 trades/year
+with better entry timing than 4h/6h strategies. Key learnings from failures:
 
-Why this should work where CRSI/mean-reversion failed:
-- Trend-following works better in crypto than mean-reversion
-- 4h TF = natural 30-50 trades/year (not overtraded like 15m/30m)
-- RSI 40-60 pullback is LOOSE enough to generate trades (unlike RSI<30/>70)
-- 1d HMA filter prevents 2022-style crash whipsaw
-- Simple logic = fewer conditions that can all fail simultaneously
+1. CRSI/mean-reversion ALWAYS fails on BTC/ETH (1150+ strategies proved this)
+2. TREND-FOLLOWING with RSI pullback works (#1398 had +12% return despite negative Sharpe)
+3. Zero trades = auto-reject (experiments #1390, #1393, #1396, #1397 all got Sharpe=0.000)
+4. Session filters are TOO STRICT for 1h (killed trade generation)
+5. RSI 40-60 pullback zone generates MORE trades than 30/70 extremes
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: 1d_HMA bullish + 4h_HMA16 > 4h_HMA48 + RSI > 40
-- SHORT: 1d_HMA bearish + 4h_HMA16 < 4h_HMA48 + RSI < 60
+Strategy Design:
+- 12h HMA(21): Major trend bias (avoid counter-trend in crashes)
+- 4h HMA(16/48): Intermediate trend momentum
+- 1h RSI(14): Pullback entry in 35-65 zone (LOOSE enough for trades)
+- 1h ATR(14): 2.5x trailing stoploss
+- Size: 0.20-0.30 discrete (control drawdown)
 
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Entry Logic (LOOSE to guarantee trades):
+- LONG: 12h_HMA bullish + 4h_HMA16>48 + 1h_RSI 35-65
+- SHORT: 12h_HMA bearish + 4h_HMA16<48 + 1h_RSI 35-65
+
+Why this beats #1398:
+- 1h entries = better timing than 4h entries
+- RSI 35-65 = wider than 40-60, more trades
+- No session filter = trades generate in all market hours
+- Triple HMA confluence = fewer false signals than dual HMA
+
+Target: Sharpe>0.45 (beat current best 0.447), trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 1h
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_dual_hma_rsi_pullback_1d_v1"
-timeframe = "4h"
+name = "mtf_1h_triple_hma_rsi_pullback_4h12h_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -108,20 +115,24 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_16_raw = calculate_hma(df_4h['close'].values, period=16)
+    hma_4h_48_raw = calculate_hma(df_4h['close'].values, period=48)
+    hma_12h_21_raw = calculate_hma(df_12h['close'].values, period=21)
     
-    # Calculate 4h indicators
-    hma_16 = calculate_hma(close, period=16)
-    hma_48 = calculate_hma(close, period=48)
+    hma_4h_16 = align_htf_to_ltf(prices, df_4h, hma_4h_16_raw)
+    hma_4h_48 = align_htf_to_ltf(prices, df_4h, hma_4h_48_raw)
+    hma_12h_21 = align_htf_to_ltf(prices, df_12h, hma_12h_21_raw)
+    
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
+    SIZE_BASE = 0.20
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -145,46 +156,47 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_4h_16[i]) or np.isnan(hma_4h_48[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_12h_21[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1d HMA bias) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === TREND DIRECTION (12h HMA bias - major trend) ===
+        price_above_12h = close[i] > hma_12h_21[i]
+        price_below_12h = close[i] < hma_12h_21[i]
         
-        # === 4h HMA CROSSOVER (trend momentum) ===
-        hma_bullish = hma_16[i] > hma_48[i]
-        hma_bearish = hma_16[i] < hma_48[i]
+        # === 4h HMA CROSSOVER (intermediate trend momentum) ===
+        hma_4h_bullish = hma_4h_16[i] > hma_4h_48[i]
+        hma_4h_bearish = hma_4h_16[i] < hma_4h_48[i]
         
         # === RSI PULLBACK (LOOSE entry - guarantee trades) ===
         rsi = rsi_14[i]
+        rsi_neutral = 35 <= rsi <= 65  # Wider zone than 40-60
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + 4h HMA bullish + RSI > 40 (pullback zone, not extreme)
-        if price_above_1d and hma_bullish and rsi > 40:
-            # Strong if RSI also < 70 (not overbought)
-            if rsi < 70:
+        # LONG: 12h bullish + 4h HMA bullish + RSI in pullback zone
+        if price_above_12h and hma_4h_bullish and rsi_neutral:
+            # Strong if RSI in 40-60 (center of zone)
+            if 40 <= rsi <= 60:
                 desired_signal = SIZE_STRONG
             else:
                 desired_signal = SIZE_BASE
         
-        # SHORT: 1d bearish + 4h HMA bearish + RSI < 60 (pullback zone, not extreme)
-        elif price_below_1d and hma_bearish and rsi < 60:
-            # Strong if RSI also > 30 (not oversold)
-            if rsi > 30:
+        # SHORT: 12h bearish + 4h HMA bearish + RSI in pullback zone
+        elif price_below_12h and hma_4h_bearish and rsi_neutral:
+            # Strong if RSI in 40-60 (center of zone)
+            if 40 <= rsi <= 60:
                 desired_signal = -SIZE_STRONG
             else:
                 desired_signal = -SIZE_BASE
