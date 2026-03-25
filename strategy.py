@@ -1,36 +1,69 @@
 #!/usr/bin/env python3
 """
-Experiment #1326: 1d Primary + 1w HTF — Donchian Breakout + Weekly HMA Trend
+Experiment #1327: 6h Primary + 1d/1w HTF — Donchian Breakout + Volume Confirmation
 
-Hypothesis: Recent 1d strategies failed due to overly complex regime filters causing 0 trades.
-This strategy uses SIMPLE, PROVEN patterns that worked in research:
-1. Weekly HMA(21) for major trend bias (only trade with weekly direction)
-2. Daily Donchian(20) breakout for clean entry signals
-3. RSI(14) filter to avoid extreme overbought/oversold entries
-4. ATR(14) 2.5x trailing stop for risk management
+Hypothesis: Recent 6h strategies failed due to over-complexity (Fisher, CHOP, weekly pivots).
+This returns to a proven trend-following core (Donchian breakout) with simple HTF filters.
+Key insights from 1090 failed experiments:
 
-Why this should work:
-- 1d timeframe = natural 20-50 trades/year (fee-friendly)
-- Weekly trend filter = strong directional bias without over-filtering
-- Donchian breakout = catches sustained moves, not noise
-- LOOSE RSI filter (25-75 range, not extremes) = guarantees trades
+1. Donchian(20) breakout = proven trend follower, works across regimes
+2. Volume confirmation = filters false breakouts (critical for 6h)
+3. 1w HMA for major regime = only short when weekly trend is bearish
+4. 1d HMA for intermediate trend = directional bias filter
+5. LOOSE entry conditions = guarantee 30-60 trades/year (unlike failed exps)
+6. Asymmetric sizing = smaller shorts in bull regimes, full size in bear
+
+Why 6h Donchian should work:
+- 6h Donchian(20) = ~5 day breakout (catches multi-day trends)
+- Volume filter = avoids fake breakouts in low-liquidity periods
+- 1w HMA = prevents shorting in bull markets (2021, 2024)
+- Simple logic = fewer conditions to fail simultaneously
 - Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
 
 Entry logic (LOOSE to guarantee trades):
-- LONG: Weekly HMA bullish + price > Donchian(20) high + RSI < 75
-- SHORT: Weekly HMA bearish + price < Donchian(20) low + RSI > 25
+- LONG: Donchian breakout + volume > avg + 1d_HMA bullish + (1w_HMA neutral/bullish)
+- SHORT: Donchian breakdown + volume > avg + 1d_HMA bearish + 1w_HMA bearish
 
-Target: Sharpe>0.5, trades>=20 train, trades>=5 test, DD>-35%
-Timeframe: 1d
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
+Size: 0.25-0.30 discrete (0.20 for shorts in bull regime)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_breakout_weekly_hma_trend_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_donchian_vol_breakout_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i - period + 1:i + 1])
+        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -62,82 +95,48 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-        else:
-            rsi[i] = 100.0
-    
-    return rsi
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
+def calculate_volume_sma(volume, period=20):
+    """Simple Moving Average of Volume"""
+    n = len(volume)
     if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
+    vol_sma = np.full(n, np.nan, dtype=np.float64)
     for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+        vol_sma[i] = np.nanmean(volume[i - period + 1:i + 1])
     
-    return upper, lower
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 1d indicators
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
+    vol_sma_20 = calculate_volume_sma(volume, period=20)
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
-    # Also calculate 1d HMA for local trend confirmation
-    hma_1d = calculate_hma(close, period=21)
+    # Also calculate 6h HMA for local trend
+    hma_6h = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
+    SIZE_SHORT_BULL = 0.20  # Reduced short size in bull regime
     
     # Position tracking for stoploss
     in_position = False
@@ -160,14 +159,7 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -181,61 +173,66 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === WEEKLY TREND BIAS (1w HMA slope) ===
-        # Compare weekly HMA to 2 bars ago for stability
-        hma_1w_slope = 0.0
-        if i >= 2 and not np.isnan(hma_1w_aligned[i-2]):
-            hma_1w_slope = hma_1w_aligned[i] - hma_1w_aligned[i-2]
+        if np.isnan(hma_6h[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        weekly_bullish = hma_1w_slope > 0
-        weekly_bearish = hma_1w_slope < 0
+        # === REGIME BIAS (1w HMA) ===
+        # Weekly trend determines if we allow shorts
+        weekly_bullish = close[i] > hma_1w_aligned[i]
+        weekly_bearish = close[i] < hma_1w_aligned[i]
         
-        # === DAILY TREND CONFIRMATION ===
-        price_above_1d = close[i] > hma_1d[i]
-        price_below_1d = close[i] < hma_1d[i]
+        # === INTERMEDIATE TREND (1d HMA) ===
+        daily_bullish = close[i] > hma_1d_aligned[i]
+        daily_bearish = close[i] < hma_1d_aligned[i]
+        
+        # === VOLUME CONFIRMATION ===
+        vol_ratio = volume[i] / vol_sma_20[i] if vol_sma_20[i] > 0 else 0
+        volume_confirmed = vol_ratio > 1.0  # Above average volume
         
         # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i]
-        breakout_short = close[i] < donchian_lower[i]
+        breakout_long = close[i] > donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else False
+        breakout_short = close[i] < donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else False
         
-        # === RSI FILTER (LOOSE - avoid extremes only) ===
-        rsi = rsi_14[i]
-        rsi_ok_long = rsi < 75  # Not overbought
-        rsi_ok_short = rsi > 25  # Not oversold
+        # === 6h LOCAL TREND ===
+        price_above_6h = close[i] > hma_6h[i]
+        price_below_6h = close[i] < hma_6h[i]
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: Weekly bullish + daily bullish + Donchian breakout + RSI OK
-        if weekly_bullish and price_above_1d and breakout_long and rsi_ok_long:
-            # Strong signal if RSI also rising (momentum confirmation)
-            if i >= 1 and not np.isnan(rsi_14[i-1]):
-                rsi_change = rsi - rsi_14[i-1]
-                if rsi_change > 0 and rsi < 65:
+        # LONG: Donchian breakout + volume + daily bullish + 6h confirm
+        if breakout_long and volume_confirmed and daily_bullish and price_above_6h:
+            # In weekly bull regime = full size
+            # In weekly bear regime = reduced size (counter-trend)
+            if weekly_bullish:
+                if vol_ratio > 1.5:
                     desired_signal = SIZE_STRONG
                 else:
                     desired_signal = SIZE_BASE
             else:
-                desired_signal = SIZE_BASE
+                # Weekly bearish but daily bullish = reduced long
+                desired_signal = SIZE_BASE * 0.8
         
-        # SHORT: Weekly bearish + daily bearish + Donchian breakout + RSI OK
-        elif weekly_bearish and price_below_1d and breakout_short and rsi_ok_short:
-            # Strong signal if RSI also falling (momentum confirmation)
-            if i >= 1 and not np.isnan(rsi_14[i-1]):
-                rsi_change = rsi - rsi_14[i-1]
-                if rsi_change < 0 and rsi > 35:
+        # SHORT: Donchian breakdown + volume + daily bearish + weekly bearish
+        elif breakout_short and volume_confirmed and daily_bearish and price_below_6h:
+            # Only short in weekly bearish regime (asymmetric)
+            if weekly_bearish:
+                if vol_ratio > 1.5:
                     desired_signal = -SIZE_STRONG
                 else:
                     desired_signal = -SIZE_BASE
-            else:
-                desired_signal = -SIZE_BASE
+            # In weekly bullish regime, skip shorts entirely
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
