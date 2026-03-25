@@ -1,36 +1,154 @@
 #!/usr/bin/env python3
 """
-Experiment #1270: 1h Primary + 4h/1d HTF — HMA Trend + RSI Pullback + Session
+Experiment #1271: 6h Primary + 1w/1d HTF — Mean Reversion with HTF Trend Bias
 
-Hypothesis: Recent failures (1258-1269) show Sharpe=0.000 = ZERO trades generated.
-The #1 failure is over-filtering. This strategy uses LOOSE entry conditions to
-guarantee 40-80 trades/year on 1h timeframe.
+Hypothesis: Trend-following 6h strategies have been extensively tested (1044+ failures).
+This experiment tests MEAN REVERSION on 6h with HTF trend bias - a fundamentally different
+approach from the KAMA/HMA trend strategies that dominate 6h experiments.
 
-Key design:
-1. 4h HMA(21) slope = primary trend direction (smooth, reliable)
-2. 1d HMA(21) = regime bias (only trade with daily trend)
-3. 1h RSI(14) pullback = entry timing (35-65 zone, NOT extremes)
-4. Session filter 06-22 UTC = liquidity (broad window to ensure trades)
-5. ATR(14) 2.5x trailing stop = risk management
-6. Discrete sizing: 0.0, ±0.20, ±0.30 (minimize fee churn)
+Key innovations:
+1. Connors RSI (CRSI) for mean reversion entries - proven 75% win rate in literature
+2. 1w HMA for major regime bias (only long above weekly trend, short below)
+3. 1d Choppiness Index to detect range vs trend regimes
+4. LOOSE entry thresholds to guarantee 30-60 trades/year (CRSI<25/>75, not <10/>90)
+5. ATR 2.5x stoploss for risk management
 
-Why this should generate trades:
-- RSI 35-65 is VERY common (not 30/70 extremes)
-- HMA slope over 3 bars is frequent (not strict crossover)
-- Session 06-22 UTC = 16 hours = most liquid period
-- No choppiness/complex regime filters that kill signals
+Why this should work on 6h:
+- 6h is ideal for mean reversion (captures multi-day swings without noise of lower TF)
+- 1w bias prevents counter-trend trades in strong trends
+- CHOP filter avoids mean reversion in strong trends (where it fails)
+- CRSI combines 3 signals (RSI + Streak RSI + PercentRank) for robust entry
 
-Target: Sharpe>0.45 (beat current best 0.447), trades>=40 train, trades>=5 test
-Timeframe: 1h (mandatory per experiment)
-Size: 0.20-0.30 discrete
+Entry logic (LOOSE to guarantee trades):
+- LONG: price > 1w_HMA + CHOP > 45 (range) + CRSI < 25 (oversold)
+- SHORT: price < 1w_HMA + CHOP > 45 (range) + CRSI > 75 (overbought)
+- In strong trend (CHOP < 38): only trade WITH trend on pullbacks
+
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_pullback_session_4h1d_v1"
-timeframe = "1h"
+name = "mtf_6h_crsi_meanrev_chop_regime_1w1d_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close)
+    gain = np.zeros(n - 1)
+    loss = np.zeros(n - 1)
+    gain[delta > 0] = delta[delta > 0]
+    loss[delta < 0] = -delta[delta < 0]
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan)
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi[period:] = 100.0 - (100.0 / (1.0 + rs))
+    
+    return rsi
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """
+    Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    Proven mean reversion indicator with 75% win rate
+    """
+    n = len(close)
+    if n < rank_period + 1:
+        return np.full(n, np.nan)
+    
+    # RSI(3)
+    rsi_3 = calculate_rsi(close, period=rsi_period)
+    
+    # Streak RSI - RSI on streak of up/down days
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = streak[i-1]
+    
+    # Convert streak to RSI-like value (Streak RSI)
+    streak_rsi = np.full(n, np.nan)
+    for i in range(streak_period, n):
+        streak_window = streak[i-streak_period+1:i+1]
+        up_streaks = np.sum(streak_window > 0)
+        total = streak_period
+        if total > 0:
+            streak_rsi[i] = (up_streaks / total) * 100.0
+    
+    # Percent Rank - where current return ranks vs last 100 days
+    percent_rank = np.full(n, np.nan)
+    for i in range(rank_period, n):
+        returns = np.diff(close[i-rank_period:i+1]) / close[i-rank_period:i]
+        current_return = returns[-1] if len(returns) > 0 else 0
+        if len(returns) > 0:
+            rank = np.sum(returns[:-1] < current_return) / (len(returns) - 1)
+            percent_rank[i] = rank * 100.0
+    
+    # Combine into CRSI
+    crsi = np.full(n, np.nan)
+    for i in range(rank_period, n):
+        if not np.isnan(rsi_3[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(percent_rank[i]):
+            crsi[i] = (rsi_3[i] + streak_rsi[i] + percent_rank[i]) / 3.0
+    
+    return crsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index - identifies trending vs ranging markets
+    CHOP > 61.8 = range (mean reversion works)
+    CHOP < 38.2 = trend (trend following works)
+    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    # Calculate ATR
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    choppiness = np.full(n, np.nan)
+    for i in range(period, n):
+        atr_sum = np.nansum(atr[i-period+1:i+1])
+        highest_high = np.nanmax(high[i-period+1:i+1])
+        lowest_low = np.nanmin(low[i-period+1:i+1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            choppiness[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return choppiness
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -62,73 +180,35 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    delta = np.zeros(n, dtype=np.float64)
-    for i in range(1, n):
-        delta[i] = close[i] - close[i-1]
-    
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-        else:
-            rsi[i] = 100.0
-    
-    return rsi
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # 1d Choppiness for regime detection
+    chop_1d_raw = calculate_choppiness(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values,
+        period=14
+    )
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d_raw)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    
-    # Also calculate 1h HMA for local trend confirmation
-    hma_1h = calculate_hma(close, period=21)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -141,7 +221,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 150
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -152,67 +232,59 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(crsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(chop_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1h[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === REGIME DETECTION (1d Choppiness) ===
+        chop = chop_1d_aligned[i]
+        is_range = chop > 45.0  # Range market (mean reversion works)
+        is_trend = chop < 38.0  # Trending market (trend following works)
         
-        # === SESSION FILTER (06-22 UTC for liquidity) ===
-        # Extract hour from open_time (milliseconds timestamp)
-        hour_utc = (open_time[i] // 3600000) % 24
-        in_session = 6 <= hour_utc <= 22
+        # === TREND BIAS (1w HMA) ===
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
         
-        # === TREND DIRECTION (4h HMA slope + 1d HMA bias) ===
-        # 4h HMA slope (compare to 3 bars ago for stability)
-        hma_4h_slope = 0.0
-        if i >= 3 and not np.isnan(hma_4h_aligned[i-3]):
-            hma_4h_slope = hma_4h_aligned[i] - hma_4h_aligned[i-3]
-        
-        # 1d HMA bias
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
-        
-        # 1h price vs 1h HMA for local confirmation
-        price_above_1h = close[i] > hma_1h[i]
-        price_below_1h = close[i] < hma_1h[i]
-        
-        # === RSI PULLBACK (LOOSE - 35-65 zone for frequent entries) ===
-        rsi = rsi_14[i]
-        
-        # === ENTRY LOGIC (LOOSE to guarantee 40-80 trades/year) ===
+        # === ENTRY LOGIC (LOOSE - guarantee 30-60 trades/year) ===
         desired_signal = 0.0
         
-        # LONG: 4h HMA rising + 1d bullish + RSI pullback zone + session
-        if hma_4h_slope > 0 and price_above_1d and price_above_1h:
-            if 35 <= rsi <= 65 and in_session:
-                if rsi <= 50:
-                    desired_signal = SIZE_STRONG  # Deeper pullback
-                else:
-                    desired_signal = SIZE_BASE  # Shallow pullback
+        # LONG entries
+        if price_above_1w:  # Only long when above weekly trend
+            if is_range:
+                # Mean reversion in range: buy oversold
+                if crsi[i] < 25.0:  # LOOSE threshold (not <10)
+                    if crsi[i] < 15.0:
+                        desired_signal = SIZE_STRONG
+                    else:
+                        desired_signal = SIZE_BASE
+            elif is_trend:
+                # Trend pullback: buy shallow pullbacks
+                if crsi[i] < 35.0:  # Even looser in trends
+                    desired_signal = SIZE_BASE
         
-        # SHORT: 4h HMA falling + 1d bearish + RSI pullback zone + session
-        elif hma_4h_slope < 0 and price_below_1d and price_below_1h:
-            if 35 <= rsi <= 65 and in_session:
-                if rsi >= 50:
-                    desired_signal = -SIZE_STRONG  # Higher pullback
-                else:
-                    desired_signal = -SIZE_BASE  # Lower pullback
+        # SHORT entries
+        elif price_below_1w:  # Only short when below weekly trend
+            if is_range:
+                # Mean reversion in range: sell overbought
+                if crsi[i] > 75.0:  # LOOSE threshold (not >90)
+                    if crsi[i] > 85.0:
+                        desired_signal = -SIZE_STRONG
+                    else:
+                        desired_signal = -SIZE_BASE
+            elif is_trend:
+                # Trend pullback: sell shallow rallies
+                if crsi[i] > 65.0:  # Even looser in trends
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
