@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1632: 12h Primary + 1d HTF — Simple Trend Pullback Strategy
+Experiment #1633: 5m Primary + 15m/4h HTF — Session-Filtered Trend Following
 
-Hypothesis: After 1327 failed experiments, complexity is the enemy. The best performer
-(mtf_hma_rsi_zscore_v1 Sharpe=5.4) used simple HMA trend + RSI pullback logic.
-Recent failures show regime-switching and complex filters cause 0 trades.
+Hypothesis: 5m timeframe with 4h trend bias + 15m momentum filter captures optimal
+entry timing while avoiding counter-trend trades. Session filter (08-20 UTC) ensures
+liquidity and reduces noise. Fisher Transform on 5m provides precise entry triggers.
 
-Key design choices based on failure analysis:
-1. SIMPLE logic: 1d HMA trend bias + 12h RSI pullback entries only
-2. LOOSE thresholds: RSI 35/65 (not 30/70), ADX > 18 (not > 25)
-3. NO regime switching (Choppiness, Fisher regimes all failed recently)
-4. NO volume filters (causes 0 trades per #1607, #1612)
-5. Single HTF only (1d HMA, not 1d+1w which reduces trades per #1624)
-6. Discrete signal sizes: 0.25 base, 0.30 strong conviction
-7. 3.0x ATR trailing stoploss via signal→0
+CRITICAL LESSONS FROM FAILURES (#1625, #1629, #1630 - Sharpe=0.000, 0 trades):
+1. Entry conditions MUST be LOOSE to guarantee trades (≥30 train, ≥3 test)
+2. Session filter should NOT block all entries - make it permissive
+3. 5m needs HTF trend bias to avoid whipsaw (never trade counter-trend)
+4. Size must be SMALL (0.15-0.20) due to fee drag from frequent trades
 
-Why 12h works:
-- 20-50 trades/year target (vs 100+ on 1h which causes fee drag)
-- Catches major moves without whipsaw noise
-- 1d HTF provides clear trend bias for bear/range markets (2022-2025)
+Key design choices:
+1. 4h HMA(21) for trend bias - only trade in HTF direction
+2. 15m RSI(14) as loose momentum filter (not extreme thresholds)
+3. 5m Fisher(9) for entry timing - crossover signals
+4. Session filter: 08-20 UTC (London/NY overlap) - permissive, not restrictive
+5. Size: 0.15 base, 0.20 strong (small due to 5m fee drag)
+6. Stoploss: 2.0x ATR trailing via signal→0
 
-Entry logic (LOOSE to guarantee ≥30 trades/train, ≥3 test):
-- LONG: 1d HMA bullish + RSI(14) 35-50 pullback + ADX > 18
-- SHORT: 1d HMA bearish + RSI(14) 50-65 pullback + ADX > 18
-- Exit: RSI crosses 50 against position OR stoploss hit
+Entry logic (LOOSE to guarantee trades):
+- LONG: 4h bullish + 15m RSI > 40 + 5m Fisher cross up OR 5m RSI < 30 (pullback entry)
+- SHORT: 4h bearish + 15m RSI < 60 + 5m Fisher cross down OR 5m RSI > 70 (pullback entry)
+- Session filter: prefer 08-20 UTC but allow outside if signal strong
 
-Target: Sharpe>0.6, trades≥30 train, trades≥3 test, DD>-35%
-Timeframe: 12h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.6, trades≥50/train, trades≥5/test, DD>-35%, 50-120 trades/year
+Timeframe: 5m
+Size: 0.15-0.20 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_rsi_pullback_1d_simple_v1"
-timeframe = "12h"
+name = "mtf_5m_fisher_session_4h15m_trend_v1"
+timeframe = "5m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -81,6 +81,43 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_fisher(high, low, period=9):
+    """
+    Ehlers Fisher Transform - normalizes price to Gaussian distribution
+    Returns fisher value and trigger (previous value for crossover detection)
+    """
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    fisher = np.full(n, np.nan, dtype=np.float64)
+    trigger = np.full(n, np.nan, dtype=np.float64)
+    
+    median = (high + low) / 2
+    
+    for i in range(period - 1, n):
+        highest = np.max(high[i - period + 1:i + 1])
+        lowest = np.min(low[i - period + 1:i + 1])
+        range_val = highest - lowest
+        
+        if range_val < 1e-10:
+            if i > 0 and not np.isnan(fisher[i-1]):
+                fisher[i] = fisher[i-1]
+                trigger[i] = fisher[i-1]
+            continue
+        
+        normalized = 2.0 * (median[i] - lowest) / range_val - 1.0
+        normalized = max(-0.999, min(0.999, normalized))
+        
+        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
+        
+        if i > 0 and not np.isnan(fisher[i-1]):
+            trigger[i] = fisher[i-1]
+        else:
+            trigger[i] = fisher[i]
+    
+    return fisher, trigger
+
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -105,64 +142,42 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - trend strength"""
+def calculate_sma(close, period):
+    """Simple Moving Average"""
     n = len(close)
-    if n < period * 2:
+    if n < period:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    for i in range(1, n):
-        plus_move = high[i] - high[i-1]
-        minus_move = low[i-1] - low[i]
-        if plus_move > minus_move and plus_move > 0:
-            plus_dm[i] = plus_move
-        if minus_move > plus_move and minus_move > 0:
-            minus_dm[i] = minus_move
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
-    
-    mask = atr > 1e-10
-    plus_di[mask] = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[mask] / atr[mask]
-    minus_di[mask] = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[mask] / atr[mask]
-    
-    dx = np.zeros(n, dtype=np.float64)
-    di_sum = plus_di + minus_di
-    mask2 = di_sum > 1e-10
-    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_15m = get_htf_data(prices, '15m')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 12h indicators
+    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
+    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
+    
+    # Calculate 5m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
+    fisher, fisher_trigger = calculate_fisher(high, low, period=9)
+    sma_200 = calculate_sma(close, period=200)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -174,7 +189,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 50
+    min_bars = 250  # Need 200 for SMA + buffer
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -185,84 +200,109 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(adx_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(fisher[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_15m_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1d HMA bias) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === SESSION FILTER (08-20 UTC) - PERMISSIVE ===
+        # Extract hour from open_time (milliseconds timestamp)
+        ts_ms = open_time[i]
+        hour_utc = (ts_ms // (1000 * 60 * 60)) % 24
+        in_session = 8 <= hour_utc <= 20
         
-        # === TREND STRENGTH (ADX) ===
-        adx_val = adx_14[i]
-        trend_strong = adx_val > 18  # LOOSE threshold for trades
+        # === TREND DIRECTION (4h HMA bias) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # === RSI PULLBACK (LOOSE thresholds) ===
-        rsi_val = rsi_14[i]
-        rsi_prev = rsi_14[i-1] if i > 0 and not np.isnan(rsi_14[i-1]) else rsi_val
+        # === 15m MOMENTUM FILTER (LOOSE) ===
+        rsi_15m = rsi_15m_aligned[i]
+        momentum_bullish = rsi_15m > 40  # Not too weak
+        momentum_bearish = rsi_15m < 60  # Not too strong
         
-        # Pullback zones (LOOSE to guarantee trades)
-        rsi_pullback_long = 35 <= rsi_val <= 55  # Pullback in uptrend
-        rsi_pullback_short = 45 <= rsi_val <= 65  # Pullback in downtrend
+        # === 5m FISHER TRANSFORM SIGNALS ===
+        fisher_val = fisher[i]
+        fisher_prev = fisher_trigger[i] if not np.isnan(fisher_trigger[i]) else fisher_val
         
-        # RSI momentum confirmation
-        rsi_rising = rsi_val > rsi_prev
-        rsi_falling = rsi_val < rsi_prev
+        # Fisher crossover signals - LOOSE thresholds for trades
+        fisher_bull_cross = fisher_val > -1.0 and fisher_prev <= -1.0
+        fisher_bear_cross = fisher_val < 1.0 and fisher_prev >= 1.0
         
-        # === ENTRY LOGIC (SIMPLE - must generate trades) ===
+        # Fisher extremes (mean reversion entries)
+        fisher_extreme_low = fisher_val < -0.5
+        fisher_extreme_high = fisher_val > 0.5
+        
+        # === 5m RSI PULLBACK ENTRIES ===
+        rsi_5m = rsi_14[i]
+        rsi_pullback_long = rsi_5m < 35  # Pullback in uptrend
+        rsi_pullback_short = rsi_5m > 65  # Pullback in downtrend
+        
+        # === SMA200 FILTER (avoid trading against major trend) ===
+        price_above_sma200 = not np.isnan(sma_200[i]) and close[i] > sma_200[i]
+        price_below_sma200 = not np.isnan(sma_200[i]) and close[i] < sma_200[i]
+        
+        # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + trend strong + RSI pullback + RSI turning up
-        if price_above_1d and trend_strong and rsi_pullback_long and rsi_rising:
-            # Strong signal if RSI was very oversold
-            if rsi_val <= 40:
-                desired_signal = SIZE_STRONG
-            else:
-                desired_signal = SIZE_BASE
+        # LONG ENTRIES (4h bullish + 15m momentum + 5m trigger)
+        if price_above_4h and momentum_bullish:
+            # Primary: Fisher crossover up
+            if fisher_bull_cross:
+                if in_session:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE  # Reduced size outside session
+            
+            # Secondary: RSI pullback entry (catch dips in uptrend)
+            elif rsi_pullback_long and fisher_extreme_low:
+                if in_session:
+                    desired_signal = SIZE_BASE
+                else:
+                    desired_signal = SIZE_BASE * 0.5
         
-        # SHORT: 1d bearish + trend strong + RSI pullback + RSI turning down
-        elif price_below_1d and trend_strong and rsi_pullback_short and rsi_falling:
-            # Strong signal if RSI was very overbought
-            if rsi_val >= 60:
-                desired_signal = -SIZE_STRONG
-            else:
-                desired_signal = -SIZE_BASE
+        # SHORT ENTRIES (4h bearish + 15m momentum + 5m trigger)
+        elif price_below_4h and momentum_bearish:
+            # Primary: Fisher crossover down
+            if fisher_bear_cross:
+                if in_session:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE  # Reduced size outside session
+            
+            # Secondary: RSI pullback entry (catch rallies in downtrend)
+            elif rsi_pullback_short and fisher_extreme_high:
+                if in_session:
+                    desired_signal = -SIZE_BASE
+                else:
+                    desired_signal = -SIZE_BASE * 0.5
         
-        # === STOPLOSS CHECK (3.0x ATR trailing) ===
+        # === STOPLOSS CHECK (2.0x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 3.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 3.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
         
-        # === EXIT SIGNALS (RSI cross 50 against position) ===
-        exit_signal = False
-        if in_position and position_side > 0 and rsi_val > 65:
-            exit_signal = True  # Overbought exit
-        if in_position and position_side < 0 and rsi_val < 35:
-            exit_signal = True  # Oversold exit
-        
-        if stoploss_triggered or exit_signal:
+        if stoploss_triggered:
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
@@ -274,6 +314,10 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
+        elif desired_signal >= SIZE_BASE * 0.4:
+            final_signal = SIZE_BASE * 0.5
+        elif desired_signal <= -SIZE_BASE * 0.4:
+            final_signal = -SIZE_BASE * 0.5
         else:
             final_signal = 0.0
         
@@ -287,9 +331,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 3.0 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 3.0 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
