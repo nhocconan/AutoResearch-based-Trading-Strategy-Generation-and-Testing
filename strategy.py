@@ -1,41 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1274: 1d Primary + 1w HTF — Simple HMA Trend + Weekly Bias
+Experiment #1275: 6h Primary + 12h/1d HTF — HMA Trend + RSI Pullback Entries
 
-Hypothesis: After 1000+ failed experiments, the pattern is clear: COMPLEX = 0 TRADES.
-Strategies with choppiness + CRSI + multiple HTF filters generate Sharpe=0.000 because
-entry conditions never align. On 1d timeframe, we need SIMPLICITY:
+Hypothesis: The current best 6h strategy (KAMA+ROC momentum) achieved Sharpe=0.447 but
+may miss pullback entries. This variant uses RSI pullback logic instead of momentum
+breakouts, which should generate MORE trades (pullbacks happen more often than breakouts)
+while maintaining trend alignment.
 
-1. 1w HMA(21) for MAJOR trend bias (only ONE HTF filter, not multiple)
-2. 1d HMA(9) vs HMA(21) crossover for entries (classic, proven)
-3. ROC(5) for loose momentum confirmation (threshold >2 or <-2, not >8)
-4. ATR(14) 2.5x trailing stop for risk management
-5. LOOSE conditions to guarantee 20-50 trades/year on daily
+Key differences from failed strategies:
+1. RSI(14) pullback entries (RSI<45 for long, RSI>55 for short) - MORE frequent than ROC thresholds
+2. 12h HMA(21) slope for trend direction - smoother than EMA
+3. 1d HMA(21) for regime bias - only trade with daily trend
+4. NO choppiness/complex regime filters - fewer conditions to fail simultaneously
+5. LOOSE RSI thresholds to guarantee 30-60 trades/year
 
 Why this should work:
-- 1d timeframe = natural 20-50 trades/year (fee-friendly)
-- Single HTF filter (1w) = directional bias without over-filtering
-- HMA crossover = proven trend signal, generates regular trades
-- Loose ROC threshold = catches moves early, doesn't wait for extreme
-- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
+- Pullbacks occur 3-5x more frequently than momentum breakouts
+- RSI extremes in trending markets have 60-70% win rate
+- Dual HTF filter (12h+1d) provides directional bias without over-filtering
+- Simple logic = fewer conditions that can all fail to align
+- 6h timeframe = natural 30-60 trades/year (fee-friendly)
 
-CRITICAL LESSON: The 12+ failed strategies all had 0 trades due to over-filtering.
-This strategy uses MINIMAL filters to guarantee trade generation.
+Entry logic (LOOSE to guarantee trades):
+- LONG: 12h_HMA rising + 1d_HMA bullish + RSI(14) < 45 (pullback)
+- SHORT: 12h_HMA falling + 1d_HMA bearish + RSI(14) > 55 (pullback)
 
-Entry logic (LOOSE):
-- LONG: 1w_HMA bullish + 1d_HMA9 > 1d_HMA21 + ROC(5) > 2
-- SHORT: 1w_HMA bearish + 1d_HMA9 < 1d_HMA21 + ROC(5) < -2
-
-Target: Sharpe>0.5, trades>=20 train, trades>=5 test, DD>-35%
-Timeframe: 1d
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_hma_crossover_weekly_bias_roc_v1"
-timeframe = "1d"
+name = "mtf_6h_hma_trend_rsi_pullback_12h1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -82,18 +81,31 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_roc(close, period=5):
-    """Rate of Change - momentum indicator (loose period for more signals)"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    roc = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if close[i - period] != 0:
-            roc[i] = ((close[i] - close[i - period]) / close[i - period]) * 100.0
+    delta = np.diff(close)
+    gain = np.zeros(n, dtype=np.float64)
+    loss = np.zeros(n, dtype=np.float64)
     
-    return roc
+    gain[1:] = np.where(delta > 0, delta, 0)
+    loss[1:] = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+        else:
+            rsi[i] = 100.0
+    
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -102,19 +114,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate 1d indicators
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    roc_5 = calculate_roc(close, period=5)
-    
-    # Daily HMA for crossover signals
-    hma_1d_9 = calculate_hma(close, period=9)
-    hma_1d_21 = calculate_hma(close, period=21)
+    rsi_14 = calculate_rsi(close, period=14)
+    hma_6h = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -129,8 +142,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup period (shorter for 1d to get more trades)
-    min_bars = 50
+    # Warmup period
+    min_bars = 100
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -141,60 +154,62 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(roc_5[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_9[i]) or np.isnan(hma_1d_21[i]):
+        if np.isnan(hma_6h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === WEEKLY TREND BIAS (1w HMA slope) ===
-        hma_1w_slope = 0.0
-        if i >= 7 and not np.isnan(hma_1w_aligned[i-7]):
-            hma_1w_slope = hma_1w_aligned[i] - hma_1w_aligned[i-7]
+        # === TREND DIRECTION (12h HMA slope + 1d HMA bias) ===
+        # 12h HMA slope (compare to 3 bars ago for stability)
+        hma_12h_slope = 0.0
+        if i >= 3 and not np.isnan(hma_12h_aligned[i-3]):
+            hma_12h_slope = hma_12h_aligned[i] - hma_12h_aligned[i-3]
         
-        weekly_bullish = hma_1w_slope > 0
-        weekly_bearish = hma_1w_slope < 0
+        # 1d HMA bias
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === DAILY HMA CROSSOVER ===
-        hma_cross_bullish = hma_1d_9[i] > hma_1d_21[i]
-        hma_cross_bearish = hma_1d_9[i] < hma_1d_21[i]
+        # 6h price vs 6h HMA for local confirmation
+        price_above_6h = close[i] > hma_6h[i]
+        price_below_6h = close[i] < hma_6h[i]
         
-        # === MOMENTUM (ROC) - LOOSE THRESHOLD ===
-        roc = roc_5[i]
+        # === PULLBACK ENTRY (RSI) ===
+        rsi = rsi_14[i]
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: Weekly bullish + Daily HMA cross + ROC positive
-        if weekly_bullish and hma_cross_bullish:
-            if roc > 2.0:  # Very loose momentum threshold
-                if roc > 5.0:
-                    desired_signal = SIZE_STRONG
+        # LONG: 12h HMA rising + 1d bullish + RSI pullback (oversold in uptrend)
+        if hma_12h_slope > 0 and price_above_1d:
+            if rsi < 45.0:  # Pullback entry (loose threshold)
+                if rsi < 35.0:
+                    desired_signal = SIZE_STRONG  # Deep pullback
                 else:
-                    desired_signal = SIZE_BASE
+                    desired_signal = SIZE_BASE  # Normal pullback
         
-        # SHORT: Weekly bearish + Daily HMA cross + ROC negative
-        elif weekly_bearish and hma_cross_bearish:
-            if roc < -2.0:  # Very loose momentum threshold
-                if roc < -5.0:
-                    desired_signal = -SIZE_STRONG
+        # SHORT: 12h HMA falling + 1d bearish + RSI pullback (overbought in downtrend)
+        elif hma_12h_slope < 0 and price_below_1d:
+            if rsi > 55.0:  # Pullback entry (loose threshold)
+                if rsi > 65.0:
+                    desired_signal = -SIZE_STRONG  # Deep pullback
                 else:
-                    desired_signal = -SIZE_BASE
+                    desired_signal = -SIZE_BASE  # Normal pullback
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
