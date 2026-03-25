@@ -1,40 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #1305: 15m Primary + 4h/1d HTF — Daily CPR Breakout with HTF Trend Filter
+Experiment #1306: 1d Primary + 1w HTF — Dual Regime Breakout + Mean Reversion
 
-Hypothesis: 15m strategies have failed due to excessive trades and fee drag. This strategy
-uses Daily CPR (Central Pivot Range) levels from 1d HTF as key support/resistance, combined
-with 4h HMA trend filter and volume confirmation. Key innovations:
+Hypothesis: Daily timeframe with weekly trend filter provides optimal trade frequency
+(20-50/year) while maintaining signal quality. This strategy combines:
 
-1. Daily CPR from 1d HTF: BC/TC levels act as intraday pivot points (proven in tradfi)
-2. 4h HMA(21) for major trend bias (only trade CPR breakouts in trend direction)
-3. Volume spike filter: taker_buy_volume ratio > 1.5 for breakout confirmation
-4. Session filter: 00-12 UTC only (London+NY overlap, highest liquidity)
-5. RSI(7) pullback entry within CPR range for mean-reversion trades
-6. VERY selective: require 3+ confluence (HTF trend + CPR level + volume + session)
+1. 1w HMA(21) for major trend bias (only trade with weekly direction)
+2. 1d Regime detection via Choppiness Index (CHOP > 61.8 = range, < 38.2 = trend)
+3. TREND regime: Donchian(20) breakout + RSI(14) confirmation
+4. RANGE regime: Connors RSI mean reversion (CRSI < 15 long, > 85 short)
+5. ATR(14) 2.5x trailing stop for risk management
+6. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Why this should work on 15m:
-- CPR levels are respected intraday (institutional order flow)
-- 4h trend filter prevents counter-trend trades (major failure mode)
-- Session filter avoids low-liquidity whipsaws (Asia session)
-- Volume confirmation filters false breakouts
-- Target: 40-80 trades/year (strict entry conditions)
+Why this should work:
+- 1d timeframe = natural 20-50 trades/year (fee-friendly)
+- Weekly filter = strong directional bias without over-filtering
+- Dual regime = adapts to market conditions (trend vs chop)
+- Connors RSI = proven 75% win rate on mean reversion
+- Loose enough entries to guarantee 30+ trades on train
 
 Entry logic:
-- LONG: 4h_HMA bullish + price > TC + volume_spike + session + RSI(7) < 70
-- SHORT: 4h_HMA bearish + price < BC + volume_spike + session + RSI(7) > 30
-- MEAN REVERT: Inside CPR range + RSI(7) extremes + HTF trend alignment
+- TREND regime (CHOP < 38.2): Donchian breakout + RSI 40-60 + weekly alignment
+- RANGE regime (CHOP > 61.8): CRSI extremes (<15 long, >85 short) + weekly bias
+- TRANSITION (38.2-61.8): No trades, wait for clarity
 
-Timeframe: 15m (FIRST 15m EXPERIMENT)
-Size: 0.15-0.20 discrete (smaller for higher frequency)
 Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 1d
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_cpr_breakout_hma_volume_4h1d_session_v1"
-timeframe = "15m"
+name = "mtf_1d_dual_regime_donchian_crsi_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -87,99 +86,141 @@ def calculate_rsi(close, period=14):
     if n < period + 1:
         return np.full(n, np.nan)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    gain = np.concatenate([[np.nan], gain])
+    loss = np.concatenate([[np.nan], loss])
     
     avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
     rsi = np.full(n, np.nan, dtype=np.float64)
     for i in range(period, n):
-        if avg_loss[i] != 0:
+        if avg_loss[i] != 0 and not np.isnan(avg_gain[i]) and not np.isnan(avg_loss[i]):
             rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-        else:
+            rsi[i] = 100 - (100 / (1 + rs))
+        elif avg_loss[i] == 0 and not np.isnan(avg_gain[i]):
             rsi[i] = 100.0
     
     return rsi
 
-def calculate_cpr_levels(df_1d):
-    """
-    Calculate Daily CPR (Central Pivot Range) levels from 1d data.
-    CPR = [BC, Pivot, TC] where:
-    - Pivot = (High + Low + Close) / 3
-    - BC (Bottom Central) = (High + Low) / 2
-    - TC (Top Central) = (Pivot + BC) / 2
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
     
-    Returns arrays aligned to 1d bars.
-    """
-    n = len(df_1d)
-    high = df_1d['high'].values
-    low = df_1d['low'].values
-    close = df_1d['close'].values
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
-    pivot = np.full(n, np.nan, dtype=np.float64)
-    bc = np.full(n, np.nan, dtype=np.float64)
-    tc = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i - period + 1:i + 1])
+        lower[i] = np.nanmin(low[i - period + 1:i + 1])
     
-    for i in range(1, n):  # Start from 1 (use previous day's levels)
-        pivot[i] = (high[i-1] + low[i-1] + close[i-1]) / 3.0
-        bc[i] = (high[i-1] + low[i-1]) / 2.0
-        tc[i] = (pivot[i] + bc[i]) / 2.0
-    
-    return pivot, bc, tc
+    return upper, lower
 
-def calculate_volume_ratio(taker_buy_volume, volume):
-    """Calculate taker buy volume ratio (buying pressure)"""
-    n = len(volume)
-    ratio = np.full(n, np.nan, dtype=np.float64)
-    for i in range(n):
-        if volume[i] > 0:
-            ratio[i] = taker_buy_volume[i] / volume[i]
-    return ratio
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - measures market choppy vs trending"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        highest_high = np.nanmax(high[i - period + 1:i + 1])
+        lowest_low = np.nanmin(low[i - period + 1:i + 1])
+        
+        if highest_high == lowest_low:
+            chop[i] = 100.0
+            continue
+        
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_sum += tr
+        
+        chop[i] = 100.0 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    
+    return chop
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """Connors RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3"""
+    n = len(close)
+    if n < rank_period + 1:
+        return np.full(n, np.nan)
+    
+    # RSI(3)
+    rsi_short = calculate_rsi(close, rsi_period)
+    
+    # RSI Streak (2) - streak of up/down days
+    streak = np.zeros(n, dtype=np.float64)
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close[i] < close[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = streak[i-1]
+    
+    # Convert streak to RSI-like value (0-100)
+    streak_rsi = np.full(n, np.nan, dtype=np.float64)
+    for i in range(streak_period, n):
+        abs_streak = abs(streak[i])
+        if abs_streak >= streak_period:
+            streak_rsi[i] = 100.0 if streak[i] > 0 else 0.0
+        else:
+            streak_rsi[i] = 50.0 + (streak[i] / streak_period) * 50.0
+        streak_rsi[i] = np.clip(streak_rsi[i], 0, 100)
+    
+    # Percent Rank (100) - where current return ranks in last 100 days
+    pct_rank = np.full(n, np.nan, dtype=np.float64)
+    for i in range(rank_period, n):
+        returns = np.zeros(rank_period, dtype=np.float64)
+        for j in range(rank_period):
+            if close[i - rank_period + j] != 0:
+                returns[j] = (close[i - rank_period + j + 1] - close[i - rank_period + j]) / close[i - rank_period + j]
+        
+        current_return = (close[i] - close[i-1]) / close[i-1] if close[i-1] != 0 else 0
+        count_below = np.sum(returns[:-1] < current_return)
+        pct_rank[i] = (count_below / (rank_period - 1)) * 100.0
+    
+    # Combine into CRSI
+    crsi = np.full(n, np.nan, dtype=np.float64)
+    for i in range(rank_period, n):
+        if not np.isnan(rsi_short[i]) and not np.isnan(streak_rsi[i]) and not np.isnan(pct_rank[i]):
+            crsi[i] = (rsi_short[i] + streak_rsi[i] + pct_rank[i]) / 3.0
+    
+    return crsi
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_vol = prices["taker_buy_volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate Daily CPR levels and align to 15m
-    pivot_1d, bc_1d, tc_1d = calculate_cpr_levels(df_1d)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    bc_aligned = align_htf_to_ltf(prices, df_1d, bc_1d)
-    tc_aligned = align_htf_to_ltf(prices, df_1d, tc_1d)
-    
-    # Calculate 15m indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
     rsi_14 = calculate_rsi(close, period=14)
-    vol_ratio = calculate_volume_ratio(taker_buy_vol, volume)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     
-    # Calculate 15m HMA for local trend
-    hma_15m = calculate_hma(close, period=21)
-    
-    # Calculate CPR width (narrow CPR = consolidation, wide = trending)
-    cpr_width = np.full(n, np.nan, dtype=np.float64)
-    for i in range(n):
-        if not np.isnan(tc_aligned[i]) and not np.isnan(bc_aligned[i]) and close[i] > 0:
-            cpr_width[i] = (tc_aligned[i] - bc_aligned[i]) / close[i] * 100.0
+    # 1d HMA for local trend
+    hma_1d = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -191,7 +232,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 150
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -202,105 +243,78 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(pivot_aligned[i]):
+        if np.isnan(chop_14[i]) or np.isnan(donchian_upper[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_15m[i]) or np.isnan(cpr_width[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === WEEKLY TREND BIAS ===
+        # Weekly HMA slope (compare to 2 bars ago for stability)
+        hma_1w_slope = 0.0
+        if i >= 2 and not np.isnan(hma_1w_aligned[i-2]):
+            hma_1w_slope = hma_1w_aligned[i] - hma_1w_aligned[i-2]
         
-        # === SESSION FILTER (00-12 UTC only) ===
-        # Convert open_time (ms) to hour
-        hour_utc = (open_time[i] // (1000 * 60 * 60)) % 24
-        in_session = (hour_utc >= 0 and hour_utc < 12)  # London+NY overlap
+        weekly_bullish = hma_1w_slope > 0
+        weekly_bearish = hma_1w_slope < 0
         
-        # === TREND DIRECTION (4h HMA slope) ===
-        hma_4h_slope = 0.0
-        if i >= 4 and not np.isnan(hma_4h_aligned[i-4]):
-            hma_4h_slope = hma_4h_aligned[i] - hma_4h_aligned[i-4]
+        # === REGIME DETECTION (Choppiness Index) ===
+        chop = chop_14[i]
         
-        trend_bullish = hma_4h_slope > 0
-        trend_bearish = hma_4h_slope < 0
+        # TREND regime: CHOP < 38.2
+        # RANGE regime: CHOP > 61.8
+        # TRANSITION: 38.2 - 61.8 (no trades)
         
-        # === CPR LEVELS ===
-        price_above_tc = close[i] > tc_aligned[i]
-        price_below_bc = close[i] < bc_aligned[i]
-        price_inside_cpr = close[i] >= bc_aligned[i] and close[i] <= tc_aligned[i]
+        in_trend_regime = chop < 38.2
+        in_range_regime = chop > 61.8
         
-        # Narrow CPR = consolidation (breakout more likely)
-        narrow_cpr = cpr_width[i] < 0.5  # Less than 0.5% width
-        
-        # === VOLUME CONFIRMATION ===
-        volume_spike = vol_ratio[i] > 1.5 or vol_ratio[i] < 0.5  # Strong buying or selling
-        
-        # === 15m LOCAL TREND ===
-        price_above_15m = close[i] > hma_15m[i]
-        price_below_15m = close[i] < hma_15m[i]
-        
-        # === ENTRY LOGIC (VERY SELECTIVE - 3+ confluence required) ===
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG BREAKOUT: 4h bullish + price > TC + volume spike + session + narrow CPR
-        if trend_bullish and price_above_tc and in_session:
-            confluence_count = 0
-            if volume_spike and vol_ratio[i] > 1.5:
-                confluence_count += 1
-            if narrow_cpr:
-                confluence_count += 1
-            if price_above_15m:
-                confluence_count += 1
-            if rsi_7[i] < 75:  # Not overbought
-                confluence_count += 1
+        if in_trend_regime:
+            # TREND FOLLOWING: Donchian breakout + RSI confirmation + weekly alignment
+            rsi = rsi_14[i]
             
-            if confluence_count >= 3:
-                if confluence_count >= 4:
+            # LONG: Break above Donchian + RSI 40-70 + weekly bullish
+            if close[i] > donchian_upper[i] and 40 <= rsi <= 70 and weekly_bullish:
+                if rsi > 55:
                     desired_signal = SIZE_STRONG
                 else:
                     desired_signal = SIZE_BASE
-        
-        # SHORT BREAKOUT: 4h bearish + price < BC + volume spike + session + narrow CPR
-        elif trend_bearish and price_below_bc and in_session:
-            confluence_count = 0
-            if volume_spike and vol_ratio[i] < 0.5:
-                confluence_count += 1
-            if narrow_cpr:
-                confluence_count += 1
-            if price_below_15m:
-                confluence_count += 1
-            if rsi_7[i] > 25:  # Not oversold
-                confluence_count += 1
             
-            if confluence_count >= 3:
-                if confluence_count >= 4:
+            # SHORT: Break below Donchian + RSI 30-60 + weekly bearish
+            elif close[i] < donchian_lower[i] and 30 <= rsi <= 60 and weekly_bearish:
+                if rsi < 45:
                     desired_signal = -SIZE_STRONG
                 else:
                     desired_signal = -SIZE_BASE
         
-        # MEAN REVERSION LONG: Inside CPR + 4h bullish + RSI(7) oversold + session
-        elif trend_bullish and price_inside_cpr and in_session:
-            if rsi_7[i] < 25 and rsi_14[i] < 35:
-                if vol_ratio[i] > 1.2:  # Buying pressure building
-                    desired_signal = SIZE_BASE
-        
-        # MEAN REVERSION SHORT: Inside CPR + 4h bearish + RSI(7) overbought + session
-        elif trend_bearish and price_inside_cpr and in_session:
-            if rsi_7[i] > 75 and rsi_14[i] > 65:
-                if vol_ratio[i] < 0.8:  # Selling pressure building
-                    desired_signal = -SIZE_BASE
+        elif in_range_regime:
+            # MEAN REVERSION: Connors RSI extremes + weekly bias filter
+            if not np.isnan(crsi[i]):
+                crsi_val = crsi[i]
+                
+                # LONG: CRSI < 15 (oversold) + weekly not strongly bearish
+                if crsi_val < 15 and not weekly_bearish:
+                    if crsi_val < 10:
+                        desired_signal = SIZE_STRONG
+                    else:
+                        desired_signal = SIZE_BASE
+                
+                # SHORT: CRSI > 85 (overbought) + weekly not strongly bullish
+                elif crsi_val > 85 and not weekly_bullish:
+                    if crsi_val > 90:
+                        desired_signal = -SIZE_STRONG
+                    else:
+                        desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
