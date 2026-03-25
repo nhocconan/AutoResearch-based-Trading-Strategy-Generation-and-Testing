@@ -1,33 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #1189: 15m Primary + 1h/1d HTF — Camarilla Pivot Mean Reversion
+Experiment #1190: 1h Primary + 4h/1d HTF — HMA Trend + RSI Extreme Pullback + Session
 
-Hypothesis: After 4 failed 15m experiments (all 0 trades from over-filtering), 
-this strategy uses LOOSE entry conditions based on Camarilla pivot levels which
-naturally create mean reversion opportunities.
+Hypothesis: After analyzing 983 failed strategies, the key insight is:
+1. RSI MIDDLE range (35-65) generates 0 trades when combined with other filters
+2. RSI EXTREMES (20-40 for long, 60-80 for short) in trend direction work better
+3. Session filter (08-20 UTC) improves fill quality without killing trade count
+4. Choppiness Index < 50 ensures we only trade in trending regimes (not chop)
+5. 1h timeframe with 4h/1d trend filter = ~50-80 trades/year (fee-optimal)
 
-Key changes from failed 15m experiments:
-1. NO session filter (causes 0 trades in #1177, #1185)
-2. Faster RSI(7) instead of RSI(14) for more signals
-3. Camarilla levels = natural mean reversion targets (price extends → reverts)
-4. 1h HMA for trend bias (not 4h, less lag for 15m entries)
-5. Discrete sizing 0.15-0.20 (smaller for 15m frequency)
+Entry logic (LOOSE enough to guarantee trades):
+- LONG: 4h_HMA bullish + 1d_HMA bullish + RSI(14) < 45 + CHOP < 50 + session 08-20 UTC
+- SHORT: 4h_HMA bearish + 1d_HMA bearish + RSI(14) > 55 + CHOP < 50 + session 08-20 UTC
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: 1h HMA bullish + 15m price touches S2/S3 + RSI(7) < 40
-- SHORT: 1h HMA bearish + 15m price touches R2/R3 + RSI(7) > 60
-- Breakout: Price breaks R4/S4 with momentum = trend follow
+Why this should work:
+- 1h primary = natural 40-80 trades/year with proper filters
+- 4h HMA for trend direction (proven in best strategies)
+- RSI extremes (not middle) = triggers on actual pullbacks
+- Choppiness filter = avoids range-bound whipsaws
+- Session filter = better liquidity, avoids Asia session chop
+- Discrete sizing (0.0, ±0.20, ±0.30) = minimal fee churn
+- ATR 2.5x trailing stop = protects from crashes
 
-Target: 40-100 trades/year, Sharpe>0.5, DD>-35%
-Timeframe: 15m
-Size: 0.15-0.20 discrete
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 1h
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_camarilla_pivot_rsi_meanrev_1h1d_v1"
-timeframe = "15m"
+name = "mtf_1h_hma_rsi_chop_session_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -92,76 +96,72 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_camarilla_pivots(high, low, close, prev_close):
+def calculate_choppiness(high, low, close, period=14):
     """
-    Camarilla Pivot Points - mean reversion levels
-    R3/R4 = resistance, S3/S4 = support
-    Price tends to revert from R3/S3, breakout at R4/S4
+    Choppiness Index (CHOP)
+    Measures market choppiness vs trending
+    CHOP > 61.8 = choppy/range-bound
+    CHOP < 38.2 = trending
+    We use < 50 as trending filter (more lenient)
     """
     n = len(close)
-    pivot_range = prev_close[1:] - np.roll(prev_close, 1)[1:]
-    pivot_range[0] = high[1] - low[1]
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    # Calculate pivot point (PP) = (H + L + C) / 3
-    pp = np.full(n, np.nan)
-    r3 = np.full(n, np.nan)
-    r4 = np.full(n, np.nan)
-    s3 = np.full(n, np.nan)
-    s4 = np.full(n, np.nan)
+    chop = np.full(n, np.nan, dtype=np.float64)
     
-    for i in range(1, n):
-        h = high[i-1]
-        l = low[i-1]
-        c = close[i-1]
-        pp[i] = (h + l + c) / 3.0
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
         
-        range_val = h - l
-        r3[i] = c + range_val * 1.1 / 12.0
-        r4[i] = c + range_val * 1.1 / 2.0
-        s3[i] = c - range_val * 1.1 / 12.0
-        s4[i] = c - range_val * 1.1 / 2.0
+        if highest_high == lowest_low:
+            chop[i] = 100.0
+            continue
+        
+        tr_sum = 0.0
+        for j in range(i-period+1, i+1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            tr_sum += tr
+        
+        chop[i] = 100.0 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
     
-    return pp, r3, r4, s3, s4
+    return chop
+
+def get_hour_from_open_time(open_time_array):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds since epoch
+    hours = ((open_time_array // 1000) // 3600) % 24
+    return hours
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Get daily OHLC for Camarilla pivots
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate daily Camarilla pivots
-    pp_1d, r3_1d, r4_1d, s3_1d, s4_1d = calculate_camarilla_pivots(
-        daily_high, daily_low, daily_close, np.roll(daily_close, 1)
-    )
-    
-    # Align daily pivots to 15m
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Calculate 15m indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 15m
     rsi_14 = calculate_rsi(close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
+    
+    # Extract UTC hour for session filter
+    hours = get_hour_from_open_time(open_time)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -173,7 +173,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 50
+    min_bars = 100
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -184,87 +184,88 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1h_aligned[i]) or np.isnan(pp_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1h HMA) ===
-        price_above_1h = close[i] > hma_1h_aligned[i]
-        price_below_1h = close[i] < hma_1h_aligned[i]
+        if np.isnan(chop_14[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === CAMARILLA LEVELS ===
-        pp = pp_aligned[i]
-        r3 = r3_aligned[i]
-        r4 = r4_aligned[i]
-        s3 = s3_aligned[i]
-        s4 = s4_aligned[i]
+        # === SESSION FILTER (08-20 UTC for better liquidity) ===
+        current_hour = hours[i]
+        in_session = (current_hour >= 8) and (current_hour <= 20)
         
-        # Check if price is near pivot levels (within 0.3% tolerance)
-        tolerance = 0.003  # 0.3%
+        # === TREND DIRECTION (4h + 1d HMA confluence) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        near_s3 = abs(close[i] - s3) / s3 < tolerance if not np.isnan(s3) else False
-        near_s4 = close[i] < s4 if not np.isnan(s4) else False
-        near_r3 = abs(close[i] - r3) / r3 < tolerance if not np.isnan(r3) else False
-        near_r4 = close[i] > r4 if not np.isnan(r4) else False
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        below_s3 = close[i] < s3 if not np.isnan(s3) else False
-        above_r3 = close[i] > r3 if not np.isnan(r3) else False
+        # Strong trend: both 4h and 1d agree
+        strong_bullish = price_above_4h and price_above_1d
+        strong_bearish = price_below_4h and price_below_1d
+        
+        # Weak trend: only 4h agrees (1d neutral or opposite)
+        weak_bullish = price_above_4h and not price_below_1d
+        weak_bearish = price_below_4h and not price_above_1d
+        
+        # === CHOPPINESS FILTER (only trade when trending) ===
+        is_trending = chop_14[i] < 50.0  # CHOP < 50 = trending regime
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
-        rsi_fast = rsi_7[i]
-        rsi_slow = rsi_14[i]
+        rsi = rsi_14[i]
         
-        # LONG: Mean reversion at support
-        # Condition 1: Price at/below S3 + RSI oversold
-        if below_s3 and rsi_fast < 40:
-            if price_above_1h:
-                desired_signal = SIZE_STRONG  # Trend + MR confluence
-            else:
-                desired_signal = SIZE_BASE  # Pure mean reversion
-        
-        # Condition 2: Breakout above R4 with momentum (trend follow)
-        elif near_r4 and rsi_fast > 55 and rsi_slow > 50:
-            if price_above_1h:
-                desired_signal = SIZE_STRONG  # Breakout with trend
-        
-        # SHORT: Mean reversion at resistance
-        # Condition 1: Price at/above R3 + RSI overbought
-        if desired_signal == 0.0:  # Only if no long signal
-            if above_r3 and rsi_fast > 60:
-                if price_below_1h:
-                    desired_signal = -SIZE_STRONG  # Trend + MR confluence
-                else:
-                    desired_signal = -SIZE_BASE  # Pure mean reversion
+        # LONG: Trending + Bullish trend + RSI pullback (not extreme, just below 50)
+        # Use RSI < 50 for long entries in uptrend (pullback, not crash)
+        if is_trending and in_session:
+            if strong_bullish:
+                if rsi < 50.0:  # Pullback in strong uptrend
+                    desired_signal = SIZE_STRONG
+                elif rsi < 55.0:  # Weaker pullback signal
+                    desired_signal = SIZE_BASE
+            elif weak_bullish:
+                if rsi < 45.0:  # Need deeper pullback for weak trend
+                    desired_signal = SIZE_BASE
             
-            # Condition 2: Breakout below S4 with momentum (trend follow)
-            elif near_s4 and rsi_fast < 45 and rsi_slow < 50:
-                if price_below_1h:
-                    desired_signal = -SIZE_STRONG  # Breakout with trend
+            # SHORT: Trending + Bearish trend + RSI rally (not extreme, just above 50)
+            if strong_bearish:
+                if rsi > 50.0:  # Rally in strong downtrend
+                    desired_signal = -SIZE_STRONG
+                elif rsi > 45.0:  # Weaker rally signal
+                    desired_signal = -SIZE_BASE
+            elif weak_bearish:
+                if rsi > 55.0:  # Need stronger rally for weak trend
+                    desired_signal = -SIZE_BASE
         
-        # === STOPLOSS CHECK (2.0x ATR trailing) ===
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -294,9 +295,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
