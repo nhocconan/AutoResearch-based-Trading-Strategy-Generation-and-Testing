@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1254: 1d Primary + 1w HTF — Dual HMA Trend + Weekly Bias + RSI Filter
+Experiment #1255: 6h Primary + 12h/1d HTF — HMA Trend + ROC Momentum Confirmation
 
-Hypothesis: After 1000+ failed experiments, the winning pattern is SIMPLE trend-following
-with HTF confirmation. Complex regime switches (choppiness, ADX, multiple filters) cause
-0 trades. This strategy uses:
+Hypothesis: The current best 6h strategy (KAMA+ROC) achieved Sharpe=0.447. This variant
+uses HMA instead of KAMA for cleaner trend signals, with ROC momentum confirmation
+to filter false breakouts. Key differences from failed strategies:
 
-1. Weekly HMA(21) = Major trend bias (ONLY trade in this direction)
-2. Daily HMA(8) vs HMA(21) crossover = Entry trigger
-3. RSI(14) 30-70 filter = Avoid extreme overbought/oversold entries
-4. ATR(14) 3x trailing stop = Risk management
+1. HMA(21) on 12h for primary trend (smoother than EMA, less lag than SMA)
+2. 1d HMA(21) for major regime bias (only trade with daily trend)
+3. 6h ROC(10) for momentum confirmation (must be >5 for long, <-5 for short)
+4. ATR(14) 2.5x trailing stop for risk management
+5. LOOSE entry conditions to guarantee 30-60 trades/year
 
-Key insight: Weekly trend filter ensures we're on the right side of major moves.
-Daily HMA crossover provides entry timing. RSI filter avoids chasing tops/bottoms.
-This should generate 30-50 trades/year on 1d timeframe with clean trend exposure.
+Why this should work:
+- 6h timeframe = natural 30-60 trades/year (fee-friendly, between 4h and 12h)
+- Dual HTF filter (12h+1d) = strong directional bias without over-filtering
+- ROC momentum = catches breakouts early, exits before reversal
+- No choppiness/complex regime = fewer conditions to fail simultaneously
+- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
 
-Why this differs from failures:
-- NO choppiness/ADX regime switches (causes 0 trades)
-- NO complex confluence (3+ conditions never align)
-- LOOSE RSI range (30-70, not 20-80 extremes)
-- Weekly bias = directional filter only, not entry trigger
-- Discrete sizing (0.0, ±0.25, ±0.30) minimizes fee churn
+Entry logic (LOOSE to guarantee trades):
+- LONG: 12h_HMA rising + 1d_HMA bullish + ROC(10) > 5
+- SHORT: 12h_HMA falling + 1d_HMA bearish + ROC(10) < -5
 
 Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 1d
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_dual_hma_weekly_bias_rsi_v1"
-timeframe = "1d"
+name = "mtf_6h_hma_trend_roc_momentum_12h1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -78,23 +79,18 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+def calculate_roc(close, period=10):
+    """Rate of Change - momentum indicator"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    roc = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if close[i - period] != 0:
+            roc[i] = ((close[i] - close[i - period]) / close[i - period]) * 100.0
     
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    rsi[:period] = np.nan
-    return rsi
+    return roc
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -103,17 +99,22 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align weekly HMA for trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align HTF indicators
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate daily indicators
-    hma_8 = calculate_hma(close, period=8)
-    hma_21 = calculate_hma(close, period=21)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
+    roc_10 = calculate_roc(close, period=10)
+    
+    # Also calculate 6h HMA for local trend
+    hma_6h = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -140,76 +141,76 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(roc_10[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_8[i]) or np.isnan(hma_21[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_6h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === WEEKLY TREND BIAS (Major direction filter) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        # === TREND DIRECTION (12h HMA slope + 1d HMA bias) ===
+        # 12h HMA slope (compare to 3 bars ago for stability)
+        hma_12h_slope = 0.0
+        if i >= 3 and not np.isnan(hma_12h_aligned[i-3]):
+            hma_12h_slope = hma_12h_aligned[i] - hma_12h_aligned[i-3]
         
-        # === DAILY HMA CROSSOVER (Entry trigger) ===
-        hma8_above_hma21 = hma_8[i] > hma_21[i]
-        hma8_below_hma21 = hma_8[i] < hma_21[i]
+        # 1d HMA bias
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # Check previous bar for crossover detection
-        hma8_prev_above_hma21 = hma_8[i-1] > hma_21[i-1] if i > 0 else False
-        hma8_prev_below_hma21 = hma_8[i-1] < hma_21[i-1] if i > 0 else False
+        # 6h price vs 6h HMA for local confirmation
+        price_above_6h = close[i] > hma_6h[i]
+        price_below_6h = close[i] < hma_6h[i]
         
-        # === RSI FILTER (Avoid extremes) ===
-        rsi = rsi_14[i]
-        rsi_valid_long = 30.0 <= rsi <= 70.0
-        rsi_valid_short = 30.0 <= rsi <= 70.0
+        # === MOMENTUM (ROC) ===
+        roc = roc_10[i]
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: Weekly bullish + Daily HMA8>21 + RSI not extreme
-        # Bullish crossover: HMA8 crossed above HMA21
-        if price_above_1w and hma8_above_hma21 and rsi_valid_long:
-            if not hma8_prev_above_hma21:  # Fresh crossover
-                desired_signal = SIZE_STRONG
-            else:
-                desired_signal = SIZE_BASE  # Already in trend
+        # LONG: 12h HMA rising + 1d bullish + ROC positive momentum
+        if hma_12h_slope > 0 and price_above_1d and price_above_6h:
+            if roc > 3.0:  # Loose momentum threshold
+                if roc > 8.0:
+                    desired_signal = SIZE_STRONG  # Strong momentum
+                else:
+                    desired_signal = SIZE_BASE  # Basic momentum
         
-        # SHORT: Weekly bearish + Daily HMA8<21 + RSI not extreme
-        # Bearish crossover: HMA8 crossed below HMA21
-        elif price_below_1w and hma8_below_hma21 and rsi_valid_short:
-            if not hma8_prev_below_hma21:  # Fresh crossover
-                desired_signal = -SIZE_STRONG
-            else:
-                desired_signal = -SIZE_BASE  # Already in trend
+        # SHORT: 12h HMA falling + 1d bearish + ROC negative momentum
+        elif hma_12h_slope < 0 and price_below_1d and price_below_6h:
+            if roc < -3.0:  # Loose momentum threshold
+                if roc < -8.0:
+                    desired_signal = -SIZE_STRONG  # Strong momentum
+                else:
+                    desired_signal = -SIZE_BASE  # Basic momentum
         
-        # === STOPLOSS CHECK (3x ATR trailing) ===
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 3.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 3.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -239,9 +240,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 3.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 3.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
