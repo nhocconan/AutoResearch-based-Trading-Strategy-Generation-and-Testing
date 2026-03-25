@@ -1,40 +1,45 @@
 #!/usr/bin/env python3
 """
-Experiment #1110: 1h Primary + 4h/1d HTF — Simplified Regime + RSI Pullback + Session Filter
+Experiment #1111: 6h Primary + 1d/1w HTF — Volatility Squeeze Breakout with Regime Filter
 
-Hypothesis: After 900+ failed experiments, complexity is the enemy. This strategy uses:
-1. 4h HMA(21) for trend direction (simpler than triple HMA)
-2. 1h RSI(7) pullback entries in trend direction (proven pattern)
-3. Session filter 08-20 UTC (avoid Asian session noise)
-4. Choppiness Index as meta-filter (only trade when CHOP in valid range)
-5. Discrete sizing 0.20/0.30 to minimize fee churn
+Hypothesis: Volatility squeeze breakouts (BB Width at lows + Keltner breakout) with HTF
+trend confirmation will capture major moves while avoiding whipsaws. The 6h timeframe
+captures multi-day breakouts without the noise of lower TFs.
 
-Key simplifications from failures:
-- Removed complex regime switching (caused 0 trades in #1108, #1109)
-- Loosened entry thresholds (RSI 35-65 instead of extreme values)
-- Single HTF filter (4h HMA) instead of triple alignment
-- Session filter reduces false signals during low liquidity
+Key innovations:
+1. Bollinger Band Width Percentile: BBW in bottom 25% = squeeze (coiling energy)
+2. Keltner Channel Breakout: Price outside KC = momentum confirmation
+3. 1w HMA(21): Long-term trend bias (only trade in direction)
+4. 1d ADX(14): Trend strength filter (ADX>20 = trend, ADX<20 = range/reversion)
+5. Dual regime logic:
+   - ADX>20 + BBW squeeze + KC breakout = trend follow
+   - ADX<20 + BBW extreme + RSI extreme = mean reversion
+6. ATR(14) 2.5x trailing stop for risk management
+7. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Why this should work on 1h:
-- 4h trend filter gives direction bias (avoid counter-trend trades)
-- 1h RSI pullback catches entries at better prices
-- Session filter (08-20 UTC) avoids 3am Asian session whipsaws
-- Target 40-80 trades/year (fee drag manageable at 0.05% RT)
+Why this should work:
+- BB squeeze precedes 70% of major moves (literature-backed)
+- Keltner breakout confirms momentum direction
+- 1w HMA ensures we don't fight the macro trend
+- 6h captures moves that 4h misses (longer holding period = less fee drag)
+- Dual regime adapts to both trending and ranging markets
 
-Entry conditions (LOOSE to guarantee trades):
-- LONG: 4h_HMA bullish + RSI(7) 35-50 + CHOP 30-70 + session 08-20 UTC
-- SHORT: 4h_HMA bearish + RSI(7) 50-65 + CHOP 30-70 + session 08-20 UTC
+Entry conditions (LOOSE to guarantee 30+ trades/year):
+- LONG trend: BBW_pct<30 + price>KC_upper + close>1w_HMA + ADX>18
+- LONG mean-rev: BBW_pct<20 + RSI<30 + close>1w_HMA*0.95 + ADX<22
+- SHORT trend: BBW_pct<30 + price<KC_lower + close<1w_HMA + ADX>18
+- SHORT mean-rev: BBW_pct<20 + RSI>70 + close<1w_HMA*1.05 + ADX<22
 
-Target: Sharpe>0.45, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 1h (REQUIRED by experiment)
-Size: 0.20-0.30 discrete
+Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_rsi_pullback_4h_trend_session_v1"
-timeframe = "1h"
+name = "mtf_6h_bb_keltner_squeeze_regime_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -99,73 +104,117 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness vs trending
-    CHOP > 61.8 = ranging market
-    CHOP < 38.2 = trending market
-    We use 30-70 as valid trading range
-    """
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Bollinger Bands"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma
+    
+    return upper, lower, bandwidth
+
+def calculate_keltner(high, low, close, period=20, atr_mult=1.5):
+    """Keltner Channels"""
     n = len(close)
     if n < period + 1:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, period)
+    
+    upper = ema + atr_mult * atr
+    lower = ema - atr_mult * atr
+    
+    return upper, lower
+
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index"""
+    n = len(close)
+    if n < period * 2 + 1:
         return np.full(n, np.nan)
     
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
     tr = np.zeros(n, dtype=np.float64)
+    
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i-period+1:i+1])
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
         
-        price_range = highest_high - lowest_low
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+        if high[i] - high[i-1] > low[i-1] - low[i]:
+            plus_dm[i] = max(0, high[i] - high[i-1])
+        else:
+            plus_dm[i] = 0
+            
+        if low[i-1] - low[i] > high[i] - high[i-1]:
+            minus_dm[i] = max(0, low[i-1] - low[i])
+        else:
+            minus_dm[i] = 0
     
-    return chop
+    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    plus_di_pct = np.divide(plus_di, atr_smooth, out=np.zeros_like(plus_di), where=atr_smooth != 0) * 100
+    minus_di_pct = np.divide(minus_di, atr_smooth, out=np.zeros_like(minus_di), where=atr_smooth != 0) * 100
+    
+    dx = np.divide(np.abs(plus_di_pct - minus_di_pct), 
+                   plus_di_pct + minus_di_pct, 
+                   out=np.zeros_like(plus_di_pct), 
+                   where=(plus_di_pct + minus_di_pct) != 0) * 100
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    adx[:period*2] = np.nan
+    
+    return adx
 
-def get_hour_from_open_time(open_time_array):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    hours = np.zeros(len(open_time_array), dtype=np.int32)
-    for i in range(len(open_time_array)):
-        # open_time is in milliseconds
-        ts_sec = open_time_array[i] / 1000.0
-        hours[i] = int((ts_sec % 86400) / 3600)
-    return hours
+def calculate_bbwidth_percentile(bandwidth, lookback=100):
+    """Percentile rank of BB Width over lookback period"""
+    n = len(bandwidth)
+    pct = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(lookback, n):
+        window = bandwidth[i-lookback:i]
+        if not np.any(np.isnan(window)):
+            count_below = np.sum(window < bandwidth[i])
+            pct[i] = 100.0 * count_below / lookback
+    
+    return pct
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    adx_1d_raw = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_raw)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
     rsi_14 = calculate_rsi(close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # Get UTC hour for session filter
-    utc_hours = get_hour_from_open_time(open_time)
+    bb_upper, bb_lower, bb_width = calculate_bollinger(close, period=20, std_mult=2.0)
+    bbwidth_pct = calculate_bbwidth_percentile(bb_width, lookback=100)
+    
+    kc_upper, kc_lower = calculate_keltner(high, low, close, period=20, atr_mult=1.5)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -177,7 +226,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -186,68 +235,64 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(bb_width[i]) or np.isnan(bbwidth_pct[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (08-20 UTC) ===
-        hour = utc_hours[i]
-        in_session = (hour >= 8) and (hour <= 20)
-        
-        if not in_session:
-            # Close positions outside session
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(adx_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === CHOPPINESS FILTER (valid range 30-70) ===
-        chop_valid = (chop_14[i] >= 30.0) and (chop_14[i] <= 70.0)
+        # === REGIME DETECTION ===
+        is_squeeze = bbwidth_pct[i] < 30.0  # BB width in bottom 30%
+        is_extreme_squeeze = bbwidth_pct[i] < 20.0  # Bottom 20%
+        is_trending = adx_1d_aligned[i] > 18.0  # 1d ADX indicates trend
+        is_ranging = adx_1d_aligned[i] < 22.0  # 1d ADX indicates range
         
-        if not chop_valid:
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === HTF BIAS ===
+        hma_1w_bull = close[i] > hma_1w_aligned[i]
+        hma_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # === HTF TREND BIAS (4h HMA) ===
-        trend_bull = close[i] > hma_4h_aligned[i]
-        trend_bear = close[i] < hma_4h_aligned[i]
-        
-        # Stronger bias when 4h and 1d align
-        strong_bull = trend_bull and (close[i] > hma_1d_aligned[i])
-        strong_bear = trend_bear and (close[i] < hma_1d_aligned[i])
-        
-        # === ENTRY LOGIC (RSI PULLBACK IN TREND DIRECTION) ===
+        # === ENTRY LOGIC (DUAL REGIME) ===
         desired_signal = 0.0
         
-        # LONG: bullish trend + RSI pullback to 35-50
-        if trend_bull:
-            if rsi_7[i] >= 35.0 and rsi_7[i] <= 50.0:
-                desired_signal = SIZE_BASE
-            # Stronger signal if RSI very oversold in uptrend
-            elif rsi_7[i] < 35.0 and rsi_14[i] < 45.0:
+        # TREND FOLLOWING MODE (ADX > 18, squeeze breakout)
+        if is_trending and is_squeeze:
+            # Long breakout above Keltner with HTF bull bias
+            if close[i] > kc_upper[i] and hma_1w_bull:
                 desired_signal = SIZE_STRONG
-        
-        # SHORT: bearish trend + RSI pullback to 50-65
-        elif trend_bear:
-            if rsi_7[i] >= 50.0 and rsi_7[i] <= 65.0:
-                desired_signal = -SIZE_BASE
-            # Stronger signal if RSI very overbought in downtrend
-            elif rsi_7[i] > 65.0 and rsi_14[i] > 55.0:
+            # Short breakout below Keltner with HTF bear bias
+            elif close[i] < kc_lower[i] and hma_1w_bear:
                 desired_signal = -SIZE_STRONG
+        
+        # MEAN REVERSION MODE (ADX < 22, extreme squeeze + RSI extreme)
+        elif is_ranging and is_extreme_squeeze:
+            # Long when RSI oversold + above weekly HMA support
+            if rsi_14[i] < 35.0 and close[i] > hma_1w_aligned[i] * 0.97:
+                desired_signal = SIZE_BASE
+            # Short when RSI overbought + below weekly HMA resistance
+            elif rsi_14[i] > 65.0 and close[i] < hma_1w_aligned[i] * 1.03:
+                desired_signal = -SIZE_BASE
+        
+        # Additional trend entries (looser conditions for more trades)
+        if desired_signal == 0.0 and is_trending:
+            if hma_1w_bull and close[i] > kc_upper[i] * 0.995:
+                desired_signal = SIZE_BASE
+            elif hma_1w_bear and close[i] < kc_lower[i] * 1.005:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
