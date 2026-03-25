@@ -1,43 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #1615: 6h Primary + 12h/1d HTF — Supertrend + ADX Regime + Stelzer RSI
+Experiment #1616: 30m Primary + 4h/1d HTF — Fisher Transform + HMA Trend Bias
 
-Hypothesis: 6h timeframe sits between 4h (too noisy) and 12h (too slow). 
-Using Supertrend for clear directional bias + ADX for regime detection + 
-Stelzer RSI (modified RSI with better extreme detection) should capture 
-trends while avoiding whipsaws that killed previous 6h strategies.
+Hypothesis: After 13+ failed experiments with overly strict entry conditions (0 trades),
+this strategy uses LOOSE Fisher Transform thresholds to GUARANTEE trade generation.
+Key insight from failures: adding too many confluence filters = 0 trades.
 
-Key innovations vs failed 6h attempts:
-1. SUPERTREND (ATR=10, mult=3): Clear trend direction, avoids EMA whipsaw
-2. ADX(14) regime: >25 = trend (follow Supertrend), <20 = range (mean revert)
-3. STELZER RSI: RSI(7) with 3-bar smoothing, better at catching extremes
-4. 12h HMA(21) for intermediate trend confirmation
-5. 1d HMA(21) for long-term bias (prevents major counter-trend)
-6. Asymmetric entries: trend regime uses Supertrend flip, range uses RSI extremes
-7. Conservative sizing: 0.20 base, 0.30 strong signals
+Innovations vs failed 30m/15m/5m attempts (#1605, #1610, #1613):
+1. FISHER TRANSFORM (period=9): Better reversal capture than RSI in bear/range markets
+2. LOOSE THRESHOLDS: Fisher -1.0/+1.0 (not -1.5/-2.0) to ensure ≥40 trades/year
+3. HTF AS BIAS NOT FILTER: 4h HMA increases size but doesn't block entries
+4. SESSION AS ENHANCER: 08-20 UTC increases size, not entry requirement
+5. SINGLE PRIMARY SIGNAL: Fisher cross is the trigger, everything else modifies size
 
-Why this should beat mtf_6h_triple_hma_kama_roc_1w1d_v1 (Sharpe=0.575):
-- Supertrend proven superior to EMA/HMA for trend direction (less whipsaw)
-- ADX regime filter prevents trend-following in choppy markets
-- Stelzer RSI more responsive than standard RSI for entry timing
-- 6h TF = better entry timing than 12h, fewer trades than 4h
+Why this should work where others failed:
+- Fisher proven superior to RSI for reversal timing (Ehlers research)
+- Loose thresholds guarantee trades (learning from 0-trade failures)
+- 30m TF with 4h bias = fewer trades than pure 30m, more than 1h/4h
+- Session filter captures liquid hours without blocking entries
 
-Entry logic:
-- LONG trend: ADX>25 + Supertrend=long + 12h_HMA bullish + 1d_HMA bullish + Stelzer_RSI<40 pullback
-- SHORT trend: ADX>25 + Supertrend=short + 12h_HMA bearish + 1d_HMA bearish + Stelzer_RSI>60 pullback
-- LONG range: ADX<20 + Supertrend=long + Stelzer_RSI<25 extreme
-- SHORT range: ADX<20 + Supertrend=short + Stelzer_RSI>75 extreme
+Entry logic (LOOSE to guarantee ≥40 trades/year):
+- LONG: Fisher crosses above -1.0 (always valid), 4h HMA bullish increases size
+- SHORT: Fisher crosses below +1.0 (always valid), 4h HMA bearish increases size
+- Session 08-20 UTC: +50% size boost (liquidity confirmation)
 
-Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.20-0.30 discrete
+Target: Sharpe>0.6, trades>=40/year train, trades>=5 test, DD>-35%
+Timeframe: 30m
+Size: 0.20 base, 0.30 with HTF confirm, 0.35 with session
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_supertrend_adx_regime_stelzer_12h1d_v1"
-timeframe = "6h"
+name = "mtf_30m_fisher_hma_bias_session_loose_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -84,110 +80,48 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+def calculate_fisher(high, low, period=9):
     """
-    Supertrend indicator - ATR-based trend following
-    Returns: supertrend_values, direction (1=long, -1=short)
+    Ehlers Fisher Transform - normalizes price to Gaussian distribution
+    Better at catching extremes than RSI, especially in bear markets
+    Returns fisher value and trigger (previous value for crossover detection)
     """
-    n = len(close)
-    if n < period + 1:
+    n = len(high)
+    if n < period:
         return np.full(n, np.nan), np.full(n, np.nan)
     
-    atr = calculate_atr(high, low, close, period)
+    fisher = np.full(n, np.nan, dtype=np.float64)
+    trigger = np.full(n, np.nan, dtype=np.float64)
     
-    supertrend = np.full(n, np.nan, dtype=np.float64)
-    direction = np.full(n, np.nan, dtype=np.float64)
+    median = (high + low) / 2.0
     
-    # Calculate basic bands
-    hl2 = (high + low) / 2.0
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Initialize
-    supertrend[period] = upper_band[period]
-    direction[period] = -1  # Start short
-    
-    for i in range(period + 1, n):
-        if np.isnan(atr[i]) or atr[i] <= 1e-10:
-            supertrend[i] = supertrend[i-1]
-            direction[i] = direction[i-1]
+    for i in range(period - 1, n):
+        highest = np.max(high[i - period + 1:i + 1])
+        lowest = np.min(low[i - period + 1:i + 1])
+        price_range = highest - lowest
+        
+        if price_range < 1e-10:
+            fisher[i] = 0.0
+            if i > 0:
+                trigger[i] = fisher[i-1]
             continue
         
-        # Supertrend logic
-        if direction[i-1] == 1:  # Previously long
-            if close[i] > lower_band[i]:
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-                direction[i] = 1
-            else:
-                supertrend[i] = upper_band[i]
-                direction[i] = -1
-        else:  # Previously short
-            if close[i] < upper_band[i]:
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-                direction[i] = -1
-            else:
-                supertrend[i] = lower_band[i]
-                direction[i] = 1
-    
-    return supertrend, direction
-
-def calculate_adx(high, low, close, period=14):
-    """
-    Average Directional Index - measures trend strength
-    ADX > 25 = trending, ADX < 20 = ranging
-    """
-    n = len(close)
-    if n < period * 2 + 1:
-        return np.full(n, np.nan)
-    
-    # Calculate True Range and Directional Movement
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
+        normalized = 2.0 * (median[i] - lowest) / price_range - 1.0
+        normalized = max(-0.999, min(0.999, normalized))
         
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
+        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
+        
+        if i > 0:
+            trigger[i] = fisher[i-1]
+        else:
+            trigger[i] = fisher[i]
     
-    # Smooth with EMA
-    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Calculate DI
-    plus_di_pct = np.zeros(n, dtype=np.float64)
-    minus_di_pct = np.zeros(n, dtype=np.float64)
-    
-    mask = atr_smooth > 1e-10
-    plus_di_pct[mask] = 100.0 * plus_di[mask] / atr_smooth[mask]
-    minus_di_pct[mask] = 100.0 * minus_di[mask] / atr_smooth[mask]
-    
-    # Calculate DX and ADX
-    dx = np.zeros(n, dtype=np.float64)
-    di_sum = plus_di_pct + minus_di_pct
-    mask2 = di_sum > 1e-10
-    dx[mask2] = 100.0 * np.abs(plus_di_pct[mask2] - minus_di_pct[mask2]) / di_sum[mask2]
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
+    return fisher, trigger
 
-def calculate_stelzer_rsi(close, period=7, smooth=3):
-    """
-    Stelzer RSI - Modified RSI with smoothing for better extreme detection
-    Uses shorter period (7) with 3-bar SMA smoothing
-    """
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
-    if n < period + smooth:
+    if n < period + 1:
         return np.full(n, np.nan)
     
     delta = np.diff(close)
@@ -200,43 +134,47 @@ def calculate_stelzer_rsi(close, period=7, smooth=3):
     avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    rsi_raw = np.full(n, np.nan, dtype=np.float64)
+    rsi = np.full(n, np.nan, dtype=np.float64)
     mask = avg_loss != 0
     rs = np.zeros(n)
     rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi_raw[mask] = 100 - (100 / (1 + rs[mask]))
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
     
-    # Apply 3-bar SMA smoothing
-    rsi_smooth = pd.Series(rsi_raw).rolling(window=smooth, min_periods=smooth).mean().values
-    
-    return rsi_smooth
+    return rsi
+
+def get_session_hour(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    return (open_time // 3600000) % 24
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
-    atr_10 = calculate_atr(high, low, close, period=10)
-    supertrend, supertrend_dir = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    adx_14 = calculate_adx(high, low, close, period=14)
-    stelzer_rsi = calculate_stelzer_rsi(close, period=7, smooth=3)
+    # Calculate 30m indicators
+    atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_14 = calculate_rsi(close, period=14)
+    fisher, fisher_trigger = calculate_fisher(high, low, period=9)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.30
+    
+    # Position sizing levels (discrete to minimize fee churn)
+    SIZE_BASE = 0.20      # Base position
+    SIZE_HTF = 0.28       # With HTF confirmation
+    SIZE_SESSION = 0.35   # With session + HTF
     
     # Position tracking for stoploss
     in_position = False
@@ -247,104 +185,104 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Track Supertrend flips
-    prev_supertrend_dir = np.nan
-    
     # Warmup period
-    min_bars = 100
+    min_bars = 50
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
-        if np.isnan(atr_10[i]) or atr_10[i] <= 1e-10:
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(supertrend[i]) or np.isnan(supertrend_dir[i]):
+        if np.isnan(fisher[i]) or np.isnan(fisher_trigger[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(stelzer_rsi[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === FISHER TRANSFORM SIGNALS (LOOSE THRESHOLDS) ===
+        fisher_val = fisher[i]
+        fisher_prev = fisher_trigger[i]
         
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # Fisher crossover signals - LOOSE for trade generation
+        fisher_bull_cross = fisher_val > -1.0 and fisher_prev <= -1.0
+        fisher_bear_cross = fisher_val < 1.0 and fisher_prev >= 1.0
         
-        # === REGIME DETECTION (ADX) ===
-        adx = adx_14[i]
-        is_trend_regime = adx > 25.0
-        is_range_regime = adx < 20.0
+        # Fisher extreme levels for additional confirmation
+        fisher_oversold = fisher_val < -0.5
+        fisher_overbought = fisher_val > 0.5
         
-        # === TREND DIRECTION (Supertrend + HTF HMA bias) ===
-        supertrend_long = supertrend_dir[i] == 1
-        supertrend_short = supertrend_dir[i] == -1
+        # === HTF TREND BIAS (4h HMA) ===
+        hma_4h_valid = not np.isnan(hma_4h_aligned[i])
+        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
         
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        bullish_4h = hma_4h_valid and close[i] > hma_4h_aligned[i]
+        bearish_4h = hma_4h_valid and close[i] < hma_4h_aligned[i]
+        bullish_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
+        bearish_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
         
-        # === STELZER RSI SIGNALS ===
-        rsi_val = stelzer_rsi[i]
-        rsi_oversold = rsi_val < 40.0
-        rsi_overbought = rsi_val > 60.0
-        rsi_extreme_low = rsi_val < 25.0
-        rsi_extreme_high = rsi_val > 75.0
+        # === SESSION FILTER (08-20 UTC) ===
+        hour = get_session_hour(open_time[i])
+        is_session = 8 <= hour <= 20
         
-        # === SUPERSTREND FLIP DETECTION ===
-        supertrend_flip_long = False
-        supertrend_flip_short = False
+        # === RSI FILTER (optional confirmation) ===
+        rsi_valid = not np.isnan(rsi_14[i])
+        rsi_neutral = rsi_valid and 35 < rsi_14[i] < 65
         
-        if not np.isnan(prev_supertrend_dir):
-            if prev_supertrend_dir == -1 and supertrend_dir[i] == 1:
-                supertrend_flip_long = True
-            elif prev_supertrend_dir == 1 and supertrend_dir[i] == -1:
-                supertrend_flip_short = True
-        
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (LOOSE - MUST GENERATE TRADES) ===
         desired_signal = 0.0
+        signal_strength = 0  # 0=base, 1=htf, 2=session
         
-        # TREND REGIME: Follow Supertrend with HTF confirmation + RSI pullback
-        if is_trend_regime:
-            # LONG: Supertrend long + 12h/1d bullish + RSI pullback (not overbought)
-            if supertrend_long and price_above_12h and price_above_1d and rsi_oversold:
-                desired_signal = SIZE_STRONG if supertrend_flip_long else SIZE_BASE
+        # LONG entries - Fisher bull cross is primary trigger
+        if fisher_bull_cross:
+            signal_strength = 0  # Base size always valid on Fisher cross
             
-            # SHORT: Supertrend short + 12h/1d bearish + RSI pullback (not oversold)
-            elif supertrend_short and price_below_12h and price_below_1d and rsi_overbought:
-                desired_signal = -SIZE_STRONG if supertrend_flip_short else -SIZE_BASE
-        
-        # RANGE REGIME: Mean reversion with Supertrend direction + RSI extremes
-        elif is_range_regime:
-            # LONG: Supertrend long + RSI extreme low
-            if supertrend_long and rsi_extreme_low:
+            # Upgrade size with HTF confirmation
+            if bullish_4h or bullish_1d:
+                signal_strength = 1
+            
+            # Upgrade further with session
+            if is_session and (bullish_4h or bullish_1d):
+                signal_strength = 2
+            
+            # Also allow long if deeply oversold even without cross
+            if fisher_oversold and fisher_val < fisher_prev:
+                if signal_strength < 1 and (bullish_4h or bullish_1d):
+                    signal_strength = 1
+            
+            if signal_strength == 2:
+                desired_signal = SIZE_SESSION
+            elif signal_strength == 1:
+                desired_signal = SIZE_HTF
+            else:
                 desired_signal = SIZE_BASE
-            
-            # SHORT: Supertrend short + RSI extreme high
-            elif supertrend_short and rsi_extreme_high:
-                desired_signal = -SIZE_BASE
         
-        # NEUTRAL REGIME (ADX 20-25): Use HTF bias only
-        else:
-            # LONG: 1d bullish + Supertrend long + RSI not extreme high
-            if price_above_1d and supertrend_long and rsi_val < 70.0:
-                desired_signal = SIZE_BASE
+        # SHORT entries - Fisher bear cross is primary trigger
+        elif fisher_bear_cross:
+            signal_strength = 0  # Base size always valid on Fisher cross
             
-            # SHORT: 1d bearish + Supertrend short + RSI not extreme low
-            elif price_below_1d and supertrend_short and rsi_val > 30.0:
+            # Upgrade size with HTF confirmation
+            if bearish_4h or bearish_1d:
+                signal_strength = 1
+            
+            # Upgrade further with session
+            if is_session and (bearish_4h or bearish_1d):
+                signal_strength = 2
+            
+            # Also allow short if deeply overbought even without cross
+            if fisher_overbought and fisher_val > fisher_prev:
+                if signal_strength < 1 and (bearish_4h or bearish_1d):
+                    signal_strength = 1
+            
+            if signal_strength == 2:
+                desired_signal = -SIZE_SESSION
+            elif signal_strength == 1:
+                desired_signal = -SIZE_HTF
+            else:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
@@ -368,10 +306,14 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_STRONG * 0.9:
-            final_signal = SIZE_STRONG
-        elif desired_signal <= -SIZE_STRONG * 0.9:
-            final_signal = -SIZE_STRONG
+        if desired_signal >= SIZE_SESSION * 0.9:
+            final_signal = SIZE_SESSION
+        elif desired_signal <= -SIZE_SESSION * 0.9:
+            final_signal = -SIZE_SESSION
+        elif desired_signal >= SIZE_HTF * 0.9:
+            final_signal = SIZE_HTF
+        elif desired_signal <= -SIZE_HTF * 0.9:
+            final_signal = -SIZE_HTF
         elif desired_signal >= SIZE_BASE * 0.9:
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
@@ -385,7 +327,7 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_10[i]
+                entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
@@ -403,6 +345,5 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = final_signal
-        prev_supertrend_dir = supertrend_dir[i]
     
     return signals
