@@ -1,39 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #1489: 15m Primary + 1h/1d HTF — High-Probability Intraday Trend
+Experiment #1490: 1h Primary + 4h/1d HTF — Simplified Multi-Confluence Strategy
 
-Hypothesis: 15m strategies fail because entry conditions are EITHER too strict (0 trades)
-OR too loose (>300 trades/year, fee drag kills returns). This strategy uses:
+Hypothesis: Previous failures used overly complex regime detection (CRSI+Chop+multiple filters)
+which resulted in 0 trades or negative Sharpe. This strategy uses SIMPLER but PROVEN filters:
 
-1. 1d HMA(21) for MAJOR trend bias — only trade in direction of daily trend
-2. 1h RSI(14) for momentum confirmation — LOOSE thresholds (40/60, not 30/70)
-3. 15m HMA(8/21) crossover for entry timing — fast but with HTF confirmation
-4. Session filter: 00-12 UTC (London/NY overlap for crypto volume)
-5. ATR(14) trailing stop at 2.0x — tight but not whipsaw-prone
-6. Discrete sizing: 0.0, ±0.15, ±0.20 (smaller for 15m frequency)
+1. 4h HMA(21) for major trend direction — only trade WITH 4h trend
+2. 1h RSI(7) for entry timing — oversold in uptrend, overbought in downtrend
+3. Volume confirmation — above 0.8x 20-bar average (not too strict)
+4. ATR(14) stoploss at 2.5x — protects from major drawdowns
+5. Session bias — slightly favor 08-20 UTC but don't require it
 
-Why this should work on 15m:
-- HTF (1d/1h) provides direction — prevents counter-trend disasters
-- 15m HMA crossover gives entry timing — captures intraday moves
-- LOOSE RSI thresholds (40/60) GUARANTEE trades (critical for 15m)
-- Session filter reduces low-volume whipsaws
-- Small position size (0.15-0.20) accounts for higher trade frequency
-- Target: 50-100 trades/year (fee-efficient for 15m)
+Key differences from failed strategies:
+- LOOSER RSI thresholds (35/65 instead of 25/75) to guarantee trades
+- Volume filter is permissive (0.8x avg, not 1.5x)
+- Only 2 out of 3 confluence needed (not all 3)
+- Discrete sizing: 0.0, ±0.20, ±0.30 (minimize fee churn)
+- Proper MTF alignment using mtf_data helper (NO manual resampling)
 
-Entry logic (LOOSE to guarantee ≥10 trades/train, ≥3/test):
-- LONG: 1d_HMA bullish + 1h_RSI > 40 + 15m_HMA8 > HMA21 + session 00-12 UTC
-- SHORT: 1d_HMA bearish + 1h_RSI < 60 + 15m_HMA8 < HMA21 + session 00-12 UTC
-
-Timeframe: 15m
-Size: 0.15-0.20 discrete (smaller for higher frequency)
-Target: Sharpe>0.6, trades>=50 train, trades>=5 test, DD>-35%
+Target: Sharpe>0.6, trades>=40/year, DD>-35%, ALL symbols positive Sharpe
+Timeframe: 1h
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_hma_rsi_session_1h1d_loose_v1"
-timeframe = "15m"
+name = "mtf_1h_hma_rsi_vol_confluence_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -104,32 +98,42 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_sma(series, period):
+    """Simple Moving Average"""
+    n = len(series)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    sma = pd.Series(series).rolling(window=period, min_periods=period).mean().values
+    return sma
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    rsi_1h_raw = calculate_rsi(df_1h['close'].values, period=14)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
-    
-    # Calculate 15m indicators
-    hma_8 = calculate_hma(close, period=8)
-    hma_21 = calculate_hma(close, period=21)
+    # Calculate 1h indicators
+    rsi_7 = calculate_rsi(close, period=7)
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
+    vol_sma_20 = calculate_sma(volume, 20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -152,62 +156,105 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_8[i]) or np.isnan(hma_21[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC) ===
-        # open_time is in milliseconds
-        hour_utc = (open_time[i] // (1000 * 60 * 60)) % 24
-        is_session = (hour_utc >= 0 and hour_utc < 12)
+        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] <= 1e-10:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === TREND DIRECTION (1d HMA bias) ===
+        # === TREND DIRECTION (4h HMA bias) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
+        
+        # === 1d HMA major trend filter ===
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === 1h RSI MOMENTUM (LOOSE thresholds) ===
-        rsi_1h = rsi_1h_aligned[i]
-        rsi_bullish = rsi_1h > 40  # LOOSE: not oversold
-        rsi_bearish = rsi_1h < 60  # LOOSE: not overbought
+        # === RSI signals (LOOSE thresholds for trade generation) ===
+        rsi = rsi_7[i]
+        rsi_oversold = rsi < 40  # Was 35, loosened to 40
+        rsi_overbought = rsi > 60  # Was 65, loosened to 60
         
-        # === 15m HMA CROSSOVER (entry timing) ===
-        hma_bullish = hma_8[i] > hma_21[i]
-        hma_bearish = hma_8[i] < hma_21[i]
+        # === Volume confirmation (permissive) ===
+        vol_ratio = volume[i] / vol_sma_20[i] if vol_sma_20[i] > 0 else 0
+        vol_confirmed = vol_ratio > 0.8  # Very permissive
+        
+        # === Session filter (08-20 UTC) — optional boost ===
+        hour = (prices['open_time'].iloc[i] // 3600000) % 24
+        is_session = 8 <= hour <= 20
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
+        # Only need 2 out of 3 confluence factors
         desired_signal = 0.0
+        confluence_long = 0
+        confluence_short = 0
         
-        # LONG: 1d bullish + 1h RSI > 40 + 15m HMA8 > HMA21 + session
-        if price_above_1d and rsi_bullish and hma_bullish and is_session:
-            desired_signal = SIZE_STRONG
+        # LONG confluence factors:
+        if price_above_4h:
+            confluence_long += 1
+        if rsi_oversold:
+            confluence_long += 1
+        if vol_confirmed:
+            confluence_long += 1
         
-        # SHORT: 1d bearish + 1h RSI < 60 + 15m HMA8 < HMA21 + session
-        elif price_below_1d and rsi_bearish and hma_bearish and is_session:
-            desired_signal = -SIZE_STRONG
+        # SHORT confluence factors:
+        if price_below_4h:
+            confluence_short += 1
+        if rsi_overbought:
+            confluence_short += 1
+        if vol_confirmed:
+            confluence_short += 1
         
-        # === STOPLOSS CHECK (2.0x ATR trailing) ===
+        # Entry: need 2+ confluence + 1d trend agreement (or neutral)
+        if confluence_long >= 2 and (price_above_1d or not price_below_1d):
+            # Boost size if 1d also bullish
+            if price_above_1d:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
+        
+        if confluence_short >= 2 and (price_below_1d or not price_above_1d):
+            # Boost size if 1d also bearish
+            if price_below_1d:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
+        
+        # Session boost: if in session and signal exists, increase confidence
+        if is_session and desired_signal != 0:
+            if desired_signal > 0:
+                desired_signal = min(desired_signal + 0.05, SIZE_STRONG)
+            else:
+                desired_signal = max(desired_signal - 0.05, -SIZE_STRONG)
+        
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -237,9 +284,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
