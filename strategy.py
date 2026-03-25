@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1380: 6h Primary + 1d/1w HTF — Donchian Breakout + RSI Pullback + Volume Confirm
+Experiment #1381: 15m Primary + 1h/4h/1d HTF — Multi-TF RSI Mean Reversion in Trend
 
-Hypothesis: 6h timeframe is underexplored with ZERO successful experiments. Previous 6h failures
-used overly complex regime filters (CHOP+CRSI) that generated 0 trades or negative Sharpe.
+Hypothesis: 15m timeframe is HIGH-PRIORITY (ZERO prior successful experiments). This strategy uses:
+1. 4h HMA(21) for major trend bias (only trade in trend direction)
+2. 1h RSI(14) for regime confirmation (avoid counter-trend exhaustion)
+3. 15m RSI(7) for entry timing (faster RSI for lower TF entries)
+4. ATR(14) stoploss for risk management
+5. NO session filter (maximize trade count — previous 15m failures had 0 trades)
 
-This strategy simplifies entry logic while maintaining strong HTF trend filter:
-1. 1d HMA(21) + 1w HMA(21) for major trend bias (avoid counter-trend = key lesson from 2022)
-2. 6h Donchian(20) breakout for entry trigger (proven on 4h/12h, untested on 6h)
-3. 6h RSI(14) pullback confirmation (RSI 40-60 zone = healthy pullback, not exhaustion)
-4. 6h Volume surge confirmation (taker_buy_volume ratio > 1.5 = real breakout)
-5. ATR(14) trailing stop at 2.5x (mandatory risk management)
+Why this should work where 15m strategies failed:
+- LOOSE RSI thresholds (<40/>60 not <20/>80) = MORE trades
+- HTF trend filter prevents whipsaw but doesn't block entries
+- 15m RSI(7) reacts faster than 15m RSI(14) = more entry opportunities
+- Discrete sizing (0.15/0.25) minimizes fee churn
+- Target: 50-80 trades/year = 200-320 trades over 4-year train
 
-Why this should work where 6h strategies failed:
-- Simpler entry = more trades (avoid 0-trade failure mode)
-- Donchian breakout = catches trending moves (works in bull AND bear)
-- RSI pullback filter = avoids chasing exhausted breakouts
-- Volume confirm = filters false breakouts (unique vs prior 6h attempts)
-- 1d+1w trend filter = prevents 2022-style crash whipsaw
+Entry logic (LOOSE to guarantee trades):
+- LONG: price > 4h_HMA + 15m_RSI(7) < 40 + 1h_RSI > 35 (not oversold on 1h)
+- SHORT: price < 4h_HMA + 15m_RSI(7) > 60 + 1h_RSI < 65 (not overbought on 1h)
 
-Entry logic:
-- LONG: price > 1d_HMA + Donchian breakout high + RSI 40-65 + volume surge
-- SHORT: price < 1d_HMA + Donchian breakout low + RSI 35-60 + volume surge
-
-Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.20-0.30 discrete (vol-scaled)
+Target: Sharpe>0.5, trades>=160 train (40/year), trades>=15 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.25 discrete (smaller for higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_rsi_pullback_volume_1d1w_v1"
-timeframe = "6h"
+name = "mtf_15m_rsi7_pullback_hma_trend_1h4h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -65,20 +62,6 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -103,70 +86,45 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout detection"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    return upper, lower
-
-def calculate_volume_ratio(taker_buy_volume, total_volume, period=20):
-    """Volume ratio vs rolling average"""
-    n = len(total_volume)
-    if n < period:
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    vol_avg = pd.Series(total_volume).rolling(window=period, min_periods=period).mean().values
-    ratio = np.full(n, np.nan, dtype=np.float64)
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    mask = vol_avg > 0
-    ratio[mask] = total_volume[mask] / vol_avg[mask]
-    
-    return ratio
-
-def calculate_taker_ratio(taker_buy_volume, total_volume):
-    """Taker buy volume ratio (buying pressure)"""
-    n = len(total_volume)
-    ratio = np.full(n, np.nan, dtype=np.float64)
-    
-    mask = total_volume > 0
-    ratio[mask] = taker_buy_volume[mask] / total_volume[mask]
-    
-    return ratio
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    rsi_1h_raw = calculate_rsi(df_1h['close'].values, period=14)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
     
-    # Calculate 6h indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 15m entries
     rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    vol_ratio = calculate_volume_ratio(taker_buy_vol, volume, period=20)
-    taker_ratio = calculate_taker_ratio(taker_buy_vol, volume)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -178,7 +136,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 50
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -189,90 +147,53 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(vol_ratio[i]) or np.isnan(taker_ratio[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION (4h HMA bias) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # === TREND DIRECTION (1d + 1w HMA bias) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === 1h RSI REGIME (avoid exhaustion) ===
+        rsi_1h = rsi_1h_aligned[i]
         
-        # 1w HMA for major regime (stronger filter)
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
-        
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Breakout high = price crosses above Donchian upper
-        # Breakout low = price crosses below Donchian lower
-        breakout_high = close[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
-        breakout_low = close[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
-        
-        # === VOLUME CONFIRMATION ===
-        # Volume surge = current volume > 1.5x 20-bar average
-        volume_surge = vol_ratio[i] > 1.5
-        
-        # Taker ratio confirmation (buying/selling pressure)
-        taker_buy_pressure = taker_ratio[i] > 0.55  # More buying
-        taker_sell_pressure = taker_ratio[i] < 0.45  # More selling
-        
-        # === RSI PULLBACK ZONE ===
-        # RSI 40-65 = healthy pullback in uptrend (not overbought)
-        # RSI 35-60 = healthy pullback in downtrend (not oversold)
-        rsi = rsi_14[i]
-        rsi_long_zone = 40 <= rsi <= 65
-        rsi_short_zone = 35 <= rsi <= 60
+        # === 15m RSI ENTRY SIGNALS (LOOSE thresholds) ===
+        rsi_7_val = rsi_7[i]
+        rsi_14_val = rsi_14[i]
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + Donchian breakout + RSI in zone + volume confirm
-        if price_above_1d and breakout_high and rsi_long_zone:
-            if price_above_1w:
-                # Strong trend alignment (1d + 1w both bullish)
+        # LONG: 4h bullish + 15m RSI(7) oversold + 1h RSI not overbought
+        # Thresholds: RSI(7) < 40 (not <20), 1h RSI > 35 (not exhausted)
+        if price_above_4h and rsi_7_val < 40 and rsi_1h > 35:
+            # Strong signal if RSI(7) very oversold
+            if rsi_7_val < 30:
                 base_size = SIZE_STRONG
-                # Volume confirm less strict in strong trend
-                volume_ok = volume_surge or vol_ratio[i] > 1.2
             else:
-                # Basic long (only 1d bullish)
                 base_size = SIZE_BASE
-                # Volume confirm required
-                volume_ok = volume_surge
-            
-            if volume_ok and taker_buy_pressure:
-                desired_signal = base_size
+            desired_signal = base_size
         
-        # SHORT: 1d bearish + Donchian breakout + RSI in zone + volume confirm
-        elif price_below_1d and breakout_low and rsi_short_zone:
-            if price_below_1w:
-                # Strong trend alignment (1d + 1w both bearish)
+        # SHORT: 4h bearish + 15m RSI(7) overbought + 1h RSI not oversold
+        # Thresholds: RSI(7) > 60 (not >80), 1h RSI < 65 (not exhausted)
+        elif price_below_4h and rsi_7_val > 60 and rsi_1h < 65:
+            # Strong signal if RSI(7) very overbought
+            if rsi_7_val > 70:
                 base_size = SIZE_STRONG
-                # Volume confirm less strict in strong trend
-                volume_ok = volume_surge or vol_ratio[i] > 1.2
             else:
-                # Basic short (only 1d bearish)
                 base_size = SIZE_BASE
-                # Volume confirm required
-                volume_ok = volume_surge
-            
-            if volume_ok and taker_sell_pressure:
-                desired_signal = -base_size
+            desired_signal = -base_size
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
