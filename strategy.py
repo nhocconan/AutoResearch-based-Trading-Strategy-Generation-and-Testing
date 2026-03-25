@@ -1,76 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1612: 12h Primary + 1d HTF — KAMA Adaptive Trend + RSI Pullback
+Experiment #1613: 5m Primary + 15m/4h HTF — HMA Trend + RSI Pullback + Session
 
-Hypothesis: After 1311 failed strategies, complexity is the enemy. Fisher/CRSI/Choppiness
-combinations have all failed recently. This strategy uses PROVEN simple logic:
-1. 1d HMA for primary trend bias (slow, reliable)
-2. 12h KAMA for adaptive trend following (adjusts to volatility)
-3. RSI(14) 40/60 levels for pullback entries (NOT 30/70 - too strict, causes 0 trades)
-4. ATR(14) stoploss at 2.5x
+Hypothesis: 5m timeframe is completely unexplored (0 experiments). Using proven
+MTF framework from winning 6h strategy but adapted for 5m frequency:
+1. 4h HMA(21) for primary trend bias (like mtf_6h_triple_hma_kama_roc_1w1d_v1)
+2. 15m RSI(7) for pullback entry timing (faster than RSI14 for 5m)
+3. Session filter: 08-20 UTC (London/NY overlap = real volume)
+4. Volatility filter: ATR(14)/ATR(50) > 1.0 (avoid dead zones)
+5. LOOSE entry thresholds: RSI 35/65 (not 30/70) to guarantee trades
 
-Why this should work when others failed:
-- KAMA adapts to market regime automatically (no manual chop detection needed)
-- RSI 40/60 levels ensure entries happen (30/70 too rare in crypto)
-- 12h TF = natural trade frequency 20-50/year (fee-efficient)
-- Simple logic = fewer mutually exclusive conditions = more trades
+Key insight: 5m needs FEWER filters than 15m/1h because frequency is already high.
+Too many confluence filters = 0 trades (see exp#1601, #1605, #1610 all Sharpe=0.000).
 
-Entry logic (LOOSE to guarantee ≥30 trades/train):
-- LONG: 1d_HMA bullish + KAMA crossover up + RSI > 40 (pullback, not extreme)
-- SHORT: 1d_HMA bearish + KAMA crossover down + RSI < 60
+Why this should work:
+- 4h trend bias prevents counter-trend trades (major failure mode on lower TF)
+- 15m RSI pullback = entry timing precision without over-filtering
+- Session filter removes Asian session whipsaw (low volume = fake moves)
+- Small size (0.15-0.20) accounts for higher fee drag at 5m frequency
 
-Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 12h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.6, trades>=50 train, trades>=5 test, DD>-30%
+Timeframe: 5m
+Size: 0.15-0.20 discrete (smaller due to more trades)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_kama_rsi_pullback_1d_v1"
-timeframe = "12h"
+name = "mtf_5m_hma_rsi_pullback_15m4h_session_v1"
+timeframe = "5m"
 leverage = 1.0
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Kaufman Adaptive Moving Average
-    Adjusts smoothing based on market efficiency/volatility
-    """
-    n = len(close)
-    if n < period + slow:
-        return np.full(n, np.nan)
-    
-    kama = np.full(n, np.nan, dtype=np.float64)
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        change = abs(close[i] - close[i - period])
-        volatility = np.sum(np.abs(np.diff(close[i - period:i + 1])))
-        if volatility > 1e-10:
-            er[i] = change / volatility
-        else:
-            er[i] = 0
-    
-    # Calculate smoothing constant
-    sc = np.full(n, np.nan, dtype=np.float64)
-    fast_sc = 2.0 / (fast + 1)
-    slow_sc = 2.0 / (slow + 1)
-    for i in range(period, n):
-        if not np.isnan(er[i]):
-            sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Initialize KAMA
-    kama[period] = close[period]
-    
-    # Calculate KAMA
-    for i in range(period + 1, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i - 1]):
-            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-        else:
-            kama[i] = kama[i - 1] if not np.isnan(kama[i - 1]) else close[i]
-    
-    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -140,28 +99,43 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def is_session_active(open_time_unix_ms):
+    """
+    Session filter: 08-20 UTC (London open to NY close overlap)
+    open_time_unix_ms: Binance open_time in milliseconds
+    Returns True if within active session
+    """
+    # Convert ms to hours UTC
+    hours_utc = (open_time_unix_ms / 3600000) % 24
+    # Active: 08:00 to 20:00 UTC
+    return 8 <= hours_utc < 20
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_15m = get_htf_data(prices, '15m')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 12h indicators
+    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=7)
+    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
+    
+    # Calculate 5m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    kama_10 = calculate_kama(close, period=10, fast=2, slow=30)
-    kama_20 = calculate_kama(close, period=20, fast=2, slow=30)
+    atr_50 = calculate_atr(high, low, close, period=50)
+    rsi_7 = calculate_rsi(close, period=7)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -173,7 +147,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 50
+    min_bars = 100
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -184,51 +158,63 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(kama_10[i]) or np.isnan(kama_20[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(atr_50[i]) or atr_50[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_15m_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1d HMA bias) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === SESSION FILTER (08-20 UTC) ===
+        if not is_session_active(open_time[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === KAMA CROSSOVER SIGNALS ===
-        kama_cross_up = kama_10[i] > kama_20[i] and kama_10[i-1] <= kama_20[i-1]
-        kama_cross_down = kama_10[i] < kama_20[i] and kama_10[i-1] >= kama_20[i-1]
+        # === VOLATILITY FILTER (avoid dead zones) ===
+        atr_ratio = atr_14[i] / atr_50[i]
+        if atr_ratio < 1.0:
+            # Volatility too low - skip
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === KAMA SLOPE (momentum confirmation) ===
-        kama_slope_up = kama_10[i] > kama_10[i-1] if i > 0 and not np.isnan(kama_10[i-1]) else False
-        kama_slope_down = kama_10[i] < kama_10[i-1] if i > 0 and not np.isnan(kama_10[i-1]) else False
+        # === TREND DIRECTION (4h HMA bias) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # === RSI PULLBACK LEVELS (LOOSE - 40/60 not 30/70) ===
-        rsi = rsi_14[i]
-        rsi_bullish = rsi > 40  # Pullback in uptrend
-        rsi_bearish = rsi < 60  # Rally in downtrend
-        rsi_strong_bull = rsi > 50
-        rsi_strong_bear = rsi < 50
+        # === 15m RSI PULLBACK SIGNALS ===
+        rsi_15m = rsi_15m_aligned[i]
+        
+        # LOOSE thresholds to guarantee trades (RSI 35/65 not 30/70)
+        rsi_pullback_long = rsi_15m < 45 and rsi_15m > 35
+        rsi_pullback_short = rsi_15m > 55 and rsi_15m < 65
+        
+        # Strong signal: deeper pullback
+        rsi_deep_long = rsi_15m < 40
+        rsi_deep_short = rsi_15m > 60
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + KAMA cross up or slope up + RSI > 40
-        if price_above_1d:
-            if kama_cross_up or (kama_slope_up and rsi_bullish):
-                desired_signal = SIZE_STRONG if rsi_strong_bull else SIZE_BASE
+        # LONG: 4h bullish + 15m RSI pullback
+        if price_above_4h and rsi_pullback_long:
+            desired_signal = SIZE_STRONG if rsi_deep_long else SIZE_BASE
         
-        # SHORT: 1d bearish + KAMA cross down or slope down + RSI < 60
-        elif price_below_1d:
-            if kama_cross_down or (kama_slope_down and rsi_bearish):
-                desired_signal = -SIZE_STRONG if rsi_strong_bear else -SIZE_BASE
+        # SHORT: 4h bearish + 15m RSI pullback
+        elif price_below_4h and rsi_pullback_short:
+            desired_signal = -SIZE_STRONG if rsi_deep_short else -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
