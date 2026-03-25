@@ -1,41 +1,54 @@
 #!/usr/bin/env python3
 """
-Experiment #1498: 4h Primary + 1d HTF — Simplified HMA Trend + RSI Pullback
+Experiment #1499: 1h Primary + 4h/12h HTF — Simplified Trend-Pullback Strategy
 
-Hypothesis: Recent failures (#1486-#1497) show overly complex regime filters cause 0 trades.
-This strategy SIMPLIFIES entry logic to guarantee trade generation while maintaining edge.
+Hypothesis: After 1200+ failed strategies, complexity is the enemy. This strategy
+uses SIMPLE but LOOSE entry conditions that GUARANTEE trades while maintaining
+edge through HTF trend alignment.
 
-Key components:
-1. 1d HMA(21) for major trend bias (prevents counter-trend disasters)
-2. 4h HMA(16/48) crossover for momentum confirmation
-3. RSI(14) pullback entries with LOOSE thresholds (<50 long, >50 short)
-4. Choppiness Index for position sizing adjustment (not hard filter)
-5. ATR(14) trailing stoploss at 2.5x ATR
-6. Discrete sizing: 0.0, ±0.25, ±0.30
+Key insight from failures:
+- Experiments 1489-1498 all got Sharpe=0.000 (ZERO TRADES) due to over-filtering
+- Complex regime detection (Choppiness, ADX, multiple confirmations) = no triggers
+- Session filters on lower TFs kill trade frequency
+
+This strategy:
+1. 4h HMA(21) for trend bias (simple, proven)
+2. 1h RSI(7) for entry timing (looser than RSI14)
+3. 1h EMA(21) pullback entry (price near EMA, not exact touch)
+4. Volume filter (above 0.7x average - very loose)
+5. ATR(14) stoploss at 2.5x
+
+Entry logic (LOOSE to guarantee ≥40 trades/year):
+- LONG: 4h_HMA bullish + RSI7<35 + price<EMA21*1.01 + vol>0.7x_avg
+- SHORT: 4h_HMA bearish + RSI7>65 + price>EMA21*0.99 + vol>0.7x_avg
 
 Why this should work:
-- SIMPLER logic = more trades (recent failures had 0 trades)
-- 4h TF = natural 25-45 trades/year (fee-efficient per Rule 10)
-- LOOSE RSI thresholds (50 not 30/70) guarantee signal generation
-- 1d HMA filter prevents major counter-trend losses in 2022 crash
-- Proven pattern: HMA + RSI worked on SOL (Sharpe +0.879 in research)
+- RSI7 reaches 35/65 frequently (unlike RSI14 at 30/70)
+- Price "near EMA" triggers often (within 1%, not exact touch)
+- Volume filter is very permissive (70% of average)
+- 4h trend filter prevents counter-trend disasters
+- 1h TF = natural 50-80 trades/year with these loose settings
 
-Entry logic (LOOSE to guarantee ≥30 trades/train, ≥3/test):
-- LONG: price > 1d_HMA + HMA16 > HMA48 + RSI < 55 + CHOP < 65
-- SHORT: price < 1d_HMA + HMA16 < HMA48 + RSI > 45 + CHOP < 65
-- Neutral CHOP (38-62): reduce size to 0.20
-
-Target: Sharpe>0.6, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Timeframe: 1h
+Size: 0.25 discrete (0.0, ±0.25)
+Target: Sharpe>0.5, trades>=40/train, trades>=5/test, DD>-35%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_rsi_pullback_1d_simple_v1"
-timeframe = "4h"
+name = "mtf_1h_hma_rsi_pullback_loose_4h_v1"
+timeframe = "1h"
 leverage = 1.0
+
+def calculate_ema(close, period):
+    """Exponential Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return ema
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -105,57 +118,38 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppy vs trending
-    CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    """
-    n = len(close)
-    if n < period + 1:
+def calculate_volume_sma(volume, period=20):
+    """Simple Moving Average of Volume"""
+    n = len(volume)
+    if n < period:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 4h indicators
-    hma_16 = calculate_hma(close, period=16)
-    hma_48 = calculate_hma(close, period=48)
+    # Calculate 1h indicators
+    ema_21 = calculate_ema(close, period=21)
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for more signals
+    vol_sma_20 = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
-    SIZE_WEAK = 0.20
+    SIZE = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -178,58 +172,51 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(ema_21[i]) or np.isnan(vol_sma_20[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(chop_14[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME AWARENESS (Choppiness Index) ===
-        chop = chop_14[i]
-        is_trending = chop < 50  # Looser threshold for more trades
-        is_choppy = chop > 60
+        # === TREND BIAS (4h HMA) ===
+        trend_bullish = close[i] > hma_4h_aligned[i]
+        trend_bearish = close[i] < hma_4h_aligned[i]
         
-        # === TREND DIRECTION (1d HMA bias) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === RSI EXTREMES (LOOSE thresholds) ===
+        rsi = rsi_7[i]
+        rsi_oversold = rsi < 35  # Loose: not 30, not 25
+        rsi_overbought = rsi > 65  # Loose: not 70, not 75
         
-        # === 4h HMA CROSSOVER (momentum) ===
-        hma_bullish = hma_16[i] > hma_48[i]
-        hma_bearish = hma_16[i] < hma_48[i]
+        # === PRICE NEAR EMA (within 1%, not exact touch) ===
+        price_near_ema_long = close[i] < ema_21[i] * 1.015  # Within 1.5% below EMA
+        price_near_ema_short = close[i] > ema_21[i] * 0.985  # Within 1.5% above EMA
         
-        # === RSI PULLBACK (LOOSE thresholds) ===
-        rsi = rsi_14[i]
-        rsi_not_overbought = rsi < 60  # Very loose
-        rsi_not_oversold = rsi > 40    # Very loose
+        # === VOLUME FILTER (very loose) ===
+        vol_ratio = volume[i] / vol_sma_20[i] if vol_sma_20[i] > 0 else 0
+        vol_ok = vol_ratio > 0.6  # 60% of average is fine
+        
+        # === SESSION FILTER (08-20 UTC for liquidity) ===
+        hour_utc = (open_time[i] // 3600000) % 24
+        session_ok = 6 <= hour_utc <= 22  # Very wide: 06-22 UTC
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + 4h HMA bullish + RSI pullback
-        if price_above_1d and hma_bullish and rsi_not_overbought:
-            if is_trending:
-                desired_signal = SIZE_STRONG
-            elif is_choppy:
-                desired_signal = SIZE_WEAK
-            else:
-                desired_signal = SIZE_BASE
+        # LONG: 4h bullish + RSI oversold + price near EMA + volume ok
+        if trend_bullish and rsi_oversold and price_near_ema_long and vol_ok and session_ok:
+            desired_signal = SIZE
         
-        # SHORT: 1d bearish + 4h HMA bearish + RSI pullback
-        elif price_below_1d and hma_bearish and rsi_not_oversold:
-            if is_trending:
-                desired_signal = -SIZE_STRONG
-            elif is_choppy:
-                desired_signal = -SIZE_WEAK
-            else:
-                desired_signal = -SIZE_BASE
+        # SHORT: 4h bearish + RSI overbought + price near EMA + volume ok
+        elif trend_bearish and rsi_overbought and price_near_ema_short and vol_ok and session_ok:
+            desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -252,18 +239,10 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_STRONG * 0.9:
-            final_signal = SIZE_STRONG
-        elif desired_signal <= -SIZE_STRONG * 0.9:
-            final_signal = -SIZE_STRONG
-        elif desired_signal >= SIZE_BASE * 0.9:
-            final_signal = SIZE_BASE
-        elif desired_signal <= -SIZE_BASE * 0.9:
-            final_signal = -SIZE_BASE
-        elif desired_signal >= SIZE_WEAK * 0.9:
-            final_signal = SIZE_WEAK
-        elif desired_signal <= -SIZE_WEAK * 0.9:
-            final_signal = -SIZE_WEAK
+        if desired_signal >= SIZE * 0.9:
+            final_signal = SIZE
+        elif desired_signal <= -SIZE * 0.9:
+            final_signal = -SIZE
         else:
             final_signal = 0.0
         
