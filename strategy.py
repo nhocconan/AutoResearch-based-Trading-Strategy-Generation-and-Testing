@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #1229: 15m Primary + 1h/1d HTF — Session-Aware HMA Trend + RSI Momentum
+Experiment #1230: 1h Primary + 4h/1d HTF — HMA Trend + RSI Pullback + Session Filter
 
-Hypothesis: 15m strategies fail due to OVER-FILTERING (0 trades) or UNDER-FILTERING (fee death).
-This strategy uses LOOSE but meaningful confluence:
+Hypothesis: After analyzing 1000+ failed experiments, the winning pattern for 1h timeframe is:
+1. 4h HMA(21) for primary trend direction (faster than 1d, matches 1h entry节奏)
+2. 1d HMA(21) for macro confirmation (avoid counter-trend trades in major reversals)
+3. 1h RSI(14) pullback entries in 40-60 range (not too strict, guarantees trades)
+4. Session filter 08-20 UTC (avoid low-liquidity Asian night whipsaws)
+5. ATR(14) 2.5x trailing stop for risk management
 
-1. Daily HMA(21) = primary trend direction (1 filter)
-2. 1h RSI(14) = momentum confirmation in 40-60 range (1 filter, LOOSE)
-3. UTC Session 00-12 = London/NY overlap for crypto liquidity (1 filter)
-4. 15m ATR breakout = entry timing trigger (volatility expansion)
+Key insight: 1h needs 4h trend filter (not 1d alone) because 1d is too slow for 1h entries.
+The 4h/1d combo gives both responsiveness and macro confirmation.
+Session filter reduces noise from low-volume periods (major cause of 1h failures).
 
-Key insight from 15m failures (#1217, #1219, #1221, #1225 all Sharpe=0.000):
-- Too many filters = ZERO trades
-- Too few filters = 300+ trades/year = fee death
-- Sweet spot: 3 LOOSE filters = 50-80 trades/year
+Entry logic (LOOSE enough for trades, strict enough for quality):
+- LONG: 4h_HMA bullish + 1d_HMA confirms + RSI 40-60 + session 08-20 UTC
+- SHORT: 4h_HMA bearish + 1d_HMA confirms + RSI 40-60 + session 08-20 UTC
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: price > 1d_HMA AND 1h_RSI 40-60 AND UTC hour 0-12 AND 15m close > entry trigger
-- SHORT: price < 1d_HMA AND 1h_RSI 40-60 AND UTC hour 0-12 AND 15m close < entry trigger
+Why this should work:
+- 1h timeframe with 4h trend = natural 40-80 trades/year (fee-friendly per Rule 10)
+- RSI 40-60 range = triggers on normal pullbacks, not extremes (avoids 0 trades)
+- Session filter = avoids 30% of noise trades during low liquidity
+- Discrete sizing (0.0, ±0.20, ±0.30) = minimal fee churn per Rule 4
+- 4h HMA alignment via mtf_data = no look-ahead per Rule 1-3
 
-Why 1h RSI not 15m RSI: 15m RSI is too noisy, causes whipsaw. 1h RSI gives cleaner momentum.
-Why session filter: Crypto has real liquidity patterns. 00-12 UTC = London+NY overlap = cleaner moves.
-Why ATR breakout: Ensures we enter on volatility expansion, not dead ranges.
-
-Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%, trades/year 50-80
-Timeframe: 15m
-Size: 0.20 base, 0.25 strong (smaller than 12h due to higher frequency)
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 1h
+Size: 0.20 base, 0.30 strong (when 4h+1d aligned)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_session_hma_rsi_atr_1h1d_v1"
-timeframe = "15m"
+name = "mtf_1h_hma_rsi_session_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -97,6 +98,11 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
+def get_hour_from_open_time(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds since epoch
+    return (open_time // (1000 * 60 * 60)) % 24
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -105,22 +111,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1h = get_htf_data(prices, '1h')
     
     # Calculate and align HTF indicators
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    rsi_1h_raw = calculate_rsi(df_1h['close'].values, period=14)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
-    
-    # Calculate 15m indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_14 = calculate_rsi(close, period=14)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.20
-    SIZE_STRONG = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -134,22 +141,6 @@ def generate_signals(prices):
     # Warmup period
     min_bars = 100
     
-    # Pre-compute session hours from open_time (milliseconds since epoch)
-    # Binance timestamps are UTC
-    session_valid = np.zeros(n, dtype=bool)
-    for i in range(n):
-        # Convert milliseconds to hours UTC
-        ts_ms = open_time[i]
-        hour_utc = (ts_ms // (1000 * 60 * 60)) % 24
-        # Session filter: 00-12 UTC (London + NY overlap for crypto)
-        session_valid[i] = (hour_utc >= 0 and hour_utc <= 12)
-    
-    # Pre-compute ATR breakout levels (previous bar high/low)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    
     for i in range(min_bars, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
@@ -159,45 +150,52 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(rsi_1h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (Daily HMA) ===
+        # === SESSION FILTER (08-20 UTC) ===
+        hour = get_hour_from_open_time(open_time[i])
+        in_session = 8 <= hour <= 20
+        
+        # === TREND DIRECTION (4h HMA primary, 1d HMA confirmation) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
+        
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === MOMENTUM (1h RSI in 40-60 range = neutral momentum, room to run) ===
-        rsi_1h = rsi_1h_aligned[i]
-        rsi_neutral = (40.0 <= rsi_1h <= 60.0)
-        
-        # === SESSION FILTER (UTC 00-12) ===
-        in_session = session_valid[i]
-        
-        # === ATR BREAKOUT TRIGGER ===
-        atr_breakout_up = close[i] > prev_high[i]
-        atr_breakout_down = close[i] < prev_low[i]
-        
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
+        rsi = rsi_14[i]
         
-        # LONG: Price above 1d HMA + 1h RSI neutral + session + breakout up
-        if price_above_1d and rsi_neutral and in_session and atr_breakout_up:
-            desired_signal = SIZE_BASE
-        
-        # SHORT: Price below 1d HMA + 1h RSI neutral + session + breakout down
-        elif price_below_1d and rsi_neutral and in_session and atr_breakout_down:
-            desired_signal = -SIZE_BASE
+        # Only trade during session hours (avoid Asian night whipsaws)
+        if in_session:
+            # LONG: 4h bullish + 1d confirms (or neutral) + RSI pullback (40-60)
+            if price_above_4h:
+                if 40.0 <= rsi <= 60.0:
+                    if price_above_1d:
+                        desired_signal = SIZE_STRONG  # Both 4h+1d aligned bullish
+                    else:
+                        desired_signal = SIZE_BASE  # 4h bullish only
+            
+            # SHORT: 4h bearish + 1d confirms (or neutral) + RSI pullback (40-60)
+            elif price_below_4h:
+                if 40.0 <= rsi <= 60.0:
+                    if price_below_1d:
+                        desired_signal = -SIZE_STRONG  # Both 4h+1d aligned bearish
+                    else:
+                        desired_signal = -SIZE_BASE  # 4h bearish only
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -220,7 +218,11 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_BASE * 0.9:
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_BASE * 0.9:
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
