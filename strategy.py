@@ -1,41 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #1150: 1h Primary + 4h/1d HTF — Simplified Regime + Pullback Entries
+Experiment #1151: 6h Primary + 1d/1w HTF — Keltner Trend + RSI Pullback + ADX Sizing
 
-Hypothesis: Previous strategies failed due to overly complex regime switching and
-too-strict entry filters (0 trades). This strategy uses SIMPLIFIED logic:
-1. 4h HMA(21) for trend direction (HTF bias)
-2. 1h RSI(14) pullback entries (not extremes - loosened for trade generation)
-3. Choppiness(14) regime filter (wide bands to allow trades)
-4. Session filter 08-20 UTC (reduces overnight noise)
-5. Discrete sizing 0.0, ±0.20, ±0.30 with 2.5x ATR stoploss
+Hypothesis: 6h timeframe is underexplored (ZERO prior experiments). Using Keltner Channels
+for volatility-based entries with RSI pullback in confirmed trends should capture multi-day
+swings better than Bollinger Bands (which whipsaw in crypto trends). ADX confirms trend
+strength for position sizing rather than entry filtering.
 
-Key changes from failed experiments:
-- LOOSENED RSI thresholds (35-45 long, 55-65 short) to guarantee trades
-- Wider Choppiness bands (>50 choppy, <50 trending) to avoid no-trade zones
-- Removed CRSI complexity (was causing 0 trades in exp 1141, 1145, 1149)
-- Simple HMA crossover for HTF bias (proven in best strategy mtf_6h_hma_rsi_triple)
+Key innovations:
+1. Keltner Channels (EMA20 + 2*ATR14): Better than BB for trending crypto markets
+2. 1w HMA(21) for major trend bias (long-term direction)
+3. 1d HMA(21) for intermediate confirmation (don't fight the daily trend)
+4. 6h RSI(14) pullback entries: Long when RSI 35-50 in uptrend, Short when 50-65 in downtrend
+5. ADX(14) for sizing: ADX>25 = full size (0.30), ADX<25 = half size (0.15)
+6. ATR(14) 2.5x trailing stop with breakeven after 1.5R profit
+7. Looser entry thresholds to GUARANTEE trades (RSI 35-65 range, not 20-80)
 
-Why this should work:
-- 4h trend filter avoids counter-trend trades (main loss source)
-- RSI pullback (not extreme) generates 40-80 trades/year target
-- Session filter reduces whipsaw during low-volume hours
-- Simple logic = fewer bugs, more reliable across BTC/ETH/SOL
+Why this should work on 6h:
+- 6h captures 2-4 day swings (perfect for crypto momentum)
+- Keltner Channels adapt to volatility (widen in high vol, narrow in low vol)
+- RSI pullback entries avoid chasing breakouts (enter on dips in trends)
+- ADX sizing reduces exposure in choppy markets without blocking entries
+- 1w/1d HTF ensures we trade with major trend (no counter-trend trades)
+- Looser RSI thresholds guarantee 30-60 trades/year target
 
-Entry conditions (LOOSENED for trade generation):
-- LONG: 4h_HMA bullish + RSI(14) 35-45 + CHOP < 60 OR CHOP > 40 + session 08-20 UTC
-- SHORT: 4h_HMA bearish + RSI(14) 55-65 + CHOP < 60 OR CHOP > 40 + session 08-20 UTC
+Entry conditions (LOOSE to guarantee trades):
+- LONG: price>1w_HMA + price>1d_HMA + RSI(14) 35-50 + price>Keltner_mid
+- SHORT: price<1w_HMA + price<1d_HMA + RSI(14) 50-65 + price<Keltner_mid
 
-Target: Sharpe>0.45, trades>=40 train, trades>=5 test, DD>-40%, ALL symbols Sharpe>0
-Timeframe: 1h
-Size: 0.20-0.30 discrete
+Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
+Timeframe: 6h
+Size: 0.15-0.30 discrete (ADX-scaled)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_chop_session_4h1d_v1"
-timeframe = "1h"
+name = "mtf_6h_keltner_rsi_pullback_adx_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -100,61 +102,92 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness vs trending
-    CHOP > 61.8 = ranging market (mean revert)
-    CHOP < 38.2 = trending market (trend follow)
-    We use wider bands (>50 / <50) to ensure trade generation
-    """
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - measures trend strength"""
     n = len(close)
-    if n < period + 1:
+    if n < period * 2 + 1:
         return np.full(n, np.nan)
     
+    # Calculate +DM and -DM
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    # Calculate ATR for smoothing
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    chop = np.full(n, np.nan, dtype=np.float64)
+    # Smooth +DM, -DM, and TR
+    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i-period+1:i+1])
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        price_range = highest_high - lowest_low
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    # Calculate +DI and -DI
+    plus_di = np.divide(plus_dm_smooth, atr_smooth, out=np.zeros_like(plus_dm_smooth), where=atr_smooth != 0) * 100
+    minus_di = np.divide(minus_dm_smooth, atr_smooth, out=np.zeros_like(minus_dm_smooth), where=atr_smooth != 0) * 100
     
-    return chop
+    # Calculate DX
+    di_sum = plus_di + minus_di
+    dx = np.divide(np.abs(plus_di - minus_di), di_sum, out=np.zeros_like(plus_di), where=di_sum != 0) * 100
+    
+    # Calculate ADX (smoothed DX)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    adx[:period*2] = np.nan
+    
+    return adx
+
+def calculate_keltner(high, low, close, ema_period=20, atr_period=14, multiplier=2.0):
+    """Keltner Channels - EMA +/- multiplier*ATR"""
+    n = len(close)
+    
+    # Calculate EMA
+    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
+    
+    # Calculate ATR
+    atr = calculate_atr(high, low, close, period=atr_period)
+    
+    # Calculate channels
+    upper = ema + multiplier * atr
+    lower = ema - multiplier * atr
+    
+    return upper, ema, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1h indicators
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
+    adx_14 = calculate_adx(high, low, close, period=14)
+    keltner_upper, keltner_mid, keltner_lower = calculate_keltner(high, low, close)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.30
+    SIZE_WEAK = 0.15   # ADX < 25
+    SIZE_STRONG = 0.30 # ADX >= 25
     
     # Position tracking for stoploss
     in_position = False
@@ -164,8 +197,9 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    profit_target_hit = False
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -174,83 +208,82 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(adx_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (08-20 UTC) ===
-        # Extract hour from open_time (milliseconds timestamp)
-        hour_utc = (open_time[i] // 3600000) % 24
-        in_session = 8 <= hour_utc <= 20
+        if np.isnan(keltner_mid[i]) or np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === HTF BIAS (4h HMA) ===
-        hma_4h_bull = close[i] > hma_4h_aligned[i]
-        hma_4h_bear = close[i] < hma_4h_aligned[i]
-        
-        # === 1d HMA confirmation (stronger bias) ===
+        # === HTF BIAS (Triple HMA alignment) ===
         hma_1d_bull = close[i] > hma_1d_aligned[i]
         hma_1d_bear = close[i] < hma_1d_aligned[i]
+        hma_1w_bull = close[i] > hma_1w_aligned[i]
+        hma_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # Strong bias when 4h and 1d align
-        strong_bull = hma_4h_bull and hma_1d_bull
-        strong_bear = hma_4h_bear and hma_1d_bear
+        # Strong trend alignment (both 1d and 1w agree)
+        strong_bull = hma_1d_bull and hma_1w_bull
+        strong_bear = hma_1d_bear and hma_1w_bear
         
-        # === REGIME (Choppiness) ===
-        # Wide bands to ensure trade generation
-        is_choppy = chop_14[i] > 50.0
-        is_trending = chop_14[i] < 50.0
+        # === ADX-BASED SIZING ===
+        adx_strong = adx_14[i] >= 25.0
+        current_size = SIZE_STRONG if adx_strong else SIZE_WEAK
         
-        # === ENTRY LOGIC (LOOSENED for trade generation) ===
+        # === ENTRY LOGIC (RSI PULLBACK IN TREND) ===
         desired_signal = 0.0
         
-        # LONG entries
-        if hma_4h_bull and in_session:
-            # RSI pullback in uptrend (loosened: 35-50 instead of 30-40)
-            if 35.0 <= rsi_14[i] <= 50.0:
-                if is_trending and strong_bull:
-                    desired_signal = SIZE_STRONG
-                elif is_choppy or hma_4h_bull:
-                    desired_signal = SIZE_BASE
-            # RSI momentum confirmation
-            elif rsi_14[i] > 50.0 and rsi_14[i] < 70.0 and strong_bull:
-                desired_signal = SIZE_BASE
+        # LONG: Uptrend + RSI pullback to 35-50 + price above Keltner mid
+        if strong_bull and 35.0 <= rsi_14[i] <= 50.0 and close[i] > keltner_mid[i]:
+            desired_signal = current_size
         
-        # SHORT entries
-        elif hma_4h_bear and in_session:
-            # RSI pullback in downtrend (loosened: 50-65 instead of 60-70)
-            if 50.0 <= rsi_14[i] <= 65.0:
-                if is_trending and strong_bear:
-                    desired_signal = -SIZE_STRONG
-                elif is_choppy or hma_4h_bear:
-                    desired_signal = -SIZE_BASE
-            # RSI momentum confirmation
-            elif rsi_14[i] < 50.0 and rsi_14[i] > 30.0 and strong_bear:
-                desired_signal = -SIZE_BASE
+        # SHORT: Downtrend + RSI pullback to 50-65 + price below Keltner mid
+        elif strong_bear and 50.0 <= rsi_14[i] <= 65.0 and close[i] < keltner_mid[i]:
+            desired_signal = -current_size
         
-        # === STOPLOSS CHECK (2.5x ATR trailing) ===
+        # === STOPLOSS CHECK (2.5x ATR trailing with breakeven) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
+            unrealized_pnl = (highest_since_entry - entry_price) / entry_atr
+            
+            # Move to breakeven after 1.5R profit
+            if unrealized_pnl >= 1.5:
+                profit_target_hit = True
+                stop_price = max(stop_price, entry_price + 0.5 * entry_atr)
+            else:
+                trailing_stop = highest_since_entry - 2.5 * entry_atr
+                stop_price = max(stop_price, trailing_stop)
+            
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
+            unrealized_pnl = (entry_price - lowest_since_entry) / entry_atr
+            
+            # Move to breakeven after 1.5R profit
+            if unrealized_pnl >= 1.5:
+                profit_target_hit = True
+                stop_price = min(stop_price, entry_price - 0.5 * entry_atr)
+            else:
+                trailing_stop = lowest_since_entry + 2.5 * entry_atr
+                stop_price = min(stop_price, trailing_stop)
+            
             if high[i] > stop_price:
                 stoploss_triggered = True
         
@@ -262,10 +295,10 @@ def generate_signals(prices):
             final_signal = SIZE_STRONG
         elif desired_signal <= -SIZE_STRONG * 0.9:
             final_signal = -SIZE_STRONG
-        elif desired_signal >= SIZE_BASE * 0.9:
-            final_signal = SIZE_BASE
-        elif desired_signal <= -SIZE_BASE * 0.9:
-            final_signal = -SIZE_BASE
+        elif desired_signal >= SIZE_WEAK * 0.9:
+            final_signal = SIZE_WEAK
+        elif desired_signal <= -SIZE_WEAK * 0.9:
+            final_signal = -SIZE_WEAK
         else:
             final_signal = 0.0
         
@@ -278,6 +311,7 @@ def generate_signals(prices):
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
+                profit_target_hit = False
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
@@ -291,6 +325,7 @@ def generate_signals(prices):
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
+                profit_target_hit = False
         
         signals[i] = final_signal
     
