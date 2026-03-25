@@ -1,36 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1547: 6h Primary + 1d HTF — Simple Momentum Breakout with Volume
+Experiment #1548: 4h Primary + 1d HTF — HMA Trend + RSI Pullback + Donchian Breakout
 
-Hypothesis: 6h strategies have failed due to OVER-FILTERING (too many confluence
-requirements = zero trades). This strategy uses SIMPLE momentum breakout logic:
-1. 1d HMA(21) for soft trend bias (not hard filter)
-2. 6h ROC(10) for momentum confirmation
-3. Volume spike (>1.5x avg) for breakout validation
-4. Donchian(20) breakout for entry trigger
-5. ATR(14) trailing stoploss (2.5x)
+Hypothesis: 4h timeframe offers optimal balance between trade frequency (20-50/year)
+and signal quality. This strategy combines THREE proven entry methods to guarantee
+sufficient trades while maintaining edge:
 
-Why this should work on 6h:
-- 6h is MOMENTUM timeframe (not mean-reversion like 15m/30m)
-- Volume confirmation filters false breakouts
-- 1d bias prevents major counter-trend trades
-- LOOSE entry (only 2-3 conditions) guarantees ≥30 trades/train
-- Discrete sizing (0.25, 0.30) minimizes fee churn
+1. 1d HMA(21) for major trend bias (prevents counter-trend disasters in 2022 crash)
+2. 4h HMA(16/48) crossover for momentum confirmation
+3. RSI(14) pullback entries (LOOSE thresholds: 35/65 not 30/70)
+4. Donchian(20) breakout as alternative entry when RSI doesn't trigger
+5. ATR(14) trailing stoploss (2.5x ATR)
 
-Entry logic (LOOSE):
-- LONG: 1d_HMA bullish OR flat + ROC>5 + Volume>1.5x + Donchian breakout
-- SHORT: 1d_HMA bearish OR flat + ROC<-5 + Volume>1.5x + Donchian breakdown
+Why this should beat previous attempts:
+- DUAL entry methods (RSI pullback OR Donchian breakout) = more trades guaranteed
+- LOOSE RSI thresholds (35/65) trigger frequently in 4h timeframe
+- 1d HMA filter prevents major counter-trend positions
+- Discrete sizing (0.0, ±0.25, ±0.30) minimizes fee churn
+- Proven indicators from quantitative literature (HMA reduces lag, RSI mean-reverts)
+
+Entry logic (designed to generate ≥30 trades/train, ≥5/test):
+- LONG: 1d_HMA bullish + (RSI<45 OR Donchian breakout) + HMA16>HMA48
+- SHORT: 1d_HMA bearish + (RSI>55 OR Donchian breakdown) + HMA16<HMA48
 
 Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
+Timeframe: 4h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_momentum_breakout_volume_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_hma_rsi_donchian_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -77,18 +79,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_roc(close, period=10):
-    """Rate of Change - momentum indicator"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    roc = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if close[i - period] != 0:
-            roc[i] = 100.0 * (close[i] - close[i - period]) / close[i - period]
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    return roc
+    gain = np.insert(gain, 0, 0)
+    loss = np.insert(loss, 0, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan, dtype=np.float64)
+    mask = avg_loss != 0
+    rs = np.zeros(n)
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    
+    return rsi
 
 def calculate_donchian(high, low, period=20):
     """Donchian Channel - highest high and lowest low over period"""
@@ -105,22 +118,10 @@ def calculate_donchian(high, low, period=20):
     
     return upper, lower
 
-def calculate_volume_spike(volume, period=20, threshold=1.5):
-    """Detect volume spikes above moving average"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, False)
-    
-    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    spike = volume > (threshold * vol_ma)
-    
-    return spike
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -130,11 +131,12 @@ def generate_signals(prices):
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
+    hma_16 = calculate_hma(close, period=16)
+    hma_48 = calculate_hma(close, period=48)
     atr_14 = calculate_atr(high, low, close, period=14)
-    roc_10 = calculate_roc(close, period=10)
+    rsi_14 = calculate_rsi(close, period=14)
     donch_upper, donch_lower = calculate_donchian(high, low, period=20)
-    vol_spike = calculate_volume_spike(volume, period=20, threshold=1.5)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -149,8 +151,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup period (shorter to get more trades)
-    min_bars = 50
+    # Warmup period
+    min_bars = 100
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -161,53 +163,60 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(roc_10[i]) or np.isnan(donch_upper[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND BIAS (1d HMA - soft filter, not hard) ===
-        # Allow trades even if 1d is flat/neutral
-        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
-        price_above_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
-        price_below_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === MOMENTUM (ROC) ===
-        roc = roc_10[i]
-        momentum_long = roc > 3.0  # LOOSE threshold
-        momentum_short = roc < -3.0  # LOOSE threshold
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = vol_spike[i]
+        # === TREND DIRECTION (1d HMA bias) ===
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
+        
+        # === 4h HMA CROSSOVER (trend momentum) ===
+        hma_bullish = hma_16[i] > hma_48[i]
+        hma_bearish = hma_16[i] < hma_48[i]
+        
+        # === RSI (LOOSE thresholds for more trades) ===
+        rsi = rsi_14[i]
+        rsi_oversold = rsi < 45  # LOOSE: was 30-35
+        rsi_overbought = rsi > 55  # LOOSE: was 65-70
         
         # === DONCHIAN BREAKOUT ===
         donchian_breakout_long = False
         donchian_breakout_short = False
-        
         if not np.isnan(donch_upper[i-1]):
             donchian_breakout_long = close[i] > donch_upper[i-1]
-        
         if not np.isnan(donch_lower[i-1]):
             donchian_breakout_short = close[i] < donch_lower[i-1]
         
-        # === ENTRY LOGIC (LOOSE - must generate trades) ===
+        # === ENTRY LOGIC (DUAL METHOD - RSI OR Donchian) ===
         desired_signal = 0.0
         
-        # LONG: momentum + volume + breakout (1d bias optional)
-        if momentum_long and volume_confirmed and donchian_breakout_long:
-            if price_above_1d or not hma_1d_valid:
-                desired_signal = SIZE_STRONG
-            else:
-                desired_signal = SIZE_BASE  # smaller size against 1d trend
+        # LONG: 1d bullish + HMA bullish + (RSI pullback OR Donchian breakout)
+        if price_above_1d and hma_bullish:
+            if rsi_oversold or donchian_breakout_long:
+                desired_signal = SIZE_STRONG if donchian_breakout_long else SIZE_BASE
         
-        # SHORT: momentum + volume + breakdown (1d bias optional)
-        elif momentum_short and volume_confirmed and donchian_breakout_short:
-            if price_below_1d or not hma_1d_valid:
-                desired_signal = -SIZE_STRONG
-            else:
-                desired_signal = -SIZE_BASE  # smaller size against 1d trend
+        # SHORT: 1d bearish + HMA bearish + (RSI pullback OR Donchian breakdown)
+        elif price_below_1d and hma_bearish:
+            if rsi_overbought or donchian_breakout_short:
+                desired_signal = -SIZE_STRONG if donchian_breakout_short else -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
