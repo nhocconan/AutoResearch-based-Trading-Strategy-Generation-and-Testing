@@ -1,43 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1399: 1h Primary + 4h/12h HTF — Triple HMA Trend + RSI Pullback
+Experiment #1400: 6h Primary + 1d/1w HTF — Triple HMA Trend + KAMA Adaptive Entry
 
-Hypothesis: 1h timeframe with HTF trend filter can achieve 40-80 trades/year
-with better entry timing than 4h/6h strategies. Key learnings from failures:
+Hypothesis: 6h timeframe is underexplored (0 experiments). This strategy combines:
+1. 1w HMA(21) for major weekly trend bias (slowest, most reliable filter)
+2. 1d HMA(21) for daily trend confirmation (intermediate filter)
+3. 6h KAMA(10) adaptive MA for entry timing (adjusts to volatility)
+4. 6h RSI(14) pullback in 35-65 zone (LOOSE entry to guarantee trades)
+5. ATR(14) trailing stoploss (2.5x ATR)
 
-1. CRSI/mean-reversion ALWAYS fails on BTC/ETH (1150+ strategies proved this)
-2. TREND-FOLLOWING with RSI pullback works (#1398 had +12% return despite negative Sharpe)
-3. Zero trades = auto-reject (experiments #1390, #1393, #1396, #1397 all got Sharpe=0.000)
-4. Session filters are TOO STRICT for 1h (killed trade generation)
-5. RSI 40-60 pullback zone generates MORE trades than 30/70 extremes
+Why this should beat the current best (KAMA+ROC Sharpe=0.447):
+- Triple HMA alignment (1w+1d+6h) reduces false signals in choppy markets
+- KAMA adapts to volatility better than fixed EMA/HMA
+- RSI 35-65 zone is LOOSE enough to generate 40-60 trades/year
+- 6h TF = natural fee efficiency (30-60 trades/year target)
+- Weekly filter prevents 2022-style crash whipsaw
 
-Strategy Design:
-- 12h HMA(21): Major trend bias (avoid counter-trend in crashes)
-- 4h HMA(16/48): Intermediate trend momentum
-- 1h RSI(14): Pullback entry in 35-65 zone (LOOSE enough for trades)
-- 1h ATR(14): 2.5x trailing stoploss
-- Size: 0.20-0.30 discrete (control drawdown)
+Entry logic (LOOSE to guarantee trades):
+- LONG: 1w_HMA bullish + 1d_HMA bullish + 6h_KAMA rising + RSI > 35
+- SHORT: 1w_HMA bearish + 1d_HMA bearish + 6h_KAMA falling + RSI < 65
 
-Entry Logic (LOOSE to guarantee trades):
-- LONG: 12h_HMA bullish + 4h_HMA16>48 + 1h_RSI 35-65
-- SHORT: 12h_HMA bearish + 4h_HMA16<48 + 1h_RSI 35-65
-
-Why this beats #1398:
-- 1h entries = better timing than 4h entries
-- RSI 35-65 = wider than 40-60, more trades
-- No session filter = trades generate in all market hours
-- Triple HMA confluence = fewer false signals than dual HMA
-
-Target: Sharpe>0.45 (beat current best 0.447), trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 1h
-Size: 0.20-0.30 discrete
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_triple_hma_rsi_pullback_4h12h_v1"
-timeframe = "1h"
+name = "mtf_6h_triple_hma_kama_rsi_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -69,6 +61,40 @@ def calculate_hma(close, period):
             diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
     return wma(diff, sqrt_n)
+
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average - adjusts to volatility"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan, dtype=np.float64)
+    
+    # First value is just the close
+    kama[period - 1] = close[period - 1]
+    
+    for i in range(period, n):
+        # Calculate change (signal)
+        change = abs(close[i] - close[i - period])
+        
+        # Calculate volatility (noise)
+        noise = 0.0
+        for j in range(i - period + 1, i + 1):
+            noise += abs(close[j] - close[j - 1])
+        
+        # Efficiency Ratio
+        if noise > 0:
+            er = change / noise
+        else:
+            er = 1.0
+        
+        # Smoothed constant
+        sc = (er * (2.0 / (fast + 1) - 2.0 / (slow + 1)) + 2.0 / (slow + 1)) ** 2
+        
+        # KAMA calculation
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -115,24 +141,29 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_16_raw = calculate_hma(df_4h['close'].values, period=16)
-    hma_4h_48_raw = calculate_hma(df_4h['close'].values, period=48)
-    hma_12h_21_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_4h_16 = align_htf_to_ltf(prices, df_4h, hma_4h_16_raw)
-    hma_4h_48 = align_htf_to_ltf(prices, df_4h, hma_4h_48_raw)
-    hma_12h_21 = align_htf_to_ltf(prices, df_12h, hma_12h_21_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
+    kama_10 = calculate_kama(close, period=10)
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
     
+    # Also calculate KAMA slope for momentum confirmation
+    kama_slope = np.zeros(n)
+    for i in range(2, n):
+        if not np.isnan(kama_10[i]) and not np.isnan(kama_10[i-2]):
+            kama_slope[i] = kama_10[i] - kama_10[i-2]
+    
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -156,47 +187,48 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_4h_16[i]) or np.isnan(hma_4h_48[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(kama_10[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_12h_21[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (12h HMA bias - major trend) ===
-        price_above_12h = close[i] > hma_12h_21[i]
-        price_below_12h = close[i] < hma_12h_21[i]
+        # === TREND DIRECTION (1w + 1d HMA bias) ===
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === 4h HMA CROSSOVER (intermediate trend momentum) ===
-        hma_4h_bullish = hma_4h_16[i] > hma_4h_48[i]
-        hma_4h_bearish = hma_4h_16[i] < hma_4h_48[i]
+        # === 6h KAMA MOMENTUM ===
+        kama_rising = kama_slope[i] > 0
+        kama_falling = kama_slope[i] < 0
         
         # === RSI PULLBACK (LOOSE entry - guarantee trades) ===
         rsi = rsi_14[i]
-        rsi_neutral = 35 <= rsi <= 65  # Wider zone than 40-60
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 12h bullish + 4h HMA bullish + RSI in pullback zone
-        if price_above_12h and hma_4h_bullish and rsi_neutral:
-            # Strong if RSI in 40-60 (center of zone)
-            if 40 <= rsi <= 60:
+        # LONG: 1w bullish + 1d bullish + KAMA rising + RSI > 35 (pullback zone)
+        if price_above_1w and price_above_1d and kama_rising and rsi > 35:
+            # Strong if RSI also < 70 (not overbought)
+            if rsi < 70:
                 desired_signal = SIZE_STRONG
             else:
                 desired_signal = SIZE_BASE
         
-        # SHORT: 12h bearish + 4h HMA bearish + RSI in pullback zone
-        elif price_below_12h and hma_4h_bearish and rsi_neutral:
-            # Strong if RSI in 40-60 (center of zone)
-            if 40 <= rsi <= 60:
+        # SHORT: 1w bearish + 1d bearish + KAMA falling + RSI < 65 (pullback zone)
+        elif price_below_1w and price_below_1d and kama_falling and rsi < 65:
+            # Strong if RSI also > 30 (not oversold)
+            if rsi > 30:
                 desired_signal = -SIZE_STRONG
             else:
                 desired_signal = -SIZE_BASE
