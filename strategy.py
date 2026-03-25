@@ -1,39 +1,45 @@
 #!/usr/bin/env python3
 """
-Experiment #1447: 6h Primary + 1d HTF — Adaptive KAMA Trend + RSI Pullback
+Experiment #1448: 4h Primary + 12h/1d HTF — Regime-Adaptive KAMA + RSI
 
-Hypothesis: 6h timeframe is underexplored (ZERO prior experiments). This combines:
-1. 1d HMA(21) for major trend bias (avoid counter-trend in bear markets)
-2. 6h KAMA(14) adaptive MA for trend direction (responds to volatility)
-3. 6h RSI(14) pullback entry in 35-65 zone (LOOSE to guarantee 30-60 trades/year)
-4. 6h Volume confirmation (volume > 0.8 * SMA20 volume) to filter weak moves
-5. ATR(14) trailing stoploss at 2.5x (signal→0 when stopped)
-6. Discrete sizing: 0.0, ±0.25, ±0.30 (minimize fee churn)
+Hypothesis: Previous 4h strategies failed due to either (1) too strict entries = 0 trades,
+or (2) single-regime logic that fails in chop. This strategy uses:
 
-Why this differs from failed 6h strategies:
-- NO complex regime filters (CHOP, Fisher failed on 6h in #1440, #1442, #1443)
-- NO weekly pivot approaches (failed in #1435, #1440, #1442, #1443)
-- Uses KAMA instead of HMA (KAMA adapts to volatility, better in range markets)
-- RSI 35-65 zone is LOOSE enough to generate trades (unlike RSI<30/>70)
-- Volume filter prevents entries on low-liquidity bars
+1. REGIME DETECTION: Choppiness Index (CHOP) to switch between trend/mean-revert
+   - CHOP > 61.8 = choppy/range → mean reversion logic
+   - CHOP < 38.2 = trending → trend following logic
+   - Between = neutral, use trend bias only
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: 1d_HMA bullish + 6h_KAMA rising + RSI 35-65 + volume confirmed
-- SHORT: 1d_HMA bearish + 6h_KAMA falling + RSI 35-65 + volume confirmed
+2. TREND BIAS: 12h KAMA(40) adaptive moving average (better than HMA in crypto)
+   - KAMA adapts to volatility, reduces whipsaw in chop
+
+3. ENTRY TRIGGERS (LOOSE to guarantee trades):
+   - Trend regime: KAMA(10) > KAMA(40) + RSI(7) > 45 (long)
+   - Mean-revert regime: RSI(7) < 35 + price > 12h_KAMA (long)
+   - Mirror for shorts
+
+4. ATR(14) trailing stoploss at 2.5x
+
+Why this should work:
+- CHOP regime filter proven in literature (Connors/Van Tharp)
+- KAMA adapts better than HMA/EMA in crypto volatility
+- RSI(7) is faster than RSI(14), generates more signals
+- LOOSE thresholds (RSI 35-65, not 30-70) guarantee trades
+- 4h TF = natural 25-45 trades/year (fee efficient)
 
 Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
+Timeframe: 4h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_kama_rsi_vol_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_regime_kama_rsi_chop_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_kama(close, period=14, fast_period=2, slow_period=30):
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
     """Kaufman Adaptive Moving Average - adapts to market noise"""
     n = len(close)
     if n < period + slow_period:
@@ -41,67 +47,65 @@ def calculate_kama(close, period=14, fast_period=2, slow_period=30):
     
     kama = np.full(n, np.nan, dtype=np.float64)
     
-    # Calculate Efficiency Ratio (ER)
-    er = np.full(n, np.nan, dtype=np.float64)
+    # Change = absolute price change over period
+    change = np.zeros(n)
     for i in range(period, n):
-        if not np.isnan(close[i]) and not np.isnan(close[i - period]):
-            signal = abs(close[i] - close[i - period])
-            noise = 0.0
-            for j in range(i - period + 1, i + 1):
-                if not np.isnan(close[j]) and not np.isnan(close[j - 1]):
-                    noise += abs(close[j] - close[j - 1])
-            if noise > 0:
-                er[i] = signal / noise
-            else:
-                er[i] = 1.0
+        change[i] = abs(close[i] - close[i - period])
     
-    # Calculate smoothing constant
-    sc = np.full(n, np.nan, dtype=np.float64)
+    # Sum of absolute differences (volatility)
+    volatility = np.zeros(n)
+    for i in range(1, n):
+        volatility[i] = volatility[i-1] + abs(close[i] - close[i-1])
+        if i >= period:
+            volatility[i] -= abs(close[i - period] - close[i - period - 1])
+    
+    # Efficiency Ratio
+    er = np.zeros(n)
+    mask = volatility > 0
+    er[mask] = change[mask] / volatility[mask]
+    er = np.clip(er, 0, 1)
+    
+    # Smoothing constants
     fast_sc = 2.0 / (fast_period + 1)
     slow_sc = 2.0 / (slow_period + 1)
-    for i in range(period, n):
-        if not np.isnan(er[i]):
-            sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Adaptive smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Initialize KAMA
+    kama[period] = close[period]
     
     # Calculate KAMA
-    kama[period] = close[period]
     for i in range(period + 1, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i - 1]):
-            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-        elif not np.isnan(close[i]):
-            kama[i] = close[i]
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
     return kama
 
-def calculate_hma(close, period):
-    """Hull Moving Average - reduces lag while smoothing"""
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - measures market choppiness vs trending"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
     
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
+    chop = np.full(n, np.nan, dtype=np.float64)
     
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
-    
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
-    
-    diff = np.full(n, np.nan, dtype=np.float64)
     for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        
+        tr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            tr_sum += tr
+        
+        range_val = highest_high - lowest_low
+        if range_val > 0 and tr_sum > 0:
+            chop[i] = 100 * np.log10(tr_sum / range_val) / np.log10(period)
     
-    return wma(diff, sqrt_n)
+    return chop
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -117,8 +121,8 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+def calculate_rsi(close, period=7):
+    """Relative Strength Index - faster period for more signals"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -141,35 +145,25 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_volume_sma(volume, period=20):
-    """Simple Moving Average of Volume"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    kama_12h_raw = calculate_kama(df_12h['close'].values, period=40)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h_raw)
     
-    # Calculate 6h indicators
-    kama_14 = calculate_kama(close, period=14)
-    kama_50 = calculate_kama(close, period=50)
+    # Calculate 4h indicators
+    kama_10 = calculate_kama(close, period=10)
+    kama_40 = calculate_kama(close, period=40)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    vol_sma_20 = calculate_volume_sma(volume, period=20)
+    rsi_7 = calculate_rsi(close, period=7)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -196,57 +190,65 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(kama_14[i]) or np.isnan(kama_50[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(kama_10[i]) or np.isnan(kama_40[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(vol_sma_20[i]):
+        if np.isnan(chop_14[i]) or np.isnan(kama_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1d HMA bias) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === REGIME DETECTION ===
+        chop = chop_14[i]
+        is_choppy = chop > 61.8  # Range/mean-revert regime
+        is_trending = chop < 38.2  # Trend regime
+        # Between 38.2-61.8 = neutral, use trend bias only
         
-        # === 6h KAMA TREND (adaptive momentum) ===
-        kama_bullish = kama_14[i] > kama_50[i]
-        kama_bearish = kama_14[i] < kama_50[i]
+        # === TREND BIAS (12h KAMA) ===
+        price_above_12h = close[i] > kama_12h_aligned[i]
+        price_below_12h = close[i] < kama_12h_aligned[i]
         
-        # KAMA slope confirmation
-        kama_rising = False
-        kama_falling = False
-        if i >= 3 and not np.isnan(kama_14[i-3]):
-            kama_rising = kama_14[i] > kama_14[i-3]
-            kama_falling = kama_14[i] < kama_14[i-3]
+        # === 4h KAMA CROSSOVER ===
+        kama_bullish = kama_10[i] > kama_40[i]
+        kama_bearish = kama_10[i] < kama_40[i]
         
-        # === RSI PULLBACK (LOOSE entry - guarantee trades) ===
-        rsi = rsi_14[i]
-        rsi_neutral = 35 <= rsi <= 65  # LOOSE zone for more trades
-        
-        # === VOLUME CONFIRMATION ===
-        volume_confirmed = volume[i] > 0.8 * vol_sma_20[i]
+        # === RSI ===
+        rsi = rsi_7[i]
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + 6h KAMA bullish + RSI neutral + volume confirmed
-        if price_above_1d and kama_bullish and kama_rising and rsi_neutral and volume_confirmed:
-            if rsi < 55:  # Stronger if not overbought
-                desired_signal = SIZE_STRONG
-            else:
-                desired_signal = SIZE_BASE
+        if is_trending:
+            # TREND FOLLOWING regime
+            # LONG: 12h bullish + 4h KAMA bullish + RSI > 45 (not overbought)
+            if price_above_12h and kama_bullish and rsi > 45:
+                desired_signal = SIZE_STRONG if rsi < 70 else SIZE_BASE
+            
+            # SHORT: 12h bearish + 4h KAMA bearish + RSI < 55 (not oversold)
+            elif price_below_12h and kama_bearish and rsi < 55:
+                desired_signal = -SIZE_STRONG if rsi > 30 else -SIZE_BASE
         
-        # SHORT: 1d bearish + 6h KAMA bearish + RSI neutral + volume confirmed
-        elif price_below_1d and kama_bearish and kama_falling and rsi_neutral and volume_confirmed:
-            if rsi > 45:  # Stronger if not oversold
-                desired_signal = -SIZE_STRONG
-            else:
+        elif is_choppy:
+            # MEAN REVERSION regime
+            # LONG: RSI < 35 (oversold) + price above 12h KAMA (uptrend bias)
+            if rsi < 35 and price_above_12h:
+                desired_signal = SIZE_BASE
+            
+            # SHORT: RSI > 65 (overbought) + price below 12h KAMA (downtrend bias)
+            elif rsi > 65 and price_below_12h:
+                desired_signal = -SIZE_BASE
+        
+        else:
+            # NEUTRAL regime - use simpler trend bias
+            if price_above_12h and kama_bullish and rsi > 50:
+                desired_signal = SIZE_BASE
+            elif price_below_12h and kama_bearish and rsi < 50:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
