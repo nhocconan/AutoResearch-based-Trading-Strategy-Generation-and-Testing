@@ -1,35 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #1381: 15m Primary + 1h/4h/1d HTF — Multi-TF RSI Mean Reversion in Trend
+Experiment #1382: 4h Primary + 1d/1w HTF — Simplified Trend Pullback Strategy
 
-Hypothesis: 15m timeframe is HIGH-PRIORITY (ZERO prior successful experiments). This strategy uses:
-1. 4h HMA(21) for major trend bias (only trade in trend direction)
-2. 1h RSI(14) for regime confirmation (avoid counter-trend exhaustion)
-3. 15m RSI(7) for entry timing (faster RSI for lower TF entries)
-4. ATR(14) stoploss for risk management
-5. NO session filter (maximize trade count — previous 15m failures had 0 trades)
+Hypothesis: Recent failures (1370-1381) show ZERO trades due to over-filtering.
+This strategy uses LOOSE entry conditions to GUARANTEE trades while keeping
+HTF trend bias for direction. Key insight: 4h timeframe needs 20-50 trades/year.
 
-Why this should work where 15m strategies failed:
-- LOOSE RSI thresholds (<40/>60 not <20/>80) = MORE trades
-- HTF trend filter prevents whipsaw but doesn't block entries
-- 15m RSI(7) reacts faster than 15m RSI(14) = more entry opportunities
-- Discrete sizing (0.15/0.25) minimizes fee churn
-- Target: 50-80 trades/year = 200-320 trades over 4-year train
+Why this should work where others failed:
+- 1d HMA(21) for major trend (proven in best strategies)
+- 4h RSI(14) with LOOSE thresholds (35/65 not 30/70) = more trades
+- ADX(14) > 20 (not 25+) = trend confirmation without filtering out trades
+- KAMA(21) slope for entry timing (adaptive to volatility)
+- Simple ATR trailing stop (2.5x) for risk management
+- Discrete sizing (0.0, ±0.20, ±0.30) to minimize fee churn
 
 Entry logic (LOOSE to guarantee trades):
-- LONG: price > 4h_HMA + 15m_RSI(7) < 40 + 1h_RSI > 35 (not oversold on 1h)
-- SHORT: price < 4h_HMA + 15m_RSI(7) > 60 + 1h_RSI < 65 (not overbought on 1h)
+- LONG: price > 1d_HMA + RSI > 35 + ADX > 20 + KAMA slope up
+- SHORT: price < 1d_HMA + RSI < 65 + ADX > 20 + KAMA slope down
 
-Target: Sharpe>0.5, trades>=160 train (40/year), trades>=15 test, DD>-35%
-Timeframe: 15m
-Size: 0.15-0.25 discrete (smaller for higher frequency)
+Target: Sharpe>0.5, trades>=30 train, trades>=3 test, DD>-35%
+Timeframe: 4h
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_rsi7_pullback_hma_trend_1h4h_v1"
-timeframe = "15m"
+name = "mtf_4h_kama_rsi_adx_trend_1d1w_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -62,6 +60,54 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average - adapts to market noise"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan, dtype=np.float64)
+    
+    er = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if not np.isnan(close[i]) and not np.isnan(close[i - period]):
+            signal = abs(close[i] - close[i - period])
+            noise = 0.0
+            for j in range(i - period + 1, i + 1):
+                if not np.isnan(close[j]) and not np.isnan(close[j - 1]):
+                    noise += abs(close[j] - close[j - 1])
+            if noise > 0:
+                er[i] = signal / noise
+    
+    sc = np.full(n, np.nan, dtype=np.float64)
+    fast_sc = 2.0 / (fast + 1)
+    slow_sc = 2.0 / (slow + 1)
+    for i in range(period, n):
+        if not np.isnan(er[i]):
+            sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    kama[period - 1] = close[period - 1]
+    
+    for i in range(period, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i - 1]) and not np.isnan(close[i]):
+            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -86,19 +132,46 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - trend strength"""
     n = len(close)
-    if n < period + 1:
+    if n < period * 2:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        if not np.isnan(high[i]) and not np.isnan(low[i]):
+            plus_dm[i] = max(0, high[i] - high[i-1]) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
+            minus_dm[i] = max(0, low[i-1] - low[i]) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
+    
+    tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+    
+    plus_di = np.full(n, np.nan)
+    minus_di = np.full(n, np.nan)
+    
+    plus_di_sum = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di_sum = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    mask = atr != 0
+    plus_di[mask] = 100 * plus_di_sum[mask] / atr[mask]
+    minus_di[mask] = 100 * minus_di_sum[mask] / atr[mask]
+    
+    dx = np.full(n, np.nan)
+    for i in range(period * 2 - 1, n):
+        if not np.isnan(plus_di[i]) and not np.isnan(minus_di[i]):
+            di_sum = plus_di[i] + minus_di[i]
+            if di_sum > 0:
+                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return adx
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -107,24 +180,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    rsi_1h_raw = calculate_rsi(df_1h['close'].values, period=14)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 15m indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 15m entries
     rsi_14 = calculate_rsi(close, period=14)
+    kama_21 = calculate_kama(close, period=21)
+    adx_14 = calculate_adx(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.25
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -136,7 +210,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 50
+    min_bars = 100
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -147,49 +221,61 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(kama_21[i]) or np.isnan(adx_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (4h HMA bias) ===
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
+        # === TREND DIRECTION (1d HMA bias) ===
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === 1h RSI REGIME (avoid exhaustion) ===
-        rsi_1h = rsi_1h_aligned[i]
+        # 1w HMA for major regime
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
         
-        # === 15m RSI ENTRY SIGNALS (LOOSE thresholds) ===
-        rsi_7_val = rsi_7[i]
-        rsi_14_val = rsi_14[i]
+        # === KAMA TREND SLOPE ===
+        kama_slope_up = False
+        kama_slope_down = False
+        
+        if i >= 2:
+            if kama_21[i] > kama_21[i-1]:
+                kama_slope_up = True
+            elif kama_21[i] < kama_21[i-1]:
+                kama_slope_down = True
+        
+        # === TREND STRENGTH (ADX) ===
+        adx = adx_14[i]
+        trend_strength = adx > 20  # LOOSE threshold for more trades
+        
+        # === MOMENTUM (RSI) - LOOSE thresholds ===
+        rsi = rsi_14[i]
+        rsi_bullish = rsi > 35  # Not oversold
+        rsi_bearish = rsi < 65  # Not overbought
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: 4h bullish + 15m RSI(7) oversold + 1h RSI not overbought
-        # Thresholds: RSI(7) < 40 (not <20), 1h RSI > 35 (not exhausted)
-        if price_above_4h and rsi_7_val < 40 and rsi_1h > 35:
-            # Strong signal if RSI(7) very oversold
-            if rsi_7_val < 30:
+        # LONG: 1d bullish + KAMA up + ADX > 20 + RSI > 35
+        if price_above_1d and kama_slope_up and trend_strength and rsi_bullish:
+            if price_above_1w:
                 base_size = SIZE_STRONG
             else:
                 base_size = SIZE_BASE
             desired_signal = base_size
         
-        # SHORT: 4h bearish + 15m RSI(7) overbought + 1h RSI not oversold
-        # Thresholds: RSI(7) > 60 (not >80), 1h RSI < 65 (not exhausted)
-        elif price_below_4h and rsi_7_val > 60 and rsi_1h < 65:
-            # Strong signal if RSI(7) very overbought
-            if rsi_7_val > 70:
+        # SHORT: 1d bearish + KAMA down + ADX > 20 + RSI < 65
+        elif price_below_1d and kama_slope_down and trend_strength and rsi_bearish:
+            if price_below_1w:
                 base_size = SIZE_STRONG
             else:
                 base_size = SIZE_BASE
