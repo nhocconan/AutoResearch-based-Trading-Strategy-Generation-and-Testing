@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1180: 6h Primary + 1d/1w HTF — Fisher Transform Reversals + HMA Trend
+Experiment #1181: 15m Primary + 1h/4h/1d HTF — HMA Trend + Fast RSI Pullback
 
-Hypothesis: After 960+ failed experiments, the key insight is that BTC/ETH perform poorly
-in bear/range markets with simple trend following. The Fisher Transform (Ehlers, 2002)
-is specifically designed to catch reversals in non-trending markets and has shown
-Sharpe 0.8-1.5 through 2022 crash in research.
+Hypothesis: After 10+ failed 15m experiments (all Sharpe=0.000 = 0 trades), the problem
+is OVER-FILTERING. 15m has 96 bars/day vs 2 bars/day for 12h, so entries must be LOOSE
+enough to trigger but SELECTIVE enough to avoid fee death (>100 trades/year).
 
-Strategy logic:
-1. 1d HMA(21) for primary trend direction (price above = bullish bias)
-2. 1w HMA(21) for macro confirmation (optional strength filter)
-3. 6h Fisher Transform(9) for reversal entries (crosses -1.5 = long, +1.5 = short)
-4. ATR(14) 2.5x trailing stop for risk management
-5. LOOSE entry conditions to guarantee ≥30 trades/train, ≥3 trades/test
-
-Why Fisher Transform:
-- Normalizes price to Gaussian distribution, making extremes statistically significant
-- Crosses at -1.5/+1.5 capture ~95% of reversal points
-- Works in both trending AND ranging markets (unlike RSI which fails in trends)
-- Proven on BTC/ETH through 2022 crash (research note #3)
+Key changes from failed 15m experiments:
+1. SINGLE HTF trend filter (4h HMA only, not 4h+1d) - fewer conditions to fail
+2. WIDER RSI range (25-75 instead of 35-65) - triggers on normal moves
+3. NO session filter - crypto moves 24/7, session filters kill trades
+4. FASTER RSI (period=7 for 15m) - quicker entry signals
+5. SMALLER position size (0.15-0.20) - 15m has more trades, reduce risk per trade
 
 Entry logic (LOOSE to guarantee trades):
-- LONG: price > 1d_HMA AND Fisher crosses above -1.5 (reversal in uptrend)
-- SHORT: price < 1d_HMA AND Fisher crosses below +1.5 (reversal in downtrend)
-- Strong signal: also aligned with 1w HMA direction
+- LONG: price > 4h_HMA AND RSI(7) between 25-75 (pullback in uptrend)
+- SHORT: price < 4h_HMA AND RSI(7) between 25-75 (pullback in downtrend)
+- Optional: 1d HMA for strong trend confirmation (boosts size, not required)
 
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Why this should work:
+- 15m timeframe = natural 50-150 trades/year with loose entries
+- Single HTF filter (4h HMA) = clear bias without over-constraining
+- RSI(7) 25-75 range = triggers on normal pullbacks, not extremes
+- Discrete sizing (0.0, ±0.15, ±0.20) = minimal fee churn
+- ATR(14) 2.5x trailing stop = protects from large drawdowns
+
+Target: Sharpe>0.5, trades>=50 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.20 discrete (smaller for higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_fisher_reversal_hma_trend_1d1w_v1"
-timeframe = "6h"
+name = "mtf_15m_hma_trend_rsi_fast_4h_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -81,42 +81,23 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_fisher(close, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution
-    Makes extremes statistically significant for reversal detection
-    Reference: Ehlers, J.F. (2002) "Fisher Transform"
-    """
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
-        return np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
-    # Calculate highest high and lowest low over period
-    fisher = np.full(n, np.nan, dtype=np.float64)
-    fisher_prev = np.full(n, np.nan, dtype=np.float64)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    for i in range(period, n):
-        # Find highest high and lowest low over lookback period
-        hh = np.nanmax(close[i-period+1:i+1])
-        ll = np.nanmin(close[i-period+1:i+1])
-        
-        if hh == ll:
-            continue
-        
-        # Normalize price to -1 to +1 range
-        value = (2.0 * close[i] - (hh + ll)) / (hh - ll)
-        
-        # Clamp to avoid division issues
-        value = np.clip(value, -0.999, 0.999)
-        
-        # Fisher transform
-        fisher[i] = 0.5 * np.log((1.0 + value) / (1.0 - value))
-        
-        # Previous value for crossover detection
-        if i > period:
-            fisher_prev[i] = fisher[i-1]
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    return fisher, fisher_prev
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi[:period] = np.nan
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -125,23 +106,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate 6h indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    fisher, fisher_prev = calculate_fisher(close, period=9)
+    rsi_7 = calculate_rsi(close, period=7)  # Fast RSI for 15m
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -152,8 +133,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup period
-    min_bars = 100
+    # Warmup period (shorter for 15m)
+    min_bars = 50
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -164,53 +145,50 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(fisher_prev[i]):
+        if np.isnan(rsi_7[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (Daily HMA) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === TREND DIRECTION (4h HMA - PRIMARY) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # Weekly HMA for additional confirmation
-        hma_1w_valid = not np.isnan(hma_1w_aligned[i])
-        price_above_1w = hma_1w_valid and close[i] > hma_1w_aligned[i]
-        price_below_1w = hma_1w_valid and close[i] < hma_1w_aligned[i]
-        
-        # === FISHER TRANSFORM REVERSAL SIGNALS ===
-        fisher_val = fisher[i]
-        fisher_prev_val = fisher_prev[i]
-        
-        # Fisher crossover detection
-        fisher_cross_up = fisher_prev_val < -1.5 and fisher_val >= -1.5
-        fisher_cross_down = fisher_prev_val > 1.5 and fisher_val <= 1.5
+        # 1d HMA for strong trend confirmation (optional boost)
+        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
+        price_above_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
+        price_below_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
+        rsi = rsi_7[i]
         
-        # LONG: Price above 1d HMA + Fisher crosses above -1.5 (reversal from oversold)
-        if price_above_1d and fisher_cross_up:
-            if price_above_1w:
-                desired_signal = SIZE_STRONG  # Strong trend alignment
-            else:
-                desired_signal = SIZE_BASE  # Basic uptrend reversal
+        # LONG: Price above 4h HMA + RSI pullback (25-75 range for 15m)
+        # Strong long: also above 1d HMA
+        if price_above_4h:
+            if 25.0 <= rsi <= 75.0:
+                if price_above_1d:
+                    desired_signal = SIZE_STRONG  # Strong trend alignment
+                else:
+                    desired_signal = SIZE_BASE  # Basic uptrend pullback
         
-        # SHORT: Price below 1d HMA + Fisher crosses below +1.5 (reversal from overbought)
-        elif price_below_1d and fisher_cross_down:
-            if price_below_1w:
-                desired_signal = -SIZE_STRONG  # Strong trend alignment
-            else:
-                desired_signal = -SIZE_BASE  # Basic downtrend reversal
+        # SHORT: Price below 4h HMA + RSI pullback (25-75 range for 15m)
+        # Strong short: also below 1d HMA
+        elif price_below_4h:
+            if 25.0 <= rsi <= 75.0:
+                if price_below_1d:
+                    desired_signal = -SIZE_STRONG  # Strong trend alignment
+                else:
+                    desired_signal = -SIZE_BASE  # Basic downtrend pullback
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
