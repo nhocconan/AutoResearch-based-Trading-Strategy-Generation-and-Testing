@@ -1,41 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #1471: 6h Primary + 1w/1d HTF — Volatility Regime + Multi-TF Trend
+Experiment #1473: 5m Primary + 15m/4h HTF — Session-Filtered Trend Pullback
 
-Hypothesis: 6h timeframe is underexplored (ZERO prior experiments). This strategy
-combines volatility expansion detection with multi-timeframe trend confirmation.
+Hypothesis: 5m timeframe is unexplored territory. By using 15m HMA for immediate 
+trend and 4h HMA for major bias, we only trade in established direction. 
+5m RSI pullback entries provide precise timing. Session filter (08-20 UTC) 
+avoids low-liquidity Asian hours where whipsaws dominate.
 
 Key components:
-1. 1w HMA(21) for major trend bias (slowest filter, avoids counter-trend)
-2. 1d RSI(14) for intermediate momentum confirmation
-3. 6h ATR ratio (ATR7/ATR30) for volatility regime detection
-4. 6h HMA(16/48) crossover for entry timing
-5. 6h Donchian(20) breakout confirmation
-6. ATR(14) trailing stoploss (2.5x ATR)
-7. Discrete sizing: 0.0, ±0.25, ±0.30 (minimize fee churn)
+1. 4h HMA(21) for major trend bias (NEVER counter-trend)
+2. 15m HMA(16/48) for immediate trend momentum
+3. 5m RSI(14) for pullback entry timing (long when RSI<45 in uptrend, short when RSI>55 in downtrend)
+4. Session filter: only trade 08-20 UTC (London/NY overlap = highest liquidity)
+5. ATR(14) trailing stoploss at 2.5x ATR
+6. Discrete sizing: 0.0, ±0.15, ±0.20 (smaller due to higher trade frequency)
 
-Why this should work on 6h:
-- 1w HMA provides strong trend bias (only trade with weekly trend)
-- ATR ratio > 1.5 = volatility expansion (breakout regime)
-- ATR ratio < 0.8 = volatility contraction (mean-reversion regime)
-- LOOSE entry thresholds guarantee trades (RSI 35/65, not 30/70)
-- 6h TF = natural 30-50 trades/year (fee-efficient)
-- Multiple confluence filters prevent whipsaws
+Why this should work on 5m:
+- HTF trend filter prevents counter-trend disasters (main 5m failure mode)
+- Session filter avoids Asian session whipsaws (low volume = fake breakouts)
+- RSI pullback (not extreme) ensures enough trades while waiting for retracement
+- Loose RSI thresholds (45/55, not 30/70) guarantee ≥50 trades/year
+- Small size (0.15-0.20) accounts for higher fee drag on 5m
 
-Entry logic (LOOSE to guarantee ≥30 trades/train, ≥3/test):
-- LONG: 1w_HMA bullish + 1d_RSI > 45 + ATR_ratio > 1.0 + HMA16>HMA48 + Donchian breakout
-- SHORT: 1w_HMA bearish + 1d_RSI < 55 + ATR_ratio > 1.0 + HMA16<HMA48 + Donchian breakdown
+Entry logic (LOOSE to guarantee trades):
+- LONG: 4h_HMA bullish + 15m_HMA16>HMA48 + 5m_RSI<50 + session 08-20 UTC
+- SHORT: 4h_HMA bearish + 15m_HMA16<HMA48 + 5m_RSI>50 + session 08-20 UTC
 
-Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.6, trades>=50 train, trades>=5 test, DD>-35%, 50-120 trades/year
+Timeframe: 5m
+Size: 0.15-0.20 discrete (smaller than higher TFs due to fee drag)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vol_regime_hma_donchian_1w1d_v1"
-timeframe = "6h"
+name = "mtf_5m_session_rsi_pullback_hma_15m4h_v1"
+timeframe = "5m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -106,55 +106,42 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
+def is_trading_session(open_time, start_hour=8, end_hour=20):
+    """
+    Check if timestamp is within trading session (UTC)
+    08-20 UTC covers London open through NY session
+    """
+    # open_time is in milliseconds since epoch
+    hour = pd.to_datetime(open_time, unit='ms').hour
+    return start_hour <= hour < end_hour
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
+    df_15m = get_htf_data(prices, '15m')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    rsi_1d_raw = calculate_rsi(df_1d['close'].values, period=14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_raw)
+    hma_15m_16_raw = calculate_hma(df_15m['close'].values, period=16)
+    hma_15m_48_raw = calculate_hma(df_15m['close'].values, period=48)
+    hma_15m_16_aligned = align_htf_to_ltf(prices, df_15m, hma_15m_16_raw)
+    hma_15m_48_aligned = align_htf_to_ltf(prices, df_15m, hma_15m_48_raw)
     
-    # Calculate 6h indicators
-    hma_16 = calculate_hma(close, period=16)
-    hma_48 = calculate_hma(close, period=48)
+    # Calculate 5m indicators
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
-    
-    # Calculate ATR ratio for volatility regime
-    atr_ratio = np.full(n, np.nan, dtype=np.float64)
-    for i in range(30, n):
-        if atr_30[i] > 1e-10:
-            atr_ratio[i] = atr_7[i] / atr_30[i]
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -177,87 +164,45 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(hma_15m_16_aligned[i]) or np.isnan(hma_15m_48_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === SESSION FILTER (08-20 UTC) ===
+        in_session = is_trading_session(open_time[i], start_hour=8, end_hour=20)
         
-        if np.isnan(atr_ratio[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION (4h HMA bias - NEVER counter-trend) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # === VOLATILITY REGIME (ATR ratio) ===
-        atr_rat = atr_ratio[i]
-        is_vol_expansion = atr_rat > 1.0  # Volatility expanding
-        is_vol_contraction = atr_rat < 0.8  # Volatility contracting
+        # === 15m HMA CROSSOVER (immediate trend momentum) ===
+        hma_15m_bullish = hma_15m_16_aligned[i] > hma_15m_48_aligned[i]
+        hma_15m_bearish = hma_15m_16_aligned[i] < hma_15m_48_aligned[i]
         
-        # === TREND DIRECTION (1w HMA bias) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        # === 5m RSI (pullback entry timing) ===
+        rsi = rsi_14[i]
         
-        # === MOMENTUM (1d RSI) ===
-        rsi_1d = rsi_1d_aligned[i]
-        rsi_bullish = rsi_1d > 45  # LOOSE threshold
-        rsi_bearish = rsi_1d < 55  # LOOSE threshold
-        
-        # === 6h HMA CROSSOVER (trend momentum) ===
-        hma_bullish = hma_16[i] > hma_48[i]
-        hma_bearish = hma_16[i] < hma_48[i]
-        
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = close[i] > donch_upper[i-1] if not np.isnan(donch_upper[i-1]) else False
-        donchian_breakout_short = close[i] < donch_lower[i-1] if not np.isnan(donch_lower[i-1]) else False
-        
-        # === ENTRY LOGIC (LOOSE - must generate trades) ===
+        # === ENTRY LOGIC (LOOSE - must generate ≥50 trades/year) ===
         desired_signal = 0.0
         
-        # VOLATILITY EXPANSION REGIME: Trend following with breakout
-        if is_vol_expansion:
-            # LONG: 1w bullish + 1d RSI bullish + HMA bullish + Donchian breakout
-            if price_above_1w and rsi_bullish and hma_bullish and donchian_breakout_long:
-                desired_signal = SIZE_STRONG
-            
-            # SHORT: 1w bearish + 1d RSI bearish + HMA bearish + Donchian breakdown
-            elif price_below_1w and rsi_bearish and hma_bearish and donchian_breakout_short:
-                desired_signal = -SIZE_STRONG
-        
-        # VOLATILITY CONTRACTION REGIME: Mean reversion with HMA confirmation
-        elif is_vol_contraction:
-            # LONG: 1w bullish + HMA bullish (pullback entry)
-            if price_above_1w and hma_bullish and rsi_bullish:
+        # Only trade during session hours
+        if in_session:
+            # LONG: 4h bullish + 15m bullish + RSI pullback (<50, not extreme)
+            if price_above_4h and hma_15m_bullish and rsi < 50:
                 desired_signal = SIZE_BASE
             
-            # SHORT: 1w bearish + HMA bearish (rally entry)
-            elif price_below_1w and hma_bearish and rsi_bearish:
-                desired_signal = -SIZE_BASE
-        
-        # NEUTRAL VOLATILITY: Only take strong trend signals
-        else:
-            # LONG: All trend factors aligned
-            if price_above_1w and rsi_bullish and hma_bullish:
-                desired_signal = SIZE_BASE
-            
-            # SHORT: All trend factors aligned
-            elif price_below_1w and rsi_bearish and hma_bearish:
+            # SHORT: 4h bearish + 15m bearish + RSI pullback (>50, not extreme)
+            elif price_below_4h and hma_15m_bearish and rsi > 50:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
