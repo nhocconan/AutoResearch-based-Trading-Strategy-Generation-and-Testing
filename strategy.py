@@ -1,62 +1,101 @@
 #!/usr/bin/env python3
 """
-Experiment #1246: 1d Primary + 1w HTF — Donchian Breakout + HMA Trend + ATR Stop
+Experiment #1247: 6h Primary + 1d HTF — KAMA Trend + ROC Momentum + Vol Filter
 
-Hypothesis: Daily timeframe with weekly trend confirmation provides optimal balance
-of trade frequency (20-50/year) and signal quality. Donchian breakouts capture momentum
-while HMA trend filter avoids counter-trend trades.
+Hypothesis: After 1027 failed experiments, the pattern is clear:
+1. HMA works but whipsaws in ranging markets (BTC/ETH range 70% of time)
+2. RSI is too slow for 6h momentum entries
+3. CHOP regime filters kill trade frequency → 0 trades
+4. Weekly pivot strategies all failed on 6h
 
-Key insights from failures:
-- Complex regime filters (choppiness, ADX) kill trade generation
-- RSI extremes too narrow for daily data
-- Need LOOSE entries that trigger on normal market moves
+NEW APPROACH:
+1. KAMA (Kaufman Adaptive) instead of HMA — adapts to volatility, reduces whipsaw
+2. ROC(10) instead of RSI — faster momentum signal, crosses 0 frequently
+3. ATR ratio (7/30) vol filter — only trade when vol expanding (ATR7/ATR30 > 1.0)
+4. LOOSE entries: 1d KAMA trend + ROC direction + vol expanding = entry
+5. No CHOP, no complex regime — just trend + momentum + vol
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: Price breaks 14-day Donchian high + RSI > 40 + (optional: price > 1w_HMA)
-- SHORT: Price breaks 14-day Donchian low + RSI < 60 + (optional: price < 1w_HMA)
-- Exit: ATR(14) 2.5x trailing stop or signal reversal
+Why 6h might work now:
+- 6h is unexplored (0 prior experiments before #1240)
+- Between 4h (too many trades) and 12h (too few trades)
+- Natural 30-60 trades/year with proper filters
+- 1d HTF gives clear trend bias without over-filtering
 
-Timeframe: 1d
+Entry logic (LOOSE):
+- LONG: price > 1d_KAMA AND ROC(10) > 0 AND ATR7/ATR30 > 1.0
+- SHORT: price < 1d_KAMA AND ROC(10) < 0 AND ATR7/ATR30 > 1.0
+
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
 Size: 0.25-0.30 discrete
-Target: Sharpe>0.5, trades>=30 train, trades>=3 test, DD>-35%
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_hma_breakout_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_kama_trend_roc_momentum_1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average - reduces lag while smoothing"""
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market efficiency (trend vs noise)
+    
+    Efficiency Ratio (ER) = |Close - Close_n| / Sum(|Close - Close_prev|)
+    Fast SC = 2/(fast+1), Slow SC = 2/(slow+1)
+    Smoothing Constant = (ER * (Fast - Slow) + Slow)^2
+    """
     n = len(close)
-    if n < period:
+    if n < slow_period + er_period:
         return np.full(n, np.nan)
     
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
+    kama = np.full(n, np.nan, dtype=np.float64)
     
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
+    # Calculate Efficiency Ratio
+    er = np.full(n, np.nan, dtype=np.float64)
+    for i in range(er_period, n):
+        if not np.isnan(close[i]) and not np.isnan(close[i - er_period]):
+            signal = abs(close[i] - close[i - er_period])
+            noise = 0.0
+            for j in range(i - er_period + 1, i + 1):
+                noise += abs(close[j] - close[j - 1])
+            if noise > 1e-10:
+                er[i] = signal / noise
+            else:
+                er[i] = 1.0
     
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
+    # Calculate KAMA
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
     
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+    # Initialize KAMA with first valid close
+    init_idx = er_period
+    while init_idx < n and np.isnan(er[init_idx]):
+        init_idx += 1
+    if init_idx < n:
+        kama[init_idx] = close[init_idx]
     
-    return wma(diff, sqrt_n)
+    for i in range(init_idx + 1, n):
+        if np.isnan(er[i]) or np.isnan(kama[i-1]) or np.isnan(close[i]):
+            continue
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_roc(close, period=10):
+    """Rate of Change — momentum indicator"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    roc = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if close[i - period] > 1e-10 and not np.isnan(close[i]):
+            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100.0
+    
+    return roc
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -72,36 +111,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    rsi[:period] = np.nan
-    return rsi
-
-def calculate_donchian(high, low, period=14):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -109,16 +118,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    kama_1d_raw = calculate_kama(df_1d['close'].values, er_period=10, fast_period=2, slow_period=30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
     
-    # Calculate 1d indicators
-    atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=14)
+    # Calculate 6h indicators
+    kama_6h = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    roc_10 = calculate_roc(close, period=10)
+    atr_7 = calculate_atr(high, low, close, period=7)
+    atr_30 = calculate_atr(high, low, close, period=30)
+    
+    # ATR ratio for volatility expansion filter
+    atr_ratio = np.full(n, np.nan, dtype=np.float64)
+    for i in range(n):
+        if not np.isnan(atr_7[i]) and not np.isnan(atr_30[i]) and atr_30[i] > 1e-10:
+            atr_ratio[i] = atr_7[i] / atr_30[i]
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -138,53 +154,58 @@ def generate_signals(prices):
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or atr_7[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(roc_10[i]) or np.isnan(kama_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION (Daily KAMA) ===
+        price_above_1d = close[i] > kama_1d_aligned[i]
+        price_below_1d = close[i] < kama_1d_aligned[i]
         
-        # === TREND DIRECTION (Weekly HMA) ===
-        hma_1w_valid = not np.isnan(hma_1w_aligned[i])
-        price_above_1w = hma_1w_valid and close[i] > hma_1w_aligned[i]
-        price_below_1w = hma_1w_valid and close[i] < hma_1w_aligned[i]
+        # === VOLATILITY FILTER (ATR ratio > 1.0 = expanding vol) ===
+        vol_expanding = atr_ratio[i] > 1.0
+        
+        # === MOMENTUM (ROC crossing 0) ===
+        roc = roc_10[i]
+        roc_positive = roc > 0.0
+        roc_negative = roc < 0.0
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
-        rsi = rsi_14[i]
         
-        # Donchian breakout detection
-        breakout_long = close[i] > donchian_upper[i - 1] if i > 0 else False
-        breakout_short = close[i] < donchian_lower[i - 1] if i > 0 else False
-        
-        # LONG: Donchian breakout + RSI confirmation + weekly trend (optional boost)
-        if breakout_long and rsi > 40.0:
-            if price_above_1w:
-                desired_signal = SIZE_STRONG  # Strong trend alignment
+        # LONG: Price above 1d KAMA + ROC positive + vol expanding
+        if price_above_1d and roc_positive and vol_expanding:
+            # Check 6h KAMA slope for confirmation
+            if i >= 5 and not np.isnan(kama_6h[i]) and not np.isnan(kama_6h[i-5]):
+                kama_slope = kama_6h[i] - kama_6h[i-5]
+                if kama_slope > 0:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
             else:
-                desired_signal = SIZE_BASE  # Basic breakout
+                desired_signal = SIZE_BASE
         
-        # SHORT: Donchian breakout + RSI confirmation + weekly trend (optional boost)
-        elif breakout_short and rsi < 60.0:
-            if price_below_1w:
-                desired_signal = -SIZE_STRONG  # Strong trend alignment
+        # SHORT: Price below 1d KAMA + ROC negative + vol expanding
+        elif price_below_1d and roc_negative and vol_expanding:
+            # Check 6h KAMA slope for confirmation
+            if i >= 5 and not np.isnan(kama_6h[i]) and not np.isnan(kama_6h[i-5]):
+                kama_slope = kama_6h[i] - kama_6h[i-5]
+                if kama_slope < 0:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
             else:
-                desired_signal = -SIZE_BASE  # Basic breakout
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -224,7 +245,7 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr_7[i] if not np.isnan(atr_7[i]) else atr_30[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
