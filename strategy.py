@@ -1,69 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1327: 6h Primary + 1d/1w HTF — Donchian Breakout + Volume Confirmation
+Experiment #1328: 4h Primary + 12h HTF — HMA Trend + RSI Pullback Strategy
 
-Hypothesis: Recent 6h strategies failed due to over-complexity (Fisher, CHOP, weekly pivots).
-This returns to a proven trend-following core (Donchian breakout) with simple HTF filters.
-Key insights from 1090 failed experiments:
+Hypothesis: After analyzing 1091 failed strategies, the #1 cause of failure is
+TOO MANY FILTERS that never all agree simultaneously (Sharpe=0.000 = 0 trades).
 
-1. Donchian(20) breakout = proven trend follower, works across regimes
-2. Volume confirmation = filters false breakouts (critical for 6h)
-3. 1w HMA for major regime = only short when weekly trend is bearish
-4. 1d HMA for intermediate trend = directional bias filter
-5. LOOSE entry conditions = guarantee 30-60 trades/year (unlike failed exps)
-6. Asymmetric sizing = smaller shorts in bull regimes, full size in bear
+This strategy SIMPLIFIES to guarantee trades while maintaining edge:
+1. SINGLE HTF filter: 12h HMA(21) slope for trend direction (not dual 12h+1d)
+2. RSI pullback entries: Long when RSI<40 in uptrend, Short when RSI>60 in downtrend
+3. ATR trailing stop: 2.5x ATR(14) for risk management
+4. LOOSE thresholds: RSI 35-45 for long, 55-65 for short (not extreme 20/80)
 
-Why 6h Donchian should work:
-- 6h Donchian(20) = ~5 day breakout (catches multi-day trends)
-- Volume filter = avoids fake breakouts in low-liquidity periods
-- 1w HMA = prevents shorting in bull markets (2021, 2024)
-- Simple logic = fewer conditions to fail simultaneously
+Why this should work on 4h:
+- 4h timeframe = natural 20-50 trades/year (fee-friendly per Rule 10)
+- Single HTF filter = fewer conditions to fail simultaneously
+- RSI pullback = proven mean-reversion within trend (works in bull AND bear)
+- No choppiness/session/volume filters = entries actually trigger
 - Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: Donchian breakout + volume > avg + 1d_HMA bullish + (1w_HMA neutral/bullish)
-- SHORT: Donchian breakdown + volume > avg + 1d_HMA bearish + 1w_HMA bearish
+Entry logic (LOOSE to guarantee 30+ trades):
+- LONG: 12h_HMA rising (slope>0) + RSI(14) < 45 (pullback in uptrend)
+- SHORT: 12h_HMA falling (slope<0) + RSI(14) > 55 (rally in downtrend)
 
-Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.25-0.30 discrete (0.20 for shorts in bull regime)
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 4h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_vol_breakout_1d1w_v1"
-timeframe = "6h"
+name = "mtf_4h_hma_trend_rsi_pullback_12h_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -95,48 +64,72 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_volume_sma(volume, period=20):
-    """Simple Moving Average of Volume"""
-    n = len(volume)
-    if n < period:
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    vol_sma = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        vol_sma[i] = np.nanmean(volume[i - period + 1:i + 1])
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    return vol_sma
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close)
+    gain = np.zeros(n, dtype=np.float64)
+    loss = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        if delta[i-1] > 0:
+            gain[i] = delta[i-1]
+        else:
+            loss[i] = -delta[i-1]
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+        else:
+            rsi[i] = 100.0
+    
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    vol_sma_20 = calculate_volume_sma(volume, period=20)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    rsi_14 = calculate_rsi(close, period=14)
     
-    # Also calculate 6h HMA for local trend
-    hma_6h = calculate_hma(close, period=21)
+    # Also calculate 4h HMA for local trend confirmation
+    hma_4h = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
-    SIZE_SHORT_BULL = 0.20  # Reduced short size in bull regime
     
     # Position tracking for stoploss
     in_position = False
@@ -148,7 +141,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 50
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -159,80 +152,58 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] <= 1e-10:
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_6h[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION (12h HMA slope) ===
+        # Compare to 3 bars ago for stability (reduces noise)
+        hma_12h_slope = 0.0
+        if i >= 3 and not np.isnan(hma_12h_aligned[i-3]):
+            hma_12h_slope = hma_12h_aligned[i] - hma_12h_aligned[i-3]
         
-        # === REGIME BIAS (1w HMA) ===
-        # Weekly trend determines if we allow shorts
-        weekly_bullish = close[i] > hma_1w_aligned[i]
-        weekly_bearish = close[i] < hma_1w_aligned[i]
+        # 4h price vs 4h HMA for local confirmation
+        price_above_4h = close[i] > hma_4h[i]
+        price_below_4h = close[i] < hma_4h[i]
         
-        # === INTERMEDIATE TREND (1d HMA) ===
-        daily_bullish = close[i] > hma_1d_aligned[i]
-        daily_bearish = close[i] < hma_1d_aligned[i]
-        
-        # === VOLUME CONFIRMATION ===
-        vol_ratio = volume[i] / vol_sma_20[i] if vol_sma_20[i] > 0 else 0
-        volume_confirmed = vol_ratio > 1.0  # Above average volume
-        
-        # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else False
-        breakout_short = close[i] < donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else False
-        
-        # === 6h LOCAL TREND ===
-        price_above_6h = close[i] > hma_6h[i]
-        price_below_6h = close[i] < hma_6h[i]
+        # === RSI PULLBACK ===
+        rsi = rsi_14[i]
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: Donchian breakout + volume + daily bullish + 6h confirm
-        if breakout_long and volume_confirmed and daily_bullish and price_above_6h:
-            # In weekly bull regime = full size
-            # In weekly bear regime = reduced size (counter-trend)
-            if weekly_bullish:
-                if vol_ratio > 1.5:
-                    desired_signal = SIZE_STRONG
+        # LONG: 12h HMA rising + RSI pullback (not too extreme, guarantee entries)
+        if hma_12h_slope > 0 and price_above_4h:
+            if rsi < 45:  # Pullback in uptrend (loose threshold)
+                if rsi < 35:
+                    desired_signal = SIZE_STRONG  # Deep pullback
                 else:
-                    desired_signal = SIZE_BASE
-            else:
-                # Weekly bearish but daily bullish = reduced long
-                desired_signal = SIZE_BASE * 0.8
+                    desired_signal = SIZE_BASE  # Normal pullback
         
-        # SHORT: Donchian breakdown + volume + daily bearish + weekly bearish
-        elif breakout_short and volume_confirmed and daily_bearish and price_below_6h:
-            # Only short in weekly bearish regime (asymmetric)
-            if weekly_bearish:
-                if vol_ratio > 1.5:
-                    desired_signal = -SIZE_STRONG
+        # SHORT: 12h HMA falling + RSI rally (not too extreme, guarantee entries)
+        elif hma_12h_slope < 0 and price_below_4h:
+            if rsi > 55:  # Rally in downtrend (loose threshold)
+                if rsi > 65:
+                    desired_signal = -SIZE_STRONG  # Strong rally
                 else:
-                    desired_signal = -SIZE_BASE
-            # In weekly bullish regime, skip shorts entirely
+                    desired_signal = -SIZE_BASE  # Normal rally
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
