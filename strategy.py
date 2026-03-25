@@ -1,37 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #1494: 1d Primary + 1w HTF — Volatility Compression Breakout with Trend Filter
+Experiment #1495: 6h Primary + 12h/1d HTF — Keltner-ADX Regime Adaptive
 
-Hypothesis: Daily timeframe with weekly trend filter provides optimal balance between
-trade frequency (20-50/year) and signal quality. This strategy combines:
-1. Volatility compression detection (BB Width at 200-day low) → breakout imminent
-2. Weekly HMA(21) for major trend bias (avoid counter-trend breakouts)
-3. Donchian(20) breakout for entry timing
-4. ATR-based position sizing and stoploss (3x ATR for daily TF)
-5. Asymmetric sizing: stronger positions with weekly trend, weaker against
+Hypothesis: 6h timeframe offers optimal balance between 4h (too many trades) and 
+12h (too few trades). This strategy uses ADX regime detection to switch between
+trend-following (Keltner breakout) and mean-reversion (Keltner bounce) based on
+market conditions, with 1d HMA for major trend bias.
 
-Why this should work on 1d:
-- Volatility compression precedes major moves (proven in quant literature)
-- Weekly filter prevents major counter-trend disasters (2022 crash protection)
-- Daily TF = natural 25-40 trades/year (fee-efficient, meets minimum trade req)
-- LOOSE breakout thresholds guarantee trades (Donchian break, not exact level)
-- Works in both bull and bear regimes (asymmetric, not long-only)
+Key components:
+1. 1d HMA(21) for major trend bias (avoid counter-trend in strong trends)
+2. 12h ADX(14) for regime detection:
+   - ADX > 25 = trending (use Keltner breakout strategy)
+   - ADX < 20 = ranging (use Keltner mean-reversion)
+   - Between = neutral (reduce position size)
+3. 6h Keltner Channel(20, 2.0*ATR) for entry signals
+4. 6h RSI(14) for momentum confirmation
+5. 6h HMA(16/48) for trend momentum confirmation
+6. ATR(14) trailing stoploss (2.5x ATR)
+7. Discrete sizing: 0.0, ±0.25, ±0.30 (minimize fee churn)
+
+Why this should work:
+- ADX regime adaptation prevents trend strategies from dying in chop
+- Keltner Channels are more adaptive than Bollinger (uses ATR not std)
+- 6h TF = natural 30-60 trades/year (fee-efficient)
+- LOOSE entry thresholds guarantee trades (RSI 35/65, not 30/70)
+- 1d HMA filter prevents major counter-trend disasters
+- Different from failed CRSI/weekly pivot strategies
 
 Entry logic (LOOSE to guarantee ≥30 trades/train, ≥3/test):
-- LONG: weekly_HMA bullish + BB_width < 200d_low + price > Donchian_high
-- SHORT: weekly_HMA bearish + BB_width < 200d_low + price < Donchian_low
-- Also allow mean-reversion when BB_width > 80th percentile (vol expansion exhaustion)
+- LONG trend: 1d_HMA bullish + ADX>25 + price>Keltner_upper + HMA16>HMA48 + RSI>45
+- SHORT trend: 1d_HMA bearish + ADX>25 + price<Keltner_lower + HMA16<HMA48 + RSI<55
+- LONG range: ADX<20 + price<Keltner_lower + RSI<40
+- SHORT range: ADX<20 + price>Keltner_upper + RSI>60
 
-Target: Sharpe>0.6, trades>=30 train, trades>=3 test, DD>-35%
-Timeframe: 1d
-Size: 0.25-0.30 discrete (0.30 with trend, 0.20 counter-trend)
+Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_vol_compression_donchian_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_keltner_adx_regime_hma_1d12h_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -102,50 +113,69 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Bollinger Bands with bandwidth"""
+def calculate_adx(high, low, close, period=14):
+    """
+    Average Directional Index - measures trend strength
+    ADX > 25 = trending, ADX < 20 = ranging
+    """
     n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    # Calculate True Range and Directional Movement
+    tr = np.zeros(n, dtype=np.float64)
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
     
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    bandwidth = (upper - lower) / sma
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        elif down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
     
-    return upper, sma, lower, bandwidth
+    # Smooth using Wilder's method (EMA with span=period)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di_raw = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di_raw = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI
+    plus_di = np.full(n, np.nan, dtype=np.float64)
+    minus_di = np.full(n, np.nan, dtype=np.float64)
+    
+    mask = atr > 1e-10
+    plus_di[mask] = 100 * plus_di_raw[mask] / atr[mask]
+    minus_di[mask] = 100 * minus_di_raw[mask] / atr[mask]
+    
+    # Calculate DX and ADX
+    dx = np.full(n, np.nan, dtype=np.float64)
+    di_sum = plus_di + minus_di
+    di_diff = np.abs(plus_di - minus_di)
+    mask2 = di_sum > 1e-10
+    dx[mask2] = 100 * di_diff[mask2] / di_sum[mask2]
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+def calculate_keltner(high, low, close, period=20, atr_mult=2.0):
+    """Keltner Channels - EMA middle with ATR bands"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
+    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, period)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+    upper = ema + atr_mult * atr
+    lower = ema - atr_mult * atr
     
-    return upper, lower
-
-def calculate_percentile_rank(series, lookback=200):
-    """Percentile rank of current value over lookback period"""
-    n = len(series)
-    result = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(lookback, n):
-        window = series[i - lookback:i + 1]
-        valid = window[~np.isnan(window)]
-        if len(valid) > 0:
-            current = series[i]
-            rank = np.sum(valid <= current) / len(valid)
-            result[i] = rank
-    
-    return result
+    return upper, ema, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -154,25 +184,26 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    adx_12h_raw = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, period=14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h_raw)
     
-    # Calculate 1d indicators
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate 6h indicators
+    hma_16 = calculate_hma(close, period=16)
+    hma_48 = calculate_hma(close, period=48)
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    bb_upper, bb_mid, bb_lower, bb_bandwidth = calculate_bollinger(close, period=20, std_mult=2.0)
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
-    
-    # Calculate BB bandwidth percentile rank (vol compression detection)
-    bb_percentile = calculate_percentile_rank(bb_bandwidth, lookback=200)
+    keltner_upper, keltner_mid, keltner_lower = calculate_keltner(high, low, close, period=20, atr_mult=2.0)
     
     signals = np.zeros(n)
-    SIZE_WITH_TREND = 0.30
-    SIZE_COUNTER_TREND = 0.20
-    SIZE_MEAN_REVERT = 0.25
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -183,8 +214,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup period (need 200 bars for percentile rank)
-    min_bars = 250
+    # Warmup period
+    min_bars = 100
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -195,91 +226,96 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(bb_bandwidth[i]) or np.isnan(donch_upper[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(bb_percentile[i]):
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === WEEKLY TREND BIAS ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        if np.isnan(adx_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === VOLATILITY REGIME ===
-        bb_pct = bb_percentile[i]
-        is_vol_compression = bb_pct < 0.15  # BB width in bottom 15% of 200d range
-        is_vol_expansion = bb_pct > 0.80    # BB width in top 20% of 200d range
+        # === REGIME DETECTION (12h ADX) ===
+        adx = adx_12h_aligned[i]
+        is_trend_regime = adx > 25.0
+        is_range_regime = adx < 20.0
+        is_neutral_regime = not is_trend_regime and not is_range_regime
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = close[i] > donch_upper[i-1] if not np.isnan(donch_upper[i-1]) else False
-        donchian_breakout_short = close[i] < donch_lower[i-1] if not np.isnan(donch_lower[i-1]) else False
+        # === TREND DIRECTION (1d HMA bias) ===
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === RSI EXTREMES (for mean reversion) ===
+        # === 6h HMA CROSSOVER (trend momentum) ===
+        hma_bullish = hma_16[i] > hma_48[i]
+        hma_bearish = hma_16[i] < hma_48[i]
+        
+        # === RSI ===
         rsi = rsi_14[i]
-        rsi_oversold = rsi < 35
-        rsi_overbought = rsi > 65
+        
+        # === KELTNER CHANNEL TOUCH/BREAK ===
+        keltner_break_upper = close[i] > keltner_upper[i-1] if not np.isnan(keltner_upper[i-1]) else False
+        keltner_break_lower = close[i] < keltner_lower[i-1] if not np.isnan(keltner_lower[i-1]) else False
+        keltner_touch_upper = close[i] >= keltner_upper[i] * 0.998
+        keltner_touch_lower = close[i] <= keltner_lower[i] * 1.002
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # VOL COMPRESSION BREAKOUT (primary signal - high probability)
-        if is_vol_compression:
-            # LONG: weekly bullish + breakout up
-            if price_above_1w and donchian_breakout_long:
-                desired_signal = SIZE_WITH_TREND
+        # TREND REGIME: Keltner breakout + HMA confirmation + 1d bias
+        if is_trend_regime:
+            # LONG: 1d bullish + HMA bullish + Keltner breakout + RSI confirmation
+            if price_above_1d and hma_bullish and keltner_break_upper and rsi > 45:
+                desired_signal = SIZE_STRONG
             
-            # SHORT: weekly bearish + breakout down
-            elif price_below_1w and donchian_breakout_short:
-                desired_signal = -SIZE_WITH_TREND
-            
-            # Counter-trend breakout (weaker signal)
-            elif price_below_1w and donchian_breakout_long:
-                desired_signal = SIZE_COUNTER_TREND
-            
-            elif price_above_1w and donchian_breakout_short:
-                desired_signal = -SIZE_COUNTER_TREND
+            # SHORT: 1d bearish + HMA bearish + Keltner breakdown + RSI confirmation
+            elif price_below_1d and hma_bearish and keltner_break_lower and rsi < 55:
+                desired_signal = -SIZE_STRONG
         
-        # VOL EXPANSION MEAN REVERSION (exhaustion trades)
-        elif is_vol_expansion:
-            # LONG: RSI oversold + price near BB lower
-            if rsi_oversold and close[i] <= bb_lower[i] * 1.01:
-                desired_signal = SIZE_MEAN_REVERT
+        # RANGE REGIME: Keltner mean reversion + RSI extremes
+        elif is_range_regime:
+            # LONG: price at Keltner lower + RSI oversold
+            if keltner_touch_lower and rsi < 40:
+                desired_signal = SIZE_BASE
             
-            # SHORT: RSI overbought + price near BB upper
-            elif rsi_overbought and close[i] >= bb_upper[i] * 0.99:
-                desired_signal = -SIZE_MEAN_REVERT
+            # SHORT: price at Keltner upper + RSI overbought
+            elif keltner_touch_upper and rsi > 60:
+                desired_signal = -SIZE_BASE
         
-        # NEUTRAL VOL: Only take strong trend signals
-        else:
-            # LONG: weekly bullish + RSI not overbought + price above BB mid
-            if price_above_1w and rsi < 60 and close[i] > bb_mid[i]:
-                desired_signal = SIZE_COUNTER_TREND * 0.8
+        # NEUTRAL REGIME: Only take strong signals with full confluence
+        elif is_neutral_regime:
+            # LONG: 1d bullish + HMA bullish + RSI not overbought + Keltner break
+            if price_above_1d and hma_bullish and rsi < 65 and keltner_break_upper:
+                desired_signal = SIZE_BASE
             
-            # SHORT: weekly bearish + RSI not oversold + price below BB mid
-            elif price_below_1w and rsi > 40 and close[i] < bb_mid[i]:
-                desired_signal = -SIZE_COUNTER_TREND * 0.8
+            # SHORT: 1d bearish + HMA bearish + RSI not oversold + Keltner break
+            elif price_below_1d and hma_bearish and rsi > 35 and keltner_break_lower:
+                desired_signal = -SIZE_BASE
         
-        # === STOPLOSS CHECK (3x ATR for daily TF - wider stops) ===
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 3.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 3.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -288,18 +324,14 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_WITH_TREND * 0.9:
-            final_signal = SIZE_WITH_TREND
-        elif desired_signal <= -SIZE_WITH_TREND * 0.9:
-            final_signal = -SIZE_WITH_TREND
-        elif desired_signal >= SIZE_MEAN_REVERT * 0.9:
-            final_signal = SIZE_MEAN_REVERT
-        elif desired_signal <= -SIZE_MEAN_REVERT * 0.9:
-            final_signal = -SIZE_MEAN_REVERT
-        elif desired_signal >= SIZE_COUNTER_TREND * 0.9:
-            final_signal = SIZE_COUNTER_TREND
-        elif desired_signal <= -SIZE_COUNTER_TREND * 0.9:
-            final_signal = -SIZE_COUNTER_TREND
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_BASE * 0.9:
+            final_signal = SIZE_BASE
+        elif desired_signal <= -SIZE_BASE * 0.9:
+            final_signal = -SIZE_BASE
         else:
             final_signal = 0.0
         
@@ -313,9 +345,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 3.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 3.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
