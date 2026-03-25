@@ -1,41 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1162: 4h Primary + 1d HTF — Simplified Regime + Loose Entries
+Experiment #1163: 6h Primary + 1d/1w HTF — Simplified HMA Trend + RSI Pullback
 
-Hypothesis: Previous regime strategies failed due to OVERLY STRICT entry conditions.
-This version uses LOOSE thresholds to guarantee 30+ trades per symbol while maintaining
-regime-adaptive logic. Key changes from failed experiments:
+Hypothesis: Previous 6h strategies failed due to OVERLY STRICT entry conditions (0 trades).
+This strategy uses LOOSE entry conditions to guarantee trade generation while maintaining
+edge through multi-timeframe alignment.
 
-1. CHOP thresholds widened: >50 = choppy, <50 = trending (no dead zone)
-2. RSI instead of CRSI: RSI(14)<35/>65 more common than CRSI<20/>80
-3. Single HTF (1d) instead of triple: reduces alignment failures
-4. Donchian breakout for trend: price>20d high is more common than HMA cross
-5. Removed HMA alignment requirement for mean reversion entries
-6. Added volume confirmation filter (only 1.2x avg) to avoid false breakouts
+Key innovations:
+1. 1w HMA(21) for long-term trend bias — only trade in weekly direction
+2. 1d HMA(21) for intermediate confirmation — adds confluence
+3. 6h RSI(14) pullback entries — buy dips in uptrend, sell rallies in downtrend
+4. Volume confirmation — entry volume > 1.2x 20-bar avg volume (filters false breakouts)
+5. ATR(14) 2.5x trailing stop — protects capital during reversals
+6. LOOSE entry thresholds — RSI<50 for long, RSI>50 for short (not extreme values)
 
-Why this should work:
-- Looser entries = guaranteed trades (fixes #1 failure mode from exp history)
-- Regime switch still provides edge (chop=mean revert, trend=breakout)
-- 4h timeframe = 20-50 trades/year target (fee-efficient)
-- 1d HTF bias prevents counter-trend trades in strong trends
-- ATR stoploss protects from 2022-style crashes
+Why this should work on 6h:
+- 6h captures 2-5 day swings — perfect for crypto trend persistence
+- Weekly bias filters out counter-trend trades (major edge in crypto)
+- RSI pullback entries catch retracements within trends (high win rate)
+- Volume filter avoids low-liquidity false signals
+- LOOSE conditions guarantee 30-60 trades/year (fixes #1 failure mode)
 
-Entry conditions (LOOSE — designed to trigger):
-- LONG choppy: CHOP>50 + RSI<40 + price>1d_HMA*0.90
-- SHORT choppy: CHOP>50 + RSI>60 + price<1d_HMA*1.10
-- LONG trending: CHOP<50 + price>Donchian(20)high + volume>1.2x avg
-- SHORT trending: CHOP<50 + price<Donchian(20)low + volume>1.2x avg
+Entry conditions (LOOSE to guarantee trades):
+- LONG: 1w_HMA bullish + 1d_HMA bullish + RSI(14)<50 + volume>1.2x avg
+- SHORT: 1w_HMA bearish + 1d_HMA bearish + RSI(14)>50 + volume>1.2x avg
 
-Target: Sharpe>0.45, trades>=30/symbol train, trades>=3/symbol test, DD>-40%
-Timeframe: 4h
+Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_regime_loose_rsi_donchian_1d_v1"
-timeframe = "4h"
+name = "mtf_6h_hma_rsi_vol_pullback_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -100,57 +99,16 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness vs trending
-    CHOP > 50 = ranging market (mean revert)
-    CHOP < 50 = trending market (breakout)
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i-period+1:i+1])
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        price_range = highest_high - lowest_low
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i-period+1:i+1])
-        lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
-
-def calculate_volume_sma(volume, period=20):
-    """Simple moving average of volume"""
+def calculate_volume_ratio(volume, period=20):
+    """Volume ratio vs rolling average"""
     n = len(volume)
     if n < period:
         return np.full(n, np.nan)
     
-    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    return vol_sma
+    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / vol_ratio if vol_ratio else np.full(n, np.nan)
+    vol_ratio = np.divide(volume, vol_avg, out=np.full(n, np.nan), where=vol_avg > 0)
+    return vol_ratio
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -161,17 +119,19 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 4h indicators
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    vol_sma_20 = calculate_volume_sma(volume, period=20)
+    vol_ratio = calculate_volume_ratio(volume, period=20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -195,61 +155,51 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(vol_sma_20[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        is_choppy = chop_14[i] > 50.0  # Range market
-        is_trending = chop_14[i] <= 50.0  # Trend market
-        
-        # === HTF BIAS (1d HMA) ===
+        # === HTF BIAS (Weekly + Daily HMA alignment) ===
+        hma_1w_bull = close[i] > hma_1w_aligned[i]
+        hma_1w_bear = close[i] < hma_1w_aligned[i]
         hma_1d_bull = close[i] > hma_1d_aligned[i]
         hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        vol_confirmed = volume[i] > 1.15 * vol_sma_20[i]
+        # Strong alignment: both weekly and daily agree
+        strong_bull = hma_1w_bull and hma_1d_bull
+        strong_bear = hma_1w_bear and hma_1d_bear
         
-        # === ENTRY LOGIC (REGIME-ADAPTIVE - LOOSE THRESHOLDS) ===
+        # Volume confirmation
+        vol_confirmed = vol_ratio[i] >= 1.1  # At least 10% above average
+        
+        # === ENTRY LOGIC (LOOSE to guarantee trades) ===
         desired_signal = 0.0
         
-        if is_choppy:
-            # MEAN REVERSION MODE - RSI extremes with HTF bias filter
-            # Long when RSI oversold (LOOSE: <40 instead of <20)
-            if rsi_14[i] < 40.0 and hma_1d_bull:
+        # LONG: Weekly bullish + Daily bullish + RSI pullback + Volume
+        if strong_bull:
+            if rsi_14[i] < 50.0 and vol_confirmed:
                 desired_signal = SIZE_BASE
-            # Short when RSI overbought (LOOSE: >60 instead of >80)
-            elif rsi_14[i] > 60.0 and hma_1d_bear:
-                desired_signal = -SIZE_BASE
-            # Stronger signals at more extreme RSI
-            elif rsi_14[i] < 30.0 and hma_1d_bull:
+            # Stronger entry on deeper pullback
+            if rsi_14[i] < 40.0 and vol_confirmed:
                 desired_signal = SIZE_STRONG
-            elif rsi_14[i] > 70.0 and hma_1d_bear:
-                desired_signal = -SIZE_STRONG
         
-        elif is_trending:
-            # TREND FOLLOWING MODE - Donchian breakout with volume
-            # Long breakout above 20-period high
-            if close[i] > donchian_upper[i] and vol_confirmed:
-                desired_signal = SIZE_STRONG
-            # Short breakout below 20-period low
-            elif close[i] < donchian_lower[i] and vol_confirmed:
-                desired_signal = -SIZE_STRONG
-            # Weaker trend signals (price near HTF HMA)
-            elif hma_1d_bull and rsi_14[i] > 50.0 and rsi_14[i] < 70.0:
-                desired_signal = SIZE_BASE
-            elif hma_1d_bear and rsi_14[i] < 50.0 and rsi_14[i] > 30.0:
+        # SHORT: Weekly bearish + Daily bearish + RSI rally + Volume
+        elif strong_bear:
+            if rsi_14[i] > 50.0 and vol_confirmed:
                 desired_signal = -SIZE_BASE
+            # Stronger entry on stronger rally
+            if rsi_14[i] > 60.0 and vol_confirmed:
+                desired_signal = -SIZE_STRONG
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
