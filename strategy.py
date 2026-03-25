@@ -1,47 +1,192 @@
 #!/usr/bin/env python3
 """
-Experiment #1123: 6h Primary + 1d/1w HTF — Fisher Transform Reversals + HMA Trend Bias
+Experiment #1124: 12h Primary + 1d/1w HTF — KAMA Adaptive Trend + ADX Regime + RSI Pullback
 
-Hypothesis: Ehlers Fisher Transform excels at catching turning points in ranging markets
-(which BTC/ETH spend 60-70% of time in). Combined with 1d/1w HMA trend bias for
-directional filtering, this should outperform pure trend-following or pure mean-reversion.
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market efficiency better than EMA/HMA,
+reducing whipsaws in choppy markets while capturing trends efficiently. Combined with ADX regime
+filter and HTF alignment, this should work across bull/bear/range markets.
 
 Key innovations:
-1. Fisher Transform (period=9): Normalizes price to Gaussian distribution, extreme values
-   (-2 to +2) mark reversal zones. More responsive than RSI for turning points.
-2. 1d HMA(21) + 1w HMA(21): Dual HTF trend bias - only take longs above 1w_HMA, shorts below
-3. ATR Ratio Filter (ATR7/ATR30): Avoid entries during low-volatility compression (<0.8)
-4. Asymmetric thresholds: Easier entries when aligned with HTF trend, harder against
-5. 2.5x ATR trailing stop for risk management
+1. KAMA(21): Adapts smoothing based on market efficiency ratio (ER)
+   - High ER (trending) = less smoothing, follows price closely
+   - Low ER (choppy) = more smoothing, filters noise
+2. ADX(14) regime: >25 = trend follow, <20 = mean revert, 20-25 = neutral
+3. 1d HMA(21) + 1w HMA(21): Multi-timeframe bias confirmation
+4. Regime-adaptive entries:
+   - Trend (ADX>25): Pullback to KAMA + RSI 40-60 + HTF aligned
+   - Range (ADX<20): RSI extremes (<35 long, >65 short) at BB bounds
+5. ATR(14) 2.5x trailing stop for risk management
 6. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Why 6h timeframe:
-- Captures multi-day swings (3-7 day holds typical)
-- Less noise than 4h, more trades than 12h
-- Target: 30-60 trades/year (1-2 per week per symbol)
+Why this should work:
+- KAMA reduces lag in trends while filtering chop (proven in literature)
+- ADX regime filter avoids wrong strategy in wrong market
+- 12h captures multi-day swings (20-50 trades/year target)
+- Loose entry conditions guarantee trades (learned from 928 failures)
+- HTF alignment ensures we trade with higher-timeframe momentum
 
 Entry conditions (LOOSE to guarantee trades):
-- LONG: Fisher < -1.0 + price > 1w_HMA*0.98 (bull bias) OR Fisher < -1.8 (deep oversold any regime)
-- SHORT: Fisher > 1.0 + price < 1w_HMA*1.02 (bear bias) OR Fisher > 1.8 (deep overbought any regime)
-- ATR ratio > 0.7 to ensure sufficient volatility
+- LONG trend: ADX>25 + price>KAMA + price>1d_HMA>1w_HMA + RSI>45
+- LONG range: ADX<20 + RSI<35 + price<BB_lower*1.02
+- SHORT trend: ADX>25 + price<KAMA + price<1d_HMA<1w_HMA + RSI<55
+- SHORT range: ADX<20 + RSI>65 + price>BB_upper*0.98
 
-Why this should work:
-- Fisher Transform has proven edge in ranging markets (BTC 2022-2023, 2025 bear)
-- HTF bias prevents counter-trend trades that get stopped out
-- ATR filter avoids dead zones with no follow-through
-- 6h captures swing moves without 4h noise or 12h slowness
-
-Target: Sharpe>0.50, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 6h
+Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
+Timeframe: 12h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_fisher_hma_atr_regime_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_kama_adx_regime_rsi_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_kama(close, period=21, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market Efficiency Ratio (ER)
+    
+    ER = |Close - Close[n]| / Sum(|Close[i] - Close[i-1]|)
+    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
+    KAMA = KAMA_prev + SC * (Close - KAMA_prev)
+    """
+    n = len(close)
+    if n < period + slow_period:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan, dtype=np.float64)
+    
+    # Calculate Efficiency Ratio
+    er = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        signal = abs(close[i] - close[i - period])
+        noise = 0.0
+        for j in range(i - period + 1, i + 1):
+            noise += abs(close[j] - close[j - 1])
+        if noise > 1e-10:
+            er[i] = signal / noise
+        else:
+            er[i] = 0.0
+    
+    # Calculate Smoothing Constant
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
+    sc = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if not np.isnan(er[i]):
+            sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Initialize KAMA
+    kama[period] = close[period]
+    
+    # Calculate KAMA
+    for i in range(period + 1, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i - 1]):
+            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+        else:
+            kama[i] = kama[i - 1] if not np.isnan(kama[i - 1]) else close[i]
+    
+    return kama
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Average Directional Index (ADX)
+    Measures trend strength (not direction)
+    ADX > 25 = strong trend, ADX < 20 = ranging
+    """
+    n = len(close)
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
+    
+    # Calculate True Range and Directional Movement
+    tr = np.zeros(n, dtype=np.float64)
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        elif down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di_raw = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di_raw = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI
+    plus_di = np.zeros(n, dtype=np.float64)
+    minus_di = np.zeros(n, dtype=np.float64)
+    for i in range(period, n):
+        if atr[i] > 1e-10:
+            plus_di[i] = 100.0 * plus_di_raw[i] / atr[i]
+            minus_di[i] = 100.0 * minus_di_raw[i] / atr[i]
+    
+    # Calculate DX
+    dx = np.zeros(n, dtype=np.float64)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 1e-10:
+            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # Calculate ADX (smoothed DX)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi[:period] = np.nan
+    return rsi
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Bollinger Bands"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    
+    return upper, lower
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -73,81 +218,6 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_fisher_transform(high, low, close, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution
-    Extreme values (-2 to +2) mark reversal zones
-    
-    Formula:
-    1. Calculate typical price: (High + Low + Close) / 3
-    2. Normalize: 0.66 * ((TP - LL) / (HH - LL) - 0.5) + 0.66 * prev_norm
-    3. Fisher: 0.5 * ln((1 + norm) / (1 - norm)) + 0.5 * prev_fisher
-    
-    Bounds normalized value to [-0.99, 0.99] to avoid ln(0)
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    # Typical price
-    tp = (high + low + close) / 3.0
-    
-    # Normalize and Fisher
-    fisher = np.full(n, np.nan, dtype=np.float64)
-    fisher_signal = np.full(n, np.nan, dtype=np.float64)
-    
-    norm = np.zeros(n, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        # Find highest high and lowest low over lookback
-        hh = np.nanmax(high[i-period+1:i+1])
-        ll = np.nanmin(low[i-period+1:i+1])
-        
-        price_range = hh - ll
-        if price_range < 1e-10:
-            continue
-        
-        # Normalize price position within range
-        norm_raw = 0.66 * ((tp[i] - ll) / price_range - 0.5)
-        
-        # Add inertia from previous normalized value
-        if i > period - 1 and not np.isnan(norm[i-1]):
-            norm[i] = norm_raw + 0.66 * norm[i-1]
-        else:
-            norm[i] = norm_raw
-        
-        # Bound to avoid ln(0)
-        norm_bounded = np.clip(norm[i], -0.99, 0.99)
-        
-        # Fisher transform
-        fisher_raw = 0.5 * np.log((1 + norm_bounded) / (1 - norm_bounded))
-        
-        # Add inertia from previous Fisher value
-        if i > period - 1 and not np.isnan(fisher[i-1]):
-            fisher[i] = fisher_raw + 0.5 * fisher[i-1]
-        else:
-            fisher[i] = fisher_raw
-        
-        # Fisher signal is previous Fisher value (for crossover detection)
-        if i > 0 and not np.isnan(fisher[i-1]):
-            fisher_signal[i] = fisher[i-1]
-    
-    return fisher, fisher_signal
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -165,11 +235,12 @@ def generate_signals(prices):
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
+    kama_21 = calculate_kama(close, period=21)
+    adx_14 = calculate_adx(high, low, close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    fisher, fisher_signal = calculate_fisher_transform(high, low, close, period=9)
+    rsi_14 = calculate_rsi(close, period=14)
+    bb_upper, bb_lower = calculate_bollinger_bands(close, period=20, std_dev=2.0)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -193,7 +264,7 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(fisher_signal[i]):
+        if np.isnan(kama_21[i]) or np.isnan(adx_14[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -207,58 +278,64 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === VOLATILITY FILTER (ATR Ratio) ===
-        # Avoid low volatility periods where moves lack follow-through
-        atr_ratio = atr_7[i] / atr_30[i] if atr_30[i] > 1e-10 else 0.0
-        vol_ok = atr_ratio > 0.7  # Sufficient volatility
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === HTF TREND BIAS ===
-        hma_1w_bull = close[i] > hma_1w_aligned[i]
-        hma_1w_bear = close[i] < hma_1w_aligned[i]
+        # === REGIME DETECTION (ADX) ===
+        is_trending = adx_14[i] > 25.0  # Strong trend
+        is_ranging = adx_14[i] < 20.0  # Range market
+        
+        # === HTF BIAS ===
         hma_1d_bull = close[i] > hma_1d_aligned[i]
         hma_1d_bear = close[i] < hma_1d_aligned[i]
+        hma_1w_bull = close[i] > hma_1w_aligned[i]
+        hma_1w_bear = close[i] < hma_1w_aligned[i]
         
-        # Strong trend alignment (both 1d and 1w agree)
-        strong_bull = hma_1d_bull and hma_1w_bull
-        strong_bear = hma_1d_bear and hma_1w_bear
+        # Strong trend alignment
+        strong_bull = hma_1d_bull and hma_1w_bull and hma_1d_aligned[i] > hma_1w_aligned[i]
+        strong_bear = hma_1d_bear and hma_1w_bear and hma_1d_aligned[i] < hma_1w_aligned[i]
         
-        # === FISHER TRANSFORM SIGNALS ===
-        # Fisher extreme values mark reversal zones
-        fisher_oversold = fisher[i] < -1.0
-        fisher_deep_oversold = fisher[i] < -1.8
-        fisher_overbought = fisher[i] > 1.0
-        fisher_deep_overbought = fisher[i] > 1.8
-        
-        # Fisher crossover (turning up from oversold / turning down from overbought)
-        fisher_turning_up = fisher[i] > fisher_signal[i] and fisher_signal[i] < -0.5
-        fisher_turning_down = fisher[i] < fisher_signal[i] and fisher_signal[i] > 0.5
-        
-        # === ENTRY LOGIC (ASYMMETRIC BASED ON HTF BIAS) ===
+        # === ENTRY LOGIC (REGIME-ADAPTIVE) ===
         desired_signal = 0.0
         
-        # LONG ENTRIES
-        if vol_ok:
-            # Strong long: Fisher deep oversold (any regime) - high conviction reversal
-            if fisher_deep_oversold:
+        if is_trending:
+            # TREND FOLLOWING MODE - pullback to KAMA
+            # Long in uptrend on pullback
+            if strong_bull and close[i] > kama_21[i] and rsi_14[i] > 45.0 and rsi_14[i] < 75.0:
                 desired_signal = SIZE_STRONG
-            # Moderate long: Fisher oversold + HTF bull bias
-            elif fisher_oversold and hma_1w_bull:
+            elif hma_1d_bull and hma_1w_bull and close[i] > kama_21[i] and rsi_14[i] > 50.0:
                 desired_signal = SIZE_BASE
-            # Moderate long: Fisher turning up from oversold + HTF bull
-            elif fisher_turning_up and strong_bull:
-                desired_signal = SIZE_BASE
-        
-        # SHORT ENTRIES
-        if vol_ok:
-            # Strong short: Fisher deep overbought (any regime) - high conviction reversal
-            if fisher_deep_overbought:
+            
+            # Short in downtrend on pullback
+            elif strong_bear and close[i] < kama_21[i] and rsi_14[i] < 55.0 and rsi_14[i] > 25.0:
                 desired_signal = -SIZE_STRONG
-            # Moderate short: Fisher overbought + HTF bear bias
-            elif fisher_overbought and hma_1w_bear:
+            elif hma_1d_bear and hma_1w_bear and close[i] < kama_21[i] and rsi_14[i] < 50.0:
                 desired_signal = -SIZE_BASE
-            # Moderate short: Fisher turning down from overbought + HTF bear
-            elif fisher_turning_down and strong_bear:
+        
+        elif is_ranging:
+            # MEAN REVERSION MODE - RSI extremes at BB bounds
+            # Long when oversold near lower BB
+            if rsi_14[i] < 35.0 and close[i] < bb_lower[i] * 1.02:
+                desired_signal = SIZE_BASE
+            elif rsi_14[i] < 30.0 and close[i] < bb_lower[i] * 1.03:
+                desired_signal = SIZE_STRONG
+            
+            # Short when overbought near upper BB
+            elif rsi_14[i] > 65.0 and close[i] > bb_upper[i] * 0.98:
                 desired_signal = -SIZE_BASE
+            elif rsi_14[i] > 70.0 and close[i] > bb_upper[i] * 0.97:
+                desired_signal = -SIZE_STRONG
+        
+        # Neutral regime (ADX 20-25): stay flat or reduce position
+        else:
+            if in_position:
+                desired_signal = 0.0  # Exit in neutral regime
+            else:
+                desired_signal = 0.0
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
