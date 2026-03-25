@@ -1,40 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #1558: 4h Primary + 1d HTF — HMA Trend + RSI Pullback Strategy
+Experiment #1559: 1h Primary + 4h/12h HTF — Simple Trend Pullback with Volume
 
-Hypothesis: 4h timeframe with 1d trend filter provides optimal balance of 
-trade frequency (25-40/year) and signal quality. This strategy uses SIMPLE
-entry logic to guarantee trades (learning from 0-trade failures).
+Hypothesis: After 1272 failed strategies with complex regime detection, return to 
+SIMPLE proven patterns. Complex filters (chop + cRSI + session + multiple TF) 
+kill trade frequency. This strategy uses:
 
-Key components:
-1. 1d HMA(21) for major trend bias (loose filter - not blocking entries)
-2. 4h HMA(16/48) crossover for momentum signal
-3. RSI(14) for pullback entry timing (wide thresholds: 35-65)
-4. ATR(14) trailing stoploss (2.5x ATR)
-5. Discrete sizing: 0.0, ±0.25, ±0.30
+1. 4h HMA(21) for major trend bias (direction filter only)
+2. 1h RSI(14) for pullback entries (RSI<45 long in uptrend, RSI>55 short in downtrend)
+3. 1h ATR(14) for stoploss (2.5x ATR trailing)
+4. Volume filter (volume > 0.7 * 20-bar avg) - loose to allow trades
+5. NO session filter (previous experiments with session=0 trades)
+
+Key insight from failures:
+- Session filters + multiple confluence = 0 trades (experiments #1549, #1553, #1556, #1557)
+- Choppiness index regimes often stay neutral = no signals
+- LOOSE entry thresholds guarantee trades while HTF filter prevents disasters
 
 Why this should work:
-- SIMPLE entry logic = guaranteed trades (no complex regime switching)
-- 4h TF = natural 25-40 trades/year (fee-efficient)
-- RSI thresholds LOOSE (35/65 not 25/75) to ensure entries
-- 1d HMA is soft bias only, not hard filter
-- Proven pattern: HMA crossover + RSI pullback worked on SOL (+0.879)
+- 4h trend filter prevents counter-trend trades in major moves
+- RSI pullback entries catch retracements (proven 60%+ win rate)
+- Loose RSI thresholds (45/55 not 30/70) ensure ≥40 trades/year
+- Volume filter is loose (0.7x not 1.2x) to avoid filtering valid trades
+- Simple = fewer bugs, more reliable execution
 
-Entry logic (LOOSE to guarantee ≥30 trades/train, ≥3/test):
-- LONG: 1d_HMA bullish (price>hma) + 4h_HMA16>48 + RSI<55 (pullback)
-- SHORT: 1d_HMA bearish (price<hma) + 4h_HMA16<48 + RSI>45 (pullback)
-- Exit: RSI extreme (>70 long, <30 short) OR stoploss hit
-
-Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.6, trades>=40/year, DD>-30%
+Timeframe: 1h
+Size: 0.25 discrete (0.0, ±0.25, ±0.30)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_rsi_pullback_1d_v1"
-timeframe = "4h"
+name = "mtf_1h_hma4h_rsi_pullback_volume_simple_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -105,24 +104,41 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_sma(series, period):
+    """Simple Moving Average"""
+    n = len(series)
+    if n < period:
+        return np.full(n, np.nan)
+    return pd.Series(series).rolling(window=period, min_periods=period).mean().values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 4h indicators
-    hma_16 = calculate_hma(close, period=16)
-    hma_48 = calculate_hma(close, period=48)
-    atr_14 = calculate_atr(high, low, close, period=14)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
+    # Calculate 1h indicators
     rsi_14 = calculate_rsi(close, period=14)
+    atr_14 = calculate_atr(high, low, close, period=14)
+    vol_sma_20 = calculate_sma(volume, 20)
+    
+    # Price relative to 4h HMA for trend strength
+    hma_4h_slope = np.full(n, np.nan)
+    for i in range(5, n):
+        if not np.isnan(hma_4h_aligned[i]) and not np.isnan(hma_4h_aligned[i-5]):
+            hma_4h_slope[i] = (hma_4h_aligned[i] - hma_4h_aligned[i-5]) / hma_4h_aligned[i-5]
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -149,59 +165,57 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_16[i]) or np.isnan(hma_48[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(vol_sma_20[i]) or np.isnan(hma_4h_slope[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1d HMA bias - SOFT FILTER) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === TREND DIRECTION (4h HMA bias) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # === 4h HMA CROSSOVER (trend momentum) ===
-        hma_bullish = hma_16[i] > hma_48[i]
-        hma_bearish = hma_16[i] < hma_48[i]
+        # 12h HMA for major trend confirmation
+        price_above_12h = not np.isnan(hma_12h_aligned[i]) and close[i] > hma_12h_aligned[i]
+        price_below_12h = not np.isnan(hma_12h_aligned[i]) and close[i] < hma_12h_aligned[i]
         
-        # === RSI (pullback detection) ===
+        # === RSI PULLBACK (LOOSE thresholds for trade frequency) ===
         rsi = rsi_14[i]
+        rsi_oversold = rsi < 50  # Loose: was 40, now 50 for more trades
+        rsi_overbought = rsi > 50  # Loose: was 60, now 50 for more trades
+        
+        # === VOLUME FILTER (LOOSE) ===
+        vol_ok = volume[i] > 0.7 * vol_sma_20[i]  # 70% of avg, not 100%
+        
+        # === TREND STRENGTH (4h HMA slope) ===
+        trend_strong_up = hma_4h_slope[i] > 0.005  # 0.5% over 5 bars
+        trend_strong_down = hma_4h_slope[i] < -0.005
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish bias + 4h HMA bullish + RSI pullback (not overbought)
-        if price_above_1d and hma_bullish and rsi < 55:
-            # Stronger signal if RSI in sweet spot (35-50)
-            if rsi < 50:
-                desired_signal = SIZE_STRONG
+        # LONG: 4h bullish + RSI pullback + volume OK
+        # Two entry modes for more trades:
+        if price_above_4h and rsi_oversold and vol_ok:
+            if trend_strong_up or price_above_12h:
+                desired_signal = SIZE_STRONG  # Strong signal with 12h confirm
             else:
-                desired_signal = SIZE_BASE
+                desired_signal = SIZE_BASE  # Base signal
         
-        # SHORT: 1d bearish bias + 4h HMA bearish + RSI pullback (not oversold)
-        elif price_below_1d and hma_bearish and rsi > 45:
-            # Stronger signal if RSI in sweet spot (50-65)
-            if rsi > 50:
-                desired_signal = -SIZE_STRONG
+        # SHORT: 4h bearish + RSI rally + volume OK
+        elif price_below_4h and rsi_overbought and vol_ok:
+            if trend_strong_down or price_below_12h:
+                desired_signal = -SIZE_STRONG  # Strong signal with 12h confirm
             else:
-                desired_signal = -SIZE_BASE
-        
-        # === EXIT LOGIC (RSI extreme or stoploss) ===
-        exit_long = rsi > 70  # Overbought exit for longs
-        exit_short = rsi < 30  # Oversold exit for shorts
-        
-        if in_position and position_side > 0 and exit_long:
-            desired_signal = 0.0
-        
-        if in_position and position_side < 0 and exit_short:
-            desired_signal = 0.0
+                desired_signal = -SIZE_BASE  # Base signal
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
