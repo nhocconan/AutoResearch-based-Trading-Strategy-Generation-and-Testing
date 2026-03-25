@@ -1,65 +1,115 @@
 #!/usr/bin/env python3
 """
-Experiment #1231: 6h Primary + 1w/1d HTF — Weekly Trend + Daily Confirm + 6h RSI Entry
+Experiment #1232: 12h Primary + 1d HTF — KAMA Adaptive Trend + ADX Regime + RSI Entry
 
-Hypothesis: 6h timeframe is underexplored (ZERO prior experiments). It sits between 4h (too noisy) 
-and 12h (too slow). Key insight: Use WEEKLY HMA for primary bias (very stable), DAILY HMA for 
-confirmation, and 6h RSI(7) for faster entry timing. This gives HTF trend stability with MTF entry 
-precision.
+Hypothesis: After 1000+ failed experiments, the key insight is that ADAPTIVE indicators
+outperform static ones in crypto's varying volatility regimes. KAMA (Kaufman Adaptive MA)
+adjusts speed based on market efficiency ratio - fast in trends, slow in chop.
 
-Why this should work:
-1. Weekly HMA(21) = ultra-slow trend filter (only 2-4 direction changes/year)
-2. Daily HMA(16) = intermediate confirmation (reduces false signals from weekly alone)
-3. 6h RSI(7) = faster entry trigger (more sensitive than RSI(14), catches pullbacks earlier)
-4. ATR volatility filter = avoids entering during panic/extreme vol (reduces whipsaw)
-5. Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
+Combined with ADX hysteresis (enter 25, exit 18) to avoid whipsaw, and fast RSI(7) for
+12h entry timing. This should generate 25-45 trades/year on 12h timeframe.
 
-Entry logic:
-- LONG: price > 1w_HMA AND price > 1d_HMA AND RSI(7) between 25-45 (pullback in strong uptrend)
-- SHORT: price < 1w_HMA AND price < 1d_HMA AND RSI(7) between 55-75 (pullback in strong downtrend)
-- ATR ratio < 1.8 (avoid extreme volatility spikes)
+Key differences from failed attempts:
+- KAMA instead of HMA/EMA (adapts to volatility automatically)
+- ADX hysteresis band (20/25) prevents rapid flip-flopping
+- RSI(7) instead of RSI(14) for faster 12h signals
+- LOOSE RSI range (35-65) to guarantee trades
+- Discrete sizing (0.0, ±0.25, ±0.30) to minimize fee churn
 
 Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
+Timeframe: 12h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_weekly_trend_daily_confirm_rsi7_1w1d_v1"
-timeframe = "6h"
+name = "mtf_12h_kama_adx_regime_rsi7_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average - reduces lag while smoothing"""
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average
+    Adapts smoothing based on market efficiency (trend vs noise)
+    """
     n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
+    kama = np.full(n, np.nan, dtype=np.float64)
     
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
+    if n < period + slow_period:
+        return kama
     
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
+    # Efficiency Ratio (ER)
+    er = np.zeros(n, dtype=np.float64)
+    for i in range(period, n):
+        price_change = abs(close[i] - close[i - period])
+        if price_change > 0:
+            volatility = np.sum(np.abs(np.diff(close[max(0, i - period):i + 1])))
+            if volatility > 0:
+                er[i] = price_change / volatility
     
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1.0)
+    slow_sc = 2.0 / (slow_period + 1.0)
     
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+    # Initialize KAMA
+    kama[period] = close[period]
     
-    return wma(diff, sqrt_n)
+    for i in range(period + 1, n):
+        if np.isnan(er[i]):
+            kama[i] = kama[i - 1]
+            continue
+        
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - measures trend strength"""
+    n = len(close)
+    adx = np.full(n, np.nan, dtype=np.float64)
+    
+    if n < period * 3:
+        return adx
+    
+    # True Range and Directional Movement
+    tr = np.zeros(n, dtype=np.float64)
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        elif down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    # Smoothed averages
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Avoid division by zero
+    plus_di = np.divide(plus_di, atr, out=np.zeros_like(plus_di), where=atr > 0) * 100
+    minus_di = np.divide(minus_di, atr, out=np.zeros_like(minus_di), where=atr > 0) * 100
+    
+    # DX and ADX
+    dx = np.zeros(n, dtype=np.float64)
+    di_sum = plus_di + minus_di
+    for i in range(period * 2, n):
+        if di_sum[i] > 0:
+            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum[i]
+    
+    adx_raw = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    adx[period * 2:] = adx_raw[period * 2:]
+    
+    return adx
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -93,18 +143,6 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
-    """ATR ratio for volatility spike detection"""
-    atr_short = calculate_atr(high, low, close, short_period)
-    atr_long = calculate_atr(high, low, close, long_period)
-    
-    ratio = np.full(len(close), np.nan, dtype=np.float64)
-    for i in range(len(close)):
-        if not np.isnan(atr_short[i]) and not np.isnan(atr_long[i]) and atr_long[i] > 1e-10:
-            ratio[i] = atr_short[i] / atr_long[i]
-    
-    return ratio
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -113,19 +151,15 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    kama_1d_raw = calculate_kama(df_1d['close'].values, period=21, fast_period=2, slow_period=30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=16)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
-    atr_ratio = calculate_atr_ratio(high, low, close, short_period=7, long_period=30)
+    adx_14 = calculate_adx(high, low, close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 12h entries
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -139,6 +173,9 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    
+    # ADX hysteresis state
+    adx_above_entry = False  # Track if ADX crossed above 25
     
     # Warmup period
     min_bars = 100
@@ -159,46 +196,62 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(adx_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (Weekly + Daily HMA) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        if np.isnan(kama_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === TREND DIRECTION (Daily KAMA) ===
+        price_above_1d = close[i] > kama_1d_aligned[i]
+        price_below_1d = close[i] < kama_1d_aligned[i]
         
-        # === VOLATILITY FILTER (avoid extreme vol spikes) ===
-        vol_ok = True
-        if not np.isnan(atr_ratio[i]) and atr_ratio[i] > 1.8:
-            vol_ok = False
+        # === ADX REGIME WITH HYSTERESIS ===
+        adx = adx_14[i]
+        
+        # ADX hysteresis: enter when >25, stay in trend until <18
+        if adx > 25.0:
+            adx_above_entry = True
+        elif adx < 18.0:
+            adx_above_entry = False
+        
+        trend_regime = adx_above_entry  # True = trend mode, False = chop mode
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         rsi = rsi_7[i]
         
-        # LONG: Price above BOTH 1w and 1d HMA + RSI pullback (25-45 range)
-        # Strong long: RSI closer to 25 (deeper pullback)
-        if price_above_1w and price_above_1d and vol_ok:
-            if 25.0 <= rsi <= 45.0:
-                if rsi <= 35.0:
-                    desired_signal = SIZE_STRONG  # Deeper pullback
+        # In trend regime (ADX hysteresis active)
+        if trend_regime:
+            # LONG: Price above 1d KAMA + RSI pullback (35-65 range)
+            if price_above_1d and 35.0 <= rsi <= 65.0:
+                # Strong if RSI rising
+                if i > 0 and rsi_7[i] > rsi_7[i-1]:
+                    desired_signal = SIZE_STRONG
                 else:
-                    desired_signal = SIZE_BASE  # Moderate pullback
-        
-        # SHORT: Price below BOTH 1w and 1d HMA + RSI pullback (55-75 range)
-        # Strong short: RSI closer to 75 (deeper pullback)
-        elif price_below_1w and price_below_1d and vol_ok:
-            if 55.0 <= rsi <= 75.0:
-                if rsi >= 65.0:
-                    desired_signal = -SIZE_STRONG  # Deeper pullback
+                    desired_signal = SIZE_BASE
+            
+            # SHORT: Price below 1d KAMA + RSI pullback (35-65 range)
+            elif price_below_1d and 35.0 <= rsi <= 65.0:
+                # Strong if RSI falling
+                if i > 0 and rsi_7[i] < rsi_7[i-1]:
+                    desired_signal = -SIZE_STRONG
                 else:
-                    desired_signal = -SIZE_BASE  # Moderate pullback
+                    desired_signal = -SIZE_BASE
+        else:
+            # In chop regime - smaller positions, tighter RSI range
+            if price_above_1d and 40.0 <= rsi <= 60.0:
+                desired_signal = SIZE_BASE * 0.6  # Reduced size in chop
+            elif price_below_1d and 40.0 <= rsi <= 60.0:
+                desired_signal = -SIZE_BASE * 0.6  # Reduced size in chop
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -229,6 +282,9 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
+        elif abs(desired_signal) >= SIZE_BASE * 0.5:
+            # Small position in chop
+            final_signal = np.sign(desired_signal) * SIZE_BASE * 0.6
         else:
             final_signal = 0.0
         
