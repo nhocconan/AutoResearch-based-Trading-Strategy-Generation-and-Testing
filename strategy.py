@@ -1,42 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1379: 1h Primary + 4h/12h HTF — Vol Spike Mean Reversion + Fisher Transform
+Experiment #1380: 6h Primary + 1d/1w HTF — Donchian Breakout + RSI Pullback + Volume Confirm
 
-Hypothesis: After 1134 failed strategies, the key insight is:
-1. Zero-trade strategies (Sharpe=0.000) = entry conditions TOO STRICT
-2. Negative Sharpe strategies = trend-following fails in bear/range markets (2025 test)
-3. BEST EDGE for BTC/ETH: Vol spike reversion + Fisher Transform (catches reversals better than RSI)
+Hypothesis: 6h timeframe is underexplored with ZERO successful experiments. Previous 6h failures
+used overly complex regime filters (CHOP+CRSI) that generated 0 trades or negative Sharpe.
 
-This strategy combines:
-1. 4h HMA(21) for trend bias (avoid counter-trend in major moves)
-2. 12h HMA(21) for major regime filter (stronger conviction)
-3. ATR(7)/ATR(30) vol spike detection (>1.5 = panic/reversal likely)
-4. Ehlers Fisher Transform(9) for reversal timing (crosses at -1.0/+1.0)
-5. Bollinger Band(20,2.0) for mean reversion confirmation
-6. Session filter (08-20 UTC) for liquidity boost (optional, not required)
+This strategy simplifies entry logic while maintaining strong HTF trend filter:
+1. 1d HMA(21) + 1w HMA(21) for major trend bias (avoid counter-trend = key lesson from 2022)
+2. 6h Donchian(20) breakout for entry trigger (proven on 4h/12h, untested on 6h)
+3. 6h RSI(14) pullback confirmation (RSI 40-60 zone = healthy pullback, not exhaustion)
+4. 6h Volume surge confirmation (taker_buy_volume ratio > 1.5 = real breakout)
+5. ATR(14) trailing stop at 2.5x (mandatory risk management)
 
-Why this should work where others failed:
-- Fisher Transform catches reversals better than RSI (proven in literature)
-- Vol spike + mean reversion works in bear/range markets (2025 test period)
-- LOOSE entry conditions (Fisher < -1.0 not -1.5, ATR ratio > 1.5 not > 2.0)
-- Session filter is OPTIONAL boost, not required (prevents 0 trades)
-- 1h TF with 4h/12h HTF = 40-80 trades/year (fee-friendly)
+Why this should work where 6h strategies failed:
+- Simpler entry = more trades (avoid 0-trade failure mode)
+- Donchian breakout = catches trending moves (works in bull AND bear)
+- RSI pullback filter = avoids chasing exhausted breakouts
+- Volume confirm = filters false breakouts (unique vs prior 6h attempts)
+- 1d+1w trend filter = prevents 2022-style crash whipsaw
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: 4h_HMA bullish + ATR_ratio > 1.5 + Fisher < -1.0 + price < BB_lower
-- SHORT: 4h_HMA bearish + ATR_ratio > 1.5 + Fisher > 1.0 + price > BB_upper
-- 12h_HMA alignment = larger size (0.30 vs 0.20)
+Entry logic:
+- LONG: price > 1d_HMA + Donchian breakout high + RSI 40-65 + volume surge
+- SHORT: price < 1d_HMA + Donchian breakout low + RSI 35-60 + volume surge
 
 Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 1h
-Size: 0.20-0.30 discrete
+Timeframe: 6h
+Size: 0.20-0.30 discrete (vol-scaled)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_fisher_vol_spike_meanreversion_4h12h_v1"
-timeframe = "1h"
+name = "mtf_6h_donchian_rsi_pullback_volume_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -83,94 +79,90 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_fisher_transform(high, low, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution
-    Catches reversals better than RSI in bear/range markets
-    """
-    n = len(close) if 'close' in dir() else len(high)
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    gain = np.insert(gain, 0, 0)
+    loss = np.insert(loss, 0, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan, dtype=np.float64)
+    mask = avg_loss != 0
+    rs = np.zeros(n)
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    
+    return rsi
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - breakout detection"""
     n = len(high)
     if n < period:
         return np.full(n, np.nan), np.full(n, np.nan)
     
-    # Calculate typical price
-    typical = (high + low + np.roll(high + low, 1)) / 4.0
-    typical[0] = (high[0] + low[0]) / 2.0
-    
-    # Normalize to -1 to +1 range
-    fisher_input = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        window = typical[i - period + 1:i + 1]
-        valid = window[~np.isnan(window)]
-        if len(valid) >= 2:
-            highest = np.max(valid)
-            lowest = np.min(valid)
-            if highest > lowest:
-                fisher_input[i] = 0.66 * ((typical[i] - lowest) / (highest - lowest) - 0.5) + 0.67 * fisher_input[i-1] if i > period and not np.isnan(fisher_input[i-1]) else 0.0
-                fisher_input[i] = max(-0.999, min(0.999, fisher_input[i]))
-    
-    # Fisher transform
-    fisher = np.full(n, np.nan, dtype=np.float64)
-    fisher_signal = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if not np.isnan(fisher_input[i]) and abs(fisher_input[i]) < 0.999:
-            fisher[i] = 0.5 * np.log((1 + fisher_input[i]) / (1 - fisher_input[i]))
-            if i > period and not np.isnan(fisher[i-1]):
-                fisher_signal[i] = fisher[i-1]
-    
-    return fisher, fisher_signal
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Bollinger Bands"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
     return upper, lower
 
-def calculate_atr_ratio(atr_short, atr_long):
-    """ATR ratio for vol spike detection"""
-    ratio = np.full(len(atr_short), np.nan, dtype=np.float64)
-    mask = (atr_long > 0) & (~np.isnan(atr_short)) & (~np.isnan(atr_long))
-    ratio[mask] = atr_short[mask] / atr_long[mask]
+def calculate_volume_ratio(taker_buy_volume, total_volume, period=20):
+    """Volume ratio vs rolling average"""
+    n = len(total_volume)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    vol_avg = pd.Series(total_volume).rolling(window=period, min_periods=period).mean().values
+    ratio = np.full(n, np.nan, dtype=np.float64)
+    
+    mask = vol_avg > 0
+    ratio[mask] = total_volume[mask] / vol_avg[mask]
+    
+    return ratio
+
+def calculate_taker_ratio(taker_buy_volume, total_volume):
+    """Taker buy volume ratio (buying pressure)"""
+    n = len(total_volume)
+    ratio = np.full(n, np.nan, dtype=np.float64)
+    
+    mask = total_volume > 0
+    ratio[mask] = taker_buy_volume[mask] / total_volume[mask]
+    
     return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    taker_buy_vol = prices["taker_buy_volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 1h indicators
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_ratio = calculate_atr_ratio(atr_7, atr_30)
-    fisher, fisher_signal = calculate_fisher_transform(high, low, period=9)
-    bb_upper, bb_lower = calculate_bollinger_bands(close, period=20, std_dev=2.0)
-    
-    # Extract hour from open_time for session filter
-    try:
-        hours = pd.to_datetime(prices['open_time']).dt.hour.values
-    except:
-        hours = np.zeros(n, dtype=np.int32)
+    rsi_14 = calculate_rsi(close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    vol_ratio = calculate_volume_ratio(taker_buy_vol, volume, period=20)
+    taker_ratio = calculate_taker_ratio(taker_buy_vol, volume)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.20
@@ -197,90 +189,90 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(atr_ratio[i]) or np.isnan(fisher[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(vol_ratio[i]) or np.isnan(taker_ratio[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (4h HMA bias) ===
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
+        # === TREND DIRECTION (1d + 1w HMA bias) ===
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # 12h HMA for major regime (stronger filter)
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
+        # 1w HMA for major regime (stronger filter)
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
         
-        # === VOL SPIKE DETECTION ===
-        # ATR(7)/ATR(30) > 1.5 = vol spike (panic/reversal likely)
-        vol_spike = atr_ratio[i] > 1.5
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Breakout high = price crosses above Donchian upper
+        # Breakout low = price crosses below Donchian lower
+        breakout_high = close[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_low = close[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # === FISHER TRANSFORM REVERSAL ===
-        fisher_value = fisher[i]
-        fisher_prev = fisher_signal[i] if not np.isnan(fisher_signal[i]) else fisher_value
+        # === VOLUME CONFIRMATION ===
+        # Volume surge = current volume > 1.5x 20-bar average
+        volume_surge = vol_ratio[i] > 1.5
         
-        # Fisher oversold (reversal up likely)
-        fisher_oversold = fisher_value < -1.0
+        # Taker ratio confirmation (buying/selling pressure)
+        taker_buy_pressure = taker_ratio[i] > 0.55  # More buying
+        taker_sell_pressure = taker_ratio[i] < 0.45  # More selling
         
-        # Fisher overbought (reversal down likely)
-        fisher_overbought = fisher_value > 1.0
-        
-        # === BOLLINGER BAND MEAN REVERSION ===
-        price_below_bb = close[i] < bb_lower[i]
-        price_above_bb = close[i] > bb_upper[i]
-        
-        # === SESSION FILTER (optional boost, not required) ===
-        hour = hours[i] if i < len(hours) else 12
-        session_active = 8 <= hour <= 20  # 08-20 UTC
+        # === RSI PULLBACK ZONE ===
+        # RSI 40-65 = healthy pullback in uptrend (not overbought)
+        # RSI 35-60 = healthy pullback in downtrend (not oversold)
+        rsi = rsi_14[i]
+        rsi_long_zone = 40 <= rsi <= 65
+        rsi_short_zone = 35 <= rsi <= 60
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: 4h bullish + vol spike + Fisher oversold + price below BB
-        # Session filter is OPTIONAL (boosts size, not required for entry)
-        if price_above_4h and vol_spike and fisher_oversold and price_below_bb:
-            if price_above_12h:
-                # Strong trend alignment (4h + 12h both bullish)
+        # LONG: 1d bullish + Donchian breakout + RSI in zone + volume confirm
+        if price_above_1d and breakout_high and rsi_long_zone:
+            if price_above_1w:
+                # Strong trend alignment (1d + 1w both bullish)
                 base_size = SIZE_STRONG
+                # Volume confirm less strict in strong trend
+                volume_ok = volume_surge or vol_ratio[i] > 1.2
             else:
-                # Basic long (only 4h bullish)
+                # Basic long (only 1d bullish)
                 base_size = SIZE_BASE
+                # Volume confirm required
+                volume_ok = volume_surge
             
-            desired_signal = base_size
-            
-            # Session boost (optional)
-            if session_active:
-                desired_signal = min(SIZE_STRONG, desired_signal * 1.1)
+            if volume_ok and taker_buy_pressure:
+                desired_signal = base_size
         
-        # SHORT: 4h bearish + vol spike + Fisher overbought + price above BB
-        elif price_below_4h and vol_spike and fisher_overbought and price_above_bb:
-            if price_below_12h:
-                # Strong trend alignment (4h + 12h both bearish)
+        # SHORT: 1d bearish + Donchian breakout + RSI in zone + volume confirm
+        elif price_below_1d and breakout_low and rsi_short_zone:
+            if price_below_1w:
+                # Strong trend alignment (1d + 1w both bearish)
                 base_size = SIZE_STRONG
+                # Volume confirm less strict in strong trend
+                volume_ok = volume_surge or vol_ratio[i] > 1.2
             else:
-                # Basic short (only 4h bearish)
+                # Basic short (only 1d bearish)
                 base_size = SIZE_BASE
+                # Volume confirm required
+                volume_ok = volume_surge
             
-            desired_signal = -base_size
-            
-            # Session boost (optional)
-            if session_active:
-                desired_signal = max(-SIZE_STRONG, desired_signal * 1.1)
+            if volume_ok and taker_sell_pressure:
+                desired_signal = -base_size
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
