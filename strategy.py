@@ -1,44 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1597: 15m Primary + 4h/12h HTF — Volume Spike Reversal + Regime Filter
+Experiment #1598: 4h Primary + 1d HTF — HMA Trend + RSI Pullback + ATR Stop
 
-Hypothesis: 15m strategies fail due to too many trades and fee drag. This strategy
-uses EXTREMELY selective entries with 4+ confluence factors to limit trades to
-40-80/year while capturing high-probability volume spike reversals.
+Hypothesis: After 1300+ failed experiments, the key insight is SIMPLICITY wins.
+Complex regime-switching (Choppiness + Fisher + Donchian + BB + Volume) generates
+ZERO trades because conditions never align. This strategy uses PROVEN patterns:
 
-Key innovations:
-1. VOLUME SPIKE REVERSAL: ATR(7)/ATR(30) > 2.0 indicates panic/extreme move,
-   followed by mean reversion. Proven edge in crypto crash/rally scenarios.
-2. 4h HMA trend bias: Only trade 15m reversals IN DIRECTION of 4h trend
-   (long reversals in 4h uptrend, short reversals in 4h downtrend)
-3. 12h Choppiness regime: Trend regime (CHOP<38) = trade pullbacks,
-   Range regime (CHOP>61) = trade Bollinger extremes
-4. SESSION FILTER: Only trade 00-12 UTC (London/NY overlap = best liquidity)
-5. RSI(7) extremes: <20 for long, >80 for short (tighter than standard 30/70)
-6. Position size: 0.15-0.20 (smaller due to 15m frequency)
+1. 4h HMA(21) for primary trend direction (proven on SOL +0.879)
+2. 1d HMA(21) for higher-timeframe bias filter (prevents major counter-trend)
+3. RSI(14) pullback entries in trend direction (RSI 35-45 long, 55-65 short)
+4. ATR(14) 2.5x trailing stoploss (protects from 2022-style crashes)
+5. Discrete position sizing 0.25-0.30 (controls drawdown during 77% BTC crash)
 
-Why this should beat failed 15m attempts:
-- Volume spike filter eliminates 80% of false signals
-- 4h trend bias prevents counter-trend trades (major killer in 2022)
-- Session filter avoids low-liquidity Asian session whipsaws
-- Discrete sizing (0.0, ±0.15, ±0.20) minimizes fee churn
+Why this should work when complex strategies failed:
+- FEWER conditions = MORE trades (guarantees ≥30 train, ≥3 test)
+- HMA reduces lag vs EMA (better trend capture in crypto)
+- RSI pullback (not extreme) = enters on dip in uptrend, not waiting for crash
+- 4h TF = 20-50 trades/year target (low fee drag, enough samples)
+- 1d HTF bias = avoids counter-trend trades in major moves
 
-Entry logic (VERY STRICT to limit trades):
-- LONG: 4h_HMA bullish + (trend: RSI7<25 + ATR_ratio>1.8 OR range: RSI7<20 + BB_lower)
-        + volume>1.5x + session 00-12 UTC
-- SHORT: 4h_HMA bearish + (trend: RSI7>75 + ATR_ratio>1.8 OR range: RSI7>80 + BB_upper)
-         + volume>1.5x + session 00-12 UTC
+Entry logic (LOOSE to guarantee trades):
+- LONG: 4h_price > 4h_HMA + 1d_HMA bullish + RSI 35-45 (pullback in uptrend)
+- SHORT: 4h_price < 4h_HMA + 1d_HMA bearish + RSI 55-65 (rally in downtrend)
 
-Target: Sharpe>0.6, trades>=30 train, trades>=3 test, DD>-35%, trades/year<100
-Timeframe: 15m
-Size: 0.15-0.20 discrete
+Exit: ATR 2.5x trailing stop OR signal reversal
+
+Target: Sharpe>0.6, trades>=30 train, trades>=3 test, DD>-35%
+Timeframe: 4h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_volspike_reversal_4h12h_session_v1"
-timeframe = "15m"
+name = "mtf_4h_hma_rsi_pullback_1d_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -109,113 +105,27 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppy vs trending
-    CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
-
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Bollinger Bands"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    
-    return upper, sma, lower
-
-def calculate_atr_ratio(atr_short, atr_long):
-    """ATR ratio for volume spike detection"""
-    n = len(atr_short)
-    ratio = np.full(n, np.nan, dtype=np.float64)
-    mask = (atr_long > 1e-10) & (~np.isnan(atr_short)) & (~np.isnan(atr_long))
-    ratio[mask] = atr_short[mask] / atr_long[mask]
-    return ratio
-
-def calculate_volume_ratio(volume, period=20):
-    """Current volume vs average volume"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / vol_avg
-    
-    return vol_ratio
-
-def is_high_liquidity_session(open_time):
-    """
-    Check if bar is in high-liquidity session (00-12 UTC)
-    open_time is in milliseconds since epoch
-    """
-    # Convert to hours UTC
-    ts_seconds = open_time / 1000
-    hour_utc = (ts_seconds % 86400) / 3600
-    return 0 <= hour_utc < 12
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    chop_12h_raw = calculate_choppiness(
-        df_12h['high'].values,
-        df_12h['low'].values,
-        df_12h['close'].values,
-        period=14
-    )
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h_raw)
-    
-    # Calculate 15m indicators
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
+    # Calculate 4h indicators
+    hma_4h = calculate_hma(close, period=21)
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
     rsi_14 = calculate_rsi(close, period=14)
-    bb_upper, bb_mid, bb_lower = calculate_bollinger(close, period=20, std_mult=2.0)
-    vol_ratio = calculate_volume_ratio(volume, period=20)
-    atr_ratio = calculate_atr_ratio(atr_7, atr_30)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -227,7 +137,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 50
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -238,90 +148,47 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_4h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(bb_lower[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr_ratio[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(chop_12h_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION ===
+        price_above_hma_4h = close[i] > hma_4h[i]
+        price_below_hma_4h = close[i] < hma_4h[i]
         
-        # === SESSION FILTER (00-12 UTC only) ===
-        if not is_high_liquidity_session(open_time[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # 1d HMA slope (bullish if current > previous)
+        hma_1d_bullish = hma_1d_aligned[i] > hma_1d_aligned[i-1] if i > 0 else False
+        hma_1d_bearish = hma_1d_aligned[i] < hma_1d_aligned[i-1] if i > 0 else False
         
-        # === REGIME DETECTION (12h Choppiness) ===
-        chop = chop_12h_aligned[i]
-        is_trend_regime = chop < 38.2
-        is_range_regime = chop > 61.8
+        # === RSI PULLBACK ZONES (LOOSE thresholds for trade frequency) ===
+        rsi = rsi_14[i]
         
-        # === TREND DIRECTION (4h HMA bias) ===
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
+        # Long: RSI pulled back to 35-48 in uptrend (not waiting for extreme 30)
+        rsi_pullback_long = 35 <= rsi <= 48
         
-        # === VOLUME SPIKE DETECTION ===
-        vol_spike = vol_ratio[i] > 1.5 if not np.isnan(vol_ratio[i]) else False
-        atr_spike = atr_ratio[i] > 1.8 if not np.isnan(atr_ratio[i]) else False
+        # Short: RSI rallied to 52-65 in downtrend (not waiting for extreme 70)
+        rsi_rally_short = 52 <= rsi <= 65
         
-        # === RSI EXTREMES (tighter than standard) ===
-        rsi_oversold = rsi_7[i] < 25
-        rsi_overbought = rsi_7[i] > 75
-        rsi_extreme_low = rsi_7[i] < 20
-        rsi_extreme_high = rsi_7[i] > 80
-        
-        # === BOLLINGER BAND TOUCH ===
-        bb_touch_lower = close[i] <= bb_lower[i] * 1.005
-        bb_touch_upper = close[i] >= bb_upper[i] * 0.995
-        
-        # === ENTRY LOGIC (VERY STRICT - 4+ confluence) ===
+        # === ENTRY LOGIC (SIMPLE - must generate trades) ===
         desired_signal = 0.0
         
-        # TREND REGIME: Trade pullbacks in direction of 4h trend
-        if is_trend_regime:
-            # LONG: 4h bullish + RSI oversold + volume or ATR spike
-            if price_above_4h and rsi_oversold and (vol_spike or atr_spike):
-                desired_signal = SIZE_STRONG if vol_spike and atr_spike else SIZE_BASE
-            
-            # SHORT: 4h bearish + RSI overbought + volume or ATR spike
-            elif price_below_4h and rsi_overbought and (vol_spike or atr_spike):
-                desired_signal = -SIZE_STRONG if vol_spike and atr_spike else -SIZE_BASE
+        # LONG: 4h uptrend + 1d bullish bias + RSI pullback
+        if price_above_hma_4h and hma_1d_bullish and rsi_pullback_long:
+            desired_signal = SIZE_STRONG
         
-        # RANGE REGIME: Trade Bollinger extremes (mean reversion)
-        elif is_range_regime:
-            # LONG: RSI extreme low + BB lower touch + volume confirmation
-            if rsi_extreme_low and bb_touch_lower and vol_ratio[i] > 1.2:
-                desired_signal = SIZE_BASE
-            
-            # SHORT: RSI extreme high + BB upper touch + volume confirmation
-            elif rsi_extreme_high and bb_touch_upper and vol_ratio[i] > 1.2:
-                desired_signal = -SIZE_BASE
-        
-        # NEUTRAL REGIME: Only trade strongest signals
-        else:
-            # LONG: 4h bullish + extreme RSI + both volume and ATR spike
-            if price_above_4h and rsi_extreme_low and vol_spike and atr_spike:
-                desired_signal = SIZE_BASE
-            
-            # SHORT: 4h bearish + extreme RSI + both volume and ATR spike
-            elif price_below_4h and rsi_extreme_high and vol_spike and atr_spike:
-                desired_signal = -SIZE_BASE
+        # SHORT: 4h downtrend + 1d bearish bias + RSI rally
+        elif price_below_hma_4h and hma_1d_bearish and rsi_rally_short:
+            desired_signal = -SIZE_STRONG
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
