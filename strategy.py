@@ -1,37 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #1396: 30m Primary + 4h/1d HTF — Simplified Trend Pullback with Session Filter
+Experiment #1397: 15m Primary + 4h/1d HTF — Selective Trend Pullback with Session Filter
 
-Hypothesis: Previous experiments failed due to OVER-FILTERING (CRSI + Choppiness + multiple HTF = 0 trades).
-This strategy SIMPLIFIES to guarantee trades while maintaining quality:
+Hypothesis: 15m strategies fail due to overtrading (>300 trades/year → fee drag).
+This strategy uses EXTREMELY selective entries with 4+ confluence:
+1. 4h HMA(21) for intermediate trend direction
+2. 1d HMA(21) for major regime filter (only trade WITH daily trend)
+3. 15m RSI(7) pullback (RSI<35 in uptrend, RSI>65 in downtrend)
+4. Session filter: 00-12 UTC only (London+NY overlap = highest volume)
+5. Volume confirmation: current volume > 1.5x 20-bar average
 
-1. 4h HMA(21) = primary trend direction (LESS strict than 1d)
-2. 1d HMA(21) = regime confirmation (only strengthens signal, doesn't block entry)
-3. 30m RSI(7) = pullback entry timing (40-55 for long, 45-60 for short — LOOSE ranges)
-4. 30m ATR(14) > median = volatility filter (avoid dead markets)
-5. Session 08-20 UTC = liquidity filter (London/NY overlap)
+Why this should work:
+- 4h+1d alignment prevents counter-trend trades that killed Sharpe in 2022
+- RSI(7) pullback = enter on temporary weakness in strong trend
+- Session filter cuts 50% of potential trades (only best hours)
+- Volume filter avoids low-liquidity false breakouts
+- Target: 40-80 trades/year (fee-friendly for 15m)
 
-Why this should work where CRSI/Choppiness failed:
-- RSI(7) pullback is PROVEN on crypto (less extreme than RSI(14) extremes)
-- 4h trend is less restrictive than 1d (more trade opportunities)
-- Session filter reduces false breakouts during low-liquidity hours
-- LOOSE RSI ranges (40-55, not 25-35) = GUARANTEES trades
+Entry logic:
+- LONG: 4h_HMA bullish + 1d_HMA bullish + RSI(7)<35 + volume>1.5x_avg + 00-12 UTC
+- SHORT: 4h_HMA bearish + 1d_HMA bearish + RSI(7)>65 + volume>1.5x_avg + 00-12 UTC
 
-Entry logic (LOOSE to ensure trades):
-- LONG: price > 4h_HMA + RSI(7) 40-55 + ATR > median + session 08-20
-- SHORT: price < 4h_HMA + RSI(7) 45-60 + ATR > median + session 08-20
-- 1d_HMA adds conviction (larger size) but doesn't block entry
-
-Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 30m
-Size: 0.20 base, 0.30 with 1d confirmation
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.25 discrete (smaller for 15m frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_rsi7_pullback_hma_trend_4h1d_session_v1"
-timeframe = "30m"
+name = "mtf_15m_rsi7_pullback_hma_trend_session_4h1d_v3"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -102,17 +101,32 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def is_session_active(open_time_unix_ms):
-    """Check if timestamp is within 08-20 UTC session"""
-    # Convert ms to hours
-    hours_utc = (open_time_unix_ms / (1000 * 60 * 60)) % 24
-    return 8 <= hours_utc < 20
+def calculate_volume_ratio(volume, period=20):
+    """Volume ratio vs rolling average"""
+    n = len(volume)
+    ratio = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        avg_vol = np.nanmean(volume[i-period:i])
+        if avg_vol > 0 and not np.isnan(volume[i]):
+            ratio[i] = volume[i] / avg_vol
+    
+    return ratio
+
+def get_utc_hour(prices, idx):
+    """Extract UTC hour from open_time at index"""
+    open_time = prices.iloc[idx]['open_time']
+    # open_time is in milliseconds since epoch
+    timestamp_ms = open_time
+    # Convert to hours UTC
+    hour = (timestamp_ms // (1000 * 60 * 60)) % 24
+    return hour
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -126,16 +140,14 @@ def generate_signals(prices):
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 30m indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_7 = calculate_rsi(close, period=7)
-    
-    # Pre-calculate ATR median for volatility filter
-    atr_median = np.nanmedian(atr_14[100:]) if n > 100 else np.nanmedian(atr_14)
+    vol_ratio = calculate_volume_ratio(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -165,55 +177,57 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (08-20 UTC) ===
-        session_active = is_session_active(open_time[i])
+        if np.isnan(vol_ratio[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === VOLATILITY FILTER ===
-        vol_ok = atr_14[i] >= atr_median * 0.7  # Allow some flexibility
+        # === SESSION FILTER (00-12 UTC only) ===
+        utc_hour = get_utc_hour(prices, i)
+        in_session = (utc_hour >= 0 and utc_hour < 12)
         
         # === TREND DIRECTION (4h HMA bias) ===
         price_above_4h = close[i] > hma_4h_aligned[i]
         price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # 1d HMA for regime confirmation (adds conviction, doesn't block)
-        price_above_1d = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
-        price_below_1d = not np.isnan(hma_1d_aligned[i]) and close[i] < hma_1d_aligned[i]
+        # === REGIME FILTER (1d HMA - only trade WITH daily trend) ===
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === RSI PULLBACK (LOOSE RANGES TO GUARANTEE TRADES) ===
+        # === VOLUME CONFIRMATION ===
+        volume_confirmed = vol_ratio[i] > 1.5
+        
+        # === RSI PULLBACK ===
         rsi = rsi_7[i]
+        rsi_oversold = rsi < 35  # Pullback in uptrend
+        rsi_overbought = rsi > 65  # Pullback in downtrend
         
-        # Long: RSI pulled back to 40-55 (not oversold, just pullback in uptrend)
-        rsi_long_ok = 40 <= rsi <= 55
-        
-        # Short: RSI rallied to 45-60 (not overbought, just retracement in downtrend)
-        rsi_short_ok = 45 <= rsi <= 60
-        
-        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
+        # === ENTRY LOGIC (VERY SELECTIVE - all conditions must align) ===
         desired_signal = 0.0
         
-        # LONG: 4h bullish + RSI pullback + vol ok + session active
-        if price_above_4h and rsi_long_ok and vol_ok and session_active:
-            if price_above_1d:
-                # Strong trend alignment (4h + 1d both bullish)
+        # LONG: 4h bullish + 1d bullish + RSI oversold + volume + session
+        if price_above_4h and price_above_1d and rsi_oversold and volume_confirmed and in_session:
+            # Check RSI turning up (confirmation)
+            if i >= 2 and rsi_7[i] > rsi_7[i-1]:
                 desired_signal = SIZE_STRONG
             else:
-                # Basic long (only 4h bullish)
                 desired_signal = SIZE_BASE
         
-        # SHORT: 4h bearish + RSI pullback + vol ok + session active
-        elif price_below_4h and rsi_short_ok and vol_ok and session_active:
-            if price_below_1d:
-                # Strong trend alignment (4h + 1d both bearish)
+        # SHORT: 4h bearish + 1d bearish + RSI overbought + volume + session
+        elif price_below_4h and price_below_1d and rsi_overbought and volume_confirmed and in_session:
+            # Check RSI turning down (confirmation)
+            if i >= 2 and rsi_7[i] < rsi_7[i-1]:
                 desired_signal = -SIZE_STRONG
             else:
-                # Basic short (only 4h bearish)
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
