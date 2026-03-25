@@ -1,40 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #1240: 6h Primary + 1d/1w HTF — Regime-Adaptive HMA + RSI(7) Pullback
+Experiment #1241: 15m Primary + 1h/4h/1d HTF — HMA Trend + RSI Pullback + Volume Confirm
 
-Hypothesis: 6h timeframe is underexplored (zero prior experiments). This strategy combines:
-1. Daily HMA(21) for primary trend direction (proven in #1164)
-2. Weekly HMA(21) for macro bias confirmation
-3. 6h RSI(7) for faster pullback detection (shorter period = more responsive on 6h)
-4. Choppiness Index (CHOP) for regime filter - only trade when CHOP < 50 (trending)
-5. ATR-based trailing stop for risk management
+Hypothesis: 15m timeframe has ZERO successful experiments. The key is using HTF (4h/1d) 
+for trend direction and regime, while 15m only provides entry timing precision. This gives
+HTF-quality trade frequency (40-100/year) with 15m entry precision.
 
-Key insight from failures (#1231, #1235): 
-- Too many filters = 0 trades (Fisher strategy had 0 trades)
-- Weekly pivot strategies haven't worked yet on 6h
-- Need LOOSE entry conditions that trigger on normal market moves
+Strategy Logic:
+1. 4h HMA(21) = primary trend direction (long when price > 4h_HMA)
+2. 1d HMA(21) = regime filter (only trade in direction of daily trend)
+3. 15m RSI(7) = entry timing (pullback to 35-55 for longs, 45-65 for shorts)
+4. Volume confirmation = 15m volume > 1.2x 20-bar MA volume
+5. Session filter = prefer 00-12 UTC (London/NY overlap)
+6. ATR(14) 2.5x trailing stoploss
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: price > 1d_HMA AND RSI(7) between 30-65 AND CHOP < 50
-- SHORT: price < 1d_HMA AND RSI(7) between 35-70 AND CHOP < 50
-- Strong signal: also aligned with 1w HMA
+Key Design Choices:
+- Size: 0.15-0.20 (smaller for 15m frequency to reduce fee impact)
+- RSI window: 7 (faster than 14 for 15m entries)
+- Discrete signals: 0.0, ±0.15, ±0.20 (minimize churn)
+- LOOSE entry conditions to guarantee trades (RSI 35-65 range)
 
-Why 6h should work:
-- Natural 30-60 trades/year (fee-friendly, between 4h and 12h)
-- RSI(7) more responsive than RSI(14) on 6h candles
-- CHOP < 50 is loose enough to allow trades but filters extreme ranges
-- Discrete sizing (0.0, ±0.20, ±0.30) = minimal fee churn
-
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.20-0.30 discrete
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 15m
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma_rsi7_chop_regime_1d1w_v1"
-timeframe = "6h"
+name = "mtf_15m_hma_rsi_volume_4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -99,64 +93,49 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_chop(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP) - measures market choppiness vs trending
-    Formula: CHOP = 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
-    CHOP > 61.8 = range-bound, CHOP < 38.2 = trending
-    We use CHOP < 50 as loose trending filter
-    """
-    n = len(close)
-    if n < period + 1:
+def calculate_volume_ma(volume, period=20):
+    """Volume moving average"""
+    n = len(volume)
+    if n < period:
         return np.full(n, np.nan)
     
-    # Calculate ATR for each bar
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.nansum(tr[i-period+1:i+1])
-        highest_high = np.nanmax(high[i-period+1:i+1])
-        lowest_low = np.nanmin(low[i-period+1:i+1])
-        
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-        else:
-            chop[i] = 50.0  # neutral if can't calculate
-    
-    return chop
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_ma
+
+def get_hour_from_open_time(open_time):
+    """Extract hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds since epoch
+    hours = (open_time // (1000 * 60 * 60)) % 24
+    return hours
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate 6h indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 6h
-    chop_14 = calculate_chop(high, low, close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)
+    vol_ma_20 = calculate_volume_ma(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -186,57 +165,56 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(chop_14[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION (4h HMA) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # === REGIME FILTER (Choppiness Index) ===
-        # CHOP < 50 = trending regime (allow trades)
-        # CHOP >= 50 = choppy regime (flat or reduce size)
-        is_trending = chop_14[i] < 50.0
-        
-        # === TREND DIRECTION (Daily HMA) ===
+        # === REGIME FILTER (1d HMA) ===
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # Weekly HMA for additional confirmation
-        hma_1w_valid = not np.isnan(hma_1w_aligned[i])
-        price_above_1w = hma_1w_valid and close[i] > hma_1w_aligned[i]
-        price_below_1w = hma_1w_valid and close[i] < hma_1w_aligned[i]
+        # === VOLUME CONFIRMATION ===
+        vol_confirmed = False
+        if not np.isnan(vol_ma_20[i]) and vol_ma_20[i] > 0:
+            vol_ratio = volume[i] / vol_ma_20[i]
+            vol_confirmed = vol_ratio > 1.2
+        
+        # === SESSION FILTER (00-12 UTC preferred) ===
+        hour = get_hour_from_open_time(open_time[i])
+        preferred_session = (0 <= hour <= 12)
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         rsi = rsi_7[i]
         
-        # Only trade in trending regime
-        if is_trending:
-            # LONG: Price above 1d HMA + RSI(7) pullback (30-65 range)
-            # Strong long: also above 1w HMA
-            if price_above_1d:
-                if 30.0 <= rsi <= 65.0:
-                    if price_above_1w:
-                        desired_signal = SIZE_STRONG  # Strong trend alignment
-                    else:
-                        desired_signal = SIZE_BASE  # Basic uptrend pullback
-            
-            # SHORT: Price below 1d HMA + RSI(7) pullback (35-70 range)
-            # Strong short: also below 1w HMA
-            elif price_below_1d:
-                if 35.0 <= rsi <= 70.0:
-                    if price_below_1w:
-                        desired_signal = -SIZE_STRONG  # Strong trend alignment
-                    else:
-                        desired_signal = -SIZE_BASE  # Basic downtrend pullback
+        # LONG: Price above 4h HMA + aligned with 1d trend + RSI pullback
+        if price_above_4h and price_above_1d:
+            # RSI pullback zone (35-55 for longs)
+            if 35.0 <= rsi <= 55.0:
+                if vol_confirmed and preferred_session:
+                    desired_signal = SIZE_STRONG
+                elif vol_confirmed or preferred_session:
+                    desired_signal = SIZE_BASE
+                else:
+                    desired_signal = SIZE_BASE * 0.5  # Weaker signal without confirmations
+        
+        # SHORT: Price below 4h HMA + aligned with 1d trend + RSI pullback
+        elif price_below_4h and price_below_1d:
+            # RSI pullback zone (45-65 for shorts)
+            if 45.0 <= rsi <= 65.0:
+                if vol_confirmed and preferred_session:
+                    desired_signal = -SIZE_STRONG
+                elif vol_confirmed or preferred_session:
+                    desired_signal = -SIZE_BASE
+                else:
+                    desired_signal = -SIZE_BASE * 0.5  # Weaker signal without confirmations
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -267,6 +245,10 @@ def generate_signals(prices):
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
+        elif desired_signal >= SIZE_BASE * 0.4:
+            final_signal = SIZE_BASE * 0.5
+        elif desired_signal <= -SIZE_BASE * 0.4:
+            final_signal = -SIZE_BASE * 0.5
         else:
             final_signal = 0.0
         
