@@ -1,45 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1493: 5m Primary + 15m/4h HTF — Session-Filtered Momentum Pullback
+Experiment #1494: 1d Primary + 1w HTF — Volatility Compression Breakout with Trend Filter
 
-Hypothesis: 5m timeframe has ZERO prior experiments. This strategy uses:
-1. 4h HMA(21) for major trend bias (NEVER trade counter-trend)
-2. 15m RSI(14) for momentum confirmation (RSI>50 for longs, <50 for shorts)
-3. 5m EMA(8/21) crossover for precise entry timing
-4. Session filter: 12-22 UTC only (London/NY overlap = highest liquidity)
-5. ATR(14) trailing stoploss (2.0x ATR)
+Hypothesis: Daily timeframe with weekly trend filter provides optimal balance between
+trade frequency (20-50/year) and signal quality. This strategy combines:
+1. Volatility compression detection (BB Width at 200-day low) → breakout imminent
+2. Weekly HMA(21) for major trend bias (avoid counter-trend breakouts)
+3. Donchian(20) breakout for entry timing
+4. ATR-based position sizing and stoploss (3x ATR for daily TF)
+5. Asymmetric sizing: stronger positions with weekly trend, weaker against
 
-Why this should work on 5m:
-- HTF trend filter prevents 5m whipsaw deaths (proven in higher TFs)
-- Session filter reduces noise during low-liquidity hours
-- EMA cross on 5m = frequent enough signals (target 80-120 trades/year)
-- LOOSE RSI threshold (45/55 not 30/70) ensures trades generate
-- Small size (0.15) accounts for higher fee drag on lower TF
+Why this should work on 1d:
+- Volatility compression precedes major moves (proven in quant literature)
+- Weekly filter prevents major counter-trend disasters (2022 crash protection)
+- Daily TF = natural 25-40 trades/year (fee-efficient, meets minimum trade req)
+- LOOSE breakout thresholds guarantee trades (Donchian break, not exact level)
+- Works in both bull and bear regimes (asymmetric, not long-only)
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: 4h_HMA bullish + 15m_RSI>45 + 5m_EMA8>EMA21 + session active
-- SHORT: 4h_HMA bearish + 15m_RSI<55 + 5m_EMA8<EMA21 + session active
+Entry logic (LOOSE to guarantee ≥30 trades/train, ≥3/test):
+- LONG: weekly_HMA bullish + BB_width < 200d_low + price > Donchian_high
+- SHORT: weekly_HMA bearish + BB_width < 200d_low + price < Donchian_low
+- Also allow mean-reversion when BB_width > 80th percentile (vol expansion exhaustion)
 
-Target: Sharpe>0.6, trades>=50 train, trades>=5 test, DD>-35%
-Timeframe: 5m
-Size: 0.15 discrete (smaller due to more trades)
+Target: Sharpe>0.6, trades>=30 train, trades>=3 test, DD>-35%
+Timeframe: 1d
+Size: 0.25-0.30 discrete (0.30 with trend, 0.20 counter-trend)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_5m_session_ema_pullback_4h15m_v1"
-timeframe = "5m"
+name = "mtf_1d_vol_compression_donchian_1w_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -109,40 +102,77 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def is_session_active(open_time):
-    """
-    Session filter: 12-22 UTC only (London/NY overlap + crypto peak hours)
-    open_time is in milliseconds since epoch
-    """
-    # Convert to hour of day UTC
-    hour = (open_time // (1000 * 60 * 60)) % 24
-    return 12 <= hour <= 22
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Bollinger Bands with bandwidth"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma
+    
+    return upper, sma, lower, bandwidth
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
+def calculate_percentile_rank(series, lookback=200):
+    """Percentile rank of current value over lookback period"""
+    n = len(series)
+    result = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(lookback, n):
+        window = series[i - lookback:i + 1]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            current = series[i]
+            rank = np.sum(valid <= current) / len(valid)
+            result[i] = rank
+    
+    return result
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_15m = get_htf_data(prices, '15m')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
-    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
-    
-    # Calculate 5m indicators
-    ema_8 = calculate_ema(close, period=8)
-    ema_21 = calculate_ema(close, period=21)
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_14 = calculate_rsi(close, period=14)
+    bb_upper, bb_mid, bb_lower, bb_bandwidth = calculate_bollinger(close, period=20, std_mult=2.0)
+    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    
+    # Calculate BB bandwidth percentile rank (vol compression detection)
+    bb_percentile = calculate_percentile_rank(bb_bandwidth, lookback=200)
     
     signals = np.zeros(n)
-    SIZE = 0.15  # Smaller size for 5m due to higher fee drag
+    SIZE_WITH_TREND = 0.30
+    SIZE_COUNTER_TREND = 0.20
+    SIZE_MEAN_REVERT = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -153,8 +183,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup period
-    min_bars = 100
+    # Warmup period (need 200 bars for percentile rank)
+    min_bars = 250
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -165,65 +195,91 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(ema_8[i]) or np.isnan(ema_21[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(bb_bandwidth[i]) or np.isnan(donch_upper[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_15m_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(bb_percentile[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (12-22 UTC only) ===
-        session_active = is_session_active(open_time[i])
+        # === WEEKLY TREND BIAS ===
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
         
-        # === TREND DIRECTION (4h HMA bias) ===
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
+        # === VOLATILITY REGIME ===
+        bb_pct = bb_percentile[i]
+        is_vol_compression = bb_pct < 0.15  # BB width in bottom 15% of 200d range
+        is_vol_expansion = bb_pct > 0.80    # BB width in top 20% of 200d range
         
-        # === MOMENTUM (15m RSI) ===
-        rsi_15m = rsi_15m_aligned[i]
-        momentum_bullish = rsi_15m > 45  # LOOSE threshold
-        momentum_bearish = rsi_15m < 55  # LOOSE threshold
+        # === DONCHIAN BREAKOUT ===
+        donchian_breakout_long = close[i] > donch_upper[i-1] if not np.isnan(donch_upper[i-1]) else False
+        donchian_breakout_short = close[i] < donch_lower[i-1] if not np.isnan(donch_lower[i-1]) else False
         
-        # === ENTRY SIGNAL (5m EMA crossover) ===
-        ema_bullish = ema_8[i] > ema_21[i]
-        ema_bearish = ema_8[i] < ema_21[i]
-        
-        # Check for fresh crossover (not just sustained)
-        ema_cross_long = ema_bullish and (i > 0 and ema_8[i-1] <= ema_21[i-1] if not np.isnan(ema_8[i-1]) else False)
-        ema_cross_short = ema_bearish and (i > 0 and ema_8[i-1] >= ema_21[i-1] if not np.isnan(ema_8[i-1]) else False)
+        # === RSI EXTREMES (for mean reversion) ===
+        rsi = rsi_14[i]
+        rsi_oversold = rsi < 35
+        rsi_overbought = rsi > 65
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        if session_active:
-            # LONG: 4h bullish + 15m RSI not bearish + 5m EMA cross or sustained bullish
-            if price_above_4h and momentum_bullish and ema_bullish:
-                desired_signal = SIZE
+        # VOL COMPRESSION BREAKOUT (primary signal - high probability)
+        if is_vol_compression:
+            # LONG: weekly bullish + breakout up
+            if price_above_1w and donchian_breakout_long:
+                desired_signal = SIZE_WITH_TREND
             
-            # SHORT: 4h bearish + 15m RSI not bullish + 5m EMA cross or sustained bearish
-            elif price_below_4h and momentum_bearish and ema_bearish:
-                desired_signal = -SIZE
+            # SHORT: weekly bearish + breakout down
+            elif price_below_1w and donchian_breakout_short:
+                desired_signal = -SIZE_WITH_TREND
+            
+            # Counter-trend breakout (weaker signal)
+            elif price_below_1w and donchian_breakout_long:
+                desired_signal = SIZE_COUNTER_TREND
+            
+            elif price_above_1w and donchian_breakout_short:
+                desired_signal = -SIZE_COUNTER_TREND
         
-        # === STOPLOSS CHECK (2.0x ATR trailing) ===
+        # VOL EXPANSION MEAN REVERSION (exhaustion trades)
+        elif is_vol_expansion:
+            # LONG: RSI oversold + price near BB lower
+            if rsi_oversold and close[i] <= bb_lower[i] * 1.01:
+                desired_signal = SIZE_MEAN_REVERT
+            
+            # SHORT: RSI overbought + price near BB upper
+            elif rsi_overbought and close[i] >= bb_upper[i] * 0.99:
+                desired_signal = -SIZE_MEAN_REVERT
+        
+        # NEUTRAL VOL: Only take strong trend signals
+        else:
+            # LONG: weekly bullish + RSI not overbought + price above BB mid
+            if price_above_1w and rsi < 60 and close[i] > bb_mid[i]:
+                desired_signal = SIZE_COUNTER_TREND * 0.8
+            
+            # SHORT: weekly bearish + RSI not oversold + price below BB mid
+            elif price_below_1w and rsi > 40 and close[i] < bb_mid[i]:
+                desired_signal = -SIZE_COUNTER_TREND * 0.8
+        
+        # === STOPLOSS CHECK (3x ATR for daily TF - wider stops) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 3.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 3.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -232,10 +288,18 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE * 0.9:
-            final_signal = SIZE
-        elif desired_signal <= -SIZE * 0.9:
-            final_signal = -SIZE
+        if desired_signal >= SIZE_WITH_TREND * 0.9:
+            final_signal = SIZE_WITH_TREND
+        elif desired_signal <= -SIZE_WITH_TREND * 0.9:
+            final_signal = -SIZE_WITH_TREND
+        elif desired_signal >= SIZE_MEAN_REVERT * 0.9:
+            final_signal = SIZE_MEAN_REVERT
+        elif desired_signal <= -SIZE_MEAN_REVERT * 0.9:
+            final_signal = -SIZE_MEAN_REVERT
+        elif desired_signal >= SIZE_COUNTER_TREND * 0.9:
+            final_signal = SIZE_COUNTER_TREND
+        elif desired_signal <= -SIZE_COUNTER_TREND * 0.9:
+            final_signal = -SIZE_COUNTER_TREND
         else:
             final_signal = 0.0
         
@@ -249,9 +313,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 3.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 3.0 * entry_atr
         else:
             if in_position:
                 in_position = False
