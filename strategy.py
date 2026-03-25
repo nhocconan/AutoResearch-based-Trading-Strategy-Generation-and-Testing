@@ -1,37 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #1227: 6h Primary + 1d HTF — HMA Trend + RSI Pullback + Donchian Momentum
+Experiment #1228: 4h Primary + 12h/1d HTF — Donchian Breakout + HMA Trend + RSI Pullback
 
-Hypothesis: 6h timeframe is underexplored (ZERO prior experiments). It sits between 4h and 12h,
-offering fewer trades than 4h (less fee drag) but more signals than 12h (better capture of
-medium-term trends). This strategy combines:
+Hypothesis: After analyzing 1200+ failed experiments, the winning pattern for 4h is:
+1. 12h HMA(21) for trend direction (faster than 1d, smoother than 4h)
+2. 4h Donchian(20) breakout for momentum confirmation
+3. 4h RSI(14) 35-65 for pullback entries (not extremes - guarantees trades)
+4. 1d HMA(21) for regime filter (only trade with weekly trend)
+5. ATR(14) 2.5x trailing stop for risk management
 
-1. Daily HMA(21) for primary trend direction (proven in #1218, #1223)
-2. 6h RSI(14) pullback entries with WIDE range (30-70) to guarantee trades
-3. Donchian(20) breakout confirmation for momentum (catches trend continuation)
-4. ATR(14) 2.5x trailing stop for risk management
+Why this should beat current best (Sharpe=0.445):
+- Donchian breakout ensures we enter on momentum resumption, not dead cat bounces
+- 12h HMA responds faster than 1d but smoother than 4h noise
+- RSI 35-65 range is LOOSE enough to generate 30-60 trades/year on 4h
+- Discrete sizing (0.0, ±0.25, ±0.30) minimizes fee churn
+- 2.5x ATR stop protects from 2022-style crashes
 
-Key learnings from failures:
-- #1224, #1226: Complex regime filters (CHOP, CRSI) → negative Sharpe
-- #1225: Poor risk management → -88.7% return
-- #1217, #1219, #1221: Over-filtered → 0 trades (Sharpe=0.000)
-- #1223: Simple HMA+RSI+ROC → Sharpe=0.238 (positive but beatable)
-
-This strategy uses LOOSE entry conditions to guarantee 30+ trades:
-- RSI range 30-70 (wider than typical 35-65)
-- Donchian confirmation optional for base size, required for strong size
-- No choppiness/ADX filters that kill trade frequency
-
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.25 base, 0.30 strong (discrete levels to minimize fee churn)
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 4h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma_trend_rsi_donchian_momentum_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_hma_rsi_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -96,14 +90,14 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_donchian_channels(high, low, period=20):
-    """Donchian Channels - highest high and lowest low over period"""
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
     n = len(high)
     if n < period:
         return np.full(n, np.nan), np.full(n, np.nan)
     
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
     for i in range(period - 1, n):
         upper[i] = np.nanmax(high[i - period + 1:i + 1])
@@ -118,16 +112,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, period=20)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -161,7 +159,7 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -175,43 +173,42 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (Daily HMA) ===
+        # === TREND DIRECTION (12h HMA + 1d HMA confirmation) ===
+        price_above_12h = close[i] > hma_12h_aligned[i]
+        price_below_12h = close[i] < hma_12h_aligned[i]
+        
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
         # === MOMENTUM (Donchian Breakout) ===
-        # Price near upper Donchian = bullish momentum
-        # Price near lower Donchian = bearish momentum
-        donchian_range = donchian_upper[i] - donchian_lower[i]
-        if donchian_range > 1e-10:
-            donchian_position = (close[i] - donchian_lower[i]) / donchian_range
-        else:
-            donchian_position = 0.5
-        
-        bullish_momentum = donchian_position > 0.6  # Price in upper 40% of Donchian
-        bearish_momentum = donchian_position < 0.4  # Price in lower 40% of Donchian
+        # Price breaking above recent high = bullish momentum
+        # Price breaking below recent low = bearish momentum
+        breakout_long = close[i] > donchian_upper[i - 1] if i > 0 else False
+        breakout_short = close[i] < donchian_lower[i - 1] if i > 0 else False
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         rsi = rsi_14[i]
         
-        # LONG: Price above 1d HMA + RSI pullback (30-70 range for more trades)
-        # Strong long: also has bullish Donchian momentum
-        if price_above_1d:
-            if 30.0 <= rsi <= 70.0:  # WIDE range to ensure trades
-                if bullish_momentum:
-                    desired_signal = SIZE_STRONG  # Strong trend + momentum alignment
-                else:
-                    desired_signal = SIZE_BASE  # Basic uptrend pullback
+        # LONG: 12h trend up + RSI pullback (35-65) + Donchian breakout OR price near upper
+        if price_above_12h:
+            if 35.0 <= rsi <= 65.0:
+                # Strong long: 1d also bullish + breakout
+                if price_above_1d and breakout_long:
+                    desired_signal = SIZE_STRONG
+                # Basic long: 12h bullish + RSI pullback
+                elif close[i] > donchian_upper[i] * 0.98:  # Near upper channel
+                    desired_signal = SIZE_BASE
         
-        # SHORT: Price below 1d HMA + RSI pullback (30-70 range for more trades)
-        # Strong short: also has bearish Donchian momentum
-        elif price_below_1d:
-            if 30.0 <= rsi <= 70.0:  # WIDE range to ensure trades
-                if bearish_momentum:
-                    desired_signal = -SIZE_STRONG  # Strong trend + momentum alignment
-                else:
-                    desired_signal = -SIZE_BASE  # Basic downtrend pullback
+        # SHORT: 12h trend down + RSI pullback (35-65) + Donchian breakout OR price near lower
+        elif price_below_12h:
+            if 35.0 <= rsi <= 65.0:
+                # Strong short: 1d also bearish + breakout
+                if price_below_1d and breakout_short:
+                    desired_signal = -SIZE_STRONG
+                # Basic short: 12h bearish + RSI pullback
+                elif close[i] < donchian_lower[i] * 1.02:  # Near lower channel
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
