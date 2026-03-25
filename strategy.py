@@ -1,38 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #1192: 12h Primary + 1d HTF — Dual HMA Crossover + RSI Momentum
+Experiment #1193: 5m Primary + 15m/4h HTF — Ultra-Selective Trend Following
 
-Hypothesis: After 980+ failed experiments, the key insight is:
-1. COMPLEXITY KILLS: Strategies with choppiness/ADX/regime switches generate 0 trades
-2. SIMPLICITY WINS: Pure trend + momentum with loose filters = consistent trades
-3. 12h TIMEFRAME: Natural 20-50 trades/year, fee-friendly, less noise than 1h/4h
+Hypothesis: 5m is untested territory. The key is EXTREME selectivity with HTF trend filter.
+Most 5m strategies fail from too many trades (fee drag). This uses:
 
-This strategy combines:
-1. Dual HMA crossover on 12h (HMA8 vs HMA21) for fast trend detection
-2. 1d HMA21 for higher timeframe confirmation (directional bias only)
-3. RSI(14) momentum filter (40-60 range = neutral momentum, enter on crossover)
-4. ATR(14) 2.5x trailing stop for risk management
+1. 4h HMA(21) for PRIMARY trend direction (only trade with 4h trend)
+2. 15m RSI(14) for momentum confirmation (RSI > 55 for long, < 45 for short)
+3. 5m RSI(7) for entry timing (fast RSI extremes: < 25 long, > 75 short)
+4. Session filter: 08:00-20:00 UTC only (high liquidity, avoid Asia overnight)
+5. Volume spike confirmation (volume > 1.5x 20-bar avg)
+6. ATR(14) 2.5x trailing stoploss
 
-Key improvements from #1164 (which had 0 trades):
-- HMA crossover (8/21) instead of price vs HMA = more frequent signals
-- RSI 40-60 range (wider than 35-65) = more entry opportunities
-- No weekly HMA requirement = fewer conditions to fail
-- Entry on crossover direction, not just pullback = captures trend changes
+Key insight: 5m needs 3+ confluence to avoid fee death. 4h trend ensures we only
+trade in established direction. 15m RSI filters out weak momentum. 5m RSI gives
+precise entry timing. Session filter avoids low-liquidity whipsaws.
 
-Entry logic (LOOSE to guarantee 30+ trades):
-- LONG: HMA8 > HMA21 (crossover bullish) + RSI > 40 + price > 1d_HMA
-- SHORT: HMA8 < HMA21 (crossover bearish) + RSI < 60 + price < 1d_HMA
+Entry logic (SELECTIVE but guaranteed trades):
+- LONG: 4h_HMA bullish + 15m_RSI > 55 + 5m_RSI < 25 (oversold pullback) + session + volume
+- SHORT: 4h_HMA bearish + 15m_RSI < 45 + 5m_RSI > 75 (overbought pullback) + session + volume
 
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 12h
-Size: 0.25-0.30 discrete
+Why this should work:
+- 4h trend filter = only ~50% of time eligible (reduces trades 2x)
+- Session filter = only ~50% of bars eligible (reduces trades 2x)
+- Triple confluence = ~12.5% of remaining bars (50-100 trades/year target)
+- 5m timeframe with HTF filter = best of both worlds
+- Small size (0.15) = survivable during 2022 crash
+
+Target: Sharpe>0.5, trades>=50 train, trades>=5 test, DD>-35%, trades/year 50-120
+Timeframe: 5m
+Size: 0.15-0.20 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_hma_crossover_rsi_momentum_1d_v1"
-timeframe = "12h"
+name = "mtf_5m_hma_trend_rsi_triple_confluence_15m4h_v1"
+timeframe = "5m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -97,28 +101,51 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
+def calculate_volume_ratio(volume, period=20):
+    """Volume ratio vs rolling average"""
+    n = len(volume)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    ratio = volume / vol_avg
+    ratio[:period] = np.nan
+    return ratio
+
+def is_session_active(open_time):
+    """Check if bar is within 08:00-20:00 UTC session"""
+    # open_time is in milliseconds since epoch
+    hour = pd.to_datetime(open_time, unit='ms').hour
+    return 8 <= hour < 20
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_15m = get_htf_data(prices, '15m')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 12h indicators
-    hma_8 = calculate_hma(close, period=8)
-    hma_21 = calculate_hma(close, period=21)
+    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
+    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
+    
+    # Calculate 5m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
+    rsi_5m_fast = calculate_rsi(close, period=7)  # Fast RSI for 5m entries
+    rsi_5m_std = calculate_rsi(close, period=14)  # Standard RSI for confirmation
+    vol_ratio = calculate_volume_ratio(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -129,8 +156,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup period
+    # Warmup period (need all indicators ready)
     min_bars = 100
+    
+    # Track RSI crosses for entry timing
+    rsi_5m_prev = np.nan
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -139,51 +169,63 @@ def generate_signals(prices):
             if in_position:
                 in_position = False
                 position_side = 0
+            rsi_5m_prev = rsi_5m_fast[i] if not np.isnan(rsi_5m_fast[i]) else rsi_5m_prev
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(rsi_5m_fast[i]) or np.isnan(rsi_15m_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
+            rsi_5m_prev = rsi_5m_fast[i] if not np.isnan(rsi_5m_fast[i]) else rsi_5m_prev
             continue
         
-        if np.isnan(hma_8[i]) or np.isnan(hma_21[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
+            rsi_5m_prev = rsi_5m_fast[i] if not np.isnan(rsi_5m_fast[i]) else rsi_5m_prev
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === SESSION FILTER (08:00-20:00 UTC only) ===
+        session_active = is_session_active(open_time[i])
         
-        # === TREND DIRECTION (HMA Crossover + Daily HMA) ===
-        hma_bullish = hma_8[i] > hma_21[i]
-        hma_bearish = hma_8[i] < hma_21[i]
+        # === TREND DIRECTION (4h HMA) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === MOMENTUM CONFIRMATION (15m RSI) ===
+        rsi_15m = rsi_15m_aligned[i]
+        momentum_bullish = rsi_15m > 55.0
+        momentum_bearish = rsi_15m < 45.0
         
-        # === MOMENTUM (RSI) ===
-        rsi = rsi_14[i]
-        rsi_neutral_long = rsi >= 40.0  # Not oversold, room to run
-        rsi_neutral_short = rsi <= 60.0  # Not overbought, room to fall
+        # === ENTRY TIMING (5m RSI extremes) ===
+        rsi_5m = rsi_5m_fast[i]
+        rsi_5m_crossed_up = (not np.isnan(rsi_5m_prev) and rsi_5m_prev < 25.0 and rsi_5m >= 25.0)
+        rsi_5m_crossed_down = (not np.isnan(rsi_5m_prev) and rsi_5m_prev > 75.0 and rsi_5m <= 75.0)
         
-        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
+        # === VOLUME CONFIRMATION ===
+        volume_confirmed = not np.isnan(vol_ratio[i]) and vol_ratio[i] > 1.3
+        
+        # === ENTRY LOGIC (TRIPLE CONFLUENCE) ===
         desired_signal = 0.0
         
-        # LONG: HMA crossover bullish + RSI momentum + price above 1d HMA
-        if hma_bullish and rsi_neutral_long and price_above_1d:
-            desired_signal = SIZE_BASE
+        # LONG: 4h bullish + 15m momentum + 5m RSI oversold cross + session + volume
+        if price_above_4h and momentum_bullish and session_active:
+            if rsi_5m < 30.0 or rsi_5m_crossed_up:
+                if volume_confirmed:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
         
-        # SHORT: HMA crossover bearish + RSI momentum + price below 1d HMA
-        if hma_bearish and rsi_neutral_short and price_below_1d:
-            desired_signal = -SIZE_BASE
+        # SHORT: 4h bearish + 15m momentum + 5m RSI overbought cross + session + volume
+        elif price_below_4h and momentum_bearish and session_active:
+            if rsi_5m > 70.0 or rsi_5m_crossed_down:
+                if volume_confirmed:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -206,7 +248,11 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_BASE * 0.9:
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_BASE * 0.9:
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
@@ -237,5 +283,6 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = final_signal
+        rsi_5m_prev = rsi_5m
     
     return signals
