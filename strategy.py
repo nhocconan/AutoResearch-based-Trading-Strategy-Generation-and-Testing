@@ -1,69 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1202: 4h Primary + 1d/1w HTF — KAMA Adaptive Trend + RSI Pullback
+Experiment #1203: 6h Primary + 1d/1w HTF — Dual HMA Cross with RSI Momentum
 
-Hypothesis: After analyzing 960+ failures, the key issues are: (1) over-filtered entries = 0 trades, 
-(2) static MAs like HMA/EMA whipsaw in choppy markets. KAMA (Kaufman Adaptive Moving Average) 
-adapts smoothing based on market efficiency ratio - smooth in noise, fast in trends.
+Hypothesis: After 990+ failed experiments, the key insight is:
+1. Donchian breakouts on 6h are TOO RARE (2-3/year) → 0 trades with filters
+2. Simple HMA trend + RSI pullback WORKS (exp 1198 Sharpe=0.141, current best Sharpe=0.445)
+3. DUAL HMA cross on daily provides cleaner trend signal than price-vs-HMA
+4. RSI momentum (not pullback) generates MORE trades while staying trend-aligned
 
-Strategy Design:
-1. 4h KAMA(21) - Primary trend (adaptive, less whipsaw than HMA)
-2. 1d HMA(21) - Higher timeframe trend confirmation
-3. RSI(14) 30-70 range - Pullback entries (wider than 35-65 to generate MORE trades)
-4. ROC(10) momentum filter - Confirm trend has actual momentum
-5. 2.5x ATR trailing stop - Risk management
+Strategy logic:
+- LONG: Daily HMA(9) > HMA(21) [bullish] + 6h RSI(14) > 50 [momentum] + Weekly HMA up
+- SHORT: Daily HMA(9) < HMA(21) [bearish] + 6h RSI(14) < 50 [momentum] + Weekly HMA down
+- Exit: RSI crosses below 50 (long) or above 50 (short) OR stoploss hit
 
-Key improvements over failed strategies:
-- RSI range 30-70 (not 35-65) = more entry triggers
-- KAMA instead of HMA = adapts to volatility, fewer false signals
-- ROC momentum filter = only enter when trend has actual strength
-- Weekly HMA for strong conviction sizing (not required for entry)
+Why this generates trades:
+- HMA cross changes ~10-20 times/year on daily
+- RSI >50/<50 flips frequently within trend
+- Combined = 30-60 trades/year target
+- No choppiness/ADX filters that kill signal generation
 
-Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 4h
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_adaptive_rsi_pullback_1d1w_v1"
-timeframe = "4h"
+name = "mtf_6h_dual_hma_cross_rsi_momentum_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_kama(close, period=21, fast_sc=2.0/3.0, slow_sc=2.0/31.0):
-    """
-    Kaufman Adaptive Moving Average
-    Adapts smoothing based on market efficiency (trend vs noise)
-    """
-    n = len(close)
-    kama = np.full(n, np.nan, dtype=np.float64)
-    
-    if n < period:
-        return kama
-    
-    # Efficiency Ratio: net change / sum of absolute changes
-    er = np.zeros(n, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(close[i]) and not np.isnan(close[i - period + 1]):
-            net_change = abs(close[i] - close[i - period + 1])
-            sum_changes = 0.0
-            for j in range(i - period + 2, i + 1):
-                if not np.isnan(close[j]) and not np.isnan(close[j - 1]):
-                    sum_changes += abs(close[j] - close[j - 1])
-            if sum_changes > 1e-10:
-                er[i] = net_change / sum_changes
-    
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama[period - 1] = close[period - 1]
-    for i in range(period, n):
-        if not np.isnan(kama[i - 1]) and not np.isnan(close[i]):
-            kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -127,15 +93,6 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_roc(close, period=10):
-    """Rate of Change - momentum indicator"""
-    n = len(close)
-    roc = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if close[i - period] != 0 and not np.isnan(close[i]) and not np.isnan(close[i - period]):
-            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100.0
-    return roc
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -147,17 +104,17 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_1d_fast_raw = calculate_hma(df_1d['close'].values, period=9)
+    hma_1d_slow_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_fast = align_htf_to_ltf(prices, df_1d, hma_1d_fast_raw)
+    hma_1d_slow = align_htf_to_ltf(prices, df_1d, hma_1d_slow_raw)
     
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 4h indicators
-    kama_21 = calculate_kama(close, period=21)
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    roc_10 = calculate_roc(close, period=10)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -172,6 +129,9 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
+    # Track previous RSI for exit detection
+    prev_rsi = 50.0
+    
     # Warmup period
     min_bars = 100
     
@@ -182,57 +142,68 @@ def generate_signals(prices):
             if in_position:
                 in_position = False
                 position_side = 0
+            prev_rsi = rsi_14[i] if not np.isnan(rsi_14[i]) else prev_rsi
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(kama_21[i]) or np.isnan(roc_10[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1d_fast[i]) or np.isnan(hma_1d_slow[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
+            prev_rsi = rsi_14[i] if not np.isnan(rsi_14[i]) else prev_rsi
             continue
         
-        # === TREND DIRECTION (4h KAMA + 1d HMA) ===
-        price_above_kama = close[i] > kama_21[i]
-        price_below_kama = close[i] < kama_21[i]
+        # === TREND DIRECTION (Daily HMA Cross) ===
+        hma_cross_bullish = hma_1d_fast[i] > hma_1d_slow[i]
+        hma_cross_bearish = hma_1d_fast[i] < hma_1d_slow[i]
         
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
-        
-        # Weekly HMA for strong conviction
+        # Weekly HMA slope for major trend confirmation
         hma_1w_valid = not np.isnan(hma_1w_aligned[i])
-        price_above_1w = hma_1w_valid and close[i] > hma_1w_aligned[i]
-        price_below_1w = hma_1w_valid and close[i] < hma_1w_aligned[i]
+        hma_1w_up = False
+        hma_1w_down = False
+        if hma_1w_valid and i >= 5 and not np.isnan(hma_1w_aligned[i-5]):
+            hma_1w_up = hma_1w_aligned[i] > hma_1w_aligned[i-5]
+            hma_1w_down = hma_1w_aligned[i] < hma_1w_aligned[i-5]
         
-        # === MOMENTUM FILTER ===
-        momentum_positive = roc_10[i] > 0.5  # >0.5% gain over 10 bars
-        momentum_negative = roc_10[i] < -0.5  # <-0.5% loss over 10 bars
-        
-        # === ENTRY LOGIC (RSI pullback in trend direction) ===
-        desired_signal = 0.0
+        # === MOMENTUM (6h RSI) ===
         rsi = rsi_14[i]
+        rsi_momentum_long = rsi > 50.0
+        rsi_momentum_short = rsi < 50.0
         
-        # LONG: Price above KAMA + above 1d HMA + positive momentum + RSI pullback
-        if price_above_kama and price_above_1d and momentum_positive:
-            if 30.0 <= rsi <= 70.0:  # Wider range = more trades
-                if price_above_1w:
-                    desired_signal = SIZE_STRONG
-                else:
-                    desired_signal = SIZE_BASE
+        # RSI cross detection for exit
+        rsi_crossed_below_50 = (prev_rsi >= 50.0) and (rsi < 50.0)
+        rsi_crossed_above_50 = (prev_rsi <= 50.0) and (rsi > 50.0)
         
-        # SHORT: Price below KAMA + below 1d HMA + negative momentum + RSI pullback
-        elif price_below_kama and price_below_1d and momentum_negative:
-            if 30.0 <= rsi <= 70.0:
-                if price_below_1w:
-                    desired_signal = -SIZE_STRONG
-                else:
-                    desired_signal = -SIZE_BASE
+        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
+        desired_signal = 0.0
+        
+        # LONG: Daily HMA cross bullish + RSI momentum > 50
+        if hma_cross_bullish and rsi_momentum_long:
+            if hma_1w_up:
+                desired_signal = SIZE_STRONG  # Strong trend alignment
+            else:
+                desired_signal = SIZE_BASE  # Basic bullish cross
+        
+        # SHORT: Daily HMA cross bearish + RSI momentum < 50
+        elif hma_cross_bearish and rsi_momentum_short:
+            if hma_1w_down:
+                desired_signal = -SIZE_STRONG  # Strong trend alignment
+            else:
+                desired_signal = -SIZE_BASE  # Basic bearish cross
+        
+        # === EXIT LOGIC (RSI cross against position) ===
+        if in_position and position_side > 0 and rsi_crossed_below_50:
+            desired_signal = 0.0  # Exit long on RSI cross below 50
+        
+        if in_position and position_side < 0 and rsi_crossed_above_50:
+            desired_signal = 0.0  # Exit short on RSI cross above 50
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -290,5 +261,6 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = final_signal
+        prev_rsi = rsi
     
     return signals
