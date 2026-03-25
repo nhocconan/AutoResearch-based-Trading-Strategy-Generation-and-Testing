@@ -1,40 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #1096: 30m Primary + 4h/1d HTF — Trend-Pullback with Session Filter
+Experiment #1097: 15m Primary + 4h/12h HTF — HMA Trend + RSI Pullback + Session Filter
 
-Hypothesis: Using 4h HMA for trend direction and 30m RSI for pullback entries
-will generate quality trades (40-80/year) with positive Sharpe on ALL symbols.
+Hypothesis: 15m timeframe with HTF trend bias will capture intraday swings while avoiding
+noise. Using 12h/4h HMA for direction and 15m RSI pullbacks for entries should generate
+50-100 trades/year with positive Sharpe.
 
 Key innovations:
-1. 4h HMA(21) for primary trend bias — only trade WITH HTF trend
-2. 30m RSI(14) pullback entries — enter on retracements, not breakouts
-3. Session filter (06-22 UTC) — avoid low-volume Asian overnight hours
-4. Volume confirmation — volume > 0.8 * SMA20(volume) ensures liquidity
-5. ATR(14) 2.5x trailing stop — protects capital in volatile moves
-6. Discrete sizing: 0.0, ±0.20, ±0.30 — minimizes fee churn
+1. 12h HMA(21) for long-term bias (load ONCE before loop via mtf_data)
+2. 4h HMA(21) for intermediate trend confirmation
+3. 15m HMA(8) for entry timing (fast response)
+4. RSI(7) pullback entries (more sensitive than RSI(14))
+5. Session filter: 00-12 UTC preferred (London/NY overlap), but allow all hours
+6. ATR(14) 2.5x trailing stop for risk management
+7. LOOSE entry thresholds to GUARANTEE trades (learned from 0-trade failures)
 
-Why this should work on 30m:
-- HTF (4h) trend filter reduces whipsaws (only 1 direction per multi-day trend)
-- RSI pullback entries catch better prices than breakout chasing
-- Session filter avoids 40% of low-quality trades during thin volume
-- Volume filter ensures we're not trading dead periods
-- 30m captures intraday swings while respecting HTF structure
+Why this should work:
+- 15m captures intraday moves without excessive noise
+- HTF bias (12h/4h) prevents counter-trend trades
+- RSI(7) pullback entries catch dips in uptrends (high win rate)
+- Session filter reduces low-liquidity whipsaws
+- Discrete sizing (0.0, ±0.15, ±0.20) minimizes fee churn
 
-Entry conditions (LOOSENED to guarantee trades):
-- LONG: 4h_HMA_bull + RSI(14) 25-45 + volume_ok + session_ok
-- SHORT: 4h_HMA_bear + RSI(14) 55-75 + volume_ok + session_ok
-- Exit: RSI crosses 50 OR stoploss hit OR HTF trend reverses
+Entry conditions (LOOSE to guarantee trades):
+- LONG: 12h_HMA bullish + 4h_HMA bullish + price > 15m_HMA(8) + RSI(7) < 65
+- SHORT: 12h_HMA bearish + 4h_HMA bearish + price < 15m_HMA(8) + RSI(7) > 35
+- Session: 00-12 UTC = full size, 12-24 UTC = half size (optional)
 
-Target: Sharpe>0.45, trades>=40 train, trades>=5 test, DD>-40%
-Timeframe: 30m
-Size: 0.20-0.30 discrete
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.20 discrete (smaller for higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_hma_rsi_pullback_session_4h_v1"
-timeframe = "30m"
+name = "mtf_15m_hma_rsi_pullback_4h12h_session_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -99,42 +101,33 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_sma(series, period):
-    """Simple Moving Average"""
-    n = len(series)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    sma = pd.Series(series).rolling(window=period, min_periods=period).mean().values
-    return sma
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF indicators
     hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate 30m indicators
+    # Calculate 15m indicators
+    hma_15m_8 = calculate_hma(close, period=8)
+    hma_15m_21 = calculate_hma(close, period=21)
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    vol_sma20 = calculate_sma(volume, 20)
+    rsi_7 = calculate_rsi(close, period=7)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -154,64 +147,65 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(hma_15m_8[i]) or np.isnan(hma_15m_21[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(vol_sma20[i]) or vol_sma20[i] <= 1e-10:
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        # === SESSION FILTER (06-22 UTC) ===
-        # Extract hour from open_time (milliseconds since epoch)
-        timestamp_ms = open_time[i]
-        hour_utc = (timestamp_ms // 3600000) % 24
-        session_ok = (hour_utc >= 6) and (hour_utc <= 22)
-        
-        # === VOLUME FILTER ===
-        volume_ok = volume[i] > 0.8 * vol_sma20[i]
-        
-        # === HTF TREND BIAS (4h HMA) ===
+        # === HTF BIAS (12h + 4h alignment) ===
+        hma_12h_bull = close[i] > hma_12h_aligned[i]
+        hma_12h_bear = close[i] < hma_12h_aligned[i]
         hma_4h_bull = close[i] > hma_4h_aligned[i]
         hma_4h_bear = close[i] < hma_4h_aligned[i]
         
-        # === 1D CONFIRMATION (stronger trend) ===
-        hma_1d_bull = close[i] > hma_1d_aligned[i]
-        hma_1d_bear = close[i] < hma_1d_aligned[i]
+        # Strong bias when both HTF agree
+        strong_bull = hma_12h_bull and hma_4h_bull
+        strong_bear = hma_12h_bear and hma_4h_bear
         
-        # === ENTRY LOGIC (PULLBACK IN TREND) ===
+        # === 15m TREND ===
+        price_above_hma8 = close[i] > hma_15m_8[i]
+        price_below_hma8 = close[i] < hma_15m_8[i]
+        hma8_above_hma21 = hma_15m_8[i] > hma_15m_21[i]
+        hma8_below_hma21 = hma_15m_8[i] < hma_15m_21[i]
+        
+        # === SESSION FILTER (00-12 UTC preferred) ===
+        # Parse open_time (milliseconds since epoch)
+        hour_utc = (open_time[i] // 3600000) % 24
+        is_prime_session = 0 <= hour_utc <= 12
+        
+        # === ENTRY LOGIC (LOOSE to guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: 4h bull + RSI pullback (25-45) + session + volume
-        if hma_4h_bull and rsi_14[i] >= 25.0 and rsi_14[i] <= 45.0:
-            if session_ok and volume_ok:
-                # Stronger if 1d also bull
-                if hma_1d_bull:
-                    desired_signal = SIZE_STRONG
-                else:
-                    desired_signal = SIZE_BASE
+        # LONG: HTF bullish + 15m trend + RSI pullback (not overbought)
+        if strong_bull and price_above_hma8 and rsi_7[i] < 65.0 and rsi_7[i] > 30.0:
+            if is_prime_session:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # SHORT: 4h bear + RSI pullback (55-75) + session + volume
-        elif hma_4h_bear and rsi_14[i] >= 55.0 and rsi_14[i] <= 75.0:
-            if session_ok and volume_ok:
-                # Stronger if 1d also bear
-                if hma_1d_bear:
-                    desired_signal = -SIZE_STRONG
-                else:
-                    desired_signal = -SIZE_BASE
+        # SHORT: HTF bearish + 15m trend + RSI pullback (not oversold)
+        elif strong_bear and price_below_hma8 and rsi_7[i] > 35.0 and rsi_7[i] < 70.0:
+            if is_prime_session:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
+        
+        # Additional LONG: HMA8 crosses above HMA21 in bullish HTF
+        elif strong_bull and hma8_above_hma21 and rsi_7[i] < 70.0:
+            desired_signal = SIZE_BASE
+        
+        # Additional SHORT: HMA8 crosses below HMA21 in bearish HTF
+        elif strong_bear and hma8_below_hma21 and rsi_7[i] > 30.0:
+            desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -231,24 +225,6 @@ def generate_signals(prices):
                 stoploss_triggered = True
         
         if stoploss_triggered:
-            desired_signal = 0.0
-        
-        # === TREND REVERSAL EXIT ===
-        # Exit long if 4h trend turns bear
-        if in_position and position_side > 0 and hma_4h_bear:
-            desired_signal = 0.0
-        
-        # Exit short if 4h trend turns bull
-        if in_position and position_side < 0 and hma_4h_bull:
-            desired_signal = 0.0
-        
-        # === RSI OVEREXTENDED EXIT ===
-        # Exit long if RSI > 70 (overbought)
-        if in_position and position_side > 0 and rsi_14[i] > 70.0:
-            desired_signal = 0.0
-        
-        # Exit short if RSI < 30 (oversold)
-        if in_position and position_side < 0 and rsi_14[i] < 30.0:
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
