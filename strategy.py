@@ -1,39 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #1342: 4h Primary + 1d/1w HTF — HMA Trend + RSI Pullback + Weekly Regime
+Experiment #1343: 6h Primary + 1d/1w HTF — Volatility Spike Mean Reversion
 
-Hypothesis: 4h timeframe with multi-HTF filtering will achieve better risk-adjusted returns
-than 6h strategies. Key innovations vs failed experiments:
+Hypothesis: Trend-following 6h strategies have failed (Sharpe negative on most recent).
+This strategy uses VOLATILITY SPIKE REVERSION — a proven pattern for BTC/ETH that
+works especially well during crash periods (2022) when trend strategies fail.
 
-1. 1w HMA(21) for MAJOR regime bias (only trade with weekly trend direction)
-2. 1d HMA(21) for intermediate trend confirmation (aligns with weekly)
-3. 4h HMA(16/48) crossover for entry timing (faster than 21)
-4. RSI(7) pullback entries (not extremes - enter at 45-55 zone during trend)
-5. ATR(14) 2.5x trailing stop for risk management
-6. LOOSE entry conditions to guarantee 20-50 trades/year on 4h
+Key insight from research: ATR(7)/ATR(30) > 2.0 indicates panic/extreme vol.
+After vol spikes, price typically mean-reverts. This captures the "vol crush"
+after panic selling — the exact opposite of trend-following.
 
-Why this should work (learning from failures):
-- 4h = natural 20-50 trades/year (fee-friendly, proven in research)
-- Triple HTF filter (1w+1d+4h) = strong directional bias without over-filtering
-- RSI pullback (not extreme) = catches trend continuations, not reversals
-- HMA crossover (16/48) = faster signals than single HMA, less lag
-- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
-- Stoploss via signal=0 = proper risk management
+Why this should work on 6h:
+1. 6h captures multi-day vol cycles (faster than 12h, slower than 4h)
+2. Vol spikes happen 20-40 times/year on 6h — guarantees trade frequency
+3. Works in BOTH bull and bear markets (panic happens either way)
+4. 1d/1w HTF provides directional bias without over-filtering
+5. DIFFERENT from all failed 6h strategies (no HMA crossover, no CHOP regime)
 
-Entry logic (LOOSE to guarantee trades):
-- LONG: 1w_HMA bullish + 1d_HMA rising + 4h_HMA16>48 + RSI(7) 40-60
-- SHORT: 1w_HMA bearish + 1d_HMA falling + 4h_HMA16<48 + RSI(7) 40-60
+Entry logic:
+- LONG: ATR_ratio > 2.0 (vol spike) + 1d_HMA bullish + RSI(14) < 35 (oversold)
+- SHORT: ATR_ratio > 2.0 (vol spike) + 1d_HMA bearish + RSI(14) > 65 (overbought)
+- Exit: ATR_ratio < 1.3 (vol normalized) OR 2.5x ATR stoploss
 
 Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 4h
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_rsi_pullback_weekly_regime_1d1w_v1"
-timeframe = "4h"
+name = "mtf_6h_vol_spike_mean_reversion_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -80,7 +78,7 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=7):
+def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
@@ -120,13 +118,16 @@ def generate_signals(prices):
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 4h indicators
-    atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
+    # Calculate 6h indicators
+    atr_7 = calculate_atr(high, low, close, period=7)
+    atr_30 = calculate_atr(high, low, close, period=30)
+    rsi_14 = calculate_rsi(close, period=14)
     
-    # 4h HMA crossover (fast/slow)
-    hma_4h_fast = calculate_hma(close, period=16)
-    hma_4h_slow = calculate_hma(close, period=48)
+    # Volatility spike ratio: ATR(7) / ATR(30)
+    atr_ratio = np.full(n, np.nan, dtype=np.float64)
+    for i in range(30, n):
+        if atr_30[i] > 1e-10 and not np.isnan(atr_7[i]):
+            atr_ratio[i] = atr_7[i] / atr_30[i]
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -146,14 +147,14 @@ def generate_signals(prices):
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr_ratio[i]) or atr_ratio[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -167,53 +168,46 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_fast[i]) or np.isnan(hma_4h_slow[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === VOLATILITY REGIME ===
+        vol_spike = atr_ratio[i] > 2.0  # Extreme volatility
+        vol_normalizing = atr_ratio[i] < 1.3  # Vol returning to normal
         
-        # === WEEKLY REGIME BIAS (1w HMA) ===
+        # === TREND BIAS (1d HMA + 1w HMA) ===
+        # 1d trend direction
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
+        
+        # 1w major regime
         price_above_1w = close[i] > hma_1w_aligned[i]
         price_below_1w = close[i] < hma_1w_aligned[i]
         
-        # === DAILY TREND CONFIRMATION (1d HMA slope) ===
-        hma_1d_slope = 0.0
-        if i >= 3 and not np.isnan(hma_1d_aligned[i-3]):
-            hma_1d_slope = hma_1d_aligned[i] - hma_1d_aligned[i-3]
+        # === RSI EXTREMES ===
+        rsi = rsi_14[i]
+        rsi_oversold = rsi < 35.0
+        rsi_overbought = rsi > 65.0
+        rsi_extreme_oversold = rsi < 25.0
+        rsi_extreme_overbought = rsi > 75.0
         
-        daily_bullish = hma_1d_slope > 0
-        daily_bearish = hma_1d_slope < 0
-        
-        # === 4h HMA CROSSOVER ===
-        hma_cross_bullish = hma_4h_fast[i] > hma_4h_slow[i]
-        hma_cross_bearish = hma_4h_fast[i] < hma_4h_slow[i]
-        
-        # === RSI PULLBACK ZONE (not extremes) ===
-        rsi = rsi_7[i]
-        rsi_neutral = 40.0 <= rsi <= 60.0
-        rsi_bullish_pullback = 40.0 <= rsi <= 55.0
-        rsi_bearish_pullback = 45.0 <= rsi <= 60.0
-        
-        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
+        # === ENTRY LOGIC (Vol spike mean reversion) ===
         desired_signal = 0.0
         
-        # LONG: Weekly bullish + Daily rising + 4h HMA cross + RSI pullback
-        if price_above_1w and daily_bullish and hma_cross_bullish:
-            if rsi_bullish_pullback:
-                if rsi <= 50.0:
-                    desired_signal = SIZE_STRONG  # Deeper pullback
-                else:
-                    desired_signal = SIZE_BASE  # Shallow pullback
+        # LONG: Vol spike + 1d bullish bias + RSI oversold (panic buying opportunity)
+        if vol_spike and price_above_1d and rsi_oversold:
+            if rsi_extreme_oversold:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # SHORT: Weekly bearish + Daily falling + 4h HMA cross + RSI pullback
-        elif price_below_1w and daily_bearish and hma_cross_bearish:
-            if rsi_bearish_pullback:
-                if rsi >= 50.0:
-                    desired_signal = -SIZE_STRONG  # Higher pullback
-                else:
-                    desired_signal = -SIZE_BASE  # Lower pullback
+        # SHORT: Vol spike + 1d bearish bias + RSI overbought (panic selling opportunity)
+        elif vol_spike and price_below_1d and rsi_overbought:
+            if rsi_extreme_overbought:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
+        
+        # === EXIT LOGIC (Vol normalized = take profit) ===
+        if in_position and vol_normalizing:
+            desired_signal = 0.0
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -253,7 +247,7 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr_7[i] if not np.isnan(atr_7[i]) else atr_30[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
