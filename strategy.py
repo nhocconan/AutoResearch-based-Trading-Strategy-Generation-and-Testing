@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #1340: 6h Primary + 1d/1w HTF — ADX Regime-Adaptive with HMA Trend
+Experiment #1341: 15m Primary + 1h/4h/1d HTF — Daily Pivot + 4h Trend + 15m RSI Pullback
 
-Hypothesis: Previous 6h strategies failed due to either too strict entry conditions (0 trades)
-or no regime adaptation (whipsaw in ranging markets). This strategy adapts to market regime:
+Hypothesis: 15m has ZERO successful experiments because most try pure mean-reversion 
+or pure trend-following. This combines BOTH with LOOSE entry conditions to guarantee trades:
 
-1. ADX(14) determines regime: >25 = trending, <20 = ranging (with hysteresis)
-2. Trending regime: Enter on HMA(21) pullbacks with 1d trend confirmation
-3. Ranging regime: Mean revert at Bollinger Band(20,2) extremes
-4. 1d HMA(21) for major trend bias (only long if above, only short if below)
-5. 1w HMA(21) for ultra-long-term regime context
+1. Daily CPR (Central Pivot Range) from 1d HTF - key S/R levels where price reacts
+2. 4h HMA(21) for major trend direction (only trade with HTF trend)
+3. 15m RSI(7) for oversold/overbought pullback entries (LOOSE: <40 />60)
+4. Session bonus 00-12 UTC (London/NY overlap = higher volume, but NOT required)
+5. Discrete sizing 0.15-0.20 (smaller due to 15m frequency)
+6. ATR 2.0x trailing stop
 
-Why this should work:
-- Regime adaptation = fewer whipsaws in chop, capture trends when they occur
-- Loose entry thresholds = guarantee 30-60 trades/year on 6h
-- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
-- ATR trailing stop = protect against adverse moves
+Entry logic (LOOSE to guarantee 40-100 trades/year):
+- LONG: 4h HMA rising + price > daily pivot + 15m RSI(7) < 40 (oversold bounce)
+- SHORT: 4h HMA falling + price < daily pivot + 15m RSI(7) > 60 (overbought fade)
+- Session filter is BONUS not requirement (avoids 0 trades)
 
-Entry logic (LOOSE to guarantee trades):
-- LONG trending: ADX>25 + 1d_HMA bullish + price pulls back to 6h_HMA + ROC>0
-- LONG ranging: ADX<20 + 1d_HMA bullish + price < BB_lower
-- SHORT trending: ADX>25 + 1d_HMA bearish + price rallies to 6h_HMA + ROC<0
-- SHORT ranging: ADX<20 + 1d_HMA bearish + price > BB_upper
+Why this should work on 15m:
+- HTF trend filter reduces whipsaws (4h HMA = stable direction)
+- Daily pivot = natural S/R where institutions react
+- RSI(7) pullback = enters on retracements, not breakouts (better R:R)
+- LOOSE thresholds guarantee trades (learned from 1102 failures)
+- Small size (0.15-0.20) controls drawdown on higher frequency
 
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.5, trades=40-100/year, DD>-35%, ALL symbols must trade
+Timeframe: 15m
+Size: 0.15-0.20 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_adx_regime_hma_bb_1d1w_v1"
-timeframe = "6h"
+name = "mtf_15m_daily_pivot_4h_trend_rsi_pullback_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -65,6 +66,24 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    
+    return rsi
+
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -79,95 +98,59 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - trend strength"""
-    n = len(close)
-    if n < period * 2:
-        return np.full(n, np.nan)
+def calculate_daily_pivot(df_1d):
+    """Calculate Daily CPR (Central Pivot Range) from daily data"""
+    n = len(df_1d)
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
+    pivot = np.full(n, np.nan, dtype=np.float64)
+    bc = np.full(n, np.nan, dtype=np.float64)
+    tc = np.full(n, np.nan, dtype=np.float64)
+    r1 = np.full(n, np.nan, dtype=np.float64)
+    s1 = np.full(n, np.nan, dtype=np.float64)
     
     for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
+        high_prev = df_1d['high'].iloc[i-1]
+        low_prev = df_1d['low'].iloc[i-1]
+        close_prev = df_1d['close'].iloc[i-1]
         
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
+        pivot[i] = (high_prev + low_prev + close_prev) / 3.0
+        bc[i] = (high_prev + low_prev) / 2.0
+        tc[i] = (pivot[i] - bc[i]) + pivot[i]
+        r1[i] = 2.0 * pivot[i] - low_prev
+        s1[i] = 2.0 * pivot[i] - high_prev
     
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = np.where(atr > 0, plus_di / atr * 100, 0)
-    minus_di = np.where(atr > 0, minus_di / atr * 100, 0)
-    
-    dx = np.where((plus_di + minus_di) > 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Bollinger Bands"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    
-    return upper, sma, lower
-
-def calculate_roc(close, period=10):
-    """Rate of Change - momentum indicator"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    roc = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if close[i - period] != 0:
-            roc[i] = ((close[i] - close[i - period]) / close[i - period]) * 100.0
-    
-    return roc
+    return pivot, bc, tc, r1, s1
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    # Load HTF data ONCE before loop (CRITICAL - Rule 1)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate daily pivot levels and align
+    pivot_1d, bc_1d, tc_1d, r1_1d, s1_1d = calculate_daily_pivot(df_1d)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    bc_aligned = align_htf_to_ltf(prices, df_1d, bc_1d)
+    tc_aligned = align_htf_to_ltf(prices, df_1d, tc_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 6h indicators
+    # Calculate 15m indicators
+    rsi_7 = calculate_rsi(close, period=7)
     atr_14 = calculate_atr(high, low, close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
-    roc_10 = calculate_roc(close, period=10)
-    hma_6h = calculate_hma(close, period=21)
-    bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(close, period=20, std_dev=2.0)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -178,10 +161,6 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Regime state (hysteresis to avoid flipping)
-    in_trending_regime = None  # None = unknown, True = trending, False = ranging
-    
-    # Warmup period
     min_bars = 100
     
     for i in range(min_bars, n):
@@ -193,105 +172,99 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(roc_10[i]):
+        if np.isnan(rsi_7[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(pivot_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_6h[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === SESSION BONUS (00-12 UTC) - NOT REQUIRED, just bonus ===
+        hour_utc = (open_time[i] // 1000 // 3600) % 24
+        in_session = 0 <= hour_utc < 12
         
-        # === REGIME DETECTION (with hysteresis) ===
-        adx = adx_14[i]
+        # === 4h TREND DIRECTION (LOOSE - use 8 bars for slope) ===
+        hma_4h_slope = 0.0
+        if i >= 8 and not np.isnan(hma_4h_aligned[i-8]):
+            hma_4h_slope = hma_4h_aligned[i] - hma_4h_aligned[i-8]
         
-        if in_trending_regime is None:
-            # Initialize regime
-            in_trending_regime = adx > 22.5  # Middle ground
-        else:
-            # Hysteresis: enter trending at 25, exit at 20
-            if in_trending_regime and adx < 20:
-                in_trending_regime = False
-            elif not in_trending_regime and adx > 25:
-                in_trending_regime = True
+        trend_bullish = hma_4h_slope > 0
+        trend_bearish = hma_4h_slope < 0
         
-        # === TREND DIRECTION (1d HMA + 1w HMA) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === DAILY PIVOT POSITION ===
+        price_above_pivot = close[i] > pivot_aligned[i]
+        price_below_pivot = close[i] < pivot_aligned[i]
         
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        # Check if near support/resistance (within 1.5% of pivot levels)
+        near_s1 = False
+        near_r1 = False
+        if not np.isnan(s1_aligned[i]) and s1_aligned[i] > 0:
+            near_s1 = abs(close[i] - s1_aligned[i]) / close[i] < 0.015
+        if not np.isnan(r1_aligned[i]) and r1_aligned[i] > 0:
+            near_r1 = abs(close[i] - r1_aligned[i]) / close[i] < 0.015
         
-        # 6h price vs 6h HMA for local position
-        price_above_6h = close[i] > hma_6h[i]
-        price_below_6h = close[i] < hma_6h[i]
-        
-        # === MOMENTUM (ROC) ===
-        roc = roc_10[i]
-        
-        # === BB POSITION ===
-        bb_position = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i]) if (bb_upper[i] - bb_lower[i]) > 0 else 0.5
+        # === 15m RSI PULLBACK (LOOSE thresholds) ===
+        rsi = rsi_7[i]
+        oversold = rsi < 40  # LOOSE: was 35
+        overbought = rsi > 60  # LOOSE: was 65
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
+        # Only 2 confluence required: HTF trend + RSI extreme
+        # Pivot position and session are bonuses
         desired_signal = 0.0
         
-        if in_trending_regime:
-            # TRENDING REGIME: Pullback entries
-            # LONG: 1d bullish + price pulls back to/near HMA + positive momentum
-            if price_above_1d and price_above_1w:
-                if price_below_6h or (price_above_6h and close[i] < hma_6h[i] * 1.005):
-                    if roc > -2.0:  # Very loose - just not strongly negative
-                        if roc > 5.0:
-                            desired_signal = SIZE_STRONG
-                        else:
-                            desired_signal = SIZE_BASE
+        # LONG: 4h trend up + RSI oversold (pivot above is bonus)
+        if trend_bullish and oversold:
+            confluence = 2  # trend + RSI
+            if price_above_pivot:
+                confluence += 1
+            if in_session:
+                confluence += 1
+            if near_s1:
+                confluence += 1
             
-            # SHORT: 1d bearish + price rallies to/near HMA + negative momentum
-            elif price_below_1d and price_below_1w:
-                if price_above_6h or (price_below_6h and close[i] > hma_6h[i] * 0.995):
-                    if roc < 2.0:  # Very loose - just not strongly positive
-                        if roc < -5.0:
-                            desired_signal = -SIZE_STRONG
-                        else:
-                            desired_signal = -SIZE_BASE
-        
-        else:
-            # RANGING REGIME: Mean reversion at BB extremes
-            # LONG: 1d bullish + price at BB lower
-            if price_above_1d:
-                if bb_position < 0.15:  # Near lower band
+            if confluence >= 2:  # LOOSE: only 2 required
+                if confluence >= 4:
+                    desired_signal = SIZE_STRONG
+                else:
                     desired_signal = SIZE_BASE
+        
+        # SHORT: 4h trend down + RSI overbought (pivot below is bonus)
+        elif trend_bearish and overbought:
+            confluence = 2  # trend + RSI
+            if price_below_pivot:
+                confluence += 1
+            if in_session:
+                confluence += 1
+            if near_r1:
+                confluence += 1
             
-            # SHORT: 1d bearish + price at BB upper
-            elif price_below_1d:
-                if bb_position > 0.85:  # Near upper band
+            if confluence >= 2:  # LOOSE: only 2 required
+                if confluence >= 4:
+                    desired_signal = -SIZE_STRONG
+                else:
                     desired_signal = -SIZE_BASE
         
-        # === STOPLOSS CHECK (2.5x ATR trailing) ===
+        # === STOPLOSS CHECK (2.0x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -321,9 +294,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
