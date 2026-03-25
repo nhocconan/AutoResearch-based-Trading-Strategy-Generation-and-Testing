@@ -1,41 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #1520: 6h Primary + 1d/1w HTF — Volatility Cycle Strategy
+Experiment #1521: 15m Primary + 1h/4h/1d HTF — Camarilla Pivot Mean Reversion
 
-Hypothesis: Volatility cycles work in BOTH bull and bear markets, unlike pure trend
-following which died in 2022 crash and 2025 bear. This strategy captures the
-"volatility crush" pattern: after vol expansion (panic/euphoria), vol contracts
-and price mean-reverts. 
+Hypothesis: 15m timeframe with STRICT multi-timeframe confluence can capture
+intraday mean-reversion while respecting higher-timeframe trend direction.
+Key innovation: Camarilla pivot levels (R3/S3 for mean-reversion, R4/S4 for breakout)
+combined with 4h trend bias and session filtering.
 
-Key components:
-1. 1w HMA(21) - major trend bias (only trade WITH weekly trend)
-2. 1d ATR ratio (ATR7/ATR30) - detects vol expansion on daily
-3. 6h ATR ratio (ATR7/ATR30) - entry trigger when vol contracts after expansion
-4. 6h RSI(14) - entry timing (oversold for long, overbought for short)
-5. 6h Bollinger Band width - confirms vol contraction
-6. ATR(14) trailing stoploss (2.5x ATR)
+Why 15m can work (unlike previous failed attempts):
+1. 4h HMA(21) for major trend bias — ONLY trade in HTF trend direction
+2. 1h RSI(7) for momentum confirmation — avoid entering against momentum
+3. Camarilla pivots from 1d HTF — institutional support/resistance levels
+4. Session filter (00-12 UTC) — trade only during high liquidity
+5. Very strict entry: need ALL 4 confluences (HTF trend + momentum + level + session)
+6. Conservative sizing: 0.15-0.20 (smaller due to higher frequency)
 
-Why this should work on 6h:
-- 6h captures multi-day vol cycles (unlike 15m/1h noise)
-- Weekly trend filter prevents counter-trend disasters
-- Vol contraction after expansion = high-probability mean reversion
-- LOOSE thresholds guarantee ≥30 trades/train, ≥3/test
-- Works in bull (2021), bear (2022, 2025), and range (2023-2024)
+Entry logic (MUST generate ≥10 trades/train, ≥3/test):
+- LONG: 4h_HMA bullish + 1h_RSI < 40 (oversold) + price < S3 + session active
+- SHORT: 4h_HMA bearish + 1h_RSI > 60 (overbought) + price > R3 + session active
+- BREAKOUT LONG: 4h_HMA bullish + price > R4 + volume spike
+- BREAKOUT SHORT: 4h_HMA bearish + price < S4 + volume spike
 
-Entry logic (LOOSE):
-- LONG: 1w_HMA bullish + 1d_ATR_ratio > 1.3 + 6h_ATR_ratio < 1.2 + RSI < 50
-- SHORT: 1w_HMA bearish + 1d_ATR_ratio > 1.3 + 6h_ATR_ratio < 1.2 + RSI > 50
-
-Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%, trades/year < 100
+Timeframe: 15m
+Size: 0.15-0.20 discrete (smaller for higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vol_cycle_hma_atr_rsi_1w1d_v1"
-timeframe = "6h"
+name = "mtf_15m_camarilla_pivot_4h1h1d_session_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -82,21 +77,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
-    """ATR Ratio - detects vol expansion/contraction"""
-    n = len(close)
-    if n < long_period + 1:
-        return np.full(n, np.nan)
-    
-    atr_short = calculate_atr(high, low, close, short_period)
-    atr_long = calculate_atr(high, low, close, long_period)
-    
-    ratio = np.full(n, np.nan, dtype=np.float64)
-    mask = (atr_long > 1e-10) & (~np.isnan(atr_short)) & (~np.isnan(atr_long))
-    ratio[mask] = atr_short[mask] / atr_long[mask]
-    
-    return ratio
-
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -121,53 +101,102 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_bollinger_width(close, period=20):
-    """Bollinger Band Width - (Upper - Lower) / Middle"""
+def calculate_camarilla_pivots(high, low, close, prev_close):
+    """
+    Camarilla Pivot Points - institutional support/resistance levels
+    R4/S4 = breakout levels, R3/S3 = mean-reversion levels
+    """
     n = len(close)
+    pivot_range = prev_close - np.roll(prev_close, 1)
+    pivot_range[0] = 0
+    
+    # Camarilla calculations
+    hlc3 = (high + low + close) / 3.0
+    
+    r4 = np.full(n, np.nan)
+    r3 = np.full(n, np.nan)
+    s3 = np.full(n, np.nan)
+    s4 = np.full(n, np.nan)
+    pivot = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        range_val = prev_close[i-1]  # Use previous day's close as reference
+        if i > 1:
+            high_prev = high[i-1]
+            low_prev = low[i-1]
+            close_prev = close[i-1]
+            pivot_range_val = high_prev - low_prev
+            
+            pivot[i] = (high_prev + low_prev + close_prev) / 3.0
+            r4[i] = close_prev + (pivot_range_val * 1.5)
+            r3[i] = close_prev + (pivot_range_val * 1.25)
+            s3[i] = close_prev - (pivot_range_val * 1.25)
+            s4[i] = close_prev - (pivot_range_val * 1.5)
+    
+    return r4, r3, s3, s4, pivot
+
+def calculate_volume_spike(volume, period=20):
+    """Detect volume spikes (>2x average)"""
+    n = len(volume)
     if n < period:
-        return np.full(n, np.nan)
+        return np.full(n, False)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    width = np.full(n, np.nan, dtype=np.float64)
-    mask = sma > 1e-10
-    width[mask] = (2.0 * std[mask]) / sma[mask]
-    
-    return width
+    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    spike = volume > (vol_avg * 2.0)
+    return spike
+
+def get_session_hour(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds
+    hours = (open_time // (1000 * 60 * 60)) % 24
+    return hours
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1h = get_htf_data(prices, '1h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    atr_ratio_1d_raw = calculate_atr_ratio(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
-        df_1d['close'].values, 
-        short_period=7, 
-        long_period=30
+    rsi_1h_raw = calculate_rsi(df_1h['close'].values, period=7)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
+    
+    # Get 1d previous close for Camarilla pivots
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    r4_1d, r3_1d, s3_1d, s4_1d, pivot_1d = calculate_camarilla_pivots(
+        high_1d, low_1d, close_1d, close_1d
     )
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d_raw)
     
-    # Calculate 6h indicators
-    atr_ratio_6h = calculate_atr_ratio(high, low, close, short_period=7, long_period=30)
-    rsi_14 = calculate_rsi(close, period=14)
-    bb_width_20 = calculate_bollinger_width(close, period=20)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_14 = calculate_rsi(close, period=14)
+    vol_spike = calculate_volume_spike(volume, period=20)
+    
+    # Session hours (UTC): 00-12 for London/NY overlap liquidity
+    session_hours = np.array([get_session_hour(ot) for ot in open_time])
+    session_active = (session_hours >= 0) & (session_hours <= 12)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -179,7 +208,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 150
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -190,80 +219,77 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(atr_ratio_6h[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(bb_width_20[i]):
+        if np.isnan(rsi_1h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === 4h TREND BIAS (major direction) ===
+        trend_bullish = close[i] > hma_4h_aligned[i]
+        trend_bearish = close[i] < hma_4h_aligned[i]
         
-        # === VOLATILITY CYCLE DETECTION ===
-        atr_ratio_1d = atr_ratio_1d_aligned[i]
-        atr_ratio_6h_val = atr_ratio_6h[i]
+        # === 1h MOMENTUM (RSI confirmation) ===
+        rsi_1h = rsi_1h_aligned[i]
+        momentum_oversold = rsi_1h < 40
+        momentum_overbought = rsi_1h > 60
         
-        # Vol expansion on daily (panic/euphoria happened)
-        vol_expanded_1d = atr_ratio_1d > 1.3
+        # === CAMARILLA LEVELS ===
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
+        r4 = r4_aligned[i]
+        s4 = s4_aligned[i]
         
-        # Vol contracting on 6h (vol crush pattern - entry signal)
-        vol_contracting_6h = atr_ratio_6h_val < 1.2
+        # === 15m RSI (entry timing) ===
+        rsi_15m = rsi_14[i]
         
-        # Bollinger width confirms vol contraction
-        bb_width_low = bb_width_20[i] < 0.08  # narrow bands
+        # === SESSION FILTER ===
+        in_session = session_active[i]
         
-        # === TREND BIAS (1w HMA) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
-        
-        # === RSI ENTRY TIMING ===
-        rsi = rsi_14[i]
-        rsi_oversold = rsi < 50
-        rsi_overbought = rsi > 50
-        
-        # === ENTRY LOGIC (LOOSE - must generate trades) ===
+        # === ENTRY LOGIC (STRICT - 4 confluences required) ===
         desired_signal = 0.0
         
-        # LONG: Weekly bullish + vol expanded on 1d + vol contracting on 6h + RSI not overbought
-        if price_above_1w and vol_expanded_1d and vol_contracting_6h and rsi_oversold:
-            desired_signal = SIZE_STRONG
+        # MEAN REVERSION LONG: 4h bullish + 1h oversold + price < S3 + session
+        if trend_bullish and momentum_oversold and in_session:
+            if not np.isnan(s3) and close[i] < s3 * 1.002:  # within 0.2% of S3
+                desired_signal = SIZE_BASE
         
-        # SHORT: Weekly bearish + vol expanded on 1d + vol contracting on 6h + RSI not oversold
-        elif price_below_1w and vol_expanded_1d and vol_contracting_6h and rsi_overbought:
-            desired_signal = -SIZE_STRONG
+        # MEAN REVERSION SHORT: 4h bearish + 1h overbought + price > R3 + session
+        if trend_bearish and momentum_overbought and in_session:
+            if not np.isnan(r3) and close[i] > r3 * 0.998:  # within 0.2% of R3
+                desired_signal = -SIZE_BASE
         
-        # Weaker signals when BB width confirms (add confluence)
-        elif price_above_1w and vol_contracting_6h and bb_width_low and rsi < 45:
-            desired_signal = SIZE_BASE
+        # BREAKOUT LONG: 4h bullish + price > R4 + volume spike
+        if trend_bullish and vol_spike[i]:
+            if not np.isnan(r4) and close[i] > r4:
+                desired_signal = SIZE_STRONG
         
-        elif price_below_1w and vol_contracting_6h and bb_width_low and rsi > 55:
-            desired_signal = -SIZE_BASE
+        # BREAKOUT SHORT: 4h bearish + price < S4 + volume spike
+        if trend_bearish and vol_spike[i]:
+            if not np.isnan(s4) and close[i] < s4:
+                desired_signal = -SIZE_STRONG
         
-        # === STOPLOSS CHECK (2.5x ATR trailing) ===
+        # === STOPLOSS CHECK (2.0x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -293,9 +319,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
