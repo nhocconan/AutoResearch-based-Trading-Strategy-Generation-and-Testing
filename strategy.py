@@ -1,37 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1343: 6h Primary + 1d/1w HTF — Volatility Spike Mean Reversion
+Experiment #1344: 12h Primary + 1d/1w HTF — Donchian Breakout + HMA Trend + RSI Filter
 
-Hypothesis: Trend-following 6h strategies have failed (Sharpe negative on most recent).
-This strategy uses VOLATILITY SPIKE REVERSION — a proven pattern for BTC/ETH that
-works especially well during crash periods (2022) when trend strategies fail.
+Hypothesis: Donchian breakouts generate consistent trades across all market conditions.
+Combined with 1d HMA for trend direction and loose RSI filter, this should achieve:
+- 30-60 trades/year on 12h timeframe
+- Positive Sharpe on BTC/ETH/SOL individually
+- DD < -35%
 
-Key insight from research: ATR(7)/ATR(30) > 2.0 indicates panic/extreme vol.
-After vol spikes, price typically mean-reverts. This captures the "vol crush"
-after panic selling — the exact opposite of trend-following.
+Key features:
+1. 1d HMA(21) for major trend bias (only long when price > 1d HMA)
+2. 12h Donchian(20) breakout for entries (proven to work on SOL)
+3. RSI(14) loose filter (>35 for long, <65 for short) - NOT extreme values
+4. ATR(14) 2.5x trailing stop
+5. Discrete sizing (0.0, ±0.25, ±0.30)
 
-Why this should work on 6h:
-1. 6h captures multi-day vol cycles (faster than 12h, slower than 4h)
-2. Vol spikes happen 20-40 times/year on 6h — guarantees trade frequency
-3. Works in BOTH bull and bear markets (panic happens either way)
-4. 1d/1w HTF provides directional bias without over-filtering
-5. DIFFERENT from all failed 6h strategies (no HMA crossover, no CHOP regime)
+Why this should work where others failed:
+- Donchian breakout = generates trades in both trending and ranging markets
+- Loose RSI filter = doesn't block valid entries
+- 1d trend filter = avoids counter-trend trades that kill Sharpe
+- 12h TF = natural 30-60 trades/year (fee-friendly)
 
 Entry logic:
-- LONG: ATR_ratio > 2.0 (vol spike) + 1d_HMA bullish + RSI(14) < 35 (oversold)
-- SHORT: ATR_ratio > 2.0 (vol spike) + 1d_HMA bearish + RSI(14) > 65 (overbought)
-- Exit: ATR_ratio < 1.3 (vol normalized) OR 2.5x ATR stoploss
+- LONG: price > 1d_HMA + 12h price breaks Donchian(20) high + RSI > 35
+- SHORT: price < 1d_HMA + 12h price breaks Donchian(20) low + RSI < 65
 
 Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
+Timeframe: 12h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vol_spike_mean_reversion_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_breakout_hma_trend_rsi_1d1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -84,22 +87,38 @@ def calculate_rsi(close, period=14):
     if n < period + 1:
         return np.full(n, np.nan)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    gain = np.insert(gain, 0, 0)
+    loss = np.insert(loss, 0, 0)
     
     avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
     rsi = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-        else:
-            rsi[i] = 100.0
+    mask = avg_loss != 0
+    rs = np.zeros(n)
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
     
     return rsi
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i - period + 1:i + 1])
+        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -118,16 +137,10 @@ def generate_signals(prices):
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 6h indicators
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
+    # Calculate 12h indicators
+    atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    
-    # Volatility spike ratio: ATR(7) / ATR(30)
-    atr_ratio = np.full(n, np.nan, dtype=np.float64)
-    for i in range(30, n):
-        if atr_30[i] > 1e-10 and not np.isnan(atr_7[i]):
-            atr_ratio[i] = atr_7[i] / atr_30[i]
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -147,7 +160,7 @@ def generate_signals(prices):
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
-        if np.isnan(atr_ratio[i]) or atr_ratio[i] <= 1e-10:
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -168,46 +181,47 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === VOLATILITY REGIME ===
-        vol_spike = atr_ratio[i] > 2.0  # Extreme volatility
-        vol_normalizing = atr_ratio[i] < 1.3  # Vol returning to normal
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === TREND BIAS (1d HMA + 1w HMA) ===
-        # 1d trend direction
+        # === TREND DIRECTION (1d HMA bias) ===
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # 1w major regime
+        # 1w HMA for major regime
         price_above_1w = close[i] > hma_1w_aligned[i]
         price_below_1w = close[i] < hma_1w_aligned[i]
         
-        # === RSI EXTREMES ===
-        rsi = rsi_14[i]
-        rsi_oversold = rsi < 35.0
-        rsi_overbought = rsi > 65.0
-        rsi_extreme_oversold = rsi < 25.0
-        rsi_extreme_overbought = rsi > 75.0
+        # === DONCHIAN BREAKOUT ===
+        # Use previous bar's Donchian levels to avoid look-ahead
+        breakout_high = close[i] > donchian_upper[i-1] if i > 0 else False
+        breakout_low = close[i] < donchian_lower[i-1] if i > 0 else False
         
-        # === ENTRY LOGIC (Vol spike mean reversion) ===
+        # === RSI FILTER (LOOSE) ===
+        rsi = rsi_14[i]
+        rsi_ok_long = rsi > 35  # Not oversold
+        rsi_ok_short = rsi < 65  # Not overbought
+        
+        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: Vol spike + 1d bullish bias + RSI oversold (panic buying opportunity)
-        if vol_spike and price_above_1d and rsi_oversold:
-            if rsi_extreme_oversold:
-                desired_signal = SIZE_STRONG
+        # LONG: 1d bullish + Donchian breakout + RSI not oversold
+        if price_above_1d and breakout_high and rsi_ok_long:
+            if price_above_1w:
+                desired_signal = SIZE_STRONG  # Strong trend alignment
             else:
-                desired_signal = SIZE_BASE
+                desired_signal = SIZE_BASE  # Basic long
         
-        # SHORT: Vol spike + 1d bearish bias + RSI overbought (panic selling opportunity)
-        elif vol_spike and price_below_1d and rsi_overbought:
-            if rsi_extreme_overbought:
-                desired_signal = -SIZE_STRONG
+        # SHORT: 1d bearish + Donchian breakout + RSI not overbought
+        elif price_below_1d and breakout_low and rsi_ok_short:
+            if price_below_1w:
+                desired_signal = -SIZE_STRONG  # Strong trend alignment
             else:
-                desired_signal = -SIZE_BASE
-        
-        # === EXIT LOGIC (Vol normalized = take profit) ===
-        if in_position and vol_normalizing:
-            desired_signal = 0.0
+                desired_signal = -SIZE_BASE  # Basic short
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -247,7 +261,7 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_7[i] if not np.isnan(atr_7[i]) else atr_30[i]
+                entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
