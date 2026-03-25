@@ -1,47 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1649: 15m Primary + 1h/1d HTF — Loose Multi-TF Fisher Entry
+Experiment #1650: 1h Primary + 4h/1d HTF — Volatility Contraction Breakout
 
-Hypothesis: 15m timeframe with 1h momentum + 1d trend bias can capture intraday 
-moves while respecting higher timeframe direction. Key insight from 15m failures 
-(#1637, #1641, #1645 all had 0 trades): entry conditions MUST be very loose.
+Hypothesis: 1h timeframe with 4h trend bias and 1d regime filter captures optimal
+entry timing while maintaining trade quality. Volatility contraction (BB squeeze)
+followed by expansion signals high-probability breakouts.
 
-Why 15m should work (if we fix the trade generation problem):
-1. Faster reaction to reversals than 1h/4h strategies
-2. Can capture intraday mean-reversion within daily trend
-3. More entry opportunities = better statistical edge IF fees controlled
+Key design based on failure analysis:
+1. 4h HMA for trend direction (proven in best strategies)
+2. BB squeeze detection for low-volatility entries
+3. Volume confirmation to avoid false breakouts
+4. Session filter (08-20 UTC) for liquidity
+5. Discrete signal sizes: 0.25 base, 0.30 strong
+6. 2.5x ATR trailing stoploss
 
-Key design choices based on 15m failure analysis:
-1. VERY LOOSE Fisher thresholds: -0.8/+0.8 (not -1.2/+1.2) to guarantee crossovers
-2. LOOSE RSI: 40/60 (not 30/70) — 15m RSI rarely hits extremes
-3. NO session filter (#1641, #1645 had 0 trades with session filters)
-4. NO volume filter (kills trade frequency based on #1607, #1612)
-5. Simple 1d HMA(21) for trend bias (complex filters reduce trades)
-6. 1h RSI(14) for momentum confirmation (loose thresholds)
-7. Discrete signal sizes: 0.15 base, 0.20 strong (smaller for 15m frequency)
-8. 2.0x ATR trailing stoploss via signal→0
+Entry logic (balanced for 40-80 trades/year):
+- LONG: 4h HMA bullish + BB squeeze + volume spike + price breaks BB upper
+- SHORT: 4h HMA bearish + BB squeeze + volume spike + price breaks BB lower
+- 1d HMA as regime filter (only trade with 1d trend)
 
-Entry logic (EXTREMELY LOOSE to guarantee ≥40 trades/train):
-- LONG: 1d HMA bullish + 1h RSI > 40 + 15m Fisher cross above -0.8
-- SHORT: 1d HMA bearish + 1h RSI < 60 + 15m Fisher cross below +0.8
-- Alternative: 15m close > 15m EMA(21) + 1d bias (simple trend follow)
+Why this might beat mtf_6h_triple_hma_kama_roc_1w1d_v1 (Sharpe=0.575):
+- 1h TF = more entries than 6h, better capture of intraday moves
+- BB squeeze = proven volatility breakout pattern
+- Volume filter = avoids false breakouts (failed in #1641, #1645)
+- Session filter = avoids low-liquidity whipsaws
 
-Why this beats previous 15m attempts (all had 0 trades):
-- Removed session filter (was blocking all entries)
-- Removed volume filter (too restrictive)
-- Looser Fisher thresholds (-0.8 vs -1.2)
-- Added simple EMA crossover as fallback entry
-
-Target: Sharpe>0.3, trades≥40 train, trades≥5 test, DD>-35%
-Timeframe: 15m
-Size: 0.15-0.20 discrete (smaller for higher frequency)
+Target: Sharpe>0.6, trades≥30 train, trades≥3 test, DD>-35%
+Timeframe: 1h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_fisher_rsi_hma_1h1d_loose_v1"
-timeframe = "15m"
+name = "mtf_1h_bb_squeeze_vol_4h1d_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -88,43 +81,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_fisher(high, low, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution
-    Returns fisher value and trigger (previous value for crossover detection)
-    """
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    fisher = np.full(n, np.nan, dtype=np.float64)
-    trigger = np.full(n, np.nan, dtype=np.float64)
-    
-    median = (high + low) / 2
-    
-    for i in range(period - 1, n):
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        range_val = highest - lowest
-        
-        if range_val < 1e-10:
-            if i > 0 and not np.isnan(fisher[i-1]):
-                fisher[i] = fisher[i-1]
-                trigger[i] = fisher[i-1]
-            continue
-        
-        normalized = 2.0 * (median[i] - lowest) / range_val - 1.0
-        normalized = max(-0.999, min(0.999, normalized))
-        
-        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
-        
-        if i > 0 and not np.isnan(fisher[i-1]):
-            trigger[i] = fisher[i-1]
-        else:
-            trigger[i] = fisher[i]
-    
-    return fisher, trigger
-
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -149,40 +105,124 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Bollinger Bands with bandwidth for squeeze detection"""
     n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    
+    # Bandwidth = (upper - lower) / sma
+    bandwidth = np.full(n, np.nan, dtype=np.float64)
+    mask = sma != 0
+    bandwidth[mask] = (upper[mask] - lower[mask]) / sma[mask]
+    
+    return upper, sma, lower, bandwidth
+
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - trend strength"""
+    n = len(close)
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        plus_move = high[i] - high[i-1]
+        minus_move = low[i-1] - low[i]
+        
+        if plus_move > minus_move and plus_move > 0:
+            plus_dm[i] = plus_move
+        if minus_move > plus_move and minus_move > 0:
+            minus_dm[i] = minus_move
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    plus_di = np.full(n, np.nan, dtype=np.float64)
+    minus_di = np.full(n, np.nan, dtype=np.float64)
+    
+    mask = atr != 0
+    plus_di[mask] = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[mask] / atr[mask]
+    minus_di[mask] = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[mask] / atr[mask]
+    
+    dx = np.full(n, np.nan, dtype=np.float64)
+    di_sum = plus_di + minus_di
+    mask2 = di_sum != 0
+    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
+def calculate_volume_sma(volume, period=20):
+    """Volume Simple Moving Average"""
+    n = len(volume)
     if n < period:
         return np.full(n, np.nan)
     
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+
+def calculate_bandwidth_percentile(bandwidth, lookback=100):
+    """Percentile rank of bandwidth over lookback period"""
+    n = len(bandwidth)
+    percentile = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(lookback, n):
+        window = bandwidth[i - lookback:i + 1]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            rank = np.sum(valid <= bandwidth[i]) / len(valid)
+            percentile[i] = rank * 100
+    
+    return percentile
+
+def get_hour_from_open_time(open_time):
+    """Extract hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds
+    hour = (open_time // (1000 * 60 * 60)) % 24
+    return hour
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    rsi_1h_raw = calculate_rsi(df_1h['close'].values, period=14)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
-    
-    # Calculate 15m indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    fisher, fisher_trigger = calculate_fisher(high, low, period=9)
-    ema_21 = calculate_ema(close, period=21)
+    rsi_14 = calculate_rsi(close, period=14)
+    adx_14 = calculate_adx(high, low, close, period=14)
+    bb_upper, bb_mid, bb_lower, bb_bandwidth = calculate_bollinger(close, period=20, std_mult=2.0)
+    bb_bw_percentile = calculate_bandwidth_percentile(bb_bandwidth, lookback=100)
+    vol_sma_20 = calculate_volume_sma(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -193,8 +233,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup period (shorter for 15m to get trades faster)
-    min_bars = 30
+    # Warmup period
+    min_bars = 150
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -205,75 +245,107 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(ema_21[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(adx_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
+        if np.isnan(bb_lower[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_bandwidth[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1d HMA bias) ===
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(vol_sma_20[i]) or np.isnan(bb_bw_percentile[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # === SESSION FILTER (08-20 UTC for liquidity) ===
+        hour = get_hour_from_open_time(open_time[i])
+        in_session = 8 <= hour <= 20
+        
+        # === REGIME DETECTION ===
+        # 4h trend direction
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
+        
+        # 1d trend direction (regime filter)
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === 1H MOMENTUM (RSI) ===
-        rsi_1h = rsi_1h_aligned[i]
-        rsi_1h_bullish = rsi_1h > 40  # LOOSE threshold
-        rsi_1h_bearish = rsi_1h < 60  # LOOSE threshold
+        # === BB SQUEEZE DETECTION ===
+        # Bandwidth at low percentile = squeeze
+        is_squeeze = bb_bw_percentile[i] < 30  # Bottom 30% of bandwidth
         
-        # === FISHER TRANSFORM SIGNALS (VERY LOOSE for 15m trades) ===
-        fisher_val = fisher[i]
-        fisher_prev = fisher_trigger[i] if not np.isnan(fisher_trigger[i]) else fisher_val
+        # === VOLUME SPIKE ===
+        vol_ratio = volume[i] / vol_sma_20[i] if vol_sma_20[i] > 0 else 0
+        vol_spike = vol_ratio > 1.3  # 30% above average
         
-        # Fisher crossover signals - VERY LOOSE thresholds for 15m
-        fisher_bull_cross = fisher_val > -0.8 and fisher_prev <= -0.8
-        fisher_bear_cross = fisher_val < 0.8 and fisher_prev >= 0.8
+        # === ADX TREND STRENGTH ===
+        adx_val = adx_14[i]
+        is_trending = adx_val > 20  # Minimum trend strength
         
-        # === EMA TREND (15m) ===
-        ema_trend_bull = close[i] > ema_21[i]
-        ema_trend_bear = close[i] < ema_21[i]
+        # === RSI MOMENTUM ===
+        rsi_val = rsi_14[i]
+        rsi_bullish = rsi_val > 45 and rsi_val < 70
+        rsi_bearish = rsi_val < 55 and rsi_val > 30
         
-        # === ENTRY LOGIC (EXTREMELY LOOSE - must generate trades) ===
+        # === PRICE POSITION ===
+        price_near_upper = close[i] >= bb_upper[i] * 0.995
+        price_near_lower = close[i] <= bb_lower[i] * 1.005
+        price_above_mid = close[i] > bb_mid[i]
+        price_below_mid = close[i] < bb_mid[i]
+        
+        # === ENTRY LOGIC (balanced for 40-80 trades/year) ===
         desired_signal = 0.0
         
-        # PRIMARY: Fisher cross + 1d bias + 1h RSI confirmation
-        if price_above_1d and rsi_1h_bullish and fisher_bull_cross:
-            desired_signal = SIZE_STRONG
-        elif price_below_1d and rsi_1h_bearish and fisher_bear_cross:
-            desired_signal = -SIZE_STRONG
+        # LONG: 4h bullish + 1d bullish + squeeze + volume + breakout
+        if price_above_4h and price_above_1d:
+            if is_squeeze and vol_spike and price_near_upper and rsi_bullish:
+                desired_signal = SIZE_STRONG if adx_val > 30 else SIZE_BASE
+            elif price_above_mid and rsi_bullish and vol_spike and is_trending:
+                # Secondary entry: momentum continuation
+                desired_signal = SIZE_BASE
         
-        # FALLBACK 1: 1d bias + 15m EMA trend (simple trend follow, generates more trades)
-        elif price_above_1d and ema_trend_bull and rsi_1h > 45:
-            desired_signal = SIZE_BASE
-        elif price_below_1d and ema_trend_bear and rsi_1h < 55:
-            desired_signal = -SIZE_BASE
+        # SHORT: 4h bearish + 1d bearish + squeeze + volume + breakdown
+        elif price_below_4h and price_below_1d:
+            if is_squeeze and vol_spike and price_near_lower and rsi_bearish:
+                desired_signal = -SIZE_STRONG if adx_val > 30 else -SIZE_BASE
+            elif price_below_mid and rsi_bearish and vol_spike and is_trending:
+                # Secondary entry: momentum continuation
+                desired_signal = -SIZE_BASE
         
-        # FALLBACK 2: Fisher extreme reversal (mean reversion)
-        elif fisher_val < -1.0 and price_above_1d:
-            desired_signal = SIZE_BASE
-        elif fisher_val > 1.0 and price_below_1d:
-            desired_signal = -SIZE_BASE
+        # === SESSION FILTER APPLICATION ===
+        # Only enter during session hours, but hold positions through night
+        if not in_session and desired_signal != 0 and not in_position:
+            desired_signal = 0.0
         
-        # === STOPLOSS CHECK (2.0x ATR trailing) ===
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -303,9 +375,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
