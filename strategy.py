@@ -1,36 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #1167: 6h Primary + 1d HTF — HMA Trend + RSI Momentum Pullback
+Experiment #1168: 4h Primary + 12h/1d HTF — Simple HMA Trend + RSI Pullback
 
-Hypothesis: 6h is unexplored territory between 4h and 12h. After 960+ failures, the pattern is clear:
-over-filtered entries = 0 trades. The winning 12h strategy (#1164) used SIMPLE logic:
-1d HMA for trend + RSI pullback with NO volume/ADX/choppiness filters.
+Hypothesis: After 960+ failed experiments, the winning pattern is SIMPLE + LOOSE.
+Complex regime switches, choppiness filters, and multiple confluence requirements
+generate ZERO trades (see #1156, #1158, #1159, #1160, #1161, #1163, #1165).
 
-For 6h, I'll use the SAME loose philosophy but with adjusted parameters:
-1. 1d HMA(21) for primary trend direction (proven to work)
-2. 6h RSI(14) with WIDER range (25-75) to guarantee trades (6h moves faster than 12h)
-3. 6h ROC(10) momentum confirmation — must align with trend but NOT be extreme filter
+The KEEP strategy #1164 (12h HMA + RSI pullback) proved: simple trend filter +
+loose RSI range = positive Sharpe with actual trades.
+
+This strategy adapts that winning formula to 4h timeframe:
+1. 12h HMA(21) for primary trend direction
+2. 1d HMA(21) for confirmation (strengthens signal, not required)
+3. 4h RSI(14) pullback entries in trend direction (35-65 range = LOOSE)
 4. ATR(14) 2.5x trailing stop for risk management
 
-Key insight: 6h has more bars than 12h, so entries trigger more often. Need slightly wider
-RSI range to avoid overtrading while still hitting 30-60 trades/year target.
+Why 4h should work:
+- 4h timeframe = natural 30-60 trades/year (fee-friendly, Rule 10)
+- Single trend filter (12h HMA) = clear directional bias without over-filtering
+- RSI 35-65 range = triggers on normal pullbacks, not extreme conditions
+- No choppiness/ADX/complex regime = fewer conditions that can all fail
+- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
 
-Why 6h might work:
-- More responsive than 12h (catches moves earlier)
-- Less noisy than 4h (fewer whipsaws)
-- 1d HTF filter provides clear directional bias
-- Loose RSI range (25-75) ensures trades trigger on normal pullbacks
+Entry logic (LOOSE to guarantee trades):
+- LONG: price > 12h_HMA AND RSI(14) between 35-65 (pullback in uptrend)
+- SHORT: price < 12h_HMA AND RSI(14) between 35-65 (pullback in downtrend)
+- Strong signal: also aligned with 1d HMA
 
-Target: Sharpe>0.5, trades>=120 train (30/year), trades>=12 test (3/year), DD>-35%
-Timeframe: 6h
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 4h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma_trend_rsi_momentum_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_hma_trend_rsi_pullback_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -95,18 +101,6 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_roc(close, period=10):
-    """Rate of Change - momentum indicator"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    roc = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if close[i - period] != 0:
-            roc[i] = (close[i] - close[i - period]) / close[i - period] * 100.0
-    return roc
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -114,16 +108,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    roc_10 = calculate_roc(close, period=10)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -157,53 +154,43 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(roc_10[i]):
+        if np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION (12h HMA) ===
+        price_above_12h = close[i] > hma_12h_aligned[i]
+        price_below_12h = close[i] < hma_12h_aligned[i]
         
-        # === TREND DIRECTION (Daily HMA) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
-        
-        # === MOMENTUM CONFIRMATION (6h ROC) ===
-        # ROC > 0 = upward momentum, ROC < 0 = downward momentum
-        roc_positive = roc_10[i] > 0.0
-        roc_negative = roc_10[i] < 0.0
+        # 1d HMA for additional confirmation (not required for entry)
+        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
+        price_above_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
+        price_below_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
-        # WIDER RSI range (25-75) for 6h timeframe to ensure sufficient trade frequency
         desired_signal = 0.0
         rsi = rsi_14[i]
         
-        # LONG: Price above 1d HMA + RSI pullback (25-75 range) + ROC momentum positive
-        if price_above_1d:
-            if 25.0 <= rsi <= 75.0:
-                if roc_positive:
-                    # Strong momentum alignment
-                    desired_signal = SIZE_STRONG
+        # LONG: Price above 12h HMA + RSI pullback (35-65 range)
+        # Strong long: also above 1d HMA
+        if price_above_12h:
+            if 35.0 <= rsi <= 65.0:
+                if price_above_1d:
+                    desired_signal = SIZE_STRONG  # Strong trend alignment
                 else:
-                    # Weaker momentum but still in uptrend
-                    desired_signal = SIZE_BASE
+                    desired_signal = SIZE_BASE  # Basic uptrend pullback
         
-        # SHORT: Price below 1d HMA + RSI pullback (25-75 range) + ROC momentum negative
-        elif price_below_1d:
-            if 25.0 <= rsi <= 75.0:
-                if roc_negative:
-                    # Strong momentum alignment
-                    desired_signal = -SIZE_STRONG
+        # SHORT: Price below 12h HMA + RSI pullback (35-65 range)
+        # Strong short: also below 1d HMA
+        elif price_below_12h:
+            if 35.0 <= rsi <= 65.0:
+                if price_below_1d:
+                    desired_signal = -SIZE_STRONG  # Strong trend alignment
                 else:
-                    # Weaker momentum but still in downtrend
-                    desired_signal = -SIZE_BASE
+                    desired_signal = -SIZE_BASE  # Basic downtrend pullback
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
