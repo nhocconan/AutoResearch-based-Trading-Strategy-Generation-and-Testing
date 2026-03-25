@@ -1,77 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #1580: 6h Primary + 1d/1w HTF — Adaptive KAMA Trend with Vol Regime
+Experiment #1581: 15m Primary + 1h/4h/1d HTF — Camarilla Pivot Mean Reversion
 
-Hypothesis: 6h timeframe sits in the "Goldilocks zone" between 4h (too noisy) and 12h (too slow).
-This strategy uses KAMA (Kaufman Adaptive Moving Average) which adapts to market efficiency,
-combined with Bollinger Band Width regime detection and 1d/1w trend confirmation.
+Hypothesis: 15m timeframe is underexplored (0 successful experiments). This strategy
+uses Camarilla pivot levels (from 1d HTF) for mean-reversion entries, with 4h HMA
+for trend bias and 15m RSI(7) for precise entry timing.
+
+Why this should work on 15m:
+1. Camarilla R3/S3 levels are hit frequently (guarantees trades)
+2. 4h HMA filter prevents counter-trend disasters
+3. RSI(7) extremes on 15m provide good entry timing
+4. Session filter (00-12 UTC) avoids low-volume Asian session whipsaws
+5. Discrete sizing (0.15/0.25) minimizes fee churn
 
 Key components:
-1. 1w HMA(21) for major secular trend bias (avoid counter-trend in strong trends)
-2. 1d KAMA(10) for intermediate trend direction
-3. 6h KAMA(10) + KAMA(30) for entry timing (adaptive to volatility)
-4. BB Width percentile for regime: narrow = breakout likely, wide = mean revert
-5. ROC(10) momentum confirmation (avoid entering against momentum)
-6. ATR(14) trailing stoploss (2.5x ATR)
-7. Discrete sizing: 0.0, ±0.25, ±0.30 (minimize fee churn)
+- 1d Camarilla pivots (R3/S3 for mean-reversion, R4/S4 for breakout)
+- 4h HMA(21) for major trend bias
+- 15m RSI(7) for entry timing (loose thresholds: 25/75)
+- Session filter: prefer 00-12 UTC (London+NY overlap)
+- ATR(14) trailing stoploss (2.0x ATR)
+- Discrete sizing: 0.0, ±0.15, ±0.25
 
-Why this should work:
-- KAMA adapts to market conditions (fast in trends, slow in chop)
-- 6h TF = natural 30-50 trades/year (fee-efficient)
-- LOOSE entry thresholds guarantee trades (KAMA cross + ROC confirm)
-- 1w/1d HTF filter prevents major counter-trend disasters
-- BB Width regime switches between breakout and pullback logic
+Entry logic (LOOSE to guarantee ≥40 trades/train, ≥5/test):
+- LONG: price<S3 + RSI<35 + 4h_HMA bullish OR price<S4 (breakout long)
+- SHORT: price>R3 + RSI>65 + 4h_HMA bearish OR price>R4 (breakout short)
 
-Entry logic (LOOSE to guarantee ≥30 trades/train, ≥3/test):
-- LONG: 1w_HMA bullish + 1d_KAMA bullish + 6h_KAMA10>30 + ROC>0
-- SHORT: 1w_HMA bearish + 1d_KAMA bearish + 6h_KAMA10<30 + ROC<0
-- Pullback entries when BB Width narrow (trend continuation)
-- Breakout entries when BB Width expands (new trend)
-
-Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.6, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.25 discrete (smaller for higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_kama_adaptive_trend_bbwidth_1w1d_v1"
-timeframe = "6h"
+name = "mtf_15m_camarilla_rsi_4h1d_session_v1"
+timeframe = "15m"
 leverage = 1.0
-
-def calculate_kama(close, period=10):
-    """
-    Kaufman Adaptive Moving Average (KAMA)
-    Adapts smoothing based on market efficiency ratio.
-    Fast in trends, slow in chop.
-    """
-    n = len(close)
-    if n < period + 10:
-        return np.full(n, np.nan)
-    
-    kama = np.full(n, np.nan, dtype=np.float64)
-    
-    # Efficiency Ratio (ER) = |Net Change| / Sum of Absolute Changes
-    er = np.zeros(n)
-    for i in range(10, n):
-        net_change = abs(close[i] - close[i - 10])
-        sum_changes = np.sum(np.abs(np.diff(close[i - 10:i + 1])))
-        if sum_changes > 1e-10:
-            er[i] = net_change / sum_changes
-    
-    # Smoothing Constants
-    fast_sc = 2.0 / (2.0 + 1.0)  # Fast SC for period=2
-    slow_sc = 2.0 / (2.0 + 30.0)  # Slow SC for period=30
-    
-    # Initialize KAMA
-    kama[9] = close[9]  # Start at first valid price
-    
-    for i in range(10, n):
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -117,76 +81,115 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_roc(close, period=10):
-    """Rate of Change - momentum indicator"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    roc = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if close[i - period] != 0:
-            roc[i] = 100.0 * (close[i] - close[i - period]) / close[i - period]
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    return roc
+    gain = np.insert(gain, 0, 0)
+    loss = np.insert(loss, 0, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan, dtype=np.float64)
+    mask = avg_loss != 0
+    rs = np.zeros(n)
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    
+    return rsi
 
-def calculate_bollinger_width(close, period=20):
-    """Bollinger Band Width = (Upper - Lower) / Middle"""
+def calculate_camarilla_pivots(high, low, close, period=1):
+    """
+    Camarilla Pivot Points - intraday support/resistance levels
+    Uses previous day's HLC to calculate levels
+    
+    R4 = H + 1.5 * (H - L)
+    R3 = H + 1.0 * (H - L) / 2
+    R2 = H + 0.5 * (H - L) / 3
+    R1 = H + 0.25 * (H - L) / 6
+    Pivot = (H + L + C) / 3
+    S1 = L - 0.25 * (H - L) / 6
+    S2 = L - 0.5 * (H - L) / 3
+    S3 = L - 1.0 * (H - L) / 2
+    S4 = L - 1.5 * (H - L)
+    """
     n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    # Use previous day's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     
-    width = np.full(n, np.nan, dtype=np.float64)
-    mask = sma != 0
-    width[mask] = (2.0 * std[mask]) / sma[mask]
+    # Set first bar to NaN
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    return width
+    range_val = prev_high - prev_low
+    
+    r4 = prev_high + 1.5 * range_val
+    r3 = prev_high + 1.0 * range_val / 2
+    r2 = prev_high + 0.5 * range_val / 3
+    r1 = prev_high + 0.25 * range_val / 6
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    
+    s1 = prev_low - 0.25 * range_val / 6
+    s2 = prev_low - 0.5 * range_val / 3
+    s3 = prev_low - 1.0 * range_val / 2
+    s4 = prev_low - 1.5 * range_val
+    
+    return r4, r3, r2, r1, pivot, s1, s2, s3, s4
 
-def calculate_bb_width_percentile(bb_width, lookback=50):
-    """Percentile rank of BB Width over lookback period"""
-    n = len(bb_width)
-    percentile = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(lookback, n):
-        if not np.isnan(bb_width[i]):
-            window = bb_width[i - lookback:i + 1]
-            valid = window[~np.isnan(window)]
-            if len(valid) > 0:
-                percentile[i] = 100.0 * np.sum(valid < bb_width[i]) / len(valid)
-    
-    return percentile
+def calculate_session_hour(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds
+    hours = (open_time // (1000 * 60 * 60)) % 24
+    return hours
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    kama_1d_raw = calculate_kama(df_1d['close'].values, period=10)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
+    # Calculate 1d Camarilla pivots and align
+    cam_r4_raw, cam_r3_raw, cam_r2_raw, cam_r1_raw, cam_pivot_raw, \
+    cam_s1_raw, cam_s2_raw, cam_s3_raw, cam_s4_raw = calculate_camarilla_pivots(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
+    )
     
-    # Calculate 6h indicators
-    kama_10 = calculate_kama(close, period=10)
-    kama_30 = calculate_kama(close, period=30)
+    cam_r3_aligned = align_htf_to_ltf(prices, df_1d, cam_r3_raw)
+    cam_s3_aligned = align_htf_to_ltf(prices, df_1d, cam_s3_raw)
+    cam_r4_aligned = align_htf_to_ltf(prices, df_1d, cam_r4_raw)
+    cam_s4_aligned = align_htf_to_ltf(prices, df_1d, cam_s4_raw)
+    
+    # Calculate 15m indicators
+    rsi_7 = calculate_rsi(close, period=7)
     atr_14 = calculate_atr(high, low, close, period=14)
-    roc_10 = calculate_roc(close, period=10)
-    bb_width = calculate_bollinger_width(close, period=20)
-    bb_width_pct = calculate_bb_width_percentile(bb_width, lookback=50)
+    
+    # Session hours
+    session_hours = calculate_session_hour(open_time)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -209,95 +212,75 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(kama_10[i]) or np.isnan(kama_30[i]) or np.isnan(roc_10[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(bb_width_pct[i]):
+        if np.isnan(cam_r3_aligned[i]) or np.isnan(cam_s3_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(kama_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === SESSION FILTER (00-12 UTC preferred) ===
+        hour = session_hours[i]
+        is_prime_session = (hour >= 0 and hour <= 12)
         
-        # === REGIME DETECTION (BB Width Percentile) ===
-        bb_pct = bb_width_pct[i]
-        is_squeeze_regime = bb_pct < 30.0  # Narrow bands = breakout likely
-        is_expansion_regime = bb_pct > 70.0  # Wide bands = mean revert likely
-        is_neutral_regime = not is_squeeze_regime and not is_expansion_regime
+        # === TREND BIAS (4h HMA) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        # === TREND DIRECTION (1w HMA + 1d KAMA bias) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        # === CAMARILLA LEVELS ===
+        r3 = cam_r3_aligned[i]
+        s3 = cam_s3_aligned[i]
+        r4 = cam_r4_aligned[i]
+        s4 = cam_s4_aligned[i]
         
-        kama_1d_bullish = close[i] > kama_1d_aligned[i]
-        kama_1d_bearish = close[i] < kama_1d_aligned[i]
-        
-        # === 6h KAMA CROSSOVER (adaptive trend momentum) ===
-        kama_bullish = kama_10[i] > kama_30[i]
-        kama_bearish = kama_10[i] < kama_30[i]
-        
-        # === ROC MOMENTUM ===
-        roc = roc_10[i]
-        roc_positive = roc > 0.5  # Slight positive momentum
-        roc_negative = roc < -0.5  # Slight negative momentum
+        # === RSI ===
+        rsi = rsi_7[i]
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # SQUEEZE REGIME: Breakout entries (narrow BB = explosive move coming)
-        if is_squeeze_regime:
-            # LONG: 1w bullish + 1d bullish + KAMA cross up + ROC positive
-            if price_above_1w and kama_1d_bullish and kama_bullish and roc_positive:
+        # MEAN REVERSION: Fade at R3/S3 with RSI confirmation
+        # LONG: price below S3 + RSI oversold + 4h bullish bias (or prime session)
+        if close[i] < s3 * 1.002 and rsi < 35:
+            if price_above_4h or is_prime_session:
+                desired_signal = SIZE_BASE
+        
+        # SHORT: price above R3 + RSI overbought + 4h bearish bias (or prime session)
+        elif close[i] > r3 * 0.998 and rsi > 65:
+            if price_below_4h or is_prime_session:
+                desired_signal = -SIZE_BASE
+        
+        # BREAKOUT: Strong move through R4/S4
+        # LONG breakout: price breaks above R4 + RSI rising
+        elif close[i] > r4 * 0.998 and rsi > 50 and rsi < 80:
+            if price_above_4h:
                 desired_signal = SIZE_STRONG
-            
-            # SHORT: 1w bearish + 1d bearish + KAMA cross down + ROC negative
-            elif price_below_1w and kama_1d_bearish and kama_bearish and roc_negative:
+        
+        # SHORT breakout: price breaks below S4 + RSI falling
+        elif close[i] < s4 * 1.002 and rsi < 50 and rsi > 20:
+            if price_below_4h:
                 desired_signal = -SIZE_STRONG
         
-        # EXPANSION REGIME: Pullback entries (wide BB = mean reversion likely)
-        elif is_expansion_regime:
-            # LONG: 1w bullish + KAMA bullish but price pulled back to KAMA30
-            if price_above_1w and kama_bullish and close[i] < kama_10[i] * 1.002 and roc > -2.0:
-                desired_signal = SIZE_BASE
-            
-            # SHORT: 1w bearish + KAMA bearish but price rallied to KAMA10
-            elif price_below_1w and kama_bearish and close[i] > kama_10[i] * 0.998 and roc < 2.0:
-                desired_signal = -SIZE_BASE
-        
-        # NEUTRAL REGIME: Standard trend following
-        elif is_neutral_regime:
-            # LONG: 1w bullish + 1d bullish + KAMA cross + ROC confirm
-            if price_above_1w and kama_1d_bullish and kama_bullish and roc > 0:
-                desired_signal = SIZE_BASE
-            
-            # SHORT: 1w bearish + 1d bearish + KAMA cross + ROC confirm
-            elif price_below_1w and kama_1d_bearish and kama_bearish and roc < 0:
-                desired_signal = -SIZE_BASE
-        
-        # === STOPLOSS CHECK (2.5x ATR trailing) ===
+        # === STOPLOSS CHECK (2.0x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -327,9 +310,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
