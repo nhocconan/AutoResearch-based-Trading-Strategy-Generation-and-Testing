@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #1414: 1d Primary + 1w HTF — Dual HMA Trend + RSI Pullback
+Experiment #1415: 6h Primary + 12h/1d HTF — Volatility Expansion Breakout
 
-Hypothesis: Daily timeframe with weekly trend filter should produce 20-50 trades/year
-with lower fee drag than lower TFs. This strategy combines:
-1. 1w HMA(21) for major trend bias (avoid counter-trend in bear markets)
-2. 1d HMA(16) vs HMA(48) crossover for trend momentum
-3. 1d RSI(14) pullback entry (LOOSE: RSI>35 long, RSI<65 short - guarantee trades)
-4. ATR(14) trailing stoploss (signal→0 when stopped at 2.5x ATR)
-5. Discrete sizing: 0.0, ±0.25, ±0.30 (minimize fee churn)
+Hypothesis: 6h timeframe is underexplored (ZERO prior experiments). This strategy combines:
+1. 1d HMA(21) for major trend bias (avoid counter-trend trades)
+2. 12h HMA(21) for intermediate trend confirmation
+3. 6h Bollinger Band squeeze detection (BW percentile < 20%)
+4. 6h Donchian(20) breakout entry when BB expands
+5. ATR(14) trailing stoploss (signal→0 when stopped)
+6. Discrete sizing: 0.0, ±0.25, ±0.30 (minimize fee churn)
 
-Why this should beat #1411 (Sharpe=0.575):
-- 1d TF = natural 25-40 trades/year (optimal fee efficiency)
-- 1w HMA filter prevents major trend reversals (2022 crash protection)
-- LOOSE RSI thresholds guarantee trades (unlike RSI<30/>70 which rarely trigger)
-- Simple dual-HMA crossover is proven to work on daily charts
-- Fewer conflicting filters = more consistent signal generation
+Why this should work:
+- 6h TF = natural 30-50 trades/year (fee-efficient middle ground)
+- BB squeeze + breakout captures volatility expansion (proven in TradFi)
+- Dual HTF (12h+1d) prevents 2022-style crash whipsaw
+- Donchian breakout ensures momentum confirmation
+- LOOSE entry filters guarantee trades (unlike failed CRSI/chop strategies)
 
-Entry logic (LOOSE to guarantee ≥30 trades train, ≥5 test):
-- LONG: 1w_HMA bullish + 1d_HMA16 > 1d_HMA48 + RSI > 35
-- SHORT: 1w_HMA bearish + 1d_HMA16 < 1d_HMA48 + RSI < 65
+Entry logic (LOOSE to guarantee trades):
+- LONG: 1d_HMA bullish + 12h_HMA bullish + BB_squeeze + price > Donchian_high + RSI < 70
+- SHORT: 1d_HMA bearish + 12h_HMA bearish + BB_squeeze + price < Donchian_low + RSI > 30
 
 Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 1d
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_dual_hma_rsi_pullback_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_bb_squeeze_donchian_breakout_12h1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -101,6 +101,51 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
+def calculate_bollinger_bands(close, period=20, std_mult=2.0):
+    """Bollinger Bands with bandwidth"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    bandwidth = (upper - lower) / sma
+    
+    return upper, lower, sma, bandwidth
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i - period + 1:i + 1])
+        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
+def calculate_bw_percentile(bandwidth, lookback=100):
+    """Calculate bandwidth percentile over lookback period"""
+    n = len(bandwidth)
+    percentile = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(lookback - 1, n):
+        window = bandwidth[i - lookback + 1:i + 1]
+        valid_window = window[~np.isnan(window)]
+        if len(valid_window) > 0:
+            current_bw = bandwidth[i]
+            if not np.isnan(current_bw):
+                percentile[i] = np.sum(valid_window <= current_bw) / len(valid_window) * 100
+    
+    return percentile
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -108,17 +153,25 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate 1d indicators
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate 6h indicators
     hma_16 = calculate_hma(close, period=16)
     hma_48 = calculate_hma(close, period=48)
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
+    
+    bb_upper, bb_lower, bb_sma, bb_bandwidth = calculate_bollinger_bands(close, period=20, std_mult=2.0)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    bw_percentile = calculate_bw_percentile(bb_bandwidth, lookback=100)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -134,7 +187,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 150
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -152,42 +205,63 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(donchian_upper[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1w HMA bias) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === 1d HMA CROSSOVER (trend momentum) ===
+        # === TREND DIRECTION (HTF HMA bias) ===
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
+        
+        price_above_12h = close[i] > hma_12h_aligned[i]
+        price_below_12h = close[i] < hma_12h_aligned[i]
+        
+        # === 6h HMA CROSSOVER (momentum confirm) ===
         hma_bullish = hma_16[i] > hma_48[i]
         hma_bearish = hma_16[i] < hma_48[i]
         
-        # === RSI PULLBACK (LOOSE entry - guarantee trades) ===
+        # === BB SQUEEZE DETECTION (volatility compression) ===
+        bb_squeeze = False
+        if not np.isnan(bw_percentile[i]):
+            bb_squeeze = bw_percentile[i] < 30  # BW in bottom 30% = squeeze
+        
+        # === DONCHIAN BREAKOUT ===
+        donchian_breakout_long = close[i] > donchian_upper[i]
+        donchian_breakout_short = close[i] < donchian_lower[i]
+        
+        # === RSI FILTER (LOOSE - guarantee trades) ===
         rsi = rsi_14[i]
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1w bullish + 1d HMA bullish + RSI > 35 (very loose pullback zone)
-        if price_above_1w and hma_bullish and rsi > 35:
-            # Strong if RSI also < 75 (not extremely overbought)
-            if rsi < 75:
-                desired_signal = SIZE_STRONG
-            else:
-                desired_signal = SIZE_BASE
+        # LONG: 1d bullish + 12h bullish + (HMA bullish OR Donchian breakout) + RSI < 70
+        if price_above_1d and price_above_12h:
+            if (hma_bullish or donchian_breakout_long) and rsi < 70:
+                # Strong if BB squeeze present (volatility expansion play)
+                if bb_squeeze and donchian_breakout_long:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
         
-        # SHORT: 1w bearish + 1d HMA bearish + RSI < 65 (very loose pullback zone)
-        elif price_below_1w and hma_bearish and rsi < 65:
-            # Strong if RSI also > 25 (not extremely oversold)
-            if rsi > 25:
-                desired_signal = -SIZE_STRONG
-            else:
-                desired_signal = -SIZE_BASE
+        # SHORT: 1d bearish + 12h bearish + (HMA bearish OR Donchian breakout) + RSI > 30
+        elif price_below_1d and price_below_12h:
+            if (hma_bearish or donchian_breakout_short) and rsi > 30:
+                # Strong if BB squeeze present (volatility expansion play)
+                if bb_squeeze and donchian_breakout_short:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
