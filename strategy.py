@@ -1,40 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #1152: 12h Primary + 1d HTF — Volatility-Adjusted RSI Pullback with ADX Filter
+Experiment #1153: 5m Primary + 15m/4h HTF — Trend-Following Pullback with Session Filter
 
-Hypothesis: 12h timeframe with daily trend bias will capture multi-day swings while avoiding
-noise. Key innovation: volatility-adjusted RSI thresholds (wider bands in high vol) + ADX
-filter to avoid entering during weak trends. This addresses the #1 failure mode (0 trades)
-by using looser RSI thresholds while maintaining quality via ADX confirmation.
-
-Why 12h works:
-- 20-50 trades/year target (fee drag 1-2.5%)
-- Captures multi-day trends without 4h noise
-- Daily HTF provides strong trend bias without 1w lag
+Hypothesis: 5m timeframe is unexplored territory. Using 4h HMA for trend direction + 15m RSI 
+for pullback entries + session filter (08-20 UTC high volume) will capture intraday momentum
+while avoiding noise and low-volume whipsaws.
 
 Key innovations:
-1. Volatility-adjusted RSI: RSI thresholds widen when ATR ratio > 1.5 (high vol)
-   - Normal: RSI<40 long, RSI>60 short
-   - High vol: RSI<30 long, RSI>70 short (avoid catching falling knives)
-2. ADX(14) filter: Only enter when ADX>20 (trend has strength)
-3. Daily HMA(21) bias: Long only when price>1d_HMA, short only when price<1d_HMA
-4. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
-5. ATR(14) 2.5x trailing stop for risk management
+1. 4h HMA(21) for primary trend bias — ONLY trade with HTF trend
+2. 15m RSI(14) pullback entries — long on RSI 35-45 dip in uptrend, short on RSI 55-65 rally in downtrend
+3. Session filter: 08-20 UTC only (avoid Asian low-volume chop)
+4. 5m ATR(14) 2.5x trailing stop for tight risk management
+5. Small position size (0.15) due to higher trade frequency on 5m
+6. Volume confirmation: only enter when 5m volume > 0.8 * 20-bar avg
 
-Entry conditions (LOOSE to guarantee trades):
-- LONG: price>1d_HMA + ADX>18 + RSI<45 (or RSI<35 in high vol)
-- SHORT: price<1d_HMA + ADX>18 + RSI>55 (or RSI>65 in high vol)
+Why this should work:
+- 4h trend filter prevents counter-trend trades (major failure mode on lower TF)
+- RSI pullback entries catch continuation moves with better risk/reward
+- Session filter avoids 60% of noise (low-volume hours)
+- 5m entries give precise timing within 4h trend structure
+- Small size (0.15) handles fee drag from more frequent trades
 
-Target: Sharpe>0.45, trades>=30 train, trades>=3 test, DD>-40%
-Timeframe: 12h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.45, trades>=50/symbol train, trades>=5/symbol test, DD>-35%
+Timeframe: 5m
+Size: 0.15 (discrete: 0.0, ±0.15, ±0.25)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_rsi_pullback_adx_1d_v1"
-timeframe = "12h"
+name = "mtf_5m_hma_rsi_pullback_session_4h15m_v1"
+timeframe = "5m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -99,77 +95,35 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - measures trend strength"""
-    n = len(close)
-    if n < period * 2 + 1:
-        return np.full(n, np.nan)
-    
-    # True Range
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    # Directional Movement
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    # Smoothed DM and TR
-    plus_dm_s = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_s = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    tr_s = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Directional Indicators
-    plus_di = np.divide(plus_dm_s, tr_s, out=np.zeros_like(tr_s), where=tr_s != 0) * 100
-    minus_di = np.divide(minus_dm_s, tr_s, out=np.zeros_like(tr_s), where=tr_s != 0) * 100
-    
-    # DX
-    di_sum = plus_di + minus_di
-    dx = np.divide(np.abs(plus_di - minus_di), di_sum, out=np.zeros_like(di_sum), where=di_sum != 0) * 100
-    
-    # ADX (smoothed DX)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_15m = get_htf_data(prices, '15m')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 12h indicators
+    rsi_15m_raw = calculate_rsi(df_15m['close'].values, period=14)
+    rsi_15m_aligned = align_htf_to_ltf(prices, df_15m, rsi_15m_raw)
+    
+    # Calculate 5m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_30 = calculate_atr(high, low, close, period=30)
     rsi_14 = calculate_rsi(close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
     
-    # Volatility ratio for adaptive thresholds
-    vol_ratio = np.full(n, np.nan, dtype=np.float64)
-    for i in range(30, n):
-        if atr_30[i] > 1e-10:
-            vol_ratio[i] = atr_14[i] / atr_30[i]
+    # Volume SMA for confirmation
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -180,7 +134,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(150, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -189,56 +143,61 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(adx_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(rsi_15m_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (Daily HMA) ===
-        hma_1d_bull = close[i] > hma_1d_aligned[i]
-        hma_1d_bear = close[i] < hma_1d_aligned[i]
+        # === SESSION FILTER (08-20 UTC only) ===
+        # Convert open_time (ms) to hour
+        timestamp_ms = open_time[i]
+        hour_utc = (timestamp_ms // 3600000) % 24
+        in_session = 8 <= hour_utc <= 20
         
-        # === VOLATILITY REGIME ===
-        high_vol = vol_ratio[i] > 1.5 if not np.isnan(vol_ratio[i]) else False
+        # === VOLUME FILTER ===
+        vol_ok = not np.isnan(vol_sma[i]) and volume[i] > 0.8 * vol_sma[i]
         
-        # === ADAPTIVE RSI THRESHOLDS ===
-        if high_vol:
-            rsi_long_threshold = 35
-            rsi_short_threshold = 65
-        else:
-            rsi_long_threshold = 40
-            rsi_short_threshold = 60
+        # === 4h TREND BIAS ===
+        trend_bull = close[i] > hma_4h_aligned[i]
+        trend_bear = close[i] < hma_4h_aligned[i]
         
-        # === ADX FILTER ===
-        adx_ok = adx_14[i] > 18  # Trend has some strength
+        # === 15m RSI PULLBACK SIGNALS ===
+        # Long: RSI dipped to 35-45 in uptrend (pullback entry)
+        rsi_long_pullback = 35.0 <= rsi_15m_aligned[i] <= 48.0
+        # Short: RSI rallied to 55-65 in downtrend (pullback entry)
+        rsi_short_pullback = 52.0 <= rsi_15m_aligned[i] <= 65.0
+        
+        # === 5m RSI CONFIRMATION (avoid catching falling knife) ===
+        rsi_5m_rising = rsi_14[i] > rsi_14[i-1] if i > 0 else False
+        rsi_5m_falling = rsi_14[i] < rsi_14[i-1] if i > 0 else False
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: Daily bias bull + ADX confirms trend + RSI pullback
-        if hma_1d_bull and adx_ok and rsi_14[i] < rsi_long_threshold:
-            # Stronger signal if RSI very oversold
-            if rsi_14[i] < 25:
-                desired_signal = SIZE_STRONG
-            else:
-                desired_signal = SIZE_BASE
+        # LONG entry: 4h uptrend + 15m RSI pullback + session + volume + 5m RSI turning up
+        if trend_bull and rsi_long_pullback and in_session and vol_ok and rsi_5m_rising:
+            desired_signal = SIZE_BASE
         
-        # SHORT: Daily bias bear + ADX confirms trend + RSI pullback
-        elif hma_1d_bear and adx_ok and rsi_14[i] > rsi_short_threshold:
-            # Stronger signal if RSI very overbought
-            if rsi_14[i] > 75:
-                desired_signal = -SIZE_STRONG
-            else:
-                desired_signal = -SIZE_BASE
+        # Stronger long: deeper pullback or strong momentum
+        if trend_bull and 30.0 <= rsi_15m_aligned[i] <= 40.0 and in_session and vol_ok:
+            desired_signal = SIZE_STRONG
+        
+        # SHORT entry: 4h downtrend + 15m RSI pullback + session + volume + 5m RSI turning down
+        if trend_bear and rsi_short_pullback and in_session and vol_ok and rsi_5m_falling:
+            desired_signal = -SIZE_BASE
+        
+        # Stronger short: deeper pullback or strong momentum
+        if trend_bear and 60.0 <= rsi_15m_aligned[i] <= 70.0 and in_session and vol_ok:
+            desired_signal = -SIZE_STRONG
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
