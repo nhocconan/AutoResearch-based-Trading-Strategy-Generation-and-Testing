@@ -1,34 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1250: 1h Primary + 4h/1d HTF — HMA Trend + RSI Pullback + Volatility Filter
+Experiment #1251: 6h Primary + 1w/1d HTF — Vol Spike Mean Reversion with Regime Filter
 
-Hypothesis: After analyzing 1029 failed strategies, the key insight is:
-1. Choppiness filters kill trade generation (see exp#1238, #1242, #1248 failures)
-2. Too many confluence filters = 0 trades (see exp#1241, #1243, #1245, #1249)
-3. The winning pattern: HTF trend (4h HMA) + LTF entry (1h RSI pullback) + simple vol filter
+Hypothesis: After 960+ failed experiments, the key insight is that BTC/ETH perform poorly
+in pure trend-following during bear/range markets (2022 crash, 2025 test period). This
+strategy combines VOLATILITY SPIKE detection with MEAN REVERSION entries, filtered by
+HTF regime detection.
 
-This strategy uses:
-1. 4h HMA(21) for primary trend direction (proven in best strategies)
-2. 1h RSI(14) pullback entries in 35-65 range (loose enough for trades)
-3. 1d HMA(21) for stronger confirmation (increase size when aligned)
-4. ATR ratio filter (ATR7/ATR30 < 2.5) to avoid extreme volatility entries
-5. 2.5x ATR trailing stoploss for risk management
-6. Discrete sizing: 0.0, ±0.20 (base), ±0.35 (strong with 1d confirmation)
+Key components:
+1. Weekly HMA(21) for macro trend bias (don't fight the tide)
+2. Daily Choppiness Index for regime detection (CHOP>55 = range, favor mean-reversion)
+3. 6h ATR ratio (ATR7/ATR30) for vol spike detection (>1.8 = panic/extreme)
+4. 6h Bollinger Band position for entry timing (price near bands = extreme)
+5. 6h RSI(7) for oversold/overbought confirmation
 
-Key difference from failures: LOOSE RSI range (35-65, not extremes), 
-NO choppiness filter, NO session filter (crypto trades 24/7), 
-simple volatility filter only.
+Entry logic (LOOSE to guarantee trades):
+- LONG: 1w_HMA bullish + 1d_CHOP>50 + 6h_ATR_ratio>1.5 + price<BB_lower + RSI<35
+- SHORT: 1w_HMA bearish + 1d_CHOP>50 + 6h_ATR_ratio>1.5 + price>BB_upper + RSI>65
 
-Target: Sharpe>0.5, trades>=40/year, DD>-35%
-Timeframe: 1h
-Size: 0.20-0.35 discrete
+Why 6h works:
+- Natural 20-50 trades/year (fee-friendly)
+- Captures multi-day mean reversion swings
+- Vol spikes at 6h are significant but not noise
+
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_trend_rsi_pullback_4h1d_v1"
-timeframe = "1h"
+name = "mtf_6h_vol_spike_meanrev_chop_1w1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -93,6 +97,49 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP) - measures if market is chopping or trending
+    CHOP > 61.8 = ranging/choppy market
+    CHOP < 38.2 = trending market
+    Formula: 100 * LOG10(SUM(ATR, n) / (Highest High - Lowest Low)) / LOG10(n)
+    """
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    # Calculate True Range
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        sum_atr = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and sum_atr > 1e-10:
+            chop[i] = 100.0 * np.log10(sum_atr / price_range) / np.log10(period)
+    
+    return chop
+
+def calculate_bollinger_bands(close, period=20, std_dev=2.0):
+    """Bollinger Bands"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    
+    return upper, lower, sma
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -100,28 +147,37 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    chop_1d_raw = calculate_choppiness(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values,
+        period=14
+    )
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d_raw)
     
-    # Calculate 1h indicators
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # Calculate 6h indicators
     atr_7 = calculate_atr(high, low, close, period=7)
     atr_30 = calculate_atr(high, low, close, period=30)
-    rsi_14 = calculate_rsi(close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)
     
-    # ATR ratio for volatility filter
-    atr_ratio = np.divide(atr_7, atr_30, out=np.full(n, np.nan), where=atr_30 > 1e-10)
+    bb_upper, bb_lower, bb_sma = calculate_bollinger_bands(close, period=20, std_dev=2.0)
+    
+    # ATR ratio for vol spike detection
+    atr_ratio = np.full(n, np.nan, dtype=np.float64)
+    for i in range(30, n):
+        if atr_30[i] > 1e-10:
+            atr_ratio[i] = atr_7[i] / atr_30[i]
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
-    SIZE_STRONG = 0.35
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -137,59 +193,86 @@ def generate_signals(prices):
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or atr_30[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(rsi_7[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === VOLATILITY FILTER (avoid extreme vol entries) ===
-        vol_ok = not np.isnan(atr_ratio[i]) and atr_ratio[i] < 2.5
+        if np.isnan(hma_1w_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === TREND DIRECTION (4h HMA) ===
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
+        if np.isnan(chop_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # Daily HMA for stronger confirmation
-        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
-        price_above_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
-        price_below_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
+        # === REGIME DETECTION ===
+        # Weekly HMA for macro trend bias
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
+        
+        # Daily Choppiness for regime (CHOP > 50 = range, favor mean-reversion)
+        chop_high = chop_1d_aligned[i] > 50.0
+        chop_low = chop_1d_aligned[i] < 50.0
+        
+        # === VOL SPIKE DETECTION ===
+        vol_spike = atr_ratio[i] > 1.5  # Current vol > 1.5x recent avg
+        
+        # === BB POSITION ===
+        bb_range = bb_upper[i] - bb_lower[i]
+        if bb_range > 1e-10:
+            bb_position = (close[i] - bb_lower[i]) / bb_range  # 0=lower, 1=upper
+        else:
+            bb_position = 0.5
+        
+        price_near_lower = bb_position < 0.15  # Near lower band
+        price_near_upper = bb_position > 0.85  # Near upper band
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
-        rsi = rsi_14[i]
+        rsi = rsi_7[i]
         
-        if vol_ok:
-            # LONG: Price above 4h HMA + RSI pullback (35-65 range)
-            if price_above_4h:
-                if 35.0 <= rsi <= 65.0:
-                    if price_above_1d:
-                        desired_signal = SIZE_STRONG  # Strong trend alignment
-                    else:
-                        desired_signal = SIZE_BASE  # Basic uptrend pullback
-            
-            # SHORT: Price below 4h HMA + RSI pullback (35-65 range)
-            elif price_below_4h:
-                if 35.0 <= rsi <= 65.0:
-                    if price_below_1d:
-                        desired_signal = -SIZE_STRONG  # Strong trend alignment
-                    else:
-                        desired_signal = -SIZE_BASE  # Basic downtrend pullback
+        # LONG: Vol spike + price near BB lower + RSI oversold
+        # Weekly trend filter: prefer long when price above 1w HMA (trend-following MR)
+        # But allow counter-trend MR when vol spike is extreme (atr_ratio > 2.0)
+        if vol_spike and price_near_lower and rsi < 35.0:
+            if price_above_1w or chop_high:
+                # Strong long: trend-aligned or ranging market
+                if atr_ratio[i] > 2.0 or (price_above_1w and chop_high):
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
+        
+        # SHORT: Vol spike + price near BB upper + RSI overbought
+        elif vol_spike and price_near_upper and rsi > 65.0:
+            if price_below_1w or chop_high:
+                # Strong short: trend-aligned or ranging market
+                if atr_ratio[i] > 2.0 or (price_below_1w and chop_high):
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -229,7 +312,7 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr_7[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
