@@ -1,123 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #1107: 6h Primary + 1d HTF — Fisher Transform + KAMA Trend + Volume Confirm
+Experiment #1108: 4h Primary + 1d HTF — Choppiness Regime + RSI Extremes + HMA Bias
 
-Hypothesis: Ehlers Fisher Transform catches reversals better than RSI in bear/range markets
-(2025 test period). KAMA adapts to volatility changes better than HMA/EMA. Combined with
-1d trend bias and volume confirmation, this should generate consistent trades with good
-risk-adjusted returns on 6h timeframe.
+Hypothesis: Simplified regime-switching strategy using Choppiness Index to detect
+market state (range vs trend) and switching between mean-reversion (RSI extremes)
+in choppy markets and trend-following (HMA alignment) in trending markets.
 
 Key innovations:
-1. Ehlers Fisher Transform (period=9): Long when Fisher crosses above -1.5, Short when crosses below +1.5
-   - Normalizes price to Gaussian distribution, catches reversals early
-2. KAMA (Kaufman Adaptive MA, ER=10): Trend direction that adapts to volatility
-   - Fast in trends, slow in chop - perfect for 6h multi-day swings
-3. 1d HMA(21) bias: Only long if price > 1d_HMA, only short if price < 1d_HMA
-4. Volume confirmation: Current volume > 0.8 * 20-period avg (filters false breakouts)
-5. ATR(14) 2.5x stoploss with trailing
-6. Discrete sizing: 0.0, ±0.25, ±0.30
+1. Choppiness Index (CHOP 14): >55 = range (mean revert), <45 = trend (trend follow)
+2. RSI(14) extremes: Long RSI<35, Short RSI>65 in range markets
+3. 1d HMA(21) for trend bias: Only long when price>1d_HMA, only short when price<1d_HMA
+4. Regime-adaptive entries with LOOSE conditions to guarantee trades
+5. ATR(14) 2.5x trailing stop for risk management
+6. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Why this should work on 6h:
-- Fisher Transform excels in range/bear markets (2022-2023, 2025 test)
-- KAMA reduces whipsaws vs HMA/EMA during volatile periods
-- 6h captures 2-4 day swings (30-60 trades/year target)
-- Volume filter avoids fake breakouts common on lower TFs
-- Looser entries than failed 6h experiments (Fisher levels -1.5/+1.5 not extreme)
+Why this should work:
+- Simpler than CRSI, more reliable RSI signals
+- Choppiness filter avoids trend-following whipsaws in range markets
+- 1d HMA provides solid trend bias without overfitting
+- 4h captures multi-day swings (20-50 trades/year target)
+- LOOSE entry conditions ensure sufficient trades
 
-Entry conditions (LOOSE to guarantee trades):
-- LONG: Fisher crosses above -1.5 + price > KAMA + price > 1d_HMA + volume confirm
-- SHORT: Fisher crosses below +1.5 + price < KAMA + price < 1d_HMA + volume confirm
+Entry conditions (LOOSE):
+- LONG range: CHOP>55 + RSI<40 + price>1d_HMA*0.95
+- LONG trend: CHOP<45 + price>1d_HMA + RSI>45
+- SHORT range: CHOP>55 + RSI>60 + price<1d_HMA*1.05
+- SHORT trend: CHOP<45 + price<1d_HMA + RSI<55
 
 Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 6h
+Timeframe: 4h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_fisher_kama_volume_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_chop_rsi_hma_regime_1d_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Kaufman Adaptive Moving Average
-    Adapts smoothing based on market efficiency (trend vs noise)
-    ER = |close - close[n]| / sum(|close[i] - close[i-1]|)
-    SC = (ER * (fast_sc - slow_sc) + slow_sc)^2
-    """
-    n = len(close)
-    if n < period + slow:
-        return np.full(n, np.nan)
-    
-    kama = np.full(n, np.nan, dtype=np.float64)
-    
-    # Calculate Efficiency Ratio
-    er = np.zeros(n, dtype=np.float64)
-    for i in range(period, n):
-        price_change = abs(close[i] - close[i - period])
-        volatility = np.sum(np.abs(np.diff(close[i-period:i+1])))
-        if volatility > 1e-10:
-            er[i] = price_change / volatility
-    
-    # Smoothing constant
-    fast_sc = 2.0 / (fast + 1)
-    slow_sc = 2.0 / (slow + 1)
-    sc = np.zeros(n, dtype=np.float64)
-    for i in range(period, n):
-        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama[period] = close[period]
-    for i in range(period + 1, n):
-        if not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_fisher(close, period=9):
-    """
-    Ehlers Fisher Transform
-    Normalizes price to Gaussian distribution for clearer reversal signals
-    Fisher = 0.5 * ln((1 + EHS) / (1 - EHS))
-    EHS = 0.33 * 2 * ((close - LL) / (HH - LL) - 0.5) + 0.67 * prev_EHS
-    """
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    fisher = np.full(n, np.nan, dtype=np.float64)
-    trigger = np.full(n, np.nan, dtype=np.float64)
-    ehs = np.zeros(n, dtype=np.float64)
-    
-    for i in range(period, n):
-        highest = np.max(close[i-period+1:i+1])
-        lowest = np.min(close[i-period+1:i+1])
-        
-        price_range = highest - lowest
-        if price_range > 1e-10:
-            raw_ehs = 0.67 * ((close[i] - lowest) / price_range - 0.5) + 0.33 * ehs[i-1]
-            ehs[i] = np.clip(raw_ehs, -0.99, 0.99)
-            
-            fisher[i] = 0.5 * np.log((1 + ehs[i]) / (1 - ehs[i]))
-            trigger[i] = fisher[i-1] if i > period else fisher[i]
-    
-    return fisher, trigger
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -149,25 +69,71 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_volume_ratio(volume, period=20):
-    """Current volume vs rolling average"""
-    n = len(volume)
-    if n < period:
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    vol_ratio = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        avg_vol = np.mean(volume[i-period+1:i+1])
-        if avg_vol > 1e-10:
-            vol_ratio[i] = volume[i] / avg_vol
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    return vol_ratio
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi[:period] = np.nan
+    return rsi
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index - measures market choppiness vs trending
+    Formula: 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
+    CHOP > 61.8 = ranging market
+    CHOP < 38.2 = trending market
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        price_range = highest_high - lowest_low
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -177,11 +143,10 @@ def generate_signals(prices):
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    kama_10 = calculate_kama(close, period=10, fast=2, slow=30)
-    fisher, trigger = calculate_fisher(close, period=9)
-    vol_ratio = calculate_volume_ratio(volume, period=20)
+    rsi_14 = calculate_rsi(close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -196,9 +161,6 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Track Fisher crosses
-    prev_fisher = np.nan
-    
     for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
@@ -208,63 +170,58 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(kama_10[i]) or np.isnan(fisher[i]) or np.isnan(trigger[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
+        
+        # === REGIME DETECTION (Choppiness Index) ===
+        is_choppy = chop_14[i] > 55.0  # Range market
+        is_trending = chop_14[i] < 45.0  # Trend market
         
         # === HTF BIAS (1d HMA) ===
-        htf_bull = close[i] > hma_1d_aligned[i]
-        htf_bear = close[i] < hma_1d_aligned[i]
+        hma_1d_bull = close[i] > hma_1d_aligned[i]
+        hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === TREND DIRECTION (KAMA) ===
-        kama_bull = close[i] > kama_10[i]
-        kama_bear = close[i] < kama_10[i]
-        
-        # === VOLUME CONFIRMATION ===
-        volume_ok = vol_ratio[i] > 0.8  # At least 80% of avg volume
-        
-        # === FISHER TRANSFORM SIGNALS ===
-        fisher_cross_long = False
-        fisher_cross_short = False
-        
-        if not np.isnan(prev_fisher):
-            # Long: Fisher crosses above -1.5 from below
-            if prev_fisher < -1.5 and fisher[i] >= -1.5:
-                fisher_cross_long = True
-            # Short: Fisher crosses below +1.5 from above
-            if prev_fisher > 1.5 and fisher[i] <= 1.5:
-                fisher_cross_short = True
-        
-        prev_fisher = fisher[i]
-        
-        # === ENTRY LOGIC (LOOSE CONDITIONS) ===
+        # === ENTRY LOGIC (REGIME-ADAPTIVE) ===
         desired_signal = 0.0
         
-        # LONG entry: Fisher cross + KAMA bull + HTF bull + volume
-        if fisher_cross_long and kama_bull and htf_bull and volume_ok:
-            desired_signal = SIZE_STRONG
-        elif fisher_cross_long and kama_bull and htf_bull:
-            desired_signal = SIZE_BASE
-        elif fisher_cross_long and htf_bull and volume_ok:
-            desired_signal = SIZE_BASE
+        if is_choppy:
+            # MEAN REVERSION MODE - use RSI extremes
+            # Long when RSI oversold + price near/above 1d HMA
+            if rsi_14[i] < 40.0 and close[i] > hma_1d_aligned[i] * 0.92:
+                desired_signal = SIZE_BASE
+            # Short when RSI overbought + price near/below 1d HMA
+            elif rsi_14[i] > 60.0 and close[i] < hma_1d_aligned[i] * 1.08:
+                desired_signal = -SIZE_BASE
+            # Stronger signals at more extreme RSI
+            elif rsi_14[i] < 30.0 and close[i] > hma_1d_aligned[i] * 0.90:
+                desired_signal = SIZE_STRONG
+            elif rsi_14[i] > 70.0 and close[i] < hma_1d_aligned[i] * 1.10:
+                desired_signal = -SIZE_STRONG
         
-        # SHORT entry: Fisher cross + KAMA bear + HTF bear + volume
-        if fisher_cross_short and kama_bear and htf_bear and volume_ok:
-            desired_signal = -SIZE_STRONG
-        elif fisher_cross_short and kama_bear and htf_bear:
-            desired_signal = -SIZE_BASE
-        elif fisher_cross_short and htf_bear and volume_ok:
-            desired_signal = -SIZE_BASE
+        elif is_trending:
+            # TREND FOLLOWING MODE - use HMA alignment + RSI filter
+            # Long in uptrend with RSI confirmation
+            if hma_1d_bull and rsi_14[i] > 45.0 and rsi_14[i] < 75.0:
+                desired_signal = SIZE_STRONG
+            # Short in downtrend with RSI confirmation
+            elif hma_1d_bear and rsi_14[i] < 55.0 and rsi_14[i] > 25.0:
+                desired_signal = -SIZE_STRONG
+            # Weaker trend signals
+            elif hma_1d_bull and rsi_14[i] > 50.0:
+                desired_signal = SIZE_BASE
+            elif hma_1d_bear and rsi_14[i] < 50.0:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
