@@ -1,86 +1,45 @@
 #!/usr/bin/env python3
 """
-Experiment #1602: 4h Primary + 1d/1w HTF — KAMA/HMA Crossover with Dynamic RSI
+Experiment #1603: 6h Primary + 1d/1w HTF — Volume-Weighted Momentum + Adaptive Trend
 
-Hypothesis: After 1300+ failed experiments, complex regime detection (Choppiness, Fisher)
-consistently fails. Return to proven basics: KAMA (adapts to noise) + HMA (low lag) 
-crossover with RSI filter and strong 1d trend bias.
+Hypothesis: 6h timeframe sits between 4h (too noisy) and 12h (too slow). 
+Using volume-weighted momentum (VWM) instead of simple ROC captures 
+institutional flow better. Combined with KAMA adaptive trend and simple 
+HTF bias (1d HMA slope + 1w HMA position), this should generate 30-60 
+trades/year with better risk-adjusted returns than pure trend strategies.
 
-Why this should work where others failed:
-1. KAMA adapts ER (Efficiency Ratio) - smooth in chop, fast in trends
-2. HMA provides faster signal than EMA with less whipsaw
-3. Dynamic RSI thresholds (percentile-based) vs fixed 30/70
-4. 1d HMA bias prevents major counter-trend trades (critical for 2022 crash)
-5. Volatility-adjusted position sizing (reduce size when ATR spikes)
-6. Simple logic = fewer false signals = better Sharpe
+Key innovations vs failed 6h attempts:
+1. VOLUME-WEIGHTED MOMENTUM: VWM = (close - close[n]) * avg_volume_ratio
+   High volume moves get amplified signal weight
+2. KAMA EFFICIENCY RATIO: Adjusts trend sensitivity based on market noise
+   ER > 0.5 = trending (follow), ER < 0.3 = ranging (mean revert)
+3. SIMPLE HTF BIAS: 1d HMA slope direction + 1w HMA position (not complex regime)
+4. LOOSE ENTRY THRESHOLDS: VWM cross 0 + volume spike OR KAMA cross + HTF confirm
+   Must guarantee ≥30 trades/train (learned from 0-trade failures)
+5. ASYMMETRIC SIZING: 0.30 when 1w+1d align, 0.20 when only 1d confirms
 
-Key differences from failed 4h attempts:
-- NO Choppiness Index (failed in #1591, #1594, #1600)
-- NO Fisher Transform (failed in #1600)
-- NO complex regime switching (failed in #1590, #1592, #1595)
-- YES: KAMA+HMA crossover (proven in baseline strategies)
-- YES: Dynamic RSI percentiles (adapts to market conditions)
-- YES: 1d HMA strong bias (prevents 2022-style drawdowns)
+Why this should beat mtf_6h_triple_hma_kama_roc_1w1d_v1 (Sharpe=0.575):
+- Volume weighting captures institutional flow (proven edge in crypto)
+- KAMA ER adapts to regime automatically (no CHOP threshold tuning)
+- Simpler HTF logic = fewer false filters = more trades
+- 6h TF = sweet spot between 4h noise and 12h lag
 
-Entry logic (LOOSE to guarantee ≥30 trades/train):
-- LONG: 1d_HMA bullish + KAMA>HMA + RSI>45 (not fixed 50) + price>20-bar high
-- SHORT: 1d_HMA bearish + KAMA<HMA + RSI<55 (not fixed 50) + price<20-bar low
-- RSI thresholds adapt: use 40th/60th percentile of recent 100 bars
-
-Exit logic:
-- KAMA crosses below/above HMA (trend reversal)
-- Stoploss: 2.5x ATR trailing
-- Take profit: reduce to half at 2R
-
-Position sizing:
-- Base: 0.25, High vol: 0.20 (when ATR > 1.5x 50-bar avg)
-- Discrete: 0.0, ±0.20, ±0.25
+Entry logic (LOOSE to guarantee trades):
+- LONG: 1d_HMA_slope>0 + (VWM>0 crossing up OR KAMA cross above price) + vol>1.2x
+- SHORT: 1d_HMA_slope<0 + (VWM<0 crossing down OR KAMA cross below price) + vol>1.2x
+- Exit: VWM crosses opposite OR stoploss (2.5x ATR)
 
 Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 4h
+Timeframe: 6h
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_hma_rsi_dynamic_1d1w_v1"
-timeframe = "4h"
+name = "mtf_6h_vwm_kama_era_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """
-    Kaufman Adaptive Moving Average
-    Adapts smoothing based on market efficiency (trend vs noise)
-    """
-    n = len(close)
-    if n < er_period + slow_period:
-        return np.full(n, np.nan)
-    
-    kama = np.full(n, np.nan, dtype=np.float64)
-    
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        if not np.isnan(close[i]) and not np.isnan(close[i - er_period]):
-            signal = abs(close[i] - close[i - er_period])
-            noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-            if noise > 1e-10:
-                er[i] = signal / noise
-    
-    # Calculate smoothing constants
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    # Initialize KAMA
-    kama[er_period] = close[er_period]
-    
-    for i in range(er_period + 1, n):
-        if np.isnan(er[i]) or np.isnan(kama[i-1]):
-            continue
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
-    
-    return kama
 
 def calculate_hma(close, period):
     """Hull Moving Average - reduces lag while smoothing"""
@@ -111,6 +70,61 @@ def calculate_hma(close, period):
             diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
     return wma(diff, sqrt_n)
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average
+    Adjusts smoothing based on market efficiency (trend vs noise)
+    """
+    n = len(close)
+    if n < er_period + slow_period:
+        return np.full(n, np.nan)
+    
+    kama = np.full(n, np.nan, dtype=np.float64)
+    
+    # Calculate Efficiency Ratio
+    er = np.full(n, np.nan, dtype=np.float64)
+    for i in range(er_period - 1, n):
+        price_change = abs(close[i] - close[i - er_period + 1])
+        volatility = np.sum(np.abs(np.diff(close[i - er_period + 1:i + 1])))
+        if volatility > 1e-10:
+            er[i] = price_change / volatility
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[er_period - 1] = close[er_period - 1]
+    
+    for i in range(er_period, n):
+        if not np.isnan(er[i]):
+            sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama, er
+
+def calculate_vwm(close, volume, period=14):
+    """
+    Volume-Weighted Momentum
+    Momentum amplified by relative volume
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    vwm = np.full(n, np.nan, dtype=np.float64)
+    
+    # Calculate volume average
+    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    
+    for i in range(period, n):
+        if vol_avg[i] > 0 and vol_avg[i - period] > 0:
+            price_momentum = close[i] - close[i - period]
+            vol_ratio = volume[i] / vol_avg[i]
+            vwm[i] = price_momentum * vol_ratio
+    
+    return vwm
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -150,38 +164,16 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - for breakout detection"""
-    n = len(high)
+def calculate_volume_ratio(volume, period=20):
+    """Current volume vs average volume"""
+    n = len(volume)
     if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
+    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / vol_avg
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
-def calculate_rsi_percentile(rsi, lookback=100):
-    """
-    Dynamic RSI thresholds based on recent percentile
-    Returns 40th and 60th percentile of recent RSI values
-    """
-    n = len(rsi)
-    rsi_40 = np.full(n, np.nan)
-    rsi_60 = np.full(n, np.nan)
-    
-    for i in range(lookback, n):
-        recent_rsi = rsi[i - lookback:i + 1]
-        recent_rsi = recent_rsi[~np.isnan(recent_rsi)]
-        if len(recent_rsi) >= lookback // 2:
-            rsi_40[i] = np.percentile(recent_rsi, 40)
-            rsi_60[i] = np.percentile(recent_rsi, 60)
-    
-    return rsi_40, rsi_60
+    return vol_ratio
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -201,23 +193,16 @@ def generate_signals(prices):
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 4h indicators
-    kama_20 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    hma_20 = calculate_hma(close, period=20)
-    hma_48 = calculate_hma(close, period=48)
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    kama_21, er_10 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    vwm_14 = calculate_vwm(close, volume, period=14)
+    vol_ratio = calculate_volume_ratio(volume, period=20)
     rsi_14 = calculate_rsi(close, period=14)
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
-    
-    # Dynamic RSI thresholds
-    rsi_40, rsi_60 = calculate_rsi_percentile(rsi_14, lookback=100)
-    
-    # ATR average for vol adjustment
-    atr_avg_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_LOW_VOL = 0.20
+    SIZE_WEAK = 0.20
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -228,11 +213,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Track KAMA/HMA cross
-    prev_kama_hma_diff = np.nan
+    # Track VWM crossings
+    prev_vwm = np.nan
     
     # Warmup period
-    min_bars = 100
+    min_bars = 80
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -243,14 +228,7 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(kama_20[i]) or np.isnan(hma_20[i]) or np.isnan(hma_48[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        if np.isnan(rsi_14[i]) or np.isnan(donch_upper[i]):
+        if np.isnan(kama_21[i]) or np.isnan(er_10[i]) or np.isnan(vwm_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -264,56 +242,64 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1d and 1w HMA bias) ===
+        # === HTF TREND BIAS (1d HMA slope + 1w HMA position) ===
+        # Calculate 1d HMA slope (current vs 3 bars ago)
+        hma_1d_slope = 0.0
+        if i >= 3 and not np.isnan(hma_1d_aligned[i-3]):
+            hma_1d_slope = hma_1d_aligned[i] - hma_1d_aligned[i-3]
+        
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         price_above_1w = close[i] > hma_1w_aligned[i]
         price_below_1w = close[i] < hma_1w_aligned[i]
         
-        # === KAMA/HMA CROSSOVER SIGNAL ===
-        kama_hma_diff = kama_20[i] - hma_20[i]
-        kama_hma_cross_bull = prev_kama_hma_diff is not np.nan and prev_kama_hma_diff <= 0 and kama_hma_diff > 0
-        kama_hma_cross_bear = prev_kama_hma_diff is not np.nan and prev_kama_hma_diff >= 0 and kama_hma_diff < 0
+        # === VOLUME-WEIGHTED MOMENTUM SIGNALS ===
+        vwm_val = vwm_14[i]
+        vwm_prev = prev_vwm if not np.isnan(prev_vwm) else vwm_val
         
-        # Current trend state
-        kama_above_hma = kama_hma_diff > 0
-        kama_below_hma = kama_hma_diff < 0
+        vwm_bull_cross = vwm_val > 0 and vwm_prev <= 0
+        vwm_bear_cross = vwm_val < 0 and vwm_prev >= 0
         
-        # === DYNAMIC RSI THRESHOLDS ===
-        rsi_threshold_long = rsi_40[i] if not np.isnan(rsi_40[i]) else 45.0
-        rsi_threshold_short = rsi_60[i] if not np.isnan(rsi_60[i]) else 55.0
+        # === KAMA ADAPTIVE TREND ===
+        kama_val = kama_21[i]
+        er_val = er_10[i]
         
-        rsi_bullish = rsi_14[i] > rsi_threshold_long
-        rsi_bearish = rsi_14[i] < rsi_threshold_short
+        kama_above_price = kama_val > close[i]
+        kama_below_price = kama_val < close[i]
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = close[i] > donch_upper[i-1] if i > 0 and not np.isnan(donch_upper[i-1]) else False
-        donchian_breakout_short = close[i] < donch_lower[i-1] if i > 0 and not np.isnan(donch_lower[i-1]) else False
+        # Efficiency Ratio regime
+        is_trending = er_val > 0.5
+        is_ranging = er_val < 0.3
         
-        # === VOLATILITY ADJUSTMENT ===
-        vol_adjust = 1.0
-        if not np.isnan(atr_avg_50[i]) and atr_avg_50[i] > 1e-10:
-            if atr_14[i] > 1.5 * atr_avg_50[i]:
-                vol_adjust = 0.8  # Reduce size in high vol
+        # === VOLUME CONFIRMATION ===
+        vol_confirmed = vol_ratio[i] > 1.2 if not np.isnan(vol_ratio[i]) else False
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + KAMA>HMA + RSI bullish + breakout OR cross
-        if price_above_1d and kama_above_hma and rsi_bullish:
-            if donchian_breakout_long or kama_hma_cross_bull:
-                desired_signal = SIZE_BASE * vol_adjust
+        # LONG entries
+        if price_above_1d:  # 1d bias bullish
+            # Strong signal: 1w confirms + VWM cross + volume
+            if price_above_1w and vwm_bull_cross and vol_confirmed:
+                desired_signal = SIZE_STRONG
+            # Medium signal: VWM cross OR KAMA cross + volume
+            elif (vwm_bull_cross or (kama_below_price and close[i] > kama_val)) and vol_confirmed:
+                desired_signal = SIZE_WEAK
+            # Weak signal: VWM positive + 1d bullish (catch trends early)
+            elif vwm_val > 0 and price_above_1d:
+                desired_signal = SIZE_WEAK * 0.5
         
-        # SHORT: 1d bearish + KAMA<HMA + RSI bearish + breakout OR cross
-        elif price_below_1d and kama_below_hma and rsi_bearish:
-            if donchian_breakout_short or kama_hma_cross_bear:
-                desired_signal = -SIZE_BASE * vol_adjust
-        
-        # Additional: 1w confirmation for stronger signals
-        if price_above_1w and desired_signal > 0:
-            desired_signal = min(desired_signal * 1.1, SIZE_BASE)
-        elif price_below_1w and desired_signal < 0:
-            desired_signal = max(desired_signal * 1.1, -SIZE_BASE)
+        # SHORT entries
+        elif price_below_1d:  # 1d bias bearish
+            # Strong signal: 1w confirms + VWM cross + volume
+            if price_below_1w and vwm_bear_cross and vol_confirmed:
+                desired_signal = -SIZE_STRONG
+            # Medium signal: VWM cross OR KAMA cross + volume
+            elif (vwm_bear_cross or (kama_above_price and close[i] < kama_val)) and vol_confirmed:
+                desired_signal = -SIZE_WEAK
+            # Weak signal: VWM negative + 1d bearish
+            elif vwm_val < 0 and price_below_1d:
+                desired_signal = -SIZE_WEAK * 0.5
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -335,19 +321,25 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT ON TREND REVERSAL ===
-        if in_position and position_side > 0 and kama_below_hma:
+        # === EXIT SIGNALS (VWM reversal) ===
+        if in_position and position_side > 0 and vwm_bear_cross:
             desired_signal = 0.0
-        if in_position and position_side < 0 and kama_above_hma:
+        if in_position and position_side < 0 and vwm_bull_cross:
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_BASE * 0.9:
-            final_signal = SIZE_BASE
-        elif desired_signal <= -SIZE_BASE * 0.9:
-            final_signal = -SIZE_BASE
-        elif abs(desired_signal) >= SIZE_LOW_VOL * 0.9:
-            final_signal = np.sign(desired_signal) * SIZE_LOW_VOL
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_WEAK * 0.9:
+            final_signal = SIZE_WEAK
+        elif desired_signal <= -SIZE_WEAK * 0.9:
+            final_signal = -SIZE_WEAK
+        elif desired_signal >= SIZE_WEAK * 0.4:
+            final_signal = SIZE_WEAK * 0.5
+        elif desired_signal <= -SIZE_WEAK * 0.4:
+            final_signal = -SIZE_WEAK * 0.5
         else:
             final_signal = 0.0
         
@@ -375,6 +367,6 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = final_signal
-        prev_kama_hma_diff = kama_hma_diff
+        prev_vwm = vwm_val
     
     return signals
