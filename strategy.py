@@ -1,78 +1,95 @@
 #!/usr/bin/env python3
 """
-Experiment #1441: 15m Primary + 1h/4h HTF — Triple Timeframe Trend Pullback
+Experiment #1442: 4h Primary + 1d HTF — KAMA Adaptive Trend + ROC Momentum + Volume
 
-Hypothesis: 15m has ZERO successful experiments because entry conditions were TOO STRICT.
-This strategy uses LOOSE filters to guarantee trades while maintaining quality:
+Hypothesis: Based on #1431 success (6h KAMA+ROC+volume, Sharpe=0.381), this adapts
+the winning formula to 4h timeframe with 1d trend filter. Key insights:
+1. KAMA adapts to volatility better than HMA/EMA in crypto's choppy markets
+2. ROC momentum confirms trend direction (worked in #1431)
+3. Volume spike filter adds conviction (avoids false breakouts)
+4. 1d KAMA filter prevents counter-trend trades in major moves
+5. LOOSE entry conditions to guarantee 30+ trades (learned from 0-trade failures)
 
-1. 4h HMA(21) for major trend bias (price vs HMA, simple and effective)
-2. 1h RSI(14) for momentum (RSI > 45 long, < 55 short - very loose)
-3. 15m EMA(8) vs EMA(21) for entry timing (crossover signals)
-4. Session filter: 00-12 UTC only (London+NY overlap, reduces trade count)
-5. ATR(14) trailing stoploss at 2.5x (signal→0 when stopped)
-6. Discrete sizing: 0.0, ±0.15, ±0.20 (15m needs smaller size due to frequency)
-
-Why this should work where other 15m strategies failed:
-- LOOSE RSI thresholds (45/55 vs 30/70) = more trades
-- Only 3 filters max (HTF trend + momentum + entry) = less conflict
-- Session filter controls trade frequency (target 50-80 trades/year)
-- Smaller position size (0.15-0.20) = lower drawdown on 15m volatility
-- Simple EMA crossover on 15m = frequent but HTF-filtered signals
+Why this should beat current best (Sharpe=0.575):
+- 4h TF = more signals than 6h while maintaining fee efficiency
+- Volume confirmation reduces whipsaw entries
+- KAMA efficiency ratio adapts to regime changes automatically
+- Simple logic = fewer conditions that can all fail simultaneously
 
 Entry logic (LOOSE to guarantee trades):
-- LONG: 4h_price > 4h_HMA + 1h_RSI > 45 + 15m_EMA8 > EMA21 + UTC 00-12
-- SHORT: 4h_price < 4h_HMA + 1h_RSI < 55 + 15m_EMA8 < EMA21 + UTC 00-12
+- LONG: 1d_KAMA bullish + 4h_KAMA rising + ROC(10) > -5 + volume > 0.8*avg
+- SHORT: 1d_KAMA bearish + 4h_KAMA falling + ROC(10) < 5 + volume > 0.8*avg
 
-Target: Sharpe>0.6, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 15m
-Size: 0.15-0.20 discrete (smaller for 15m frequency)
+Target: Sharpe>0.6, trades>=40 train, trades>=5 test, DD>-30%
+Timeframe: 4h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_triple_tf_hma_rsi_ema_session_v1"
-timeframe = "15m"
+name = "mtf_4h_kama_roc_volume_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average - reduces lag while smoothing"""
+def calculate_kama(close, period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average (KAMA)
+    Adapts smoothing based on market efficiency (trend vs noise)
+    From Perry Kaufman's "Trading Systems and Methods"
+    """
     n = len(close)
-    if n < period:
+    if n < period + slow_period:
         return np.full(n, np.nan)
     
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
+    kama = np.full(n, np.nan, dtype=np.float64)
     
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
+    # Change = absolute price change over period
+    change = np.abs(close[period:] - close[:-period])
     
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
+    # Sum of individual changes (volatility/noise)
+    sum_changes = np.zeros(len(change))
+    for i in range(len(change)):
+        sum_changes[i] = np.sum(np.abs(np.diff(close[i:i+period+1])))
     
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+    # Efficiency Ratio (ER) = change / noise (0 to 1)
+    er = np.zeros(len(change))
+    mask = sum_changes != 0
+    er[mask] = change[mask] / sum_changes[mask]
+    er = np.clip(er, 0, 1)
     
-    return wma(diff, sqrt_n)
+    # Smoothing constants
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Adaptive smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Initialize KAMA
+    kama[period - 1] = close[period - 1]
+    
+    # Calculate KAMA
+    for i in range(period, n):
+        idx = i - period
+        if idx < len(sc):
+            kama[i] = kama[i-1] + sc[idx] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    return kama
 
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
+def calculate_roc(close, period=10):
+    """Rate of Change - momentum indicator"""
     n = len(close)
-    if n < period:
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
+    roc = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if close[i - period] != 0:
+            roc[i] = 100.0 * (close[i] - close[i - period]) / close[i - period]
+    
+    return roc
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -88,56 +105,44 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
+def calculate_volume_sma(volume, period=20):
+    """Simple moving average of volume"""
+    n = len(volume)
+    if n < period:
         return np.full(n, np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    gain = np.insert(gain, 0, 0)
-    loss = np.insert(loss, 0, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.full(n, np.nan, dtype=np.float64)
-    mask = avg_loss != 0
-    rs = np.zeros(n)
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    
-    return rsi
+    vol_sma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_sma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
-    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    kama_1d_raw = calculate_kama(df_1d['close'].values, period=10)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
     
-    rsi_1h_raw = calculate_rsi(df_1h['close'].values, period=14)
-    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
-    
-    # Calculate 15m indicators
-    ema_8 = calculate_ema(close, period=8)
-    ema_21 = calculate_ema(close, period=21)
+    # Calculate 4h indicators
+    kama_4h = calculate_kama(close, period=10)
+    roc_10 = calculate_roc(close, period=10)
     atr_14 = calculate_atr(high, low, close, period=14)
+    vol_sma_20 = calculate_volume_sma(volume, period=20)
+    
+    # KAMA slope (direction)
+    kama_slope_4h = np.zeros(n)
+    for i in range(1, n):
+        if not np.isnan(kama_4h[i]) and not np.isnan(kama_4h[i-1]):
+            kama_slope_4h[i] = kama_4h[i] - kama_4h[i-1]
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -160,49 +165,62 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(ema_8[i]) or np.isnan(ema_21[i]):
+        if np.isnan(kama_4h[i]) or np.isnan(kama_slope_4h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(rsi_1h_aligned[i]):
+        if np.isnan(roc_10[i]) or np.isnan(vol_sma_20[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC only) ===
-        # open_time is in milliseconds
-        hour_utc = (open_time[i] // (1000 * 60 * 60)) % 24
-        in_session = 0 <= hour_utc <= 12
+        if np.isnan(kama_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === TREND DIRECTION (4h HMA bias) ===
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
+        # === TREND DIRECTION (1d KAMA bias) ===
+        price_above_1d = close[i] > kama_1d_aligned[i]
+        price_below_1d = close[i] < kama_1d_aligned[i]
         
-        # === MOMENTUM (1h RSI - LOOSE thresholds) ===
-        rsi_1h = rsi_1h_aligned[i]
-        rsi_bullish = rsi_1h > 45  # Very loose (not 50)
-        rsi_bearish = rsi_1h < 55  # Very loose (not 50)
+        # === 4h KAMA MOMENTUM (adaptive trend) ===
+        kama_rising = kama_slope_4h[i] > 0
+        kama_falling = kama_slope_4h[i] < 0
         
-        # === ENTRY TIMING (15m EMA crossover) ===
-        ema_bullish = ema_8[i] > ema_21[i]
-        ema_bearish = ema_8[i] < ema_21[i]
+        # === ROC MOMENTUM (LOOSE threshold) ===
+        roc = roc_10[i]
+        roc_positive = roc > -5.0  # Very loose - allows slight pullbacks
+        roc_negative = roc < 5.0   # Very loose - allows slight bounces
+        
+        # === VOLUME CONFIRMATION (LOOSE) ===
+        vol_ratio = volume[i] / vol_sma_20[i] if vol_sma_20[i] > 0 else 0
+        vol_confirmed = vol_ratio > 0.8  # Very loose - just not extremely low
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        if in_session:
-            # LONG: 4h bullish + 1h RSI > 45 + 15m EMA bullish
-            if price_above_4h and rsi_bullish and ema_bullish:
+        # LONG: 1d bullish + 4h KAMA rising + ROC not too negative + volume OK
+        if price_above_1d and kama_rising and roc_positive and vol_confirmed:
+            # Strong if ROC also positive
+            if roc > 0:
                 desired_signal = SIZE_STRONG
-            
-            # SHORT: 4h bearish + 1h RSI < 55 + 15m EMA bearish
-            elif price_below_4h and rsi_bearish and ema_bearish:
+            else:
+                desired_signal = SIZE_BASE
+        
+        # SHORT: 1d bearish + 4h KAMA falling + ROC not too positive + volume OK
+        elif price_below_1d and kama_falling and roc_negative and vol_confirmed:
+            # Strong if ROC also negative
+            if roc < 0:
                 desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
