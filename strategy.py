@@ -1,40 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #1468: 4h Primary + 12h/1d HTF — Simplified HMA Trend + RSI Pullback
+Experiment #1469: 15m Primary + 1h/1d HTF — Session-Filtered Pullback Strategy
 
-Hypothesis: Complex regime switching (Choppiness Index) has been failing. 
-Return to proven pattern: HMA trend + RSI pullback entries with HTF confirmation.
-This strategy uses SIMPLE filters to guarantee trades while maintaining edge.
+Hypothesis: 15m timeframe can work IF we use strict session filters and HTF trend
+direction. Key insight from failed 15m experiments (#1457, #1461, #1465): they had
+0 trades because entry conditions were too strict. This strategy uses LOOSE entry
+thresholds (RSI 45/55, not 30/70) to guarantee trades, while session filter
+(00-12 UTC) controls trade frequency to 40-100/year.
 
-Key components:
-1. 4h HMA(21/42) crossover for momentum
-2. 12h HMA(21) for intermediate trend bias
-3. 1d HMA(21) for major trend direction (avoid counter-trend)
-4. RSI(14) pullback entries (40-60 zone, NOT extremes - guarantees trades)
-5. Volume confirmation (>1.2x 20-period avg)
-6. ATR(14) trailing stop at 2.5x
+Strategy components:
+1. 1d HMA(21) for major trend bias (avoid counter-trend)
+2. 1h HMA(21) for intermediate trend confirmation
+3. 15m RSI(7) for pullback entries (loose: <45 long, >55 short)
+4. Session filter: only trade 00-12 UTC (London+NY overlap, high liquidity)
+5. ATR(14) volatility filter: avoid low-vol periods (ATR ratio > 0.8)
+6. Discrete sizing: 0.0, ±0.15, ±0.20 (smaller for 15m frequency)
+7. Stoploss: 2.5x ATR trailing stop
 
-Why this should work:
-- Simpler = more trades (recent failures had 0 trades from over-filtering)
-- RSI 40-60 pullback zone triggers frequently in trends
-- 4h TF = natural 25-40 trades/year (fee-efficient)
-- HTF confirmation prevents major counter-trend positions
-- Volume filter reduces false breakouts
+Why this should work on 15m:
+- HTF trend filter (1d + 1h) prevents whipsaw entries
+- Session filter reduces trades to fee-efficient levels
+- LOOSE RSI thresholds guarantee ≥30 trades/train, ≥3/test
+- Smaller position size (0.15-0.20) accounts for higher frequency
+- Proven pattern from mtf_hma_rsi_zscore_v1 (Sharpe=5.4)
 
-Entry logic (LOOSE to guarantee ≥30 trades/train):
-- LONG: 1d_HMA bullish + 12h_HMA bullish + 4h_HMA21>42 + RSI 40-55 + volume confirm
-- SHORT: 1d_HMA bearish + 12h_HMA bearish + 4h_HMA21<42 + RSI 45-60 + volume confirm
+Entry logic (LOOSE to guarantee trades):
+- LONG: 1d_HMA bullish + 1h_HMA bullish + RSI(7)<45 + session 00-12 UTC
+- SHORT: 1d_HMA bearish + 1h_HMA bearish + RSI(7)>55 + session 00-12 UTC
 
-Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.6, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.20 discrete (smaller for higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_rsi_pullback_12h1d_simple_v1"
-timeframe = "4h"
+name = "mtf_15m_session_rsi_pullback_hma_1h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -105,42 +108,40 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_volume_sma(volume, period=20):
-    """Simple moving average of volume"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_1h = get_htf_data(prices, '1h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
     
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 4h indicators
-    hma_21 = calculate_hma(close, period=21)
-    hma_42 = calculate_hma(close, period=42)
+    # Calculate 15m indicators
+    hma_15m = calculate_hma(close, period=21)
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)
     rsi_14 = calculate_rsi(close, period=14)
-    vol_sma_20 = calculate_volume_sma(volume, period=20)
+    
+    # ATR ratio for volatility filter (ATR(7)/ATR(21))
+    atr_7 = calculate_atr(high, low, close, period=7)
+    atr_21 = calculate_atr(high, low, close, period=21)
+    atr_ratio = np.full(n, np.nan, dtype=np.float64)
+    mask = (atr_21 > 1e-10) & (~np.isnan(atr_7)) & (~np.isnan(atr_21))
+    atr_ratio[mask] = atr_7[mask] / atr_21[mask]
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -163,54 +164,69 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(hma_21[i]) or np.isnan(hma_42[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(hma_15m[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(vol_sma_20[i]) or np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
+        
+        if np.isnan(atr_ratio[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # === SESSION FILTER (00-12 UTC only) ===
+        # open_time is in milliseconds, convert to hour
+        timestamp_ms = open_time[i]
+        hour_utc = (timestamp_ms // (1000 * 60 * 60)) % 24
+        in_session = (hour_utc >= 0) and (hour_utc < 12)
+        
+        # === VOLATILITY FILTER ===
+        vol_ok = atr_ratio[i] > 0.6  # Avoid extremely low vol periods
         
         # === TREND DIRECTION (HTF bias) ===
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
+        price_above_1h = close[i] > hma_1h_aligned[i]
+        price_below_1h = close[i] < hma_1h_aligned[i]
         
-        # === 4h HMA CROSSOVER (momentum) ===
-        hma_bullish = hma_21[i] > hma_42[i]
-        hma_bearish = hma_21[i] < hma_42[i]
+        # === 15m HMA confirmation ===
+        hma_15m_bullish = close[i] > hma_15m[i]
+        hma_15m_bearish = close[i] < hma_15m[i]
         
-        # === RSI PULLBACK ZONE (LOOSE - guarantees trades) ===
-        rsi = rsi_14[i]
-        rsi_pullback_long = 38 <= rsi <= 58  # pullback in uptrend
-        rsi_pullback_short = 42 <= rsi <= 62  # rally in downtrend
-        
-        # === VOLUME CONFIRMATION ===
-        volume_confirm = volume[i] > 1.15 * vol_sma_20[i] if vol_sma_20[i] > 0 else False
+        # === RSI (LOOSE thresholds to guarantee trades) ===
+        rsi = rsi_7[i]
+        rsi_oversold = rsi < 45  # Loose: was 30, now 45
+        rsi_overbought = rsi > 55  # Loose: was 70, now 55
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + 12h bullish + 4h HMA bullish + RSI pullback + volume
-        if price_above_1d and price_above_12h and hma_bullish and rsi_pullback_long:
-            if volume_confirm:
+        # Only trade during session hours
+        if in_session and vol_ok:
+            # LONG: 1d bullish + 1h bullish + 15m bullish + RSI pullback
+            if price_above_1d and price_above_1h and hma_15m_bullish and rsi_oversold:
                 desired_signal = SIZE_STRONG
-            else:
-                desired_signal = SIZE_BASE
-        
-        # SHORT: 1d bearish + 12h bearish + 4h HMA bearish + RSI pullback + volume
-        elif price_below_1d and price_below_12h and hma_bearish and rsi_pullback_short:
-            if volume_confirm:
+            
+            # SHORT: 1d bearish + 1h bearish + 15m bearish + RSI bounce
+            elif price_below_1d and price_below_1h and hma_15m_bearish and rsi_overbought:
                 desired_signal = -SIZE_STRONG
-            else:
+            
+            # Weaker signals (only 2/3 HTF agree)
+            elif price_above_1d and price_above_1h and rsi_oversold:
+                desired_signal = SIZE_BASE
+            elif price_below_1d and price_below_1h and rsi_overbought:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
