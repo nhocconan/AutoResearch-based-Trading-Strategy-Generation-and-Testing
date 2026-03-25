@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1187: 6h Primary + 1d HTF — Keltner Channel Mean Reversion + HMA Trend
+Experiment #1188: 4h Primary + 12h/1d HTF — Donchian Breakout + HMA Trend + RSI Momentum
 
-Hypothesis: After 960+ failed experiments, the 6h timeframe is underexplored. Most failed
-6h strategies used complex regime filters or weekly pivots that generated 0 trades.
+Hypothesis: After analyzing 960+ failures, the key insight is:
+1. Lower TF (15m/30m) generates 0 trades due to over-filtering
+2. 4h timeframe naturally produces 20-50 trades/year (fee-optimal)
+3. Donchian breakouts work well on SOL (Sharpe +0.782 in prior tests)
+4. HMA trend filter prevents counter-trend breakouts (major loss source)
+5. RSI momentum filter adds confirmation without being too restrictive
 
-This strategy uses Keltner Channels (EMA + ATR bands) for mean reversion entries:
-- Keltner works well in ranging/bear markets (2025 test period)
-- 1d HMA(21) provides simple trend bias without over-filtering
-- Entry when price touches Keltner band + RSI extreme in trend direction
-- Exit at Keltner middle (EMA) or 2.5x ATR stoploss
+Strategy Logic:
+- 12h HMA(21) = primary trend direction (price above = bullish bias)
+- 1d HMA(21) = stronger confirmation (optional boost to position size)
+- 4h Donchian(20) breakout = entry trigger (20-bar high/low)
+- 4h RSI(14) > 45 for longs, < 55 for shorts = momentum confirmation
+- ATR(14) 2.5x trailing stop = risk management
 
-Why this should work on 6h:
-- 6h = natural 30-60 trades/year (fee-friendly, not too many)
-- Keltner mean reversion captures multi-day swings in crypto
-- 1d trend filter avoids counter-trend trades in strong trends
-- Different from all failed 6h strategies (no weekly pivots, no Donchian, no Fisher)
-
-Entry logic:
-- LONG: price > 1d_HMA + price touches Keltner lower band + RSI(14) < 40
-- SHORT: price < 1d_HMA + price touches Keltner upper band + RSI(14) > 60
-- Exit: price crosses Keltner middle (EMA20) or stoploss hit
+Why this should beat current best (Sharpe=0.445):
+- Donchian breakouts capture momentum moves (proven on SOL)
+- HMA trend filter prevents whipsaw entries in chop
+- RSI 45/55 threshold is LOOSE (guarantees trades, not extremes like 30/70)
+- 4h TF = natural trade frequency without fee drag
+- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
 
 Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
+Timeframe: 4h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_keltner_meanreversion_hma_trend_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_hma_rsi_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -96,14 +97,20 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    n = len(close)
+def calculate_donchian_channels(high, low, period=20):
+    """Donchian Channels - highest high and lowest low over period"""
+    n = len(high)
     if n < period:
-        return np.full(n, np.nan)
+        return np.full(n, np.nan), np.full(n, np.nan)
     
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i - period + 1:i + 1])
+        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -112,22 +119,20 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    ema_20 = calculate_ema(close, period=20)
-    
-    # Keltner Channels: EMA(20) +/- 2.0*ATR(14)
-    keltner_mult = 2.0
-    keltner_upper = ema_20 + keltner_mult * atr_14
-    keltner_lower = ema_20 - keltner_mult * atr_14
-    keltner_middle = ema_20
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, period=20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -154,55 +159,66 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(ema_20[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (Daily HMA) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        if np.isnan(hma_12h_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === KELTNER CHANNEL POSITION ===
-        price_near_lower = low[i] <= keltner_lower[i] * 1.002  # touched or crossed lower band
-        price_near_upper = high[i] >= keltner_upper[i] * 0.998  # touched or crossed upper band
-        price_at_middle = abs(close[i] - keltner_middle[i]) < keltner_middle[i] * 0.005  # near EMA
+        # === TREND DIRECTION (12h HMA) ===
+        price_above_12h = close[i] > hma_12h_aligned[i]
+        price_below_12h = close[i] < hma_12h_aligned[i]
         
-        # === ENTRY LOGIC (Mean Reversion in Trend Direction) ===
-        desired_signal = 0.0
+        # 1d HMA for additional confirmation (boosts position size)
+        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
+        price_above_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
+        price_below_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
+        
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Long breakout: price crosses above Donchian upper
+        # Short breakout: price crosses below Donchian lower
+        prev_upper = donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else donchian_upper[i]
+        prev_lower = donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else donchian_lower[i]
+        
+        long_breakout = close[i] > prev_upper
+        short_breakout = close[i] < prev_lower
+        
+        # === RSI MOMENTUM FILTER (LOOSE - guarantees trades) ===
         rsi = rsi_14[i]
+        rsi_bullish = rsi > 45.0  # Not too strict (was 50+)
+        rsi_bearish = rsi < 55.0  # Not too strict (was 50-)
         
-        # LONG: Price above 1d HMA (uptrend) + price touches Keltner lower + RSI oversold
-        if price_above_1d:
-            if price_near_lower and rsi < 40.0:
-                desired_signal = SIZE_BASE
-            elif price_near_lower and rsi < 30.0:
-                desired_signal = SIZE_STRONG  # Stronger oversold
+        # === ENTRY LOGIC ===
+        desired_signal = 0.0
         
-        # SHORT: Price below 1d HMA (downtrend) + price touches Keltner upper + RSI overbought
-        elif price_below_1d:
-            if price_near_upper and rsi > 60.0:
-                desired_signal = -SIZE_BASE
-            elif price_near_upper and rsi > 70.0:
-                desired_signal = -SIZE_STRONG  # Stronger overbought
+        # LONG: Donchian breakout + price above 12h HMA + RSI bullish
+        if long_breakout and price_above_12h and rsi_bullish:
+            if price_above_1d:
+                desired_signal = SIZE_STRONG  # Strong trend alignment (12h + 1d)
+            else:
+                desired_signal = SIZE_BASE  # Basic uptrend breakout
         
-        # === EXIT LOGIC (Mean Reversion to Middle) ===
-        if in_position:
-            if position_side > 0 and price_at_middle:
-                # Long position: exit when price returns to Keltner middle
-                desired_signal = 0.0
-            elif position_side < 0 and price_at_middle:
-                # Short position: exit when price returns to Keltner middle
-                desired_signal = 0.0
+        # SHORT: Donchian breakout + price below 12h HMA + RSI bearish
+        elif short_breakout and price_below_12h and rsi_bearish:
+            if price_below_1d:
+                desired_signal = -SIZE_STRONG  # Strong trend alignment (12h + 1d)
+            else:
+                desired_signal = -SIZE_BASE  # Basic downtrend breakout
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
