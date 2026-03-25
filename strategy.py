@@ -1,43 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #1175: 6h Primary + 12h/1d HTF — Donchian Breakout + ADX Trend Filter
+Experiment #1176: 30m Primary + 4h/1d HTF — Trend Pullback with Regime Filter
 
-Hypothesis: After analyzing 970+ failed strategies, the winning pattern is SIMPLE trend-following
-with momentum confirmation. Mean reversion (CRSI, Choppiness) consistently fails on BTC/ETH.
+Hypothesis: 30m timeframe needs VERY selective entries to avoid fee drag (>80 trades/year = failure).
+Key insight from failures: lower TF strategies fail from too many trades, not too few signals.
 
-This strategy uses:
-1. Donchian Channel(20) breakout for entry timing - captures momentum moves
-2. 12h HMA(21) for trend direction filter - only trade with HTF trend
-3. ADX(14) > 20 filter - ensures we're trading in trending markets, not chop
-4. 1d HMA(21) for position sizing - stronger trend = larger position
-5. ATR(14) 2.5x trailing stop - protects gains and limits drawdown
+Strategy design:
+1. 4h HMA(21) for primary trend direction (proven in #1167 Sharpe=0.445)
+2. 1d HMA(21) for higher timeframe confirmation (adds confluence)
+3. 30m RSI(14) pullback entries in trend direction (wider range 30-70 to guarantee trades)
+4. Choppiness Index(14) < 50 filter (only trade in trending regime, avoid range whipsaw)
+5. Session filter: 08-20 UTC only (high volume hours, avoid Asian dead zone)
+6. ATR volatility filter: ATR(14) > 20th percentile (avoid dead markets)
+7. Size: 0.20-0.25 discrete (conservative for 30m fee sensitivity)
+8. Stoploss: 2.5x ATR trailing (signal → 0 when hit)
 
-Why 6h Donchian might work:
-- 6h is the "goldilocks" timeframe: slower than 4h (less noise), faster than 12h (more trades)
-- Donchian(20) = ~5 days of data on 6h - captures multi-day momentum moves
-- ADX filter prevents the #1 killer: trading in choppy/range markets
-- Target: 30-50 trades/year (fee-friendly, avoids 0-trade failure)
-
-Entry Logic:
-- LONG: Price > 12h_HMA AND Donchian(20) high break AND ADX(14) > 20
-- SHORT: Price < 12h_HMA AND Donchian(20) low break AND ADX(14) > 20
-- Strong signal: Also aligned with 1d_HMA (SIZE_STRONG = 0.30)
-- Base signal: Only 12h_HMA alignment (SIZE_BASE = 0.25)
-
-Exit Logic:
-- Trailing stop: 2.5x ATR from highest/lowest since entry
-- Signal flip: When price crosses back through 12h_HMA
-
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Target: 40-80 trades/year, Sharpe>0.45, DD>-35%
+Timeframe: 30m
+Size: 0.20-0.25 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_adx_trend_12h1d_v1"
-timeframe = "6h"
+name = "mtf_30m_hma_trend_rsi_chop_session_4h1d_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -84,98 +71,90 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - measures trend strength"""
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
-    if n < period * 2 + 1:
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
-    
-    smooth_period = period * 2
-    for i in range(smooth_period - 1, n):
-        if i == smooth_period - 1:
-            plus_tr = np.sum(tr[1:smooth_period])
-            plus_dm_sum = np.sum(plus_dm[1:smooth_period])
-            minus_dm_sum = np.sum(minus_dm[1:smooth_period])
-        else:
-            plus_tr = pd.Series(tr[:i+1]).ewm(span=smooth_period, min_periods=smooth_period, adjust=False).mean().iloc[-1] * smooth_period
-            plus_dm_sum = pd.Series(plus_dm[:i+1]).ewm(span=smooth_period, min_periods=smooth_period, adjust=False).mean().iloc[-1] * smooth_period
-            minus_dm_sum = pd.Series(minus_dm[:i+1]).ewm(span=smooth_period, min_periods=smooth_period, adjust=False).mean().iloc[-1] * smooth_period
-        
-        if plus_tr > 0:
-            plus_di[i] = 100.0 * plus_dm_sum / plus_tr
-        if plus_tr > 0:
-            minus_di[i] = 100.0 * minus_dm_sum / plus_tr
-    
-    dx = np.zeros(n, dtype=np.float64)
-    for i in range(smooth_period - 1, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    adx[:smooth_period + period - 1] = np.nan
-    return adx
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss != 0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi[:period] = np.nan
+    return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP) - measures market choppiness vs trending
+    Formula: 100 * (SUM(ATR, period) / (Highest High - Lowest Low)) / (log10(period))
+    CHOP > 61.8 = choppy/range, CHOP < 38.2 = trending
+    We use < 50 as trending filter (more lenient to ensure trades)
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
+    atr = calculate_atr(high, low, close, period)
     
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+    chop = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if np.isnan(atr[i]):
+            continue
+        
+        atr_sum = np.nansum(atr[i - period + 1:i + 1])
+        highest_high = np.nanmax(high[i - period + 1:i + 1])
+        lowest_low = np.nanmin(low[i - period + 1:i + 1])
+        
+        price_range = highest_high - lowest_low
+        if price_range > 1e-10:
+            chop[i] = 100.0 * (atr_sum / price_range) / np.log10(period)
     
-    return upper, lower
+    return chop
+
+def extract_hour(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds, convert to seconds then to datetime
+    return pd.to_datetime(open_time, unit='ms').hour
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    rsi_14 = calculate_rsi(close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
+    
+    # Calculate ATR percentile for volatility filter (20th percentile threshold)
+    atr_valid = atr_14[~np.isnan(atr_14)]
+    if len(atr_valid) > 0:
+        atr_threshold = np.percentile(atr_valid, 20)
+    else:
+        atr_threshold = 0.0
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -185,10 +164,6 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    
-    # Track Donchian breaks
-    prev_upper = np.nan
-    prev_lower = np.nan
     
     # Warmup period
     min_bars = 100
@@ -202,71 +177,78 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(adx_14[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_12h_aligned[i]):
+        if np.isnan(chop_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (12h HMA) ===
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
+        # === SESSION FILTER (08-20 UTC only) ===
+        hour = extract_hour(open_time[i])
+        in_session = 8 <= hour <= 20
         
-        # 1d HMA for additional confirmation (position sizing)
-        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
-        price_above_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
-        price_below_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
+        if not in_session:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === TREND STRENGTH (ADX) ===
-        adx = adx_14[i]
-        is_trending = adx > 20.0  # ADX > 20 = trending market
+        # === VOLATILITY FILTER (ATR > 20th percentile) ===
+        if atr_14[i] < atr_threshold:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        upper_break = False
-        lower_break = False
+        # === CHOPPINESS REGIME FILTER (CHOP < 50 = trending) ===
+        if chop_14[i] >= 50.0:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        if not np.isnan(prev_upper) and not np.isnan(prev_lower):
-            # Break above previous Donchian high
-            if high[i] > prev_upper and close[i] > prev_upper:
-                upper_break = True
-            # Break below previous Donchian low
-            if low[i] < prev_lower and close[i] < prev_lower:
-                lower_break = True
+        # === TREND DIRECTION (4h + 1d HMA) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        prev_upper = donchian_upper[i]
-        prev_lower = donchian_lower[i]
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (30m RSI pullback in trend direction) ===
         desired_signal = 0.0
+        rsi = rsi_14[i]
         
-        # LONG: 12h trend up + Donchian breakout + ADX confirms trend
-        if price_above_12h and upper_break and is_trending:
-            if price_above_1d:
-                desired_signal = SIZE_STRONG  # Strong trend alignment (12h + 1d)
-            else:
-                desired_signal = SIZE_BASE  # Basic uptrend breakout
+        # LONG: Price above 4h HMA + 1d HMA confirmation + RSI pullback (30-70)
+        if price_above_4h and price_above_1d:
+            if 30.0 <= rsi <= 70.0:
+                desired_signal = SIZE_STRONG  # Strong trend alignment
+            elif 25.0 <= rsi < 30.0:
+                desired_signal = SIZE_BASE  # Deeper pullback
         
-        # SHORT: 12h trend down + Donchian breakout + ADX confirms trend
-        elif price_below_12h and lower_break and is_trending:
-            if price_below_1d:
-                desired_signal = -SIZE_STRONG  # Strong trend alignment (12h + 1d)
-            else:
-                desired_signal = -SIZE_BASE  # Basic downtrend breakout
+        # SHORT: Price below 4h HMA + 1d HMA confirmation + RSI pullback (30-70)
+        elif price_below_4h and price_below_1d:
+            if 30.0 <= rsi <= 70.0:
+                desired_signal = -SIZE_STRONG  # Strong trend alignment
+            elif 70.0 < rsi <= 75.0:
+                desired_signal = -SIZE_BASE  # Deeper pullback
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
