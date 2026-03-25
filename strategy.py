@@ -1,40 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #1127: 6h Primary + 1d HTF — HMA Trend Bias + RSI Mean Reversion + Volume Confirmation
+Experiment #1128: 4h Primary + 12h/1d HTF — Donchian Breakout + HMA Trend + RSI Filter
 
-Hypothesis: 6h timeframe captures multi-day swings better than 4h (less noise) and 12h (more signals).
-Using 1d HMA for trend bias + 6h RSI extremes for mean reversion entries should work well in
-bear/range markets (2025 test period) while still catching trends in bull markets (2021 train).
+Hypothesis: Donchian breakouts generate reliable trades (20-50/year on 4h), while HTF HMA
+filters ensure we only trade in the direction of the higher timeframe trend. RSI filter
+avoids entering at momentum extremes. This is simpler than regime-switching and should
+generate MORE trades than complex CRSI/Choppiness strategies.
 
 Key innovations:
-1. 1d HMA(21) slope for trend bias (simpler than triple HMA, more responsive)
-2. 6h RSI(14) extremes for entries (RSI<35 long, RSI>65 short) — looser than CRSI
-3. Volume spike confirmation (vol > 1.5x 20-bar avg) ensures real moves
-4. ATR(14) 2.5x trailing stop for risk management
-5. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
-6. Regime-adaptive: only long when 1d_HMA sloping up, only short when sloping down
+1. Donchian(20) breakout: price breaks 20-bar high/low = momentum entry
+2. 12h HMA(21) trend filter: only long if price > 12h_HMA, only short if price < 12h_HMA
+3. 1d HMA(21) bias confirmation: strengthens signal when 12h and 1d align
+4. RSI(14) filter: avoid longs when RSI>75, avoid shorts when RSI<25
+5. ATR(14) 2.5x trailing stop for risk management
+6. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Why 6h might work:
-- 6h has ZERO prior experiments — unexplored territory
-- Captures 4x daily candles, smooths intraday noise
-- 20-40 trades/year target (between 4h's 20-50 and 12h's 10-30)
-- 1d HTF filter ensures we trade with multi-day trend
+Why this should work:
+- Donchian breakouts are proven momentum signals (Turtle Trading)
+- HTF HMA filter avoids counter-trend trades (major source of losses in 2022)
+- RSI filter prevents chasing overextended moves
+- 4h captures multi-day swings without noise
+- Simpler logic = more trades generated (avoiding Sharpe=0.000 failure mode)
+- 12h/1d alignment ensures we trade with the macro trend
 
 Entry conditions (LOOSE to guarantee trades):
-- LONG: 1d_HMA slope > 0 + RSI(14) < 40 + volume > 1.3x avg
-- SHORT: 1d_HMA slope < 0 + RSI(14) > 60 + volume > 1.3x avg
-- Strong signals at RSI < 30 / > 70 with volume > 1.5x avg
+- LONG: price breaks Donchian(20) high + price > 12h_HMA + RSI(14) < 75
+- SHORT: price breaks Donchian(20) low + price < 12h_HMA + RSI(14) > 25
+- Stronger signal when 12h_HMA and 1d_HMA align same direction
 
 Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 6h
+Timeframe: 4h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma_rsi_vol_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_hma_rsi_12h1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -99,49 +102,42 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_volume_ratio(volume, period=20):
-    """Volume ratio vs rolling average"""
-    n = len(volume)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
     if n < period:
-        return np.full(n, np.nan)
+        return np.full(n, np.nan), np.full(n, np.nan)
     
-    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / vol_avg
-    vol_ratio[:period] = np.nan
-    return vol_ratio
-
-def calculate_hma_slope(hma_values, lookback=5):
-    """Calculate HMA slope over lookback periods"""
-    n = len(hma_values)
-    slope = np.full(n, np.nan, dtype=np.float64)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
-    for i in range(lookback, n):
-        if not np.isnan(hma_values[i]) and not np.isnan(hma_values[i - lookback]):
-            slope[i] = (hma_values[i] - hma_values[i - lookback]) / hma_values[i - lookback]
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
     
-    return slope
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1d HMA slope for trend bias
-    hma_1d_slope = calculate_hma_slope(hma_1d_aligned, lookback=3)
-    
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    vol_ratio = calculate_volume_ratio(volume, period=20)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -165,43 +161,51 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1d_slope[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND BIAS (1d HMA slope) ===
-        trend_bull = hma_1d_slope[i] > 0.001  # 1d HMA sloping up
-        trend_bear = hma_1d_slope[i] < -0.001  # 1d HMA sloping down
+        # === HTF TREND BIAS ===
+        hma_12h_bull = close[i] > hma_12h_aligned[i]
+        hma_12h_bear = close[i] < hma_12h_aligned[i]
+        hma_1d_bull = close[i] > hma_1d_aligned[i]
+        hma_1d_bear = close[i] < hma_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        vol_confirmed = vol_ratio[i] > 1.3  # Volume 30% above average
+        # Strong trend alignment (both 12h and 1d agree)
+        strong_bull = hma_12h_bull and hma_1d_bull
+        strong_bear = hma_12h_bear and hma_1d_bear
         
-        # === ENTRY LOGIC (RSI Mean Reversion with Trend Bias) ===
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Check if price broke out of Donchian channel this bar
+        breakout_long = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        breakout_short = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG entries: 1d trend up + RSI oversold + volume confirmation
-        if trend_bull:
-            if rsi_14[i] < 30.0 and vol_confirmed:
-                desired_signal = SIZE_STRONG  # Strong long signal
-            elif rsi_14[i] < 40.0 and vol_ratio[i] > 1.15:
-                desired_signal = SIZE_BASE  # Base long signal
+        # LONG entry: Donchian breakout + HTF bull + RSI not overbought
+        if breakout_long and hma_12h_bull and rsi_14[i] < 75.0:
+            if strong_bull:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # SHORT entries: 1d trend down + RSI overbought + volume confirmation
-        elif trend_bear:
-            if rsi_14[i] > 70.0 and vol_confirmed:
-                desired_signal = -SIZE_STRONG  # Strong short signal
-            elif rsi_14[i] > 60.0 and vol_ratio[i] > 1.15:
-                desired_signal = -SIZE_BASE  # Base short signal
+        # SHORT entry: Donchian breakout + HTF bear + RSI not oversold
+        elif breakout_short and hma_12h_bear and rsi_14[i] > 25.0:
+            if strong_bear:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
