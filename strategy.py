@@ -1,44 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #1208: 4h Primary + 12h/1d HTF — Donchian Breakout + HMA Trend + RSI Filter
+Experiment #1209: 15m Primary + 1h/1d HTF — HMA Trend + RSI Pullback (LOOSE Entries)
 
-Hypothesis: After analyzing 960+ failures, the key insight is that BREAKOUT strategies
-generate consistent trades (unlike mean-reversion which often gives 0 trades). This
-combines:
+Hypothesis: After 960+ failed experiments, the #1 killer is over-filtered entries causing 0 trades.
+15m strategies #1197, #1201, #1205 all failed with negative/zero Sharpe due to:
+- Too many confluence filters
+- Session filters that blocked entries
+- RSI ranges too narrow
 
-1. 12h HMA(21) for primary trend direction (price above = bullish bias)
-2. 1d HMA(21) for stronger confirmation (optional boost to position size)
-3. Donchian(20) breakout for entry trigger (guarantees trades on volatility)
-4. RSI(14) filter to avoid exhausted moves (RSI < 70 for longs, > 30 for shorts)
-5. ADX(14) > 18 to confirm momentum (loose threshold to ensure trades)
-6. ATR(14) 2.5x trailing stop for risk management
+This strategy uses LOOSE entry logic to GUARANTEE trades:
+1. Daily HMA(21) for PRIMARY trend direction (slow, clear bias)
+2. 1h HMA(21) for SECONDARY confirmation (medium-term alignment)
+3. 15m RSI(14) pullback entries in trend direction (wide 30-70 range)
+4. ATR(14) 2.5x trailing stop for risk management
+5. NO session filters (they killed #1201)
+6. Discrete sizing: 0.0, ±0.15, ±0.20 (smaller for 15m frequency)
 
-Key insight: Donchian breakouts naturally generate 20-50 trades/year on 4h timeframe.
-The HMA filter prevents counter-trend breakouts (which fail in 2022 crash).
-RSI filter avoids entering at exhaustion (breakout + RSI>80 = trap).
-
-Entry logic (designed to guarantee trades):
-- LONG: price > 12h_HMA AND Donchian breakout high AND RSI < 70 AND ADX > 18
-- SHORT: price < 12h_HMA AND Donchian breakout low AND RSI > 30 AND ADX > 18
-
-Why this should work:
-- 4h timeframe = natural 20-50 trades/year (fee-friendly per Rule 10)
-- Donchian breakout = guaranteed entries on volatility (no 0-trade risk)
-- HMA trend filter = avoids counter-trend traps (2022 crash protection)
-- RSI filter = avoids exhaustion entries (breakout traps)
-- ADX loose threshold (18 not 25) = ensures trades trigger
-- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
-
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Key insight: 15m needs HTF direction filter to avoid whipsaw, but entries must be LOOSE.
+Target: 40-100 trades/year, Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.20 discrete (smaller than 12h due to higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_rsi_adx_12h1d_v1"
-timeframe = "4h"
+name = "mtf_15m_hma_trend_rsi_pullback_1h1d_loose_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -103,56 +91,6 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index"""
-    n = len(close)
-    if n < period * 3:
-        return np.full(n, np.nan)
-    
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    tr = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = np.divide(plus_di, atr, out=np.zeros_like(plus_di), where=atr != 0) * 100
-    minus_di = np.divide(minus_di, atr, out=np.zeros_like(minus_di), where=atr != 0) * 100
-    
-    dx = np.divide(np.abs(plus_di - minus_di), plus_di + minus_di, 
-                   out=np.zeros_like(plus_di), where=(plus_di + minus_di) != 0) * 100
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    adx[:period*2] = np.nan
-    return adx
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -160,25 +98,23 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_1h = get_htf_data(prices, '1h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
     
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 4h indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -201,63 +137,48 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(adx_14[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (12h HMA) ===
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
+        # === TREND DIRECTION (Daily + 1h HMA) ===
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # 1d HMA for additional confirmation (optional boost)
-        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
-        price_above_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
-        price_below_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
+        price_above_1h = close[i] > hma_1h_aligned[i]
+        price_below_1h = close[i] < hma_1h_aligned[i]
         
-        # === BREAKOUT DETECTION ===
-        # Long breakout: price breaks above Donchian upper
-        long_breakout = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
-        
-        # Short breakout: price breaks below Donchian lower
-        short_breakout = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
-        
-        # === FILTERS ===
-        rsi = rsi_14[i]
-        adx = adx_14[i]
-        
-        # RSI filter: avoid exhaustion (long: RSI < 70, short: RSI > 30)
-        rsi_ok_long = rsi < 70.0
-        rsi_ok_short = rsi > 30.0
-        
-        # ADX filter: loose threshold to ensure trades (ADX > 18)
-        adx_ok = adx > 18.0
-        
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
+        rsi = rsi_14[i]
         
-        # LONG: Price above 12h HMA + Donchian breakout + RSI < 70 + ADX > 18
-        if price_above_12h and long_breakout and rsi_ok_long and adx_ok:
-            if price_above_1d:
-                desired_signal = SIZE_STRONG  # Strong trend alignment (12h + 1d)
-            else:
-                desired_signal = SIZE_BASE  # Basic uptrend breakout
+        # LONG: Price above 1d HMA (primary trend) + RSI pullback (30-70 wide range)
+        # Strong long: also above 1h HMA (secondary confirmation)
+        if price_above_1d:
+            if 30.0 <= rsi <= 70.0:
+                if price_above_1h:
+                    desired_signal = SIZE_STRONG  # Strong trend alignment (1d + 1h)
+                else:
+                    desired_signal = SIZE_BASE  # Basic uptrend pullback (1d only)
         
-        # SHORT: Price below 12h HMA + Donchian breakout + RSI > 30 + ADX > 18
-        elif price_below_12h and short_breakout and rsi_ok_short and adx_ok:
-            if price_below_1d:
-                desired_signal = -SIZE_STRONG  # Strong trend alignment (12h + 1d)
-            else:
-                desired_signal = -SIZE_BASE  # Basic downtrend breakout
+        # SHORT: Price below 1d HMA (primary trend) + RSI pullback (30-70 wide range)
+        # Strong short: also below 1h HMA (secondary confirmation)
+        elif price_below_1d:
+            if 30.0 <= rsi <= 70.0:
+                if price_below_1h:
+                    desired_signal = -SIZE_STRONG  # Strong trend alignment (1d + 1h)
+                else:
+                    desired_signal = -SIZE_BASE  # Basic downtrend pullback (1d only)
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
