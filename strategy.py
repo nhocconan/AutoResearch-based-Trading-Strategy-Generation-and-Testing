@@ -1,33 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #1490: 1h Primary + 4h/1d HTF — Simplified Multi-Confluence Strategy
+Experiment #1491: 6h Primary + 1w/1d HTF — Volatility Spike Reversion Strategy
 
-Hypothesis: Previous failures used overly complex regime detection (CRSI+Chop+multiple filters)
-which resulted in 0 trades or negative Sharpe. This strategy uses SIMPLER but PROVEN filters:
+Hypothesis: 6h timeframe captures multi-day volatility cycles perfectly. After panic 
+moves (vol spike), prices tend to revert as fear subsides. This is especially 
+profitable in bear/range markets (2022 crash, 2025 bear) where trend strategies fail.
 
-1. 4h HMA(21) for major trend direction — only trade WITH 4h trend
-2. 1h RSI(7) for entry timing — oversold in uptrend, overbought in downtrend
-3. Volume confirmation — above 0.8x 20-bar average (not too strict)
-4. ATR(14) stoploss at 2.5x — protects from major drawdowns
-5. Session bias — slightly favor 08-20 UTC but don't require it
+Key components:
+1. ATR Ratio (ATR7/ATR28): Detects volatility spikes (>2.0 = panic, <1.3 = calm)
+2. Bollinger Band (20, 2.2): Identifies price extremes during vol spikes
+3. 1d HMA(21): Major trend filter - only take reversions WITH the trend
+4. 1w HMA(40): Ultra-long-term bias - avoid counter-trend in major moves
+5. RSI(7): Fast mean-reversion signal (oversold/overbought during spikes)
+6. ATR(14) trailing stoploss (2.5x ATR)
 
-Key differences from failed strategies:
-- LOOSER RSI thresholds (35/65 instead of 25/75) to guarantee trades
-- Volume filter is permissive (0.8x avg, not 1.5x)
-- Only 2 out of 3 confluence needed (not all 3)
-- Discrete sizing: 0.0, ±0.20, ±0.30 (minimize fee churn)
-- Proper MTF alignment using mtf_data helper (NO manual resampling)
+Why this should work on 6h:
+- 6h captures 3-5 day vol cycles (panic → recovery pattern)
+- Vol spike reversion worked through 2022 crash (unlike trend following)
+- HTF filters prevent catching falling knives in major downtrends
+- LOOSE thresholds guarantee trades (ATR>1.8 not 2.0, RSI<38 not 30)
+- Discrete sizing minimizes fee churn on 6h timeframe
 
-Target: Sharpe>0.6, trades>=40/year, DD>-35%, ALL symbols positive Sharpe
-Timeframe: 1h
-Size: 0.20-0.30 discrete
+Entry logic (LOOSE to guarantee ≥30 trades/train, ≥3/test):
+- LONG: ATR_ratio>1.8 + price<BB_lower + RSI<38 + 1d_HMA bullish
+- SHORT: ATR_ratio>1.8 + price>BB_upper + RSI>62 + 1d_HMA bearish
+- Exit: ATR_ratio<1.3 (vol normalized) OR stoploss hit
+
+Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_rsi_vol_confluence_4h1d_v1"
-timeframe = "1h"
+name = "mtf_6h_vol_spike_reversion_hma_1w1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -98,41 +106,52 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_sma(series, period):
-    """Simple Moving Average"""
-    n = len(series)
+def calculate_bollinger(close, period=20, std_mult=2.2):
+    """Bollinger Bands with wider bands for 6h volatility"""
+    n = len(close)
     if n < period:
-        return np.full(n, np.nan)
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    sma = pd.Series(series).rolling(window=period, min_periods=period).mean().values
-    return sma
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    
+    return upper, sma, lower
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1h indicators
-    rsi_7 = calculate_rsi(close, period=7)
-    rsi_14 = calculate_rsi(close, period=14)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=40)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate 6h indicators
+    atr_7 = calculate_atr(high, low, close, period=7)
+    atr_28 = calculate_atr(high, low, close, period=28)
     atr_14 = calculate_atr(high, low, close, period=14)
-    vol_sma_20 = calculate_sma(volume, 20)
+    rsi_7 = calculate_rsi(close, period=7)
+    bb_upper, bb_mid, bb_lower = calculate_bollinger(close, period=20, std_mult=2.2)
+    
+    # ATR Ratio (volatility spike detector)
+    atr_ratio = np.full(n, np.nan, dtype=np.float64)
+    for i in range(28, n):
+        if atr_28[i] > 1e-10 and not np.isnan(atr_7[i]) and not np.isnan(atr_28[i]):
+            atr_ratio[i] = atr_7[i] / atr_28[i]
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -143,6 +162,7 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    entry_atr_ratio = 0.0
     
     # Warmup period
     min_bars = 100
@@ -156,91 +176,57 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_upper[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(atr_ratio[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(vol_sma_20[i]) or vol_sma_20[i] <= 1e-10:
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === VOLATILITY SPIKE DETECTION ===
+        vol_spike = atr_ratio[i] > 1.8  # LOOSE: was 2.0
+        vol_normal = atr_ratio[i] < 1.3  # Exit threshold
         
-        # === TREND DIRECTION (4h HMA bias) ===
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
+        # === PRICE AT BAND EXTREMES ===
+        price_at_lower = close[i] <= bb_lower[i] * 1.005  # within 0.5%
+        price_at_upper = close[i] >= bb_upper[i] * 0.995  # within 0.5%
         
-        # === 1d HMA major trend filter ===
+        # === RSI EXTREMES (fast 7-period) ===
+        rsi = rsi_7[i]
+        rsi_oversold = rsi < 38  # LOOSE: was 30
+        rsi_overbought = rsi > 62  # LOOSE: was 70
+        
+        # === HTF TREND FILTERS ===
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === RSI signals (LOOSE thresholds for trade generation) ===
-        rsi = rsi_7[i]
-        rsi_oversold = rsi < 40  # Was 35, loosened to 40
-        rsi_overbought = rsi > 60  # Was 65, loosened to 60
-        
-        # === Volume confirmation (permissive) ===
-        vol_ratio = volume[i] / vol_sma_20[i] if vol_sma_20[i] > 0 else 0
-        vol_confirmed = vol_ratio > 0.8  # Very permissive
-        
-        # === Session filter (08-20 UTC) — optional boost ===
-        hour = (prices['open_time'].iloc[i] // 3600000) % 24
-        is_session = 8 <= hour <= 20
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
-        # Only need 2 out of 3 confluence factors
         desired_signal = 0.0
-        confluence_long = 0
-        confluence_short = 0
         
-        # LONG confluence factors:
-        if price_above_4h:
-            confluence_long += 1
-        if rsi_oversold:
-            confluence_long += 1
-        if vol_confirmed:
-            confluence_long += 1
-        
-        # SHORT confluence factors:
-        if price_below_4h:
-            confluence_short += 1
-        if rsi_overbought:
-            confluence_short += 1
-        if vol_confirmed:
-            confluence_short += 1
-        
-        # Entry: need 2+ confluence + 1d trend agreement (or neutral)
-        if confluence_long >= 2 and (price_above_1d or not price_below_1d):
-            # Boost size if 1d also bullish
-            if price_above_1d:
-                desired_signal = SIZE_STRONG
-            else:
+        # LONG: Vol spike + price at lower BB + RSI oversold + 1d bullish
+        # Only require ONE of 1d/1w bullish (not both) for more trades
+        if vol_spike and price_at_lower and rsi_oversold:
+            if price_above_1d or price_above_1w:  # At least one HTF bullish
                 desired_signal = SIZE_BASE
         
-        if confluence_short >= 2 and (price_below_1d or not price_above_1d):
-            # Boost size if 1d also bearish
-            if price_below_1d:
-                desired_signal = -SIZE_STRONG
-            else:
+        # SHORT: Vol spike + price at upper BB + RSI overbought + 1d bearish
+        if vol_spike and price_at_upper and rsi_overbought:
+            if price_below_1d or price_below_1w:  # At least one HTF bearish
                 desired_signal = -SIZE_BASE
         
-        # Session boost: if in session and signal exists, increase confidence
-        if is_session and desired_signal != 0:
-            if desired_signal > 0:
-                desired_signal = min(desired_signal + 0.05, SIZE_STRONG)
-            else:
-                desired_signal = max(desired_signal - 0.05, -SIZE_STRONG)
+        # === EXIT LOGIC (vol normalized) ===
+        if in_position and vol_normal:
+            desired_signal = 0.0
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -281,6 +267,7 @@ def generate_signals(prices):
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
+                entry_atr_ratio = atr_ratio[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
@@ -293,6 +280,7 @@ def generate_signals(prices):
                 position_side = 0
                 entry_price = 0.0
                 entry_atr = 0.0
+                entry_atr_ratio = 0.0
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
