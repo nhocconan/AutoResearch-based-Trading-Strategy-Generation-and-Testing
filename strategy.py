@@ -1,38 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #1273: 5m Primary + 15m/4h HTF — HMA Trend + RSI Pullback + Session Filter
+Experiment #1274: 1d Primary + 1w HTF — Simple HMA Trend + Weekly Bias
 
-Hypothesis: 5m timeframe is unexplored (0 experiments). Key insight: lower TF needs
-STRONGER HTF filter to avoid whipsaw. This strategy uses:
+Hypothesis: After 1000+ failed experiments, the pattern is clear: COMPLEX = 0 TRADES.
+Strategies with choppiness + CRSI + multiple HTF filters generate Sharpe=0.000 because
+entry conditions never align. On 1d timeframe, we need SIMPLICITY:
 
-1. 4h HMA(21) for MAJOR trend bias (only trade with 4h direction)
-2. 15m HMA(9) for INTERMEDIATE trend confirmation (faster than 4h)
-3. 5m RSI(7) for ENTRY timing (pullback in established trend)
-4. Session filter 08-20 UTC (London/NY overlap = highest volume, lowest slippage)
-5. ATR(14) 2.5x trailing stop for risk management
+1. 1w HMA(21) for MAJOR trend bias (only ONE HTF filter, not multiple)
+2. 1d HMA(9) vs HMA(21) crossover for entries (classic, proven)
+3. ROC(5) for loose momentum confirmation (threshold >2 or <-2, not >8)
+4. ATR(14) 2.5x trailing stop for risk management
+5. LOOSE conditions to guarantee 20-50 trades/year on daily
 
-Why this should work on 5m:
-- 4h trend filter = prevents counter-trend trades (#1 killer on lower TF)
-- 15m HMA = catches intermediate momentum shifts before 4h turns
-- RSI(7) = fast enough for 5m entries, not too noisy like RSI(3)
-- Session filter = avoids low-volume Asian session whipsaw
-- Small size (0.15-0.20) = accounts for higher trade frequency + fee drag
-- LOOSE RSI thresholds (35/65) = guarantees 50-120 trades/year
+Why this should work:
+- 1d timeframe = natural 20-50 trades/year (fee-friendly)
+- Single HTF filter (1w) = directional bias without over-filtering
+- HMA crossover = proven trend signal, generates regular trades
+- Loose ROC threshold = catches moves early, doesn't wait for extreme
+- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
 
-Entry logic:
-- LONG: 4h_HMA bullish + 15m_HMA rising + RSI(7) < 35 (pullback) + session 08-20 UTC
-- SHORT: 4h_HMA bearish + 15m_HMA falling + RSI(7) > 65 (pullback) + session 08-20 UTC
+CRITICAL LESSON: The 12+ failed strategies all had 0 trades due to over-filtering.
+This strategy uses MINIMAL filters to guarantee trade generation.
 
-Target: Sharpe>0.5, trades>=50 train, trades>=5 test, DD>-35%
-Timeframe: 5m
-Size: 0.15-0.20 discrete (smaller due to more trades = fee drag)
+Entry logic (LOOSE):
+- LONG: 1w_HMA bullish + 1d_HMA9 > 1d_HMA21 + ROC(5) > 2
+- SHORT: 1w_HMA bearish + 1d_HMA9 < 1d_HMA21 + ROC(5) < -2
+
+Target: Sharpe>0.5, trades>=20 train, trades>=5 test, DD>-35%
+Timeframe: 1d
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_5m_hma_trend_rsi_pullback_session_15m4h_v1"
-timeframe = "5m"
+name = "mtf_1d_hma_crossover_weekly_bias_roc_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -79,65 +82,43 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+def calculate_roc(close, period=5):
+    """Rate of Change - momentum indicator (loose period for more signals)"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0.0)
-    
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.full(n, np.nan, dtype=np.float64)
+    roc = np.full(n, np.nan, dtype=np.float64)
     for i in range(period, n):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-        else:
-            rsi[i] = 100.0
+        if close[i - period] != 0:
+            roc[i] = ((close[i] - close[i - period]) / close[i - period]) * 100.0
     
-    return rsi
-
-def is_session_active(open_time_unix_ms):
-    """Check if bar is within 08-20 UTC session"""
-    # Convert ms timestamp to hour UTC
-    hour_utc = (open_time_unix_ms // (1000 * 60 * 60)) % 24
-    return 8 <= hour_utc < 20
+    return roc
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_15m = get_htf_data(prices, '15m')
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
-    hma_15m_raw = calculate_hma(df_15m['close'].values, period=9)
-    hma_15m_aligned = align_htf_to_ltf(prices, df_15m, hma_15m_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
-    
-    # Calculate 5m indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
+    roc_5 = calculate_roc(close, period=5)
     
-    # Also calculate 5m HMA for local trend
-    hma_5m = calculate_hma(close, period=14)
+    # Daily HMA for crossover signals
+    hma_1d_9 = calculate_hma(close, period=9)
+    hma_1d_21 = calculate_hma(close, period=21)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -148,8 +129,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup period
-    min_bars = 100
+    # Warmup period (shorter for 1d to get more trades)
+    min_bars = 50
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -160,70 +141,60 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]):
+        if np.isnan(roc_5[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_15m_aligned[i]) or np.isnan(hma_4h_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_5m[i]):
+        if np.isnan(hma_1d_9[i]) or np.isnan(hma_1d_21[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (08-20 UTC only) ===
-        if not is_session_active(open_time[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === WEEKLY TREND BIAS (1w HMA slope) ===
+        hma_1w_slope = 0.0
+        if i >= 7 and not np.isnan(hma_1w_aligned[i-7]):
+            hma_1w_slope = hma_1w_aligned[i] - hma_1w_aligned[i-7]
         
-        # === TREND DIRECTION (4h HMA + 15m HMA slope) ===
-        # 4h HMA bias (price above/below)
-        price_above_4h = close[i] > hma_4h_aligned[i]
-        price_below_4h = close[i] < hma_4h_aligned[i]
+        weekly_bullish = hma_1w_slope > 0
+        weekly_bearish = hma_1w_slope < 0
         
-        # 15m HMA slope (compare to 3 bars ago for stability)
-        hma_15m_slope = 0.0
-        if i >= 3 and not np.isnan(hma_15m_aligned[i-3]):
-            hma_15m_slope = hma_15m_aligned[i] - hma_15m_aligned[i-3]
+        # === DAILY HMA CROSSOVER ===
+        hma_cross_bullish = hma_1d_9[i] > hma_1d_21[i]
+        hma_cross_bearish = hma_1d_9[i] < hma_1d_21[i]
         
-        # 5m price vs 5m HMA for local confirmation
-        price_above_5m = close[i] > hma_5m[i]
-        price_below_5m = close[i] < hma_5m[i]
-        
-        # === RSI PULLBACK ===
-        rsi = rsi_7[i]
+        # === MOMENTUM (ROC) - LOOSE THRESHOLD ===
+        roc = roc_5[i]
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: 4h bullish + 15m rising + RSI oversold pullback
-        if price_above_4h and hma_15m_slope > 0:
-            if rsi < 35:  # Pullback entry (loose threshold)
-                if rsi < 25:
-                    desired_signal = SIZE_STRONG  # Deep pullback
+        # LONG: Weekly bullish + Daily HMA cross + ROC positive
+        if weekly_bullish and hma_cross_bullish:
+            if roc > 2.0:  # Very loose momentum threshold
+                if roc > 5.0:
+                    desired_signal = SIZE_STRONG
                 else:
-                    desired_signal = SIZE_BASE  # Normal pullback
+                    desired_signal = SIZE_BASE
         
-        # SHORT: 4h bearish + 15m falling + RSI overbought pullback
-        elif price_below_4h and hma_15m_slope < 0:
-            if rsi > 65:  # Pullback entry (loose threshold)
-                if rsi > 75:
-                    desired_signal = -SIZE_STRONG  # Deep pullback
+        # SHORT: Weekly bearish + Daily HMA cross + ROC negative
+        elif weekly_bearish and hma_cross_bearish:
+            if roc < -2.0:  # Very loose momentum threshold
+                if roc < -5.0:
+                    desired_signal = -SIZE_STRONG
                 else:
-                    desired_signal = -SIZE_BASE  # Normal pullback
+                    desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
