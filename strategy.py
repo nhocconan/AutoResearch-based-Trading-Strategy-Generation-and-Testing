@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1228: 4h Primary + 12h/1d HTF — Donchian Breakout + HMA Trend + RSI Pullback
+Experiment #1229: 15m Primary + 1h/1d HTF — Session-Aware HMA Trend + RSI Momentum
 
-Hypothesis: After analyzing 1200+ failed experiments, the winning pattern for 4h is:
-1. 12h HMA(21) for trend direction (faster than 1d, smoother than 4h)
-2. 4h Donchian(20) breakout for momentum confirmation
-3. 4h RSI(14) 35-65 for pullback entries (not extremes - guarantees trades)
-4. 1d HMA(21) for regime filter (only trade with weekly trend)
-5. ATR(14) 2.5x trailing stop for risk management
+Hypothesis: 15m strategies fail due to OVER-FILTERING (0 trades) or UNDER-FILTERING (fee death).
+This strategy uses LOOSE but meaningful confluence:
 
-Why this should beat current best (Sharpe=0.445):
-- Donchian breakout ensures we enter on momentum resumption, not dead cat bounces
-- 12h HMA responds faster than 1d but smoother than 4h noise
-- RSI 35-65 range is LOOSE enough to generate 30-60 trades/year on 4h
-- Discrete sizing (0.0, ±0.25, ±0.30) minimizes fee churn
-- 2.5x ATR stop protects from 2022-style crashes
+1. Daily HMA(21) = primary trend direction (1 filter)
+2. 1h RSI(14) = momentum confirmation in 40-60 range (1 filter, LOOSE)
+3. UTC Session 00-12 = London/NY overlap for crypto liquidity (1 filter)
+4. 15m ATR breakout = entry timing trigger (volatility expansion)
 
-Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Key insight from 15m failures (#1217, #1219, #1221, #1225 all Sharpe=0.000):
+- Too many filters = ZERO trades
+- Too few filters = 300+ trades/year = fee death
+- Sweet spot: 3 LOOSE filters = 50-80 trades/year
+
+Entry logic (LOOSE to guarantee trades):
+- LONG: price > 1d_HMA AND 1h_RSI 40-60 AND UTC hour 0-12 AND 15m close > entry trigger
+- SHORT: price < 1d_HMA AND 1h_RSI 40-60 AND UTC hour 0-12 AND 15m close < entry trigger
+
+Why 1h RSI not 15m RSI: 15m RSI is too noisy, causes whipsaw. 1h RSI gives cleaner momentum.
+Why session filter: Crypto has real liquidity patterns. 00-12 UTC = London+NY overlap = cleaner moves.
+Why ATR breakout: Ensures we enter on volatility expansion, not dead ranges.
+
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%, trades/year 50-80
+Timeframe: 15m
+Size: 0.20 base, 0.25 strong (smaller than 12h due to higher frequency)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_rsi_12h1d_v1"
-timeframe = "4h"
+name = "mtf_15m_session_hma_rsi_atr_1h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -90,46 +97,30 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
+    df_1h = get_htf_data(prices, '1h')
     
     # Calculate and align HTF indicators
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
-    
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 4h indicators
+    rsi_1h_raw = calculate_rsi(df_1h['close'].values, period=14)
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_1h_raw)
+    
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -143,6 +134,22 @@ def generate_signals(prices):
     # Warmup period
     min_bars = 100
     
+    # Pre-compute session hours from open_time (milliseconds since epoch)
+    # Binance timestamps are UTC
+    session_valid = np.zeros(n, dtype=bool)
+    for i in range(n):
+        # Convert milliseconds to hours UTC
+        ts_ms = open_time[i]
+        hour_utc = (ts_ms // (1000 * 60 * 60)) % 24
+        # Session filter: 00-12 UTC (London + NY overlap for crypto)
+        session_valid[i] = (hour_utc >= 0 and hour_utc <= 12)
+    
+    # Pre-compute ATR breakout levels (previous bar high/low)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    
     for i in range(min_bars, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
@@ -152,63 +159,45 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(rsi_1h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        # === TREND DIRECTION (12h HMA + 1d HMA confirmation) ===
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
-        
+        # === TREND DIRECTION (Daily HMA) ===
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === MOMENTUM (Donchian Breakout) ===
-        # Price breaking above recent high = bullish momentum
-        # Price breaking below recent low = bearish momentum
-        breakout_long = close[i] > donchian_upper[i - 1] if i > 0 else False
-        breakout_short = close[i] < donchian_lower[i - 1] if i > 0 else False
+        # === MOMENTUM (1h RSI in 40-60 range = neutral momentum, room to run) ===
+        rsi_1h = rsi_1h_aligned[i]
+        rsi_neutral = (40.0 <= rsi_1h <= 60.0)
+        
+        # === SESSION FILTER (UTC 00-12) ===
+        in_session = session_valid[i]
+        
+        # === ATR BREAKOUT TRIGGER ===
+        atr_breakout_up = close[i] > prev_high[i]
+        atr_breakout_down = close[i] < prev_low[i]
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
-        rsi = rsi_14[i]
         
-        # LONG: 12h trend up + RSI pullback (35-65) + Donchian breakout OR price near upper
-        if price_above_12h:
-            if 35.0 <= rsi <= 65.0:
-                # Strong long: 1d also bullish + breakout
-                if price_above_1d and breakout_long:
-                    desired_signal = SIZE_STRONG
-                # Basic long: 12h bullish + RSI pullback
-                elif close[i] > donchian_upper[i] * 0.98:  # Near upper channel
-                    desired_signal = SIZE_BASE
+        # LONG: Price above 1d HMA + 1h RSI neutral + session + breakout up
+        if price_above_1d and rsi_neutral and in_session and atr_breakout_up:
+            desired_signal = SIZE_BASE
         
-        # SHORT: 12h trend down + RSI pullback (35-65) + Donchian breakout OR price near lower
-        elif price_below_12h:
-            if 35.0 <= rsi <= 65.0:
-                # Strong short: 1d also bearish + breakout
-                if price_below_1d and breakout_short:
-                    desired_signal = -SIZE_STRONG
-                # Basic short: 12h bearish + RSI pullback
-                elif close[i] < donchian_lower[i] * 1.02:  # Near lower channel
-                    desired_signal = -SIZE_BASE
+        # SHORT: Price below 1d HMA + 1h RSI neutral + session + breakout down
+        elif price_below_1d and rsi_neutral and in_session and atr_breakout_down:
+            desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -231,11 +220,7 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_STRONG * 0.9:
-            final_signal = SIZE_STRONG
-        elif desired_signal <= -SIZE_STRONG * 0.9:
-            final_signal = -SIZE_STRONG
-        elif desired_signal >= SIZE_BASE * 0.9:
+        if desired_signal >= SIZE_BASE * 0.9:
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
             final_signal = -SIZE_BASE
