@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1163: 6h Primary + 1d/1w HTF — Simplified HMA Trend + RSI Pullback
+Experiment #1164: 12h Primary + 1d/1w HTF — Simple HMA Trend + RSI Pullback
 
-Hypothesis: Previous 6h strategies failed due to OVERLY STRICT entry conditions (0 trades).
-This strategy uses LOOSE entry conditions to guarantee trade generation while maintaining
-edge through multi-timeframe alignment.
+Hypothesis: After 960+ failed experiments, complexity is the enemy. The #1 failure mode
+is 0 trades from over-filtered entries. This strategy uses SIMPLE, LOOSE entry logic:
 
-Key innovations:
-1. 1w HMA(21) for long-term trend bias — only trade in weekly direction
-2. 1d HMA(21) for intermediate confirmation — adds confluence
-3. 6h RSI(14) pullback entries — buy dips in uptrend, sell rallies in downtrend
-4. Volume confirmation — entry volume > 1.2x 20-bar avg volume (filters false breakouts)
-5. ATR(14) 2.5x trailing stop — protects capital during reversals
-6. LOOSE entry thresholds — RSI<50 for long, RSI>50 for short (not extreme values)
+1. Daily HMA(21) for primary trend direction (price above = bullish bias)
+2. Weekly HMA(21) for confirmation (optional, not required for entry)
+3. 12h RSI(14) pullback entries in trend direction
+4. ATR(14) 2.5x trailing stop for risk management
 
-Why this should work on 6h:
-- 6h captures 2-5 day swings — perfect for crypto trend persistence
-- Weekly bias filters out counter-trend trades (major edge in crypto)
-- RSI pullback entries catch retracements within trends (high win rate)
-- Volume filter avoids low-liquidity false signals
-- LOOSE conditions guarantee 30-60 trades/year (fixes #1 failure mode)
+Key insight from failures: Strategies with regime switches, choppiness filters, and
+multiple confluence requirements generate ZERO trades. We need LOOSE entries that
+trigger on normal market moves.
 
-Entry conditions (LOOSE to guarantee trades):
-- LONG: 1w_HMA bullish + 1d_HMA bullish + RSI(14)<50 + volume>1.2x avg
-- SHORT: 1w_HMA bearish + 1d_HMA bearish + RSI(14)>50 + volume>1.2x avg
+Entry logic (LOOSE to guarantee trades):
+- LONG: price > 1d_HMA AND RSI(14) between 35-65 (pullback in uptrend)
+- SHORT: price < 1d_HMA AND RSI(14) between 35-65 (pullback in downtrend)
 
-Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 6h
+Why this should work:
+- 12h timeframe = natural 20-50 trades/year (fee-friendly)
+- Single trend filter (1d HMA) = clear directional bias
+- RSI 35-65 range = triggers on normal pullbacks, not extremes
+- No choppiness/ADX/complex regime = fewer conditions to fail
+- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
+
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 12h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma_rsi_vol_pullback_1d1w_v1"
-timeframe = "6h"
+name = "mtf_12h_hma_trend_rsi_pullback_1d_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -99,22 +99,10 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_volume_ratio(volume, period=20):
-    """Volume ratio vs rolling average"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    vol_ratio = volume / vol_ratio if vol_ratio else np.full(n, np.nan)
-    vol_ratio = np.divide(volume, vol_avg, out=np.full(n, np.nan), where=vol_avg > 0)
-    return vol_ratio
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -128,10 +116,9 @@ def generate_signals(prices):
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    vol_ratio = calculate_volume_ratio(volume, period=20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -146,7 +133,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(100, n):
+    # Warmup period
+    min_bars = 100
+    
+    for i in range(min_bars, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -155,51 +145,50 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === HTF BIAS (Weekly + Daily HMA alignment) ===
-        hma_1w_bull = close[i] > hma_1w_aligned[i]
-        hma_1w_bear = close[i] < hma_1w_aligned[i]
-        hma_1d_bull = close[i] > hma_1d_aligned[i]
-        hma_1d_bear = close[i] < hma_1d_aligned[i]
+        # === TREND DIRECTION (Daily HMA) ===
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # Strong alignment: both weekly and daily agree
-        strong_bull = hma_1w_bull and hma_1d_bull
-        strong_bear = hma_1w_bear and hma_1d_bear
+        # Weekly HMA for additional confirmation (not required)
+        hma_1w_valid = not np.isnan(hma_1w_aligned[i])
+        price_above_1w = hma_1w_valid and close[i] > hma_1w_aligned[i]
+        price_below_1w = hma_1w_valid and close[i] < hma_1w_aligned[i]
         
-        # Volume confirmation
-        vol_confirmed = vol_ratio[i] >= 1.1  # At least 10% above average
-        
-        # === ENTRY LOGIC (LOOSE to guarantee trades) ===
+        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
+        rsi = rsi_14[i]
         
-        # LONG: Weekly bullish + Daily bullish + RSI pullback + Volume
-        if strong_bull:
-            if rsi_14[i] < 50.0 and vol_confirmed:
-                desired_signal = SIZE_BASE
-            # Stronger entry on deeper pullback
-            if rsi_14[i] < 40.0 and vol_confirmed:
-                desired_signal = SIZE_STRONG
+        # LONG: Price above 1d HMA + RSI pullback (35-65 range)
+        # Strong long: also above 1w HMA
+        if price_above_1d:
+            if 35.0 <= rsi <= 65.0:
+                if price_above_1w:
+                    desired_signal = SIZE_STRONG  # Strong trend alignment
+                else:
+                    desired_signal = SIZE_BASE  # Basic uptrend pullback
         
-        # SHORT: Weekly bearish + Daily bearish + RSI rally + Volume
-        elif strong_bear:
-            if rsi_14[i] > 50.0 and vol_confirmed:
-                desired_signal = -SIZE_BASE
-            # Stronger entry on stronger rally
-            if rsi_14[i] > 60.0 and vol_confirmed:
-                desired_signal = -SIZE_STRONG
+        # SHORT: Price below 1d HMA + RSI pullback (35-65 range)
+        # Strong short: also below 1w HMA
+        elif price_below_1d:
+            if 35.0 <= rsi <= 65.0:
+                if price_below_1w:
+                    desired_signal = -SIZE_STRONG  # Strong trend alignment
+                else:
+                    desired_signal = -SIZE_BASE  # Basic downtrend pullback
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
