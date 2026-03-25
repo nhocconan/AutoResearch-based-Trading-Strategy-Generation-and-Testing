@@ -1,38 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #1297: 15m Primary + 4h/12h HTF — HMA Trend + RSI Pullback + Session Filter
+Experiment #1298: 4h Primary + 1d HTF — Donchian Breakout + HMA Trend + RSI Filter
 
-Hypothesis: 15m timeframe has ZERO successful experiments. This strategy uses proven
-6h concepts (HTF trend + momentum) but adapted for 15m with stricter filters to
-control trade frequency. Key innovations:
+Hypothesis: Based on proven 4h patterns (Donchian+HMA+RSI+ATR achieved SOL Sharpe +0.879),
+this strategy combines breakout momentum with trend confirmation. Key learnings from failures:
 
-1. 12h HMA(21) for major regime bias (only trade with daily trend)
-2. 4h HMA(21) for intermediate trend direction
-3. 15m RSI(7) for pullback entries (oversold in uptrend, overbought in downtrend)
-4. Session filter: 00-12 UTC only (London+NY overlap = highest liquidity)
-5. ATR(14) 2.5x trailing stop for risk management
-6. Discrete sizing (0.15, 0.20) to minimize fee churn
+1. #1288 failed (Sharpe=-0.553) due to over-filtering (chop+CRSI+dual HTF = 0 trades)
+2. Simple trend+momentum works better than complex regime switches on 4h
+3. Need LOOSE entry conditions to guarantee 20-50 trades/year on 4h
+4. 1d HTF for major bias only (not 12h+1d dual which over-filters)
 
-Why this should work on 15m:
-- HTF filters (4h+12h) reduce trade frequency to 40-100/year target
-- RSI pullback = enters on dips within trend (better R:R than breakout)
-- Session filter avoids low-liquidity Asia hours (reduces whipsaws)
-- Smaller position size (0.15-0.20 vs 0.25-0.30) accounts for higher frequency
+Strategy design:
+- 4h Donchian(20) breakout for entry timing (catches momentum early)
+- 4h HMA(21) for local trend confirmation
+- 1d HMA(21) for major regime bias (only ONE HTF filter, not two)
+- RSI(14) filter to avoid overbought/oversold traps
+- ATR(14) 2.5x trailing stop for risk management
+- Discrete sizing (0.0, ±0.25, ±0.30) to minimize fee churn
 
-Entry logic (balanced for trade count):
-- LONG: 12h_HMA bullish + 4h_HMA rising + RSI(7)<35 + session 00-12 UTC
-- SHORT: 12h_HMA bearish + 4h_HMA falling + RSI(7)>65 + session 00-12 UTC
+Entry logic (LOOSE to guarantee trades):
+- LONG: price>Donchian_mid + HMA rising + 1d_HMA bullish + RSI(14) < 70
+- SHORT: price<Donchian_mid + HMA falling + 1d_HMA bearish + RSI(14) > 30
 
-Target: Sharpe>0.45, trades>=30 train, trades>=3 test, DD>-35%, trades<150/year
-Timeframe: 15m
-Size: 0.15-0.20 discrete (smaller for higher frequency)
+Why this should beat 6h KAMA baseline (Sharpe=0.447):
+- 4h captures moves earlier than 6h (better entry timing)
+- Donchian breakout catches momentum before RSI extremes
+- Single 1d HTF filter (not dual) = fewer conditions to fail
+- RSI filter prevents chasing tops/bottoms
+
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 4h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_hma_trend_rsi_pullback_4h12h_session_v1"
-timeframe = "15m"
+name = "mtf_4h_donchian_hma_rsi_breakout_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -79,13 +84,16 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=7):
+def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    delta = np.diff(close, prepend=close[0])
+    delta = np.zeros(n, dtype=np.float64)
+    for i in range(1, n):
+        delta[i] = close[i] - close[i-1]
+    
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
     
@@ -102,40 +110,44 @@ def calculate_rsi(close, period=7):
     
     return rsi
 
-def is_session_active(open_time, start_hour=0, end_hour=12):
-    """Check if bar is within London/NY overlap session (00-12 UTC)"""
-    # open_time is in milliseconds since epoch
-    hour = pd.to_datetime(open_time, unit='ms').hour
-    return start_hour <= hour < end_hour
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper, lower, mid"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.nanmax(high[i - period + 1:i + 1])
+        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+    
+    mid = (upper + lower) / 2.0
+    return upper, lower, mid
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
-    
-    # Calculate 15m indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_7 = calculate_rsi(close, period=7)
-    
-    # Also calculate 15m HMA for local trend confirmation
-    hma_15m = calculate_hma(close, period=21)
+    rsi_14 = calculate_rsi(close, period=14)
+    hma_4h = calculate_hma(close, period=21)
+    donch_upper, donch_lower, donch_mid = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.15
-    SIZE_STRONG = 0.20
+    SIZE_BASE = 0.25
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -158,65 +170,64 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_15m[i]):
+        if np.isnan(hma_4h[i]) or np.isnan(donch_mid[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC only) ===
-        in_session = is_session_active(open_time[i], start_hour=0, end_hour=12)
-        
-        # === TREND DIRECTION (12h HMA bias + 4h HMA slope) ===
-        # 12h HMA bias (price above/below)
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
-        
+        # === TREND DIRECTION (4h HMA slope + 1d HMA bias) ===
         # 4h HMA slope (compare to 3 bars ago for stability)
         hma_4h_slope = 0.0
-        if i >= 3 and not np.isnan(hma_4h_aligned[i-3]):
-            hma_4h_slope = hma_4h_aligned[i] - hma_4h_aligned[i-3]
+        if i >= 3 and not np.isnan(hma_4h[i-3]):
+            hma_4h_slope = hma_4h[i] - hma_4h[i-3]
         
-        # 15m price vs 15m HMA for local confirmation
-        price_above_15m = close[i] > hma_15m[i]
-        price_below_15m = close[i] < hma_15m[i]
+        # 1d HMA bias (price vs daily HMA)
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === RSI PULLBACK ===
-        rsi = rsi_7[i]
+        # Price vs Donchian mid (breakout confirmation)
+        price_above_donch = close[i] > donch_mid[i]
+        price_below_donch = close[i] < donch_mid[i]
         
-        # === ENTRY LOGIC (balanced for trade frequency) ===
+        # === RSI FILTER (avoid extremes) ===
+        rsi = rsi_14[i]
+        rsi_not_overbought = rsi < 70.0
+        rsi_not_oversold = rsi > 30.0
+        
+        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: 12h bullish + 4h rising + RSI oversold pullback + session
-        if price_above_12h and hma_4h_slope > 0 and in_session:
-            if rsi < 35:  # Oversold pullback in uptrend
-                if rsi < 25:
-                    desired_signal = SIZE_STRONG  # Deep pullback
-                else:
-                    desired_signal = SIZE_BASE  # Moderate pullback
+        # LONG: 4h HMA rising + 1d bullish + price above Donchian mid + RSI not overbought
+        if hma_4h_slope > 0 and price_above_1d and price_above_donch and rsi_not_overbought:
+            # Stronger signal if RSI in bullish zone (40-60)
+            if 40.0 <= rsi <= 60.0:
+                desired_signal = SIZE_STRONG
+            else:
+                desired_signal = SIZE_BASE
         
-        # SHORT: 12h bearish + 4h falling + RSI overbought pullback + session
-        elif price_below_12h and hma_4h_slope < 0 and in_session:
-            if rsi > 65:  # Overbought pullback in downtrend
-                if rsi > 75:
-                    desired_signal = -SIZE_STRONG  # Deep pullback
-                else:
-                    desired_signal = -SIZE_BASE  # Moderate pullback
+        # SHORT: 4h HMA falling + 1d bearish + price below Donchian mid + RSI not oversold
+        elif hma_4h_slope < 0 and price_below_1d and price_below_donch and rsi_not_oversold:
+            # Stronger signal if RSI in bearish zone (40-60)
+            if 40.0 <= rsi <= 60.0:
+                desired_signal = -SIZE_STRONG
+            else:
+                desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
