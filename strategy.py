@@ -1,51 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #1614: 1d Primary + 1w HTF — Dual Regime (Trend/Mean-Revert) with HMA + RSI
+Experiment #1615: 6h Primary + 12h/1d HTF — Supertrend + ADX Regime + Stelzer RSI
 
-Hypothesis: Daily timeframe with weekly bias filter provides optimal trade frequency (20-50/year)
-while capturing both trend breakouts and mean-reversion opportunities. Key innovations:
+Hypothesis: 6h timeframe sits between 4h (too noisy) and 12h (too slow). 
+Using Supertrend for clear directional bias + ADX for regime detection + 
+Stelzer RSI (modified RSI with better extreme detection) should capture 
+trends while avoiding whipsaws that killed previous 6h strategies.
 
-1. DUAL REGIME SWITCH: Choppiness Index determines strategy mode
-   - CHOP < 38: Trend-following (Donchian breakout + HMA bias)
-   - CHOP > 61: Mean-reversion (RSI extremes + Bollinger touch)
-   - 38-61: Neutral, use 1w HMA for direction only
-
-2. WEEKLY HMA BIAS: Ultra-long-term trend filter prevents major counter-trend trades
-   - Only long when price > 1w HMA (or strong mean-revert signal)
-   - Only short when price < 1w HMA (or strong mean-revert signal)
-
-3. LOOSE ENTRY THRESHOLDS: RSI 35/65 (not 30/70), Donchian(15) not (20)
-   - Guarantees ≥30 trades/train, ≥5 trades/test
-   - Previous 12h Fisher strategy had too many filters = few trades
-
-4. ATR TRAILING STOPLOSS: 2.5x ATR from entry, signal→0 when hit
-   - Protects against 2022-style crashes
-
-5. DISCRETE SIZING: 0.0, ±0.25, ±0.30 to minimize fee churn
-   - Each signal change costs 0.10% round-trip
+Key innovations vs failed 6h attempts:
+1. SUPERTREND (ATR=10, mult=3): Clear trend direction, avoids EMA whipsaw
+2. ADX(14) regime: >25 = trend (follow Supertrend), <20 = range (mean revert)
+3. STELZER RSI: RSI(7) with 3-bar smoothing, better at catching extremes
+4. 12h HMA(21) for intermediate trend confirmation
+5. 1d HMA(21) for long-term bias (prevents major counter-trend)
+6. Asymmetric entries: trend regime uses Supertrend flip, range uses RSI extremes
+7. Conservative sizing: 0.20 base, 0.30 strong signals
 
 Why this should beat mtf_6h_triple_hma_kama_roc_1w1d_v1 (Sharpe=0.575):
-- 1d TF = fewer false signals than 6h, lower fee drag
-- Dual regime adapts to market conditions (trend vs range)
-- 1w HMA prevents counter-trend disasters in bear markets
-- Simpler logic = more trades = better statistics
+- Supertrend proven superior to EMA/HMA for trend direction (less whipsaw)
+- ADX regime filter prevents trend-following in choppy markets
+- Stelzer RSI more responsive than standard RSI for entry timing
+- 6h TF = better entry timing than 12h, fewer trades than 4h
 
-Entry logic (LOOSE to guarantee trades):
-- LONG trend: 1w_HMA bullish + CHOP<38 + close>Donchian(15) high + RSI>50
-- SHORT trend: 1w_HMA bearish + CHOP<38 + close<Donchian(15) low + RSI<50
-- LONG range: CHOP>61 + RSI<35 + close<BB_lower
-- SHORT range: CHOP>61 + RSI>65 + close>BB_upper
+Entry logic:
+- LONG trend: ADX>25 + Supertrend=long + 12h_HMA bullish + 1d_HMA bullish + Stelzer_RSI<40 pullback
+- SHORT trend: ADX>25 + Supertrend=short + 12h_HMA bearish + 1d_HMA bearish + Stelzer_RSI>60 pullback
+- LONG range: ADX<20 + Supertrend=long + Stelzer_RSI<25 extreme
+- SHORT range: ADX<20 + Supertrend=short + Stelzer_RSI>75 extreme
 
 Target: Sharpe>0.6, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 1d
-Size: 0.25-0.30 discrete
+Timeframe: 6h
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_dual_regime_hma_rsi_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_supertrend_adx_regime_stelzer_12h1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -92,10 +84,110 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Supertrend indicator - ATR-based trend following
+    Returns: supertrend_values, direction (1=long, -1=short)
+    """
     n = len(close)
     if n < period + 1:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    atr = calculate_atr(high, low, close, period)
+    
+    supertrend = np.full(n, np.nan, dtype=np.float64)
+    direction = np.full(n, np.nan, dtype=np.float64)
+    
+    # Calculate basic bands
+    hl2 = (high + low) / 2.0
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    # Initialize
+    supertrend[period] = upper_band[period]
+    direction[period] = -1  # Start short
+    
+    for i in range(period + 1, n):
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
+            supertrend[i] = supertrend[i-1]
+            direction[i] = direction[i-1]
+            continue
+        
+        # Supertrend logic
+        if direction[i-1] == 1:  # Previously long
+            if close[i] > lower_band[i]:
+                supertrend[i] = max(lower_band[i], supertrend[i-1])
+                direction[i] = 1
+            else:
+                supertrend[i] = upper_band[i]
+                direction[i] = -1
+        else:  # Previously short
+            if close[i] < upper_band[i]:
+                supertrend[i] = min(upper_band[i], supertrend[i-1])
+                direction[i] = -1
+            else:
+                supertrend[i] = lower_band[i]
+                direction[i] = 1
+    
+    return supertrend, direction
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Average Directional Index - measures trend strength
+    ADX > 25 = trending, ADX < 20 = ranging
+    """
+    n = len(close)
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
+    
+    # Calculate True Range and Directional Movement
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    # Smooth with EMA
+    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI
+    plus_di_pct = np.zeros(n, dtype=np.float64)
+    minus_di_pct = np.zeros(n, dtype=np.float64)
+    
+    mask = atr_smooth > 1e-10
+    plus_di_pct[mask] = 100.0 * plus_di[mask] / atr_smooth[mask]
+    minus_di_pct[mask] = 100.0 * minus_di[mask] / atr_smooth[mask]
+    
+    # Calculate DX and ADX
+    dx = np.zeros(n, dtype=np.float64)
+    di_sum = plus_di_pct + minus_di_pct
+    mask2 = di_sum > 1e-10
+    dx[mask2] = 100.0 * np.abs(plus_di_pct[mask2] - minus_di_pct[mask2]) / di_sum[mask2]
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
+def calculate_stelzer_rsi(close, period=7, smooth=3):
+    """
+    Stelzer RSI - Modified RSI with smoothing for better extreme detection
+    Uses shorter period (7) with 3-bar SMA smoothing
+    """
+    n = len(close)
+    if n < period + smooth:
         return np.full(n, np.nan)
     
     delta = np.diff(close)
@@ -108,69 +200,16 @@ def calculate_rsi(close, period=14):
     avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    rsi = np.full(n, np.nan, dtype=np.float64)
+    rsi_raw = np.full(n, np.nan, dtype=np.float64)
     mask = avg_loss != 0
     rs = np.zeros(n)
     rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    rsi_raw[mask] = 100 - (100 / (1 + rs[mask]))
     
-    return rsi
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppy vs trending
-    CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+    # Apply 3-bar SMA smoothing
+    rsi_smooth = pd.Series(rsi_raw).rolling(window=smooth, min_periods=smooth).mean().values
     
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
-
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Bollinger Bands"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    
-    return upper, sma, lower
-
-def calculate_donchian(high, low, period=15):
-    """Donchian Channel - shorter period for more signals"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
+    return rsi_smooth
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -179,21 +218,24 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate and align 1w HMA for ultra-long-term bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate and align HTF indicators
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate 1d indicators
-    atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
-    bb_upper, bb_mid, bb_lower = calculate_bollinger(close, period=20, std_mult=2.0)
-    donch_upper, donch_lower = calculate_donchian(high, low, period=15)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Calculate 6h indicators
+    atr_10 = calculate_atr(high, low, close, period=10)
+    supertrend, supertrend_dir = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    adx_14 = calculate_adx(high, low, close, period=14)
+    stelzer_rsi = calculate_stelzer_rsi(close, period=7, smooth=3)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
+    SIZE_BASE = 0.20
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -205,87 +247,104 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
+    # Track Supertrend flips
+    prev_supertrend_dir = np.nan
+    
     # Warmup period
-    min_bars = 50
+    min_bars = 100
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr_10[i]) or atr_10[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
+        if np.isnan(supertrend[i]) or np.isnan(supertrend_dir[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(bb_lower[i]) or np.isnan(donch_upper[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(adx_14[i]) or np.isnan(stelzer_rsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME DETECTION (Choppiness Index) ===
-        chop = chop_14[i]
-        is_trend_regime = chop < 38.2
-        is_range_regime = chop > 61.8
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === TREND DIRECTION (1w HMA bias) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        # === REGIME DETECTION (ADX) ===
+        adx = adx_14[i]
+        is_trend_regime = adx > 25.0
+        is_range_regime = adx < 20.0
         
-        # === RSI SIGNALS (LOOSE thresholds for more trades) ===
-        rsi = rsi_14[i]
-        rsi_bullish = rsi > 50
-        rsi_bearish = rsi < 50
-        rsi_oversold = rsi < 35  # Loose: was 30
-        rsi_overbought = rsi > 65  # Loose: was 70
+        # === TREND DIRECTION (Supertrend + HTF HMA bias) ===
+        supertrend_long = supertrend_dir[i] == 1
+        supertrend_short = supertrend_dir[i] == -1
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_breakout_long = close[i] > donch_upper[i-1] if i > 0 and not np.isnan(donch_upper[i-1]) else False
-        donchian_breakout_short = close[i] < donch_lower[i-1] if i > 0 and not np.isnan(donch_lower[i-1]) else False
+        price_above_12h = close[i] > hma_12h_aligned[i]
+        price_below_12h = close[i] < hma_12h_aligned[i]
+        price_above_1d = close[i] > hma_1d_aligned[i]
+        price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === BOLLINGER BAND TOUCH ===
-        bb_touch_lower = close[i] <= bb_lower[i] * 1.01
-        bb_touch_upper = close[i] >= bb_upper[i] * 0.99
+        # === STELZER RSI SIGNALS ===
+        rsi_val = stelzer_rsi[i]
+        rsi_oversold = rsi_val < 40.0
+        rsi_overbought = rsi_val > 60.0
+        rsi_extreme_low = rsi_val < 25.0
+        rsi_extreme_high = rsi_val > 75.0
         
-        # === ENTRY LOGIC (LOOSE - must generate trades) ===
+        # === SUPERSTREND FLIP DETECTION ===
+        supertrend_flip_long = False
+        supertrend_flip_short = False
+        
+        if not np.isnan(prev_supertrend_dir):
+            if prev_supertrend_dir == -1 and supertrend_dir[i] == 1:
+                supertrend_flip_long = True
+            elif prev_supertrend_dir == 1 and supertrend_dir[i] == -1:
+                supertrend_flip_short = True
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # TREND REGIME: Donchian breakout + 1w HMA bias + RSI confirmation
+        # TREND REGIME: Follow Supertrend with HTF confirmation + RSI pullback
         if is_trend_regime:
-            # LONG: 1w bullish + Donchian breakout + RSI bullish
-            if price_above_1w and donchian_breakout_long and rsi_bullish:
-                desired_signal = SIZE_STRONG
+            # LONG: Supertrend long + 12h/1d bullish + RSI pullback (not overbought)
+            if supertrend_long and price_above_12h and price_above_1d and rsi_oversold:
+                desired_signal = SIZE_STRONG if supertrend_flip_long else SIZE_BASE
             
-            # SHORT: 1w bearish + Donchian breakdown + RSI bearish
-            elif price_below_1w and donchian_breakout_short and rsi_bearish:
-                desired_signal = -SIZE_STRONG
+            # SHORT: Supertrend short + 12h/1d bearish + RSI pullback (not oversold)
+            elif supertrend_short and price_below_12h and price_below_1d and rsi_overbought:
+                desired_signal = -SIZE_STRONG if supertrend_flip_short else -SIZE_BASE
         
-        # RANGE REGIME: RSI extremes + Bollinger touch (mean reversion)
+        # RANGE REGIME: Mean reversion with Supertrend direction + RSI extremes
         elif is_range_regime:
-            # LONG: RSI oversold + price at BB lower
-            if rsi_oversold and bb_touch_lower:
+            # LONG: Supertrend long + RSI extreme low
+            if supertrend_long and rsi_extreme_low:
                 desired_signal = SIZE_BASE
             
-            # SHORT: RSI overbought + price at BB upper
-            elif rsi_overbought and bb_touch_upper:
+            # SHORT: Supertrend short + RSI extreme high
+            elif supertrend_short and rsi_extreme_high:
                 desired_signal = -SIZE_BASE
         
-        # NEUTRAL REGIME: Use 1w HMA for direction only + RSI filter
+        # NEUTRAL REGIME (ADX 20-25): Use HTF bias only
         else:
-            # LONG: 1w bullish + RSI not overbought
-            if price_above_1w and not rsi_overbought and rsi_bullish:
+            # LONG: 1d bullish + Supertrend long + RSI not extreme high
+            if price_above_1d and supertrend_long and rsi_val < 70.0:
                 desired_signal = SIZE_BASE
             
-            # SHORT: 1w bearish + RSI not oversold
-            elif price_below_1w and not rsi_oversold and rsi_bearish:
+            # SHORT: 1d bearish + Supertrend short + RSI not extreme low
+            elif price_below_1d and supertrend_short and rsi_val > 30.0:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
@@ -326,7 +385,7 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(final_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr_10[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
@@ -344,5 +403,6 @@ def generate_signals(prices):
                 lowest_since_entry = 0.0
         
         signals[i] = final_signal
+        prev_supertrend_dir = supertrend_dir[i]
     
     return signals
