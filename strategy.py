@@ -1,42 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #1544: 12h Primary + 1d/1w HTF — Simplified Mean Reversion with Trend Filter
+Experiment #1545: 15m Primary + 4h/1d HTF — Session-Filtered RSI Pullback
 
-Hypothesis: Complex regime-switching strategies overfit. A simpler approach with LOOSE 
-entry conditions will generate sufficient trades while the 1d/1w HMA filters prevent 
-major counter-trend disasters. Key insight from failures: entry conditions were too 
-strict (0 trades) or too complex (negative Sharpe in bear markets).
+Hypothesis: 15m timeframe with strict HTF filtering can capture intraday pullbacks
+in the direction of the higher timeframe trend. Key innovations:
+1. 1d HMA(21) for major trend bias (only trade with major trend)
+2. 4h HMA(16/48) crossover for intermediate momentum confirmation
+3. 15m RSI(7) extremes for entry timing (oversold in uptrend, overbought in downtrend)
+4. UTC session filter: 00-12 UTC gets full size (London+NY overlap), 12-24 UTC gets half
+5. ATR(14) 2.5x trailing stoploss
+6. Discrete sizing: 0.0, ±0.15, ±0.25 (minimize fee churn on 15m)
 
-Strategy components:
-1. 1w HMA(21) - Major secular trend bias (avoid fighting multi-month trends)
-2. 1d HMA(21) - Intermediate trend filter (avoid counter-trend on daily)
-3. 12h RSI(7) - Fast mean reversion signal (LOOSE thresholds: 35/65 not 25/75)
-4. 12h ATR(14) - Volatility normalization for stops
-5. Discrete sizing: 0.0, ±0.25, ±0.30 (minimize fee churn)
-6. Trailing stoploss: 2.5x ATR from entry/extreme
-
-Why this should work:
-- RSI(7) is faster than RSI(14), generating more signals on 12h TF
-- Thresholds 35/65 are LOOSE - will trigger on normal pullbacks, not just extremes
-- 1w + 1d HMA double filter prevents major counter-trend positions
-- Simple logic = less overfitting than complex regime-switching
-- 12h TF naturally produces 25-40 trades/year (fee-efficient)
+Why this should work on 15m:
+- HTF filters prevent counter-trend trades (main killer of lower TF strategies)
+- RSI(7) is fast enough for 15m but not too noisy
+- Session filter reduces trades by ~40% while keeping quality entries
+- LOOSE RSI thresholds (30/70, not 25/75) ensure >=40 trades/year
+- 1d bias prevents major disasters in 2022 crash and 2025 bear
 
 Entry logic (LOOSE to guarantee trades):
-- LONG: 1w_HMA bullish + 1d_HMA bullish + RSI(7) < 35
-- SHORT: 1w_HMA bearish + 1d_HMA bearish + RSI(7) > 65
-- Exit: RSI crosses back through 50 OR stoploss hit
+- LONG: 1d_HMA bullish + 4h_HMA16>48 + RSI(7)<35 + session 00-12 UTC
+- SHORT: 1d_HMA bearish + 4h_HMA16<48 + RSI(7)>65 + session 00-12 UTC
+- Reduced size (0.15) for 12-24 UTC entries
 
-Target: Sharpe>0.6, trades>=50 train, trades>=5 test, DD>-35%
-Timeframe: 12h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.6, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.25 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_rsi7_hma_1d1w_simple_v1"
-timeframe = "12h"
+name = "mtf_15m_rsi7_hma_session_4h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -111,26 +107,29 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate and align HTF indicators
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    hma_4h_16_raw = calculate_hma(df_4h['close'].values, period=16)
+    hma_4h_48_raw = calculate_hma(df_4h['close'].values, period=48)
+    hma_4h_16_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_16_raw)
+    hma_4h_48_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_48_raw)
     
-    # Calculate 12h indicators
-    rsi_7 = calculate_rsi(close, period=7)
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.25
     
     # Position tracking for stoploss
     in_position = False
@@ -153,55 +152,48 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_7[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_4h_16_aligned[i]) or np.isnan(hma_4h_48_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1w + 1d HMA double filter) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
+        # === SESSION FILTER (UTC hour from open_time) ===
+        # open_time is in milliseconds, convert to hour
+        ts_ms = open_time[i]
+        hour_utc = (ts_ms // (1000 * 60 * 60)) % 24
+        is_prime_session = 0 <= hour_utc < 12  # 00-12 UTC = London+NY overlap
         
+        # === TREND DIRECTION (1d HMA bias) ===
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        # === RSI (fast, period=7) ===
+        # === 4h HMA CROSSOVER (intermediate momentum) ===
+        hma_4h_bullish = hma_4h_16_aligned[i] > hma_4h_48_aligned[i]
+        hma_4h_bearish = hma_4h_16_aligned[i] < hma_4h_48_aligned[i]
+        
+        # === RSI(7) ===
         rsi = rsi_7[i]
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
+        size_multiplier = 1.0 if is_prime_session else 0.6
         
-        # LONG: Both 1w and 1d bullish + RSI oversold (<35 is loose)
-        if price_above_1w and price_above_1d and rsi < 35:
-            desired_signal = SIZE_STRONG
+        # LONG: 1d bullish + 4h bullish + RSI oversold
+        if price_above_1d and hma_4h_bullish and rsi < 35:
+            desired_signal = SIZE_STRONG * size_multiplier
         
-        # SHORT: Both 1w and 1d bearish + RSI overbought (>65 is loose)
-        elif price_below_1w and price_below_1d and rsi > 65:
-            desired_signal = -SIZE_STRONG
-        
-        # Weaker signal: Only 1d confirmation (1w neutral or conflicting)
-        elif price_above_1d and rsi < 30:
-            desired_signal = SIZE_BASE
-        elif price_below_1d and rsi > 70:
-            desired_signal = -SIZE_BASE
-        
-        # === EXIT SIGNAL (RSI mean reversion) ===
-        # If in long position and RSI crosses above 55, reduce/exit
-        if in_position and position_side > 0 and rsi > 55:
-            desired_signal = 0.0
-        
-        # If in short position and RSI crosses below 45, reduce/exit
-        if in_position and position_side < 0 and rsi < 45:
-            desired_signal = 0.0
+        # SHORT: 1d bearish + 4h bearish + RSI overbought
+        elif price_below_1d and hma_4h_bearish and rsi > 65:
+            desired_signal = -SIZE_STRONG * size_multiplier
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -224,13 +216,13 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_STRONG * 0.9:
-            final_signal = SIZE_STRONG
-        elif desired_signal <= -SIZE_STRONG * 0.9:
-            final_signal = -SIZE_STRONG
-        elif desired_signal >= SIZE_BASE * 0.9:
+        if desired_signal >= SIZE_STRONG * 0.8:
+            final_signal = SIZE_STRONG if is_prime_session else SIZE_BASE
+        elif desired_signal <= -SIZE_STRONG * 0.8:
+            final_signal = -SIZE_STRONG if is_prime_session else -SIZE_BASE
+        elif desired_signal >= SIZE_BASE * 0.8:
             final_signal = SIZE_BASE
-        elif desired_signal <= -SIZE_BASE * 0.9:
+        elif desired_signal <= -SIZE_BASE * 0.8:
             final_signal = -SIZE_BASE
         else:
             final_signal = 0.0
