@@ -1,41 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #1349: 15m Primary + 1h/1d HTF — HMA Trend + RSI Pullback + Session Filter
+Experiment #1350: 1h Primary + 4h/1d HTF — HMA Trend + RSI Pullback + Volatility Filter
 
-Hypothesis: 15m timeframe needs LOOSE entry conditions to generate trades (avoid Sharpe=0.000).
-Using 1d/1h HMA for trend direction + 15m RSI(7) pullback with wide thresholds should achieve:
-- 50-100 trades/year on 15m timeframe
+Hypothesis: Simple is better. Use 4h HMA for trend direction, 1h RSI for pullback entries.
+This proven pattern (from current best strategies) should achieve:
+- 40-80 trades/year on 1h timeframe
 - Positive Sharpe on BTC/ETH/SOL individually
-- DD < -40%
+- DD < -35%
 
 Key features:
-1. 1d HMA(21) for major trend bias (only trade with trend)
-2. 1h HMA(21) for intermediate confirmation
-3. 15m RSI(7) pullback entries with LOOSE thresholds (<45 long, >55 short)
-4. Session filter: 00-12 UTC (London+NY overlap) for better fills
+1. 4h HMA(21) for trend bias (only long when price > 4h HMA)
+2. 1h RSI(7) for pullback entries (RSI < 45 long, RSI > 55 short) - LOOSE thresholds
+3. Volatility filter: ATR(14) > ATR(14)_median(50) to avoid dead markets
+4. 1d HMA for major regime confirmation (boost size when aligned)
 5. ATR(14) 2.5x trailing stop
 6. Discrete sizing (0.0, ±0.20, ±0.30)
 
-Why this should work where 15m strategies failed:
-- RSI thresholds are LOOSE (not extreme values like <20 or >80)
-- Session filter reduces noise but doesn't block all entries
-- 15m TF = natural 50-100 trades/year with proper filtering
-- HMA reduces lag vs EMA for faster trend detection
+Why this should work where others failed:
+- LOOSE RSI thresholds guarantee trades (not extreme 20/80)
+- 4h trend filter prevents counter-trend whipsaws
+- Volatility filter avoids low-vol chop that kills Sharpe
+- 1h TF = natural 40-80 trades/year (fee-friendly)
+- Simple logic = less likely to have bugs/look-ahead
 
 Entry logic:
-- LONG: price > 1d_HMA + price > 1h_HMA + RSI(7) < 45 + session 00-12 UTC
-- SHORT: price < 1d_HMA + price < 1h_HMA + RSI(7) > 55 + session 00-12 UTC
+- LONG: 4h_HMA bullish + 1h RSI(7) < 45 + vol_ok
+- SHORT: 4h_HMA bearish + 1h RSI(7) > 55 + vol_ok
 
-Target: Sharpe>0.5, trades>=50 train, trades>=10 test, DD>-40%
-Timeframe: 15m
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 1h
 Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_15m_hma_trend_rsi7_pullback_session_1h1d_v1"
-timeframe = "15m"
+name = "mtf_1h_hma_trend_rsi7_pullback_vol_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -104,29 +105,50 @@ def calculate_rsi(close, period=14):
     rs[mask] = avg_gain[mask] / avg_loss[mask]
     rsi[mask] = 100 - (100 / (1 + rs[mask]))
     
+    # Handle case where all gains (no losses)
+    mask_all_gain = (avg_loss == 0) & (avg_gain > 0)
+    rsi[mask_all_gain] = 100
+    
     return rsi
+
+def calculate_median(series, period):
+    """Rolling median"""
+    n = len(series)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    median = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        window = series[i - period + 1:i + 1]
+        valid = window[~np.isnan(window)]
+        if len(valid) >= period // 2:
+            median[i] = np.median(valid)
+    
+    return median
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1h = get_htf_data(prices, '1h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
-    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 15m indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_7 = calculate_rsi(close, period=7)
+    
+    # Volatility filter: ATR > median ATR(50)
+    atr_median_50 = calculate_median(atr_14, period=50)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.20
@@ -142,7 +164,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 150
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -160,47 +182,52 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === SESSION FILTER (00-12 UTC) ===
-        # Extract hour from open_time (milliseconds timestamp)
-        ts_ms = open_time[i]
-        hour_utc = (ts_ms // (1000 * 60 * 60)) % 24
-        in_session = (hour_utc >= 0) and (hour_utc < 12)
+        if np.isnan(atr_median_50[i]) or atr_median_50[i] <= 1e-10:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === TREND DIRECTION (1d + 1h HMA bias) ===
+        # === VOLATILITY FILTER ===
+        vol_ok = atr_14[i] > atr_median_50[i] * 0.8  # Allow some slack
+        
+        # === TREND DIRECTION (4h HMA bias) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
+        
+        # 1d HMA for major regime confirmation
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
         
-        price_above_1h = close[i] > hma_1h_aligned[i]
-        price_below_1h = close[i] < hma_1h_aligned[i]
-        
         # === RSI PULLBACK (LOOSE THRESHOLDS) ===
         rsi = rsi_7[i]
-        rsi_oversold = rsi < 45  # LOOSE: not extreme <20
-        rsi_overbought = rsi > 55  # LOOSE: not extreme >80
+        rsi_pullback_long = rsi < 45  # Pullback in uptrend
+        rsi_pullback_short = rsi > 55  # Rally in downtrend
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: 1d bullish + 1h bullish + RSI pullback + session
-        if price_above_1d and price_above_1h and rsi_oversold:
-            if in_session:
-                desired_signal = SIZE_STRONG  # Strong: all conditions met
+        # LONG: 4h bullish + RSI pullback + vol_ok
+        if price_above_4h and rsi_pullback_long and vol_ok:
+            if price_above_1d:
+                desired_signal = SIZE_STRONG  # Strong trend alignment
             else:
-                desired_signal = SIZE_BASE  # Weaker: outside session
+                desired_signal = SIZE_BASE  # Basic long
         
-        # SHORT: 1d bearish + 1h bearish + RSI pullback + session
-        elif price_below_1d and price_below_1h and rsi_overbought:
-            if in_session:
-                desired_signal = -SIZE_STRONG  # Strong: all conditions met
+        # SHORT: 4h bearish + RSI pullback + vol_ok
+        elif price_below_4h and rsi_pullback_short and vol_ok:
+            if price_below_1d:
+                desired_signal = -SIZE_STRONG  # Strong trend alignment
             else:
-                desired_signal = -SIZE_BASE  # Weaker: outside session
+                desired_signal = -SIZE_BASE  # Basic short
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
