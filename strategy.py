@@ -1,42 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #1310: 1h Primary + 4h/1d HTF — HMA Trend + ROC Momentum + Volatility Filter
+Experiment #1311: 6h Primary + 1w/1d HTF — HMA Trend + ROC Momentum
 
-Hypothesis: Recent 1h strategies failed (Sharpe=0.000) due to overly strict entry conditions.
-This variant uses LOOSE thresholds to guarantee 40-80 trades/year while maintaining
-multi-timeframe confluence. Key learnings from failures:
+Hypothesis: 6h timeframe captures multi-day trends without 4h noise or 12h slowness.
+Using 1w for major regime + 1d for intermediate trend + loose 6h ROC entry should
+generate 30-60 trades/year while avoiding counter-trend trades.
 
-1. RSI pullback on 1h = 0 trades (#1299 failed)
-2. CRSI mean reversion = 0 trades (#1309 failed)
-3. Too many regime filters = no signals trigger
-
-New approach:
-- 4h HMA(21) slope for trend direction (proven in best strategies)
-- 1h ROC(10) for momentum entry (LOOSE: >2 or <-2, not >5)
-- 1d HMA(21) for major regime bias (single filter, not dual)
-- ATR(14) ratio for volatility filter (only trade when vol expanding)
-- 2.5x ATR trailing stoploss
+Key insight from failures: Too many filters = 0 trades. Recent 6h strategies failed
+because weekly slope + daily slope + 6h conditions never aligned. This version:
+- Uses 1w HMA position (price vs HMA) instead of slope = more stable signal
+- Uses 1d HMA position instead of slope = less whipsaw
+- Very loose ROC threshold (1.5%) = guarantees entry opportunities
+- No 6h HMA filter = one less condition to fail
 
 Why this should work:
-- 1h timeframe with HTF direction = proven pattern (mtf_hma_rsi_zscore_v1 Sharpe=5.4)
-- Loose ROC thresholds = guarantee trades without over-trading
-- Volatility filter = avoid choppy periods naturally
-- Discrete sizing (0.0, ±0.20, ±0.30) = minimal fee churn
+- 1w HMA(21) = major bull/bear regime (price above = bull, below = bear)
+- 1d HMA(21) = intermediate confirmation (must agree with weekly)
+- 6h ROC(10) > 1.5% = loose momentum trigger (ensures trades)
+- ATR(14) 2.5x trailing stop = protects against reversals
+- Discrete sizing: 0.0, ±0.25, ±0.30 = minimal fee churn
 
-Entry logic (LOOSE to guarantee 40-80 trades/year):
-- LONG: 4h_HMA rising + 1d_HMA bullish + ROC(10) > 2 + ATR_ratio > 1.0
-- SHORT: 4h_HMA falling + 1d_HMA bearish + ROC(10) < -2 + ATR_ratio > 1.0
-
-Target: Sharpe>0.45, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 1h
-Size: 0.20-0.30 discrete
+Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
+Timeframe: 6h
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_hma_trend_roc_momentum_vol_4h1d_v1"
-timeframe = "1h"
+name = "mtf_6h_hma_regime_roc_momentum_1w1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -96,15 +89,6 @@ def calculate_roc(close, period=10):
     
     return roc
 
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    ema = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return ema
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -112,24 +96,22 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_30 = calculate_atr(high, low, close, period=30)
     roc_10 = calculate_roc(close, period=10)
-    ema_21 = calculate_ema(close, period=21)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.20
+    SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -160,55 +142,40 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(ema_21[i]) or np.isnan(atr_30[i]) or atr_30[i] <= 1e-10:
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND REGIME (1w + 1d HMA position) ===
+        # Weekly regime: price above 1w HMA = bull, below = bear
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
         
-        # === TREND DIRECTION (4h HMA slope + 1d HMA bias) ===
-        # 4h HMA slope (compare to 2 bars ago for stability)
-        hma_4h_slope = 0.0
-        if i >= 2 and not np.isnan(hma_4h_aligned[i-2]):
-            hma_4h_slope = hma_4h_aligned[i] - hma_4h_aligned[i-2]
-        
-        # 1d HMA bias
+        # Daily confirmation: must agree with weekly
         price_above_1d = close[i] > hma_1d_aligned[i]
         price_below_1d = close[i] < hma_1d_aligned[i]
-        
-        # 1h price vs 1h EMA for local confirmation
-        price_above_ema = close[i] > ema_21[i]
-        price_below_ema = close[i] < ema_21[i]
         
         # === MOMENTUM (ROC) ===
         roc = roc_10[i]
         
-        # === VOLATILITY FILTER (ATR ratio) ===
-        atr_ratio = atr_14[i] / atr_30[i] if atr_30[i] > 0 else 0.0
-        
-        # === ENTRY LOGIC (LOOSE - guarantee 40-80 trades/year) ===
+        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         
-        # LONG: 4h HMA rising + 1d bullish + ROC positive + vol expanding
-        if hma_4h_slope > 0 and price_above_1d and price_above_ema:
-            if roc > 2.0 and atr_ratio > 0.9:  # Loose thresholds
-                if roc > 5.0 and atr_ratio > 1.2:
+        # LONG: Weekly bull + Daily bull + ROC positive momentum
+        if price_above_1w and price_above_1d:
+            if roc > 1.5:  # Very loose momentum threshold
+                if roc > 5.0:
                     desired_signal = SIZE_STRONG  # Strong momentum
                 else:
                     desired_signal = SIZE_BASE  # Basic momentum
         
-        # SHORT: 4h HMA falling + 1d bearish + ROC negative + vol expanding
-        elif hma_4h_slope < 0 and price_below_1d and price_below_ema:
-            if roc < -2.0 and atr_ratio > 0.9:  # Loose thresholds
-                if roc < -5.0 and atr_ratio > 1.2:
+        # SHORT: Weekly bear + Daily bear + ROC negative momentum
+        elif price_below_1w and price_below_1d:
+            if roc < -1.5:  # Very loose momentum threshold
+                if roc < -5.0:
                     desired_signal = -SIZE_STRONG  # Strong momentum
                 else:
                     desired_signal = -SIZE_BASE  # Basic momentum
