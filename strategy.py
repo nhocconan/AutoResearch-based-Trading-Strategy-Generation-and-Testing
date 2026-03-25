@@ -1,39 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #1616: 30m Primary + 4h/1d HTF — Fisher Transform + HMA Trend Bias
+Experiment #1617: 15m Primary + 4h/12h HTF — HMA Trend + RSI Pullback + Volume
 
-Hypothesis: After 13+ failed experiments with overly strict entry conditions (0 trades),
-this strategy uses LOOSE Fisher Transform thresholds to GUARANTEE trade generation.
-Key insight from failures: adding too many confluence filters = 0 trades.
+Hypothesis: 15m timeframe has ZERO successful experiments because entry conditions
+were too strict. This strategy uses LOOSE thresholds to guarantee trades while
+maintaining edge through multi-timeframe confluence.
 
-Innovations vs failed 30m/15m/5m attempts (#1605, #1610, #1613):
-1. FISHER TRANSFORM (period=9): Better reversal capture than RSI in bear/range markets
-2. LOOSE THRESHOLDS: Fisher -1.0/+1.0 (not -1.5/-2.0) to ensure ≥40 trades/year
-3. HTF AS BIAS NOT FILTER: 4h HMA increases size but doesn't block entries
-4. SESSION AS ENHANCER: 08-20 UTC increases size, not entry requirement
-5. SINGLE PRIMARY SIGNAL: Fisher cross is the trigger, everything else modifies size
+Key innovations vs failed 15m attempts:
+1. LOOSE RSI(7) thresholds: 30/70 (not 20/80) to generate more signals
+2. PERMISSIVE volume filter: vol > 0.8x avg (not 1.3x) — just avoid dead zones
+3. WIDE session window: 00-16 UTC (not just 00-12) — crypto trades 24/7
+4. 4h HMA(21) for trend bias + 15m RSI(7) for entry timing (proven MTF combo)
+5. Bollinger Band mean-reversion WITH trend filter (pure mean-rev failed badly)
+6. DISCRETE sizing: 0.0, ±0.20, ±0.30 to minimize fee churn
 
-Why this should work where others failed:
-- Fisher proven superior to RSI for reversal timing (Ehlers research)
-- Loose thresholds guarantee trades (learning from 0-trade failures)
-- 30m TF with 4h bias = fewer trades than pure 30m, more than 1h/4h
-- Session filter captures liquid hours without blocking entries
+Why this should work when #1609 (mtf_15m_rsi7_hma1h_meanrev_v1) failed:
+- #1609 used 1h HMA (too slow for 15m entries) — we use 4h HMA (proper HTF)
+- #1609 had strict RSI thresholds — we use 30/70 (loose)
+- #1609 had no volume filter — we add loose vol confirmation
+- #1609 was pure mean-reversion — we add trend bias filter
 
-Entry logic (LOOSE to guarantee ≥40 trades/year):
-- LONG: Fisher crosses above -1.0 (always valid), 4h HMA bullish increases size
-- SHORT: Fisher crosses below +1.0 (always valid), 4h HMA bearish increases size
-- Session 08-20 UTC: +50% size boost (liquidity confirmation)
+Entry logic (LOOSE to guarantee ≥30 trades/train):
+- LONG: 4h_HMA bullish + 15m_RSI(7)<35 + price>BB_lower + session 00-16 UTC
+- SHORT: 4h_HMA bearish + 15m_RSI(7)>65 + price<BB_upper + session 00-16 UTC
+- Exit: RSI crosses 50 or stoploss (2.5x ATR)
 
-Target: Sharpe>0.6, trades>=40/year train, trades>=5 test, DD>-35%
-Timeframe: 30m
-Size: 0.20 base, 0.30 with HTF confirm, 0.35 with session
+Target: Sharpe>0.6, trades>=40 train, trades>=5 test, DD>-35%
+Timeframe: 15m
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_30m_fisher_hma_bias_session_loose_v1"
-timeframe = "30m"
+name = "mtf_15m_hma_rsi_pullback_4h_loose_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -80,44 +81,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_fisher(high, low, period=9):
-    """
-    Ehlers Fisher Transform - normalizes price to Gaussian distribution
-    Better at catching extremes than RSI, especially in bear markets
-    Returns fisher value and trigger (previous value for crossover detection)
-    """
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    fisher = np.full(n, np.nan, dtype=np.float64)
-    trigger = np.full(n, np.nan, dtype=np.float64)
-    
-    median = (high + low) / 2.0
-    
-    for i in range(period - 1, n):
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        price_range = highest - lowest
-        
-        if price_range < 1e-10:
-            fisher[i] = 0.0
-            if i > 0:
-                trigger[i] = fisher[i-1]
-            continue
-        
-        normalized = 2.0 * (median[i] - lowest) / price_range - 1.0
-        normalized = max(-0.999, min(0.999, normalized))
-        
-        fisher[i] = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
-        
-        if i > 0:
-            trigger[i] = fisher[i-1]
-        else:
-            trigger[i] = fisher[i]
-    
-    return fisher, trigger
-
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -142,39 +105,60 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def get_session_hour(open_time):
-    """Extract UTC hour from open_time (milliseconds timestamp)"""
-    return (open_time // 3600000) % 24
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Bollinger Bands"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
+    
+    return upper, sma, lower
+
+def calculate_volume_ratio(volume, period=20):
+    """Current volume vs average volume"""
+    n = len(volume)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    vol_avg = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    vol_ratio = volume / vol_avg
+    
+    return vol_ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF indicators
     hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
     hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate 30m indicators
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 15m
     rsi_14 = calculate_rsi(close, period=14)
-    fisher, fisher_trigger = calculate_fisher(high, low, period=9)
+    bb_upper, bb_mid, bb_lower = calculate_bollinger(close, period=20, std_mult=2.0)
+    vol_ratio = calculate_volume_ratio(volume, period=20)
     
     signals = np.zeros(n)
-    
-    # Position sizing levels (discrete to minimize fee churn)
-    SIZE_BASE = 0.20      # Base position
-    SIZE_HTF = 0.28       # With HTF confirmation
-    SIZE_SESSION = 0.35   # With session + HTF
+    SIZE_BASE = 0.20
+    SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
     in_position = False
@@ -197,93 +181,86 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(fisher[i]) or np.isnan(fisher_trigger[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === FISHER TRANSFORM SIGNALS (LOOSE THRESHOLDS) ===
-        fisher_val = fisher[i]
-        fisher_prev = fisher_trigger[i]
+        if np.isnan(bb_lower[i]) or np.isnan(bb_upper[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # Fisher crossover signals - LOOSE for trade generation
-        fisher_bull_cross = fisher_val > -1.0 and fisher_prev <= -1.0
-        fisher_bear_cross = fisher_val < 1.0 and fisher_prev >= 1.0
+        if np.isnan(hma_4h_aligned[i]) or np.isnan(hma_12h_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # Fisher extreme levels for additional confirmation
-        fisher_oversold = fisher_val < -0.5
-        fisher_overbought = fisher_val > 0.5
+        # === TREND DIRECTION (4h and 12h HMA bias) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
+        price_above_12h = close[i] > hma_12h_aligned[i]
+        price_below_12h = close[i] < hma_12h_aligned[i]
         
-        # === HTF TREND BIAS (4h HMA) ===
-        hma_4h_valid = not np.isnan(hma_4h_aligned[i])
-        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
+        # 4h trend confirmation
+        trend_bullish = price_above_4h
+        trend_bearish = price_below_4h
         
-        bullish_4h = hma_4h_valid and close[i] > hma_4h_aligned[i]
-        bearish_4h = hma_4h_valid and close[i] < hma_4h_aligned[i]
-        bullish_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
-        bearish_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
+        # === RSI SIGNALS (LOOSE thresholds) ===
+        rsi_val = rsi_7[i]
+        rsi_oversold = rsi_val < 35  # LOOSE (was 30)
+        rsi_overbought = rsi_val > 65  # LOOSE (was 70)
+        rsi_neutral_cross_up = rsi_7[i] > 50 and rsi_7[i-1] <= 50 if i > 0 else False
+        rsi_neutral_cross_down = rsi_7[i] < 50 and rsi_7[i-1] >= 50 if i > 0 else False
         
-        # === SESSION FILTER (08-20 UTC) ===
-        hour = get_session_hour(open_time[i])
-        is_session = 8 <= hour <= 20
+        # === BOLLINGER BAND POSITION ===
+        bb_position = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i]) if (bb_upper[i] - bb_lower[i]) > 1e-10 else 0.5
+        bb_touch_lower = close[i] <= bb_lower[i] * 1.01
+        bb_touch_upper = close[i] >= bb_upper[i] * 0.99
+        bb_mid_cross_up = close[i] > bb_mid[i] and close[i-1] <= bb_mid[i] if i > 0 else False
+        bb_mid_cross_down = close[i] < bb_mid[i] and close[i-1] >= bb_mid[i] if i > 0 else False
         
-        # === RSI FILTER (optional confirmation) ===
-        rsi_valid = not np.isnan(rsi_14[i])
-        rsi_neutral = rsi_valid and 35 < rsi_14[i] < 65
+        # === VOLUME CONFIRMATION (LOOSE) ===
+        vol_ok = vol_ratio[i] > 0.8 if not np.isnan(vol_ratio[i]) else True  # Just avoid dead zones
         
-        # === ENTRY LOGIC (LOOSE - MUST GENERATE TRADES) ===
+        # === SESSION FILTER (PERMISSIVE) ===
+        # Extract hour from open_time (milliseconds timestamp)
+        hour_utc = (open_time[i] // 3600000) % 24
+        session_ok = 0 <= hour_utc <= 16  # Wide window (was 00-12)
+        
+        # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
-        signal_strength = 0  # 0=base, 1=htf, 2=session
         
-        # LONG entries - Fisher bull cross is primary trigger
-        if fisher_bull_cross:
-            signal_strength = 0  # Base size always valid on Fisher cross
-            
-            # Upgrade size with HTF confirmation
-            if bullish_4h or bullish_1d:
-                signal_strength = 1
-            
-            # Upgrade further with session
-            if is_session and (bullish_4h or bullish_1d):
-                signal_strength = 2
-            
-            # Also allow long if deeply oversold even without cross
-            if fisher_oversold and fisher_val < fisher_prev:
-                if signal_strength < 1 and (bullish_4h or bullish_1d):
-                    signal_strength = 1
-            
-            if signal_strength == 2:
-                desired_signal = SIZE_SESSION
-            elif signal_strength == 1:
-                desired_signal = SIZE_HTF
-            else:
-                desired_signal = SIZE_BASE
+        # LONG: 4h bullish + RSI oversold + BB lower + volume OK + session OK
+        if trend_bullish and rsi_oversold and (bb_touch_lower or bb_position < 0.25):
+            if vol_ok and session_ok:
+                # Strong signal if 12h also bullish
+                if price_above_12h:
+                    desired_signal = SIZE_STRONG
+                else:
+                    desired_signal = SIZE_BASE
         
-        # SHORT entries - Fisher bear cross is primary trigger
-        elif fisher_bear_cross:
-            signal_strength = 0  # Base size always valid on Fisher cross
-            
-            # Upgrade size with HTF confirmation
-            if bearish_4h or bearish_1d:
-                signal_strength = 1
-            
-            # Upgrade further with session
-            if is_session and (bearish_4h or bearish_1d):
-                signal_strength = 2
-            
-            # Also allow short if deeply overbought even without cross
-            if fisher_overbought and fisher_val > fisher_prev:
-                if signal_strength < 1 and (bearish_4h or bearish_1d):
-                    signal_strength = 1
-            
-            if signal_strength == 2:
-                desired_signal = -SIZE_SESSION
-            elif signal_strength == 1:
-                desired_signal = -SIZE_HTF
-            else:
-                desired_signal = -SIZE_BASE
+        # SHORT: 4h bearish + RSI overbought + BB upper + volume OK + session OK
+        elif trend_bearish and rsi_overbought and (bb_touch_upper or bb_position > 0.75):
+            if vol_ok and session_ok:
+                # Strong signal if 12h also bearish
+                if price_below_12h:
+                    desired_signal = -SIZE_STRONG
+                else:
+                    desired_signal = -SIZE_BASE
+        
+        # EXIT SIGNALS (RSI cross 50 or BB mid cross)
+        if in_position:
+            if position_side > 0 and (rsi_neutral_cross_down or bb_mid_cross_down):
+                desired_signal = 0.0
+            elif position_side < 0 and (rsi_neutral_cross_up or bb_mid_cross_up):
+                desired_signal = 0.0
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -306,14 +283,10 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_SESSION * 0.9:
-            final_signal = SIZE_SESSION
-        elif desired_signal <= -SIZE_SESSION * 0.9:
-            final_signal = -SIZE_SESSION
-        elif desired_signal >= SIZE_HTF * 0.9:
-            final_signal = SIZE_HTF
-        elif desired_signal <= -SIZE_HTF * 0.9:
-            final_signal = -SIZE_HTF
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
         elif desired_signal >= SIZE_BASE * 0.9:
             final_signal = SIZE_BASE
         elif desired_signal <= -SIZE_BASE * 0.9:
