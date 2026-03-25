@@ -1,38 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #1188: 4h Primary + 12h/1d HTF — Donchian Breakout + HMA Trend + RSI Momentum
+Experiment #1189: 15m Primary + 1h/1d HTF — Camarilla Pivot Mean Reversion
 
-Hypothesis: After analyzing 960+ failures, the key insight is:
-1. Lower TF (15m/30m) generates 0 trades due to over-filtering
-2. 4h timeframe naturally produces 20-50 trades/year (fee-optimal)
-3. Donchian breakouts work well on SOL (Sharpe +0.782 in prior tests)
-4. HMA trend filter prevents counter-trend breakouts (major loss source)
-5. RSI momentum filter adds confirmation without being too restrictive
+Hypothesis: After 4 failed 15m experiments (all 0 trades from over-filtering), 
+this strategy uses LOOSE entry conditions based on Camarilla pivot levels which
+naturally create mean reversion opportunities.
 
-Strategy Logic:
-- 12h HMA(21) = primary trend direction (price above = bullish bias)
-- 1d HMA(21) = stronger confirmation (optional boost to position size)
-- 4h Donchian(20) breakout = entry trigger (20-bar high/low)
-- 4h RSI(14) > 45 for longs, < 55 for shorts = momentum confirmation
-- ATR(14) 2.5x trailing stop = risk management
+Key changes from failed 15m experiments:
+1. NO session filter (causes 0 trades in #1177, #1185)
+2. Faster RSI(7) instead of RSI(14) for more signals
+3. Camarilla levels = natural mean reversion targets (price extends → reverts)
+4. 1h HMA for trend bias (not 4h, less lag for 15m entries)
+5. Discrete sizing 0.15-0.20 (smaller for 15m frequency)
 
-Why this should beat current best (Sharpe=0.445):
-- Donchian breakouts capture momentum moves (proven on SOL)
-- HMA trend filter prevents whipsaw entries in chop
-- RSI 45/55 threshold is LOOSE (guarantees trades, not extremes like 30/70)
-- 4h TF = natural trade frequency without fee drag
-- Discrete sizing (0.0, ±0.25, ±0.30) = minimal fee churn
+Entry logic (LOOSE to guarantee trades):
+- LONG: 1h HMA bullish + 15m price touches S2/S3 + RSI(7) < 40
+- SHORT: 1h HMA bearish + 15m price touches R2/R3 + RSI(7) > 60
+- Breakout: Price breaks R4/S4 with momentum = trend follow
 
-Target: Sharpe>0.5, trades>=30 train, trades>=5 test, DD>-35%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Target: 40-100 trades/year, Sharpe>0.5, DD>-35%
+Timeframe: 15m
+Size: 0.15-0.20 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_rsi_12h1d_v1"
-timeframe = "4h"
+name = "mtf_15m_camarilla_pivot_rsi_meanrev_1h1d_v1"
+timeframe = "15m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -97,20 +92,36 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_donchian_channels(high, low, period=20):
-    """Donchian Channels - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+def calculate_camarilla_pivots(high, low, close, prev_close):
+    """
+    Camarilla Pivot Points - mean reversion levels
+    R3/R4 = resistance, S3/S4 = support
+    Price tends to revert from R3/S3, breakout at R4/S4
+    """
+    n = len(close)
+    pivot_range = prev_close[1:] - np.roll(prev_close, 1)[1:]
+    pivot_range[0] = high[1] - low[1]
     
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
+    # Calculate pivot point (PP) = (H + L + C) / 3
+    pp = np.full(n, np.nan)
+    r3 = np.full(n, np.nan)
+    r4 = np.full(n, np.nan)
+    s3 = np.full(n, np.nan)
+    s4 = np.full(n, np.nan)
     
-    for i in range(period - 1, n):
-        upper[i] = np.nanmax(high[i - period + 1:i + 1])
-        lower[i] = np.nanmin(low[i - period + 1:i + 1])
+    for i in range(1, n):
+        h = high[i-1]
+        l = low[i-1]
+        c = close[i-1]
+        pp[i] = (h + l + c) / 3.0
+        
+        range_val = h - l
+        r3[i] = c + range_val * 1.1 / 12.0
+        r4[i] = c + range_val * 1.1 / 2.0
+        s3[i] = c - range_val * 1.1 / 12.0
+        s4[i] = c - range_val * 1.1 / 2.0
     
-    return upper, lower
+    return pp, r3, r4, s3, s4
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -119,24 +130,38 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    df_1h = get_htf_data(prices, '1h')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_1h_raw = calculate_hma(df_1h['close'].values, period=21)
+    hma_1h_aligned = align_htf_to_ltf(prices, df_1h, hma_1h_raw)
     
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Get daily OHLC for Camarilla pivots
+    daily_close = df_1d['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     
-    # Calculate 4h indicators
+    # Calculate daily Camarilla pivots
+    pp_1d, r3_1d, r4_1d, s3_1d, s4_1d = calculate_camarilla_pivots(
+        daily_high, daily_low, daily_close, np.roll(daily_close, 1)
+    )
+    
+    # Align daily pivots to 15m
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Calculate 15m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_7 = calculate_rsi(close, period=7)  # Faster RSI for 15m
     rsi_14 = calculate_rsi(close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
+    SIZE_BASE = 0.15
+    SIZE_STRONG = 0.20
     
     # Position tracking for stoploss
     in_position = False
@@ -148,7 +173,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 100
+    min_bars = 50
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -159,80 +184,87 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(rsi_7[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(hma_1h_aligned[i]) or np.isnan(pp_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_12h_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION (1h HMA) ===
+        price_above_1h = close[i] > hma_1h_aligned[i]
+        price_below_1h = close[i] < hma_1h_aligned[i]
         
-        # === TREND DIRECTION (12h HMA) ===
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
+        # === CAMARILLA LEVELS ===
+        pp = pp_aligned[i]
+        r3 = r3_aligned[i]
+        r4 = r4_aligned[i]
+        s3 = s3_aligned[i]
+        s4 = s4_aligned[i]
         
-        # 1d HMA for additional confirmation (boosts position size)
-        hma_1d_valid = not np.isnan(hma_1d_aligned[i])
-        price_above_1d = hma_1d_valid and close[i] > hma_1d_aligned[i]
-        price_below_1d = hma_1d_valid and close[i] < hma_1d_aligned[i]
+        # Check if price is near pivot levels (within 0.3% tolerance)
+        tolerance = 0.003  # 0.3%
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Long breakout: price crosses above Donchian upper
-        # Short breakout: price crosses below Donchian lower
-        prev_upper = donchian_upper[i - 1] if not np.isnan(donchian_upper[i - 1]) else donchian_upper[i]
-        prev_lower = donchian_lower[i - 1] if not np.isnan(donchian_lower[i - 1]) else donchian_lower[i]
+        near_s3 = abs(close[i] - s3) / s3 < tolerance if not np.isnan(s3) else False
+        near_s4 = close[i] < s4 if not np.isnan(s4) else False
+        near_r3 = abs(close[i] - r3) / r3 < tolerance if not np.isnan(r3) else False
+        near_r4 = close[i] > r4 if not np.isnan(r4) else False
         
-        long_breakout = close[i] > prev_upper
-        short_breakout = close[i] < prev_lower
+        below_s3 = close[i] < s3 if not np.isnan(s3) else False
+        above_r3 = close[i] > r3 if not np.isnan(r3) else False
         
-        # === RSI MOMENTUM FILTER (LOOSE - guarantees trades) ===
-        rsi = rsi_14[i]
-        rsi_bullish = rsi > 45.0  # Not too strict (was 50+)
-        rsi_bearish = rsi < 55.0  # Not too strict (was 50-)
-        
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
+        rsi_fast = rsi_7[i]
+        rsi_slow = rsi_14[i]
         
-        # LONG: Donchian breakout + price above 12h HMA + RSI bullish
-        if long_breakout and price_above_12h and rsi_bullish:
-            if price_above_1d:
-                desired_signal = SIZE_STRONG  # Strong trend alignment (12h + 1d)
+        # LONG: Mean reversion at support
+        # Condition 1: Price at/below S3 + RSI oversold
+        if below_s3 and rsi_fast < 40:
+            if price_above_1h:
+                desired_signal = SIZE_STRONG  # Trend + MR confluence
             else:
-                desired_signal = SIZE_BASE  # Basic uptrend breakout
+                desired_signal = SIZE_BASE  # Pure mean reversion
         
-        # SHORT: Donchian breakout + price below 12h HMA + RSI bearish
-        elif short_breakout and price_below_12h and rsi_bearish:
-            if price_below_1d:
-                desired_signal = -SIZE_STRONG  # Strong trend alignment (12h + 1d)
-            else:
-                desired_signal = -SIZE_BASE  # Basic downtrend breakout
+        # Condition 2: Breakout above R4 with momentum (trend follow)
+        elif near_r4 and rsi_fast > 55 and rsi_slow > 50:
+            if price_above_1h:
+                desired_signal = SIZE_STRONG  # Breakout with trend
         
-        # === STOPLOSS CHECK (2.5x ATR trailing) ===
+        # SHORT: Mean reversion at resistance
+        # Condition 1: Price at/above R3 + RSI overbought
+        if desired_signal == 0.0:  # Only if no long signal
+            if above_r3 and rsi_fast > 60:
+                if price_below_1h:
+                    desired_signal = -SIZE_STRONG  # Trend + MR confluence
+                else:
+                    desired_signal = -SIZE_BASE  # Pure mean reversion
+            
+            # Condition 2: Breakout below S4 with momentum (trend follow)
+            elif near_s4 and rsi_fast < 45 and rsi_slow < 50:
+                if price_below_1h:
+                    desired_signal = -SIZE_STRONG  # Breakout with trend
+        
+        # === STOPLOSS CHECK (2.0x ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -262,9 +294,9 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
