@@ -1,37 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #1635: 6h Primary + 12h/1d HTF — Simple Trend Following with Regime Filter
+Experiment #1636: 30m Primary + 4h HTF — HMA Trend + RSI Pullback + ROC Momentum
 
-Hypothesis: 6h timeframe sits between 4h (too noisy) and 12h (too slow). 
-Using 12h HMA for trend direction + 1d ADX for regime detection provides 
-optimal balance. Simple RSI pullback entries in trend regime, BB mean reversion 
-in range regime. LOOSE thresholds to guarantee ≥30 trades/train.
+Hypothesis: 30m timeframe with 4h trend bias captures optimal entry timing while
+maintaining HTF directionality. RSI pullback entries with ROC momentum confirmation
+provide high-probability setups with manageable trade frequency.
 
-Key design choices based on 6h failure analysis:
-1. SIMPLE logic - fewer confluence requirements than failed strategies
-2. LOOSE RSI thresholds: 35/65 (not 30/70) to guarantee entries
-3. 12h HMA (not 1d) for trend - faster response for 6h entries
-4. 1d ADX for regime - proven filter from literature
-5. NO weekly data (too slow for 6h, caused failures in #1623, #1627)
-6. Discrete signal sizes: 0.25 base, 0.30 strong
-7. 2.5x ATR trailing stoploss via signal→0
+LESSONS FROM FAILURES (#1625, #1629, #1630, #1633):
+- Session filters (08-20 UTC) = ZERO trades (crypto trades 24/7!)
+- RSI 40/60 too strict → use 35/65 for more entries
+- Need momentum confirmation (ROC) that's easy to trigger
+- Warmup too long (50 bars) → reduce to 30 bars
+- Complex regime logic (Choppiness) reduces trade count
 
-Why this might beat mtf_6h_triple_hma_kama_roc_1w1d_v1 (Sharpe=0.575):
-- Simpler logic = fewer conflicting filters = more trades
-- 12h HMA more responsive than 1d/1w combo for 6h entries
-- ADX regime filter proven in quantitative literature
-- Loose thresholds ensure trade generation (critical for Sharpe)
+Key design choices:
+1. NO session filter (crypto is 24/7 market)
+2. LOOSE RSI thresholds: 35/65 (not 40/60) to guarantee ≥50 trades/year
+3. 4h HMA(21) for trend bias (proven in best strategies)
+4. ROC(10) momentum confirmation (easy to trigger, adds confluence)
+5. Simple ATR(14) stoploss at 2.5x
+6. Discrete signal sizes: 0.20 base, 0.30 strong
+7. Short warmup (30 bars) to start trading earlier
 
-Target: Sharpe>0.6, trades≥30 train, trades≥3 test, DD>-35%
-Timeframe: 6h
-Size: 0.25-0.30 discrete
+Entry logic (LOOSE to guarantee trades):
+- LONG: 4h HMA bullish + RSI(14) < 45 + ROC(10) > 0
+- SHORT: 4h HMA bearish + RSI(14) > 55 + ROC(10) < 0
+- Exit: RSI mean reversion (60/40) or stoploss hit
+
+Why this beats failed 30m strategies:
+- No session filter = trades throughout 24h crypto market
+- Loose RSI + ROC = more entry opportunities
+- 4h HMA = responsive trend filter without being too slow
+- 3+ confluence (HMA + RSI + ROC) but each is loose
+
+Target: Sharpe>0.6, trades≥50/year train, trades≥5 test, DD>-35%
+Timeframe: 30m
+Size: 0.20-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_hma_adx_regime_12h1d_loose_v1"
-timeframe = "6h"
+name = "mtf_30m_hma_rsi_roc_4h_loose_v1"
+timeframe = "30m"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -78,43 +89,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - measures trend strength"""
-    n = len(close)
-    if n < period * 2 + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        elif down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = np.full(n, np.nan, dtype=np.float64)
-    minus_di = np.full(n, np.nan, dtype=np.float64)
-    
-    mask = atr > 0
-    plus_di[mask] = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[mask] / atr[mask]
-    minus_di[mask] = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[mask] / atr[mask]
-    
-    dx = np.full(n, np.nan, dtype=np.float64)
-    di_sum = plus_di + minus_di
-    mask2 = di_sum > 0
-    dx[mask2] = 100 * np.abs(plus_di[mask2] - minus_di[mask2]) / di_sum[mask2]
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
-
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
     n = len(close)
@@ -139,19 +113,18 @@ def calculate_rsi(close, period=14):
     
     return rsi
 
-def calculate_bollinger(close, period=20, std_mult=2.0):
-    """Bollinger Bands"""
+def calculate_roc(close, period=10):
+    """Rate of Change - momentum indicator"""
     n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    roc = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if close[i - period] != 0:
+            roc[i] = 100.0 * (close[i] - close[i - period]) / close[i - period]
     
-    upper = sma + std_mult * std
-    lower = sma - std_mult * std
-    
-    return upper, sma, lower
+    return roc
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -160,23 +133,19 @@ def generate_signals(prices):
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
     
     # Calculate and align HTF indicators
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    adx_1d_raw = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_raw)
-    
-    # Calculate 6h indicators
+    # Calculate 30m indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    bb_upper, bb_mid, bb_lower = calculate_bollinger(close, period=20, std_mult=2.0)
+    roc_10 = calculate_roc(close, period=10)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
+    SIZE_BASE = 0.20
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -188,8 +157,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup period
-    min_bars = 50
+    # Warmup period (reduced from 50 to 30 for earlier trading)
+    min_bars = 30
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -200,79 +169,41 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(roc_10[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(bb_lower[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TREND DIRECTION (4h HMA bias) ===
+        price_above_4h = close[i] > hma_4h_aligned[i]
+        price_below_4h = close[i] < hma_4h_aligned[i]
         
-        if np.isnan(hma_12h_aligned[i]) or np.isnan(adx_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        # === REGIME DETECTION (1d ADX) ===
-        adx = adx_1d_aligned[i]
-        is_trend_regime = adx > 25
-        is_range_regime = adx < 20
-        
-        # === TREND DIRECTION (12h HMA bias) ===
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
-        
-        # === RSI SIGNALS (LOOSE thresholds for trades) ===
+        # === RSI PULLBACK SIGNALS (LOOSE thresholds) ===
         rsi_val = rsi_14[i]
-        rsi_bullish = rsi_val > 35
-        rsi_bearish = rsi_val < 65
-        rsi_oversold = rsi_val < 40
-        rsi_overbought = rsi_val > 60
         
-        # === BOLLINGER BAND TOUCH ===
-        bb_touch_lower = close[i] <= bb_lower[i] * 1.01
-        bb_touch_upper = close[i] >= bb_upper[i] * 0.99
+        # LONG: RSI pullback below 45 (loose)
+        rsi_pullback_long = rsi_val < 45
+        
+        # SHORT: RSI pullback above 55 (loose)
+        rsi_pullback_short = rsi_val > 55
+        
+        # === ROC MOMENTUM CONFIRMATION (easy to trigger) ===
+        roc_val = roc_10[i]
+        roc_bullish = roc_val > 0.0
+        roc_bearish = roc_val < 0.0
         
         # === ENTRY LOGIC (LOOSE - must generate trades) ===
         desired_signal = 0.0
         
-        # TREND REGIME: Follow 12h HMA direction with RSI pullback
-        if is_trend_regime:
-            # LONG: 12h bullish + RSI not overbought (loose)
-            if price_above_12h and rsi_bullish:
-                desired_signal = SIZE_STRONG if rsi_val < 55 else SIZE_BASE
-            
-            # SHORT: 12h bearish + RSI not oversold (loose)
-            elif price_below_12h and rsi_bearish:
-                desired_signal = -SIZE_STRONG if rsi_val > 45 else -SIZE_BASE
+        # LONG: 4h HMA bullish + RSI pullback + ROC positive
+        if price_above_4h and rsi_pullback_long and roc_bullish:
+            desired_signal = SIZE_BASE
         
-        # RANGE REGIME: Mean reversion at Bollinger bands
-        elif is_range_regime:
-            # LONG: Price at BB lower + RSI oversold
-            if bb_touch_lower and rsi_oversold:
-                desired_signal = SIZE_BASE
-            
-            # SHORT: Price at BB upper + RSI overbought
-            elif bb_touch_upper and rsi_overbought:
-                desired_signal = -SIZE_BASE
-        
-        # NEUTRAL REGIME: Simple 12h HMA bias only (most trades)
-        else:
-            # LONG: 12h bullish + RSI neutral
-            if price_above_12h and rsi_val > 40 and rsi_val < 60:
-                desired_signal = SIZE_BASE
-            
-            # SHORT: 12h bearish + RSI neutral
-            elif price_below_12h and rsi_val > 40 and rsi_val < 60:
-                desired_signal = -SIZE_BASE
+        # SHORT: 4h HMA bearish + RSI pullback + ROC negative
+        elif price_below_4h and rsi_pullback_short and roc_bearish:
+            desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -292,6 +223,15 @@ def generate_signals(prices):
                 stoploss_triggered = True
         
         if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === EXIT CONDITIONS (RSI mean reversion) ===
+        # Exit long when RSI > 60 (overbought)
+        if in_position and position_side > 0 and rsi_val > 60:
+            desired_signal = 0.0
+        
+        # Exit short when RSI < 40 (oversold)
+        if in_position and position_side < 0 and rsi_val < 40:
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
