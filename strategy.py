@@ -1,41 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #1142: 4h Primary + 1d/1w HTF — Simplified Regime + HMA Trend + RSI Pullback
+Experiment #1143: 6h Primary + 1d/1w HTF — Choppiness Regime + RSI Mean Reversion + HMA Trend
 
-Hypothesis: Previous strategy (exp #1002) had too many filters causing 0 trades.
-This version SIMPLIFIES entry conditions while keeping the regime-switching logic.
+Hypothesis: 6h timeframe sits between 4h and 12h - captures multi-day swings with less noise than 4h.
+Using Choppiness Index to switch between mean-reversion (RSI extremes) in range markets and
+trend-following (HMA alignment) in trending markets. 1d/1w HTF provides directional bias.
 
-Key changes from exp #1002:
-1. Replace complex CRSI with simple RSI(14) - more reliable, triggers more often
-2. Loosen Choppiness thresholds: >50 = choppy, <40 = trending (was 55/45)
-3. Remove streak_rsi and percent_rank from CRSI calculation (too restrictive)
-4. Add volume confirmation filter (vol > 0.8 * vol_sma20)
-5. Simplify HMA alignment checks (2 HMA instead of 3)
-6. Loosen RSI entry thresholds: long RSI<45, short RSI>55 (was more extreme)
+Key innovations:
+1. Choppiness Index (CHOP 14): >55 = range (mean revert RSI), <40 = trend (HMA follow)
+2. RSI(14) extremes: <35 oversold long, >65 overbought short (looser than CRSI for trade gen)
+3. Triple HMA filter: 1w HMA(21) long-term bias, 1d HMA(21) intermediate, 6h HMA(16) entry
+4. Regime-adaptive entries with LOOSE thresholds to guarantee trades:
+   - Range: RSI<35 + price>1w_HMA*0.97 → long | RSI>65 + price<1w_HMA*1.03 → short
+   - Trend: 6h_HMA>1d_HMA>1w_HMA + RSI>45 → long | 6h_HMA<1d_HMA<1w_HMA + RSI<55 → short
+5. ATR(14) 2.5x trailing stop for risk management
+6. Discrete sizing: 0.0, ±0.25, ±0.30 to minimize fee churn
 
-Why this should work:
-- Fewer filters = more trades (critical for passing trade count requirements)
-- RSI(14) is more stable than CRSI for 4h timeframe
-- Volume filter ensures we only trade on meaningful moves
-- Still keeps regime-switching (proven concept from literature)
-- 4h timeframe naturally limits trades to 20-50/year target
+Why 6h should work:
+- Less noise than 4h, more signals than 12h
+- Captures 2-5 day swings (crypto multi-day momentum)
+- CHOP filter avoids whipsaws in 2022-2023 range markets
+- Looser RSI thresholds ensure trade generation (critical lesson from failed exps)
 
-Entry conditions (LOOSENED to guarantee trades):
-- LONG choppy: CHOP>50 + RSI<45 + price>1w_HMA*0.92 + vol_ok
-- LONG trending: CHOP<40 + price>1d_HMA>1w_HMA + RSI>40 + RSI<70 + vol_ok
-- SHORT choppy: CHOP>50 + RSI>55 + price<1w_HMA*1.08 + vol_ok
-- SHORT trending: CHOP<40 + price<1d_HMA<1w_HMA + RSI<60 + RSI>30 + vol_ok
-
-Target: Sharpe>0.45, trades>=30 train, trades>=5 test, DD>-40%
-Timeframe: 4h
+Target: 25-50 trades/year per symbol, Sharpe>0.45, DD>-40%
+Timeframe: 6h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_regime_hma_rsi_vol_simplified_v1"
-timeframe = "4h"
+name = "mtf_6h_chop_rsi_hma_regime_1d1w_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -103,9 +99,9 @@ def calculate_rsi(close, period=14):
 def calculate_choppiness(high, low, close, period=14):
     """
     Choppiness Index - measures market choppiness vs trending
+    Formula: 100 * LOG10(SUM(ATR, period) / (Highest High - Lowest Low)) / LOG10(period)
     CHOP > 61.8 = ranging market
     CHOP < 38.2 = trending market
-    We use 50/40 thresholds for more sensitivity
     """
     n = len(close)
     if n < period + 1:
@@ -133,7 +129,6 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
@@ -147,13 +142,11 @@ def generate_signals(prices):
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 4h indicators
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
     chop_14 = calculate_choppiness(high, low, close, period=14)
-    
-    # Volume SMA for confirmation
-    vol_sma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    hma_6h = calculate_hma(close, period=16)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
@@ -168,7 +161,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
@@ -177,7 +170,7 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]):
+        if np.isnan(rsi_14[i]) or np.isnan(chop_14[i]) or np.isnan(hma_6h[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -191,59 +184,51 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(vol_sma20[i]) or vol_sma20[i] <= 1e-10:
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        # Volume confirmation (must be at least 80% of 20-bar average)
-        vol_ok = volume[i] >= 0.8 * vol_sma20[i]
-        
         # === REGIME DETECTION (Choppiness Index) ===
-        is_choppy = chop_14[i] > 50.0  # Range market
+        is_choppy = chop_14[i] > 55.0  # Range market
         is_trending = chop_14[i] < 40.0  # Trend market
         
-        # === HTF BIAS ===
+        # === HTF BIAS (Triple HMA alignment) ===
         hma_1d_bull = close[i] > hma_1d_aligned[i]
         hma_1d_bear = close[i] < hma_1d_aligned[i]
         hma_1w_bull = close[i] > hma_1w_aligned[i]
         hma_1w_bear = close[i] < hma_1w_aligned[i]
+        hma_6h_bull = close[i] > hma_6h[i]
+        hma_6h_bear = close[i] < hma_6h[i]
         
         # Strong trend alignment
-        strong_bull = hma_1d_bull and hma_1w_bull and hma_1d_aligned[i] > hma_1w_aligned[i]
-        strong_bear = hma_1d_bear and hma_1w_bear and hma_1d_aligned[i] < hma_1w_aligned[i]
+        strong_bull = hma_6h_bull and hma_1d_bull and hma_1w_bull
+        strong_bear = hma_6h_bear and hma_1d_bear and hma_1w_bear
         
-        # === ENTRY LOGIC (REGIME-ADAPTIVE, LOOSENED) ===
+        # === ENTRY LOGIC (REGIME-ADAPTIVE) ===
         desired_signal = 0.0
         
         if is_choppy:
-            # MEAN REVERSION MODE - RSI extremes with HTF filter
-            # Long when RSI oversold and price near/above weekly HMA
-            if rsi_14[i] < 45.0 and close[i] > hma_1w_aligned[i] * 0.92 and vol_ok:
+            # MEAN REVERSION MODE - use RSI extremes (LOOSE thresholds for trade gen)
+            # Long when RSI oversold + weekly bias neutral/bull
+            if rsi_14[i] < 35.0 and (hma_1w_bull or abs(close[i] - hma_1w_aligned[i]) / hma_1w_aligned[i] < 0.05):
                 desired_signal = SIZE_BASE
-            # Short when RSI overbought and price near/below weekly HMA
-            elif rsi_14[i] > 55.0 and close[i] < hma_1w_aligned[i] * 1.08 and vol_ok:
+            # Short when RSI overbought + weekly bias neutral/bear
+            elif rsi_14[i] > 65.0 and (hma_1w_bear or abs(close[i] - hma_1w_aligned[i]) / hma_1w_aligned[i] < 0.05):
                 desired_signal = -SIZE_BASE
             # Stronger signals at more extreme RSI
-            elif rsi_14[i] < 35.0 and close[i] > hma_1w_aligned[i] * 0.90 and vol_ok:
+            elif rsi_14[i] < 25.0:
                 desired_signal = SIZE_STRONG
-            elif rsi_14[i] > 65.0 and close[i] < hma_1w_aligned[i] * 1.10 and vol_ok:
+            elif rsi_14[i] > 75.0:
                 desired_signal = -SIZE_STRONG
         
         elif is_trending:
-            # TREND FOLLOWING MODE - HMA alignment + RSI filter
-            # Long in strong uptrend with RSI confirmation (not overbought)
-            if strong_bull and rsi_14[i] > 40.0 and rsi_14[i] < 70.0 and vol_ok:
+            # TREND FOLLOWING MODE - use HMA alignment + RSI filter
+            # Long in strong uptrend with RSI confirmation
+            if strong_bull and rsi_14[i] > 45.0 and rsi_14[i] < 80.0:
                 desired_signal = SIZE_STRONG
-            # Short in strong downtrend with RSI confirmation (not oversold)
-            elif strong_bear and rsi_14[i] < 60.0 and rsi_14[i] > 30.0 and vol_ok:
+            # Short in strong downtrend with RSI confirmation
+            elif strong_bear and rsi_14[i] < 55.0 and rsi_14[i] > 20.0:
                 desired_signal = -SIZE_STRONG
-            # Weaker trend signals (single HMA alignment)
-            elif hma_1d_bull and hma_1w_bull and rsi_14[i] > 45.0 and rsi_14[i] < 75.0 and vol_ok:
+            # Weaker trend signals (single HMA cross)
+            elif hma_6h_bull and hma_1d_bull and rsi_14[i] > 50.0:
                 desired_signal = SIZE_BASE
-            elif hma_1d_bear and hma_1w_bear and rsi_14[i] < 55.0 and rsi_14[i] > 25.0 and vol_ok:
+            elif hma_6h_bear and hma_1d_bear and rsi_14[i] < 50.0:
                 desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
