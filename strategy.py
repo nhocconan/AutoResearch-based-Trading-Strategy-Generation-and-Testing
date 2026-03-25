@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #1178: 4h Primary + 1d HTF — HMA Trend + RSI Pullback + Donchian Momentum
+Experiment #1179: 1h Primary + 4h/12h HTF — HMA Trend + RSI Pullback + Session Filter
 
-Hypothesis: After 973 failed experiments, the winning formula is SIMPLE + LOOSE entries.
-Complex regime filters (choppiness, CRSI, multiple HTF) all failed with negative Sharpe.
+Hypothesis: After 974 failed experiments, the pattern is clear:
+- 0 trades = over-filtered entries (choppiness, ADX, multiple confluence)
+- Negative Sharpe = wrong regime logic or too many trades with fee drag
+- Working pattern (exp#1167): HTF trend + LTF pullback + LOOSE entry conditions
 
-The current best (6h HMA + RSI + 1d HTF) achieved Sharpe=0.445. For 4h:
-- Use SAME logic but LOOSER RSI range (30-70 vs 35-65) to ensure enough trades
-- 4h has 6x more bars than 1d, so need wider entry bands
-- Add Donchian(20) breakout for momentum confirmation (proven on SOL)
-- Single HTF filter (1d HMA) - NOT multiple HTF which caused #1168 failure
+This strategy uses:
+1. 12h HMA(21) for primary trend direction (stronger than 4h)
+2. 4h HMA(21) for intermediate confirmation
+3. 1h RSI(14) pullback entries in trend direction (LOOSE: 30-70 range)
+4. Session filter (08-20 UTC) to avoid Asian session noise
+5. ATR(14) 2.5x trailing stop for risk management
 
-Entry logic:
-- LONG: price > 1d_HMA(21) AND RSI(14) 30-70 AND price > Donchian_mid(20)
-- SHORT: price < 1d_HMA(21) AND RSI(14) 30-70 AND price < Donchian_mid(20)
+Key insight: RSI 30-70 is LOOSE enough to guarantee 40-80 trades/year on 1h.
+Session filter reduces noise but doesn't eliminate trades (12hr window).
+HTF trend ensures we're trading with the dominant direction.
 
-Why this should work:
-- 4h timeframe = natural 30-60 trades/year
-- Single trend filter (1d HMA) = clear bias without over-filtering
-- RSI 30-70 = triggers on normal pullbacks (wider than 35-65)
-- Donchian mid = momentum confirmation (breakout above/below midpoint)
-- No choppiness/ADX/weekly = fewer conditions to fail simultaneously
+Entry logic (LOOSE to guarantee trades):
+- LONG: price > 12h_HMA AND 4h_HMA rising AND RSI(14) between 30-70 AND session 08-20 UTC
+- SHORT: price < 12h_HMA AND 4h_HMA falling AND RSI(14) between 30-70 AND session 08-20 UTC
 
-Key fix from #1168: Use ONLY 1d HTF (not 12h+1d), which caused conflicting signals.
-Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Target: Sharpe>0.5, trades>=40 train, trades>=5 test, DD>-35%, trades/year 40-80
+Timeframe: 1h
+Size: 0.20 base, 0.30 strong (discrete levels)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_hma_trend_rsi_donchian_1d_v1"
-timeframe = "4h"
+name = "mtf_1h_hma_trend_rsi_pullback_4h12h_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -97,40 +96,44 @@ def calculate_rsi(close, period=14):
     rsi[:period] = np.nan
     return rsi
 
-def calculate_donchian_mid(high, low, period=20):
-    """Donchian Channel Midpoint"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    mid = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        window_high = high[i - period + 1:i + 1]
-        window_low = low[i - period + 1:i + 1]
-        if not np.any(np.isnan(window_high)) and not np.any(np.isnan(window_low)):
-            mid[i] = (np.max(window_high) + np.min(window_low)) / 2.0
-    return mid
+def get_hour_from_open_time(open_time):
+    """Extract UTC hour from open_time (milliseconds timestamp)"""
+    # open_time is in milliseconds since epoch
+    hour = (open_time // (1000 * 60 * 60)) % 24
+    return hour
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
     # Calculate and align HTF indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 4h indicators
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    
+    # Calculate 4h HMA slope for direction confirmation
+    hma_4h_slope = np.zeros(n)
+    for i in range(1, n):
+        if not np.isnan(hma_4h_aligned[i]) and not np.isnan(hma_4h_aligned[i-1]):
+            hma_4h_slope[i] = hma_4h_aligned[i] - hma_4h_aligned[i-1]
+        else:
+            hma_4h_slope[i] = np.nan
+    
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     rsi_14 = calculate_rsi(close, period=14)
-    donchian_mid = calculate_donchian_mid(high, low, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
+    SIZE_BASE = 0.20
     SIZE_STRONG = 0.30
     
     # Position tracking for stoploss
@@ -161,52 +164,47 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donchian_mid[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === SESSION FILTER (08-20 UTC) ===
+        hour = get_hour_from_open_time(open_time[i])
+        in_session = 8 <= hour <= 20
         
-        # === TREND DIRECTION (Daily HMA) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === TREND DIRECTION (12h HMA + 4h HMA slope) ===
+        price_above_12h = close[i] > hma_12h_aligned[i]
+        price_below_12h = close[i] < hma_12h_aligned[i]
         
-        # === MOMENTUM (Donchian Midpoint) ===
-        price_above_donchian = close[i] > donchian_mid[i]
-        price_below_donchian = close[i] < donchian_mid[i]
+        hma_4h_rising = hma_4h_slope[i] > 0
+        hma_4h_falling = hma_4h_slope[i] < 0
         
         # === ENTRY LOGIC (LOOSE - guarantee trades) ===
         desired_signal = 0.0
         rsi = rsi_14[i]
         
-        # LONG: Price above 1d HMA + RSI pullback (30-70 range) + above Donchian mid
-        if price_above_1d and price_above_donchian:
+        # LONG: Price above 12h HMA + 4h HMA rising + RSI pullback (30-70) + session
+        if price_above_12h and hma_4h_rising and in_session:
             if 30.0 <= rsi <= 70.0:
-                # Strong long: RSI in favorable 40-60 range
+                # Strong long: RSI in neutral zone (40-60)
                 if 40.0 <= rsi <= 60.0:
                     desired_signal = SIZE_STRONG
                 else:
                     desired_signal = SIZE_BASE
         
-        # SHORT: Price below 1d HMA + RSI pullback (30-70 range) + below Donchian mid
-        elif price_below_1d and price_below_donchian:
+        # SHORT: Price below 12h HMA + 4h HMA falling + RSI pullback (30-70) + session
+        elif price_below_12h and hma_4h_falling and in_session:
             if 30.0 <= rsi <= 70.0:
-                # Strong short: RSI in favorable 40-60 range
+                # Strong short: RSI in neutral zone (40-60)
                 if 40.0 <= rsi <= 60.0:
                     desired_signal = -SIZE_STRONG
                 else:
                     desired_signal = -SIZE_BASE
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
-        # Update highs/lows FIRST, then check stop
         stoploss_triggered = False
         
         if in_position and position_side > 0:
