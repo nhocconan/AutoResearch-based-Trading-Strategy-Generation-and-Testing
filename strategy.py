@@ -1,80 +1,55 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 6h Elder Ray + ADX Regime + 1d Trend Bias
+Experiment #021: 4h Donchian Breakout + Volume + 1d Trend
 
-HYPOTHESIS: Elder Ray measures institutional pressure (bull/bear power vs EMA).
-Bull Power > 0 after being negative = smart money buying.
-Bear Power < 0 after being positive = smart money selling.
-Combined with ADX > 20 (trending) regime filter from 1d to avoid chop.
-Works in both bull (follow bull power) and bear (follow bear power in downtrend).
+HYPOTHESIS: Donchian(20) breakout marks institutional entry points.
+Volume spike (>1.5x MA20) confirms the move is real.
+1d HMA(21) alignment filters trades against the major trend.
+ATR(14) stoploss at 2.5x controls risk.
+4h is fast enough for meaningful trades (75-125 over 4yr) but slow enough
+to avoid overtrading. Works in both bull (buy breakouts above 1d HMA)
+and bear (sell breakouts below 1d HMA, including breakdown shorts).
 
-Novel concept: Elder Ray has NOT been tried in any previous experiment.
-TIMEFRAME: 6h primary
-HTF: 1d for ADX regime and EMA trend
-TARGET: 75-200 total trades over 4 years (12-37/year)
+Entry: Breakout OR price outside channel + volume spike + 1d trend aligned
+Exit: Opposite band break OR 3xATR stoploss
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_elder_ray_adx_regime_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_vol_1d_hma_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - returns ADX series"""
+def calculate_hma(close, period):
+    """Hull Moving Average"""
     n = len(close)
-    if n < period + 1:
+    if n < period:
         return np.full(n, np.nan)
     
-    # True Range
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    half = max(1, period // 2)
+    sqrt_n = max(1, int(np.sqrt(period)))
     
-    # Directional Movement
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
+    def wma(series, span):
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
+        for i in range(span - 1, len(series)):
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1].astype(np.float64)
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / weight_sum
+        return result
     
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
     
-    # Smooth with EMA
-    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    diff = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
-    # DI
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
-    
-    for i in range(period, n):
-        if atr_smooth[i] > 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / atr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / atr_smooth[i]
-    
-    # DX
-    dx = np.zeros(n, dtype=np.float64)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    # ADX
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
+    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -90,22 +65,19 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_elder_ray(high, low, ema_values, period=13):
-    """
-    Elder Ray (Bull Power / Bear Power)
-    Bull Power = High - EMA (buying pressure above EMA)
-    Bear Power = Low - EMA (selling pressure below EMA)
-    """
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper, lower, and midpoint"""
     n = len(high)
-    bull_power = np.full(n, np.nan, dtype=np.float64)
-    bear_power = np.full(n, np.nan, dtype=np.float64)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    mid = np.full(n, np.nan, dtype=np.float64)
     
-    for i in range(period, n):
-        if not np.isnan(ema_values[i]):
-            bull_power[i] = high[i] - ema_values[i]
-            bear_power[i] = low[i] - ema_values[i]
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        mid[i] = (upper[i] + lower[i]) / 2.0
     
-    return bull_power, bear_power
+    return upper, lower, mid
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -114,164 +86,119 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE ===
+    # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA for trend direction
-    ema_1d_raw = calculate_ema(df_1d['close'].values, period=21)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_raw)
+    # 1d HMA for trend alignment
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # 1d ADX for regime (trending vs ranging)
-    adx_1d_raw = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_raw)
-    
-    # === Local 6h indicators ===
-    # EMA 13 for Elder Ray
-    ema_13 = calculate_ema(close, period=13)
-    
-    # Elder Ray
-    bull_power, bear_power = calculate_elder_ray(high, low, ema_13, period=13)
-    
-    # Local ADX for momentum confirmation
-    adx_local = calculate_adx(high, low, close, period=14)
-    
-    # ATR for stops
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Volume for confirmation
+    # Donchian 20-period
+    donch_upper, donch_lower, donch_mid = calculate_donchian(high, low, period=20)
+    
+    # Volume MA20 and ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25  # Conservative sizing
+    SIZE = 0.30  # 30% position size - conservative but meaningful
     
-    # Position tracking
+    # Position state
     in_position = False
-    position_side = 0
+    position_side = 0  # 1=long, -1=short
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    prev_bull_power = 0.0
-    prev_bear_power = 0.0
     
-    warmup = 60  # Need enough for ADX calculation
+    warmup = 50
     
     for i in range(warmup, n):
-        # Skip if key indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        # Guard: check all indicators ready
+        if np.isnan(atr_14[i]) or atr_14[i] <= 0:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # Current values
-        bull = bull_power[i] if not np.isnan(bull_power[i]) else 0.0
-        bear = bear_power[i] if not np.isnan(bear_power[i]) else 0.0
-        adx_1d = adx_1d_aligned[i] if not np.isnan(adx_1d_aligned[i]) else 0.0
-        adx_6h = adx_local[i] if not np.isnan(adx_local[i]) else 0.0
-        ema_21_local = ema_13[i] if not np.isnan(ema_13[i]) else close[i]  # Approximate
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === TREND FILTER (1d EMA) ===
-        # Only take longs when price above 1d EMA (bullish trend)
-        # Only take shorts when price below 1d EMA (bearish trend)
-        price_above_ema_1d = close[i] > ema_1d_aligned[i]
-        price_below_ema_1d = close[i] < ema_1d_aligned[i]
+        # === CONDITION PRECOMPUTATION ===
+        # 1d trend alignment
+        bullish_trend = close[i] > hma_1d_aligned[i]
+        bearish_trend = close[i] < hma_1d_aligned[i]
         
-        # === REGIME FILTER (1d ADX) ===
-        # ADX > 20 = trending, ADX < 20 = ranging
-        # Elder Ray works better in trending markets
-        is_trending = adx_1d > 20
+        # Volume confirmation
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === ELDER RAY SIGNALS ===
-        # Bull Power crosses from negative to positive = buying pressure
-        # Bear Power crosses from positive to negative = selling pressure
-        bull_turning_positive = (bull > 0) and (prev_bull_power <= 0)
-        bear_turning_negative = (bear < 0) and (prev_bear_power >= 0)
+        # Donchian state
+        price_above_upper = close[i] > donch_upper[i]
+        price_below_lower = close[i] < donch_lower[i]
+        price_above_mid = close[i] > donch_mid[i]
+        price_below_mid = close[i] < donch_mid[i]
         
-        # Strong power: > 0.5 * ATR
-        atr_val = atr_14[i]
-        strong_bull = bull > 0.5 * atr_val
-        strong_bear = bear < -0.5 * atr_val
-        
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.2
+        # ATR stop level
+        stop_mult = 2.5
+        long_stop = close[i] - stop_mult * atr_14[i]
+        short_stop = close[i] + stop_mult * atr_14[i]
         
         desired_signal = 0.0
         
+        # === NEW ENTRY LOGIC ===
         if not in_position:
-            # === NEW LONG ENTRY ===
-            # Bull power turning positive + price above 1d EMA + trending
-            if bull_turning_positive and price_above_ema_1d and is_trending:
-                if strong_bull or vol_spike:  # Require either strong power or volume
-                    desired_signal = SIZE
+            # LONG: Breakout above upper band + volume + bullish 1d
+            if price_above_upper and vol_spike and bullish_trend:
+                desired_signal = SIZE
             
-            # === NEW SHORT ENTRY ===
-            # Bear power turning negative + price below 1d EMA + trending
-            if bear_turning_negative and price_below_ema_1d and is_trending:
-                if strong_bear or vol_spike:
-                    desired_signal = -SIZE
+            # SHORT: Breakdown below lower band + volume + bearish 1d
+            if price_below_lower and vol_spike and bearish_trend:
+                desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR) ===
-        stoploss_triggered = False
+        # === EXIT LOGIC ===
+        stoploss_hit = False
+        exit_signal = False
         
-        if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
-                stoploss_triggered = True
+        if in_position:
+            # Update highest/lowest
+            if position_side > 0:
+                highest_since_entry = max(highest_since_entry, high[i])
+            else:
+                lowest_since_entry = min(lowest_since_entry, low[i])
+            
+            # ATR stoploss check
+            if position_side > 0:
+                if low[i] < (entry_price - stop_mult * entry_atr):
+                    stoploss_hit = True
+            else:
+                if high[i] > (entry_price + stop_mult * entry_atr):
+                    stoploss_hit = True
+            
+            # Opposite band exit (price returns to channel)
+            if position_side > 0 and price_below_lower:
+                exit_signal = True
+            if position_side < 0 and price_above_upper:
+                exit_signal = True
+            
+            if stoploss_hit or exit_signal:
+                desired_signal = 0.0
         
-        if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
-                stoploss_triggered = True
-        
-        if stoploss_triggered:
-            desired_signal = 0.0
-        
-        # === EXIT CONDITIONS ===
-        exit_triggered = False
-        
-        if in_position and position_side > 0:
-            # Exit long if:
-            # - Bear power turns strongly negative (selling pressure)
-            # - Price breaks below 1d EMA (trend change)
-            # - ADX drops below 15 (regime change)
-            if bear_turning_negative and strong_bear:
-                exit_triggered = True
-            if price_below_ema_1d:
-                exit_triggered = True
-            if adx_1d < 15:
-                exit_triggered = True
-        
-        if in_position and position_side < 0:
-            # Exit short if:
-            # - Bull power turns strongly positive (buying pressure)
-            # - Price breaks above 1d EMA (trend change)
-            # - ADX drops below 15 (regime change)
-            if bull_turning_positive and strong_bull:
-                exit_triggered = True
-            if price_above_ema_1d:
-                exit_triggered = True
-            if adx_1d < 15:
-                exit_triggered = True
-        
-        if exit_triggered:
-            desired_signal = 0.0
-        
-        # === UPDATE POSITION ===
+        # === POSITION MANAGEMENT ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 # New position or flip
@@ -281,23 +208,14 @@ def generate_signals(prices):
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
-                else:
-                    stop_price = entry_price + 2.5 * entry_atr
-        else:
-            if in_position:
-                in_position = False
-                position_side = 0
-                entry_price = 0.0
-                entry_atr = 0.0
-                stop_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
-        
-        # Store previous values for next iteration
-        prev_bull_power = bull
-        prev_bear_power = bear
+        elif in_position:
+            # Exit
+            in_position = False
+            position_side = 0
+            entry_price = 0.0
+            entry_atr = 0.0
+            highest_since_entry = 0.0
+            lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
