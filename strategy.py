@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #012: 12h Donchian Breakout + Volume + 1d HMA Trend
+Experiment #021: 12h Camarilla Pivot + Volume Spike + 1d Trend
 
-HYPOTHESIS: On 12h timeframe, 20-period Donchian breakouts with volume 
-confirmation capture institutional momentum. Combined with 1d HMA trend 
-alignment, this works in BOTH bull (long breakouts) and bear (short after 
-breakdowns). 12h is slower than 4h, reducing trades to target 75-200 total.
+HYPOTHESIS: Camarilla pivots are institutional support/resistance levels that
+work in both bull and bear markets. Price bouncing from S1/S2 with volume 
+confirms smart money accumulation. Price rejecting at R1/R2 with volume 
+confirms distribution. Combined with 1d HMA trend filter to avoid fighting 
+the larger trend. 12h is slow enough to avoid overtrading but fast enough 
+to capture meaningful moves.
 
-Key: Must generate ≥50 trades. Previous attempts failed with 0 trades due 
-to overly strict conditions. This version loosens entry to capture breakouts.
+WHY BOTH MARKETS:
+- Bull: longs at S1/S2 bounces when price above 1d HMA
+- Bear: shorts at R1/R2 rejections when price below 1d HMA
+- Range: mean-revert to center pivot
+
+TIMEFRAME: 12h primary | HTF: 1d
+TARGET: 50-150 total trades over 4 years (12-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_vol_1d_trend_v1"
+name = "mtf_12h_camarilla_vol_1d_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -62,17 +69,36 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper and lower bands"""
-    n = len(high)
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
+def calculate_camarilla_levels(high, low, close, period=20):
+    """
+    Classic Camarilla pivot levels.
+    Based on market structure of last N bars.
+    """
+    n = len(close)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+    # Pivot point
+    pivot = (high + low + close) / 3.0
     
-    return upper, lower
+    # Range
+    rng = high - low
+    
+    # Resistance levels
+    r4 = close + rng * 0.55
+    r3 = close + rng * 0.275
+    r2 = close + rng * 0.183
+    r1 = close + rng * 0.0916
+    
+    # Support levels
+    s1 = close - rng * 0.0916
+    s2 = close - rng * 0.183
+    s3 = close - rng * 0.275
+    s4 = close - rng * 0.55
+    
+    return {
+        'pivot': pivot,
+        'r1': r1, 'r2': r2, 'r3': r3, 'r4': r4,
+        's1': s1, 's2': s2, 's3': s3, 's4': s4
+    }
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -91,30 +117,21 @@ def generate_signals(prices):
     # Calculate local 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Donchian 20-period
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
-    
-    # Previous Donchian for breakout detection
-    donch_upper_prev = np.roll(donch_upper, 1)
-    donch_lower_prev = np.roll(donch_lower, 1)
-    donch_upper_prev[0] = np.nan
-    donch_lower_prev[0] = np.nan
+    # Camarilla levels (20-period lookback for structure)
+    levels = calculate_camarilla_levels(high, low, close, period=20)
+    s1 = levels['s1']
+    s2 = levels['s2']
+    r1 = levels['r1']
+    r2 = levels['r2']
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        if vol_ma[i] > 0:
-            vol_ratio[i] = volume[i] / vol_ma[i]
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # RSI for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - (100 / (1 + rs))).values
+    # ATR-based proximity threshold (0.5% of price OR 0.3 ATR)
+    atr_threshold = 0.3 * atr_14
+    pct_threshold = close * 0.005
+    threshold = np.maximum(atr_threshold, pct_threshold)
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -124,7 +141,6 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
@@ -134,110 +150,120 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(s1[i]) or np.isnan(r1[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
         if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        # === TREND FILTER (1d HMA) ===
+        bullish_trend = close[i] > hma_1d_aligned[i]
+        bearish_trend = close[i] < hma_1d_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === DONCHIAN BREAKOUT ===
-        # Price crosses above previous upper band
-        breakout_up = close[i] > donch_upper_prev[i] and close[i-1] <= donch_upper_prev[i-1]
-        # Price crosses below previous lower band
-        breakout_down = close[i] < donch_lower_prev[i] and close[i-1] >= donch_lower_prev[i-1]
+        # === PROXIMITY TO PIVOT LEVELS ===
+        # Distance from current price to key levels
+        dist_to_s1 = abs(close[i] - s1[i])
+        dist_to_s2 = abs(close[i] - s2[i])
+        dist_to_r1 = abs(close[i] - r1[i])
+        dist_to_r2 = abs(close[i] - r2[i])
         
-        # Price already outside channel
-        price_above_upper = close[i] > donch_upper[i]
-        price_below_lower = close[i] < donch_lower[i]
-        
-        # === STOPLOSS CHECK ===
-        if in_position:
-            if position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
-                trailing_stop = highest_since_entry - 2.5 * entry_atr
-                stop_price = max(stop_price, trailing_stop)
-                if low[i] < stop_price:
-                    signals[i] = 0.0
-                    in_position = False
-                    position_side = 0
-                    entry_price = 0.0
-                    entry_atr = 0.0
-                    stop_price = 0.0
-                    highest_since_entry = 0.0
-                    continue
-            
-            elif position_side < 0:
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                trailing_stop = lowest_since_entry + 2.5 * entry_atr
-                stop_price = min(stop_price, trailing_stop)
-                if high[i] > stop_price:
-                    signals[i] = 0.0
-                    in_position = False
-                    position_side = 0
-                    entry_price = 0.0
-                    entry_atr = 0.0
-                    stop_price = 0.0
-                    lowest_since_entry = 0.0
-                    continue
+        # Near level if within threshold
+        near_s1 = dist_to_s1 < threshold[i]
+        near_s2 = dist_to_s2 < threshold[i]
+        near_r1 = dist_to_r1 < threshold[i]
+        near_r2 = dist_to_r2 < threshold[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: breakout or price above channel + volume + bullish trend
-            if (breakout_up or price_above_upper) and vol_spike and price_above_1d_hma:
+            # === LONG ENTRY: Price near S1/S2 + volume spike + bullish trend ===
+            # Support bounce: price above level but touching
+            s1_touch = low[i] <= s1[i] + threshold[i] and close[i] > s1[i]
+            s2_touch = low[i] <= s2[i] + threshold[i] and close[i] > s2[i]
+            
+            if (s1_touch or s2_touch) and vol_spike and bullish_trend:
                 desired_signal = SIZE
             
-            # SHORT: breakout or price below channel + volume + bearish trend
-            if (breakout_down or price_below_lower) and vol_spike and not price_above_1d_hma:
+            # === SHORT ENTRY: Price near R1/R2 + volume spike + bearish trend ===
+            # Resistance rejection: price below level but touching
+            r1_touch = high[i] >= r1[i] - threshold[i] and close[i] < r1[i]
+            r2_touch = high[i] >= r2[i] - threshold[i] and close[i] < r2[i]
+            
+            if (r1_touch or r2_touch) and vol_spike and bearish_trend:
                 desired_signal = -SIZE
-        else:
-            # Maintain position
-            desired_signal = SIZE if position_side > 0 else -SIZE
         
-        # === EXIT ON RSI EXTREME ===
-        rsi_val = rsi[i]
-        if in_position and position_side > 0 and rsi_val > 75:
-            desired_signal = 0.0
-        if in_position and position_side < 0 and rsi_val < 25:
+        # === STOPLOSS CHECK (2.5 ATR) ===
+        stoploss_triggered = False
+        
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            if low[i] < trailing_stop:
+                stoploss_triggered = True
+        
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            if high[i] > trailing_stop:
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
             desired_signal = 0.0
         
-        # === UPDATE POSITION ===
+        # === TAKE PROFIT: When price reaches opposite level ===
+        tp_triggered = False
+        
+        if in_position and position_side > 0:
+            # TP: price reaches R1 or R2
+            if close[i] >= r1[i] * 0.998:
+                tp_triggered = True
+            if close[i] >= r2[i] * 0.998:
+                tp_triggered = True
+        
+        if in_position and position_side < 0:
+            # TP: price reaches S1 or S2
+            if close[i] <= s1[i] * 1.002:
+                tp_triggered = True
+            if close[i] <= s2[i] * 1.002:
+                tp_triggered = True
+        
+        if tp_triggered:
+            desired_signal = 0.0
+        
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
-            if not in_position:
+            if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
-                else:
-                    stop_price = entry_price + 2.5 * entry_atr
+            # else: maintain position (no churn)
         else:
             if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
                 entry_atr = 0.0
-                stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
         
