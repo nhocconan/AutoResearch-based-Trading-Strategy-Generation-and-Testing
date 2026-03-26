@@ -1,84 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h TRIX Momentum + Volume Spike + Choppiness Regime
+Experiment #022: 1d Camarilla Pivot + Williams %R + 1w Trend
 
-HYPOTHESIS: TRIX(14) momentum crossover is a proven momentum indicator that 
-captures institutional trend changes. Combined with:
-1. Volume spike confirmation (>1.5x) to filter noise
-2. Choppiness Index regime filter (CHOP < 50 = trending, follow momentum)
-3. ATR-based stoploss for risk management
+HYPOTHESIS: Daily Camarilla pivot levels (S3/S4/R3/R4) mark institutional 
+reversal points. Combined with Williams %R for momentum and 1w HMA for 
+trend, this captures mean-reversion moves at major levels.
+Simple = fewer trades = less fee drag.
 
-WHY IT WORKS IN BULL AND BEAR:
-- Bull: TRIX crosses positive + volume spike + price above HMA → long
-- Bear: TRIX crosses negative + volume spike + price below HMA → short
-- Range: CHOP > 60 = no trades (avoid whipsaws)
-
-TIMEFRAME: 4h primary
-HTF: 1d for HMA trend bias
-TARGET: 75-150 total trades over 4 years (19-38/year)
+TIMEFRAME: 1d primary
+HTF: 1w for trend confirmation
+TARGET: 50-100 total trades over 4 years (12-25/year)
+ENTRY: 2 conditions (Camarilla touch + Williams %R extreme)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_trix_vol_chop_regime_v1"
-timeframe = "4h"
+name = "mtf_1d_camarilla_williams_1w_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_trix(close, period=14):
-    """TRIX - Triple EMA Rate of Change"""
-    n = len(close)
-    if n < period * 3:
-        return np.full(n, np.nan)
-    
-    # Triple EMA
-    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # Rate of change of triple EMA
-    trix = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if not np.isnan(ema3[i]) and not np.isnan(ema3[i - period]):
-            if abs(ema3[i - period]) > 1e-10:
-                trix[i] = ((ema3[i] / ema3[i - period]) - 1) * 100
-    
-    return trix
-
-def calculate_signal_line(trix, signal_period=9):
-    """Signal line - EMA of TRIX"""
-    n = len(trix)
-    signal = pd.Series(trix).ewm(span=signal_period, min_periods=signal_period, adjust=False).mean().values
-    return signal
-
-def calculate_choppiness(close, period=14):
-    """Choppiness Index - lower = trending, higher = ranging"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        # Sum of true range over period
-        atr_sum = 0.0
-        highest = -np.inf
-        lowest = np.inf
-        
-        for j in range(i - period + 1, i + 1):
-            tr = max(close[j] - close[j-1] if j > 0 else 0, 
-                     abs(close[j] - close[j-1]) if j > 0 else 0,
-                     abs(close[j-1] - close[j]) if j > 0 else 0)
-            atr_sum += tr if j > 0 else (close[j] - close[j]) + (high[j] - low[j])
-            highest = max(highest, close[j])
-            lowest = min(lowest, close[j])
-        
-        range_sum = highest - lowest
-        if range_sum > 1e-10:
-            # Simplified CHOP formula
-            chop[i] = 100 * (np.log10(atr_sum / range_sum) / np.log10(period))
-    
-    return chop
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -95,20 +35,20 @@ def calculate_hma(close, period):
         weight_sum = np.sum(weights)
         for i in range(span - 1, len(series)):
             if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].values.astype(np.float64) if hasattr(series, 'values') else series[i - span + 1:i + 1].astype(np.float64)
+                window = series[i - span + 1:i + 1].astype(np.float64)
                 if not np.any(np.isnan(window)):
                     result[i] = np.sum(window * weights) / weight_sum
         return result
     
-    wma_half = wma(pd.Series(close), half)
-    wma_full = wma(pd.Series(close), period)
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
     
     diff = np.full(n, np.nan, dtype=np.float64)
     for i in range(period - 1, n):
         if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
             diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
-    return wma(pd.Series(diff), sqrt_n)
+    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -124,6 +64,43 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R - momentum indicator"""
+    n = len(close)
+    willr = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        period_high = np.max(high[i - period + 1:i + 1])
+        period_low = np.min(low[i - period + 1:i + 1])
+        if period_high != period_low:
+            willr[i] = -100 * (period_high - close[i]) / (period_high - period_low)
+    
+    return willr
+
+def calculate_camarilla_pivots(high, low, close, period=20):
+    """Camarilla pivot levels - S3, S4, R3, R4"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    s3 = np.full(n, np.nan, dtype=np.float64)
+    s4 = np.full(n, np.nan, dtype=np.float64)
+    r3 = np.full(n, np.nan, dtype=np.float64)
+    r4 = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        h = high[i - period + 1:i + 1]
+        l = low[i - period + 1:i + 1]
+        pivot = (h.max() + l.min() + close[i - 1]) / 3.0
+        range_val = h.max() - l.min()
+        
+        s3[i] = close[i - 1] + range_val * 1.1 / 4.0
+        s4[i] = close[i - 1] + range_val * 1.1 / 2.0
+        r3[i] = close[i - 1] - range_val * 1.1 / 4.0
+        r4[i] = close[i - 1] - range_val * 1.1 / 2.0
+    
+    return s3, s4, r3, r4
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -132,21 +109,18 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # 1w HMA for trend
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 4h indicators
+    # Calculate indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    trix = calculate_trix(close, period=14)
-    trix_signal = calculate_signal_line(trix, signal_period=9)
+    willr = calculate_williams_r(high, low, close, period=14)
+    s3, s4, r3, r4 = calculate_camarilla_pivots(high, low, close, period=20)
     
-    # Choppiness Index
-    chop = calculate_choppiness(close, period=14)
-    
-    # Volume ratio
+    # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -161,8 +135,9 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    bars_in_trade = 0
     
-    warmup = 100
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -173,68 +148,61 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(trix[i]) or np.isnan(trix_signal[i]):
+        if np.isnan(willr[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME CHECK (Choppiness) ===
-        chop_val = chop[i] if not np.isnan(chop[i]) else 50.0
-        trending = chop_val < 50.0  # Below 50 = trending market
+        # === 1w TREND ===
+        price_above_1w_hma = close[i] > hma_1w_aligned[i]
+        bull_trend = price_above_1w_hma
+        bear_trend = not price_above_1w_hma
         
-        # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
-        
-        # === MOMENTUM SIGNALS ===
-        trix_val = trix[i]
-        trix_sig_val = trix_signal[i]
-        
-        # Previous values for crossover detection
-        trix_prev = trix[i - 1] if i > 0 else 0
-        trix_sig_prev = trix_signal[i - 1] if i > 0 else 0
-        
-        # Bullish crossover: TRIX crosses above signal
-        bullish_cross = (trix_val > trix_sig_val) and (trix_prev <= trix_sig_prev)
-        # Bearish crossover: TRIX crosses below signal
-        bearish_cross = (trix_val < trix_sig_val) and (trix_prev >= trix_sig_prev)
-        
-        # Momentum direction
-        trix_bullish = trix_val > 0 and trix_sig_val > 0
-        trix_bearish = trix_val < 0 and trix_sig_val < 0
+        # === WILLIAMS %R MOMENTUM ===
+        willr_val = willr[i]
+        oversold = willr_val < -80
+        overbought = willr_val > -20
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
+        # === CAMARILLA LEVEL TOUCH ===
+        # Long: price touches S3 or S4 (support bounce)
+        touch_s3 = low[i] <= s3[i] if not np.isnan(s3[i]) else False
+        touch_s4 = low[i] <= s4[i] if not np.isnan(s4[i]) else False
+        
+        # Short: price touches R3 or R4 (resistance rejection)
+        touch_r3 = high[i] >= r3[i] if not np.isnan(r3[i]) else False
+        touch_r4 = high[i] >= r4[i] if not np.isnan(r4[i]) else False
+        
+        # === ENTRY LOGIC (2 conditions) ===
         desired_signal = 0.0
         
-        # === ENTRY LOGIC ===
         if not in_position:
-            # === NEW LONG ENTRY ===
-            # Bullish crossover + volume spike + 1d trend aligned
-            if bullish_cross and vol_spike and price_above_1d_hma:
-                desired_signal = SIZE
-            # Alternative: strong bullish momentum in trending market
-            elif trix_bullish and vol_spike and price_above_1d_hma and trending:
-                desired_signal = SIZE
+            # === LONG ENTRY: Support touch + oversold + trend aligned ===
+            # Condition 1: Price touches S3 or S4
+            # Condition 2: Williams %R oversold OR volume spike
+            if (touch_s3 or touch_s4) and (oversold or vol_spike):
+                # Only in bull trend or neutral
+                if bull_trend or not bear_trend:
+                    desired_signal = SIZE
             
-            # === NEW SHORT ENTRY ===
-            # Bearish crossover + volume spike + 1d trend aligned
-            if bearish_cross and vol_spike and not price_above_1d_hma:
-                desired_signal = -SIZE
-            # Alternative: strong bearish momentum in trending market
-            elif trix_bearish and vol_spike and not price_above_1d_hma and trending:
-                desired_signal = -SIZE
+            # === SHORT ENTRY: Resistance touch + overbought ===
+            if (touch_r3 or touch_r4) and (overbought or vol_spike):
+                # Only in bear trend or neutral
+                if bear_trend or not bull_trend:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR) ===
+        # === STOPLOSS (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -254,17 +222,21 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT: Opposite crossover ===
+        # === EXIT ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: bearish crossover
-            if bearish_cross:
+            # Long exit: Williams %R overbought OR price at R3/R4
+            if willr_val > -20:
+                exit_triggered = True
+            if touch_r3 or touch_r4:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: bullish crossover
-            if bullish_cross:
+            # Short exit: Williams %R oversold OR price at S3/S4
+            if willr_val < -80:
+                exit_triggered = True
+            if touch_s3 or touch_s4:
                 exit_triggered = True
         
         if exit_triggered:
@@ -273,17 +245,19 @@ def generate_signals(prices):
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
+                bars_in_trade = 0
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
+            else:
+                bars_in_trade += 1
         else:
             if in_position:
                 in_position = False
@@ -293,6 +267,7 @@ def generate_signals(prices):
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
+                bars_in_trade = 0
         
         signals[i] = desired_signal
     
