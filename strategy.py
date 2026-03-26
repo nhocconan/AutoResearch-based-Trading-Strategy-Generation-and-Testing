@@ -1,36 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 6h Donchian Breakout + 1d Trend Bias + Volume Confirmation
+Experiment #012: 12h Donchian Breakout + 1d Trend + Volume + Chop Regime
 
-HYPOTHESIS: Donchian channel breakouts (20-period high/low) capture genuine momentum 
-when aligned with higher timeframe trend. 1d HMA provides weekly bias direction. 
-Volume spike (1.3x 20-bar MA) confirms institutional participation, filtering false 
-breakouts common in crypto.
+HYPOTHESIS: 12h Donchian(20) breakouts capture major trend moves. When aligned with 
+1d HMA trend bias, confirmed by volume spike, and occurring in trending regime (low chop),
+these breakouts have high probability of continuation.
 
 WHY THIS WORKS IN BOTH BULL AND BEAR:
 - Bull: Long breakout above Donchian high when 1d HMA bullish + volume spike
 - Bear: Short breakout below Donchian low when 1d HMA bearish + volume spike
-- ATR filter ensures breakout magnitude exceeds noise (>0.3 ATR beyond channel)
-- 2.5 ATR trailing stop protects capital during reversals
-- Minimum 3-bar hold prevents churn on false breakouts
+- Chop filter ensures we only trade when market is trending (not ranging)
+- 12h timeframe naturally limits trade count (fewer bars = fewer signals)
 
-TARGET: 75-200 total trades over 4 years (~19-50/year)
-Timeframe: 6h
+TARGET: 50-150 total trades over 4 years (12-37/year per symbol)
+DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (SOL: Sharpe=1.382, 95tr)
 
-KEY DIFFERENCES from failed #009 (2443 trades):
-1. Donchian breakout (rare event) vs Camarilla proximity (every bar)
-2. AND logic: breakout + (trend OR volume) - stricter than OR-only
-3. ATR magnitude filter: breakout must exceed channel by >0.3 ATR
-4. Minimum 3-bar hold: no exit before bar 3
-5. Trailing stoploss: 2.5 ATR from entry extreme
-6. Discrete signals: only 0, +0.25, -0.25 (no gradual changes)
+KEY DESIGN:
+- Donchian(20) breakout = price structure
+- 1d HMA(21) = trend bias (HTF alignment)
+- Volume > 1.5x MA = institutional confirmation
+- Choppiness < 50 = trending regime (stricter than 61.8)
+- ATR(14) 2.5x stoploss = risk management
+- Signal size: 0.25-0.30 discrete levels
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_1d_trend_vol_atr_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_1d_hma_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -77,8 +75,36 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index
+    CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    We use CHOP < 50 as trending regime filter (stricter)
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel: upper = highest high, lower = lowest low over period"""
+    """Donchian Channel - upper and lower bounds"""
     n = len(high)
     upper = np.full(n, np.nan, dtype=np.float64)
     lower = np.full(n, np.nan, dtype=np.float64)
@@ -103,22 +129,21 @@ def generate_signals(prices):
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
+    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
     
     # Volume MA and ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.28  # Discrete position size
     
     # Position tracking
     in_position = False
     position_side = 0
-    entry_bar = 0
-    bars_in_trade = 0
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
@@ -136,29 +161,53 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(chop_14[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
+        # === REGIME CHECK ===
+        chop = chop_14[i]
+        is_trending = chop < 50.0  # Stricter: only trade in trending markets
+        
         # === TREND BIAS (1d HMA) ===
         price_above_1d_hma = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3
+        vol_spike = vol_ratio[i] > 1.5  # Strong volume confirmation
         
         # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donchian_upper[i]
-        breakout_short = close[i] < donchian_lower[i]
+        # Long breakout: price crosses above Donchian upper
+        # Short breakout: price crosses below Donchian lower
+        # Use previous bar to detect actual breakout (avoid look-ahead)
+        breakout_long = False
+        breakout_short = False
         
-        # === ATR MAGNITUDE FILTER ===
-        # Breakout must exceed channel by >0.3 ATR (filters noise)
-        long_valid = breakout_long and (close[i] - donchian_upper[i]) > 0.3 * atr_14[i]
-        short_valid = breakout_short and (donchian_lower[i] - close[i]) > 0.3 * atr_14[i]
+        if i > 0 and not np.isnan(donch_upper[i-1]) and not np.isnan(donch_lower[i-1]):
+            # Long: current close above upper, previous close below or at upper
+            if close[i] > donch_upper[i] and close[i-1] <= donch_upper[i-1]:
+                breakout_long = True
+            # Short: current close below lower, previous close above or at lower
+            if close[i] < donch_lower[i] and close[i-1] >= donch_lower[i-1]:
+                breakout_short = True
         
-        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        # === ENTRY LOGIC ===
+        desired_signal = 0.0
+        
+        if is_trending:
+            # LONG: Donchian breakout + bullish 1d trend OR volume spike
+            if breakout_long:
+                if price_above_1d_hma or vol_spike:
+                    desired_signal = SIZE
+            
+            # SHORT: Donchian breakout + bearish 1d trend OR volume spike
+            if breakout_short:
+                if (not price_above_1d_hma) or vol_spike:
+                    desired_signal = -SIZE
+        
+        # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -175,63 +224,45 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 stoploss_triggered = True
         
-        # === TAKE PROFIT at opposite Donchian ===
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === TAKE PROFIT at opposite Donchian bound ===
         tp_triggered = False
-        if in_position and position_side > 0 and not np.isnan(donchian_upper[i]):
-            # Exit long at new Donchian high (momentum exhaustion)
-            if high[i] >= donchian_upper[i] * 1.02:  # 2% beyond upper
+        if in_position and position_side > 0 and not np.isnan(donch_lower[i]):
+            # Long TP: price reaches lower band (trend reversal)
+            if low[i] <= donch_lower[i]:
                 tp_triggered = True
         
-        if in_position and position_side < 0 and not np.isnan(donchian_lower[i]):
-            # Exit short at new Donchian low (momentum exhaustion)
-            if low[i] <= donchian_lower[i] * 0.98:  # 2% beyond lower
+        if in_position and position_side < 0 and not np.isnan(donch_upper[i]):
+            # Short TP: price reaches upper band (trend reversal)
+            if high[i] >= donch_upper[i]:
                 tp_triggered = True
         
-        # === ENTRY LOGIC ===
-        desired_signal = 0.0
-        
-        if not in_position or stoploss_triggered or tp_triggered:
-            # Can consider new entry
-            if stoploss_triggered or tp_triggered:
-                # Just exited, need fresh signal
-                pass
-            
-            # LONG: breakout + (bullish trend OR volume spike)
-            if long_valid and (price_above_1d_hma or vol_spike):
-                desired_signal = SIZE
-            
-            # SHORT: breakout + (bearish trend OR volume spike)
-            if short_valid and ((not price_above_1d_hma) or vol_spike):
-                desired_signal = -SIZE
-        
-        # === MINIMUM HOLDING PERIOD (3 bars) ===
-        if in_position and bars_in_trade < 3 and not stoploss_triggered and not tp_triggered:
-            # Cannot exit before bar 3 (keep same signal)
-            desired_signal = signals[i-1] if i > 0 else 0.0
+        if tp_triggered:
+            desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side or stoploss_triggered or tp_triggered:
-                # New position or flip or re-entry after exit
+            if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
-                entry_bar = i
-                bars_in_trade = 0
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
-            else:
-                bars_in_trade += 1
+            # If same side, keep position (no signal churn)
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                bars_in_trade = 0
+                entry_price = 0.0
+                entry_atr = 0.0
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
