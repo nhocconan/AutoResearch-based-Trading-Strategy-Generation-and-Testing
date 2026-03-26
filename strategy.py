@@ -1,54 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 4h Donchian Breakout + 1d HMA Trend + Volume
+Experiment #024: 6h RSI(2) Mean Reversion + ATR Volatility Expansion + 1d Trend
 
-HYPOTHESIS: 4h Donchian(20) breakouts mark institutional moves.
-Combined with 1d HMA trend alignment and volume confirmation,
-this captures major trends while filtering whipsaws. Works in both
-bull (long breakouts) and bear (short breakdowns to HMA).
+HYPOTHESIS: RSI(2) captures short-term overextensions that revert. Combined with
+ATR expansion confirmation (>1.5x 20-bar ATR) to avoid chop, and 1d EMA(50) for 
+trend alignment, this catches reversals at major support/resistance. Works in 
+both bull (long RSI<20 bounces) and bear (short RSI>80 rejections) markets.
 
-TIMEFRAME: 4h primary
-HTF: 1d for trend bias
-TARGET: 75-150 total trades over 4 years (proven pattern from DB)
-SIZE: 0.30
+TIMEFRAME: 6h primary
+HTF: 1d for trend alignment
+TARGET: 75-150 total trades over 4 years (12-37/year)
+SIZE: 0.25 (discrete)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_vol_v1"
-timeframe = "4h"
+name = "mtf_6h_rsi2_atr_expansion_1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
-    
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
-    
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
-    
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
-    
-    return wma(diff, sqrt_n)
+def calculate_rsi(close, period=14):
+    """RSI indicator"""
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -64,17 +45,9 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper and lower bands"""
-    n = len(high)
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
+def calculate_ema(close, period):
+    """EMA indicator"""
+    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -86,22 +59,25 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # 1d EMA for trend
+    ema_1d_raw = calculate_ema(df_1d['close'].values, period=50)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_raw)
     
-    # Calculate local 4h indicators
+    # Local indicators
+    rsi_2 = calculate_rsi(close, period=2)
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
+    atr_20 = calculate_atr(high, low, close, period=20)
     
-    # Donchian 20-period
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    # ATR expansion ratio (current ATR vs 20-bar ATR)
+    atr_ratio = atr_14 / np.where(atr_20 > 0, atr_20, 1)
     
-    # Volume MA
+    # Volume MA and ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
@@ -112,7 +88,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 50
+    warmup = 60
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -123,62 +99,51 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
-        
-        # === VOLUME CONFIRMATION ===
+        rsi2 = rsi_2[i]
+        rsi14 = rsi_14[i]
+        atr_expansion = atr_ratio[i]
         vol_spike = vol_ratio[i] > 1.2
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Price at/above upper band = potential long
-        price_above_upper = close[i] >= donch_upper[i]
-        # Price at/below lower band = potential short
-        price_below_lower = close[i] <= donch_lower[i]
+        # === TREND DIRECTION (1d EMA) ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i]
         
-        # Price position relative to channel (for mean reversion exits)
-        channel_width = donch_upper[i] - donch_lower[i]
-        price_position = (close[i] - donch_lower[i]) / channel_width if channel_width > 0 else 0.5
-        
+        # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
         if not in_position:
-            # === NEW LONG ENTRY ===
-            # Price breaks above Donchian upper + trend aligned + volume
-            if price_above_upper and price_above_1d_hma and vol_spike:
+            # === LONG: RSI(2) oversold + ATR expansion + trend aligned ===
+            # RSI(2) < 15 indicates extreme oversold
+            # ATR expansion > 1.5 confirms volatility spike (potential reversal)
+            # Price above 1d EMA confirms bullish trend
+            if rsi2 < 15 and atr_expansion > 1.5 and price_above_1d_ema:
                 desired_signal = SIZE
             
-            # === NEW SHORT ENTRY ===
-            # Price breaks below Donchian lower + trend opposed + volume
-            if price_below_lower and not price_above_1d_hma and vol_spike:
+            # === SHORT: RSI(2) overbought + ATR expansion + trend opposed ===
+            # RSI(2) > 85 indicates extreme overbought
+            # Price below 1d EMA confirms bearish trend
+            if rsi2 > 85 and atr_expansion > 1.5 and not price_above_1d_ema:
                 desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (2.0 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -186,17 +151,17 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT: Price returns to channel center ===
+        # === EXIT: RSI(2) mean reverts OR opposite extreme ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: price back inside channel
-            if not price_above_upper:
+            # Long exit: RSI(2) mean reverts above 50
+            if rsi2 > 50:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: price back inside channel
-            if not price_below_lower:
+            # Short exit: RSI(2) mean reverts below 50
+            if rsi2 < 50:
                 exit_triggered = True
         
         if exit_triggered:
@@ -213,9 +178,12 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
+            else:
+                # Same direction - maintain position
+                pass
         else:
             if in_position:
                 in_position = False
