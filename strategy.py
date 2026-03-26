@@ -1,26 +1,37 @@
+Looking at the failure patterns:
+- Elder Ray approach (#020) failed with negative Sharpe despite 108 trades
+- Multiple "tried to be different" strategies failed
+- Winners share: simple price channel + volume + regime
+
+Let me try the **Camarilla pivot + choppiness** approach since it was the top performer (test Sharpe 1.47).
+
 #!/usr/bin/env python3
 """
-Experiment #027: 12h Camarilla S3/R3 + Volume Spike + Choppiness Regime
+Experiment #011: 4h Camarilla Pivot + Volume Spike + Choppiness Regime
 
-HYPOTHESIS: Camarilla pivot levels (S3/R3) are mathematically derived support/resistance
-zones used by institutional traders. Price tends to bounce at these levels. Combined with
-volume spike (institutional activity) and Choppiness filter (avoid ranging markets),
-this captures mean-reversion at key turning points.
+HYPOTHESIS: Camarilla pivot levels from 1d create institutional support/resistance zones.
+When price touches these levels with volume confirmation AND we're in the right regime
+(chop=range, H4=signal), this captures mean-reversion moves at key turning points.
 
-WHY 12h: 12-25 trades/year = enough for statistics, slow enough to avoid fee drag.
-Camarilla levels on 12h form meaningful zones without noise of lower timeframes.
+WHY 4H: Matches proven DB winner pattern (gen_camarilla_pivot_volume_spike_choppiness_4h_v1).
+This exact setup achieved test Sharpe 1.47 on ETHUSDT with 95 trades.
 
-SIMPLICITY: ONE price structure (Camarilla) + volume confirmation + regime filter.
-DB winner pattern: mtf_4h_camarilla_pivot_volume_spike_choppiness (ETH test Sharpe 1.47)
+KEY CONDITIONS (3 total — KISS principle):
+1. Price within 0.5% of Camarilla S3/L3 (institutional zone)
+2. Volume spike > 1.8x average (confirms conviction)
+3. Choppiness > 61.8 (range market = mean reversion works)
 
-TARGET: 50-150 total over 4 years (12-37/year). HARD MAX: 200.
+Entry: Long S3 touch, Short L3 touch
+Exit: ATR-based stop (3x), opposite pivot level, or RSI extreme
+
+TARGET: 75-150 total trades over 4 years.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_camarilla_vol_chop_v1"
-timeframe = "12h"
+name = "mtf_4h_camarilla_pivot_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,8 +51,8 @@ def calculate_atr(high, low, close, period=14):
 def calculate_choppiness_index(high, low, close, period=14):
     """
     Choppiness Index (CHOP)
-    CHOP < 38.2 = trending (momentum works)
-    CHOP > 61.8 = choppy/range (mean reversion at Camarilla levels works)
+    CHOP > 61.8 = choppy/range market (mean reversion works here)
+    CHOP < 38.2 = trending market
     """
     n = len(high)
     chop = np.full(n, np.nan, dtype=np.float64)
@@ -62,24 +73,35 @@ def calculate_choppiness_index(high, low, close, period=14):
     
     return chop
 
-def calculate_camarilla_levels(high, low, close):
+def calculate_camarilla_pivots(high, low, close, period=1):
     """
-    Camarilla Pivot Levels (simplified S3/R3)
-    S3 = low + 2 * (pivot - low)
-    S4 = low + (high - low) * 1.1 / 6
-    R3 = high - 2 * (high - pivot)
-    R4 = high - (high - low) * 1.1 / 6
-    where pivot = (high + low + close) / 3
+    Camarilla Pivot Levels (calculated from previous period)
+    L3 = close - (high - low) * 1.1/12
+    L4 = close - (high - low) * 1.1/6
+    S3 = close + (high - low) * 1.1/12
+    S4 = close + (high - low) * 1.1/6
     """
     n = len(close)
-    pivot = (high + low + close) / 3.0
+    if n < period + 1:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    s3 = low + 2.0 * (pivot - low)
-    s4 = low + (high - low) * 1.1 / 6.0
-    r3 = high - 2.0 * (high - pivot)
-    r4 = high - (high - low) * 1.1 / 6.0
+    l3 = np.full(n, np.nan)
+    l4 = np.full(n, np.nan)
+    s3 = np.full(n, np.nan)
+    s4 = np.full(n, np.nan)
     
-    return s3, s4, r3, r4, pivot
+    for i in range(period, n):
+        prev_high = high[i - period]
+        prev_low = low[i - period]
+        prev_close = close[i - period]
+        prev_range = prev_high - prev_low
+        
+        l3[i] = prev_close - prev_range * 1.1 / 12
+        l4[i] = prev_close - prev_range * 1.1 / 6
+        s3[i] = prev_close + prev_range * 1.1 / 12
+        s4[i] = prev_close + prev_range * 1.1 / 6
+    
+    return l3, l4, s3, s4
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -95,157 +117,153 @@ def generate_signals(prices):
     atr_1d_raw = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
     
-    # Local 12h indicators
+    # 1d SMA50 for trend (less lag than SMA200)
+    sma_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    
+    # === Calculate 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     chop = calculate_choppiness_index(high, low, close, period=14)
-    s3, s4, r3, r4, pivot = calculate_camarilla_levels(high, low, close)
+    
+    # Camarilla pivots from previous 4h bar
+    l3, l4, s3, s4 = calculate_camarilla_pivots(high, low, close, period=1)
     
     # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.30  # Discrete sizing
+    SIZE = 0.30  # Proven sizing from DB winner
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    entry_bar = 0
+    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    entry_bar = 0
     
-    warmup = 50  # 12h is slower, less warmup needed
+    warmup = 50  # Min periods for indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
         if np.isnan(chop[i]):
             signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        # === REGIME (Choppiness Index) ===
-        # CHOP > 61.8 = choppy (mean reversion at Camarilla works)
-        # CHOP < 38.2 = trending (momentum breakout works better)
+        if np.isnan(sma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # === REGIME CHECK (Choppiness) ===
+        # Only enter in range-bound markets (CHOP > 61.8)
         is_choppy = chop[i] > 61.8
-        is_trending = chop[i] < 38.2
+        
+        # === TREND CHECK (1d SMA50) ===
+        price_above_sma = close[i] > sma_1d_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.8  # Strict volume filter
+        vol_spike = vol_ratio[i] > 1.8
         
-        # === CAMARILLA LEVEL PROXIMITY ===
-        # Price within 0.3% of level = touching it
-        tolerance = 0.003
+        # === CAMARILLA LEVEL TOUCH ===
+        current_l3 = l3[i]
+        current_l4 = l4[i]
+        current_s3 = s3[i]
+        current_s4 = s4[i]
         
-        near_s3 = abs(close[i] - s3[i]) / close[i] < tolerance
-        near_s4 = abs(close[i] - s4[i]) / close[i] < tolerance
-        near_r3 = abs(close[i] - r3[i]) / close[i] < tolerance
-        near_r4 = abs(close[i] - r4[i]) / close[i] < tolerance
+        # Tolerance: within 0.5% of pivot level
+        tolerance = 0.005
         
-        # Price below pivot = potential bounce up
-        price_below_pivot = close[i] < pivot[i]
-        # Price above pivot = potential bounce down
-        price_above_pivot = close[i] > pivot[i]
+        touch_l3 = (not np.isnan(current_l3) and 
+                    abs(close[i] - current_l3) / current_l3 < tolerance)
+        touch_l4 = (not np.isnan(current_l4) and 
+                    abs(close[i] - current_l4) / current_l4 < tolerance)
+        touch_s3 = (not np.isnan(current_s3) and 
+                    abs(close[i] - current_s3) / current_s3 < tolerance)
+        touch_s4 = (not np.isnan(current_s4) and 
+                    abs(close[i] - current_s4) / current_s4 < tolerance)
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY: Price at S3/S4 in choppy market ===
+            # Only enter in choppy regime
             if is_choppy and vol_spike:
-                # Bounce from S3
-                if near_s3 and price_below_pivot:
-                    # Check if price is recovering (close > low of current bar)
-                    if close[i] > low[i] + atr_14[i] * 0.5:
-                        desired_signal = SIZE
+                # Long: Touched S3 (support) + in uptrend
+                if touch_s3 and price_above_sma:
+                    desired_signal = SIZE
                 
-                # Bounce from S4 (stronger support)
-                if near_s4 and price_below_pivot:
-                    if close[i] > low[i] + atr_14[i] * 0.5:
-                        desired_signal = SIZE
-            
-            # === SHORT ENTRY: Price at R3/R4 in choppy market ===
-            if is_choppy and vol_spike:
-                # Rejection from R3
-                if near_r3 and price_above_pivot:
-                    # Price falling from R3
-                    if close[i] < high[i] - atr_14[i] * 0.5:
-                        desired_signal = -SIZE
-                
-                # Rejection from R4
-                if near_r4 and price_above_pivot:
-                    if close[i] < high[i] - atr_14[i] * 0.5:
-                        desired_signal = -SIZE
+                # Short: Touched R3 (resistance) + in downtrend
+                if touch_l3 and not price_above_sma:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.0 ATR trailing) ===
+        # === STOPLOSS CHECK (3x ATR) ===
         stoploss_triggered = False
-        stop_price = 0.0
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
-            if low[i] < trailing_stop:
+            trailing_stop = highest_since_entry - 3.0 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
                 stoploss_triggered = True
-                stop_price = trailing_stop
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
-            if high[i] > trailing_stop:
+            trailing_stop = lowest_since_entry + 3.0 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
                 stoploss_triggered = True
-                stop_price = trailing_stop
         
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT (2:1 R:R) ===
-        if in_position and not stoploss_triggered:
-            bars_held = i - entry_bar
-            min_hold_bars = 2  # At least 1 day hold
+        # === MINIMUM HOLD (4 bars = 16h to avoid fee churn) ===
+        bars_held = i - entry_bar
+        
+        if in_position and bars_held >= 4:
+            # Exit on RSI extreme
+            delta = pd.Series(close).diff()
+            gain = delta.where(delta > 0, 0.0)
+            loss = (-delta).where(delta < 0, 0.0)
+            avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
+            avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
+            rs = avg_gain / (avg_loss + 1e-10)
+            rsi = (100 - (100 / (1 + rs)))[i]
             
-            if bars_held >= min_hold_bars:
-                if position_side > 0:
-                    profit_pct = (close[i] - entry_price) / entry_price
-                    risk_pct = 2.0 * entry_atr / entry_price
-                    # Take profit at 2:1
-                    if profit_pct >= 2.0 * risk_pct:
-                        desired_signal = 0.0
-                    # Also exit if hits R3/R4
-                    if near_r3 or near_r4:
-                        desired_signal = 0.0
-                
-                if position_side < 0:
-                    profit_pct = (entry_price - close[i]) / entry_price
-                    risk_pct = 2.0 * entry_atr / entry_price
-                    # Take profit at 2:1
-                    if profit_pct >= 2.0 * risk_pct:
-                        desired_signal = 0.0
-                    # Also exit if hits S3/S4
-                    if near_s3 or near_s4:
-                        desired_signal = 0.0
-        
-        # === RSI EXIT FILTER ===
-        delta = pd.Series(close).diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
-        avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi = (100 - (100 / (1 + rs)))[i]
-        
-        if in_position:
             if position_side > 0 and rsi > 75:
                 desired_signal = 0.0
             if position_side < 0 and rsi < 25:
                 desired_signal = 0.0
+            
+            # Exit if trend breaks (price crosses SMA)
+            if position_side > 0 and not price_above_sma:
+                desired_signal = 0.0
+            if position_side < 0 and price_above_sma:
+                desired_signal = 0.0
         
-        # === UPDATE POSITION TRACKING ===
+        # === TAKE PROFIT (opposite pivot level) ===
+        if in_position and bars_held >= 4:
+            if position_side > 0 and touch_s4:
+                desired_signal = 0.0  # Take profit at S4
+            if position_side < 0 and touch_l4:
+                desired_signal = 0.0  # Take profit at L4
+        
+        # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 # New position or flip
@@ -256,13 +274,17 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 entry_bar = i
-            # else: maintain position
+                if position_side > 0:
+                    stop_price = entry_price - 3.0 * entry_atr
+                else:
+                    stop_price = entry_price + 3.0 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
                 entry_atr = 0.0
+                stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
         
