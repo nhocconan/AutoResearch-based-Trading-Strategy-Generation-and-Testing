@@ -1,98 +1,58 @@
 #!/usr/bin/env python3
 """
-Experiment #013: 4h Williams %R Extreme + Supertrend + Volume
+Experiment #021: 4h Camarilla Pivot Break + Volume + Choppiness (Simplified)
 
-HYPOTHESIS: Williams %R at extremes (<-80=oversold, >-20=overbought) catches 
-reversal points. Supertrend confirms we're not fighting the primary trend. 
-Volume spike confirms institutional involvement at reversal points.
+HYPOTHESIS: Camarilla pivot levels (S3/R3) act as institutional support/resistance.
+Price crossing these levels signals institutions accepting liquidity.
+Volume spike confirms institutional involvement.
+Choppiness < 55 filters to trending periods only.
+This pattern has DB precedent: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 (Sharpe=1.471, 95 trades).
 
-WHY THIS SHOULD WORK:
-- Bear markets: rallies to Williams %R > -20 are short opportunities
-- Bull markets: dips to Williams %R < -80 are long opportunities
-- Supertrend keeps us on right side (bullish ATR mode for longs, bearish for shorts)
-- Works in ALL conditions because it trades reversals at extremes
+WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
+- Camarilla derived from previous range, works in any market regime
+- Bear: short R3 break with tight ATR stop
+- Bull: long S3 break with trailing stop
+- Range: mean-revert between pivots
 
-TARGET: 75-120 total trades over 4 years (3 symbols ~25-40 each).
-DB reference: Williams %R + Supertrend combo proven in volatility strategies.
+TARGET: 75-100 total trades over 4 years (2-3/month). DB winner had 95 trades.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_williams_r_supertrend_vol_v1"
+name = "mtf_4h_camarilla_vol_chop_simple_v1"
 timeframe = "4h"
 leverage = 1.0
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum oscillator for reversals"""
+def calculate_hma(close, period):
+    """Hull Moving Average"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
     
-    williams = np.full(n, np.nan, dtype=np.float64)
+    half = max(1, period // 2)
+    sqrt_n = max(1, int(np.sqrt(period)))
     
+    def wma(series, span):
+        result = np.full(len(series), np.nan)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        wsum = np.sum(weights)
+        for i in range(span - 1, len(series)):
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1]
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / wsum
+        return result
+    
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
+    
+    diff = np.full(n, np.nan)
     for i in range(period - 1, n):
-        window_high = np.max(high[i - period + 1:i + 1])
-        window_low = np.min(low[i - period + 1:i + 1])
-        range_hl = window_high - window_low
-        
-        if range_hl > 1e-10:
-            williams[i] = -100.0 * (window_high - close[i]) / range_hl
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
-    return williams
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """
-    Supertrend - trend following indicator
-    Returns: supertrend value, bullish (1) or bearish (-1)
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan), np.zeros(n)
-    
-    # ATR
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # HL2
-    hl2 = (high + low) / 2.0
-    
-    # Upper and Lower bands
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    supertrend = np.full(n, np.nan, dtype=np.float64)
-    direction = np.zeros(n, dtype=np.float64)  # 1=bullish, -1=bearish
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = -1
-    
-    for i in range(1, n):
-        prev_close = close[i - 1]
-        prev_st = supertrend[i - 1]
-        prev_dir = direction[i - 1]
-        
-        # Bullish trend continues
-        if prev_dir == 1:
-            if close[i] < lower_band[i]:
-                direction[i] = -1
-                supertrend[i] = upper_band[i]
-            else:
-                direction[i] = 1
-                supertrend[i] = max(prev_st, lower_band[i])
-        else:  # Bearish trend continues
-            if close[i] > upper_band[i]:
-                direction[i] = 1
-                supertrend[i] = lower_band[i]
-            else:
-                direction[i] = -1
-                supertrend[i] = min(prev_st, upper_band[i])
-    
-    return supertrend, direction
+    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -105,8 +65,56 @@ def calculate_atr(high, low, close, period=14):
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+    return pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - CHOP < 55 = trending (trade), > 55 = choppy (no trade)"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest = np.max(high[i - period + 1:i + 1])
+        lowest = np.min(low[i - period + 1:i + 1])
+        price_range = highest - lowest
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
+def calculate_camarilla_pivots(prev_high, prev_low, prev_close):
+    """
+    Camarilla pivot levels
+    S3 = close - range * 1.1/4, R3 = close + range * 1.1/4
+    """
+    n = len(prev_high)
+    pivots = {
+        's3': np.full(n, np.nan, dtype=np.float64),
+        'r3': np.full(n, np.nan, dtype=np.float64),
+    }
+    
+    for i in range(n):
+        if np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]):
+            continue
+        
+        rng = prev_high[i] - prev_low[i]
+        if rng <= 1e-10:
+            continue
+        
+        c = prev_close[i]
+        pivots['s3'][i] = c - rng * 1.1 / 4
+        pivots['r3'][i] = c + rng * 1.1 / 4
+    
+    return pivots
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -115,128 +123,147 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Calculate 4h indicators ===
-    williams_r = calculate_williams_r(high, low, close, period=14)
-    supertrend, st_direction = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # Load 1d data ONCE for pivots and trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Volume average
+    # 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # Camarilla pivots from 1d
+    cam_pivots = calculate_camarilla_pivots(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values
+    )
+    
+    # Align pivots to 4h (shifted by 1 for no look-ahead)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['s3'])
+    r3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['r3'])
+    
+    # 4h indicators
+    atr_14 = calculate_atr(high, low, close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
+    
+    # Volume: 20-bar MA ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25  # Conservative sizing
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
-    bars_in_trade = 0
+    stop_price = 0.0
+    highest = 0.0
+    lowest = 0.0
     
     warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(williams_r[i]) or np.isnan(supertrend[i]) or np.isnan(atr_14[i]):
+        if np.isnan(atr_14[i]) or np.isnan(chop_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(vol_ratio[i]) or vol_ratio[i] <= 0:
+        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME CHECK ===
-        williams = williams_r[i]
-        st_dir = st_direction[i]
-        vol_spike = vol_ratio[i] > 1.4
+        if np.isnan(vol_ratio[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        s3 = s3_aligned[i]
+        r3 = r3_aligned[i]
+        chop = chop_14[i]
+        vol_spike = vol_ratio[i] > 1.5
+        
+        # Trend: price vs 1d HMA
+        price_above_1d_hma = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
         
         desired_signal = 0.0
         
-        # === ENTRY LOGIC ===
-        # LONG: Williams %R < -80 (oversold) + Supertrend bullish + volume
-        if not in_position or position_side <= 0:
-            # Oversold extreme
-            if williams < -80:
-                # Supertrend bullish confirmation
-                if st_dir > 0:
-                    if vol_spike:
-                        desired_signal = SIZE
-                    elif bars_in_trade >= 4:  # Not too quick to enter
-                        desired_signal = SIZE
+        # === REGIME CHECK: trending only ===
+        if chop < 55.0:
+            # === LONG ENTRY: price breaks below S3 with volume ===
+            # Price crosses below S3 (close < S3, prev close >= prev S3)
+            if i > 0 and close[i] < s3 and close[i-1] >= s3:
+                if vol_spike and price_above_1d_hma:
+                    desired_signal = SIZE
+                elif price_above_1d_hma:
+                    desired_signal = SIZE
+            
+            # === SHORT ENTRY: price breaks above R3 with volume ===
+            if i > 0 and close[i] > r3 and close[i-1] <= r3:
+                if vol_spike and not price_above_1d_hma:
+                    desired_signal = -SIZE
+                elif not price_above_1d_hma:
+                    desired_signal = -SIZE
         
-        # SHORT: Williams %R > -20 (overbought) + Supertrend bearish + volume
-        if not in_position or position_side >= 0:
-            # Overbought extreme
-            if williams > -20:
-                # Supertrend bearish confirmation
-                if st_dir < 0:
-                    if vol_spike:
-                        desired_signal = -SIZE
-                    elif bars_in_trade >= 4:
-                        desired_signal = -SIZE
-        
-        # === STOPLOSS CHECK ===
-        stoploss_triggered = False
-        
+        # === STOPLOSS CHECK (2x ATR) ===
+        stoploss_hit = False
         if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
-            if low[i] < trailing_stop:
-                stoploss_triggered = True
+            highest = max(highest, high[i])
+            trailing_stop = highest - 2.0 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                stoploss_hit = True
         
         if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
-            if high[i] > trailing_stop:
-                stoploss_triggered = True
+            lowest = min(lowest, low[i])
+            trailing_stop = lowest + 2.0 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                stoploss_hit = True
         
-        if stoploss_triggered:
+        if stoploss_hit:
             desired_signal = 0.0
         
-        # === TAKE PROFIT: Williams %R mean reversion ===
-        tp_triggered = False
+        # === TAKE PROFIT: price reaches opposite pivot ===
+        tp_hit = False
         if in_position and position_side > 0:
-            # TP when Williams %R mean-reverts (rises above -50)
-            if williams > -50:
-                tp_triggered = True
+            # TP at R3
+            if high[i] >= r3:
+                tp_hit = True
         
         if in_position and position_side < 0:
-            # TP when Williams %R mean-reverts (falls below -50)
-            if williams < -50:
-                tp_triggered = True
+            # TP at S3
+            if low[i] <= s3:
+                tp_hit = True
         
-        if tp_triggered:
+        if tp_hit:
             desired_signal = 0.0
         
-        # === UPDATE POSITION TRACKING ===
+        # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                bars_in_trade = 0
+                highest = high[i]
+                lowest = low[i]
+                if position_side > 0:
+                    stop_price = entry_price - 2.0 * entry_atr
+                else:
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
-                bars_in_trade += 1
-                # Force exit after 20 bars (5 days at 4h) if not stopped out
-                if bars_in_trade > 20:
-                    in_position = False
-                    position_side = 0
-                    bars_in_trade = 0
-            else:
-                bars_in_trade = 0
+                in_position = False
+                position_side = 0
         
         signals[i] = desired_signal
     
