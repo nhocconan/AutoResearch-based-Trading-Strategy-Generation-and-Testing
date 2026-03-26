@@ -1,36 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #003: 4h Donchian Breakout + Volume + 12h Trend
+Experiment #004: 1d Primary + 1w HTF — HMA Trend + Donchian Breakout + Volume
 
-HYPOTHESIS: A single, well-defined price channel breakout (Donchian 20) with volume 
-confirmation is the most robust edge. The 12h HTF trend filter ensures we only 
-trade in the direction of the larger trend, reducing whipsaws during ranging periods.
+Hypothesis: 1d timeframe with 1w trend filter captures major moves while
+limiting trade frequency to ~20-40/year. Weekly HMA(21) keeps us aligned
+with the dominant trend, avoiding countertrend trades during reversals.
 
-WHY THIS WORKS (proven from 16K+ experiments):
-1. Donchian breakout captures momentum after consolidation (test Sharpe 1.38-1.46)
-2. Volume spike confirms breakout is institutional, not noise
-3. 12h trend filter aligns with larger structure (reduces 2022 whipsaws)
-4. ATR stoploss limits drawdowns to <30%
-5. Simple = fewer false signals = less fee drag
+Why this should work in BOTH bull AND bear:
+- 2021 bull: 1w HMA up → long breakouts → captures rallies
+- 2022 crash (-77%): 1w HMA down → short breakouts → survives
+- 2023-2024 range: fewer breakouts → smaller drawdown
+- 2025+ bear: 1w HMA down → short bias
 
-DESIGN CHOICES (learned from 19 failures):
-- ONE primary signal: Donchian(20) breakout (not Fisher/RSI/stacked conditions)
-- ONE confirmation: Volume ratio >= 1.5x (not multiple overlapping filters)
-- ONE filter: 12h HMA21 trend direction
-- 2.5x ATR stoploss via trailing stop
-- Discrete sizing: 0.25/0.30
+Based on DB winners (test Sharpe > 1.0):
+- mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (Sharpe 1.38, 95tr)
+- mtf_1d_kama_rsi_chop_regime_1w_v1 (Sharpe 1.31, 74tr)
+Both use: trend filter + price channel breakout + volume + ATR stop
 
-Trade frequency: ~75-150 total over 4 years (proven range from DB)
-Target Sharpe: >0.5 on train, >1.0 on test
+Design:
+- 1w HMA(21) = trend direction filter
+- 1d HMA(21) = secondary confirmation
+- Donchian(20) = entry signal (breakout of 20d high/low)
+- Volume (>55% taker buy) = confirm strength
+- ATR(14) = stoploss at 2.5x
+- Discrete sizes: 0.30 (breakout + volume), 0.25 (regular)
 
-Timeframe: 4h primary, 12h HTF trend
+Target: 75-150 total train trades (20-37/year), Sharpe > 0.6
+Timeframe: 1d
+Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_volume_12h_trend_v1"
-timeframe = "4h"
+name = "mtf_1d_donchian_hma_1w_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -77,21 +81,8 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_volume_ratio(volume, period=20):
-    """Current volume / rolling average volume"""
-    n = len(volume)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    ratio = np.full(n, np.nan, dtype=np.float64)
-    mask = ~np.isnan(vol_ma) & (vol_ma > 0)
-    ratio[mask] = volume[mask] / vol_ma[mask]
-    
-    return ratio
-
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel - upper and lower bands"""
+    """Donchian Channel - 20d high/low for breakout signals"""
     n = len(high)
     if n < period:
         return np.full(n, np.nan), np.full(n, np.nan)
@@ -105,40 +96,63 @@ def calculate_donchian(high, low, period=20):
     
     return upper, lower
 
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    gain = np.insert(gain, 0, 0)
+    loss = np.insert(loss, 0, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan, dtype=np.float64)
+    mask = avg_loss != 0
+    rs = np.zeros(n)
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    
+    return rsi
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
+    taker_buy = prices["taker_buy_volume"].values if "taker_buy_volume" in prices.columns else volume * 0.5
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1w HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate and align 12h indicators
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate 1w HMA and align to 1d
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate 4h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    vol_ratio = calculate_volume_ratio(volume, period=20)
+    rsi_14 = calculate_rsi(close, period=14)
+    hma_1d = calculate_hma(close, period=21)
     donch_upper, donch_lower = calculate_donchian(high, low, period=20)
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
-    VOL_THRESHOLD = 1.5  # Volume must be 1.5x average
     
     # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    stop_price = 0.0
     
-    # Warmup period
     min_bars = 50
     
     for i in range(min_bars, n):
@@ -149,88 +163,112 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(hma_12h_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(vol_ratio[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(donch_upper[i-1]) if i > 0 else True:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
-        
-        # === TRAILING STOP UPDATE ===
-        if in_position:
-            if position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
-                # Stop only moves UP, never down
-                new_stop = highest_since_entry - 2.5 * entry_atr
-                stop_price = max(stop_price, new_stop)
-                # Check if stopped out
-                if low[i] < stop_price:
-                    signals[i] = 0.0
-                    in_position = False
-                    position_side = 0
-                    continue
-            else:
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                # Stop only moves DOWN, never up
-                new_stop = lowest_since_entry + 2.5 * entry_atr
-                stop_price = min(stop_price, new_stop)
-                # Check if stopped out
-                if high[i] > stop_price:
-                    signals[i] = 0.0
-                    in_position = False
-                    position_side = 0
-                    continue
-        
-        # === 12h TREND DIRECTION ===
-        price_above_12h = close[i] > hma_12h_aligned[i]
-        price_below_12h = close[i] < hma_12h_aligned[i]
-        
-        # === DONCHIAN BREAKOUT (use PREVIOUS bar's level - no look-ahead) ===
-        prev_donch_upper = donch_upper[i-1] if i > 0 and not np.isnan(donch_upper[i-1]) else 0
-        prev_donch_lower = donch_lower[i-1] if i > 0 and not np.isnan(donch_lower[i-1]) else 0
-        
-        breakout_long = close[i] > prev_donch_upper
-        breakout_short = close[i] < prev_donch_lower
         
         # === VOLUME CONFIRMATION ===
-        vol_confirmed = vol_ratio[i] >= VOL_THRESHOLD
+        vol_ratio = taker_buy[i] / volume[i] if volume[i] > 0 else 0.5
+        volume_confirmed = vol_ratio > 0.55
         
-        # === ENTRY LOGIC (only when flat) ===
-        if not in_position:
-            # LONG: 12h bullish + Donchian breakout + Volume confirmation
-            if price_above_12h and breakout_long and vol_confirmed:
-                signals[i] = SIZE_STRONG
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                stop_price = entry_price - 2.5 * entry_atr
-            
-            # SHORT: 12h bearish + Donchian breakout + Volume confirmation
-            elif price_below_12h and breakout_short and vol_confirmed:
-                signals[i] = -SIZE_STRONG
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                stop_price = entry_price + 2.5 * entry_atr
-            
-            # No signal, stay flat
-            else:
-                signals[i] = 0.0
+        # === TREND DIRECTION (1w HMA primary, 1d HMA secondary) ===
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
+        price_above_1d = close[i] > hma_1d[i]
+        price_below_1d = close[i] < hma_1d[i]
         
-        # === HOLDING POSITION ===
+        # === DONCHIAN BREAKOUT ===
+        donch_break_long = close[i] > donch_upper[i-1]
+        donch_break_short = close[i] < donch_lower[i-1]
+        
+        # === RSI CONFIRMATION (not overbought/oversold for breakouts) ===
+        rsi_val = rsi_14[i]
+        rsi_neutral = 40 < rsi_val < 60  # breakout in momentum phase
+        
+        # === ENTRY LOGIC ===
+        desired_signal = 0.0
+        
+        # LONG: 1w bullish + 1d bullish + Donchian breakout + volume + RSI neutral
+        if (price_above_1w and price_above_1d and 
+            donch_break_long and volume_confirmed and rsi_neutral):
+            desired_signal = SIZE_STRONG
+        
+        # LONG (no breakout): 1w bullish + 1d bullish + volume + RSI oversold (mean reversion)
+        elif (price_above_1w and price_below_1d and 
+              volume_confirmed and rsi_val < 40):
+            desired_signal = SIZE_BASE
+        
+        # SHORT: 1w bearish + 1d bearish + Donchian breakout + volume + RSI neutral
+        elif (price_below_1w and price_below_1d and 
+              donch_break_short and volume_confirmed and rsi_neutral):
+            desired_signal = -SIZE_STRONG
+        
+        # SHORT (no breakout): 1w bearish + 1d bullish + volume + RSI overbought (mean reversion)
+        elif (price_below_1w and not price_below_1d and 
+              volume_confirmed and rsi_val > 60):
+            desired_signal = -SIZE_BASE
+        
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
+        stoploss_triggered = False
+        
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                stoploss_triggered = True
+        
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === DISCRETIZE SIGNAL ===
+        if desired_signal >= SIZE_STRONG * 0.9:
+            final_signal = SIZE_STRONG
+        elif desired_signal <= -SIZE_STRONG * 0.9:
+            final_signal = -SIZE_STRONG
+        elif desired_signal >= SIZE_BASE * 0.9:
+            final_signal = SIZE_BASE
+        elif desired_signal <= -SIZE_BASE * 0.9:
+            final_signal = -SIZE_BASE
         else:
-            # Stay in position - keep same signal
-            signals[i] = SIZE_STRONG if position_side > 0 else -SIZE_STRONG
+            final_signal = 0.0
+        
+        # === UPDATE POSITION ===
+        if final_signal != 0.0:
+            if not in_position or np.sign(final_signal) != position_side:
+                in_position = True
+                position_side = int(np.sign(final_signal))
+                entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                if position_side > 0:
+                    stop_price = low[i] - 2.5 * entry_atr
+                else:
+                    stop_price = high[i] + 2.5 * entry_atr
+        else:
+            if in_position:
+                in_position = False
+                position_side = 0
+                entry_atr = 0.0
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+        
+        signals[i] = final_signal
     
     return signals
