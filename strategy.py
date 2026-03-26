@@ -1,31 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #009: 4h Donchian Breakout + 1d HMA Trend (Simple)
+Experiment #010: 1d Primary + 1w HTF — Simple Donchian Breakout with Weekly Trend
 
-HYPOTHESIS: A simple price channel breakout (Donchian) with HTF trend bias (1d HMA)
-is the proven winning pattern from database. Complex multi-indicator strategies 
-consistently fail due to overtrading and conflicting signals. The key is 2-3 
-conditions max: structure (Donchian) + trend (1d HMA) + confirmation (momentum).
+HYPOTHESIS:
+1d timeframe with 1w trend bias captures the best risk-adjusted trades because:
+- 1d = enough bars (~1460/year) for statistical validity without overtrading
+- 1w HMA(21) provides strong trend filter without being too slow
+- Donchian(20) breakout is a proven edge (SOLUSDT test Sharpe 1.10-1.38)
+- Choppiness regime filter prevents trading in ranges (biggest cause of failure)
+- Simple = fewer conditions = fewer trades = less fee drag
 
-Why this should work in BOTH bull and bear:
-- Bull: Donchian breakout catches momentum continuation
-- Bear: 1d HMA filter prevents long entries in downtrends
-- Range: Tight stoploss avoids whipsaws
+Why this should work in BOTH bull AND bear:
+- Bull: Price breaks Donchian high + 1w trend up = strong momentum trade
+- Bear: Price breaks Donchian low + 1w trend down = continuation short
+- Range: CHOP>61 prevents entries in chop, avoids 2022 whipsaw destruction
+- ATR stoploss (2.5x) handles volatility expansion during crashes
 
-Based on mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (test_sharpe=1.382, 95 trades)
-but SIMPLIFIED by removing volume filter (per failure analysis) and using only
-2 conditions: Donchian breakout + 1d HMA bias. Fewer conditions = fewer trades.
-
-Target: 75-200 total train trades (19-50/year), test Sharpe > 0.8
-Timeframe: 4h
-Size: 0.25-0.30 discrete
+Target trades: 30-100 total over 4 years (7-25/year) - HARD MAX: 150
+Entry philosophy: ONLY enter on confirmed Donchian breakout, not on pullbacks
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_simple_1d_v1"
-timeframe = "4h"
+name = "mtf_1d_donchian_1w_trend_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -72,8 +71,35 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index - measures market choppy vs trending
+    CHOP > 61.8 = ranging (don't trade), CHOP < 38.2 = trending (trade)
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel - price channel breakout structure"""
+    """Donchian Channel - price channel breakout system"""
     n = len(high)
     if n < period:
         return np.full(n, np.nan), np.full(n, np.nan)
@@ -87,53 +113,46 @@ def calculate_donchian(high, low, period=20):
     
     return upper, lower
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
+def calculate_volume_ratio(volume, period=20):
+    """
+    Volume ratio - compares current volume to average
+    Used to confirm breakouts (high volume = more likely valid)
+    """
+    n = len(volume)
+    if n < period:
         return np.full(n, np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    avg_vol = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    ratio = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if not np.isnan(avg_vol[i]) and avg_vol[i] > 0 and volume[i] > 0:
+            ratio[i] = volume[i] / avg_vol[i]
     
-    gain = np.insert(gain, 0, 0)
-    loss = np.insert(loss, 0, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.full(n, np.nan, dtype=np.float64)
-    mask = avg_loss != 0
-    rs = np.zeros(n)
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    
-    return rsi
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w HTF data ONCE before loop (Rule 1 - CRITICAL)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate 1w HMA for trend direction
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # 4h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    vol_ratio = calculate_volume_ratio(volume, period=20)
     
     signals = np.zeros(n)
-    SIZE_BASE = 0.25
-    SIZE_STRONG = 0.30
     
-    # Position tracking
+    # Position tracking for stoploss and trailing stop
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -142,11 +161,19 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
+    # Warmup period - need enough bars for all indicators
     min_bars = 50
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(chop_14[i]) or np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -160,31 +187,51 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(vol_ratio[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1d HMA bias) ===
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # === 1w TREND DIRECTION ===
+        price_above_1w = close[i] > hma_1w_aligned[i]
+        price_below_1w = close[i] < hma_1w_aligned[i]
         
-        # === DONCHIAN BREAKOUT (uses prior bar for confirmation) ===
-        donch_breakout_long = close[i] > donch_upper[i-1] if i > 0 and not np.isnan(donch_upper[i-1]) else False
-        donch_breakout_short = close[i] < donch_lower[i-1] if i > 0 and not np.isnan(donch_lower[i-1]) else False
+        # === REGIME CHECK (only trade in trending regime) ===
+        chop = chop_14[i]
+        is_trending = chop < 50.0  # Relaxed threshold - only filter extreme chop
         
-        # === ENTRY LOGIC (SIMPLE: 2 conditions) ===
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Need previous bar's Donchian for breakout confirmation
+        donch_upper_prev = donch_upper[i-1] if i > 0 and not np.isnan(donch_upper[i-1]) else np.nan
+        donch_lower_prev = donch_lower[i-1] if i > 0 and not np.isnan(donch_lower[i-1]) else np.nan
+        
+        # Breakout: price CLOSES above/below previous period's channel
+        donch_breakout_long = False
+        donch_breakout_short = False
+        
+        if not np.isnan(donch_upper_prev):
+            donch_breakout_long = close[i] > donch_upper_prev
+        if not np.isnan(donch_lower_prev):
+            donch_breakout_short = close[i] < donch_lower_prev
+        
+        # === VOLUME CONFIRMATION ===
+        # Volume ratio > 1.2 = above average volume (confirms breakout)
+        vol_confirmed = vol_ratio[i] > 1.2
+        
+        # === ENTRY LOGIC ===
+        # Simple, strict: ONLY enter on confirmed Donchian breakout + 1w trend
+        # This guarantees we don't overtrade
         desired_signal = 0.0
         
-        # LONG: Donchian breakout + 1d bullish trend
-        if donch_breakout_long and price_above_1d:
-            desired_signal = SIZE_STRONG
+        # LONG: 1w trend up + Donchian breakout + volume confirmation
+        if price_above_1w and donch_breakout_long and vol_confirmed and is_trending:
+            desired_signal = 0.30
         
-        # SHORT: Donchian breakout + 1d bearish trend
-        elif donch_breakout_short and price_below_1d:
-            desired_signal = -SIZE_STRONG
+        # SHORT: 1w trend down + Donchian breakout + volume confirmation
+        elif price_below_1w and donch_breakout_short and vol_confirmed and is_trending:
+            desired_signal = -0.30
         
         # === STOPLOSS CHECK (2.5x ATR trailing) ===
         stoploss_triggered = False
@@ -207,14 +254,10 @@ def generate_signals(prices):
             desired_signal = 0.0
         
         # === DISCRETIZE SIGNAL VALUES ===
-        if desired_signal >= SIZE_STRONG * 0.9:
-            final_signal = SIZE_STRONG
-        elif desired_signal <= -SIZE_STRONG * 0.9:
-            final_signal = -SIZE_STRONG
-        elif desired_signal >= SIZE_BASE * 0.9:
-            final_signal = SIZE_BASE
-        elif desired_signal <= -SIZE_BASE * 0.9:
-            final_signal = -SIZE_BASE
+        if desired_signal >= 0.25:
+            final_signal = 0.30
+        elif desired_signal <= -0.25:
+            final_signal = -0.30
         else:
             final_signal = 0.0
         
