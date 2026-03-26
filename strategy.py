@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 12h Donchian Breakout + 1d/1w Trend Confirmation
+Experiment #024: 4h Donchian Breakout + Williams %R + Volume
 
-HYPOTHESIS: 12h Donchian(20) breakouts mark institutional moves. Using:
-- 1d HMA for immediate trend alignment
-- 1w HMA for regime context
-- Volume spike confirmation (1.5x)
-- ATR trailing stop (3x)
+HYPOTHESIS: Donchian(20) breakouts mark institutional accumulation/distribution 
+points. Williams %R at extremes (<-80 for longs, >-20 for shorts) confirms 
+momentum shift. Volume spike (>1.5x MA) filters false breakouts. 1d HMA(21) 
+trend filter ensures alignment with higher timeframe direction.
 
-This should work in BOTH bull (long breakouts) and bear (short breakdowns + short rallies).
-12h is slow enough to avoid overtrading while capturing major trend moves.
-Target: 75-150 total trades over 4 years (19-37/year).
+WHY THIS SHOULD WORK: Williams %R oscillates -100 to 0, making it ideal for 
+identifying oversold/overbought extremes. Combined with price channel breakouts,
+it creates a mean-reversion-on-breakout hybrid that works in both trending 
+(rides breakouts) and ranging (fades extremes) markets.
+
+TIMEFRAME: 4h primary
+HTF: 1d for trend bias
+TARGET: 100-200 total trades over 4 years (25-50/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_vol_1d_1w_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_williams_vol_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -30,20 +34,23 @@ def calculate_hma(close, period):
     sqrt_n = max(1, int(np.sqrt(period)))
     
     def wma(series, span):
-        result = np.full(len(series), np.nan)
-        weights = np.arange(1, span + 1)
-        weight_sum = span * (span + 1) // 2
-        
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
         for i in range(span - 1, len(series)):
-            window = series[i - span + 1:i + 1]
-            if not np.any(np.isnan(window)):
-                result[i] = np.sum(window * weights) / weight_sum
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1].astype(np.float64)
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / weight_sum
         return result
     
     wma_half = wma(close, half)
     wma_full = wma(close, period)
     
-    diff = np.where(np.isnan(wma_half) | np.isnan(wma_full), np.nan, 2.0 * wma_half - wma_full)
+    diff = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
     return wma(diff, sqrt_n)
 
@@ -53,23 +60,39 @@ def calculate_atr(high, low, close, period=14):
     if n < period + 1:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n)
+    tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # EMA-based ATR
-    atr = np.full(n, np.nan)
-    sma = np.mean(tr[:period])
-    multiplier = 2.0 / (period + 1)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper and lower bands"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
     for i in range(period - 1, n):
-        if i == period - 1:
-            atr[i] = sma
-        elif i > period - 1:
-            atr[i] = atr[i-1] + multiplier * (tr[i] - atr[i-1])
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    return atr
+    return upper, lower
+
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R - momentum oscillator"""
+    n = len(close)
+    williams = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        
+        if highest_high != lowest_low:
+            williams[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+    
+    return williams
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -80,24 +103,19 @@ def generate_signals(prices):
     
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # 1d HMA for trend
+    # 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # 1w HMA for regime
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Local 12h indicators
+    # Calculate local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    williams_r = calculate_williams_r(high, low, close, period=14)
     
-    # Donchian 20
-    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian 20-period
+    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
     
-    # Volume MA
+    # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -109,16 +127,15 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    trailing_high = 0.0
-    trailing_low = 0.0
-    bars_held = 0
     stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 0:
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -132,96 +149,111 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(williams_r[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === CONDITION COMPONENTS ===
-        # Volume spike
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # === TREND FILTER (1d HMA) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        
+        # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # 1d trend: price above HMA21
-        price_above_1d = close[i] > hma_1d_aligned[i]
+        # === WILLIAMS %R ===
+        wr_val = williams_r[i]
+        wr_oversold = wr_val < -80       # Strong oversold - bullish
+        wr_overbought = wr_val > -20     # Strong overbought - bearish
+        wr_not_overbought = wr_val < -10  # Not extended for longs
+        wr_not_oversold = wr_val > -90    # Not extended for shorts
         
-        # 1w regime: price above HMA21
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        
-        # Donchian breakout detection
+        # === DONCHIAN BREAKOUT ===
+        # Breakout = close above upper band for longs, below lower for shorts
         breakout_up = close[i] > donch_upper[i]
         breakout_down = close[i] < donch_lower[i]
         
-        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
+        # === NEW LONG ENTRY ===
+        # Requirements: breakout above upper + Williams %R oversold + volume spike + 1d trend bullish
         if not in_position:
-            # === LONG: Breakout above + volume + bullish 1d trend ===
-            # In bull regime (price > 1w HMA): require breakout + vol + trend
-            # In bear regime: skip longs (too risky)
-            if breakout_up and vol_spike and price_above_1d and price_above_1w:
+            if breakout_up and wr_oversold and vol_spike and price_above_1d_hma:
                 desired_signal = SIZE
-            
-            # === SHORT: Breakout below + volume + bearish 1d trend ===
-            # In bear regime: require breakout + vol + trend
-            # In bull regime: skip shorts (counter-trend)
-            if breakout_down and vol_spike and not price_above_1d and not price_above_1w:
+        
+        # === NEW SHORT ENTRY ===
+        # Requirements: breakout below lower + Williams %R overbought + volume spike + 1d trend bearish
+        if not in_position:
+            if breakout_down and wr_overbought and vol_spike and not price_above_1d_hma:
                 desired_signal = -SIZE
         
-        # === EXIT LOGIC ===
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        stoploss_triggered = False
+        
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                stoploss_triggered = True
+        
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === WILLIAMS %R EXIT (opposite extreme) ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long: trailing stop OR breakout below lower band
-            trailing_high = max(trailing_high, high[i])
-            stop_price = trailing_high - 3.0 * entry_atr
-            
-            if low[i] < stop_price:
-                exit_triggered = True
-            elif breakout_down:
+            # Long exit: Williams %R reaches overbought territory
+            if wr_val > -10:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short: trailing stop OR breakout above upper band
-            trailing_low = min(trailing_low, low[i])
-            stop_price = trailing_low + 3.0 * entry_atr
-            
-            if high[i] > stop_price:
-                exit_triggered = True
-            elif breakout_up:
+            # Short exit: Williams %R reaches oversold territory
+            if wr_val < -90:
                 exit_triggered = True
         
         if exit_triggered:
             desired_signal = 0.0
         
-        # === UPDATE POSITION ===
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New entry or flip
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
-                trailing_high = high[i]
-                trailing_low = low[i]
-                bars_held = 0
-                
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 3.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 3.0 * entry_atr
-            else:
-                # Same direction - maintain
-                bars_held += 1
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                bars_held = 0
-                trailing_high = 0.0
-                trailing_low = 0.0
+                entry_price = 0.0
+                entry_atr = 0.0
                 stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
