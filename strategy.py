@@ -1,97 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #010: 1d KAMA Adaptive Trend + RSI Extremes + Weekly Regime
+Experiment #011: 6h Donchian Breakout + 1d Trend + Volume Confirmation
 
-HYPOTHESIS: KAMA (Kaufman Adaptive Moving Average) adapts to market noise,
-reducing whipsaws in choppy periods while capturing trends efficiently.
-RSI extremes identify overbought/oversold conditions for entry timing.
-Weekly HMA provides macro trend bias. Choppiness filter avoids range markets.
+HYPOTHESIS: Donchian channel breakouts capture momentum moves, but only in the 
+direction of the daily trend. Volume spike confirms institutional participation.
+This works in BOTH bull and bear markets because we follow the HTF trend direction.
 
-WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull markets: KAMA turns up + RSI from oversold + price > weekly HMA → long
-- Bear markets: KAMA turns down + RSI from overbought + price < weekly HMA → short
-- Range markets: Choppiness filter keeps us out (CHOP > 61.8)
+WHY THIS SHOULD WORK:
+- Donchian(20) breakout = proven momentum signal (Turtle Trading)
+- 1d HMA filter = only trade with higher timeframe trend (reduces whipsaws)
+- Volume spike (>1.3x avg) = confirms breakout is real, not fake
+- ATR threshold = breakout must be significant (not just touching the line)
+- 6h timeframe = fewer trades than 4h, more than 12h (sweet spot)
 
-TARGET: 60-120 total trades over 4 years (15-30/year) for 1d timeframe.
-DB reference: mtf_1d_kama_rsi_chop_regime_1w_v1 (Sharpe=1.310, 74 trades)
-This version loosens RSI thresholds slightly to ensure >=50 trades minimum.
+TARGET: 80-150 total trades over 4 years (12-37/year)
+- Donchian breakout: ~2-3 per month per direction = 48-72/year raw
+- With 1d trend filter: ~50% pass = 24-36/year
+- With volume filter: ~70% pass = 17-25/year final
 
 KEY DESIGN:
-1. KAMA(10) direction change as primary trend signal
-2. RSI(14) extremes (25/75) for entry timing
-3. 1w HMA(21) for macro trend bias
-4. Choppiness < 58 for trending regime (slightly looser)
-5. ATR(14) stoploss at 2.5x
-6. Signal: 0.30 (discrete)
+1. Donchian(20) high/low as breakout levels
+2. 1d HMA(21) for trend bias (long only if price > 1d HMA, short if <)
+3. Volume > 1.3x 20-avg for confirmation
+4. Breakout must exceed level by 0.5 ATR (significant move)
+5. Stoploss: 2.5 ATR from entry
+6. Signal: ±0.28 (discrete, moderate size)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_rsi_chop_1w_v3"
-timeframe = "1d"
+name = "mtf_6h_donchian_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
-    """
-    Kaufman Adaptive Moving Average
-    Adapts smoothing based on market efficiency ratio
-    """
-    n = len(close)
-    kama = np.full(n, np.nan, dtype=np.float64)
-    
-    if n < er_period + slow_period:
-        return kama
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.full(n, np.nan, dtype=np.float64)
-    for i in range(er_period, n):
-        if not np.isnan(close[i]) and not np.isnan(close[i - er_period]):
-            signal = abs(close[i] - close[i - er_period])
-            noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
-            if noise > 1e-10:
-                er[i] = signal / noise
-    
-    # Calculate smoothing constant
-    fast_sc = 2.0 / (fast_period + 1)
-    slow_sc = 2.0 / (slow_period + 1)
-    
-    # Initialize KAMA
-    kama[er_period] = close[er_period]
-    
-    for i in range(er_period + 1, n):
-        if np.isnan(er[i]):
-            continue
-        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
-
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    delta = np.diff(close)
-    gain = np.zeros(n)
-    loss = np.zeros(n)
-    
-    gain[1:] = np.where(delta > 0, delta, 0)
-    loss[1:] = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rsi = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100.0
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-    
-    return rsi
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -106,33 +47,6 @@ def calculate_atr(high, low, close, period=14):
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness
-    CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -164,6 +78,18 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - upper and lower bounds"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -171,25 +97,23 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1w data for trend bias
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA for trend
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1d indicators
-    kama_10 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
-    rsi_14 = calculate_rsi(close, period=14)
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.28  # Discrete position size
     
     # Position tracking
     in_position = False
@@ -200,13 +124,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Track KAMA direction
-    kama_prev = np.full(n, np.nan, dtype=np.float64)
-    for i in range(1, n):
-        if not np.isnan(kama_10[i]) and not np.isnan(kama_10[i-1]):
-            kama_prev[i] = kama_10[i-1]
-    
-    # Warmup
+    # Warmup (need 20 for Donchian + 14 for ATR + some buffer)
     warmup = 50
     
     for i in range(warmup, n):
@@ -218,57 +136,47 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(chop_14[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(kama_10[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME CHECK ===
-        chop = chop_14[i]
-        is_trending = chop < 58.0  # Slightly looser to allow more trades
-        
-        # === TREND BIAS (1w HMA) ===
-        price_above_1w_hma = close[i] > hma_1w_aligned[i]
-        
-        # === KAMA DIRECTION ===
-        kama_bullish = kama_10[i] > kama_prev[i] if not np.isnan(kama_prev[i]) else False
-        kama_bearish = kama_10[i] < kama_prev[i] if not np.isnan(kama_prev[i]) else False
-        
-        # === RSI EXTREMES (looser thresholds for more trades) ===
-        rsi = rsi_14[i]
-        rsi_oversold = rsi < 35.0  # Looser than 25
-        rsi_overbought = rsi > 65.0  # Looser than 75
+        # === TREND BIAS (1d HMA) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3  # Slightly looser
+        vol_spike = vol_ratio[i] > 1.3
+        
+        # === DONCHIAN LEVELS ===
+        du = donchian_upper[i]
+        dl = donchian_lower[i]
+        
+        # === BREAKOUT THRESHOLD (must exceed by 0.5 ATR) ===
+        breakout_threshold = 0.5 * atr_14[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: KAMA turns up + RSI from oversold + bullish weekly trend
-        if is_trending and kama_bullish and rsi_oversold:
-            if price_above_1w_hma:
+        # LONG: Price breaks above Donchian upper + above 1d HMA + volume
+        if price_above_1d_hma:
+            if close[i] > du + breakout_threshold:
                 if vol_spike:
                     desired_signal = SIZE
-                else:
-                    desired_signal = SIZE * 0.7  # Enter anyway, smaller size
         
-        # SHORT: KAMA turns down + RSI from overbought + bearish weekly trend
-        if is_trending and kama_bearish and rsi_overbought:
-            if not price_above_1w_hma:
+        # SHORT: Price breaks below Donchian lower + below 1d HMA + volume
+        if not price_above_1d_hma:
+            if close[i] < dl - breakout_threshold:
                 if vol_spike:
                     desired_signal = -SIZE
-                else:
-                    desired_signal = -SIZE * 0.7  # Enter anyway, smaller size
         
         # === STOPLOSS CHECK ===
         stoploss_triggered = False
@@ -290,10 +198,19 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT ON OPPOSITE SIGNAL ===
-        if in_position and position_side > 0 and desired_signal < 0:
-            desired_signal = 0.0
-        if in_position and position_side < 0 and desired_signal > 0:
+        # === TAKE PROFIT at opposite Donchian level ===
+        tp_triggered = False
+        if in_position and position_side > 0:
+            # TP when price reaches lower Donchian (trend reversal)
+            if low[i] <= dl:
+                tp_triggered = True
+        
+        if in_position and position_side < 0:
+            # TP when price reaches upper Donchian (trend reversal)
+            if high[i] >= du:
+                tp_triggered = True
+        
+        if tp_triggered:
             desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
