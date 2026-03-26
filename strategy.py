@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 12h ATR Channel Breakout + Volume + 1d Trend
+Experiment #025: 4h Donchian Breakout + HMA Trend + Volume Spike
 
-HYPOTHESIS: ATR channels (±2*ATR from SMA20) are more responsive than
-Donchian channels and capture volatility-adjusted breakouts. Combined with
-volume confirmation and 1d HMA trend, this catches institutional moves while
-volume filter prevents false breakouts. Works in both bull (long breakouts
-above 1d HMA) and bear (short breakdowns below 1d HMA).
+HYPOTHESIS: Donchian(20) breakouts on 4h capture institutional moves.
+Combined with HMA(16) trend confirmation and volume spike filter,
+this captures high-probability breakouts in both directions.
+4h timeframe offers ~180 bars/month = more trade opportunities than 12h
+while staying under 200 trades/year with strict volume filtering.
+HTF 1d HMA provides regime bias, reducing whipsaws during ranges.
 
-KEY DIFFERENCE FROM #012: Uses ATR bands instead of Donchian - more trades,
-better volatility adjustment.
-
-TIMEFRAME: 12h
-HTF: 1d for trend
-TARGET: 75-200 total trades over 4 years (19-50/year)
+WHY BOTH BULL AND BEAR: Breakout is directional - works for longs in bull,
+shorts in bear crashes. HMA trend filter ensures we follow the dominant trend.
+Size 0.30 limits losses on 2022-style crashes.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_atr_channel_vol_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_hma_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -67,6 +65,20 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper, middle, lower bands"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    middle = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2.0
+    
+    return upper, middle, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -77,25 +89,24 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d HMA for trend direction
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    # 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=16)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Local indicators
+    # Calculate local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # SMA 20 for centerline
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # Local HMA for faster trend
+    hma_local = calculate_hma(close, period=16)
     
-    # ATR channel bands (2x ATR)
-    upper_band = sma_20 + 2.0 * atr_14
-    lower_band = sma_20 - 2.0 * atr_14
+    # Donchian 20-period
+    donch_upper, donch_middle, donch_lower = calculate_donchian(high, low, period=20)
     
-    # Volume MA
+    # Volume MA for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # RSI for additional confirmation
+    # RSI for momentum
     delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
@@ -112,7 +123,6 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
@@ -122,60 +132,64 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(sma_20[i]):
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
         if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
         # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        hma_trend_bull = close[i] > hma_1d_aligned[i]
+        hma_trend_bear = close[i] < hma_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.4
+        # === LOCAL HMA DIRECTION ===
+        hma_local_up = hma_local[i] > hma_local[i-1] if not np.isnan(hma_local[i-1]) else True
+        hma_local_down = hma_local[i] < hma_local[i-1] if not np.isnan(hma_local[i-1]) else False
         
-        # === RSI VALUE ===
+        # === VOLUME CONFIRMATION (strict) ===
+        vol_spike = vol_ratio[i] > 1.5
+        
+        # === RSI FOR MOMENTUM/EXIT ===
         rsi_val = rsi[i]
         
-        # === ATR CHANNEL BREAKOUT ===
-        # Breakout up: close above upper band
-        breakout_up = close[i] > upper_band[i]
-        # Breakout down: close below lower band
-        breakout_down = close[i] < lower_band[i]
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Breakout: close crosses above previous upper or below previous lower
+        breakout_up = (close[i] > donch_upper[i]) and (close[i-1] <= donch_upper[i-1] if i > 1 else False)
+        breakout_down = (close[i] < donch_lower[i]) and (close[i-1] >= donch_lower[i-1] if i > 1 else False)
         
-        # Touch/explosion entry: price at extreme of recent range
-        price_near_upper = close[i] > upper_band[i] * 0.98  # within 2% of upper
-        price_near_lower = close[i] < lower_band[i] * 1.02   # within 2% of lower
+        # Price position relative to channel
+        price_above_upper = close[i] > donch_upper[i]
+        price_below_lower = close[i] < donch_lower[i]
+        price_above_middle = close[i] > donch_middle[i]
+        price_below_middle = close[i] < donch_middle[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
             # === NEW LONG ENTRY ===
-            # Need breakout above upper band OR price near upper with RSI confirmation
-            if breakout_up or (price_near_upper and rsi_val > 55):
-                # Volume spike required for breakout
-                if vol_spike and price_above_1d_hma:
-                    desired_signal = SIZE
-                # Or if RSI very strong (momentum play), still allow
-                elif not vol_spike and price_above_1d_hma and rsi_val > 65:
+            # Breakout above upper channel + volume + bullish 1d HMA
+            if breakout_up or price_above_upper:
+                if vol_spike and hma_trend_bull:
                     desired_signal = SIZE
             
             # === NEW SHORT ENTRY ===
-            if breakout_down or (price_near_lower and rsi_val < 45):
-                if vol_spike and not price_above_1d_hma:
-                    desired_signal = -SIZE
-                elif not vol_spike and not price_above_1d_hma and rsi_val < 35:
+            # Breakout below lower channel + volume + bearish 1d HMA
+            if breakout_down or price_below_lower:
+                if vol_spike and hma_trend_bear:
                     desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
@@ -184,15 +198,13 @@ def generate_signals(prices):
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
+            if low[i] < trailing_stop:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
             trailing_stop = lowest_since_entry + 2.5 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
+            if high[i] > trailing_stop:
                 stoploss_triggered = True
         
         if stoploss_triggered:
@@ -202,17 +214,17 @@ def generate_signals(prices):
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: price crosses below SMA20 center OR RSI < 35
-            if close[i] < sma_20[i]:
+            # Long exit: price crosses below middle band OR RSI < 30
+            if price_below_middle and not price_above_middle:
                 exit_triggered = True
-            if rsi_val < 35:
+            if rsi_val < 30:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: price crosses above SMA20 center OR RSI > 65
-            if close[i] > sma_20[i]:
+            # Short exit: price crosses above middle band OR RSI > 70
+            if price_above_middle and not price_below_middle:
                 exit_triggered = True
-            if rsi_val > 65:
+            if rsi_val > 70:
                 exit_triggered = True
         
         if exit_triggered:
@@ -221,29 +233,16 @@ def generate_signals(prices):
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
-                else:
-                    stop_price = entry_price + 2.5 * entry_atr
-            else:
-                # Same direction - maintain position
-                pass
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                entry_price = 0.0
-                entry_atr = 0.0
-                stop_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
