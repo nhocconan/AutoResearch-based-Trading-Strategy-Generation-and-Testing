@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #026: 6h Supertrend + 1d SMA200 + Volume + Choppiness Regime
+Experiment #027: 12h Camarilla S3/R3 + Volume Spike + Choppiness Regime
 
-HYPOTHESIS: Supertrend (ATR-based, multiplier 3) provides cleaner trend signals
-than EMA crossovers. Combined with 1d SMA200 for trend alignment, volume 
-confirmation for institutional conviction, and Choppiness regime filter, this
-captures trend starts without overtrading.
+HYPOTHESIS: Camarilla pivot levels (S3/R3) are mathematically derived support/resistance
+zones used by institutional traders. Price tends to bounce at these levels. Combined with
+volume spike (institutional activity) and Choppiness filter (avoid ranging markets),
+this captures mean-reversion at key turning points.
 
-WHY 6h: Between 4h (too many trades) and 12h (too few). Supertrend on 6h 
-captures multi-day trends with ~30-60 trades/year.
+WHY 12h: 12-25 trades/year = enough for statistics, slow enough to avoid fee drag.
+Camarilla levels on 12h form meaningful zones without noise of lower timeframes.
 
-KEY DIFFERENCE FROM FAILURES:
-- NOT Elder Ray (failed #012, #020)
-- NOT pure Donchian (overtrades)
-- Supertrend is continuous ATR-based, not oscillating
+SIMPLICITY: ONE price structure (Camarilla) + volume confirmation + regime filter.
+DB winner pattern: mtf_4h_camarilla_pivot_volume_spike_choppiness (ETH test Sharpe 1.47)
 
-TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 300.
+TARGET: 50-150 total over 4 years (12-37/year). HARD MAX: 200.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_supertrend_1d_sma200_vol_chop_v1"
-timeframe = "6h"
+name = "mtf_12h_camarilla_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -39,70 +37,11 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, atr_period=10, multiplier=3.0):
-    """
-    Supertrend indicator
-    Returns: supertrend values (positive = bull, negative = bear), upper_band, lower_band
-    """
-    atr = calculate_atr(high, low, close, period=atr_period)
-    n = len(close)
-    
-    # hl2 = (high + low) / 2
-    hl2 = (high + low) / 2.0
-    
-    # Upper and lower bands
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Supertrend
-    supertrend = np.zeros(n)
-    direction = np.zeros(n)  # 1 = bull, -1 = bear
-    
-    for i in range(n):
-        if i == 0:
-            supertrend[i] = lower_band[i]
-            direction[i] = 1
-        else:
-            # Previous values
-            prev_st = supertrend[i-1]
-            prev_dir = direction[i-1]
-            prev_close = close[i-1]
-            
-            if pd.isna(atr[i]) or atr[i] <= 0:
-                supertrend[i] = prev_st
-                direction[i] = prev_dir
-                continue
-            
-            # Current bands
-            curr_upper = upper_band[i]
-            curr_lower = lower_band[i]
-            
-            if prev_dir == 1:  # Was bullish
-                # Check if should flip to bearish
-                if close[i] < prev_st:
-                    supertrend[i] = curr_upper
-                    direction[i] = -1
-                else:
-                    # Stay bullish, lower band can't go below previous
-                    supertrend[i] = max(prev_st, curr_lower)
-                    direction[i] = 1
-            else:  # Was bearish
-                # Check if should flip to bullish
-                if close[i] > prev_st:
-                    supertrend[i] = curr_lower
-                    direction[i] = 1
-                else:
-                    # Stay bearish, upper band can't go above previous
-                    supertrend[i] = min(prev_st, curr_upper)
-                    direction[i] = -1
-    
-    return supertrend, direction, upper_band, lower_band
-
 def calculate_choppiness_index(high, low, close, period=14):
     """
     Choppiness Index (CHOP)
-    CHOP > 61.8 = choppy/range (avoid trend following)
-    CHOP < 38.2 = trending (trend following works)
+    CHOP < 38.2 = trending (momentum works)
+    CHOP > 61.8 = choppy/range (mean reversion at Camarilla levels works)
     """
     n = len(high)
     chop = np.full(n, np.nan, dtype=np.float64)
@@ -123,16 +62,24 @@ def calculate_choppiness_index(high, low, close, period=14):
     
     return chop
 
-def calculate_rsi(close, period=14):
-    """RSI indicator"""
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+def calculate_camarilla_levels(high, low, close):
+    """
+    Camarilla Pivot Levels (simplified S3/R3)
+    S3 = low + 2 * (pivot - low)
+    S4 = low + (high - low) * 1.1 / 6
+    R3 = high - 2 * (high - pivot)
+    R4 = high - (high - low) * 1.1 / 6
+    where pivot = (high + low + close) / 3
+    """
+    n = len(close)
+    pivot = (high + low + close) / 3.0
+    
+    s3 = low + 2.0 * (pivot - low)
+    s4 = low + (high - low) * 1.1 / 6.0
+    r3 = high - 2.0 * (high - pivot)
+    r4 = high - (high - low) * 1.1 / 6.0
+    
+    return s3, s4, r3, r4, pivot
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -144,30 +91,21 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d SMA200 for trend direction
-    sma_200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
+    # 1d ATR for stoploss sizing
+    atr_1d_raw = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
     
-    # Local 6h indicators
+    # Local 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    supertrend, direction, upper_band, lower_band = calculate_supertrend(
-        high, low, close, atr_period=10, multiplier=3.0
-    )
     chop = calculate_choppiness_index(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
+    s3, s4, r3, r4, pivot = calculate_camarilla_levels(high, low, close)
     
-    # Volume for confirmation
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Track Supertrend flips for entry signals
-    supertrend_dir_change = np.zeros(n)
-    for i in range(1, n):
-        if direction[i] != direction[i-1]:
-            supertrend_dir_change[i] = direction[i]  # +1 = bull flip, -1 = bear flip
-    
     signals = np.zeros(n)
-    SIZE = 0.30  # Standard sizing
+    SIZE = 0.30  # Discrete sizing
     
     # Position tracking
     in_position = False
@@ -175,81 +113,158 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = 250  # Need 200 for SMA200 + buffer
+    warmup = 50  # 12h is slower, less warmup needed
     
     for i in range(warmup, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
-        if np.isnan(sma_200_aligned[i]):
-            continue
+        
         if np.isnan(chop[i]):
+            signals[i] = 0.0
             continue
         
-        # === MARKET REGIME ===
-        # Only trend follow when CHOP < 61.8 (trending)
-        # In choppy markets (CHOP > 61.8), we stay flat
-        is_trending = chop[i] < 61.8
+        # === REGIME (Choppiness Index) ===
+        # CHOP > 61.8 = choppy (mean reversion at Camarilla works)
+        # CHOP < 38.2 = trending (momentum breakout works better)
         is_choppy = chop[i] > 61.8
-        
-        # === TREND DIRECTION (1d SMA200) ===
-        price_above_1d_sma = close[i] > sma_200_aligned[i]
+        is_trending = chop[i] < 38.2
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.8  # Strict volume filter
+        
+        # === CAMARILLA LEVEL PROXIMITY ===
+        # Price within 0.3% of level = touching it
+        tolerance = 0.003
+        
+        near_s3 = abs(close[i] - s3[i]) / close[i] < tolerance
+        near_s4 = abs(close[i] - s4[i]) / close[i] < tolerance
+        near_r3 = abs(close[i] - r3[i]) / close[i] < tolerance
+        near_r4 = abs(close[i] - r4[i]) / close[i] < tolerance
+        
+        # Price below pivot = potential bounce up
+        price_below_pivot = close[i] < pivot[i]
+        # Price above pivot = potential bounce down
+        price_above_pivot = close[i] > pivot[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === ENTRY: Supertrend flip + trend alignment + volume ===
+            # === LONG ENTRY: Price at S3/S4 in choppy market ===
+            if is_choppy and vol_spike:
+                # Bounce from S3
+                if near_s3 and price_below_pivot:
+                    # Check if price is recovering (close > low of current bar)
+                    if close[i] > low[i] + atr_14[i] * 0.5:
+                        desired_signal = SIZE
+                
+                # Bounce from S4 (stronger support)
+                if near_s4 and price_below_pivot:
+                    if close[i] > low[i] + atr_14[i] * 0.5:
+                        desired_signal = SIZE
             
-            # LONG: Supertrend flipped to bullish (+1), price above 1d SMA, trending regime, volume
-            if supertrend_dir_change[i] == 1:
-                if price_above_1d_sma and is_trending and vol_spike:
-                    desired_signal = SIZE
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    entry_atr = atr_14[i]
-                    entry_bar = i
-            
-            # SHORT: Supertrend flipped to bearish (-1), price below 1d SMA, trending regime, volume
-            elif supertrend_dir_change[i] == -1:
-                if not price_above_1d_sma and is_trending and vol_spike:
-                    desired_signal = -SIZE
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    entry_atr = atr_14[i]
-                    entry_bar = i
+            # === SHORT ENTRY: Price at R3/R4 in choppy market ===
+            if is_choppy and vol_spike:
+                # Rejection from R3
+                if near_r3 and price_above_pivot:
+                    # Price falling from R3
+                    if close[i] < high[i] - atr_14[i] * 0.5:
+                        desired_signal = -SIZE
+                
+                # Rejection from R4
+                if near_r4 and price_above_pivot:
+                    if close[i] < high[i] - atr_14[i] * 0.5:
+                        desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.0 ATR trailing) ===
-        if in_position:
-            if position_side > 0:
-                # Long stop: price drops below Supertrend line
-                if close[i] < supertrend[i]:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                # RSI overbought exit
-                elif rsi_14[i] > 78:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
+        stoploss_triggered = False
+        stop_price = 0.0
+        
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            if low[i] < trailing_stop:
+                stoploss_triggered = True
+                stop_price = trailing_stop
+        
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            if high[i] > trailing_stop:
+                stoploss_triggered = True
+                stop_price = trailing_stop
+        
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === TAKE PROFIT (2:1 R:R) ===
+        if in_position and not stoploss_triggered:
+            bars_held = i - entry_bar
+            min_hold_bars = 2  # At least 1 day hold
             
-            elif position_side < 0:
-                # Short stop: price rises above Supertrend line
-                if close[i] > supertrend[i]:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                # RSI oversold exit
-                elif rsi_14[i] < 22:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
+            if bars_held >= min_hold_bars:
+                if position_side > 0:
+                    profit_pct = (close[i] - entry_price) / entry_price
+                    risk_pct = 2.0 * entry_atr / entry_price
+                    # Take profit at 2:1
+                    if profit_pct >= 2.0 * risk_pct:
+                        desired_signal = 0.0
+                    # Also exit if hits R3/R4
+                    if near_r3 or near_r4:
+                        desired_signal = 0.0
+                
+                if position_side < 0:
+                    profit_pct = (entry_price - close[i]) / entry_price
+                    risk_pct = 2.0 * entry_atr / entry_price
+                    # Take profit at 2:1
+                    if profit_pct >= 2.0 * risk_pct:
+                        desired_signal = 0.0
+                    # Also exit if hits S3/S4
+                    if near_s3 or near_s4:
+                        desired_signal = 0.0
+        
+        # === RSI EXIT FILTER ===
+        delta = pd.Series(close).diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
+        avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
+        rs = avg_gain / (avg_loss + 1e-10)
+        rsi = (100 - (100 / (1 + rs)))[i]
+        
+        if in_position:
+            if position_side > 0 and rsi > 75:
+                desired_signal = 0.0
+            if position_side < 0 and rsi < 25:
+                desired_signal = 0.0
+        
+        # === UPDATE POSITION TRACKING ===
+        if desired_signal != 0.0:
+            if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
+                in_position = True
+                position_side = int(np.sign(desired_signal))
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                entry_bar = i
+            # else: maintain position
+        else:
+            if in_position:
+                in_position = False
+                position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
