@@ -1,90 +1,54 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 6h Williams Alligator + ADX + 1d Trend
+Experiment #012: 12h Donchian Breakout + Volume + 1d Trend Bias
 
-HYPOTHESIS: Williams Alligator (Jaw=SMA13, Teeth=SMA8, Lips=SMA5) provides
-natural multi-component trend structure. When Lips crosses above Teeth
-(both above Jaw) with ADX>20 confirming trend strength, and 1d SMA confirming
-direction — this marks institutional trend entries. The shifted EMAs (8/5/3 bars)
-create built-in momentum confirmation without additional oscillators.
+HYPOTHESIS: On 12h timeframe, 20-period Donchian breakouts mark institutional 
+breakout points. Combined with volume confirmation and 1d HMA trend alignment, 
+this captures major trend moves while avoiding whipsaws. 12h is slower than 4h, 
+reducing trade frequency and fee drag. Works in both bull (long breakouts) and 
+bear (short breakdowns + short rallies to HMA).
 
-TIMEFRAME: 6h primary
-HTF: 1d for trend bias, 1w for regime
-TARGET: 75-150 total trades over 4 years (19-37/year)
+TIMEFRAME: 12h primary
+HTF: 1d for trend bias, 1w for regime check
+TARGET: 75-200 total trades over 4 years (19-50/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_alligator_adx_1d_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_vol_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5):
-    """
-    Williams Alligator indicator.
-    Jaw = SMA(13) of median price, shifted 8 bars
-    Teeth = SMA(8) of median price, shifted 5 bars
-    Lips = SMA(5) of median price, shifted 3 bars
-    """
+def calculate_hma(close, period):
+    """Hull Moving Average"""
     n = len(close)
-    median = (high + low + close) / 3.0
-    
-    # Calculate raw SMAs
-    jaw_raw = pd.Series(median).rolling(window=jaw_period, min_periods=jaw_period).mean().values
-    teeth_raw = pd.Series(median).rolling(window=teeth_period, min_periods=teeth_period).mean().values
-    lips_raw = pd.Series(median).rolling(window=lips_period, min_periods=lips_period).mean().values
-    
-    # Apply Williams shift (shift forward = delay in time series)
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    
-    # Set NaN for first elements
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
-    return jaw, teeth, lips
-
-def calculate_adx(high, low, close, period=14):
-    """ADX with DMI"""
-    n = len(close)
-    if n < period * 2:
+    if n < period:
         return np.full(n, np.nan)
     
-    # True Range
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    half = max(1, period // 2)
+    sqrt_n = max(1, int(np.sqrt(period)))
     
-    # Directional Movement
-    up_move = high[i] - high[i-1]
-    down_move = low[i-1] - low[i]
+    def wma(series, span):
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
+        for i in range(span - 1, len(series)):
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1].astype(np.float64)
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / weight_sum
+        return result
     
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
     
-    for i in range(1, n):
-        up = high[i] - high[i-1]
-        down = low[i-1] - low[i]
-        plus_dm[i] = up if (up > down and up > 0) else 0
-        minus_dm[i] = down if (down > up and down > 0) else 0
+    diff = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
-    # Smooth with EMA
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # DX
-    di_sum = plus_di + minus_di + 1e-10
-    dx = 100 * np.abs(plus_di - minus_di) / di_sum
-    
-    # ADX = smoothed DX
-    adx = pd.Series(dx).ewm(span=period, min_periods=period * 2, adjust=False).mean().values
-    
-    return adx
+    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -100,6 +64,18 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper and lower bands"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -111,26 +87,31 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # 1d SMA for trend bias
-    sma_1d_raw = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
+    # 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # 1w SMA for regime
-    sma_1w_raw = pd.Series(df_1w['close'].values).rolling(window=21, min_periods=21).mean().values
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w_raw)
+    # 1w HMA for regime (bull/bear/range)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate local 6h indicators
+    # Calculate local 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    adx = calculate_adx(high, low, close, period=14)
     
-    # Williams Alligator
-    jaw, teeth, lips = calculate_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5)
+    # Donchian 20-period
+    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    
+    # Previous Donchian for breakout detection
+    donch_upper_prev = np.roll(donch_upper, 1)
+    donch_lower_prev = np.roll(donch_lower, 1)
+    donch_upper_prev[0] = np.nan
+    donch_lower_prev[0] = np.nan
     
     # Volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # RSI for momentum
+    # RSI for additional confirmation
     delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
@@ -141,7 +122,6 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     SIZE = 0.30
-    SIZE_HALF = 0.15
     
     # Position tracking
     in_position = False
@@ -164,76 +144,59 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(sma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === ALLIGATOR STATE ===
-        alligator_awake_long = lips[i] > teeth[i] and teeth[i] > jaw[i]  # Lines aligned up
-        alligator_awake_short = lips[i] < teeth[i] and teeth[i] < jaw[i]  # Lines aligned down
-        alligator_closed = abs(lips[i] - jaw[i]) < 0.1 * jaw[i]  # Alligator sleeping
+        # === TREND BIAS (1d HMA) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
-        # Price vs Alligator
-        price_above_alligator = close[i] > lips[i] and close[i] > teeth[i] and close[i] > jaw[i]
-        price_below_alligator = close[i] < lips[i] and close[i] < teeth[i] and close[i] < jaw[i]
-        
-        # === 1d TREND BIAS ===
-        price_above_1d_sma = close[i] > sma_1d_aligned[i]
-        
-        # === 1w REGIME ===
-        price_above_1w_sma = close[i] > sma_1w_aligned[i] if not np.isnan(sma_1w_aligned[i]) else True
-        
-        # === ADX TREND STRENGTH ===
-        adx_val = adx[i] if not np.isnan(adx[i]) else 0
-        strong_trend = adx_val > 20
+        # === REGIME (1w HMA) ===
+        price_above_1w_hma = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.2
+        vol_spike = vol_ratio[i] > 1.3
         
-        # === RSI MOMENTUM ===
+        # === RSI FOR MOMENTUM ===
         rsi_val = rsi[i]
         
-        # === LIPS CROSS TEETH (momentum shift) ===
-        # Check if lips crosses above teeth (long momentum)
-        lips_cross_above_teeth = (lips[i] > teeth[i] and lips[i-1] <= teeth[i-1]) if i > 1 else False
-        # Check if lips crosses below teeth (short momentum)
-        lips_cross_below_teeth = (lips[i] < teeth[i] and lips[i-1] >= teeth[i-1]) if i > 1 else False
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Breakout up: close crosses above previous upper band
+        breakout_up = (close[i] > donch_upper_prev[i]) and (close[i-1] <= donch_upper_prev[i-1] if i > 1 else True)
+        # Breakout down: close crosses below previous lower band
+        breakout_down = (close[i] < donch_lower_prev[i]) and (close[i-1] >= donch_lower_prev[i-1] if i > 1 else True)
+        
+        # Alternative: price already above/below channel
+        price_above_upper = close[i] > donch_upper[i]
+        price_below_lower = close[i] < donch_lower[i]
         
         # === ENTRY LOGIC ===
+        # Key: breakout OR price outside channel + volume + trend aligned
         desired_signal = 0.0
         
         if not in_position:
             # === NEW LONG ENTRY ===
-            # Momentum shift up + alligator aligned + trend aligned
-            if lips_cross_above_teeth and alligator_awake_long and price_above_1d_sma:
-                # Add trend strength filter
-                if strong_trend:
-                    desired_signal = SIZE
-            
-            # Alternative: Price breaks above all lines with volume
-            if price_above_alligator and price_above_1d_sma and vol_spike and strong_trend:
-                if alligator_awake_long:
+            # Breakout up OR price above upper channel
+            if breakout_up or price_above_upper:
+                # Need volume spike AND bullish 1d trend
+                if vol_spike and price_above_1d_hma:
                     desired_signal = SIZE
             
             # === NEW SHORT ENTRY ===
-            # Momentum shift down + alligator aligned down + trend aligned down
-            if lips_cross_below_teeth and alligator_awake_short and not price_above_1d_sma:
-                if strong_trend:
-                    desired_signal = -SIZE
-            
-            # Alternative: Price breaks below all lines with volume
-            if price_below_alligator and not price_above_1d_sma and vol_spike and strong_trend:
-                if alligator_awake_short:
+            # Breakout down OR price below lower channel  
+            if breakout_down or price_below_lower:
+                # Need volume spike AND bearish 1d trend
+                if vol_spike and not price_above_1d_hma:
                     desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
@@ -256,44 +219,21 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT at 2R ===
-        tp_triggered = False
-        if in_position and position_side > 0:
-            profit_pct = (high[i] - entry_price) / entry_price
-            if profit_pct > 0.04:  # 4% = 2R approx (ATR is typically ~2%)
-                tp_triggered = True
-        
-        if in_position and position_side < 0:
-            profit_pct = (entry_price - low[i]) / entry_price
-            if profit_pct > 0.04:
-                tp_triggered = True
-        
-        if tp_triggered:
-            # Reduce to half position
-            if in_position:
-                desired_signal = SIZE_HALF * position_side
-        
-        # === EXIT CONDITIONS ===
+        # === EXIT: Opposite breakout or RSI extreme ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: price crosses below alligator OR RSI oversold
-            if price_below_alligator and lips[i] < teeth[i]:
+            # Long exit: price breaks below lower channel OR RSI < 30
+            if price_below_lower:
                 exit_triggered = True
-            if rsi_val < 35:
-                exit_triggered = True
-            # Alligator closing (reversal signal)
-            if alligator_awake_short:
+            if rsi_val < 30:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: price crosses above alligator OR RSI overbought
-            if price_above_alligator and lips[i] > teeth[i]:
+            # Short exit: price breaks above upper channel OR RSI > 70
+            if price_above_upper:
                 exit_triggered = True
-            if rsi_val > 65:
-                exit_triggered = True
-            # Alligator closing (reversal signal)
-            if alligator_awake_long:
+            if rsi_val > 70:
                 exit_triggered = True
         
         if exit_triggered:
@@ -315,7 +255,7 @@ def generate_signals(prices):
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
             else:
-                # Same direction - maintain position
+                # Same direction - maintain position (no churn)
                 pass
         else:
             if in_position:
