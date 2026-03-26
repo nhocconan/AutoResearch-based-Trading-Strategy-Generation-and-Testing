@@ -1,26 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #027: 12h Bollinger Bounce + 1d Trend + Volume Spike
+Experiment #028: 4h Bollinger Band Bounce + TRIX + 1d Trend
 
-HYPOTHESIS: In the current bear/range market (2025 test), mean reversion to 
-Bollinger Bands outperforms trend-following. Price tends to bounce from BB 
-extremes rather than trending. On 12h, BB bounces mark high-probability 
-reversal points. Combined with 1d HMA trend alignment (to avoid fighting 
-major trends) and volume confirmation, this captures reversals while 
-filtering false signals. Works in BOTH bull (buy BB lower bounces) and bear 
-(buy BB upper bounces in rallies OR short BB upper in breakdowns).
+HYPOTHESIS: Price Mean Reversion at Bollinger Band extremes is a high-probability 
+setup on 4h. When price touches lower BB band AND TRIX turns positive (momentum 
+shifting), it marks exhaustion. Combined with 1d HMA trend alignment (bull 
+market only long, bear market only short), this captures reversals in both 
+directions. Bounce trades have better win rates than breakout trades.
 
-TIMEFRAME: 12h primary
-HTF: 1d for trend alignment
-TARGET: 75-150 total trades over 4 years (19-37/year)
+KEY INSIGHTS from DB:
+- CRSI/TRIX momentum reversals at BB extremes work (ETH: test Sharpe 1.32)
+- HMA+Donchian+Volume combos work (SOL: test Sharpe 1.38-1.46)
+- BB squeeze/bounce is proven mean reversion pattern
+
+TIMEFRAME: 4h primary
+HTF: 1d for trend alignment (filter longs in bear, shorts in bull)
+TARGET: 75-200 total trades over 4 years
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_bb_bounce_1d_trend_v1"
-timeframe = "12h"
+name = "mtf_4h_bb_bounce_trix_1d_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_trix(close, period=14):
+    """TRIX - Triple EMA Oscillator"""
+    n = len(close)
+    if n < period * 3:
+        return np.full(n, np.nan)
+    
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    trix = ema3.pct_change() * 100
+    return trix.values
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -52,14 +68,19 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_bollinger_bands(close, period=20, num_std=2.0):
-    """Bollinger Bands - returns middle, upper, lower"""
+def calculate_bb(close, period=20, std_dev=2.0):
+    """Bollinger Bands"""
     n = len(close)
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = middle + num_std * std
-    lower = middle - num_std * std
-    return middle, upper, lower
+    
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    
+    return upper, sma, lower
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -85,17 +106,28 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d HMA for trend alignment
+    # 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate local 12h indicators
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # TRIX(14) for momentum
+    trix = calculate_trix(close, period=14)
+    
+    # TRIX signal (9-period of TRIX)
+    trix_series = pd.Series(trix)
+    trix_signal = trix_series.ewm(span=9, min_periods=9, adjust=False).mean().values
     
     # Bollinger Bands (20, 2.0)
-    bb_mid, bb_upper, bb_lower = calculate_bollinger_bands(close, period=20, num_std=2.0)
+    bb_upper, bb_mid, bb_lower = calculate_bb(close, period=20, std_dev=2.0)
     
-    # RSI for momentum
+    # ATR for stoploss
+    atr_14 = calculate_atr(high, low, close, period=14)
+    
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # RSI for additional confirmation
     delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
@@ -103,20 +135,6 @@ def generate_signals(prices):
     avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = (100 - (100 / (1 + rs))).values
-    
-    # BB Bandwidth for regime detection
-    bb_width = (bb_upper - bb_lower) / (bb_mid + 1e-10)
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_width_ratio = bb_width / (bb_width_ma + 1e-10)
-    
-    # Volume MA and ratio
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # Position in BB (0 = lower, 1 = middle, 2 = upper)
-    bb_range = bb_upper - bb_lower
-    bb_position = (close - bb_lower) / (bb_range + 1e-10)
-    bb_position = np.clip(bb_position, 0, 1)
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -136,71 +154,70 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(bb_lower[i]) or np.isnan(bb_upper[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(trix[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        # Current values
-        close_i = close[i]
+        # === HTF TREND (1d HMA) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        trend_bullish = price_above_1d_hma
+        
+        # === LOCAL INDICATORS ===
+        bb_up = bb_upper[i]
+        bb_low = bb_lower[i]
+        bb_mid_val = bb_mid[i]
+        
+        trix_val = trix[i]
+        trix_sig = trix_signal[i]
+        
         rsi_val = rsi[i]
-        vol_val = vol_ratio[i]
-        bb_pos = bb_position[i]
+        vol_ratio_val = vol_ratio[i]
         
-        # 1d trend: price above HMA = bullish
-        price_above_1d_hma = close_i > hma_1d_aligned[i]
+        # === TRIX MOMENTUM SHIFT ===
+        # TRIX crosses above signal = momentum turning bullish
+        trix_cross_up = (trix[i] > trix_sig[i]) and (trix[i-1] <= trix_signal[i-1] if i > 1 else True)
+        # TRIX crosses below signal = momentum turning bearish
+        trix_cross_down = (trix[i] < trix_sig[i]) and (trix[i-1] >= trix_signal[i-1] if i > 1 else True)
         
-        # BB regime: narrow bands = potential breakout, wide = trending
-        # For mean reversion, we want moderate width (not squeeze, not expanded)
-        bb_regime_ok = (0.5 <= bb_width_ratio[i] <= 1.5) if not np.isnan(bb_width_ratio[i]) else True
+        # === VOLUME CONFIRMATION ===
+        vol_confirm = vol_ratio_val > 1.2
         
-        # Volume confirmation
-        vol_confirm = vol_val > 1.15
+        # === BB TOUCH (price at extreme) ===
+        # Long: price touches or is very close to lower band
+        touch_lower = low[i] <= bb_low[i] * 1.002
+        # Short: price touches or is very close to upper band
+        touch_upper = high[i] >= bb_up[i] * 0.998
+        
+        # === RSI FILTER ===
+        # Avoid entering when RSI is neutral
+        rsi_oversold = rsi_val < 35
+        rsi_overbought = rsi_val > 65
         
         desired_signal = 0.0
         
-        # === ENTRY LOGIC ===
+        # === NEW ENTRY LOGIC ===
         if not in_position:
-            # === LONG ENTRY: Price at/near lower BB + oversold RSI ===
-            # Trigger: BB position < 0.2 (near lower band) + RSI < 40 + volume spike + 1d bullish
-            long_trigger = (bb_pos < 0.20) and (rsi_val < 40) and vol_confirm and price_above_1d_hma
-            
-            if long_trigger:
+            # === LONG ENTRY: BB lower touch + TRIX turning up + RSI oversold + volume ===
+            if touch_lower and trix_cross_up and rsi_oversold and vol_confirm:
                 desired_signal = SIZE
-            else:
-                # === SHORT ENTRY: Price at/near upper BB + overbought RSI ===
-                # Trigger: BB position > 0.80 (near upper band) + RSI > 60 + volume spike
-                # In bear market, shorting upper BB works better
-                short_trigger = (bb_pos > 0.80) and (rsi_val > 60) and vol_confirm
-                
-                if short_trigger:
-                    desired_signal = -SIZE
-                else:
-                    # Alternative: Breakout from squeeze in trend direction
-                    # Narrow bands + close breaks above upper = short squeeze
-                    squeeze_long = (bb_width_ratio[i] < 0.7) and (close_i > bb_upper[i]) and price_above_1d_hma and vol_confirm
-                    squeeze_short = (bb_width_ratio[i] < 0.7) and (close_i < bb_lower[i]) and not price_above_1d_hma and vol_confirm
-                    
-                    if squeeze_long:
-                        desired_signal = SIZE
-                    elif squeeze_short:
-                        desired_signal = -SIZE
+            
+            # === SHORT ENTRY: BB upper touch + TRIX turning down + RSI overbought + volume ===
+            if touch_upper and trix_cross_down and rsi_overbought and vol_confirm:
+                desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR) ===
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -220,23 +237,15 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT: Mean reversion target ===
-        # For longs: take profit when RSI normalizes or price reaches middle BB
-        # For shorts: take profit when RSI normalizes or price reaches middle BB
+        # === TAKE PROFIT: Price returned to BB mid ===
         tp_triggered = False
         
         if in_position and position_side > 0:
-            # Long TP: RSI > 50 (normalized) OR price > middle BB
-            if rsi_val > 50:
-                tp_triggered = True
-            if close_i > bb_mid[i]:
+            if close[i] >= bb_mid_val:
                 tp_triggered = True
         
         if in_position and position_side < 0:
-            # Short TP: RSI < 50 (normalized) OR price < middle BB
-            if rsi_val < 50:
-                tp_triggered = True
-            if close_i < bb_mid[i]:
+            if close[i] <= bb_mid_val:
                 tp_triggered = True
         
         if tp_triggered:
@@ -248,7 +257,7 @@ def generate_signals(prices):
                 # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
-                entry_price = close_i
+                entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
@@ -256,9 +265,6 @@ def generate_signals(prices):
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
-            else:
-                # Same direction - maintain position
-                pass
         else:
             if in_position:
                 in_position = False
