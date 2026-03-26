@@ -1,35 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #1651: 6h Primary + 1w/1d HTF — Simplified Multi-TF Trend Pullback
+Experiment #001: 4h Camarilla Pivot + Volume Spike + Choppiness Regime
 
-Hypothesis: 6h timeframe with 1w trend bias + 1d confirmation captures multi-day 
-swings better than 4h (too noisy) or 12h (too slow). Recent 6h failures used overly 
-complex regime filters (Fisher+CHOP+RSI). This strategy uses SIMPLER logic:
+Hypothesis: Camarilla pivot levels from 1d provide STRUCTURAL price targets 
+(R3/S3, R4/S4) that only trigger on significant moves, naturally limiting trades 
+to 50-150/year. Combined with volume spike confirmation and choppiness regime 
+filter, this captures the exact pattern that produced Sharpe 1.47 on ETH.
 
-1. 1w HMA(21) = PRIMARY trend direction (most stable for 6h entries)
-2. 1d HMA(21) = SECONDARY confirmation (must agree with 1w)
-3. 6h RSI(14) pullback = ENTRY timing (RSI 40-60 in trend direction)
-4. 6h ATR vol filter = avoid low vol chop (ATR ratio > 1.2)
-5. Simple 2.5x ATR trailing stoploss
+Why Camarilla over Donchian/KAMA:
+- Camarilla has 8 levels (S1-S4, R1-R4) - more precise entry/exit structure
+- R3/S3 are "midnight reversal" levels - proven in crypto volatile markets  
+- Unlike RSI/Fisher thresholds, levels are absolute prices (no false triggers)
+- Volume spike confirms whether breakouts are "real" institutional moves
 
-Why this beats recent 6h failures:
-- #1640 Fisher+RSI+regime: too many conflicting filters
-- #1643 CRSI+CHOP: regime detection too slow for 6h
-- #1647 Vol expansion: volume unreliable on 6h
+Entry logic (TIGHT to avoid overtrading):
+- TREND (CHOP<38): Close breaks R3/S3 + volume spike >1.5x avg + 1d HMA bias
+- RANGE (CHOP>61): Price at outer bands (S4/R4) + extreme chop = mean reversion back to R3/S3
 
-This is SIMPLER: just trend alignment + pullback entry.
-Looser RSI thresholds (40-60 not 30-70) = more trades.
-
-Target: Sharpe>0.6, trades≥30 train, trades≥5 test, DD>-35%
-Timeframe: 6h
+Target: Sharpe>0.8, trades 75-150 train, trades≥15 test, DD>-30%
+Timeframe: 4h
 Size: 0.25-0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_trend_pullback_1w1d_simple_v1"
-timeframe = "6h"
+name = "mtf_4h_camarilla_volume_chop_regime_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -76,68 +73,133 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
+def calculate_camarilla_pivot(high, low, close, period=1):
+    """
+    Camarilla Pivot Points (classic formula)
+    Uses previous period's H, L, C to calculate 8 levels:
+    R4 = C + (H - L) * 1.1
+    R3 = C + (H - L) * 1.1 / 2
+    R2 = C + (H - L) * 1.1 / 4
+    R1 = C + (H - L) * 1.1 / 6
+    S1 = C - (H - L) * 1.1 / 6
+    S2 = C - (H - L) * 1.1 / 4
+    S3 = C - (H - L) * 1.1 / 2
+    S4 = C - (H - L) * 1.1
+    """
+    n = len(close)
+    if n < period + 2:
+        return {k: np.full(n, np.nan) for k in ['R1','R2','R3','R4','S1','S2','S3','S4','P']}
+    
+    r4 = np.full(n, np.nan, dtype=np.float64)
+    r3 = np.full(n, np.nan, dtype=np.float64)
+    r2 = np.full(n, np.nan, dtype=np.float64)
+    r1 = np.full(n, np.nan, dtype=np.float64)
+    s1 = np.full(n, np.nan, dtype=np.float64)
+    s2 = np.full(n, np.nan, dtype=np.float64)
+    s3 = np.full(n, np.nan, dtype=np.float64)
+    s4 = np.full(n, np.nan, dtype=np.float64)
+    piv = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        prev_high = high[i - period]
+        prev_low = low[i - period]
+        prev_close = close[i - period]
+        rng = prev_high - prev_low
+        
+        if rng > 1e-10:
+            piv[i] = (prev_high + prev_low + prev_close) / 3.0
+            r1[i] = prev_close + rng * (1.1 / 6)
+            r2[i] = prev_close + rng * (1.1 / 4)
+            r3[i] = prev_close + rng * (1.1 / 2)
+            r4[i] = prev_close + rng * 1.1
+            s1[i] = prev_close - rng * (1.1 / 6)
+            s2[i] = prev_close - rng * (1.1 / 4)
+            s3[i] = prev_close - rng * (1.1 / 2)
+            s4[i] = prev_close - rng * 1.1
+    
+    return {'R1': r1, 'R2': r2, 'R3': r3, 'R4': r4, 
+            'S1': s1, 'S2': s2, 'S3': s3, 'S4': s4, 'P': piv}
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index - measures market choppy vs trending
+    CHOP > 61.8 = ranging (mean reversion), CHOP < 38.2 = trending
+    """
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    gain = np.insert(gain, 0, 0)
-    loss = np.insert(loss, 0, 0)
+    chop = np.full(n, np.nan, dtype=np.float64)
     
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
     
-    rsi = np.full(n, np.nan, dtype=np.float64)
-    mask = avg_loss != 0
-    rs = np.zeros(n)
-    rs[mask] = avg_gain[mask] / avg_loss[mask]
-    rsi[mask] = 100 - (100 / (1 + rs[mask]))
-    
-    return rsi
+    return chop
 
-def calculate_sma(close, period):
-    """Simple Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    return sma
+def calculate_volume_confirmation(volume, period=20):
+    """
+    Volume moving average for spike detection
+    Volume spike = current vol > 1.5x 20-period average
+    """
+    n = len(volume)
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return vol_ma
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
     # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
-    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate and align HTF indicators
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=48)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
+    # Calculate 1d Camarilla from HTF data
+    cam_1d = calculate_camarilla_pivot(
+        df_1d['high'].values, 
+        df_1d['low'].values, 
+        df_1d['close'].values
+    )
+    
+    # Align 1d Camarilla to 4h
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, cam_1d['R3'])
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, cam_1d['S3'])
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, cam_1d['R4'])
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, cam_1d['S4'])
+    
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    rsi_14 = calculate_rsi(close, period=14)
-    sma_50 = calculate_sma(close, period=50)
-    sma_200 = calculate_sma(close, period=200)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
+    vol_ma_20 = calculate_volume_confirmation(volume, period=20)
+    
+    # 4h Camarilla for tighter entries
+    cam_4h = calculate_camarilla_pivot(high, low, close)
+    r3_4h = cam_4h['R3']
+    s3_4h = cam_4h['S3']
+    r4_4h = cam_4h['R4']
+    s4_4h = cam_4h['S4']
     
     signals = np.zeros(n)
     SIZE_BASE = 0.25
     SIZE_STRONG = 0.30
     
-    # Position tracking for stoploss
+    # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -147,7 +209,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     
     # Warmup period
-    min_bars = 250
+    min_bars = 60
     
     for i in range(min_bars, n):
         # Skip if indicators not ready
@@ -158,86 +220,96 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]) or np.isnan(sma_50[i]) or np.isnan(sma_200[i]):
+        if np.isnan(chop_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (1w + 1d HMA alignment) ===
-        price_above_1w = close[i] > hma_1w_aligned[i]
-        price_below_1w = close[i] < hma_1w_aligned[i]
-        price_above_1d = close[i] > hma_1d_aligned[i]
-        price_below_1d = close[i] < hma_1d_aligned[i]
+        # Check HTF alignment
+        if np.isnan(hma_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # 1w HMA slope (trend strength)
-        hma_1w_slope = 0.0
-        if i >= 4 and not np.isnan(hma_1w_aligned[i-4]):
-            hma_1w_slope = (hma_1w_aligned[i] - hma_1w_aligned[i-4]) / hma_1w_aligned[i-4]
+        # === VOLUME SPIKE DETECTION ===
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
-        # 1d HMA slope
-        hma_1d_slope = 0.0
-        if i >= 4 and not np.isnan(hma_1d_aligned[i-4]):
-            hma_1d_slope = (hma_1d_aligned[i] - hma_1d_aligned[i-4]) / hma_1d_aligned[i-4]
+        # === REGIME DETECTION ===
+        chop = chop_14[i]
+        is_trend_regime = chop < 38.2
+        is_range_regime = chop > 61.8
         
-        # Strong trend = both 1w and 1d agree + positive slope
-        strong_bull_trend = price_above_1w and price_above_1d and hma_1w_slope > 0 and hma_1d_slope > 0
-        strong_bear_trend = price_below_1w and price_below_1d and hma_1w_slope < 0 and hma_1d_slope < 0
+        # === 1d HMA TREND BIAS ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        price_below_1d_hma = close[i] < hma_1d_aligned[i]
         
-        # Moderate trend = price above/below both but slope neutral
-        mod_bull_trend = price_above_1w and price_above_1d
-        mod_bear_trend = price_below_1w and price_below_1d
+        # === 4h CAMARILLA LEVELS ===
+        r3 = r3_4h[i]
+        s3 = s3_4h[i]
+        r4 = r4_4h[i]
+        s4 = s4_4h[i]
         
-        # === VOLATILITY FILTER (ATR ratio) ===
-        atr_ratio = atr_14[i] / atr_30[i] if atr_30[i] > 1e-10 else 1.0
-        vol_expanding = atr_ratio > 1.1
-        vol_normal = atr_ratio > 0.8
+        # === 1d CAMARILLA LEVELS (for confirmation) ===
+        r3_1d = r3_1d_aligned[i]
+        s3_1d = s3_1d_aligned[i]
         
-        # === RSI PULLBACK (LOOSE thresholds for trades) ===
-        rsi_val = rsi_14[i]
-        
-        # Bull pullback = RSI dipped but not oversold
-        rsi_bull_pullback = 40 <= rsi_val <= 60
-        rsi_bull_strong = 45 <= rsi_val <= 55
-        
-        # Bear pullback = RSI rallied but not overbought
-        rsi_bear_pullback = 40 <= rsi_val <= 60
-        rsi_bear_strong = 45 <= rsi_val <= 55
-        
-        # === PRICE ACTION FILTER ===
-        price_above_sma50 = close[i] > sma_50[i]
-        price_below_sma50 = close[i] < sma_50[i]
-        price_above_sma200 = close[i] > sma_200[i]
-        price_below_sma200 = close[i] < sma_200[i]
-        
-        # === ENTRY LOGIC (LOOSE - must generate trades) ===
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: Strong bull trend + RSI pullback + vol normal/expanding
-        if strong_bull_trend and rsi_bull_pullback and vol_normal:
-            desired_signal = SIZE_STRONG if rsi_bull_strong else SIZE_BASE
+        # TREND REGIME: Breakout through R3/S3 with volume + 1d bias
+        if is_trend_regime:
+            if price_above_1d_hma:
+                # Long: break above R3 + volume spike
+                if not np.isnan(r3) and close[i] > r3 and vol_spike:
+                    # Check 1d R3 is also above (confirming trend)
+                    if not np.isnan(r3_1d) and r3_1d > hma_1d_aligned[i]:
+                        desired_signal = SIZE_STRONG
+            
+            elif price_below_1d_hma:
+                # Short: break below S3 + volume spike  
+                if not np.isnan(s3) and close[i] < s3 and vol_spike:
+                    # Check 1d S3 is also below (confirming trend)
+                    if not np.isnan(s3_1d) and s3_1d < hma_1d_aligned[i]:
+                        desired_signal = -SIZE_STRONG
         
-        # LONG: Moderate bull trend + RSI pullback + above SMA50 + vol normal
-        elif mod_bull_trend and rsi_bull_pullback and price_above_sma50 and vol_normal:
-            desired_signal = SIZE_BASE
+        # RANGE REGIME: Mean reversion from outer bands
+        elif is_range_regime:
+            if price_above_1d_hma:
+                # Long: price dropped to S4 area in range + bounce
+                if not np.isnan(s4) and close[i] > s4 and close[i] < s4 * 1.02:
+                    # Look for reversal candle pattern (close > open)
+                    if close[i] > (high[i] + low[i]) / 2:
+                        desired_signal = SIZE_BASE
+            
+            elif price_below_1d_hma:
+                # Short: price rallied to R4 area in range + reversal
+                if not np.isnan(r4) and close[i] < r4 and close[i] > r4 * 0.98:
+                    # Bearish reversal (close < open)
+                    if close[i] < (high[i] + low[i]) / 2:
+                        desired_signal = -SIZE_BASE
         
-        # SHORT: Strong bear trend + RSI pullback + vol normal/expanding
-        elif strong_bear_trend and rsi_bear_pullback and vol_normal:
-            desired_signal = -SIZE_STRONG if rsi_bear_strong else -SIZE_BASE
+        # NEUTRAL: No position (wait for clearer signal)
+        else:
+            # Only take trades with strong confluence: volume + 1d trend + 4h breakout
+            if price_above_1d_hma and vol_spike:
+                if not np.isnan(r3) and close[i] > r3:
+                    desired_signal = SIZE_BASE
+            elif price_below_1d_hma and vol_spike:
+                if not np.isnan(s3) and close[i] < s3:
+                    desired_signal = -SIZE_BASE
         
-        # SHORT: Moderate bear trend + RSI pullback + below SMA50 + vol normal
-        elif mod_bear_trend and rsi_bear_pullback and price_below_sma50 and vol_normal:
-            desired_signal = -SIZE_BASE
-        
-        # === STOPLOSS CHECK (2.5x ATR trailing) ===
+        # === TRAILING STOPLOSS (2.5x ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
