@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #013: 12h Donchian Breakout + Volume + 1w Trend Filter
+Experiment #011: 6h Ichimoku TK Cross + Cloud + Volume
 
-HYPOTHESIS: 12h timeframe is optimal for this experiment (slower than 4h/6h, 
-reduces fee drag). Donchian(20) breakouts mark institutional moves. Combined 
-with volume confirmation (1.5x avg) and 1w HMA trend filter, this captures 
-major trend continuations while avoiding whipsaws. Works in BOTH bull (long 
-breakouts when price > 1w HMA) AND bear (short breakdowns when price < 1w HMA).
+HYPOTHESIS: Ichimoku Cloud is a complete institutional system (trend + momentum + structure).
+The TK Cross (Tenkan-Kijun) is a fast momentum signal. Cloud defines support/resistance.
+Volume spike at TK Cross confirms institutional participation. 1d HMA trend alignment ensures
+we only trade with higher timeframe bias. This should work in both:
+- BULL: Long breakouts with price above cloud, TK cross up, volume surge
+- BEAR: Short breakdowns with price below cloud, TK cross down, volume surge
+- RANGE: TK crosses within cloud = no trade (filters chop)
 
-TIMEFRAME: 12h primary, 1w for trend
-TARGET: 50-100 total trades over 4 years (12-25/year)
+TIMEFRAME: 6h primary
+HTF: 1d for trend alignment, 1w for regime
+TARGET: 75-200 total trades over 4 years (12-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_vol_1w_v1"
-timeframe = "12h"
+name = "mtf_6h_ichimoku_cloud_vol_1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -49,6 +52,42 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
+def calculate_ichimoku(high, low, close, t_period=9, k_period=26, span_b_period=52, displacement=26):
+    """
+    Ichimoku Cloud calculation
+    Returns: tenkan, kijun, senkou_a, senkou_b, cloud_bullish, price_above_cloud
+    """
+    n = len(close)
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    tenkan = np.full(n, np.nan, dtype=np.float64)
+    kijun = np.full(n, np.nan, dtype=np.float64)
+    senkou_a = np.full(n, np.nan, dtype=np.float64)
+    senkou_b = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(t_period - 1, n):
+        window_high = np.nanmax(high[i - t_period + 1:i + 1])
+        window_low = np.nanmin(low[i - t_period + 1:i + 1])
+        tenkan[i] = (window_high + window_low) / 2
+    
+    for i in range(k_period - 1, n):
+        window_high = np.nanmax(high[i - k_period + 1:i + 1])
+        window_low = np.nanmin(low[i - k_period + 1:i + 1])
+        kijun[i] = (window_high + window_low) / 2
+    
+    # Senkou Span A: (Tenkan + Kijun) / 2, plotted 26 periods ahead
+    for i in range(k_period - 1, n):
+        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
+            senkou_a[i + displacement] = (tenkan[i] + kijun[i]) / 2
+    
+    # Senkou Span B: (52-period high + 52-period low) / 2, plotted 26 periods ahead
+    for i in range(span_b_period - 1, n):
+        window_high = np.nanmax(high[i - span_b_period + 1:i + 1])
+        window_low = np.nanmin(low[i - span_b_period + 1:i + 1])
+        senkou_b[i + displacement] = (window_high + window_low) / 2
+    
+    return tenkan, kijun, senkou_a, senkou_b
+
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -63,18 +102,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper and lower bands"""
-    n = len(high)
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -83,21 +110,28 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # 1w HMA for trend filter
+    # 1d HMA for trend alignment
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    
+    # 1w HMA for regime
     hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Local 12h indicators
-    atr_14 = calculate_atr(high, low, close, period=14)
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    # === Calculate Ichimoku ===
+    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
     
-    # Volume MA for spike detection
+    # ATR for stoploss
+    atr_14 = calculate_atr(high, low, close, period=14)
+    
+    # Volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # RSI for exit confirmation
+    # RSI for additional confirmation
     delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
@@ -107,7 +141,7 @@ def generate_signals(prices):
     rsi = (100 - (100 / (1 + rs))).values
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -118,7 +152,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 55
+    warmup = 60  # Need enough for Ichimoku (26 + displacement)
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -129,62 +163,77 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(tenkan[i]) or np.isnan(kijun[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # Get current values
-        price = close[i]
-        vol_spike = vol_ratio[i] > 1.5
+        # === ICHIMOKU SIGNALS ===
+        tenkan_val = tenkan[i]
+        kijun_val = kijun[i]
+        
+        # TK Cross detection (need previous values)
+        tenkan_prev = tenkan[i - 1] if i > 0 and not np.isnan(tenkan[i - 1]) else tenkan_val
+        kijun_prev = kijun[i - 1] if i > 0 and not np.isnan(kijun[i - 1]) else kijun_val
+        
+        # Bullish TK Cross: Tenkan crosses above Kijun
+        tk_bullish_cross = (tenkan_val > kijun_val) and (tenkan_prev <= kijun_prev)
+        # Bearish TK Cross: Tenkan crosses below Kijun
+        tk_bearish_cross = (tenkan_val < kijun_val) and (tenkan_prev >= kijun_prev)
+        
+        # Cloud boundaries (current period values)
+        cloud_top = max(senkou_a[i], senkou_b[i]) if not np.isnan(senkou_a[i]) and not np.isnan(senkou_b[i]) else close[i]
+        cloud_bottom = min(senkou_a[i], senkou_b[i]) if not np.isnan(senkou_a[i]) and not np.isnan(senkou_b[i]) else close[i]
+        
+        # Price above/below cloud
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        price_in_cloud = not price_above_cloud and not price_below_cloud
+        
+        # === TREND ALIGNMENT (1d HMA) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        
+        # === REGIME (1w HMA) - only trade with trend in bear market ===
+        price_above_1w_hma = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
+        
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5  # Volume 50% above average
+        
+        # === RSI MOMENTUM ===
         rsi_val = rsi[i]
-        
-        # === 1w TREND FILTER ===
-        price_above_1w = price > hma_1w_aligned[i]
-        
-        # === DONCHIAN BREAKOUT ===
-        # Price breaks above 20-period high = potential long
-        # Price breaks below 20-period low = potential short
-        donch_mid = (donch_upper[i] + donch_lower[i]) / 2
-        donch_range = donch_upper[i] - donch_lower[i]
-        
-        # Breakout: price exceeds previous channel boundary by some amount
-        # Use close > upper or close < lower (current bar close)
-        breakout_up = price > donch_upper[i]
-        breakout_down = price < donch_lower[i]
-        
-        # Also check if we just broke out (current close vs previous)
-        prev_close = close[i-1] if i > 0 else price
-        prev_upper = donch_upper[i-1] if i > 0 else donch_upper[i]
-        prev_lower = donch_lower[i-1] if i > 0 else donch_lower[i]
-        
-        breakout_up_cross = (price > prev_upper) and (prev_close <= prev_upper)
-        breakout_down_cross = (price < prev_lower) and (prev_close >= prev_lower)
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY ===
-            # Breakout above channel + volume confirmation + bullish 1w trend
-            if (breakout_up or breakout_up_cross) and vol_spike and price_above_1w:
+            # === BULLISH ENTRY ===
+            # TK cross up + price above cloud + bullish 1d trend + volume spike
+            if tk_bullish_cross and price_above_cloud and price_above_1d_hma and vol_spike:
                 desired_signal = SIZE
+            # Alternative: Strong momentum without cross (gap up with volume)
+            elif price_above_cloud and price_above_1d_hma and vol_spike and rsi_val > 60:
+                if tenkan_val > kijun_val:  # Still bullish alignment
+                    desired_signal = SIZE
             
-            # === SHORT ENTRY ===
-            # Breakdown below channel + volume confirmation + bearish 1w trend
-            if (breakout_down or breakout_down_cross) and vol_spike and not price_above_1w:
+            # === BEARISH ENTRY ===
+            # TK cross down + price below cloud + bearish 1d trend + volume spike
+            if tk_bearish_cross and price_below_cloud and not price_above_1d_hma and vol_spike:
                 desired_signal = -SIZE
+            # Alternative: Strong bearish momentum
+            elif price_below_cloud and not price_above_1d_hma and vol_spike and rsi_val < 40:
+                if tenkan_val < kijun_val:  # Still bearish alignment
+                    desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -204,29 +253,37 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === RSI-BASED EXIT ===
+        # === EXIT: Opposite signal or RSI extreme ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: RSI oversold
-            if rsi_val < 30:
+            # Long exit: TK bearish cross OR price breaks below cloud OR RSI oversold
+            if tk_bearish_cross:
+                exit_triggered = True
+            if price_below_cloud:
+                exit_triggered = True
+            if rsi_val < 35:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: RSI overbought
-            if rsi_val > 70:
+            # Short exit: TK bullish cross OR price breaks above cloud OR RSI overbought
+            if tk_bullish_cross:
+                exit_triggered = True
+            if price_above_cloud:
+                exit_triggered = True
+            if rsi_val > 65:
                 exit_triggered = True
         
         if exit_triggered:
             desired_signal = 0.0
         
-        # === UPDATE POSITION ===
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
-                entry_price = price
+                entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
@@ -234,10 +291,16 @@ def generate_signals(prices):
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
+            # else: same direction - maintain (no churn)
         else:
             if in_position:
                 in_position = False
                 position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
