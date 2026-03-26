@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #004: 1d Donchian Breakout + 1w Trend + Volume
+Experiment #005: 12h Donchian Breakout + 1d Trend Filter + Volume
 
-HYPOTHESIS: Donchian channel breakouts capture momentum moves in crypto.
-1w HMA provides trend bias to avoid counter-trend trades. Volume confirmation
-filters false breakouts. ATR stoploss protects capital.
+HYPOTHESIS: Donchian channel breakouts capture momentum shifts at key levels.
+12h timeframe reduces noise vs 4h while maintaining sufficient trade frequency.
+1d HMA provides trend bias to avoid counter-trend breakouts that fail.
+Volume confirmation filters false breakouts. ATR stoploss protects capital.
 
-WHY THIS WORKS IN BOTH BULL AND BEAR:
-- Bull: Long breakouts above Donchian high with 1w HMA bullish
-- Bear: Short breakouts below Donchian low with 1w HMA bearish
-- Volume spike confirms institutional participation
-- ATR stop adapts to volatility regime
+WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
+- Bull: Long breakouts above Donchian high when price > 1d HMA
+- Bear: Short breakouts below Donchian low when price < 1d HMA
+- Range: No trades (price oscillates around HMA, no clean breakouts)
 
-TARGET: 50-150 total trades over 4 years (12-37/year)
-DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (SOL Sharpe=1.38)
+TARGET: 75-150 total trades over 4 years (19-37/year) for 12h timeframe.
+DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (Sharpe=1.382, 95tr)
+
+KEY DESIGN:
+1. Donchian(20) breakout = primary signal
+2. 1d HMA(21) = trend filter (only trade in trend direction)
+3. Volume > 1.2x 20-avg = confirmation
+4. ATR(14) 2.5x stoploss = risk management
+5. Signal: 0.30 (discrete, 30% position size)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_vol_1w_hma_v1"
-timeframe = "1d"
+name = "mtf_12h_donchian_hma_vol_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -70,9 +77,18 @@ def calculate_atr(high, low, close, period=14):
 def calculate_donchian(high, low, period=20):
     """Donchian Channel - highest high and lowest low over period"""
     n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
     return upper, lower
+
+def calculate_ema(close, span):
+    """Exponential Moving Average"""
+    return pd.Series(close).ewm(span=span, min_periods=span, adjust=False).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -81,14 +97,14 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1w data for trend bias - CALL ONCE BEFORE LOOP
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA for trend
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 1d indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
@@ -108,7 +124,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 60
+    # Warmup for all indicators
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -133,33 +150,28 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === TREND BIAS (1w HMA) ===
-        price_above_1w_hma = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
+        # === TREND BIAS (1d HMA) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3  # Moderate threshold
+        vol_ok = vol_ratio[i] > 1.2
         
-        # === DONCHIAN BREAKOUT ===
-        # Breakout = close crosses above/below previous bar's Donchian level
-        breakout_long = close[i] > donchian_upper[i-1] if i > 0 else False
-        breakout_short = close[i] < donchian_lower[i-1] if i > 0 else False
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Long: Price breaks above Donchian upper (new 20-bar high)
+        # Short: Price breaks below Donchian lower (new 20-bar low)
+        donchian_breakout_long = close[i] > donchian_upper[i]
+        donchian_breakout_short = close[i] < donchian_lower[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: Breakout above Donchian + bullish 1w trend + volume
-        if breakout_long and price_above_1w_hma:
-            if vol_spike:
-                desired_signal = SIZE
-            else:
-                desired_signal = SIZE * 0.5  # Enter half size without volume
+        # LONG: Breakout above + price above 1d HMA + volume
+        if donchian_breakout_long and price_above_1d_hma and vol_ok:
+            desired_signal = SIZE
         
-        # SHORT: Breakout below Donchian + bearish 1w trend + volume
-        if breakout_short and not price_above_1w_hma:
-            if vol_spike:
-                desired_signal = -SIZE
-            else:
-                desired_signal = -SIZE * 0.5  # Enter half size without volume
+        # SHORT: Breakout below + price below 1d HMA + volume
+        if donchian_breakout_short and not price_above_1d_hma and vol_ok:
+            desired_signal = -SIZE
         
         # === STOPLOSS CHECK ===
         stoploss_triggered = False
@@ -179,6 +191,21 @@ def generate_signals(prices):
                 stoploss_triggered = True
         
         if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === TAKE PROFIT at opposite Donchian band ===
+        tp_triggered = False
+        if in_position and position_side > 0:
+            # TP at Donchian lower (full channel traverse)
+            if close[i] < donchian_lower[i]:
+                tp_triggered = True
+        
+        if in_position and position_side < 0:
+            # TP at Donchian upper
+            if close[i] > donchian_upper[i]:
+                tp_triggered = True
+        
+        if tp_triggered:
             desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
