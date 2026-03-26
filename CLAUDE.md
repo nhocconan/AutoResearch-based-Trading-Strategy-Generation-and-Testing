@@ -39,7 +39,7 @@ But ALWAYS try all 3 symbols — don't stop at first failure.
 
 - Source: Binance Public Data (futures/um), downloaded via `prepare.py` + `update_data.py`
 - Symbols: BTCUSDT, ETHUSDT, SOLUSDT
-- Timeframes: 5m, 15m, 30m, 1h, 4h, 6h, 12h, 1d (1m excluded — too noisy)
+- Timeframes: 5m, 15m, 30m, 1h, 4h, 6h, 12h, 1d, 1w (1m excluded — too noisy; no 8h data — use 6h or 12h instead)
 - Format: Parquet files in `data/processed/`
 - Date range: 2021-01-01 to present (updated with `update_data.py`)
 - Train period: 2021-01-01 to 2024-12-31

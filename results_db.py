@@ -55,6 +55,16 @@ _stats_dirty: bool = True
 _stats_ts: float = 0.0
 _STATS_TTL: float = 60.0
 
+# Concept stats cache — expensive (iterates all strategies), refresh every 5 min
+_concept_cache: dict = {}
+_concept_ts: float = 0.0
+_CONCEPT_TTL: float = 300.0
+
+# Scatter data cache — complex JOIN, refresh every 2 min
+_scatter_cache: list = []
+_scatter_ts: float = 0.0
+_SCATTER_TTL: float = 120.0
+
 
 def get_conn() -> sqlite3.Connection:
     """Open DB with WAL mode for concurrent access."""
@@ -162,12 +172,13 @@ def query_stats() -> dict:
                 MAX(CASE WHEN period='train' THEN sharpe END) as train_best,
                 SUM(period='test') as test_total,
                 SUM(period='test' AND status='keep') as test_kept,
-                MAX(CASE WHEN period='test' THEN sharpe END) as test_best
+                MAX(CASE WHEN period='test' THEN sharpe END) as test_best,
+                MAX(CASE WHEN period='test' AND status='keep' THEN sharpe END) as best_kept_test
             FROM results
         """).fetchone()
     keys = ["total","kept","discarded","crashed","best_sharpe",
             "train_total","train_kept","train_best",
-            "test_total","test_kept","test_best"]
+            "test_total","test_kept","test_best","best_kept_test"]
     _stats_cache = dict(zip(keys, row))
     _stats_dirty = False
     _stats_ts = time.monotonic()
@@ -239,6 +250,35 @@ def query_best_kept_sharpe() -> float:
     return float(row[0] or 0.0)
 
 
+def query_recent_experiments(n: int = 12) -> pd.DataFrame:
+    """Return last n distinct strategies (train period) with aggregate metrics, ordered newest first."""
+    if not DB_FILE.exists():
+        return pd.DataFrame()
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            """SELECT strategy,
+                      MAX(sharpe) as best_sharpe,
+                      AVG(sharpe) as avg_sharpe,
+                      AVG(win_rate) as avg_winrate,
+                      AVG(max_dd_pct) as avg_dd,
+                      SUM(trades) as total_trades,
+                      MAX(CASE WHEN status='keep' THEN 1 ELSE 0 END) as kept
+               FROM results
+               WHERE period='train' AND strategy IN (
+                   SELECT strategy FROM (
+                       SELECT strategy, MAX(id) as last_id
+                       FROM results WHERE period='train'
+                       GROUP BY strategy
+                       ORDER BY last_id DESC
+                       LIMIT ?
+                   )
+               )
+               GROUP BY strategy
+               ORDER BY MAX(id) DESC""",
+            conn, params=(n,)
+        )
+
+
 def upsert_results(rows: list[dict]):
     """Insert or replace rows (used by revalidate.py full rebuild).
 
@@ -290,6 +330,141 @@ def metrics_to_db_dict(
         "description": description[:80],
         "period": period,
     }
+
+
+def query_concept_stats() -> dict:
+    """Parse strategy names → indicator + timeframe coverage stats. For Concepts tab.
+    Cached for 5 minutes — expensive iteration over all strategies."""
+    global _concept_cache, _concept_ts
+    now = time.monotonic()
+    if _concept_cache and (now - _concept_ts) < _CONCEPT_TTL:
+        return _concept_cache
+
+    if not DB_FILE.exists():
+        return {"indicators": {}, "timeframes": {}}
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT strategy,
+                   MAX(sharpe) as best_sharpe,
+                   SUM(CASE WHEN status='keep' THEN 1 ELSE 0 END) > 0 as any_kept
+            FROM results
+            GROUP BY strategy
+        """).fetchall()
+
+    VALID_TFS = ["1w", "1d", "12h", "6h", "4h", "1h", "30m", "15m", "5m"]
+
+    # (name, test_fn) — ordered specific→general to avoid double-counting
+    INDICATORS = [
+        ("cRSI",     lambda s: "crsi" in s),
+        ("HMA",      lambda s: "hma" in s or "hull" in s),
+        ("RSI",      lambda s: ("rsi" in s.split("_") or any(p.startswith("rsi") for p in s.split("_"))) and "crsi" not in s),
+        ("Donchian", lambda s: "donchian" in s),
+        ("KAMA",     lambda s: "kama" in s),
+        ("Fisher",   lambda s: "fisher" in s),
+        ("Bollinger",lambda s: any(p in ("bb","bbands","bollinger","squeeze") for p in s.split("_"))),
+        ("Keltner",  lambda s: "keltner" in s),
+        ("ADX",      lambda s: "adx" in s.split("_")),
+        ("Chop",     lambda s: "chop" in s),
+        ("ATR",      lambda s: "atr" in s.split("_")),
+        ("Volume",   lambda s: "volume" in s or "vol" in s.split("_")),
+        ("Funding",  lambda s: "funding" in s),
+        ("Regime",   lambda s: "regime" in s),
+        ("Pullback", lambda s: "pullback" in s),
+        ("STC",      lambda s: "stc" in s.split("_")),
+        ("Ichimoku", lambda s: "ichimoku" in s),
+        ("Pivot",    lambda s: "pivot" in s or "cpr" in s),
+    ]
+
+    ind_stats = {name: {"total": 0, "kept": 0, "best": None} for name, _ in INDICATORS}
+    tf_stats  = {tf:   {"total": 0, "kept": 0, "best": None} for tf in VALID_TFS}
+    heatmap: dict = {}
+
+    for strategy, best_sharpe, any_kept in rows:
+        s = strategy.lower()
+        best_sharpe = float(best_sharpe or 0.0)
+
+        # Primary TF: search all parts (handles both mtf_TF_... and gen_..._TF_... naming)
+        tf_found = None
+        parts = s.split("_")
+        for p in parts:
+            if p in tf_stats:
+                tf_stats[p]["total"] += 1
+                if any_kept:
+                    tf_stats[p]["kept"] += 1
+                if tf_stats[p]["best"] is None or best_sharpe > tf_stats[p]["best"]:
+                    tf_stats[p]["best"] = best_sharpe
+                tf_found = p
+                break
+
+        for ind_name, test_fn in INDICATORS:
+            try:
+                if test_fn(s):
+                    ind_stats[ind_name]["total"] += 1
+                    if any_kept:
+                        ind_stats[ind_name]["kept"] += 1
+                    if ind_stats[ind_name]["best"] is None or best_sharpe > ind_stats[ind_name]["best"]:
+                        ind_stats[ind_name]["best"] = best_sharpe
+            except Exception:
+                pass
+
+        # Heatmap: indicator × TF
+        if tf_found:
+            for ind_name, test_fn in INDICATORS:
+                try:
+                    if test_fn(s):
+                        if ind_name not in heatmap:
+                            heatmap[ind_name] = {}
+                        prev = heatmap[ind_name].get(tf_found)
+                        if prev is None or best_sharpe > prev:
+                            heatmap[ind_name][tf_found] = round(best_sharpe, 3)
+                except Exception:
+                    pass
+
+    result = {
+        "indicators": {k: v for k, v in ind_stats.items() if v["total"] > 0},
+        "timeframes":  {k: v for k, v in tf_stats.items()  if v["total"] > 0},
+        "heatmap": heatmap,
+    }
+    _concept_cache = result
+    _concept_ts = time.monotonic()
+    return result
+
+
+def query_scatter_data(limit: int = 400) -> list:
+    """Per-strategy train vs test best Sharpe. For scatter plot.
+    Cached for 2 minutes — complex JOIN query."""
+    global _scatter_cache, _scatter_ts
+    now = time.monotonic()
+    if _scatter_cache and (now - _scatter_ts) < _SCATTER_TTL:
+        return _scatter_cache
+
+    if not DB_FILE.exists():
+        return []
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT t.strategy, t.best_train, s.best_test, t.any_kept
+            FROM (
+                SELECT strategy,
+                       MAX(sharpe) as best_train,
+                       SUM(CASE WHEN status='keep' THEN 1 ELSE 0 END) > 0 as any_kept
+                FROM results WHERE period='train'
+                GROUP BY strategy
+            ) t
+            INNER JOIN (
+                SELECT strategy, MAX(sharpe) as best_test
+                FROM results WHERE period='test'
+                GROUP BY strategy
+            ) s ON t.strategy = s.strategy
+            ORDER BY t.best_train DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    result = [
+        {"n": r[0][:35], "tr": round(float(r[1]), 3), "te": round(float(r[2]), 3), "k": bool(r[3])}
+        for r in rows
+    ]
+    _scatter_cache = result
+    _scatter_ts = time.monotonic()
+    return result
 
 
 # Auto-init on import

@@ -162,7 +162,41 @@ Before submitting strategy.py, verify:
 - [ ] All indicators use min_periods
 - [ ] No .shift(-n) or future indexing
 
-## Rule 10: Trade Frequency by Timeframe
+## Rule 10: Session/Hour Filters — Correct Pattern
+
+`open_time` in the prices DataFrame is **already `datetime64[ms]`** (NOT milliseconds integer).
+Using `pd.to_datetime(open_time, unit='ms')` will CRASH with TypeError.
+
+```python
+# WRONG ❌ — crashes: "floor_divide datetime64" TypeError
+open_time = prices["open_time"].values
+hours = pd.to_datetime(open_time, unit='ms').hour.values  # CRASH!
+
+# WRONG ❌ — crashes: cannot floor_divide datetime64 scalar
+timestamp_ms = open_time[i]
+hour_utc = (timestamp_ms // (1000 * 60 * 60)) % 24  # CRASH!
+
+# WRONG ❌ — also crashes
+hour = (open_time[i] // 3600000) % 24  # CRASH!
+
+# CORRECT ✅ — compute ONCE before loop, index inside
+hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+for i in range(warmup, n):
+    hour = hours[i]
+    in_session = (8 <= hour <= 20)  # UTC 8-20
+
+# CORRECT ✅ — alternative using open_time column (already datetime64, NOT ms int)
+hours = pd.DatetimeIndex(prices["open_time"]).hour  # pre-compute before loop
+
+# CORRECT ✅ — per-bar if you need one-off Timestamp
+hour = pd.Timestamp(open_time[i]).hour  # safe but slower
+```
+
+**Why**: Binance parquet stores `open_time` as `datetime64[ms]` (NOT as integer milliseconds).
+Every arithmetic operation on datetime64 (`//`, `/`, `*`) crashes with TypeError.
+Use `prices.index.hour` — it's already a DatetimeIndex with no conversion needed.
+
+## Rule 11: Trade Frequency by Timeframe
 
 The #1 reason lower TF strategies fail: too many trades → fee drag.
 
