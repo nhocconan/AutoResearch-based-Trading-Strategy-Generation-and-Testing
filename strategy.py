@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #005: 12h Donchian Breakout + 1d Trend + Volume + Chop Regime
+Experiment #006: 4h Donchian Breakout + Volume + Choppiness + 1d Trend
 
-HYPOTHESIS: Donchian(20) breakouts capture momentum moves on 12h timeframe.
-1d HMA provides trend bias to avoid counter-trend trades. Volume confirms
-institutional participation. Choppiness filter avoids range-bound whipsaws.
+HYPOTHESIS: Donchian(20) breakouts capture genuine momentum moves when confirmed by 
+volume spikes and trending regime. 1d HMA provides higher-timeframe trend bias to 
+filter counter-trend breakouts that fail. Choppiness Index ensures we only trade 
+in trending conditions where breakouts have follow-through.
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Long breakouts above Donchian high when price > 1d HMA
-- Bear: Short breakouts below Donchian low when price < 1d HMA
-- Range: Choppiness > 60 blocks all entries (avoid whipsaw)
+- Bull markets: Long breakouts above Donchian high with 1d HMA bullish
+- Bear markets: Short breakouts below Donchian low with 1d HMA bearish
+- Range markets: Choppiness filter keeps us out (CHOP > 55)
+- Volume confirmation filters false breakouts (institutional participation)
 
-TARGET: 75-150 total trades over 4 years (12h = slower than 4h).
-DB reference: mtf_4h_hma_donchian_volume_rsi_12h_v1 (Sharpe=1.382, 95tr)
+KEY DESIGN CHOICES TO HIT 75-200 TRADES TARGET:
+1. Volume spike > 2.0x (stricter than 1.5x) - reduces false breakouts
+2. Choppiness < 45 (stricter than 55) - only strong trends
+3. Close must be in breakout direction - confirms momentum
+4. Previous bar NOT at extreme - ensures fresh breakout, not continuation
+5. 1d HMA trend bias - filters counter-trend trades that fail
+6. 2.5*ATR stoploss - tight enough to limit loss, wide enough for noise
+7. Signal = 0.30 discrete - minimizes fee churn on position changes
 
-KEY DESIGN:
-1. Donchian(20) breakout = entry trigger
-2. 1d HMA(21) = trend bias (only trade with HTF trend)
-3. Volume > 1.3x MA(20) = confirmation
-4. Choppiness < 60 = trending regime only
-5. ATR(14) stoploss at 2.5x
-6. Signal: 0.30 (discrete)
+TARGET: 75-150 total trades over 4 years (19-38/year)
+DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (95 trades, Sharpe=1.38)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_hma_vol_chop_v2"
-timeframe = "12h"
+name = "mtf_4h_donchian_vol_chop_1d_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,8 +50,8 @@ def calculate_atr(high, low, close, period=14):
 def calculate_choppiness(high, low, close, period=14):
     """
     Choppiness Index - measures market choppiness
-    CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    We use < 60 as filter to avoid choppy markets
+    CHOP > 61.8 = ranging, CHOP < 38.2 = strong trend
+    We use CHOP < 45 for entry (trending), CHOP > 55 for exit (chop returning)
     """
     n = len(close)
     if n < period + 1:
@@ -121,19 +124,19 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1d data for trend bias
+    # === LOAD 1D HTF DATA ONCE (before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d HMA for trend
+    # Calculate 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 12h indicators
+    # === CALCULATE 4H INDICATORS ===
     atr_14 = calculate_atr(high, low, close, period=14)
     chop_14 = calculate_choppiness(high, low, close, period=14)
     donch_upper, donch_lower = calculate_donchian(high, low, period=20)
     
-    # Volume moving average
+    # Volume MA and ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -151,10 +154,10 @@ def generate_signals(prices):
     bars_in_trade = 0
     
     # Warmup
-    warmup = 50
+    warmup = 60
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
+        # === VALIDATION CHECKS ===
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
@@ -176,7 +179,7 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(vol_ratio[i]):
+        if np.isnan(vol_ratio[i]) or np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -185,36 +188,35 @@ def generate_signals(prices):
         
         # === REGIME CHECK ===
         chop = chop_14[i]
-        is_trending = chop < 60.0  # Only trade in trending/neutral markets
+        is_trending = chop < 45.0  # Only trade in strong trends
+        chop_exit = chop > 55.0  # Exit when chop returns
         
         # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3  # Moderate volume confirmation
+        vol_spike = vol_ratio[i] > 2.0  # Stricter: 2.0x instead of 1.5x
         
-        # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donch_upper[i - 1]  # Break above previous high
-        breakout_short = close[i] < donch_lower[i - 1]  # Break below previous low
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Fresh breakout: price breaks level but previous bar did not
+        prev_donch_upper = donch_upper[i-1] if i > 0 else donch_upper[i]
+        prev_donch_lower = donch_lower[i-1] if i > 0 else donch_lower[i]
+        
+        # Long breakout: high breaks above Donchian upper, close confirms
+        long_breakout = (high[i] > prev_donch_upper) and (close[i] > prev_donch_upper)
+        # Short breakout: low breaks below Donchian lower, close confirms
+        short_breakout = (low[i] < prev_donch_lower) and (close[i] < prev_donch_lower)
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if is_trending:
-            # LONG: Breakout above Donchian + price above 1d HMA + volume
-            if breakout_long and price_above_1d_hma:
-                if vol_spike:
-                    desired_signal = SIZE
-                else:
-                    # Allow entry without volume spike if trend is strong
-                    desired_signal = SIZE
-            
-            # SHORT: Breakout below Donchian + price below 1d HMA + volume
-            if breakout_short and not price_above_1d_hma:
-                if vol_spike:
-                    desired_signal = -SIZE
-                else:
-                    desired_signal = -SIZE
+        # LONG: Fresh breakout + volume + trend + regime
+        if long_breakout and vol_spike and is_trending and price_above_1d_hma:
+            desired_signal = SIZE
+        
+        # SHORT: Fresh breakout + volume + trend + regime
+        if short_breakout and vol_spike and is_trending and not price_above_1d_hma:
+            desired_signal = -SIZE
         
         # === STOPLOSS CHECK ===
         stoploss_triggered = False
@@ -236,45 +238,41 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT at opposite Donchian ===
-        tp_triggered = False
+        # === TAKE PROFIT / EXIT CONDITIONS ===
+        exit_triggered = False
+        
+        # Chop returns - exit all positions
+        if in_position and chop_exit:
+            exit_triggered = True
+        
+        # Opposite Donchian breakout (trend reversal)
         if in_position and position_side > 0:
-            # Exit if price reaches upper Donchian (momentum exhausted)
-            if high[i] >= donch_upper[i]:
-                tp_triggered = True
-        
+            if low[i] < donch_lower[i]:
+                exit_triggered = True
         if in_position and position_side < 0:
-            # Exit if price reaches lower Donchian
-            if low[i] <= donch_lower[i]:
-                tp_triggered = True
+            if high[i] > donch_upper[i]:
+                exit_triggered = True
         
-        if tp_triggered:
+        if exit_triggered:
             desired_signal = 0.0
-        
-        # === MINIMUM HOLDING PERIOD (reduce churn) ===
-        if in_position and bars_in_trade < 3:
-            # Don't exit before 3 bars unless stoploss hit
-            if not stoploss_triggered:
-                if position_side > 0:
-                    desired_signal = SIZE
-                else:
-                    desired_signal = -SIZE
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
+                # New position or reversal
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                bars_in_trade = 0
+                bars_in_trade = 1
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
             else:
+                # Same direction - maintain position
                 bars_in_trade += 1
         else:
             if in_position:
