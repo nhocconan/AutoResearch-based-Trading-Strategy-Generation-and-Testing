@@ -1,24 +1,60 @@
 #!/usr/bin/env python3
 """
-Experiment #006: 4h Donchian Breakout + Volume + 12h HMA Trend
+Experiment #024: 6h Ichimoku Cloud + 1d Trend Filter
 
-HYPOTHESIS: Institutional breakout points on 4h timeframe aligned with 12h trend
-direction. Breakouts with volume confirmation catch major moves. Works in both
-bull (long breakouts when 12h HMA bullish) and bear (short breakdowns when 12h
-HMA bearish). 4h timeframe generates 19-50 trades/year - proven optimal for
-Sharpe generalization.
+HYPOTHESIS: Ichimoku Cloud system captures institutional price structure.
+TK cross (Tenkan/Kijun) signals momentum shifts. Cloud (Kumo) provides
+dynamic support/resistance. Combined with 1d HMA for trend direction,
+this works in BOTH bull markets (long TK crosses above cloud) and
+bear markets (short TK crosses below cloud).
 
-TIMEFRAME: 4h primary
-HTF: 12h for trend direction
-TARGET: 75-200 total trades over 4 years (19-50/year)
+TIMEFRAME: 6h primary
+HTF: 1d for trend bias
+TARGET: 50-150 total trades over 4 years (12-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_vol_12h_trend_v1"
-timeframe = "4h"
+name = "mtf_6h_ichimoku_cloud_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou_b=52):
+    """
+    Ichimoku Cloud calculation
+    Returns: tenkan, kijun, senkou_a, senkou_b, close (for chikou comparison)
+    """
+    n = len(close)
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    tenkan = np.full(n, np.nan, dtype=np.float64)
+    for i in range(8, n):
+        period_high = np.max(high[i-8:i+1])
+        period_low = np.min(low[i-8:i+1])
+        tenkan[i] = (period_high + period_low) / 2.0
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    kijun = np.full(n, np.nan, dtype=np.float64)
+    for i in range(25, n):
+        period_high = np.max(high[i-25:i+1])
+        period_low = np.min(low[i-25:i+1])
+        kijun[i] = (period_high + period_low) / 2.0
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, plotted 26 periods ahead
+    senkou_a = np.full(n, np.nan, dtype=np.float64)
+    for i in range(25, n):
+        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
+            senkou_a[i] = (tenkan[i] + kijun[i]) / 2.0
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, plotted 26 periods ahead
+    senkou_b_arr = np.full(n, np.nan, dtype=np.float64)
+    for i in range(51, n):
+        period_high = np.max(high[i-51:i+1])
+        period_low = np.min(low[i-51:i+1])
+        senkou_b_arr[i] = (period_high + period_low) / 2.0
+    
+    return tenkan, kijun, senkou_a, senkou_b_arr
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -64,18 +100,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper and lower bands"""
-    n = len(high)
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -83,22 +107,55 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
-    df_12h = get_htf_data(prices, '12h')
+    # === Load HTF data ONCE ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # 12h HMA for trend direction
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=48)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate local 4h indicators
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # Calculate 6h Ichimoku
+    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
     
-    # Donchian 20-period
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
-    
-    # Volume MA for spike detection
+    # Volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # ATR for stops
+    atr_14 = calculate_atr(high, low, close, period=14)
+    
+    # ADX for trend strength
+    def calculate_adx(high, low, close, period=14):
+        n = len(close)
+        if n < period + 1:
+            return np.full(n, np.nan)
+        
+        plus_dm = np.zeros(n)
+        minus_dm = np.zeros(n)
+        
+        for i in range(1, n):
+            high_diff = high[i] - high[i-1]
+            low_diff = low[i-1] - low[i]
+            
+            if high_diff > low_diff and high_diff > 0:
+                plus_dm[i] = high_diff
+            if low_diff > high_diff and low_diff > 0:
+                minus_dm[i] = low_diff
+        
+        tr = np.zeros(n)
+        tr[0] = high[0] - low[0]
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr_smooth + 1e-10)
+        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr_smooth + 1e-10)
+        
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+        return adx
+    
+    adx = calculate_adx(high, low, close)
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -112,10 +169,31 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 50
+    warmup = 60
     
     for i in range(warmup, n):
         # Skip if indicators not ready
+        if np.isnan(tenkan[i]) or np.isnan(kijun[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
@@ -123,44 +201,51 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === ICHIMOKU SIGNALS ===
+        tk_cross_up = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] if i > 1 else False
+        tk_cross_down = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] if i > 1 else False
         
-        if np.isnan(hma_12h_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # Cloud boundaries (average of senkou a and b)
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
         
-        # === TREND DIRECTION (12h HMA) ===
-        hma_bullish = close[i] > hma_12h_aligned[i]
+        # Price position relative to cloud
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        price_in_cloud = not price_above_cloud and not price_below_cloud
+        
+        # TK line position
+        tk_above_kijun = tenkan[i] > kijun[i]
+        
+        # === 1d TREND ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.4
         
-        # === DONCHIAN BREAKOUT ===
-        donch_width = donch_upper[i] - donch_lower[i]
-        price_near_upper = close[i] > donch_upper[i] - 0.1 * donch_width
-        price_near_lower = close[i] < donch_lower[i] + 0.1 * donch_width
+        # === ADX TREND STRENGTH ===
+        adx_val = adx[i] if not np.isnan(adx[i]) else 0
+        adx_strong = adx_val > 18
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Price breaks above upper Donchian + volume spike + 12h HMA bullish
-            if price_near_upper and vol_spike and hma_bullish:
-                desired_signal = SIZE
+            # === TK CROSS UP (BULLISH) ===
+            # Only in bull trend (price above 1d HMA) AND either above cloud or ADX strong
+            if tk_cross_up and price_above_1d_hma:
+                if (price_above_cloud or (adx_strong and not price_below_cloud)):
+                    if vol_spike or adx_strong:
+                        desired_signal = SIZE
             
-            # SHORT: Price breaks below lower Donchian + volume spike + 12h HMA bearish
-            if price_near_lower and vol_spike and not hma_bullish:
-                desired_signal = -SIZE
+            # === TK CROSS DOWN (BEARISH) ===
+            # Only in bear trend (price below 1d HMA) AND either below cloud or ADX strong
+            if tk_cross_down and not price_above_1d_hma:
+                if (price_below_cloud or (adx_strong and not price_above_cloud)):
+                    if vol_spike or adx_strong:
+                        desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -180,17 +265,23 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT: Opposite channel boundary ===
+        # === TK REVERSAL EXIT ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: price breaks below lower channel
-            if price_near_lower:
+            # Exit long on TK cross down
+            if tk_cross_down:
+                exit_triggered = True
+            # Or price falls into cloud in weak ADX
+            if price_below_cloud and not adx_strong:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: price breaks above upper channel
-            if price_near_upper:
+            # Exit short on TK cross up
+            if tk_cross_up:
+                exit_triggered = True
+            # Or price rises into cloud in weak ADX
+            if price_above_cloud and not adx_strong:
                 exit_triggered = True
         
         if exit_triggered:
@@ -210,9 +301,6 @@ def generate_signals(prices):
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
-            else:
-                # Same direction - maintain position
-                pass
         else:
             if in_position:
                 in_position = False
