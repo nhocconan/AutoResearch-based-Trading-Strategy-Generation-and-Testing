@@ -1,26 +1,95 @@
 #!/usr/bin/env python3
 """
-Experiment #003 v3: Simplified 4h Camarilla + Volume + Choppiness
+Experiment #004: 1d KAMA + RSI + Choppiness Regime
 
-HYPOTHESIS: Camarilla S3/R3 levels from 1d are key support/resistance where 
-institutions place orders. Volume spike confirms institutional involvement.
-Choppiness Index filters ranging markets.
+HYPOTHESIS: KAMA adapts to volatility automatically. In trending markets, KAMA 
+stays above price for shorts/below for longs. RSI(14) confirms momentum. 
+Choppiness Index filters out choppy periods. 1d timeframe naturally limits trades.
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Camarilla works in ALL markets (derived from previous day's range)
-- Bear: short at R3/R4. Bull: long at S3/S4. Range: mean-revert between pivots
-- Simple entry: price within 2 ATR of S3/R3 + (volume spike OR trending chop)
+- KAMA adapts: fast in trending, slow in ranging (self-adjusting)
+- Long: price > KAMA(10) + RSI > 55 + chop < 50
+- Short: price < KAMA(10) + RSI < 45 + chop < 50
+- ATR-based stops prevent large losses in crashes
+- 1d = ~250 bars/year max = ~50-100 trades realistic
 
-TARGET: 75-150 trades over 4 years (proven pattern from DB).
-KEY FIX: Remove nested conditions that caused 0 trades in v1.
+TARGET: 50-100 total trades over 4 years (proven pattern from DB).
+DB reference: mtf_1d_kama_rsi_chop_regime_1w_v1 (Sharpe=1.310, 74tr)
+
+KEY DESIGN:
+1. KAMA(10) for trend detection
+2. RSI(14) for momentum confirmation
+3. Choppiness Index < 50 for trending regime
+4. ATR(14) * 2.5 for stoploss
+5. 1w KAMA aligned for higher timeframe confirmation
+6. Signal: 0.25 (discrete)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_vol_chop_simple_v3"
-timeframe = "4h"
+name = "mtf_1d_kama_rsi_chop_1w_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_kama(close, period=10, fast_ema=2, slow_ema=30):
+    """
+    Kaufman Adaptive Moving Average
+    """
+    n = len(close)
+    if n < period + slow_ema:
+        return np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        price_change = abs(close[i] - close[i - period])
+        volatility = 0.0
+        for j in range(i - period + 1, i + 1):
+            if j > 0:
+                volatility += abs(close[j] - close[j - 1])
+        
+        if volatility > 1e-10:
+            er[i] = price_change / volatility
+    
+    # Calculate smoothing constants
+    fast_const = 2.0 / (fast_ema + 1)
+    slow_const = 2.0 / (slow_ema + 1)
+    scaling = (fast_const - slow_const) ** 2
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan, dtype=np.float64)
+    kama[period] = close[period]
+    
+    for i in range(period + 1, n):
+        if np.isnan(er[i]):
+            continue
+        sc = (er[i] * scaling + slow_const) ** 0.5 * (fast_const - slow_const) + slow_const
+        if not np.isnan(kama[i - 1]):
+            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    deltas = np.diff(close, prepend=close[0])
+    deltas[0] = 0
+    
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+    
+    avg_gain = pd.Series(gains).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(losses).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.where(avg_loss > 1e-10, avg_gain / avg_loss, 0.0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    
+    return rsi
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -39,7 +108,7 @@ def calculate_atr(high, low, close, period=14):
 def calculate_choppiness(high, low, close, period=14):
     """
     Choppiness Index - measures market choppiness
-    CHOP > 61.8 = ranging (avoid), CHOP < 50 = trending (trade)
+    CHOP > 61.8 = ranging, CHOP < 50 = trending
     """
     n = len(close)
     if n < period + 1:
@@ -63,39 +132,6 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_camarilla_pivots(prev_high, prev_low, prev_close):
-    """
-    Camarilla pivot levels from previous day's HLC
-    S3 = close - range * 1.1/4
-    R3 = close + range * 1.1/4
-    S4 = close - range * 1.1/2
-    R4 = close + range * 1.1/2
-    """
-    n = len(prev_high)
-    pivots = {
-        's3': np.full(n, np.nan, dtype=np.float64),
-        's4': np.full(n, np.nan, dtype=np.float64),
-        'r3': np.full(n, np.nan, dtype=np.float64),
-        'r4': np.full(n, np.nan, dtype=np.float64),
-    }
-    
-    for i in range(n):
-        if np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]):
-            continue
-        
-        high_low_range = prev_high[i] - prev_low[i]
-        if high_low_range <= 1e-10:
-            continue
-        
-        close = prev_close[i]
-        
-        pivots['s3'][i] = close - high_low_range * 1.1 / 4
-        pivots['s4'][i] = close - high_low_range * 1.1 / 2
-        pivots['r3'][i] = close + high_low_range * 1.1 / 4
-        pivots['r4'][i] = close + high_low_range * 1.1 / 2
-    
-    return pivots
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -103,148 +139,135 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1d data for Camarilla pivots (ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for HTF trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d Camarilla pivots
-    cam_pivots = calculate_camarilla_pivots(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values
-    )
+    # Calculate 1w KAMA for trend
+    kama_1w_raw = calculate_kama(df_1w['close'].values, period=10)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w_raw)
     
-    # Align pivots to 4h (auto shift by 1 HTF bar for no look-ahead)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['s3'])
-    s4_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['s4'])
-    r3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['r3'])
-    r4_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['r4'])
-    
-    # Calculate 4h indicators
+    # Calculate 1d indicators
+    kama_10 = calculate_kama(close, period=10)
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
     chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # Volume moving average (20-period for 4h = ~80h of volume)
+    # Volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
     position_side = 0
+    entry_price = 0.0
     entry_atr = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
-    stop_price = 0.0
     
-    # Warmup (need 100 bars for indicators)
-    warmup = 100
+    # Warmup (need 1w bars = ~4 1d bars)
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(kama_10[i]) or np.isnan(rsi_14[i]) or np.isnan(atr_14[i]) or np.isnan(chop_14[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(chop_14[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(kama_1w_aligned[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]):
+        if atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        # Get pivot values
-        s3 = s3_aligned[i]
-        s4 = s4_aligned[i]
-        r3 = r3_aligned[i]
-        r4 = r4_aligned[i]
+        # === REGIME CHECK ===
+        chop = chop_14[i]
+        is_trending = chop < 50.0  # Only trade in trending regime
         
-        # Calculate distances to pivots (as ATR multiples)
-        if atr_14[i] > 0:
-            dist_to_s3 = (close[i] - s3) / atr_14[i]
-            dist_to_s4 = (close[i] - s4) / atr_14[i] if not np.isnan(s4) else 999
-            dist_to_r3 = (r3 - close[i]) / atr_14[i]
-            dist_to_r4 = (r4 - close[i]) / atr_14[i] if not np.isnan(r4) else 999
-        else:
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === 1w TREND (HTF confirmation) ===
+        price_above_1w_kama = close[i] > kama_1w_aligned[i]
         
-        # === FILTERS ===
-        # Volume spike: >1.5x average volume
-        vol_spike = vol_ratio[i] > 1.5
-        # Choppiness trending: <55 (lower = more trending)
-        is_trending = chop_14[i] < 55.0
+        # === 1d KAMA TREND ===
+        price_above_1d_kama = close[i] > kama_10[i]
         
-        # Need EITHER volume spike OR trending (relaxed condition)
-        # This ensures we still get trades even without volume spike
-        tradeable = vol_spike or is_trending
+        # === MOMENTUM ===
+        rsi = rsi_14[i]
+        rsi_bullish = rsi > 52.0
+        rsi_bearish = rsi < 48.0
+        
+        # === VOLUME CONFIRMATION ===
+        vol_ok = vol_ratio[i] > 0.9
+        
+        # === ENTRY LOGIC ===
+        desired_signal = 0.0
+        
+        # LONG ENTRY: Price above both KAMAs + RSI bullish + trending regime
+        if is_trending:
+            if price_above_1w_kama and price_above_1d_kama:
+                if rsi_bullish and vol_ok:
+                    desired_signal = SIZE
+        
+        # SHORT ENTRY: Price below both KAMAs + RSI bearish + trending regime
+        if is_trending:
+            if not price_above_1w_kama and not price_above_1d_kama:
+                if rsi_bearish and vol_ok:
+                    desired_signal = -SIZE
         
         # === STOPLOSS CHECK ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
+            stop_distance = entry_price - 2.5 * entry_atr
+            if low[i] < stop_distance:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
+            stop_distance = entry_price + 2.5 * entry_atr
+            if high[i] > stop_distance:
                 stoploss_triggered = True
         
         if stoploss_triggered:
-            in_position = False
-            position_side = 0
-            signals[i] = 0.0
-            continue
+            desired_signal = 0.0
         
-        # === ENTRY LOGIC (simplified - no nested conditions) ===
-        desired_signal = 0.0
+        # === TAKE PROFIT (trailing stop, 2.5R) ===
+        tp_triggered = False
+        if in_position and position_side > 0:
+            profit = (close[i] - entry_price) / entry_atr
+            if profit >= 2.5:
+                tp_triggered = True
         
-        # Only enter if not in position
-        if not in_position and tradeable:
-            # LONG: price within 2 ATR of S3 or S4 support
-            if dist_to_s3 >= -0.5 and dist_to_s3 < 2.5:
-                desired_signal = SIZE
-            elif dist_to_s4 >= -0.5 and dist_to_s4 < 2.5:
-                desired_signal = SIZE
-            
-            # SHORT: price within 2 ATR of R3 or R4 resistance
-            if dist_to_r3 >= -0.5 and dist_to_r3 < 2.5:
-                desired_signal = -SIZE
-            elif dist_to_r4 >= -0.5 and dist_to_r4 < 2.5:
-                desired_signal = -SIZE
+        if in_position and position_side < 0:
+            profit = (entry_price - close[i]) / entry_atr
+            if profit >= 2.5:
+                tp_triggered = True
         
-        # === UPDATE POSITION ===
+        if tp_triggered:
+            desired_signal = 0.0
+        
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
-            # Enter new position or reverse
-            in_position = True
-            position_side = int(np.sign(desired_signal))
-            entry_atr = atr_14[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
-            if position_side > 0:
-                stop_price = close[i] - 2.0 * entry_atr
-            else:
-                stop_price = close[i] + 2.0 * entry_atr
-        
-        # Hold position until stopped out
-        if in_position:
-            desired_signal = SIZE * position_side
+            if not in_position or np.sign(desired_signal) != position_side:
+                in_position = True
+                position_side = int(np.sign(desired_signal))
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+        else:
+            if in_position:
+                in_position = False
+                position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
         
         signals[i] = desired_signal
     
