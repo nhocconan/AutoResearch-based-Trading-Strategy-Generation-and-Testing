@@ -1,33 +1,71 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Volatility Expansion + RSI Extremes + 1d Trend
+Experiment #022: 4h Bollinger Squeeze Breakout + 1d Trend
 
-HYPOTHESIS: Markets cycle between low-volatility squeeze and high-volatility 
-expansion phases. Entering on volatility expansion (ATR(14) > 1.8× ATR(100)) 
-with RSI(7) at extremes captures the start of big moves. The 1d SMA(50) keeps 
-direction aligned with the larger trend, avoiding countertrend trades in 
-strong trends. This regime-adaptive approach works in both bull (buy RSI dips 
-with 1d uptrend) and bear (short RSI spikes with 1d downtrend).
+HYPOTHESIS: Bollinger Band squeeze (low volatility) followed by volatility 
+expansion captures institutional moves. BB width percentile < 10 = squeeze, 
+then BB breakout = entry. Combined with 1d HMA trend direction and volume 
+confirmation. BB squeeze breaks 5-10x per year vs Donchian's 2-3x, giving 
+proper trade frequency. ATR stoploss manages risk. Works in both bull 
+(breakout up) and bear (breakout down with 1d trend filter).
 
-WHY 12H: Slower than 4h = fewer trades = less fee drag. ATR(100) on 12h = 
-1200h lookback = 50 days = good regime filter. RSI(7) on 12h = equivalent to 
-RSI(28) on 1h = smooth, less noise.
-
-EXPECTED TRADES: 60-120 total over 4 years (15-30/year). Volume filter adds 
-confirmation to avoid false breakouts.
-
-TARGET: Sharpe > 0.5 on train, trades >= 50 total.
+TIMEFRAME: 4h primary
+HTF: 1d for trend alignment
+TARGET: 100-250 total trades over 4 years (25-60/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_volatility_expansion_rsi_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_bb_squeeze_trend_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
+def calculate_hma(close, period):
+    """Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    half = max(1, period // 2)
+    sqrt_n = max(1, int(np.sqrt(period)))
+    
+    def wma(series, span):
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
+        for i in range(span - 1, len(series)):
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1].astype(np.float64)
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / weight_sum
+        return result
+    
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
+    
+    diff = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+    
+    return wma(diff, sqrt_n)
+
+def calculate_bollinger_bands(close, period=20, num_std=2):
+    """Bollinger Bands - returns (upper, middle, lower, width)"""
+    n = len(close)
+    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = middle + num_std * std
+    lower = middle - num_std * std
+    
+    # BB width for squeeze detection
+    width = upper - lower
+    
+    return upper, middle, lower, width
+
 def calculate_atr(high, low, close, period=14):
-    """Average True Range with proper handling"""
+    """Average True Range"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -35,24 +73,24 @@ def calculate_atr(high, low, close, period=14):
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        hl = high[i] - low[i]
-        hc = abs(high[i] - close[i-1])
-        lc = abs(low[i] - close[i-1])
-        tr[i] = max(hl, hc, lc)
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """RSI calculation"""
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - (100 / (1 + rs))).values
-    return rsi
+def calculate_bb_width_percentile(width, period=100):
+    """Percentile rank of current BB width vs recent range"""
+    n = len(width)
+    percentile = np.full(n, 50.0, dtype=np.float64)  # default middle
+    
+    for i in range(period, n):
+        if not np.isnan(width[i]):
+            window = width[i - period + 1:i + 1]
+            if not np.any(np.isnan(window)):
+                rank = np.sum(window < width[i]) / len(window) * 100
+                percentile[i] = rank
+    
+    return percentile
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -64,22 +102,34 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d SMA(50) for trend filter
-    sma_1d_raw = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
+    # 1d HMA for trend
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # === Local 12h indicators ===
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_100 = calculate_atr(high, low, close, period=100)
     
-    rsi_7 = calculate_rsi(close, period=7)
+    # Bollinger Bands
+    bb_upper, bb_middle, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, num_std=2)
     
-    # Volume MA
+    # BB width percentile (squeeze detection)
+    bb_width_pct = calculate_bb_width_percentile(bb_width, period=100)
+    
+    # Volume metrics
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
+    # RSI for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = (100 - (100 / (1 + rs))).values
+    
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -87,9 +137,14 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
-    entry_bar = 0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = max(100, 100)  # ATR(100) needs ~100 bars
+    # Squeeze state tracking
+    squeeze_active = False
+    squeeze_bar = 0
+    
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -100,97 +155,144 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(atr_100[i]) or atr_100[i] <= 1e-10:
+        if np.isnan(bb_width_pct[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(sma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME CHECK: Volatility Expansion ===
-        atr_ratio = atr_14[i] / atr_100[i]
-        vol_expansion = atr_ratio > 1.8
+        # === 1d TREND ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        trend_bullish = price_above_1d_hma
         
-        # === TREND FILTER (1d SMA) ===
-        price_above_1d_sma = close[i] > sma_1d_aligned[i]
+        # === VOLUME ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === MOMENTUM (RSI 7) ===
-        rsi_val = rsi_7[i]
+        # === RSI ===
+        rsi_val = rsi[i]
         
-        # === VOLUME CONFIRMATION ===
-        vol_confirm = vol_ratio[i] > 1.2
+        # === SQUEEZE DETECTION ===
+        # BB width in bottom 15% = squeeze
+        in_squeeze = bb_width_pct[i] < 15.0
         
-        # === ENTRY LOGIC ===
+        # === BREAKOUT DETECTION ===
+        # Price breaks above BB upper
+        breakout_up = close[i] > bb_upper[i] and close[i-1] <= bb_upper[i-1] if i > warmup else False
+        # Price breaks below BB lower
+        breakout_down = close[i] < bb_lower[i] and close[i-1] >= bb_lower[i-1] if i > warmup else False
+        
+        # Price already outside bands
+        price_above_bb_upper = close[i] > bb_upper[i]
+        price_below_bb_lower = close[i] < bb_lower[i]
+        
+        # === ATR STOPLOSS LEVELS ===
+        stop_atr_mult = 2.5
+        
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY ===
-            # Volatility expansion + RSI oversold + bullish 1d trend + volume confirm
-            if vol_expansion and rsi_val < 35 and price_above_1d_sma and vol_confirm:
-                desired_signal = SIZE
+            # === NEW ENTRY: Squeeze + Breakout + Volume + Trend ===
             
-            # === SHORT ENTRY ===
-            # Volatility expansion + RSI overbought + bearish 1d trend + volume confirm
-            if vol_expansion and rsi_val > 65 and not price_above_1d_sma and vol_confirm:
-                desired_signal = -SIZE
+            # LONG: breakout up with squeeze, volume, bullish trend
+            if (breakout_up or price_above_bb_upper) and in_squeeze:
+                if vol_spike and trend_bullish:
+                    desired_signal = SIZE
+                    squeeze_active = True
+                    squeeze_bar = i
+            
+            # SHORT: breakout down with squeeze, volume, bearish trend
+            if (breakout_down or price_below_bb_lower) and in_squeeze:
+                if vol_spike and not trend_bullish:
+                    desired_signal = -SIZE
+                    squeeze_active = True
+                    squeeze_bar = i
+            
+            # Also allow entries without prior squeeze if trend is very strong
+            # LONG: breakout up, very strong volume, strong trend
+            if not in_squeeze and trend_bullish:
+                if vol_spike and vol_ratio[i] > 2.0 and breakout_up:
+                    desired_signal = SIZE
+            
+            # SHORT: breakout down, very strong volume, strong downtrend
+            if not in_squeeze and not trend_bullish:
+                if vol_spike and vol_ratio[i] > 2.0 and breakout_down:
+                    desired_signal = -SIZE
         
-        else:
-            # === STOPLOSS CHECK ===
-            stop_triggered = False
-            
-            if position_side > 0:
-                if low[i] < stop_price:
-                    stop_triggered = True
-            elif position_side < 0:
-                if high[i] > stop_price:
-                    stop_triggered = True
-            
-            if stop_triggered:
-                desired_signal = 0.0
-            else:
-                # === TREND LOSS CHECK ===
-                # If trend flips against position, exit
-                if position_side > 0 and not price_above_1d_sma:
-                    # 1d trend turned bearish - exit long
-                    desired_signal = 0.0
-                elif position_side < 0 and price_above_1d_sma:
-                    # 1d trend turned bullish - exit short
-                    desired_signal = 0.0
-                else:
-                    # === RSI NEUTRAL EXIT ===
-                    # RSI returned to neutral - take profit
-                    if position_side > 0 and rsi_val > 55:
-                        desired_signal = 0.0
-                    elif position_side < 0 and rsi_val < 45:
-                        desired_signal = 0.0
-                    else:
-                        # Maintain position
-                        desired_signal = position_side * SIZE
+        # === STOPLOSS CHECK ===
+        stoploss_triggered = False
+        
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - stop_atr_mult * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                stoploss_triggered = True
+        
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + stop_atr_mult * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === TAKE PROFIT: 3R or RSI extreme ===
+        tp_triggered = False
+        if in_position and position_side > 0:
+            profit = (close[i] - entry_price) / entry_price
+            if profit > 0.06:  # 6% profit (~3R with 2% ATR risk)
+                tp_triggered = True
+            if rsi_val > 75:  # RSI overbought
+                tp_triggered = True
+        
+        if in_position and position_side < 0:
+            profit = (entry_price - close[i]) / entry_price
+            if profit > 0.06:
+                tp_triggered = True
+            if rsi_val < 25:  # RSI oversold
+                tp_triggered = True
+        
+        if tp_triggered:
+            desired_signal = 0.0
+        
+        # === EXIT: Opposite band touch ===
+        exit_triggered = False
+        
+        if in_position and position_side > 0:
+            if price_below_bb_lower:  # Fell back through lower band
+                exit_triggered = True
+        
+        if in_position and position_side < 0:
+            if price_above_bb_upper:  # Broke back through upper band
+                exit_triggered = True
+        
+        if exit_triggered:
+            desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
-                entry_bar = i
-                # Stop: 2.5 ATR from entry
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                squeeze_active = False
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - stop_atr_mult * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
-            else:
-                # Same direction - maintain
-                pass
+                    stop_price = entry_price + stop_atr_mult * entry_atr
         else:
             if in_position:
                 in_position = False
@@ -198,7 +300,9 @@ def generate_signals(prices):
                 entry_price = 0.0
                 entry_atr = 0.0
                 stop_price = 0.0
-                entry_bar = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+                squeeze_active = False
         
         signals[i] = desired_signal
     
