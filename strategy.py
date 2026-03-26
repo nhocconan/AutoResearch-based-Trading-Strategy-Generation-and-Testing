@@ -1,33 +1,45 @@
+Looking at the experiment history, I see several key patterns:
+1. 357 trades/sym Camarilla strategy failed (too many trades)
+2. 242 trades/sym 12h strategy failed (overtrading)
+3. 0 trade strategies failed (too strict)
+
+The key insight: the current 4h strategy has overlapping entry conditions and too many triggers. For 12h, I need **strict, tight entries with single pivot zone only**.
+
+My hypothesis: A simplified 12h Camarilla strategy with ONLY S3/R3 pivot touches (not S4/R4 overlap), volume confirmation, and choppiness filter should generate 75-150 trades and pass the keep rate threshold (54% for 12h).
 #!/usr/bin/env python3
 """
-Experiment #004: 1d Donchian Breakout + Weekly Trend + Volume Confirmation
+Experiment #005: 12h Camarilla S3/R3 Only + Volume + Choppiness
 
-HYPOTHESIS: Weekly trend (HMA) filters direction, daily Donchian(20) breakout 
-captures institutional moves, volume confirms, ATR stoploss manages risk.
+HYPOTHESIS: Using ONLY S3 and R3 (not S4/R4) eliminates the overlapping 
+entry conditions that caused overtrading in experiment #015 (357 trades).
+S3/R3 are the most significant Camarilla levels - deeper S4/R4 often 
+create duplicate signals on the same move.
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Weekly HMA = trend direction filter (no counter-trend trades)
-- Donchian breakout = structural break, works in both directions
-- Volume spike = institutional confirmation
-- ATR stoploss = adapts to volatility in any market phase
-- 1d timeframe = ~100 trades max over 4 years (proven sustainable)
+- 12h timeframe = fewer trades = less fee drag = better Sharpe
+- S3 = support where institutions buy (bull) or where bear rallies fail
+- R3 = resistance where institutions sell (bear) or where bull pullbacks stall
+- Choppiness filter keeps us out of range-bound chop
+- Volume spike confirms institutional involvement at key levels
 
-TARGET: 75-150 total over 4 years (19-37/year).
-DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (Sharpe=1.382, 95tr)
+TARGET: 75-150 total trades over 4 years (proven pattern from DB).
+DB reference: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 (Sharpe=1.471)
+Keep rate for 12h: 54%
 
-KEY DESIGN (KISS - Keep It Simple Stupid):
-1. Weekly HMA(21) for trend direction ONLY
-2. Daily Donchian(20) breakout for entry
-3. Volume spike (>1.5x 20-avg) for confirmation
-4. ATR(14) stoploss at 2x
-5. Signal: 0.30 (discrete)
+KEY DESIGN:
+1. S3 ONLY for longs (no S4 overlap = fewer trades)
+2. R3 ONLY for shorts (no R4 overlap = fewer trades)
+3. Volume spike > 1.8x (stricter than 1.5x)
+4. Choppiness < 52 (trend regime only)
+5. Price must be within 0.3 ATR of pivot (tight zone = fewer false entries)
+6. 2*ATR stoploss, opposite pivot for TP
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_wma_vol_1w_v1"
-timeframe = "1d"
+name = "mtf_12h_camarilla_s3_r3_tight_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -74,16 +86,52 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns (upper, lower)"""
-    n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - CHOP > 61.8 = ranging, CHOP < 50 = trending"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
 
-def calculate_ema(close, span):
-    """Exponential Moving Average"""
-    return pd.Series(close).ewm(span=span, min_periods=span, adjust=False).mean().values
+def calculate_camarilla_pivots(prev_high, prev_low, prev_close):
+    """Camarilla pivot levels (S3/R3 only for this strategy)"""
+    n = len(prev_high)
+    pivots = {
+        's3': np.full(n, np.nan, dtype=np.float64),
+        'r3': np.full(n, np.nan, dtype=np.float64),
+    }
+    
+    for i in range(n):
+        if np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]):
+            continue
+        
+        high_low_range = prev_high[i] - prev_low[i]
+        if high_low_range <= 1e-10:
+            continue
+        
+        close = prev_close[i]
+        
+        pivots['s3'][i] = close - high_low_range * 1.1 / 4
+        pivots['r3'][i] = close + high_low_range * 1.1 / 4
+    
+    return pivots
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -92,27 +140,30 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === WEEKLY HTF DATA (for trend) ===
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for Camarilla pivots and trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly HMA(21) for trend direction
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Weekly EMA for additional confirmation
-    ema_1w_raw = calculate_ema(df_1w['close'].values, span=21)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_raw)
+    # Calculate S3/R3 pivots from 1d
+    cam_pivots = calculate_camarilla_pivots(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values
+    )
     
-    # === DAILY INDICATORS ===
+    # Align pivots to 12h
+    s3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['s3'])
+    r3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['r3'])
+    
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # Daily EMA for local trend
-    ema_8 = calculate_ema(close, 8)
-    ema_21 = calculate_ema(close, 21)
-    
-    # Volume moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume moving average (30-period for 12h)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
@@ -127,8 +178,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup - need at least 20 bars for Donchian
-    warmup = 50
+    # Warmup - need at least 60 bars for indicators
+    warmup = 60
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -139,7 +190,14 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(donchian_upper[i]):
+        if np.isnan(chop_14[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -153,48 +211,49 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === TREND DIRECTION (Weekly) ===
-        weekly_trend_bullish = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
-        weekly_ema_bullish = close[i] > ema_1w_aligned[i] if not np.isnan(ema_1w_aligned[i]) else True
-        weekly_trend_bearish = close[i] < hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else False
+        # === REGIME CHECK (stricter: require trending) ===
+        chop = chop_14[i]
+        is_trending = chop < 52.0  # Strict trending filter
         
-        # Local trend (daily)
-        local_bullish = ema_8[i] > ema_21[i] if not np.isnan(ema_8[i]) else True
-        local_bearish = ema_8[i] < ema_21[i] if not np.isnan(ema_8[i]) else False
+        # === TREND BIAS (1d HMA only - keep it simple) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
+        price_below_1d_hma = close[i] < hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else False
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        # === VOLUME CONFIRMATION (stricter: 1.8x) ===
+        vol_spike = vol_ratio[i] > 1.8
         
-        # === DONCHIAN CHANNEL BREAKOUT ===
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        middle = (upper + lower) / 2 if not np.isnan(upper) and not np.isnan(lower) else close[i]
+        # === PIVOT LEVELS ===
+        s3 = s3_aligned[i]
+        r3 = r3_aligned[i]
         
-        # Price broke above channel (bullish breakout)
-        bullish_breakout = close[i] > upper and high[i] > upper
-        
-        # Price broke below channel (bearish breakout)
-        bearish_breakout = close[i] < lower and low[i] < lower
+        # Price distance to pivot (as ATR) - TIGHT ZONE
+        if atr_14[i] > 0:
+            dist_to_s3 = (close[i] - s3) / atr_14[i]
+            dist_to_r3 = (r3 - close[i]) / atr_14[i]
+        else:
+            dist_to_s3 = 999
+            dist_to_r3 = 999
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: Weekly bullish + local bullish + breakout above + volume
-        if weekly_trend_bullish and local_bullish and bullish_breakout:
-            if vol_spike:
-                desired_signal = SIZE
-            else:
-                # Allow entry without volume but with trend confirmation
-                desired_signal = SIZE
+        # LONG: Price AT S3 support (within 0.3 ATR below to 0.5 ATR above)
+        # Only in trending regime with bullish bias
+        if is_trending and price_above_1d_hma:
+            # Price must be close to S3 - tight zone prevents overtrading
+            if dist_to_s3 >= -0.3 and dist_to_s3 <= 0.5:
+                if vol_spike:
+                    desired_signal = SIZE
         
-        # SHORT: Weekly bearish + local bearish + breakout below + volume
-        if weekly_trend_bearish and local_bearish and bearish_breakout:
-            if vol_spike:
-                desired_signal = -SIZE
-            else:
-                desired_signal = -SIZE
+        # SHORT: Price AT R3 resistance (within 0.3 ATR above to 0.5 ATR below)
+        # Only in trending regime with bearish bias
+        if is_trending and price_below_1d_hma:
+            # Price must be close to R3 - tight zone prevents overtrading
+            if dist_to_r3 >= -0.3 and dist_to_r3 <= 0.5:
+                if vol_spike:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (trailing) ===
+        # === STOPLOSS CHECK (ATR-based trailing stop) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -214,16 +273,20 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TREND REVERSAL EXIT ===
-        # If weekly trend flips, exit position
-        if in_position and position_side > 0 and weekly_trend_bearish:
-            # Only exit if local trend also turns
-            if local_bearish:
-                desired_signal = 0.0
+        # === TAKE PROFIT at opposite pivot ===
+        tp_triggered = False
+        if in_position and position_side > 0:
+            # TP at R3
+            if not np.isnan(r3) and high[i] >= r3:
+                tp_triggered = True
         
-        if in_position and position_side < 0 and weekly_trend_bullish:
-            if local_bullish:
-                desired_signal = 0.0
+        if in_position and position_side < 0:
+            # TP at S3
+            if not np.isnan(s3) and low[i] <= s3:
+                tp_triggered = True
+        
+        if tp_triggered:
+            desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
