@@ -1,29 +1,58 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Camarilla Bounce + Choppiness Regime + Volume
+Experiment #004: 1d Williams %R Reversal + Donchian Confirmation
 
-HYPOTHESIS: Top DB performer (ETH test Sharpe 1.47, 95 trades) uses Camarilla
-S3/R3 bounce logic in choppy markets. Price bounces off extreme Camarilla levels
-in range-bound conditions, fading the move. This is fundamentally DIFFERENT from
-breakout trading - it profits from mean-reversion, not trend continuation.
+HYPOTHESIS: Williams %R extreme readings (<-80 or >-20) mark reversal points.
+Combined with Donchian(20) channel touch for structural confirmation and 
+1w HMA for trend direction, this captures major mean-reversion moves.
+1d timeframe naturally limits trades to 50-150 total over 4 years.
 
-KEY INSIGHT: Donchian breakout strategies all failed. Camarilla bounce strategy
-succeeded because:
-1. It trades extremes, not breakouts (higher probability)
-2. Choppiness filter prevents trading in trending markets
-3. Volume confirmation ensures institutional interest
+WHY BOTH BULL AND BEAR: 
+- Bull markets: %R oversold bounces + price above 1w HMA catch rallies
+- Bear markets: %R overbought shorts + price below 1w HMA catch breakdowns
+- Range markets: %R extremes at channel boundaries catch reversals
 
-TIMEFRAME: 4h primary
-HTF: 12h for regime confirmation
-TARGET: 75-150 total trades over 4 years (19-37/year)
+TIMEFRAME: 1d primary
+HTF: 1w for trend direction (aligned once, used as filter)
+TARGET: 50-150 total trades over 4 years (12.5-37.5/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_bounce_chop_vol_v1"
-timeframe = "4h"
+name = "mtf_1d_williams_donchian_1w_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_hma(close, period):
+    """Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    half = max(1, period // 2)
+    sqrt_n = max(1, int(np.sqrt(period)))
+    
+    def wma(series, span):
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
+        for i in range(span - 1, len(series)):
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1].astype(np.float64)
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / weight_sum
+        return result
+    
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
+    
+    diff = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+    
+    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -39,58 +68,30 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = choppy/range-bound market (mean reversion favored)
-    CHOP < 38.2 = trending market (trend following favored)
-    """
+def calculate_williams_r(high, low, close, period=20):
+    """Williams %R"""
     n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+    williams = np.full(n, np.nan, dtype=np.float64)
     
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        # Sum of ATR over period
-        atr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            atr_sum += tr
-        
-        # Highest high - lowest low over period
+    for i in range(period - 1, n):
         highest_high = np.max(high[i - period + 1:i + 1])
         lowest_low = np.min(low[i - period + 1:i + 1])
-        range_hl = highest_high - lowest_low
-        
-        if range_hl > 0 and atr_sum > 0:
-            # CHOP = 100 * log10(atr_sum / range_hl) / log10(period)
-            chop[i] = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
+        if highest_high != lowest_low:
+            williams[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
     
-    return chop
+    return williams
 
-def calculate_camarilla_levels(high, low, close):
-    """
-    Camarilla Pivot Levels
-    R3 = close + (high - low) * 1.1 / 2
-    R4 = close + (high - low) * 1.1
-    S3 = close - (high - low) * 1.1 / 2
-    S4 = close - (high - low) * 1.1
-    """
-    n = len(close)
-    r3 = np.full(n, np.nan, dtype=np.float64)
-    r4 = np.full(n, np.nan, dtype=np.float64)
-    s3 = np.full(n, np.nan, dtype=np.float64)
-    s4 = np.full(n, np.nan, dtype=np.float64)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper and lower bands"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
-    for i in range(1, n):
-        hl_range = high[i] - low[i]
-        r3[i] = close[i] + hl_range * 1.1 / 2
-        r4[i] = close[i] + hl_range * 1.1
-        s3[i] = close[i] - hl_range * 1.1 / 2
-        s4[i] = close[i] - hl_range * 1.1
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    return r3, r4, s3, s4
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -100,38 +101,26 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 12h Choppiness for regime (smoother, less noise)
-    chop_12h_raw = calculate_choppiness_index(df_12h['high'].values, df_12h['low'].values, 
-                                               df_12h['close'].values, period=14)
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h_raw)
+    # 1w HMA for trend direction
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate local 4h indicators
+    # Local indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    williams_r = calculate_williams_r(high, low, close, period=20)
+    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
     
-    # 4h Choppiness
-    chop_4h = calculate_choppiness_index(high, low, close, period=14)
-    
-    # Camarilla levels
-    r3, r4, s3, s4 = calculate_camarilla_levels(high, low, close)
-    
-    # Volume MA for confirmation
+    # Volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # RSI for additional confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - (100 / (1 + rs))).values
-    
-    # ATR-based stops
-    atr_ma = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    atr_percent = atr_14 / close * 100
+    # Previous Donchian for breakout detection (shifted by 1 for no look-ahead)
+    donch_upper_prev = np.roll(donch_upper, 1)
+    donch_lower_prev = np.roll(donch_lower, 1)
+    donch_upper_prev[0] = np.nan
+    donch_lower_prev[0] = np.nan
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -144,8 +133,9 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    target_price = 0.0
     
-    warmup = 50
+    warmup = 60  # Need enough for 1w HMA alignment
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -156,124 +146,74 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(chop_12h_aligned[i]):
+        if np.isnan(williams_r[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME CHECK ===
-        # CHOP > 50 means choppy (no clear trend) - perfect for Camarilla bounces
-        # Use average of 4h and 12h CHOP for confirmation
-        chop_val = np.nanmean([chop_4h[i] if not np.isnan(chop_4h[i]) else 50, 
-                               chop_12h_aligned[i]])
-        is_choppy = chop_val > 50.0  # Range-bound market
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(hma_1w_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # === TREND DIRECTION (1w HMA) ===
+        trend_bull = close[i] > hma_1w_aligned[i]
+        
+        # === WILLIAMS %R EXTREMES ===
+        williams_oversold = williams_r[i] < -80   # Strong oversold
+        williams_overbought = williams_r[i] > -20  # Strong overbought
+        
+        # === DONCHIAN TOUCH (structural confirmation) ===
+        near_lower = close[i] <= donch_lower[i] * 1.02  # Within 2% of lower band
+        near_upper = close[i] >= donch_upper[i] * 0.98  # Within 2% of upper band
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.2
+        vol_spike = vol_ratio[i] > 1.3
         
-        # === RSI FOR MOMENTUM ===
-        rsi_val = rsi[i]
-        
-        # === Camarilla bounce conditions ===
-        # Price touched or approached R3/R4 (overbought) = potential short
-        near_r3 = abs(close[i] - r3[i]) < 0.5 * atr_14[i] if not np.isnan(r3[i]) else False
-        near_r4 = abs(close[i] - r4[i]) < 0.5 * atr_14[i] if not np.isnan(r4[i]) else False
-        
-        # Price touched or approached S3/S4 (oversold) = potential long
-        near_s3 = abs(close[i] - s3[i]) < 0.5 * atr_14[i] if not np.isnan(s3[i]) else False
-        near_s4 = abs(close[i] - s4[i]) < 0.5 * atr_14[i] if not np.isnan(s4[i]) else False
+        # === ATR FILTER (enough volatility for 2.5 ATR stop) ===
+        atr_ratio = atr_14[i] / close[i]
+        has_volatility = atr_ratio >= 0.015  # Need ~1.5% daily ATR minimum
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === NEW LONG ENTRY (bounce off S3/S4) ===
-            # Conditions: near support level + RSI oversold + volume + choppy
-            if (near_s3 or near_s4) and rsi_val < 40 and vol_spike and is_choppy:
+            # === LONG ENTRY: %R oversold + near lower band + bullish trend ===
+            if williams_oversold and near_lower and trend_bull and has_volatility:
                 desired_signal = SIZE
             
-            # === NEW SHORT ENTRY (bounce off R3/R4) ===
-            # Conditions: near resistance level + RSI overbought + volume + choppy
-            if (near_r3 or near_r4) and rsi_val > 60 and vol_spike and is_choppy:
+            # === SHORT ENTRY: %R overbought + near upper band + bearish trend ===
+            if williams_overbought and near_upper and not trend_bull and has_volatility:
                 desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
-        stoploss_triggered = False
-        
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
-                stoploss_triggered = True
+                desired_signal = 0.0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
             trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
-                stoploss_triggered = True
+                desired_signal = 0.0
         
-        if stoploss_triggered:
-            desired_signal = 0.0
-        
-        # === EXIT: Mean reversion target or ATR profit ===
-        exit_triggered = False
-        
-        if in_position and position_side > 0:
-            # Long exit: RSI normalized or touched middle (R3)
-            if rsi_val > 55:
-                exit_triggered = True
-            # Or if RSI reached neutral zone (40-60)
-            if 40 <= rsi_val <= 60:
-                exit_triggered = True
-            # Or price reached R3 (mean reversion complete)
-            if not np.isnan(r3[i]) and close[i] >= r3[i]:
-                exit_triggered = True
-        
-        if in_position and position_side < 0:
-            # Short exit: RSI normalized
-            if rsi_val < 45:
-                exit_triggered = True
-            # Or if RSI reached neutral zone
-            if 40 <= rsi_val <= 60:
-                exit_triggered = True
-            # Or price reached S3
-            if not np.isnan(s3[i]) and close[i] <= s3[i]:
-                exit_triggered = True
-        
-        if exit_triggered:
-            desired_signal = 0.0
-        
-        # === UPDATE POSITION TRACKING ===
-        if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
-                in_position = True
-                position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
-                else:
-                    stop_price = entry_price + 2.5 * entry_atr
-            else:
-                # Same direction - maintain position
-                pass
-        else:
-            if in_position:
-                in_position = False
-                position_side = 0
-                entry_price = 0.0
-                entry_atr = 0.0
-                stop_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
-        
-        signals[i] = desired_signal
-    
-    return signals
+        # === TARGET CHECK (3R profit) ===
+        if in_position and target_price > 0:
+            if position_side > 0 and high[i] >= target_price:
+                # Take profit at 3R
+                desired_signal = SIZE / 2
