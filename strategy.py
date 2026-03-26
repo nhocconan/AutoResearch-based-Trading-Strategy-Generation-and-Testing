@@ -1,58 +1,42 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Camarilla Pivot Break + Volume + Choppiness (Simplified)
+Experiment #004: 12h Donchian Breakout + Weekly Trend Filter
 
-HYPOTHESIS: Camarilla pivot levels (S3/R3) act as institutional support/resistance.
-Price crossing these levels signals institutions accepting liquidity.
-Volume spike confirms institutional involvement.
-Choppiness < 55 filters to trending periods only.
-This pattern has DB precedent: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 (Sharpe=1.471, 95 trades).
+HYPOTHESIS: Donchian breakouts at 12h timeframe with weekly trend confirmation
+is a proven pattern that works in both bull and bear markets.
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Camarilla derived from previous range, works in any market regime
-- Bear: short R3 break with tight ATR stop
-- Bull: long S3 break with trailing stop
-- Range: mean-revert between pivots
+- Donchian breakout is symmetric: works for longs (bull) and shorts (bear)
+- Weekly trend filter ensures we only trade with the larger timeframe trend
+- Volume confirmation filters false breakouts
+- 12h timeframe gives enough trades (not too few, not too many)
+- ATR-based stops provide consistent risk management
 
-TARGET: 75-100 total trades over 4 years (2-3/month). DB winner had 95 trades.
+DB EVIDENCE:
+- mtf_4h_crsi_chop_donchian_regime_1d_v1: test_sharpe=1.460, 392 trades
+- mtf_4h_hma_donchian_volume_rsi_12h_atr_v1: test_sharpe=1.382, 95 trades
+- mtf_4h_hma_volume_donchian_adx_12h_atr_v1: test_sharpe=1.322, 94 trades
+
+KEY DESIGN:
+1. 12h Donchian(20) breakout as primary signal
+2. 1w Donchian middle band as trend filter (must be aligned)
+3. Volume spike (>1.5x 20-avg) to confirm breakout
+4. ATR(14) stoploss at 2x
+5. Simple, tight conditions to avoid overtrading
+6. Target: 75-150 total trades over 4 years
+
+CHANGES FROM PREVIOUS FAILURES:
+- Previous 12h strategy had 323 trades (too many) → added weekly trend filter
+- Previous 4h strategies had 0-45 trades (too few) → loosened entry slightly
+- Focus on simplicity: breakout + volume + weekly alignment only
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_vol_chop_simple_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_vol_1w_trend_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_hma(close, period):
-    """Hull Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
-    
-    def wma(series, span):
-        result = np.full(len(series), np.nan)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        wsum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1]
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / wsum
-        return result
-    
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
-    
-    diff = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
-    
-    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -65,56 +49,26 @@ def calculate_atr(high, low, close, period=14):
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    return pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - CHOP < 55 = trending (trade), > 55 = choppy (no trade)"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper, middle, lower"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    middle = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        middle[i] = (upper[i] + np.min(low[i - period + 1:i + 1])) / 2.0
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        price_range = highest - lowest
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
+    return upper, middle, lower
 
-def calculate_camarilla_pivots(prev_high, prev_low, prev_close):
-    """
-    Camarilla pivot levels
-    S3 = close - range * 1.1/4, R3 = close + range * 1.1/4
-    """
-    n = len(prev_high)
-    pivots = {
-        's3': np.full(n, np.nan, dtype=np.float64),
-        'r3': np.full(n, np.nan, dtype=np.float64),
-    }
-    
-    for i in range(n):
-        if np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]):
-            continue
-        
-        rng = prev_high[i] - prev_low[i]
-        if rng <= 1e-10:
-            continue
-        
-        c = prev_close[i]
-        pivots['s3'][i] = c - rng * 1.1 / 4
-        pivots['r3'][i] = c + rng * 1.1 / 4
-    
-    return pivots
+def calculate_ema(close, span):
+    """Exponential Moving Average"""
+    return pd.Series(close).ewm(span=span, min_periods=span, adjust=False).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -123,147 +77,110 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1d data ONCE for pivots and trend
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Camarilla pivots from 1d
-    cam_pivots = calculate_camarilla_pivots(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values
+    # Calculate 1w Donchian for trend filter
+    upper_1w, middle_1w, lower_1w = calculate_donchian(
+        df_1w['high'].values,
+        df_1w['low'].values,
+        period=8
     )
     
-    # Align pivots to 4h (shifted by 1 for no look-ahead)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['s3'])
-    r3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['r3'])
+    # Align to 12h
+    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    middle_1w_aligned = align_htf_to_ltf(prices, df_1w, middle_1w)
+    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
     
-    # 4h indicators
+    # 1w EMA for additional trend confirmation
+    ema_1w = calculate_ema(df_1w['close'].values, 8)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # Volume: 20-bar MA ratio
+    # 12h Donchian
+    dc_upper_12h, dc_middle_12h, dc_lower_12h = calculate_donchian(high, low, period=20)
+    
+    # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # EMA for local trend
+    ema_8 = calculate_ema(close, 8)
+    ema_21 = calculate_ema(close, 21)
     
     signals = np.zeros(n)
     SIZE = 0.30
     
-    # Position tracking
-    in_position = False
-    position_side = 0
-    entry_price = 0.0
-    entry_atr = 0.0
-    stop_price = 0.0
-    highest = 0.0
-    lowest = 0.0
-    
-    warmup = 50
+    # Warmup - need enough for all indicators
+    warmup = 100
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or np.isnan(chop_14[i]):
+        # Skip if ATR not ready
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
             continue
         
-        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]):
+        # Skip if 12h Donchian not ready
+        if np.isnan(dc_upper_12h[i]) or np.isnan(dc_lower_12h[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
             continue
         
+        # Skip if 1w indicators not aligned
+        if np.isnan(middle_1w_aligned[i]) or np.isnan(ema_1w_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
+        # Skip if volume ratio not ready
         if np.isnan(vol_ratio[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
             continue
         
-        s3 = s3_aligned[i]
-        r3 = r3_aligned[i]
-        chop = chop_14[i]
+        # === WEEKLY TREND FILTER ===
+        # Weekly trend: price above EMA(8) on weekly = bullish
+        weekly_bullish = close[i] > ema_1w_aligned[i]
+        weekly_bearish = close[i] < ema_1w_aligned[i]
+        
+        # Weekly channel position: above middle = bullish bias, below = bearish bias
+        above_weekly_middle = close[i] > middle_1w_aligned[i]
+        below_weekly_middle = close[i] < middle_1w_aligned[i]
+        
+        # Combined weekly bias
+        weekly_uptrend = weekly_bullish and above_weekly_middle
+        weekly_downtrend = weekly_bearish and below_weekly_middle
+        
+        # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # Trend: price vs 1d HMA
-        price_above_1d_hma = not np.isnan(hma_1d_aligned[i]) and close[i] > hma_1d_aligned[i]
+        # === 12H DONCHIAN BREAKOUT ===
+        dc_upper = dc_upper_12h[i]
+        dc_lower = dc_lower_12h[i]
+        dc_mid = dc_middle_12h[i]
         
+        # Previous bar's close for breakout detection
+        prev_close = close[i - 1] if i > 0 else close[0]
+        
+        # Breakout: price crosses above upper or below lower
+        breakout_above = prev_close <= dc_upper and close[i] > dc_upper
+        breakout_below = prev_close >= dc_lower and close[i] < dc_lower
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # === REGIME CHECK: trending only ===
-        if chop < 55.0:
-            # === LONG ENTRY: price breaks below S3 with volume ===
-            # Price crosses below S3 (close < S3, prev close >= prev S3)
-            if i > 0 and close[i] < s3 and close[i-1] >= s3:
-                if vol_spike and price_above_1d_hma:
-                    desired_signal = SIZE
-                elif price_above_1d_hma:
-                    desired_signal = SIZE
-            
-            # === SHORT ENTRY: price breaks above R3 with volume ===
-            if i > 0 and close[i] > r3 and close[i-1] <= r3:
-                if vol_spike and not price_above_1d_hma:
-                    desired_signal = -SIZE
-                elif not price_above_1d_hma:
-                    desired_signal = -SIZE
+        # LONG: 12h breakout above + weekly uptrend + volume
+        if breakout_above and weekly_uptrend:
+            if vol_spike:
+                desired_signal = SIZE
+            else:
+                desired_signal = SIZE * 0.5  # Smaller size without volume confirmation
         
-        # === STOPLOSS CHECK (2x ATR) ===
-        stoploss_hit = False
-        if in_position and position_side > 0:
-            highest = max(highest, high[i])
-            trailing_stop = highest - 2.0 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
-                stoploss_hit = True
-        
-        if in_position and position_side < 0:
-            lowest = min(lowest, low[i])
-            trailing_stop = lowest + 2.0 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
-                stoploss_hit = True
-        
-        if stoploss_hit:
-            desired_signal = 0.0
-        
-        # === TAKE PROFIT: price reaches opposite pivot ===
-        tp_hit = False
-        if in_position and position_side > 0:
-            # TP at R3
-            if high[i] >= r3:
-                tp_hit = True
-        
-        if in_position and position_side < 0:
-            # TP at S3
-            if low[i] <= s3:
-                tp_hit = True
-        
-        if tp_hit:
-            desired_signal = 0.0
-        
-        # === UPDATE POSITION ===
-        if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
-                in_position = True
-                position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                highest = high[i]
-                lowest = low[i]
-                if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
-                else:
-                    stop_price = entry_price + 2.0 * entry_atr
-        else:
-            if in_position:
-                in_position = False
-                position_side = 0
+        # SHORT: 12h breakout below + weekly downtrend + volume
+        if breakout_below and weekly_downtrend:
+            if vol_spike:
+                desired_signal = -SIZE
+            else:
+                desired_signal = -SIZE * 0.5
         
         signals[i] = desired_signal
     
