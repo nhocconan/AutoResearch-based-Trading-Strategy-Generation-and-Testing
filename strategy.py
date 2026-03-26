@@ -1,37 +1,138 @@
 #!/usr/bin/env python3
 """
-Experiment #009: 4h Camarilla S4/R4 Extreme + Volume + 1d Trend + ADX
+Experiment #010: 1d KAMA Adaptive Trend + RSI Extremes + Weekly Regime
 
-HYPOTHESIS: Only trade extreme Camarilla levels (S4/R4) where institutional orders cluster.
-These are rare events (~2-3 per month per symbol) that generate 75-150 trades over 4 years.
+HYPOTHESIS: KAMA (Kaufman Adaptive Moving Average) adapts to market noise,
+reducing whipsaws in choppy periods while capturing trends efficiently.
+RSI extremes identify overbought/oversold conditions for entry timing.
+Weekly HMA provides macro trend bias. Choppiness filter avoids range markets.
 
-WHY THIS WORKS IN BOTH BULL AND BEAR:
-- S4/R4 are derived from previous day's range, not trend direction
-- Bull market: long at S4 support with 1d HMA confirming uptrend
-- Bear market: short at R4 resistance with 1d HMA confirming downtrend
-- Volume spike (>2.0x) confirms institutional participation
-- ADX > 25 filters out choppy periods where pivots fail
-- 10-bar cooldown prevents re-entry whipsaw
+WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
+- Bull markets: KAMA turns up + RSI from oversold + price > weekly HMA → long
+- Bear markets: KAMA turns down + RSI from overbought + price < weekly HMA → short
+- Range markets: Choppiness filter keeps us out (CHOP > 61.8)
 
-TARGET: 75-150 total trades over 4 years (proven pattern from DB winner with 95 trades).
-DB reference: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 (Sharpe=1.471, 95tr)
+TARGET: 60-120 total trades over 4 years (15-30/year) for 1d timeframe.
+DB reference: mtf_1d_kama_rsi_chop_regime_1w_v1 (Sharpe=1.310, 74 trades)
+This version loosens RSI thresholds slightly to ensure >=50 trades minimum.
 
 KEY DESIGN:
-1. ONLY S4/R4 levels (not S3/R3) - these are extreme and rare
-2. Volume spike > 2.0x 20-avg (stricter than 1.5x)
-3. 1d HMA for trend bias (mandatory alignment)
-4. ADX > 25 for trending regime
-5. 10-bar cooldown after exit
+1. KAMA(10) direction change as primary trend signal
+2. RSI(14) extremes (25/75) for entry timing
+3. 1w HMA(21) for macro trend bias
+4. Choppiness < 58 for trending regime (slightly looser)
+5. ATR(14) stoploss at 2.5x
 6. Signal: 0.30 (discrete)
-7. ATR stoploss: 2.5x for wider stops on extreme levels
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_s4r4_vol_adx_1d_v1"
-timeframe = "4h"
+name = "mtf_1d_kama_rsi_chop_1w_v3"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_kama(close, er_period=10, fast_period=2, slow_period=30):
+    """
+    Kaufman Adaptive Moving Average
+    Adapts smoothing based on market efficiency ratio
+    """
+    n = len(close)
+    kama = np.full(n, np.nan, dtype=np.float64)
+    
+    if n < er_period + slow_period:
+        return kama
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.full(n, np.nan, dtype=np.float64)
+    for i in range(er_period, n):
+        if not np.isnan(close[i]) and not np.isnan(close[i - er_period]):
+            signal = abs(close[i] - close[i - er_period])
+            noise = np.sum(np.abs(np.diff(close[i - er_period:i + 1])))
+            if noise > 1e-10:
+                er[i] = signal / noise
+    
+    # Calculate smoothing constant
+    fast_sc = 2.0 / (fast_period + 1)
+    slow_sc = 2.0 / (slow_period + 1)
+    
+    # Initialize KAMA
+    kama[er_period] = close[er_period]
+    
+    for i in range(er_period + 1, n):
+        if np.isnan(er[i]):
+            continue
+        sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+        kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
+    
+    return kama
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close)
+    gain = np.zeros(n)
+    loss = np.zeros(n)
+    
+    gain[1:] = np.where(delta > 0, delta, 0)
+    loss[1:] = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if avg_loss[i] == 0:
+            rsi[i] = 100.0
+        else:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+    
+    return rsi
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index - measures market choppiness
+    CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -63,92 +164,6 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index"""
-    n = len(close)
-    if n < period * 2 + 1:
-        return np.full(n, np.nan)
-    
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    tr = np.zeros(n, dtype=np.float64)
-    
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i-1])
-        else:
-            plus_dm[i] = 0
-        
-        if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(0, low[i-1] - low[i])
-        else:
-            minus_dm[i] = 0
-    
-    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di_pct = np.zeros(n, dtype=np.float64)
-    minus_di_pct = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        if atr[i] > 1e-10:
-            plus_di_pct[i] = 100.0 * plus_di[i] / atr[i]
-            minus_di_pct[i] = 100.0 * minus_di[i] / atr[i]
-    
-    dx = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        di_sum = plus_di_pct[i] + minus_di_pct[i]
-        if di_sum > 1e-10:
-            dx[i] = 100.0 * abs(plus_di_pct[i] - minus_di_pct[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
-
-def calculate_camarilla_pivots(prev_high, prev_low, prev_close):
-    """
-    Camarilla pivot levels - ONLY compute S4 and R4 (extreme levels)
-    S4 = close - (high - low) * 1.1 / 2
-    R4 = close + (high - low) * 1.1 / 2
-    """
-    n = len(prev_high)
-    s4 = np.full(n, np.nan, dtype=np.float64)
-    r4 = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(n):
-        if np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]):
-            continue
-        
-        high_low_range = prev_high[i] - prev_low[i]
-        if high_low_range <= 1e-10:
-            continue
-        
-        close = prev_close[i]
-        s4[i] = close - high_low_range * 1.1 / 2
-        r4[i] = close + high_low_range * 1.1 / 2
-    
-    return s4, r4
-
-def calculate_ema(close, span):
-    """Exponential Moving Average"""
-    return pd.Series(close).ewm(span=span, min_periods=span, adjust=False).mean().values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -156,27 +171,18 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for trend bias
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate 1w HMA for trend
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
     # Calculate 1d indicators
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Calculate Camarilla S4/R4 from 1d
-    s4_1d, r4_1d = calculate_camarilla_pivots(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values
-    )
-    
-    # Align pivots to 4h
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    
-    # Calculate 4h indicators
+    kama_10 = calculate_kama(close, er_period=10, fast_period=2, slow_period=30)
+    rsi_14 = calculate_rsi(close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
     # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -194,12 +200,14 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Cooldown tracking (prevent re-entry whipsaw)
-    bars_since_exit = 100  # Start high to allow initial entries
-    COOLDOWN_BARS = 10
+    # Track KAMA direction
+    kama_prev = np.full(n, np.nan, dtype=np.float64)
+    for i in range(1, n):
+        if not np.isnan(kama_10[i]) and not np.isnan(kama_10[i-1]):
+            kama_prev[i] = kama_10[i-1]
     
     # Warmup
-    warmup = 60
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -210,59 +218,59 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(adx_14[i]):
+        if np.isnan(chop_14[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(s4_aligned[i]) or np.isnan(r4_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(kama_10[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(vol_ratio[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === REGIME CHECK ===
+        chop = chop_14[i]
+        is_trending = chop < 58.0  # Slightly looser to allow more trades
         
-        # === REGIME CHECK: ADX > 25 (trending only) ===
-        adx = adx_14[i]
-        is_trending = adx > 25.0
+        # === TREND BIAS (1w HMA) ===
+        price_above_1w_hma = close[i] > hma_1w_aligned[i]
         
-        # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
+        # === KAMA DIRECTION ===
+        kama_bullish = kama_10[i] > kama_prev[i] if not np.isnan(kama_prev[i]) else False
+        kama_bearish = kama_10[i] < kama_prev[i] if not np.isnan(kama_prev[i]) else False
         
-        # === VOLUME CONFIRMATION (> 2.0x average) ===
-        vol_spike = vol_ratio[i] > 2.0
+        # === RSI EXTREMES (looser thresholds for more trades) ===
+        rsi = rsi_14[i]
+        rsi_oversold = rsi < 35.0  # Looser than 25
+        rsi_overbought = rsi > 65.0  # Looser than 75
         
-        # === CAMARILLA S4/R4 LEVELS ===
-        s4 = s4_aligned[i]
-        r4 = r4_aligned[i]
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.3  # Slightly looser
         
-        # Check if price is AT or BELOW S4 (long zone) or AT or ABOVE R4 (short zone)
-        # Use 0.3 ATR tolerance for "at the level"
-        atr = atr_14[i]
-        at_s4 = (close[i] <= s4 + 0.3 * atr) and (close[i] >= s4 - 0.5 * atr)
-        at_r4 = (close[i] >= r4 - 0.3 * atr) and (close[i] <= r4 + 0.5 * atr)
-        
-        # === ENTRY LOGIC (STRICT: all conditions must align) ===
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: At S4 + bullish 1d trend + volume spike + trending regime + cooldown ok
-        if is_trending and price_above_1d_hma and vol_spike and at_s4 and bars_since_exit >= COOLDOWN_BARS:
-            desired_signal = SIZE
+        # LONG: KAMA turns up + RSI from oversold + bullish weekly trend
+        if is_trending and kama_bullish and rsi_oversold:
+            if price_above_1w_hma:
+                if vol_spike:
+                    desired_signal = SIZE
+                else:
+                    desired_signal = SIZE * 0.7  # Enter anyway, smaller size
         
-        # SHORT: At R4 + bearish 1d trend + volume spike + trending regime + cooldown ok
-        if is_trending and not price_above_1d_hma and vol_spike and at_r4 and bars_since_exit >= COOLDOWN_BARS:
-            desired_signal = -SIZE
+        # SHORT: KAMA turns down + RSI from overbought + bearish weekly trend
+        if is_trending and kama_bearish and rsi_overbought:
+            if not price_above_1w_hma:
+                if vol_spike:
+                    desired_signal = -SIZE
+                else:
+                    desired_signal = -SIZE * 0.7  # Enter anyway, smaller size
         
-        # === STOPLOSS CHECK (2.5x ATR for extreme levels) ===
+        # === STOPLOSS CHECK ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -282,19 +290,10 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT at opposite pivot ===
-        tp_triggered = False
-        if in_position and position_side > 0:
-            # TP at R4
-            if not np.isnan(r4) and high[i] >= r4:
-                tp_triggered = True
-        
-        if in_position and position_side < 0:
-            # TP at S4
-            if not np.isnan(s4) and low[i] <= s4:
-                tp_triggered = True
-        
-        if tp_triggered:
+        # === EXIT ON OPPOSITE SIGNAL ===
+        if in_position and position_side > 0 and desired_signal < 0:
+            desired_signal = 0.0
+        if in_position and position_side < 0 and desired_signal > 0:
             desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -310,10 +309,8 @@ def generate_signals(prices):
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
-                bars_since_exit = 0  # Reset cooldown on new entry
         else:
             if in_position:
-                # Exited position
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
@@ -321,9 +318,6 @@ def generate_signals(prices):
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
-                bars_since_exit = 0  # Start cooldown
-            else:
-                bars_since_exit += 1  # Increment cooldown if no position
         
         signals[i] = desired_signal
     
