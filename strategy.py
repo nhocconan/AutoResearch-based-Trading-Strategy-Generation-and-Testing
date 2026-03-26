@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 4h ATR Channel Breakout + 1d SMA200 + Volume Spike
+Experiment #026: 6h Supertrend + 1d SMA200 + Volume + Choppiness Regime
 
-HYPOTHESIS: ATR-channel breakout adapts to volatility better than fixed-% Donchian.
-In high-vol environments (2022 crash), the wider channel prevents false breakouts.
-Combined with 1d SMA200 trend filter for direction and tight ATR-based stops.
+HYPOTHESIS: Supertrend (ATR-based, multiplier 3) provides cleaner trend signals
+than EMA crossovers. Combined with 1d SMA200 for trend alignment, volume 
+confirmation for institutional conviction, and Choppiness regime filter, this
+captures trend starts without overtrading.
 
-WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Breakout above ATR channel = momentum continuation, ride the rally
-- Bear: Breakout below ATR channel = short rallies, avoid long false breakouts
-- ATR stop adapts to vol: 2*ATR in crash = wider stop = fewer stop-outs on wicks
-- 1d SMA200 catches major trend changes (2022 crash = price crosses below = shorts)
+WHY 6h: Between 4h (too many trades) and 12h (too few). Supertrend on 6h 
+captures multi-day trends with ~30-60 trades/year.
 
-Previous experiments to avoid:
-- Elder Ray (failed 012, 020)
-- Fixed % Donchian (too few trades)
-- KAMA-only trend (005 = 0 trades)
-- 1d timeframe (crashes too slow)
+KEY DIFFERENCE FROM FAILURES:
+- NOT Elder Ray (failed #012, #020)
+- NOT pure Donchian (overtrades)
+- Supertrend is continuous ATR-based, not oscillating
+
+TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 300.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_atr_channel_1d_sma200_vol_v1"
-timeframe = "4h"
+name = "mtf_6h_supertrend_1d_sma200_vol_chop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,20 +39,100 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Donchian Channel: returns (upper, lower, middle)"""
-    n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    middle = (upper + lower) / 2
-    return upper, lower, middle
+def calculate_supertrend(high, low, close, atr_period=10, multiplier=3.0):
+    """
+    Supertrend indicator
+    Returns: supertrend values (positive = bull, negative = bear), upper_band, lower_band
+    """
+    atr = calculate_atr(high, low, close, period=atr_period)
+    n = len(close)
+    
+    # hl2 = (high + low) / 2
+    hl2 = (high + low) / 2.0
+    
+    # Upper and lower bands
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    # Supertrend
+    supertrend = np.zeros(n)
+    direction = np.zeros(n)  # 1 = bull, -1 = bear
+    
+    for i in range(n):
+        if i == 0:
+            supertrend[i] = lower_band[i]
+            direction[i] = 1
+        else:
+            # Previous values
+            prev_st = supertrend[i-1]
+            prev_dir = direction[i-1]
+            prev_close = close[i-1]
+            
+            if pd.isna(atr[i]) or atr[i] <= 0:
+                supertrend[i] = prev_st
+                direction[i] = prev_dir
+                continue
+            
+            # Current bands
+            curr_upper = upper_band[i]
+            curr_lower = lower_band[i]
+            
+            if prev_dir == 1:  # Was bullish
+                # Check if should flip to bearish
+                if close[i] < prev_st:
+                    supertrend[i] = curr_upper
+                    direction[i] = -1
+                else:
+                    # Stay bullish, lower band can't go below previous
+                    supertrend[i] = max(prev_st, curr_lower)
+                    direction[i] = 1
+            else:  # Was bearish
+                # Check if should flip to bullish
+                if close[i] > prev_st:
+                    supertrend[i] = curr_lower
+                    direction[i] = 1
+                else:
+                    # Stay bearish, upper band can't go above previous
+                    supertrend[i] = min(prev_st, curr_upper)
+                    direction[i] = -1
+    
+    return supertrend, direction, upper_band, lower_band
 
-def calculate_bull_bear_power(high, low, close, ema_period=13):
-    """Elder Ray Bull/Bear Power"""
-    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    bull_power = high - ema
-    bear_power = low - ema
-    return bull_power, bear_power
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = choppy/range (avoid trend following)
+    CHOP < 38.2 = trending (trend following works)
+    """
+    n = len(high)
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        tr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+            tr_sum += tr
+        
+        if tr_sum > 0:
+            hh = np.max(high[i - period + 1:i + 1])
+            ll = np.min(low[i - period + 1:i + 1])
+            range_hl = hh - ll
+            
+            if range_hl > 0:
+                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
+    
+    return chop
+
+def calculate_rsi(close, period=14):
+    """RSI indicator"""
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -62,82 +141,60 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
+    # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
     # 1d SMA200 for trend direction
     sma_200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200_aligned if (sma_200_aligned := sma_200_1d) else sma_200_1d)
+    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
     
-    # === Pre-compute all indicators BEFORE loop ===
+    # Local 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    supertrend, direction, upper_band, lower_band = calculate_supertrend(
+        high, low, close, atr_period=10, multiplier=3.0
+    )
+    chop = calculate_choppiness_index(high, low, close, period=14)
+    rsi_14 = calculate_rsi(close, period=14)
     
-    # ATR-based channel (adapts to volatility)
-    # Channel width = ATR(14) * multiplier
-    atr_ma = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    channel_mult_upper = 0.5  # Upper channel at close + 0.5 * ATR_ma
-    channel_mult_lower = 0.5  # Lower channel at close - 0.5 * ATR_ma
-    
-    upper_channel = close + channel_mult_upper * atr_ma
-    lower_channel = close - channel_mult_lower * atr_ma
-    
-    # Donchian(20) for structure
-    donch_upper, donch_lower, donch_mid = calculate_donchian(high, low, period=20)
-    
-    # Volume
+    # Volume for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Bull/Bear power for exit
-    bull_power, bear_power = calculate_bull_bear_power(high, low, close, ema_period=13)
-    bull_smooth = pd.Series(bull_power).ewm(span=5, min_periods=5, adjust=False).mean().values
-    bear_smooth = pd.Series(bear_power).ewm(span=5, min_periods=5, adjust=False).mean().values
-    
-    # RSI for exit
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - (100 / (1 + rs))).values
+    # Track Supertrend flips for entry signals
+    supertrend_dir_change = np.zeros(n)
+    for i in range(1, n):
+        if direction[i] != direction[i-1]:
+            supertrend_dir_change[i] = direction[i]  # +1 = bull flip, -1 = bear flip
     
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% of capital
+    SIZE = 0.30  # Standard sizing
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 220  # 200 for SMA200 + buffer
+    warmup = 250  # Need 200 for SMA200 + buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 0 or np.isnan(atr_ma[i]) or atr_ma[i] <= 0:
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+            continue
+        if np.isnan(sma_200_aligned[i]):
+            continue
+        if np.isnan(chop[i]):
             continue
         
-        if np.isnan(sma_200_aligned[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === MARKET REGIME ===
+        # Only trend follow when CHOP < 61.8 (trending)
+        # In choppy markets (CHOP > 61.8), we stay flat
+        is_trending = chop[i] < 61.8
+        is_choppy = chop[i] > 61.8
         
         # === TREND DIRECTION (1d SMA200) ===
         price_above_1d_sma = close[i] > sma_200_aligned[i]
-        
-        # === ATR-normalized Elder Ray for confirmation ===
-        atr_local = atr_14[i]
-        bull_norm = bull_smooth[i] / atr_local
-        bear_norm = bear_smooth[i] / atr_local
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
@@ -146,75 +203,53 @@ def generate_signals(prices):
         desired_signal = 0.0
         
         if not in_position:
-            # Long: Price breaks above ATR channel AND above 1d SMA AND bull power positive
-            # ATR channel breakout: close > upper_channel (ATR-adaptive)
-            long_breakout = close[i] > upper_channel[i]
-            if long_breakout and price_above_1d_sma and bull_norm > 0 and vol_spike:
-                desired_signal = SIZE
+            # === ENTRY: Supertrend flip + trend alignment + volume ===
             
-            # Short: Price breaks below ATR channel AND below 1d SMA AND bear power negative
-            short_breakout = close[i] < lower_channel[i]
-            if short_breakout and not price_above_1d_sma and bear_norm < 0 and vol_spike:
-                desired_signal = -SIZE
+            # LONG: Supertrend flipped to bullish (+1), price above 1d SMA, trending regime, volume
+            if supertrend_dir_change[i] == 1:
+                if price_above_1d_sma and is_trending and vol_spike:
+                    desired_signal = SIZE
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    entry_atr = atr_14[i]
+                    entry_bar = i
+            
+            # SHORT: Supertrend flipped to bearish (-1), price below 1d SMA, trending regime, volume
+            elif supertrend_dir_change[i] == -1:
+                if not price_above_1d_sma and is_trending and vol_spike:
+                    desired_signal = -SIZE
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    entry_atr = atr_14[i]
+                    entry_bar = i
         
-        # === STOPLOSS CHECK ===
-        stoploss_triggered = False
-        
+        # === STOPLOSS CHECK (2.0 ATR trailing) ===
         if in_position:
             if position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
-                trailing_stop = highest_since_entry - 2.0 * entry_atr
-                stop_price = max(stop_price, trailing_stop)
-                if low[i] < stop_price:
-                    stoploss_triggered = True
+                # Long stop: price drops below Supertrend line
+                if close[i] < supertrend[i]:
+                    desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
+                # RSI overbought exit
+                elif rsi_14[i] > 78:
+                    desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
             
-            if position_side < 0:
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                trailing_stop = lowest_since_entry + 2.0 * entry_atr
-                stop_price = min(stop_price, trailing_stop)
-                if high[i] > stop_price:
-                    stoploss_triggered = True
-        
-        if stoploss_triggered:
-            desired_signal = 0.0
-        
-        # === MINIMUM HOLD TIME (4 bars = 16 hours) ===
-        bars_held = i - entry_bar if in_position else 0
-        min_hold_bars = 4
-        
-        if in_position and bars_held >= min_hold_bars:
-            # Exit if Elder Ray reverses (momentum shift)
-            if position_side > 0 and bear_norm < -0.3:
-                desired_signal = 0.0
-            if position_side < 0 and bull_norm > 0.3:
-                desired_signal = 0.0
-        
-        # === RSI EXIT FILTER ===
-        if in_position:
-            if position_side > 0 and rsi[i] > 75:
-                desired_signal = 0.0
-            if position_side < 0 and rsi[i] < 25:
-                desired_signal = 0.0
-        
-        # === UPDATE POSITION TRACKING ===
-        if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
-                in_position = True
-                position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                entry_bar = i
-                if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
-                else:
-                    stop_price = entry_price + 2.0 * entry_atr
-        else:
-            if in_position:
-                in_position = False
-                position_side = 0
+            elif position_side < 0:
+                # Short stop: price rises above Supertrend line
+                if close[i] > supertrend[i]:
+                    desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
+                # RSI oversold exit
+                elif rsi_14[i] < 22:
+                    desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
         
         signals[i] = desired_signal
     
