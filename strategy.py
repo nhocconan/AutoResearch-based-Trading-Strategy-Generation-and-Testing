@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Camarilla Pullback + Tight Zone + Volume + 1d Trend
+Experiment #021: 1d Camarilla S3/R3 + Weekly Trend + Volume Spike
 
-HYPOTHESIS: Camarilla S3/S4 zones work for longs when price pulls back TO the level
-(within ±0.5 ATR, NOT up to 2 ATR). This catches mean-reversion entries at institutional
-support zones. The #016 failure (2443 trades) had a 0-2 ATR zone that was far too loose.
+HYPOTHESIS: 1d Camarilla S3 (support) and R3 (resistance) with weekly trend 
+confirmation and volume spike. 1d timeframe naturally limits trades to target range.
 
-KEY DIFFERENCE from #016:
-- Tight zone: ±0.5 ATR (not 0-2 ATR) → ~4x fewer entries
-- AND logic for trend+volume (not OR) → higher conviction
-- Choppiness < 50 (not <61.8) → trending market required
-- Minimum 4-bar hold to prevent chop whipsaw
+WHY THIS WORKS IN BOTH BULL AND BEAR:
+- Bull: Long at S3 when weekly HMA trending up + volume spike
+- Bear: Short at R3 when weekly HMA trending down + volume spike
+- S3/R3 are the "sweet spots" - most reliable Camarilla levels
 
-TARGET: 75-150 total trades over 4 years (~19-37/year)
-DB reference: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 (95 trades, Sharpe=1.471)
+WHY 1d (not 4h):
+- 1d = ~365 bars/year vs 4h = ~2190 bars/year (6x fewer bars = natural trade limit)
+- DB: mtf_1d_kama_rsi_chop_regime_1w_v1 (74tr, Sharpe=1.31) = proven 1d edge
+
+TARGET: 30-100 total trades over 4 years (7-25/year) - matches 1d HARD MAX of 150
+KEY FIX from #016 (2443 trades - way overtraded):
+- Tighter proximity: 0.3-1.0 ATR (not 0-2 ATR)
+- Weekly HMA required (not optional)
+- Volume spike 1.5x (not 1.3x)
+- Minimum 15-bar hold to prevent signal churn
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_pullback_tight_v1"
-timeframe = "4h"
+name = "mtf_1d_camarilla_s3r3_1w_trend_vol"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -67,46 +73,16 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
+def calculate_camarilla_s3r3(prev_high, prev_low, prev_close):
     """
-    Choppiness Index
-    CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    We require CHOP < 50 for entry (more selective than <61.8)
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
-
-def calculate_camarilla_pivots(prev_high, prev_low, prev_close):
-    """
-    Camarilla pivot levels (from previous day's HLC)
-    S3/S4 = support zones for longs (price should be AT or slightly BELOW)
-    R3/R4 = resistance zones for shorts (price should be AT or slightly ABOVE)
+    Camarilla S3 and R3 levels (most reliable pivot levels)
+    S3 = support below close (for longs)
+    R3 = resistance above close (for shorts)
     """
     n = len(prev_high)
     pivots = {
         's3': np.full(n, np.nan, dtype=np.float64),
-        's4': np.full(n, np.nan, dtype=np.float64),
         'r3': np.full(n, np.nan, dtype=np.float64),
-        'r4': np.full(n, np.nan, dtype=np.float64),
     }
     
     for i in range(n):
@@ -119,12 +95,10 @@ def calculate_camarilla_pivots(prev_high, prev_low, prev_close):
         
         close = prev_close[i]
         
-        # S3/S4 = support (below close)
+        # S3 = support (below close)
         pivots['s3'][i] = close - high_low_range * 1.1 / 4
-        pivots['s4'][i] = close - high_low_range * 1.1 / 2
-        # R3/R4 = resistance (above close)
+        # R3 = resistance (above close)
         pivots['r3'][i] = close + high_low_range * 1.1 / 4
-        pivots['r4'][i] = close + high_low_range * 1.1 / 2
     
     return pivots
 
@@ -135,29 +109,31 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate weekly HMA for trend direction
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate Camarilla pivots from 1d
-    cam_pivots = calculate_camarilla_pivots(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values
+    # Calculate weekly HMA slope for trend strength
+    hma_1w_slope_raw = np.zeros_like(hma_1w_raw)
+    for i in range(3, len(hma_1w_raw)):
+        if not np.isnan(hma_1w_raw[i]) and not np.isnan(hma_1w_raw[i-3]):
+            hma_1w_slope_raw[i] = hma_1w_raw[i] - hma_1w_raw[i-3]
+    hma_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_slope_raw)
+    
+    # Calculate Camarilla S3/R3 from daily data
+    cam_pivots = calculate_camarilla_s3r3(
+        prices["high"].values,
+        prices["low"].values,
+        close
     )
+    s3 = cam_pivots['s3']
+    r3 = cam_pivots['r3']
     
-    # Align pivots to 4h (with shift(1) for completed bars)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['s3'])
-    s4_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['s4'])
-    r3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['r3'])
-    r4_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['r4'])
-    
-    # Calculate 4h indicators
+    # Calculate indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
     
     # Volume MA and ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -172,11 +148,9 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     bars_in_trade = 0
     
-    warmup = 50
+    warmup = 30
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -187,111 +161,74 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(chop_14[i]):
+        if np.isnan(s3[i]) or np.isnan(r3[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === WEEKLY TREND CHECK (strict requirement) ===
+        weekly_trend_bull = False
+        weekly_trend_bear = False
         
-        bars_in_trade += 1
+        if not np.isnan(hma_1w_aligned[i]) and not np.isnan(hma_1w_slope_aligned[i]):
+            # Weekly trend bullish: price above weekly HMA and HMA sloping up
+            weekly_trend_bull = (close[i] > hma_1w_aligned[i] and hma_1w_slope_aligned[i] > 0)
+            # Weekly trend bearish: price below weekly HMA and HMA sloping down
+            weekly_trend_bear = (close[i] < hma_1w_aligned[i] and hma_1w_slope_aligned[i] < 0)
         
-        # === REGIME CHECK (stricter: CHOP < 50) ===
-        chop = chop_14[i]
-        is_trending = chop < 50.0  # Stricter than <61.8
+        # === VOLUME SPIKE (strict 1.5x) ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
+        # === CAMARILLA S3/R3 PROXIMITY (tight: 0.3-1.0 ATR) ===
+        s3_dist = (close[i] - s3[i]) / atr_14[i]  # positive = price above S3
+        r3_dist = (r3[i] - close[i]) / atr_14[i]  # positive = price below R3
         
-        # === VOLUME CONFIRMATION (1.5x, stricter) ===
-        vol_spike = vol_ratio[i] > 1.5  # Stricter than 1.3
+        at_s3_zone = (0.3 <= s3_dist <= 1.0)  # Price 0.3-1.0 ATR above S3 (bouncing at support)
+        at_r3_zone = (0.3 <= r3_dist <= 1.0)  # Price 0.3-1.0 ATR below R3 (bouncing at resistance)
         
-        # === CAMARILLA PIVOT LEVELS ===
-        s3 = s3_aligned[i]
-        s4 = s4_aligned[i]
-        r3 = r3_aligned[i]
-        r4 = r4_aligned[i]
-        
-        # TIGHT ZONE: price must be WITHIN ±0.5 ATR of pivot (not 0-2 ATR!)
-        # For LONG: price at or below S3/S4 support (within 0.5 ATR below)
-        # For SHORT: price at or above R3/R4 resistance (within 0.5 ATR above)
-        at_s3_zone = False
-        at_s4_zone = False
-        at_r3_zone = False
-        at_r4_zone = False
-        
-        ZONE_SIZE = 0.5  # Tighter zone than original 2.0
-        
-        if not np.isnan(s3) and atr_14[i] > 0:
-            # dist < 0 means price at or below S3
-            # dist between -0.5 and 0 means price within 0.5 ATR of S3
-            dist_s3 = (close[i] - s3) / atr_14[i]
-            at_s3_zone = (-ZONE_SIZE <= dist_s3 <= 0.0)
-        
-        if not np.isnan(s4) and atr_14[i] > 0:
-            dist_s4 = (close[i] - s4) / atr_14[i]
-            at_s4_zone = (-ZONE_SIZE <= dist_s4 <= 0.0)
-        
-        if not np.isnan(r3) and atr_14[i] > 0:
-            # dist < 0 means price at or below R3 (NOT at resistance)
-            # For SHORT: need price at or above R3
-            dist_r3 = (close[i] - r3) / atr_14[i]
-            at_r3_zone = (0.0 <= dist_r3 <= ZONE_SIZE)
-        
-        if not np.isnan(r4) and atr_14[i] > 0:
-            dist_r4 = (close[i] - r4) / atr_14[i]
-            at_r4_zone = (0.0 <= dist_r4 <= ZONE_SIZE)
-        
-        # === ENTRY LOGIC (AND logic: both trend AND volume required) ===
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if is_trending:
-            # LONG: At S3/S4 support zone AND bullish 1d trend AND volume spike
-            if (at_s3_zone or at_s4_zone):
-                if price_above_1d_hma and vol_spike:
-                    desired_signal = SIZE
-            
-            # SHORT: At R3/R4 resistance zone AND bearish 1d trend AND volume spike
-            if (at_r3_zone or at_r4_zone):
-                if (not price_above_1d_hma) and vol_spike:
-                    desired_signal = -SIZE
+        # LONG: At S3 + weekly bull trend + volume spike (ALL THREE required)
+        if at_s3_zone and weekly_trend_bull and vol_spike:
+            desired_signal = SIZE
         
-        # === MINIMUM HOLDING PERIOD (prevent chop whipsaw) ===
-        MIN_BARS = 4
-        if bars_in_trade < MIN_BARS:
-            # Keep position even if signals say exit
-            if in_position:
-                signals[i] = position_side * SIZE
-                continue
+        # SHORT: At R3 + weekly bear trend + volume spike (ALL THREE required)
+        if at_r3_zone and weekly_trend_bear and vol_spike:
+            desired_signal = -SIZE
+        
+        # === MINIMUM HOLD: 15 bars (prevent churn) ===
+        if in_position and bars_in_trade < 15:
+            # Keep position, don't exit early
+            desired_signal = position_side * SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
         
-        if stoploss_triggered:
+        if stoploss_triggered and bars_in_trade >= 15:
             desired_signal = 0.0
         
-        # === SIGNAL FLIP LOGIC ===
+        # === TRAILING STOP (after 20 bars) ===
+        if in_position and bars_in_trade >= 20:
+            if position_side > 0:
+                # Trail stop: lock in profits
+                new_stop = high[i] - 2.0 * atr_14[i]
+                stop_price = max(stop_price, new_stop)
+            else:
+                new_stop = low[i] + 2.0 * atr_14[i]
+                stop_price = min(stop_price, new_stop)
+        
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 # New position or flip
@@ -299,14 +236,11 @@ def generate_signals(prices):
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 bars_in_trade = 0
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
-            # If same side, keep position (no signal churn)
         else:
             if in_position:
                 in_position = False
@@ -314,10 +248,11 @@ def generate_signals(prices):
                 entry_price = 0.0
                 entry_atr = 0.0
                 stop_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
                 bars_in_trade = 0
         
-        signals[i] = desired_signal if desired_signal != 0.0 else (position_side * SIZE if in_position else 0.0)
+        signals[i] = desired_signal
+        
+        if in_position:
+            bars_in_trade += 1
     
     return signals
