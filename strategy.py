@@ -1,87 +1,65 @@
 #!/usr/bin/env python3
 """
-Experiment #009: 4h Donchian Breakout + Volume + 1d HMA Trend
+Experiment #035: 6h Weekly Donchian Breakout + ADX + Volume
 
-HYPOTHESIS: Simple breakout strategy that works in both bull and bear.
-- Bull markets: price breaks above Donchian resistance → continue higher
-- Bear markets: rallies to upper band fail → short the failure
-- Volume spike confirms institutional involvement
-- 1d HMA filters entries to trend direction
-- ATR stoploss protects against volatility
+HYPOTHESIS: Weekly Donchian breakout captures major institutional trend changes.
+Weekly ADX (not choppiness) confirms momentum. Weekly volume confirms smart money.
+Weekly RSI avoids entries at extended levels.
 
-WHY THIS SHOULD WORK:
-- Donchian breakouts are a proven price action pattern
-- In bull: momentum continues after resistance break
-- In bear: rallies fail at resistance = high-probability shorts
-- Volume filter eliminates false breakouts
-- ATR stop prevents blowup on volatility spikes
+WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
+- Weekly Donchian is pure price structure — symmetric for bull/bear
+- Bull: long breakouts above weekly high, ride with trailing ATR stop
+- Bear: short breakouts below weekly low ( rallies to resistance)
+- 6h captures enough for 50-150 trades/year without overtrading
 
-TARGET TRADES: 75-150 total over 4 years (proven range from DB)
-DB REFERENCE: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (Sharpe 1.38)
+KEY DIFFERENCES FROM FAILED ATTEMPTS:
+- NOT Camarilla (failed 4+ times with overtrading/neg Sharpe)
+- NOT Choppiness (caused 0 trades in multiple attempts)
+- Weekly-only structure for signal (not mixed HTF/LTF)
+- ADX instead of choppiness for regime (more reliable)
 
-KEY DESIGN:
-1. 4h Donchian(20) upper/lower as breakout zones
-2. Volume > 1.5x 20-bar MA for confirmation
-3. 1d HMA(21) rising/falling for trend filter
-4. ATR(14) stoploss at 2.5x
-5. Signal: 0.30 (discrete)
+TARGET: 75-120 total trades over 4 years = 19-30/year.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_vol_hma_simple_v1"
-timeframe = "4h"
+name = "mtf_6h_weekly_donchian_adx_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average - precompute once"""
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX using proper Wilder smoothing"""
     n = len(close)
-    if n < period:
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        hl = high[i] - low[i]
+        hc = abs(high[i] - close[i-1])
+        lc = abs(low[i] - close[i-1])
+        tr[i] = max(hl, hc, lc)
     
-    # Weights for WMA
-    weights = np.arange(1, half + 1, dtype=np.float64)
-    half_weight_sum = np.sum(weights)
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
     
-    full_weights = np.arange(1, period + 1, dtype=np.float64)
-    full_weight_sum = np.sum(full_weights)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1) * 100
+    minus_di = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1) * 100
     
-    sqrt_weights = np.arange(1, sqrt_n + 1, dtype=np.float64)
-    sqrt_weight_sum = np.sum(sqrt_weights)
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    result = np.full(n, np.nan, dtype=np.float64)
-    wma_half = np.full(n, np.nan, dtype=np.float64)
-    wma_full = np.full(n, np.nan, dtype=np.float64)
-    
-    # Half WMA
-    for i in range(half - 1, n):
-        window = close[i - half + 1:i + 1]
-        if not np.any(np.isnan(window)):
-            wma_half[i] = np.sum(window * weights) / half_weight_sum
-    
-    # Full WMA
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        if not np.any(np.isnan(window)):
-            wma_full[i] = np.sum(window * weights) / full_weight_sum
-    
-    # Diff
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
-    
-    # HMA of diff
-    for i in range(sqrt_n - 1, n):
-        window = diff[i - sqrt_n + 1:i + 1]
-        if not np.any(np.isnan(window)):
-            result[i] = np.sum(window * sqrt_weights) / sqrt_weight_sum
-    
-    return result
+    return adx
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -94,8 +72,29 @@ def calculate_atr(high, low, close, period=14):
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+    return pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+
+def calculate_rsi(close, period=14):
+    """RSI indicator"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi
+
+def calculate_ema(close, span):
+    """Exponential Moving Average"""
+    return pd.Series(close).ewm(span=span, min_periods=span, adjust=False).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -104,137 +103,212 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # ============================================================
-    # STEP 1: Load HTF data ONCE before loop
-    # ============================================================
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d HMA(21) for trend - aligned to 4h
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Weekly indicators (calculated on weekly data)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_volume = df_1w['volume'].values
     
-    # ============================================================
-    # STEP 2: Pre-compute all 4h indicators (vectorized)
-    # ============================================================
+    # Weekly Donchian (20 bars = ~5 trading weeks)
+    donchian_period = 20
+    weekly_donch_upper = np.full(len(weekly_close), np.nan, dtype=np.float64)
+    weekly_donch_lower = np.full(len(weekly_close), np.nan, dtype=np.float64)
+    for i in range(donchian_period - 1, len(weekly_close)):
+        weekly_donch_upper[i] = np.max(weekly_high[i - donchian_period + 1:i + 1])
+        weekly_donch_lower[i] = np.min(weekly_low[i - donchian_period + 1:i + 1])
     
-    # Donchian Channel (20 periods = 80 hours = 5 trading days)
-    donchian_upper = pd.Series(close).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(close).rolling(window=20, min_periods=20).min().values
+    # Weekly ADX
+    weekly_adx = calculate_adx(weekly_high, weekly_low, weekly_close, period=14)
     
-    # ATR for stoploss
+    # Weekly RSI
+    weekly_rsi = calculate_rsi(weekly_close, period=14)
+    
+    # Weekly EMA for trend
+    weekly_ema_fast = calculate_ema(weekly_close, 8)
+    weekly_ema_slow = calculate_ema(weekly_close, 21)
+    
+    # Weekly volume MA
+    vol_ma_period = 20
+    weekly_vol_ma = np.full(len(weekly_volume), np.nan, dtype=np.float64)
+    for i in range(vol_ma_period - 1, len(weekly_volume)):
+        weekly_vol_ma[i] = np.mean(weekly_volume[i - vol_ma_period + 1:i + 1])
+    weekly_vol_ratio = weekly_volume / np.where(weekly_vol_ma > 0, weekly_vol_ma, 1)
+    
+    # Align all weekly indicators to 6h
+    donch_upper_aligned = align_htf_to_ltf(prices, df_1w, weekly_donch_upper)
+    donch_lower_aligned = align_htf_to_ltf(prices, df_1w, weekly_donch_lower)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, weekly_adx)
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, weekly_rsi)
+    ema_fast_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_fast)
+    ema_slow_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_slow)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1w, weekly_vol_ratio)
+    
+    # 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    ema_8 = calculate_ema(close, 8)
+    ema_21 = calculate_ema(close, 21)
     
-    # Volume ratio
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    # 6h volume for confirmation
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_6h = volume / np.where(vol_ma_6h > 0, vol_ma_6h, 1)
     
-    # ============================================================
-    # STEP 3: Signal generation loop
-    # ============================================================
     signals = np.zeros(n)
     SIZE = 0.30
     
     # Position tracking
-    position_side = 0      # 1=long, -1=short, 0=flat
+    in_position = False
+    position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
+    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 50  # Need at least 20 bars for Donchian
+    warmup = 80
     
     for i in range(warmup, n):
-        # ============================================================
-        # SANITY CHECKS: skip if indicators not ready
-        # ============================================================
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            continue
+        # Check indicators ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 0:
-            continue
-        if np.isnan(vol_ratio[i]):
-            continue
-        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        # ============================================================
-        # STOPLOSS CHECK (check before new entries)
-        # ============================================================
-        if position_side != 0:
-            if position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.5 * entry_atr
-                if low[i] <= stop_price:
-                    position_side = 0
-                    entry_price = 0.0
-                    entry_atr = 0.0
-                    highest_since_entry = 0.0
-                    lowest_since_entry = 0.0
-                    continue
-            
-            elif position_side < 0:
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.5 * entry_atr
-                if high[i] >= stop_price:
-                    position_side = 0
-                    entry_price = 0.0
-                    entry_atr = 0.0
-                    highest_since_entry = 0.0
-                    lowest_since_entry = 0.0
-                    continue
+        # Skip if weekly data not ready
+        donch_upper = donch_upper_aligned[i]
+        donch_lower = donch_lower_aligned[i]
+        adx_val = adx_aligned[i]
+        rsi_val = rsi_aligned[i]
+        vol_ratio_w = vol_ratio_aligned[i]
+        vol_ratio_6 = vol_ratio_6h[i]
+        ema_fast = ema_fast_aligned[i]
+        ema_slow = ema_slow_aligned[i]
         
-        # ============================================================
-        # ENTRY CONDITIONS
-        # ============================================================
+        if np.isnan(donch_upper) or np.isnan(donch_lower):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(adx_val) or np.isnan(rsi_val):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(vol_ratio_w) or np.isnan(vol_ratio_6):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # Weekly trend (EMA alignment)
+        weekly_bullish = ema_fast > ema_slow if not (np.isnan(ema_fast) or np.isnan(ema_slow)) else True
+        weekly_bearish = ema_fast < ema_slow if not (np.isnan(ema_fast) or np.isnan(ema_slow)) else False
+        
+        # 6h EMA for entry timing
+        ema_bullish_6h = ema_8[i] > ema_21[i] if not (np.isnan(ema_8[i]) or np.isnan(ema_21[i])) else True
+        ema_bearish_6h = ema_8[i] < ema_21[i] if not (np.isnan(ema_8[i]) or np.isnan(ema_21[i])) else False
+        
+        # ADX trend confirmation (must be trending, not ranging)
+        is_trending = adx_val > 22.0
+        
+        # RSI not extended (avoid buying tops, shorting bottoms)
+        rsi_not_high = rsi_val < 72.0
+        rsi_not_low = rsi_val > 28.0
+        
+        # Volume confirmation (spike on weekly OR 6h)
+        vol_spike_w = vol_ratio_w > 1.4
+        vol_spike_6 = vol_ratio_6 > 1.3
+        
+        # Weekly Donchian breakout signals
+        price_above_donch = close[i] > donch_upper
+        price_below_donch = close[i] < donch_lower
+        
+        # Distance to breakout level (in ATR units)
+        dist_to_upper = (donch_upper - close[i]) / atr_14[i] if atr_14[i] > 0 else 999
+        dist_to_lower = (close[i] - donch_lower) / atr_14[i] if atr_14[i] > 0 else 999
+        
         desired_signal = 0.0
         
-        # 1d HMA trend (need previous value for direction)
-        prev_hma = hma_1d_aligned[i-1] if i > warmup else hma_1d_aligned[i]
-        hma_rising = hma_1d_aligned[i] > prev_hma if not np.isnan(prev_hma) else True
-        hma_falling = hma_1d_aligned[i] < prev_hma if not np.isnan(prev_hma) else False
+        # === ENTRY LOGIC ===
+        # LONG: Weekly breakout above, bullish EMA, ADX trending, RSI not extended
+        if not in_position or position_side <= 0:
+            if price_above_donch:
+                if weekly_bullish and is_trending and rsi_not_high:
+                    if vol_spike_w or vol_spike_6:
+                        desired_signal = SIZE
+                    elif ema_bullish_6h:
+                        desired_signal = SIZE
         
-        # Volume confirmation (>1.5x average)
-        vol_confirm = vol_ratio[i] > 1.5
+        # SHORT: Weekly breakdown below, bearish EMA, ADX trending, RSI not extended
+        if not in_position or position_side >= 0:
+            if price_below_donch:
+                if weekly_bearish and is_trending and rsi_not_low:
+                    if vol_spike_w or vol_spike_6:
+                        desired_signal = -SIZE
+                    elif ema_bearish_6h:
+                        desired_signal = -SIZE
         
-        # Price position relative to Donchian
-        price_above_upper = close[i] > donchian_upper[i]
-        price_below_lower = close[i] < donchian_lower[i]
+        # === STOPLOSS CHECK ===
+        stoploss_triggered = False
         
-        # ============================================================
-        # LONG ENTRY: Breakout above + rising trend + volume
-        # ============================================================
-        if position_side == 0:
-            if price_above_upper and hma_rising and vol_confirm:
-                desired_signal = SIZE
-            elif price_below_lower and hma_falling and vol_confirm:
-                desired_signal = -SIZE
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                stoploss_triggered = True
         
-        # ============================================================
-        # TAKE PROFIT at opposite band
-        # ============================================================
-        if position_side > 0:
-            # TP when price hits lower band (mean reversion)
-            if low[i] <= donchian_lower[i]:
-                position_side = 0
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === REVERSAL: Exit and flip ===
+        # If we have a signal in opposite direction while in position
+        if in_position:
+            if position_side > 0 and desired_signal < 0:
+                # Stopped out or reversal signal
+                desired_signal = 0.0  # Force flat first
+            elif position_side < 0 and desired_signal > 0:
                 desired_signal = 0.0
         
-        if position_side < 0:
-            # TP when price hits upper band
-            if high[i] >= donchian_upper[i]:
-                position_side = 0
-                desired_signal = 0.0
-        
-        # ============================================================
-        # EXECUTE TRADE
-        # ============================================================
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
-            new_side = int(np.sign(desired_signal))
-            if new_side != position_side:
-                position_side = new_side
+            if not in_position or np.sign(desired_signal) != position_side:
+                in_position = True
+                position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
+                if position_side > 0:
+                    stop_price = entry_price - 2.5 * entry_atr
+                else:
+                    stop_price = entry_price + 2.5 * entry_atr
+        else:
+            if in_position:
+                in_position = False
+                position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
-        signals[i] = desired_signal if position_side != 0 else 0.0
+        signals[i] = desired_signal
     
     return signals
