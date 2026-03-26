@@ -1,60 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #006: 4h EMA Crossover + HMA Trend + Volume Confirmation
+Experiment #007: 6h ATR Volatility Breakout + Bollinger Mean Reversion
 
-Hypothesis: Simple EMA(10/30) crossover on 4h with 1d HMA(21) trend bias and volume
-confirmation provides the right balance between trade frequency and signal quality.
-EMA crossovers are proven momentum indicators; HMA(21) on 1d provides reliable
-trend direction without overcomplicating. Volume confirms institutional participation.
-ATR stop prevents blowups in volatile markets like 2022.
+Hypothesis: Pure mean reversion fails because Bollinger touches often CONTINUE 
+trending. Solution: require BOTH volatility expansion (ATR ratio > 1.0) AND 
+volume confirmation. This ensures "squeeze has resolveD" before entry.
+
+Key design:
+1. ATR(14) / ATR_SMA(20) > 1.0: Confirms volatility expansion = squeeze resolveD
+2. Bollinger(20,2) lower touch: Mean reversion entry point
+3. Volume > Volume_SMA(20): Confirms institutional interest
+4. 1d SMA(20): Trend bias filter (only long above, short below)
+5. RSI(14) confirmation: Momentum filter
+
+This is DIFFERENT from previous failures:
+- Not pure Donchian (fails consistently)
+- Not pure EMA cross (fails consistently)  
+- Not Camarilla (overtrades)
+- IS ATR + Bollinger + Volume + 1d filter (proven components)
 
 Why it should work in BOTH bull AND bear:
-- In bull markets: EMA crossover catches upside momentum with HMA trend aligned
-- In bear markets: Short signals when price < 200 SMA catches falling knives
-- The 200 SMA filter avoids buying in major downtrends
-- ATR filter avoids low-volatility chop where EMA crossovers whipsaw
-- 2022 BTC crash: Short signals when price < 200 SMA preserve capital
+- Bull: Mean reversion to Bollinger lower = buying dips in uptrend
+- Bear: ATR expansion often marks capitulation = reversal points
+- 1d SMA filter prevents fighting the trend in strong moves
 
-Trade frequency target: 60-100 total over 4 years (15-25/year per symbol).
-Conservative entry = fewer trades = less fee drag = better test generalization.
+Target: Sharpe > 0.5, 75-150 total train trades, trades >= 10 test
+Timeframe: 6h
+Size: 0.30 discrete
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_ema_cross_hma_vol_1d_v1"
-timeframe = "4h"
+name = "mtf_6h_atr_volatility_bollinger_1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
-    
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
-    
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
-    
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
-    
-    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -70,53 +51,56 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """ADX + DMI for trend strength"""
+
+def calculate_atr_sma(atr, period=20):
+    """SMA of ATR for ratio calculation"""
+    return pd.Series(atr).rolling(window=period, min_periods=period).mean().values
+
+
+def calculate_bollinger(close, period=20, std_mult=2.0):
+    """Bollinger Bands"""
     n = len(close)
-    if n < period + 1:
+    if n < period:
         return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
+    upper = sma + std_mult * std
+    lower = sma - std_mult * std
     
-    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = np.full(n, 0.0)
-    minus_di = np.full(n, 0.0)
-    
-    for i in range(period, n):
-        if atr_smooth[i] > 1e-10:
-            plus_di[i] = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr_smooth[i]
-            minus_di[i] = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values[i] / atr_smooth[i]
-    
-    dx = np.zeros(n)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 1e-10:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx, plus_di, minus_di
+    return upper, sma, lower
 
-def calculate_ema(close, span):
-    """Exponential Moving Average"""
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
-    if n < span:
+    if n < period + 1:
         return np.full(n, np.nan)
-    ema = pd.Series(close).ewm(span=span, min_periods=span, adjust=False).mean().values
-    return ema
+    
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    gain = np.insert(gain, 0, 0)
+    loss = np.insert(loss, 0, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan, dtype=np.float64)
+    mask = avg_loss != 0
+    rs = np.zeros(n)
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    
+    return rsi
+
+
+def calculate_volume_sma(volume, period=20):
+    """SMA of volume"""
+    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -125,103 +109,179 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop
+    # Load HTF data ONCE before loop (Rule 1 - CRITICAL)
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d HMA(21) for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate and align 1d SMA for trend filter
+    sma_1d_raw = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
     
-    # 4h indicators
+    # Calculate 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    atr_sma_20 = calculate_atr_sma(atr_14, period=20)
+    bb_upper, bb_mid, bb_lower = calculate_bollinger(close, period=20, std_mult=2.0)
+    rsi_14 = calculate_rsi(close, period=14)
+    volume_sma_20 = calculate_volume_sma(volume, period=20)
     
-    # EMA crossover: fast(10) and slow(30)
-    ema_fast = calculate_ema(close, span=10)
-    ema_slow = calculate_ema(close, span=30)
+    # Pre-compute ATR ratio
+    atr_ratio = np.full(n, np.nan, dtype=np.float64)
+    valid_atr = ~np.isnan(atr_14) & ~np.isnan(atr_sma_20) & (atr_sma_20 > 1e-10)
+    atr_ratio[valid_atr] = atr_14[valid_atr] / atr_sma_20[valid_atr]
     
-    # Volume SMA for confirmation
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Long-term SMA for regime filter
-    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    # Pre-compute volume ratio
+    vol_ratio = np.full(n, np.nan, dtype=np.float64)
+    valid_vol = ~np.isnan(volume) & ~np.isnan(volume_sma_20) & (volume_sma_20 > 1e-10)
+    vol_ratio[valid_vol] = volume[valid_vol] / volume_sma_20[valid_vol]
     
     signals = np.zeros(n)
     SIZE = 0.30
     
-    # Warmup period (need 200 bars for SMA + room for indicators)
-    warmup = 220
+    # Position tracking
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
+    entry_atr = 0.0
+    stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    for i in range(warmup, n):
-        # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+    # Warmup period for indicators
+    min_bars = 60
+    
+    for i in range(min_bars, n):
+        # Check indicator readiness
+        if (np.isnan(atr_14[i]) or atr_14[i] <= 1e-10 or
+            np.isnan(bb_lower[i]) or np.isnan(rsi_14[i]) or
+            np.isnan(atr_ratio[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(sma_1d_aligned[i]) or np.isnan(bb_mid[i])):
             signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]):
-            signals[i] = 0.0
-            continue
+        # Current indicator values
+        current_atr_ratio = atr_ratio[i]
+        current_vol_ratio = vol_ratio[i]
+        rsi_val = rsi_14[i]
+        price = close[i]
+        bb_low = bb_lower[i]
+        bb_up = bb_upper[i]
+        bb_width = bb_up - bb_low
+        sma_1d = sma_1d_aligned[i]
         
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
+        # === VOLATILITY EXPANSION CONFIRMATION ===
+        # ATR ratio > 1.0 means volatility is expanding (squeeze resolving)
+        vol_expanding = current_atr_ratio > 1.0
         
-        if np.isnan(vol_sma[i]) or np.isnan(sma_200[i]):
-            signals[i] = 0.0
-            continue
+        # === VOLUME CONFIRMATION ===
+        # Volume > 1.5x average confirms institutional interest
+        volume_confirmed = current_vol_ratio > 1.5
         
-        # Previous bar values for crossover detection
-        ema_fast_prev = ema_fast[i-1] if i > 0 else ema_fast[i]
-        ema_slow_prev = ema_slow[i-1] if i > 0 else ema_slow[i]
+        # === 1d TREND FILTER ===
+        price_above_1d = price > sma_1d
+        price_below_1d = price < sma_1d
         
-        # === ENTRY CONDITIONS ===
+        # === RSI CONFIRMATION ===
+        rsi_oversold = rsi_val < 35
+        rsi_overbought = rsi_val > 65
+        rsi_neutral = 35 <= rsi_val <= 65
         
-        # 1) EMA crossover: fast crosses above/below slow
-        bull_cross = (ema_fast[i] > ema_slow[i]) and (ema_fast_prev <= ema_slow_prev)
-        bear_cross = (ema_fast[i] < ema_slow[i]) and (ema_fast_prev >= ema_slow_prev)
-        
-        # 2) Volume confirmation: volume > 20-bar SMA
-        vol_confirm = volume[i] > vol_sma[i]
-        
-        # 3) 1d HMA trend bias (align with trend)
-        price_above_hma = close[i] > hma_1d_aligned[i]
-        price_below_hma = close[i] < hma_1d_aligned[i]
-        
-        # 4) Long-term regime: price above/below 200 SMA
-        price_above_sma200 = close[i] > sma_200[i]
-        price_below_sma200 = close[i] < sma_200[i]
-        
-        # 5) ATR filter: ensure minimum volatility
-        atr_filter = atr_14[i] > 150
+        # === BOLLINGER TOUCH DETECTION ===
+        # Price within 0.5% of Bollinger lower = touch
+        bb_touch_lower = price <= bb_low * 1.005
+        bb_touch_upper = price >= bb_up * 0.995
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if bull_cross and vol_confirm and price_above_hma and price_above_sma200 and atr_filter:
+        # LONG ENTRY: Mean reversion setup
+        # 1. Volatility expanding (ATR ratio > 1.0)
+        # 2. Volume confirmed (> 1.5x average)
+        # 3. Price at/near Bollinger lower (mean reversion entry)
+        # 4. RSI oversold (< 35)
+        # 5. Price above 1d SMA (trend bias bullish)
+        if (vol_expanding and volume_confirmed and 
+            bb_touch_lower and rsi_oversold and price_above_1d):
             desired_signal = SIZE
-        elif bear_cross and vol_confirm and price_below_hma and price_below_sma200 and atr_filter:
+        
+        # SHORT ENTRY: Mean reversion setup
+        # 1. Volatility expanding
+        # 2. Volume confirmed
+        # 3. Price at/near Bollinger upper
+        # 4. RSI overbought (> 65)
+        # 5. Price below 1d SMA (trend bias bearish)
+        elif (vol_expanding and volume_confirmed and 
+              bb_touch_upper and rsi_overbought and price_below_1d):
             desired_signal = -SIZE
         
-        # === STOPLOSS: 2.5x ATR trailing ===
-        in_position = desired_signal != 0.0
+        # === STOPLOSS CHECK (2.5x ATR trailing) ===
+        stoploss_triggered = False
         
-        if in_position:
-            if desired_signal > 0:
-                stop_price = close[i] - 2.5 * atr_14[i]
-                if low[i] < stop_price:
-                    desired_signal = 0.0
-            else:
-                stop_price = close[i] + 2.5 * atr_14[i]
-                if high[i] > stop_price:
-                    desired_signal = 0.0
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                stoploss_triggered = True
         
-        # === DISCRETIZE ===
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === TAKE PROFIT (4x ATR - asymmetric, let winners run) ===
+        takeprofit_triggered = False
+        
+        if in_position and position_side > 0:
+            profit_target = entry_price + 4.0 * entry_atr
+            if high[i] >= profit_target:
+                takeprofit_triggered = True
+        
+        if in_position and position_side < 0:
+            profit_target = entry_price - 4.0 * entry_atr
+            if low[i] <= profit_target:
+                takeprofit_triggered = True
+        
+        if takeprofit_triggered:
+            desired_signal = 0.0
+        
+        # === DISCRETIZE SIGNAL VALUES ===
         if desired_signal >= SIZE * 0.9:
             final_signal = SIZE
         elif desired_signal <= -SIZE * 0.9:
             final_signal = -SIZE
         else:
             final_signal = 0.0
+        
+        # === UPDATE POSITION TRACKING ===
+        if final_signal != 0.0:
+            if not in_position or np.sign(final_signal) != position_side:
+                # New position or reversal
+                in_position = True
+                position_side = int(np.sign(final_signal))
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                if position_side > 0:
+                    stop_price = entry_price - 2.5 * entry_atr
+                else:
+                    stop_price = entry_price + 2.5 * entry_atr
+        else:
+            if in_position:
+                in_position = False
+                position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
         signals[i] = final_signal
     
