@@ -1,79 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Vortex Crossover + Volume + 12h Trend
+Experiment #021: 12h Williams %R Extreme + Volume Spike + ATR Regime
 
-HYPOTHESIS: The Vortex Indicator (VI) identifies trend direction changes 
-more reliably than RSI or MACD because it's derived from actual price 
-positioning (high/low vs prior bars). VI crossovers are RARE events that 
-mark institutional momentum shifts. Combined with volume confirmation 
-and 12h HMA trend alignment, this captures high-probability setups in 
-both bull (long VI+ crossover) and bear (short VI- crossover) markets.
+HYPOTHESIS: Williams %R hitting extreme levels (below -80 or above -20) on 12h
+marks institutional reversal points. Combined with volume spike confirmation and
+ATR-based regime filter, this captures mean-reversion setups in both bull and bear.
+12h is slow enough to reduce fee drag but fast enough to catch major reversals.
 
-TIMEFRAME: 4h primary
-HTF: 12h for trend alignment via HMA
-TARGET: 75-200 total trades over 4 years (19-50/year)
-REASONING: VI crossovers happen ~1-2x/month per symbol = 48-96 trades/4y
+WHY IT SHOULD WORK IN BOTH MARKETS:
+- Bull: Buy oversold (-80) dips, ride to mean
+- Bear: Short overbought (-20) rallies, fade the bounce
+- ATR regime prevents fading major trends
+
+TIMEFRAME: 12h primary
+HTF: 1d for trend bias
+TARGET: 75-150 total trades over 4 years
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_vortex_vol_12h_trend_v1"
-timeframe = "4h"
+name = "mtf_12h_williams_r_vol_atr_regime_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_vortex(close, high, low, period=14):
-    """Vortex Indicator - identifies trend reversal points"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    vm = np.zeros(n, dtype=np.float64)
-    tr = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        if np.isnan(close[i-1]) or np.isnan(high[i-1]) or np.isnan(low[i-1]):
-            continue
-        hl = high[i] - low[i]
-        hc = abs(high[i] - close[i-1])
-        lc = abs(low[i] - close[i-1])
-        tr[i] = max(hl, hc, lc)
-        vm[i] = abs(high[i] - low[i-1]) - abs(low[i] - high[i-1])
-    
-    vi_plus = pd.Series(vm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    vi_minus = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return vi_plus, vi_minus, tr
-
-def calculate_hma(close, period):
-    """Hull Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
-    
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
-    
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
-    
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
-    
-    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -89,6 +38,26 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R"""
+    n = len(close)
+    willr = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        
+        if highest_high != lowest_low:
+            willr[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+        else:
+            willr[i] = -50  # neutral when range is zero
+    
+    return willr
+
+def calculate_ema(close, period):
+    """Exponential Moving Average"""
+    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -97,23 +66,34 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 12h HMA for trend alignment
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # 1d EMA for trend bias
+    ema_1d_raw = calculate_ema(df_1d['close'].values, period=50)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_raw)
     
-    # Calculate local 4h indicators
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    vi_plus, vi_minus, _ = calculate_vortex(close, high, low, period=14)
     
-    # VI signal line (9-period EMA of VI)
-    vi_signal_raw = pd.Series(vi_plus - vi_minus).ewm(span=9, min_periods=9, adjust=False).mean().values
-    vi_signal_aligned = align_htf_to_ltf(prices, df_12h, vi_signal_raw)
+    # Williams %R
+    willr = calculate_williams_r(high, low, close, period=14)
     
-    # Volume ratio
+    # ATR ratio for regime (current vs trailing)
+    atr_7 = calculate_atr(high, low, close, period=7)
+    atr_ratio = atr_7 / (atr_14 + 1e-10)
+    
+    # Volume MA and ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # RSI for additional confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = (100 - (100 / (1 + rs))).values
     
     signals = np.zeros(n)
     SIZE = 0.25  # Conservative sizing
@@ -127,7 +107,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 100  # Need 100 bars for all indicators
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -138,50 +118,60 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(vi_plus[i]) or np.isnan(vi_signal_aligned[i]):
+        if np.isnan(willr[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_12h_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # Current values
-        vi_current = vi_plus[i] - vi_minus[i]
-        vi_signal_current = vi_signal_aligned[i]
+        # === TREND BIAS (1d EMA) ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i]
         
-        # Previous VI difference (from previous bar)
-        vi_prev = (vi_plus[i-1] - vi_minus[i-1]) if i > 0 else 0.0
-        vi_signal_prev = vi_signal_aligned[i-1] if i > 0 else 0.0
+        # === REGIME (ATR ratio) ===
+        # ATR ratio > 1.5 = high volatility = choppy/range (don't fade extremes as much)
+        # ATR ratio < 1.2 = low volatility = trending (mean reversion works)
+        high_vol_regime = atr_ratio[i] > 1.5
         
-        # Crossover detection
-        bullish_cross = (vi_current > vi_signal_current) and (vi_prev <= vi_signal_prev)
-        bearish_cross = (vi_current < vi_signal_current) and (vi_prev >= vi_signal_prev)
+        # === WILLIAMS %R EXTREME LEVELS ===
+        willr_val = willr[i]
+        oversold = willr_val < -80  # Strong oversold
+        overbought = willr_val > -20  # Strong overbought
         
-        # Volume confirmation
-        vol_confirm = vol_ratio[i] > 1.5
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.2
         
-        # 12h trend filter
-        price_above_12h_hma = close[i] > hma_12h_aligned[i]
+        # === RSI CONFIRMATION ===
+        rsi_val = rsi[i]
+        rsi_oversold = rsi_val < 35
+        rsi_overbought = rsi_val > 65
         
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === NEW LONG ENTRY ===
-            # VI bullish crossover + volume spike + price above 12h HMA
-            if bullish_cross and vol_confirm and price_above_12h_hma:
-                desired_signal = SIZE
+            # === LONG ENTRY: Williams %R oversold + RSI confirm + volume + trend aligned ===
+            if oversold and rsi_oversold:
+                # In high vol regime, require bullish trend
+                # In low vol regime, allow counter-trend if RSI very oversold
+                if price_above_1d_ema:
+                    desired_signal = SIZE
+                elif high_vol_regime and rsi_val < 25:  # Extreme counter-trend
+                    desired_signal = SIZE * 0.5  # Half size for counter-trend
             
-            # === NEW SHORT ENTRY ===
-            # VI bearish crossover + volume spike + price below 12h HMA
-            if bearish_cross and vol_confirm and not price_above_12h_hma:
-                desired_signal = -SIZE
+            # === SHORT ENTRY: Williams %R overbought + RSI confirm + volume + trend aligned ===
+            if overbought and rsi_overbought:
+                if not price_above_1d_ema:
+                    desired_signal = -SIZE
+                elif high_vol_regime and rsi_val > 75:  # Extreme counter-trend
+                    desired_signal = -SIZE * 0.5  # Half size for counter-trend
         
         # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
@@ -203,11 +193,24 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === OPPOSITE SIGNAL EXIT ===
-        if in_position and position_side > 0 and bearish_cross:
-            desired_signal = 0.0
+        # === EXIT: Williams %R mean reversion or RSI normalize ===
+        exit_triggered = False
         
-        if in_position and position_side < 0 and bullish_cross:
+        if in_position and position_side > 0:
+            # Long exit: Williams %R normalize (above -20) or RSI neutral
+            if willr_val > -20:
+                exit_triggered = True
+            if rsi_val > 55:
+                exit_triggered = True
+        
+        if in_position and position_side < 0:
+            # Short exit: Williams %R normalize (below -80) or RSI neutral
+            if willr_val < -80:
+                exit_triggered = True
+            if rsi_val < 45:
+                exit_triggered = True
+        
+        if exit_triggered:
             desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
