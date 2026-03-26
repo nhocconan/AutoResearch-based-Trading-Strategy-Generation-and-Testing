@@ -1,75 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #004: 1d KAMA + RSI + Choppiness Regime
+Experiment #005: 12h RSI(2) Extreme Reversal + 1d Trend Filter
 
-HYPOTHESIS: KAMA adapts to volatility automatically. In trending markets, KAMA 
-stays above price for shorts/below for longs. RSI(14) confirms momentum. 
-Choppiness Index filters out choppy periods. 1d timeframe naturally limits trades.
+HYPOTHESIS: RSI(2) at extreme levels (<20 or >80) marks local reversal points
+where short-term mean reversion is likely. The 1d SMA(50) provides a trend bias
+filter that prevents fading major trends.
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- KAMA adapts: fast in trending, slow in ranging (self-adjusting)
-- Long: price > KAMA(10) + RSI > 55 + chop < 50
-- Short: price < KAMA(10) + RSI < 45 + chop < 50
-- ATR-based stops prevent large losses in crashes
-- 1d = ~250 bars/year max = ~50-100 trades realistic
+- Bull markets: RSI(2)<20 + price>1d_SMA50 → strong long reversal setups
+- Bear markets: RSI(2)>80 + price<1d_SMA50 → strong short reversal setups
+- Range markets: RSI(2) extremes work as pure mean-reversion signals
+- The 1d filter adapts to regime (bull=long bias, bear=short bias)
 
-TARGET: 50-100 total trades over 4 years (proven pattern from DB).
-DB reference: mtf_1d_kama_rsi_chop_regime_1w_v1 (Sharpe=1.310, 74tr)
-
-KEY DESIGN:
-1. KAMA(10) for trend detection
-2. RSI(14) for momentum confirmation
-3. Choppiness Index < 50 for trending regime
-4. ATR(14) * 2.5 for stoploss
-5. 1w KAMA aligned for higher timeframe confirmation
-6. Signal: 0.25 (discrete)
+TARGET: 75-150 total trades over 4 years (tight entry conditions).
+Timeframe: 12h primary, 1d for trend filter.
+Signal: 0.25-0.30 (discrete).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_rsi_chop_1w_v1"
-timeframe = "1d"
+name = "mtf_12h_rsi2_extreme_reversal_1d_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_kama(close, period=10, fast_ema=2, slow_ema=30):
-    """
-    Kaufman Adaptive Moving Average
-    """
-    n = len(close)
-    if n < period + slow_ema:
-        return np.full(n, np.nan)
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        price_change = abs(close[i] - close[i - period])
-        volatility = 0.0
-        for j in range(i - period + 1, i + 1):
-            if j > 0:
-                volatility += abs(close[j] - close[j - 1])
-        
-        if volatility > 1e-10:
-            er[i] = price_change / volatility
-    
-    # Calculate smoothing constants
-    fast_const = 2.0 / (fast_ema + 1)
-    slow_const = 2.0 / (slow_ema + 1)
-    scaling = (fast_const - slow_const) ** 2
-    
-    # Calculate KAMA
-    kama = np.full(n, np.nan, dtype=np.float64)
-    kama[period] = close[period]
-    
-    for i in range(period + 1, n):
-        if np.isnan(er[i]):
-            continue
-        sc = (er[i] * scaling + slow_const) ** 0.5 * (fast_const - slow_const) + slow_const
-        if not np.isnan(kama[i - 1]):
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
 
 def calculate_rsi(close, period=14):
     """Relative Strength Index"""
@@ -78,15 +31,13 @@ def calculate_rsi(close, period=14):
         return np.full(n, np.nan)
     
     deltas = np.diff(close, prepend=close[0])
-    deltas[0] = 0
-    
-    gains = np.where(deltas > 0, deltas, 0.0)
-    losses = np.where(deltas < 0, -deltas, 0.0)
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
     
     avg_gain = pd.Series(gains).ewm(span=period, min_periods=period, adjust=False).mean().values
     avg_loss = pd.Series(losses).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    rs = np.where(avg_loss > 1e-10, avg_gain / avg_loss, 0.0)
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
     rsi = 100.0 - (100.0 / (1.0 + rs))
     
     return rsi
@@ -105,32 +56,9 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness
-    CHOP > 61.8 = ranging, CHOP < 50 = trending
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
-    
-    return chop
+def calculate_sma(values, period):
+    """Simple Moving Average"""
+    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -139,121 +67,160 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1w data for HTF trend
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w KAMA for trend
-    kama_1w_raw = calculate_kama(df_1w['close'].values, period=10)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w_raw)
+    # 1d SMA(50) for trend direction
+    sma_1d_raw = calculate_sma(df_1d['close'].values, 50)
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
     
-    # Calculate 1d indicators
-    kama_10 = calculate_kama(close, period=10)
-    rsi_14 = calculate_rsi(close, period=14)
-    atr_14 = calculate_atr(high, low, close, period=14)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
+    # 1d EMA(21) for smoother trend
+    ema_1d_raw = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_raw)
     
-    # Volume average
+    # 12h indicators
+    rsi_2 = calculate_rsi(close, 2)
+    rsi_14 = calculate_rsi(close, 14)
+    atr_14 = calculate_atr(high, low, close, 14)
+    
+    # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
+    stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Warmup (need 1w bars = ~4 1d bars)
-    warmup = 50
+    # Warmup - need enough for 1d SMA alignment
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(kama_10[i]) or np.isnan(rsi_14[i]) or np.isnan(atr_14[i]) or np.isnan(chop_14[i]):
+        if np.isnan(rsi_2[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(kama_1w_aligned[i]):
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if atr_14[i] <= 1e-10:
+        if np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME CHECK ===
-        chop = chop_14[i]
-        is_trending = chop < 50.0  # Only trade in trending regime
+        # === TREND CHECK (1d) ===
+        price_above_1d_sma = close[i] > sma_1d_aligned[i]
+        price_above_1d_ema = close[i] > ema_1d_aligned[i] if not np.isnan(ema_1d_aligned[i]) else price_above_1d_sma
         
-        # === 1w TREND (HTF confirmation) ===
-        price_above_1w_kama = close[i] > kama_1w_aligned[i]
+        # Strong trend = price above both SMA and EMA
+        bullish_trend = price_above_1d_sma and price_above_1d_ema
+        bearish_trend = not price_above_1d_sma and not price_above_1d_ema
         
-        # === 1d KAMA TREND ===
-        price_above_1d_kama = close[i] > kama_10[i]
+        # === RSI(2) EXTREME LEVELS ===
+        rsi2_oversold = rsi_2[i] < 20  # Extreme oversold
+        rsi2_overbought = rsi_2[i] > 80  # Extreme overbought
         
-        # === MOMENTUM ===
-        rsi = rsi_14[i]
-        rsi_bullish = rsi > 52.0
-        rsi_bearish = rsi < 48.0
+        # RSI(14) confirmation - confirm momentum shift
+        rsi14_neutral = 30 < rsi_14[i] < 70
         
         # === VOLUME CONFIRMATION ===
-        vol_ok = vol_ratio[i] > 0.9
+        vol_above_avg = vol_ratio[i] > 1.2
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG ENTRY: Price above both KAMAs + RSI bullish + trending regime
-        if is_trending:
-            if price_above_1w_kama and price_above_1d_kama:
-                if rsi_bullish and vol_ok:
-                    desired_signal = SIZE
+        # LONG: RSI(2) extreme oversold + bullish 1d trend + volume
+        if rsi2_oversold and bullish_trend:
+            if vol_above_avg:
+                desired_signal = SIZE
+            elif rsi14_neutral:
+                desired_signal = SIZE * 0.5  # Half size without volume
         
-        # SHORT ENTRY: Price below both KAMAs + RSI bearish + trending regime
-        if is_trending:
-            if not price_above_1w_kama and not price_above_1d_kama:
-                if rsi_bearish and vol_ok:
-                    desired_signal = -SIZE
+        # SHORT: RSI(2) extreme overbought + bearish 1d trend + volume
+        if rsi2_overbought and bearish_trend:
+            if vol_above_avg:
+                desired_signal = -SIZE
+            elif rsi14_neutral:
+                desired_signal = -SIZE * 0.5  # Half size without volume
         
-        # === STOPLOSS CHECK ===
+        # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
-            stop_distance = entry_price - 2.5 * entry_atr
-            if low[i] < stop_distance:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
-            stop_distance = entry_price + 2.5 * entry_atr
-            if high[i] > stop_distance:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
+            in_position = False
+            position_side = 0
+            entry_price = 0.0
+            entry_atr = 0.0
+            stop_price = 0.0
+            highest_since_entry = 0.0
+            lowest_since_entry = 0.0
         
-        # === TAKE PROFIT (trailing stop, 2.5R) ===
+        # === TAKE PROFIT (3R or opposite extreme) ===
         tp_triggered = False
         if in_position and position_side > 0:
-            profit = (close[i] - entry_price) / entry_atr
-            if profit >= 2.5:
+            profit_target = entry_price + 3.0 * entry_atr
+            if high[i] >= profit_target:
                 tp_triggered = True
         
         if in_position and position_side < 0:
-            profit = (entry_price - close[i]) / entry_atr
-            if profit >= 2.5:
+            profit_target = entry_price - 3.0 * entry_atr
+            if low[i] <= profit_target:
                 tp_triggered = True
         
         if tp_triggered:
             desired_signal = 0.0
+            in_position = False
+            position_side = 0
+            entry_price = 0.0
+            entry_atr = 0.0
+            stop_price = 0.0
+            highest_since_entry = 0.0
+            lowest_since_entry = 0.0
+        
+        # === TRAILING STOP ACTIVATION (after 1.5R profit) ===
+        if in_position and position_side > 0:
+            if close[i] > entry_price + 1.5 * entry_atr:
+                # Lock in profits - reduce to half
+                if desired_signal == SIZE:
+                    desired_signal = SIZE * 0.5
+        
+        if in_position and position_side < 0:
+            if close[i] < entry_price - 1.5 * entry_atr:
+                # Lock in profits - reduce to half
+                if desired_signal == -SIZE:
+                    desired_signal = -SIZE * 0.5
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -262,12 +229,21 @@ def generate_signals(prices):
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                if position_side > 0:
+                    stop_price = entry_price - 2.5 * entry_atr
+                else:
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
                 entry_atr = 0.0
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
