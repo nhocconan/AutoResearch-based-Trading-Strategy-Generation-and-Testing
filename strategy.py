@@ -1,75 +1,65 @@
 #!/usr/bin/env python3
 """
-Experiment #026: 6h VWAP Anchored + RSI Extreme + Choppiness Regime
+Experiment #027: 12h Bollinger Bounce + 1d Trend + Volume Spike
 
-HYPOTHESIS: Daily VWAP anchors institutional "fair value" that price oscillates around.
-During trending markets (low Choppiness), RSI extremes (<30, >70) mark exhaustion points
-that often reverse. Using 1d VWAP direction as trend bias, entering on RSI extremes only
-in the direction of trend catches mean-reversion moves within trends. This is different
-from momentum strategies (MACD, TRIX) and channel strategies (Donchian) that failed.
+HYPOTHESIS: In the current bear/range market (2025 test), mean reversion to 
+Bollinger Bands outperforms trend-following. Price tends to bounce from BB 
+extremes rather than trending. On 12h, BB bounces mark high-probability 
+reversal points. Combined with 1d HMA trend alignment (to avoid fighting 
+major trends) and volume confirmation, this captures reversals while 
+filtering false signals. Works in BOTH bull (buy BB lower bounces) and bear 
+(buy BB upper bounces in rallies OR short BB upper in breakdowns).
 
-Why it should work in both bull AND bear:
-- Bull: Pullbacks to VWAP with RSI < 30 = oversold buying opportunity
-- Bear: Rallies to VWAP with RSI > 70 = short opportunities
-- Range: RSI extremes still work for bounces off extremes
-
-TIMEFRAME: 6h primary
-HTF: 1d for VWAP and Choppiness regime
+TIMEFRAME: 12h primary
+HTF: 1d for trend alignment
 TARGET: 75-150 total trades over 4 years (19-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vwap_rsi_chop_1d_v1"
-timeframe = "6h"
+name = "mtf_12h_bb_bounce_1d_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_vwap(high, low, close, volume):
-    """VWAP calculated per bar - typical price weighted by volume"""
-    typical_price = (high + low + close) / 3.0
-    return np.sum(typical_price * volume) / np.sum(volume) if np.sum(volume) > 0 else typical_price[-1]
-
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness vs trending
-    CHOP < 38.2 = trending (good for trend following)
-    CHOP > 61.8 = choppy (avoid, good for mean reversion)
-    Values around 50 = neutral
-    """
+def calculate_hma(close, period):
+    """Hull Moving Average"""
     n = len(close)
     if n < period:
-        return np.full(n, 50.0)  # neutral default
+        return np.full(n, np.nan)
     
-    chop = np.full(n, 50.0, dtype=np.float64)
+    half = max(1, period // 2)
+    sqrt_n = max(1, int(np.sqrt(period)))
     
-    for i in range(period, n):
-        # Sum of ATR over period
-        atr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], 
-                     abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j],
-                     abs(low[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            atr_sum += tr
-        
-        # Highest - Lowest over period
-        hl_range = np.max(high[i - period + 1:i + 1]) - np.min(low[i - period + 1:i + 1])
-        
-        if hl_range > 0:
-            # CHOP = 100 * log10(atr_sum / hl_range) / log10(period)
-            chop[i] = 100 * np.log10(atr_sum / hl_range) / np.log10(period)
+    def wma(series, span):
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
+        for i in range(span - 1, len(series)):
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1].astype(np.float64)
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / weight_sum
+        return result
     
-    return chop
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
+    
+    diff = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+    
+    return wma(diff, sqrt_n)
 
-def calculate_rsi(close, period=14):
-    """RSI with min_periods"""
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    return (100 - (100 / (1 + rs))).values
+def calculate_bollinger_bands(close, period=20, num_std=2.0):
+    """Bollinger Bands - returns middle, upper, lower"""
+    n = len(close)
+    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = middle + num_std * std
+    lower = middle - num_std * std
+    return middle, upper, lower
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -85,12 +75,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_ema(close, span, min_periods=None):
-    """EMA calculation"""
-    if min_periods is None:
-        min_periods = span
-    return pd.Series(close).ewm(span=span, min_periods=min_periods, adjust=False).mean().values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -101,56 +85,38 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d indicators (aligned to 6h) ===
-    # 1d EMA21 for trend direction
-    ema_1d_raw = calculate_ema(df_1d['close'].values, span=21, min_periods=21)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_raw)
+    # 1d HMA for trend alignment
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # 1d Choppiness Index for regime
-    chop_1d_raw = calculate_choppiness_index(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
-        df_1d['close'].values, 
-        period=14
-    )
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d_raw)
-    
-    # === Local 6h indicators ===
-    rsi_14 = calculate_rsi(close, period=14)
+    # Calculate local 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Local VWAP approximation using rolling window (22 days ~ 1 month)
-    typical_price = (high + low + close) / 3.0
-    vol_price = typical_price * volume
+    # Bollinger Bands (20, 2.0)
+    bb_mid, bb_upper, bb_lower = calculate_bollinger_bands(close, period=20, num_std=2.0)
     
-    # Cumulative VWAP for current session
-    cum_vol_price = np.zeros(n)
-    cum_volume = np.zeros(n)
-    cum_vol_price[0] = vol_price[0]
-    cum_volume[0] = volume[0]
+    # RSI for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = (100 - (100 / (1 + rs))).values
     
-    for i in range(1, n):
-        cum_vol_price[i] = cum_vol_price[i-1] + vol_price[i]
-        cum_volume[i] = cum_volume[i-1] + volume[i]
+    # BB Bandwidth for regime detection
+    bb_width = (bb_upper - bb_lower) / (bb_mid + 1e-10)
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    bb_width_ratio = bb_width / (bb_width_ma + 1e-10)
     
-    # Rolling VWAP (reset conceptually each day - use 88 bars ≈ 22 days of 6h)
-    vwap_window = 88
-    rolling_vol_price = pd.Series(cum_vol_price).rolling(window=vwap_window, min_periods=vwap_window).last().values
-    rolling_vol = pd.Series(cum_volume).rolling(window=vwap_window, min_periods=vwap_window).last().values
+    # Volume MA and ratio
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Previous cum values for incremental VWAP
-    prev_vol_price = np.zeros(n)
-    prev_vol = np.zeros(n)
-    prev_vol_price[vwap_window:] = cum_vol_price[:-vwap_window]
-    prev_vol[vwap_window:] = cum_volume[:-vwap_window]
-    
-    vwap = (cum_vol_price - prev_vol_price) / np.where((cum_volume - prev_vol) > 0, (cum_volume - prev_vol), 1)
-    
-    # Price vs VWAP position
-    vwap_distance = (close - vwap) / (atr_14 + 1e-10)
-    
-    # RSI MA for smoothing
-    rsi_ma = pd.Series(rsi_14).rolling(window=5, min_periods=3).mean().values
+    # Position in BB (0 = lower, 1 = middle, 2 = upper)
+    bb_range = bb_upper - bb_lower
+    bb_position = (close - bb_lower) / (bb_range + 1e-10)
+    bb_position = np.clip(bb_position, 0, 1)
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -164,7 +130,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 100  # Need enough data for VWAP window
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -175,53 +141,64 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(bb_lower[i]) or np.isnan(bb_upper[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME CHECK (1d Choppiness) ===
-        chop = chop_1d_aligned[i] if not np.isnan(chop_1d_aligned[i]) else 50.0
-        is_trending = chop < 50.0  # Not too choppy
-        is_choppy = chop > 55.0    # Very choppy - be more selective
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === TREND BIAS (1d EMA21) ===
-        price_above_1d_ema = close[i] > ema_1d_aligned[i]
-        trend_bullish = price_above_1d_ema
-        trend_bearish = not price_above_1d_ema
+        # Current values
+        close_i = close[i]
+        rsi_val = rsi[i]
+        vol_val = vol_ratio[i]
+        bb_pos = bb_position[i]
         
-        # === RSI LEVELS ===
-        rsi_val = rsi_14[i]
-        rsi_smooth = rsi_ma[i] if not np.isnan(rsi_ma[i]) else rsi_val
-        rsi_oversold = rsi_val < 35  # Expanded from 30
-        rsi_overbought = rsi_val > 65  # Expanded from 70
+        # 1d trend: price above HMA = bullish
+        price_above_1d_hma = close_i > hma_1d_aligned[i]
         
-        # === VWAP POSITION ===
-        dist_from_vwap = vwap_distance[i]
+        # BB regime: narrow bands = potential breakout, wide = trending
+        # For mean reversion, we want moderate width (not squeeze, not expanded)
+        bb_regime_ok = (0.5 <= bb_width_ratio[i] <= 1.5) if not np.isnan(bb_width_ratio[i]) else True
         
-        # Extreme: price significantly away from VWAP
-        far_from_vwap_long = dist_from_vwap < -1.5   # Below VWAP by 1.5 ATR
-        far_from_vwap_short = dist_from_vwap > 1.5   # Above VWAP by 1.5 ATR
+        # Volume confirmation
+        vol_confirm = vol_val > 1.15
         
-        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
+        # === ENTRY LOGIC ===
         if not in_position:
-            # === NEW LONG ENTRY ===
-            # RSI oversold + price below VWAP (cheap) + trend aligned OR not bearish
-            if rsi_oversold:
-                # Prefer: in uptrend OR not in strong downtrend
-                if trend_bullish or not far_from_vwap_short:
-                    desired_signal = SIZE
+            # === LONG ENTRY: Price at/near lower BB + oversold RSI ===
+            # Trigger: BB position < 0.2 (near lower band) + RSI < 40 + volume spike + 1d bullish
+            long_trigger = (bb_pos < 0.20) and (rsi_val < 40) and vol_confirm and price_above_1d_hma
             
-            # === NEW SHORT ENTRY ===
-            # RSI overbought + price above VWAP (expensive) + trend aligned OR not bullish
-            if rsi_overbought:
-                # Prefer: in downtrend OR not in strong uptrend
-                if trend_bearish or not far_from_vwap_long:
+            if long_trigger:
+                desired_signal = SIZE
+            else:
+                # === SHORT ENTRY: Price at/near upper BB + overbought RSI ===
+                # Trigger: BB position > 0.80 (near upper band) + RSI > 60 + volume spike
+                # In bear market, shorting upper BB works better
+                short_trigger = (bb_pos > 0.80) and (rsi_val > 60) and vol_confirm
+                
+                if short_trigger:
                     desired_signal = -SIZE
+                else:
+                    # Alternative: Breakout from squeeze in trend direction
+                    # Narrow bands + close breaks above upper = short squeeze
+                    squeeze_long = (bb_width_ratio[i] < 0.7) and (close_i > bb_upper[i]) and price_above_1d_hma and vol_confirm
+                    squeeze_short = (bb_width_ratio[i] < 0.7) and (close_i < bb_lower[i]) and not price_above_1d_hma and vol_confirm
+                    
+                    if squeeze_long:
+                        desired_signal = SIZE
+                    elif squeeze_short:
+                        desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
@@ -243,20 +220,26 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT: RSI mean reversion (return to 45-55) ===
-        exit_triggered = False
+        # === TAKE PROFIT: Mean reversion target ===
+        # For longs: take profit when RSI normalizes or price reaches middle BB
+        # For shorts: take profit when RSI normalizes or price reaches middle BB
+        tp_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: RSI normalizes (no longer oversold)
-            if rsi_val > 52:
-                exit_triggered = True
+            # Long TP: RSI > 50 (normalized) OR price > middle BB
+            if rsi_val > 50:
+                tp_triggered = True
+            if close_i > bb_mid[i]:
+                tp_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: RSI normalizes (no longer overbought)
-            if rsi_val < 48:
-                exit_triggered = True
+            # Short TP: RSI < 50 (normalized) OR price < middle BB
+            if rsi_val < 50:
+                tp_triggered = True
+            if close_i < bb_mid[i]:
+                tp_triggered = True
         
-        if exit_triggered:
+        if tp_triggered:
             desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -265,7 +248,7 @@ def generate_signals(prices):
                 # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
+                entry_price = close_i
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
