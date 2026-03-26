@@ -1,32 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #009: 4h Camarilla Pivot + Volume + 1d Trend Bias
+Experiment #010: 1d Donchian Breakout + 1w HMA Trend + Volume + Chop Regime
 
-HYPOTHESIS: Camarilla S3/S4 (support) and R3/R4 (resistance) from 1d data mark 
-institutional order zones. When price reaches these levels WITH volume confirmation 
-and aligned with 1d trend, institutions are likely defending positions.
+HYPOTHESIS: Daily Donchian(20) breakouts capture major trend moves. When aligned with
+weekly HMA(21) trend bias, confirmed by volume spike, and in trending regime (low chop),
+these breakouts have high probability of continuation.
 
 WHY THIS WORKS IN BOTH BULL AND BEAR:
-- Bull: Long at S3/S4 when 1d HMA bullish (institutions buying dips)
-- Bear: Short at R3/R4 when 1d HMA bearish (institutions selling rallies)
-- Volume spike confirms institutional participation, not retail noise
+- Bull: Long breakouts when 1w HMA bullish (trend continuation)
+- Bear: Short breakouts when 1w HMA bearish (trend continuation)
+- Volume confirms institutional participation, not fake breakouts
+- Chop filter avoids range-bound whipsaws
 
-TARGET: 75-200 total trades over 4 years (~19-50/year)
-DB reference: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 (Sharpe=1.471, 95tr)
+TARGET: 40-100 total trades over 4 years (10-25/year) - VERY TIGHT entries
+DB reference: mtf_1d_kama_rsi_chop_regime_1w_v1 (Sharpe=1.31, 74tr)
 
-KEY FIXES from #016 failure (Sharpe=-2.331):
-1. Simplified entry: pivot touch + volume OR trend bias (not both required)
-2. Corrected distance logic: price WITHIN 0-2 ATR of pivot (not arbitrary ranges)
-3. Relaxed volume: 1.3x instead of 1.5x (more trades)
-4. Relaxed chop filter: <61.8 instead of <55 (allow more entries)
-5. Clearer signal flip logic to reduce churn
+KEY FIXES from previous failures:
+1. Only enter on BREAKOUT bar (price crosses level), not just being near level
+2. Track previous signal to avoid churn (only flip when signal changes)
+3. Minimum hold period: 3 bars before allowing exit
+4. Tighter volume: 1.5x (not 1.3x)
+5. Stricter chop: <50 (not <61.8)
+6. 1d timeframe = naturally fewer trades than 4h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_vol_1d_trend_v2"
-timeframe = "4h"
+name = "mtf_1d_donchian_1w_hma_vol_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -77,7 +79,7 @@ def calculate_choppiness(high, low, close, period=14):
     """
     Choppiness Index
     CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    We allow entries when CHOP < 61.8 (not too choppy)
+    We require CHOP < 50 for entries (trending regime)
     """
     n = len(close)
     if n < period + 1:
@@ -101,38 +103,17 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_camarilla_pivots(prev_high, prev_low, prev_close):
-    """
-    Camarilla pivot levels (from previous day's HLC)
-    S3/S4 = support zones for longs
-    R3/R4 = resistance zones for shorts
-    """
-    n = len(prev_high)
-    pivots = {
-        's3': np.full(n, np.nan, dtype=np.float64),
-        's4': np.full(n, np.nan, dtype=np.float64),
-        'r3': np.full(n, np.nan, dtype=np.float64),
-        'r4': np.full(n, np.nan, dtype=np.float64),
-    }
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel: upper = highest high, lower = lowest low over period"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
-    for i in range(n):
-        if np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]):
-            continue
-        
-        high_low_range = prev_high[i] - prev_low[i]
-        if high_low_range <= 1e-10:
-            continue
-        
-        close = prev_close[i]
-        
-        # S3/S4 = support (below close)
-        pivots['s3'][i] = close - high_low_range * 1.1 / 4
-        pivots['s4'][i] = close - high_low_range * 1.1 / 2
-        # R3/R4 = resistance (above close)
-        pivots['r3'][i] = close + high_low_range * 1.1 / 4
-        pivots['r4'][i] = close + high_low_range * 1.1 / 2
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    return pivots
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -141,29 +122,17 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # Calculate 1w HMA for trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate Camarilla pivots from 1d
-    cam_pivots = calculate_camarilla_pivots(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values
-    )
-    
-    # Align pivots to 4h (with shift(1) for completed bars)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['s3'])
-    s4_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['s4'])
-    r3_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['r3'])
-    r4_aligned = align_htf_to_ltf(prices, df_1d, cam_pivots['r4'])
-    
-    # Calculate 4h indicators
+    # Calculate 1d indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     chop_14 = calculate_choppiness(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     # Volume MA and ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -181,6 +150,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     bars_in_trade = 0
+    prev_signal = 0.0
+    min_hold_bars = 3
     
     warmup = 50
     
@@ -188,92 +159,78 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
+            if in_position and bars_in_trade >= min_hold_bars:
                 in_position = False
                 position_side = 0
             continue
         
         if np.isnan(chop_14[i]):
             signals[i] = 0.0
-            if in_position:
+            if in_position and bars_in_trade >= min_hold_bars:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
-            if in_position:
+            if in_position and bars_in_trade >= min_hold_bars:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(hma_1w_aligned[i]):
+            signals[i] = 0.0
+            if in_position and bars_in_trade >= min_hold_bars:
                 in_position = False
                 position_side = 0
             continue
         
         # === REGIME CHECK ===
         chop = chop_14[i]
-        is_trending = chop < 61.8  # Allow entries when not too choppy
+        is_trending = chop < 50.0  # Stricter: only trending regime
         
-        # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
+        # === TREND BIAS (1w HMA) ===
+        price_above_1w_hma = close[i] > hma_1w_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3  # Relaxed from 1.5
+        vol_spike = vol_ratio[i] > 1.5  # Stricter: 1.5x
         
-        # === CAMARILLA PIVOT LEVELS ===
-        s3 = s3_aligned[i]
-        s4 = s4_aligned[i]
-        r3 = r3_aligned[i]
-        r4 = r4_aligned[i]
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Only enter on BREAKOUT bar (price crosses level from outside)
+        prev_upper = donchian_upper[i-1] if i > 0 else donchian_upper[i]
+        prev_lower = donchian_lower[i-1] if i > 0 else donchian_lower[i]
         
-        # Price distance to pivot levels (as % of ATR)
-        # For LONG at S3: price should be slightly ABOVE S3 (0 to 2 ATR above)
-        # For SHORT at R3: price should be slightly BELOW R3 (0 to 2 ATR below)
-        at_s3_zone = False
-        at_s4_zone = False
-        at_r3_zone = False
-        at_r4_zone = False
+        # Long breakout: price crosses ABOVE upper (was below, now above)
+        long_breakout = (high[i] > prev_upper) and (close[i] > prev_upper)
         
-        if not np.isnan(s3) and atr_14[i] > 0:
-            dist_s3 = (close[i] - s3) / atr_14[i]
-            at_s3_zone = (0 <= dist_s3 <= 2.0)  # Price within 0-2 ATR above S3
-        
-        if not np.isnan(s4) and atr_14[i] > 0:
-            dist_s4 = (close[i] - s4) / atr_14[i]
-            at_s4_zone = (0 <= dist_s4 <= 2.0)
-        
-        if not np.isnan(r3) and atr_14[i] > 0:
-            dist_r3 = (r3 - close[i]) / atr_14[i]
-            at_r3_zone = (0 <= dist_r3 <= 2.0)  # Price within 0-2 ATR below R3
-        
-        if not np.isnan(r4) and atr_14[i] > 0:
-            dist_r4 = (r4 - close[i]) / atr_14[i]
-            at_r4_zone = (0 <= dist_r4 <= 2.0)
+        # Short breakout: price crosses BELOW lower (was above, now below)
+        short_breakout = (low[i] < prev_lower) and (close[i] < prev_lower)
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if is_trending:
-            # LONG: At S3/S4 support + bullish 1d trend OR volume spike
-            if (at_s3_zone or at_s4_zone):
-                if price_above_1d_hma or vol_spike:
-                    desired_signal = SIZE
+            # LONG: Donchian breakout + 1w HMA bullish + volume spike
+            if long_breakout and price_above_1w_hma and vol_spike:
+                desired_signal = SIZE
             
-            # SHORT: At R3/R4 resistance + bearish 1d trend OR volume spike
-            if (at_r3_zone or at_r4_zone):
-                if (not price_above_1d_hma) or vol_spike:
-                    desired_signal = -SIZE
+            # SHORT: Donchian breakout + 1w HMA bearish + volume spike
+            if short_breakout and (not price_above_1w_hma) and vol_spike:
+                desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2 ATR) ===
+        # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -281,18 +238,24 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT at opposite pivot ===
+        # === TAKE PROFIT at opposite Donchian level ===
         tp_triggered = False
-        if in_position and position_side > 0 and not np.isnan(r3):
-            if high[i] >= r3:
+        if in_position and position_side > 0 and not np.isnan(donchian_lower[i]):
+            if low[i] <= donchian_lower[i]:
                 tp_triggered = True
         
-        if in_position and position_side < 0 and not np.isnan(s3):
-            if low[i] <= s3:
+        if in_position and position_side < 0 and not np.isnan(donchian_upper[i]):
+            if high[i] >= donchian_upper[i]:
                 tp_triggered = True
         
         if tp_triggered:
             desired_signal = 0.0
+        
+        # === MINIMUM HOLD PERIOD ===
+        # Don't exit before min_hold_bars unless stoploss/TP hit
+        if in_position and bars_in_trade < min_hold_bars:
+            if desired_signal == 0.0 and not stoploss_triggered and not tp_triggered:
+                desired_signal = prev_signal  # Keep previous signal
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -306,10 +269,11 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 bars_in_trade = 0
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
-            # If same side, keep position (no signal churn)
+                    stop_price = entry_price + 2.5 * entry_atr
+            else:
+                bars_in_trade += 1
         else:
             if in_position:
                 in_position = False
@@ -322,5 +286,6 @@ def generate_signals(prices):
                 bars_in_trade = 0
         
         signals[i] = desired_signal
+        prev_signal = desired_signal
     
     return signals
