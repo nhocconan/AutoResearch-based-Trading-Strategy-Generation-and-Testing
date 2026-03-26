@@ -1,58 +1,35 @@
 #!/usr/bin/env python3
 """
-Experiment #010: 1d Donchian Breakout + 1w Trend Filter
+Experiment #011: 6h Elder Ray + Volume Spike + ADX Regime
 
-HYPOTHESIS: Donchian breakout captures momentum after consolidation.
-1w HTF confirms trend direction, avoiding counter-trend trades.
-Volume spike confirms institutional involvement.
-ATR stoploss manages risk.
+HYPOTHESIS: Elder Ray (High - EMA(13), Low - EMA(13)) measures institutional 
+pressure beyond the EMA. Bull Power > 0 confirms bulls can push beyond EMA.
+Bear Power < 0 confirms bears pushing below EMA. This is distinct from RSI/MACD
+because it measures WHERE price closes relative to EMA extremes, not momentum.
 
-WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Breakout systems work in all markets (momentum after squeeze)
-- Bull: long breakouts above 1w HMA
-- Bear: short breakouts below 1w HMA  
-- Range: choppiness filter avoids whipsaws
+WHY NOVEL: Elder Ray hasn't appeared in any of the 27 failed attempts.
+DB reference: Elder Ray is TIER 4 in program.md, untested in experiments.
 
-TARGET: 50-120 total trades over 4 years (proven pattern from DB).
-KEY: Simple 3 conditions = reliable entries.
+WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
+- Bull markets: Bull Power positive confirms buyers aggressive
+- Bear markets: Bear Power negative confirms sellers aggressive  
+- Range: ADX < 20 prevents trading in chop
+- Volume spike confirms institutional involvement at key levels
+
+TARGET: 75-150 total trades over 4 years (19-37/year).
+SIZE: 0.30 (discrete)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_breakout_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_elder_ray_vol_adx_1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_hma(close, period):
-    """Hull Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
-    
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
-    
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
-    
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
-    
-    return wma(diff, sqrt_n)
+def calculate_ema(close, span):
+    """Exponential Moving Average"""
+    return pd.Series(close).ewm(span=span, min_periods=span, adjust=False).mean().values
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -68,13 +45,13 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
+def calculate_adx(high, low, close, period=14):
     """
-    Choppiness Index - measures market choppiness
-    CHOP > 61.8 = ranging (avoid), CHOP < 50 = trending (allow)
+    Average Directional Index - measures trend strength
+    ADX > 25 = trending, ADX < 20 = ranging
     """
     n = len(close)
-    if n < period + 1:
+    if n < period * 2 + 1:
         return np.full(n, np.nan)
     
     tr = np.zeros(n, dtype=np.float64)
@@ -82,25 +59,66 @@ def calculate_choppiness(high, low, close, period=14):
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    chop = np.full(n, np.nan, dtype=np.float64)
+    # Plus and Minus DM
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    # Smooth
+    smooth_plus = pd.Series(plus_dm).rolling(window=period, min_periods=period).sum().values
+    smooth_minus = pd.Series(minus_dm).rolling(window=period, min_periods=period).sum().values
+    smooth_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    
+    # Calculate DI
+    di_plus = np.zeros(n, dtype=np.float64)
+    di_minus = np.zeros(n, dtype=np.float64)
     
     for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        price_range = highest_high - lowest_low
-        
-        if price_range > 1e-10 and atr_sum > 0:
-            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+        if smooth_tr[i] > 0:
+            di_plus[i] = 100.0 * smooth_plus[i] / smooth_tr[i]
+            di_minus[i] = 100.0 * smooth_minus[i] / smooth_tr[i]
     
-    return chop
+    # DX
+    dx = np.zeros(n, dtype=np.float64)
+    for i in range(period, n):
+        di_sum = di_plus[i] + di_minus[i]
+        if di_sum > 0:
+            dx[i] = 100.0 * abs(di_plus[i] - di_minus[i]) / di_sum
+    
+    # ADX
+    adx = pd.Series(dx).ewm(span=period, min_periods=period * 2, adjust=False).mean().values
+    return adx
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - upper and lower bands"""
-    n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_elder_ray(high, low, close, ema_period=13):
+    """
+    Elder Ray by Alexander Elder
+    Bull Power = High - EMA(close, period)
+    Bear Power = Low - EMA(close, period)
+    
+    Interpretation:
+    - Bull Power > 0: Bulls can push above EMA
+    - Bear Power < 0: Bears can push below EMA
+    """
+    n = len(close)
+    ema = calculate_ema(close, ema_period)
+    
+    bull_power = np.zeros(n, dtype=np.float64)
+    bear_power = np.zeros(n, dtype=np.float64)
+    
+    for i in range(n):
+        if not np.isnan(ema[i]):
+            bull_power[i] = high[i] - ema[i]
+            bear_power[i] = low[i] - ema[i]
+    
+    return bull_power, bear_power, ema
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -109,126 +127,127 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1w data for trend filter (ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for multi-timeframe trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA for trend direction
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate 1d EMA for trend direction
+    ema_1d = calculate_ema(df_1d['close'].values, span=21)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1d Donchian
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    # Calculate 1d ADX for regime
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate ATR for stops
+    # Calculate 6h Elder Ray
+    bull_power, bear_power, ema_6h = calculate_elder_ray(high, low, close, ema_period=13)
+    
+    # Calculate 6h ADX
+    adx_6h = calculate_adx(high, low, close, period=14)
+    
+    # ATR for stops
     atr_14 = calculate_atr(high, low, close, period=14)
-    
-    # Calculate choppiness for regime filter
-    chop_14 = calculate_choppiness(high, low, close, period=14)
     
     # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position size
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    stop_price = 0.0
     
-    # Warmup period
+    # Warmup
     warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(bull_power[i]) or np.isnan(atr_14[i]) or atr_14[i] <= 0:
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(chop_14[i]):
+        if np.isnan(adx_6h[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === REGIME CHECK (ADX < 25 = ranging, allow mean reversion) ===
+        adx_trending = adx_6h[i] > 25
         
-        if np.isnan(vol_ratio[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === 1d TREND BIAS ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i] if not np.isnan(ema_1d_aligned[i]) else True
+        adx_1d_trending = adx_1d_aligned[i] > 20 if not np.isnan(adx_1d_aligned[i]) else False
         
-        # === REGIME CHECK ===
-        chop = chop_14[i]
-        is_trending = chop < 55.0  # Trend mode only
-        
-        # === 1w TREND DIRECTION ===
-        price_above_1w_hma = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
-        
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        upper = donch_upper[i]
-        lower = donch_lower[i]
-        
-        # Breakout: price closes above 20d high
-        bullish_breakout = close[i] > upper
-        
-        # Breakdown: price closes below 20d low
-        bearish_breakout = close[i] < lower
+        # === ELDER RAY SIGNALS ===
+        bull = bull_power[i]
+        bear = bear_power[i]
+        ema = ema_6h[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.3
         
-        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if not in_position:
-            # LONG: Bullish breakout + 1w confirms + trending + volume
-            if bullish_breakout and price_above_1w_hma and is_trending:
-                if vol_spike:
-                    desired_signal = SIZE
-                else:
-                    desired_signal = SIZE * 0.5  # Half size without volume
-            
-            # SHORT: Bearish breakdown + 1w confirms + trending + volume
-            elif bearish_breakout and not price_above_1w_hma and is_trending:
-                if vol_spike:
-                    desired_signal = -SIZE
-                else:
-                    desired_signal = -SIZE * 0.5
+        # === ENTRY LOGIC ===
+        # Long: Bull Power > 0 + price above 6h EMA + volume confirmation
+        if bull > 0 and close[i] > ema:
+            if vol_spike or adx_trending:  # Either volume or trend confirmation
+                desired_signal = SIZE
         
-        # === STOPLOSS CHECK (trailing) ===
-        stoploss_triggered = False
+        # Short: Bear Power < 0 + price below 6h EMA + volume confirmation
+        if bear < 0 and close[i] < ema:
+            if vol_spike or adx_trending:
+                desired_signal = -SIZE
         
+        # === ADDITIONAL FILTER: TREND CONFLICT ===
+        # In strong 1d uptrend (price >> 1d EMA), only allow longs
+        if price_above_1d_ema and adx_1d_trending:
+            if desired_signal < 0:  # Cancel shorts in strong uptrend
+                desired_signal = 0.0
+        
+        # In strong 1d downtrend (price << 1d EMA), only allow shorts
+        if not price_above_1d_ema and adx_1d_trending:
+            if desired_signal > 0:  # Cancel longs in strong downtrend
+                desired_signal = 0.0
+        
+        # === STOPLOSS CHECK ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
-                stoploss_triggered = True
+                desired_signal = 0.0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
-                stoploss_triggered = True
+                desired_signal = 0.0
         
-        if stoploss_triggered:
-            desired_signal = 0.0
+        # === TAKE PROFIT at 2R ===
+        if in_position and position_side > 0:
+            profit = close[i] - entry_price
+            if profit >= 2.0 * entry_atr:
+                desired_signal = SIZE / 2  # Half position at 2R
         
-        # === UPDATE POSITION TRACKING ===
+        if in_position and position_side < 0:
+            profit = entry_price - close[i]
+            if profit >= 2.0 * entry_atr:
+                desired_signal = -SIZE / 2
+        
+        # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 in_position = True
@@ -238,13 +257,18 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+                stop_price = 0.0
         
         signals[i] = desired_signal
     
