@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Williams %R Extreme + Volume Spike + ATR Regime
+Experiment #021: 4h Camarilla Bounce + Choppiness Regime + Volume
 
-HYPOTHESIS: Williams %R hitting extreme levels (below -80 or above -20) on 12h
-marks institutional reversal points. Combined with volume spike confirmation and
-ATR-based regime filter, this captures mean-reversion setups in both bull and bear.
-12h is slow enough to reduce fee drag but fast enough to catch major reversals.
+HYPOTHESIS: Top DB performer (ETH test Sharpe 1.47, 95 trades) uses Camarilla
+S3/R3 bounce logic in choppy markets. Price bounces off extreme Camarilla levels
+in range-bound conditions, fading the move. This is fundamentally DIFFERENT from
+breakout trading - it profits from mean-reversion, not trend continuation.
 
-WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull: Buy oversold (-80) dips, ride to mean
-- Bear: Short overbought (-20) rallies, fade the bounce
-- ATR regime prevents fading major trends
+KEY INSIGHT: Donchian breakout strategies all failed. Camarilla bounce strategy
+succeeded because:
+1. It trades extremes, not breakouts (higher probability)
+2. Choppiness filter prevents trading in trending markets
+3. Volume confirmation ensures institutional interest
 
-TIMEFRAME: 12h primary
-HTF: 1d for trend bias
-TARGET: 75-150 total trades over 4 years
+TIMEFRAME: 4h primary
+HTF: 12h for regime confirmation
+TARGET: 75-150 total trades over 4 years (19-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_williams_r_vol_atr_regime_v1"
-timeframe = "12h"
+name = "mtf_4h_camarilla_bounce_chop_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -38,25 +39,58 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R"""
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = choppy/range-bound market (mean reversion favored)
+    CHOP < 38.2 = trending market (trend following favored)
+    """
     n = len(close)
-    willr = np.full(n, np.nan, dtype=np.float64)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    for i in range(period - 1, n):
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        # Sum of ATR over period
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+            atr_sum += tr
+        
+        # Highest high - lowest low over period
         highest_high = np.max(high[i - period + 1:i + 1])
         lowest_low = np.min(low[i - period + 1:i + 1])
+        range_hl = highest_high - lowest_low
         
-        if highest_high != lowest_low:
-            willr[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
-        else:
-            willr[i] = -50  # neutral when range is zero
+        if range_hl > 0 and atr_sum > 0:
+            # CHOP = 100 * log10(atr_sum / range_hl) / log10(period)
+            chop[i] = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
     
-    return willr
+    return chop
 
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+def calculate_camarilla_levels(high, low, close):
+    """
+    Camarilla Pivot Levels
+    R3 = close + (high - low) * 1.1 / 2
+    R4 = close + (high - low) * 1.1
+    S3 = close - (high - low) * 1.1 / 2
+    S4 = close - (high - low) * 1.1
+    """
+    n = len(close)
+    r3 = np.full(n, np.nan, dtype=np.float64)
+    r4 = np.full(n, np.nan, dtype=np.float64)
+    s3 = np.full(n, np.nan, dtype=np.float64)
+    s4 = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(1, n):
+        hl_range = high[i] - low[i]
+        r3[i] = close[i] + hl_range * 1.1 / 2
+        r4[i] = close[i] + hl_range * 1.1
+        s3[i] = close[i] - hl_range * 1.1 / 2
+        s4[i] = close[i] - hl_range * 1.1
+    
+    return r3, r4, s3, s4
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -66,23 +100,23 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d EMA for trend bias
-    ema_1d_raw = calculate_ema(df_1d['close'].values, period=50)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_raw)
+    # 12h Choppiness for regime (smoother, less noise)
+    chop_12h_raw = calculate_choppiness_index(df_12h['high'].values, df_12h['low'].values, 
+                                               df_12h['close'].values, period=14)
+    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h_raw)
     
-    # Calculate 12h indicators
+    # Calculate local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Williams %R
-    willr = calculate_williams_r(high, low, close, period=14)
+    # 4h Choppiness
+    chop_4h = calculate_choppiness_index(high, low, close, period=14)
     
-    # ATR ratio for regime (current vs trailing)
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_ratio = atr_7 / (atr_14 + 1e-10)
+    # Camarilla levels
+    r3, r4, s3, s4 = calculate_camarilla_levels(high, low, close)
     
-    # Volume MA and ratio
+    # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -95,8 +129,12 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = (100 - (100 / (1 + rs))).values
     
+    # ATR-based stops
+    atr_ma = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    atr_percent = atr_14 / close * 100
+    
     signals = np.zeros(n)
-    SIZE = 0.25  # Conservative sizing
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -118,60 +156,48 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(willr[i]):
+        if np.isnan(chop_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        # === TREND BIAS (1d EMA) ===
-        price_above_1d_ema = close[i] > ema_1d_aligned[i]
-        
-        # === REGIME (ATR ratio) ===
-        # ATR ratio > 1.5 = high volatility = choppy/range (don't fade extremes as much)
-        # ATR ratio < 1.2 = low volatility = trending (mean reversion works)
-        high_vol_regime = atr_ratio[i] > 1.5
-        
-        # === WILLIAMS %R EXTREME LEVELS ===
-        willr_val = willr[i]
-        oversold = willr_val < -80  # Strong oversold
-        overbought = willr_val > -20  # Strong overbought
+        # === REGIME CHECK ===
+        # CHOP > 50 means choppy (no clear trend) - perfect for Camarilla bounces
+        # Use average of 4h and 12h CHOP for confirmation
+        chop_val = np.nanmean([chop_4h[i] if not np.isnan(chop_4h[i]) else 50, 
+                               chop_12h_aligned[i]])
+        is_choppy = chop_val > 50.0  # Range-bound market
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.2
         
-        # === RSI CONFIRMATION ===
+        # === RSI FOR MOMENTUM ===
         rsi_val = rsi[i]
-        rsi_oversold = rsi_val < 35
-        rsi_overbought = rsi_val > 65
+        
+        # === Camarilla bounce conditions ===
+        # Price touched or approached R3/R4 (overbought) = potential short
+        near_r3 = abs(close[i] - r3[i]) < 0.5 * atr_14[i] if not np.isnan(r3[i]) else False
+        near_r4 = abs(close[i] - r4[i]) < 0.5 * atr_14[i] if not np.isnan(r4[i]) else False
+        
+        # Price touched or approached S3/S4 (oversold) = potential long
+        near_s3 = abs(close[i] - s3[i]) < 0.5 * atr_14[i] if not np.isnan(s3[i]) else False
+        near_s4 = abs(close[i] - s4[i]) < 0.5 * atr_14[i] if not np.isnan(s4[i]) else False
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY: Williams %R oversold + RSI confirm + volume + trend aligned ===
-            if oversold and rsi_oversold:
-                # In high vol regime, require bullish trend
-                # In low vol regime, allow counter-trend if RSI very oversold
-                if price_above_1d_ema:
-                    desired_signal = SIZE
-                elif high_vol_regime and rsi_val < 25:  # Extreme counter-trend
-                    desired_signal = SIZE * 0.5  # Half size for counter-trend
+            # === NEW LONG ENTRY (bounce off S3/S4) ===
+            # Conditions: near support level + RSI oversold + volume + choppy
+            if (near_s3 or near_s4) and rsi_val < 40 and vol_spike and is_choppy:
+                desired_signal = SIZE
             
-            # === SHORT ENTRY: Williams %R overbought + RSI confirm + volume + trend aligned ===
-            if overbought and rsi_overbought:
-                if not price_above_1d_ema:
-                    desired_signal = -SIZE
-                elif high_vol_regime and rsi_val > 75:  # Extreme counter-trend
-                    desired_signal = -SIZE * 0.5  # Half size for counter-trend
+            # === NEW SHORT ENTRY (bounce off R3/R4) ===
+            # Conditions: near resistance level + RSI overbought + volume + choppy
+            if (near_r3 or near_r4) and rsi_val > 60 and vol_spike and is_choppy:
+                desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
@@ -193,21 +219,29 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT: Williams %R mean reversion or RSI normalize ===
+        # === EXIT: Mean reversion target or ATR profit ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: Williams %R normalize (above -20) or RSI neutral
-            if willr_val > -20:
-                exit_triggered = True
+            # Long exit: RSI normalized or touched middle (R3)
             if rsi_val > 55:
+                exit_triggered = True
+            # Or if RSI reached neutral zone (40-60)
+            if 40 <= rsi_val <= 60:
+                exit_triggered = True
+            # Or price reached R3 (mean reversion complete)
+            if not np.isnan(r3[i]) and close[i] >= r3[i]:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: Williams %R normalize (below -80) or RSI neutral
-            if willr_val < -80:
-                exit_triggered = True
+            # Short exit: RSI normalized
             if rsi_val < 45:
+                exit_triggered = True
+            # Or if RSI reached neutral zone
+            if 40 <= rsi_val <= 60:
+                exit_triggered = True
+            # Or price reached S3
+            if not np.isnan(s3[i]) and close[i] <= s3[i]:
                 exit_triggered = True
         
         if exit_triggered:
