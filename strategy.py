@@ -1,86 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h Weekly Pivot Mean Reversion + Extreme Volume + Regime
+Experiment #008: 12h Donchian Breakout + Volume + Weekly Trend + Chop Filter
 
-HYPOTHESIS: Weekly pivot levels represent major institutional S/R zones. When price 
-deviates significantly from 6h mean (EMA21) AND touches weekly pivot AND shows 
-extreme volume (>2.5x), institutions are defending levels → mean reversion play.
+HYPOTHESIS: Donchian channel breakouts capture momentum moves, but only work when:
+1. Weekly trend confirms direction (avoid counter-trend breakouts that fail)
+2. Volume spike confirms institutional participation (not fake breakout)
+3. Market is trending, not choppy (Choppiness Index < 50)
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Mean reversion works in all regimes when price is at extreme deviations
-- Weekly pivots are major levels that hold in bull AND bear markets
-- Extreme volume confirms institutional defense of levels
-- Regime filter (ADX) ensures we only trade when there's enough movement
+- Bull: Long breakouts above Donchian high when 1w HMA bullish
+- Bear: Short breakouts below Donchian low when 1w HMA bearish
+- Range: Choppiness filter blocks entries (CHOP > 55 = no trades)
+- Volume confirmation filters out low-liquidity fake breakouts
 
-KEY DIFFERENCE FROM FAILED STRATEGIES:
-- Previous Camarilla (747 trades) was too loose → this uses WEEKLY pivots (higher TF)
-- Volume threshold 2.5x (not 1.5x) → fewer but higher quality signals
-- Mean reversion (not breakout) → different edge than Donchian failures
-- Target: 75-150 total trades over 4 years (12-37/year)
+TARGET: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+This is TIGHTER than 4h strategies because 12h has fewer bars.
 
-ENTRY CONDITIONS (ALL must align):
-1. Price within 1 ATR of weekly S3/R3 pivot
-2. Price >2.5 ATR away from 6h EMA21 (extreme deviation)
-3. Volume >2.5x 20-bar average (extreme spike)
-4. ADX(14) > 20 (enough movement to profit)
-5. 1d HMA trend confirmation (trade with HTF trend)
+KEY DESIGN (tight entry to avoid overtrading):
+1. 1w HMA(21) for major trend bias (call ONCE before loop)
+2. Donchian(20) breakout structure (20-bar high/low)
+3. Volume spike > 1.5x 20-avg (institutional confirmation)
+4. Choppiness < 50 (trending regime only)
+5. ATR(14) trailing stop at 2.5x (tight risk management)
+6. Signal: discrete 0.0, ±0.25, ±0.30 (minimize churn)
 
-SIZE: 0.25 (discrete)
-STOPLOSS: 2.5 ATR trailing
+CRITICAL: All conditions must align = fewer trades = less fee drag.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_weekly_pivot_meanrev_extreme_vol_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_vol_chop_1w_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_ema(close, span):
-    """Exponential Moving Average"""
-    return pd.Series(close).ewm(span=span, min_periods=span, adjust=False).mean().values
-
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index"""
-    n = len(close)
-    if n < period * 2:
-        return np.full(n, np.nan)
-    
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    tr = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
-        
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
-    
-    for i in range(period, n):
-        if tr_smooth[i] > 1e-10:
-            plus_di[i] = 100.0 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100.0 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    dx = np.zeros(n, dtype=np.float64)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 1e-10:
-            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -96,46 +48,75 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_weekly_pivots(prev_high, prev_low, prev_close):
+def calculate_choppiness(high, low, close, period=14):
     """
-    Weekly pivot levels (standard floor pivots)
-    PP = (H + L + C) / 3
-    R1 = 2*PP - L
-    R2 = PP + (H - L)
-    R3 = H + 2*(PP - L)
-    S1 = 2*PP - H
-    S2 = PP - (H - L)
-    S3 = L - 2*(H - PP)
+    Choppiness Index - measures market choppiness
+    CHOP > 61.8 = ranging (no trades), CHOP < 38.2 = strongly trending
+    We use CHOP < 50 as threshold to allow trades
     """
-    n = len(prev_high)
-    pivots = {
-        'pp': np.full(n, np.nan, dtype=np.float64),
-        'r1': np.full(n, np.nan, dtype=np.float64),
-        'r2': np.full(n, np.nan, dtype=np.float64),
-        'r3': np.full(n, np.nan, dtype=np.float64),
-        's1': np.full(n, np.nan, dtype=np.float64),
-        's2': np.full(n, np.nan, dtype=np.float64),
-        's3': np.full(n, np.nan, dtype=np.float64),
-    }
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    for i in range(n):
-        if np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]):
-            continue
-        
-        h = prev_high[i]
-        l = prev_low[i]
-        c = prev_close[i]
-        
-        pp = (h + l + c) / 3.0
-        pivots['pp'][i] = pp
-        pivots['r1'][i] = 2.0 * pp - l
-        pivots['r2'][i] = pp + (h - l)
-        pivots['r3'][i] = h + 2.0 * (pp - l)
-        pivots['s1'][i] = 2.0 * pp - h
-        pivots['s2'][i] = pp - (h - l)
-        pivots['s3'][i] = l - 2.0 * (h - pp)
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    return pivots
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
+def calculate_hma(close, period):
+    """Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    half = max(1, period // 2)
+    sqrt_n = max(1, int(np.sqrt(period)))
+    
+    def wma(series, span):
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
+        for i in range(span - 1, len(series)):
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1].astype(np.float64)
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / weight_sum
+        return result
+    
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
+    
+    diff = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+    
+    return wma(diff, sqrt_n)
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -144,48 +125,24 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # === LOAD 1W DATA ONCE BEFORE LOOP ===
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HMA for trend bias
-    def calc_hma(series, period):
-        half = max(1, period // 2)
-        sqrt_n = max(1, int(np.sqrt(period)))
-        wma_half = series.ewm(span=half, min_periods=half, adjust=False).mean()
-        wma_full = series.ewm(span=period, min_periods=period, adjust=False).mean()
-        diff = 2.0 * wma_half - wma_full
-        return diff.ewm(span=sqrt_n, min_periods=sqrt_n, adjust=False).mean().values
+    # Calculate 1w HMA for trend bias
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    hma_1d_raw = calc_hma(pd.Series(df_1d['close'].values), 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
-    
-    # Calculate weekly pivots
-    weekly_pivots = calculate_weekly_pivots(
-        df_1w['high'].values,
-        df_1w['low'].values,
-        df_1w['close'].values
-    )
-    
-    # Align weekly pivots to 6h
-    s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivots['s3'])
-    s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivots['s2'])
-    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivots['s1'])
-    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivots['r1'])
-    r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivots['r2'])
-    r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivots['r3'])
-    
-    # Calculate 6h indicators
+    # === CALCULATE 12H INDICATORS ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
-    ema_21 = calculate_ema(close, 21)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
     # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.25  # Conservative size for 12h
     
     # Position tracking
     in_position = False
@@ -196,6 +153,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
+    # Warmup for all indicators
     warmup = 100
     
     for i in range(warmup, n):
@@ -207,14 +165,14 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(ema_21[i]):
+        if np.isnan(chop_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -228,58 +186,45 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
+        if np.isnan(hma_1w_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
         # === REGIME CHECK ===
-        adx = adx_14[i]
-        is_trending = adx > 20.0  # Need some directional movement
+        chop = chop_14[i]
+        is_trending = chop < 50.0  # Only trade in trending markets
         
-        # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
+        # === TREND BIAS (1w HMA) ===
+        price_above_1w_hma = close[i] > hma_1w_aligned[i]
         
-        # === VOLUME CONFIRMATION (EXTREME) ===
-        vol_extreme = vol_ratio[i] > 2.5  # Much stricter than 1.5x
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === PRICE DEVIATION FROM MEAN ===
-        if ema_21[i] > 1e-10:
-            price_deviation = (close[i] - ema_21[i]) / atr_14[i]
-        else:
-            price_deviation = 0.0
+        # === DONCHIAN BREAKOUT DETECTION ===
+        prev_upper = donchian_upper[i-1] if i > 0 else donchian_upper[i]
+        prev_lower = donchian_lower[i-1] if i > 0 else donchian_lower[i]
         
-        extreme_below = price_deviation < -2.5  # Price >2.5 ATR below EMA
-        extreme_above = price_deviation > 2.5   # Price >2.5 ATR above EMA
+        # Breakout above Donchian upper
+        breakout_long = close[i] > prev_upper and close[i-1] <= prev_upper
         
-        # === WEEKLY PIVOT PROXIMITY ===
-        # Check if price is within 1 ATR of any major weekly pivot
-        at_support = False
-        at_resistance = False
+        # Breakout below Donchian lower
+        breakout_short = close[i] < prev_lower and close[i-1] >= prev_lower
         
-        for pivot in [s1_aligned[i], s2_aligned[i], s3_aligned[i]]:
-            if not np.isnan(pivot) and atr_14[i] > 0:
-                dist = (close[i] - pivot) / atr_14[i]
-                if -1.0 < dist < 1.5:  # Within 1 ATR below to 1.5 ATR above
-                    at_support = True
-                    break
-        
-        for pivot in [r1_aligned[i], r2_aligned[i], r3_aligned[i]]:
-            if not np.isnan(pivot) and atr_14[i] > 0:
-                dist = (pivot - close[i]) / atr_14[i]
-                if -1.0 < dist < 1.5:
-                    at_resistance = True
-                    break
-        
-        # === ENTRY LOGIC (MEAN REVERSION) ===
+        # === ENTRY LOGIC (ALL CONDITIONS MUST ALIGN) ===
         desired_signal = 0.0
         
-        # LONG: Price at weekly support + extreme below EMA + volume + trend bias
-        if is_trending and at_support and extreme_below and vol_extreme:
-            if price_above_1d_hma:  # Only long if 1d trend is up
-                desired_signal = SIZE
+        # LONG: Donchian breakout + bullish 1w trend + volume spike + trending regime
+        if breakout_long and price_above_1w_hma and vol_spike and is_trending:
+            desired_signal = SIZE
         
-        # SHORT: Price at weekly resistance + extreme above EMA + volume + trend bias
-        if is_trending and at_resistance and extreme_above and vol_extreme:
-            if not price_above_1d_hma:  # Only short if 1d trend is down
-                desired_signal = -SIZE
+        # SHORT: Donchian breakout + bearish 1w trend + volume spike + trending regime
+        if breakout_short and not price_above_1w_hma and vol_spike and is_trending:
+            desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (ATR trailing stop) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -299,15 +244,22 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT (mean reversion to EMA) ===
+        # === TAKE PROFIT (opposite Donchian band) ===
         tp_triggered = False
         if in_position and position_side > 0:
-            # TP when price returns to EMA (mean reversion complete)
-            if close[i] >= ema_21[i]:
+            # TP at Donchian lower (mean reversion after extended move)
+            if not np.isnan(donchian_lower[i]) and low[i] <= donchian_lower[i]:
+                tp_triggered = True
+            # Or 3R profit
+            if high[i] >= entry_price + 3.0 * entry_atr:
                 tp_triggered = True
         
         if in_position and position_side < 0:
-            if close[i] <= ema_21[i]:
+            # TP at Donchian upper
+            if not np.isnan(donchian_upper[i]) and high[i] >= donchian_upper[i]:
+                tp_triggered = True
+            # Or 3R profit
+            if low[i] <= entry_price - 3.0 * entry_atr:
                 tp_triggered = True
         
         if tp_triggered:
