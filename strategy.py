@@ -1,90 +1,45 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 6h Ichimoku Cloud + 1d Trend Filter
+Experiment #021: 12h TRIX Momentum + Volume + 1d SMA200 Trend
 
-HYPOTHESIS: Ichimoku Cloud system captures institutional price structure.
-TK cross (Tenkan/Kijun) signals momentum shifts. Cloud (Kumo) provides
-dynamic support/resistance. Combined with 1d HMA for trend direction,
-this works in BOTH bull markets (long TK crosses above cloud) and
-bear markets (short TK crosses below cloud).
+HYPOTHESIS: TRIX (Triple EMA) measures rate of change of momentum. 
+A TRIX crossover signals momentum shift — more robust than simple EMA crossover.
+Combined with volume confirmation and 1d SMA200 trend filter, this captures 
+trend changes without overtrading. TRIX is a smoothing oscillator that filters 
+noise better than raw momentum indicators. 12h TF = ~20 bars/week = ~75-150 trades/4yr.
 
-TIMEFRAME: 6h primary
-HTF: 1d for trend bias
-TARGET: 50-150 total trades over 4 years (12-37/year)
+TIMEFRAME: 12h primary
+HTF: 1d for trend direction filter
+TARGET: 75-200 total trades over 4 years (19-50/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_ichimoku_cloud_1d_trend_v1"
-timeframe = "6h"
+name = "mtf_12h_trix_vol_1d_sma200_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou_b=52):
-    """
-    Ichimoku Cloud calculation
-    Returns: tenkan, kijun, senkou_a, senkou_b, close (for chikou comparison)
-    """
+def calculate_trix(close, period=14):
+    """TRIX - Triple EMA Rate of Change"""
     n = len(close)
-    
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    tenkan = np.full(n, np.nan, dtype=np.float64)
-    for i in range(8, n):
-        period_high = np.max(high[i-8:i+1])
-        period_low = np.min(low[i-8:i+1])
-        tenkan[i] = (period_high + period_low) / 2.0
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    kijun = np.full(n, np.nan, dtype=np.float64)
-    for i in range(25, n):
-        period_high = np.max(high[i-25:i+1])
-        period_low = np.min(low[i-25:i+1])
-        kijun[i] = (period_high + period_low) / 2.0
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, plotted 26 periods ahead
-    senkou_a = np.full(n, np.nan, dtype=np.float64)
-    for i in range(25, n):
-        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
-            senkou_a[i] = (tenkan[i] + kijun[i]) / 2.0
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, plotted 26 periods ahead
-    senkou_b_arr = np.full(n, np.nan, dtype=np.float64)
-    for i in range(51, n):
-        period_high = np.max(high[i-51:i+1])
-        period_low = np.min(low[i-51:i+1])
-        senkou_b_arr[i] = (period_high + period_low) / 2.0
-    
-    return tenkan, kijun, senkou_a, senkou_b_arr
-
-def calculate_hma(close, period):
-    """Hull Moving Average"""
-    n = len(close)
-    if n < period:
+    if n < period * 3:
         return np.full(n, np.nan)
     
-    half = max(1, period // 2)
-    sqrt_n = max(1, int(np.sqrt(period)))
+    # Triple EMA
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
+    # Rate of change of triple EMA
+    trix = ema3.pct_change(period) * 100
     
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
-    
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
-    
-    return wma(diff, sqrt_n)
+    return trix.values
+
+def calculate_sma(close, period):
+    """Simple Moving Average"""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -110,52 +65,32 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # 1d SMA200 for trend direction
+    sma200_1d_raw = calculate_sma(df_1d['close'].values, period=200)
+    sma200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d_raw)
     
-    # Calculate 6h Ichimoku
-    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
+    # Calculate local 12h indicators
+    atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Volume MA
+    # TRIX
+    trix = calculate_trix(close, period=14)
+    
+    # TRIX signal line (EMA of TRIX)
+    trix_series = pd.Series(trix)
+    trix_signal = trix_series.ewm(span=9, min_periods=9, adjust=False).mean().values
+    
+    # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # ATR for stops
-    atr_14 = calculate_atr(high, low, close, period=14)
-    
-    # ADX for trend strength
-    def calculate_adx(high, low, close, period=14):
-        n = len(close)
-        if n < period + 1:
-            return np.full(n, np.nan)
-        
-        plus_dm = np.zeros(n)
-        minus_dm = np.zeros(n)
-        
-        for i in range(1, n):
-            high_diff = high[i] - high[i-1]
-            low_diff = low[i-1] - low[i]
-            
-            if high_diff > low_diff and high_diff > 0:
-                plus_dm[i] = high_diff
-            if low_diff > high_diff and low_diff > 0:
-                minus_dm[i] = low_diff
-        
-        tr = np.zeros(n)
-        tr[0] = high[0] - low[0]
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr_smooth + 1e-10)
-        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / (atr_smooth + 1e-10)
-        
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-        return adx
-    
-    adx = calculate_adx(high, low, close)
+    # RSI for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = (100 - (100 / (1 + rs))).values
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -169,81 +104,62 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 60
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(tenkan[i]) or np.isnan(kijun[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        if np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        # === ICHIMOKU SIGNALS ===
-        tk_cross_up = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] if i > 1 else False
-        tk_cross_down = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] if i > 1 else False
+        if np.isnan(trix[i]) or np.isnan(trix_signal[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # Cloud boundaries (average of senkou a and b)
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        if np.isnan(sma200_1d_aligned[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # Price position relative to cloud
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        price_in_cloud = not price_above_cloud and not price_below_cloud
+        # === 1d TREND FILTER ===
+        bullish_trend = close[i] > sma200_1d_aligned[i]
+        bearish_trend = close[i] < sma200_1d_aligned[i]
         
-        # TK line position
-        tk_above_kijun = tenkan[i] > kijun[i]
+        # === TRIX CROSSOVER DETECTION ===
+        # Bullish crossover: TRIX crosses above signal line
+        trix_above_sig_prev = trix[i-1] > trix_signal[i-1] if i > 1 else False
+        trix_above_sig_curr = trix[i] > trix_signal[i]
+        bullish_crossover = trix_above_sig_curr and not trix_above_sig_prev
         
-        # === 1d TREND ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        # Bearish crossover: TRIX crosses below signal line
+        trix_below_sig_prev = trix[i-1] < trix_signal[i-1] if i > 1 else False
+        trix_below_sig_curr = trix[i] < trix_signal[i]
+        bearish_crossover = trix_below_sig_curr and not trix_below_sig_prev
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.4
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === ADX TREND STRENGTH ===
-        adx_val = adx[i] if not np.isnan(adx[i]) else 0
-        adx_strong = adx_val > 18
+        # === RSI MOMENTUM ===
+        rsi_val = rsi[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === TK CROSS UP (BULLISH) ===
-            # Only in bull trend (price above 1d HMA) AND either above cloud or ADX strong
-            if tk_cross_up and price_above_1d_hma:
-                if (price_above_cloud or (adx_strong and not price_below_cloud)):
-                    if vol_spike or adx_strong:
-                        desired_signal = SIZE
+            # === NEW LONG ENTRY ===
+            # TRIX bullish crossover + volume spike + bullish 1d trend + RSI confirming
+            if bullish_crossover and vol_spike and bullish_trend and rsi_val > 45:
+                desired_signal = SIZE
             
-            # === TK CROSS DOWN (BEARISH) ===
-            # Only in bear trend (price below 1d HMA) AND either below cloud or ADX strong
-            if tk_cross_down and not price_above_1d_hma:
-                if (price_below_cloud or (adx_strong and not price_above_cloud)):
-                    if vol_spike or adx_strong:
-                        desired_signal = -SIZE
+            # === NEW SHORT ENTRY ===
+            # TRIX bearish crossover + volume spike + bearish 1d trend + RSI confirming
+            if bearish_crossover and vol_spike and bearish_trend and rsi_val < 55:
+                desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
@@ -265,23 +181,21 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TK REVERSAL EXIT ===
+        # === EXIT: Opposite crossover or RSI extreme ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Exit long on TK cross down
-            if tk_cross_down:
+            # Long exit: TRIX bearish crossover OR RSI < 35
+            if bearish_crossover:
                 exit_triggered = True
-            # Or price falls into cloud in weak ADX
-            if price_below_cloud and not adx_strong:
+            if rsi_val < 35:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Exit short on TK cross up
-            if tk_cross_up:
+            # Short exit: TRIX bullish crossover OR RSI > 65
+            if bullish_crossover:
                 exit_triggered = True
-            # Or price rises into cloud in weak ADX
-            if price_above_cloud and not adx_strong:
+            if rsi_val > 65:
                 exit_triggered = True
         
         if exit_triggered:
@@ -301,6 +215,9 @@ def generate_signals(prices):
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
+            else:
+                # Same direction - maintain position
+                pass
         else:
             if in_position:
                 in_position = False
