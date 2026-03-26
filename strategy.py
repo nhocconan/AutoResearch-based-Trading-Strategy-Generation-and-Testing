@@ -1,24 +1,78 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Donchian Breakout + RSI Momentum + 1w Trend Filter
+Experiment #021: 12h KAMA Trend + RSI Momentum + Volume
 
-HYPOTHESIS: 12h Donchian(20) breaks are institutional-level moves.
-Adding RSI momentum filter (not extremes, but directional) reduces whipsaws.
-Weekly HMA(21) provides regime bias (bull market = long only, bear = short bias).
-This combination should yield 60-120 total trades over 4 years with positive Sharpe.
+HYPOTHESIS: KAMA(10) tracks price efficiently in both bull and bear markets.
+RSI(14) crossing 50 is a proven momentum shift signal. Volume confirmation 
+filters false breakouts. 1d HMA provides trend bias. This combination 
+captures major trend changes with 2-3 conditions only.
 
-Why 12h: Slower than 4h (less fee drag), faster than 1d (more opportunities).
-Target: 15-30 trades/year = ~60-120 total over 4 years.
-
-Works in: BOTH bull (long breakouts) AND bear (short breakdowns with RSI < 50).
+TIMEFRAME: 12h
+HTF: 1d for trend bias (HMA21)
+TARGET: 75-200 total trades over 4 years (19-50/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_rsi_1w_v1"
+name = "mtf_12h_kama_rsi_vol_1d_v1"
 timeframe = "12h"
 leverage = 1.0
+
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Kaufman's Adaptive Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(close[period:] - close[:-period])
+    volatility = np.zeros(n)
+    for i in range(period, n):
+        volatility[i] = np.sum(np.abs(close[i-period+1:i+1] - close[i-period:i]))
+    
+    er = np.zeros(n)
+    mask = volatility > 1e-10
+    er[mask] = change[mask] / volatility[mask]
+    
+    # Calculate smoothing constant
+    fast_const = 2 / (fast + 1)
+    slow_const = 2 / (slow + 1)
+    sc = (er * (fast_const - slow_const) + slow_const) ** 2
+    
+    # KAMA calculation
+    kama = np.full(n, np.nan, dtype=np.float64)
+    kama[period] = close[period]
+    
+    for i in range(period + 1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_rsi(close, period=14):
+    """RSI calculation"""
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    return (100 - (100 / (1 + rs))).values
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -50,45 +104,6 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper, lower, and midpoint"""
-    n = len(high)
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    mid = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-        mid[i] = (upper[i] + lower[i]) / 2.0
-    
-    return upper, lower, mid
-
-def calculate_rsi(close, period=14):
-    """RSI indicator"""
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - (100 / (1 + rs))).values
-    return rsi
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -96,35 +111,32 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
-    df_1w = get_htf_data(prices, '1w')
+    # === Load HTF data ONCE ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly HMA for trend
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # === Calculate local 12h indicators ===
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    donch_upper, donch_lower, donch_mid = calculate_donchian(high, low, period=20)
-    
-    # RSI for momentum
+    kama_10 = calculate_kama(close, period=10)
     rsi_14 = calculate_rsi(close, period=14)
+    rsi_prev = np.roll(rsi_14, 1)
+    rsi_prev[0] = np.nan
     
-    # Volume SMA
+    # Volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.30  # Position size
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    entry_bar = 0
-    
-    # ATR-based stop
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
@@ -140,52 +152,58 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(kama_10[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME (1w HMA) ===
-        weekly_bull = close[i] > hma_1w_aligned[i]
-        weekly_bear = close[i] < hma_1w_aligned[i]
+        # === TREND BIAS (1d HMA) ===
+        bullish_trend = close[i] > hma_1d_aligned[i]
+        bearish_trend = close[i] < hma_1d_aligned[i]
         
-        # === DONCHIAN BREAKOUT ===
-        price_above_upper = close[i] > donch_upper[i]
-        price_below_lower = close[i] < donch_lower[i]
-        price_above_mid = close[i] > donch_mid[i]
-        price_below_mid = close[i] < donch_mid[i]
-        
-        # === RSI MOMENTUM ===
-        rsi_val = rsi_14[i]
-        rsi_bullish = rsi_val > 50  # Momentum favors upside
-        rsi_bearish = rsi_val < 50  # Momentum favors downside
+        # === MOMENTUM (RSI crossover) ===
+        rsi_curr = rsi_14[i]
+        rsi_prv = rsi_prev[i] if i > 0 else np.nan
+        rsi_cross_up = (rsi_curr > 50) and (rsi_prv <= 50) if not np.isnan(rsi_prv) else False
+        rsi_cross_down = (rsi_curr < 50) and (rsi_prv >= 50) if not np.isnan(rsi_prv) else False
         
         # === VOLUME CONFIRMATION ===
         vol_confirm = vol_ratio[i] > 1.2
         
+        # === KAMA SLOPE for trend confirmation ===
+        kama_up = kama_10[i] > kama_10[i-1] if i > 0 and not np.isnan(kama_10[i-1]) else False
+        kama_down = kama_10[i] < kama_10[i-1] if i > 0 and not np.isnan(kama_10[i-1]) else False
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === NEW LONG ===
-            # Breakout above upper band + bullish RSI + weekly bull or neutral
-            if price_above_upper and rsi_bullish:
+            # === NEW LONG ENTRY ===
+            # RSI crosses above 50 + bullish 1d trend + volume confirmation
+            if rsi_cross_up and bullish_trend and vol_confirm:
+                desired_signal = SIZE
+            # Alternative: Strong momentum (RSI > 60) + KAMA rising + trend
+            elif rsi_curr > 60 and kama_up and bullish_trend and vol_confirm:
                 desired_signal = SIZE
             
-            # === NEW SHORT ===
-            # Breakdown below lower band + bearish RSI + weekly bear
-            if price_below_lower and rsi_bearish:
+            # === NEW SHORT ENTRY ===
+            # RSI crosses below 50 + bearish 1d trend + volume confirmation
+            if rsi_cross_down and bearish_trend and vol_confirm:
+                desired_signal = -SIZE
+            # Alternative: Strong bearish momentum (RSI < 40) + KAMA falling + trend
+            elif rsi_curr < 40 and kama_down and bearish_trend and vol_confirm:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -205,44 +223,58 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT CONDITIONS ===
+        # === EXIT LOGIC ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Exit long: RSI turns bearish OR price back below midpoint
-            if rsi_val < 40:  # RSI momentum shifts down
+            # Long exit: RSI overbought OR trend reversal
+            if rsi_curr > 75:
                 exit_triggered = True
-            if price_below_mid:  # Lost structure
+            if bearish_trend and rsi_curr < 45:
+                exit_triggered = True
+            # Stop on trend reversal
+            if close[i] < hma_1d_aligned[i] and rsi_curr < 50:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Exit short: RSI turns bullish OR price back above midpoint
-            if rsi_val > 60:  # RSI momentum shifts up
+            # Short exit: RSI oversold OR trend reversal
+            if rsi_curr < 25:
                 exit_triggered = True
-            if price_above_mid:  # Lost structure
+            if bullish_trend and rsi_curr > 55:
+                exit_triggered = True
+            # Stop on trend reversal
+            if close[i] > hma_1d_aligned[i] and rsi_curr > 50:
                 exit_triggered = True
         
         if exit_triggered:
             desired_signal = 0.0
         
-        # === UPDATE POSITION ===
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                entry_bar = i
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
+            else:
+                # Same direction - maintain position
+                pass
         else:
             if in_position:
                 in_position = False
                 position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
