@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Williams Alligator + Volume Wake Up
+Experiment #021: 12h HMA Trend + Donchian Breakout + Volume Confirmation
 
-HYPOTHESIS: The Williams Alligator (3 smoothed MAs) shows institutional 
-"sleeping/waking" cycles. When the Alligator sleeps (lines converge), 
-price compresses. When it wakes (lines separate), a move begins. Combined 
-with volume confirmation on the wake-up bar, this catches major breakouts 
-after consolidation. Works in both bull (buy wake-ups with bullish 1d trend) 
-and bear (short rallies to Alligator in downtrend).
-
-12h timeframe is slower than 4h, reducing trades from ~100 to ~50/year.
-1d HMA adds trend bias to filter counter-trend entries.
+HYPOTHESIS: 12h timeframe is slow enough to reduce trade frequency (targeting 75-150 total trades).
+Uses 12h HMA(21) for trend direction and 12h Donchian(20) for breakout structure.
+Single strong signal (Donchian breakout + volume spike) + simple ATR stoploss.
+Works in both bull (trend-following breakouts) and bear (counter-trend breakouts on rallies).
 
 TIMEFRAME: 12h primary
-HTF: 1d for trend bias
+HTF: 1d for additional trend confirmation
 TARGET: 75-150 total trades over 4 years (19-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_alligator_wakeup_1d_v1"
+name = "mtf_12h_hma_donchian_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -68,63 +63,19 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_williams_alligator(high, low, close):
-    """
-    Williams Alligator: 3 smoothed MAs
-    Jaw (blue): SMMA(13) of median price
-    Teeth (red): SMMA(8) of median price
-    Lips (green): SMMA(5) of median price
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper and lower bands"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    middle = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
-    Returns: jaw, teeth, lips arrays
-    """
-    n = len(close)
-    median = (high + low + close) / 3.0
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2.0
     
-    # SMMA using EWM with alpha = 1/period
-    def smma(series, period):
-        result = np.full(n, np.nan, dtype=np.float64)
-        alpha = 1.0 / period
-        running_sum = 0.0
-        count = 0
-        for i in range(n):
-            if count < period:
-                running_sum += series[i]
-                count += 1
-                if count == period:
-                    result[i] = running_sum / period
-            else:
-                result[i] = result[i-1] + alpha * (series[i] - result[i-1])
-        return result
-    
-    jaw = smma(median, 13)
-    teeth = smma(median, 8)
-    lips = smma(median, 5)
-    
-    return jaw, teeth, lips
-
-def calculate_rsi(close, period=14):
-    """RSI"""
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - (100 / (1 + rs))).values
-    return rsi
-
-def calculate_volatility_ratio(high, low, close, period=10):
-    """Volatility Ratio for squeeze detection"""
-    n = len(close)
-    vr = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        hlt = high[i] - low[i]
-        if hlt > 0:
-            hmc = abs(close[i] - low[i - period] if i >= period else close[i])
-            vr[i] = hlt / (hmc + 1e-10)
-    
-    return vr
+    return upper, middle, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -136,25 +87,19 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d HMA for trend bias (bullish when price > HMA)
+    # 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate local 12h indicators
+    # Local 12h indicators (since prices is 12h data)
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Williams Alligator
-    jaw, teeth, lips = calculate_williams_alligator(high, low, close)
+    # Donchian 20-period
+    donch_upper, donch_middle, donch_lower = calculate_donchian(high, low, period=20)
     
-    # RSI for momentum
-    rsi_14 = calculate_rsi(close, period=14)
-    
-    # Volume MA for confirmation
+    # Volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # Volatility ratio for squeeze detection
-    vr = calculate_volatility_ratio(high, low, close, period=10)
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -167,9 +112,8 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    entry_bar = 0
     
-    warmup = 100
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -180,7 +124,7 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -194,47 +138,35 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === ALLIGATOR STATE ===
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        
-        # Alligator awake: lips > teeth > jaw (bullish) or lips < teeth < jaw (bearish)
-        alligator_awake_bull = lips_val > teeth_val and teeth_val > jaw_val
-        alligator_awake_bear = lips_val < teeth_val and teeth_val < jaw_val
-        
-        # Alligator sleeping: lines within 0.5 ATR of each other (consolidation)
-        spread = abs(lips_val - jaw_val)
-        alligator_sleeping = spread < 0.5 * atr_14[i]
-        
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5  # 50% above average
-        
         # === TREND BIAS (1d HMA) ===
         price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        trend_bullish = price_above_1d_hma
+        trend_bearish = not price_above_1d_hma
         
-        # === RSI FOR MOMENTUM ===
-        rsi_val = rsi_14[i]
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === ATR FOR STOPLOSS ===
-        current_atr = atr_14[i]
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Price outside channel
+        price_above_upper = close[i] > donch_upper[i]
+        price_below_lower = close[i] < donch_lower[i]
         
+        # === ENTRY LOGIC ===
+        # Simple: breakout + volume + trend aligned
         desired_signal = 0.0
         
         if not in_position:
             # === NEW LONG ENTRY ===
-            # Price breaks above all lines + volume spike + bullish 1d trend
-            if close[i] > lips_val and close[i] > teeth_val and close[i] > jaw_val:
-                if vol_spike and price_above_1d_hma:
+            if price_above_upper:
+                if vol_spike and trend_bullish:
                     desired_signal = SIZE
             
             # === NEW SHORT ENTRY ===
-            # Price breaks below all lines + volume spike + bearish 1d trend
-            if close[i] < lips_val and close[i] < teeth_val and close[i] < jaw_val:
-                if vol_spike and not price_above_1d_hma:
+            if price_below_lower:
+                if vol_spike and trend_bearish:
                     desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -254,21 +186,17 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT CONDITIONS ===
+        # === EXIT: Opposite channel touch ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: price falls below alligator lines OR RSI oversold
-            if close[i] < lips_val and close[i] < teeth_val:
-                exit_triggered = True
-            if rsi_val < 30:
+            # Long exit: price breaks below lower channel
+            if price_below_lower:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: price rises above alligator lines OR RSI overbought
-            if close[i] > lips_val and close[i] > teeth_val:
-                exit_triggered = True
-            if rsi_val > 70:
+            # Short exit: price breaks above upper channel
+            if price_above_upper:
                 exit_triggered = True
         
         if exit_triggered:
@@ -284,12 +212,12 @@ def generate_signals(prices):
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                entry_bar = i
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
             else:
+                # Same direction - maintain position
                 pass
         else:
             if in_position:
@@ -300,7 +228,6 @@ def generate_signals(prices):
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
-                entry_bar = 0
         
         signals[i] = desired_signal
     
