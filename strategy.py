@@ -1,42 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #004: 1d Williams Alligator + Fractals + Weekly Trend Filter
+Experiment #005: 12h Williams Alligator + Donchian Structure + 1d Trend Filter
 
-HYPOTHESIS: Williams Alligator (SMMA 5/8/13) captures institutional trend 
-direction. Fractals mark key breakout/breakdown points. Weekly HMA confirms 
-the broader trend direction. Alligator "awake" (lines spread apart) = strong 
-trend, "sleeping" = chop/no trade.
+HYPOTHESIS: Williams Alligator (3/5/8 SMAs) captures institutional order flow 
+through the jaw/teeth/lips alignment. Combined with Donchian breakouts for 
+structural boundaries and 1d HMA trend filter, this should work in both bull 
+and bear markets.
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull markets: Long when weekly uptrend + bullish alligator + fractal break
-- Bear markets: Short when weekly downtrend + bearish alligator + fractal break
-- Range: Alligator sleeping = no trades (correctly skips chop)
+- Alligator identifies trend direction and exhaustion via jaw/teeth/lips spread
+- Bull: Alligator wakes up (lines converge) + price above = long
+- Bear: Alligator wakes up + price below = short  
+- Range: Alligator sleeps (lines flat) = no trades
+- Donchian confirms structural breakouts, filters false signals
+- 1d trend filter prevents fighting the larger trend
 
-TARGET: 50-100 total trades over 4 years (12-25/year on 1d).
-This is achievable since we have ~250 bars/year on 1d.
+TARGET: 75-150 total trades over 4 years (12h = ~2920 bars total)
+This means entry trigger rate of ~3-5%, much stricter than current 1550 trades.
+
+DB REFERENCE: mtf_12h_simple_donchian_1w_trend_v1 (104 tr, session best)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_williams_alligator_weekly_v1"
-timeframe = "1d"
+name = "mtf_12h_alligator_donchian_1d_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_smma(close, period):
-    """Smoothed Moving Average (Williams Alligator component)"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    result = np.full(n, np.nan, dtype=np.float64)
-    result[period - 1] = np.nanmean(close[:period])
-    
-    for i in range(period, n):
-        if not np.isnan(result[i - 1]) and not np.isnan(close[i]):
-            result[i] = (result[i - 1] * (period - 1) + close[i]) / period
-    
-    return result
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -82,35 +72,49 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_fractals(high, low, period=5):
-    """Williams Fractals - local extrema marked N bars after formation"""
-    n = len(high)
-    fractal_up = np.full(n, np.nan, dtype=np.float64)
-    fractal_down = np.full(n, np.nan, dtype=np.float64)
+def calculate_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5):
+    """
+    Williams Alligator indicator
+    Jaw = SMMA(jaw_period) of median price
+    Teeth = SMMA(teeth_period) of median price  
+    Lips = SMMA(lips_period) of median price
     
-    # Fractal forms when bar i is center of 5-bar pattern
-    # We mark it period bars later (fractal "confirmation")
-    for i in range(period, n - period):
-        # Bullish fractal: highest high at center, lower highs on sides
-        is_bull = True
-        for j in range(i - period, i + period + 1):
-            if j != i and high[j] >= high[i]:
-                is_bull = False
-                break
-        if is_bull:
-            # Mark fractal at current bar (will be "visible" after period bars)
-            fractal_up[i] = high[i]
-        
-        # Bearish fractal: lowest low at center, higher lows on sides
-        is_bear = True
-        for j in range(i - period, i + period + 1):
-            if j != i and low[j] <= low[i]:
-                is_bear = False
-                break
-        if is_bear:
-            fractal_down[i] = low[i]
+    Alligator sleeps = lines converged/flat (choppy)
+    Alligator wakes = lines spread (trending)
+    """
+    n = len(close)
+    median = (high + low) / 2.0
     
-    return fractal_up, fractal_down
+    # SMMA (Smoothed Moving Average = EMA with alpha=1/period)
+    def smma(series, period):
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        # First valid value is simple SMA
+        for i in range(period - 1, len(series)):
+            window = series[i - period + 1:i + 1]
+            if not np.any(np.isnan(window)):
+                sma = np.mean(window)
+                result[i] = sma
+        # Apply smoothing
+        alpha = 1.0 / period
+        for i in range(period, len(series)):
+            if np.isnan(result[i]):
+                continue
+            if not np.isnan(result[i - 1]):
+                result[i] = result[i - 1] + alpha * (series[i] - result[i - 1])
+        return result
+    
+    jaw = smma(median, jaw_period)
+    teeth = smma(median, teeth_period)
+    lips = smma(median, lips_period)
+    
+    return jaw, teeth, lips
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - breakouts of 20-period high/low"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2.0
+    return upper, lower, mid
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -119,27 +123,21 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly HMA for trend direction
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=13)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate 1d HMA for trend direction
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Daily Williams Alligator components
-    jaw = calculate_smma(close, 13)   # Jaw = blue = slowest
-    teeth = calculate_smma(close, 8)  # Teeth = red = medium
-    lips = calculate_smma(close, 5)   # Lips = green = fastest
-    
-    # ATR for stoploss
+    # Calculate 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    jaw, teeth, lips = calculate_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5)
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
     
-    # Calculate fractals
-    fractal_up, fractal_down = calculate_fractals(high, low, period=5)
-    
-    # Volume SMA for confirmation
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_sma > 0, vol_sma, 1)
+    # Volume MA
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -153,150 +151,161 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Trade cooldown (bars since last exit)
-    bars_since_exit = 999
+    # Cooldown to prevent overtrading
+    bars_since_entry = 0
+    cooldown_bars = 8  # Minimum 8 bars (4 days) between entries
     
-    # Warmup: need jaw(13), ATR(14), vol_sma(20), fractals(5)
     warmup = 60
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
-            signals[i] = 0.0
-            continue
-        
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
             signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        # === WEEKLY TREND FILTER ===
-        weekly_uptrend = close[i] > hma_1w_aligned[i]
-        weekly_downtrend = close[i] < hma_1w_aligned[i]
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === ALLIGATOR STATE ===
-        # Bullish: lips > teeth > jaw (lines spread, pointing up)
-        bull_alligator = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        # Bearish: lips < teeth < jaw (lines spread, pointing down)
-        bear_alligator = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # Alligator spread (trend strength)
-        jaw_teeth_spread = abs(teeth[i] - jaw[i]) / jaw[i] if jaw[i] != 0 else 0
-        teeth_lips_spread = abs(lips[i] - teeth[i]) / teeth[i] if teeth[i] != 0 else 0
-        total_spread = jaw_teeth_spread + teeth_lips_spread
+        bars_since_entry += 1 if not in_position else 0
         
-        # Alligator "awake" when spread > 0.3% (not sleeping)
-        alligator_awake = total_spread > 0.003
+        # === 1d TREND FILTER ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        trend_bullish = price_above_1d_hma
+        trend_bearish = not price_above_1d_hma
         
-        # === FRACTAL CHECK ===
-        # Current price vs recent fractals
-        bull_fractal_price = fractal_up[i] if not np.isnan(fractal_up[i]) else 0
-        bear_fractal_price = fractal_down[i] if not np.isnan(fractal_down[i]) else 0
+        # === ALLIGATOR CONDITION ===
+        # Alligator "waking up" = lips crosses above teeth (bull) or below (bear)
+        # Alligator aligned = lips > teeth > jaw (bull) or lips < teeth < jaw (bear)
+        lips_above_teeth = lips[i] > teeth[i] if not np.isnan(lips[i]) and not np.isnan(teeth[i]) else False
+        teeth_above_jaw = teeth[i] > jaw[i] if not np.isnan(teeth[i]) and not np.isnan(jaw[i]) else False
         
-        # Price broke above recent bullish fractal
-        bull_fractal_broken = (bull_fractal_price > 0 and 
-                               close[i] > bull_fractal_price and
-                               high[i] > bull_fractal_price)
+        alligator_bullish = lips_above_teeth and teeth_above_jaw
+        alligator_bearish = not lips_above_teeth and not teeth_above_jaw
         
-        # Price broke below recent bearish fractal
-        bear_fractal_broken = (bear_fractal_price > 0 and 
-                               close[i] < bear_fractal_price and
-                               low[i] < bear_fractal_price)
+        # Alligator spread (awake vs sleeping)
+        alligator_spread = abs(lips[i] - jaw[i]) / atr_14[i] if not np.isnan(lips[i]) and not np.isnan(jaw[i]) else 0.0
+        alligator_awake = alligator_spread > 0.3  # Lines spread = trending
+        
+        # === DONCHIAN BREAKOUT ===
+        donchian_broken_up = close[i] > donchian_upper[i] if not np.isnan(donchian_upper[i]) else False
+        donchian_broken_down = close[i] < donchian_lower[i] if not np.isnan(donchian_lower[i]) else False
         
         # === VOLUME CONFIRMATION ===
-        vol_confirm = vol_ratio[i] > 1.3
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (strict - must have confluence) ===
         desired_signal = 0.0
         
-        # LONG: Weekly uptrend + bullish alligator + fractal break + volume
-        if weekly_uptrend and bull_alligator and alligator_awake:
-            if bull_fractal_broken:
-                if vol_confirm:
-                    desired_signal = SIZE
-                else:
-                    desired_signal = SIZE * 0.5  # Partial without volume
+        # LONG: Alligator bullish + price above 1d HMA + Donchian breakout + volume
+        # Minimum 3 of 4 conditions, with volume required
+        if vol_spike:
+            bullish_conditions = sum([
+                alligator_bullish,
+                trend_bullish,
+                donchian_broken_up,
+                alligator_awake
+            ])
+            if bullish_conditions >= 3:
+                desired_signal = SIZE
         
-        # SHORT: Weekly downtrend + bearish alligator + fractal break + volume
-        if weekly_downtrend and bear_alligator and alligator_awake:
-            if bear_fractal_broken:
-                if vol_confirm:
-                    desired_signal = -SIZE
-                else:
-                    desired_signal = -SIZE * 0.5  # Partial without volume
+        # SHORT: Alligator bearish + price below 1d HMA + Donchian breakdown + volume
+        if vol_spike:
+            bearish_conditions = sum([
+                alligator_bearish,
+                trend_bearish,
+                donchian_broken_down,
+                alligator_awake
+            ])
+            if bearish_conditions >= 3:
+                desired_signal = -SIZE
         
-        # === COOLDOWN CHECK ===
-        if bars_since_exit < 10:
-            if in_position:
-                # Keep existing position
-                pass
-            else:
-                # No new entries during cooldown
-                desired_signal = 0.0
+        # === COOLDOWN ===
+        if bars_since_entry < cooldown_bars:
+            desired_signal = 0.0
         
         # === STOPLOSS CHECK ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
-            bars_since_exit = 0
         
-        # === TAKE PROFIT (alligator reversal) ===
-        tp_triggered = False
-        
+        # === TRAILING STOP on profit ===
         if in_position and position_side > 0:
-            # Exit long when alligator starts closing
-            if lips[i] < teeth[i] or teeth[i] < jaw[i]:
-                tp_triggered = True
+            profit_pct = (highest_since_entry - entry_price) / entry_price
+            if profit_pct > 0.03:  # 3% profit - tighten stop
+                trailing_stop = highest_since_entry - 1.5 * entry_atr
+                stop_price = max(stop_price, trailing_stop)
+                if low[i] < stop_price:
+                    stoploss_triggered = True
+                    desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # Exit short when alligator starts closing
-            if lips[i] > teeth[i] or teeth[i] > jaw[i]:
-                tp_triggered = True
-        
-        if tp_triggered:
-            desired_signal = 0.0
-            bars_since_exit = 0
+            profit_pct = (entry_price - lowest_since_entry) / entry_price
+            if profit_pct > 0.03:
+                trailing_stop = lowest_since_entry + 1.5 * entry_atr
+                stop_price = min(stop_price, trailing_stop)
+                if high[i] > stop_price:
+                    stoploss_triggered = True
+                    desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New entry or reversal
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
+                bars_since_entry = 0
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-        
-        # Update cooldown counter
-        if not in_position:
-            bars_since_exit += 1
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
