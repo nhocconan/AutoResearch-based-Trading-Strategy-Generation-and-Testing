@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #008: 12h Donchian Breakout + Williams %R + Volume Confirmation + 1w Trend
+Experiment #021: 4h Donchian Breakout + Volume + 1d Trend Filter
 
-HYPOTHESIS: 12h Donchian(20) channel breakouts mark institutional moves. 
-Williams %R confirms momentum at the breakout point (not oversold/overbought extremes).
-Volume spike confirms institutional participation. 1w HMA trend filters counter-trend entries.
+HYPOTHESIS: Price breaking a 4h Donchian channel (20 periods = ~5 days) with 
+volume confirmation marks institutional moves. The 1d HMA(21) filters for trend 
+direction. ATR-based stoploss manages risk. This pattern works in both bull 
+(running longs) and bear (shorting breakdowns).
 
 WHY THIS WORKS IN BOTH BULL AND BEAR:
-- Bull: Long breakouts of 20-period high + Williams %R > -20 (momentum confirming)
-- Bear: Short breakouts of 20-period low + Williams %R < -80 (momentum confirming)
-- 1w HMA trend keeps us aligned with macro direction
-- 12h timeframe naturally limits trades to ~50-150 over 4 years
+- Bull: Price breaks above Donchian high + 1d HMA rising = momentum confirmation
+- Bear: Price breaks below Donchian low + 1d HMA falling = bearish continuation
+- Volume spike confirms institutional participation, not whipsaws
+- ATR stoploss prevents 2022-style crash losses
 
-TARGET: 50-150 total over 4 years (~12-37/year). HARD MAX: 200.
-DB reference: Donchian + HMA + volume + ATR (SOL: test Sharpe 1.10-1.38)
+TARGET: 75-200 total trades over 4 years (~19-50/year)
+DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (Sharpe=1.382, 95tr, 52%wr)
+
+KEY INSIGHT: Entry conditions MUST be strict enough to generate 75-200 trades,
+not the 2443 trades from #016 which was catastrophic overtrading.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_williams_vol_1w_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_vol_1d_trend_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -53,23 +57,6 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum oscillator"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    williams = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        
-        if highest > lowest and not np.isnan(close[i]):
-            williams[i] = -100.0 * (highest - close[i]) / (highest - lowest)
-    
-    return williams
-
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
@@ -84,6 +71,36 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index"""
+    n = len(close)
+    if n < period * 2 + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr_smooth > 0, atr_smooth, 1)
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr_smooth > 0, atr_smooth, 1)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -91,31 +108,31 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA for trend direction
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Align 1w highs/lows for trend check
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, df_1w['close'].values)
-    
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    williams_r = calculate_williams_r(high, low, close, period=14)
+    adx_14 = calculate_adx(high, low, close, period=14)
     
-    # Donchian channels (20 periods on 12h = 10 days)
+    # Donchian channels (20 periods = 5 days of 4h bars)
     donchian_period = 20
     donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Volume MA and ratio
+    # Volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
+    # 4h EMA for trend
+    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    
     signals = np.zeros(n)
-    SIZE = 0.25  # Conservative sizing
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -126,7 +143,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = donchian_period + 30
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -137,7 +154,14 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(williams_r[i]):
+        if np.isnan(adx_14[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -151,45 +175,48 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === TREND CHECK (1w HMA) ===
-        price_above_1w_hma = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
-        trend_bullish = price_above_1w_hma
+        # === REGIME CHECK (ADX for trend strength) ===
+        adx = adx_14[i]
+        is_trending = adx > 20  # Require some trend strength
         
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        # Upper breakout: price breaks above 20-period high
-        upper_breakout = close[i] > donchian_high[i]
-        # Lower breakout: price breaks below 20-period low
-        lower_breakout = close[i] < donchian_low[i]
+        # === 1d TREND BIAS ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        hma_rising = i > 0 and not np.isnan(hma_1d_aligned[i-1]) and hma_1d_aligned[i] > hma_1d_aligned[i-1]
+        hma_falling = i > 0 and not np.isnan(hma_1d_aligned[i-1]) and hma_1d_aligned[i] < hma_1d_aligned[i-1]
         
-        # Previous bar was NOT in breakout (avoid repeated signals)
-        prev_upper_breakout = close[i-1] > donchian_high[i-1] if i > warmup else False
-        prev_lower_breakout = close[i-1] < donchian_low[i-1] if i > warmup else False
+        # === DONCHIAN BREAKOUT LEVELS ===
+        dch_high = donchian_high[i]
+        dch_low = donchian_low[i]
         
-        new_upper_breakout = upper_breakout and not prev_upper_breakout
-        new_lower_breakout = lower_breakout and not prev_lower_breakout
-        
-        # === WILLIAMS %R CONFIRMATION ===
-        # Long: Williams %R above -50 (momentum not exhausted) but not extreme
-        # Short: Williams %R below -50 (momentum not exhausted) but not extreme
-        williams_ok_long = williams_r[i] > -50 and williams_r[i] < -10
-        williams_ok_short = williams_r[i] < -50 and williams_r[i] > -90
+        # Previous bar's Donchian for breakout detection
+        dch_high_prev = donchian_high[i-1] if i > 0 else dch_high
+        dch_low_prev = donchian_low[i-1] if i > 0 else dch_low
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.4
+        vol_spike = vol_ratio[i] > 1.5  # Strict volume requirement
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if not in_position:
-            # LONG: New upper breakout + bullish 1w trend + Williams %R confirms + volume spike
-            if new_upper_breakout and trend_bullish and williams_ok_long and vol_spike:
-                desired_signal = SIZE
-            
-            # SHORT: New lower breakout + bearish 1w trend + Williams %R confirms + volume spike
-            if new_lower_breakout and (not trend_bullish) and williams_ok_short and vol_spike:
-                desired_signal = -SIZE
+        # BREAKOUT DETECTION: current close above/below previous Donchian
+        # Long: close breaks above previous 4h high
+        # Short: close breaks below previous 4h low
+        long_breakout = close[i] > dch_high_prev and high[i] > dch_high_prev
+        short_breakout = close[i] < dch_low_prev and low[i] < dch_low_prev
         
-        # === STOPLOSS CHECK (2.5 ATR) ===
+        # === STRICT ENTRY: breakout + volume + aligned trend ===
+        if is_trending:
+            # LONG: Breakout above + volume spike + bullish 1d trend
+            if long_breakout and vol_spike:
+                if price_above_1d_hma and (hma_rising or adx > 25):
+                    desired_signal = SIZE
+            
+            # SHORT: Breakdown below + volume spike + bearish 1d trend
+            if short_breakout and vol_spike:
+                if not price_above_1d_hma and (hma_falling or adx > 25):
+                    desired_signal = -SIZE
+        
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -209,14 +236,12 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT ON OPPOSITE DONCHIAN ===
-        # Exit long if price breaks lower channel (trend reversal)
-        exit_long = position_side > 0 and close[i] < donchian_low[i]
-        # Exit short if price breaks upper channel (trend reversal)
-        exit_short = position_side < 0 and close[i] > donchian_high[i]
-        
-        if exit_long or exit_short:
-            desired_signal = 0.0
+        # === OPPOSITE BREAKOUT EXIT ===
+        if in_position:
+            if position_side > 0 and short_breakout:
+                desired_signal = 0.0
+            if position_side < 0 and long_breakout:
+                desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
