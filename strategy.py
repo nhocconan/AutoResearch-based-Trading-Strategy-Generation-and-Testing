@@ -1,25 +1,75 @@
 #!/usr/bin/env python3
 """
-Experiment #022: 4h Bollinger Squeeze Breakout + 1d Trend
+Experiment #023: 6h VWAP Anchor + Williams %R Regime + Volume Conf
 
-HYPOTHESIS: Bollinger Band squeeze (low volatility) followed by volatility 
-expansion captures institutional moves. BB width percentile < 10 = squeeze, 
-then BB breakout = entry. Combined with 1d HMA trend direction and volume 
-confirmation. BB squeeze breaks 5-10x per year vs Donchian's 2-3x, giving 
-proper trade frequency. ATR stoploss manages risk. Works in both bull 
-(breakout up) and bear (breakout down with 1d trend filter).
+HYPOTHESIS: 1d VWAP is a major institutional reference point that price 
+reverts to after volatility expansions. Combined with Williams %R to detect 
+oversold/overbought extremes (different from RSI), and volume confirmation, 
+this captures mean reversion trades at key institutional levels.
 
-TIMEFRAME: 4h primary
-HTF: 1d for trend alignment
-TARGET: 100-250 total trades over 4 years (25-60/year)
+Why 6h + VWAP: 
+- 6h gives enough bars for Williams %R (14) to have valid readings
+- 1d VWAP anchor provides strong institutional reference
+- Works in both bull (long near VWAP in uptrend) and bear (short rallies to VWAP)
+
+TARGET: 75-150 total trades over 4 years (19-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_bb_squeeze_trend_1d_v1"
-timeframe = "4h"
+name = "mtf_6h_vwap_williams_vol_1d_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_vwap(high, low, close, volume):
+    """VWAP - Volume Weighted Average Price"""
+    n = len(close)
+    typical_price = (high + low + close) / 3.0
+    cumulative_tp_vol = np.cumsum(typical_price * volume)
+    cumulative_vol = np.cumsum(volume)
+    vwap = np.zeros(n)
+    for i in range(n):
+        if cumulative_vol[i] > 0:
+            vwap[i] = cumulative_tp_vol[i] / cumulative_vol[i]
+    return vwap
+
+def calculate_vwap_std(vwap, high, low, close, volume, period=20):
+    """Standard deviation bands around VWAP"""
+    n = len(close)
+    typical_price = (high + low + close) / 3.0
+    # Compute rolling std of price-distance from VWAP
+    deviations = typical_price - vwap
+    std_dev = pd.Series(deviations).rolling(window=period, min_periods=period).std().values
+    return std_dev
+
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R - momentum oscillator"""
+    n = len(close)
+    williams_r = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i - period:i + 1])
+        lowest_low = np.min(low[i - period:i + 1])
+        
+        if highest_high - lowest_low > 0:
+            williams_r[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+    
+    return williams_r
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -51,47 +101,6 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_bollinger_bands(close, period=20, num_std=2):
-    """Bollinger Bands - returns (upper, middle, lower, width)"""
-    n = len(close)
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = middle + num_std * std
-    lower = middle - num_std * std
-    
-    # BB width for squeeze detection
-    width = upper - lower
-    
-    return upper, middle, lower, width
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_bb_width_percentile(width, period=100):
-    """Percentile rank of current BB width vs recent range"""
-    n = len(width)
-    percentile = np.full(n, 50.0, dtype=np.float64)  # default middle
-    
-    for i in range(period, n):
-        if not np.isnan(width[i]):
-            window = width[i - period + 1:i + 1]
-            if not np.any(np.isnan(window)):
-                rank = np.sum(window < width[i]) / len(window) * 100
-                percentile[i] = rank
-    
-    return percentile
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -102,31 +111,35 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d HMA for trend
+    # 1d HMA for trend bias
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 4h indicators
+    # 1d VWAP for institutional anchor
+    df_1d['vwap'] = calculate_vwap(
+        df_1d['high'].values, 
+        df_1d['low'].values, 
+        df_1d['close'].values,
+        df_1d['volume'].values
+    )
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['vwap'].values)
+    
+    # Calculate local 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Bollinger Bands
-    bb_upper, bb_middle, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, num_std=2)
+    # Local VWAP and bands
+    vwap_local = calculate_vwap(high, low, close, volume)
+    vwap_std = calculate_vwap_std(vwap_local, high, low, close, volume, period=20)
     
-    # BB width percentile (squeeze detection)
-    bb_width_pct = calculate_bb_width_percentile(bb_width, period=100)
+    # Williams %R
+    williams_r = calculate_williams_r(high, low, close, period=14)
     
-    # Volume metrics
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # RSI for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - (100 / (1 + rs))).values
+    # Deviation from VWAP for mean reversion signal
+    vwap_deviation = (close - vwap_local) / (vwap_std + 1e-10)
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -140,11 +153,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Squeeze state tracking
-    squeeze_active = False
-    squeeze_bar = 0
-    
-    warmup = 100
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -155,7 +164,7 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(bb_width_pct[i]):
+        if np.isnan(vwap_local[i]) or np.isnan(vwap_std[i]) or vwap_std[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -169,76 +178,96 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        # === 1d TREND ===
+        if np.isnan(williams_r[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # === TREND BIAS (1d HMA) ===
         price_above_1d_hma = close[i] > hma_1d_aligned[i]
-        trend_bullish = price_above_1d_hma
         
-        # === VOLUME ===
-        vol_spike = vol_ratio[i] > 1.5
+        # === 1d VWAP ANCHOR ===
+        vwap_1d = vwap_1d_aligned[i] if not np.isnan(vwap_1d_aligned[i]) else close[i]
+        price_vs_vwap_1d = close[i] / vwap_1d - 1.0  # percentage deviation
         
-        # === RSI ===
-        rsi_val = rsi[i]
+        # === LOCAL VWAP + BANDS ===
+        vwap = vwap_local[i]
+        band_1_std = vwap_std[i]
+        upper_band = vwap + 1.5 * band_1_std
+        lower_band = vwap - 1.5 * band_1_std
         
-        # === SQUEEZE DETECTION ===
-        # BB width in bottom 15% = squeeze
-        in_squeeze = bb_width_pct[i] < 15.0
+        # Price relative to local VWAP
+        price_above_vwap_local = close[i] > vwap
+        price_below_vwap_local = close[i] < vwap
         
-        # === BREAKOUT DETECTION ===
-        # Price breaks above BB upper
-        breakout_up = close[i] > bb_upper[i] and close[i-1] <= bb_upper[i-1] if i > warmup else False
-        # Price breaks below BB lower
-        breakout_down = close[i] < bb_lower[i] and close[i-1] >= bb_lower[i-1] if i > warmup else False
+        # === WILLIAMS %R REGIME ===
+        wr_val = williams_r[i]
+        # Oversold: below -80 (potential long)
+        # Overbought: above -20 (potential short)
+        is_oversold = wr_val < -80
+        is_overbought = wr_val > -20
+        is_neutral_wr = -80 <= wr_val <= -20
         
-        # Price already outside bands
-        price_above_bb_upper = close[i] > bb_upper[i]
-        price_below_bb_lower = close[i] < bb_lower[i]
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.4
         
-        # === ATR STOPLOSS LEVELS ===
-        stop_atr_mult = 2.5
+        # === MEAN REVERSION SIGNALS ===
+        # Price far from VWAP (potential reversion)
+        far_from_vwap = abs(vwap_deviation[i]) > 1.2
         
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === NEW ENTRY: Squeeze + Breakout + Volume + Trend ===
+            # === NEW LONG ENTRY ===
+            # Conditions:
+            # 1. Williams %R oversold (< -80)
+            # 2. Price bouncing from below local VWAP OR price below lower band
+            # 3. Bullish 1d trend (price > 1d HMA)
+            # 4. Volume spike confirmation
             
-            # LONG: breakout up with squeeze, volume, bullish trend
-            if (breakout_up or price_above_bb_upper) and in_squeeze:
-                if vol_spike and trend_bullish:
-                    desired_signal = SIZE
-                    squeeze_active = True
-                    squeeze_bar = i
+            long_conditions = (
+                is_oversold and
+                (price_below_vwap_local or close[i] < lower_band) and
+                price_above_1d_hma and
+                vol_spike
+            )
             
-            # SHORT: breakout down with squeeze, volume, bearish trend
-            if (breakout_down or price_below_bb_lower) and in_squeeze:
-                if vol_spike and not trend_bullish:
-                    desired_signal = -SIZE
-                    squeeze_active = True
-                    squeeze_bar = i
+            if long_conditions:
+                desired_signal = SIZE
             
-            # Also allow entries without prior squeeze if trend is very strong
-            # LONG: breakout up, very strong volume, strong trend
-            if not in_squeeze and trend_bullish:
-                if vol_spike and vol_ratio[i] > 2.0 and breakout_up:
-                    desired_signal = SIZE
+            # === NEW SHORT ENTRY ===
+            # Conditions:
+            # 1. Williams %R overbought (> -20)
+            # 2. Price rejecting from above local VWAP OR price above upper band
+            # 3. Bearish 1d trend (price < 1d HMA)
+            # 4. Volume spike confirmation
             
-            # SHORT: breakout down, very strong volume, strong downtrend
-            if not in_squeeze and not trend_bullish:
-                if vol_spike and vol_ratio[i] > 2.0 and breakout_down:
-                    desired_signal = -SIZE
+            short_conditions = (
+                is_overbought and
+                (price_above_vwap_local or close[i] > upper_band) and
+                not price_above_1d_hma and
+                vol_spike
+            )
+            
+            if short_conditions:
+                desired_signal = -SIZE
         
-        # === STOPLOSS CHECK ===
+        # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - stop_atr_mult * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + stop_atr_mult * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -246,53 +275,43 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT: 3R or RSI extreme ===
-        tp_triggered = False
-        if in_position and position_side > 0:
-            profit = (close[i] - entry_price) / entry_price
-            if profit > 0.06:  # 6% profit (~3R with 2% ATR risk)
-                tp_triggered = True
-            if rsi_val > 75:  # RSI overbought
-                tp_triggered = True
-        
-        if in_position and position_side < 0:
-            profit = (entry_price - close[i]) / entry_price
-            if profit > 0.06:
-                tp_triggered = True
-            if rsi_val < 25:  # RSI oversold
-                tp_triggered = True
-        
-        if tp_triggered:
-            desired_signal = 0.0
-        
-        # === EXIT: Opposite band touch ===
+        # === EXIT: Williams %R returns to neutral OR VWAP cross ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            if price_below_bb_lower:  # Fell back through lower band
+            # Long exit: Williams %R returns to neutral OR price crosses above VWAP
+            if is_neutral_wr and wr_val > -50:
+                exit_triggered = True
+            if close[i] > upper_band:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            if price_above_bb_upper:  # Broke back through upper band
+            # Short exit: Williams %R returns to neutral OR price crosses below VWAP
+            if is_neutral_wr and wr_val < -50:
+                exit_triggered = True
+            if close[i] < lower_band:
                 exit_triggered = True
         
         if exit_triggered:
             desired_signal = 0.0
         
-        # === UPDATE POSITION ===
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                squeeze_active = False
                 if position_side > 0:
-                    stop_price = entry_price - stop_atr_mult * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + stop_atr_mult * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
+            else:
+                # Same direction - maintain position
+                pass
         else:
             if in_position:
                 in_position = False
@@ -302,7 +321,6 @@ def generate_signals(prices):
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
-                squeeze_active = False
         
         signals[i] = desired_signal
     
