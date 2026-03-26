@@ -1,99 +1,53 @@
 #!/usr/bin/env python3
 """
-Experiment #004: 1d KAMA Trend + CRSI Momentum + 1w Regime Filter
+Experiment #022: 12h Bollinger Band Mean Reversion + Volume + 1d HMA
 
-HYPOTHESIS: Daily KAMA captures smooth trend direction, filtering noise.
-CRSI (Connors RSI) identifies mean-reversion entry points within the trend.
-Weekly HMA confirms regime (bull/bear) to avoid counter-trend trades.
-This combination generates fewer but higher-quality signals suitable for
-the slow 1d timeframe (7-25 trades/year). Works in both directions by
-checking both KAMA slope and CRSI extremes.
+HYPOTHESIS: On 12h timeframe, Bollinger Band touches at extremes combined with 
+volume confirmation mark high-probability mean reversion setups. The 1d HMA 
+provides trend context to filter directional bias. This works in BOTH bull 
+markets (long lower BB bounces) and bear markets (short upper BB rallies) because 
+it only enters in the trend direction determined by 1d HMA.
 
-TIMEFRAME: 1d primary, 1w for regime
-TARGET: 50-120 total trades over 4 years (12-30/year)
+TIMEFRAME: 12h primary
+HTF: 1d for trend filter
+TARGET: 75-200 total trades over 4 years (19-50/year) - conservative for 12h
+ENTRY: Lower BB touch + volume spike + 1d HMA above price (bullish alignment)
+       Upper BB touch + volume spike + 1d HMA below price (bearish alignment)
+EXIT: ATR trailing stop + opposite RSI extreme or middle BB touch
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_crsi_1w_regime_v1"
-timeframe = "1d"
+name = "mtf_12h_bb_volume_1d_hma_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_kama(close, period=21, fast_ema=2, slow_ema=30):
-    """Kaufman's Adaptive Moving Average"""
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
     n = len(close)
-    if n < period:
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    # Calculate Efficiency Ratio (ER)
-    direction = np.abs(close[period-1:] - close[:n-(period-1)])
-    volatility = np.zeros(n - period + 1)
-    for i in range(n - period):
-        volatility[i] = np.sum(np.abs(np.diff(close[i:i+period])))
-    volatility = np.concatenate([[np.nan] * (period - 1), volatility])
-    
-    er = np.zeros(n)
-    for i in range(period - 1, n):
-        if volatility[i] > 1e-10:
-            er[i] = direction[i] / volatility[i]
-    
-    # Calculate smoothing constant
-    fast_const = (fast_ema / slow_ema) ** 2
-    sc = (er * fast_const + (1 - er) * (2 / (slow_ema + 1)) ** 0.5) ** 2
-    
-    kama = np.full(n, np.nan, dtype=np.float64)
-    kama[period - 1] = close[period - 1]
-    
-    for i in range(period, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_crsi(close, period=14, streak_len=2, rank_period=100):
-    """Connors RSI: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3"""
-    n = len(close)
-    if n < rank_period:
-        return np.full(n, 50.0)
-    
-    # RSI(3)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=3, min_periods=3, adjust=False).mean()
-    avg_loss = loss.ewm(span=3, min_periods=3, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi3 = (100 - (100 / (1 + rs)))
-    
-    # RSI Streak (2)
-    streak = np.zeros(n)
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
     for i in range(1, n):
-        if close[i] > close[i-1]:
-            streak[i] = max(streak[i-1] + 1, 1)
-        elif close[i] < close[i-1]:
-            streak[i] = min(streak[i-1] - 1, -1)
-        else:
-            streak[i] = 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    streak_series = pd.Series(streak)
-    streak_delta = streak_series.diff()
-    streak_gain = streak_delta.where(streak_delta > 0, 0.0)
-    streak_loss = (-streak_delta).where(streak_delta < 0, 0.0)
-    streak_avg_gain = streak_gain.ewm(span=2, min_periods=2, adjust=False).mean()
-    streak_avg_loss = streak_loss.ewm(span=2, min_periods=2, adjust=False).mean()
-    streak_rs = streak_avg_gain / (streak_avg_loss + 1e-10)
-    rsi_streak = (100 - (100 / (1 + streak_rs)))
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_bollinger_bands(close, period=20, num_std=2.5):
+    """Bollinger Bands - returns upper, middle, lower"""
+    n = len(close)
+    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
     
-    # PercentRank(100)
-    percent_rank = pd.Series(close).rolling(rank_period, min_periods=rank_period).apply(
-        lambda x: (x[-1] < x).sum() / len(x) * 100, raw=True
-    )
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    # Combined CRSI
-    crsi = (rsi3 + rsi_streak + percent_rank) / 3.0
+    upper = middle + num_std * std
+    lower = middle - num_std * std
     
-    return crsi.values
+    return upper, middle, lower
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -125,32 +79,6 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper and lower bands"""
-    n = len(high)
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -159,33 +87,33 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w HMA for regime
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # 1d HMA for trend direction
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate local 1d indicators
+    # === Calculate local indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # KAMA 21
-    kama = calculate_kama(close, period=21)
+    # Bollinger Bands
+    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close, period=20, num_std=2.5)
     
-    # CRSI (3 components combined)
-    crsi = calculate_crsi(close, period=14, streak_len=2, rank_period=100)
-    
-    # Volume MA
+    # Volume MA and ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # KAMA slope (trend direction)
-    kama_slope = pd.Series(kama).diff(5).values
-    
-    # Donchian for structure
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    # RSI
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = (100 - (100 / (1 + rs))).values
     
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.30  # Discrete position size
     
     # Position tracking
     in_position = False
@@ -195,119 +123,106 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    last_entry_bar = -100  # Minimum bars between entries
+    entry_bar = 0
+    bars_since_entry = 0
     
-    warmup = 150  # Need at least 100 for CRSI percentrank
+    warmup = 50
     
     for i in range(warmup, n):
+        bars_since_entry = i - entry_bar
+        
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(kama[i]) or np.isnan(crsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === 1w REGIME CHECK ===
-        price_above_1w_hma = not np.isnan(hma_1w_aligned[i]) and close[i] > hma_1w_aligned[i]
-        price_below_1w_hma = not np.isnan(hma_1w_aligned[i]) and close[i] < hma_1w_aligned[i]
-        regime_bull = price_above_1w_hma
-        regime_bear = price_below_1w_hma
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === KAMA TREND ===
-        kama_up = kama_slope[i] > 0 if not np.isnan(kama_slope[i]) else False
-        kama_down = kama_slope[i] < 0 if not np.isnan(kama_slope[i]) else False
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # === CRSI MOMENTUM ===
-        crsi_oversold = crsi[i] < 20  # Very oversold - reversal likely
-        crsi_overbought = crsi[i] > 80  # Very overbought - reversal likely
-        crsi_neutral_high = crsi[i] > 50
-        crsi_neutral_low = crsi[i] < 50
+        # Current indicator values
+        rsi_val = rsi[i]
+        vol_ratio_val = vol_ratio[i]
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.2
+        # Volume confirmation required
+        vol_spike = vol_ratio_val > 1.2
         
-        # === DONCHIAN STRUCTURE ===
-        price_near_upper = close[i] > donch_upper[i] - atr_14[i] if not np.isnan(donch_upper[i]) else False
-        price_near_lower = close[i] < donch_lower[i] + atr_14[i] if not np.isnan(donch_lower[i]) else False
+        # === ENTRY CONDITIONS ===
+        # Lower BB touch + RSI not oversold + bullish 1d trend + volume
+        touch_lower_bb = low[i] <= bb_lower[i]
+        long_rsi_ok = 30 < rsi_val < 55  # Not extreme oversold
         
-        # Minimum bars since last entry
-        bars_since_entry = i - last_entry_bar
-        min_bars_passed = bars_since_entry > 5
+        # Upper BB touch + RSI not overbought + bearish 1d trend + volume
+        touch_upper_bb = high[i] >= bb_upper[i]
+        short_rsi_ok = 45 < rsi_val < 70  # Not extreme overbought
         
-        # === ENTRY LOGIC ===
-        desired_signal = 0.0
-        
-        if not in_position and min_bars_passed:
-            # === LONG ENTRY ===
-            # CRSI oversold + KAMA turning up + volume + bull regime
-            if crsi_oversold and (kama_up or crsi[i] > crsi[i-3]):  # CRSI bouncing or KAMA rising
-                if vol_spike and regime_bull:
-                    desired_signal = SIZE
-            
-            # Alternative: Strong momentum in bull regime
-            if not desired_signal and regime_bull and crsi[i] < 30 and vol_spike:
-                desired_signal = SIZE * 0.5  # Half size - less confident
-            
-            # === SHORT ENTRY ===
-            # CRSI overbought + KAMA turning down + volume + bear regime
-            if crsi_overbought and (kama_down or crsi[i] < crsi[i-3]):  # CRSI falling or KAMA declining
-                if vol_spike and regime_bear:
-                    desired_signal = -SIZE
-            
-            # Alternative: Strong momentum in bear regime
-            if desired_signal == 0 and regime_bear and crsi[i] > 70 and vol_spike:
-                desired_signal = -SIZE * 0.5  # Half size - less confident
-        
-        # === STOPLOSS CHECK (2.5 ATR) ===
+        # === STOPLOSS CHECK ===
         stoploss_triggered = False
+        exit_triggered = False
         
         if in_position and position_side > 0:
+            # Trailing stop for longs
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
+            
             if low[i] < stop_price:
                 stoploss_triggered = True
+            
+            # RSI exit for longs (when RSI reaches extreme)
+            if rsi_val > 70:
+                exit_triggered = True
+            
+            # Take profit at middle BB
+            if close[i] >= bb_middle[i] and bars_since_entry > 8:
+                exit_triggered = True
         
         if in_position and position_side < 0:
+            # Trailing stop for shorts
             lowest_since_entry = min(lowest_since_entry, low[i])
             trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
+            
             if high[i] > stop_price:
                 stoploss_triggered = True
+            
+            # RSI exit for shorts (when RSI reaches extreme)
+            if rsi_val < 30:
+                exit_triggered = True
+            
+            # Take profit at middle BB
+            if close[i] <= bb_middle[i] and bars_since_entry > 8:
+                exit_triggered = True
         
-        if stoploss_triggered:
+        # === POSITION MANAGEMENT ===
+        desired_signal = 0.0
+        
+        if stoploss_triggered or exit_triggered:
             desired_signal = 0.0
-        
-        # === TAKE PROFIT (3:1) ===
-        take_profit = False
-        
-        if in_position and position_side > 0:
-            profit_target = entry_price + 3.0 * entry_atr
-            if high[i] >= profit_target:
-                take_profit = True
-        
-        if in_position and position_side < 0:
-            profit_target = entry_price - 3.0 * entry_atr
-            if low[i] <= profit_target:
-                take_profit = True
-        
-        if take_profit:
-            desired_signal = 0.0
-        
-        # === TRAILING STOP ADJUSTMENT ===
-        if in_position and position_side > 0:
-            # Trail stop when in profit
-            if close[i] > entry_price + 1.5 * entry_atr:
-                stop_price = max(stop_price, entry_price + 0.5 * entry_atr)
-        
-        if in_position and position_side < 0:
-            if close[i] < entry_price - 1.5 * entry_atr:
-                stop_price = min(stop_price, entry_price - 0.5 * entry_atr)
+        elif not in_position:
+            # === NEW LONG ENTRY ===
+            # Price touches lower BB + RSI in middle range + above 1d HMA + volume
+            if touch_lower_bb and long_rsi_ok and price_above_1d_hma and vol_spike:
+                desired_signal = SIZE
+            
+            # === NEW SHORT ENTRY ===
+            # Price touches upper BB + RSI in middle range + below 1d HMA + volume
+            if touch_upper_bb and short_rsi_ok and not price_above_1d_hma and vol_spike:
+                desired_signal = -SIZE
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -319,20 +234,25 @@ def generate_signals(prices):
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                last_entry_bar = i
+                entry_bar = i
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
+            else:
+                # Same direction - maintain position
+                pass
         else:
-            if in_position and (stoploss_triggered or take_profit or 
-                               (i - last_entry_bar > 50)):  # Max hold ~50 days
+            if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
                 entry_atr = 0.0
                 stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+                entry_bar = 0
         
-        signals[i] = desired_signal if in_position else 0.0
+        signals[i] = desired_signal
     
     return signals
