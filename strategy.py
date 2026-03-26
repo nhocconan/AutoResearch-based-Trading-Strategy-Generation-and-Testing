@@ -1,61 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 6h VWAP Anchor + Williams %R Regime + Volume Conf
+Experiment #024: 12h TRIX Momentum Crossover + 1w Trend + Volume
 
-HYPOTHESIS: 1d VWAP is a major institutional reference point that price 
-reverts to after volatility expansions. Combined with Williams %R to detect 
-oversold/overbought extremes (different from RSI), and volume confirmation, 
-this captures mean reversion trades at key institutional levels.
+HYPOTHESIS: TRIX(15) crossing zero captures mid-cycle momentum reversals 
+on the 12h timeframe. Combined with 1w HMA trend filter (bias only, no reversal) 
+and volume confirmation, this should catch institutional momentum shifts while 
+avoiding the overtrading that plagued Alligator strategies (267 trades vs 200 max).
 
-Why 6h + VWAP: 
-- 6h gives enough bars for Williams %R (14) to have valid readings
-- 1d VWAP anchor provides strong institutional reference
-- Works in both bull (long near VWAP in uptrend) and bear (short rallies to VWAP)
+KEY INSIGHT: TRIX crossover triggers more frequently than Donchian breakout 
+on 12h (which generates 0 trades), but less than Williams Alligator wakeup 
+(which generated 267). Target: 75-150 total trades over 4 years.
 
-TARGET: 75-150 total trades over 4 years (19-37/year)
+TIMEFRAME: 12h primary | HTF: 1w for trend bias
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vwap_williams_vol_1d_v1"
-timeframe = "6h"
+name = "mtf_12h_trix_vol_1w_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_vwap(high, low, close, volume):
-    """VWAP - Volume Weighted Average Price"""
+def calculate_trix(close, period=15):
+    """TRIX - Triple EMA Rate of Change"""
     n = len(close)
-    typical_price = (high + low + close) / 3.0
-    cumulative_tp_vol = np.cumsum(typical_price * volume)
-    cumulative_vol = np.cumsum(volume)
-    vwap = np.zeros(n)
-    for i in range(n):
-        if cumulative_vol[i] > 0:
-            vwap[i] = cumulative_tp_vol[i] / cumulative_vol[i]
-    return vwap
-
-def calculate_vwap_std(vwap, high, low, close, volume, period=20):
-    """Standard deviation bands around VWAP"""
-    n = len(close)
-    typical_price = (high + low + close) / 3.0
-    # Compute rolling std of price-distance from VWAP
-    deviations = typical_price - vwap
-    std_dev = pd.Series(deviations).rolling(window=period, min_periods=period).std().values
-    return std_dev
-
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum oscillator"""
-    n = len(close)
-    williams_r = np.full(n, np.nan, dtype=np.float64)
+    if n < period * 3:
+        return np.full(n, np.nan)
     
+    # Triple EMA
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Rate of change of triple EMA
+    trix = np.full(n, np.nan, dtype=np.float64)
     for i in range(period, n):
-        highest_high = np.max(high[i - period:i + 1])
-        lowest_low = np.min(low[i - period:i + 1])
-        
-        if highest_high - lowest_low > 0:
-            williams_r[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+        if not np.isnan(ema3[i]) and not np.isnan(ema3[i - 1]) and ema3[i - 1] != 0:
+            trix[i] = ((ema3[i] - ema3[i - 1]) / ema3[i - 1]) * 100
     
-    return williams_r
+    return trix
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -108,38 +91,32 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    # === Load HTF data ONCE before loop ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # 1w HMA for trend bias (bull/bear filter)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # 1d VWAP for institutional anchor
-    df_1d['vwap'] = calculate_vwap(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
-        df_1d['close'].values,
-        df_1d['volume'].values
-    )
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['vwap'].values)
-    
-    # Calculate local 6h indicators
+    # Calculate 12h indicators
+    trix_15 = calculate_trix(close, period=15)
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Local VWAP and bands
-    vwap_local = calculate_vwap(high, low, close, volume)
-    vwap_std = calculate_vwap_std(vwap_local, high, low, close, volume, period=20)
+    # TRIX signal line (EMA of TRIX)
+    trix_signal = pd.Series(trix_15).ewm(span=9, min_periods=9, adjust=False).mean().values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, period=14)
-    
-    # Volume confirmation
+    # Volume analysis
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Deviation from VWAP for mean reversion signal
-    vwap_deviation = (close - vwap_local) / (vwap_std + 1e-10)
+    # RSI for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = (100 - (100 / (1 + rs))).values
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -149,147 +126,110 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 50
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if indicators not ready
+        if np.isnan(trix_15[i]) or np.isnan(trix_signal[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
+        
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(vwap_local[i]) or np.isnan(vwap_std[i]) or vwap_std[i] <= 1e-10:
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === 1w TREND FILTER ===
+        price_above_1w_hma = close[i] > hma_1w_aligned[i]
         
-        if np.isnan(williams_r[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
+        # === TRIX CROSSOVER DETECTION ===
+        trix_val = trix_15[i]
+        trix_sig = trix_signal[i]
+        trix_prev = trix_15[i - 1] if i > 0 else 0.0
+        trix_sig_prev = trix_signal[i - 1] if i > 0 else 0.0
         
-        # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        # Bullish crossover: TRIX crosses above signal
+        bullish_cross = (trix_val > trix_sig) and (trix_prev <= trix_sig_prev)
+        # Bearish crossover: TRIX crosses below signal
+        bearish_cross = (trix_val < trix_sig) and (trix_prev >= trix_sig_prev)
         
-        # === 1d VWAP ANCHOR ===
-        vwap_1d = vwap_1d_aligned[i] if not np.isnan(vwap_1d_aligned[i]) else close[i]
-        price_vs_vwap_1d = close[i] / vwap_1d - 1.0  # percentage deviation
-        
-        # === LOCAL VWAP + BANDS ===
-        vwap = vwap_local[i]
-        band_1_std = vwap_std[i]
-        upper_band = vwap + 1.5 * band_1_std
-        lower_band = vwap - 1.5 * band_1_std
-        
-        # Price relative to local VWAP
-        price_above_vwap_local = close[i] > vwap
-        price_below_vwap_local = close[i] < vwap
-        
-        # === WILLIAMS %R REGIME ===
-        wr_val = williams_r[i]
-        # Oversold: below -80 (potential long)
-        # Overbought: above -20 (potential short)
-        is_oversold = wr_val < -80
-        is_overbought = wr_val > -20
-        is_neutral_wr = -80 <= wr_val <= -20
+        # TRIX zero line cross (momentum shift)
+        trix_above_zero = trix_val > 0
+        trix_prev_above_zero = trix_prev > 0
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.4
         
-        # === MEAN REVERSION SIGNALS ===
-        # Price far from VWAP (potential reversion)
-        far_from_vwap = abs(vwap_deviation[i]) > 1.2
+        # === RSI MOMENTUM ===
+        rsi_val = rsi[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
             # === NEW LONG ENTRY ===
-            # Conditions:
-            # 1. Williams %R oversold (< -80)
-            # 2. Price bouncing from below local VWAP OR price below lower band
-            # 3. Bullish 1d trend (price > 1d HMA)
-            # 4. Volume spike confirmation
-            
-            long_conditions = (
-                is_oversold and
-                (price_below_vwap_local or close[i] < lower_band) and
-                price_above_1d_hma and
-                vol_spike
-            )
-            
-            if long_conditions:
+            # Bullish TRIX cross + bullish 1w trend + volume
+            if bullish_cross and price_above_1w_hma and vol_spike:
                 desired_signal = SIZE
+            # Alternative: TRIX crosses above zero with RSI momentum
+            elif trix_above_zero and not trix_prev_above_zero and price_above_1w_hma:
+                if rsi_val > 50:
+                    desired_signal = SIZE
             
             # === NEW SHORT ENTRY ===
-            # Conditions:
-            # 1. Williams %R overbought (> -20)
-            # 2. Price rejecting from above local VWAP OR price above upper band
-            # 3. Bearish 1d trend (price < 1d HMA)
-            # 4. Volume spike confirmation
-            
-            short_conditions = (
-                is_overbought and
-                (price_above_vwap_local or close[i] > upper_band) and
-                not price_above_1d_hma and
-                vol_spike
-            )
-            
-            if short_conditions:
+            # Bearish TRIX cross + bearish 1w trend + volume
+            if bearish_cross and not price_above_1w_hma and vol_spike:
                 desired_signal = -SIZE
+            # Alternative: TRIX crosses below zero with RSI bearish
+            elif not trix_above_zero and trix_prev_above_zero and not price_above_1w_hma:
+                if rsi_val < 50:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR) ===
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
+            if low[i] < trailing_stop:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
             trailing_stop = lowest_since_entry + 2.5 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
+            if high[i] > trailing_stop:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT: Williams %R returns to neutral OR VWAP cross ===
+        # === EXIT LOGIC ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: Williams %R returns to neutral OR price crosses above VWAP
-            if is_neutral_wr and wr_val > -50:
+            # Long exit: opposite signal or TRIX turns negative
+            if bearish_cross:
                 exit_triggered = True
-            if close[i] > upper_band:
+            if rsi_val < 35:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: Williams %R returns to neutral OR price crosses below VWAP
-            if is_neutral_wr and wr_val < -50:
+            # Short exit: opposite signal or TRIX turns positive
+            if bullish_cross:
                 exit_triggered = True
-            if close[i] < lower_band:
+            if rsi_val > 65:
                 exit_triggered = True
         
         if exit_triggered:
@@ -298,29 +238,17 @@ def generate_signals(prices):
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
-                else:
-                    stop_price = entry_price + 2.5 * entry_atr
-            else:
-                # Same direction - maintain position
-                pass
+            # Same direction: maintain signal
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                entry_price = 0.0
-                entry_atr = 0.0
-                stop_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
