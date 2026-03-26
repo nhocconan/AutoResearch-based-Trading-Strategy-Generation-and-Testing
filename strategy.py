@@ -1,24 +1,49 @@
 #!/usr/bin/env python3
 """
-Experiment #012: 12h Donchian Breakout + Volume + 1d Trend Bias
+Experiment #021: 4h Vortex Crossover + Volume + 12h Trend
 
-HYPOTHESIS: On 12h timeframe, 20-period Donchian breakouts mark institutional 
-breakout points. Combined with volume confirmation and 1d HMA trend alignment, 
-this captures major trend moves while avoiding whipsaws. 12h is slower than 4h, 
-reducing trade frequency and fee drag. Works in both bull (long breakouts) and 
-bear (short breakdowns + short rallies to HMA).
+HYPOTHESIS: The Vortex Indicator (VI) identifies trend direction changes 
+more reliably than RSI or MACD because it's derived from actual price 
+positioning (high/low vs prior bars). VI crossovers are RARE events that 
+mark institutional momentum shifts. Combined with volume confirmation 
+and 12h HMA trend alignment, this captures high-probability setups in 
+both bull (long VI+ crossover) and bear (short VI- crossover) markets.
 
-TIMEFRAME: 12h primary
-HTF: 1d for trend bias, 1w for regime check
+TIMEFRAME: 4h primary
+HTF: 12h for trend alignment via HMA
 TARGET: 75-200 total trades over 4 years (19-50/year)
+REASONING: VI crossovers happen ~1-2x/month per symbol = 48-96 trades/4y
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_vol_1d_trend_v1"
-timeframe = "12h"
+name = "mtf_4h_vortex_vol_12h_trend_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_vortex(close, high, low, period=14):
+    """Vortex Indicator - identifies trend reversal points"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    vm = np.zeros(n, dtype=np.float64)
+    tr = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        if np.isnan(close[i-1]) or np.isnan(high[i-1]) or np.isnan(low[i-1]):
+            continue
+        hl = high[i] - low[i]
+        hc = abs(high[i] - close[i-1])
+        lc = abs(low[i] - close[i-1])
+        tr[i] = max(hl, hc, lc)
+        vm[i] = abs(high[i] - low[i-1]) - abs(low[i] - high[i-1])
+    
+    vi_plus = pd.Series(vm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    vi_minus = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return vi_plus, vi_minus, tr
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -64,18 +89,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper and lower bands"""
-    n = len(high)
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
-    
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -84,44 +97,26 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # 12h HMA for trend alignment
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # 1w HMA for regime (bull/bear/range)
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
-    
-    # Calculate local 12h indicators
+    # Calculate local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    vi_plus, vi_minus, _ = calculate_vortex(close, high, low, period=14)
     
-    # Donchian 20-period
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    # VI signal line (9-period EMA of VI)
+    vi_signal_raw = pd.Series(vi_plus - vi_minus).ewm(span=9, min_periods=9, adjust=False).mean().values
+    vi_signal_aligned = align_htf_to_ltf(prices, df_12h, vi_signal_raw)
     
-    # Previous Donchian for breakout detection
-    donch_upper_prev = np.roll(donch_upper, 1)
-    donch_lower_prev = np.roll(donch_lower, 1)
-    donch_upper_prev[0] = np.nan
-    donch_lower_prev[0] = np.nan
-    
-    # Volume MA
+    # Volume ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # RSI for additional confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - (100 / (1 + rs))).values
-    
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25  # Conservative sizing
     
     # Position tracking
     in_position = False
@@ -131,9 +126,8 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    entry_bar = 0
     
-    warmup = 50
+    warmup = 100  # Need 100 bars for all indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -144,60 +138,50 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(vi_plus[i]) or np.isnan(vi_signal_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        # Current values
+        vi_current = vi_plus[i] - vi_minus[i]
+        vi_signal_current = vi_signal_aligned[i]
         
-        # === REGIME (1w HMA) ===
-        price_above_1w_hma = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
+        # Previous VI difference (from previous bar)
+        vi_prev = (vi_plus[i-1] - vi_minus[i-1]) if i > 0 else 0.0
+        vi_signal_prev = vi_signal_aligned[i-1] if i > 0 else 0.0
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3
+        # Crossover detection
+        bullish_cross = (vi_current > vi_signal_current) and (vi_prev <= vi_signal_prev)
+        bearish_cross = (vi_current < vi_signal_current) and (vi_prev >= vi_signal_prev)
         
-        # === RSI FOR MOMENTUM ===
-        rsi_val = rsi[i]
+        # Volume confirmation
+        vol_confirm = vol_ratio[i] > 1.5
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Breakout up: close crosses above previous upper band
-        breakout_up = (close[i] > donch_upper_prev[i]) and (close[i-1] <= donch_upper_prev[i-1] if i > 1 else True)
-        # Breakout down: close crosses below previous lower band
-        breakout_down = (close[i] < donch_lower_prev[i]) and (close[i-1] >= donch_lower_prev[i-1] if i > 1 else True)
+        # 12h trend filter
+        price_above_12h_hma = close[i] > hma_12h_aligned[i]
         
-        # Alternative: price already above/below channel
-        price_above_upper = close[i] > donch_upper[i]
-        price_below_lower = close[i] < donch_lower[i]
-        
-        # === ENTRY LOGIC ===
-        # Key: breakout OR price outside channel + volume + trend aligned
         desired_signal = 0.0
         
         if not in_position:
             # === NEW LONG ENTRY ===
-            # Breakout up OR price above upper channel
-            if breakout_up or price_above_upper:
-                # Need volume spike AND bullish 1d trend
-                if vol_spike and price_above_1d_hma:
-                    desired_signal = SIZE
+            # VI bullish crossover + volume spike + price above 12h HMA
+            if bullish_cross and vol_confirm and price_above_12h_hma:
+                desired_signal = SIZE
             
             # === NEW SHORT ENTRY ===
-            # Breakout down OR price below lower channel  
-            if breakout_down or price_below_lower:
-                # Need volume spike AND bearish 1d trend
-                if vol_spike and not price_above_1d_hma:
-                    desired_signal = -SIZE
+            # VI bearish crossover + volume spike + price below 12h HMA
+            if bearish_cross and vol_confirm and not price_above_12h_hma:
+                desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
@@ -219,24 +203,11 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT: Opposite breakout or RSI extreme ===
-        exit_triggered = False
+        # === OPPOSITE SIGNAL EXIT ===
+        if in_position and position_side > 0 and bearish_cross:
+            desired_signal = 0.0
         
-        if in_position and position_side > 0:
-            # Long exit: price breaks below lower channel OR RSI < 30
-            if price_below_lower:
-                exit_triggered = True
-            if rsi_val < 30:
-                exit_triggered = True
-        
-        if in_position and position_side < 0:
-            # Short exit: price breaks above upper channel OR RSI > 70
-            if price_above_upper:
-                exit_triggered = True
-            if rsi_val > 70:
-                exit_triggered = True
-        
-        if exit_triggered:
+        if in_position and position_side < 0 and bullish_cross:
             desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -249,13 +220,12 @@ def generate_signals(prices):
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                entry_bar = i
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
             else:
-                # Same direction - maintain position (no churn)
+                # Same direction - maintain position
                 pass
         else:
             if in_position:
@@ -266,7 +236,6 @@ def generate_signals(prices):
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
-                entry_bar = 0
         
         signals[i] = desired_signal
     
