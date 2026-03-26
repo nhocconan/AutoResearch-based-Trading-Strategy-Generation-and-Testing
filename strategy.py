@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #016: 12h Donchian Breakout + 1d Trend + Volume + Chop Filter
+Experiment #021: 4h Donchian Breakout + 1d Trend + Volume + Chop Filter
 
-HYPOTHESIS: Donchian(20) breakouts capture genuine trend moves when confirmed by:
-1. 1d HMA(21) trend bias (institutions aligned)
-2. Volume spike >1.5x (institutional participation)
-3. Choppiness <61.8 (not ranging - breakout has follow-through)
+HYPOTHESIS: Donchian(20) breakouts are rare events (~1-2 per month per direction).
+When combined with 1d HMA trend bias, volume confirmation (1.5x), and choppiness 
+filter (CHOP < 55), we get high-quality entries that work in both bull and bear.
 
-WHY THIS WORKS IN BOTH BULL AND BEAR:
+WHY THIS WORKS:
 - Bull: Long breakouts when 1d HMA bullish (trend continuation)
 - Bear: Short breakouts when 1d HMA bearish (trend continuation)
-- Chop filter avoids false breakouts in ranging markets (2022 bottom)
+- Volume confirms institutional participation
+- Chop filter avoids range-bound whipsaws
 
-KEY FIXES from #009 failure (2443 trades = overtrading death):
-1. Donchian breakout (not pivot zones) = fewer triggers
-2. ALL conditions must align (not OR logic) = stricter entry
-3. Minimum hold period 3 bars (36h) = reduces churn
-4. Target: 75-150 total trades over 4 years (12h timeframe)
+TARGET: 75-200 total trades over 4 years (~19-50/year)
+DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (Sharpe=1.382, 95tr)
 
-DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (95tr, Sharpe=1.382)
+KEY FIXES from #017 failure (2443 trades):
+1. Donchian breakout (rarer than pivot touches)
+2. Stricter volume: 1.5x (not 1.3x)
+3. Stricter chop: <55 (not <61.8)
+4. Minimum hold: 8 bars (32h) before exit allowed
+5. No signal flip - must go flat before reversing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_hma_vol_chop_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_1d_hma_vol_chop_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -76,7 +78,7 @@ def calculate_choppiness(high, low, close, period=14):
     """
     Choppiness Index
     CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    We allow entries when CHOP < 61.8 (not too choppy)
+    We only enter when CHOP < 55 (trending regime)
     """
     n = len(close)
     if n < period + 1:
@@ -126,7 +128,7 @@ def generate_signals(prices):
     hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     chop_14 = calculate_choppiness(high, low, close, period=14)
     donch_upper, donch_lower = calculate_donchian(high, low, period=20)
@@ -136,7 +138,7 @@ def generate_signals(prices):
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.28  # Discrete position size
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -147,54 +149,74 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     bars_in_trade = 0
-    MIN_HOLD_BARS = 3  # Minimum 3 bars (36h on 12h) before exit allowed
+    MIN_HOLD_BARS = 8  # Must hold at least 8 bars (32h on 4h)
     
     warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
-            signals[i] = signals[i-1] if i > 0 else 0.0
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
         if np.isnan(chop_14[i]):
-            signals[i] = signals[i-1] if i > 0 else 0.0
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
         if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
-            signals[i] = signals[i-1] if i > 0 else 0.0
-            continue
-        
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = signals[i-1] if i > 0 else 0.0
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
         # === REGIME CHECK ===
         chop = chop_14[i]
-        is_trending = chop < 61.8  # Not too choppy
+        is_trending = chop < 55  # Stricter: only trending regime
         
         # === TREND BIAS (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
+        hma_1d = hma_1d_aligned[i]
+        trend_bullish = (not np.isnan(hma_1d)) and (close[i] > hma_1d)
+        trend_bearish = (not np.isnan(hma_1d)) and (close[i] < hma_1d)
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5  # Strong volume
+        vol_spike = vol_ratio[i] > 1.5  # Stricter: 1.5x
         
-        # === DONCHIAN BREAKOUT ===
-        breakout_long = close[i] > donch_upper[i-1] if i > 0 else False
-        breakout_short = close[i] < donch_lower[i-1] if i > 0 else False
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Long breakout: price crosses ABOVE upper Donchian
+        # Short breakout: price crosses BELOW lower Donchian
+        long_breakout = False
+        short_breakout = False
         
-        # === ENTRY LOGIC (ALL conditions must align) ===
+        if i > 0 and not np.isnan(donch_upper[i-1]):
+            # Price was below upper, now above (or touching)
+            if high[i] > donch_upper[i] and close[i-1] <= donch_upper[i-1]:
+                long_breakout = True
+        
+        if i > 0 and not np.isnan(donch_lower[i-1]):
+            # Price was above lower, now below (or touching)
+            if low[i] < donch_lower[i] and close[i-1] >= donch_lower[i-1]:
+                short_breakout = True
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # LONG: Donchian breakout + bullish 1d trend + volume + trending regime
-        if breakout_long and price_above_1d_hma and vol_spike and is_trending:
-            if not in_position or position_side < 0:
-                desired_signal = SIZE
-        
-        # SHORT: Donchian breakout + bearish 1d trend + volume + trending regime
-        if breakout_short and (not price_above_1d_hma) and vol_spike and is_trending:
-            if not in_position or position_side > 0:
-                desired_signal = -SIZE
+        if is_trending:
+            # LONG: Donchian breakout + bullish 1d trend + volume spike
+            if long_breakout and trend_bullish and vol_spike:
+                if not in_position or position_side <= 0:
+                    desired_signal = SIZE
+            
+            # SHORT: Donchian breakout + bearish 1d trend + volume spike
+            if short_breakout and trend_bearish and vol_spike:
+                if not in_position or position_side >= 0:
+                    desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
@@ -216,16 +238,30 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
+        # === TAKE PROFIT at opposite Donchian ===
+        tp_triggered = False
+        if in_position and position_side > 0 and not np.isnan(donch_lower[i]):
+            if low[i] <= donch_lower[i]:
+                tp_triggered = True
+        
+        if in_position and position_side < 0 and not np.isnan(donch_upper[i]):
+            if high[i] >= donch_upper[i]:
+                tp_triggered = True
+        
+        if tp_triggered:
+            desired_signal = 0.0
+        
         # === MINIMUM HOLD PERIOD ===
+        # Cannot exit before MIN_HOLD_BARS unless stoploss/TP hit
         if in_position and bars_in_trade < MIN_HOLD_BARS:
-            # Cannot exit yet (unless stoploss)
-            if not stoploss_triggered:
-                desired_signal = signals[i-1] if i > 0 else 0.0
+            if not stoploss_triggered and not tp_triggered:
+                # Must maintain position
+                desired_signal = signals[i-1] if i > 0 else SIZE * position_side
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
+            if not in_position:
+                # New position
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
@@ -237,12 +273,23 @@ def generate_signals(prices):
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
-            bars_in_trade += 1
+            elif np.sign(desired_signal) != position_side:
+                # Flip position - only allowed after min hold
+                if bars_in_trade >= MIN_HOLD_BARS:
+                    position_side = int(np.sign(desired_signal))
+                    entry_price = close[i]
+                    entry_atr = atr_14[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    bars_in_trade = 0
+                    if position_side > 0:
+                        stop_price = entry_price - 2.5 * entry_atr
+                    else:
+                        stop_price = entry_price + 2.5 * entry_atr
+                # else: keep old position (min hold not met)
         else:
             if in_position:
-                bars_in_trade += 1
-                # Can exit after min hold period
-                if bars_in_trade >= MIN_HOLD_BARS:
+                if bars_in_trade >= MIN_HOLD_BARS or stoploss_triggered or tp_triggered:
                     in_position = False
                     position_side = 0
                     entry_price = 0.0
@@ -251,6 +298,10 @@ def generate_signals(prices):
                     highest_since_entry = 0.0
                     lowest_since_entry = 0.0
                     bars_in_trade = 0
+                # else: keep position despite desired_signal=0
+        
+        if in_position:
+            bars_in_trade += 1
         
         signals[i] = desired_signal
     
