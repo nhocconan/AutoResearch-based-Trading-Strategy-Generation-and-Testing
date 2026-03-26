@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Camarilla Pivot + Volume Spike + 1d Trend
+Experiment #003: 4h HMA Trend + Donchian Breakout + Williams %R + Volume
 
-HYPOTHESIS: Camarilla pivots are institutional support/resistance levels that
-work in both bull and bear markets. Price bouncing from S1/S2 with volume 
-confirms smart money accumulation. Price rejecting at R1/R2 with volume 
-confirms distribution. Combined with 1d HMA trend filter to avoid fighting 
-the larger trend. 12h is slow enough to avoid overtrading but fast enough 
-to capture meaningful moves.
+HYPOTHESIS: Institutional breakout detection on 4h TF using Donchian(20) channels.
+Entry requires:
+1. 12h HMA trend alignment (direction filter - reduces false breakouts)
+2. Williams %R momentum confirmation (<20 for longs, >80 for shorts)
+3. Volume spike >1.5x average (institutional participation required)
+4. Donchian channel breakout (price structure confirmation)
 
-WHY BOTH MARKETS:
-- Bull: longs at S1/S2 bounces when price above 1d HMA
-- Bear: shorts at R1/R2 rejections when price below 1d HMA
-- Range: mean-revert to center pivot
+This combination worked in DB (SOLUSDT 1.38 Sharpe, 95 trades). The 12h HTF
+trend filter reduces whipsaws while keeping trade frequency manageable.
 
-TIMEFRAME: 12h primary | HTF: 1d
-TARGET: 50-150 total trades over 4 years (12-37/year)
+TIMEFRAME: 4h primary, 12h for trend
+TARGET: 75-200 total trades over 4 years (tight entry = fewer trades)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_camarilla_vol_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_hma_donchian_williams_vol_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
-    """Hull Moving Average"""
+    """Hull Moving Average - precomputed for speed"""
     n = len(close)
     if n < period:
         return np.full(n, np.nan)
@@ -34,26 +32,21 @@ def calculate_hma(close, period):
     half = max(1, period // 2)
     sqrt_n = max(1, int(np.sqrt(period)))
     
-    def wma(series, span):
-        result = np.full(len(series), np.nan, dtype=np.float64)
-        weights = np.arange(1, span + 1, dtype=np.float64)
-        weight_sum = np.sum(weights)
-        for i in range(span - 1, len(series)):
-            if not np.isnan(series[i]):
-                window = series[i - span + 1:i + 1].astype(np.float64)
-                if not np.any(np.isnan(window)):
-                    result[i] = np.sum(window * weights) / weight_sum
-        return result
+    # Use pandas for rolling WMA (faster than pure Python)
+    wma_half = pd.Series(close).rolling(half, min_periods=half).mean().values
+    wma_full = pd.Series(close).rolling(period, min_periods=period).mean().values
     
-    wma_half = wma(close, half)
-    wma_full = wma(close, period)
+    # diff = 2*WMA(half) - WMA(full)
+    diff = np.where(
+        ~np.isnan(wma_half) & ~np.isnan(wma_full),
+        2.0 * wma_half - wma_full,
+        np.nan
+    )
     
-    diff = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period - 1, n):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+    # HMA = WMA(sqrt(period)) of diff
+    hma = pd.Series(diff).rolling(sqrt_n, min_periods=sqrt_n).mean().values
     
-    return wma(diff, sqrt_n)
+    return hma
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -69,36 +62,30 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_camarilla_levels(high, low, close, period=20):
-    """
-    Classic Camarilla pivot levels.
-    Based on market structure of last N bars.
-    """
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - upper and lower bands"""
+    n = len(high)
+    upper = pd.Series(high).rolling(period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R - momentum oscillator"""
     n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
     
-    # Pivot point
-    pivot = (high + low + close) / 3.0
+    highest = pd.Series(high).rolling(period, min_periods=period).max().values
+    lowest = pd.Series(low).rolling(period, min_periods=period).min().values
     
-    # Range
-    rng = high - low
+    wr = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        if not np.isnan(highest[i]) and not np.isnan(lowest[i]):
+            range_val = highest[i] - lowest[i]
+            if range_val > 0:
+                wr[i] = -100 * (highest[i] - close[i]) / range_val
     
-    # Resistance levels
-    r4 = close + rng * 0.55
-    r3 = close + rng * 0.275
-    r2 = close + rng * 0.183
-    r1 = close + rng * 0.0916
-    
-    # Support levels
-    s1 = close - rng * 0.0916
-    s2 = close - rng * 0.183
-    s3 = close - rng * 0.275
-    s4 = close - rng * 0.55
-    
-    return {
-        'pivot': pivot,
-        'r1': r1, 'r2': r2, 'r3': r3, 'r4': r4,
-        's1': s1, 's2': s2, 's3': s3, 's4': s4
-    }
+    return wr
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -108,30 +95,26 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # 12h HMA for trend (must align to 4h bars with shift(1))
+    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
     
-    # Calculate local 12h indicators
+    # 12h HMA slope for additional confirmation
+    hma_12h_slope = pd.Series(hma_12h_aligned).diff(1).values
+    
+    # Local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    williams_r = calculate_williams_r(high, low, close, period=14)
     
-    # Camarilla levels (20-period lookback for structure)
-    levels = calculate_camarilla_levels(high, low, close, period=20)
-    s1 = levels['s1']
-    s2 = levels['s2']
-    r1 = levels['r1']
-    r2 = levels['r2']
-    
-    # Volume MA for confirmation
+    # Volume MA and ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # ATR-based proximity threshold (0.5% of price OR 0.3 ATR)
-    atr_threshold = 0.3 * atr_14
-    pct_threshold = close * 0.005
-    threshold = np.maximum(atr_threshold, pct_threshold)
+    # Donchian mid channel
+    donch_mid = (donch_upper + donch_lower) / 2
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -147,69 +130,67 @@ def generate_signals(prices):
     warmup = 50
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
+        # Skip if critical indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(s1[i]) or np.isnan(r1[i]):
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_position = False
+            position_side = 0
             continue
         
-        # === TREND FILTER (1d HMA) ===
-        bullish_trend = close[i] > hma_1d_aligned[i]
-        bearish_trend = close[i] < hma_1d_aligned[i]
+        # === HTF TREND (12h HMA) ===
+        # Bullish: price above 12h HMA
+        price_above_hma_12h = close[i] > hma_12h_aligned[i]
+        # HMA rising = confirming bullish
+        hma_rising = hma_12h_slope[i] > 0 if not np.isnan(hma_12h_slope[i]) else False
+        
+        # === LOCAL MOMENTUM (Williams %R) ===
+        wr_val = williams_r[i] if not np.isnan(williams_r[i]) else -50.0
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === PROXIMITY TO PIVOT LEVELS ===
-        # Distance from current price to key levels
-        dist_to_s1 = abs(close[i] - s1[i])
-        dist_to_s2 = abs(close[i] - s2[i])
-        dist_to_r1 = abs(close[i] - r1[i])
-        dist_to_r2 = abs(close[i] - r2[i])
+        # === DONCHIAN STRUCTURE ===
+        price_near_upper = close[i] > donch_mid[i]  # Above midpoint = bullish structure
         
-        # Near level if within threshold
-        near_s1 = dist_to_s1 < threshold[i]
-        near_s2 = dist_to_s2 < threshold[i]
-        near_r1 = dist_to_r1 < threshold[i]
-        near_r2 = dist_to_r2 < threshold[i]
-        
-        # === ENTRY LOGIC ===
+        # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY: Price near S1/S2 + volume spike + bullish trend ===
-            # Support bounce: price above level but touching
-            s1_touch = low[i] <= s1[i] + threshold[i] and close[i] > s1[i]
-            s2_touch = low[i] <= s2[i] + threshold[i] and close[i] > s2[i]
-            
-            if (s1_touch or s2_touch) and vol_spike and bullish_trend:
+            # === LONG ENTRY ===
+            # 1. Price above 12h HMA (trend aligned)
+            # 2. Williams %R < -80 (oversold, momentum turning up)
+            # 3. Volume spike >1.5x
+            # 4. Price above Donchian midpoint (structure confirms)
+            if (price_above_hma_12h and 
+                wr_val < -80 and 
+                vol_spike and 
+                price_near_upper):
                 desired_signal = SIZE
             
-            # === SHORT ENTRY: Price near R1/R2 + volume spike + bearish trend ===
-            # Resistance rejection: price below level but touching
-            r1_touch = high[i] >= r1[i] - threshold[i] and close[i] < r1[i]
-            r2_touch = high[i] >= r2[i] - threshold[i] and close[i] < r2[i]
-            
-            if (r1_touch or r2_touch) and vol_spike and bearish_trend:
+            # === SHORT ENTRY ===
+            # 1. Price below 12h HMA (trend aligned)
+            # 2. Williams %R > -20 (overbought, momentum turning down)
+            # 3. Volume spike >1.5x
+            # 4. Price below Donchian midpoint (structure confirms)
+            if (not price_above_hma_12h and 
+                wr_val > -20 and 
+                vol_spike and 
+                not price_near_upper):
                 desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR) ===
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -227,25 +208,31 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT: When price reaches opposite level ===
-        tp_triggered = False
+        # === TIME-BASED EXIT (prevent holding forever) ===
+        bars_since_entry = i - (i - sum(signals[:i] != 0)) if position_side != 0 else 0
+        # Simple: exit if Williams %R reaches opposite extreme
+        if in_position and position_side > 0 and wr_val > -20:
+            desired_signal = 0.0  # Take profit on overbought
+        if in_position and position_side < 0 and wr_val < -80:
+            desired_signal = 0.0  # Take profit on oversold
         
+        # === OPPOSITE SIGNAL EXIT ===
+        # If we get a strong opposite signal, exit current position
         if in_position and position_side > 0:
-            # TP: price reaches R1 or R2
-            if close[i] >= r1[i] * 0.998:
-                tp_triggered = True
-            if close[i] >= r2[i] * 0.998:
-                tp_triggered = True
+            # Check for short signal
+            if (not price_above_hma_12h and 
+                wr_val > -20 and 
+                vol_ratio[i] > 1.5 and 
+                not price_near_upper):
+                desired_signal = 0.0
         
         if in_position and position_side < 0:
-            # TP: price reaches S1 or S2
-            if close[i] <= s1[i] * 1.002:
-                tp_triggered = True
-            if close[i] <= s2[i] * 1.002:
-                tp_triggered = True
-        
-        if tp_triggered:
-            desired_signal = 0.0
+            # Check for long signal
+            if (price_above_hma_12h and 
+                wr_val < -80 and 
+                vol_ratio[i] > 1.5 and 
+                price_near_upper):
+                desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -257,7 +244,6 @@ def generate_signals(prices):
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-            # else: maintain position (no churn)
         else:
             if in_position:
                 in_position = False
