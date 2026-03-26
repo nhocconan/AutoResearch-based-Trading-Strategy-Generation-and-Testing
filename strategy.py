@@ -1,24 +1,53 @@
 #!/usr/bin/env python3
 """
-Experiment #022: 6h RSI Extreme + ATR Volatility Regime + 1d KAMA Trend
+Experiment #023: 12h Donchian Breakout + Volume + 1d HMA Trend
+HYPOTHESIS: On 12h, true Donchian(20) breakouts mark institutional moves.
+Strict entry = breakout candle + volume confirmation + trend alignment.
+NO position tracking = fewer trades, less complexity, less overfitting.
+Target: 75-150 total trades over 4 years (19-37/year).
 
-HYPOTHESIS: RSI extremes (below 30 / above 70) on 6h capture momentum reversals
-that align with volatility regime changes. When ATR(7) rises above its EMA,
-volatility is expanding — ideal for fading RSI extremes. Combined with 1d KAMA
-trend bias, this catches reversals WITH trend, not against it. Works in bull
-(rally from oversold) and bear (short rallies to overbought).
-
-TIMEFRAME: 6h primary
-HTF: 1d for KAMA trend filter
-TARGET: 75-200 total trades over 4 years (19-50/year)
+WHY: 12h is slow enough to avoid overtrading (vs 4h), but fast enough to
+capture major trend moves. Donchian breakouts work in both bull (long upper
+breakouts) and bear (short lower breakouts + rallies to HMA). Volume confirms
+institutional involvement. 1d HMA filters noise.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_rsi_atr_regime_kama_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_vol_1d_strict_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_hma(close, period):
+    """Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    half = max(1, period // 2)
+    sqrt_n = max(1, int(np.sqrt(period)))
+    
+    def wma(series, span):
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
+        for i in range(span - 1, len(series)):
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1].astype(np.float64)
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / weight_sum
+        return result
+    
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
+    
+    diff = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period - 1, n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
+    
+    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -34,6 +63,16 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian_upper(high, period=20):
+    """Donchian upper band - shifted by 1 to avoid look-ahead"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().shift(1).values
+    return upper
+
+def calculate_donchian_lower(low, period=20):
+    """Donchian lower band - shifted by 1 to avoid look-ahead"""
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().shift(1).values
+    return lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -44,26 +83,20 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d KAMA for trend (approximated via EWM for speed)
-    kama_period = 10
-    delta_1d = np.abs(np.diff(df_1d['close'].values))
-    diff_1d = np.insert(delta_1d, 0, np.nan)
-    vol_1d = pd.Series(np.abs(diff_1d)).rolling(window=kama_period, min_periods=kama_period).mean().values
-    er_1d = np.where(vol_1d > 1e-10, diff_1d / vol_1d, 0.0)
-    sc_1d = (er_1d * 0.6667) + 0.1111
-    kama_1d_raw = pd.Series(df_1d['close'].values).ewm(span=kama_period, min_periods=kama_period, adjust=False).mean().values
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
+    # 1d HMA for trend
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
-    atr_7 = calculate_atr(high, low, close, period=7)
-    atr_30 = calculate_atr(high, low, close, period=30)
-    atr_ratio = atr_7 / np.where(atr_30 > 1e-10, atr_30, 1e-10)
+    # Local indicators
+    atr_14 = calculate_atr(high, low, close, period=14)
+    donch_upper = calculate_donchian_upper(high, period=20)
+    donch_lower = calculate_donchian_lower(low, period=20)
     
-    # Volume confirmation (50-period MA for 6h = ~12.5 days)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume MA
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # RSI(14) for momentum extremes
+    # RSI
     delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
@@ -75,55 +108,124 @@ def generate_signals(prices):
     signals = np.zeros(n)
     SIZE = 0.30
     
-    # Position tracking
-    in_position = False
-    position_side = 0
+    # Position tracking (simple: in_long, in_short)
+    in_long = False
+    in_short = False
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    warmup = 100
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_7[i]) or np.isnan(atr_30[i]) or atr_7[i] <= 1e-10:
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_long = False
+            in_short = False
             continue
         
-        if np.isnan(kama_1d_aligned[i]):
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
+            in_long = False
+            in_short = False
             continue
         
-        # 1d KAMA trend alignment
-        price_above_1d_kama = close[i] > kama_1d_aligned[i]
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            in_long = False
+            in_short = False
+            continue
         
-        # ATR volatility regime (expanding = good for reversals)
-        atr_regime_expanding = atr_ratio[i] >= 1.0
+        # === CONDITIONS ===
+        vol_spike = vol_ratio[i] > 1.5
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
-        # Volume confirmation
-        vol_confirmed = vol_ratio[i] >= 1.2
-        
-        # RSI momentum extremes
         rsi_val = rsi[i]
+        rsi_oversold = rsi_val < 35
+        rsi_overbought = rsi_val > 65
+        
+        upper = donch_upper[i]
+        lower = donch_lower[i]
+        
+        # Price positions
+        price_above_upper = close[i] > upper
+        price_below_lower = close[i] < lower
+        
+        # === BREAKOUT DETECTION ===
+        # True breakout: close crosses ABOVE upper band
+        # Was below last bar, now above this bar
+        prev_close = close[i-1] if i > warmup else close[i]
+        prev_above_upper = prev_close > upper
+        
+        breakout_up = price_above_upper and not prev_above_upper
+        
+        # True breakdown: close crosses BELOW lower band
+        prev_below_lower = prev_close < lower
+        breakout_down = price_below_lower and not prev_below_lower
         
         desired_signal = 0.0
         
-        # === LONG ENTRY: RSI oversold + expanding ATR + volume + bullish 1d trend ===
-        if not in_position:
-            if rsi_val < 30 and atr_regime_expanding and vol_confirmed and price_above_1d_kama:
+        # === NO POSITION: Look for entry ===
+        if not in_long and not in_short:
+            # LONG: breakout above upper + volume + bullish trend
+            if breakout_up and vol_spike and price_above_1d_hma:
                 desired_signal = SIZE
+                in_long = True
+                in_short = False
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+                stop_price = entry_price - 2.5 * entry_atr
             
-            # === SHORT ENTRY: RSI overbought + expanding ATR + volume + bearish 1d trend ===
-            if rsi_val > 70 and atr_regime_expanding and vol_confirmed and not price_above_1d_kama:
+            # SHORT: breakout below lower + volume + bearish trend
+            elif breakout_down and vol_spike and not price_above_1d_hma:
+                desired_signal = -SIZE
+                in_long = False
+                in_short = True
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+                stop_price = entry_price + 2.5 * entry_atr
+        
+        # === IN LONG: Check stoploss, exit conditions ===
+        elif in_long:
+            # Stoploss check
+            if low[i] < stop_price:
+                desired_signal = 0.0
+                in_long = False
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+            # Exit: opposite band break OR RSI oversold OR trend flip
+            elif price_below_lower or rsi_oversold or not price_above_1d_hma:
+                desired_signal = 0.0
+                in_long = False
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+            else:
+                # Maintain position
+                desired_signal = SIZE
+        
+        # === IN SHORT: Check stoploss, exit conditions ===
+        elif in_short:
+            # Stoploss check
+            if high[i] > stop_price:
+                desired_signal = 0.0
+                in_short = False
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+            # Exit: opposite band break OR RSI overbought OR trend flip
+            elif price_above_upper or rsi_overbought or price_above_1d_hma:
+                desired_signal = 0.0
+                in_short = False
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+            else:
+                # Maintain position
                 desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR) ===
-        stoploss_triggered = False
+        signals[i] = desired_signal
+    
+    return signals
