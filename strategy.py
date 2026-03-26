@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #013: 4h Donchian Breakout + 12h Trend + Volume + Choppiness
+Experiment #014: 1h RSI Mean Reversion + 4h Trend + Volume Spike + Session Filter
 
-HYPOTHESIS: Donchian channel breakouts capture momentum moves in both bull and bear markets.
-12h HMA provides trend bias without being too restrictive. Volume confirmation filters
-false breakouts. Choppiness Index avoids ranging periods where breakouts fail.
+HYPOTHESIS: 1h RSI extremes (oversold/overbought) provide mean-reversion entries,
+but only when aligned with 4h trend direction. Volume spike confirms institutional
+participation. Session filter (08-20 UTC) avoids Asian session noise. Choppiness
+filter ensures we only trade in trending/neutral markets, not chop.
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Long breakouts above Donchian high when 12h HMA bullish
-- Bear: Short breakouts below Donchian low when 12h HMA bearish
-- Donchian works in ALL regimes - it's pure price structure, not trend-dependent
-- Volume spike confirms institutional participation (not retail fakeout)
-- Choppiness < 55 ensures we're not trading in chop where breakouts fail
+- Bull market: RSI oversold + 4h bullish = buy dips in uptrend
+- Bear market: RSI overbought + 4h bearish = sell rallies in downtrend
+- Range market: Choppiness filter blocks entries (CHOP > 55)
+- Volume spike ensures we're not catching falling knives without confirmation
 
-TARGET: 100-200 total trades over 4 years (25-50/year)
-DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (SOL Sharpe=1.38, 95 trades)
+TARGET: 75-150 total trades over 4 years (19-37/year for 1h).
+HARD MAX: 200 total trades.
 
 KEY DESIGN:
-1. Donchian(20) breakout = entry trigger
-2. 12h HMA(21) = trend bias (loose filter, not strict)
-3. Volume > 1.3x 20-avg = confirmation
-4. Choppiness < 55 = trending regime
-5. ATR(14) * 2.5 = stoploss
-6. Signal: ±0.30 (discrete)
+1. 4h HMA(21) for trend bias (HTF direction)
+2. 1h RSI(7) extremes (<30 long, >70 short) for entry timing
+3. Volume spike (>1.5x 20-avg) for confirmation
+4. Choppiness(14) < 55 for regime filter
+5. Session filter: 08-20 UTC only
+6. Signal: 0.25 (discrete)
+7. Stoploss: 2.5 ATR trailing
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_12h_trend_vol_chop_v1"
-timeframe = "4h"
+name = "mtf_1h_rsi_4h_trend_vol_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -103,17 +104,30 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    upper = np.full(n, np.nan, dtype=np.float64)
-    lower = np.full(n, np.nan, dtype=np.float64)
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    for i in range(period - 1, n):
-        upper[i] = np.max(high[i - period + 1:i + 1])
-        lower[i] = np.min(low[i - period + 1:i + 1])
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    return upper, lower
+    gain_ma = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    loss_ma = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rsi = np.full(n, np.nan, dtype=np.float64)
+    for i in range(period, n):
+        if loss_ma[i] > 1e-10:
+            rs = gain_ma[i] / loss_ma[i]
+            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+        elif gain_ma[i] > 0:
+            rsi[i] = 100.0
+        else:
+            rsi[i] = 50.0
+    
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -122,24 +136,27 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 12h data for trend bias
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data for trend bias
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h HMA for trend
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate 4h HMA for trend
+    hma_4h_raw = calculate_hma(df_4h['close'].values, period=21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_raw)
     
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     chop_14 = calculate_choppiness(high, low, close, period=14)
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    rsi_7 = calculate_rsi(close, period=7)
     
     # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
+    # Session filter: 08-20 UTC (pre-compute hours)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
@@ -162,21 +179,25 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(chop_14[i]):
+        if np.isnan(chop_14[i]) or np.isnan(rsi_7[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(hma_4h_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(vol_ratio[i]):
+        # === SESSION FILTER (08-20 UTC) ===
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             signals[i] = 0.0
             if in_position:
                 in_position = False
@@ -187,32 +208,43 @@ def generate_signals(prices):
         chop = chop_14[i]
         is_trending = chop < 55.0  # Allow entries in trending or neutral
         
-        # === TREND BIAS (12h HMA) ===
-        # Loose filter - only use to prefer one direction, not block trades
-        price_above_12h_hma = close[i] > hma_12h_aligned[i] if not np.isnan(hma_12h_aligned[i]) else True
+        if not is_trending:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # === TREND BIAS (4h HMA) ===
+        price_above_4h_hma = close[i] > hma_4h_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3  # Lowered from 1.5 to allow more trades
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Check if price broke above upper or below lower in this bar
-        broke_upper = high[i] > donch_upper[i-1] if not np.isnan(donch_upper[i-1]) else False
-        broke_lower = low[i] < donch_lower[i-1] if not np.isnan(donch_lower[i-1]) else False
+        # === RSI EXTREMES ===
+        rsi = rsi_7[i]
+        rsi_oversold = rsi < 30
+        rsi_overbought = rsi > 70
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if is_trending:
-            # LONG: Breakout above Donchian + volume + bullish or neutral bias
-            if broke_upper and vol_spike:
-                # Prefer long when above 12h HMA, but allow anyway with volume
-                if price_above_12h_hma or vol_ratio[i] > 1.5:
+        # LONG: RSI oversold + price above 4h HMA (bullish trend) + volume
+        if rsi_oversold and price_above_4h_hma:
+            if vol_spike:
+                desired_signal = SIZE
+            else:
+                # Allow entry without volume spike if RSI is extremely oversold
+                if rsi < 25:
                     desired_signal = SIZE
-            
-            # SHORT: Breakout below Donchian + volume + bearish or neutral bias
-            if broke_lower and vol_spike:
-                # Prefer short when below 12h HMA, but allow anyway with volume
-                if not price_above_12h_hma or vol_ratio[i] > 1.5:
+        
+        # SHORT: RSI overbought + price below 4h HMA (bearish trend) + volume
+        if rsi_overbought and not price_above_4h_hma:
+            if vol_spike:
+                desired_signal = -SIZE
+            else:
+                # Allow entry without volume spike if RSI is extremely overbought
+                if rsi > 75:
                     desired_signal = -SIZE
         
         # === STOPLOSS CHECK ===
@@ -235,16 +267,16 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT at opposite Donchian band ===
+        # === TAKE PROFIT (RSI mean reversion) ===
         tp_triggered = False
         if in_position and position_side > 0:
-            # Exit long when price reaches upper Donchian (momentum exhausted)
-            if high[i] >= donch_upper[i] * 1.005:  # Small buffer
+            # Exit long when RSI recovers above 50
+            if rsi > 55:
                 tp_triggered = True
         
         if in_position and position_side < 0:
-            # Exit short when price reaches lower Donchian
-            if low[i] <= donch_lower[i] * 0.995:  # Small buffer
+            # Exit short when RSI drops below 50
+            if rsi < 45:
                 tp_triggered = True
         
         if tp_triggered:
