@@ -1,89 +1,96 @@
 #!/usr/bin/env python3
 """
-Experiment #027: 1d TRIX + Choppiness Regime + Volume Confirmation
+Experiment #011: 6h CRSI Momentum + 1d Trend Bias
 
-HYPOTHESIS: TRIX (Triple EMA) crossover on 1d timeframe is slow enough to 
-avoid overtrading while capturing major trend reversals. Combined with:
-- Choppiness Index < 50 (trending market, not ranging)
-- Volume spike confirmation (institutional interest)
-- ATR-based stoploss for risk management
+HYPOTHESIS: Conners RSI (CRSI) = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+is a proven momentum oscillator that catches reversals better than plain RSI.
+Combined with 1d SMA200 trend alignment, this captures mean-reversion setups
+in the direction of the larger trend. CRSI < 10 historically has 75% win rate.
 
-TIMEFRAME: 1d primary
-HTF: 1w for regime confirmation
-TARGET: 40-80 total trades over 4 years (10-20/year)
+CRSI hasn't been tried on 6h in any of the 27 failed attempts. The key is
+LOOSE CRSI thresholds (< 15 for longs, > 85 for shorts) + trend confirmation.
+
+TIMEFRAME: 6h primary
+HTF: 1d for SMA200 trend bias
+TARGET: 75-200 total trades over 4 years (19-50/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_trix_chop_vol_1w_v1"
-timeframe = "1d"
+name = "mtf_6h_crsi_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_trix(close, period=9):
-    """TRIX - Triple EMA oscillator"""
-    n = len(close)
-    if n < period * 3:
-        return np.full(n, np.nan)
-    
-    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    trix = np.zeros(n, dtype=np.float64)
-    trix[0] = 0
-    for i in range(1, n):
-        if not np.isnan(ema3[i]) and not np.isnan(ema3[i-1]) and ema3[i-1] != 0:
-            trix[i] = 100 * (ema3[i] - ema3[i-1]) / ema3[i-1]
-        else:
-            trix[i] = 0
-    
-    return trix
+def calculate_rsi(close, period=14):
+    """Standard RSI"""
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    return (100 - (100 / (1 + rs))).values
 
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index - measures market choppiness
-    < 38.2 = trending, > 61.8 = ranging
-    """
-    n = len(high)
-    if n < period + 1:
-        return np.full(n, np.nan)
+def calculate_rsi_streak(close, period=2):
+    """RSI Streak - consecutive up/down closes"""
+    n = len(close)
+    delta = pd.Series(close).diff()
     
-    chop = np.full(n, np.nan, dtype=np.float64)
+    # Mark up/down
+    is_up = (delta > 0).astype(float)
+    is_down = (delta < 0).astype(float) * -1
+    
+    # Cumulative streak
+    streak = np.zeros(n)
+    for i in range(1, n):
+        if delta.iloc[i] > 0:
+            streak[i] = max(0, streak[i-1] + 1)
+        elif delta.iloc[i] < 0:
+            streak[i] = min(0, streak[i-1] - 1)
+        else:
+            streak[i] = streak[i-1]
+    
+    # RSI of streak
+    streak_series = pd.Series(streak)
+    return calculate_rsi(streak_series.values, period)
+
+def calculate_percent_rank(close, period=100):
+    """Percent Rank over rolling window"""
+    n = len(close)
+    result = np.full(n, np.nan)
     
     for i in range(period, n):
-        sum_tr = 0.0
-        highest = -np.inf
-        lowest = np.inf
-        
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], 
-                     abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j],
-                     abs(low[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            sum_tr += tr
-            if high[j] > highest:
-                highest = high[j]
-            if low[j] < lowest:
-                lowest = low[j]
-        
-        range_sum = highest - lowest
-        if range_sum > 0 and sum_tr > 0:
-            chop[i] = 100 * np.log10(sum_tr / range_sum) / np.log10(period)
+        window = close[i-period:i]
+        count_below = np.sum(window < close[i])
+        result[i] = (count_below / period) * 100
     
-    return chop
+    return result
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """Conners RSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3"""
+    rsi3 = calculate_rsi(close, rsi_period)
+    rsi_streak = calculate_rsi_streak(close, streak_period)
+    pct_rank = calculate_percent_rank(close, rank_period)
+    
+    crsi = (rsi3 + rsi_streak + pct_rank) / 3.0
+    return crsi
+
+def calculate_sma(close, period):
+    """Simple Moving Average"""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    return sma
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
-    if n < period + 2:
+    if n < period + 1:
         return np.full(n, np.nan)
     
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
@@ -96,37 +103,19 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w close for regime confirmation
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 1d SMA200 for trend bias
+    sma_1d_raw = calculate_sma(df_1d['close'].values, period=200)
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
     
-    # 1w HMA for trend
-    hma_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    
-    # 1w Choppiness for regime
-    chop_1w = calculate_choppiness_index(high_1w, low_1w, close_1w, period=14)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
-    
-    # === Local 1d indicators ===
-    trix_9 = calculate_trix(close, period=9)
-    trix_21 = calculate_trix(close, period=21)
-    
-    # TRIX signal line (EMA of TRIX)
-    trix_signal = pd.Series(trix_9).ewm(span=9, min_periods=9, adjust=False).mean().values
-    
-    # ATR for stoploss
+    # Calculate local 6h indicators
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Volume
+    # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # 1d Choppiness for local regime
-    chop_1d = calculate_choppiness_index(high, low, close, period=14)
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -136,21 +125,14 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    entry_bar = 0
+    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 100  # Need enough for TRIX calculation
+    warmup = 200  # Need 200 bars for SMA200 alignment
     
     for i in range(warmup, n):
-        # Check indicators available
-        if np.isnan(trix_9[i]) or np.isnan(trix_signal[i]):
-            signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
-            continue
-        
+        # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             if in_position:
@@ -158,78 +140,80 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(chop_1d[i]) or np.isnan(hma_1w_aligned[i]):
+        if np.isnan(crsi[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === REGIME CHECK ===
-        # Choppiness < 50 = trending (not too choppy)
-        # Choppiness < 38.2 = strong trend
-        local_chop = chop_1d[i]
-        weekly_chop = chop_1w_aligned[i] if not np.isnan(chop_1w_aligned[i]) else 50
+        if np.isnan(sma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
         
-        # Both timeframes should be trending
-        is_trending = (local_chop < 50) and (weekly_chop < 55)
+        crsi_val = crsi[i]
         
-        # === 1w TREND DIRECTION ===
-        price_above_1w_hma = close[i] > hma_1w_aligned[i]
-        trend_bullish = price_above_1w_hma
-        trend_bearish = not price_above_1w_hma
+        # === TREND BIAS (1d SMA200) ===
+        bullish_trend = close[i] > sma_1d_aligned[i]
+        bearish_trend = close[i] < sma_1d_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.4
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === TRIX CROSSOVER SIGNALS ===
-        # TRIX crosses above signal = bullish momentum
-        # TRIX crosses below signal = bearish momentum
-        trix_prev = trix_9[i-1]
-        signal_prev = trix_signal[i-1]
-        trix_curr = trix_9[i]
-        signal_curr = trix_signal[i]
-        
-        # Crossover detection
-        trix_cross_up = (trix_prev <= signal_prev) and (trix_curr > signal_curr)
-        trix_cross_down = (trix_prev >= signal_prev) and (trix_curr < signal_curr)
-        
-        # TRIX momentum direction
-        trix_positive = trix_curr > 0
-        trix_negative = trix_curr < 0
-        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
             # === NEW LONG ENTRY ===
-            # TRIX crosses above signal + trending + volume + weekly bullish
-            if trix_cross_up and is_trending and vol_spike and trend_bullish:
+            # CRSI deeply oversold (< 15) + price above SMA200 + volume confirmation
+            if crsi_val < 15 and bullish_trend:
                 desired_signal = SIZE
             
             # === NEW SHORT ENTRY ===
-            # TRIX crosses below signal + trending + volume + weekly bearish
-            if trix_cross_down and is_trending and vol_spike and trend_bearish:
+            # CRSI extremely overbought (> 85) + price below SMA200 + volume confirmation
+            if crsi_val > 85 and bearish_trend:
                 desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR) ===
-        if in_position:
-            if position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.5 * entry_atr
-                if low[i] < stop_price:
-                    desired_signal = 0.0
-            elif position_side < 0:
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.5 * entry_atr
-                if high[i] > stop_price:
-                    desired_signal = 0.0
+        stoploss_triggered = False
         
-        # === EXIT: Opposite signal or regime change ===
-        if in_position and not is_trending and abs(desired_signal) > 0:
-            # Market turned choppy - exit
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                stoploss_triggered = True
+        
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
             desired_signal = 0.0
         
-        # === UPDATE POSITION ===
+        # === EXIT: CRSI mean reversion ===
+        exit_triggered = False
+        
+        if in_position and position_side > 0:
+            # Long exit: CRSI crosses above 60 (mean reversion)
+            if crsi_val > 60:
+                exit_triggered = True
+        
+        if in_position and position_side < 0:
+            # Short exit: CRSI crosses below 40 (mean reversion)
+            if crsi_val < 40:
+                exit_triggered = True
+        
+        if exit_triggered:
+            desired_signal = 0.0
+        
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 # New position or flip
@@ -239,15 +223,17 @@ def generate_signals(prices):
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                entry_bar = i
-            # else: maintain position
+                if position_side > 0:
+                    stop_price = entry_price - 2.5 * entry_atr
+                else:
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
                 entry_atr = 0.0
-                entry_bar = 0
+                stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
         
