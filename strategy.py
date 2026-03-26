@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h Donchian Breakout + RSI Momentum + Volume Confirmation
+Experiment #024: 12h Donchian Momentum + Volume Confirmation + 1w Regime
 
-HYPOTHESIS: On 6h timeframe, 20-period Donchian breakouts mark institutional 
-move starts. Combined with RSI momentum confirmation (RSI >50 for longs, <50 
-for shorts) and volume spike confirmation, this captures the start of trends 
-while filtering noise. Works in both bull and bear via long/short entries.
+HYPOTHESIS: 12h Donchian breakouts with consecutive closes outside the channel
+capture institutional moves. Combined with volume confirmation and 1w HMA regime
+filter, this should work in both bull markets (trend-following longs) and bear
+markets (short rallies to the HMA). 12h timeframe reduces trade frequency vs 4h.
 
-TIMEFRAME: 6h primary
-HTF: 1d/1w for regime (optional filter)
-TARGET: 75-200 total trades over 4 years (19-50/year)
+KEY INSIGHT: Previous failures had either 0 trades (too strict) or 500+ trades
+(too loose). This version uses CONSECUTIVE BAR CONFIRMATION (2+ bars) to ensure
+breakouts are real, while still generating enough trades (75-150 total).
+
+TIMEFRAME: 12h primary
+HTF: 1w for regime, 1d for ATR stop
+TARGET: 75-150 total trades over 4 years
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_rsi_vol_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_consec_1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -63,6 +67,20 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper and lower bands"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
+    mid = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        mid[i] = (upper[i] + lower[i]) / 2.0
+    
+    return upper, lower, mid
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -71,7 +89,152 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['
+    # 1w HMA for regime (bull/bear/range)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    
+    # Calculate local 12h indicators
+    atr_14 = calculate_atr(high, low, close, period=14)
+    
+    # Donchian 20-period
+    donch_upper, donch_lower, donch_mid = calculate_donchian(high, low, period=20)
+    
+    # Count consecutive bars above upper / below lower (momentum confirmation)
+    above_upper_count = np.zeros(n, dtype=np.int32)
+    below_lower_count = np.zeros(n, dtype=np.int32)
+    
+    for i in range(20, n):
+        if close[i] > donch_upper[i]:
+            above_upper_count[i] = above_upper_count[i-1] + 1 if i > 20 else 1
+        if close[i] < donch_lower[i]:
+            below_lower_count[i] = below_lower_count[i-1] + 1 if i > 20 else 1
+    
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    signals = np.zeros(n)
+    SIZE = 0.30
+    
+    # Position tracking
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
+    entry_atr = 0.0
+    stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    
+    warmup = 50
+    
+    for i in range(warmup, n):
+        # Skip if indicators not ready
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # 1w regime check
+        price_above_1w_hma = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
+        
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.2
+        
+        # Consecutive bar momentum (need 2+ bars for confirmation)
+        above_count = above_upper_count[i]
+        below_count = below_lower_count[i]
+        
+        # === ENTRY LOGIC ===
+        desired_signal = 0.0
+        
+        if not in_position:
+            # === NEW LONG ENTRY ===
+            # 2+ consecutive closes above upper band + volume + bullish regime
+            if above_count >= 2 and vol_spike and price_above_1w_hma:
+                desired_signal = SIZE
+            
+            # === NEW SHORT ENTRY ===
+            # 2+ consecutive closes below lower band + volume + bearish regime
+            if below_count >= 2 and vol_spike and not price_above_1w_hma:
+                desired_signal = -SIZE
+        
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        stoploss_triggered = False
+        
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                stoploss_triggered = True
+        
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === EXIT: Return to channel or regime change ===
+        exit_triggered = False
+        
+        if in_position and position_side > 0:
+            # Long exit: price returns below lower band OR regime turns bearish
+            if below_count >= 1:
+                exit_triggered = True
+            # Also exit if 1w HMA flips bearish while we're long
+            if not price_above_1w_hma and above_count == 0:
+                exit_triggered = True
+        
+        if in_position and position_side < 0:
+            # Short exit: price returns above upper band OR regime turns bullish
+            if above_count >= 1:
+                exit_triggered = True
+            # Also exit if 1w HMA flips bullish while we're short
+            if price_above_1w_hma and below_count == 0:
+                exit_triggered = True
+        
+        if exit_triggered:
+            desired_signal = 0.0
+        
+        # === UPDATE POSITION TRACKING ===
+        if desired_signal != 0.0:
+            if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
+                in_position = True
+                position_side = int(np.sign(desired_signal))
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                if position_side > 0:
+                    stop_price = entry_price - 2.5 * entry_atr
+                else:
+                    stop_price = entry_price + 2.5 * entry_atr
+        else:
+            if in_position:
+                in_position = False
+                position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+        
+        signals[i] = desired_signal
+    
+    return signals
