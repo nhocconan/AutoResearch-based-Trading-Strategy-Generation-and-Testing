@@ -1,42 +1,95 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 4h Bollinger Band Bounce + TRIX + 1d Trend
+Experiment #013: 1d Camarilla Bounce + Choppiness Regime
 
-HYPOTHESIS: Price Mean Reversion at Bollinger Band extremes is a high-probability 
-setup on 4h. When price touches lower BB band AND TRIX turns positive (momentum 
-shifting), it marks exhaustion. Combined with 1d HMA trend alignment (bull 
-market only long, bear market only short), this captures reversals in both 
-directions. Bounce trades have better win rates than breakout trades.
+HYPOTHESIS: On 1d timeframe, Camarilla pivot levels (S3/R3) act as strong 
+support/resistance where price frequently bounces. Combined with:
+- Volume confirmation (validates institutional interest)
+- Choppiness Index regime filter (prevents fading trending moves)
+- Simple ATR stoploss
 
-KEY INSIGHTS from DB:
-- CRSI/TRIX momentum reversals at BB extremes work (ETH: test Sharpe 1.32)
-- HMA+Donchian+Volume combos work (SOL: test Sharpe 1.38-1.46)
-- BB squeeze/bounce is proven mean reversion pattern
+This is the proven DB pattern (gen_camarilla_pivot_volume_spike_choppiness_4h_v1 
+had test Sharpe=1.471). Adapted to 1d for even fewer trades and lower fee drag.
 
-TIMEFRAME: 4h primary
-HTF: 1d for trend alignment (filter longs in bear, shorts in bull)
-TARGET: 75-200 total trades over 4 years
+TIMEFRAME: 1d primary
+HTF: 1w for regime confirmation
+TARGET: 50-150 total trades over 4 years (12-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_bb_bounce_trix_1d_v1"
-timeframe = "4h"
+name = "mtf_1d_camarilla_chop_vol_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_trix(close, period=14):
-    """TRIX - Triple EMA Oscillator"""
+def calculate_camarilla(high, low, close, open_price=None):
+    """
+    Camarilla Pivot Points
+    R4 = C + (H - L) * 1.1/2
+    R3 = C + (H - L) * 1.1/4
+    R2 = C + (H - L) * 1.1/6
+    R1 = C + (H - L) * 1.1/12
+    S1 = C - (H - L) * 1.1/12
+    S2 = C - (H - L) * 1.1/6
+    S3 = C - (H - L) * 1.1/4
+    S4 = C - (H - L) * 1.1/2
+    """
     n = len(close)
-    if n < period * 3:
+    hl = high - low
+    factor = 1.1 / 2
+    
+    r4 = close + hl * factor
+    r3 = close + hl * (factor / 2)
+    r2 = close + hl * (factor / 3)
+    r1 = close + hl * (factor / 6)
+    s1 = close - hl * (factor / 6)
+    s2 = close - hl * (factor / 3)
+    s3 = close - hl * (factor / 2)
+    s4 = close - hl * factor
+    
+    return r4, r3, r2, r1, s1, s2, s3, s4
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index - measures market choppiness vs trending
+    CHOP > 61.8 = choppy/range (fade moves)
+    CHOP < 38.2 = trending (follow moves)
+    """
+    n = len(close)
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
-    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
-    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
+    chop = np.full(n, np.nan)
     
-    trix = ema3.pct_change() * 100
-    return trix.values
+    for i in range(period, n):
+        # Sum of true range over period
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+            atr_sum += tr
+        
+        # Highest - lowest over period
+        hl_range = np.max(high[i - period + 1:i + 1]) - np.min(low[i - period + 1:i + 1])
+        
+        if hl_range > 1e-10 and atr_sum > 1e-10:
+            chop[i] = 100 * (np.log10(atr_sum) / np.log10(hl_range))
+    
+    return chop
+
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -68,33 +121,16 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
-def calculate_bb(close, period=20, std_dev=2.0):
-    """Bollinger Bands"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    
-    return upper, sma, lower
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+def calculate_rsi(close, period=14):
+    """RSI indicator"""
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = (100 - (100 / (1 + rs))).values
+    return rsi
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -104,37 +140,27 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d HMA for trend bias
-    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
+    # 1w HMA for trend confirmation
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # TRIX(14) for momentum
-    trix = calculate_trix(close, period=14)
-    
-    # TRIX signal (9-period of TRIX)
-    trix_series = pd.Series(trix)
-    trix_signal = trix_series.ewm(span=9, min_periods=9, adjust=False).mean().values
-    
-    # Bollinger Bands (20, 2.0)
-    bb_upper, bb_mid, bb_lower = calculate_bb(close, period=20, std_dev=2.0)
-    
-    # ATR for stoploss
+    # === Calculate indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Volume MA for confirmation
+    # Camarilla levels
+    r4, r3, r2, r1, s1, s2, s3, s4 = calculate_camarilla(high, low, close)
+    
+    # Choppiness Index
+    chop = calculate_choppiness_index(high, low, close, period=14)
+    
+    # RSI
+    rsi = calculate_rsi(close, period=14)
+    
+    # Volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # RSI for additional confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = (100 - (100 / (1 + rs))).values
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -154,82 +180,75 @@ def generate_signals(prices):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(chop[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        if np.isnan(trix[i]) or np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
+            if in_position:
+                in_position = False
+                position_side = 0
             continue
         
-        # === HTF TREND (1d HMA) ===
-        price_above_1d_hma = close[i] > hma_1d_aligned[i]
-        trend_bullish = price_above_1d_hma
-        
-        # === LOCAL INDICATORS ===
-        bb_up = bb_upper[i]
-        bb_low = bb_lower[i]
-        bb_mid_val = bb_mid[i]
-        
-        trix_val = trix[i]
-        trix_sig = trix_signal[i]
-        
+        chop_val = chop[i]
         rsi_val = rsi[i]
         vol_ratio_val = vol_ratio[i]
         
-        # === TRIX MOMENTUM SHIFT ===
-        # TRIX crosses above signal = momentum turning bullish
-        trix_cross_up = (trix[i] > trix_sig[i]) and (trix[i-1] <= trix_signal[i-1] if i > 1 else True)
-        # TRIX crosses below signal = momentum turning bearish
-        trix_cross_down = (trix[i] < trix_sig[i]) and (trix[i-1] >= trix_signal[i-1] if i > 1 else True)
+        # Choppiness regime
+        # CHOP > 61.8 = choppy = mean reversion (fade S3/R3 touches)
+        # CHOP < 38.2 = trending = trend following (hold through)
+        is_choppy = chop_val > 61.8
+        is_trending = chop_val < 38.2
         
-        # === VOLUME CONFIRMATION ===
+        # 1w trend
+        price_above_1w_hma = close[i] > hma_1w_aligned[i]
+        
+        # Volume confirmation
         vol_confirm = vol_ratio_val > 1.2
         
-        # === BB TOUCH (price at extreme) ===
-        # Long: price touches or is very close to lower band
-        touch_lower = low[i] <= bb_low[i] * 1.002
-        # Short: price touches or is very close to upper band
-        touch_upper = high[i] >= bb_up[i] * 0.998
-        
-        # === RSI FILTER ===
-        # Avoid entering when RSI is neutral
-        rsi_oversold = rsi_val < 35
-        rsi_overbought = rsi_val > 65
-        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # === NEW ENTRY LOGIC ===
         if not in_position:
-            # === LONG ENTRY: BB lower touch + TRIX turning up + RSI oversold + volume ===
-            if touch_lower and trix_cross_up and rsi_oversold and vol_confirm:
-                desired_signal = SIZE
+            # === LONG ENTRY: Price bounces from S3 with volume ===
+            # S3 is strong support - bounce when price approaches
+            if close[i] >= s3[i] and close[i] <= s2[i]:
+                # Price at/below S3, bounce expected
+                # Need volume confirmation
+                if vol_confirm:
+                    # In choppy: fade the move (long the bounce)
+                    # In trending: confirm with 1w trend aligned
+                    if is_choppy or (is_trending and price_above_1w_hma):
+                        desired_signal = SIZE
             
-            # === SHORT ENTRY: BB upper touch + TRIX turning down + RSI overbought + volume ===
-            if touch_upper and trix_cross_down and rsi_overbought and vol_confirm:
-                desired_signal = -SIZE
+            # === SHORT ENTRY: Price bounces from R3 with volume ===
+            if close[i] <= r3[i] and close[i] >= r2[i]:
+                if vol_confirm:
+                    if is_choppy or (is_trending and not price_above_1w_hma):
+                        desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (3 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 3.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 3.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -237,24 +256,31 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT: Price returned to BB mid ===
-        tp_triggered = False
+        # === EXIT CONDITIONS ===
+        exit_triggered = False
         
         if in_position and position_side > 0:
-            if close[i] >= bb_mid_val:
-                tp_triggered = True
+            # Long exit: price reaches R3 (take profit zone)
+            if close[i] >= r3[i]:
+                exit_triggered = True
+            # Or RSI overbought in choppy
+            if is_choppy and rsi_val > 70:
+                exit_triggered = True
         
         if in_position and position_side < 0:
-            if close[i] <= bb_mid_val:
-                tp_triggered = True
+            # Short exit: price reaches S3 (take profit zone)
+            if close[i] <= s3[i]:
+                exit_triggered = True
+            # Or RSI oversold in choppy
+            if is_choppy and rsi_val < 30:
+                exit_triggered = True
         
-        if tp_triggered:
+        if exit_triggered:
             desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
@@ -262,9 +288,11 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 3.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 3.0 * entry_atr
+            else:
+                pass  # Maintain position
         else:
             if in_position:
                 in_position = False
