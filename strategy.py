@@ -1,41 +1,61 @@
 #!/usr/bin/env python3
 """
-Experiment #012 - v2: 12h Williams %R + ATR Volatility Expansion + 1d Trend
+Experiment #021: 4h Donchian Breakout + Volume + 1d/1w Trend + ATR Stoploss
 
-HYPOTHESIS: Williams %R extremes (< -80 long, > -20 short) catch reversal points.
-ATR expansion filter (ATR(14)/ATR(30) > 1.15) ensures we only trade during volatile
-moves, avoiding the 2022 choppy bear market. 1d SMA(50) as trend filter keeps us
-aligned with higher timeframe direction. 12h is slow enough to avoid overtrading
-while capturing meaningful reversals. Williams %R is proven on crypto (reversals
-are sharper than stocks).
+HYPOTHESIS: Donchian(20) breakouts identify institutional breakout points.
+Combining with volume confirmation and 1d/1w HMA trend alignment filters noise.
+ATR-based trailing stops manage risk. 4h is optimal: frequent enough for
+50-75 trades but slow enough to avoid fee drag. Works in BOTH bull (long 
+breakouts) and bear (short breakdowns when 1w trend confirms).
 
-TIMEFRAME: 12h primary
-HTF: 1d for trend SMA, 1w for regime check
+KEY LEARNINGS FROM FAILURES:
+- #008/#011: no trades - entry conditions mutually exclusive
+- #010: 504 trades - entry too loose, need 1w trend filter
+- #012/#016/#018: negative Sharpe - need tighter volume confirmation
+
+WINNING FORMULA (from DB): Donchian breakout + volume spike + HTF trend + ATR stop
+
+TIMEFRAME: 4h
+HTF: 1d for trend bias, 1w for regime
 TARGET: 75-200 total trades over 4 years (19-50/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_williamsr_atr_exp_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_vol_htf_trend_v5"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum oscillator"""
+def calculate_hma(close, period):
+    """Hull Moving Average"""
     n = len(close)
-    wr = np.full(n, np.nan, dtype=np.float64)
+    if n < period:
+        return np.full(n, np.nan)
     
+    half = max(1, period // 2)
+    sqrt_n = max(1, int(np.sqrt(period)))
+    
+    def wma(series, span):
+        result = np.full(len(series), np.nan, dtype=np.float64)
+        weights = np.arange(1, span + 1, dtype=np.float64)
+        weight_sum = np.sum(weights)
+        for i in range(span - 1, len(series)):
+            if not np.isnan(series[i]):
+                window = series[i - span + 1:i + 1].astype(np.float64)
+                if not np.any(np.isnan(window)):
+                    result[i] = np.sum(window * weights) / weight_sum
+        return result
+    
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
+    
+    diff = np.full(n, np.nan, dtype=np.float64)
     for i in range(period - 1, n):
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        
-        if highest_high != lowest_low:
-            wr[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
-        else:
-            wr[i] = -50  # neutral when no range
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            diff[i] = 2.0 * wma_half[i] - wma_full[i]
     
-    return wr
+    return wma(diff, sqrt_n)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -51,59 +71,17 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(values, period):
-    """Simple Moving Average"""
-    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
-
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - trend strength"""
-    n = len(close)
-    if n < period * 2:
-        return np.full(n, np.nan)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper and lower bands"""
+    n = len(high)
+    upper = np.full(n, np.nan, dtype=np.float64)
+    lower = np.full(n, np.nan, dtype=np.float64)
     
-    # True Range components
-    tr_list = []
-    plus_dm_list = []
-    minus_dm_list = []
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
     
-    for i in range(1, n):
-        tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        plus_dm = max(high[i] - high[i-1], 0) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
-        minus_dm = max(low[i-1] - low[i], 0) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
-        tr_list.append(tr)
-        plus_dm_list.append(plus_dm)
-        minus_dm_list.append(minus_dm)
-    
-    tr_arr = np.array(tr_list)
-    plus_dm_arr = np.array(plus_dm_list)
-    minus_dm_arr = np.array(minus_dm_list)
-    
-    # Smooth with EMA
-    atr_smooth = pd.Series(tr_arr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm_arr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm_arr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # DX calculation
-    di_plus = np.zeros(len(atr_smooth))
-    di_minus = np.zeros(len(atr_smooth))
-    dx = np.zeros(len(atr_smooth))
-    
-    for i in range(len(atr_smooth)):
-        if atr_smooth[i] > 0:
-            di_plus[i] = 100 * plus_dm_smooth[i] / atr_smooth[i]
-            di_minus[i] = 100 * minus_dm_smooth[i] / atr_smooth[i]
-            di_sum = di_plus[i] + di_minus[i]
-            if di_sum > 0:
-                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / di_sum
-    
-    # ADX as smoothed DX
-    adx = np.full(n, np.nan)
-    adx_values = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    for i in range(period * 2, n):
-        adx[i] = adx_values[i - 1] if i > 0 else np.nan
-    
-    return adx
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -116,28 +94,21 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # 1d SMA(50) for trend filter
-    sma_1d_raw = calculate_sma(df_1d['close'].values, period=50)
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_raw)
+    # 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # 1w SMA(21) for regime
-    sma_1w_raw = calculate_sma(df_1w['close'].values, period=21)
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w_raw)
+    # 1w HMA for regime (bull/bear/range)
+    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
     
-    # Calculate local 12h indicators
+    # Calculate local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_30 = calculate_atr(high, low, close, period=30)
     
-    # ATR expansion ratio
-    atr_expansion = atr_14 / np.where(atr_30 > 0, atr_30, 1)
+    # Donchian 20-period
+    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, period=14)
-    
-    # ADX for trend strength
-    adx_14 = calculate_adx(high, low, close, period=14)
-    
-    # Volume MA
+    # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -152,9 +123,8 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    entry_bar = 0
     
-    warmup = 60
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -165,64 +135,50 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(williams_r[i]):
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(sma_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # Current indicator values
-        wr = williams_r[i]
-        atr_exp = atr_expansion[i]
-        adx = adx_14[i]
+        # === TREND BIAS (1d HMA) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
-        # === TREND FILTER (1d SMA) ===
-        price_above_1d_sma = close[i] > sma_1d_aligned[i]
-        price_below_1d_sma = close[i] < sma_1d_aligned[i]
-        
-        # === REGIME (1w SMA) ===
-        price_above_1w_sma = close[i] > sma_1w_aligned[i] if not np.isnan(sma_1w_aligned[i]) else True
-        price_below_1w_sma = close[i] < sma_1w_aligned[i] if not np.isnan(sma_1w_aligned[i]) else False
-        
-        # === VOLATILITY FILTER ===
-        # Only enter during ATR expansion (volatility breakout)
-        vol_expansion = atr_exp > 1.15
-        
-        # === TREND STRENGTH FILTER ===
-        # ADX > 20 = trending (don't fight trend in ranging)
-        trending = adx > 20 if not np.isnan(adx) else True
+        # === REGIME (1w HMA) - bull if price above, bear if below ===
+        price_above_1w_hma = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
         
         # === VOLUME CONFIRMATION ===
-        vol_confirm = vol_ratio[i] > 1.0
+        vol_spike = vol_ratio[i] > 1.3
         
-        # === ENTRY CONDITIONS ===
-        # Long: Williams %R < -80 (extreme oversold) + price above 1d SMA + vol expansion
-        # Short: Williams %R > -20 (extreme overbought) + price below 1d SMA + vol expansion
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Breakout: price CLOSES above upper band (not just touching)
+        breakout_up = (close[i] > donch_upper[i]) and (close[i-1] <= donch_upper[i-1] if i > warmup else True)
+        # Breakdown: price CLOSES below lower band
+        breakout_down = (close[i] < donch_lower[i]) and (close[i-1] >= donch_lower[i-1] if i > warmup else True)
         
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === NEW LONG ===
-            # Oversold + trend aligned + volatility expansion
-            if wr < -80:
-                if price_above_1d_sma and vol_expansion and (trending or price_above_1w_sma):
-                    desired_signal = SIZE
+            # === NEW LONG ENTRY ===
+            # Breakout above upper channel + volume spike + 1d bullish + 1w bullish
+            if breakout_up and vol_spike and price_above_1d_hma and price_above_1w_hma:
+                desired_signal = SIZE
             
-            # === NEW SHORT ===
-            # Overbought + trend aligned + volatility expansion
-            if wr > -20:
-                if price_below_1d_sma and vol_expansion and (trending or price_below_1w_sma):
-                    desired_signal = -SIZE
+            # === NEW SHORT ENTRY ===
+            # Breakdown below lower channel + volume spike + 1d bearish + 1w bearish
+            if breakout_down and vol_spike and not price_above_1d_hma and not price_above_1w_hma:
+                desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR) ===
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -242,21 +198,17 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT: Opposite Williams %R extreme ===
+        # === EXIT: Price returns to Donchian channel ===
         exit_triggered = False
         
         if in_position and position_side > 0:
-            # Long exit: Williams %R reaches overbought OR price crosses below 1d SMA
-            if wr > -20:
-                exit_triggered = True
-            if price_below_1d_sma:
+            # Long exit: price falls back below upper band
+            if close[i] <= donch_upper[i] and close[i-1] > donch_upper[i-1] if i > warmup else False:
                 exit_triggered = True
         
         if in_position and position_side < 0:
-            # Short exit: Williams %R reaches oversold OR price crosses above 1d SMA
-            if wr < -80:
-                exit_triggered = True
-            if price_above_1d_sma:
+            # Short exit: price rises back above lower band
+            if close[i] >= donch_lower[i] and close[i-1] < donch_lower[i-1] if i > warmup else False:
                 exit_triggered = True
         
         if exit_triggered:
@@ -272,14 +224,10 @@ def generate_signals(prices):
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                entry_bar = i
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
                 else:
                     stop_price = entry_price + 2.5 * entry_atr
-            else:
-                # Same direction - maintain position
-                pass
         else:
             if in_position:
                 in_position = False
@@ -289,7 +237,6 @@ def generate_signals(prices):
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
-                entry_bar = 0
         
         signals[i] = desired_signal
     
