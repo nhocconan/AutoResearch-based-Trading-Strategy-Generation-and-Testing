@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 REQUIRED_FIELDS = ["name", "timeframe", "leverage", "generate_signals"]
-VALID_TIMEFRAMES = ["5m", "15m", "30m", "1h", "4h", "6h", "12h", "1d"]  # 1m excluded: too noisy
+VALID_TIMEFRAMES = ["5m", "15m", "30m", "1h", "4h", "6h", "12h", "1d", "1w"]  # 1m excluded: too noisy
 MAX_LEVERAGE = 5.0
 
 LOOK_AHEAD_PATTERNS = [
@@ -61,6 +61,22 @@ RUNTIME_ERROR_PATTERNS = [
     # Deprecated pandas fillna(method=...) — 6 occurrences
     (r"\.fillna\s*\([^)]*method\s*=",
      "TypeError: fillna(method=) removed in pandas 2.x — use .ffill() or .bfill() instead"),
+    # pd.to_datetime(open_time, unit='ms') crashes when open_time is already datetime64
+    (r"to_datetime\s*\([^)]*unit\s*=\s*['\"]ms['\"]",
+     "TypeError: pd.to_datetime(x, unit='ms') crashes when x is datetime64 — use prices.index.hour or pd.DatetimeIndex(prices['open_time']).hour instead"),
+    # open_time[i] // int or timestamp_ms // — datetime64 scalar floor-divide (session filter)
+    (r"(?:open_time|timestamp_ms|timestamp_s|ts_ms)\s*\[?\s*(?:i\s*\])?\s*//",
+     "TypeError: datetime64 floor-divide — use prices.index.hour for session filters, not timestamp arithmetic"),
+    # Manual hour extraction from ms: // (1000 * 60 * 60) or // 3600000
+    (r"//\s*\(?\s*1000\s*\*\s*60\s*\*\s*60",
+     "TypeError: // (1000*60*60) on datetime64 crashes — use prices.index.hour for UTC hour extraction"),
+    (r"//\s*3600(?:000)?(?!\d)",
+     "TypeError: // 3600(000) on datetime64 crashes — use prices.index.hour for UTC hour extraction"),
+    # Single-divide on datetime index/column (18+9 occurrences)
+    (r"prices\.index\s*/[^/=]",
+     "TypeError: prices.index / N divides datetime64 — use integer loop variable instead"),
+    (r"['\"]open_time['\"]\s*\]\s*/[^/=]",
+     "TypeError: open_time / N divides datetime64 — use integer index instead"),
 ]
 
 
@@ -217,7 +233,7 @@ def _check_undefined_bare_names(code: str, result: ValidationResult):
     never assigned there — the top recurring runtime errors are 'close' (159x)
     and 'j' (78x) in production logs.
     """
-    BARE_NAMES = {"close", "high", "low", "open", "volume", "j"}
+    BARE_NAMES = {"close", "high", "low", "open", "volume", "j", "period", "n"}
     try:
         tree = ast.parse(code)
     except SyntaxError:

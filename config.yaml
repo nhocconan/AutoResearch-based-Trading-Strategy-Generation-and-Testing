@@ -61,13 +61,20 @@ research:
   baseline: "sma_crossover"
 
 # --- LLM API Settings ---
-# Supports OpenAI-compatible, Anthropic, and Google Gemini
+# Supports OpenAI-compatible, Anthropic, Google Gemini, and Ollama Cloud
 # Set via environment variables or override here
 llm:
-  # Default provider: openai | anthropic | gemini
-  default_provider: "openai"
+  # Default provider: openai | anthropic | gemini | ollama
+  default_provider: "ollama"
 
   providers:
+    ollama:
+      api_key_env: "OLLAMA_API_KEY"
+      base_url: "https://ollama.com/api/chat"
+      model: "minimax-m2.7"
+      max_tokens: 8192
+      temperature: 0.7
+
     openai:
       api_key_env: "OPENAI_API_KEY"
       base_url_env: "OPENAI_BASE_URL"     # For custom endpoints (e.g. DashScope, vLLM)

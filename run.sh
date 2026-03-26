@@ -52,12 +52,12 @@ case "${1:-run}" in
         echo "Dashboard:"
         ps aux | grep "dashboard.py" | grep -v grep || echo "  Not running"
         echo ""
-        echo "Results:"
-        if [ -f results.tsv ]; then
-            TOTAL=$(wc -l < results.tsv)
-            KEPT=$(grep -c "	keep	" results.tsv 2>/dev/null || echo 0)
-            echo "  Total rows: $((TOTAL - 1))"
-            echo "  Kept: $KEPT"
+        echo "Results (SQLite):"
+        if [ -f results.db ]; then
+            TOTAL=$(sqlite3 results.db "SELECT COUNT(*) FROM results;" 2>/dev/null || echo 0)
+            KEPT=$(sqlite3 results.db "SELECT COUNT(*) FROM results WHERE status='keep';" 2>/dev/null || echo 0)
+            STRATS=$(sqlite3 results.db "SELECT COUNT(DISTINCT strategy) FROM results;" 2>/dev/null || echo 0)
+            echo "  Total rows: $TOTAL | Kept: $KEPT | Strategies: $STRATS"
         else
             echo "  No results yet"
         fi
@@ -80,51 +80,47 @@ case "${1:-run}" in
 
     --stop)
         echo "=== Stopping all processes ==="
+        tmux kill-session -t research 2>/dev/null && echo "Killed tmux session 'research'" || true
         pkill -f "agent_research.py" 2>/dev/null && echo "Stopped research loop" || echo "Research loop not running"
         pkill -f "dashboard.py" 2>/dev/null && echo "Stopped dashboard" || echo "Dashboard not running"
-        pkill -f "watchdog_loop" 2>/dev/null && echo "Stopped watchdog" || true
         ;;
 
     --watchdog|-w)
-        echo "=== Starting watchdog (auto-restarts loop if stuck/dead) ==="
-        # Start dashboard if not running
-        if ! pgrep -f "dashboard.py" > /dev/null 2>&1; then
-            $PYTHON dashboard.py &
-            echo "Dashboard: http://127.0.0.1:8888"
-        fi
-        # Watchdog loop: check every 5 min, restart if dead or stuck
-        WATCHDOG_INTERVAL=300  # 5 minutes
-        MAX_SILENT_S=600       # 10 min without log = stuck
-        echo "Watchdog: checking every ${WATCHDOG_INTERVAL}s, restart if silent > ${MAX_SILENT_S}s"
-        while true; do
-            if ! pgrep -f "agent_research.py" > /dev/null 2>&1; then
-                echo "[$(date '+%H:%M:%S')] Loop DEAD — restarting..."
-                nohup $PYTHON -u agent_research.py >> research_loop.log 2>&1 &
-                echo "[$(date '+%H:%M:%S')] Restarted PID: $!"
-            else
-                # Check if log was updated recently
-                if [ -f research_loop.log ]; then
-                    LAST_MOD=$(stat -f %m research_loop.log 2>/dev/null || stat -c %Y research_loop.log 2>/dev/null)
-                    NOW=$(date +%s)
-                    SILENT=$((NOW - LAST_MOD))
-                    if [ "$SILENT" -gt "$MAX_SILENT_S" ]; then
-                        echo "[$(date '+%H:%M:%S')] Loop STUCK (no output for ${SILENT}s) — killing & restarting..."
-                        pkill -9 -f "agent_research.py" 2>/dev/null
-                        sleep 2
-                        nohup $PYTHON -u agent_research.py >> research_loop.log 2>&1 &
-                        echo "[$(date '+%H:%M:%S')] Restarted PID: $!"
-                    else
-                        echo "[$(date '+%H:%M:%S')] OK (last output ${SILENT}s ago)"
-                    fi
-                fi
-            fi
-            # Also keep caffeinate alive
-            if ! pgrep -f "caffeinate" > /dev/null 2>&1; then
-                caffeinate -d -i -s &
-                echo "[$(date '+%H:%M:%S')] Restarted caffeinate"
-            fi
-            sleep $WATCHDOG_INTERVAL
-        done
+        echo "=== Starting in tmux with auto-restart ==="
+        SESSION="research"
+        DIR="$(pwd)"
+        ACTIVATE="source $DIR/.venv/bin/activate && export \$(grep -v '^#' $DIR/.env | grep '=' | xargs)"
+
+        # Kill existing session forcefully
+        tmux kill-session -t "$SESSION" 2>/dev/null || true
+        sleep 1
+        # Double-check: if session persists, force kill
+        tmux has-session -t "$SESSION" 2>/dev/null && tmux kill-session -t "$SESSION"
+        sleep 0.5
+
+        # Create tmux session — first window is research (index 0)
+        tmux new-session -d -s "$SESSION" -n research -x 200 -y 50
+        tmux send-keys -t "$SESSION:0" "cd $DIR && $ACTIVATE && while true; do echo \"[\$(date '+%H:%M:%S')] Starting research loop...\"; python3 -u agent_research.py --max 999999 2>&1 | tee research_loop.log; EXIT=\$?; echo \"[\$(date '+%H:%M:%S')] Research exited (\$EXIT), restarting in 5s...\"; sleep 5; done" Enter
+
+        # Dashboard in window 1 (auto-restart on crash)
+        tmux new-window -t "$SESSION:1" -n dashboard
+        tmux send-keys -t "$SESSION:1" "cd $DIR && $ACTIVATE && while true; do echo \"[\$(date '+%H:%M:%S')] Starting dashboard...\"; python3 dashboard.py 2>&1 | tee dashboard.log; EXIT=\$?; echo \"[\$(date '+%H:%M:%S')] Dashboard exited (\$EXIT), restarting in 3s...\"; sleep 3; done" Enter
+
+        # Watchdog in window 2 (monitors stuck processes)
+        tmux new-window -t "$SESSION:2" -n watchdog
+        tmux send-keys -t "$SESSION:2" "cd $DIR && $ACTIVATE && echo 'Watchdog started — checks every 5min for stuck processes'; while true; do sleep 300; if [ -f research_loop.log ]; then LAST_MOD=\$(stat -c %Y research_loop.log 2>/dev/null); NOW=\$(date +%s); SILENT=\$((NOW - LAST_MOD)); if [ \"\$SILENT\" -gt 600 ]; then echo \"[\$(date '+%H:%M:%S')] Research STUCK (\${SILENT}s silent) — killing...\"; pkill -9 -f 'agent_research.py' 2>/dev/null; fi; echo \"[\$(date '+%H:%M:%S')] OK (last output \${SILENT}s ago)\"; fi; done" Enter
+
+        # Focus on research window
+        tmux select-window -t "$SESSION:0"
+
+        echo ""
+        echo "tmux session '$SESSION' created with 3 windows:"
+        echo "  0:research  - auto-restart research loop"
+        echo "  1:dashboard - auto-restart dashboard (http://0.0.0.0:8888)"
+        echo "  2:watchdog  - kills stuck processes (>10min silent)"
+        echo ""
+        echo "Attach:  tmux attach -t $SESSION"
+        echo "Stop:    ./run.sh --stop"
         ;;
 
     --all|-a)
