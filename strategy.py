@@ -1,85 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #015: 6h Fisher Transform Extremes + Volume Spike + Weekly Trend
+Experiment #001: 4h Camarilla S4/R4 Extreme + Volume Spike + 1d Trend Filter
 
-HYPOTHESIS: Fisher Transform identifies price extremes where reversals are likely.
-In bear markets (2022 crash, 2025 test), catching reversals at extremes outperforms
-trend-following which gets whipsawed. Volume spike confirms institutional participation.
-Weekly HMA provides dominant trend bias to avoid counter-trend traps.
+HYPOTHESIS: Camarilla S4/R4 are extreme support/resistance levels where institutional 
+orders cluster. These levels only work when: (1) volume confirms institutional interest, 
+(2) 1d trend supports the reversal direction, (3) market is trending (not choppy).
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Fisher extremes capture panic bottoms (bear) and euphoria tops (bull)
-- Volume confirmation filters false breakouts common in 2022-2025
-- Weekly trend bias prevents dangerous counter-trend entries
-- Tight entry conditions (Fisher < -1.8 or > +1.8) ensure few but high-quality trades
+- Bull market: Long at S4 when price > 1d HMA (pullback entry in uptrend)
+- Bear market: Short at R4 when price < 1d HMA (rally entry in downtrend)
+- Range market: CHOP filter blocks trades (CHOP > 50 = no trades)
 
-TARGET: 50-150 total trades over 4 years (12-37/year). This is MEAN REVERSION so
-fewer trades than trend-following, but higher win rate per trade.
+KEY DIFFERENCE FROM FAILED VERSIONS:
+- ONLY S4/R4 (not S3/R3) - extreme levels = fewer but higher quality trades
+- Require ALL conditions: volume spike AND 1d HMA AND CHOP < 50
+- Tight proximity: price within 0.3 ATR of pivot (not 2.0 ATR)
+- Volume threshold: 1.8x (not 1.5x) for stronger confirmation
 
-KEY DESIGN:
-1. Fisher Transform(14) extremes: < -1.8 long, > +1.8 short
-2. Volume spike: > 2.0x 20-avg (institutional confirmation)
-3. Weekly HMA(21) trend bias: long only if price > weekly HMA, short if <
-4. Stoploss: 2.5 ATR trailing
-5. Exit: Fisher crosses back through 0 (mean reversion complete)
-6. Signal: 0.25 (discrete, conservative sizing)
+TARGET: 75-150 total trades over 4 years (19-38/year).
+DB reference: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 (Sharpe=1.471, 95tr)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_fisher_extreme_vol_weekly_v1"
-timeframe = "6h"
+name = "mtf_4h_camarilla_s4r4_vol_1d_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_fisher_transform(close, period=14):
-    """
-    Ehlers Fisher Transform - identifies price extremes for reversals
-    Normalizes price to -1 to +1 range, then applies Fisher equation
-    Values < -1.5 or > +1.5 indicate extreme oversold/overbought
-    """
-    n = len(close)
-    fisher = np.full(n, np.nan, dtype=np.float64)
-    fisher_signal = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        window = close[i - period + 1:i + 1]
-        highest = np.max(window)
-        lowest = np.min(window)
-        price_range = highest - lowest
-        
-        if price_range < 1e-10:
-            continue
-        
-        normalized = 0.999 * (close[i] - lowest) / price_range
-        if normalized <= 0.001:
-            normalized = 0.001
-        if normalized >= 0.999:
-            normalized = 0.999
-        
-        fisher_value = 0.5 * np.log((1.0 + normalized) / (1.0 - normalized))
-        fisher[i] = fisher_value
-        
-        if i >= period + 2:
-            fisher_signal[i] = 0.67 * fisher[i] + 0.33 * fisher[i - 1]
-        elif i >= period:
-            fisher_signal[i] = fisher[i]
-    
-    return fisher_signal
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
 
 def calculate_hma(close, period):
     """Hull Moving Average"""
@@ -111,6 +58,73 @@ def calculate_hma(close, period):
     
     return wma(diff, sqrt_n)
 
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index - measures market choppiness
+    CHOP > 61.8 = ranging (no trades), CHOP < 38.2 = strongly trending
+    We use CHOP < 50 as threshold to allow trades
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        price_range = highest_high - lowest_low
+        
+        if price_range > 1e-10 and atr_sum > 0:
+            chop[i] = 100.0 * np.log10(atr_sum / price_range) / np.log10(period)
+    
+    return chop
+
+def calculate_camarilla_pivots(prev_high, prev_low, prev_close):
+    """
+    Camarilla pivot levels - only compute S4 and R4 (extreme levels)
+    S4 = close - (high - low) * 1.1 / 2
+    R4 = close + (high - low) * 1.1 / 2
+    """
+    n = len(prev_high)
+    s4 = np.full(n, np.nan, dtype=np.float64)
+    r4 = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(n):
+        if np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i]):
+            continue
+        
+        high_low_range = prev_high[i] - prev_low[i]
+        if high_low_range <= 1e-10:
+            continue
+        
+        close = prev_close[i]
+        
+        s4[i] = close - high_low_range * 1.1 / 2
+        r4[i] = close + high_low_range * 1.1 / 2
+    
+    return s4, r4
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -118,23 +132,34 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load weekly data for trend bias (HTF)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly HMA for trend bias
-    hma_1w_raw = calculate_hma(df_1w['close'].values, period=21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_raw)
+    # Calculate 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
-    # Calculate 6h indicators
-    fisher = calculate_fisher_transform(close, period=14)
+    # Calculate Camarilla S4/R4 from 1d
+    s4_1d, r4_1d = calculate_camarilla_pivots(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values
+    )
+    
+    # Align pivots to 4h
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    
+    # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
     # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -145,8 +170,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Warmup for Fisher + ATR + Volume
-    warmup = 80
+    # Warmup
+    warmup = 60
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -157,42 +182,68 @@ def generate_signals(prices):
                 position_side = 0
             continue
         
-        if np.isnan(fisher[i]):
+        if np.isnan(chop_14[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        if np.isnan(vol_ratio[i]) or vol_ratio[i] <= 0:
+        if np.isnan(s4_aligned[i]) or np.isnan(r4_aligned[i]):
             signals[i] = 0.0
             if in_position:
                 in_position = False
                 position_side = 0
             continue
         
-        # === TREND BIAS (Weekly HMA) ===
-        price_above_weekly = close[i] > hma_1w_aligned[i] if not np.isnan(hma_1w_aligned[i]) else True
+        if np.isnan(vol_ratio[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        if np.isnan(hma_1d_aligned[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            continue
+        
+        # === REGIME CHECK ===
+        chop = chop_14[i]
+        is_trending = chop < 50.0  # Only trade in trending markets
+        
+        # === TREND BIAS (1d HMA) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 2.0  # Strict: 2x average volume
+        vol_spike = vol_ratio[i] > 1.8  # Strong volume confirmation
         
-        # === FISHER EXTREMES ===
-        fisher_extreme_low = fisher[i] < -1.8  # Very oversold
-        fisher_extreme_high = fisher[i] > 1.8   # Very overbought
+        # === CAMARILLA S4/R4 LEVELS ===
+        s4 = s4_aligned[i]
+        r4 = r4_aligned[i]
         
-        # === ENTRY LOGIC (Mean Reversion at Extremes) ===
+        # Price distance to pivot levels (as fraction of ATR)
+        dist_to_s4 = (close[i] - s4) / atr_14[i]
+        dist_to_r4 = (r4 - close[i]) / atr_14[i]
+        
+        # === ENTRY LOGIC - REQUIRE ALL CONDITIONS ===
         desired_signal = 0.0
         
-        # LONG: Fisher extreme low + volume spike + bullish weekly bias
-        if fisher_extreme_low and vol_spike and price_above_weekly:
-            desired_signal = SIZE
+        # LONG: Price at S4 support + bullish 1d trend + volume spike + trending regime
+        if is_trending and price_above_1d_hma and vol_spike:
+            # Price within 0.3 ATR of S4 (touching or slightly above)
+            if dist_to_s4 >= -0.3 and dist_to_s4 <= 0.5:
+                desired_signal = SIZE
         
-        # SHORT: Fisher extreme high + volume spike + bearish weekly bias
-        if fisher_extreme_high and vol_spike and not price_above_weekly:
-            desired_signal = -SIZE
+        # SHORT: Price at R4 resistance + bearish 1d trend + volume spike + trending regime
+        if is_trending and not price_above_1d_hma and vol_spike:
+            # Price within 0.3 ATR of R4 (touching or slightly below)
+            if dist_to_r4 >= -0.3 and dist_to_r4 <= 0.5:
+                desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR Trailing) ===
+        # === STOPLOSS CHECK ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -212,20 +263,17 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT (Fisher Mean Reversion Complete) ===
+        # === TAKE PROFIT at opposite pivot ===
         tp_triggered = False
-        
         if in_position and position_side > 0:
-            # Exit when Fisher crosses back above 0 (mean reversion done)
-            if i > 0 and not np.isnan(fisher[i-1]):
-                if fisher[i-1] < 0 and fisher[i] >= 0:
-                    tp_triggered = True
+            # TP at R4
+            if not np.isnan(r4) and high[i] >= r4:
+                tp_triggered = True
         
         if in_position and position_side < 0:
-            # Exit when Fisher crosses back below 0
-            if i > 0 and not np.isnan(fisher[i-1]):
-                if fisher[i-1] > 0 and fisher[i] <= 0:
-                    tp_triggered = True
+            # TP at S4
+            if not np.isnan(s4) and low[i] <= s4:
+                tp_triggered = True
         
         if tp_triggered:
             desired_signal = 0.0
