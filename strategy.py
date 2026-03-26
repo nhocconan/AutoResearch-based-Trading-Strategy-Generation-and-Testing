@@ -1,39 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #013: 4h Donchian Breakout + 12h HMA Trend + Volume + ADX
+Experiment #001: 4h Donchian Breakout + Volume + HTF Trend
 
-HYPOTHESIS: Donchian(20) breakouts capture momentum moves, but only work when:
-1. 12h HMA confirms trend direction (multi-timeframe alignment)
-2. Volume spike confirms institutional participation
-3. ADX > 25 confirms trending regime (not chop)
+HYPOTHESIS: Donchian channel breakouts capture momentum shifts when price breaks
+multi-period highs/lows. Volume spike confirms institutional participation.
+1d HMA provides trend bias to avoid counter-trend trades that fail in 2022 crash.
 
 WHY THIS SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Long breakouts above Donchian high when 12h HMA bullish
-- Bear: Short breakouts below Donchian low when 12h HMA bearish
-- ADX filters out choppy periods where breakouts fail (whipsaws)
-- Volume confirms real moves vs fake breakouts
+- Bull markets: Long breakouts above Donchian upper with price > 1d HMA
+- Bear markets: Short breakouts below Donchian lower with price < 1d HMA
+- Volume filter avoids false breakouts (common in crypto)
+- ATR stoploss limits downside during whipsaws
 
-TARGET: 75-200 total trades over 4 years (~20-50/year)
-DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (SOL Sharpe=1.382, 95tr)
+TARGET: 100-200 total trades over 4 years (25-50/year)
+DB reference: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (Sharpe=1.382, 95tr)
 
 KEY DESIGN:
-1. Donchian(20) breakout = primary signal
-2. 12h HMA(21) = trend bias (only trade in HTF direction)
-3. Volume > 1.5x 20-bar MA = confirmation
-4. ADX(14) > 25 = trending regime filter
-5. ATR(14) stoploss = 2.5x ATR trailing
-6. Signal: 0.30 discrete, hold until stop/TP
-
-POSITION MANAGEMENT:
-- Enter on breakout + all filters
-- Hold position until stoploss OR take profit OR opposite signal
-- Do NOT exit just because entry signal disappears (massive churn killer)
+1. Donchian(20) breakout as primary signal
+2. Volume spike > 1.3x 20-avg for confirmation
+3. 1d HMA(21) for trend bias (only trade with HTF trend)
+4. 6-bar cooldown to prevent overtrading
+5. 2.5 ATR stoploss for risk management
+6. Signal: 0.30 (discrete)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma12_vol_adx_v1"
+name = "mtf_4h_donchian_vol_hma1d_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -81,54 +75,8 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index"""
-    n = len(close)
-    if n < period * 2:
-        return np.full(n, np.nan)
-    
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    tr = np.zeros(n, dtype=np.float64)
-    
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        if high[i] - high[i-1] > low[i-1] - low[i]:
-            plus_dm[i] = max(0, high[i] - high[i-1])
-        else:
-            plus_dm[i] = 0
-            
-        if low[i-1] - low[i] > high[i] - high[i-1]:
-            minus_dm[i] = max(0, low[i-1] - low[i])
-        else:
-            minus_dm[i] = 0
-    
-    # Smooth with Wilder's method (EMA with span=period)
-    tr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
-    
-    for i in range(period, n):
-        if tr_smooth[i] > 1e-10:
-            plus_di[i] = 100.0 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100.0 * minus_dm_smooth[i] / tr_smooth[i]
-    
-    dx = np.zeros(n, dtype=np.float64)
-    for i in range(period, n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 1e-10:
-            dx[i] = 100.0 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
-
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel - upper and lower bands"""
+    """Donchian Channel - upper/lower bands"""
     n = len(high)
     upper = np.full(n, np.nan, dtype=np.float64)
     lower = np.full(n, np.nan, dtype=np.float64)
@@ -146,26 +94,25 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load 12h data for trend bias
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h HMA for trend
-    hma_12h_raw = calculate_hma(df_12h['close'].values, period=21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_raw)
+    # Calculate 1d HMA for trend bias
+    hma_1d_raw = calculate_hma(df_1d['close'].values, period=21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_raw)
     
     # Calculate 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    adx_14 = calculate_adx(high, low, close, period=14)
-    donch_upper, donch_lower = calculate_donchian(high, low, period=20)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
-    # Volume MA
+    # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
     SIZE = 0.30
     
-    # Position tracking - CRITICAL: hold until stop/TP, not every bar
+    # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -173,50 +120,68 @@ def generate_signals(prices):
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    cooldown = 0  # Bars to wait after exit before re-entry
     
-    warmup = 60
+    # Warmup
+    warmup = 40
     
     for i in range(warmup, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            if cooldown > 0:
+                cooldown -= 1
             continue
         
-        if np.isnan(adx_14[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            if cooldown > 0:
+                cooldown -= 1
             continue
         
-        if np.isnan(hma_12h_aligned[i]):
+        if np.isnan(vol_ratio[i]):
+            signals[i] = 0.0
+            if in_position:
+                in_position = False
+                position_side = 0
+            if cooldown > 0:
+                cooldown -= 1
             continue
         
-        # === REGIME CHECK ===
-        is_trending = adx_14[i] > 25.0  # Only trade in trending markets
-        
-        # === TREND BIAS (12h HMA) ===
-        price_above_12h_hma = close[i] > hma_12h_aligned[i]
+        # === TREND BIAS (1d HMA) ===
+        price_above_1d_hma = close[i] > hma_1d_aligned[i] if not np.isnan(hma_1d_aligned[i]) else True
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.3
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Breakout = close crosses above upper or below lower
-        prev_upper = donch_upper[i-1] if i > 0 else donch_upper[i]
-        prev_lower = donch_lower[i-1] if i > 0 else donch_lower[i]
+        # === DONCHIAN BREAKOUT ===
+        upper_band = donchian_upper[i]
+        lower_band = donchian_lower[i]
         
-        breakout_long = close[i] > prev_upper and close[i-1] <= prev_upper
-        breakout_short = close[i] < prev_lower and close[i-1] >= prev_lower
+        # Breakout threshold: must exceed band by 0.3 ATR to avoid false breakouts
+        breakout_threshold = 0.3 * atr_14[i]
+        
+        upper_breakout = close[i] > upper_band + breakout_threshold
+        lower_breakout = close[i] < lower_band - breakout_threshold
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if is_trending:
-            # LONG: Donchian breakout + bullish 12h HMA + volume
-            if breakout_long and price_above_12h_hma and vol_spike:
-                desired_signal = SIZE
-            
-            # SHORT: Donchian breakout + bearish 12h HMA + volume
-            if breakout_short and not price_above_12h_hma and vol_spike:
-                desired_signal = -SIZE
+        # LONG: Upper breakout + bullish trend + volume
+        if upper_breakout and price_above_1d_hma and vol_spike and cooldown == 0:
+            desired_signal = SIZE
         
-        # === STOPLOSS CHECK (trailing) ===
+        # SHORT: Lower breakout + bearish trend + volume
+        if lower_breakout and not price_above_1d_hma and vol_spike and cooldown == 0:
+            desired_signal = -SIZE
+        
+        # === STOPLOSS CHECK ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -233,54 +198,52 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 stoploss_triggered = True
         
-        # === TAKE PROFIT (opposite Donchian band) ===
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === TAKE PROFIT: Opposite Donchian band ===
         tp_triggered = False
         if in_position and position_side > 0:
-            # TP at lower Donchian (mean reversion after run)
-            if donch_lower[i] > 0 and high[i] >= donch_lower[i] * 1.02:
-                # Check if we've run 2R
-                profit = (high[i] - entry_price) / entry_atr
-                if profit >= 2.5:
-                    tp_triggered = True
+            # TP at lower band (mean reversion after trend)
+            if low[i] <= lower_band:
+                tp_triggered = True
         
         if in_position and position_side < 0:
-            if donch_upper[i] > 0 and low[i] <= donch_upper[i] * 0.98:
-                profit = (entry_price - low[i]) / entry_atr
-                if profit >= 2.5:
-                    tp_triggered = True
+            # TP at upper band
+            if high[i] >= upper_band:
+                tp_triggered = True
         
-        # === OPPOSITE SIGNAL EXIT ===
-        opposite_signal = False
-        if in_position and position_side > 0 and desired_signal < 0:
-            opposite_signal = True
-        if in_position and position_side < 0 and desired_signal > 0:
-            opposite_signal = True
+        if tp_triggered:
+            desired_signal = 0.0
         
-        # === APPLY EXITS ===
-        if stoploss_triggered or tp_triggered or opposite_signal:
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            entry_price = 0.0
-            entry_atr = 0.0
-            stop_price = 0.0
-            highest_since_entry = 0.0
-            lowest_since_entry = 0.0
-        elif desired_signal != 0.0 and not in_position:
-            # New entry
-            signals[i] = desired_signal
-            in_position = True
-            position_side = int(np.sign(desired_signal))
-            entry_price = close[i]
-            entry_atr = atr_14[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
-            if position_side > 0:
-                stop_price = entry_price - 2.5 * entry_atr
-            else:
-                stop_price = entry_price + 2.5 * entry_atr
-        elif in_position:
-            # Hold position - keep same signal
-            signals[i] = float(position_side) * SIZE
+        # === UPDATE POSITION TRACKING ===
+        if desired_signal != 0.0:
+            if not in_position or np.sign(desired_signal) != position_side:
+                in_position = True
+                position_side = int(np.sign(desired_signal))
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                if position_side > 0:
+                    stop_price = entry_price - 2.5 * entry_atr
+                else:
+                    stop_price = entry_price + 2.5 * entry_atr
+                cooldown = 6  # 6-bar cooldown after entry (24h on 4h)
+        else:
+            if in_position:
+                in_position = False
+                position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+                cooldown = 6  # Cooldown after exit too
+        
+        if cooldown > 0 and not in_position:
+            cooldown -= 1
+        
+        signals[i] = desired_signal
     
     return signals
