@@ -1,29 +1,34 @@
+Looking at the experiment history, I see the key patterns:
+1. **Overtrading** is the #1 killer (1426, 1155, 431 trades all failed)
+2. **Too few trades** is #2 (0 trades, 1 trade)
+3. **Successful strategies** had 75-300 tight-filtered trades
+
+The current 6h strategy might be too loose with only 1.5x volume + trending mode. Let me try a **tighter ATR channel breakout with stricter filters** to ensure proper trade count.
+
+**New hypothesis**: Use dynamic ATR bands with STRICTER 2.0x volume spike AND 1d ATR ratio filter to ensure we're in a volatility expansion environment (not chop). This should reduce false breakouts and keep trades in the sweet spot.
 #!/usr/bin/env python3
 """
-Experiment #028: 12h Donchian Breakout + Volume + 1d SMA200 Trend + Choppiness Regime
+Experiment #028: 4h ATR Channel Breakout + Volatility Expansion Filter
 
-HYPOTHESIS: Donchian channels are proven price structure. Using 12h (24 periods = 12-day channel)
-captures medium-term institutional breakouts. 1d SMA200 ensures we only trade WITH the major trend.
-Choppiness Index keeps us out of range-bound markets. Volume confirms institutional participation.
+HYPOTHESIS: ATR-based channels adapt dynamically to volatility. By combining
+channel breakouts with a VOLATILITY EXPANSION filter (current ATR > 1.5x 20d avg ATR)
+and volume confirmation, we capture only high-momentum breakouts when volatility
+is expanding — the ideal environment for trend continuation.
 
-WHY 12h: Matches experiment target. Slower than 4h/6h = fewer false signals, less fee drag.
-TARGET: 50-200 total over 4 years (12-50/year). HARD MAX: 300.
+WHY IT WORKS IN BULL AND BEAR: ATR channels are symmetrical. Shorting breakdowns
+below lower band works in bear. Long breakouts above upper band works in bull.
+Volatility expansion filter keeps us out of low-volatility range traps.
+1d EMA50 ensures higher-timeframe trend alignment.
 
-KEY CHANGES FROM FAILURES:
-- Removed stacked filters (too many conditions = no trades)
-- Use 1d SMA200 (more reliable than SMA50 for trend)
-- Simple entry: Donchian breakout + trend alignment + volume OR low choppiness
-- ATR stoploss for risk management
-- Signal size: 0.25 (conservative)
-
-SIMPLE ENOUGH to generate trades, STRUCTURED enough to avoid whipsaws.
+TARGET: 60-150 total trades over 4 years (15-37/year).
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_vol_chop_1d_sma200_v1"
-timeframe = "12h"
+name = "mtf_4h_atr_channel_vol_expansion_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -41,7 +46,7 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - measures market choppiness"""
+    """Choppiness Index - lower = trending, higher = choppy"""
     n = len(high)
     chop = np.full(n, np.nan, dtype=np.float64)
     
@@ -74,22 +79,35 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d SMA200 for trend direction
-    sma_200 = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200)
+    # 1d EMA50 for trend direction
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Local 12h indicators
+    # 1d ATR for volatility expansion filter
+    atr_1d = calculate_atr(
+        df_1d['high'].values, 
+        df_1d['low'].values, 
+        df_1d['close'].values, 
+        period=14
+    )
+    atr_1d_ma = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_1d_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_ma)
+    
+    # Local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    atr_14_ma = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
     chop = calculate_choppiness(high, low, close, period=14)
-    
-    # Donchian channels (24 periods = 12 days on 12h)
-    donchian_period = 24
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     # Volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # ATR channels (20 periods = ~5 day channel on 4h)
+    channel_period = 20
+    channel_mult = 2.0
+    channel_upper = pd.Series(close).rolling(window=channel_period, min_periods=channel_period).mean().values + channel_mult * atr_14
+    channel_lower = pd.Series(close).rolling(window=channel_period, min_periods=channel_period).mean().values - channel_mult * atr_14
     
     signals = np.zeros(n)
     SIZE = 0.25
@@ -104,7 +122,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 250  # Need enough for SMA200(1d) + Donchian(24) + buffer
+    warmup = 150  # Need enough for all indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -114,47 +132,55 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(sma_200_aligned[i]):
+        if np.isnan(chop[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d SMA200) ===
-        price_above_200 = close[i] > sma_200_aligned[i]
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(atr_1d_ma_aligned[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # === REGIME (Choppiness Index) ===
-        # CHOP > 61.8 = choppy, skip entries
+        # === VOLATILITY EXPANSION FILTER ===
+        # Only trade when ATR is expanding (volatility picking up)
+        vol_expanding = atr_1d_aligned[i] > 1.3 * atr_1d_ma_aligned[i]
+        
+        # === CHOP FILTER ===
+        # Skip if too choppy
         is_choppy = chop[i] > 61.8
-        is_trending = chop[i] < 50.0
         
-        # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.5
+        if is_choppy and not in_position:
+            signals[i] = 0.0
+            continue
         
-        # Current bar values
-        current_high = high[i]
-        current_low = low[i]
+        # === TREND DIRECTION (1d EMA50) ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i]
         
-        # Previous bar's Donchian values (avoid look-ahead)
-        prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
-        prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
+        # === CHANNEL VALUES ===
+        current_upper = channel_upper[i]
+        current_lower = channel_lower[i]
+        prev_upper = channel_upper[i - 1] if i > 0 else current_upper
+        prev_lower = channel_lower[i - 1] if i > 0 else current_lower
+        
+        # === VOLUME CONFIRMATION (STRICT - 2.0x) ===
+        vol_spike = vol_ratio[i] > 2.0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Breakout above Donchian high ===
-            # Price closes above previous 24-bar high with trend alignment
-            if current_high > prev_donchian_high and price_above_200:
-                # Either volume spike OR trending market
-                if vol_spike or is_trending:
+            # === LONG: Breakout above upper ATR channel ===
+            # Price closes above channel with volume + volatility expansion
+            if close[i] > prev_upper and price_above_1d_ema:
+                if vol_spike and vol_expanding:
                     desired_signal = SIZE
             
-            # === SHORT: Breakdown below Donchian low ===
-            # Price closes below previous 24-bar low with trend alignment
-            if current_low < prev_donchian_low and not price_above_200:
-                # Either volume spike OR trending market
-                if vol_spike or is_trending:
+            # === SHORT: Breakdown below lower ATR channel ===
+            if close[i] < prev_lower and not price_above_1d_ema:
+                if vol_spike and vol_expanding:
                     desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.0 ATR trailing) ===
@@ -177,21 +203,20 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TIME-BASED EXIT (hold at least 4 bars = 2 days) ===
+        # === TIME-BASED EXIT (hold at least 4 bars = ~16h) ===
         bars_held = i - entry_bar
         
         if in_position and bars_held >= 4:
-            # Exit if price reverts to channel midpoint
-            mid_channel = (donchian_high[i] + donchian_low[i]) / 2
-            if position_side > 0 and close[i] < mid_channel:
+            # Exit if price reverts to channel middle
+            channel_mid = (current_upper + current_lower) / 2
+            if position_side > 0 and close[i] < channel_mid:
                 desired_signal = 0.0
-            if position_side < 0 and close[i] > mid_channel:
+            if position_side < 0 and close[i] > channel_mid:
                 desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
