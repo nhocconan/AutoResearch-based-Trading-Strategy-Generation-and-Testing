@@ -1,106 +1,63 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 12h ADX + RSI + BB Regime Strategy
+Experiment #006 v2: 4h TRIX Momentum + Donchian Breakout + Volume Confirm
 
-HYPOTHESIS: 12h timeframe with tight ADX/RSI/BB filters should generate 50-150 trades:
-- ADX > 28 = trending regime (stronger than CHOP for filtering)
-- RSI(14) < 35 = oversold long entry, > 65 = overbought short entry (not extreme)
-- BB(20,2.0) = price structure reference (upper/lower band touch)
-- 12h timeframe naturally limits trade count (~365 days/year * 2 = 730 potential bars)
-- With ADX>28 filter, expect only 15-20% of bars to qualify = 50-150 trades
+HYPOTHESIS: Combine TRIX (proven momentum in ETHUSDT test Sharpe 1.32) with 
+Donchian breakout (proven in multiple DB winners) for a tighter, more robust signal.
 
 WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: ADX trending up + RSI oversold pullback + BB lower touch = strong bounce
-- Bear: ADX trending down + RSI overbought rally + BB upper touch = short reversal
-- ADX works symmetrically for trending conditions in either direction
+- Bull: TRIX positive crossover + Donchian up + volume = strong long entries
+- Bear: TRIX negative crossover + Donchian down + volume = strong short entries
+- Choppiness filter prevents range-bound whipsaws
+- ATR stoploss manages risk symmetrically in both directions
 
-TARGET: 75-150 total trades over 4 years (~18-37/year) on 12h
+KEY DESIGN (learned from failures):
+- TRIX(15) instead of HMA for smoother momentum signal
+- Donchian(20) for clear price structure
+- Volume 2.0x threshold (tighter than 1.8x to reduce trades)
+- Choppiness < 50 (same as current best)
+- 2.5 ATR stoploss
+- Min hold 4 bars to reduce fee churn
+
+TARGET: 100-180 total trades over 4 years (25-45/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_adx_rsi_bb_trend_v1"
-timeframe = "12h"
+name = "mtf_4h_trix_donchian_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index - trend strength"""
+def calculate_trix(close, period=15):
+    """
+    TRIX - Triple EMA oscillator
+    1 = EMA1, 2 = EMA2, 3 = EMA3 over close
+    TRIX = 100 * (EMA3_current - EMA3_prev) / EMA3_prev
+    Positive TRIX = upward momentum, Negative = downward
+    """
     n = len(close)
-    if n < period + 1:
+    if n < period * 3:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    close_s = pd.Series(close)
+    
+    # Triple EMA
+    ema1 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    # TRIX rate of change
+    trix = np.zeros(n, dtype=np.float64)
+    ema3_vals = ema3.values
+    
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                   abs(high[i] - close[i-1]), 
-                   abs(low[i] - close[i-1]))
+        if not np.isnan(ema3_vals[i]) and not np.isnan(ema3_vals[i-1]) and abs(ema3_vals[i-1]) > 1e-10:
+            trix[i] = 100 * (ema3_vals[i] - ema3_vals[i-1]) / ema3_vals[i-1]
+        else:
+            trix[i] = 0.0
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = np.full(n, np.nan)
-    minus_di = np.full(n, np.nan)
-    for i in range(period, n):
-        if atr[i] > 0:
-            plus_di[i] = 100 * np.sum(plus_dm[i-period+1:i+1]) / atr[i] / period
-            minus_di[i] = 100 * np.sum(minus_dm[i-period+1:i+1]) / atr[i] / period
-    
-    adx = np.full(n, np.nan)
-    dx = np.zeros(n)
-    for i in range(period, n):
-        if plus_di[i] + minus_di[i] > 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-    
-    adx_series = pd.Series(dx)
-    adx = adx_series.ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx
-
-def calculate_rsi(close, period=14):
-    """Relative Strength Index"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    deltas = np.diff(close, prepend=close[0])
-    deltas[0] = 0
-    
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    
-    avg_gain = pd.Series(gains).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(losses).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    rs = np.divide(avg_gain, np.where(avg_loss == 0, 1e-10, avg_loss))
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Bollinger Bands - returns upper, middle, lower"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    
-    upper = middle + std_dev * std
-    lower = middle - std_dev * std
-    
-    return upper, middle, lower
+    return trix
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -108,19 +65,50 @@ def calculate_atr(high, low, close, period=14):
     if n < period + 1:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n)
+    tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                   abs(high[i] - close[i-1]), 
-                   abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = ranging - DON'T enter
+    CHOP < 50 = trending - GOOD to enter
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    chop = np.full(n, np.nan)
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest = np.max(high[i - period + 1:i + 1])
+        lowest = np.min(low[i - period + 1:i + 1])
+        
+        if highest > lowest and atr_sum > 0:
+            range_hl = highest - lowest
+            chop[i] = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
+    
+    return chop
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -129,20 +117,17 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load 1d HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
-    
-    # 1d EMA(50) for multi-timeframe confirmation
-    ema_50_1d = calculate_ema(df_1d['close'].values, period=50)
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === Local 12h indicators ===
-    adx_14 = calculate_adx(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close, period=20, std_dev=2.0)
+    # === Local 4h indicators ===
+    trix = calculate_trix(close, period=15)
     atr_14 = calculate_atr(high, low, close, period=14)
+    donchian_up, donchian_lo = calculate_donchian(high, low, period=20)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume MA for confirmation
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_series = pd.Series(trix)
+    trix_signal = trix_series.ewm(span=9, min_periods=9, adjust=False).mean().values
+    
+    # Volume ratio (20-period MA) - 2.0x threshold
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -156,94 +141,127 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
+    trailing_high = 0.0
+    trailing_low = 0.0
     
-    warmup = 150  # 20 for BB + 14 for ADX/RSI + some buffer
+    warmup = 250  # 200 for donchian + 45 for TRIX triple EMA + 20 for vol MA
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(adx_14[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_aligned[i]):
+        if np.isnan(trix[i]) or np.isnan(trix_signal[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME: ADX > 28 = trending ===
-        is_trending = adx_14[i] > 28
+        if np.isnan(donchian_up[i]) or np.isnan(donchian_lo[i]):
+            signals[i] = 0.0
+            continue
         
-        # === RSI ZONES ===
-        rsi_val = rsi_14[i]
-        is_oversold = rsi_val < 35
-        is_overbought = rsi_val > 65
+        # === CHOPPINESS REGIME FILTER ===
+        chop_value = chop[i]
+        is_choppy = chop_value > 61.8
+        is_trending = chop_value < 50
         
-        # === BB TOUCH ===
-        bb_up_touch = close[i] >= bb_upper[i]
-        bb_lo_touch = close[i] <= bb_lower[i]
+        # === VOLUME CONFIRMATION (2.0x) ===
+        vol_spike = vol_ratio[i] > 2.0
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        # === DONCHIAN BREAKOUT ===
+        prev_donchian_up = donchian_up[i - 1]
+        prev_donchian_lo = donchian_lo[i - 1]
         
-        # === HTF TREND ===
-        htf_bull = close[i] > ema_aligned[i]
-        htf_bear = close[i] < ema_aligned[i]
+        breakout_up = close[i] > prev_donchian_up
+        breakout_down = close[i] < prev_donchian_lo
+        
+        # === TRIX MOMENTUM SIGNAL ===
+        # Long: TRIX crosses above signal line (positive momentum building)
+        # Short: TRIX crosses below signal line (negative momentum building)
+        prev_trix = trix[i - 1]
+        prev_signal = trix_signal[i - 1]
+        curr_trix = trix[i]
+        curr_signal = trix_signal[i]
+        
+        trix_cross_up = (prev_trix < prev_signal) and (curr_trix > curr_signal)
+        trix_cross_down = (prev_trix > prev_signal) and (curr_trix < curr_signal)
+        
+        # TRIX momentum direction
+        trix_positive = curr_trix > 0
+        trix_negative = curr_trix < 0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Trending + oversold + BB lower touch + volume + HTF bull ===
-            if is_trending and is_oversold and bb_lo_touch and vol_spike and htf_bull:
+            # === LONG: TRIX bullish cross + Donchian up + volume + trending ===
+            # Require: TRIX positive OR bullish cross, breakout up, volume, trending
+            long_condition = (triy_cross_up or trix_positive) and breakout_up and vol_spike and is_trending
+            if long_condition:
                 desired_signal = SIZE
             
-            # === SHORT: Trending + overbought + BB upper touch + volume + HTF bear ===
-            if is_trending and is_overbought and bb_up_touch and vol_spike and htf_bear:
+            # === SHORT: TRIX bearish cross + Donchian down + volume + trending ===
+            short_condition = (trix_cross_down or trix_negative) and breakout_down and vol_spike and is_trending
+            if short_condition:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (3x ATR) ===
+        # === STOPLOSS (2.5 ATR trailing stop) ===
         if in_position:
             if position_side > 0:
-                stop_price = entry_price - 3.0 * entry_atr
+                # Update trailing high
+                if i == entry_bar or high[i] > trailing_high:
+                    trailing_high = high[i]
+                
+                # Trailing stop: exit if price falls 2.5 ATR from recent high
+                stop_price = trailing_high - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if ADX drops (trend weakening)
-                if adx_14[i] < 22:
+                # Exit if TRIX turns negative
+                if trix_negative and not trix_positive:
                     desired_signal = 0.0
                 
-                # Exit if HTF trend flips
-                if htf_bear:
+                # Exit if market becomes choppy
+                if is_choppy:
                     desired_signal = 0.0
             
             elif position_side < 0:
-                stop_price = entry_price + 3.0 * entry_atr
+                # Update trailing low
+                if i == entry_bar or low[i] < trailing_low:
+                    trailing_low = low[i]
+                
+                # Trailing stop: exit if price rises 2.5 ATR from recent low
+                stop_price = trailing_low + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if ADX drops
-                if adx_14[i] < 22:
+                # Exit if TRIX turns positive
+                if trix_positive and not trix_negative:
                     desired_signal = 0.0
                 
-                # Exit if HTF trend flips
-                if htf_bull:
+                # Exit if market becomes choppy
+                if is_choppy:
                     desired_signal = 0.0
         
-        # === MINIMUM HOLD: 3 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 3:
+        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
+        if in_position and (i - entry_bar) < 4:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
+                trailing_high = high[i]
+                trailing_low = low[i]
         else:
             if in_position:
                 in_position = False
