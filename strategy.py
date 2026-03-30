@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #008: 12h Donchian Breakout + Weekly EMA + Choppiness Regime
+Experiment #009: 4h Williams%R + Donchian Breakout + Volume
 
-HYPOTHESIS: Price channel breakouts (Donchian) are the most reliable structural
-signals. Using 1w EMA for trend direction filters out false breakouts in choppy
-markets. Choppiness Index > 38.2 means trending (good for breakouts), < 38.2 means
-choppy (avoid signals).
+HYPOTHESIS: Williams %R oscillates [0,-100], making -80/+20 thresholds reliable
+for identifying oversold/overbought extremes. Combining with Donchian(20) breakout
+(structural levels) and volume confirmation captures mean-reversion trades at
+key support/resistance. 1d EMA200 filters trend direction.
 
-WHY 12h: Slow enough to capture multi-day swings with 30-50 trades/year.
-Weekly EMA aligns with institutional trend direction.
+WHY IT WORKS: 
+- Williams %R is bounded, unlike RSI - thresholds are stable
+- Donchian breakout ensures we're at structural support/resistance
+- Volume confirms institutional interest at extremes
+- Works in BOTH bull (reversals from oversold) and bear (reversals from overbought)
 
-WHY IT WORKS BOTH MARKETS:
-- Bull: Buy breakouts above weekly EMA (captures rallies)
-- Bear: Short breakouts below weekly EMA (captures breakdowns)
-- Range: Choppiness filter keeps us flat during chop
-
-TARGET: 75-200 total trades over 4 years. HARD MAX: 200.
-Signal size: 0.25.
+TARGET: 75-200 total 4h trades over 4 years. HARD MAX: 400.
+Signal size: 0.25-0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_ema1w_chop_v1"
-timeframe = "12h"
+name = "mtf_4h_willr_donchian_vol_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,28 +38,22 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = very choppy (range-bound, mean reversion)
-    CHOP < 38.2 = trending (good for trend following)
-    Values between are neutral
-    """
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R - bounded oscillator [0, -100]"""
     n = len(close)
-    chop = np.full(n, np.nan)
+    if n < period:
+        return np.full(n, np.nan)
     
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        sum_tr = 0.0
-        for j in range(i - period + 1, i + 1):
-            sum_tr += max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-        
-        if highest_high - lowest_low > 1e-10:
-            chop[i] = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(period)
+    willr = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        if highest_high != lowest_low:
+            willr[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+        else:
+            willr[i] = -50  # neutral when range is zero
     
-    return chop
+    return willr
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -71,28 +63,29 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA for trend direction
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1d EMA200 for trend (faster than 50 to avoid missing bear regime)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Local indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
+    willr_14 = calculate_williams_r(high, low, close, period=14)
     
-    # Donchian channels (20 bars = 10 days on 12h)
+    # Donchian channels (20 periods = 5 days at 4h)
     donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    upper_band = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    mid_band = (upper_band + lower_band) / 2
     
-    # Volume ratio
+    # Volume ratio (20 period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -104,53 +97,74 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 100
+    warmup = 250  # Need enough for EMA200 alignment buffer
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
+        # Skip if ATR not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(chop[i]):
+        # Skip if Williams %R not ready
+        if np.isnan(willr_14[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1w EMA21) ===
-        price_above_1w_ema = close[i] > ema_1w_aligned[i]
+        # Skip if 1d EMA not aligned
+        if np.isnan(ema_1d_aligned[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # === REGIME FILTER (Choppiness) ===
-        # CHOP < 38.2 = trending, good for breakouts
-        is_trending = chop[i] > 38.2
+        # === TREND DIRECTION (1d EMA200) ===
+        bull_trend = close[i] > ema_1d_aligned[i]
+        bear_trend = close[i] < ema_1d_aligned[i]
+        
+        # === MOMENTUM (Williams %R) ===
+        # Long when oversold: willr < -80 (extreme)
+        # Short when overbought: willr > -20 (extreme)
+        oversold = willr_14[i] < -80
+        overbought = willr_14[i] > -20
         
         # Volume confirmation
         vol_spike = vol_ratio[i] > 1.5
         
-        # Donchian breakout from previous bar (no look-ahead)
-        prev_donchian_high = donchian_high[i - 1]
-        prev_donchian_low = donchian_low[i - 1]
+        # === DONCHIAN BREAKOUT (structural level) ===
+        # Long: price breaks above upper band (new high)
+        # Short: price breaks below lower band (new low)
+        donchian_breakout_up = close[i] > upper_band[i]
+        donchian_breakout_down = close[i] < lower_band[i]
         
-        # Breakout detection: price closes above/below previous Donchian
-        bull_breakout = close[i] > prev_donchian_high
-        bear_breakout = close[i] < prev_donchian_low
+        # === MID BAND MEAN REVERSION ===
+        # Price too far below mid in bull = potential bounce
+        # Price too far above mid in bear = potential drop
+        below_mid = close[i] < mid_band[i]
+        above_mid = close[i] > mid_band[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Bull breakout + above weekly EMA + trending + volume ===
-            if bull_breakout and price_above_1w_ema and is_trending and vol_spike:
+            # === LONG ENTRY ===
+            # Donchian breakout UP + oversold Williams %R + volume + bull trend
+            # OR: Price below mid band + oversold + volume + bull trend (mean reversion)
+            if (bull_trend and oversold and vol_spike and 
+                (donchian_breakout_up or below_mid)):
                 desired_signal = SIZE
             
-            # === SHORT: Bear breakout + below weekly EMA + trending + volume ===
-            if bear_breakout and not price_above_1w_ema and is_trending and vol_spike:
+            # === SHORT ENTRY ===
+            # Donchian breakout DOWN + overbought Williams %R + volume + bear trend
+            # OR: Price above mid band + overbought + volume + bear trend (mean reversion)
+            if (bear_trend and overbought and vol_spike and
+                (donchian_breakout_down or above_mid)):
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === STOPLOSS (2.5 ATR) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
@@ -165,19 +179,16 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === MINIMUM HOLD (3 bars = 1.5 days to avoid chop) ===
+        # === TAKE PROFIT: mean reversion to mid band ===
         bars_held = i - entry_bar
         
-        # === TAKE PROFIT (1.5R) ===
-        if in_position and bars_held >= 3:
-            if position_side > 0:
-                profit_target = entry_price + 1.5 * entry_atr
-                if high[i] >= profit_target:
-                    desired_signal = SIZE / 2  # Half position
-            elif position_side < 0:
-                profit_target = entry_price - 1.5 * entry_atr
-                if low[i] <= profit_target:
-                    desired_signal = -SIZE / 2  # Half position
+        if in_position and bars_held >= 2:
+            # Long: take profit when price returns to mid band
+            if position_side > 0 and close[i] >= mid_band[i]:
+                desired_signal = 0.0
+            # Short: take profit when price returns to mid band
+            if position_side < 0 and close[i] <= mid_band[i]:
+                desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
