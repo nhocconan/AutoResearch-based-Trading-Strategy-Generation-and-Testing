@@ -1,111 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h Camarilla Pivots + 1d Trend + Volume Confirmation
+Experiment #021: 4h Funding Rate Mean-Reversion + Volume + Trend Filter
 
-HYPOTHESIS: Camarilla pivot levels provide precise S/R with proven edge.
-- R3/S3: fade levels (mean reversion)
-- R4/S4: breakout continuation levels
-- 1d trend filter ensures we fade UP in bull markets, short DOWN in bear
-- Volume spike confirms institutional flow
-- 6h = sweet spot: enough signals for 75-200 trades, not as noisy as 4h
+HYPOTHESIS: Funding rate is a proven edge for BTC/ETH (from 16K+ experiments).
+- High funding (>Z+2) = speculative excess = short opportunity (mean reversion)
+- Low funding (<Z-2) = fear/panic = long opportunity (mean reversion)
+- Combine with 1d HMA trend filter + volume confirmation + ATR stoploss
 
-WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull (2021, 2024): Price dips to S3/S4, bounces with volume = strong longs
-- Bear (2022): Rallies to R3/R4, rejected with volume = strong shorts
-- Range: R3/S3 fades work perfectly in chop
+WHY IT WORKS IN BOTH BULL AND BEAR:
+- Bull: Low funding = fear = accumulation zone. Price bounces back.
+- Bear: High funding = too many longs = flush out weak hands. Short the top.
+- Mean-reversion is regime-agnostic (unlike trend following which fails in 2022)
 
-TARGET: 75-200 total trades over 4 years (19-50/year). HARD MAX: 300.
+WHY THIS IS NOVEL:
+- All 13 recent failures used ONLY price/volume indicators
+- Funding rate is a completely different data source with proven edge
+- Not attempted in this session (DB shows 0.8-1.5 Sharpe on BTC/ETH)
+
+KEY DIFFERENCES FROM PREVIOUS ATTEMPTS:
+- Uses funding_rate.parquet data (not just price/volume)
+- Mean-reversion logic (not breakout or trend following)
+- Works through the 2022 crash (funding spiked before crash)
+
+TARGET: 75-200 total trades over 4 years (19-50/year)
 """
 import numpy as np
 import pandas as pd
+import os
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_camarilla_pivots_1d_vol_v1"
-timeframe = "6h"
+name = "mtf_4h_funding_mean_reversion_vol_trend"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_camarilla_pivots(high, low, close, period=1):
-    """
-    Camarilla Pivot Levels
-    R4 = close + (high - low) * 1.1
-    R3 = close + (high - low) * 1.1/2
-    R2 = close + (high - low) * 1.1/4
-    R1 = close + (high - low) * 1.1/8
-    S1 = close - (high - low) * 1.1/8
-    S2 = close - (high - low) * 1.1/4
-    S3 = close - (high - low) * 1.1/2
-    S4 = close - (high - low) * 1.1
-    """
-    n = len(close)
-    r4 = np.full(n, np.nan)
-    r3 = np.full(n, np.nan)
-    s3 = np.full(n, np.nan)
-    s4 = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        h = high[i]
-        l = low[i]
-        c = close[i]
-        rng = h - l
-        
-        r4[i] = c + rng * 1.1
-        r3[i] = c + rng * 1.1 / 2.0
-        s3[i] = c - rng * 1.1 / 2.0
-        s4[i] = c - rng * 1.1
-    
-    return r4, r3, s3, s4
-
-def calculate_adx(high, low, close, period=14):
-    """ADX - Average Directional Index (trend strength)"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    # True Range
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    # +DM and -DM
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    # Smooth with EMA
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # DX
-    di_plus = np.zeros(n)
-    di_minus = np.zeros(n)
-    dx = np.zeros(n)
-    
-    for i in range(period, n):
-        if atr[i] > 0:
-            di_plus[i] = 100 * plus_dm_smooth[i] / atr[i]
-            di_minus[i] = 100 * minus_dm_smooth[i] / atr[i]
-            di_sum = di_plus[i] + di_minus[i]
-            if di_sum > 0:
-                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / di_sum
-    
-    # ADX = smoothed DX
-    adx = np.full(n, np.nan)
-    adx[period] = np.mean(dx[period:period+period])
-    
-    for i in range(period + 1, n):
-        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-    
-    return adx
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -121,9 +47,100 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(close, period=50):
-    """Simple Moving Average"""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+def calculate_hma(close, period=21):
+    """Hull Moving Average - faster response than EMA"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    close_s = pd.Series(close)
+    wma_half = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean().values
+    wma_full = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    hull = 2 * wma_half - wma_full
+    hma = pd.Series(hull).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean().values
+    return hma
+
+def load_funding_data(symbol, prices_df):
+    """
+    Load funding rate data from parquet file and align to prices index.
+    Returns array of funding rates aligned to prices timestamps.
+    """
+    # Find the base directory for processed data
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Try different paths for funding data
+    possible_paths = [
+        os.path.join(base_dir, 'data', 'processed', 'funding', f'{symbol}.parquet'),
+        os.path.join(base_dir, 'processed', 'funding', f'{symbol}.parquet'),
+        os.path.join(base_dir, '..', 'data', 'processed', 'funding', f'{symbol}.parquet'),
+    ]
+    
+    funding_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            funding_path = path
+            break
+    
+    if funding_path is None:
+        # Funding data not available, return zeros (no signal)
+        return np.zeros(len(prices_df))
+    
+    # Load funding data
+    funding_df = pd.read_parquet(funding_path)
+    
+    # Get prices timestamps
+    if 'open_time' in prices_df.columns:
+        price_times = pd.to_datetime(prices_df['open_time'])
+    else:
+        price_times = prices_df.index
+    
+    # Funding timestamps - align
+    if 'open_time' in funding_df.columns:
+        funding_times = pd.to_datetime(funding_df['open_time'])
+    elif funding_df.index.name == 'open_time':
+        funding_times = pd.to_datetime(funding_df.index)
+    else:
+        funding_times = pd.to_datetime(funding_df.index)
+    
+    # Create funding rate series aligned to prices
+    funding_rates = np.zeros(len(prices_df))
+    
+    # Merge on nearest 8h timestamp (funding every 8 hours)
+    # For each price bar, find the most recent funding rate
+    for i in range(len(prices_df)):
+        price_time = price_times.iloc[i] if hasattr(price_times, 'iloc') else price_times[i]
+        
+        # Find the most recent funding timestamp <= current price time
+        mask = funding_times <= price_time
+        if mask.any():
+            funding_rates[i] = funding_df.loc[mask, 'funding_rate'].iloc[-1]
+    
+    return funding_rates
+
+def calculate_funding_zscore(funding_rates, period=30):
+    """
+    Calculate rolling Z-score of funding rate.
+    Z > +2.0 = funding too high = short signal
+    Z < -2.0 = funding too low = long signal
+    """
+    n = len(funding_rates)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    funding_series = pd.Series(funding_rates)
+    rolling_mean = funding_series.rolling(window=period, min_periods=period).mean().values
+    rolling_std = funding_series.rolling(window=period, min_periods=period).std().values
+    
+    # Z-score: (current - mean) / std
+    zscore = np.zeros(n)
+    for i in range(n):
+        if rolling_std[i] > 1e-10:
+            zscore[i] = (funding_rates[i] - rolling_mean[i]) / rolling_std[i]
+        else:
+            zscore[i] = 0.0
+    
+    return zscore
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -132,35 +149,26 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load 1d HTF data ONCE ===
+    # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d SMA(50) for trend - bullish when price > SMA
-    sma_50_1d = calculate_sma(df_1d['close'].values, period=50)
-    sma_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    # 1d HMA(21) for trend direction
+    hma_21_1d = calculate_hma(df_1d['close'].values, period=21)
+    hma_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
     
-    # 1d Camarilla for HTF levels
-    r4_1d, r3_1d, s3_1d, s4_1d = calculate_camarilla_pivots(
-        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=1
-    )
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # === Load funding data ===
+    symbol = prices.get('symbol', ['BTCUSDT'])[0] if isinstance(prices.get('symbol'), pd.Series) else 'BTCUSDT'
+    funding_rates = load_funding_data(symbol, prices)
     
-    # === Local 6h indicators ===
+    # === Calculate funding Z-score ===
+    funding_zscore = calculate_funding_zscore(funding_rates, period=30)
+    
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    adx = calculate_adx(high, low, close, period=14)
-    
-    # 6h Camarilla pivots
-    r4_6h, r3_6h, s3_6h, s4_6h = calculate_camarilla_pivots(high, low, close, period=1)
     
     # Volume ratio (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # 6h SMA(50) for local trend
-    sma_50_local = calculate_sma(close, period=50)
     
     # Signals
     signals = np.zeros(n)
@@ -173,7 +181,7 @@ def generate_signals(prices):
     entry_atr = 0.0
     entry_bar = 0
     
-    warmup = 100  # SMA50 + ATR14 + volume MA
+    warmup = 100  # Min periods for funding Z-score
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -181,101 +189,85 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]):
+        if np.isnan(hma_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_aligned[i]):
+        # === FUNDING RATE SIGNALS ===
+        funding_z = funding_zscore[i]
+        
+        # Skip if no valid funding data (z-score is 0 when funding unavailable)
+        if np.isnan(funding_z) or funding_z == 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]):
-            signals[i] = 0.0
-            continue
-        
-        # === TREND DIRECTION (1d) ===
-        trend_up_1d = close[i] > sma_aligned[i]
-        trend_down_1d = close[i] < sma_aligned[i]
-        
-        # === LOCAL TREND (6h) ===
-        local_trend_up = close[i] > sma_50_local[i]
-        local_trend_down = close[i] < sma_50_local[i]
+        # === HTF TREND: 1d HMA(21) direction ===
+        htf_trend_up = close[i] > hma_aligned[i]
+        htf_trend_down = close[i] < hma_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.8
-        
-        # === ADX: allow entries when trend is not too weak ===
-        strong_trend = adx[i] > 18  # ADX below 18 = weak/no trend
-        
-        # === Camarilla Proximity (price near key levels) ===
-        # Tolerance: within 0.5% of level
-        tolerance = close[i] * 0.005
-        
-        at_s3 = abs(close[i] - s3_6h[i]) < tolerance
-        at_s4 = abs(close[i] - s4_6h[i]) < tolerance
-        at_r3 = abs(close[i] - r3_6h[i]) < tolerance
-        at_r4 = abs(close[i] - r4_6h[i]) < tolerance
+        vol_spike = vol_ratio[i] > 1.5
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Price at S3/S4 support + uptrend + volume ===
-            # S4 breakout continuation (stronger)
-            # S3 bounce (mean reversion)
+            # === SHORT: Funding too high (Z > +2) = speculative excess = mean revert down ===
+            if funding_z > 2.0 and htf_trend_down and vol_spike:
+                desired_signal = -SIZE
             
-            if trend_up_1d and (at_s4 or at_s3):
-                if vol_spike and strong_trend:
-                    desired_signal = SIZE
-                    if at_s4:
-                        # S4 breakout = stronger signal
-                        pass  # same size, but S4 is higher quality
-            
-            # === SHORT: Price at R3/R4 resistance + downtrend + volume ===
-            if trend_down_1d and (at_r4 or at_r3):
-                if vol_spike and strong_trend:
-                    desired_signal = -SIZE
+            # === LONG: Funding too low (Z < -2) = fear/panic = mean revert up ===
+            if funding_z < -2.0 and htf_trend_up and vol_spike:
+                desired_signal = SIZE
         
-        # === STOPLOSS (2.5x ATR) ===
+        # === STOPLOSS (2.5 ATR) ===
         if in_position:
             if position_side > 0:
-                # Stop if price falls 2.5 ATR from entry
+                # Long position: stop if price falls 2.5 ATR from entry
                 stop_price = entry_price - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if 1d trend flips
-                if trend_down_1d:
+                # Exit if HTF trend flips to down
+                if htf_trend_down:
                     desired_signal = 0.0
                 
-                # Take profit at R3 (aggressive) if we're at S3
-                if at_r3 and position_side > 0:
-                    # Close long near resistance
-                    if close[i] > r3_6h[i] * 0.998:
-                        desired_signal = 0.0
+                # Take profit at 2R
+                profit_target = entry_price + 2.0 * entry_atr
+                if close[i] >= profit_target:
+                    desired_signal = SIZE / 2  # Half position
+                
+                # Exit if funding mean-reverts (Z moves toward 0)
+                if funding_z > 0.5:  # Funding recovering = signal fading
+                    desired_signal = 0.0
             
             elif position_side < 0:
-                # Stop if price rises 2.5 ATR from entry
+                # Short position: stop if price rises 2.5 ATR from entry
                 stop_price = entry_price + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if 1d trend flips
-                if trend_up_1d:
+                # Exit if HTF trend flips to up
+                if htf_trend_up:
                     desired_signal = 0.0
                 
-                # Take profit at S3 (aggressive) if we're at R3
-                if at_s3 and position_side < 0:
-                    if close[i] < s3_6h[i] * 1.002:
-                        desired_signal = 0.0
+                # Take profit at 2R
+                profit_target = entry_price - 2.0 * entry_atr
+                if close[i] <= profit_target:
+                    desired_signal = -SIZE / 2  # Half position
+                
+                # Exit if funding mean-reverts (Z moves toward 0)
+                if funding_z < -0.5:  # Funding recovering = signal fading
+                    desired_signal = 0.0
         
-        # === MINIMUM HOLD: 6 bars (36h) to avoid fee churn ===
-        if in_position and (i - entry_bar) < 6:
+        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
+        if in_position and (i - entry_bar) < 4:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
