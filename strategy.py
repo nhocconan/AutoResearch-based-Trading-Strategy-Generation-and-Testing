@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #025: 12h RSI Extreme + 1d EMA Trend + Volume (12h)
+Experiment #026: 4h Donchian Breakout + Volume Confirm + ATR Stop
 
-HYPOTHESIS: RSI(7) extremes on 12h catch mean-reversion setups within 
-the major trend. 1d EMA50 provides directional bias. Volume confirms momentum.
+HYPOTHESIS: Simple = fewer parameters = better generalization.
+Based on kept strategy mtf_4h_hma_donchian_vol_chop_v2 (Sharpe 0.356, 358 trades).
+Remove HMA and chop filter, rely on Donchian structure alone.
+Volume spike (1.5x) confirms institutional interest.
+2.5x ATR stoploss provides adaptive risk management.
 
-WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull: RSI(7) < 25 (oversold) + price > 1d EMA50 + volume spike = strong long
-- Bear: RSI(7) > 75 (overbought) + price < 1d EMA50 + volume spike = strong short
-- Range: RSI extremes still work as band bounces
+Entry: Donchian(20) high/low break + volume spike (1.5x)
+Stop: 2.5x ATR from entry
+Min hold: 3 bars (reduce fee churn)
 
-EXPECTED TRADES: 75-150 total over 4 years (19-37/year per symbol)
-- RSI(7) < 25 happens roughly 8-12x/year per symbol in crypto
-- 1d EMA50 filter reduces by ~20% 
-- Volume spike (1.5x) reduces by ~25%
-- Final: ~50-90 trades = within target range
+EXPECTED: 150-250 trades over 4 years (37-62/year per symbol)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_rsi_ema50_vol_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_vol_atr_v6"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -38,24 +36,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(prices, period=14):
-    """RSI indicator"""
-    close = prices if isinstance(prices, np.ndarray) else prices.values
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def calculate_ema(prices, period):
-    """EMA indicator"""
-    return pd.Series(prices).ewm(span=period, min_periods=period, adjust=False).mean().values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -63,20 +43,14 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
-    
-    # 1d EMA50 for trend direction
-    ema50_1d = calculate_ema(df_1d['close'].values, period=50)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # === Local 12h indicators ===
+    # === Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # RSI(7) for momentum
-    rsi_7 = calculate_rsi(close, period=7)
+    # Donchian Channel(20)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume average (20 bars = 10 days)
+    # Volume average (20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -90,103 +64,102 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
-    trailing_high = 0.0
-    trailing_low = 0.0
     
-    warmup = 100  # Enough for RSI7, ATR14, EMA50(1d)
+    warmup = 60  # Enough for Donchian20, ATR14
     
     for i in range(warmup, n):
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_7[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
-        
-        if np.isnan(ema50_aligned[i]):
-            signals[i] = 0.0
-            continue
-        
-        # === TREND DIRECTION: 1d EMA50 ===
-        price_vs_ema = close[i] - ema50_aligned[i]
-        pct_above_ema = price_vs_ema / ema50_aligned[i] * 100
-        
-        bull_trend = pct_above_ema > 0  # Price above 1d EMA50
-        bear_trend = pct_above_ema < 0   # Price below 1d EMA50
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === RSI EXTREME CONDITIONS ===
-        rsi_oversold = rsi_7[i] < 25
-        rsi_overbought = rsi_7[i] > 75
+        # === DONCHIAN BREAKOUT ===
+        # Use PREVIOUS bar's channel (shift by 1 to avoid look-ahead)
+        prev_donchian_high = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
+        prev_donchian_low = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
+        
+        bullish_breakout = False
+        bearish_breakout = False
+        
+        if not np.isnan(prev_donchian_high) and not np.isnan(prev_donchian_low):
+            # Break previous high = bullish
+            if high[i] > prev_donchian_high:
+                bullish_breakout = True
+            # Break previous low = bearish
+            if low[i] < prev_donchian_low:
+                bearish_breakout = True
         
         # === ENTRY LOGIC ===
-        desired_signal = 0.0
-        
         if not in_position:
-            # LONG: RSI oversold + bull trend + volume spike
-            if rsi_oversold and bull_trend and vol_spike:
-                desired_signal = SIZE
-            
-            # SHORT: RSI overbought + bear trend + volume spike
-            elif rsi_overbought and bear_trend and vol_spike:
-                desired_signal = -SIZE
-        
-        # === EXIT LOGIC ===
-        if in_position:
-            if position_side > 0:
-                # Update trailing high
-                if i == entry_bar or high[i] > trailing_high:
-                    trailing_high = high[i]
-                
-                # Stop: 3 ATR from highest (wider for 12h)
-                stop_price = trailing_high - 3.0 * entry_atr
-                if low[i] < stop_price:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                
-                # Take profit: RSI normalizes > 50
-                elif rsi_7[i] > 55:
-                    desired_signal = SIZE * 0.5  # Half position
-                    if rsi_7[i] > 65:
-                        desired_signal = 0.0  # Full exit
-                        in_position = False
-                        position_side = 0
-                        
-            elif position_side < 0:
-                # Update trailing low
-                if i == entry_bar or low[i] < trailing_low:
-                    trailing_low = low[i]
-                
-                # Stop: 3 ATR from lowest
-                stop_price = trailing_low + 3.0 * entry_atr
-                if high[i] > stop_price:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                
-                # Take profit: RSI normalizes < 50
-                elif rsi_7[i] < 45:
-                    desired_signal = -SIZE * 0.5  # Half position
-                    if rsi_7[i] < 35:
-                        desired_signal = 0.0  # Full exit
-                        in_position = False
-                        position_side = 0
-        
-        # === EXECUTE NEW POSITION ===
-        if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
+            # LONG: Breakout above 20-bar high + volume spike
+            if bullish_breakout and vol_spike:
+                signals[i] = SIZE
                 in_position = True
-                position_side = int(np.sign(desired_signal))
+                position_side = 1
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
-                trailing_high = high[i]
-                trailing_low = low[i]
+            
+            # SHORT: Breakdown below 20-bar low + volume spike
+            elif bearish_breakout and vol_spike:
+                signals[i] = -SIZE
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+                entry_bar = i
         
-        signals[i] = desired_signal
+        # === EXIT LOGIC ===
+        else:
+            # Min hold: 3 bars to reduce fee churn
+            min_hold_passed = (i - entry_bar) >= 3
+            
+            if position_side > 0:
+                # Stop loss: 2.5x ATR from entry
+                stop_price = entry_price - 2.5 * entry_atr
+                if low[i] < stop_price:
+                    signals[i] = 0.0
+                    in_position = False
+                    position_side = 0
+                elif min_hold_passed:
+                    # Reverse signal on opposite breakout
+                    if bearish_breakout and vol_spike:
+                        signals[i] = -SIZE
+                        in_position = True
+                        position_side = -1
+                        entry_price = close[i]
+                        entry_atr = atr_14[i]
+                        entry_bar = i
+                    else:
+                        signals[i] = SIZE
+                else:
+                    signals[i] = SIZE
+            
+            elif position_side < 0:
+                # Stop loss: 2.5x ATR from entry
+                stop_price = entry_price + 2.5 * entry_atr
+                if high[i] > stop_price:
+                    signals[i] = 0.0
+                    in_position = False
+                    position_side = 0
+                elif min_hold_passed:
+                    # Reverse signal on opposite breakout
+                    if bullish_breakout and vol_spike:
+                        signals[i] = SIZE
+                        in_position = True
+                        position_side = 1
+                        entry_price = close[i]
+                        entry_atr = atr_14[i]
+                        entry_bar = i
+                    else:
+                        signals[i] = -SIZE
+                else:
+                    signals[i] = -SIZE
     
     return signals
