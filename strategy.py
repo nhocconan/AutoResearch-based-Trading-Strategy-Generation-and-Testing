@@ -1,29 +1,93 @@
 #!/usr/bin/env python3
 """
-Experiment #006: 4h Camarilla S3/R3 + Choppiness Regime + Volume Spike
+Experiment #025: 6h Regime-Adaptive Dual Strategy
 
-HYPOTHESIS: Camarilla pivot levels (S3/R3) work as mean-reversion targets in
-range-bound markets. Combined with Choppiness Index (regime filter) and volume
-spike confirmation, this should:
-- Long when price drops to S3 (oversold) + choppy range + vol spike
-- Short when price rallies to R3 (overbought) + choppy range + vol spike
-- Exit when choppiness drops below 38.2 (trending begins)
+HYPOTHESIS: A single strategy that adapts to market regime should work in BOTH
+bull (2021) and bear (2022) markets:
+- Trending regime (ADX > 25): Use Donchian breakout + volume = captures big moves
+- Choppy regime (ADX < 20): Use Bollinger Band mean reversion = profits from ranges
 
-WHY 4h: Optimal trade frequency from DB (20-50/year). 4h captures
-intraday volatility without overtrading.
+KEY INSIGHT: Previous 6h attempts failed because:
+1. Strict HTF filter (SMA) conflicted with 6h timing
+2. Single strategy doesn't adapt to regime changes
 
-KEY INSIGHT: Previous Camarilla attempt (v1) failed with Sharpe=-0.471.
-Adding choppiness as regime filter should improve by:
-1. Avoiding entries when market is trending (trending = Camarilla fails)
-2. Only entering when market is clearly range-bound (high choppiness)
+This approach: Auto-detect regime, apply appropriate strategy.
+Should generate 75-150 trades (18-37/year) with SIZE=0.30.
+
+TARGET: 75-150 total over 4 years. Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_chop_vol_v2"
-timeframe = "4h"
+name = "mtf_6h_regime_adaptive_dual_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    # True Range
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], 
+                   abs(high[i] - close[i-1]), 
+                   abs(low[i] - close[i-1]))
+    
+    # Directional Movement
+    up_move = np.zeros(n)
+    down_move = np.zeros(n)
+    
+    for i in range(1, n):
+        up = high[i] - high[i-1]
+        down = low[i-1] - low[i]
+        
+        if up > down and up > 0:
+            up_move[i] = up
+        if down > up and down > 0:
+            down_move[i] = down
+    
+    # Smoothed values using Wilder's method
+    atr_smooth = np.zeros(n)
+    atr_smooth[period-1] = np.sum(tr[1:period])
+    for i in range(period, n):
+        atr_smooth[i] = atr_smooth[i-1] - atr_smooth[i-1]/period + tr[i]
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    
+    plus_dm_smooth = np.zeros(n)
+    minus_dm_smooth = np.zeros(n)
+    plus_dm_smooth[period-1] = np.sum(up_move[1:period])
+    minus_dm_smooth[period-1] = np.sum(down_move[1:period])
+    
+    for i in range(period, n):
+        plus_dm_smooth[i] = plus_dm_smooth[i-1] - plus_dm_smooth[i-1]/period + up_move[i]
+        minus_dm_smooth[i] = minus_dm_smooth[i-1] - minus_dm_smooth[i-1]/period + down_move[i]
+        
+        if atr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / atr_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / atr_smooth[i]
+    
+    # DX
+    dx = np.zeros(n)
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # ADX as smoothed DX
+    adx = np.full(n, np.nan)
+    adx[2*period-1] = np.mean(dx[period:2*period])
+    
+    for i in range(2*period, n):
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    return adx
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -31,33 +95,13 @@ def calculate_atr(high, low, close, period=14):
     if n < 2:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
+    tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - values >61.8 = choppy/range, <38.2 = trending"""
-    n = len(close)
-    chp = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        # Sum of ATR over period
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1])) if j > 0 else high[j] - low[j]
-            tr_sum += tr
-        
-        # Highest - Lowest over period
-        hl_range = high[i - period + 1:i + 1].max() - low[i - period + 1:i + 1].min()
-        
-        if hl_range > 1e-10 and tr_sum > 1e-10:
-            chp[i] = 100 * (np.log10(tr_sum) / np.log10(hl_range * period))
-    
-    return chp
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -66,81 +110,157 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d for Camarilla pivot calculation ===
+    # === HTF: 1d SMA for macro direction (call ONCE) ===
     df_1d = get_htf_data(prices, '1d')
-    
-    # Camarilla pivot levels from 1d data
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # R3 = Close + High-Low * 1.1/12
-    cam_R3 = daily_close + (daily_high - daily_low) * (1.1 / 12)
-    # R4 = Close + High-Low * 1.1/6
-    cam_R4 = daily_close + (daily_high - daily_low) * (1.1 / 6)
-    # S3 = Close - High-Low * 1.1/12
-    cam_S3 = daily_close - (daily_high - daily_low) * (1.1 / 12)
-    # S4 = Close - High-Low * 1.1/6
-    cam_S4 = daily_close - (daily_high - daily_low) * (1.1 / 6)
-    
-    # Align to LTF
-    cam_R3_aligned = align_htf_to_ltf(prices, df_1d, cam_R3)
-    cam_R4_aligned = align_htf_to_ltf(prices, df_1d, cam_R4)
-    cam_S3_aligned = align_htf_to_ltf(prices, df_1d, cam_S3)
-    cam_S4_aligned = align_htf_to_ltf(prices, df_1d, cam_S4)
+    sma_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
     # === Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    chp = calculate_choppiness(high, low, close, period=14)
+    adx_14 = calculate_adx(high, low, close, period=14)
     
-    # Volume metrics
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Donchian 20 for breakout
+    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Bollinger Bands for mean reversion
+    bb_sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_sma + 2.0 * bb_std
+    bb_lower = bb_sma - 2.0 * bb_std
+    
+    # Volume confirmation (20-bar average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals ===
     signals = np.zeros(n)
     SIZE = 0.30
     
-    warmup = 50
+    # Position tracking
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
+    entry_atr = 0.0
+    entry_bar = 0
+    highest_since_entry = 0.0
+    lowest_since_entry = float('inf')
+    
+    warmup = 60  # Need enough for ADX calculation
     
     for i in range(warmup, n):
         # NaN checks
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(chp[i]):
+        
+        if np.isnan(adx_14[i]):
             signals[i] = 0.0
             continue
         
-        # Volume spike check (1.5x average)
-        vol_ok = volume[i] > vol_ma20[i] * 1.5 if vol_ma20[i] > 1e-10 else False
+        # === REGIME DETECTION ===
+        adx_value = adx_14[i]
+        trending = adx_value > 25   # Strong trend
+        choppy = adx_value < 20    # Range-bound
         
-        # Choppiness: > 61.8 = range-bound (Camarilla works), < 38.2 = trending (avoid)
-        in_range = chp[i] > 61.8
+        # === HTF TREND (weaker filter - just for direction bias) ===
+        htf_bullish = close[i] > sma_1d_aligned[i] if not np.isnan(sma_1d_aligned[i]) else True
+        htf_bearish = close[i] < sma_1d_aligned[i] if not np.isnan(sma_1d_aligned[i]) else False
         
-        # === LONG ENTRY: Price at S3 + range-bound + volume spike ===
-        if close[i] <= cam_S3_aligned[i] and in_range and vol_ok:
-            signals[i] = SIZE
+        # === BREAKOUT CONDITIONS ===
+        bullish_breakout = close[i] > dc_upper_20[i] if not np.isnan(dc_upper_20[i]) else False
+        bearish_breakout = close[i] < dc_lower_20[i] if not np.isnan(dc_lower_20[i]) else False
         
-        # === SHORT ENTRY: Price at R3 + range-bound + volume spike ===
-        elif close[i] >= cam_R3_aligned[i] and in_range and vol_ok:
-            signals[i] = -SIZE
+        # === BB MEAN REVERSION CONDITIONS ===
+        at_lower_band = close[i] < bb_lower[i] if not np.isnan(bb_lower[i]) else False
+        at_upper_band = close[i] > bb_upper[i] if not np.isnan(bb_upper[i]) else False
         
-        # === EXIT CONDITIONS ===
-        # Exit long: price reaches R4 or choppiness drops (trending begins)
-        elif signals[i-1] > 0 and i > warmup:
-            if close[i] >= cam_R4_aligned[i] or chp[i] < 38.2:
-                signals[i] = 0.0
+        # === VOLUME CONFIRMATION ===
+        vol_ok = volume[i] > vol_ma[i] * 1.2 if vol_ma[i] > 1e-10 else False
+        
+        # Update highest/lowest for trailing stop
+        if in_position:
+            if position_side > 0:
+                highest_since_entry = max(highest_since_entry, high[i])
             else:
-                signals[i] = SIZE
+                lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # Exit short: price reaches S4 or choppiness drops
-        elif signals[i-1] < 0 and i > warmup:
-            if close[i] <= cam_S4_aligned[i] or chp[i] < 38.2:
-                signals[i] = 0.0
+        # === MIN HOLD: 2 bars (12h) ===
+        min_hold = (i - entry_bar) >= 2
+        
+        # === ATR TRAILING STOP (2.0x ATR) ===
+        if in_position:
+            stop_hit = False
+            if position_side > 0:
+                stop_hit = low[i] < (highest_since_entry - 2.0 * atr_14[i])
             else:
-                signals[i] = -SIZE
+                stop_hit = high[i] > (lowest_since_entry + 2.0 * atr_14[i])
+            
+            # Exit on opposite HTF trend (after min hold)
+            if min_hold:
+                if position_side > 0 and htf_bearish:
+                    stop_hit = True
+                if position_side < 0 and htf_bullish:
+                    stop_hit = True
+            
+            if stop_hit:
+                signals[i] = 0.0
+                in_position = False
+                position_side = 0
+            else:
+                signals[i] = position_side * SIZE
         
-        else:
-            signals[i] = 0.0
+        # === NEW POSITIONS ===
+        if not in_position:
+            # TRENDING REGIME: Donchian breakout + volume + HTF direction
+            if trending:
+                # LONG: Breakout + volume + HTF bullish
+                if bullish_breakout and vol_ok and htf_bullish:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    entry_atr = atr_14[i]
+                    entry_bar = i
+                    highest_since_entry = high[i]
+                    signals[i] = SIZE
+                
+                # SHORT: Breakdown + volume + HTF bearish
+                elif bearish_breakout and vol_ok and htf_bearish:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    entry_atr = atr_14[i]
+                    entry_bar = i
+                    lowest_since_entry = low[i]
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
+            
+            # CHOPPY REGIME: Bollinger Band mean reversion
+            elif choppy:
+                # LONG: Price at lower BB + HTF bullish
+                if at_lower_band and htf_bullish:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    entry_atr = atr_14[i]
+                    entry_bar = i
+                    highest_since_entry = high[i]
+                    signals[i] = SIZE
+                
+                # SHORT: Price at upper BB + HTF bearish
+                elif at_upper_band and htf_bearish:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    entry_atr = atr_14[i]
+                    entry_bar = i
+                    lowest_since_entry = low[i]
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
+            
+            # NEUTRAL ZONE: No trade
+            else:
+                signals[i] = 0.0
     
     return signals
