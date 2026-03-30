@@ -1,36 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 1d Donchian20 Breakout + 1w SMA Trend + Volume Spike
+Experiment #024: 6h Keltner Channel Breakout + 1d SMA + Volatility-Adjusted ATR Stop
 
-HYPOTHESIS: Donchian(20) breakout is a proven edge across 16K+ experiments.
-Price breaking above 20d high in 1w uptrend = strong momentum continuation.
-Price breaking below 20d low in 1w downtrend = continuation of bear move.
-Combined with volume spike confirmation and ATR stoploss.
+HYPOTHESIS: Keltner Channel breakouts identify when price finally escapes
+consolidation. Unlike Camarilla (mean reversion at pivot levels), this catches
+the START of new moves. Combined with 1d SMA trend filter and volume confirmation:
+- 2021 bull: Keltner breakouts above 1d SMA capture trending continuations
+- 2022 bear: Breakouts below 1d SMA catch short-side moves after consolidations
+- 2025 range: False breakouts filtered by requiring strong volume
 
-WHY IT WORKS IN BOTH MARKETS:
-- Bull 2021: Breakouts above 20d high catch large rallies
-- Bear 2022: Short breakouts below 20d low catch crash continuation
-- Range 2025: Fewer signals, higher quality when trend aligns with 1w
+KEY INSIGHT: Previous Camarilla (#007) fades extremes. This ADDS a breakout
+strategy for 6h - different edge, same timeframe, complementary signals.
 
-KEY DIFFERENCE FROM FAILED STRATS: 
-- Simple price channel (Donchian) not stacked indicators
-- 1w SMA filter eliminates countertrend trades (main cause of failure)
-- Volume spike ensures institutional participation
-- ATR stoploss prevents single-day gap kills
-
-TRADE COUNT: 50-120 total over 4 years (12-30/year). Target 75-100.
+TRADE COUNT: 100-200 total over 4 years (25-50/year). HARD MAX: 300.
 Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian20_1w_sma_vol_v1"
-timeframe = "1d"
+name = "mtf_6h_keltner_breakout_1d_sma_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range with proper lookback"""
+    """Average True Range"""
     n = len(close)
     if n < 2:
         return np.full(n, np.nan)
@@ -43,6 +37,21 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_keltner(high, low, close, ema_period=20, atr_period=20, multiplier=2.5):
+    """
+    Keltner Channel:
+    Middle = EMA(close, period)
+    Upper = EMA + multiplier * ATR
+    Lower = EMA - multiplier * ATR
+    """
+    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
+    atr = calculate_atr(high, low, close, period=atr_period)
+    
+    upper = ema + multiplier * atr
+    lower = ema - multiplier * atr
+    
+    return upper, ema, lower
+
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
@@ -50,22 +59,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w SMA for macro trend (call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    sma_1w_50 = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w_50)
+    # === HTF: 1d SMA for macro trend (call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    sma_1d_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
     
-    # === 1d indicators ===
-    # Donchian 20 - price channel breakout
-    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # ATR for stoploss
+    # === 6h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    kelt_upper, kelt_mid, kelt_lower = calculate_keltner(high, low, close, 
+                                                          ema_period=20, 
+                                                          atr_period=20, 
+                                                          multiplier=2.5)
     
-    # Volume spike (1.5x 20d avg)
+    # Volume analysis
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
+    
+    # ATR for stop loss
+    atr_20 = calculate_atr(high, low, close, period=20)
     
     # === Signals ===
     signals = np.zeros(n)
@@ -74,12 +85,13 @@ def generate_signals(prices):
     # Position tracking
     in_position = False
     position_side = 0
+    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 100  # Need 20 bars for Donchian + 50 for 1w SMA
+    warmup = 80  # Need 50 for 1d SMA + 20 for Keltner + buffer
     
     for i in range(warmup, n):
         # NaN check
@@ -87,13 +99,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_1w_aligned[i]):
+        if np.isnan(sma_1d_aligned[i]) or np.isnan(kelt_upper[i]):
             signals[i] = 0.0
             continue
-        
-        # 1w trend filter
-        htf_bullish = close[i] > sma_1w_aligned[i]
-        htf_bearish = close[i] < sma_1w_aligned[i]
         
         # Update highest/lowest for trailing stop
         if in_position:
@@ -102,34 +110,41 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === BREAKOUT DETECTION ===
-        # Price breaks above 20d high
-        bull_breakout = close[i] > dc_upper_20[i] if not np.isnan(dc_upper_20[i]) else False
-        # Price breaks below 20d low
-        bear_breakout = close[i] < dc_lower_20[i] if not np.isnan(dc_lower_20[i]) else False
+        # === TREND FILTER ===
+        htf_bullish = close[i] > sma_1d_aligned[i]
+        htf_bearish = close[i] < sma_1d_aligned[i]
         
-        # Volume spike confirmation
-        vol_spike = vol_ratio[i] > 1.5
+        # === KELTNER BREAKOUT DETECTION ===
+        # Price breaks above upper band = bullish breakout
+        breakout_above = close[i] > kelt_upper[i]
+        # Price breaks below lower band = bearish breakout
+        breakout_below = close[i] < kelt_lower[i]
         
-        # === ATR TRAILING STOP (2.5x ATR) ===
+        # Price within bands = no breakout
+        within_bands = not breakout_above and not breakout_below
+        
+        # === VOLUME CONFIRMATION ===
+        vol_confirm = vol_ratio[i] > 1.4
+        
+        # === MINIMUM HOLD: 2 bars (12h) ===
+        min_hold = (i - entry_bar) >= 2
+        
+        # === ATR TRAILING STOP ===
         def check_atr_stop():
             if not in_position:
                 return False
             if position_side > 0:
-                # Long stop: price fell below highest - 2.5*ATR
+                # Long stop: price dropped 2.5 ATR from highest
                 return low[i] < (highest_since_entry - 2.5 * entry_atr)
             else:
-                # Short stop: price rose above lowest + 2.5*ATR
+                # Short stop: price rose 2.5 ATR from lowest
                 return high[i] > (lowest_since_entry + 2.5 * entry_atr)
-        
-        # === MINIMUM HOLD: 3 bars (3 days) to avoid noise ===
-        min_hold = (i - entry_bar) >= 3
         
         # === EXITS ===
         if in_position:
             stop_hit = check_atr_stop()
             
-            # Exit on trend reversal (1w trend flip)
+            # Exit if trend reverses and we've held minimum
             if position_side > 0 and htf_bearish and min_hold:
                 stop_hit = True
             if position_side < 0 and htf_bullish and min_hold:
@@ -144,23 +159,45 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # LONG: Breakout above 20d high + volume spike + 1w uptrend
-            if bull_breakout and vol_spike and htf_bullish:
+            # LONG: Breakout above Keltner upper + volume + uptrend
+            if breakout_above and vol_confirm and htf_bullish:
                 in_position = True
                 position_side = 1
-                entry_atr = atr_14[i]
+                entry_price = close[i]
+                entry_atr = atr_20[i] if not np.isnan(atr_20[i]) else atr_14[i]
                 entry_bar = i
                 highest_since_entry = high[i]
                 signals[i] = SIZE
             
-            # SHORT: Breakout below 20d low + volume spike + 1w downtrend
-            elif bear_breakout and vol_spike and htf_bearish:
+            # LONG WEAK: Breakout but no volume (partial position)
+            elif breakout_above and htf_bullish and not vol_confirm:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                entry_atr = atr_20[i] if not np.isnan(atr_20[i]) else atr_14[i]
+                entry_bar = i
+                highest_since_entry = high[i]
+                signals[i] = SIZE * 0.5  # Half size without volume confirm
+            
+            # SHORT: Breakout below Keltner lower + volume + downtrend
+            elif breakout_below and vol_confirm and htf_bearish:
                 in_position = True
                 position_side = -1
-                entry_atr = atr_14[i]
+                entry_price = close[i]
+                entry_atr = atr_20[i] if not np.isnan(atr_20[i]) else atr_14[i]
                 entry_bar = i
                 lowest_since_entry = low[i]
                 signals[i] = -SIZE
+            
+            # SHORT WEAK: Breakout but no volume (partial position)
+            elif breakout_below and htf_bearish and not vol_confirm:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                entry_atr = atr_20[i] if not np.isnan(atr_20[i]) else atr_14[i]
+                entry_bar = i
+                lowest_since_entry = low[i]
+                signals[i] = -SIZE * 0.5  # Half size without volume confirm
             
             else:
                 signals[i] = 0.0
