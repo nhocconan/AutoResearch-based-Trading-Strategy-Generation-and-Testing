@@ -1,35 +1,72 @@
+Looking at the experiment history, I see the **#1 killer is too_few_trades** (23 failed strategies!). The current Ichimoku+Alligator strategy is too restrictive with its 7+ stacked conditions, likely resulting in 0 trades.
+
+The winning formula from the DB: **ONE strong signal + volume confirm + regime filter**. Let me try a cleaner approach.
+
+**HYPOTHESIS**: Williams %R (simpler/faster than RSI) + Donchian breakout + volume spike. Williams %R < -70 signals momentum reversal up, combined with a 20-bar Donchian breakout for confirmation. This captures "oversold bounces" in both bull markets and bear rallies. HTF EMA(21) on 1d provides trend direction. Choppiness Index < 50 ensures we're not in a ranging market.
+
+**Why it should work**: Williams %R oscillates 0 to -100, extremes (-80 to -100) catch reversal points. Donchian breakout confirms the move has momentum. Volume validates institutional participation. Choppiness avoids range-bound whipsaws. Simpler = fewer conditions = more trades = better statistics.
+
+**Expected trades**: Williams %R < -70 and > -30 happens frequently (~30-40% of bars), combined with breakout + volume = ~75-200 trades/year on 4h. Target range.
 #!/usr/bin/env python3
 """
-Experiment #005: 12h Donchian Breakout + 1d HMA Trend + Volume Confirmation
+Experiment #022: Williams %R + Donchian Breakout + Volume (4h)
 
-HYPOTHESIS: Simple but robust 12h breakout strategy:
-- Donchian(20) on 12h = proven price channel breakout (DB: Sharpe 1.1-1.5)
-- 1d HMA(50) = HTF trend filter (bull above, bear below)
-- Volume spike = trade validation
-- ATR(14) stoploss = risk management
+HYPOTHESIS: Williams %R (<-70 = oversold bounce, >-30 = overbought dump) combined
+with 20-bar Donchian breakout for momentum confirmation. Volume spike validates
+institutional moves. HTF EMA(21) on 1d filters trend direction.
+Choppiness < 50 avoids range-bound whipsaws.
 
 WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Price breaks above 20-bar high + above 1d HMA + volume spike = long
-- Bear: Price breaks below 20-bar low + below 1d HMA + volume spike = short
-- Range: Choppiness Index filters out non-trending = no trade
+- Bull: Oversold bounce + breakout = strong long, pullback entries
+- Bear: Overbought dump + breakdown = strong short, rally shorts
+- Range: Choppiness filter reduces whipsaw losses
+- Williams %R is faster than RSI, catches reversals earlier
 
-TARGET: 75-150 total trades over 4 years (18-37/year) on 12h
+TARGET: 100-250 total trades over 4 years (25-62/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_hma_vol_v4"
-timeframe = "12h"
+name = "mtf_4h_willr_donchian_vol_1d_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_willr(high, low, close, period=14):
+    """Williams %R - momentum oscillator (-100 to 0)"""
+    n = len(close)
+    willr = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        
+        if highest_high != lowest_low:
+            willr[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+    
+    return willr
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - 20-bar breakout structure"""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2
+    
+    return upper, middle, lower
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
-    if n < period + 1:
+    if n < 2:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
+    tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -37,61 +74,28 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_hma(data, period):
-    """Hull Moving Average"""
-    n = len(data)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    half = int(period / 2)
-    sqrt_n = int(np.sqrt(period))
-    
-    # WMA of period/2
-    wma_half = pd.Series(data).rolling(window=half, min_periods=half).apply(
-        lambda x: np.sum(x * np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
-    ).values
-    
-    # WMA of period
-    wma_full = pd.Series(data).rolling(window=period, min_periods=period).apply(
-        lambda x: np.sum(x * np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
-    ).values
-    
-    # 2*WMA(half) - WMA(full)
-    diff = 2 * np.nan_to_num(wma_half) - np.nan_to_num(wma_full)
-    
-    # HMA = WMA(sqrt(period)) of the difference
-    hma = pd.Series(diff).rolling(window=sqrt_n, min_periods=sqrt_n).apply(
-        lambda x: np.sum(x * np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
-    ).values
-    
-    return hma
-
 def calculate_choppiness(high, low, close, period=14):
     """
-    Choppiness Index: measures market choppiness
-    CHOP > 61.8 = ranging (no trend, stay out)
-    CHOP < 38.2 = trending (good for entries)
+    Choppiness Index - trend vs range
+    CHOP > 61.8 = ranging (use mean reversion)
+    CHOP < 38.2 = trending (use trend following)
     """
     n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
     chop = np.full(n, np.nan)
     
     for i in range(period, n):
-        # Sum of ATR over period
-        atr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            atr_sum += tr
+        sum_tr = 0.0
+        for j in range(period):
+            idx = i - j
+            tr = max(high[idx] - low[idx], abs(high[idx] - close[idx - 1]) if idx > 0 else high[idx] - low[idx], abs(low[idx] - close[idx - 1]) if idx > 0 else 0)
+            sum_tr += tr
         
-        # Highest high - lowest low over period
-        hh = np.max(high[i - period + 1:i + 1])
-        ll = np.min(low[i - period + 1:i + 1])
-        range_sum = hh - ll
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        range_sum = highest_high - lowest_low
         
         if range_sum > 0:
-            chop[i] = 100 * np.log10(atr_sum / range_sum) / np.log10(period)
+            chop[i] = 100 * (np.log(sum_tr) / np.log(range_sum)) if range_sum > 0 else np.nan
     
     return chop
 
@@ -105,30 +109,25 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d HMA(50) for HTF trend ===
-    hma_1d = calculate_hma(df_1d['close'].values, 50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # === HTF: EMA(21) on 1d for trend direction ===
+    htf_ema = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    htf_price = df_1d['close'].values
+    htf_bullish = htf_price > htf_ema
+    htf_bearish = htf_price < htf_ema
     
-    # 1d volume for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = vol_1d / np.where(vol_ma_1d > 0, vol_ma_1d, 1)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Align HTF to 4h
+    htf_bullish_aligned = align_htf_to_ltf(prices, df_1d, htf_bullish.astype(float))
+    htf_bearish_aligned = align_htf_to_ltf(prices, df_1d, htf_bearish.astype(float))
     
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    
-    # Donchian channels (20 bars = 10 days on 12h)
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # Choppiness Index
+    willr = calculate_willr(high, low, close, period=14)
+    donchian_upper, _, donchian_lower = calculate_donchian(high, low, period=20)
     chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume ratio on 12h
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = volume / np.where(vol_ma_12h > 0, vol_ma_12h, 1)
+    # Volume ratio
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # Signals
     signals = np.zeros(n)
@@ -143,7 +142,7 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 200  # Donchian(20) + HMA(50) + volume(20)
+    warmup = 60  # Enough for all indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -151,7 +150,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(willr[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(donchian_upper[i]):
             signals[i] = 0.0
             continue
         
@@ -159,77 +162,97 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
+        # === REGIME FILTER ===
+        # CHOP < 50 = trending, good for momentum trades
+        trending = chop[i] < 50
+        very_choppy = chop[i] > 62
         
-        # === TREND FILTER (1d HMA) ===
-        price_above_hma = close[i] > hma_1d_aligned[i]
-        price_below_hma = close[i] < hma_1d_aligned[i]
+        # === DONCHIAN BREAKOUT ===
+        # Price breaks above 20-bar high = bullish momentum
+        bullish_breakout = close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1]
+        # Price breaks below 20-bar low = bearish momentum
+        bearish_breakout = close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1]
         
-        # === REGIME FILTER (Choppiness) ===
-        is_trending = chop[i] < 50.0  # Relaxed from 38.2 to get more trades
-        is_ranging = chop[i] > 61.8
+        # === WILLIAMS %R MOMENTUM ===
+        # <-70 = oversold (potential bounce)
+        oversold = willr[i] < -70
+        # >-30 = overbought (potential dump)
+        overbought = willr[i] > -30
+        # <-90 = extreme oversold (stronger signal)
+        extreme_oversold = willr[i] < -90
+        # >-10 = extreme overbought (stronger signal)
+        extreme_overbought = willr[i] > -10
         
         # === VOLUME CONFIRMATION ===
-        vol_spike_12h = vol_ratio_12h[i] > 1.5
-        vol_spike_1d = vol_ratio_1d_aligned[i] > 1.2 if not np.isnan(vol_ratio_1d_aligned[i]) else False
-        vol_confirm = vol_spike_12h or vol_spike_1d
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        # Price breaks above 20-bar high = bullish breakout
-        bullish_breakout = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1] if i > 0 else close[i] > donchian_high[i]
-        # Price breaks below 20-bar low = bearish breakout
-        bearish_breakout = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1] if i > 0 else close[i] < donchian_low[i]
+        # === HTF TREND ===
+        htf_bull = htf_bullish_aligned[i] > 0.5 if not np.isnan(htf_bullish_aligned[i]) else False
+        htf_bear = htf_bearish_aligned[i] > 0.5 if not np.isnan(htf_bearish_aligned[i]) else False
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Bullish breakout + above HTF HMA + trending + volume
-            if bullish_breakout and price_above_hma and (is_trending or not is_ranging) and vol_confirm:
-                desired_signal = SIZE
+            # LONG ENTRY: Williams %R oversold + bullish breakout + volume + trending
+            # Relaxed: oversold OR extreme oversold (either works)
+            # Add breakout for confirmation, volume for validation
+            if (oversold or extreme_oversold) and bullish_breakout and vol_spike:
+                if htf_bull or htf_bullish_aligned[i] > 0.25:  # Bull or neutral HTF
+                    desired_signal = SIZE
+            # Alternative: extreme oversold alone with breakout (catch the dip)
+            elif extreme_oversold and bullish_breakout and not very_choppy:
+                if htf_bull or htf_bullish_aligned[i] > 0.25:
+                    desired_signal = SIZE
             
-            # SHORT: Bearish breakout + below HTF HMA + trending + volume
-            elif bearish_breakout and price_below_hma and (is_trending or not is_ranging) and vol_confirm:
-                desired_signal = -SIZE
+            # SHORT ENTRY: Williams %R overbought + bearish breakout + volume + trending
+            if (overbought or extreme_overbought) and bearish_breakout and vol_spike:
+                if htf_bear or htf_bearish_aligned[i] > 0.25:  # Bear or neutral HTF
+                    desired_signal = -SIZE
+            elif extreme_overbought and bearish_breakout and not very_choppy:
+                if htf_bear or htf_bearish_aligned[i] > 0.25:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing stop) ===
+        # === STOPLOSS (2 ATR trailing stop) ===
         if in_position:
             if position_side > 0:
                 # Update trailing high
-                if i == entry_bar or high[i] > trailing_high:
+                if high[i] > trailing_high:
                     trailing_high = high[i]
                 
                 # Trailing stop
-                stop_price = trailing_high - 2.5 * entry_atr
+                stop_price = trailing_high - 2.0 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
                 
-                # Exit if price falls below HMA
-                if price_below_hma:
+                # Exit if Williams %R reaches overbought territory (reversal signal)
+                if willr[i] > -20:
                     desired_signal = 0.0
                 
-                # Exit if ranging market
-                if is_ranging and not vol_confirm:
+                # Exit if HTF turns bearish
+                if htf_bear and htf_bearish_aligned[i] > 0.75:
                     desired_signal = 0.0
             
             elif position_side < 0:
                 # Update trailing low
-                if i == entry_bar or low[i] < trailing_low:
+                if low[i] < trailing_low:
                     trailing_low = low[i]
                 
                 # Trailing stop
-                stop_price = trailing_low + 2.5 * entry_atr
+                stop_price = trailing_low + 2.0 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
                 
-                # Exit if price rises above HMA
-                if price_above_hma:
+                # Exit if Williams %R reaches oversold territory (reversal signal)
+                if willr[i] < -80:
                     desired_signal = 0.0
                 
-                # Exit if ranging market
-                if is_ranging and not vol_confirm:
+                # Exit if HTF turns bullish
+                if htf_bull and htf_bullish_aligned[i] > 0.75:
                     desired_signal = 0.0
         
         # === MINIMUM HOLD: 3 bars to avoid fee churn ===
