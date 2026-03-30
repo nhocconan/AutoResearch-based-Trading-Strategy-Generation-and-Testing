@@ -1,33 +1,81 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Donchian + 1d Trend + Volume Spike + Chop Regime
+Experiment #021: 4h DEMA Cross + 12h HMA Trend + ADX Regime + Volume
 
-HYPOTHESIS:
-Based on proven DB winner mtf_4h_chop_donchian_vol_regime_12h_v1 (test Sharpe 1.491, 107 trades),
-but adapted for 12h primary timeframe with 1d HTF reference.
+HYPOTHESIS: Combine proven local signal (DEMA cross) with 12h HMA trend and ADX regime:
+1. DEMA(8,21) cross - fast local signal (proven in ETH 1.32 performer)
+2. 12h HMA(21) - HTF trend direction (filters false breakouts)
+3. ADX(14) > 25 - trending regime (better than choppiness for trend strength)
+4. Volume 1.7x - confirmation (slightly relaxed)
+5. ATR(14) 2.5x trailing stop
 
-WHY THIS SHOULD WORK:
-1. 12h TF with 54% keep rate (experiment data) - better than 4h for this session
-2. Donchian(30) breakout on 12h - structural levels with enough history
-3. 1d HMA(21) for HTF trend - aligns with proven HTF patterns in winners
-4. Volume spike 1.8x confirmation - proven volume filter from session best
-5. CHOP<50 for trending regime - filters out range markets
-6. Target 75-150 total trades over 4 years (19-37/year) - within optimal range
+WHY IT SHOULD WORK IN BULL AND BEAR:
+- Bull: DEMA cross up + HMA up + ADX>25 = ride the rally
+- Bear: DEMA cross down + HMA down + ADX>25 = short the decline
+- Range (ADX<20): skip entries, avoid whipsaws
+- ADX is better than CHOP because it measures TREND STRENGTH directly
 
-ENTRY PHILOSOPHY: "Wait for the channel to compress, then explode"
-- Donchian narrowing = energy building
-- Volume spike on breakout = confirmation
-- HTF trend alignment = higher probability
+KEY DIFFERENCES FROM PRIOR ATTEMPTS:
+- Uses DEMA cross instead of Donchian breakout (different signal mechanism)
+- Uses ADX regime instead of Choppiness Index (different regime detection)
+- Previous session best used CHOP<50: this uses ADX>25 (more direct trend filter)
 
-STOPLOSS: 2.5x ATR trailing - proven risk management from winners
+TARGET: 75-200 total trades over 4 years (19-50/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_hma_vol_chop_v1"
-timeframe = "12h"
+name = "mtf_4h_dema_cross_htf_hma_adx_vol_12h_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_dema(prices, period=21):
+    """Double Exponential Moving Average - smoother than EMA, less lag than SMA"""
+    n = len(prices)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    prices_s = pd.Series(prices)
+    ema1 = prices_s.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    dema = 2 * ema1 - ema2
+    return dema.values
+
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index - measures trend strength"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    plus_di = np.where(atr_smooth > 0, 100 * plus_dm_smooth / atr_smooth, 0)
+    minus_di = np.where(atr_smooth > 0, 100 * minus_dm_smooth / atr_smooth, 0)
+    
+    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return adx
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -35,7 +83,7 @@ def calculate_atr(high, low, close, period=14):
     if n < period + 1:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
+    tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -57,49 +105,6 @@ def calculate_hma(close, period=21):
     hma = pd.Series(hull).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean().values
     return hma
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = ranging - AVOID
-    CHOP < 50 = trending - ENTER
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan)
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        
-        if highest > lowest and atr_sum > 0:
-            range_hl = highest - lowest
-            chop[i] = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
-    
-    return chop
-
-def calculate_donchian(high, low, period=30):
-    """Donchian Channel - higher period for 12h TF"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_volume_ratio(volume, period=20):
-    """Volume spike detection"""
-    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
-    ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    return ratio
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -107,22 +112,26 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load 1d HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    # === Load HTF data ONCE before loop ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d HMA(21) for HTF trend direction
-    hma_1d = calculate_hma(df_1d['close'].values, period=21)
-    hma_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # 12h HMA(21) for trend direction
+    hma_21_12h = calculate_hma(df_12h['close'].values, period=21)
+    hma_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
     
-    # === 12h local indicators ===
+    # === Local 4h indicators ===
+    dema_fast = calculate_dema(close, period=8)   # DEMA(8)
+    dema_slow = calculate_dema(close, period=21)  # DEMA(21)
+    adx = calculate_adx(high, low, close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_up, donchian_lo = calculate_donchian(high, low, period=30)
-    chop = calculate_choppiness(high, low, close, period=14)
-    vol_ratio = calculate_volume_ratio(volume, period=20)
+    
+    # Volume ratio (20-period MA)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position - proven size from session best
+    SIZE = 0.28
     
     # Position tracking
     in_position = False
@@ -133,15 +142,19 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 300  # 30 donchian + 14 CHOP + 20 vol MA + HTF alignment buffer
+    warmup = 200  # DEMA(21) + ADX(14) + volume MA(20) + HTF alignment
     
     for i in range(warmup, n):
-        # === Validations ===
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        # Skip if indicators not ready
+        if np.isnan(dema_fast[i]) or np.isnan(dema_slow[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(adx[i]) or adx[i] <= 0:
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
@@ -149,59 +162,53 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_up[i]) or np.isnan(donchian_lo[i]):
-            signals[i] = 0.0
-            continue
+        # === ADX REGIME FILTER ===
+        strong_trend = adx[i] > 25  # Trend is strong enough to trade
+        weak_trend = adx[i] < 20     # Ranging - skip
         
-        # === Regime check ===
-        chop_value = chop[i]
-        is_choppy = chop_value > 61.8  # Don't enter in range
-        is_trending = chop_value < 50   # Good to enter in trend
-        
-        # === HTF trend from 1d HMA ===
+        # === HTF TREND (12h HMA) ===
         htf_trend_up = close[i] > hma_aligned[i]
         htf_trend_down = close[i] < hma_aligned[i]
         
-        # === Volume confirmation ===
-        vol_spike = vol_ratio[i] > 1.8
+        # === DEMA CROSS (local signal) ===
+        # Bullish: fast crosses above slow
+        bullish_cross = dema_fast[i] > dema_slow[i] and dema_fast[i-1] <= dema_slow[i-1]
+        # Bearish: fast crosses below slow
+        bearish_cross = dema_fast[i] < dema_slow[i] and dema_fast[i-1] >= dema_slow[i-1]
         
-        # === Donchian breakout detection ===
-        prev_up = donchian_up[i - 1]
-        prev_lo = donchian_lo[i - 1]
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.7
         
-        breakout_up = close[i] > prev_up
-        breakout_down = close[i] < prev_lo
-        
-        # === Entry logic ===
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Trending + breakout up + HTF up + volume ===
-            if breakout_up and htf_trend_up and vol_spike and is_trending:
+            # === LONG: Bullish cross + HTF up + strong trend + volume ===
+            if bullish_cross and htf_trend_up and strong_trend and vol_spike:
                 desired_signal = SIZE
             
-            # === SHORT: Trending + breakout down + HTF down + volume ===
-            if breakout_down and htf_trend_down and vol_spike and is_trending:
+            # === SHORT: Bearish cross + HTF down + strong trend + volume ===
+            if bearish_cross and htf_trend_down and strong_trend and vol_spike:
                 desired_signal = -SIZE
         
-        # === STOPLOSS: 2.5x ATR trailing stop ===
+        # === STOPLOSS (2.5 ATR trailing stop) ===
         if in_position:
             if position_side > 0:
                 # Update trailing high
                 if i == entry_bar or high[i] > trailing_high:
                     trailing_high = high[i]
                 
-                # Stop if price falls 2.5 ATR from high
+                # Trailing stop
                 stop_price = trailing_high - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit on HTF trend flip
+                # Exit if HTF trend flips
                 if htf_trend_down:
                     desired_signal = 0.0
                 
-                # Exit if range market
-                if is_choppy:
+                # Exit if trend weakens (ADX < 20)
+                if weak_trend:
                     desired_signal = 0.0
             
             elif position_side < 0:
@@ -209,24 +216,24 @@ def generate_signals(prices):
                 if i == entry_bar or low[i] < trailing_low:
                     trailing_low = low[i]
                 
-                # Stop if price rises 2.5 ATR from low
+                # Trailing stop
                 stop_price = trailing_low + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit on HTF trend flip
+                # Exit if HTF trend flips
                 if htf_trend_up:
                     desired_signal = 0.0
                 
-                # Exit if range market
-                if is_choppy:
+                # Exit if trend weakens
+                if weak_trend:
                     desired_signal = 0.0
         
-        # === Minimum hold: 3 bars (12h = 36h min) ===
-        if in_position and (i - entry_bar) < 3:
+        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
+        if in_position and (i - entry_bar) < 4:
             desired_signal = position_side * SIZE
         
-        # === Position management ===
+        # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 in_position = True
