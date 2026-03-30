@@ -1,43 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h Donchian(16) Breakout + 1d Williams %R Regime + Volume
+Experiment #008: 12h Donchian Breakout + Weekly Trend + Volume
 
-HYPOTHESIS: Williams %R extremes (<-70 or >-30) on 1d capture market reversals.
-When 6h price breaks Donchian(16) WITH volume spike AND Williams %R is at extreme,
-the move has high probability of continuation.
+HYPOTHESIS: 12h Donchian(20) breakout captures multi-day institutional moves.
+Weekly EMA50 provides macro trend filter to avoid countertrend trades.
+Volume confirms breakout validity.
 
-WHY IT WORKS IN BULL AND BEAR:
-- Williams %R < -70: oversold in any market = bounce candidate
-- Williams %R > -30: overbought in any market = dump candidate  
-- Donchian breakout confirms momentum, not just oversold/overbought
-- Volume spike confirms institutional involvement
+WHY 12h: ~3x fewer trades than 4h = less fee drag.
+Donchian(20) on 12h = 10-day channel - captures big directional moves.
 
-TARGET: 75-200 total trades over 4 years = 19-50/year. HARD MAX: 300.
-Signal size: 0.25.
+WHY IT WORKS IN BOTH MARKETS:
+- Bull: Breakout above Donchian high + weekly trend = continuation trades
+- Bear: Breakout below Donchian low + weekly trend = short positions
+- Symmetrical and regime-adaptive
+
+TARGET: 75-150 total trades over 4 years (19-37/year).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_willr_vol_1d_v2"
-timeframe = "6h"
+name = "mtf_12h_donchian_vol_1w_ema50_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R"""
-    n = len(close)
-    if n < period:
-        return np.full(n, -50.0)
-    
-    willr = np.full(n, -50.0)
-    for i in range(period - 1, n):
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        if highest_high != lowest_low:
-            willr[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
-        else:
-            willr[i] = -50.0
-    return willr
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -61,21 +46,21 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d Williams %R(14) for regime
-    willr_1d = calculate_williams_r(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
-    willr_1d_aligned = align_htf_to_ltf(prices, df_1d, willr_1d)
+    # Weekly EMA50 for macro trend filter
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === Local 6h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Donchian channels (16 periods = ~4 days on 6h)
-    donchian_period = 16
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().shift(1).values
+    # Donchian channel (20 bars = 10 days on 12h)
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Volume ratio
+    # Volume ratio (20-bar moving average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -93,7 +78,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 50  # Donchian period
+    warmup = max(100, donchian_period)  # Need enough for Donchian + EMA alignment buffer
     
     for i in range(warmup, n):
         # Skip if ATR not ready
@@ -103,69 +88,64 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        # Skip if Williams %R not aligned
-        if np.isnan(willr_1d_aligned[i]):
+        # Skip if Weekly EMA not aligned
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Skip if Donchian not ready
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
-        
-        # === REGIME: Williams %R extremes ===
-        willr_val = willr_1d_aligned[i]
-        oversold = willr_val < -70    # Buy candidates
-        overbought = willr_val > -30   # Sell candidates
-        
-        # === DONCHIAN BREAKOUT ===
-        donch_break_high = close[i] > donchian_high[i]  # Breakout above
-        donch_break_low = close[i] < donchian_low[i]    # Breakdown below
+        # === MACRO TREND (1w EMA50) ===
+        price_above_1w_ema = close[i] > ema_1w_aligned[i]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
+        
+        # === DONCHIAN BREAKOUT detection (from CLOSED bars only - no look-ahead) ===
+        # Previous bar's Donchian levels (shift by 1 to use only closed bars)
+        prev_donchian_high = donchian_high[i - 1]
+        prev_donchian_low = donchian_low[i - 1]
+        
+        # Breakout: current close breaks above/below previous Donchian channel
+        breakout_up = close[i] > prev_donchian_high
+        breakout_down = close[i] < prev_donchian_low
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Breakout above Donchian high + oversold regime + volume ===
-            if donch_break_high and oversold and vol_spike:
+            # === LONG: Breakout above Donchian high + weekly trend up + volume ===
+            if breakout_up and price_above_1w_ema and vol_spike:
                 desired_signal = SIZE
-            # Soft entry: breakout + oversold, no volume (lower conviction)
-            elif donch_break_high and oversold:
-                desired_signal = SIZE * 0.5
             
-            # === SHORT: Breakdown below Donchian low + overbought regime + volume ===
-            if donch_break_low and overbought and vol_spike:
+            # === SHORT: Breakout below Donchian low + weekly trend down + volume ===
+            if breakout_down and not price_above_1w_ema and vol_spike:
                 desired_signal = -SIZE
-            # Soft entry: breakdown + overbought, no volume
-            elif donch_break_low and overbought:
-                desired_signal = -SIZE * 0.5
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === TRAILING STOPLOSS (2.0 ATR) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * atr_14[i]
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * atr_14[i]
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === TIME EXIT: exit after 4 bars (1 day) if no stop hit ===
+        # === MINIMUM HOLD (3 bars = 1.5 days to avoid whipsaw) ===
         bars_held = i - entry_bar
-        if in_position and bars_held >= 4:
-            desired_signal = 0.0
+        if in_position and bars_held >= 3:
+            # Price reverts to Donchian mid = exit
+            donchian_mid = (prev_donchian_high + prev_donchian_low) / 2
+            if position_side > 0 and close[i] <= donchian_mid:
+                desired_signal = 0.0
+            if position_side < 0 and close[i] >= donchian_mid:
+                desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
@@ -179,9 +159,9 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
