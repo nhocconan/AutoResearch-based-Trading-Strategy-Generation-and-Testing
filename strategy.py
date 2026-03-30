@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #006: 4h Keltner Squeeze + Volume Expansion + 1d Trend
+Experiment #007: 6h Elder Ray + Choppiness Index Regime
 
-HYPOTHESIS: Low volatility (squeeze) followed by high volume expansion
-is the highest-probability breakout setup. When BB contracts within Keltner
-bands, volatility is compressing. Volume surge on expansion = institutional
-move. 1d EMA confirms trend direction.
+HYPOTHESIS: Elder Ray (Bull/Bear Power) measures institutional momentum.
+- Bull Power = High - EMA(13) — positive = buying pressure
+- Bear Power = Low - EMA(13) — negative = selling pressure
 
-WHY IT WORKS IN BULL AND BEAR:
-- Bull: Squeeze clears → price explodes above Keltner upper → long
-- Bear: Squeeze clears → price collapses below Keltner lower → short
-- Symmetrical: captures moves in both directions, adapts to regime
+WHY BOTH BULL AND BEAR: Symmetric momentum signals.
+- In UPTREND: buy when Bear Power dips below zero (pullback exhaustion)
+- In DOWNTREND: short when Bull Power rises above zero (rally exhaustion)
+- Choppiness Index < 38.2 confirms trending conditions (avoid range markets)
 
-KEY DIFFERENCE FROM DONCHIAN: Keltner uses ATR-based bands, which are
-adaptive to volatility. Donchian is fixed lookback = different behavior
-in high vs low vol periods.
+WHY 6h: Balance between 4h (too many trades) and 12h (too few).
+Slower than 4h = fewer trades = less fee drag, but faster than 12h = more opportunities.
 
 TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 200.
-Signal size: 0.30
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_keltner_squeeze_vol_1d_v1"
-timeframe = "4h"
+name = "mtf_6h_elder_ray_chop_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -41,6 +39,31 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness_index(high, low, close, period=14):
+    """Choppiness Index — lower = trending, higher = ranging"""
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        highest = np.max(high[i-period+1:i+1])
+        lowest = np.min(low[i-period+1:i+1])
+        
+        if highest > lowest:
+            sum_tr = 0.0
+            for j in range(i - period + 1, i + 1):
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+                sum_tr += tr
+            
+            chop[i] = 100 * (np.log(sum_tr) / np.log(highest - lowest)) / np.log(period)
+    
+    return chop
+
+def calculate_ema(values, period, min_periods=None):
+    """Exponential Moving Average"""
+    if min_periods is None:
+        min_periods = period
+    return pd.Series(values).ewm(span=period, min_periods=min_periods, adjust=False).mean().values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -51,121 +74,157 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 for trend direction (proven from DB)
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1d EMA200 for trend direction (slower EMA = longer-term trend)
+    ema_200_1d = calculate_ema(df_1d['close'].values, 200, min_periods=200)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # === Local 4h indicators ===
+    # === Local 6h Elder Ray (classic period=13) ===
+    ema_13 = calculate_ema(close, 13, min_periods=13)
+    bull_power = high - ema_13  # Buying pressure
+    bear_power = low - ema_13   # Selling pressure
+    
+    # Smooth power values with EMA of power
+    bull_power_smooth = calculate_ema(bull_power, 5, min_periods=5)
+    bear_power_smooth = calculate_ema(bear_power, 5, min_periods=5)
+    
+    # Choppiness Index for regime detection
+    chop = calculate_choppiness_index(high, low, close, period=14)
+    
+    # ATR for stoploss
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Keltner Channel (EMA20 with 2*ATR bands)
-    kelt_ema = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    kelt_upper = kelt_ema + 2.0 * atr_14
-    kelt_lower = kelt_ema - 2.0 * atr_14
-    kelt_mid = kelt_ema
-    
-    # Bollinger Bands for squeeze detection (20, 2)
-    bb_sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_sma + 2.0 * bb_std
-    bb_lower = bb_sma - 2.0 * bb_std
-    
-    # BB Width: detect squeeze when BB contracts
-    bb_width = bb_upper - bb_lower
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_ratio = bb_width / np.where(bb_width_ma > 0, bb_width_ma, 1)
-    
-    # Volume confirmation
+    # Volume ratio (20-bar MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
+    # === ELDER RAY Z-SCORE (normalized for better entry) ===
+    # Calculate z-score of power values over lookback
+    lookback = 50
+    
+    bull_mean = pd.Series(bull_power).rolling(window=lookback, min_periods=lookback).mean().values
+    bull_std = pd.Series(bull_power).rolling(window=lookback, min_periods=lookback).std().values
+    bull_z = (bull_power - bull_mean) / np.where(bull_std > 1e-10, bull_std, 1e-10)
+    
+    bear_mean = pd.Series(bear_power).rolling(window=lookback, min_periods=lookback).mean().values
+    bear_std = pd.Series(bear_power).rolling(window=lookback, min_periods=lookback).std().values
+    bear_z = (bear_power - bear_mean) / np.where(bear_std > 1e-10, bear_std, 1e-10)
+    
+    # Signals
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
+    entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    entry_bar = 0
+    chop_exit_bars = 0  # Counter for chop confirmation before exit
     
-    warmup = 100  # Need 50 for EMA50 + buffer
+    warmup = 250  # Need enough for EMA200 alignment buffer
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
+        # Skip if ATR not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(kelt_ema[i]):
+        # Skip if 1d EMA not aligned
+        if np.isnan(ema_200_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND (1d EMA50) ===
-        price_above_1d_ema = close[i] > ema_1d_aligned[i]
+        # Skip if chop not ready
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # === KELTNER LEVELS ===
-        upper_band = kelt_upper[i]
-        lower_band = kelt_lower[i]
-        middle_band = kelt_mid[i]
+        # === TREND DIRECTION (1d EMA200) ===
+        in_uptrend = close[i] > ema_200_1d_aligned[i]
+        in_downtrend = close[i] < ema_200_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.8  # Volume 1.8x average
+        # === REGIME: Choppiness < 38.2 = trending ===
+        is_trending = chop[i] < 38.2
         
-        # === BB SQUEEZE (low volatility) ===
-        is_squeeze = squeeze_ratio[i] < 0.85  # BB contracted vs 20d avg
+        # Volume confirmation
+        vol_confirm = vol_ratio[i] > 1.2
         
-        # === BREAKOUT: price outside Keltner band ===
-        price_above_upper = close[i] > upper_band
-        price_below_lower = close[i] < lower_band
+        # === ELDER RAY SIGNALS ===
+        # Bull Power crossed above zero (buying pressure emerging)
+        bull_cross_up = bull_power[i] > 0 and (i > 0 and bull_power[i-1] <= 0)
+        # Bull Power positive and rising
+        bull_momentum = bull_power[i] > 0 and bull_power[i] > bull_power[i-1]
         
-        desired_signal = 0.0
+        # Bear Power crossed below zero (selling pressure exhausting)
+        bear_cross_down = bear_power[i] < 0 and (i > 0 and bear_power[i-1] >= 0)
+        # Bear Power negative and falling
+        bear_momentum = bear_power[i] < 0 and bear_power[i] < bear_power[i-1]
         
         # === ENTRY LOGIC ===
-        if not in_position:
-            # === LONG: Price breaks above Keltner upper + 1d trend + volume ===
-            if price_above_1d_ema and price_above_upper and vol_spike:
-                desired_signal = SIZE
-            
-            # === SHORT: Price breaks below Keltner lower + 1d trend + volume ===
-            if not price_above_1d_ema and price_below_lower and vol_spike:
-                desired_signal = -SIZE
+        desired_signal = 0.0
         
-        # === STOPLOSS (2.0 ATR trailing) ===
+        if not in_position:
+            # === LONG ENTRY: In uptrend, Bear Power shows exhaustion ===
+            # Bear Power crossed below zero OR very negative + bounce starting
+            if in_uptrend and is_trending and vol_confirm:
+                # Bear Power crossed below zero (selling exhausted)
+                if bear_cross_down:
+                    desired_signal = SIZE
+                # Or Bear Power very negative (z-score < -1.5) with Bull Power turning up
+                elif bear_z[i] < -1.5 and bull_cross_up:
+                    desired_signal = SIZE
+            
+            # === SHORT ENTRY: In downtrend, Bull Power shows exhaustion ===
+            if in_downtrend and is_trending and vol_confirm:
+                # Bull Power crossed above zero (buying exhausted)
+                if bull_cross_up:
+                    desired_signal = -SIZE
+                # Or Bull Power very positive (z-score > 1.5) with Bear Power turning down
+                elif bull_z[i] > 1.5 and bear_cross_down:
+                    desired_signal = -SIZE
+        
+        # === STOPLOSS (2.5 ATR — slightly wider for 6h) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            if low[i] < trailing_stop:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            if high[i] > trailing_stop:
                 desired_signal = 0.0
         
-        # === MINIMUM HOLD (8 bars = 2 days to reduce churn) ===
+        # === MINIMUM HOLD: 3 bars (18h) to avoid fee churn ===
         bars_held = i - entry_bar
+        if in_position and bars_held < 3:
+            # Keep position, don't exit early
+            desired_signal = position_side * SIZE
         
-        if in_position and bars_held >= 8:
-            # Exit at middle band (mean reversion)
-            if position_side > 0 and close[i] >= middle_band:
-                desired_signal = 0.0
-            if position_side < 0 and close[i] <= middle_band:
-                desired_signal = 0.0
+        # === TAKE PROFIT: Exit when power reverts to mean ===
+        if in_position and bars_held >= 3:
+            if position_side > 0:
+                # Exit if Bull Power turns negative (momentum fading)
+                if bull_power[i] < 0:
+                    desired_signal = 0.0
+            if position_side < 0:
+                # Exit if Bear Power turns positive (momentum fading)
+                if bear_power[i] > 0:
+                    desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
@@ -173,15 +232,10 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 entry_bar = i
-                if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
-                else:
-                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                stop_price = 0.0
         
         signals[i] = desired_signal
     
