@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #005: 12h Camarilla + Choppiness Regime + Volume Spike
+Experiment #006: 4h Keltner Squeeze + Volume Expansion + 1d Trend
 
-HYPOTHESIS: The proven Camarilla+volume+choppiness pattern from 4h (Sharpe 1.47)
-transfers to 12h with 1d HTF trend. Different entry logic per regime:
-- CHOP < 50 (trending): Enter on S4/R4 breakouts (strong momentum)
-- CHOP > 61.8 (choppy): Enter on S3/R3 touches (mean reversion)
-- Volume spike required for all entries
-- 1d EMA21 for trend direction
+HYPOTHESIS: Low volatility (squeeze) followed by high volume expansion
+is the highest-probability breakout setup. When BB contracts within Keltner
+bands, volatility is compressing. Volume surge on expansion = institutional
+move. 1d EMA confirms trend direction.
 
-WHY 12h: 3x fewer trades than 4h = less fee drag, better generalization.
-Target: 75-150 total trades over 4 years.
-Signal size: 0.25.
+WHY IT WORKS IN BULL AND BEAR:
+- Bull: Squeeze clears → price explodes above Keltner upper → long
+- Bear: Squeeze clears → price collapses below Keltner lower → short
+- Symmetrical: captures moves in both directions, adapts to regime
+
+KEY DIFFERENCE FROM DONCHIAN: Keltner uses ATR-based bands, which are
+adaptive to volatility. Donchian is fixed lookback = different behavior
+in high vs low vol periods.
+
+TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 200.
+Signal size: 0.30
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_camarilla_chop_vol_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_keltner_squeeze_vol_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,31 +41,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - measures trendiness vs choppiness"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, 50.0)
-    
-    chop = np.full(n, 50.0)
-    for i in range(period, n):
-        highest_high = max(high[i - period:i + 1])
-        lowest_low = min(low[i - period:i + 1])
-        
-        range_sum = highest_high - lowest_low
-        if range_sum <= 0:
-            chop[i] = 50.0
-            continue
-        
-        atr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            atr_sum += tr
-        
-        chop[i] = 100.0 * np.log10(atr_sum / range_sum) / np.log10(period)
-    
-    return chop
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -70,21 +51,36 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA21 for trend direction
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # 1d EMA50 for trend direction (proven from DB)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume ratio
+    # Keltner Channel (EMA20 with 2*ATR bands)
+    kelt_ema = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    kelt_upper = kelt_ema + 2.0 * atr_14
+    kelt_lower = kelt_ema - 2.0 * atr_14
+    kelt_mid = kelt_ema
+    
+    # Bollinger Bands for squeeze detection (20, 2)
+    bb_sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_sma + 2.0 * bb_std
+    bb_lower = bb_sma - 2.0 * bb_std
+    
+    # BB Width: detect squeeze when BB contracts
+    bb_width = bb_upper - bb_lower
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze_ratio = bb_width / np.where(bb_width_ma > 0, bb_width_ma, 1)
+    
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Signals
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -96,99 +92,80 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 100
+    warmup = 100  # Need 50 for EMA50 + buffer
     
     for i in range(warmup, n):
-        # Skip if ATR not ready
+        # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Skip if EMA not aligned
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(kelt_ema[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d EMA21) ===
+        # === TREND (1d EMA50) ===
         price_above_1d_ema = close[i] > ema_1d_aligned[i]
         
-        # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.5
+        # === KELTNER LEVELS ===
+        upper_band = kelt_upper[i]
+        lower_band = kelt_lower[i]
+        middle_band = kelt_mid[i]
         
-        # === REGIME (Choppiness) ===
-        is_choppy = chop[i] > 61.8
-        is_trending = chop[i] < 50.0
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.8  # Volume 1.8x average
         
-        # === CAMARILLA LEVELS from previous CLOSED bar (no look-ahead) ===
-        prev_high = high[i - 1]
-        prev_low = low[i - 1]
-        prev_close = close[i - 1]
-        prev_range = prev_high - prev_low
+        # === BB SQUEEZE (low volatility) ===
+        is_squeeze = squeeze_ratio[i] < 0.85  # BB contracted vs 20d avg
         
-        if prev_range <= 0:
-            signals[i] = 0.0
-            continue
+        # === BREAKOUT: price outside Keltner band ===
+        price_above_upper = close[i] > upper_band
+        price_below_lower = close[i] < lower_band
         
-        # Classic Camarilla levels (factor 1.1/12 = 0.09167)
-        r3 = prev_close + prev_range * 0.09167 * 2  # R3 = C + range * 0.1833
-        r4 = prev_close + prev_range * 0.09167 * 4  # R4 = C + range * 0.3667
-        s3 = prev_close - prev_range * 0.09167 * 2  # S3 = C - range * 0.1833
-        s4 = prev_close - prev_range * 0.09167 * 4  # S4 = C - range * 0.3667
-        
-        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
+        # === ENTRY LOGIC ===
         if not in_position:
-            # === LONG: Trend up + volume + Camarilla S-level touch ===
-            if price_above_1d_ema and vol_spike:
-                # S4 touch in trending market (strong breakout level)
-                if is_trending and low[i] <= s4:
-                    desired_signal = SIZE
-                # S3 touch in choppy market (mean reversion)
-                elif is_choppy and low[i] <= s3:
-                    desired_signal = SIZE
+            # === LONG: Price breaks above Keltner upper + 1d trend + volume ===
+            if price_above_1d_ema and price_above_upper and vol_spike:
+                desired_signal = SIZE
             
-            # === SHORT: Trend down + volume + Camarilla R-level touch ===
-            if not price_above_1d_ema and vol_spike:
-                # R4 touch in trending market
-                if is_trending and high[i] >= r4:
-                    desired_signal = -SIZE
-                # R3 touch in choppy market
-                elif is_choppy and high[i] >= r3:
-                    desired_signal = -SIZE
+            # === SHORT: Price breaks below Keltner lower + 1d trend + volume ===
+            if not price_above_1d_ema and price_below_lower and vol_spike:
+                desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === STOPLOSS (2.0 ATR trailing) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === MINIMUM HOLD: 2 bars (24h) to reduce fee churn ===
+        # === MINIMUM HOLD (8 bars = 2 days to reduce churn) ===
         bars_held = i - entry_bar
-        if in_position and bars_held >= 2:
-            # Take profit if price returns to prev close
-            if position_side > 0 and close[i] >= prev_close:
+        
+        if in_position and bars_held >= 8:
+            # Exit at middle band (mean reversion)
+            if position_side > 0 and close[i] >= middle_band:
                 desired_signal = 0.0
-            if position_side < 0 and close[i] <= prev_close:
+            if position_side < 0 and close[i] <= middle_band:
                 desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
@@ -197,9 +174,9 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
