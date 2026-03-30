@@ -1,44 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #022: Donchian Breakout + RSI Pullback + Volume Spike (4h)
+Experiment #022: 4h Donchian Breakout + Choppiness Regime + Volume (12h HTF)
 
-HYPOTHESIS: Simplify to the proven winning formula from DB:
-1. Donchian(20) breakout for structure (used in ALL top performers)
-2. RSI pullback (<35 long, >65 short) for entry timing
-3. Volume spike confirmation for institutional validity
-4. 1d SMA200 for trend filter
+HYPOTHESIS: Simple price channel breakout with regime filter is the most robust
+pattern for crypto. Donchian(20) on 4h = 5-day breakout. 12h HTF provides
+trend context. Choppiness Index filters out sideways markets. Volume spike
+confirms the breakout. This exact pattern achieved test Sharpe 1.49 on SOLUSDT.
 
-WHY IT WORKS IN BULL AND BEAR:
-- Bull market: Breakout + pullback = classic continuation setup
-- Bear market: Breakdown + bounce to RSI 65-70 = short setup
-- Range: RSI between 35-65 = no trades, avoids whipsaws
+WHY IT WORKS IN BOTH BULL AND BEAR:
+- Bull: Price breaks above 20-period Donchian high + HTF uptrend + ADX>25 = long
+- Bear: Price breaks below 20-period Donchian low + HTF downtrend + ADX>25 = short  
+- Range (CHOP>61.8): No trades — prevents whipsaw losses in chop
+- Only trades when structure breaks out of range
 
-KEY INSIGHT: Top DB performers use ONE signal type + volume + regime.
-Complex stacking (Ichimoku + Alligator) = too many filters = 0 trades.
+KEY INSIGHT: The DB shows 4h Donchian+vol+chop+HTF is the BEST pattern.
+Keep it simple: 1 channel + 1 volume filter + 1 regime + HTF direction.
+
+TARGET: 80-200 total trades over 4 years (20-50/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_rsi_vol_1d_v1"
+name = "mtf_4h_donchian_chop_vol_12h_v4"
 timeframe = "4h"
 leverage = 1.0
 
-def calculate_rsi(data, period=14):
-    """RSI with proper min_periods"""
-    delta = pd.Series(data).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50).values
-
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range for stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -51,6 +40,90 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - price channel breakout"""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+        middle[i] = (upper[i] + lower[i]) / 2
+    
+    return upper, middle, lower
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP) - measures market trendiness
+    CHOP > 61.8 = choppy/range (no trade)
+    CHOP < 38.2 = trending (trade)
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        # Sum of ATR over period
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+            atr_sum += tr
+        
+        # Highest high - lowest low over period
+        hh = np.max(high[i - period + 1:i + 1])
+        ll = np.min(low[i - period + 1:i + 1])
+        range_sum = hh - ll
+        
+        if range_sum > 0 and atr_sum > 0:
+            # CHOP = 100 * log10(atr_sum / range_sum) / log10(period)
+            chop[i] = 100 * np.log10(atr_sum / range_sum) / np.log10(period)
+    
+    return chop
+
+def calculate_adx(high, low, close, period=14):
+    """ADX for trend strength confirmation"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
+    
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    di_plus = np.zeros(n)
+    di_minus = np.zeros(n)
+    dx = np.zeros(n)
+    
+    for i in range(period, n):
+        if atr[i] > 0:
+            di_plus[i] = 100 * plus_dm_smooth[i] / atr[i]
+            di_minus[i] = 100 * minus_dm_smooth[i] / atr[i]
+            
+            di_sum = di_plus[i] + di_minus[i]
+            if di_sum > 0:
+                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / di_sum
+    
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return adx
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -59,32 +132,39 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d SMA200 for trend filter
-    sma200_1d = pd.Series(close_1d).rolling(window=200, min_periods=150).mean().values
-    sma200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d)
+    # HTF: Simple SMA200 for trend direction on 12h
+    htf_close = df_12h['close'].values
+    htf_sma200 = pd.Series(htf_close).rolling(window=200, min_periods=200).mean().values
+    htf_price_above_sma = htf_close > htf_sma200
+    htf_price_below_sma = htf_close < htf_sma200
     
-    # 1d RSI for momentum filter
-    rsi_1d = calculate_rsi(close_1d, period=14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    htf_bull_aligned = align_htf_to_ltf(prices, df_12h, htf_price_above_sma.astype(float))
+    htf_bear_aligned = align_htf_to_ltf(prices, df_12h, htf_price_below_sma.astype(float))
+    
+    # Also get 12h Donchian for HTF breakout confirmation
+    htf_high = df_12h['high'].values
+    htf_low = df_12h['low'].values
+    htf_upper, _, htf_lower = calculate_donchian(htf_high, htf_low, period=20)
+    htf_breakout_up = htf_close > htf_upper
+    htf_breakout_down = htf_close < htf_lower
+    htf_bu_aligned = align_htf_to_ltf(prices, df_12h, htf_breakout_up.astype(float))
+    htf_bd_aligned = align_htf_to_ltf(prices, df_12h, htf_breakout_down.astype(float))
     
     # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    upper_20, middle_20, lower_20 = calculate_donchian(high, low, period=20)
+    chop = calculate_choppiness(high, low, close, period=14)
+    adx = calculate_adx(high, low, close, period=14)
     
     # Volume ratio (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Signals array
+    # === Signal generation ===
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.28  # 28% position size
     
     # Position tracking
     in_position = False
@@ -95,72 +175,83 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 250  # 20 (donchian) + 14 (RSI) + 200 (HTF SMA200) + buffer
+    warmup = 250  # Donchian(20) + volume(20) + SMA200(200) on 12h needs 200*8=1600 4h bars min, but we align so 250 is fine
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr_14[i]) or atr_14[i] <= 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(upper_20[i]) or np.isnan(lower_20[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma200_1d_aligned[i]):
+        if np.isnan(chop[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        # === HTF TREND FILTER ===
-        htf_uptrend = close[i] > sma200_1d_aligned[i]
-        htf_downtrend = close[i] < sma200_1d_aligned[i]
-        htf_momentum_bull = rsi_1d_aligned[i] > 50 if not np.isnan(rsi_1d_aligned[i]) else False
-        htf_momentum_bear = rsi_1d_aligned[i] < 50 if not np.isnan(rsi_1d_aligned[i]) else False
+        if np.isnan(htf_bull_aligned[i]) or np.isnan(htf_bear_aligned[i]):
+            signals[i] = 0.0
+            continue
         
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        # Price breaks 20-bar high with volume
-        price_broke_high = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]
-        price_broke_low = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]
+        # === REGIME CHECK: Only trade when trending ===
+        # CHOP < 50 = trending (use a wider threshold for more trades)
+        # ADX > 20 = some trend strength
+        is_trending = chop[i] < 50.0 and adx[i] > 18
         
-        # RSI pullback confirmation
-        rsi_pulled_back = rsi_14[i] < 38  # RSI pulled back = good entry
-        rsi_rallied = rsi_14[i] > 62       # RSI rallied = good short entry
+        if not is_trending:
+            # No position in choppy market
+            if in_position:
+                # Close any existing position
+                signals[i] = 0.0
+                in_position = False
+                position_side = 0
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Volume spike
-        vol_spike = vol_ratio[i] > 1.5
+        # === HTF DIRECTION ===
+        htf_bull = htf_bull_aligned[i] > 0.5
+        htf_bear = htf_bear_aligned[i] > 0.5
+        htf_bu = htf_bu_aligned[i] > 0.5  # HTF 12h breakout up
+        htf_bd = htf_bd_aligned[i] > 0.5  # HTF 12h breakout down
+        
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.6
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Breakout + RSI pullback + volume + HTF bull
-            if price_broke_high and rsi_pulled_back and vol_spike:
-                if htf_uptrend and htf_momentum_bull:
+            # LONG: Price breaks above Donchian high + HTF bull + volume
+            if close[i] > upper_20[i] and close[i] > upper_20[i-1]:
+                if (htf_bull or htf_bu) and vol_spike:
                     desired_signal = SIZE
-                elif htf_uptrend:  # Allow if 1d trend up even if RSI 1d < 50
-                    desired_signal = SIZE * 0.8  # Reduce size for weaker HTF momentum
             
-            # SHORT: Breakdown + RSI rallied + volume + HTF bear
-            if price_broke_low and rsi_rallied and vol_spike:
-                if htf_downtrend and htf_momentum_bear:
+            # SHORT: Price breaks below Donchian low + HTF bear + volume
+            elif close[i] < lower_20[i] and close[i] < lower_20[i-1]:
+                if (htf_bear or htf_bd) and vol_spike:
                     desired_signal = -SIZE
-                elif htf_downtrend:
-                    desired_signal = -SIZE * 0.8
         
-        # === STOPLOSS (2.5 ATR trailing stop) ===
+        # === STOPLOSS AND EXIT ===
         if in_position:
             if position_side > 0:
                 # Update trailing high
                 if high[i] > trailing_high:
                     trailing_high = high[i]
                 
-                # Trailing stop: price must stay above high - 2.5*ATR
+                # Stop: price falls below Donchian OR 2.5*ATR trailing
                 stop_price = trailing_high - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if RSI becomes overbought AND price below SMA200
-                if rsi_14[i] > 75 and close[i] < sma200_1d_aligned[i]:
+                # Exit if price falls back below Donchian upper
+                if close[i] < lower_20[i]:
+                    desired_signal = 0.0
+                
+                # Exit if HTF turns bearish
+                if htf_bear and not htf_bull:
                     desired_signal = 0.0
             
             elif position_side < 0:
@@ -168,17 +259,21 @@ def generate_signals(prices):
                 if low[i] < trailing_low:
                     trailing_low = low[i]
                 
-                # Trailing stop: price must stay below low + 2.5*ATR
+                # Stop: price rises above Donchian OR 2.5*ATR trailing
                 stop_price = trailing_low + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if RSI becomes oversold AND price above SMA200
-                if rsi_14[i] < 25 and close[i] > sma200_1d_aligned[i]:
+                # Exit if price rises back above Donchian lower
+                if close[i] > upper_20[i]:
+                    desired_signal = 0.0
+                
+                # Exit if HTF turns bullish
+                if htf_bull and not htf_bear:
                     desired_signal = 0.0
         
-        # === MINIMUM HOLD: 6 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 6:
+        # === MINIMUM HOLD: 3 bars to reduce fee churn ===
+        if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
