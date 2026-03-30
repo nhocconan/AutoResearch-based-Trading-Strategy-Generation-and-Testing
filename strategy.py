@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #005: 12h Donchian Breakout + 1d EMA Trend + Volume
+Experiment #022: 4h Donchian + Choppiness Regime + Volume Spike
 
-HYPOTHESIS: 12h timeframe with 2 conditions (breakout + 1d trend) + volume.
-The previous 12h attempts failed because:
-- #011: 0 trades (3 filters too strict)
-- #017: 18 trades (still too strict)
+HYPOTHESIS: Choppiness Index is the proven meta-regime filter from DB winners.
+- CHOP > 61.8 = choppy/range → NO entries (avoid false breakouts)
+- CHOP < 50 = trending → allow entries
 
-This uses 2 conditions only:
-1. Donchian(10) breakout on 12h (faster = more signals)
-2. 1d EMA8 for trend direction
-3. Volume > 1.3x avg (mild filter, not strict spike)
+WHY IT SHOULD WORK IN BOTH MARKETS:
+1. CHOP filters out choppy periods where breakouts fail (2022 crash was choppy at 4h)
+2. Donchian(16) captures structural breaks (20 bars = ~3.3 days, reasonable frequency)
+3. Volume spike confirms the breakout is institutional
+4. 4h timeframe proven to avoid fee drag (vs 15m/30m)
 
-ESTIMATED TRADES: 
-- Donchian(10) 12h: ~1 per 10 bars = ~292/year
-- Volume filter cuts 40%: ~175/year  
-- 1d trend filter cuts 50%: ~87/year
-- Stop-loss will exit ~50% early
-- Final: ~40-60/year = 160-240 total over 4 years (slightly high but OK)
+ENTRY CONDITIONS (2 conditions + volume):
+- CHOP < 50 (not choppy)
+- Donchian(16) breakout (prior bar close breaks outside prior 15-bar range)
+- Volume > 1.5x 20-bar MA
 
-WHY IT SHOULD WORK:
-- 12h captures structural moves without 15m/30m noise
-- 1d EMA8 aligns with daily trend (not too slow)
-- Donchian(10) catches quick mean-reversion breakouts
-- Works in both bull (trend following) and bear (breakout reversion)
+TRADE COUNT ESTIMATE:
+- 4h bars/4yr ≈ 8760
+- Donchian(16) breakout: ~1 per 30-50 bars = ~175-290 raw signals
+- CHOP < 50 filter: ~50% of bars qualify = ~87-145
+- Volume spike filter: ~40% pass = ~35-58 trades/symbol
+- SAFE RANGE: 35-60 trades over 4 years per symbol
+
+This is on the lower end but ACCEPTABLE if Sharpe > 0.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian10_1d_ema8_vol_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_chop_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,30 +48,54 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_chop(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP) - vectorized
+    - Values > 61.8 indicate choppy/range market (avoid entries)
+    - Values < 38.2 indicate strong trending
+    - Values < 50 indicate not choppy (allow entries)
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    # Precompute rolling high/low using numpy stride tricks or simple loop
+    for i in range(period, n):
+        period_high = high[i-period+1:i+1].max()
+        period_low = low[i-period+1:i+1].min()
+        
+        if period_high > period_low:
+            # Sum of ATR-like ranges
+            sum_tr = 0.0
+            for j in range(i-period+1, i+1):
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+                sum_tr += tr
+            
+            if period_high != period_low:
+                chop[i] = 100 * np.log10(sum_tr / (period_high - period_low)) / np.log10(period)
+    
+    return chop
+
 def generate_signals(prices):
-    close = prices["close"].values
-    high = prices["high"].values
-    low = prices["low"].values
-    volume = prices["volume"].values
+    close = prices["close"].values.astype(np.float64)
+    high = prices["high"].values.astype(np.float64)
+    low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Load 1d HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
-    
-    # 1d EMA8 for trend direction (align to 12h)
-    htf_ema8 = pd.Series(df_1d['close'].values).ewm(span=8, min_periods=8, adjust=False).mean().values
-    ema8_aligned = align_htf_to_ltf(prices, df_1d, htf_ema8)
-    
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Donchian Channel(10) - faster breakout detection
-    donchian_upper = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    donchian_lower = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Choppiness Index - regime filter
+    chop = calculate_chop(high, low, close, period=14)
     
-    # Volume average (15 bars) for spike detection
-    vol_ma = pd.Series(volume).rolling(window=15, min_periods=15).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    # Donchian Channel(16) - price structure
+    # Use 16 period to get breakout signals more frequently
+    donchian_upper = pd.Series(high).rolling(window=16, min_periods=16).max().values
+    donchian_lower = pd.Series(low).rolling(window=16, min_periods=16).min().values
+    
+    # Volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
     # === Signals ===
     signals = np.zeros(n)
@@ -83,7 +108,7 @@ def generate_signals(prices):
     entry_atr = 0.0
     entry_bar = 0
     
-    warmup = 50  # Enough for Donchian10, ATR14, EMA8 alignment
+    warmup = 50  # Enough for Donchian16, ATR14, CHOP14
     
     for i in range(warmup, n):
         # NaN checks
@@ -91,63 +116,69 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            continue
+        
         if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema8_aligned[i]):
-            signals[i] = 0.0
-            continue
+        # === REGIME FILTER: CHOP < 50 (not choppy) ===
+        choppy_market = chop[i] > 50.0
         
-        # === TREND DIRECTION: 1d EMA8 ===
-        bull_trend = close[i] > ema8_aligned[i]
-        bear_trend = close[i] < ema8_aligned[i]
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === VOLUME CONFIRMATION (mild: 1.3x) ===
-        vol_confirm = vol_ratio[i] > 1.3
+        # === DONCHIAN BREAKOUT (prior bar's range) ===
+        # Get prior bar's channel values
+        prev_upper = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
+        prev_lower = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
         
-        # === DONCHIAN BREAKOUT (use prior bar's channel) ===
-        prev_high_9 = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
-        prev_low_9 = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
+        # Bullish breakout: close above prior bar's upper channel
+        bullish_breakout = (not np.isnan(prev_upper) and close[i] > prev_upper)
         
-        # Bullish breakout: close above prior 9-bar high
-        bullish_breakout = (not np.isnan(prev_high_9) and close[i] > prev_high_9)
+        # Bearish breakout: close below prior bar's lower channel
+        bearish_breakout = (not np.isnan(prev_lower) and close[i] < prev_lower)
         
-        # Bearish breakout: close below prior 9-bar low
-        bearish_breakout = (not np.isnan(prev_low_9) and close[i] < prev_low_9)
-        
-        # === MINIMUM HOLD: 2 bars to reduce fee churn ===
-        min_hold_bars = (i - entry_bar) >= 2 if in_position else True
+        # === MINIMUM HOLD: 2 bars ===
+        min_hold = (i - entry_bar) >= 2
         
         # === EXITS ===
         if in_position:
             # Stop-loss: 2.5 ATR from entry
             if position_side > 0:
-                stop_price = entry_price - 2.5 * entry_atr
-                stop_hit = low[i] < stop_price
+                stop_hit = low[i] < (entry_price - 2.5 * entry_atr)
             else:
-                stop_price = entry_price + 2.5 * entry_atr
-                stop_hit = high[i] > stop_price
+                stop_hit = high[i] > (entry_price + 2.5 * entry_atr)
             
-            # Trend exit: price crosses 1d EMA8
-            trend_exit = (position_side > 0 and close[i] < ema8_aligned[i]) or \
-                        (position_side < 0 and close[i] > ema8_aligned[i])
+            # Exit on opposite breakout (trend reversal)
+            reversal_exit = (position_side > 0 and bearish_breakout) or \
+                           (position_side < 0 and bullish_breakout)
             
             if stop_hit:
+                # Stopped out
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
-            elif min_hold_bars and trend_exit:
+            elif min_hold and reversal_exit:
+                # Trend reversal - exit
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
             else:
+                # Maintain position
                 signals[i] = position_side * SIZE
         
         # === NEW POSITIONS ===
         if not in_position:
-            # LONG: Bullish breakout + volume confirm + bull trend
-            if bullish_breakout and vol_confirm and bull_trend:
+            # Skip if choppy market
+            if choppy_market:
+                signals[i] = 0.0
+                continue
+            
+            # LONG: Bullish breakout + volume spike
+            if bullish_breakout and vol_spike:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -155,13 +186,15 @@ def generate_signals(prices):
                 entry_bar = i
                 signals[i] = SIZE
             
-            # SHORT: Bearish breakout + volume confirm + bear trend
-            elif bearish_breakout and vol_confirm and bear_trend:
+            # SHORT: Bearish breakout + volume spike
+            elif bearish_breakout and vol_spike:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 signals[i] = -SIZE
+            else:
+                signals[i] = 0.0
     
     return signals
