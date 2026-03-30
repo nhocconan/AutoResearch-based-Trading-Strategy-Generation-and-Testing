@@ -1,32 +1,86 @@
 #!/usr/bin/env python3
 """
-Experiment #004: 1d Donchian(30) + Weekly Trend + Volume Spike
+Experiment #005: 12h Williams %R + KAMA Trend + Volume Confluence
 
-HYPOTHESIS: 1d strategies fail with too few trades because they use short
-Donchian periods. By using Donchian(30), we naturally get 2-3 breakouts/month
-= 100-144 over 4 years (target range). Combined with weekly trend filter
-and volume spike confirmation, this should generate quality signals.
+HYPOTHESIS: Williams %R catches momentum reversals better than RSI because
+it measures position within the range, not rate of change. Combined with
+KAMA (adaptive smoothing) and volume confirmation, this should work in
+bull, bear, and range markets.
 
-WHY IT WORKS:
-- Donchian(30) = 1-month high/low breakout - captures major moves
-- Weekly EMA(21) trend = smooths daily noise, confirms direction
-- Volume spike (>2x 20d MA) = institutional involvement
-- 1d TF = fewer signals = less fee drag = better Sharpe on test
-- ATR stoploss adapts to volatility regime
+WHY IT SHOULD WORK:
+- Bull: %R oversold + KAMA up = strong reversal long
+- Bear: %R overbought + KAMA down = continuation short
+- Range: %R extremes + volume spike = mean reversion works
 
-EXPECTED: 80-120 total trades over 4 years (20-30/year)
-SIZE: 0.30 (discrete, survives 2022 crash with <25% drawdown)
+KEY DIFFERENCES FROM FAILED STRATEGIES:
+- Williams %R (not RSI/CRSI) = different signal source
+- KAMA (not EMA) = adaptive smoothing reduces lag
+- Tighter entry: requires BOTH %R extreme AND volume spike
+- ATR-based regime filter: scale down in high volatility
+
+TARGET: 75-150 total trades over 4 years (19-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian30_weekly_trend_v1"
-timeframe = "1d"
+name = "mtf_12h_williams_kama_vol_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R - momentum oscillator measuring position within N-period range"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    wr = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        if highest_high[i] != lowest_low[i]:
+            wr[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
+    
+    return wr
+
+def calculate_kama(close, period=21, fast_ema=2, slow_ema=30):
+    """
+    Kaufman Adaptive Moving Average
+    Adapts to market volatility - fast in trending, slow in ranging
+    """
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    # Calculate Efficiency Ratio (ER)
+    er = np.full(n, np.nan)
+    direction = np.abs(close[period:] - close[:-period])
+    volatility = np.abs(close[period:] - close[:-1])
+    vol_sum = np.zeros(n)
+    
+    for i in range(period, n):
+        vol_sum[i] = np.sum(volatility[i - period + 1:i + 1])
+        if vol_sum[i] > 0:
+            er[i] = direction[i] / vol_sum[i]
+    
+    # Calculate smoothing constants
+    fast_const = 2 / (fast_ema + 1)
+    slow_const = 2 / (slow_ema + 1)
+    smoothing = er * (fast_const - slow_const) + slow_const
+    smoothing_squared = smoothing * smoothing
+    
+    kama = np.full(n, np.nan)
+    kama[period] = close[period]
+    
+    for i in range(period + 1, n):
+        if not np.isnan(smoothing_squared[i]):
+            kama[i] = kama[i - 1] + smoothing_squared[i] * (close[i] - kama[i - 1])
+    
+    return kama
+
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range for stoploss"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -39,15 +93,10 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=30):
-    """Donchian Channel - longer period for 1d"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_volume_ratio(volume, period=20):
+    """Volume relative to moving average"""
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return volume / np.where(vol_ma > 0, vol_ma, 1)
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -57,25 +106,23 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA(21) for trend
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # 1d KAMA for trend direction
+    kama_21_1d = calculate_kama(df_1d['close'].values, period=21)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_21_1d)
     
-    # === Local 1d indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_up, donchian_lo = calculate_donchian(high, low, period=30)
+    williams_r = calculate_williams_r(high, low, close, period=14)
+    vol_ratio = calculate_volume_ratio(volume, period=20)
     
-    # Volume ratio (20-period MA for daily = ~1 month)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # === Precompute daily EMA(50) for medium-term trend ===
-    ema_50_daily = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # ATR regime: high volatility = reduce position
+    atr_ma = pd.Series(atr_14).rolling(window=30, min_periods=30).mean().values
+    atr_regime = atr_14 / np.where(atr_ma > 0, atr_ma, 1)  # >1.5 = high vol
     
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.28  # Base position size
     
     # Position tracking
     in_position = False
@@ -86,7 +133,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 100  # Need 30 for Donchian + 50 for EMA50 + 20 for vol MA
+    warmup = 250  # Need 200 for any rolling + 14 for Williams R + 20 for volume MA
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -94,80 +141,66 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_up[i]) or np.isnan(donchian_lo[i]):
+        if np.isnan(williams_r[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_aligned[i]):
+        if np.isnan(kama_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_50_daily[i]):
-            signals[i] = 0.0
-            continue
+        # === REGIME CHECKS ===
+        wr_value = williams_r[i]
+        vol_spike = vol_ratio[i] > 1.5
+        atr_scale = 1.0 if atr_regime[i] < 1.3 else 0.7  # Reduce in high vol
         
-        # === TREND DIRECTION ===
-        # Weekly EMA: HTF trend
-        weekly_trend_up = close[i] > ema_aligned[i]
-        weekly_trend_down = close[i] < ema_aligned[i]
+        # === 1d TREND: KAMA direction ===
+        kama_trend_up = close[i] > kama_aligned[i]
+        kama_trend_down = close[i] < kama_aligned[i]
         
-        # Daily EMA(50): medium-term trend (confluence with weekly)
-        daily_trend_up = close[i] > ema_50_daily[i]
-        daily_trend_down = close[i] < ema_50_daily[i]
-        
-        # Strong trend = both weekly and daily agree
-        strong_uptrend = weekly_trend_up and daily_trend_up
-        strong_downtrend = weekly_trend_down and daily_trend_down
-        
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 2.0  # Require 2x average volume
-        
-        # === DONCHIAN(30) BREAKOUT ===
-        prev_donchian_up = donchian_up[i - 1]
-        prev_donchian_lo = donchian_lo[i - 1]
-        
-        # Breakout = close above/below previous period's channel
-        breakout_up = close[i] > prev_donchian_up
-        breakout_down = close[i] < prev_donchian_lo
+        # === WILLIAMS %R SIGNALS ===
+        # Oversold: %R < -80 (reversal long potential)
+        # Overbought: %R > -20 (reversal short potential)
+        # Neutral: -80 to -20
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Strong trend + breakout up + volume spike ===
-            if breakout_up and strong_uptrend and vol_spike:
-                desired_signal = SIZE
+            # === LONG: %R oversold + KAMA up + volume spike ===
+            if wr_value < -80 and kama_trend_up and vol_spike:
+                desired_signal = SIZE * atr_scale
             
-            # === LONG: Strong trend + breakout up (no volume, but very clean signal) ===
-            elif breakout_up and strong_uptrend and close[i] > donchian_up[i] * 1.01:
-                desired_signal = SIZE * 0.8  # Smaller without volume confirm
+            # === LONG: Extreme oversold + strong trend (smaller size, no vol) ===
+            elif wr_value < -90 and kama_trend_up:
+                desired_signal = SIZE * 0.6 * atr_scale
             
-            # === SHORT: Strong trend + breakout down + volume spike ===
-            if breakout_down and strong_downtrend and vol_spike:
-                desired_signal = -SIZE
+            # === SHORT: %R overbought + KAMA down + volume spike ===
+            if wr_value > -20 and kama_trend_down and vol_spike:
+                desired_signal = -SIZE * atr_scale
             
-            # === SHORT: Strong trend + breakout down (no volume, but very clean signal) ===
-            elif breakout_down and strong_downtrend and close[i] < donchian_lo[i] * 0.99:
-                desired_signal = -SIZE * 0.8
+            # === SHORT: Extreme overbought + strong trend (smaller size, no vol) ===
+            elif wr_value > -10 and kama_trend_down:
+                desired_signal = -SIZE * 0.6 * atr_scale
         
-        # === STOPLOSS AND EXIT ===
+        # === STOPLOSS (2.5 ATR) ===
         if in_position:
             if position_side > 0:
                 # Update highest high since entry
                 if i == entry_bar or high[i] > highest_since_entry:
                     highest_since_entry = high[i]
                 
-                # Trailing stop: 3x ATR
-                stop_price = highest_since_entry - 3.0 * entry_atr
+                # Trailing stop
+                stop_price = highest_since_entry - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if weekly trend flips
-                if weekly_trend_down:
+                # Exit if KAMA trend flips
+                if kama_trend_down:
                     desired_signal = 0.0
                 
-                # Exit if price drops below daily EMA(50) significantly
-                if close[i] < ema_50_daily[i] * 0.97:
+                # Exit if %R reaches overbought without continuation
+                if wr_value > -20 and vol_ratio[i] < 1.0:
                     desired_signal = 0.0
             
             elif position_side < 0:
@@ -175,21 +208,21 @@ def generate_signals(prices):
                 if i == entry_bar or low[i] < lowest_since_entry:
                     lowest_since_entry = low[i]
                 
-                # Trailing stop: 3x ATR
-                stop_price = lowest_since_entry + 3.0 * entry_atr
+                # Trailing stop
+                stop_price = lowest_since_entry + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if weekly trend flips
-                if weekly_trend_up:
+                # Exit if KAMA trend flips
+                if kama_trend_up:
                     desired_signal = 0.0
                 
-                # Exit if price rises above daily EMA(50) significantly
-                if close[i] > ema_50_daily[i] * 1.03:
+                # Exit if %R reaches oversold without continuation
+                if wr_value < -80 and vol_ratio[i] < 1.0:
                     desired_signal = 0.0
         
-        # === MINIMUM HOLD: 2 bars (avoid fee churn on false breakouts) ===
-        if in_position and (i - entry_bar) < 2:
+        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
+        if in_position and (i - entry_bar) < 4:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
