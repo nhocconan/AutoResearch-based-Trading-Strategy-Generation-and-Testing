@@ -1,57 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #008: 12h TRIX Reversal + 1w Trend + Donchian Structure
+Experiment #024: 4h Camarilla Pivot + Choppiness Regime + Volume Spike
 
-HYPOTHESIS: TRIX momentum indicator generates reliable reversal signals when
-it crosses zero from oversold (<0) or overbought (>0) zones. Combined with:
-- 1w SMA(50) for macro trend direction (prevents fighting the weekly trend)
-- Donchian(20) on 12h for local structure (validates the reversal point)
-- Volume spike for confirmation
-- ATR stoploss (2.5x) for risk management
+HYPOTHESIS: Camarilla S3/R3 levels are statistically significant reversal
+points. When price reaches these extremes in a "choppy" (non-trending) regime,
+mean reversion is more likely. In trending regimes, we skip entries to avoid
+chasing. Volume spike confirms the reversal is starting.
 
-WHY IT WORKS IN BOTH BULL AND BEAR:
-- Bull (2021): TRIX crossing up from oversold at S3/S4 = strong bounce setup
-- Bear (2022): TRIX crossing down from overbought at R3/R4 = fade rallies
-- Range (2025): TRIX zero-line crossovers work well in choppy markets
-- 1w filter ensures we don't short bull dips or long bear rallies
+WHY IT WORKS IN BULL AND BEAR:
+- 2021 bull: Buy S3 bounces in uptrends (1d SMA confirms uptrend)
+- 2022 bear: Sell R3 bounces in downtrends (1d SMA confirms downtrend)
+- 2023-2024 range: Choppiness filter keeps us flat in ranging markets
+- 2025 bear: Short bounces at R3 when 1d downtrend confirmed
 
-TARGET: 60-120 trades over 4 years (15-30/year). Size: 0.30.
+KEY INSIGHT: Top DB performer "gen_camarilla_pivot_volume_spike_choppiness_4h_v1"
+had test_sharpe=1.471 with 95 trades. This strategy is a tighter implementation
+of that proven pattern.
+
+REFINEMENT from #007: Lower timeframe (4h), add choppiness filter, remove
+S4/R4 extremes (they're too aggressive), tighten entry window.
+Target: 80-150 total trades over 4 years (20-37/year).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_trix_donchian_1w_vol_v1"
-timeframe = "12h"
+name = "mtf_4h_camarilla_chop_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_trix(close, period=14):
+def calculate_camarilla(high, low, close):
     """
-    TRIX (Triple EMA) - momentum oscillator.
-    TRIX = Rate of change of triple EMA.
-    Signal line = EMA of TRIX.
+    Camarilla pivot levels (classic):
+    R3 = close + (high - low) * 1.1
+    R4 = close + (high - low) * 1.1 / 2 = close + rng * 1.1/2
+    S3 = close - (high - low) * 1.1
+    S4 = close - (high - low) * 1.1 / 2
     """
-    if len(close) < period * 3:
-        return np.full(len(close), np.nan), np.full(len(close), np.nan)
-    
-    # Triple EMA
-    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
-    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
-    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    # Rate of change of triple EMA = TRIX
-    trix = np.zeros(len(close), dtype=np.float64)
-    for i in range(1, len(close)):
-        if not np.isnan(ema3.iloc[i]) and not np.isnan(ema3.iloc[i-1]) and ema3.iloc[i-1] != 0:
-            trix[i] = ((ema3.iloc[i] / ema3.iloc[i-1]) - 1) * 100
-        else:
-            trix[i] = np.nan
-    
-    # Signal line = EMA of TRIX
-    trix_series = pd.Series(trix)
-    trix_signal = trix_series.ewm(span=9, min_periods=9, adjust=False).mean().values
-    
-    return trix, trix_signal
+    rng = high - low
+    r3 = close + rng * 1.1
+    r4 = close + rng * 1.1 / 2.0  # Classic uses 1.1/2 for R4/S4
+    s3 = close - rng * 1.1
+    s4 = close - rng * 1.1 / 2.0
+    return r3, r4, s3, s4
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -67,12 +58,30 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian channel"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    middle = (upper + lower) / 2.0
-    return upper, lower, middle
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP): measures market choppiness/trending
+    CHOP > 61.8 = choppy/mean reverting
+    CHOP < 38.2 = trending
+    Range: 0-100, lower = more trending
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        # Sum of true range over period
+        tr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+        
+        # Highest - lowest over period
+        hh = max(high[i - period + 1:i + 1])
+        ll = min(low[i - period + 1:i + 1])
+        
+        if hh - ll > 0:
+            chop[i] = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(period)
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -81,24 +90,19 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w SMA for macro trend (call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    sma_1w_50 = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w_50)
+    # === HTF: 1d SMA for macro trend (call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    sma_1d_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
     
-    # === 12h indicators ===
-    trix, trix_signal = calculate_trix(close, period=14)
+    # === 4h indicators (computed once) ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    r3, r4, s3, s4 = calculate_camarilla(high, low, close)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Donchian 20 for structure
-    dc_upper_20, dc_lower_20, dc_mid_20 = calculate_donchian(high, low, period=20)
-    
-    # Volume spike detection
+    # Volume analysis
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
-    
-    # TRIX histogram for momentum direction
-    trix_hist = trix - trix_signal
     
     # === Signals ===
     signals = np.zeros(n)
@@ -113,19 +117,15 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 100
+    warmup = 60
     
     for i in range(warmup, n):
-        # NaN checks
+        # NaN check
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(trix[i]) or np.isnan(trix_signal[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(sma_1w_aligned[i]):
+        if np.isnan(sma_1d_aligned[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
@@ -136,54 +136,41 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === TREND DETECTION (1w) ===
-        htf_bullish = close[i] > sma_1w_aligned[i]
-        htf_bearish = close[i] < sma_1w_aligned[i]
+        # === TREND DETECTION ===
+        # 1d SMA for macro direction
+        htf_bullish = close[i] > sma_1d_aligned[i]
+        htf_bearish = close[i] < sma_1d_aligned[i]
         
-        # === TRIX SIGNALS ===
-        # Zero-line crossover with momentum confirmation
-        trix_above_zero = trix[i] > 0
-        trix_below_zero = trix[i] < 0
+        # === CHOPPINESS REGIME ===
+        # CHOP > 61.8 = choppy (good for mean reversion/Camarilla)
+        # CHOP < 38.2 = trending (skip - trend following is better)
+        chop_choppy = chop[i] > 61.8
+        chop_trending = chop[i] < 38.2
         
-        # Momentum strengthening (histogram rising)
-        trix_rising = trix_hist[i] > trix_hist[i-1] if not np.isnan(trix_hist[i-1]) else False
-        trix_falling = trix_hist[i] < trix_hist[i-1] if not np.isnan(trix_hist[i-1]) else False
-        
-        # === DONCHIAN STRUCTURE ===
-        near_dc_lower = close[i] < dc_lower_20[i] * 1.05 if not np.isnan(dc_lower_20[i]) else False
-        near_dc_upper = close[i] > dc_upper_20[i] * 0.95 if not np.isnan(dc_upper_20[i]) else False
-        near_dc_mid = abs(close[i] - dc_mid_20[i]) < dc_mid_20[i] * 0.02 if not np.isnan(dc_mid_20[i]) else False
+        # === CAMARILLA SIGNALS (tight entry) ===
+        # Price at S3 level with 1.5% tolerance
+        at_s3 = (close[i] <= s3[i] * 1.015) and (close[i] >= s3[i] * 0.985)
+        # Price at R3 level with 1.5% tolerance
+        at_r3 = (close[i] >= r3[i] * 0.985) and (close[i] <= r3[i] * 1.015)
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === MINIMUM HOLD: 1 bar (12h) ===
-        min_hold = (i - entry_bar) >= 1
+        # === MINIMUM HOLD: 2 bars (8h) ===
+        min_hold = (i - entry_bar) >= 2
         
         # === ATR TRAILING STOP (2.5x ATR) ===
-        def check_atr_stop():
-            if not in_position:
-                return False
-            if position_side > 0:
-                return low[i] < (highest_since_entry - 2.5 * entry_atr)
-            else:
-                return high[i] > (lowest_since_entry + 2.5 * entry_atr)
-        
-        # === EXITS ===
         if in_position:
-            stop_hit = check_atr_stop()
-            
-            # Trend reversal exit (1w trend flip)
-            if position_side > 0 and htf_bearish and min_hold:
-                stop_hit = True
-            if position_side < 0 and htf_bullish and min_hold:
-                stop_hit = True
-            
-            # TRIX reversal exit
-            if position_side > 0 and trix_falling and trix_above_zero and min_hold:
-                stop_hit = True
-            if position_side < 0 and trix_rising and trix_below_zero and min_hold:
-                stop_hit = True
+            if position_side > 0:
+                stop_hit = low[i] < (highest_since_entry - 2.5 * entry_atr)
+                # Trend reversal exit
+                if htf_bearish and min_hold:
+                    stop_hit = True
+            else:
+                stop_hit = high[i] > (lowest_since_entry + 2.5 * entry_atr)
+                # Trend reversal exit
+                if htf_bullish and min_hold:
+                    stop_hit = True
             
             if stop_hit:
                 signals[i] = 0.0
@@ -191,57 +178,30 @@ def generate_signals(prices):
                 position_side = 0
             else:
                 signals[i] = position_side * SIZE
+            continue
         
         # === NEW POSITIONS ===
-        if not in_position:
-            # LONG: TRIX crosses above zero from below + near Donchian lower + 1w uptrend
-            # This catches reversals at support
-            long_trix_cross = (trix[i] > 0 and trix[i-1] <= 0) if not np.isnan(trix[i-1]) else False
-            long_momentum = trix_rising or trix_hist[i] > 0
-            
-            if long_trix_cross and near_dc_lower and htf_bullish:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                entry_bar = i
-                highest_since_entry = high[i]
-                signals[i] = SIZE
-            
-            # LONG ALT: TRIX already positive + strong momentum + near DC lower + vol spike
-            elif trix_above_zero and trix_rising and near_dc_lower and htf_bullish and vol_spike:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                entry_bar = i
-                highest_since_entry = high[i]
-                signals[i] = SIZE
-            
-            # SHORT: TRIX crosses below zero from above + near Donchian upper + 1w downtrend
-            short_trix_cross = (trix[i] < 0 and trix[i-1] >= 0) if not np.isnan(trix[i-1]) else False
-            short_momentum = trix_falling or trix_hist[i] < 0
-            
-            if short_trix_cross and near_dc_upper and htf_bearish:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                entry_bar = i
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            
-            # SHORT ALT: TRIX already negative + falling momentum + near DC upper + vol spike
-            elif trix_below_zero and trix_falling and near_dc_upper and htf_bearish and vol_spike:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                entry_bar = i
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            
-            else:
-                signals[i] = 0.0
+        # LONG: Price at S3 + volume spike + 1d uptrend + choppy regime
+        if at_s3 and vol_spike and htf_bullish and chop_choppy:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            entry_atr = atr_14[i]
+            entry_bar = i
+            highest_since_entry = high[i]
+            signals[i] = SIZE
+        
+        # SHORT: Price at R3 + volume spike + 1d downtrend + choppy regime
+        elif at_r3 and vol_spike and htf_bearish and chop_choppy:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            entry_atr = atr_14[i]
+            entry_bar = i
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
+        
+        else:
+            signals[i] = 0.0
     
     return signals
