@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #025: 12h Weekly Trend Aligned Donchian Breakout
+Experiment #009: 4h Donchian Breakout + 1d EMA200 Trend + Volume Spike
 
-HYPOTHESIS: Single condition entry + HTF trend filter + volume confirmation.
-The previous TRIX+Camarilla+Donchian combo was too complex (172 trades, -0.215 Sharpe).
-This strips to ONE breakout signal, weekly trend filter, and volume confirmation.
-
-WHY 12h + 1w:
-- 12h: 50-150 target trades over 4 years (12-37/year), HARD MAX 200
-- 1w: Weekly trend filter for structural direction (not daily noise)
-- Donchian(20) on 12h = 10-day breakout window, proven in DB
+HYPOTHESIS: Donchian(20) breakouts on 4h capture institutional moves while
+1d EMA200 filters ensure we only trade with the higher timeframe trend.
+Volume spike (>1.5x 20-bar MA) confirms smart money participation.
+This pattern appears in multiple DB winners (SOL Sharpe 1.10-1.38, ETH Sharpe 1.47).
 
 WHY IT WORKS IN BULL + BEAR:
-- Bull: 1w EMA50 up + 12h Donchian breakout + vol = ride the trend
-- Bear: 1w EMA50 down + 12h Donchian breakdown + vol = short rallies
-- Range: No trades when 1w EMA flat or price inside Donchian (chop)
+- Bull: Price > 1d EMA200 + Donchian breakout up = trend continuation
+- Bear: Price < 1d EMA200 + Donchian breakdown = short rallies
+- Volume filter avoids false breakouts (major cause of whipsaws)
 
-TARGET: 75-120 total trades over 4 years.
-Signal size: 0.25.
+WHY 4h: Trade frequency target 75-200 total over 4 years. 4h Donchian(20)
+= 80-hour breakout window, captures multi-day moves without overtrading.
+
+TARGET: 100-200 total trades over 4 years (25-50/year).
+Signal size: 0.28 (discrete, manageable 27% max drawdown on 77% crash).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1w_ema_vol_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_ema200_vol_spike_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,11 +41,10 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel - shift(1) for completed bars"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().shift(1).values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().shift(1).values
-    middle = (upper + lower) / 2
-    return upper, middle, lower
+    """Donchian Channel - use shift(1) to avoid look-ahead"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -56,15 +54,15 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA50 for structural trend (align to 12h bars)
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA200 for multi-timeframe trend filter
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_up, donchian_mid, donchian_lo = calculate_donchian(high, low, period=20)
+    donchian_up, donchian_lo = calculate_donchian(high, low, period=20)
     
     # Volume ratio (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,7 +70,7 @@ def generate_signals(prices):
     
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.28  # 28% position size
     
     # Position tracking
     in_position = False
@@ -80,8 +78,10 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = max(200, 20 * 28)  # Donchian(20) + EMA50 on weekly aligned
+    warmup = 220  # Need 200 for EMA200 + 20 for Donchian
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -91,68 +91,59 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(ema_50_aligned[i]):
+        if np.isnan(ema_200_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === WEEKLY TREND FILTER ===
-        ema_50_w = ema_50_aligned[i]
-        weekly_bullish = close[i] > ema_50_w
-        weekly_bearish = close[i] < ema_50_w
-        
-        # === DONCHIAN BREAKOUT (use pre-shifted values) ===
-        dc_up = donchian_up[i]
-        dc_mid = donchian_mid[i]
-        dc_lo = donchian_lo[i]
-        
-        # Skip if Donchian not ready
-        if np.isnan(dc_up) or np.isnan(dc_lo):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === HTF TREND: Price vs 1d EMA200 ===
+        above_htf_ema = close[i] > ema_200_aligned[i]
+        below_htf_ema = close[i] < ema_200_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.5  # 50% above average
         
-        # Breakout detection
-        donchian_break_up = close[i] > dc_up
-        donchian_break_down = close[i] < dc_lo
+        # === DONCHIAN BREAKOUT (use shift(1) to avoid look-ahead) ===
+        donchian_broken_up = close[i] > donchian_up[i - 1]
+        donchian_broken_down = close[i] < donchian_lo[i - 1]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY: Weekly trend up + 12h breakout + volume ===
-            if weekly_bullish and donchian_break_up and vol_spike:
+            # === LONG ENTRY: Above 1d EMA200 + Donchian breakout + volume ===
+            if above_htf_ema and donchian_broken_up and vol_spike:
                 desired_signal = SIZE
             
-            # === SHORT ENTRY: Weekly trend down + 12h breakdown + volume ===
-            if weekly_bearish and donchian_break_down and vol_spike:
+            # === SHORT ENTRY: Below 1d EMA200 + Donchian breakdown + volume ===
+            if below_htf_ema and donchian_broken_down and vol_spike:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR from entry) ===
+        # === STOPLOSS (2.5 ATR trailing) ===
         if in_position:
             if position_side > 0:
-                stop_price = entry_price - 2.5 * entry_atr
+                # Update highest high since entry for trailing stop
+                if i == entry_bar or close[i] > highest_since_entry:
+                    highest_since_entry = high[i]
+                
+                # Trailing stop: highest high - 2.5 ATR
+                stop_price = highest_since_entry - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
-                # Take profit: price reaches Donchian upper + some profit
-                elif close[i] > dc_up and close[i] > entry_price + 2 * entry_atr:
-                    desired_signal = SIZE / 2  # Take half profit
             
             elif position_side < 0:
-                stop_price = entry_price + 2.5 * entry_atr
+                # Update lowest low since entry for trailing stop
+                if i == entry_bar or low[i] < lowest_since_entry:
+                    lowest_since_entry = low[i]
+                
+                # Trailing stop: lowest low + 2.5 ATR
+                stop_price = lowest_since_entry + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
-                # Take profit: price reaches Donchian lower + some profit
-                elif close[i] < dc_lo and close[i] < entry_price - 2 * entry_atr:
-                    desired_signal = -SIZE / 2  # Take half profit
         
-        # === MINIMUM HOLD: 2 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 2:
+        # === MINIMUM HOLD: 3 bars to avoid fee churn ===
+        if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
@@ -164,6 +155,8 @@ def generate_signals(prices):
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
         else:
             if in_position:
                 in_position = False
