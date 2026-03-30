@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #026: 12h Donchian(24) Breakout + Choppiness + 1d SMA200
+Experiment #026: 4h Donchian(20) + Choppiness Regime + Volume Spike
 
-HYPOTHESIS: 12h is the sweet spot (54% keep rate from DB).
-Donchian(24) on 12h = ~12 days of lookback = 80-120 trades/year.
-Choppiness Index filters out ranging markets where breakouts whipsaw.
-1d SMA200 provides macro trend alignment (long only in bull, short in bear).
+HYPOTHESIS: Choppiness Index (CHOP) is the optimal regime filter from 16K+ experiments.
+It distinguishes trending vs ranging markets better than ADX or EMA alone.
+- CHOP < 38.2 = trending market → follow breakouts
+- CHOP > 61.8 = ranging market → avoid (too many false breakouts)
 
 WHY IT WORKS IN BULL AND BEAR:
-- Bull: Breakout above 12h high = momentum continuation, ride the trend
-- Bear: Breakdown below 12h low = short continuation, fade rallies
-- Range: Choppiness > 61.8 means no trades (avoid whipsaws)
+- Bull (2020-2021, 2024-2025): CHOP<38 + Donchian breakout = strong uptrend continuation
+- Bear (2022): CHOP>61 = stay out of chop, wait for clear breakouts
+- Range: CHOP>61 means skip → avoids 2022 whipsaw which destroys trend strategies
 
-ENTRY: Close > Donchian High(24) + Choppiness < 61.8 + price > SMA200(1d)
-SHORT: Close < Donchian Low(24) + Choppiness < 61.8 + price < SMA200(1d)
-EXIT: Opposite signal or 3*ATR stoploss
+ENTRY: CHOP < 40 + Close > Donchian High(20) + Volume > 1.5x MA(20)
+SHORT: CHOP < 40 + Close < Donchian Low(20) + Volume > 1.5x MA(20)
+EXIT: Opposite signal or ATR 2.5x trailing stop
 
-TARGET: 60-120 total over 4 years (15-30/year). Size: 0.30.
+TARGET: 80-150 total over 4 years (20-37/year). Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian24_chop_1d_sma200_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_chop_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -43,8 +43,8 @@ def calculate_atr(high, low, close, period=14):
 def calculate_choppiness(high, low, close, period=14):
     """
     Choppiness Index (CHOP)
-    CHOP > 61.8 = ranging (no trend, avoid)
-    CHOP < 38.2 = trending (trade breakouts)
+    CHOP > 61.8 = choppy/ranging market
+    CHOP < 38.2 = trending market
     """
     n = len(close)
     chop = np.full(n, np.nan)
@@ -56,12 +56,13 @@ def calculate_choppiness(high, low, close, period=14):
             tr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
         
         # Highest high - lowest low over period
-        highest = max(high[i - period + 1:i + 1])
-        lowest = min(low[i - period + 1:i + 1])
-        range_sum = highest - lowest
+        highest_high = max(high[i - period + 1:i + 1])
+        lowest_low = min(low[i - period + 1:i + 1])
+        hl_range = highest_high - lowest_low
         
-        if range_sum > 1e-10:
-            chop[i] = 100 * (np.log10(tr_sum) / np.log10(range_sum))
+        if hl_range > 1e-10:
+            # CHOP = 100 * log10(sum of TR / HL range) / log10(N)
+            chop[i] = 100 * np.log10(tr_sum / hl_range) / np.log10(period)
     
     return chop
 
@@ -69,22 +70,24 @@ def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d SMA200 for macro trend (call ONCE before loop) ===
+    # === HTF: 1d SMA for trend (call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    sma_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
+    sma_1d = pd.Series(df_1d['close'].values).rolling(window=30, min_periods=30).mean().values
     sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
-    # === 12h Indicators ===
+    # === 4h Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # Donchian 24 (shift by 1 to avoid look-ahead)
-    dc_upper_24 = pd.Series(high).rolling(window=24, min_periods=24).max().shift(1).values
-    dc_lower_24 = pd.Series(low).rolling(window=24, min_periods=24).min().shift(1).values
+    # Donchian 20 (shift by 1 to avoid look-ahead)
+    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Choppiness Index
-    chop = calculate_choppiness(high, low, close, period=14)
+    # Volume MA(20)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals ===
     signals = np.zeros(n)
@@ -94,11 +97,10 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_bar = 0
-    entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 100  # Need 200 bars for 1d SMA200 alignment
+    warmup = 50
     
     for i in range(warmup, n):
         # NaN checks
@@ -106,21 +108,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_1d_aligned[i]) or np.isnan(chop[i]):
+        if np.isnan(chop_14[i]) or np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME FILTER ===
-        # Only trade when CHOP < 61.8 (trending, not ranging)
-        is_trending = chop[i] < 61.8
+        # === REGIME CHECK: Only trade in trending market ===
+        is_trending = chop_14[i] < 40.0  # Stricter threshold for fewer trades
         
-        # === TREND ALIGNMENT ===
-        bullish_trend = close[i] > sma_1d_aligned[i]
-        bearish_trend = close[i] < sma_1d_aligned[i]
+        # === TREND DIRECTION FROM 1d SMA ===
+        htf_bullish = close[i] > sma_1d_aligned[i]
+        htf_bearish = close[i] < sma_1d_aligned[i]
         
         # === DONCHIAN BREAKOUT ===
-        bullish_breakout = (close[i] > dc_upper_24[i]) if not np.isnan(dc_upper_24[i]) else False
-        bearish_breakout = (close[i] < dc_lower_24[i]) if not np.isnan(dc_lower_24[i]) else False
+        bullish_breakout = (close[i] > dc_upper_20[i]) if not np.isnan(dc_upper_20[i]) else False
+        bearish_breakout = (close[i] < dc_lower_20[i]) if not np.isnan(dc_lower_20[i]) else False
+        
+        # === VOLUME CONFIRMATION (stronger: 1.5x) ===
+        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False
         
         # === TRAILING STOP UPDATE ===
         if in_position:
@@ -129,23 +133,22 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === MIN HOLD: 1 bar (12h) to avoid immediate whipsaw ===
-        min_hold = (i - entry_bar) >= 1
+        # === MIN HOLD: 3 bars (12h) to avoid immediate whipsaw ===
+        min_hold = (i - entry_bar) >= 3
         
-        # === STOPLOSS CHECK (3x ATR) ===
+        # === STOPLOSS CHECK (ATR trailing) ===
         stop_hit = False
         if in_position:
             if position_side > 0:
-                # Long stoploss: trail from highest
-                stop_hit = low[i] < (entry_price - 3.0 * atr_14[i])
-                # Also exit if trend flips
-                if min_hold and bearish_trend and not is_trending:
-                    stop_hit = True
+                stop_hit = low[i] < (highest_since_entry - 2.5 * atr_14[i])
             else:
-                # Short stoploss: trail from lowest
-                stop_hit = high[i] > (entry_price + 3.0 * atr_14[i])
-                # Also exit if trend flips
-                if min_hold and bullish_trend and not is_trending:
+                stop_hit = high[i] > (lowest_since_entry + 2.5 * atr_14[i])
+            
+            # Exit on trend reversal (after min hold)
+            if min_hold:
+                if position_side > 0 and htf_bearish:
+                    stop_hit = True
+                if position_side < 0 and htf_bullish:
                     stop_hit = True
             
             if stop_hit:
@@ -156,22 +159,20 @@ def generate_signals(prices):
                 signals[i] = position_side * SIZE
             continue
         
-        # === NEW POSITIONS ===
-        # Long: Bullish breakout + trending + uptrend
-        if bullish_breakout and is_trending and bullish_trend:
+        # === NEW POSITIONS (only in trending regime) ===
+        # Long: Trending market + bullish breakout + volume confirm
+        if is_trending and bullish_breakout and vol_ok and htf_bullish:
             in_position = True
             position_side = 1
             entry_bar = i
-            entry_price = close[i]
             highest_since_entry = high[i]
             signals[i] = SIZE
         
-        # Short: Bearish breakdown + trending + downtrend
-        elif bearish_breakout and is_trending and bearish_trend:
+        # Short: Trending market + bearish breakdown + volume confirm
+        elif is_trending and bearish_breakout and vol_ok and htf_bearish:
             in_position = True
             position_side = -1
             entry_bar = i
-            entry_price = close[i]
             lowest_since_entry = low[i]
             signals[i] = -SIZE
         
