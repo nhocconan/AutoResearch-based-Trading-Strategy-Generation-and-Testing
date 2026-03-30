@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h Bollinger Squeeze Breakout + 1d SMA200 Regime
+Experiment #021: 12h Camarilla + Choppiness Regime + Volume + 1d ATR Trend
 
-HYPOTHESIS: Bollinger Band Width contracts to 63-bar minimum = institutional
-accumulation/distribution. Subsequent band breakout with volume confirmation
-captures the explosive move that follows. 1d SMA200 regime ensures entries
-only in direction of major trend.
+HYPOTHESIS: 
+- Previous attempt (#018) failed (Sharpe=-0.338) because choppiness was a soft filter.
+- This version uses CHOPPINESS as a HARD regime filter:
+  * CHOP > 61.8 (range) → only take LONG entries at S3/S4
+  * CHOP < 38.2 (trending) → only take SHORT entries at R3/R4
+- This mirrors the proven winning pattern: range = long mean-reversion, trend = short rallies.
 
-WHY 6h: Fewer bars = squeeze conditions less frequent = tighter entries.
-1d SMA200 filter prevents bear market whipsaws (BTC crashed 77% in 2022).
+WHY 12h: Slower than 4h = fewer trades = less fee drag.
+Camarilla on 12h captures multi-day institutional levels.
 
-TARGET: 50-100 total trades over 4 years (12-25/year). Very tight entries.
-Signal size: 0.25.
+TARGET: 75-150 total over 4 years. Size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_bb_squeeze_vol_sma200_1d_v1"
-timeframe = "6h"
+name = "mtf_12h_camarilla_chop_regime_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,27 +36,30 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bb_width_pct(close, period=20, mult=2.0):
-    """Bollinger Band Width as percentage of SMA (normalized for comparison)"""
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = ranging (good for mean reversion)
+    CHOP < 38.2 = trending (good for trend following)
+    """
     n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
+    chop = np.full(n, np.nan)
     
-    # Standard Bollinger Bands
-    close_ma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    close_std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    for i in range(period, n):
+        sum_tr = 0.0
+        for j in range(period):
+            idx = i - j
+            tr = max(high[idx] - low[idx], abs(high[idx] - close[idx-1]) if idx > 0 else high[idx] - low[idx])
+            sum_tr += tr
+        
+        highest_high = max(high[i-period+1:i+1])
+        lowest_low = min(low[i-period+1:i+1])
+        range_val = highest_high - lowest_low
+        
+        if range_val > 1e-10:
+            chop[i] = 100 * (np.log(sum_tr) / np.log(range_val * period))
     
-    upper_band = close_ma + mult * close_std
-    lower_band = close_ma - mult * close_std
-    
-    # Band width as percentage of middle band (normalized)
-    bb_width = (upper_band - lower_band) / close_ma * 100
-    
-    return bb_width, close_ma
-
-def calculate_vol_ma(volume, period=20):
-    """Volume moving average"""
-    return pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -64,21 +68,28 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Local indicators ===
-    atr_14 = calculate_atr(high, low, close, period=14)
-    bb_width, close_ma = calculate_bb_width_pct(close, period=20, mult=2.0)
-    vol_ma = calculate_vol_ma(volume, period=20)
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # Rolling minimum of BB width (63 bars = ~15 days at 6h)
-    # Lower quartile check for squeeze
-    bb_width_roll63 = pd.Series(bb_width).rolling(window=63, min_periods=63).min().values
-    bb_width_q25 = pd.Series(bb_width).rolling(window=63, min_periods=30).quantile(0.25).values
-    
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
-    sma_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    
+    # 1d ATR(14) for trend strength
+    atr_1d_raw = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_raw)
+    
+    # 1d ATR ratio (short/long) for regime
+    atr_1d_short = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=5)
+    atr_1d_long = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=30)
+    atr_ratio_1d = atr_1d_short / np.where(atr_1d_long > 0, atr_1d_long, 1)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # === Local 12h indicators ===
+    atr_14 = calculate_atr(high, low, close, period=14)
+    
+    # Choppiness on 12h (regime filter)
+    chop_12h = calculate_choppiness(high, low, close, period=14)
+    
+    # Volume ratio
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # Signals
     signals = np.zeros(n)
@@ -89,10 +100,12 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
+    stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     entry_bar = 0
     
-    # Warmup: need 200 for SMA200, 63 for BB width min
-    warmup = 200
+    warmup = 100  # Buffer for all indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -102,83 +115,67 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(bb_width[i]) or np.isnan(bb_width_roll63[i]):
+        if np.isnan(chop_12h[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(sma_1d_aligned[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === REGIME FILTER (1d ATR ratio) ===
+        atr_ratio = atr_ratio_aligned[i] if not np.isnan(atr_ratio_aligned[i]) else 1.0
+        regime_volatile = atr_ratio > 1.5  # High volatility regime
         
-        # Bollinger parameters
-        sma20 = close_ma[i]
-        upper_band = sma20 + 2.0 * pd.Series(close).rolling(20, min_periods=20).std().iloc[i] if i >= 20 else np.nan
-        lower_band = sma20 - 2.0 * pd.Series(close).rolling(20, min_periods=20).std().iloc[i] if i >= 20 else np.nan
+        # === CHOPPINESS REGIME (hard filter) ===
+        chop = chop_12h[i]
+        is_range_regime = chop > 61.8  # Ranging = good for long mean-reversion
+        is_trend_regime = chop < 38.2   # Trending = good for short rallies
         
-        # Recalculate bands properly
-        if i >= 20:
-            bb_std = pd.Series(close[i-20:i+1]).std()
-            upper_band = sma20 + 2.0 * bb_std
-            lower_band = sma20 - 2.0 * bb_std
-        else:
-            upper_band = lower_band = np.nan
-        
-        # === REGIME CHECK (1d SMA200) ===
-        price_above_sma = close[i] > sma_1d_aligned[i]
-        
-        # === SQUEEZE DETECTION ===
-        # BB width at or near 63-bar minimum = squeeze
-        bb_min = bb_width_roll63[i]
-        is_squeeze = bb_width[i] <= bb_min * 1.05  # within 5% of minimum
-        
-        # === VOLUME CONFIRMATION ===
+        # Volume confirmation
         vol_spike = vol_ratio[i] > 1.5
+        
+        # === CAMARILLA LEVELS from previous CLOSED bar ===
+        prev_high = high[i - 1]
+        prev_low = low[i - 1]
+        prev_close = close[i - 1]
+        prev_range = prev_high - prev_low
+        
+        r3 = prev_close + prev_range * 0.09167
+        r4 = prev_close + prev_range * 0.18333
+        s3 = prev_close - prev_range * 0.09167
+        s4 = prev_close - prev_range * 0.18333
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # Squeeze breakout LONG: above SMA200, BB squeeze active, break upper band, volume confirm
-            if price_above_sma and is_squeeze and vol_spike:
-                if close[i] > upper_band:
+            # === LONG: Range regime + price touches S3/S4 + volume ===
+            if is_range_regime and vol_spike:
+                if low[i] <= s4:
+                    desired_signal = SIZE
+                elif low[i] <= s3:
                     desired_signal = SIZE
             
-            # Squeeze breakout SHORT: below SMA200, BB squeeze active, break lower band, volume confirm
-            if not price_above_sma and is_squeeze and vol_spike:
-                if close[i] < lower_band:
+            # === SHORT: Trend regime + price touches R3/R4 + volume ===
+            if is_trend_regime and vol_spike and regime_volatile:
+                if high[i] >= r4:
+                    desired_signal = -SIZE
+                elif high[i] >= r3:
                     desired_signal = -SIZE
         
-        # === STOPLOSS (2.0 ATR) ===
+        # === ATR TRAILING STOP ===
         if in_position and position_side > 0:
-            stop_price = entry_price - 2.0 * entry_atr
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            stop_price = entry_price + 2.0 * entry_atr
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 desired_signal = 0.0
-        
-        # === MINIMUM HOLD: 4 bars (~1 day) to avoid whipsaw ===
-        bars_held = i - entry_bar
-        if in_position and bars_held < 4:
-            # Don't exit early, maintain position
-            desired_signal = position_side * SIZE
-        
-        # === TAKE PROFIT: 2:1 RR ===
-        if in_position and bars_held >= 4:
-            if position_side > 0:
-                profit_target = entry_price + 2.0 * entry_atr
-                if high[i] >= profit_target:
-                    desired_signal = 0.0  # Exit on profit target
-            if position_side < 0:
-                profit_target = entry_price - 2.0 * entry_atr
-                if low[i] <= profit_target:
-                    desired_signal = 0.0  # Exit on profit target
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
@@ -187,7 +184,13 @@ def generate_signals(prices):
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 entry_bar = i
+                if position_side > 0:
+                    stop_price = entry_price - 2.5 * entry_atr
+                else:
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
