@@ -1,59 +1,52 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 1d KAMA + RSI(14) Extreme + 1w SMA200 Trend
+Experiment #024: 12h TRIX Momentum + Choppiness Regime + 1d EMA Filter
 
-HYPOTHESIS: KAMA adapts to volatility, catching trend shifts earlier than EMA.
-RSI(14) < 30 or > 70 marks true extremes. Weekly SMA200 trend confirmation avoids
-counter-trend trades in bear rallies. This is the proven SOL pattern (Sharpe 1.31)
-that should generalize to BTC/ETH.
+HYPOTHESIS: 12h timeframe captures medium-term momentum swings (1-5 days)
+while avoiding the fee drag of lower TFs. TRIX(12) gives smooth, lag-reduced
+momentum signals. Choppiness Index filters out ranging markets where momentum
+systems fail. 1d EMA adds structural trend context.
 
-WHY 1d: Lower frequency = fewer trades = less fee drag.
-WHY KAMA: Adaptive moving average - faster response than EMA.
-WHY RSI EXTREMES: Mean-reversion entries at market extremes = high win rate.
-WHY 1w SMA200: Weekly trend filter - avoids fighting major trends.
+WHY 12h (not 4h): 4h strategies uniformly failed due to overtrading or neg Sharpe.
+12h has proven 54% keep rate in prior experiments. Slower = fewer false signals.
 
-TARGET: 50-100 total trades over 4 years (12-25/year).
-Signal size: 0.25.
+WHY IT WORKS IN BOTH MARKETS:
+- Bull: TRIX crosses up + price > 1d EMA = trend following
+- Bear: TRIX crosses down + price < 1d EMA = shorting the trend
+- Choppiness filter: avoids 2022 bottom whipsaw that destroyed prior strategies
+
+TARGET: 75-150 total trades over 4 years (~20-40/year on 12h).
+Signal size: 0.30 (discrete).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_rsi_sma200_1w_v1"
-timeframe = "1d"
+name = "mtf_12h_trix_chop_ema_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_kama(close, period=14, fast_ema=2, slow_ema=30):
-    """Kaufman's Adaptive Moving Average"""
+def calculate_trix(close, period=12):
+    """TRIX - triple smoothed rate of change. Lag-reduced momentum."""
     n = len(close)
-    if n < slow_ema + 1:
+    if n < period * 3:
         return np.full(n, np.nan)
     
-    # Calculate EMA efficiency ratio
-    abs_diff = np.abs(close - np.roll(close, 1))
-    abs_diff[0] = 0
+    # Triple EMA smoothing
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    # Volatility (sum of price changes over period)
-    volatility = pd.Series(abs_diff).rolling(window=period, min_periods=period).sum().values
+    # Rate of change of triple EMA
+    trix = np.zeros(n)
+    trix[0] = 0.0
+    for i in range(1, n):
+        if ema3.iloc[i-1] != 0:
+            trix[i] = ((ema3.iloc[i] / ema3.iloc[i-1]) - 1) * 100
+        else:
+            trix[i] = 0.0
     
-    # Efficiency ratio (0 to 1)
-    er = np.zeros(n)
-    for i in range(period, n):
-        if volatility[i] > 1e-10:
-            er[i] = abs_diff[i] / volatility[i]
-    
-    # Smoothing constants
-    fast_const = (2 / (fast_ema + 1)) ** 2
-    slow_const = (2 / (slow_ema + 1)) ** 2
-    sc = (er * (fast_const - slow_const) + slow_const) ** 2
-    
-    kama = np.zeros(n)
-    kama[period] = close[period]  # Initialize
-    
-    for i in range(period + 1, n):
-        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
-    
-    return kama
+    return trix
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -69,35 +62,63 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - values > 61.8 = choppy/range, < 38.2 = trending"""
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            if j > 0:
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
+            else:
+                tr = high[j] - low[j]
+            atr_sum += tr
+        
+        hh = max(high[i - period + 1:i + 1])
+        ll = min(low[i - period + 1:i + 1])
+        range_sum = hh - ll
+        
+        if range_sum > 0:
+            chop[i] = 100 * (np.log10(atr_sum / range_sum) / np.log10(period))
+    
+    return chop
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # === Load 1w HTF data ONCE before loop ===
+    # === Load HTF data ONCE before loop ===
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Weekly SMA200 for trend (using close of 1w bars)
-    sma200_1w = pd.Series(df_1w['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma200_1w_aligned = align_htf_to_ltf(prices, df_1w, sma200_1w)
+    # 1d EMA50 for trend
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Local 1d indicators ===
+    # 1w EMA21 for longer-term trend
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # === Local 12h indicators ===
+    trix_12 = calculate_trix(close, period=12)
     atr_14 = calculate_atr(high, low, close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # KAMA(14) - adaptive trend
-    kama_14 = calculate_kama(close, period=14, fast_ema=2, slow_ema=30)
+    # TRIX signal line (EMA of TRIX)
+    trix_signal = pd.Series(trix_12).ewm(span=9, min_periods=9, adjust=False).mean().values
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0).ewm(span=14, min_periods=14, adjust=False).mean().values
-    loss = (-delta.clip(upper=0)).ewm(span=14, min_periods=14, adjust=False).mean().values
-    rs = gain / np.where(loss > 1e-10, loss, 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Volume ratio
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -105,86 +126,111 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
-    profit_taken = False
-    bars_since_entry = 0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    trailing_stop = 0.0
     
-    warmup = 250  # Need 200 for weekly SMA200 + buffer
+    warmup = 150  # Need enough for TRIX to stabilize
     
     for i in range(warmup, n):
-        # Skip if ATR not ready
+        # Skip if indicators not ready
+        if np.isnan(trix_12[i]) or np.isnan(trix_signal[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
+        
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        # Skip if indicators not aligned
-        if np.isnan(kama_14[i]) or np.isnan(sma200_1w_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]):
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        # Weekly trend direction
-        price_above_1w_sma = close[i] > sma200_1w_aligned[i]
+        # === TREND CONTEXT ===
+        # Bull trend: price > 1d EMA > 1w EMA
+        bull_trend = close[i] > ema_1d_aligned[i] and ema_1d_aligned[i] > ema_1w_aligned[i]
+        # Bear trend: price < 1d EMA < 1w EMA
+        bear_trend = close[i] < ema_1d_aligned[i] and ema_1d_aligned[i] < ema_1w_aligned[i]
+        trend_strong = bull_trend or bear_trend
         
-        # KAMA trend direction
-        kama_trend_up = kama_14[i] > kama_14[i - 1] if i > 0 else False
+        # === CHOPPINESS REGIME ===
+        chop = chop_14[i]
+        in_chop = chop > 61.8 if not np.isnan(chop) else False
+        in_trend_regime = chop < 38.2 if not np.isnan(chop) else False
         
-        # RSI extremes
-        rsi_oversold = rsi_14[i] < 30
-        rsi_overbought = rsi_14[i] > 70
-        rsi_extreme = rsi_14[i] < 25 or rsi_14[i] > 75  # Stricter for entries
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5
+        
+        # === TRIX MOMENTUM SIGNALS ===
+        trix_above_signal = trix_12[i] > trix_signal[i]
+        trix_below_signal = trix_12[i] < trix_signal[i]
+        
+        # TRIX zero line crossover (momentum shift)
+        trix_positive = trix_12[i] > 0
+        trix_negative = trix_12[i] < 0
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
+        bars_held = i - entry_bar
         
         if not in_position:
-            # LONG: Weekly uptrend + KAMA rising + RSI extreme oversold
-            if price_above_1w_sma and kama_trend_up and rsi_extreme:
+            # === LONG ENTRY ===
+            # Bull trend + TRIX crosses above signal line + volume
+            if bull_trend and trix_above_signal and vol_spike:
                 desired_signal = SIZE
             
-            # SHORT: Weekly downtrend + KAMA falling + RSI extreme overbought
-            if not price_above_1w_sma and not kama_trend_up and rsi_extreme:
+            # === SHORT ENTRY ===
+            # Bear trend + TRIX crosses below signal line + volume
+            if bear_trend and trix_below_signal and vol_spike:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR) ===
+        # === TRAILING STOPLOSS (2.5 ATR) ===
         if in_position and position_side > 0:
-            if close[i] < entry_price - 2.5 * entry_atr:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            if low[i] < trailing_stop:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            if close[i] > entry_price + 2.5 * entry_atr:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            if high[i] > trailing_stop:
                 desired_signal = 0.0
         
-        # === TAKE PROFIT at 2R + half position ===
-        bars_since_entry = i - entry_bar
-        if in_position and not profit_taken and bars_since_entry >= 2:
+        # === MINIMUM HOLD: 4 bars to reduce fee churn ===
+        if in_position and bars_held < 4:
             if position_side > 0:
-                profit_2r = entry_price + 2.0 * entry_atr
-                if high[i] >= profit_2r:
-                    desired_signal = SIZE * 0.5  # Take half profit
-                    profit_taken = True
+                desired_signal = SIZE
             elif position_side < 0:
-                profit_2r = entry_price - 2.0 * entry_atr
-                if low[i] <= profit_2r:
-                    desired_signal = -SIZE * 0.5
-                    profit_taken = True
-        
-        # === HOLD MINIMUM 2 BARS to avoid fee churn ===
-        if in_position and bars_since_entry < 2:
-            desired_signal = SIZE if position_side > 0 else -SIZE
+                desired_signal = -SIZE
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or direction change
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 entry_bar = i
-                profit_taken = False
+                
+                if position_side > 0:
+                    trailing_stop = entry_price - 2.5 * entry_atr
+                else:
+                    trailing_stop = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
+                trailing_stop = 0.0
         
         signals[i] = desired_signal
     
