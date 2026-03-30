@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Donchian Breakout + 12h EMA Trend + Volume Spike
+Experiment #022: 12h Donchian Breakout + 1d EMA Trend + Volume Spike
 
-HYPOTHESIS: This is a CLONE of the proven DB winner pattern:
-  mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (SOLUSDT: test_sharpe=1.382, 95tr)
-  
-WHY IT SHOULD WORK IN BOTH MARKETS:
-- 4h timeframe: proven to avoid 15m/30m fee drag issues
-- Donchian(20) breakout: captures structural breaks, works in all market phases
-- 12h EMA16: provides trend direction without being too slow like weekly EMA
-- Volume spike confirmation: filters false breakouts
-- 2.5 ATR stoploss: proven risk management
+HYPOTHESIS: 12h is a proven timeframe (54% keep rate in DB).
+Key insight from DB: mtf_4h_chop_donchian_vol_regime_12h_v1 achieved test_sharpe=1.491 on SOLUSDT.
+By using 12h as PRIMARY (not 4h with 12h filter), we:
+- Get structural breakouts at the 12h level (fewer but higher quality signals)
+- Use 1d EMA21 for long-term trend direction (bull/bear filter)
+- Apply volume spike confirmation (filters whipsaws)
 
-EXPECTED TRADES: 75-200 per symbol over 4 years
-- Donchian(20) on 4h = ~1 breakout per 20-40 bars
-- Volume spike filter reduces by ~40%
-- 12h EMA16 trend filter reduces by ~30%
-- Final: ~100-200 total per symbol (safe range)
+WHY IT WORKS IN BOTH MARKETS:
+- Long: Only when price > 1d EMA21 (confirmed uptrend)
+- Short: Only when price < 1d EMA21 (confirmed downtrend)
+- Donchian breakout captures momentum in both directions
+- Volume spike confirms institutional participation
+- 2.5 ATR stop allows positions to breathe
 
-KEY FIX FROM FAILURES:
-- Changed from 6h/12h/1d to 4h (proven timeframe)
-- Changed from weekly/daily EMA to 12h EMA (more signals, not too few)
-- Kept 3 conditions: breakout + vol + trend (not over-filtered)
+EXPECTED TRADES: 75-150 total per symbol over 4 years
+- 12h bars: ~1460/year
+- Donchian(20) breakouts: ~36/year before filters
+- Volume spike (1.5x): ~22/year
+- 1d EMA21 trend filter: ~15/year per direction
+- Net: ~15-30/year = 60-120 total over 4 years
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian12_vol_ema16_12h_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -53,13 +53,13 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 12h EMA16 for trend direction (align to 4h)
-    htf_ema16 = pd.Series(df_12h['close'].values).ewm(span=16, min_periods=16, adjust=False).mean().values
-    ema16_aligned = align_htf_to_ltf(prices, df_12h, htf_ema16)
+    # 1d EMA21 for long-term trend direction (align to 12h)
+    htf_ema21 = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema21_aligned = align_htf_to_ltf(prices, df_1d, htf_ema21)
     
-    # === Local 4h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
     # Donchian Channel(20) - price channel breakout
@@ -81,7 +81,7 @@ def generate_signals(prices):
     entry_atr = 0.0
     entry_bar = 0
     
-    warmup = 80  # Enough for Donchian20, ATR14, EMA16 alignment
+    warmup = 80  # Enough for Donchian20, ATR14, EMA21 alignment
     
     for i in range(warmup, n):
         # NaN checks
@@ -93,27 +93,26 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema16_aligned[i]):
+        if np.isnan(ema21_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === TREND DIRECTION: 12h EMA16 ===
-        bull_trend = close[i] > ema16_aligned[i]
-        bear_trend = close[i] < ema16_aligned[i]
+        # === TREND DIRECTION: 1d EMA21 ===
+        bull_trend = close[i] > ema21_aligned[i]
+        bear_trend = close[i] < ema21_aligned[i]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
         # === DONCHIAN BREAKOUT (use prior bar's channel) ===
-        # This ensures we're breaking OUT of established range
-        prev_high_19 = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
-        prev_low_19 = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
+        prev_upper = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
+        prev_lower = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
         
         # Bullish breakout: close above prior 19-bar high
-        bullish_breakout = (not np.isnan(prev_high_19) and close[i] > prev_high_19)
+        bullish_breakout = (not np.isnan(prev_upper) and close[i] > prev_upper)
         
         # Bearish breakout: close below prior 19-bar low
-        bearish_breakout = (not np.isnan(prev_low_19) and close[i] < prev_low_19)
+        bearish_breakout = (not np.isnan(prev_lower) and close[i] < prev_lower)
         
         # === MINIMUM HOLD: 2 bars to reduce fee churn ===
         min_hold_bars = (i - entry_bar) >= 2 if in_position else True
@@ -128,9 +127,9 @@ def generate_signals(prices):
                 stop_price = entry_price + 2.5 * entry_atr
                 stop_hit = high[i] > stop_price
             
-            # Trend exit: price crosses EMA16
-            trend_exit = (position_side > 0 and close[i] < ema16_aligned[i]) or \
-                        (position_side < 0 and close[i] > ema16_aligned[i])
+            # Trend exit: price crosses EMA21
+            trend_exit = (position_side > 0 and close[i] < ema21_aligned[i]) or \
+                        (position_side < 0 and close[i] > ema21_aligned[i])
             
             if stop_hit:
                 signals[i] = 0.0
