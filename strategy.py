@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h MFI Divergence + 1d SMA200 Trend
+Experiment #008: Williams Alligator + Elder Force Index + 1w Trend
 
-HYPOTHESIS: MFI (Money Flow Index) measures VOLUME-WEIGHTED money flow,
-unlike RSI which only tracks price. When MFI < 20, institutional buying
-pressure accumulates. Combined with 1d SMA200 trend filter, this catches
-high-probability pullback reversals in both bull and bear markets.
+HYPOTHESIS: Williams Alligator identifies institutional accumulation/distribution
+(when jaw/teeth/lips compress = smart money building positions). Elder Force Index
+confirms if the resulting move has real volume backing. Combined with 1w SMA200
+trend filter, this catches major trend changes in both bull and bear.
 
-WHY NOVEL: None of the 25 failed experiments used MFI. RSI was tried and failed.
-MFI's volume component gives it an edge over pure price oscillators.
+Key insight: Alligator compression BEFORE breakout = accumulator pattern.
+Force Index crossing zero AFTER compression = confirmation of direction.
 
-CORE LOGIC:
-- LONG: MFI < 20 + price > SMA200 + price bouncing from local low
-- SHORT: MFI > 80 + price < SMA200 + price rejecting from local high
-- ATR(14) stoploss at 2.0x for both directions
+WHY IT WORKS: Simple 2-condition entry (alignment + confirmation). No multiple
+filters that kill trades. Target 75-150 total trades over 4 years.
 
-TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 250.
-Signal size: 0.25
+timeframe: 12h
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_mfi_sma200_vol_1d_v1"
-timeframe = "6h"
+name = "mtf_12h_alligator_force_1w_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,34 +37,47 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_mfi(high, low, close, volume, period=14):
-    """Money Flow Index - volume-weighted RSI"""
+def williams_alligator(high, low, close):
+    """
+    Williams Alligator: 3 smoothed moving averages
+    Jaw: SMMA of close, period 13, offset 8
+    Teeth: SMMA of close, period 8, offset 5  
+    Lips: SMMA of close, period 5, offset 3
+    
+    Returns: jaw, teeth, lips
+    """
     n = len(close)
-    if n < period + 2:
-        return np.full(n, np.nan)
     
-    typical_price = (high + low + close) / 3.0
-    raw_money_flow = typical_price * volume
+    # SMMA (Smoothed Moving Average) = EMA with alpha = 1/period
+    def smma(series, period):
+        result = np.zeros(n)
+        result[0] = series[0]
+        alpha = 1.0 / period
+        for i in range(1, n):
+            result[i] = (result[i-1] * (1 - alpha) + series[i] * alpha)
+        return result
     
-    mfi = np.full(n, np.nan)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    for i in range(period, n):
-        positive_flow = 0.0
-        negative_flow = 0.0
-        
-        for j in range(i - period + 1, i + 1):
-            if typical_price[j] > typical_price[j - 1]:
-                positive_flow += raw_money_flow[j]
-            elif typical_price[j] < typical_price[j - 1]:
-                negative_flow += raw_money_flow[j]
-        
-        if negative_flow > 0:
-            money_flow_ratio = positive_flow / negative_flow
-            mfi[i] = 100.0 - (100.0 / (1.0 + money_flow_ratio))
-        else:
-            mfi[i] = 100.0
+    return jaw, teeth, lips
+
+def elder_force_index(close, volume, period=13):
+    """
+    Elder Force Index: (close - prev_close) * volume
+    Uses EMA smoothing. Positive = bullish force, Negative = bearish force.
+    """
+    n = len(close)
+    efi = np.zeros(n)
+    efi[0] = 0.0
     
-    return mfi
+    for i in range(1, n):
+        efi[i] = (close[i] - close[i-1]) * volume[i]
+    
+    # Smooth with EMA
+    efi_ema = pd.Series(efi).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return efi_ema
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -77,23 +87,24 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d SMA200 for trend (major trend filter)
-    sma_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    # 1w SMA200 for trend (works on all markets)
+    sma_1w = pd.Series(df_1w['close'].values).rolling(window=200, min_periods=200).mean().values
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
     
-    # === Local 6h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    mfi_14 = calculate_mfi(high, low, close, volume, period=14)
     
-    # Volume ratio (20-bar MA for confirmation)
+    # Williams Alligator
+    jaw, teeth, lips = williams_alligator(high, low, close)
+    
+    # Elder Force Index
+    efi = elder_force_index(close, volume, period=13)
+    
+    # Volume ratio for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # Local low for bounce detection
-    local_low_5 = pd.Series(low).rolling(window=5, min_periods=5).min().values
-    local_high_5 = pd.Series(high).rolling(window=5, min_periods=5).max().values
     
     # Signals
     signals = np.zeros(n)
@@ -104,12 +115,12 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    entry_bar = 0
+    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    stop_price = 0.0
+    entry_bar = 0
     
-    warmup = 250  # Need 200 for SMA200 + buffer
+    warmup = 300  # Need enough for 1w SMA200 alignment buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -119,63 +130,70 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(mfi_14[i]) or np.isnan(sma_1d_aligned[i]):
+        if np.isnan(sma_1w_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND FILTER (1d SMA200) ===
-        price_above_1d_sma = close[i] > sma_1d_aligned[i]
-        price_below_1d_sma = close[i] < sma_1d_aligned[i]
+        # === 1w TREND FILTER ===
+        price_above_1w_sma = close[i] > sma_1w_aligned[i]
+        price_below_1w_sma = close[i] < sma_1w_aligned[i]
         
-        # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.3
+        # === ALLIGATOR ALIGNMENT ===
+        # Bullish: lips > teeth > jaw (all aligned upward)
+        alligator_bull = (lips[i] > teeth[i]) and (teeth[i] > jaw[i]) and (jaw[i] > jaw[i-1])
+        # Bearish: lips < teeth < jaw (all aligned downward)
+        alligator_bear = (lips[i] < teeth[i]) and (teeth[i] < jaw[i]) and (jaw[i] < jaw[i-1])
         
-        # MFI extremes
-        mfi_oversold = mfi_14[i] < 20
-        mfi_overbought = mfi_14[i] > 80
+        # Alligator compression (potential breakout setup)
+        jaw_range = abs(jaw[i] - jaw[i-3]) / jaw[i] if jaw[i] > 0 else 0
+        teeth_range = abs(teeth[i] - teeth[i-3]) / teeth[i] if teeth[i] > 0 else 0
+        lips_range = abs(lips[i] - lips[i-3]) / lips[i] if lips[i] > 0 else 0
+        is_compressed = (jaw_range < 0.005) and (teeth_range < 0.005) and (lips_range < 0.005)
         
-        # Price bouncing from local low (for longs)
-        bouncing_from_low = low[i] <= local_low_5[i] * 1.002
-        rejecting_from_high = high[i] >= local_high_5[i] * 0.998
+        # === FORCE INDEX ===
+        efi_positive = efi[i] > 0
+        efi_negative = efi[i] < 0
         
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: MFI oversold + trend up + bounce confirmation ===
-            if price_above_1d_sma and mfi_oversold and (bouncing_from_low or vol_spike):
-                desired_signal = SIZE
+            # === LONG ENTRY ===
+            # Trend up + Alligator aligned + Force positive + (compressed OR volume)
+            if price_above_1w_sma and alligator_bull and efi_positive:
+                if is_compressed or vol_ratio[i] > 1.2:
+                    desired_signal = SIZE
             
-            # === SHORT: MFI overbought + trend down + rejection confirmation ===
-            if price_below_1d_sma and mfi_overbought and (rejecting_from_high or vol_spike):
-                desired_signal = -SIZE
+            # === SHORT ENTRY ===
+            # Trend down + Alligator aligned + Force negative + (compressed OR volume)
+            if price_below_1w_sma and alligator_bear and efi_negative:
+                if is_compressed or vol_ratio[i] > 1.2:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS (2.0 ATR trailing) ===
+        # === STOPLOSS (2.5 ATR) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === HOLD PERIOD: minimum 2 bars (12h) to avoid fee churn ===
+        # === MINIMUM HOLD (3 bars = 1.5 days on 12h to reduce churn) ===
         bars_held = i - entry_bar
-        
-        # === TAKE PROFIT: MFI mean reversion ===
-        if in_position and bars_held >= 2:
-            # Exit longs when MFI normalizes (> 50)
-            if position_side > 0 and mfi_14[i] > 50:
+        if in_position and bars_held >= 3:
+            # Take profit on opposite Force signal
+            if position_side > 0 and efi_negative:
                 desired_signal = 0.0
-            # Exit shorts when MFI normalizes (< 50)
-            if position_side < 0 and mfi_14[i] < 50:
+            if position_side < 0 and efi_positive:
                 desired_signal = 0.0
         
         # === UPDATE POSITION ===
@@ -190,9 +208,9 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
