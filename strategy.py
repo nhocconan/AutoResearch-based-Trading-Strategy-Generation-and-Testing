@@ -1,30 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h Williams Alligator + Elder Ray + ADX Regime
+Experiment #025: 12h Donchian + Weekly Trend + Volume + Choppiness Regime
 
-HYPOTHESIS: 
-- Williams Alligator provides trend structure (Jaw/Teeth/Lips alignment)
-- Elder Ray measures buying/selling pressure relative to EMA(13)
-- ADX regime filter prevents trading in choppy/ranging markets (the #1 killer)
-- 6h balances between too few trades (12h/1d) and overtrading (4h)
+HYPOTHESIS: 12h timeframe with choppiness regime filter solves the 2022 bear market
+problem that killed previous 12h strategies. Choppiness < 50 = trending = safe to enter.
+Choppiness > 61.5 = ranging = skip (avoids 2022 whipsaw that destroyed #017).
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull: Alligator张嘴 (Lips > Teeth > Jaw) + Bull Power > 0 + ADX > 25
-- Bear: Alligator闭嘴 (Lips < Teeth < Jaw) + Bear Power < 0 + ADX > 25
-- Range: ADX < 20 = no trades (avoid whipsaws)
+- Bull (2021, 2023-24): Breakout above 20-bar high + volume spike + trending regime = ride the move
+- Bear (2022): Choppiness stays HIGH in ranging crash → NO entries during whipsaw
+- Range (2025): Choppiness also high → still no entries = preserved capital
 
-EXPECTED TRADES: 75-150 total over 4 years (19-37/year)
-- Donchian(20) breakout every ~30 bars = 350/year potential
-- ADX filter (50% reduction) = 175/year
-- Alligator alignment (40%) = 105/year
-- Volume spike (30%) = 75/year final
+The key fix from failed #017: adding Choppiness regime filter. #017 had only 43 trades but
+negative Sharpe because it entered during the 2022 chop/range. This version SKIPS 2022.
+
+EXPECTED TRADES: ~100-200 total over 4 years (25-50/year per symbol)
+- 12h Donchian(20) ≈ 11 breakouts/year per symbol
+- Volume spike (1.5x) → 40% pass = ~7/year
+- Weekly EMA trend → 50% pass = ~4/year
+- Choppiness < 50 regime → 70% pass = ~3/year
+- Plus re-entries and early exits → ~6-8/year = 24-32/year per symbol
+- 3 symbols × 4 years × 30/year = ~360 total (upper bound)
+- With min-hold 6 bars + tighter exit = ~200-250 total (acceptable)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_alligator_elder_ray_adx_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_weekly_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -41,78 +45,27 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """ADX + DI+/DI- for regime detection"""
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - values < 50 = trending, > 61.5 = ranging"""
     n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    chop = np.full(n, np.nan)
     
-    # True Range and Directional Movement
-    tr = np.zeros(n, dtype=np.float64)
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    for i in range(period, n):
+        # Sum of true range over period
+        tr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+            tr_sum += tr
         
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
+        # Highest high - lowest low over period
+        hh = max(high[i - period + 1:i + 1])
+        ll = min(low[i - period + 1:i + 1])
+        range_sum = hh - ll
         
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
+        if range_sum > 0:
+            chop[i] = 100 * (np.log10(tr_sum) / np.log10(range_sum))
     
-    # Smooth with EMA
-    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # DI+/DI-
-    di_plus = np.where(atr_smooth > 0, 100 * plus_dm_smooth / atr_smooth, 0)
-    di_minus = np.where(atr_smooth > 0, 100 * minus_dm_smooth / atr_smooth, 0)
-    
-    # DX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    
-    # ADX
-    adx = pd.Series(dx).ewm(span=period, min_periods=period * 2, adjust=False).mean().values
-    
-    return adx, di_plus, di_minus
-
-def calculate_alligator(high, low, close):
-    """
-    Williams Alligator: SMMA on median price, shifted
-    Jaw = SMA(13) shifted 8
-    Teeth = SMA(8) shifted 5
-    Lips = SMA(5) shifted 3
-    """
-    median = (high + low + close) / 2.0
-    
-    # SMMA (smoothed moving average) = EMA for our purposes
-    jaw = pd.Series(median).ewm(span=13, min_periods=13, adjust=False).mean().values
-    teeth = pd.Series(median).ewm(span=8, min_periods=8, adjust=False).mean().values
-    lips = pd.Series(median).ewm(span=5, min_periods=5, adjust=False).mean().values
-    
-    # Shift forward (price action to the right of indicator lines)
-    jaw_shifted = pd.Series(jaw).shift(8).values
-    teeth_shifted = pd.Series(teeth).shift(5).values
-    lips_shifted = pd.Series(lips).shift(3).values
-    
-    return jaw_shifted, teeth_shifted, lips_shifted
-
-def calculate_elder_ray(high, low, close, ema_period=13):
-    """Elder Ray: measures buying/selling pressure"""
-    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    bull_power = high - ema
-    bear_power = low - ema
-    return bull_power, bear_power, ema
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel for breakout"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -122,36 +75,27 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d ADX for regime (trend vs choppy)
-    adx_1d, di_plus_1d, di_minus_1d = calculate_adx(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values,
-        period=14
-    )
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Weekly EMA(21) for trend
+    weekly_ema = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    # === Local 6h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Williams Alligator
-    jaw, teeth, lips = calculate_alligator(high, low, close)
+    # Donchian Channel(20)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Elder Ray
-    bull_power, bear_power, ema_13 = calculate_elder_ray(high, low, close, ema_period=13)
-    
-    # Donchian for breakout
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    
-    # Volume
+    # Volume average (20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # === Signals ===
     signals = np.zeros(n)
-    SIZE = 0.25  # Conservative for 6h
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -162,101 +106,100 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 80  # Enough for Alligator shifts (8+5+3=8) + Donchian(20) + ADX(14)
+    warmup = 50  # Enough for Donchian20, ATR14, Choppiness14
     
     for i in range(warmup, n):
-        # === NaN checks ===
+        # Check required data
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx_1d_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME FILTER: ADX from 1d ===
-        adx_regime = adx_1d_aligned[i]
-        is_trending = adx_regime > 20  # Below 20 = choppy, no trades
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            continue
         
-        # === ALLIGATOR TREND ===
-        jaw_val = jaw[i] if not np.isnan(jaw[i]) else 0
-        teeth_val = teeth[i] if not np.isnan(teeth[i]) else 0
-        lips_val = lips[i] if not np.isnan(lips[i]) else 0
+        if np.isnan(weekly_ema_aligned[i]):
+            signals[i] = 0.0
+            continue
         
-        # Bullish: Lips > Teeth > Jaw (Alligator eating = uptrend)
-        alligator_bull = lips_val > teeth_val > jaw_val
-        # Bearish: Lips < Teeth < Jaw (Alligator eating = downtrend)
-        alligator_bear = lips_val < teeth_val < jaw_val
+        desired_signal = 0.0
         
-        # === ELDER RAY CONFIRMATION ===
-        bull_ok = bull_power[i] > 0  # Buyers pushing above EMA
-        bear_ok = bear_power[i] < 0  # Sellers pushing below EMA
+        # === REGIME CHECK: Only trade when trending ===
+        trending_regime = chop[i] < 50.0
         
-        # === DONCHIAN BREAKOUT ===
-        prev_upper = donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else np.nan
-        prev_lower = donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else np.nan
-        
-        bullish_breakout = (not np.isnan(prev_upper) and high[i] > prev_upper)
-        bearish_breakout = (not np.isnan(prev_lower) and low[i] < prev_lower)
+        # === TREND DIRECTION: Weekly EMA ===
+        bull_trend = close[i] > weekly_ema_aligned[i]
+        bear_trend = close[i] < weekly_ema_aligned[i]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === ENTRY LOGIC ===
-        desired_signal = 0.0
+        # === DONCHIAN BREAKOUT ===
+        prev_donchian_high = donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else np.nan
+        prev_donchian_low = donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else np.nan
         
-        if not in_position and is_trending:
-            # LONG: Breakout + Alligator bullish + Elder Ray confirms + Volume
-            if bullish_breakout and alligator_bull and bull_ok and vol_spike:
+        bullish_breakout = (not np.isnan(prev_donchian_high) and 
+                           high[i] > prev_donchian_high)
+        bearish_breakout = (not np.isnan(prev_donchian_low) and 
+                           low[i] < prev_donchian_low)
+        
+        # === ENTRY LOGIC ===
+        if not in_position:
+            # LONG: Trending regime + bullish breakout + volume spike + bull trend
+            if trending_regime and bullish_breakout and vol_spike and bull_trend:
                 desired_signal = SIZE
             
-            # SHORT: Breakdown + Alligator bearish + Elder Ray confirms + Volume
-            elif bearish_breakout and alligator_bear and bear_ok and vol_spike:
+            # SHORT: Trending regime + bearish breakout + volume spike + bear trend
+            elif trending_regime and bearish_breakout and vol_spike and bear_trend:
                 desired_signal = -SIZE
         
-        # === EXIT / STOP LOGIC ===
+        # === EXIT/STOPS LOGIC ===
         if in_position:
             if position_side > 0:
-                # Update trailing high
-                if high[i] > trailing_high:
+                # Trailing high
+                if i == entry_bar or high[i] > trailing_high:
                     trailing_high = high[i]
                 
-                # Stop: 2.5 ATR from entry (wider for 6h)
+                # Stop: 2.5 ATR from highest
                 stop_price = trailing_high - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                 
-                # Exit if trend weakens (ADX drops or Alligator flattens)
-                elif adx_regime < 18 or (not alligator_bull and not alligator_bear):
+                # Exit if weekly trend flips
+                elif close[i] < weekly_ema_aligned[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                     
             elif position_side < 0:
-                # Update trailing low
-                if low[i] < trailing_low:
+                # Trailing low
+                if i == entry_bar or low[i] < trailing_low:
                     trailing_low = low[i]
                 
-                # Stop: 2.5 ATR from entry
+                # Stop: 2.5 ATR from lowest
                 stop_price = trailing_low + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                 
-                # Exit if trend weakens
-                elif adx_regime < 18 or (not alligator_bull and not alligator_bear):
+                # Exit if weekly trend flips
+                elif close[i] > weekly_ema_aligned[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
         
-        # === MINIMUM HOLD: 4 bars to reduce fee churn ===
-        if in_position and (i - entry_bar) < 4:
+        # === MINIMUM HOLD: 6 bars to reduce fee churn ===
+        if in_position and (i - entry_bar) < 6:
             desired_signal = position_side * SIZE
         
-        # === EXECUTE ===
+        # === EXECUTE NEW POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 in_position = True
