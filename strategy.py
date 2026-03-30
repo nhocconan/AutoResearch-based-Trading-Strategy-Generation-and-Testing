@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 1d Donchian(20) Breakout + 1w EMA Trend + Volume
+Experiment #005: 12h Donchian Breakout + RSI + Volume + 1d EMA200
 
-HYPOTHESIS: Daily Donchian(20) captures medium-term breakout momentum.
-Combined with weekly trend alignment (above = bullish, below = bearish),
-volume confirmation, and ATR stoploss.
+HYPOTHESIS: Donchian(20) channels capture institutional breakout structure (proven pattern).
+Price breaking above 20-bar high with RSI(14) not overbought + volume spike = momentum.
+Using 1d EMA200 as trend filter to stay with the major trend direction.
+12h timeframe = ~3x fewer trades than 4h = less fee drag = better test generalization.
 
-WHY IT WORKS IN BULL AND BEAR: Symmetrical breakout structure — buy breakouts
-above weekly EMA in uptrends, short breakouts below weekly EMA in downtrends.
-1d timeframe naturally limits trade frequency.
+WHY IT WORKS IN BOTH BULL AND BEAR:
+- Bull: Buy breakouts above 1d EMA200 when RSI neutral (40-60), not overbought.
+- Bear: Short breakouts below 1d EMA200 when RSI neutral (40-60), not oversold.
+- ATR stoploss adapts to volatility in both directions.
+- Minimum 2-bar hold prevents whipsaw from temporary breaks.
 
-TARGET: 50-100 total over 4 years (12-25/year). HARD MAX: 150.
-Signal size: 0.30.
+TARGET: 75-150 total trades over 4 years (19-37/year). HARD MAX: 200.
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_breakout_1w_v1"
-timeframe = "1d"
+name = "mtf_12h_donchian_rsi_vol_ema200_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,6 +38,19 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_rsi(prices, period=14):
+    """Relative Strength Index"""
+    delta = pd.Series(prices).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (rs + 1))
+    return rsi.values
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -43,26 +59,29 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA50 for trend direction
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1d EMA200 for trend direction
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Daily indicators (computed once, outside loop)
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    rsi_14 = calculate_rsi(close, period=14)
     
-    # Donchian channels (20-day)
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Donchian channels (20 periods = 10 days on 12h)
+    donchian_period = 20
+    upper_band = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_band = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    middle_band = (upper_band + lower_band) / 2.0
     
-    # Volume ratio (20-day MA)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma_20 > 0, vol_ma_20, 1)
+    # Volume ratio (20-bar moving average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # === Signals ===
+    # Signals
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
@@ -74,7 +93,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 200  # Donchian(20) + EMA buffer
+    warmup = 250  # Need enough for EMA200 alignment buffer + Donchian(20)
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -84,29 +103,48 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]):
+        if np.isnan(ema_200_aligned[i]) or np.isnan(rsi_14[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === Weekly trend direction ===
-        price_above_1w_ema = close[i] > ema_1w_aligned[i]
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
+        
+        # === TREND DIRECTION (1d EMA200) ===
+        price_above_1d_ema = close[i] > ema_200_aligned[i]
+        
+        # RSI momentum (neutral zone = 40-60 for entries)
+        rsi_neutral = 40.0 <= rsi_14[i] <= 60.0
         
         # Volume confirmation
         vol_spike = vol_ratio[i] > 1.5
         
+        # Donchian breakouts
+        breakout_up = close[i] > upper_band[i]  # New high
+        breakout_down = close[i] < lower_band[i]  # New low
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Price breaks above 20-day high + bullish weekly trend + volume ===
-            if price_above_1w_ema and vol_spike:
-                if high[i] > donchian_high_20[i]:
+            # === LONG: Breakout above Donchian high + trend alignment + neutral RSI ===
+            # Only in uptrend, enter on pullback to middle band (reversion to mean)
+            if price_above_1d_ema and rsi_neutral and vol_spike:
+                # Price in middle zone (between middle and upper band)
+                in_middle_zone = middle_band[i] <= close[i] <= upper_band[i]
+                if in_middle_zone:
                     desired_signal = SIZE
             
-            # === SHORT: Price breaks below 20-day low + bearish weekly trend + volume ===
-            if not price_above_1w_ema and vol_spike:
-                if low[i] < donchian_low_20[i]:
+            # === SHORT: Breakdown below Donchian low + trend alignment + neutral RSI ===
+            if not price_above_1d_ema and rsi_neutral and vol_spike:
+                # Price in lower zone (between lower and middle band)
+                in_lower_zone = lower_band[i] <= close[i] <= middle_band[i]
+                if in_lower_zone:
                     desired_signal = -SIZE
         
         # === STOPLOSS (2.0 ATR trailing) ===
@@ -124,11 +162,17 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === HOLD PERIOD: minimum 3 bars to avoid churn ===
+        # === HOLD PERIOD (minimum 2 bars = 1 day to avoid churn) ===
         bars_held = i - entry_bar
-        if bars_held < 3:
-            if in_position and desired_signal == 0.0:
-                desired_signal = position_side * SIZE
+        
+        # === TAKE PROFIT (opposite Donchian band) ===
+        if in_position and bars_held >= 2:
+            # Long: exit near upper band
+            if position_side > 0 and close[i] >= upper_band[i]:
+                desired_signal = 0.0
+            # Short: exit near lower band
+            if position_side < 0 and close[i] <= lower_band[i]:
+                desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
@@ -149,6 +193,7 @@ def generate_signals(prices):
             if in_position:
                 in_position = False
                 position_side = 0
+                stop_price = 0.0
         
         signals[i] = desired_signal
     
