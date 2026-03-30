@@ -1,51 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #008: 12h Donchian + Choppiness Regime + 1w EMA
+Experiment #022: 4h TRIX + Choppiness Regime + Volume Confirmation
 
-HYPOTHESIS: Use Choppiness Index (<38.2 trending, >61.8 ranging) as regime filter
-combined with 1w EMA macro trend and Donchian breakout on 12h. This replicates the
-proven pattern from DB: mtf_4h_chop_donchian_vol_regime_12h_v1 had test Sharpe 1.491.
+HYPOTHESIS: TRIX momentum oscillator catches trend changes but generates
+too many crossovers in ranging markets. Adding Choppiness Index as regime
+filter (only trade when CHOP < 50) should reduce whipsaws significantly.
+
+KEY INSIGHT:
+- mtf_4h_trix_1d_ema_vol_v1 had 243 trades, Sharpe 0.439 (too many trades)
+- Adding choppiness filter should reduce to ~120-180 trades
+- 1d EMA as trend filter (proven to work)
 
 WHY BOTH MARKETS:
-- 2021 bull: Choppiness < 38.2 + bullish breakout + 1w EMA up = trend follow longs
-- 2022 bear: Choppiness < 38.2 + bearish breakdown + 1w EMA down = trend follow shorts
-- 2025 range: Choppiness > 61.8 = mean revert at Donchian bounds
+- 2021 bull: CHOP < 50 during trends, TRIX crosses up catch rallies
+- 2022 bear: CHOP < 50 during breakdowns, TRIX crosses down catch shorts
+- 2025 range: CHOP > 55 = flat, avoid whipsaw crossovers
 
-TRADE COUNT: 75-175 total over 4 years (18-44/year).
+TARGET: 100-200 total trades over 4 years.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_chop_1w_ema_v1"
-timeframe = "12h"
+name = "mtf_4h_trix_chop_vol_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP < 38.2 = trending (trend follow)
-    CHOP > 61.8 = ranging (mean revert)
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    chop = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        highest = high[i-period+1:i+1].max()
-        lowest = low[i-period+1:i+1].min()
-        
-        if highest - lowest > 1e-10:
-            sum_tr = 0.0
-            for j in range(i-period+1, i+1):
-                tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-                sum_tr += tr
-            
-            chop[i] = 100 * (np.log(sum_tr) / np.log(highest - lowest)) if (highest - lowest) > 1e-10 else 50.0
-    
-    return chop
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -61,6 +40,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_trix(close, period=15):
+    """TRIX: Triple EMA Rate of Change - momentum indicator"""
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
+    trix = 100 * ema3.pct_change(period)
+    return trix.values
+
+def calculate_choppiness(close, high, low, period=14):
+    """Choppiness Index - distinguishes trending vs ranging markets"""
+    n = len(close)
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum()
+    highest = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest = pd.Series(low).rolling(window=period, min_periods=period).min()
+    
+    chop = 100 * np.log10(sum_tr / (highest - lowest)) / np.log10(period)
+    return chop.fillna(50).values
+
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
@@ -68,29 +70,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w EMA for macro trend (call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=13, min_periods=13, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === HTF: 1d EMA for macro trend (call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    trix_15 = calculate_trix(close, period=15)
+    trix_signal = pd.Series(trix_15).ewm(span=9, min_periods=9, adjust=False).mean().values
+    chop = calculate_choppiness(close, high, low, period=14)
     
-    # Donchian Channel(12) - 6 days on 12h
-    donchian_upper = pd.Series(high).rolling(window=12, min_periods=12).max().values
-    donchian_lower = pd.Series(low).rolling(window=12, min_periods=12).min().values
-    
-    # Choppiness Index (14 periods)
-    chop = calculate_choppiness(high, low, close, period=14)
-    
-    # Volume analysis
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
     # === Signals ===
     signals = np.zeros(n)
-    SIZE = 0.30  # Full position size
-    SIZE_HALF = 0.15  # Take profit size
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -100,25 +97,20 @@ def generate_signals(prices):
     entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
-    took_profit = False
     
-    warmup = 30  # 14 for chop + buffer
+    warmup = 50  # 15 for TRIX + buffer
     
     for i in range(warmup, n):
-        # NaN checks
+        # NaN check
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(trix_15[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(ema_1w_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -129,102 +121,79 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === REGIME DETECTION ===
-        chop_trending = chop[i] < 38.2  # Trending mode
-        chop_ranging = chop[i] > 61.8   # Ranging mode
+        # === HTF TREND (1d EMA aligned) ===
+        htf_bullish = close[i] > ema_1d_aligned[i]
+        htf_bearish = close[i] < ema_1d_aligned[i]
         
-        # === HTF MACRO TREND (1w EMA aligned) ===
-        htf_bullish = close[i] > ema_1w_aligned[i]
-        htf_bearish = close[i] < ema_1w_aligned[i]
+        # === VOLUME SPIKE (>1.5x average) ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === VOLUME CONFIRMATION (1.5x average) ===
-        vol_confirm = vol_ratio[i] > 1.5
+        # === CHOPPINESS REGIME FILTER ===
+        # CHOP < 50 = trending, take signals. CHOP > 55 = choppy, skip.
+        chop_trending = chop[i] < 50
         
-        # === DONCHIAN BREAKOUT DETECTION ===
-        # Use prior bar's channel for entry (no look-ahead)
-        prev_upper = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
-        prev_lower = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
+        # === TRIX CROSSOVER SIGNALS ===
+        trix_cross_up = False
+        trix_cross_dn = False
         
-        bullish_breakout = False
-        bearish_breakout = False
+        if i > 0 and not np.isnan(trix_signal[i-1]) and not np.isnan(trix_signal[i]):
+            # TRIX crosses above signal = bullish momentum
+            if trix_15[i] > trix_signal[i] and trix_15[i-1] <= trix_signal[i-1]:
+                trix_cross_up = True
+            # TRIX crosses below signal = bearish momentum
+            if trix_15[i] < trix_signal[i] and trix_15[i-1] >= trix_signal[i-1]:
+                trix_cross_dn = True
         
-        if not np.isnan(prev_upper) and not np.isnan(prev_lower):
-            # Close breaks above prior upper = bullish breakout
-            bullish_breakout = close[i] > prev_upper
-            # Close breaks below prior lower = bearish breakdown
-            bearish_breakout = close[i] < prev_lower
-        
-        # === MINIMUM HOLD: 2 bars (24h) to avoid chop whipsaws ===
-        min_hold_bars = 2
+        # === MINIMUM HOLD: 4 bars (16h) to avoid immediate reversals ===
+        min_hold_bars = 4
         min_hold = (i - entry_bar) >= min_hold_bars
         
-        # === ENTRY CONDITIONS ===
-        can_long = not in_position and bullish_breakout and vol_confirm and htf_bullish and chop_trending
-        can_short = not in_position and bearish_breakout and vol_confirm and htf_bearish and chop_trending
+        # === ATR TRAILING STOP (2.5x ATR from entry high/low) ===
+        def check_atr_stop():
+            if not in_position:
+                return False
+            if position_side > 0:
+                return low[i] < (highest_since_entry - 2.5 * entry_atr)
+            else:
+                return high[i] > (lowest_since_entry + 2.5 * entry_atr)
         
         # === EXITS ===
         if in_position:
-            # ATR trailing stop (2.5x ATR from entry)
-            if position_side > 0:
-                stop_hit = low[i] < (highest_since_entry - 2.5 * entry_atr)
-            else:
-                stop_hit = high[i] > (lowest_since_entry + 2.5 * entry_atr)
+            stop_hit = check_atr_stop()
             
-            # Trend reversal exit (1w EMA flips)
+            # Exit on trend reversal (trend filter flips)
             if position_side > 0 and htf_bearish and min_hold:
                 stop_hit = True
             if position_side < 0 and htf_bullish and min_hold:
                 stop_hit = True
             
-            # Regime change exit (chop moves to ranging)
-            if chop_ranging and min_hold:
-                stop_hit = True
-            
-            # Take profit at 2R (reduce size)
-            if not took_profit:
-                if position_side > 0:
-                    profit_target = entry_price + 2.0 * entry_atr
-                    if high[i] >= profit_target:
-                        took_profit = True
-                        signals[i] = SIZE_HALF
-                        continue
-                else:
-                    profit_target = entry_price - 2.0 * entry_atr
-                    if low[i] <= profit_target:
-                        took_profit = True
-                        signals[i] = -SIZE_HALF
-                        continue
-            
             if stop_hit:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
-                took_profit = False
             else:
                 signals[i] = position_side * SIZE
         
         # === NEW POSITIONS ===
         if not in_position:
-            if can_long:
+            # LONG: TRIX cross up + volume spike + HTF bullish + trending market
+            if trix_cross_up and vol_spike and htf_bullish and chop_trending:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                took_profit = False
                 signals[i] = SIZE
             
-            elif can_short:
+            # SHORT: TRIX cross down + volume spike + HTF bearish + trending market
+            elif trix_cross_dn and vol_spike and htf_bearish and chop_trending:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
-                highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                took_profit = False
                 signals[i] = -SIZE
             
             else:
