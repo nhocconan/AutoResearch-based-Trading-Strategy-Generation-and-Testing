@@ -1,42 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #022: 12h Williams %R Extreme + KAMA + ATR Regime
+Experiment #005: 12h Donchian(24) Breakout + Volume + 1d Trend Filter
 
-HYPOTHESIS: Williams %R at extreme oversold (<-85) or overbought (>-15) 
-captures reversal points. Combined with 1d KAMA trend direction and 1d ATR
-regime filter (high vol = better for reversals) + volume confirmation, 
-this catches major turning points while filtering noise.
+HYPOTHESIS: Donchian channel breakout is the most robust price structure
+indicator (proven in 16,000+ experiments). Using 12h timeframe = ~3x fewer
+trades than 4h = less fee drag = better generalization.
 
-WHY 12h: 3x slower than 4h = fewer but higher-quality trades.
-WHY KAMA: Adaptive to volatility, smoother than EMA.
-WHY ATR REGIME: High volatility regime favors mean reversion.
+WHY 12h DONCHIAN:
+- 24 bars = 12 days of data for structure definition
+- Institutional-level supply/demand zones
+- Proven: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (Sharpe 1.38, 95 trades)
+- Proven: mtf_4h_hma_volume_donchian_adx_12h_atr_v1 (Sharpe 1.32, 94 trades)
 
-TARGET: 75-150 total over 4 years (19-37/year). HARD MAX: 200.
-Signal size: 0.25.
+WHY IT WORKS IN BOTH BULL AND BEAR:
+- Long: price breaks ABOVE upper Donchian band + 1d trend up
+- Short: price breaks BELOW lower Donchian band + 1d trend down
+- Symmetrical structure = works in all market conditions
+
+TARGET: 75-200 total trades over 4 years (19-50/year)
+Signal size: 0.30
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_willr_kama_atr_1d_v1"
+name = "mtf_12h_donchian_vol_ema200_1d_v1"
 timeframe = "12h"
 leverage = 1.0
-
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R"""
-    n = len(close)
-    result = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        
-        if highest_high != lowest_low:
-            result[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
-        else:
-            result[i] = -50
-    
-    return result
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -52,40 +42,37 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_kama(prices, period=21):
-    """Kaufman Adaptive Moving Average"""
-    n = len(prices)
-    kama = np.full(n, np.nan)
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - upper (highest high) and lower (lowest low)"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2.0
+    return upper, mid, lower
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index - identifies trending vs ranging markets
+    CHOP > 61.8 = choppy/ranging (avoid trend trades)
+    CHOP < 38.2 = trending (good for trend trades)
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
     
-    # Need at least period+1 for first AMA
-    if n < period + 1:
-        return kama
+    for i in range(period, n):
+        sum_tr = 0.0
+        for j in range(period):
+            idx = i - j
+            tr = max(high[idx] - low[idx], abs(high[idx] - close[idx-1]) if idx > 0 else high[idx] - low[idx])
+            sum_tr += tr
+        
+        highest_high = max(high[i-period+1:i+1])
+        lowest_low = min(low[i-period+1:i+1])
+        range_val = highest_high - lowest_low
+        
+        if range_val > 0:
+            chop[i] = 100 * (np.log(sum_tr) / np.log(range_val)) if range_val > 0 else 50.0
     
-    # Use high for trend detection
-    close = prices if isinstance(prices, np.ndarray) else prices.values
-    
-    # Efficiency Ratio (ER)
-    change = np.abs(close[period:] - close[:-period])
-    volatility = np.zeros(n - period)
-    for i in range(n - period):
-        volatility[i] = np.sum(np.abs(close[i+1:i+period+1] - close[i:i+period]))
-    
-    er = np.zeros(n)
-    er[period:] = change / np.maximum(volatility, 1e-10)
-    
-    # Fast and slow SC
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # First KAMA value is SMA
-    kama[period] = np.mean(close[:period + 1])
-    
-    # KAMA calculation
-    for i in range(period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -94,34 +81,35 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    SIZE = 0.25
-    
-    # === 1d indicators (HTF) ===
+    # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d ATR for regime detection
-    atr_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio_1d = atr_1d / np.maximum(atr_ma_1d, 1e-10)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    # 1d EMA200 for trend direction (proven filter)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 1d KAMA for trend
-    kama_1d_raw = calculate_kama(df_1d['close'].values, period=21)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_raw)
-    
-    # === Primary TF (12h) indicators ===
-    willr_14 = calculate_williams_r(high, low, close, period=14)
-    
-    # ATR for stoploss
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Volume
+    # Donchian(24) - slightly wider than 20 for 12h
+    donch_upper, donch_mid, donch_lower = calculate_donchian(high, low, period=24)
+    
+    # Choppiness for regime filter
+    chop = calculate_choppiness_index(high, low, close, period=14)
+    
+    # Volume ratio (20-bar MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.maximum(vol_ma, 1e-10)
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # === Signal generation ===
+    # === Pre-compute regime flags ===
+    is_choppy = chop > 61.8
+    is_trending = chop < 38.2
+    
+    # Signals
     signals = np.zeros(n)
+    SIZE = 0.30
     
+    # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
@@ -130,39 +118,72 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_bar = 0
+    bars_since_breakout = 0  # Track bars since breakout signal
     
-    warmup = 100
+    warmup = 250  # Need enough for EMA200 alignment + Donchian buffer
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
+        # Skip if ATR not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(atr_ratio_aligned[i]) or np.isnan(kama_aligned[i]):
+        # Skip if EMA not aligned
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Current values
-        willr = willr_14[i]
-        price_above_kama = close[i] > kama_aligned[i]
-        vol_spike = vol_ratio[i] > 1.8
-        high_vol_regime = atr_ratio_aligned[i] > 1.3
+        # Skip if Donchian not ready
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
+        # === TREND DIRECTION (1d EMA200) ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema_1d_aligned[i]
+        
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Long breakout: price closes above upper band
+        long_breakout = close[i] > donch_upper[i]
+        # Short breakout: price closes below lower band
+        short_breakout = close[i] < donch_lower[i]
+        
+        # Volume confirmation
+        vol_spike = vol_ratio[i] > 1.5
+        
+        # === REGIME CHECK ===
+        # In trending markets, breakout is more reliable
+        # In choppy markets, be more selective
+        regime_ok_long = is_trending[i] or vol_spike  # Either trending OR strong volume
+        regime_ok_short = is_trending[i] or vol_spike
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Williams %R extreme oversold + KAMA uptrend + vol spike + high vol ===
-            if willr < -85 and price_above_kama and vol_spike and high_vol_regime:
+            # === LONG: Breakout above upper Donchian + trend alignment + regime ===
+            if long_breakout and price_above_1d_ema and regime_ok_long:
                 desired_signal = SIZE
+                bars_since_breakout = 0
+            # Fading: price back at lower band in uptrend (mean-reversion backup)
+            elif low[i] <= donch_lower[i] and price_above_1d_ema and vol_spike:
+                desired_signal = SIZE
+                bars_since_breakout = 0
             
-            # === SHORT: Williams %R extreme overbought + KAMA downtrend + vol spike + high vol ===
-            if willr > -15 and not price_above_kama and vol_spike and high_vol_regime:
+            # === SHORT: Breakout below lower Donchian + trend alignment + regime ===
+            if short_breakout and price_below_1d_ema and regime_ok_short:
                 desired_signal = -SIZE
+                bars_since_breakout = 0
+            # Fading: price back at upper band in downtrend
+            elif high[i] >= donch_upper[i] and price_below_1d_ema and vol_spike:
+                desired_signal = -SIZE
+                bars_since_breakout = 0
         
         # === STOPLOSS (2.0 ATR trailing) ===
         if in_position and position_side > 0:
@@ -179,19 +200,19 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === HOLD PERIOD (minimum 2 bars = 1 day to avoid churn) ===
+        # === TIME EXIT (hold minimum 4 bars = 2 days to reduce churn) ===
         bars_held = i - entry_bar
-        
-        if in_position and bars_held >= 2:
-            # Take profit: Williams %R mean reversion to -50
-            if position_side > 0 and willr > -50:
+        if in_position and bars_held >= 4:
+            # Exit on opposite breakout (trend exhaustion)
+            if position_side > 0 and close[i] < donch_lower[i]:
                 desired_signal = 0.0
-            if position_side < 0 and willr < -50:
+            if position_side < 0 and close[i] > donch_upper[i]:
                 desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
@@ -208,6 +229,12 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
                 stop_price = 0.0
+        
+        # Track bars since breakout for potential re-entry
+        if long_breakout or short_breakout:
+            bars_since_breakout = 0
+        else:
+            bars_since_breakout += 1
         
         signals[i] = desired_signal
     
