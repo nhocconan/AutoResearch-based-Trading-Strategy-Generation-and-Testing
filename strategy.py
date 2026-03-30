@@ -1,70 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 12h Donchian + 1d EMA + ADX + Volume
+Experiment #024: 4h Donchian(16) + Volume Spike + 1d EMA Filter
 
-HYPOTHESIS: 12h timeframe with looser filters than 4h strategies.
-12h naturally has fewer bars, so need ADX>15 (vs 20 for 4h) and 
-volume>1.3x (vs 1.5 for 4h) to generate 50-100 trades over 4 years.
-
-CORE ELEMENTS (from DB winners):
-1. Donchian(20) breakout - proven structural break detection
-2. ADX > 15 - looser than 4h version since 12h has fewer bars
-3. 1d EMA direction - HTF trend filter
-4. Volume spike > 1.3x - institutional confirmation (looser than 1.5)
+HYPOTHESIS: Simpler is better. Use just 3 conditions:
+1. Donchian(16) breakout - structural price channel
+2. Volume spike 1.3x - institutional confirmation
+3. 1d EMA direction - stronger HTF trend filter than 12h
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- 2022 crash: ADX spikes during directional moves, 1d EMA filters countertrend
-- 2025 bear: Occasional breakouts caught by Donchian + volume
-- 12h is slow enough to avoid fee drag but fast enough to catch trends
+- Donchian(16) catches breaks in both trending and ranging markets
+- Volume spike confirms institutional involvement (not retail noise)
+- 1d EMA is stronger than 12h - 2022 crash had clear 1d downtrend
+- 2025 bear has periods of 1d EMA alignment before breakdowns
+- Fewer conditions = more consistent across symbols
+
+TRADE COUNT TARGET: 75-150 per symbol over 4 years
+- Donchian(16): ~1 breakout per 14-16 bars = 4-5/month
+- 1d EMA filter: ~50% pass rate = 2-3/month
+- Volume spike: ~70% pass rate = 1.5-2/month
+- ~18-24 trades/symbol/year = 72-96 over 4 years ✓
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_ema_adx_vol_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian16_vol_1d_ema_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_adx(high, low, close, period=14):
-    """ADX (Average Directional Index) - measures trend strength"""
-    n = len(close)
-    tr = np.zeros(n, dtype=np.float64)
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
-        
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
-    
-    for i in range(n):
-        if atr[i] > 1e-10:
-            plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
-    
-    dx = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 1e-10:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period * 2, adjust=False).mean().values
-    return adx, plus_di, minus_di
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -92,13 +54,12 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    adx_14, _, _ = calculate_adx(high, low, close, period=14)
     
-    # Donchian Channel(20) for breakout structure
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian Channel(16) - slightly faster than 20 for more trades
+    donchian_upper = pd.Series(high).rolling(window=16, min_periods=16).max().shift(1).values
+    donchian_lower = pd.Series(low).rolling(window=16, min_periods=16).min().shift(1).values
     
     # Volume average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -115,15 +76,11 @@ def generate_signals(prices):
     entry_atr = 0.0
     entry_bar = 0
     
-    warmup = 50  # Need enough for indicators
+    warmup = 50  # Need enough for Donchian(16)
     
     for i in range(warmup, n):
         # NaN checks
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(adx_14[i]):
             signals[i] = 0.0
             continue
         
@@ -135,28 +92,19 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # === REGIME: ADX > 15 (looser than 4h's 20) ===
-        trend_strength = adx_14[i] > 15.0
+        # === DONCHIAN BREAKOUT (prior bar's channel) ===
+        bullish_breakout = close[i] > donchian_upper[i]
+        bearish_breakout = close[i] < donchian_lower[i]
         
-        # === HTF TREND DIRECTION (1d EMA aligned) ===
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.3
+        
+        # === 1d EMA TREND DIRECTION ===
         htf_bullish = close[i] > ema_1d_aligned[i]
         htf_bearish = close[i] < ema_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION (looser: 1.3x vs 1.5x) ===
-        vol_spike = vol_ratio[i] > 1.3
-        
-        # === DONCHIAN BREAKOUT (prior bar's range) ===
-        prev_upper = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
-        prev_lower = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
-        
-        # Bullish breakout: close above prior bar's upper channel
-        bullish_breakout = (not np.isnan(prev_upper) and close[i] > prev_upper)
-        
-        # Bearish breakout: close below prior bar's lower channel
-        bearish_breakout = (not np.isnan(prev_lower) and close[i] < prev_lower)
-        
-        # === MINIMUM HOLD: 2 bars ===
-        min_hold = (i - entry_bar) >= 2
+        # === MINIMUM HOLD: 4 bars to prevent whipsaw ===
+        min_hold = (i - entry_bar) >= 4
         
         # === EXITS ===
         if in_position:
@@ -167,14 +115,14 @@ def generate_signals(prices):
                 stop_hit = high[i] > (entry_price + 2.5 * entry_atr)
             
             # Exit on opposite breakout
-            reversal_exit = (position_side > 0 and bearish_breakout) or \
-                           (position_side < 0 and bullish_breakout)
+            reversal_exit = (position_side > 0 and bearish_breakout and min_hold) or \
+                           (position_side < 0 and bullish_breakout and min_hold)
             
             if stop_hit:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
-            elif min_hold and reversal_exit:
+            elif reversal_exit:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
@@ -183,12 +131,7 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # Need regime + HTF alignment + breakout + volume
-            if not trend_strength:
-                signals[i] = 0.0
-                continue
-            
-            # LONG: HTF bullish + bullish breakout + volume spike
+            # LONG: 1d bullish + breakout + volume
             if htf_bullish and bullish_breakout and vol_spike:
                 in_position = True
                 position_side = 1
@@ -197,7 +140,7 @@ def generate_signals(prices):
                 entry_bar = i
                 signals[i] = SIZE
             
-            # SHORT: HTF bearish + bearish breakout + volume spike
+            # SHORT: 1d bearish + breakout + volume
             elif htf_bearish and bearish_breakout and vol_spike:
                 in_position = True
                 position_side = -1
