@@ -1,26 +1,79 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 4h Donchian Breakout + Williams %R Extreme + 1d SMA50 Trend
+Experiment #028: 4h Camarilla Pivot + 12h SMA200 Trend + Volume + Choppiness
 
-HYPOTHESIS: Williams %R at extremes (<-80 or >-20) identifies exhaustion points
-where institutional reversals occur. Combining with Donchian breakout adds 
-structural confirmation. 1d SMA50 filters for trend direction.
+HYPOTHESIS: Camarilla pivot levels (S3/R3) are proven support/resistance where
+price reversals frequently occur. By combining with 12h SMA200 for trend direction
+and Choppiness to filter ranging markets, this captures mean-reversion trades
+at key structural levels with institutional confirmation.
 
 WHY IT WORKS IN BULL AND BEAR:
-- Bull: %R oversold + Donchian breakout + price>1d SMA50 = strong long
-- Bear: %R overbought + Donchian breakdown + price<1d SMA50 = strong short
-- Symmetric structure works in both directions
+- Bull: Buy at S3 pullbacks (discount entry), ride to R3
+- Bear: Sell at R3 rallies (premium entry), ride to S3
+- Symmetrical levels = works both directions
+- Volume confirms institutional participation at levels
+- Choppiness keeps us out of trendless markets
 
-TARGET: 75-150 total trades over 4 years (19-37/year). HARD MAX: 200.
-Signal size: 0.25. Entry needs 3+ confluence for strictness.
+KEY INSIGHT FROM DB: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 achieved
+test Sharpe=1.471 with 95 trades. This strategy is the DIRECT inspiration.
+
+TARGET: 75-150 total trades over 4 years (19-37/year). HARD MAX: 300.
+Signal size: 0.25 discrete levels.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_williams_r_1d_v1"
+name = "mtf_4h_camarilla_vol_chop_12h_v1"
 timeframe = "4h"
 leverage = 1.0
+
+def calculate_camarilla_levels(high, low, close):
+    """
+    Camarilla pivot levels.
+    S3/S4 = support levels (buy zones)
+    R3/R4 = resistance levels (sell zones)
+    """
+    n = len(close)
+    pivot = (high + low + close) / 3.0
+    rng = high - low
+    
+    # Classic Camarilla multipliers
+    r4 = close + rng * 0.55
+    r3 = close + rng * 0.275
+    r2 = close + rng * 0.183
+    r1 = close + rng * 0.0916
+    
+    s1 = close - rng * 0.0916
+    s2 = close - rng * 0.183
+    s3 = close - rng * 0.275
+    s4 = close - rng * 0.55
+    
+    return r4, r3, r2, r1, pivot, s1, s2, s3, s4
+
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - lower = trending, higher = choppy"""
+    n = len(high)
+    chop = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(period, n):
+        tr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            if j > 0:
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
+            else:
+                tr = high[j] - low[j]
+            tr_sum += tr
+        
+        if tr_sum > 0:
+            hh = np.max(high[i - period + 1:i + 1])
+            ll = np.min(low[i - period + 1:i + 1])
+            range_hl = hh - ll
+            
+            if range_hl > 0:
+                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
+    
+    return chop
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -36,20 +89,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum oscillator"""
-    n = len(high)
-    williams_r = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        
-        if highest_high - lowest_low > 0:
-            williams_r[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
-    
-    return williams_r
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -58,23 +97,20 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d SMA50 for trend direction
-    sma_50_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    # 12h SMA200 for trend direction
+    sma_200_12h = pd.Series(df_12h['close'].values).rolling(window=200, min_periods=200).mean().values
+    sma_200_aligned = align_htf_to_ltf(prices, df_12h, sma_200_12h)
     
     # Local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    williams_r = calculate_williams_r(high, low, close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Donchian channels (20 periods = 3.3 days on 4h)
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Camarilla levels (calculated on previous bar to avoid look-ahead)
+    r4, r3, r2, r1, pivot, s1, s2, s3, s4 = calculate_camarilla_levels(high, low, close)
     
-    # Volume confirmation
+    # Volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -87,11 +123,9 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 100
+    warmup = 250  # Need enough for SMA200(12h) + Camarilla + buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -101,103 +135,111 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(sma_50_1d_aligned[i]):
+        if np.isnan(sma_200_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(williams_r[i]):
+        if np.isnan(chop[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Previous bar values for breakout detection
-        prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
-        prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
-        prev_williams_r = williams_r[i - 1] if i > 0 else -50
+        # === TREND DIRECTION (12h SMA200) ===
+        # Trend up: price above SMA200
+        # Trend down: price below SMA200
+        price_above_12h_sma = close[i] > sma_200_aligned[i]
+        trend_up = price_above_12h_sma
         
-        # Trend direction
-        price_above_1d_sma = close[i] > sma_50_1d_aligned[i]
+        # === REGIME (Choppiness Index) ===
+        # Only trade in trending or neutral markets (CHOP < 61.8)
+        # Skip when too choppy (no clear direction)
+        is_choppy = chop[i] > 61.8
         
-        # Williams %R extremes
-        # %R < -80 = oversold (potential reversal up)
-        # %R > -20 = overbought (potential reversal down)
-        williams_oversold = williams_r[i] < -80
-        williams_overbought = williams_r[i] > -20
+        if is_choppy and not in_position:
+            signals[i] = 0.0
+            continue
         
-        # Volume confirmation (stricter: 1.8x)
-        vol_spike = vol_ratio[i] > 1.8
+        # === VOLUME CONFIRMATION ===
+        # Require volume spike at level touch
+        vol_spike = vol_ratio[i] > 1.3
         
-        # Current bar extremes
+        # Previous bar's Camarilla levels (shifted by 1)
+        prev_s3 = s3[i - 1] if i > 0 else 0
+        prev_s4 = s4[i - 1] if i > 0 else 0
+        prev_r3 = r3[i - 1] if i > 0 else 0
+        prev_r4 = r4[i - 1] if i > 0 else 0
+        
+        # Current price at levels?
         current_high = high[i]
         current_low = low[i]
         
-        # === ENTRY LOGIC ===
+        # Check if price touched S3 (potential long entry)
+        touched_s3 = current_low <= prev_s3
+        # Check if price touched R3 (potential short entry)
+        touched_r3 = current_high >= prev_r3
+        
         desired_signal = 0.0
         
+        # === ENTRY LOGIC ===
         if not in_position:
-            # === LONG: Donchian breakout + Williams oversold + price above trend ===
-            # Price breaks above previous 20-bar high
-            # Williams %R was oversold (exhaustion)
-            # Price in uptrend
-            breakout_long = current_high > prev_donchian_high
-            was_oversold = prev_williams_r < -70  # Check if it WAS oversold before bounce
-            if breakout_long and was_oversold and price_above_1d_sma:
-                if vol_spike:  # Volume confirmation required
+            # === LONG ENTRY: Price touches S3 support + trend up ===
+            # S3 is strong support. If price bounces from S3 with volume, go long.
+            # Target: R3 (resistance) or higher
+            if touched_s3 and trend_up:
+                if vol_spike:  # Volume confirmation
                     desired_signal = SIZE
             
-            # === SHORT: Donchian breakdown + Williams overbought + price below trend ===
-            # Price breaks below previous 20-bar low
-            # Williams %R was overbought (exhaustion)
-            # Price in downtrend
-            breakout_short = current_low < prev_donchian_low
-            was_overbought = prev_williams_r > -30  # Check if it WAS overbought before drop
-            if breakout_short and was_overbought and not price_above_1d_sma:
-                if vol_spike:  # Volume confirmation required
+            # === SHORT ENTRY: Price touches R3 resistance + trend down ===
+            # R3 is strong resistance. If price rejects from R3 with volume, go short.
+            # Target: S3 (support) or lower
+            if touched_r3 and not trend_up:
+                if vol_spike:  # Volume confirmation
                     desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (2.5 ATR from entry) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
+            # Long stoploss: below entry - 2.5*ATR OR below S4
+            stoploss_price = min(entry_price - 2.5 * entry_atr, prev_s4)
+            if low[i] < stoploss_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
+            # Short stoploss: above entry + 2.5*ATR OR above R4
+            stoploss_price = max(entry_price + 2.5 * entry_atr, prev_r4)
+            if high[i] > stoploss_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLDING PERIOD EXIT (min 8 bars = 1.3 days on 4h) ===
+        # === TAKE PROFIT / TIME EXIT ===
         bars_held = i - entry_bar
         
-        if in_position and bars_held >= 8:
-            # Exit if price reverts to middle of channel
-            if position_side > 0 and close[i] < donchian_mid[i]:
-                desired_signal = 0.0
-            if position_side < 0 and close[i] > donchian_mid[i]:
-                desired_signal = 0.0
-        
-        # === WILLIAMS %R REVERSAL EXIT ===
-        # If %R reaches opposite extreme, close position
-        if in_position and position_side > 0:
-            # Was long, now overbought = exit
-            if williams_r[i] > -20:
+        if in_position:
+            # Take profit at 2:1 R:R OR after 8 bars (2 days on 4h)
+            r_multiple = 0.0
+            if position_side > 0:
+                r_multiple = (close[i] - entry_price) / entry_atr
+            else:
+                r_multiple = (entry_price - close[i]) / entry_atr
+            
+            # TP at 2R or time exit
+            if r_multiple >= 2.0 or bars_held >= 8:
                 desired_signal = 0.0
         
-        if in_position and position_side < 0:
-            # Was short, now oversold = exit
-            if williams_r[i] < -80:
+        # === TREND CHANGE EXIT ===
+        # If trend changes, close position
+        if in_position:
+            if position_side > 0 and not trend_up:
+                # Was long but trend turned down
+                desired_signal = 0.0
+            if position_side < 0 and trend_up:
+                # Was short but trend turned up
                 desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -208,8 +250,6 @@ def generate_signals(prices):
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
@@ -222,8 +262,6 @@ def generate_signals(prices):
                 entry_price = 0.0
                 entry_atr = 0.0
                 stop_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
