@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 6h Bollinger Squeeze + Williams %R Extreme + 1d EMA Trend
+Experiment #028: 12h Donchian Breakout + 1d EMA21 Trend + Choppiness Regime
 
-HYPOTHESIS: Bollinger Band squeeze identifies low-volatility expansions before
-breakouts. Williams %R provides momentum confirmation at extremes. The 1d EMA
-defines the primary trend. This combination catches "volatility trap" reversals
-where squeeze expands in the direction of trend.
+HYPOTHESIS: 12h Donchian(20) breakout is a proven price channel structure.
+Combined with 1d EMA21 for faster trend direction (vs slow SMA200 that caused 0 trades),
+and Choppiness Index to filter range-bound markets.
 
-WHY IT WORKS IN BULL AND BEAR:
-- In bull: squeeze in uptrend → bullish expansion with momentum
-- In bear: squeeze in downtrend → bearish expansion with momentum
-- Shorting bearish expansions works in bear markets
-- Longing bullish expansions works in bull markets
-- Williams %R filters out early entries (only at extremes)
+WHY 12h: Natural trade limiter (50-100/year) vs 6h which overtraded (459 trades).
+WHY 1d EMA21: Faster than SMA200 (adjusts to trend faster = more signals).
+EMA21 1d = ~3 week trend, fast enough for signals but stable.
 
-TARGET: 75-125 total trades over 4 years = 19-31/year. HARD MAX: 300.
-Signal size: 0.25 (conservative).
+TARGET: 50-150 total over 4 years (12-37/year). HARD MAX: 200.
+Works in BOTH bull (long breakouts) and bear (short breakdowns).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_bb_squeeze_williams_1d_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_1d_ema21_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -39,31 +35,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum oscillator"""
-    n = len(close)
-    williams_r = np.full(n, np.nan, dtype=np.float64)
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - lower = trending, higher = choppy"""
+    n = len(high)
+    chop = np.full(n, np.nan, dtype=np.float64)
     
     for i in range(period, n):
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
+        tr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            if j > 0:
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
+            else:
+                tr = high[j] - low[j]
+            tr_sum += tr
         
-        if highest_high != lowest_low:
-            williams_r[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+        if tr_sum > 0:
+            hh = np.max(high[i - period + 1:i + 1])
+            ll = np.min(low[i - period + 1:i + 1])
+            range_hl = hh - ll
+            
+            if range_hl > 0:
+                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
     
-    return williams_r
-
-def calculate_bollinger_bands(close, period=20, num_std=2):
-    """Bollinger Bands - returns upper, middle, lower, width"""
-    n = len(close)
-    middle = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std(ddof=0).values
-    
-    upper = middle + num_std * std
-    lower = middle - num_std * std
-    width = upper - lower
-    
-    return upper, middle, lower, width
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -72,26 +66,23 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE ===
+    # === Load 1d HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA21 for trend direction
+    # 1d EMA21 for trend direction (faster than SMA200)
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Local 6h indicators
+    # Local 12h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    williams_r = calculate_williams_r(high, low, close, period=14)
-    bb_upper, bb_middle, bb_lower, bb_width = calculate_bollinger_bands(close, period=20, num_std=2)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # BB Width MA for squeeze detection
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    # Donchian channels (20 periods on 12h = 10 days)
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # ATR ratio for volatility regime (current vs recent average)
-    atr_ma = pd.Series(atr_14).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr_14 / np.where(atr_ma > 0, atr_ma, 1)
-    
-    # Volume
+    # Volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -107,9 +98,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_bar = 0
-    take_profit_hit = False
     
-    warmup = 100  # Need enough for all indicators
+    warmup = 80  # Need enough for Donchian(20) + indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -125,13 +115,7 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(williams_r[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
-        
-        if np.isnan(bb_width_ma[i]):
+        if np.isnan(chop[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
@@ -139,52 +123,55 @@ def generate_signals(prices):
         
         # === TREND DIRECTION (1d EMA21) ===
         price_above_1d_ema = close[i] > ema_1d_aligned[i]
-        trend_bullish = price_above_1d_ema
-        trend_bearish = not price_above_1d_ema
         
-        # === SQUEEZE DETECTION ===
-        # BB width below its MA = squeeze forming
-        in_squeeze = bb_width[i] < bb_width_ma[i]
+        # === REGIME (Choppiness Index) ===
+        # Skip if too choppy (CHOP > 61.8) — only take new trades in trending markets
+        is_choppy = chop[i] > 61.8
         
-        # Volatility expansion (not in low-vol regime)
-        vol_expanding = atr_ratio[i] > 0.7
+        if is_choppy and not in_position:
+            signals[i] = 0.0
+            continue
         
-        # === VOLUME CONFIRMATION ===
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        current_high = high[i]
+        current_low = low[i]
+        
+        # Previous bar's Donchian values (use i-1 to avoid look-ahead)
+        prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
+        prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
+        
+        # Volume confirmation (optional but helps)
         vol_spike = vol_ratio[i] > 1.5
-        
-        # === WILLIAMS %R MOMENTUM ===
-        # Extreme readings
-        wr_oversold = williams_r[i] < -80  # Strong bullish momentum
-        wr_overbought = williams_r[i] > -20  # Strong bearish momentum
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Squeeze expansion + oversold + bullish trend ===
-            # Squeeze breaks with volatility expansion, momentum at extreme, trend confirms
-            if in_squeeze and vol_expanding and wr_oversold and trend_bullish:
-                if vol_spike:  # Volume confirms
+            # === LONG: Breakout above Donchian high + uptrend ===
+            # Price closes above previous 20-bar high with volume
+            if current_high > prev_donchian_high and price_above_1d_ema:
+                # Optional volume filter — only require volume if choppy
+                if vol_spike or chop[i] < 61.8:
                     desired_signal = SIZE
             
-            # === SHORT: Squeeze expansion + overbought + bearish trend ===
-            if in_squeeze and vol_expanding and wr_overbought and trend_bearish:
-                if vol_spike:
+            # === SHORT: Breakdown below Donchian low + downtrend ===
+            if current_low < prev_donchian_low and not price_above_1d_ema:
+                if vol_spike or chop[i] < 61.8:
                     desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.0 ATR trailing) ===
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -192,26 +179,16 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT (3.0 ATR - use half position) ===
-        if in_position and not take_profit_hit:
-            if position_side > 0:
-                profit_target = entry_price + 3.0 * entry_atr
-                if high[i] >= profit_target:
-                    desired_signal = SIZE / 2  # Half position
-                    take_profit_hit = True
-                    stop_price = entry_price  # Lock in breakeven
-            elif position_side < 0:
-                profit_target = entry_price - 3.0 * entry_atr
-                if low[i] <= profit_target:
-                    desired_signal = -SIZE / 2
-                    take_profit_hit = True
-                    stop_price = entry_price
-        
-        # === TIME-BASED EXIT (hold max 20 bars = 5 days) ===
+        # === TIME-BASED EXIT (hold at least 4 bars = 2 days) ===
         bars_held = i - entry_bar
         
-        if in_position and bars_held >= 20:
-            desired_signal = 0.0
+        if in_position and bars_held >= 4:
+            # Exit if price crosses Donchian mid-point
+            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+            if position_side > 0 and close[i] < donchian_mid:
+                desired_signal = 0.0
+            if position_side < 0 and close[i] > donchian_mid:
+                desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -224,11 +201,10 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 entry_bar = i
-                take_profit_hit = False
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
@@ -238,7 +214,6 @@ def generate_signals(prices):
                 stop_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
-                take_profit_hit = False
         
         signals[i] = desired_signal
     
