@@ -1,51 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 4h Camarilla Pivot + Choppiness Regime + Volume Spike
+Experiment #024: 1d Donchian20 Breakout + 1w SMA Trend + Volume Spike
 
-HYPOTHESIS: Camarilla S3/R3 levels are statistically significant reversal
-points. When price reaches these extremes in a "choppy" (non-trending) regime,
-mean reversion is more likely. In trending regimes, we skip entries to avoid
-chasing. Volume spike confirms the reversal is starting.
+HYPOTHESIS: Donchian(20) breakout is a proven edge across 16K+ experiments.
+Price breaking above 20d high in 1w uptrend = strong momentum continuation.
+Price breaking below 20d low in 1w downtrend = continuation of bear move.
+Combined with volume spike confirmation and ATR stoploss.
 
-WHY IT WORKS IN BULL AND BEAR:
-- 2021 bull: Buy S3 bounces in uptrends (1d SMA confirms uptrend)
-- 2022 bear: Sell R3 bounces in downtrends (1d SMA confirms downtrend)
-- 2023-2024 range: Choppiness filter keeps us flat in ranging markets
-- 2025 bear: Short bounces at R3 when 1d downtrend confirmed
+WHY IT WORKS IN BOTH MARKETS:
+- Bull 2021: Breakouts above 20d high catch large rallies
+- Bear 2022: Short breakouts below 20d low catch crash continuation
+- Range 2025: Fewer signals, higher quality when trend aligns with 1w
 
-KEY INSIGHT: Top DB performer "gen_camarilla_pivot_volume_spike_choppiness_4h_v1"
-had test_sharpe=1.471 with 95 trades. This strategy is a tighter implementation
-of that proven pattern.
+KEY DIFFERENCE FROM FAILED STRATS: 
+- Simple price channel (Donchian) not stacked indicators
+- 1w SMA filter eliminates countertrend trades (main cause of failure)
+- Volume spike ensures institutional participation
+- ATR stoploss prevents single-day gap kills
 
-REFINEMENT from #007: Lower timeframe (4h), add choppiness filter, remove
-S4/R4 extremes (they're too aggressive), tighten entry window.
-Target: 80-150 total trades over 4 years (20-37/year).
+TRADE COUNT: 50-120 total over 4 years (12-30/year). Target 75-100.
+Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_chop_vol_v1"
-timeframe = "4h"
+name = "mtf_1d_donchian20_1w_sma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_camarilla(high, low, close):
-    """
-    Camarilla pivot levels (classic):
-    R3 = close + (high - low) * 1.1
-    R4 = close + (high - low) * 1.1 / 2 = close + rng * 1.1/2
-    S3 = close - (high - low) * 1.1
-    S4 = close - (high - low) * 1.1 / 2
-    """
-    rng = high - low
-    r3 = close + rng * 1.1
-    r4 = close + rng * 1.1 / 2.0  # Classic uses 1.1/2 for R4/S4
-    s3 = close - rng * 1.1
-    s4 = close - rng * 1.1 / 2.0
-    return r3, r4, s3, s4
-
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range with proper lookback"""
     n = len(close)
     if n < 2:
         return np.full(n, np.nan)
@@ -58,31 +43,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP): measures market choppiness/trending
-    CHOP > 61.8 = choppy/mean reverting
-    CHOP < 38.2 = trending
-    Range: 0-100, lower = more trending
-    """
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        # Sum of true range over period
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-        
-        # Highest - lowest over period
-        hh = max(high[i - period + 1:i + 1])
-        ll = min(low[i - period + 1:i + 1])
-        
-        if hh - ll > 0:
-            chop[i] = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(period)
-    
-    return chop
-
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
@@ -90,17 +50,20 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d SMA for macro trend (call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    sma_1d_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
+    # === HTF: 1w SMA for macro trend (call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    sma_1w_50 = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w_50)
     
-    # === 4h indicators (computed once) ===
+    # === 1d indicators ===
+    # Donchian 20 - price channel breakout
+    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # ATR for stoploss
     atr_14 = calculate_atr(high, low, close, period=14)
-    r3, r4, s3, s4 = calculate_camarilla(high, low, close)
-    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume analysis
+    # Volume spike (1.5x 20d avg)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
@@ -111,13 +74,12 @@ def generate_signals(prices):
     # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 60
+    warmup = 100  # Need 20 bars for Donchian + 50 for 1w SMA
     
     for i in range(warmup, n):
         # NaN check
@@ -125,9 +87,13 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_1d_aligned[i]) or np.isnan(chop[i]):
+        if np.isnan(sma_1w_aligned[i]):
             signals[i] = 0.0
             continue
+        
+        # 1w trend filter
+        htf_bullish = close[i] > sma_1w_aligned[i]
+        htf_bearish = close[i] < sma_1w_aligned[i]
         
         # Update highest/lowest for trailing stop
         if in_position:
@@ -136,41 +102,38 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === TREND DETECTION ===
-        # 1d SMA for macro direction
-        htf_bullish = close[i] > sma_1d_aligned[i]
-        htf_bearish = close[i] < sma_1d_aligned[i]
+        # === BREAKOUT DETECTION ===
+        # Price breaks above 20d high
+        bull_breakout = close[i] > dc_upper_20[i] if not np.isnan(dc_upper_20[i]) else False
+        # Price breaks below 20d low
+        bear_breakout = close[i] < dc_lower_20[i] if not np.isnan(dc_lower_20[i]) else False
         
-        # === CHOPPINESS REGIME ===
-        # CHOP > 61.8 = choppy (good for mean reversion/Camarilla)
-        # CHOP < 38.2 = trending (skip - trend following is better)
-        chop_choppy = chop[i] > 61.8
-        chop_trending = chop[i] < 38.2
-        
-        # === CAMARILLA SIGNALS (tight entry) ===
-        # Price at S3 level with 1.5% tolerance
-        at_s3 = (close[i] <= s3[i] * 1.015) and (close[i] >= s3[i] * 0.985)
-        # Price at R3 level with 1.5% tolerance
-        at_r3 = (close[i] >= r3[i] * 0.985) and (close[i] <= r3[i] * 1.015)
-        
-        # === VOLUME CONFIRMATION ===
+        # Volume spike confirmation
         vol_spike = vol_ratio[i] > 1.5
         
-        # === MINIMUM HOLD: 2 bars (8h) ===
-        min_hold = (i - entry_bar) >= 2
-        
         # === ATR TRAILING STOP (2.5x ATR) ===
-        if in_position:
+        def check_atr_stop():
+            if not in_position:
+                return False
             if position_side > 0:
-                stop_hit = low[i] < (highest_since_entry - 2.5 * entry_atr)
-                # Trend reversal exit
-                if htf_bearish and min_hold:
-                    stop_hit = True
+                # Long stop: price fell below highest - 2.5*ATR
+                return low[i] < (highest_since_entry - 2.5 * entry_atr)
             else:
-                stop_hit = high[i] > (lowest_since_entry + 2.5 * entry_atr)
-                # Trend reversal exit
-                if htf_bullish and min_hold:
-                    stop_hit = True
+                # Short stop: price rose above lowest + 2.5*ATR
+                return high[i] > (lowest_since_entry + 2.5 * entry_atr)
+        
+        # === MINIMUM HOLD: 3 bars (3 days) to avoid noise ===
+        min_hold = (i - entry_bar) >= 3
+        
+        # === EXITS ===
+        if in_position:
+            stop_hit = check_atr_stop()
+            
+            # Exit on trend reversal (1w trend flip)
+            if position_side > 0 and htf_bearish and min_hold:
+                stop_hit = True
+            if position_side < 0 and htf_bullish and min_hold:
+                stop_hit = True
             
             if stop_hit:
                 signals[i] = 0.0
@@ -178,30 +141,28 @@ def generate_signals(prices):
                 position_side = 0
             else:
                 signals[i] = position_side * SIZE
-            continue
         
         # === NEW POSITIONS ===
-        # LONG: Price at S3 + volume spike + 1d uptrend + choppy regime
-        if at_s3 and vol_spike and htf_bullish and chop_choppy:
-            in_position = True
-            position_side = 1
-            entry_price = close[i]
-            entry_atr = atr_14[i]
-            entry_bar = i
-            highest_since_entry = high[i]
-            signals[i] = SIZE
-        
-        # SHORT: Price at R3 + volume spike + 1d downtrend + choppy regime
-        elif at_r3 and vol_spike and htf_bearish and chop_choppy:
-            in_position = True
-            position_side = -1
-            entry_price = close[i]
-            entry_atr = atr_14[i]
-            entry_bar = i
-            lowest_since_entry = low[i]
-            signals[i] = -SIZE
-        
-        else:
-            signals[i] = 0.0
+        if not in_position:
+            # LONG: Breakout above 20d high + volume spike + 1w uptrend
+            if bull_breakout and vol_spike and htf_bullish:
+                in_position = True
+                position_side = 1
+                entry_atr = atr_14[i]
+                entry_bar = i
+                highest_since_entry = high[i]
+                signals[i] = SIZE
+            
+            # SHORT: Breakout below 20d low + volume spike + 1w downtrend
+            elif bear_breakout and vol_spike and htf_bearish:
+                in_position = True
+                position_side = -1
+                entry_atr = atr_14[i]
+                entry_bar = i
+                lowest_since_entry = low[i]
+                signals[i] = -SIZE
+            
+            else:
+                signals[i] = 0.0
     
     return signals
