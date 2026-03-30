@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 12h Supertrend Breakout + Volume + 1w ATR Regime
+Experiment #028: 4h Donchian Breakout + Volume Confirmation + 1d SMA200 Trend + Choppiness Regime
 
-HYPOTHESIS: Supertrend(10,3) provides self-adjusting price channel structure
-that works in both bull and bear markets. Combined with 1w trend direction
-and ATR-based regime filter (avoid high volatility explosions), this captures
-sustainable trend changes without overtrading.
+HYPOTHESIS: Price channel breakouts (Donchian) are proven institutional patterns.
+By combining with 1d SMA200 for trend direction and Choppiness Index to avoid 
+range-bound markets, this captures major moves in both bull and bear phases.
 
-WHY 12h: Cuts trade frequency by ~50% vs 6h, targets 12-37 trades/year.
-12h = 365 bars/year, so 50 trades = 13.7% trade frequency.
+WHY IT WORKS: 
+- Donchian(20) on 4h = 3.3-day channel - captures medium-term institutional moves
+- SMA200(1d) ensures we trade WITH the primary trend, not against it
+- Volume spike confirms institutional participation, filters false breakouts
+- Choppiness < 61.8 keeps us out of low-volatility whipsaws
+- Symmetrical channels work for both long breakouts AND short breakdowns
 
-WHY IT WORKS: Supertrend flips direction based on ATR volatility, so it
-automatically adapts to trending vs ranging. The 1w EMA(21) gives longer-term
-bias. Volume confirms institutional participation. ATR regime filter avoids
-entering during vol explosions (often reversal points).
+WHY 4h: Most successful DB strategies use 4h (Sharpe 1.38-1.47). 6h is untested risk.
+12h failed with 178-366 trades but negative Sharpe - too slow for meaningful signals.
 
-TARGET: 50-120 total trades over 4 years. STRICT filters to avoid overtrading.
-Signal size: 0.25.
+TARGET: 75-150 total trades over 4 years (19-37/year). HARD MAX: 200.
+Signal size: 0.25-0.30. 
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_supertrend_vol_1w_atr_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_vol_chop_1d_sma200_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range - vectorized"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -35,79 +36,35 @@ def calculate_atr(high, low, close, period=14):
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], 
+                    abs(high[i] - close[i-1]), 
+                    abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Supertrend indicator - returns upper band, lower band, and direction"""
-    n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    
-    upper_band = np.full(n, np.nan, dtype=np.float64)
-    lower_band = np.full(n, np.nan, dtype=np.float64)
-    supertrend = np.zeros(n, dtype=np.float64)  # 1 = bullish, -1 = bearish
-    
-    # HL2 = (high + low) / 2
-    hl2 = (high + low) / 2
-    
-    supertrend_value = hl2[period] - multiplier * atr[period]
-    supertrend[period] = 1.0  # Start bullish
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - 100*log10(sum ATR,period) / log10(period*range)"""
+    n = len(high)
+    chop = np.full(n, np.nan, dtype=np.float64)
     
     for i in range(period, n):
-        if i > period:
-            bull_band = hl2[i] - multiplier * atr[i]
-            bear_band = hl2[i] + multiplier * atr[i]
-            
-            # Upper band: use previous upper band unless broken
-            if not np.isnan(upper_band[i-1]):
-                if close[i] > upper_band[i-1]:
-                    upper_band[i] = bull_band
-                else:
-                    upper_band[i] = min(bull_band, upper_band[i-1])
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            if j > 0:
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
             else:
-                upper_band[i] = bull_band
-            
-            # Lower band: use previous lower band unless broken
-            if not np.isnan(lower_band[i-1]):
-                if close[i] < lower_band[i-1]:
-                    lower_band[i] = bear_band
-                else:
-                    lower_band[i] = max(bear_band, lower_band[i-1])
-            else:
-                lower_band[i] = bear_band
-            
-            # Supertrend direction
-            if supertrend[i-1] == 1.0:  # Was bullish
-                if close[i] < lower_band[i-1] if not np.isnan(lower_band[i-1]) else close[i] < hl2[i]:
-                    supertrend[i] = -1.0
-                else:
-                    supertrend[i] = 1.0
-            else:  # Was bearish
-                if close[i] > upper_band[i-1] if not np.isnan(upper_band[i-1]) else close[i] > hl2[i]:
-                    supertrend[i] = 1.0
-                else:
-                    supertrend[i] = -1.0
-        else:
-            upper_band[i] = hl2[i] - multiplier * atr[i]
-            lower_band[i] = hl2[i] + multiplier * atr[i]
-            supertrend[i] = 1.0
+                tr = high[j] - low[j]
+            atr_sum += tr
+        
+        hh = np.max(high[i - period + 1:i + 1])
+        ll = np.min(low[i - period + 1:i + 1])
+        range_hl = hh - ll
+        
+        if range_hl > 0 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
     
-    return upper_band, lower_band, supertrend
-
-def calculate_volatility_ratio(atr, period=10):
-    """ATR ratio: current ATR vs recent average - detects vol regime changes"""
-    n = len(atr)
-    vol_ratio = np.full(n, 1.0, dtype=np.float64)
-    
-    for i in range(period, n):
-        if not np.isnan(atr[i]) and atr[i] > 0:
-            atr_avg = np.mean(atr[max(0, i-period):i])
-            if atr_avg > 0:
-                vol_ratio[i] = atr[i] / atr_avg
-    
-    return vol_ratio
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -116,32 +73,29 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE ===
-    df_1w = get_htf_data(prices, '1w')
+    # === Load HTF data ONCE before loop ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w EMA(21) for long-term trend
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1d SMA200 for primary trend (aligned + shifted to avoid look-ahead)
+    sma_200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
+    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200_200)
     
-    # Local 12h indicators
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    upper, lower, supertrend = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
-    vol_ratio = calculate_volatility_ratio(atr_14, period=10)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume SMA
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume / np.where(vol_sma > 0, vol_sma, 1)
+    # Donchian channels (20 periods = 3.3 days on 4h)
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Williams %R (14) for momentum
-    williams_r = np.full(n, np.nan, dtype=np.float64)
-    for i in range(14, n):
-        highest_high = np.max(high[i-14:i+1])
-        lowest_low = np.min(low[i-14:i+1])
-        if highest_high > lowest_low:
-            williams_r[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+    # Volume average (20 periods)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
+    # Initialize signals
     signals = np.zeros(n)
-    SIZE = 0.25
     
     # Position tracking
     in_position = False
@@ -153,7 +107,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 200  # Need enough for Supertrend + 1w alignment + buffer
+    warmup = max(200, donchian_period + 20)  # Need 200 for SMA200 + buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -163,75 +117,70 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(ema_1w_aligned[i]):
+        if np.isnan(sma_200_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === LONG-TERM TREND (1w EMA21) ===
-        price_above_1w_ema = close[i] > ema_1w_aligned[i]
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # === VOLATILITY REGIME FILTER ===
-        # Skip if volatility is too high (often reversal points)
-        # Skip if volatility is too low (choppy, no trend)
-        vol_regime_ok = (vol_ratio[i] >= 0.7) and (vol_ratio[i] <= 2.5)
+        # === TREND DIRECTION (1d SMA200) ===
+        # Must have valid previous bar values for comparison
+        price_above_sma200 = close[i] > sma_200_aligned[i]
         
-        if not vol_regime_ok and not in_position:
+        # === REGIME (Choppiness Index) ===
+        # Only trade when not too choppy (avoid whipsaws)
+        is_choppy = chop[i] > 61.8
+        is_trending = chop[i] < 50.0
+        
+        # Skip entries if market is choppy
+        if is_choppy and not in_position:
             signals[i] = 0.0
             continue
         
-        # === VOLUME CONFIRMATION ===
-        # Require stronger volume for entry
-        volume_confirmed = vol_spike[i] > 1.6
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Use PREVIOUS bar's Donchian to avoid look-ahead
+        prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
+        prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
+        prev_close = close[i - 1] if i > 0 else close[i]
         
-        # === MOMENTUM CONFIRMATION ===
-        # Williams %R: between -30 and -70 for long entry, between -30 and -70 for short
-        momentum_ok = not np.isnan(williams_r[i])
+        # Volume confirmation (1.5x average)
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === SUPERTREND SIGNALS ===
-        st_direction = supertrend[i] if not np.isnan(supertrend[i]) else 0
-        st_prev = supertrend[i - 1] if i > 0 and not np.isnan(supertrend[i - 1]) else st_direction
-        st_flipped = (st_direction != st_prev) and (st_prev != 0)
-        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY ===
-            # Supertrend flips to bullish AND price above 1w EMA (trend confirmation)
-            # OR Supertrend already bullish with volume spike
-            if price_above_1w_ema:
-                if st_flipped and st_direction > 0:
-                    if volume_confirmed or momentum_ok:
-                        desired_signal = SIZE
-                elif st_direction > 0 and volume_confirmed:
-                    # Trend continuation with volume
-                    desired_signal = SIZE
+            # === LONG: Breakout above previous Donchian high ===
+            # Requirements: price > SMA200(1d), breakout above channel, volume confirm
+            if high[i] > prev_donchian_high and price_above_sma200:
+                if vol_spike or is_trending:  # Volume or momentum confirmation
+                    desired_signal = 0.25
             
-            # === SHORT ENTRY ===
-            # Supertrend flips to bearish AND price below 1w EMA
-            # OR Supertrend already bearish with volume spike
-            if not price_above_1w_ema:
-                if st_flipped and st_direction < 0:
-                    if volume_confirmed or momentum_ok:
-                        desired_signal = -SIZE
-                elif st_direction < 0 and volume_confirmed:
-                    # Trend continuation with volume
-                    desired_signal = -SIZE
+            # === SHORT: Breakdown below previous Donchian low ===
+            # Requirements: price < SMA200(1d), breakdown below channel, volume confirm
+            if low[i] < prev_donchian_low and not price_above_sma200:
+                if vol_spike or is_trending:  # Volume or momentum confirmation
+                    desired_signal = -0.25
         
-        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (2.0 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -239,23 +188,21 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TIME-BASED EXIT (hold at least 4 bars = 2 days on 12h) ===
+        # === TIME-BASED EXIT (hold at least 8 bars = 1.3 days) ===
+        # Prevents fee churn from quick reversals
         bars_held = i - entry_bar
         
-        if in_position and bars_held >= 4:
-            # Exit if supertrend flips
-            if (position_side > 0 and st_direction < 0) or (position_side < 0 and st_direction > 0):
+        if in_position and bars_held >= 8:
+            # Exit if price reverts to middle of channel
+            if position_side > 0 and close[i] < donchian_mid[i]:
                 desired_signal = 0.0
-            # Exit if price crosses EMA
-            if position_side > 0 and close[i] < ema_1w_aligned[i]:
-                desired_signal = 0.0
-            if position_side < 0 and close[i] > ema_1w_aligned[i]:
+            if position_side < 0 and close[i] > donchian_mid[i]:
                 desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
+                # New position or direction flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
@@ -264,9 +211,9 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
