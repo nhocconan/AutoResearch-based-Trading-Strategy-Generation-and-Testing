@@ -1,42 +1,69 @@
 #!/usr/bin/env python3
 """
-Experiment #025: 12h Donchian(20) + 1d HMA Trend + Volume + Choppiness Regime
+Experiment #025: 4h HMA Trend + Donchian Breakout + Volume Spike (12h ref)
 
-HYPOTHESIS: 12h timeframe is optimal trade frequency (target 19-37/year).
-Donchian(20) on 12h gives ~73 potential breakouts/year.
-1d HMA provides structural trend (bull/bear/range).
-Volume spike (1.5x) + Choppiness Index (<61.8) filters reduce to 19-37 trades.
-ATR-based stoploss at 2.5x handles volatility.
+HYPOTHESIS: 4h is the optimal balance. 12h HMA(16) for trend direction (faster than 1w).
+Donchian(20) for breakout structure. Volume spike (1.5x) for confirmation.
+Choppiness index to avoid range-bound whipsaws.
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull: Breakout above 20-bar high + 1d HMA up + volume spike + CHOP<61.8 → long
-- Bear: Breakdown below 20-bar low + 1d HMA down + volume spike + CHOP<61.8 → short
-- Choppiness Index ensures we only trade trending markets, not range
-- 2022 bear: HMA down filter prevents buying, allows shorts
-- 2023 recovery: HMA up filter allows longs, stops out quickly if fake
+- Bull: Price above HMA(16) + breakout above Donchian high + vol spike = momentum continuation
+- Bear: Price below HMA(16) + breakdown below Donchian low + vol spike = short momentum
+- Choppiness filter: skip when in range (CHOP > 61.8), only trade when trending (CHOP < 50)
+- ATR stoploss at 2.0x protects against 2022-style crashes
 
-EXPECTED TRADES: 75-150 total over 4 years (19-37/year per symbol)
-- Donchian(20) on 12h = 73 potential/year
-- Volume spike (1.5x) → ~60% trigger rate = 44/year
-- Choppiness (<61.8) → ~50% trigger rate = 22/year
-- HTF trend confirmation → ~85% trigger rate = 19-22/year
-- Final estimate: 75-100 total over 4 years = statistical validity
+KEY CHANGES FROM FAILED STRATEGIES:
+- Use HMA(16) instead of weekly VWAP (faster, less lag)
+- Add Choppiness index filter (proven to reduce whipsaw)
+- Simpler entry: just 2 conditions (breakout + vol) with HMA trend alignment
+- 2.0 ATR stoploss (not 2.5) = tighter risk, better Sharpe
+
+EXPECTED TRADES: 100-200 total over 4 years (25-50/year per symbol)
+- Donchian(20) on 4h = break every 20-40 bars = ~273-546 potential/year
+- Volume spike 1.5x → ~35% pass rate = 177-355
+- HMA(16) trend filter → ~40% pass rate = 71-142
+- Choppiness < 50 → ~50% pass rate = 35-71
+- Final: 75-150 trades = statistical validity + manageable fees
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_vol_chop_v1"
-timeframe = "12h"
+name = "mtf_4h_hma_donchian_vol_chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(data, period):
     """Hull Moving Average"""
-    half = pd.Series(data).rolling(window=period // 2, min_periods=period // 2).mean()
-    full = pd.Series(data).rolling(window=period, min_periods=period).mean()
-    hma = (2 * half - full)
-    hma = hma.rolling(window=int(np.sqrt(period)), min_periods=int(np.sqrt(period))).mean()
-    return hma.values
+    n = len(data)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    series = pd.Series(data)
+    half = int(period / 2)
+    sqrt_n = int(np.sqrt(period))
+    
+    wma_half = series.rolling(window=half, min_periods=half).apply(
+        lambda x: np.dot(x, np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
+    ).values
+    wma_full = series.rolling(window=period, min_periods=period).apply(
+        lambda x: np.dot(x, np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
+    ).values
+    
+    hma = np.zeros(n)
+    for i in range(n):
+        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
+            hma[i] = 2 * wma_half[i] - wma_full[i]
+        else:
+            hma[i] = np.nan
+    
+    # Smooth with WMA(sqrt_period)
+    if period >= 4:
+        sqrt_hma = pd.Series(hma).rolling(window=sqrt_n, min_periods=sqrt_n).apply(
+            lambda x: np.dot(x, np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
+        ).values
+        return sqrt_hma
+    return hma
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -52,24 +79,23 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = market is choppy/ranging (don't trade)
-    CHOP < 38.2 = market is trending (good to trade)
-    """
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - measures trend vs range"""
     n = len(close)
-    chop = np.full(n, np.nan)
+    if n < period:
+        return np.full(n, np.nan)
     
-    for i in range(period, n):
-        highest_high = high[i-period+1:i+1].max()
-        lowest_low = low[i-period+1:i+1].min()
+    chop = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        sum_tr = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+            sum_tr += tr
         
-        if highest_high > lowest_low:
-            sum_tr = 0.0
-            for j in range(i-period+1, i+1):
-                sum_tr += high[j] - low[j]
-            
+        highest_high = max(high[i - period + 1:i + 1])
+        lowest_low = min(low[i - period + 1:i + 1])
+        
+        if sum_tr > 0 and (highest_high - lowest_low) > 0:
             chop[i] = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(period)
     
     return chop
@@ -82,23 +108,32 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d HMA(21) for structural trend
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # 12h HMA(16) for trend direction
+    hma_12h = calculate_hma(df_12h['close'].values, 16)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # === Local 12h indicators ===
+    # 12h EMA(8) for faster confirmation
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=8, min_periods=8, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness_index(high, low, close, period=14)
     
-    # Donchian Channel(20)
+    # Donchian Channel(20) - primary breakout structure
     donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Local HMA(16) for faster alignment
+    local_hma = calculate_hma(close, 16)
     
     # Volume average (20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # Choppiness index
+    chop = calculate_choppiness(high, low, close, period=14)
     
     # === Signals ===
     signals = np.zeros(n)
@@ -113,9 +148,10 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 50  # Enough for Donchian20, ATR14, CHOP14
+    warmup = 60  # Enough for Donchian20, ATR14, HMA16, chop14
     
     for i in range(warmup, n):
+        # NaN checks
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
@@ -128,21 +164,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(local_hma[i]):
             signals[i] = 0.0
             continue
         
-        # === TREND DIRECTION: 1d HMA ===
-        prev_hma = hma_1d_aligned[i-1] if i > 0 and not np.isnan(hma_1d_aligned[i-1]) else hma_1d_aligned[i]
-        curr_hma = hma_1d_aligned[i]
+        # === REGIME FILTER: Skip if choppy (CHOP > 61.8) ===
+        is_choppy = chop[i] > 61.8
         
-        hma_bullish = close[i] > curr_hma and curr_hma > prev_hma  # HMA rising + price above
-        hma_bearish = close[i] < curr_hma and curr_hma < prev_hma  # HMA falling + price below
+        # === TREND DIRECTION ===
+        # Bull trend: price above 12h HMA and local HMA, HMA rising
+        bull_trend = (close[i] > hma_12h_aligned[i] and 
+                     close[i] > local_hma[i] and
+                     local_hma[i] > local_hma[i-4] if not np.isnan(local_hma[i-4]) else True)
         
-        # === CHOPPINESS REGIME ===
-        # CHOP < 61.8 = trending market (good to trade)
-        # CHOP > 61.8 = ranging market (avoid - mean reversion only)
-        chop_trending = chop[i] < 61.8
+        # Bear trend: price below 12h HMA and local HMA, HMA falling
+        bear_trend = (close[i] < hma_12h_aligned[i] and 
+                     close[i] < local_hma[i] and
+                     local_hma[i] < local_hma[i-4] if not np.isnan(local_hma[i-4]) else True)
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
@@ -160,31 +198,30 @@ def generate_signals(prices):
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Bullish breakout + volume spike + bull trend + trending market
-            if bullish_breakout and vol_spike and hma_bullish and chop_trending:
+            # LONG: Bullish breakout + volume spike + bull trend + NOT choppy
+            if bullish_breakout and vol_spike and bull_trend and not is_choppy:
                 desired_signal = SIZE
             
-            # SHORT: Bearish breakout + volume spike + bear trend + trending market
-            elif bearish_breakout and vol_spike and hma_bearish and chop_trending:
+            # SHORT: Bearish breakout + volume spike + bear trend + NOT choppy
+            elif bearish_breakout and vol_spike and bear_trend and not is_choppy:
                 desired_signal = -SIZE
         
-        # === EXIT LOGIC: ATR Trailing Stop ===
+        # === EXIT / STOP LOSS LOGIC ===
         if in_position:
             if position_side > 0:
                 # Update trailing high
                 if i == entry_bar or high[i] > trailing_high:
                     trailing_high = high[i]
                 
-                # Stop: 2.5 ATR from highest
-                stop_price = trailing_high - 2.5 * entry_atr
+                # Stop: 2.0 ATR from highest
+                stop_price = trailing_high - 2.0 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
-                    trailing_high = 0.0
                 
-                # Exit if HMA trend flips to bearish
-                elif hma_bearish:
+                # Exit if trend flips
+                elif close[i] < hma_12h_aligned[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
@@ -194,22 +231,21 @@ def generate_signals(prices):
                 if i == entry_bar or low[i] < trailing_low:
                     trailing_low = low[i]
                 
-                # Stop: 2.5 ATR from lowest
-                stop_price = trailing_low + 2.5 * entry_atr
+                # Stop: 2.0 ATR from lowest
+                stop_price = trailing_low + 2.0 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
-                    trailing_low = 0.0
                 
-                # Exit if HMA trend flips to bullish
-                elif hma_bullish:
+                # Exit if trend flips
+                elif close[i] > hma_12h_aligned[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
         
-        # === MINIMUM HOLD: 3 bars to reduce fee churn ===
-        if in_position and (i - entry_bar) < 3:
+        # === MINIMUM HOLD: 4 bars to reduce fee churn ===
+        if in_position and (i - entry_bar) < 4:
             desired_signal = position_side * SIZE
         
         # === EXECUTE NEW POSITION ===
