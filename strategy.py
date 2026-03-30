@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 6h Keltner Channel + Volatility Regime + 1d Trend
+Experiment #021: 4h Camarilla Pivot + Volume Spike + Choppiness Regime
 
-HYPOTHESIS: Markets alternate between low-volatility (range-bound) and 
-high-volatility (trending) regimes. Keltner channels + ATR ratio regime 
-detection captures both:
-- LOW vol regime: Price at outer Keltner bands often reverts
-- HIGH vol regime: Keltner breakouts capture momentum moves
+HYPOTHESIS: Choppiness Index acts as a meta-regime filter. When CHOP > 61.8
+(range market), Camarilla levels act as reversal magnets. When CHOP < 38.2
+(trending), Camarilla levels become pullback entries in trend direction.
 
-WHY 6h: Balances trade frequency (target 75-150 over 4 years)
-Keltner is momentum-based (different from Donchian/Camarilla price-based).
+WHY 4h: Matches proven DB pattern (ETHUSDT test Sharpe 1.47). 12h may miss
+some valid Camarilla setups. 4h gives better entry timing.
 
-1d EMA50 determines bull/bear bias. ATR(14) for stops.
+WHY IT WORKS IN BULL AND BEAR: Symmetrical pivot math. Buy S3/S4 in uptrends
+(CHOP > 61.8), sell R3/R4 in downtrends. Choppiness tells us when to trade.
 
-TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 250.
+TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 200.
 Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_keltner_volregime_ema50_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_camarilla_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -38,16 +37,32 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_keltner(high, low, close, ema_period=20, atr_period=10, multiplier=2.0):
-    """Keltner Channels: EMA +/- multiplier * ATR"""
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = choppy/range market (good for mean reversion)
+    CHOP < 38.2 = trending (good for trend continuation)
+    """
     n = len(close)
-    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    atr = calculate_atr(high, low, close, atr_period)
+    chop = np.full(n, np.nan)
     
-    upper = ema + multiplier * atr
-    lower = ema - multiplier * atr
+    for i in range(period, n):
+        # Sum of ATR over period
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j],
+                     abs(low[j] - close[j-1]) if j > 0 else 0)
+            atr_sum += tr
+        
+        # Highest high - lowest low over period
+        period_high = max(high[i - period + 1:i + 1])
+        period_low = min(low[i - period + 1:i + 1])
+        high_low_range = period_high - period_low
+        
+        if high_low_range > 0:
+            chop[i] = 100 * (np.log10(atr_sum) / np.log10(high_low_range * period))
     
-    return ema, upper, lower
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -59,42 +74,17 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 for trend direction
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1d SMA50 for basic trend direction (simpler than EMA)
+    sma_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
-    # === Local indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_30 = calculate_atr(high, low, close, period=30)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # Keltner channels (20 EMA, 10 ATR, 2x multiplier)
-    keltner_mid, keltner_upper, keltner_lower = calculate_keltner(high, low, close, 20, 10, 2.0)
-    
-    # Volatility regime: ATR(6)/ATR(30) — need to compute 6-period ATR first
-    atr_6 = calculate_atr(high, low, close, period=6)
-    vol_ratio = atr_6 / np.where(atr_30 > 0, atr_30, 1)
-    
-    # Smooth volatility ratio with EMA for stability
-    vol_ratio_smooth = pd.Series(vol_ratio).ewm(span=10, min_periods=10, adjust=False).mean().values
-    
-    # Volume ratio
+    # Volume ratio (20-bar MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # Bollinger bandwidth for regime confirmation
-    bb_mid = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2.0 * bb_std
-    bb_lower = bb_mid - 2.0 * bb_std
-    bb_width = (bb_upper - bb_lower) / np.where(bb_mid > 0, bb_mid, 1)
-    
-    # BB width percentile (20-day)
-    bb_width_pct = np.zeros(n)
-    for i in range(20, n):
-        window = bb_width[max(0, i-20):i+1]
-        valid = window[~np.isnan(window)]
-        if len(valid) > 0:
-            bb_width_pct[i] = (valid < bb_width[i]).sum() / len(valid)
     
     # Signals
     signals = np.zeros(n)
@@ -113,70 +103,68 @@ def generate_signals(prices):
     warmup = 100  # Need enough for all indicators
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
+        # Skip if ATR not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if chop not ready
+        if np.isnan(chop_14[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(vol_ratio_smooth[i]):
+        # Skip if SMA not aligned
+        if np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d EMA50) ===
-        bull_trend = close[i] > ema_1d_aligned[i]
-        bear_trend = close[i] < ema_1d_aligned[i]
+        # === REGIME: CHOPPINESS FILTER ===
+        # Only trade when CHOP > 61.8 (range market) or CHOP < 38.2 (strong trend)
+        # Skip when 38.2 < CHOP < 61.8 (transitional)
+        chop_regime = (chop_14[i] > 61.8) or (chop_14[i] < 38.2)
         
-        # === VOLATILITY REGIME ===
-        # vol_ratio_smooth > 0.9: trending/volatile, < 0.7: calm/range
-        high_vol = vol_ratio_smooth[i] > 0.9
-        low_vol = vol_ratio_smooth[i] < 0.7
-        
-        # BB squeeze detection (low volatility confirmed)
-        bb_squeeze = bb_width_pct[i] < 0.25
+        # === TREND: 1d SMA50 ===
+        price_above_1d_sma = close[i] > sma_1d_aligned[i]
         
         # Volume confirmation
         vol_spike = vol_ratio[i] > 1.5
         
-        # Price position relative to Keltner
-        price_above_upper = close[i] > keltner_upper[i]
-        price_below_lower = close[i] < keltner_lower[i]
-        price_above_mid = close[i] > keltner_mid[i]
-        price_below_mid = close[i] < keltner_mid[i]
+        # === CAMARILLA LEVELS from previous CLOSED bar (no look-ahead) ===
+        prev_high = high[i - 1]
+        prev_low = low[i - 1]
+        prev_close = close[i - 1]
+        prev_range = prev_high - prev_low
+        
+        # Classic Camarilla levels
+        r3 = prev_close + prev_range * 0.09167
+        r4 = prev_close + prev_range * 0.18333
+        s3 = prev_close - prev_range * 0.09167
+        s4 = prev_close - prev_range * 0.18333
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if not in_position:
-            # === LONG ENTRY CONDITIONS ===
-            if bull_trend:
-                # Option 1: Breakout in high vol (aggressive)
-                if high_vol and price_above_upper and vol_spike:
+        if not in_position and chop_regime:
+            # === LONG: Price touches S3/S4 with volume in uptrend ===
+            # In range (CHOP > 61.8): buy bounces at support
+            # In strong trend (CHOP < 38.2): buy pullbacks to S3/S4
+            if price_above_1d_sma and vol_spike:
+                if low[i] <= s4:
                     desired_signal = SIZE
-                # Option 2: Mean reversion from BB squeeze in low vol
-                elif low_vol and bb_squeeze and price_below_lower and vol_spike:
+                elif low[i] <= s3:
                     desired_signal = SIZE
-                # Option 3: Pullback to mid Keltner in uptrend
-                elif price_above_mid and price_below_mid == False and vol_spike:
-                    # Wait, this doesn't make sense. Let me fix:
-                    pass
             
-            # === SHORT ENTRY CONDITIONS ===
-            if bear_trend:
-                # Option 1: Breakout in high vol (aggressive)
-                if high_vol and price_below_lower and vol_spike:
+            # === SHORT: Price touches R3/R4 with volume in downtrend ===
+            if not price_above_1d_sma and vol_spike:
+                if high[i] >= r4:
                     desired_signal = -SIZE
-                # Option 2: Mean reversion from BB squeeze in low vol
-                elif low_vol and bb_squeeze and price_above_upper and vol_spike:
+                elif high[i] >= r3:
                     desired_signal = -SIZE
         
         # === STOPLOSS (2.0 ATR trailing) ===
@@ -194,17 +182,15 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === EXIT ON REGIME CHANGE (volatility crush) ===
-        if in_position and position_side > 0:
-            # Exit if volatility contracts after entry (take profit)
-            if vol_ratio_smooth[i] < 0.7 and bb_width_pct[i] < 0.3:
-                if i - entry_bar >= 4:  # Hold at least 1 day
-                    desired_signal = 0.0
+        # === HOLD PERIOD: minimum 2 bars to avoid churn ===
+        bars_held = i - entry_bar
         
-        if in_position and position_side < 0:
-            if vol_ratio_smooth[i] < 0.7 and bb_width_pct[i] < 0.3:
-                if i - entry_bar >= 4:
-                    desired_signal = 0.0
+        if in_position and bars_held >= 2:
+            # Exit when price returns to mid-point (prev close)
+            if position_side > 0 and close[i] >= prev_close:
+                desired_signal = 0.0
+            if position_side < 0 and close[i] <= prev_close:
+                desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
