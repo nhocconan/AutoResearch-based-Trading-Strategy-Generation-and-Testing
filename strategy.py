@@ -2,31 +2,26 @@
 """
 Experiment #028: 4h Camarilla Pivot + Volume Spike + Choppiness Regime
 
-HYPOTHESIS: Camarilla pivot levels are proven support/resistance where price
-reverses. H4/L4 breakouts are strong momentum signals. By combining:
-1. 1d Camarilla levels (prev day) for structure
-2. Volume spike confirmation (institutional participation)
-3. Choppiness Index filter (avoid range-bound whipsaws)
-4. ATR stoploss (2.5x for wider stops, fewer stop-outs)
+HYPOTHESIS: Camarilla pivot levels (S3/S4 for longs, R3/R4 for shorts) are 
+mathematically precise support/resistance derived from yesterday's range.
+Unlike Donchian breakouts, pivot touches capture mean-reversion reversals 
+at key levels. Volume spike confirms institutional significance. Choppiness
+Index keeps us out of ranging markets where pivots fail.
 
-This is a DIRECT IMPLEMENTATION of the DB top performer (ETHUSDT: test Sharpe 1.47).
+WHY IT WORKS IN BULL AND BEAR:
+- S3/S4: In bull markets, price often bounces from daily support zones
+- R3/R4: In bear markets, rallies fail at daily resistance
+- Symmetrical: both long and short setups
+- 4h TF balances trade frequency with signal quality
 
-WHY 4h: Faster than 12h (more signals), more stable than 1h (less noise).
-Using 1d Camarilla means structure doesn't change every bar.
-
-TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 300.
-Signal size: 0.25.
-
-LEARNED FROM FAILURES:
-- #002: 12h Camarilla overtraded (1155 trades) → Use 4h, stricter volume filter
-- Donchian combinations overtraded or undertraded → Camarilla is different structure
-- Too many conditions = 0 trades or fee death → Keep it to 3 conditions
+TARGET: 75-200 total trades over 4 years (19-50/year)
+Signal size: 0.25-0.30 (discrete)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_vol_chop_1d_v2"
+name = "mtf_4h_camarilla_vol_chop_1d_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -68,24 +63,34 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_camarilla_levels(high, low, close):
-    """Camarilla pivot levels - 8 levels from pivot"""
-    n = len(high)
-    pivot = (high + low + close) / 3.0
-    hl_range = high - low
+def calculate_camarilla_pivots(high, low, close):
+    """Camarilla pivot levels using yesterday's HLC"""
+    n = len(close)
     
-    r1 = pivot + hl_range * 0.09166
-    r2 = pivot + hl_range * 0.1833
-    r3 = pivot + hl_range * 0.2750
-    r4 = pivot + hl_range * 0.3666  # Key breakout level
+    # Use previous day's values for pivot calculation
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     
-    s1 = pivot - hl_range * 0.09166
-    s2 = pivot - hl_range * 0.1833
-    s3 = pivot - hl_range * 0.2750
-    s4 = pivot - hl_range * 0.3666  # Key breakdown level
+    # Set first element to NaN (no previous day)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    range_hl = prev_high - prev_low
+    
+    # Camarilla formulas
+    r4 = prev_close + (range_hl * 1.1 / 2)
+    r3 = prev_close + (range_hl * 1.1 / 4)
+    r2 = prev_close + (range_hl * 1.1 / 6)
+    r1 = prev_close + (range_hl * 1.1 / 12)
+    
+    s1 = prev_close - (range_hl * 1.1 / 12)
+    s2 = prev_close - (range_hl * 1.1 / 6)
+    s3 = prev_close - (range_hl * 1.1 / 4)
+    s4 = prev_close - (range_hl * 1.1 / 2)
     
     return {
-        'pivot': pivot,
         'r1': r1, 'r2': r2, 'r3': r3, 'r4': r4,
         's1': s1, 's2': s2, 's3': s3, 's4': s4
     }
@@ -100,29 +105,25 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d Camarilla levels (prev day)
-    cam_1d = calculate_camarilla_levels(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values
-    )
+    # 1d SMA50 for trend direction
+    sma_50_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
-    # Align 1d levels to 4h
-    h4_1d = align_htf_to_ltf(prices, df_1d, cam_1d['h4'])
-    l4_1d = align_htf_to_ltf(prices, df_1d, cam_1d['l4'])
-    h3_1d = align_htf_to_ltf(prices, df_1d, cam_1d['h3'])
-    l3_1d = align_htf_to_ltf(prices, df_1d, cam_1d['l3'])
+    # 1d EMA21 for faster trend
+    ema_21_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
     # Local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     chop = calculate_choppiness(high, low, close, period=14)
+    pivots = calculate_camarilla_pivots(high, low, close)
     
-    # Volume
+    # Volume moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30  # Slightly larger since Camarilla is more precise than Donchian
     
     # Position tracking
     in_position = False
@@ -130,16 +131,19 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     entry_bar = 0
-    was_in_position = False
     
-    warmup = 100  # Need enough for indicators + buffer
+    warmup = 100  # Need enough for indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
+        
+        if np.isnan(sma_50_aligned[i]) or np.isnan(ema_21_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
@@ -151,113 +155,155 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        # Get current 1d levels
-        h4_level = h4_1d[i] if not np.isnan(h4_1d[i]) else close[i] * 1.02
-        l4_level = l4_1d[i] if not np.isnan(l4_1d[i]) else close[i] * 0.98
-        h3_level = h3_1d[i] if not np.isnan(h3_1d[i]) else close[i] * 1.01
-        l3_level = l3_1d[i] if not np.isnan(l3_1d[i]) else close[i] * 0.99
+        current_close = close[i]
+        current_high = high[i]
+        current_low = low[i]
         
-        # Volume confirmation (stronger filter to reduce trades)
-        vol_spike = vol_ratio[i] > 1.8
+        # === TREND DIRECTION (1d EMA21 vs SMA50) ===
+        bull_trend = ema_21_aligned[i] > sma_50_aligned[i]
+        bear_trend = ema_21_aligned[i] < sma_50_aligned[i]
+        
+        # Price relative to 1d SMA50
+        price_above_1d_sma = current_close > sma_50_aligned[i]
         
         # === REGIME (Choppiness Index) ===
-        # Only trade when trending or mildly choppy
-        # CHOP > 61.8 = very choppy (skip)
-        # CHOP < 50 = trending (prefer)
-        is_trending = chop[i] < 50.0
         is_choppy = chop[i] > 61.8
+        is_trending = chop[i] < 50.0
         
         # Skip if too choppy and not in position
         if is_choppy and not in_position:
             signals[i] = 0.0
             continue
         
-        desired_signal = 0.0
+        # Get Camarilla levels for this bar
+        s3 = pivots['s3'][i]
+        s4 = pivots['s4'][i]
+        r3 = pivots['r3'][i]
+        r4 = pivots['r4'][i]
+        
+        # Skip if pivots not valid
+        if np.isnan(s3) or np.isnan(r3):
+            signals[i] = 0.0
+            continue
+        
+        # Volume confirmation
+        vol_spike = vol_ratio[i] > 1.5
         
         # === ENTRY LOGIC ===
-        if not in_position:
-            # === LONG: Breakout above H4 with volume ===
-            # Price closes above H4 breakout level
-            if close[i] > h4_level:
-                # Volume confirmation OR trending market
-                if vol_spike or is_trending:
-                    desired_signal = SIZE
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    entry_atr = atr_14[i]
-                    highest_since_entry = high[i]
-                    lowest_since_entry = low[i]
-                    entry_bar = i
-                    stop_price = entry_price - 2.5 * entry_atr
-            
-            # === SHORT: Breakdown below L4 with volume ===
-            # Price closes below L4 breakdown level
-            if close[i] < l4_level:
-                # Volume confirmation OR trending market
-                if vol_spike or is_trending:
-                    desired_signal = -SIZE
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    entry_atr = atr_14[i]
-                    highest_since_entry = high[i]
-                    lowest_since_entry = low[i]
-                    entry_bar = i
-                    stop_price = entry_price + 2.5 * entry_atr
+        desired_signal = 0.0
         
-        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        if not in_position:
+            # === LONG ENTRY: Price touches S3 or S4 support with volume ===
+            # S3 is more aggressive, S4 is extreme overshoot
+            long_trigger = False
+            
+            # Touch S3 support (primary)
+            if s4 <= current_low <= s3 and bull_trend:
+                if vol_spike or is_trending:
+                    long_trigger = True
+            
+            # Touch S4 extreme (more extreme entry)
+            if current_low <= s4 and bull_trend:
+                if vol_spike:
+                    long_trigger = True
+            
+            # Alternative: price within 0.1% of S3 in strong uptrend
+            s3_tolerance = s3 * 0.001
+            if abs(current_close - s3) < s3_tolerance and price_above_1d_sma:
+                if vol_spike:
+                    long_trigger = True
+            
+            if long_trigger:
+                desired_signal = SIZE
+            
+            # === SHORT ENTRY: Price touches R3 or R4 resistance with volume ===
+            short_trigger = False
+            
+            # Touch R3 resistance (primary)
+            if r3 <= current_high <= r4 and bear_trend:
+                if vol_spike or is_trending:
+                    short_trigger = True
+            
+            # Touch R4 extreme
+            if current_high >= r4 and bear_trend:
+                if vol_spike:
+                    short_trigger = True
+            
+            # Alternative: price within 0.1% of R3 in downtrend
+            r3_tolerance = r3 * 0.001
+            if abs(current_close - r3) < r3_tolerance and not price_above_1d_sma:
+                if vol_spike:
+                    short_trigger = True
+            
+            if short_trigger:
+                desired_signal = -SIZE
+        
+        # === STOPLOSS CHECK (2.0 ATR) ===
+        stoploss_triggered = False
+        
         if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
-                desired_signal = 0.0
-                in_position = False
-                position_side = 0
+            # Long: stop below entry minus 2*ATR, or below S4
+            stoploss_long = min(entry_price - 2.0 * entry_atr, s4 * 0.99)
+            if current_low < stoploss_long:
+                stoploss_triggered = True
         
         if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
-                desired_signal = 0.0
-                in_position = False
-                position_side = 0
+            # Short: stop above entry plus 2*ATR, or above R4
+            stoploss_short = max(entry_price + 2.0 * entry_atr, r4 * 1.01)
+            if current_high > stoploss_short:
+                stoploss_triggered = True
         
-        # === TIME-BASED EXIT (hold at least 8 bars = 2 days) ===
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === TAKE PROFIT (optional: trail stop at mid-levels) ===
         bars_held = i - entry_bar
         
+        if in_position and bars_held >= 4:
+            # Exit if price reaches opposite pivot level
+            if position_side > 0:
+                # Long: exit near R1 or R2
+                r1 = pivots['r1'][i]
+                r2 = pivots['r2'][i]
+                if not np.isnan(r1) and current_close >= r1:
+                    desired_signal = SIZE / 2  # Half position
+                if not np.isnan(r2) and current_close >= r2:
+                    desired_signal = 0.0  # Full exit
+            else:
+                # Short: exit near S1 or S2
+                s1 = pivots['s1'][i]
+                s2 = pivots['s2'][i]
+                if not np.isnan(s1) and current_close <= s1:
+                    desired_signal = -SIZE / 2  # Half position
+                if not np.isnan(s2) and current_close <= s2:
+                    desired_signal = 0.0  # Full exit
+        
+        # === TIME-BASED EXIT (hold at least 8 bars = 2 days max) ===
         if in_position and bars_held >= 8:
-            # Exit if price reverts to H3/L3 (mean reversion target)
-            if position_side > 0 and close[i] < h3_level:
-                desired_signal = 0.0
-                in_position = False
-                position_side = 0
-            if position_side < 0 and close[i] > l3_level:
-                desired_signal = 0.0
-                in_position = False
-                position_side = 0
-        
-        # === TRAILING STOP ADJUSTMENT ===
-        # If in profit (> 2R), tighten stop
-        if in_position and position_side > 0:
-            profit_r = (close[i] - entry_price) / entry_atr
-            if profit_r > 2.0:
-                # Move stop to breakeven
-                new_stop = entry_price + 0.5 * entry_atr
-                stop_price = max(stop_price, new_stop)
-        
-        if in_position and position_side < 0:
-            profit_r = (entry_price - close[i]) / entry_atr
-            if profit_r > 2.0:
-                # Move stop to breakeven
-                new_stop = entry_price - 0.5 * entry_atr
-                stop_price = min(stop_price, new_stop)
-        
-        # === FINAL SIGNAL ===
-        if not in_position:
             desired_signal = 0.0
+        
+        # === UPDATE POSITION TRACKING ===
+        if desired_signal != 0.0:
+            if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
+                in_position = True
+                position_side = int(np.sign(desired_signal))
+                entry_price = current_close
+                entry_atr = atr_14[i]
+                entry_bar = i
+                
+                # Set initial stop
+                if position_side > 0:
+                    stop_price = entry_price - 2.0 * entry_atr
+                else:
+                    stop_price = entry_price + 2.0 * entry_atr
+        else:
+            if in_position:
+                in_position = False
+                position_side = 0
+                entry_price = 0.0
+                entry_atr = 0.0
+                stop_price = 0.0
         
         signals[i] = desired_signal
     
