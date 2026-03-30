@@ -1,46 +1,82 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 4h Tight Camarilla + Volume Spike + Choppiness + Trend Bias
+Experiment #028: 1d KAMA Trend + RSI Momentum + Choppiness Regime + 1w Confirmation
 
-HYPOTHESIS: Camarilla pivot levels are mathematically precise support/resistance
-where institutional order flow clusters. Using tighter S4/R4 levels (stronger 
-breakdown/reversal zones) with volume spike confirmation and Choppiness Index
-filtering creates high-probability mean reversion setups.
+HYPOTHESIS: KAMA adapts to volatility regime changes, making it effective in both
+bull (breakouts) and bear (breakdowns). RSI(14) extremes (<30, >70) provide 
+momentum-based entries. Choppiness Index filters out the 50% of time markets
+are range-bound, avoiding 2022-style whipsaws. Weekly KAMA provides higher-
+timeframe trend alignment for better entry quality.
 
-The 1d SMA200 adds trend bias: longs only when price above SMA200 (bull bounce),
-shorts only when price below SMA200 (bear rally fade). This reduces whipsaws
-in choppy markets.
+WHY IT WORKS IN BULL AND BEAR: KAMA is adaptive - fast in trending markets,
+slow in volatile ones. Short entries on RSI>70 in downtrending markets catches
+bear rallies. Long entries on RSI<30 in uptrending markets catches reversals.
 
-WHY IT WORKS IN BULL AND BEAR: Camarilla is symmetric - both sides work.
-In bull: price bounces from S3/S4 (bull market corrections). 
-In bear: price reverses from R3/R4 (bear market rallies).
-Volume spike confirms institutional conviction. Choppiness keeps us out of 
-trend-following whipsaws.
-
-TARGET: 75-150 total trades over 4 years (19-37/year). HARD MAX: 300.
-Signal size: 0.30 (moderate).
+TARGET: 60-120 total trades over 4 years (15-30/year). HARD MAX: 150.
+Signal size: 0.25 (conservative).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_vol_chop_trend_v1"
-timeframe = "4h"
+name = "mtf_1d_kama_rsi_chop_1w_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+def calculate_kama(close, period=10, fast=2, slow=30):
+    """Kaufman's Adaptive Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    # Efficiency Ratio (ER)
+    direction = np.abs(close[period:] - close[:-period])
+    volatility = np.zeros(n - period)
+    for i in range(n - period):
+        for j in range(period):
+            volatility[i] += abs(close[i + j + 1] - close[i + j])
+    
+    er = np.zeros(n)
+    er[period:] = direction / np.maximum(volatility, 1e-10)
+    er = np.clip(er, 0, 1)
+    
+    # Smoothing constant
+    fast_const = 2 / (fast + 1)
+    slow_const = 2 / (slow + 1)
+    sc = (er * (fast_const - slow_const) + slow_const) ** 2
+    
+    kama = np.full(n, np.nan)
+    kama[period] = close[period]
+    
+    for i in range(period + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_rsi(close, period=14):
+    """Relative Strength Index"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
+    
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i]) / period
+    
+    rs = np.divide(avg_gain, np.maximum(avg_loss, 1e-10))
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi
 
 def calculate_choppiness(high, low, close, period=14):
     """Choppiness Index - lower = trending, higher = choppy"""
@@ -66,46 +102,41 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels
-    S3/S4 = support (buy zone), R3/R4 = resistance (sell zone)
-    """
-    pivot = (high + low + close) / 3.0
-    h4 = close + (high - low) * 1.1 / 2.0
-    h3 = close + (high - low) * 1.1 / 4.0
-    h2 = close + (high - low) * 1.1 / 6.0
-    h1 = close + (high - low) * 1.1 / 12.0
-    l1 = close - (high - low) * 1.1 / 12.0
-    l2 = close - (high - low) * 1.1 / 6.0
-    l3 = close - (high - low) * 1.1 / 4.0
-    l4 = close - (high - low) * 1.1 / 2.0
-    return {'h4': h4, 'h3': h3, 'h2': h2, 'h1': h1, 
-            'l1': l1, 'l2': l2, 'l3': l3, 'l4': l4, 'pivot': pivot}
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
 
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
-    volume = prices["volume"].values
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d SMA200 for trend direction
-    sma_200 = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200)
+    # Weekly KAMA for trend direction (slower = more reliable)
+    kama_1w_raw = calculate_kama(df_1w['close'].values, period=10)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w_raw)
     
-    # Local 4h indicators
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # Local 1d indicators
+    kama_1d = calculate_kama(close, period=10)
+    rsi_14 = calculate_rsi(close, period=14)
     chop = calculate_choppiness(high, low, close, period=14)
-    
-    # Volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    atr_14 = calculate_atr(high, low, close, period=14)
     
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
@@ -117,81 +148,66 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 250  # Need 200 for SMA200 + buffer
+    warmup = 50  # Need enough for KAMA(10) + Choppiness(14)
     
     for i in range(warmup, n):
         # Skip if indicators not ready
+        if np.isnan(kama_1d[i]) or np.isnan(rsi_14[i]) or np.isnan(chop[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
+        
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(sma_200_aligned[i]):
+        if np.isnan(kama_1w_aligned[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
             continue
         
-        if np.isnan(chop[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === 1w KAMA TREND DIRECTION ===
+        weekly_uptrend = kama_1w_aligned[i] > kama_1w_aligned[i - 1] if i > 0 else False
+        weekly_downtrend = kama_1w_aligned[i] < kama_1w_aligned[i - 1] if i > 0 else False
         
-        # === TREND DIRECTION (1d SMA200) ===
-        price_above_1d_sma = close[i] > sma_200_aligned[i]
+        # === 1d KAMA DIRECTION ===
+        daily_kama_up = kama_1d[i] > kama_1d[i - 1] if i > 1 else False
+        daily_kama_down = kama_1d[i] < kama_1d[i - 1] if i > 1 else False
         
-        # === REGIME (Choppiness Index) ===
-        # Skip if too choppy (avoid whipsaws)
+        # === REGIME: Skip if too choppy (CHOP > 61.8) ===
         is_choppy = chop[i] > 61.8
         
-        if is_choppy and not in_position:
-            signals[i] = 0.0
-            continue
+        # === RSI MOMENTUM ===
+        rsi_oversold = rsi_14[i] < 32
+        rsi_overbought = rsi_14[i] > 68
         
-        # === Camarilla levels ===
-        camarilla = calculate_camarilla(high[i], low[i], close[i])
-        s3 = camarilla['s3']
-        s4 = camarilla['s4']
-        r3 = camarilla['r3']
-        r4 = camarilla['r4']
-        pivot = camarilla['pivot']
-        
-        # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.5
-        
-        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
+        # === ENTRY LOGIC ===
         if not in_position:
-            # === LONG: Price bounces from S3/S4 with volume ===
-            # Low touches or接近 S3 or S4 zone
-            low_touch = low[i] <= s3 * 1.002  # Allow 0.2% buffer
-            
-            if low_touch and price_above_1d_sma and vol_spike:
+            # LONG: Weekly uptrend + Daily KAMA rising + RSI oversold
+            if weekly_uptrend and daily_kama_up and rsi_oversold:
                 desired_signal = SIZE
             
-            # === SHORT: Price reverses from R3/R4 with volume ===
-            # High touches or接近 R3 or R4 zone
-            high_touch = high[i] >= r3 * 0.998  # Allow 0.2% buffer
-            
-            if high_touch and not price_above_1d_sma and vol_spike:
+            # SHORT: Weekly downtrend + Daily KAMA falling + RSI overbought
+            elif weekly_downtrend and daily_kama_down and rsi_overbought:
                 desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.0 ATR) ===
+        # === STOPLOSS CHECK (3.0 ATR for daily = more room for noise) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            trailing_stop = highest_since_entry - 3.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            trailing_stop = lowest_since_entry + 3.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -199,16 +215,21 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT: Trail to breakeven after 1.5R ===
-        if in_position and position_side > 0:
-            profit_r = (close[i] - entry_price) / entry_atr
-            if profit_r > 1.5:
-                stop_price = max(stop_price, entry_price + 0.2 * entry_atr)
+        # === HOLDING PERIOD EXIT (min 5 bars = 5 days) ===
+        bars_held = i - entry_bar
         
-        if in_position and position_side < 0:
-            profit_r = (entry_price - close[i]) / entry_atr
-            if profit_r > 1.5:
-                stop_price = min(stop_price, entry_price - 0.2 * entry_atr)
+        if in_position and bars_held >= 5:
+            # Exit if KAMA flips against position
+            if position_side > 0 and not daily_kama_up:
+                desired_signal = 0.0
+            if position_side < 0 and not daily_kama_down:
+                desired_signal = 0.0
+        
+        # === CHOP EXIT (if market becomes choppy while in position) ===
+        if in_position and is_choppy:
+            # Reduce position in choppy markets
+            if abs(desired_signal) == SIZE:
+                desired_signal = SIZE / 2  # Half position in chop
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -222,9 +243,9 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
+                    stop_price = entry_price - 3.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                    stop_price = entry_price + 3.0 * entry_atr
         else:
             if in_position:
                 in_position = False
