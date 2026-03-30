@@ -1,63 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #006 v2: 4h TRIX Momentum + Donchian Breakout + Volume Confirm
+Experiment #007: 6h ATR Band Breakout + 1d ADX Trend + Volume
 
-HYPOTHESIS: Combine TRIX (proven momentum in ETHUSDT test Sharpe 1.32) with 
-Donchian breakout (proven in multiple DB winners) for a tighter, more robust signal.
+HYPOTHESIS: ATR bands adapt to volatility regime better than fixed-price channels.
+Band width automatically adjusts to current market conditions.
 
-WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: TRIX positive crossover + Donchian up + volume = strong long entries
-- Bear: TRIX negative crossover + Donchian down + volume = strong short entries
-- Choppiness filter prevents range-bound whipsaws
-- ATR stoploss manages risk symmetrically in both directions
+WHY 6h:
+- 12h has 54% keep rate but few total strategies tested
+- 6h is challenging (23% keep) but offers different signal profile
+- ATR bands on 6h capture multi-day volatility cycles
 
-KEY DESIGN (learned from failures):
-- TRIX(15) instead of HMA for smoother momentum signal
-- Donchian(20) for clear price structure
-- Volume 2.0x threshold (tighter than 1.8x to reduce trades)
-- Choppiness < 50 (same as current best)
-- 2.5 ATR stoploss
-- Min hold 4 bars to reduce fee churn
+KEY MECHANISM:
+- ATR(14) band around EMA(21) centerline
+- 2.5x multiplier for band width (adjusts dynamically to volatility)
+- Entry when price closes beyond band + 1d ADX trend confirmation + volume spike
+- This should generate 20-35 trades/year with quality filtering
 
-TARGET: 100-180 total trades over 4 years (25-45/year)
+TARGET: 80-140 total trades over 4 years (20-35/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_trix_donchian_volume_v2"
-timeframe = "4h"
+name = "mtf_6h_atr_band_adx_vol_1d_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_trix(close, period=15):
-    """
-    TRIX - Triple EMA oscillator
-    1 = EMA1, 2 = EMA2, 3 = EMA3 over close
-    TRIX = 100 * (EMA3_current - EMA3_prev) / EMA3_prev
-    Positive TRIX = upward momentum, Negative = downward
-    """
-    n = len(close)
-    if n < period * 3:
-        return np.full(n, np.nan)
-    
-    close_s = pd.Series(close)
-    
-    # Triple EMA
-    ema1 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
-    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    # TRIX rate of change
-    trix = np.zeros(n, dtype=np.float64)
-    ema3_vals = ema3.values
-    
-    for i in range(1, n):
-        if not np.isnan(ema3_vals[i]) and not np.isnan(ema3_vals[i-1]) and abs(ema3_vals[i-1]) > 1e-10:
-            trix[i] = 100 * (ema3_vals[i] - ema3_vals[i-1]) / ema3_vals[i-1]
-        else:
-            trix[i] = 0.0
-    
-    return trix
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -73,14 +40,10 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = ranging - DON'T enter
-    CHOP < 50 = trending - GOOD to enter
-    """
+def calculate_adx(high, low, close, period=14):
+    """Directional Movement Index - measures trend strength, not direction"""
     n = len(close)
-    if n < period + 1:
+    if n < period * 2 + 1:
         return np.full(n, np.nan)
     
     tr = np.zeros(n, dtype=np.float64)
@@ -88,27 +51,34 @@ def calculate_choppiness(high, low, close, period=14):
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    chop = np.full(n, np.nan)
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
         
-        if highest > lowest and atr_sum > 0:
-            range_hl = highest - lowest
-            chop[i] = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
+        if high_diff > low_diff and high_diff > 0:
+            plus_dm[i] = high_diff
+        if low_diff > high_diff and low_diff > 0:
+            minus_dm[i] = low_diff
     
-    return chop
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - highest high and lowest low over period"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+    # Smooth using EMA
+    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+    # Calculate DI values
+    plus_di = np.where(atr_smooth > 0, 100 * plus_dm_smooth / atr_smooth, 0)
+    minus_di = np.where(atr_smooth > 0, 100 * minus_dm_smooth / atr_smooth, 0)
+    
+    # DX
+    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # ADX = EMA of DX
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -117,21 +87,29 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Local 4h indicators ===
-    trix = calculate_trix(close, period=15)
+    # === Load 1d data ONCE before loop ===
+    df_1d = get_htf_data(prices, '1d')
+    
+    # 1d ADX for structural trend strength
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=20)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === Local 6h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_up, donchian_lo = calculate_donchian(high, low, period=20)
-    chop = calculate_choppiness(high, low, close, period=14)
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_series = pd.Series(trix)
-    trix_signal = trix_series.ewm(span=9, min_periods=9, adjust=False).mean().values
+    # EMA centerline for ATR bands
+    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
     
-    # Volume ratio (20-period MA) - 2.0x threshold
+    # ATR band upper/lower around EMA
+    atr_multiplier = 2.5
+    upper_band = ema_21 + atr_multiplier * atr_14
+    lower_band = ema_21 - atr_multiplier * atr_14
+    
+    # Volume ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Signals
+    # === Generate signals ===
     signals = np.zeros(n)
     SIZE = 0.28  # 28% position size
     
@@ -144,7 +122,7 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 250  # 200 for donchian + 45 for TRIX triple EMA + 20 for vol MA
+    warmup = 250  # 21 EMA + 14 ATR + 20 vol MA + 1d alignment
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -152,64 +130,40 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(adx_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(trix[i]) or np.isnan(trix_signal[i]):
+        if np.isnan(ema_21[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_up[i]) or np.isnan(donchian_lo[i]):
-            signals[i] = 0.0
-            continue
+        # === CONDITIONS ===
+        # 1d ADX > 25 = trending (filter out range markets)
+        adx_trending = adx_aligned[i] > 25
         
-        # === CHOPPINESS REGIME FILTER ===
-        chop_value = chop[i]
-        is_choppy = chop_value > 61.8
-        is_trending = chop_value < 50
+        # Volume spike confirmation (1.8x average)
+        vol_spike = vol_ratio[i] > 1.8
         
-        # === VOLUME CONFIRMATION (2.0x) ===
-        vol_spike = vol_ratio[i] > 2.0
-        
-        # === DONCHIAN BREAKOUT ===
-        prev_donchian_up = donchian_up[i - 1]
-        prev_donchian_lo = donchian_lo[i - 1]
-        
-        breakout_up = close[i] > prev_donchian_up
-        breakout_down = close[i] < prev_donchian_lo
-        
-        # === TRIX MOMENTUM SIGNAL ===
-        # Long: TRIX crosses above signal line (positive momentum building)
-        # Short: TRIX crosses below signal line (negative momentum building)
-        prev_trix = trix[i - 1]
-        prev_signal = trix_signal[i - 1]
-        curr_trix = trix[i]
-        curr_signal = trix_signal[i]
-        
-        trix_cross_up = (prev_trix < prev_signal) and (curr_trix > curr_signal)
-        trix_cross_down = (prev_trix > prev_signal) and (curr_trix < curr_signal)
-        
-        # TRIX momentum direction
-        trix_positive = curr_trix > 0
-        trix_negative = curr_trix < 0
+        # ATR band breakout
+        # Long: price breaks above upper band
+        # Short: price breaks below lower band
+        breakout_up = close[i] > upper_band[i]
+        breakout_down = close[i] < lower_band[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: TRIX bullish cross + Donchian up + volume + trending ===
-            # Require: TRIX positive OR bullish cross, breakout up, volume, trending
-            long_condition = (triy_cross_up or trix_positive) and breakout_up and vol_spike and is_trending
-            if long_condition:
+            # LONG: Breakout above upper band + trending + volume spike
+            if breakout_up and adx_trending and vol_spike:
                 desired_signal = SIZE
             
-            # === SHORT: TRIX bearish cross + Donchian down + volume + trending ===
-            short_condition = (trix_cross_down or trix_negative) and breakout_down and vol_spike and is_trending
-            if short_condition:
+            # SHORT: Breakout below lower band + trending + volume spike
+            if breakout_down and adx_trending and vol_spike:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing stop) ===
+        # === STOPLOSS (trailing ATR stop) ===
         if in_position:
             if position_side > 0:
                 # Update trailing high
@@ -221,12 +175,8 @@ def generate_signals(prices):
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if TRIX turns negative
-                if trix_negative and not trix_positive:
-                    desired_signal = 0.0
-                
-                # Exit if market becomes choppy
-                if is_choppy:
+                # Exit if ADX drops below 20 (trend weakening)
+                if adx_aligned[i] < 20:
                     desired_signal = 0.0
             
             elif position_side < 0:
@@ -239,12 +189,8 @@ def generate_signals(prices):
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if TRIX turns positive
-                if trix_positive and not trix_negative:
-                    desired_signal = 0.0
-                
-                # Exit if market becomes choppy
-                if is_choppy:
+                # Exit if ADX drops below 20 (trend weakening)
+                if adx_aligned[i] < 20:
                     desired_signal = 0.0
         
         # === MINIMUM HOLD: 4 bars to avoid fee churn ===
