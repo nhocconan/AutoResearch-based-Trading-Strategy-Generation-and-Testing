@@ -1,63 +1,105 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 6h Bollinger-Keltner Squeeze Breakout + 1d SMA + Volume
+Experiment #024: 6h Supertrend + Volume Spike + Williams %R Regime
 
-HYPOTHESIS: When Bollinger Bands contract INSIDE Keltner Channels (squeeze),
-volatility compresses. A subsequent expansion with volume spike indicates
-institutional accumulation/distribution. This works in both directions:
-- Bull: squeeze in uptrend + bullish volume expansion = strong signal
-- Bear: squeeze in downtrend + bearish volume expansion = short signal
-- Range: squeeze breakouts often false, filtered by 1d SMA
+HYPOTHESIS: Supertrend provides adaptive trailing stops that work in both
+bull and bear markets. The Williams %R (not RSI or ADX) is used as a
+regime filter - when %R < -80 (deep oversold), mean reversion is likely.
+When %R > -20 (overbought), reversions are also likely. This captures
+"exhaustion" points rather than trend continuation.
 
-Why 6h: captures institutional activity patterns without overtrading.
-BB(20,2) + KC(20,1.5) is the classic TTM squeeze indicator.
+DIFFERENT FROM PREVIOUS:
+- Not Donchian breakout (chases price)
+- Not Camarilla fade (too few trades historically)
+- Supertrend trails with ATR bands (adaptive)
+- Williams %R for regime (not RSI/ADX/chop)
 
-TARGET: 75-150 total over 4 years (18-37/year). Size: 0.30.
+TIMEFRAME: 6h primary, 1d for pivot confirmation
+TRADE COUNT: Target 100-200 total over 4 years (25-50/year)
+SIZE: 0.30
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_bb_kc_squeeze_1d_vol_v1"
+name = "mtf_6h_supertrend_vol_williams_v1"
 timeframe = "6h"
 leverage = 1.0
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Supertrend indicator using ATR bands.
+    Returns: supertrend (1=bullish, -1=bearish), upper_band, lower_band
+    """
     n = len(close)
-    if n < 2:
-        return np.full(n, np.nan)
     
+    # Calculate ATR
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], 
+                    abs(high[i] - close[i-1]), 
+                    abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+    
+    # Calculate bands
+    hl_avg = (high + low) / 2.0
+    upper_band = hl_avg + multiplier * atr
+    lower_band = hl_avg - multiplier * atr
+    
+    # Supertrend calculation
+    supertrend = np.zeros(n)
+    supertrend[0] = 1  # Start bullish
+    
+    for i in range(1, n):
+        # Previous values
+        prev_close = close[i-1]
+        prev_st = supertrend[i-1]
+        prev_upper = upper_band[i-1]
+        prev_lower = lower_band[i-1]
+        
+        if prev_st == 1:  # Was bullish
+            if close[i] < prev_upper:
+                supertrend[i] = -1
+            else:
+                supertrend[i] = 1
+                lower_band[i] = max(lower_band[i], prev_lower)
+        else:  # Was bearish
+            if close[i] > prev_lower:
+                supertrend[i] = 1
+            else:
+                supertrend[i] = -1
+                upper_band[i] = min(upper_band[i], prev_upper)
+    
+    return supertrend, upper_band, lower_band, atr
 
-def calculate_bollinger_bands(close, period=20, num_std=2):
-    """Bollinger Bands"""
-    mid = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = mid + num_std * std
-    lower = mid - num_std * std
-    return upper, mid, lower
-
-def calculate_keltner(high, low, close, period=20, multiplier=1.5):
-    """Keltner Channels using ATR"""
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R - momentum indicator for oversold/overbought"""
     n = len(close)
-    atr = calculate_atr(high, low, close, period)
-    mid = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    upper = mid + multiplier * atr
-    lower = mid - multiplier * atr
-    return upper, mid, lower
+    result = np.full(n, np.nan)
+    
+    for i in range(period-1, n):
+        highest = np.max(high[i-period+1:i+1])
+        lowest = np.min(low[i-period+1:i+1])
+        
+        if highest != lowest:
+            result[i] = -100 * (highest - close[i]) / (highest - lowest)
+    
+    return result
 
-def calculate_donchian(high, low, period=20):
-    """Donchian channel for momentum"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_camarilla_pivots(high, low, close):
+    """Camarilla pivot levels for structure confirmation"""
+    rng = high - low
+    r3 = close + rng * 1.1
+    s3 = close - rng * 1.1
+    return r3, s3
+
+def calculate_volume_spike(volume, period=20, threshold=1.5):
+    """Volume spike detection"""
+    vol_ma = pd.Series(volume).rolling(window=period, min_periods=period).mean().values
+    ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
+    return ratio > threshold
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -66,34 +108,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d SMA200 for macro trend (call ONCE) ===
+    # === HTF: 1d for pivot confirmation (call ONCE) ===
     df_1d = get_htf_data(prices, '1d')
-    sma_1d_200 = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_200)
     
-    # === 6h Indicators ===
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # 1d Camarilla pivots for structure
+    r3_1d, s3_1d = calculate_camarilla_pivots(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
+    )
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Bollinger Bands (20, 2)
-    bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(close, period=20, num_std=2)
+    # 1d EMA 50 for trend
+    ema_1d_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    # Keltner Channels (20, 1.5)
-    kc_upper, kc_mid, kc_lower = calculate_keltner(high, low, close, period=20, multiplier=1.5)
-    
-    # Donchian for momentum confirmation
-    dc_upper_20, dc_lower_20 = calculate_donchian(high, low, period=20)
-    
-    # Volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
-    
-    # === SQEEZE DETECTION ===
-    # Squeeze ON: BB inside KC (BB upper < KC upper AND BB lower > KC lower)
-    # This means low volatility - potential breakout coming
-    squeeze_on = (bb_upper < kc_upper) & (bb_lower > kc_lower)
-    
-    # Squeeze OFF: BB breaks outside KC = volatility expansion
-    squeeze_off_up = (bb_upper > kc_upper) & (bb_mid > bb_mid[i-1] if i > 0 else False)
+    # === 6h indicators ===
+    supertrend, upper_band, lower_band, atr = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    williams_r = calculate_williams_r(high, low, close, period=14)
+    vol_spike = calculate_volume_spike(volume, period=20, threshold=1.5)
     
     # === Signals ===
     signals = np.zeros(n)
@@ -105,77 +137,69 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
-    highest_since_entry = 0.0
-    lowest_since_entry = float('inf')
-    squeeze_was_on = False
+    supertrend_at_entry = 0
     
-    warmup = 100  # Need enough for BB(20) + SMA200(1d)
+    warmup = 50  # Need enough for indicators
     
     for i in range(warmup, n):
-        # NaN check
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        # NaN checks
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_1d_aligned[i]):
+        if np.isnan(ema_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Track squeeze state
-        is_squeeze_now = squeeze_on[i]
+        # === REGIME DETECTION via Williams %R ===
+        wr = williams_r[i]
+        is_oversold = wr < -80  # Deep oversold - potential bounce
+        is_overbought = wr > -20  # Overbought - potential drop
+        is_neutral = not is_oversold and not is_overbought
         
-        # === TREND DETECTION (1d SMA200) ===
-        htf_bullish = close[i] > sma_1d_aligned[i]
-        htf_bearish = close[i] < sma_1d_aligned[i]
+        # === TREND via 1d EMA ===
+        uptrend = close[i] > ema_aligned[i]
+        downtrend = close[i] < ema_aligned[i]
         
-        # Local momentum (Donchian position)
-        dc_mid = (dc_upper_20[i] + dc_lower_20[i]) / 2 if not np.isnan(dc_upper_20[i]) else close[i]
-        local_bullish = close[i] > dc_mid
-        local_bearish = close[i] < dc_mid
+        # === PIVOT PROXIMITY ===
+        # Price near 1d S3 = potential long
+        near_1d_s3 = close[i] < s3_aligned[i] * 1.02 if not np.isnan(s3_aligned[i]) else False
+        # Price near 1d R3 = potential short
+        near_1d_r3 = close[i] > r3_aligned[i] * 0.98 if not np.isnan(r3_aligned[i]) else False
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.8
+        # === SUPERTREND SIGNALS ===
+        st_bullish = supertrend[i] == 1
+        st_bearish = supertrend[i] == -1
         
-        # === SQUEEZE BREAKOUT LOGIC ===
-        # Long: squeeze was ON, now expanding UP with volume
-        squeeze_expansion_up = is_squeeze_now == False and squeeze_was_on and close[i] > kc_upper[i]
-        # Short: squeeze was ON, now expanding DOWN with volume
-        squeeze_expansion_down = is_squeeze_now == False and squeeze_was_on and close[i] < kc_lower[i]
+        # === MINIMUM HOLD: 2 bars (12h) to avoid fee churn ===
+        min_hold = (i - entry_bar) >= 2
         
-        # === Update position tracking ===
-        if in_position:
-            if position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
-            else:
-                lowest_since_entry = min(lowest_since_entry, low[i])
-        
-        # === ATR TRAILING STOP (2.5x ATR) ===
-        def check_atr_stop():
+        # === ATR STOP LOSS ===
+        def check_stop():
             if not in_position:
                 return False
             if position_side > 0:
-                return low[i] < (highest_since_entry - 2.5 * entry_atr)
+                # Long stop: close drops below lower band - 1 ATR
+                return low[i] < (lower_band[entry_bar] - 0.5 * atr[i])
             else:
-                return high[i] > (lowest_since_entry + 2.5 * entry_atr)
-        
-        # === MIN HOLD: 2 bars (12h) ===
-        min_hold = (i - entry_bar) >= 2
+                # Short stop: close rises above upper band + 1 ATR
+                return high[i] > (upper_band[entry_bar] + 0.5 * atr[i])
         
         # === EXITS ===
         if in_position:
-            stop_hit = check_atr_stop()
+            stop_hit = check_stop()
             
-            # Exit on opposite trend + min hold
-            if position_side > 0 and htf_bearish and min_hold:
+            # Trend flip exit (trend changes AND min_hold)
+            if position_side > 0 and st_bearish and min_hold:
                 stop_hit = True
-            if position_side < 0 and htf_bullish and min_hold:
+            if position_side < 0 and st_bullish and min_hold:
                 stop_hit = True
             
-            # Exit on Donchian reversal (price crosses midpoint)
-            if position_side > 0 and close[i] < dc_mid and min_hold:
-                stop_hit = True
-            if position_side < 0 and close[i] > dc_mid and min_hold:
-                stop_hit = True
+            # Williams %R extreme reversal exit (optional profit taking)
+            if position_side > 0 and is_overbought and (i - entry_bar) >= 4:
+                stop_hit = True  # Take profit on overbought
+            if position_side < 0 and is_oversold and (i - entry_bar) >= 4:
+                stop_hit = True  # Take profit on oversold
             
             if stop_hit:
                 signals[i] = 0.0
@@ -186,50 +210,54 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # LONG: Squeeze expansion UP + volume + 1d uptrend + local bullish
-            if squeeze_expansion_up and vol_spike and htf_bullish and local_bullish:
+            # ENTRY LOGIC:
+            # Long when: Supertrend flips bullish + oversold + near 1d S3 + vol spike
+            # OR: Supertrend bullish + very oversold + volume
+            
+            long_cond1 = (supertrend[i] == 1 and supertrend[i-1] == -1)  # ST cross up
+            long_cond2 = is_oversold  # Williams %R oversold
+            long_cond3 = near_1d_s3 or vol_spike[i]  # Near pivot or vol spike
+            long_cond4 = uptrend  # 1d trend aligned
+            
+            if long_cond1 and long_cond2 and (long_cond3 or long_cond4):
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 entry_bar = i
-                highest_since_entry = high[i]
                 signals[i] = SIZE
             
-            # LONG (no squeeze): Price above KC upper + strong volume + 1d uptrend
-            elif close[i] > kc_upper[i] and vol_spike and htf_bullish:
+            # Short when: Supertrend flips bearish + overbought + near 1d R3 + vol spike
+            short_cond1 = (supertrend[i] == -1 and supertrend[i-1] == 1)  # ST cross down
+            short_cond2 = is_overbought  # Williams %R overbought
+            short_cond3 = near_1d_r3 or vol_spike[i]  # Near pivot or vol spike
+            short_cond4 = downtrend  # 1d trend aligned
+            
+            if short_cond1 and short_cond2 and (short_cond3 or short_cond4):
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                entry_atr = atr[i]
+                entry_bar = i
+                signals[i] = -SIZE
+            
+            # Fallback: Trend continuation entries if Williams %R confirms
+            # Long continuation: ST already bullish + extreme oversold
+            if st_bullish and is_oversold and vol_spike[i] and uptrend and not in_position:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 entry_bar = i
-                highest_since_entry = high[i]
-                signals[i] = SIZE * 0.7  # Smaller size - no squeeze confirmation
+                signals[i] = SIZE * 0.5  # Half size for continuation
             
-            # SHORT: Squeeze expansion DOWN + volume + 1d downtrend + local bearish
-            elif squeeze_expansion_down and vol_spike and htf_bearish and local_bearish:
+            # Short continuation: ST already bearish + extreme overbought
+            if st_bearish and is_overbought and vol_spike[i] and downtrend and not in_position:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 entry_bar = i
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            
-            # SHORT (no squeeze): Price below KC lower + strong volume + 1d downtrend
-            elif close[i] < kc_lower[i] and vol_spike and htf_bearish:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                entry_bar = i
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE * 0.7  # Smaller size - no squeeze confirmation
-            
-            else:
-                signals[i] = 0.0
-        
-        # Store squeeze state for next iteration
-        squeeze_was_on = is_squeeze_now
+                signals[i] = -SIZE * 0.5  # Half size for continuation
     
     return signals
