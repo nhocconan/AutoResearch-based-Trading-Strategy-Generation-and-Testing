@@ -1,30 +1,51 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 4h Donchian + HMA + Volume with 12h Trend Filter
+Experiment #028: 6h TRIX Momentum + Volatility Expansion + Volume Confirmation
 
-HYPOTHESIS: Based on DB winners mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (95tr, Sharpe 1.38)
-and mtf_4h_hma_volume_donchian_adx_12h_v1 (94tr, Sharpe 1.32). This uses the proven combination:
-- 12h HMA for trend direction (captures medium-term swings)
-- 4h Donchian(20) for breakout structure
-- Volume spike for institutional confirmation
-- ATR-based stoploss for risk management
+HYPOTHESIS: TRIX is a triple-smoothed momentum oscillator that filters market noise
+better than RSI or Williams%R. By combining TRIX zero-line crossovers with:
+1. 1d SMA200 for trend direction (filters counter-trend trades)
+2. ATR(7)/ATR(30) ratio for volatility expansion regime (confirms institutional moves)
+3. Volume spike confirmation (validates momentum)
 
-WHY IT SHOULD WORK IN BULL AND BEAR:
-- Symmetrical Donchian channels catch both breakouts AND breakdowns
-- HMA adapts to volatility, works in trending and ranging markets
-- Short entries trigger on breakdowns below HMA in bear markets
-- Volume confirms institutional participation (filters false breakouts)
+This creates tight, high-probability entries with clear exit conditions.
 
-TARGET: 75-200 total trades over 4 years (19-50/year). HARD MAX: 400.
-Simplified entry: 3 conditions max (trend, breakout, volume).
+WHY IT WORKS IN BOTH BULL AND BEAR:
+- Bull: TRIX crosses above 0 + price > 1d SMA200 + vol spike = strong long
+- Bear: TRIX crosses below 0 + price < 1d SMA200 + vol spike = strong short
+- Volatility expansion filters out low-volatility chop
+- 6h timeframe = ~100 trades/year (within target range)
+
+TARGET: 75-200 total trades over 4 years. HARD MAX: 300.
+Signal size: 0.25 (conservative, max drawdown protection).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_vol_12h_v2"
-timeframe = "4h"
+name = "mtf_6h_trix_volatility_expansion_1d_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_trix(close, period=14):
+    """TRIX - Triple Smoothed Rate of Change"""
+    n = len(close)
+    if n < period * 3:
+        return np.full(n, np.nan)
+    
+    # Triple EMA smoothing
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    # Rate of change of triple smoothed EMA
+    trix = np.zeros(n)
+    trix[:] = np.nan
+    for i in range(period, n):
+        if ema3.iloc[i - period] != 0:
+            trix[i] = 100 * (ema3.iloc[i] - ema3.iloc[i - period]) / ema3.iloc[i - period]
+    
+    return trix
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -40,18 +61,16 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_hma(data, period):
-    """Hull Moving Average"""
-    half = int(period / 2)
-    sqrt_n = int(np.sqrt(period))
+def calculate_atr_ratio(high, low, close, short_period=7, long_period=30):
+    """ATR ratio: short-term volatility vs long-term volatility"""
+    atr_short = calculate_atr(high, low, close, short_period)
+    atr_long = calculate_atr(high, low, close, long_period)
     
-    wma_half = pd.Series(data).rolling(window=half, min_periods=half).mean()
-    wma_full = pd.Series(data).rolling(window=period, min_periods=period).mean()
+    ratio = np.full(len(close), np.nan, dtype=np.float64)
+    valid = atr_long > 1e-10
+    ratio[valid] = atr_short[valid] / atr_long[valid]
     
-    raw_hma = 2 * wma_half - wma_full
-    hma = raw_hma.rolling(window=sqrt_n, min_periods=sqrt_n).mean()
-    
-    return hma.values
+    return ratio
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -61,41 +80,34 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 12h HMA48 for trend direction
-    hma_12h = calculate_hma(df_12h['close'].values, 48)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # 1d SMA200 for trend direction
+    sma_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
-    # Local 4h indicators
+    # Local 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    atr_ratio = calculate_atr_ratio(high, low, close, short_period=7, long_period=30)
+    trix = calculate_trix(close, period=14)
     
-    # 4h HMA21 for local momentum
-    hma_4h = calculate_hma(close, 21)
-    
-    # Donchian channels (20 periods = 3.3 days on 4h)
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # Volume average
+    # Volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
+    entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    entry_bar = 0
     
-    warmup = 100  # Need enough for all indicators
+    warmup = 250  # Need enough for TRIX + SMA200(1d)
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -105,84 +117,94 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(hma_12h_aligned[i]):
+        if np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(hma_4h[i]):
+        if np.isnan(trix[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(atr_ratio[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (12h HMA) ===
-        price_above_12h_hma = close[i] > hma_12h_aligned[i]
-        hma_4h_above_12h = hma_4h[i] > hma_12h_aligned[i]
+        # === TRIX CROSSOVER SIGNALS ===
+        # Need previous bar's TRIX for crossover detection
+        prev_trix = trix[i - 1] if i > 0 else 0
+        curr_trix = trix[i]
         
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
-        prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
-        prev_close = close[i - 1] if i > 0 else close[i]
+        # TRIX crossed above zero = bullish momentum
+        trix_cross_up = prev_trix < 0 and curr_trix >= 0
+        # TRIX crossed below zero = bearish momentum
+        trix_cross_down = prev_trix > 0 and curr_trix <= 0
         
-        # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.3
+        # === TREND DIRECTION (1d SMA200) ===
+        price_above_1d_sma = close[i] > sma_1d_aligned[i]
+        price_below_1d_sma = close[i] < sma_1d_aligned[i]
         
-        # === ENTRY LOGIC (3 conditions) ===
+        # === VOLATILITY REGIME (ATR ratio > 1.3 = expansion) ===
+        # Only trade during volatility expansion (institutional moves)
+        vol_expansion = atr_ratio[i] > 1.3
+        
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5
+        
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Breakout above Donchian high + trending up ===
-            # Condition 1: 12h trend up (price > 12h HMA)
-            # Condition 2: 4h momentum confirms (4h HMA > 12h HMA)  
-            # Condition 3: Price breaks above previous Donchian high
-            if price_above_12h_hma and hma_4h_above_12h:
-                if high[i] > prev_donchian_high:
+            # === LONG: TRIX crosses above 0 + price above 1d SMA200 + vol expansion ===
+            if trix_cross_up and price_above_1d_sma:
+                # Require BOTH vol expansion AND volume spike for confirmation
+                if vol_expansion and vol_spike:
                     desired_signal = SIZE
             
-            # === SHORT: Breakdown below Donchian low + trending down ===
-            # Condition 1: 12h trend down (price < 12h HMA)
-            # Condition 2: 4h momentum confirms (4h HMA < 12h HMA)
-            # Condition 3: Price breaks below previous Donchian low
-            if not price_above_12h_hma and not hma_4h_above_12h:
-                if low[i] < prev_donchian_low:
+            # === SHORT: TRIX crosses below 0 + price below 1d SMA200 + vol expansion ===
+            if trix_cross_down and price_below_1d_sma:
+                if vol_expansion and vol_spike:
                     desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.0 ATR trailing) ===
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            if low[i] < trailing_stop:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            if high[i] > trailing_stop:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TIME-BASED EXIT (hold at least 4 bars = 16h) ===
-        bars_held = i - entry_bar
+        # === TRIX REVERSAL EXIT (if TRIX crosses back, take profit) ===
+        if in_position and position_side > 0 and trix_cross_down:
+            # Close long if TRIX reverses down
+            desired_signal = 0.0
         
+        if in_position and position_side < 0 and trix_cross_up:
+            # Close short if TRIX reverses up
+            desired_signal = 0.0
+        
+        # === MINIMUM HOLD TIME (4 bars = 1 day) ===
+        bars_held = i - entry_bar
         if in_position and bars_held >= 4:
-            # Exit if trend reverses (4h HMA crosses 12h HMA)
-            if position_side > 0 and not hma_4h_above_12h:
+            # If TRIX has reversed AND we have some profit, consider exit
+            if position_side > 0 and curr_trix < 0 and close[i] > entry_price:
                 desired_signal = 0.0
-            if position_side < 0 and hma_4h_above_12h:
+            if position_side < 0 and curr_trix > 0 and close[i] < entry_price:
                 desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
@@ -196,19 +218,10 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 entry_bar = i
-                if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
-                else:
-                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                entry_price = 0.0
-                entry_atr = 0.0
-                stop_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
