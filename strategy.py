@@ -1,63 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #025: 4h KAMA Trend + Donchian Breakout + RSI Confirmation
+Experiment #025: 12h Weekly Structure + ATR Volatility Expansion
 
-HYPOTHESIS: 1w KAMA(10) provides institutional-grade trend direction that 
-doesn't flip on noise. Combined with 4h Donchian(20) breakout for structure
-and RSI(14) for momentum confirmation, this creates tight entries that avoid
-whipsaws. Choppiness filter avoids range-bound markets.
+HYPOTHESIS: Weekly structural levels (Donchian + EMA) provide the primary
+trend framework. ATR volatility expansion identifies high-probability 
+momentum bursts. This combination captures institutional moves while
+filtering noise through multiple confirmation layers.
 
-WHY IT WORKS IN BOTH BULL AND BEAR:
-- Bull: KAMA rising + price > KAMA + Donchian breakout + RSI > 50 = strong long
-- Bear: KAMA falling + price < KAMA + Donchian breakdown + RSI < 50 = strong short
-- Range: Choppiness > 61.8 = no trades (avoids 2022 crash whipsaws)
+WHY 12h:
+- Weekly structure on 12h = natural 2-bar-per-day progression
+- Target: 60-120 trades over 4 years (15-30/year) — tight but valid
+- Avoids 4h overtrading (915 trades failed), 1h fee drag
 
-TARGET: 75-150 total trades over 4 years (18-37/year).
-Signal size: 0.30 (discrete levels).
+WHY IT SHOULD WORK IN BULL + BEAR:
+- Bull: price above weekly EMA200 + ATR expansion breakout = momentum long
+- Bear: price below weekly EMA200 + ATR expansion breakdown = momentum short  
+- Range: both sides fail chop filter → no trades
+
+ENTRY SIGNALS (strict — must ALL align):
+1. Weekly EMA200 trend direction (required)
+2. ATR(14) expansion > 1.8x 20-period MA (momentum burst)
+3. Volume confirmation > 1.5x MA (smart money)
+4. Donchian(20) touch/break of the channel
+
+EXIT SIGNALS:
+- ATR-based stop: 2.5x ATR from entry
+- Trail stop: HH/HL for longs, LH/LL for shorts
+- TRIX flip exits after minimum 2 bars
+
+TARGET: 60-120 total trades over 4 years, Sharpe > 0, DD < -35%
+Signal size: 0.25 (discrete)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_kama_donchian_rsi_chop_1w_v1"
-timeframe = "4h"
+name = "mtf_12h_weekly_structure_atr_expansion_1w_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """Kaufman's Adaptive Moving Average"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    # Calculate Efficiency Ratio (ER)
-    er = np.zeros(n, dtype=np.float64)
-    direction = np.abs(close[period:] - close[:-period])
-    volatility = np.zeros(n - period, dtype=np.float64)
-    
-    for i in range(period, n):
-        sum_val = 0.0
-        for j in range(i - period + 1, i + 1):
-            sum_val += abs(close[j] - close[j - 1])
-        volatility[i - period] = sum_val
-    
-    for i in range(len(er) - period):
-        if volatility[i] > 1e-10:
-            er[i + period] = direction[i] / volatility[i]
-    
-    # Smooth constant
-    fast_const = 2 / (fast + 1)
-    slow_const = 2 / (slow + 1)
-    square_slow = slow_const * slow_const
-    
-    kama = np.full(n, np.nan)
-    kama[period] = close[period]
-    
-    for i in range(period + 1, n):
-        if not np.isnan(er[i]):
-            sc = (er[i] * (fast_const - slow_const) + slow_const) ** 2
-            kama[i] = kama[i - 1] + sc * (close[i] - kama[i - 1])
-    
-    return kama
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -73,48 +53,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(close, period=14):
-    """RSI indicator"""
+def calculate_trix(close, period=9):
+    """TRIX: triple smoothed EMA rate of change"""
     n = len(close)
-    if n < period + 1:
+    if n < period * 3:
         return np.full(n, np.nan)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    trix = np.full(n, 0.0)
+    for i in range(period * 3, n):
+        if ema3[i - 1] != 0:
+            trix[i] = 100 * (ema3[i] - ema3[i - 1]) / ema3[i - 1]
     
-    rs = avg_gain / np.where(avg_loss > 0, avg_loss, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return trix
 
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel"""
+    """Donchian Channel - upper/lower bounds"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - >61.8 = choppy, <38.2 = trending"""
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        atr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr_j = high[j] - low[j] if j == 0 else max(high[j] - low[j], abs(high[j] - close[j-1]))
-            atr_sum += tr_j
-        
-        hh = max(high[i - period + 1:i + 1])
-        ll = min(low[i - period + 1:i + 1])
-        range_sum = hh - ll
-        
-        if range_sum > 0:
-            chop[i] = 100 * (np.log10(atr_sum / range_sum) / np.log10(period + 1))
-    
-    return chop
+    middle = (upper + lower) / 2
+    return upper, lower, middle
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -126,23 +87,30 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1w = get_htf_data(prices, '1w')
     
-    # 1w KAMA for institutional trend (call ONCE before loop)
-    kama_1w = calculate_kama(df_1w['close'].values, period=10)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Weekly EMA200 for multi-timeframe trend
+    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # === Local 4h indicators ===
+    # Weekly EMA50 for shorter-term trend
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
-    donchian_up, donchian_lo = calculate_donchian(high, low, period=20)
-    chop_14 = calculate_choppiness(high, low, close, period=14)
+    trix_9 = calculate_trix(close, period=9)
+    donchian_up, donchian_lo, donchian_mid = calculate_donchian(high, low, period=20)
     
-    # Volume ratio
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    # ATR expansion ratio (current ATR vs 20-period MA of ATR)
+    atr_ma20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    atr_expansion = atr_14 / np.where(atr_ma20 > 0, atr_ma20, 1)
+    
+    # Volume ratio (current vs 20-period MA)
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, 1)
     
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
@@ -150,8 +118,10 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
+    entry_high = 0.0
+    entry_low = float('inf')
     
-    warmup = 200  # Need enough for KAMA + Donchian + Choppiness
+    warmup = 300  # Need enough for EMA200 alignment + indicator warmup
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -161,83 +131,102 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(kama_1w_aligned[i]):
+        if np.isnan(ema_200_aligned[i]) or np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === 1w KAMA TREND FILTER ===
-        kama_val = kama_1w_aligned[i]
-        kama_trend_up = close[i] > kama_val
-        kama_trend_down = close[i] < kama_val
+        # === TREND DIRECTION ===
+        trix_bullish = trix_9[i] > 0
+        trix_bearish = trix_9[i] < 0
         
-        # KAMA slope (compare to 5 bars ago)
-        kama_slope_up = kama_val > kama_1w_aligned[i - 5] if i >= 5 else False
-        kama_slope_down = kama_val < kama_1w_aligned[i - 5] if i >= 5 else False
+        # Weekly trend: EMA200 primary, EMA50 confirmation
+        weekly_bull = close[i] > ema_200_aligned[i] and close[i] > ema_50_aligned[i]
+        weekly_bear = close[i] < ema_200_aligned[i] and close[i] < ema_50_aligned[i]
         
-        # === RSI MOMENTUM ===
-        rsi = rsi_14[i]
-        rsi_bullish = rsi > 50 if not np.isnan(rsi) else False
-        rsi_bearish = rsi < 50 if not np.isnan(rsi) else False
-        
-        # === CHOPPINESS REGIME ===
-        chop = chop_14[i]
-        is_choppy = chop > 61.8 if not np.isnan(chop) else False
-        is_trending = chop < 50 if not np.isnan(chop) else True
-        
-        # === DONCHIAN BREAKOUT (use shift(1) to avoid look-ahead) ===
-        donchian_broken_up = close[i] > donchian_up[i - 1] if i > 0 else False
-        donchian_broken_down = close[i] < donchian_lo[i - 1] if i > 0 else False
+        # === VOLATILITY EXPANSION ===
+        atr_expanded = atr_expansion[i] > 1.8  # ATR burst
+        atr_normal = atr_expansion[i] < 1.4     # Not already expanded (avoid late entries)
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        vol_confirmed = vol_ratio[i] > 1.5
+        
+        # === DONCHIAN TOUCH (within 0.5% of channel) ===
+        channel_touch_up = close[i] >= donchian_up[i - 1] * 0.998 if not np.isnan(donchian_up[i - 1]) else False
+        channel_touch_down = close[i] <= donchian_lo[i - 1] * 1.002 if not np.isnan(donchian_lo[i - 1]) else False
+        
+        # === CHOPPINESS (optional filter for ranging) ===
+        # Skip choppy markets (both conditions must fail for no-trade)
+        in_range = (close[i] < donchian_up[i - 1] * 0.97 and close[i] > donchian_lo[i - 1] * 1.03) if not np.isnan(donchian_up[i - 1]) else False
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
             # === LONG ENTRY ===
-            # Conditions: KAMA rising + price > KAMA + Donchian breakout + RSI > 50 + volume
-            if kama_trend_up and kama_slope_up:
-                if donchian_broken_up and rsi_bullish and vol_spike and not is_choppy:
+            # ALL conditions must align:
+            # 1. Weekly trend bullish
+            # 2. ATR expansion (momentum burst)
+            # 3. Volume confirmation
+            # 4. TRIX bullish
+            if weekly_bull and trix_bullish:
+                # Primary: Donchian upper breakout with all confirmations
+                if channel_touch_up and vol_confirmed and atr_normal:
                     desired_signal = SIZE
-            # Fallback: Strong momentum with RSI + volume in uptrend
-            elif kama_trend_up and rsi > 60 and vol_spike:
-                if donchian_broken_up:
-                    desired_signal = SIZE
+                # Alternative: ATR expansion pullback to mid-channel
+                elif atr_expanded and vol_confirmed and close[i] > donchian_mid[i - 1] if not np.isnan(donchian_mid[i - 1]) else False:
+                    desired_signal = SIZE * 0.5  # Half size for pullback
             
             # === SHORT ENTRY ===
-            # Conditions: KAMA falling + price < KAMA + Donchian breakdown + RSI < 50 + volume
-            if kama_trend_down and kama_slope_down:
-                if donchian_broken_down and rsi_bearish and vol_spike and not is_choppy:
+            if weekly_bear and trix_bearish:
+                # Primary: Donchian lower breakdown with all confirmations
+                if channel_touch_down and vol_confirmed and atr_normal:
                     desired_signal = -SIZE
-            # Fallback: Strong momentum with RSI + volume in downtrend
-            elif kama_trend_down and rsi < 40 and vol_spike:
-                if donchian_broken_down:
-                    desired_signal = -SIZE
+                # Alternative: ATR expansion rally to mid-channel
+                elif atr_expanded and vol_confirmed and close[i] < donchian_mid[i - 1] if not np.isnan(donchian_mid[i - 1]) else False:
+                    desired_signal = -SIZE * 0.5
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === EXIT LOGIC ===
         if in_position:
             bars_held = i - entry_bar
             
+            # Update trailing highs/lows
+            if high[i] > entry_high:
+                entry_high = high[i]
+            if low[i] < entry_low:
+                entry_low = low[i]
+            
+            # === ATR STOPLOSS (2.5x from entry) ===
             if position_side > 0:
-                # Long: stop if price drops below entry - 2.5 ATR
                 stop_price = entry_price - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
-                # Exit if KAMA flips or RSI deteriorates severely
-                elif (not kama_trend_up and bars_held >= 4) or (rsi < 35 and bars_held >= 2):
+                    in_position = False
+                    position_side = 0
+                # Trailing stop: lock in profits if price pulls back from high
+                elif close[i] < entry_high - 2.0 * atr_14[i]:
+                    desired_signal = SIZE * 0.5  # Take partial profits
+                # TRIX flip exit (after minimum hold)
+                elif trix_bearish and bars_held >= 3:
                     desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
             
             elif position_side < 0:
-                # Short: stop if price rises above entry + 2.5 ATR
                 stop_price = entry_price + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
-                # Exit if KAMA flips or RSI improves severely
-                elif (not kama_trend_down and bars_held >= 4) or (rsi > 65 and bars_held >= 2):
+                    in_position = False
+                    position_side = 0
+                # Trailing stop: lock in profits if price pulls back from low
+                elif close[i] > entry_low + 2.0 * atr_14[i]:
+                    desired_signal = -SIZE * 0.5  # Take partial profits
+                # TRIX flip exit (after minimum hold)
+                elif trix_bullish and bars_held >= 3:
                     desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
         
         # === MINIMUM HOLD: 2 bars to avoid fee churn ===
         if in_position and (i - entry_bar) < 2:
@@ -252,6 +241,8 @@ def generate_signals(prices):
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
+                entry_high = high[i]
+                entry_low = low[i]
         else:
             if in_position:
                 in_position = False
