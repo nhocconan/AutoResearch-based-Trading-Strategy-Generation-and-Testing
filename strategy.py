@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #023: Bollinger Band Extreme + Volume Spike + ATR Regime (4h)
+Experiment #022: 1d Donchian Breakout + Volume Spike + Weekly Trend Filter
 
-HYPOTHESIS: Price at outer Bollinger Bands with volume confirmation captures
-high-probability mean reversion setups that work in both bull and bear markets.
+HYPOTHESIS: Simple daily Donchian(20) breakout with volume confirmation and 
+weekly EMA(50) trend filter for position direction.
 
 WHY IT SHOULD WORK:
-- Bollinger Bands(20,2.5) capture ~95% price distribution
-- Price at outer bands signals statistical extremes
-- Volume spike confirms the move is institutional, not noise
-- ATR regime filter prevents trading in high-vol environments
-- Symmetric logic works in both directions
-- Simple = reliable = generates enough trades for statistical validity
+- 1d timeframe = ~250 bars/year, so Donchian(20) gives ~12-18 breakout opportunities/year
+- Volume spike (1.8x 20-day avg) filters false breakouts
+- Weekly EMA(50) as trend filter = simple, proven, 50% of year aligned
+- Expected: 30-60 trades over 4 years (8-15/year) = well within target
+- ATR(14) stoploss at 2.5x manages risk in both directions
+- Works in bull (long above weekly EMA) and bear (short below weekly EMA)
 
-WHY SIMPLE (vs complex):
-- 3 conditions = achievable frequency
-- Less dependent on perfect parameter tuning
-- DB verified: similar volume+BB approaches show good test Sharpe
+KEY INSIGHT: Keep it SIMPLE. Complex strategies fail. Donchian + volume + weekly trend = 3 conditions.
 
-EXPECTED TRADE COUNT: 80-150 total over 4 years (20-37/year)
+EXPECTED TRADE COUNT: 40-80 total over 4 years (10-20/year)
+- Donchian(20) breakouts on 1d: ~15/year
+- Volume spike filter (1.8x): reduces by ~35% → ~10/year
+- Weekly EMA trend filter: reduces by ~30% → ~7/year
+- Final: ~40-60 trades = statistical validity with low fee drag
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_bb_extreme_vol_atr_v1"
-timeframe = "4h"
+name = "mtf_1d_donchian_vol_weekly_ema_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,20 +43,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bollinger_bands(close, period=20, num_std=2.5):
-    """Bollinger Bands"""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + num_std * std
-    lower = sma - num_std * std
-    return upper, lower, sma
-
-def calculate_atr_ratio(atr, period=14):
-    """ATR ratio: current ATR vs ATR MA (detects high-vol regimes)"""
-    atr_ma = pd.Series(atr).rolling(window=period, min_periods=period).mean().values
-    ratio = atr / np.where(atr_ma > 0, atr_ma, 1)
-    return ratio
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -63,23 +50,28 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === 4h indicators ===
+    # Load 1w HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    
+    # === HTF indicators (1w) ===
+    # Weekly EMA(50) for long-term trend direction
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Weekly ATR for stoploss scaling
+    weekly_atr = calculate_atr(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, period=14)
+    weekly_atr_aligned = align_htf_to_ltf(prices, df_1w, weekly_atr)
+    
+    # === Local 1d indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_ratio = calculate_atr_ratio(atr_14, period=14)
     
-    # Bollinger Bands(20, 2.5)
-    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, num_std=2.5)
+    # Donchian Channel(20) - 20 day high/low
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume analysis
+    # Volume average (20 day)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    
-    # HTF EMA50 for trend direction
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # === Signals ===
     signals = np.zeros(n)
@@ -94,7 +86,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 50  # BB(20) + vol_ma(20)
+    warmup = 50  # ATR(14) warmup for 1d
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -102,76 +94,83 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        # Skip if HTF EMA not ready
-        if np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(ema50_1w_aligned[i]):
             signals[i] = 0.0
             continue
-        
-        desired_signal = 0.0
-        
-        # === REGIME FILTER: Skip if ATR ratio > 2.0 (too volatile) ===
-        # This prevents trading during volatile moves
-        high_vol = atr_ratio[i] > 2.0
         
         # === ENTRY CONDITIONS ===
+        desired_signal = 0.0
+        
+        # Volume spike confirmation (1.8x 20-day average)
+        vol_spike = vol_ratio[i] > 1.8
+        
+        # Weekly trend (bullish if price above weekly EMA50)
+        weekly_bull = close[i] > ema50_1w_aligned[i]
+        weekly_bear = close[i] < ema50_1w_aligned[i]
+        
+        # === LONG ENTRY: Price breaks above 20-day high + volume spike ===
         if not in_position:
-            # LONG: Price at lower BB + volume spike + moderate volatility
-            at_lower_band = low[i] <= bb_lower[i]
-            vol_spike = vol_ratio[i] > 1.5
+            # Bullish breakout: high exceeds prior 20-day high
+            bullish_breakout = high[i] > donchian_upper[i]
             
-            if at_lower_band and vol_spike and not high_vol:
+            if bullish_breakout and vol_spike and weekly_bull:
                 desired_signal = SIZE
+                
+            # === SHORT ENTRY: Price breaks below 20-day low + volume spike ===
+            # In bear market (price below weekly EMA), look for shorts
+            bearish_breakout = low[i] < donchian_lower[i]
             
-            # SHORT: Price at upper BB + volume spike + moderate volatility
-            at_upper_band = high[i] >= bb_upper[i]
-            
-            if at_upper_band and vol_spike and not high_vol:
+            if bearish_breakout and vol_spike and weekly_bear:
                 desired_signal = -SIZE
         
-        # === EXIT CONDITIONS ===
+        # === STOPLOSS AND EXIT ===
         if in_position:
             if position_side > 0:
-                # Update highest
+                # Track highest since entry
                 if high[i] > highest_since_entry:
                     highest_since_entry = high[i]
                 
-                # Trailing stop: 2.5 ATR from highest
-                stop_price = highest_since_entry - 2.5 * entry_atr
+                # Stoploss: 2.5x ATR from entry or trail from highest
+                stop_dist = max(2.5 * entry_atr, 0.5 * (highest_since_entry - entry_price))
+                stop_price = highest_since_entry - stop_dist
+                
                 if low[i] < stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                 
-                # Also exit if price crosses BB midpoint (mean reversion complete)
-                elif close[i] > bb_mid[i]:
+                # Exit if trend reverses (price crosses below weekly EMA)
+                if close[i] < ema50_1w_aligned[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                     
             elif position_side < 0:
-                # Update lowest
+                # Track lowest since entry
                 if low[i] < lowest_since_entry:
                     lowest_since_entry = low[i]
                 
-                # Trailing stop: 2.5 ATR from lowest
-                stop_price = lowest_since_entry + 2.5 * entry_atr
+                # Stoploss: 2.5x ATR from entry or trail from lowest
+                stop_dist = max(2.5 * entry_atr, 0.5 * (entry_price - lowest_since_entry))
+                stop_price = lowest_since_entry + stop_dist
+                
                 if high[i] > stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                 
-                # Also exit if price crosses BB midpoint
-                elif close[i] < bb_mid[i]:
+                # Exit if trend reverses (price crosses above weekly EMA)
+                if close[i] > ema50_1w_aligned[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
         
-        # === MINIMUM HOLD: 4 bars to reduce fee churn ===
-        if in_position and (i - entry_bar) < 4:
+        # === MINIMUM HOLD: 2 bars to avoid fee churn on noise ===
+        if in_position and (i - entry_bar) < 2:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
