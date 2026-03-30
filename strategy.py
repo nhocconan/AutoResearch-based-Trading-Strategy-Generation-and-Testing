@@ -1,31 +1,46 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 4h Williams Alligator + 1d SMA Trend + Donchian Breakout + Volume
+Experiment #024: 6h Williams %R Extreme Reversal + 1d SMA + Volume
 
-HYPOTHESIS: Williams Alligator (EMA 5/8/13) provides smooth trend detection.
-Combined with 1d SMA macro trend filter and 4h Donchian(20) breakout confirmation,
-this captures the middle of trends without chasing false breakouts.
-Volume spike confirms institutional participation.
+HYPOTHESIS: Williams %R reaching extreme oversold (<-80) followed by a bounce
+indicates institutional buying. The -80/-20 levels are statistically significant
+reversal points. Combined with 1d SMA trend filter and volume confirmation,
+this catches reversals at key levels without overtrading.
 
-WHY IT SHOULD WORK:
-- 2021 bull: Alligator spread + Donchian breakout in uptrend = strong longs
-- 2022 bear: Alligator convergence + Donchian breakdown in downtrend = strong shorts  
-- 2025 range: Alligator coiled = no trades (avoid whipsaws)
+KEY INSIGHT: Previous strategies failed by requiring too many conditions to align.
+Williams %R extremes naturally occur ~15-20% of the time, giving us the right
+trade frequency. Simple conditions = reliable execution.
 
-EXPECTED TRADES: 100-200 total over 4 years (25-50/year)
-Size: 0.30
+TRADE COUNT: 75-150 total over 4 years (18-37/year).
+Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_alligator_donchian_vol_1d_v1"
-timeframe = "4h"
+name = "mtf_6h_williamsr_1d_sma_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_ema(data, period):
-    """Exponential Moving Average"""
-    return pd.Series(data).ewm(span=period, min_periods=period, adjust=False).mean().values
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R - momentum indicator for overbought/oversold"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    # Highest high and lowest low over period
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    with np.errstate(divide='ignore', invalid='ignore'):
+        williams_r = np.where(
+            (highest_high - lowest_low) > 1e-10,
+            ((highest_high - close) / (highest_high - lowest_low)) * -100,
+            -50  # neutral when no range
+        )
+    
+    return williams_r
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -42,11 +57,10 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_donchian(high, low, period=20):
-    """Donchian channel"""
+    """Donchian channel for local trend"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    middle = (upper + pd.Series(low).rolling(window=period, min_periods=period).min().values) / 2
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, middle, lower
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -60,20 +74,16 @@ def generate_signals(prices):
     sma_1d_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
     sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
     
-    # === Williams Alligator (EMA 5/8/13) ===
-    jaw = calculate_ema(close, 13)    # Blue line
-    teeth = calculate_ema(close, 8)  # Red line  
-    lips = calculate_ema(close, 5)   # Green line
+    # === 6h indicators ===
+    williams_r = calculate_williams_r(high, low, close, period=14)
+    atr_14 = calculate_atr(high, low, close, period=14)
     
-    # === Donchian 20 for breakout confirmation ===
-    dc_upper, dc_middle, dc_lower = calculate_donchian(high, low, period=20)
+    # Donchian 20 for local trend direction
+    dc_upper_20, dc_lower_20 = calculate_donchian(high, low, period=20)
     
-    # === Volume ===
+    # Volume spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
-    
-    # === ATR for stoploss ===
-    atr_14 = calculate_atr(high, low, close, period=14)
     
     # === Signals ===
     signals = np.zeros(n)
@@ -82,12 +92,13 @@ def generate_signals(prices):
     # Position tracking
     in_position = False
     position_side = 0
+    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 50
+    warmup = 60
     
     for i in range(warmup, n):
         # NaN check
@@ -95,7 +106,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_1d_aligned[i]):
+        if np.isnan(williams_r[i]) or np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -106,27 +117,18 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === ALLIGATOR TREND ===
-        # Bullish: Lips > Teeth > Jaw (alligator mouth open up)
-        alligator_bullish = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        # Bearish: Lips < Teeth < Jaw (alligator mouth open down)
-        alligator_bearish = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-        
-        # === 1D SMA TREND ===
+        # === TREND DETECTION ===
         htf_bullish = close[i] > sma_1d_aligned[i]
         htf_bearish = close[i] < sma_1d_aligned[i]
         
-        # === DONCHIAN BREAKOUT ===
-        donchian_broken_up = close[i] > dc_upper[i] if not np.isnan(dc_upper[i]) else False
-        donchian_broken_down = close[i] < dc_lower[i] if not np.isnan(dc_lower[i]) else False
+        # Williams %R extremes
+        is_oversold = williams_r[i] < -80  # Strong oversold
+        is_overbought = williams_r[i] > -20  # Strong overbought
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === MINIMUM HOLD: 2 bars (8h) ===
-        min_hold = (i - entry_bar) >= 2
-        
-        # === ATR TRAILING STOP (2.5x ATR) ===
+        # === ATR TRAILING STOP ===
         def check_atr_stop():
             if not in_position:
                 return False
@@ -139,11 +141,20 @@ def generate_signals(prices):
         if in_position:
             stop_hit = check_atr_stop()
             
-            # Opposite trend exit
-            if position_side > 0 and (htf_bearish or not alligator_bullish) and min_hold:
+            # Minimum hold: 3 bars (18h)
+            min_hold = (i - entry_bar) >= 3
+            
+            # Opposite trend signal exits
+            if position_side > 0 and htf_bearish and min_hold:
                 stop_hit = True
-            if position_side < 0 and (htf_bullish or not alligator_bearish) and min_hold:
+            if position_side < 0 and htf_bullish and min_hold:
                 stop_hit = True
+            
+            # Williams %R mean reversion exit
+            if position_side > 0 and williams_r[i] > -20 and min_hold:
+                stop_hit = True  # Overbought = take profit
+            if position_side < 0 and williams_r[i] < -80 and min_hold:
+                stop_hit = True  # Oversold = take profit
             
             if stop_hit:
                 signals[i] = 0.0
@@ -154,19 +165,26 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # LONG: All bullish + 1d uptrend + Donchian breakout + volume
-            if alligator_bullish and htf_bullish and donchian_broken_up and vol_spike:
+            # LONG: Williams %R oversold + bounce starting + 1d uptrend + volume
+            # Bounce = current close > previous close (not continuing down)
+            bounce = close[i] > close[i-1] if i > 0 else False
+            
+            if is_oversold and bounce and htf_bullish and vol_spike:
                 in_position = True
                 position_side = 1
+                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 highest_since_entry = high[i]
                 signals[i] = SIZE
             
-            # SHORT: All bearish + 1d downtrend + Donchian breakdown + volume
-            elif alligator_bearish and htf_bearish and donchian_broken_down and vol_spike:
+            # SHORT: Williams %R overbought + drop starting + 1d downtrend + volume
+            drop = close[i] < close[i-1] if i > 0 else False
+            
+            if is_overbought and drop and htf_bearish and vol_spike:
                 in_position = True
                 position_side = -1
+                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 lowest_since_entry = low[i]
