@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment: Williams %R Extreme + ATR Expansion + 1d Trend
+Experiment #005: 12h Donchian Breakout + Volume + 1d EMA21 Trend
 
-HYPOTHESIS: Williams %R at extreme levels (<-90 or >-10) marks exhaustion zones.
-Combined with:
-1. ATR ratio > 1.0 (volatility expansion = institutional move, not noise)
-2. 1d EMA21 trend alignment (filters countertrend entries)
-3. Volume confirmation (smart money participation)
+HYPOTHESIS: Donchian(25) breakout on 12h captures multi-day trend changes.
+Volume spike confirms institutional accumulation/distribution.
+1d EMA21 alignment ensures we trade WITH the larger trend.
 
-This catches momentum reversals at extremes while avoiding whipsaws in chop.
+WHY 12h: Slower than 4h = fewer trades = less fee drag.
+Donchian(25) on 12h = 25*12h = 300h = ~12.5 days channel.
+This is tight enough to catch meaningful breakouts.
 
-WHY 12h: ~3 trades/week = ~150/year max. ATR ratio filter cuts false breakouts.
-Target: 50-100 total trades/4 years (tight but valid).
-
-HARD RULES:
-- Williams %R must be at extreme (<-90 for long, >-10 for short)
-- ATR ratio > 1.0 (vol expanding, not consolidating)
-- 1d EMA21 confirms direction
-- Volume 1.5x minimum
-- 2.5x ATR stoploss
-- 3-bar minimum hold to reduce churn
+TARGET: 75-150 total trades over 4 years (19-37/year).
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_willr_atr_expansion_1d_v1"
+name = "mtf_12h_donchian_vol_ema21_1d_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -43,27 +35,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_williams_r(high, low, close, period=21):
-    """Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    roll_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    roll_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    
-    highest = roll_high.values
-    lowest = roll_low.values
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        willr = np.where(
-            (highest - lowest) > 1e-10,
-            -100 * (highest - close) / (highest - lowest),
-            -50  # Neutral when range is zero
-        )
-    
-    return willr
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -78,16 +49,17 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Local indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    willr_21 = calculate_williams_r(high, low, close, period=21)
     
-    # ATR ratio: current ATR vs ATR EMA20 (volatility expansion filter)
-    atr_ema20 = pd.Series(atr_14).ewm(span=20, min_periods=20, adjust=False).mean().values
-    atr_ratio = atr_14 / np.where(atr_ema20 > 0, atr_ema20, 1)
+    # Donchian channels - 25 bars (~12.5 days)
+    donchian_period = 25
+    rolling_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    rolling_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     # Volume ratio
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_period = 20
+    vol_ma = pd.Series(volume).rolling(window=vol_ma_period, min_periods=vol_ma_period).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # Signals
@@ -99,109 +71,107 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
+    stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     entry_bar = 0
-    cooldown = 0
-    MIN_HOLD = 3  # Minimum bars to hold (reduces churn)
     
-    warmup = 150  # Need enough for all indicators
+    warmup = max(100, donchian_period + vol_ma_period)
     
     for i in range(warmup, n):
         # Skip if ATR not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        # Skip if EMA not aligned
+        # Skip if HTF EMA not aligned
         if np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        # === TREND DIRECTION (1d EMA21) ===
+        # === 1d TREND DIRECTION ===
         price_above_1d_ema = close[i] > ema_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema_1d_aligned[i]
         
-        # === WILLIAMS %R EXTREME LEVELS ===
-        willr = willr_21[i]
-        willr_oversold = willr < -90  # Deep oversold
-        willr_overbought = willr > -10  # Deep overbought
-        
-        # === VOLUME CONFIRMATION ===
+        # Volume confirmation (1.5x average)
         vol_spike = vol_ratio[i] > 1.5
         
-        # === ATR EXPANSION (key filter - eliminates consolidation breakouts) ===
-        atr_expanding = atr_ratio[i] > 1.0
+        # Donchian breakout levels (previous bar for no look-ahead)
+        prev_donchian_high = rolling_high[i - 1]
+        prev_donchian_low = rolling_low[i - 1]
+        
+        # Current bar breakout detection
+        bullish_breakout = high[i] > prev_donchian_high
+        bearish_breakout = low[i] < prev_donchian_low
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        # Manage cooldown
-        if cooldown > 0:
-            cooldown -= 1
-        
-        # Entry only when cooldown is clear
-        if cooldown == 0 and not in_position:
-            # === LONG: Oversold + ATR expanding + volume + uptrend ===
-            if price_above_1d_ema and willr_oversold and vol_spike and atr_expanding:
+        if not in_position:
+            # === LONG: Bullish breakout + volume + 1d uptrend ===
+            if bullish_breakout and vol_spike and price_above_1d_ema:
                 desired_signal = SIZE
             
-            # === SHORT: Overbought + ATR expanding + volume + downtrend ===
-            if not price_above_1d_ema and willr_overbought and vol_spike and atr_expanding:
+            # === SHORT: Bearish breakout + volume + 1d downtrend ===
+            if bearish_breakout and vol_spike and price_below_1d_ema:
                 desired_signal = -SIZE
         
-        # === EXIT LOGIC ===
-        if in_position:
-            bars_held = i - entry_bar
-            
-            # Minimum hold period
-            if bars_held >= MIN_HOLD:
-                # Long exit: %R normalized (>-30) or trend broke
-                if position_side > 0:
-                    if willr > -30 or not price_above_1d_ema:
-                        desired_signal = 0.0
-                        cooldown = 3  # Cool down before new entries
-                
-                # Short exit: %R normalized (<-70) or trend broke
-                if position_side < 0:
-                    if willr < -70 or price_above_1d_ema:
-                        desired_signal = 0.0
-                        cooldown = 3
+        # === STOPLOSS (2.0 ATR trailing) ===
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                desired_signal = 0.0
         
-        # === POSITION MANAGEMENT ===
-        if in_position and np.sign(desired_signal) != position_side:
-            # Close current, open new if signal flipped
-            in_position = False
-            position_side = 0
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                desired_signal = 0.0
         
+        # === TAKE PROFIT (3x ATR) ===
+        if in_position and position_side > 0:
+            profit_target = entry_price + 3.0 * entry_atr
+            if high[i] >= profit_target:
+                desired_signal = 0.0
+        
+        if in_position and position_side < 0:
+            profit_target = entry_price - 3.0 * entry_atr
+            if low[i] <= profit_target:
+                desired_signal = 0.0
+        
+        # === ANTI-WHIPSAW: minimum 3 bars hold ===
+        bars_held = i - entry_bar
+        if in_position and bars_held < 3:
+            # Keep position regardless of signals
+            desired_signal = position_side * SIZE
+        
+        # === UPDATE POSITION ===
         if desired_signal != 0.0:
-            if not in_position:
-                # New position
+            if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 entry_bar = i
-        
-        # === STOPLOSS (2.5x ATR) ===
-        if in_position and position_side > 0:
-            stop = entry_price - 2.5 * entry_atr
-            if low[i] < stop:
-                desired_signal = 0.0
+                if position_side > 0:
+                    stop_price = entry_price - 2.0 * entry_atr
+                else:
+                    stop_price = entry_price + 2.0 * entry_atr
+        else:
+            if in_position:
                 in_position = False
                 position_side = 0
-                cooldown = 3
-        
-        if in_position and position_side < 0:
-            stop = entry_price + 2.5 * entry_atr
-            if high[i] > stop:
-                desired_signal = 0.0
-                in_position = False
-                position_side = 0
-                cooldown = 3
-        
-        # === COOLDOWN ENFORCEMENT ===
-        if cooldown > 0 and desired_signal != 0.0:
-            # Don't enter if in cooldown, maintain 0
-            if not in_position:
-                desired_signal = 0.0
+                stop_price = 0.0
         
         signals[i] = desired_signal
     
