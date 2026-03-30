@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #026: 12h Donchian Breakout + Choppiness Regime + Volume + 1d SMA
+Experiment #006: 4h Camarilla S3/R3 + Choppiness Regime + Volume Spike
 
-HYPOTHESIS: Choppiness Index (CHOP) is a proven regime filter from 16K+ experiments.
-When CHOP < 50, market is trending — trend-following works.
-When CHOP > 50, market is ranging — avoid entries to prevent whipsaws.
+HYPOTHESIS: Camarilla pivot levels (S3/R3) work as mean-reversion targets in
+range-bound markets. Combined with Choppiness Index (regime filter) and volume
+spike confirmation, this should:
+- Long when price drops to S3 (oversold) + choppy range + vol spike
+- Short when price rallies to R3 (overbought) + choppy range + vol spike
+- Exit when choppiness drops below 38.2 (trending begins)
 
-- 2021 bull: CHOP<50 + breakout above Donchian = long trend continuation
-- 2022 bear: CHOP<50 + breakdown below Donchian = short rallies
-- 2025 range: CHOP>50 = no entries, avoids whipsaw trap
+WHY 4h: Optimal trade frequency from DB (20-50/year). 4h captures
+intraday volatility without overtrading.
 
-KEY INSIGHT: Regime filtering with CHOP is the meta-strategy that prevents the
-2022 bottom whipsaw that destroyed simple trend followers.
-
-TARGET: 75-150 total over 4 years (18-37/year). Size: 0.30.
+KEY INSIGHT: Previous Camarilla attempt (v1) failed with Sharpe=-0.471.
+Adding choppiness as regime filter should improve by:
+1. Avoiding entries when market is trending (trending = Camarilla fails)
+2. Only entering when market is clearly range-bound (high choppiness)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_chop_1d_sma_v3"
-timeframe = "12h"
+name = "mtf_4h_camarilla_chop_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -37,25 +39,25 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_chop(high, low, close, period=14):
-    """Choppiness Index (CHOP) - 1 = ranging, 100 = trending"""
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - values >61.8 = choppy/range, <38.2 = trending"""
     n = len(close)
-    chop = np.full(n, np.nan)
+    chp = np.full(n, np.nan)
     
     for i in range(period, n):
-        highest = high[i-period+1:i+1].max()
-        lowest = low[i-period+1:i+1].min()
+        # Sum of ATR over period
+        tr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1])) if j > 0 else high[j] - low[j]
+            tr_sum += tr
         
-        if highest == lowest:
-            chop[i] = 50.0
-        else:
-            atr_sum = 0.0
-            for j in range(i-period+1, i+1):
-                atr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            
-            chop[i] = 100.0 * np.log10(atr_sum / (highest - lowest)) / np.log10(period)
+        # Highest - Lowest over period
+        hl_range = high[i - period + 1:i + 1].max() - low[i - period + 1:i + 1].min()
+        
+        if hl_range > 1e-10 and tr_sum > 1e-10:
+            chp[i] = 100 * (np.log10(tr_sum) / np.log10(hl_range * period))
     
-    return chop
+    return chp
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -64,32 +66,39 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d SMA50 for macro direction (call ONCE before loop) ===
+    # === HTF: 1d for Camarilla pivot calculation ===
     df_1d = get_htf_data(prices, '1d')
-    sma_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    
+    # Camarilla pivot levels from 1d data
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    # R3 = Close + High-Low * 1.1/12
+    cam_R3 = daily_close + (daily_high - daily_low) * (1.1 / 12)
+    # R4 = Close + High-Low * 1.1/6
+    cam_R4 = daily_close + (daily_high - daily_low) * (1.1 / 6)
+    # S3 = Close - High-Low * 1.1/12
+    cam_S3 = daily_close - (daily_high - daily_low) * (1.1 / 12)
+    # S4 = Close - High-Low * 1.1/6
+    cam_S4 = daily_close - (daily_high - daily_low) * (1.1 / 6)
+    
+    # Align to LTF
+    cam_R3_aligned = align_htf_to_ltf(prices, df_1d, cam_R3)
+    cam_R4_aligned = align_htf_to_ltf(prices, df_1d, cam_R4)
+    cam_S3_aligned = align_htf_to_ltf(prices, df_1d, cam_S3)
+    cam_S4_aligned = align_htf_to_ltf(prices, df_1d, cam_S4)
     
     # === Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop_values = calculate_chop(high, low, close, period=14)
+    chp = calculate_choppiness(high, low, close, period=14)
     
-    # 12h Donchian 20 (shift 1 to avoid look-ahead)
-    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Volume confirmation (12-bar ~3 day average)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume metrics
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals ===
     signals = np.zeros(n)
     SIZE = 0.30
-    
-    # Position tracking
-    in_position = False
-    position_side = 0
-    entry_bar = 0
-    highest_since_entry = 0.0
-    lowest_since_entry = float('inf')
     
     warmup = 50
     
@@ -98,80 +107,40 @@ def generate_signals(prices):
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        
-        if np.isnan(chop_values[i]) or np.isnan(sma_1d_aligned[i]):
+        if np.isnan(chp[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME: CHOP < 50 = trending (lower = stronger trend) ===
-        is_trending = chop_values[i] < 50.0
+        # Volume spike check (1.5x average)
+        vol_ok = volume[i] > vol_ma20[i] * 1.5 if vol_ma20[i] > 1e-10 else False
         
-        # === HTF TREND ===
-        htf_bullish = close[i] > sma_1d_aligned[i]
-        htf_bearish = close[i] < sma_1d_aligned[i]
+        # Choppiness: > 61.8 = range-bound (Camarilla works), < 38.2 = trending (avoid)
+        in_range = chp[i] > 61.8
         
-        # === BREAKOUT CONDITIONS ===
-        # Price breaks above 20-bar high = bullish breakout
-        bullish_breakout = close[i] > dc_upper_20[i] if not np.isnan(dc_upper_20[i]) else False
-        # Price breaks below 20-bar low = bearish breakout
-        bearish_breakout = close[i] < dc_lower_20[i] if not np.isnan(dc_lower_20[i]) else False
+        # === LONG ENTRY: Price at S3 + range-bound + volume spike ===
+        if close[i] <= cam_S3_aligned[i] and in_range and vol_ok:
+            signals[i] = SIZE
         
-        # === VOLUME CONFIRMATION (1.2x = slightly looser for more trades) ===
-        vol_ok = volume[i] > vol_ma[i] * 1.2 if vol_ma[i] > 1e-10 else False
+        # === SHORT ENTRY: Price at R3 + range-bound + volume spike ===
+        elif close[i] >= cam_R3_aligned[i] and in_range and vol_ok:
+            signals[i] = -SIZE
         
-        # Update highest/lowest for trailing stop
-        if in_position:
-            if position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
-            else:
-                lowest_since_entry = min(lowest_since_entry, low[i])
-        
-        # === MIN HOLD: 2 bars (24h) ===
-        min_hold = (i - entry_bar) >= 2
-        
-        # === ATR TRAILING STOP (2.0x ATR from highest/lowest) ===
-        if in_position:
-            stop_hit = False
-            if position_side > 0:
-                # Long stop: price drops below highest - 2*ATR
-                stop_hit = low[i] < (highest_since_entry - 2.0 * atr_14[i])
-            else:
-                # Short stop: price rises above lowest + 2*ATR
-                stop_hit = high[i] > (lowest_since_entry + 2.0 * atr_14[i])
-            
-            # Exit on opposite HTF trend (after min hold)
-            if min_hold:
-                if position_side > 0 and htf_bearish:
-                    stop_hit = True
-                if position_side < 0 and htf_bullish:
-                    stop_hit = True
-            
-            if stop_hit:
+        # === EXIT CONDITIONS ===
+        # Exit long: price reaches R4 or choppiness drops (trending begins)
+        elif signals[i-1] > 0 and i > warmup:
+            if close[i] >= cam_R4_aligned[i] or chp[i] < 38.2:
                 signals[i] = 0.0
-                in_position = False
-                position_side = 0
             else:
-                signals[i] = position_side * SIZE
-        
-        # === NEW POSITIONS ===
-        if not in_position:
-            # LONG: Breakout above + volume confirm + chop trending + 1d uptrend
-            if bullish_breakout and vol_ok and is_trending and htf_bullish:
-                in_position = True
-                position_side = 1
-                entry_bar = i
-                highest_since_entry = high[i]
                 signals[i] = SIZE
-            
-            # SHORT: Breakdown below + volume confirm + chop trending + 1d downtrend
-            elif bearish_breakout and vol_ok and is_trending and htf_bearish:
-                in_position = True
-                position_side = -1
-                entry_bar = i
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            
-            else:
+        
+        # Exit short: price reaches S4 or choppiness drops
+        elif signals[i-1] < 0 and i > warmup:
+            if close[i] <= cam_S4_aligned[i] or chp[i] < 38.2:
                 signals[i] = 0.0
+            else:
+                signals[i] = -SIZE
+        
+        else:
+            signals[i] = 0.0
     
     return signals
