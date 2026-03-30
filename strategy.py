@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #025: 12h Donchian Breakout + 1d SMA50 Trend + Volume Spike
+Experiment #025: 4h RSI Extreme + Volume Spike + Daily SMA200
 
-HYPOTHESIS: Keep it SIMPLE. One strong signal (Donchian breakout) + volume 
-confirmation + simple trend filter (1d SMA50) = proven winning formula.
+HYPOTHESIS: RSI extremes (30/70) capture high-probability reversal zones.
+Volume spike confirms the move has conviction. Daily SMA200 filters countertrend.
+4h timeframe gives enough bars for meaningful sample size while avoiding fee drag.
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull: Breakout above 20-bar high + volume spike + above 1d SMA50 = trend continuation
-- Bear: Breakdown below 20-bar low + volume spike + below 1d SMA50 = short momentum
-- 1d SMA50 is slow enough to not whipsaw, fast enough to catch major trends
-- 12h timeframe = fewer trades = less fee drag = better test generalization
+- Bull: RSI<30 + volume spike + above SMA200 = oversold bounce (50-100% gains common)
+- Bear: RSI>70 + volume spike + below SMA200 = distribution/reversal (captures tops)
+- Mean reversion works in both directions - not biased to bull or bear
 
-EXPECTED TRADES: 75-150 total over 4 years (19-37/year per symbol)
-- Donchian(20) on 12h = break every 20-40 bars = 109-219 potential/year
-- Volume spike (1.5x) → reduces by ~40%
-- 1d SMA50 trend filter → reduces by ~30%
-- Final: ~75-150 trades = within target range
+EXPECTED TRADES: 150-250 total over 4 years (37-62/year per symbol)
+- RSI(14) extreme triggers: ~50-100/year per symbol
+- Volume spike filter (1.5x): reduces by ~30%
+- SMA200 trend filter: reduces by ~20%
+- Final: ~150-250 trades = statistical validity
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_sma50_vol_v1"
-timeframe = "12h"
+name = "mtf_4h_rsi_extreme_vol_sma200_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -39,9 +39,19 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_sma(values, period):
-    """Simple Moving Average"""
-    return pd.Series(values).rolling(window=period, min_periods=period).mean().values
+def calculate_rsi(prices, period=14):
+    """RSI with min_periods"""
+    close = pd.Series(prices)
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    
+    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -53,17 +63,13 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d SMA50 for trend direction
-    sma_50_1d = calculate_sma(df_1d['close'].values, 50)
-    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    # Daily SMA200
+    sma200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
+    sma200_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d)
     
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    
-    # Donchian Channel(20) - classic breakout structure
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    rsi_14 = calculate_rsi(close, period=14)
     
     # Volume average (20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -79,83 +85,85 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
+    trailing_high = 0.0
+    trailing_low = 0.0
     
-    warmup = 60  # Enough for Donchian20, ATR14, SMA50
+    warmup = 250  # Enough for RSI(14), ATR(14), SMA200(1d)
     
     for i in range(warmup, n):
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_50_aligned[i]):
+        if np.isnan(sma200_aligned[i]):
             signals[i] = 0.0
             continue
-        
-        # === TREND DIRECTION: 1d SMA50 ===
-        bull_trend = close[i] > sma_50_aligned[i]
-        bear_trend = close[i] < sma_50_aligned[i]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === DONCHIAN BREAKOUT ===
-        # Use previous bar's channel to avoid look-ahead
-        prev_donchian_high = donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else np.nan
-        prev_donchian_low = donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else np.nan
+        # === TREND DIRECTION ===
+        above_daily_sma = close[i] > sma200_aligned[i]
+        below_daily_sma = close[i] < sma200_aligned[i]
         
-        bullish_breakout = (not np.isnan(prev_donchian_high) and 
-                           close[i] > prev_donchian_high)
-        bearish_breakout = (not np.isnan(prev_donchian_low) and 
-                           close[i] < prev_donchian_low)
+        # === RSI EXTREME CONDITIONS ===
+        rsi_oversold = rsi_14[i] < 30
+        rsi_overbought = rsi_14[i] > 70
+        
+        # RSI neutralization for exit
+        rsi_neutral_long = rsi_14[i] > 55  # Exit long when RSI recovers
+        rsi_neutral_short = rsi_14[i] < 45  # Exit short when RSI drops
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Bullish breakout + volume spike + bull trend
-            if bullish_breakout and vol_spike and bull_trend:
+            # LONG: RSI oversold + volume spike + above daily SMA
+            if rsi_oversold and vol_spike and above_daily_sma:
                 desired_signal = SIZE
             
-            # SHORT: Bearish breakout + volume spike + bear trend
-            elif bearish_breakout and vol_spike and bear_trend:
+            # SHORT: RSI overbought + volume spike + below daily SMA
+            elif rsi_overbought and vol_spike and below_daily_sma:
                 desired_signal = -SIZE
         
-        # === EXIT LOGIC - Donchian Trailing Stop ===
+        # === EXIT LOGIC ===
         if in_position:
             if position_side > 0:
-                # Trailing stop: lowest low since entry (Donchian-style exit)
-                lookback = min(10, i - entry_bar)
-                if lookback > 0:
-                    stop_low = pd.Series(low[entry_bar:i+1]).min()
-                    stop_price = stop_low
-                    if low[i] < stop_price:
-                        desired_signal = 0.0
-                        in_position = False
-                        position_side = 0
+                # Trailing high
+                if i == entry_bar or high[i] > trailing_high:
+                    trailing_high = high[i]
                 
-                # Exit if trend flips (below 1d SMA50)
-                if close[i] < sma_50_aligned[i]:
+                # Stop: 2.5 ATR from highest
+                stop_price = trailing_high - 2.5 * entry_atr
+                if low[i] < stop_price:
+                    desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
+                
+                # Exit if RSI neutralizes (mean reversion complete)
+                elif rsi_neutral_long:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                     
             elif position_side < 0:
-                # Trailing stop: highest high since entry
-                lookback = min(10, i - entry_bar)
-                if lookback > 0:
-                    stop_high = pd.Series(high[entry_bar:i+1]).max()
-                    stop_price = stop_high
-                    if high[i] > stop_price:
-                        desired_signal = 0.0
-                        in_position = False
-                        position_side = 0
+                # Trailing low
+                if i == entry_bar or low[i] < trailing_low:
+                    trailing_low = low[i]
                 
-                # Exit if trend flips (above 1d SMA50)
-                if close[i] > sma_50_aligned[i]:
+                # Stop: 2.5 ATR from lowest
+                stop_price = trailing_low + 2.5 * entry_atr
+                if high[i] > stop_price:
+                    desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
+                
+                # Exit if RSI neutralizes
+                elif rsi_neutral_short:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
@@ -172,6 +180,8 @@ def generate_signals(prices):
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
+                trailing_high = high[i]
+                trailing_low = low[i]
         
         signals[i] = desired_signal
     
