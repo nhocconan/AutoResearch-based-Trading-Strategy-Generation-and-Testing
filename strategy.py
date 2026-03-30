@@ -1,49 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Donchian Breakout + HMA21 + Volume Confirmation
+Experiment #021: 12h Williams Alligator + Elder Ray + Volume
 
-HYPOTHESIS: Price channels (Donchian) capture institutional breakout moments.
-Adding HMA21 trend filter + volume spike prevents false breakouts in choppy markets.
-ATR-based stops ensure exits during volatility expansion.
+HYPOTHESIS: Williams Alligator captures institutional trend cycles.
+When price closes outside all 3 lines (Jaw/Teeth/Lips) AND Elder Ray confirms
+bull power (for longs) or bear power (for shorts) AND volume spikes, this
+indicates strong directional moves. 1d SMA200 adds longer-term structure.
 
-WHY 4h: Proven timeframe from DB (most top performers use 4h).
-WHY DONCHIAN: Simple, objective entry — no parameters to overfit.
-WHY HMA21: Faster than EMA200, more smoothing than SMA, proven trend signal.
+WHY 12h: 3x slower than 4h = fewer but higher quality signals.
+Alligator "sleeping" periods filter out choppy markets naturally.
+Works in BOTH bull (buy breakout) and bear (short breakout).
 
-Target: 75-200 total trades over 4 years (19-50/year).
+TARGET: 75-150 total trades over 4 years = 19-37/year.
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_vol_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_alligator_elder_ray_vol_1d_v1"
+timeframe = "12h"
 leverage = 1.0
-
-
-def calculate_hma(values, period):
-    """Hull Moving Average"""
-    half = period // 2
-    sqrt_n = int(np.sqrt(period))
-    
-    wma1 = pd.Series(values).rolling(window=half, min_periods=half).apply(
-        lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)), raw=True
-    ).values
-    wma2 = pd.Series(values).rolling(window=period, min_periods=period).apply(
-        lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)), raw=True, raw=True
-    ).values
-    
-    # Fill NaN with original values for first elements
-    wma1 = np.where(np.isnan(wma1), values, wma1)
-    wma2 = np.where(np.isnan(wma2), values, wma2)
-    
-    hma_raw = 2 * wma1 - wma2
-    hma = pd.Series(hma_raw).rolling(window=sqrt_n, min_periods=sqrt_n).apply(
-        lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)), raw=True
-    ).values
-    
-    return np.where(np.isnan(hma), hma_raw, hma)
-
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -59,6 +36,35 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_alligator(high, low, close):
+    """
+    Williams Alligator:
+    - Jaw (blue): SMA(13) of median price, shifted 8 bars
+    - Teeth (red): SMA(8) of median price, shifted 5 bars
+    - Lips (green): SMA(5) of median price, shifted 3 bars
+    """
+    n = len(close)
+    median = (high + low + close) / 3.0
+    
+    jaw = pd.Series(median).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    return jaw, teeth, lips
+
+def calculate_elder_ray(high, low, close, ema_period=13):
+    """
+    Elder Ray:
+    - Bull Power = High - EMA(13)
+    - Bear Power = Low - EMA(13)
+    """
+    n = len(close)
+    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
+    
+    bull_power = high - ema
+    bear_power = low - ema
+    
+    return bull_power, bear_power
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -70,36 +76,41 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d HMA21 for trend direction
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # 1d SMA200 for trend structure (shift by 1 to avoid look-ahead)
+    sma_200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().shift(1).values
+    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
     
-    # === Local 4h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Donchian channels (20 periods = 5 days)
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Williams Alligator
+    jaw, teeth, lips = calculate_alligator(high, low, close)
     
-    # Volume ratio (20-period average)
+    # Elder Ray
+    bull_power, bear_power = calculate_elder_ray(high, low, close, ema_period=13)
+    
+    # Volume ratio (20-bar MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
+    # Donchian for breakout confirmation (shift 1)
+    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
+    entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    entry_bar = 0
     
-    warmup = 100  # Buffer for all indicators
+    warmup = 150  # Need enough for Alligator alignment + SMA200 buffer
     
     for i in range(warmup, n):
         # Skip if ATR not ready
@@ -109,83 +120,99 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        # Skip if HMA not aligned
-        if np.isnan(hma_1d_aligned[i]):
+        # Skip if Alligator or SMA200 not aligned
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Skip if Donchian not ready
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(sma_200_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d HMA21) ===
-        trend_up = close[i] > hma_1d_aligned[i]
+        # === STRUCTURE: 1d SMA200 trend (shifted, so current bar uses PREVIOUS 1d value) ===
+        price_above_sma200 = close[i] > sma_200_aligned[i]
         
-        # Volume confirmation
+        # === ALLIGATOR STATE: Check if "mouth" is open or closed ===
+        # Bullish: Lips > Teeth > Jaw (lines aligned up)
+        # Bearish: Lips < Teeth < Jaw (lines aligned down)
+        # Choppy: Lines intertwined
+        alligator_bull = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        alligator_bear = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        alligator_open = alligator_bull or alligator_bear
+        
+        # === ELDER RAY: Bull/Bear power (need shift for EMA look-ahead) ===
+        # Bull power should be positive for longs, negative for shorts
+        bull_ok = bull_power[i] > 0
+        bear_ok = bear_power[i] < 0
+        
+        # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # Donchian breakout signals
-        price_broke_high = close[i] > donchian_high[i]
-        price_broke_low = close[i] < donchian_low[i]
-        
-        # ATR-based entry threshold (breakout must exceed 0.5 ATR to confirm)
-        atr_threshold = 0.5 * atr_14[i]
-        high_breakout = close[i] - donchian_high[i - 1] if i > 0 else 0
-        low_breakout = donchian_low[i - 1] - close[i] if i > 0 else 0
+        # === DONCHIAN BREAKOUT ===
+        donchian_breakout_up = close[i] > donchian_high_20[i]
+        donchian_breakout_down = close[i] < donchian_low_20[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Breakout above Donchian high + trend up + volume ===
-            if trend_up and vol_spike and price_broke_high and high_breakout > atr_threshold:
+            # === LONG ENTRY ===
+            # All conditions must align:
+            # 1. Price above 1d SMA200 (structural bull)
+            # 2. Alligator lines bullish (mouth open up)
+            # 3. Bull power positive (buying pressure)
+            # 4. Volume spike (institutional)
+            # 5. Breakout above 20-bar high
+            if (price_above_sma200 and alligator_bull and bull_ok and 
+                vol_spike and donchian_breakout_up):
                 desired_signal = SIZE
             
-            # === SHORT: Breakdown below Donchian low + trend down + volume ===
-            if not trend_up and vol_spike and price_broke_low and low_breakout > atr_threshold:
+            # === SHORT ENTRY ===
+            # 1. Price below 1d SMA200 (structural bear)
+            # 2. Alligator lines bearish (mouth open down)
+            # 3. Bear power negative (selling pressure)
+            # 4. Volume spike (institutional)
+            # 5. Breakdown below 20-bar low
+            if (not price_above_sma200 and alligator_bear and bear_ok and 
+                vol_spike and donchian_breakout_down):
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.0 ATR trailing) ===
+        # === STOPLOSS (2.0 ATR) ===
         if in_position and position_side > 0:
+            # Trailing stop: highest - 2*ATR
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * atr_14[i]
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             if low[i] < trailing_stop:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
+            # Trailing stop: lowest + 2*ATR
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * atr_14[i]
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             if high[i] > trailing_stop:
                 desired_signal = 0.0
         
-        # === MINIMUM HOLD (2 bars = 8h to avoid churn) ===
+        # === MINIMUM HOLD: 3 bars (1.5 days on 12h) to avoid fee churn ===
         bars_held = i - entry_bar
-        if in_position and bars_held < 2:
-            if position_side > 0 and desired_signal == 0:
-                desired_signal = SIZE  # Keep long until minimum hold
-            if position_side < 0 and desired_signal == 0:
-                desired_signal = -SIZE  # Keep short until minimum hold
-        
-        # === TAKE PROFIT (2:1 ratio, reduce to half) ===
-        if in_position and bars_held >= 4:  # At least 16h held
+        if in_position and bars_held >= 3:
+            # Take profit at 2R
             if position_side > 0:
-                profit = close[i] - entry_price
-                if profit > 2.0 * atr_14[i]:  # 2R profit
-                    desired_signal = SIZE / 2  # Take partial profit
+                profit_target = entry_price + 2.0 * entry_atr
+                if close[i] >= profit_target:
+                    desired_signal = 0.0
             if position_side < 0:
-                profit = entry_price - close[i]
-                if profit > 2.0 * atr_14[i]:  # 2R profit
-                    desired_signal = -SIZE / 2  # Take partial profit
+                profit_target = entry_price - 2.0 * entry_atr
+                if close[i] <= profit_target:
+                    desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
+                # New position or direction flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
@@ -195,6 +222,7 @@ def generate_signals(prices):
                 entry_bar = i
         else:
             if in_position:
+                # Stopped out or took profit
                 in_position = False
                 position_side = 0
         
