@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 1d CRSI + Weekly EMA21 Trend + Choppiness Regime
+Experiment #028: 12h Donchian Breakout + Volume + ATR Stop
 
-HYPOTHESIS: CRSI (Connors RSI) identifies short-term mean reversion extremes 
-within sustained trends. By combining CRSI extremes (<15 long, >85 short) with 
-weekly EMA21 for trend direction and Choppiness to filter range-bound markets,
-we capture high-probability reversals aligned with the broader trend.
+HYPOTHESIS: Donchian(20) breakout on 12h captures institutional momentum while
+volume confirmation filters false breakouts. ATR-based stops ensure disciplined
+risk management. This works in BOTH bull (long breakouts) and bear (short breakdowns).
 
-WHY 1d: Slower than 4h/6h = fewer false signals = lower fee drag.
-Weekly EMA21 = 5-week moving average for reliable trend direction.
-CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3 — proven edge.
+WHY 12h: Slower than 4h/6h (reduces fee drag), but faster than 1d (more opportunities).
+Donchian(20) on 12h = 10-day channel - captures medium-term swings.
+Targeting 75-150 total trades over 4 years (19-37/year).
 
-WHY IT WORKS IN BULL AND BEAR:
-- Bull: CRSI < 15 catches oversold dips that bounce. Trend stays up = high win rate.
-- Bear: CRSI > 85 catches overbought rallies that fade. Trend stays down = short winners.
-- Choppiness keeps us out during transitions (2022 bottom whipsaw protection).
-- Weekly EMA21 changes ~6-8 times/year = reliable trend filter without overtrading.
+ENTRY LOGIC (3 conditions max):
+1. Price breaks above Donchian(20) high OR below Donchian(20) low
+2. Volume spike (>1.5x 20-bar MA) confirms the move
+3. ATR stoploss at 2.5x (not too tight, not too loose)
 
-TARGET: 50-100 total trades over 4 years = 12-25/year. HARD MAX: 150.
-Signal size: 0.30.
+KEY INSIGHT: Previous failures had TOO MANY conditions (4-5 filters = too few trades).
+This strategy uses only breakout + volume + stoploss = ~75-150 trades expected.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_crsi_1w_ema21_chop_v1"
-timeframe = "1d"
+name = "mtf_12h_donchian_vol_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -42,75 +40,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
-    """Connors RSI: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3"""
-    n = len(close)
-    
-    # RSI(3) using EWM
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean()
-    avg_loss = loss.ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean()
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # RSI Streak(2) - consecutive up/down closes
-    streak = np.zeros(n)
-    current_streak = 0
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            current_streak = max(0, current_streak + 1)
-        elif close[i] < close[i-1]:
-            current_streak = min(0, current_streak - 1)
-        streak[i] = current_streak
-    
-    # RSI of streaks
-    streak_series = pd.Series(streak)
-    streak_gain = streak_series.clip(lower=0)
-    streak_loss = -streak_series.clip(upper=0)
-    streak_avg_gain = streak_gain.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
-    streak_avg_loss = streak_loss.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
-    streak_rs = streak_avg_gain / np.where(streak_avg_loss == 0, 1e-10, streak_avg_loss)
-    rsi_streak = 100 - (100 / (1 + streak_rs))
-    
-    # PercentRank(100) using rolling percentile
-    def rolling_percent_rank(x):
-        return (x[-1] < x).sum() / len(x)
-    
-    percent_rank = pd.Series(close).rolling(window=rank_period, min_periods=rank_period).apply(
-        rolling_percent_rank, raw=True
-    )
-    
-    # CRSI = average of all three
-    crsi = (rsi + rsi_streak + percent_rank) / 3
-    
-    return crsi.values
-
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - lower = trending, higher = choppy"""
-    n = len(high)
-    chop = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period, n):
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            if j > 0:
-                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
-            else:
-                tr = high[j] - low[j]
-            tr_sum += tr
-        
-        if tr_sum > 0:
-            hh = np.max(high[i - period + 1:i + 1])
-            ll = np.min(low[i - period + 1:i + 1])
-            range_hl = hh - ll
-            
-            if range_hl > 0:
-                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
-    
-    return chop
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -118,24 +47,21 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE ===
-    df_1w = get_htf_data(prices, '1w')
-    
-    # 1w EMA21 for trend direction
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Local 1d indicators
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
-    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume
+    # Donchian channels (20 periods = 10 days on 12h)
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25  # Conservative sizing
     
     # Position tracking
     in_position = False
@@ -147,7 +73,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 120  # Need enough for CRSI(100) + buffer
+    warmup = 50  # Need enough for Donchian(20)
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -157,52 +83,36 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(crsi[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(chop[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        current_high = high[i]
+        current_low = low[i]
         
-        if np.isnan(ema_1w_aligned[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # Previous bar's Donchian values (avoid look-ahead)
+        prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
+        prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
         
-        # === TREND DIRECTION (1w EMA21) ===
-        weekly_trend_bullish = close[i] > ema_1w_aligned[i]
-        weekly_trend_bearish = close[i] < ema_1w_aligned[i]
-        
-        # === REGIME (Choppiness Index) ===
-        # Skip if too choppy (avoid whipsaws)
-        is_choppy = chop[i] > 61.8
-        
-        # Volume confirmation (optional boost)
+        # Volume confirmation (at least 1.5x average)
         vol_spike = vol_ratio[i] > 1.5
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: CRSI oversold + weekly bullish trend ===
-            # CRSI < 15 = extreme oversold (rare ~5-10% of days)
-            # Weekly trend up = higher probability bounce
-            if crsi[i] < 15 and weekly_trend_bullish:
-                # Optional volume confirmation (but not required)
-                desired_signal = SIZE
+            # === LONG: Breakout above previous 20-bar high with volume ===
+            if current_high > prev_donchian_high:
+                if vol_spike:  # Volume confirmation
+                    desired_signal = SIZE
             
-            # === SHORT: CRSI overbought + weekly bearish trend ===
-            # CRSI > 85 = extreme overbought (rare ~5-10% of days)
-            # Weekly trend down = higher probability fade
-            if crsi[i] > 85 and weekly_trend_bearish:
-                # Optional volume confirmation (but not required)
-                desired_signal = -SIZE
+            # === SHORT: Breakdown below previous 20-bar low with volume ===
+            if current_low < prev_donchian_low:
+                if vol_spike:  # Volume confirmation
+                    desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
@@ -224,12 +134,35 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === EXIT: CRSI mean reversion (CRSI crosses 50) ===
-        if in_position and crsi[i] > 50 and position_side > 0:
-            desired_signal = 0.0
+        # === PROFIT TARGET CHECK (4R = 10 ATR) ===
+        profit_target_hit = False
         
-        if in_position and crsi[i] < 50 and position_side < 0:
-            desired_signal = 0.0
+        if in_position and position_side > 0:
+            profit_target = entry_price + 4.0 * entry_atr
+            if high[i] >= profit_target:
+                profit_target_hit = True
+        
+        if in_position and position_side < 0:
+            profit_target = entry_price - 4.0 * entry_atr
+            if low[i] <= profit_target:
+                profit_target_hit = True
+        
+        if profit_target_hit:
+            # Take profit: reduce position to half
+            if position_side > 0:
+                desired_signal = SIZE / 2
+            else:
+                desired_signal = -SIZE / 2
+        
+        # === MIDDLE CHANNEL EXIT (optional, after min hold) ===
+        bars_held = i - entry_bar
+        
+        if in_position and bars_held >= 4:  # Hold at least 2 days
+            # Exit if price reverts to middle of channel
+            if position_side > 0 and close[i] < donchian_mid[i]:
+                desired_signal = 0.0
+            if position_side < 0 and close[i] > donchian_mid[i]:
+                desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
