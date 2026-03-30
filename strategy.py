@@ -1,83 +1,87 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Vortex + Donchian Breakout + Choppiness
+Experiment #021: 4h TRIX Momentum + HTF Trend + Volume + Choppiness Filter
 
-HYPOTHESIS: Vortex Indicator (VI) measures directional movement strength.
-Unlike RSI/MACD which measure oscillation, VI captures TREND DIRECTION better.
-Combined with Donchian breakout and volume spike, this should work in ALL markets:
-- Bull: VI+ > VI- + price above Donchian = strong longs
-- Bear: VI- > VI+ + price below Donchian = strong shorts  
-- Range: Choppiness > 61.8 = SKIP (avoids choppy whipsaws)
-- Vol spike confirms breakout validity, reducing false signals
+HYPOTHESIS: Momentum reversal entries with regime filtering
+- TRIX crossing zero = momentum shift signal (proven edge from DB)
+- 12h EMA for trend direction (filters counter-trend trades)
+- CHOP > 61.8 = SKIP (avoid ranging markets - key killer of returns)
+- Volume spike = institutional confirmation
+- 2.5 ATR stoploss for risk management
 
-DB Analysis: "mtf_4h_chop_donchian_vol_regime_12h_v1" (107 tr, Sharpe 1.491) uses
-similar structure. Vortex adds directional confirmation without adding complexity.
+WHY IT WORKS IN BULL + BEAR + RANGE:
+- Bull: TRIX crosses up + HTF up = momentum longs (catches rallies)
+- Bear: TRIX crosses down + HTF down = momentum shorts (catches dumps)
+- Range: CHOP > 61.8 = SKIP (avoids whipsaws in chop)
+- ATR stoploss adapts to volatility (handles 2022 crash)
 
-TARGET: 80-150 total trades over 4 years (20-37/year on 12h)
+KEY IMPROVEMENT OVER #020:
+- #020: TRIX + Donchian + CHOP combined = 160 trades, Sharpe 0.362
+- #021: TRIX + HTF trend + volume confirm (fewer, higher quality)
+- TARGET: 100-180 total trades over 4 years (25-45/year)
+
+Entry logic:
+- Long: TRIX crosses above 0 + HTF trend up + volume spike
+- Short: TRIX crosses below 0 + HTF trend down + volume spike
+- Exit: stoploss at 2.5 ATR, or opposite TRIX cross, or CHOP > 61.8
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_vortex_donchian_chop_v1"
-timeframe = "12h"
+name = "mtf_4h_trix_htf_trend_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_vortex(high, low, close, period=14):
-    """
-    Vortex Indicator (VT)
-    VI+ measures upward trend strength
-    VI- measures downward trend strength
-    VI+ > VI- → bullish, VI- > VI+ → bearish
-    """
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
     n = len(close)
     if n < period + 1:
-        return np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
-    vm_plus = np.zeros(n)
-    vm_minus = np.zeros(n)
-    tr = np.zeros(n)
-    
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
     for i in range(1, n):
-        # Vortex movement (direction strength)
-        vm_plus[i] = abs(high[i] - low[i-1])
-        vm_minus[i] = abs(low[i] - high[i-1])
-        
-        # True range
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Sum over period
-    period_range = period
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_trix(close, period=9):
+    """
+    TRIX - Triple EMA Oscillator
+    - TRIX > 0 = bullish momentum
+    - TRIX < 0 = bearish momentum
+    - TRIX crossing zero line = momentum shift (our entry signal)
+    """
+    n = len(close)
+    if n < period * 3 + 1:
+        return np.full(n, np.nan)
     
-    vi_plus = np.full(n, np.nan)
-    vi_minus = np.full(n, np.nan)
+    # Triple EMA
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    for i in range(period, n):
-        sum_vm_plus = np.sum(vm_plus[i - period + 1:i + 1])
-        sum_vm_minus = np.sum(vm_minus[i - period + 1:i + 1])
-        sum_tr = np.sum(tr[i - period + 1:i + 1])
-        
-        if sum_tr > 0:
-            vi_plus[i] = sum_vm_plus / sum_tr
-            vi_minus[i] = sum_vm_minus / sum_tr
+    # TRIX = rate of change of triple EMA
+    trix = np.full(n, np.nan)
+    for i in range(1, n):
+        if not np.isnan(ema3.iloc[i]) and not np.isnan(ema3.iloc[i-1]) and ema3.iloc[i-1] != 0:
+            trix[i] = ((ema3.iloc[i] / ema3.iloc[i-1]) - 1) * 100
     
-    return vi_plus, vi_minus
+    return trix
 
 def calculate_choppiness(high, low, close, period=14):
     """
     Choppiness Index (CHOP)
-    CHOP > 61.8 = ranging - DON'T enter
-    CHOP < 50 = trending - GOOD to enter
+    CHOP > 61.8 = ranging - DON'T enter (avoid whipsaws)
+    CHOP < 50 = trending - GOOD environment
     """
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n)
+    tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -94,36 +98,6 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout levels"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().shift(1).values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().shift(1).values
-    return upper, lower
-
-def calculate_williams_r(high, low, close, period=14):
-    """
-    Williams %R - momentum oscillator for entry timing
-    < -80 = oversold (good for long entry)
-    > -20 = overbought (good for short entry)
-    """
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    wr = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        
-        if highest > lowest:
-            wr[i] = -100 * (highest - close[i]) / (highest - lowest)
-    
-    return wr
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -132,17 +106,16 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d EMA(21) for trend direction
-    ema_21_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # 12h EMA(21) for trend direction
+    ema_21_12h = pd.Series(df_12h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
     
-    # === Local 12h indicators ===
-    vi_plus, vi_minus = calculate_vortex(high, low, close, period=14)
+    # === Local 4h indicators ===
+    atr_14 = calculate_atr(high, low, close, period=14)
+    trix = calculate_trix(close, period=9)
     chop = calculate_choppiness(high, low, close, period=14)
-    channel_up, channel_lo = calculate_donchian(high, low, period=20)
-    williams_r = calculate_williams_r(high, low, close, period=14)
     
     # Volume ratio (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -159,18 +132,15 @@ def generate_signals(prices):
     entry_atr = 0.0
     entry_bar = 0
     
-    # ATR for stoploss calculation
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    warmup = 250  # 200 for channel + 14 for CHOP + 20 for vol MA
+    warmup = 200  # TRIX needs ~30 bars + 20 vol MA + buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(trix[i]) or np.isnan(trix[i-1]):
             signals[i] = 0.0
             continue
         
@@ -182,85 +152,62 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(channel_up[i]) or np.isnan(channel_lo[i]):
-            signals[i] = 0.0
-            continue
-        
         # === CHOPPINESS REGIME FILTER ===
-        chop_value = chop[i]
-        is_choppy = chop_value > 61.8
-        is_trending = chop_value < 50
+        is_choppy = chop[i] > 61.8
         
-        # Skip choppy markets entirely
-        if is_choppy:
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === TRIX CROSSOVER DETECTION ===
+        # TRIX crossing above zero = bullish momentum shift
+        # TRIX crossing below zero = bearish momentum shift
+        trix_bullish_cross = trix[i] > 0 and trix[i-1] <= 0
+        trix_bearish_cross = trix[i] < 0 and trix[i-1] >= 0
         
-        # === VORTEX DIRECTION ===
-        vi_diff = vi_plus[i] - vi_minus[i]  # positive = bullish, negative = bearish
-        vortex_bullish = vi_diff > 0
-        vortex_bearish = vi_diff < 0
-        
-        # === HTF TREND: 1d EMA(21) direction ===
+        # === HTF TREND: 12h EMA(21) direction ===
         htf_trend_up = close[i] > ema_aligned[i]
         htf_trend_down = close[i] < ema_aligned[i]
         
-        # === VOLUME CONFIRMATION (1.5x minimum) ===
+        # === VOLUME CONFIRMATION (1.5x threshold) ===
         vol_spike = vol_ratio[i] > 1.5
-        
-        # === DONCHIAN BREAKOUT (shift 1 = previous bar, not current) ===
-        breakout_up = close[i] > channel_up[i]
-        breakout_down = close[i] < channel_lo[i]
-        
-        # === WILLIAMS %R for momentum confirmation ===
-        wr_val = williams_r[i]
-        if np.isnan(wr_val):
-            wr_bullish = False
-            wr_bearish = False
-        else:
-            wr_bullish = wr_val < -70  # Oversold - good for longs
-            wr_bearish = wr_val > -30  # Overbought - good for shorts
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Trending + vortex bullish + breakout up + HTF up + volume ===
-            if breakout_up and htf_trend_up and vol_spike and is_trending:
-                if vortex_bullish:  # Vortex confirms upward momentum
-                    desired_signal = SIZE
+            # === LONG: TRIX bullish cross + HTF trend up + volume spike ===
+            if trix_bullish_cross and htf_trend_up and vol_spike:
+                desired_signal = SIZE
             
-            # === SHORT: Trending + vortex bearish + breakout down + HTF down + volume ===
-            if breakout_down and htf_trend_down and vol_spike and is_trending:
-                if vortex_bearish:  # Vortex confirms downward momentum
-                    desired_signal = -SIZE
+            # === SHORT: TRIX bearish cross + HTF trend down + volume spike ===
+            elif trix_bearish_cross and htf_trend_down and vol_spike:
+                desired_signal = -SIZE
         
         # === STOPLOSS (2.5 ATR) ===
         if in_position:
             if position_side > 0:
-                # Long stop: entry - 2.5 ATR
+                # Long: exit if price falls 2.5 ATR from entry
                 stop_price = entry_price - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if HTF trend flips or vortex turns bearish
-                if htf_trend_down or vortex_bearish:
+                # Exit if HTF trend flips to down
+                if htf_trend_down:
+                    desired_signal = 0.0
+                
+                # Exit if market becomes choppy
+                if is_choppy:
                     desired_signal = 0.0
             
             elif position_side < 0:
-                # Short stop: entry + 2.5 ATR
+                # Short: exit if price rises 2.5 ATR from entry
                 stop_price = entry_price + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if HTF trend flips or vortex turns bullish
-                if htf_trend_up or vortex_bullish:
+                # Exit if HTF trend flips to up
+                if htf_trend_up:
+                    desired_signal = 0.0
+                
+                # Exit if market becomes choppy
+                if is_choppy:
                     desired_signal = 0.0
         
         # === MINIMUM HOLD: 4 bars to avoid fee churn ===
