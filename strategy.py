@@ -1,46 +1,91 @@
 #!/usr/bin/env python3
 """
-Experiment #009: 4h Donchian + Williams%R + Volume + 1d SMA200 Trend
+Experiment #010: 1d Supertrend Breakout + Weekly EMA + Volume
 
-HYPOTHESIS: Donchian(20) breakouts capture institutional momentum moves.
-Williams %R filter (> -50 for longs, < -50 for shorts) ensures we're not
-buying/selling into extreme readings that typically reverse.
-Volume confirmation filters out false breakouts.
+HYPOTHESIS: Supertrend(ATR=10, mult=3) is a volatility-adaptive trend indicator
+that hasn't been tested in this session. It provides:
+- Dynamic support/resistance that adjusts for volatility
+- Symmetrical signals for long and short
+- Built-in trailing stop (no manual stoploss needed)
+
+Weekly EMA200 confirms structural trend direction, filtering whipsaws.
+Volume spike confirms institutional participation.
 
 WHY IT WORKS IN BULL AND BEAR:
-- Bull: Breakout above Donchian high with Williams%R > -50 confirms bullish momentum
-- Bear: Breakout below Donchian low with Williams%R < -50 confirms bearish momentum
-- Range: Choppy market = no breakouts = no trades = no losses
+- Supertrend goes long when price crosses above the upper band
+- Supertrend goes short when price crosses below the lower band
+- Symmetrical design works in both directions
+- Weekly filter prevents buying breakdowns in downtrends
 
-KEY INSIGHT: Stacking ONE strong signal type (Donchian breakout) + volume +
-trend filter + momentum filter = tight entries = fewer trades = less fee drag.
-The Williams %R filter reduces entries by ~50% vs pure Donchian.
-
-TARGET: 100-200 total trades over 4 years (25-50/year on 4h).
-Signal size: 0.25.
+TARGET: 75-150 total trades over 4 years. SIZE: 0.25.
+Signal requires: Supertrend direction + Weekly trend alignment + Volume spike.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_wr_vol_sma200_1d_v1"
-timeframe = "4h"
+name = "mtf_1d_supertrend_vol_weekly_ema_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R indicator"""
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Supertrend indicator calculation.
+    Returns: supertrend values (positive = bullish, negative = bearish)
+    """
     n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
+    if n < period + 1:
+        return np.full(n, 0.0)
     
-    willr = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        if highest_high != lowest_low:
-            willr[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
+    # Calculate ATR
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    return willr
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate Supertrend
+    supertrend = np.zeros(n, dtype=np.float64)
+    trend = np.ones(n, dtype=np.int32)  # 1 = uptrend, -1 = downtrend
+    final_upper = np.zeros(n, dtype=np.float64)
+    final_lower = np.zeros(n, dtype=np.float64)
+    
+    for i in range(n):
+        if i < 1:
+            continue
+        
+        hl2 = (high[i] + low[i]) / 2.0
+        upper = hl2 + multiplier * atr[i]
+        lower = hl2 - multiplier * atr[i]
+        
+        # Upper band
+        if close[i-1] > final_upper[i-1]:
+            final_upper[i] = max(upper, final_upper[i-1])
+        else:
+            final_upper[i] = upper
+        
+        # Lower band
+        if close[i-1] < final_lower[i-1]:
+            final_lower[i] = min(lower, final_lower[i-1])
+        else:
+            final_lower[i] = lower
+        
+        # Trend direction
+        if close[i] > final_upper[i-1]:
+            trend[i] = 1
+        elif close[i] < final_lower[i-1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i-1]
+        
+        # Supertrend value: positive in uptrend, negative in downtrend
+        if trend[i] == 1:
+            supertrend[i] = final_lower[i]
+        else:
+            supertrend[i] = -final_upper[i]
+    
+    return supertrend
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -49,28 +94,24 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    # === Load Weekly data ONCE before loop ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d SMA200 for trend direction
-    sma_200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
+    # Weekly EMA200 for structural trend (requires ~1000 bars, enough for 1d)
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === Local 4h indicators ===
-    # Williams %R(14) - momentum confirmation
-    willr_14 = calculate_williams_r(high, low, close, period=14)
+    # === Pre-calculate ALL 1d indicators before loop ===
+    # Supertrend (period=10, multiplier=3)
+    supertrend = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
     
-    # Donchian(20) channels
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # Volume confirmation: current volume vs 20-bar average
+    # Volume ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # ATR for stoploss
-    tr = np.zeros(n)
+    atr_14 = np.zeros(n, dtype=np.float64)
+    tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -85,73 +126,78 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
+    entry_bar = 0
+    prev_supertrend = 0.0
     
-    warmup = 250  # Need 200 for SMA200 + 20 for Donchian + 14 for Williams%R
+    warmup = 250  # Need enough for Supertrend(10) + EMA200 alignment
     
     for i in range(warmup, n):
         # Skip if ATR not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Skip if SMA200 not aligned
-        if np.isnan(sma_200_aligned[i]):
+        # Skip if Weekly EMA not aligned
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d SMA200) ===
-        price_above_1d_sma = close[i] > sma_200_aligned[i]
-        price_below_1d_sma = close[i] < sma_200_aligned[i]
+        current_supertrend = supertrend[i]
         
-        # === MOMENTUM (Williams %R) ===
-        willr_momentum = willr_14[i]
-        is_bullish_momentum = (not np.isnan(willr_momentum)) and (willr_momentum > -50)
-        is_bearish_momentum = (not np.isnan(willr_momentum)) and (willr_momentum < -50)
+        # === WEEKLY TREND FILTER ===
+        # Only long when price above weekly EMA (uptrend)
+        # Only short when price below weekly EMA (downtrend)
+        price_above_weekly = close[i] > ema_1w_aligned[i]
+        price_below_weekly = close[i] < ema_1w_aligned[i]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === DONCHIAN BREAKOUT (use PREVIOUS bar's Donchian to avoid look-ahead) ===
-        prev_donch_high = donchian_high[i - 1] if i > 0 else 0
-        prev_donch_low = donchian_low[i - 1] if i > 0 else float('inf')
+        # === SUPERTREND CROSSOVER DETECTION ===
+        # Long signal: Supertrend crosses from negative to positive
+        # Short signal: Supertrend crosses from positive to negative
+        bullish_cross = (prev_supertrend < 0) and (current_supertrend > 0)
+        bearish_cross = (prev_supertrend > 0) and (current_supertrend < 0)
         
-        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Breakout above Donchian high + volume + momentum + trend ===
-            # Williams %R > -50 means not overbought, room for more upside
-            if price_above_1d_sma and is_bullish_momentum and vol_spike:
-                if close[i] > prev_donch_high:
-                    desired_signal = SIZE
+            # === ENTRY LOGIC ===
+            # Long: Supertrend crosses bullish + above weekly EMA + volume spike
+            if bullish_cross and price_above_weekly and vol_spike:
+                desired_signal = SIZE
             
-            # === SHORT: Breakout below Donchian low + volume + momentum + trend ===
-            # Williams %R < -50 means oversold, more downside likely
-            if price_below_1d_sma and is_bearish_momentum and vol_spike:
-                if close[i] < prev_donch_low:
-                    desired_signal = -SIZE
+            # Short: Supertrend crosses bearish + below weekly EMA + volume spike
+            if bearish_cross and price_below_weekly and vol_spike:
+                desired_signal = -SIZE
         
-        # === STOPLOSS (2.0 ATR trailing) ===
+        # === STOPLOSS (2.0 ATR from entry) ===
         if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
+            stop_price = entry_price - 2.0 * entry_atr
             if low[i] < stop_price:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
+            stop_price = entry_price + 2.0 * entry_atr
             if high[i] > stop_price:
                 desired_signal = 0.0
+        
+        # === TAKE PROFIT (3:1 R/R) ===
+        if in_position:
+            bars_held = i - entry_bar
+            if bars_held >= 3:  # Hold at least 3 bars (3 days)
+                if position_side > 0:
+                    profit_target = entry_price + 3.0 * entry_atr
+                    if high[i] >= profit_target:
+                        desired_signal = 0.0
+                if position_side < 0:
+                    profit_target = entry_price - 3.0 * entry_atr
+                    if low[i] <= profit_target:
+                        desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
@@ -161,18 +207,13 @@ def generate_signals(prices):
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
-                else:
-                    stop_price = entry_price + 2.0 * entry_atr
+                entry_bar = i
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                stop_price = 0.0
         
+        prev_supertrend = current_supertrend
         signals[i] = desired_signal
     
     return signals
